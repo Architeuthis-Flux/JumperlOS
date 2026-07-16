@@ -2,8 +2,9 @@
  * Minimal machine.Pin implementation for Jumperless embed port (RP23xx)
  * Provides basic Pin IN/OUT/OPEN_DRAIN functionality with pull control.
  *
- * Behaviour mirrors the rp2 port where practical, but omits IRQ and
+ * Behaviour mirrors the rp2 port where practical, but omits
  * board/cpu pin name tables for now. Pins are addressed by integer id.
+ * Pin.irq() is supported (adapted from ports/rp2/machine_pin.c).
  */
 
 #include <stdio.h>
@@ -11,12 +12,15 @@
 
 #include "py/runtime.h"
 #include "py/mphal.h"
+#include "shared/runtime/mpirq.h"
 
 
 
 // No need to include extmod/modmachine.h here
 
 #include "hardware/gpio.h"
+#include "hardware/irq.h"
+#include "hardware/structs/iobank0.h"
 
 // Forward declaration for pin ownership function
 extern void jl_gpio_claim_pin(int pin);
@@ -36,6 +40,9 @@ typedef struct _mp_pin_p_t {
 // Pull flags (match rp2 values used by machine.Pin)
 #define JL_GPIO_PULL_UP    (1)
 #define JL_GPIO_PULL_DOWN  (2)
+
+// All four GPIO IRQ event bits (level low/high, edge fall/rise)
+#define JL_GPIO_IRQ_ALL    (0xf)
 
 // Default number of GPIOs on RP2 family bank0 (GP0..GP29)
 #ifndef JL_NUM_GPIOS
@@ -71,6 +78,69 @@ static const machine_pin_obj_t machine_pin_obj_table[JL_NUM_GPIOS] = {
     PIN_OBJ_ENTRY(28), PIN_OBJ_ENTRY(29)
 #undef PIN_OBJ_ENTRY
 };
+
+// ---------------------------------------------------------------------------
+// GPIO IRQ support (adapted from ports/rp2/machine_pin.c)
+// ---------------------------------------------------------------------------
+
+typedef struct _machine_pin_irq_obj_t {
+    mp_irq_obj_t base;
+    uint32_t flags;
+    uint32_t trigger;
+} machine_pin_irq_obj_t;
+
+static const mp_irq_methods_t machine_pin_irq_methods;
+
+// Whether our shared IO_IRQ_BANK0 handler is currently installed
+static bool jl_pin_irq_handler_installed;
+
+static void jl_gpio_irq(void) {
+    // Only service the registers covering GPIO 0..JL_NUM_GPIOS-1
+    for (int i = 0; i < (JL_NUM_GPIOS + 7) / 8; ++i) {
+        uint32_t intr = iobank0_hw->intr[i];
+        if (intr) {
+            for (int j = 0; j < 8; ++j) {
+                if (intr & 0xf) {
+                    uint32_t gpio = 8 * i + j;
+                    if (gpio >= JL_NUM_GPIOS) {
+                        break;
+                    }
+                    gpio_acknowledge_irq(gpio, intr & 0xf);
+                    machine_pin_irq_obj_t *irq = MP_STATE_PORT(machine_pin_irq_obj[gpio]);
+                    if (irq != NULL && (intr & irq->trigger)) {
+                        irq->flags = intr & irq->trigger;
+                        mp_irq_handler(&irq->base);
+                    }
+                }
+                intr >>= 4;
+            }
+        }
+    }
+}
+
+// Called from mp_embed_init() (after mp_init) so each VM lifecycle starts with
+// clean IRQ state; safe to call even if the previous deinit was skipped.
+void machine_pin_irq_init(void) {
+    memset(MP_STATE_PORT(machine_pin_irq_obj), 0, sizeof(MP_STATE_PORT(machine_pin_irq_obj)));
+    if (!jl_pin_irq_handler_installed) {
+        irq_add_shared_handler(IO_IRQ_BANK0, jl_gpio_irq, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+        irq_set_enabled(IO_IRQ_BANK0, true);
+        jl_pin_irq_handler_installed = true;
+    }
+}
+
+// Called from mp_embed_deinit() (before mp_deinit); disables all pin IRQs so
+// no callback can fire into a torn-down VM. The shared handler stays installed
+// (removing/re-adding shared handlers repeatedly can exhaust SDK handler slots).
+void machine_pin_irq_deinit(void) {
+    if (!jl_pin_irq_handler_installed) {
+        return;
+    }
+    for (int i = 0; i < JL_NUM_GPIOS; ++i) {
+        gpio_set_irq_enabled(i, JL_GPIO_IRQ_ALL, false);
+        MP_STATE_PORT(machine_pin_irq_obj[i]) = NULL;
+    }
+}
 
 static void machine_pin_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     (void)kind;
@@ -288,6 +358,85 @@ static mp_obj_t machine_pin_toggle(mp_obj_t self_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(machine_pin_toggle_obj, machine_pin_toggle);
 
+// Get (or lazily allocate) the IRQ object for a pin
+static machine_pin_irq_obj_t *machine_pin_get_irq(uint8_t pin) {
+    machine_pin_irq_obj_t *irq = MP_STATE_PORT(machine_pin_irq_obj[pin]);
+    if (irq == NULL) {
+        irq = m_new_obj(machine_pin_irq_obj_t);
+        irq->base.base.type = &mp_irq_type;
+        irq->base.methods = (mp_irq_methods_t *)&machine_pin_irq_methods;
+        irq->base.parent = MP_OBJ_FROM_PTR(&machine_pin_obj_table[pin]);
+        irq->base.handler = mp_const_none;
+        irq->base.ishard = false;
+        irq->flags = 0;
+        irq->trigger = 0;
+        MP_STATE_PORT(machine_pin_irq_obj[pin]) = irq;
+    }
+    return irq;
+}
+
+// pin.irq(handler=None, trigger=IRQ_FALLING|IRQ_RISING, hard=False)
+static mp_obj_t machine_pin_irq(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_handler, ARG_trigger, ARG_hard };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_handler, MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+        { MP_QSTR_trigger, MP_ARG_INT, {.u_int = GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE} },
+        { MP_QSTR_hard, MP_ARG_BOOL, {.u_bool = false} },
+    };
+    const machine_pin_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    machine_pin_irq_obj_t *irq = machine_pin_get_irq(self->id);
+
+    if (n_args > 1 || kw_args->used != 0) {
+        mp_obj_t handler = args[ARG_handler].u_obj;
+        mp_uint_t trigger = (mp_uint_t)args[ARG_trigger].u_int;
+
+        // Disable this pin's IRQs while data is updated
+        gpio_set_irq_enabled(self->id, JL_GPIO_IRQ_ALL, false);
+
+        irq->base.handler = handler;
+        irq->base.ishard = args[ARG_hard].u_bool;
+        irq->flags = 0;
+        irq->trigger = (uint32_t)trigger;
+
+        if (handler != mp_const_none && trigger != 0) {
+            gpio_set_irq_enabled(self->id, trigger, true);
+        }
+    }
+    return MP_OBJ_FROM_PTR(irq);
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(machine_pin_irq_obj_fun, 1, machine_pin_irq);
+
+// mpirq protocol: irq_obj.trigger(new_trigger)
+static mp_uint_t machine_pin_irq_trigger(mp_obj_t self_in, mp_uint_t new_trigger) {
+    const machine_pin_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    machine_pin_irq_obj_t *irq = MP_STATE_PORT(machine_pin_irq_obj[self->id]);
+    gpio_set_irq_enabled(self->id, JL_GPIO_IRQ_ALL, false);
+    irq->flags = 0;
+    irq->trigger = (uint32_t)new_trigger;
+    gpio_set_irq_enabled(self->id, new_trigger, true);
+    return 0;
+}
+
+// mpirq protocol: irq_obj.flags() / triggers query
+static mp_uint_t machine_pin_irq_info(mp_obj_t self_in, mp_uint_t info_type) {
+    const machine_pin_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    machine_pin_irq_obj_t *irq = MP_STATE_PORT(machine_pin_irq_obj[self->id]);
+    if (info_type == MP_IRQ_INFO_FLAGS) {
+        return irq->flags;
+    } else if (info_type == MP_IRQ_INFO_TRIGGERS) {
+        return irq->trigger;
+    }
+    return 0;
+}
+
+static const mp_irq_methods_t machine_pin_irq_methods = {
+    .trigger = machine_pin_irq_trigger,
+    .info = machine_pin_irq_info,
+};
+
 // Pin protocol support
 static mp_uint_t pin_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t arg, int *errcode) {
     (void)errcode;
@@ -313,7 +462,10 @@ static const mp_rom_map_elem_t machine_pin_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_value),  MP_ROM_PTR(&machine_pin_value_obj) },
     { MP_ROM_QSTR(MP_QSTR_low),    MP_ROM_PTR(&machine_pin_low_obj) },
     { MP_ROM_QSTR(MP_QSTR_high),   MP_ROM_PTR(&machine_pin_high_obj) },
+    { MP_ROM_QSTR(MP_QSTR_off),    MP_ROM_PTR(&machine_pin_low_obj) },
+    { MP_ROM_QSTR(MP_QSTR_on),     MP_ROM_PTR(&machine_pin_high_obj) },
     { MP_ROM_QSTR(MP_QSTR_toggle), MP_ROM_PTR(&machine_pin_toggle_obj) },
+    { MP_ROM_QSTR(MP_QSTR_irq),    MP_ROM_PTR(&machine_pin_irq_obj_fun) },
 
     // class constants (match rp2 values)
     { MP_ROM_QSTR(MP_QSTR_IN),         MP_ROM_INT(0) },
@@ -322,6 +474,8 @@ static const mp_rom_map_elem_t machine_pin_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ALT),        MP_ROM_INT(3) },
     { MP_ROM_QSTR(MP_QSTR_PULL_UP),    MP_ROM_INT(JL_GPIO_PULL_UP) },
     { MP_ROM_QSTR(MP_QSTR_PULL_DOWN),  MP_ROM_INT(JL_GPIO_PULL_DOWN) },
+    { MP_ROM_QSTR(MP_QSTR_IRQ_RISING),  MP_ROM_INT(GPIO_IRQ_EDGE_RISE) },
+    { MP_ROM_QSTR(MP_QSTR_IRQ_FALLING), MP_ROM_INT(GPIO_IRQ_EDGE_FALL) },
 };
 
 static MP_DEFINE_CONST_DICT(machine_pin_locals_dict, machine_pin_locals_dict_table);
@@ -336,5 +490,10 @@ MP_DEFINE_CONST_OBJ_TYPE(
     protocol, &pin_pin_p,
     locals_dict, &machine_pin_locals_dict
     );
+
+// NOTE: this registration is duplicated in rp2_qstr_stub.c so the host-side
+// QSTR/root-pointer scan picks it up (this file can't be scanned on the host
+// because it includes Pico SDK headers). Keep the two in sync.
+MP_REGISTER_ROOT_POINTER(void *machine_pin_irq_obj[30]);
 
 

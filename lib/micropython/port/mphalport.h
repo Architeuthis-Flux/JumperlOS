@@ -126,4 +126,12 @@ static inline void mp_hal_pin_low(mp_hal_pin_obj_t pin) {
 #define mp_hal_quiet_timing_enter() save_and_disable_interrupts()
 #define mp_hal_quiet_timing_exit(irq_state) restore_interrupts(irq_state)
 
+// Atomic sections (used by py/scheduler.c and mpirq). The py/mphal.h default
+// is a NO-OP, which is unsafe once callbacks are scheduled from hardware ISRs
+// (Pin.irq, Timer). Match stock rp2: mask interrupts on this core.
+// ponytail: single-core masking only — MicroPython runs on one core here; if
+// the other core ever schedules MP callbacks this needs the rp2 spinlock version.
+#define MICROPY_BEGIN_ATOMIC_SECTION()     save_and_disable_interrupts()
+#define MICROPY_END_ATOMIC_SECTION(state)  restore_interrupts(state)
+
 #endif // MICROPY_INCLUDED_MPHALPORT_H

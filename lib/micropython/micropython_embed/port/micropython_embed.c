@@ -66,6 +66,10 @@ extern const mp_obj_type_t machine_uart_type;
 const mp_obj_type_t *jl_retain_machine_uart_type = &machine_uart_type;
 #endif
 
+// Pin.irq() lifecycle hooks (machine_pin_jl.c)
+extern void machine_pin_irq_init(void);
+extern void machine_pin_irq_deinit(void);
+
 // Minimal stubs for modmachine low-level hooks to satisfy linker
 void mp_machine_idle(void) {}
 void mp_machine_set_freq(size_t n_args, const mp_obj_t *args) { (void)n_args; (void)args; }
@@ -123,6 +127,10 @@ int mp_embed_init(void *heap, size_t heap_size, void *stack_top) {
     #endif
     
     mp_init();
+
+    // Zero pin IRQ root pointers + install the shared GPIO IRQ handler.
+    // Must run after mp_init() so MP_STATE_PORT is the fresh VM state.
+    machine_pin_irq_init();
     return 0;
 }
 
@@ -133,6 +141,9 @@ size_t mp_embed_get_psram_size(void) {
 
 // Deinitialize MicroPython runtime
 void mp_embed_deinit(void) {
+    // Disable all Pin.irq() interrupts BEFORE tearing down the VM, so no GPIO
+    // ISR can call into freed heap objects.
+    machine_pin_irq_deinit();
     mp_deinit();
 }
 
@@ -344,9 +355,11 @@ void nlr_jump_fail(void *val) {
     // An infinite loop prevents stack corruption from falling through.
     // Reinit MicroPython to allow potential recovery by the REPL loop,
     // then spin forever since the caller's stack frame is invalidated.
+    machine_pin_irq_deinit();
     mp_deinit();
     delay(1000);
     mp_init();
+    machine_pin_irq_init();
     delay(1000);
     // Must never return from NORETURN function - spin forever
     for(;;) { delay(1000); }

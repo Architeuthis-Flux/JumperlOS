@@ -1,0 +1,26 @@
+---
+description: Never hand-edit generated MicroPython QSTR/root-pointer headers; regenerate with build_micropython.sh
+globs: lib/micropython/**
+alwaysApply: false
+---
+
+# MicroPython QSTR / generated-header workflow
+
+NEVER hand-edit the generated headers in `lib/micropython/micropython_embed/genhdr/`
+(`qstrdefs.generated.h`, `root_pointers.h`, `moduledefs.h`). No computing QSTR
+hashes by hand, ever.
+
+Instead:
+
+1. Add new QSTR references, `MP_REGISTER_ROOT_POINTER`, or `MP_REGISTER_MODULE`
+   entries to the host-scanned source-of-truth files:
+   - `lib/micropython/port/rp2_qstr_stub.c` (rp2/pin/peripheral QSTRs, root pointers)
+   - `lib/micropython/port/modmachine_jl.inc` (`jl_qstr_refs()`)
+2. Run `scripts/build_micropython.sh` to regenerate `micropython_embed/` from the
+   pinned MicroPython checkout in `micropython_repo/`. It prints a QSTR diff vs
+   the previous build — verify your new QSTRs show up as added.
+
+Also remember: `lib/micropython/port/*.c|h` files are copied into
+`lib/micropython/micropython_embed/port/` (both copies compile and link with
+`--allow-multiple-definition`). Edit the `port/` copy and re-run the build
+script — or `cp` manually — so the two never diverge.

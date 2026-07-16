@@ -51,6 +51,8 @@ static inline void probeOeSet( uint pin ) {
 #include "PersistentStuff.h"
 #include "Python_Proper.h"
 #include "Undo.h"
+#include "WaveGen.h" // wavegen.isRunning() - shared I2C0 bus arbitration
+extern WaveGen wavegen; // defined in main.cpp
 #include "config.h"
 #include "externVars.h"
 #include "oled.h"
@@ -5104,27 +5106,35 @@ float Probing::checkProbeCurrentRaw( void ) {
 #if defined(OG_JUMPERLESS)
     return 0.0f;
 #else
-    int div = 1;
-    float current = 0.0;
+    // Last known-good reading, served whenever a fresh one can't be taken.
+    // The INA219 driver returns 0 from a failed I2C transaction, and 0mA is
+    // indistinguishable from "switch in MEASURE" - returning the cached value
+    // instead keeps one bus glitch from flipping the detected position.
+    static float lastGoodCurrent_mA = 0.0f;
 
-    // Wait for INA219 conversion to complete (~8.5ms with 16 sample averaging)
-    // The conversion flag indicates when a new reading is ready
-    unsigned long timeout_start = millis( );
-    while ( !INA1.getConversionFlag( ) && ( millis( ) - timeout_start < 20 ) ) {
-        delayMicroseconds( 100 );
+    // While the function generator runs, core1 streams DAC samples over this
+    // same Wire bus and TwoWire has no cross-core lock - reading here would
+    // interleave two masters' buffer state and corrupt both transactions.
+    if ( wavegen.isRunning( ) ) {
+        return lastGoodCurrent_mA;
     }
 
-    // Take fewer samples since INA219 is already doing 16x averaging internally
-    for ( int i = 0; i < div; i++ ) {
-        // Wait for conversion flag before each read
-        timeout_start = millis( );
-        while ( !INA1.getConversionFlag( ) && ( millis( ) - timeout_start < 20 ) ) {
-            delayMicroseconds( 100 );
+    // NOTE: no conversion-flag wait here. CNVR only clears when the POWER
+    // register is read (which this path never does), so the old wait loops
+    // fell straight through anyway. The current register is at most one
+    // ~17ms averaging window stale, which is fine for switch sensing at a
+    // 500ms check interval - and skipping the polls keeps this call fast
+    // (<1ms worst case) and off the bus.
+    INA1.getLastError( ); // flush stale error flag
+    for ( int attempt = 0; attempt < 3; attempt++ ) {
+        float current = INA1.getCurrent_mA( );
+        if ( INA1.getLastError( ) == 0 ) {
+            lastGoodCurrent_mA = current;
+            return current;
         }
-        current += INA1.getCurrent_mA( );
+        delayMicroseconds( 200 );
     }
-    current = current / (float)div;
-    return current;
+    return lastGoodCurrent_mA;
 #endif
 }
 
@@ -5196,14 +5206,18 @@ float Probing::checkProbeCurrentZero( void ) {
     // Serial.flush();
 //delay(2000);
 
-    showProbeLEDs = 10;
-    // probeLEDs.setPixelColor( 0, 0x000000 );
-    // probeLEDs.show( );
-    // Serial.println("setting probeLEDs to 10");
-    // Serial.flush();
+    showProbeLEDs = 10; // request probe LED off
 
-    //delay(2000);
-    delayMicroseconds( 10000 );
+    // showProbeLEDs is only a request flag consumed by probeLEDhandler() on
+    // core1. Sampling INA1 while the probe LED is still lit bakes ~1.8mA of
+    // LED current into the zero offset, which then poisons every corrected
+    // reading (and the switch thresholds calibrated against them). Wait for
+    // the handler to consume the request, then let the current settle.
+    unsigned long ledOffWaitStart = millis( );
+    while ( showProbeLEDs != 0 && ( millis( ) - ledOffWaitStart < 100 ) ) {
+        delayMicroseconds( 100 );
+    }
+    delay( LED_SETTLE_TIME_MS + 5 );
 
     // Temporarily disconnect DAC0 from whatever it is connected to so
     // zero-calibration reads the true offset, then restore those exact links.
@@ -5219,47 +5233,60 @@ float Probing::checkProbeCurrentZero( void ) {
             savedNodes[i] = lastRemovedNodes[i];
         }
         savedCount = lastRemovedNodesIndex;
-        waitCore2();
-        delayMicroseconds( 10000 );
     }
-    int div = 1;
-    // Serial.println("bridgeExists = true");
-    // Serial.flush();
-    // delay(2000);
+
+    // Always sync with core2 before sampling: the disconnect above (or a
+    // refreshConnections() the caller just issued, as in first-start
+    // calibration) may still be mid-apply, and sampling while DAC0 is still
+    // routed reads load current instead of the true offset.
+    waitCore2( );
+    delayMicroseconds( 10000 );
+
+    int div = 8; // average several samples; a single reading is too noisy for a stored offset
     float current = 0.0;
     float currentSum = 0.0;
+    int goodSamples = 0;
 
-    // With 16x averaging in the INA219, we can take fewer samples here
-    // Wait for first conversion to complete
-    unsigned long timeout_start = millis( );
-    while ( !INA1.getConversionFlag( ) && ( millis( ) - timeout_start < 20 ) ) {
-        delayMicroseconds( 100 );
-    }
-
+    // Take genuinely independent samples: CNVR only clears when the POWER
+    // register is read, so arm it before each sample and wait for the NEXT
+    // completed conversion (up to ~17ms with 16-sample shunt+bus averaging).
+    // Without the arm, the flag stays latched set and all 8 "samples" can be
+    // re-reads of one averaging window. ~140ms worst case total - fine here,
+    // this only runs at boot and inside calibration apps, never the hot path.
+    // Samples that fail on the bus (driver returns 0 + error flag) are
+    // skipped rather than averaged in as fake 0mA readings.
     for ( int i = 0; i < div; i++ ) {
-        // Wait for conversion flag before each read
-        timeout_start = millis( );
-        while ( !INA1.getConversionFlag( ) && ( millis( ) - timeout_start < 20 ) ) {
+        INA1.getLastError( );        // flush stale error flag
+        (void)INA1.getPower_mW( );   // reading POWER clears CNVR
+        unsigned long timeout_start = millis( );
+        while ( !INA1.getConversionFlag( ) && ( millis( ) - timeout_start < 25 ) ) {
             delayMicroseconds( 100 );
         }
-        currentSum += INA1.getCurrent_mA( );
-        // delayMicroseconds( 2000 );  // Allow time for next conversion
+        float sample = INA1.getCurrent_mA( );
+        if ( INA1.getLastError( ) == 0 ) {
+            currentSum += sample;
+            goodSamples++;
+        }
     }
 
-    // Serial.print("currentSum = ");
-    // Serial.println(currentSum);
-
-    current = currentSum / (float)div;
-
-    jumperlessConfig.calibration.probe_current_zero = current;
+    if ( goodSamples > 0 ) {
+        current = currentSum / (float)goodSamples;
+        jumperlessConfig.calibration.probe_current_zero = current;
+    } else {
+        // Every read failed - bus problem, not a measurement. Keep the
+        // previous zero instead of storing garbage.
+        Serial.println( "\n\rWARNING: probe current zero calibration failed (I2C errors), keeping previous value" );
+        current = jumperlessConfig.calibration.probe_current_zero;
+    }
 
     // Also refresh INA0's current offset here (this runs later than startup
     // and usually gives a cleaner zero for the live current-sense path).
-    timeout_start = millis( );
-    while ( !INA0.getConversionFlag( ) && ( millis( ) - timeout_start < 20 ) ) {
-        delayMicroseconds( 100 );
+    // Same guard: don't let a failed read store a fake 0 offset.
+    INA0.getLastError( );
+    float offset0 = INA0.getCurrent_mA( );
+    if ( INA0.getLastError( ) == 0 ) {
+        currentReadingOffset0_mA = offset0;
     }
-    currentReadingOffset0_mA = INA0.getCurrent_mA( );
 
     // Serial.print("Zero calibration current = ");
     // Serial.println(current);

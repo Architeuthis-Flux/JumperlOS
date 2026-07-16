@@ -34,6 +34,8 @@
 #include "LEDs.h"
 
 #include "MCP4728.h"  // New library
+#include "WaveGen.h"  // wavegen.isRunning() - shared I2C0 bus arbitration
+extern WaveGen wavegen; // defined in main.cpp
 
 // ============================================================================
 // Peripherals Class Implementation
@@ -160,6 +162,14 @@ static bool pollCurrentSenseMeasurement() {
     //     }
     // }
 
+    // While the function generator runs, core1 sits inside wavegen.service()'s
+    // blocking streaming loop writing DAC samples on this same Wire bus - it
+    // doesn't re-check pauseCore2 mid-stream, so the pause below can't protect
+    // us. TwoWire has no cross-core lock; skip the poll entirely.
+    if ( wavegen.isRunning( ) ) {
+        return false;
+    }
+
     // Pause Core 2 during I2C operations to prevent bus conflicts
     extern volatile bool pauseCore2;
     bool was_paused = pauseCore2;
@@ -173,7 +183,14 @@ static bool pollCurrentSenseMeasurement() {
 
     lastCurrentSensePollMs = now;
 
+    INA0.getLastError();  // flush stale error flag
     float current_mA = INA0.getCurrent_mA()- currentReadingOffset0_mA;
+    if ( INA0.getLastError() != 0 ) {
+        // Failed I2C read: the driver returns 0, which would show up as a
+        // fake (-offset) current. Keep the previous state instead.
+        pauseCore2 = was_paused;
+        return false;
+    }
     float busVoltage = 0.0f;//min(8.0f, fabs(current_mA * 0.5f));
    // float busVoltage = 5.0;//INA0.getBusVoltage();
 
@@ -481,7 +498,15 @@ void initDAC( void ) {
 
     Wire.setSDA( 4 );
     Wire.setSCL( 5 );
-    Wire.setClock( 1700000 );
+    // 1MHz, not 1.7MHz: this bus is shared with both INA219s, and 1.7MHz is
+    // far past their non-high-speed rating (Hs-mode needs a master-code
+    // handshake the RP2350 I2C block never sends) - it produced intermittent
+    // silently-failed reads. WaveGen's sample-rate math already assumes 1MHz,
+    // so DAC streaming throughput is unchanged.
+    // ponytail: 1MHz is still above the INA219's 400kHz F/S rating; if reads
+    // are ever still flaky, 400000 is the fully-in-spec fallback (costs 2.5x
+    // wavegen sample rate).
+    Wire.setClock( 1000000 );
     Wire.begin( );
 
     delayMicroseconds( 100 );
@@ -608,7 +633,11 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
         // Bound any single I2C0 transaction to 15ms so a hot-unplugged
         // device (OLED on rev 7, etc.) can't wedge the main loop while
         // checkConnection() catches up and clears oledConnected.
-        Wire.setTimeout( 15 );
+        // reset_with_timeout=true: on timeout, arduino-pico reinits the I2C
+        // block and clocks SCL to release a stuck-low SDA, so one wedged
+        // transaction doesn't poison every INA/DAC read after it. Bounded
+        // (~9 SCL toggles + reinit), no meaningful blocking.
+        Wire.setTimeout( 15, true );
 
         if ( i2c0Pins[ 0 ] == sdaPin && i2c0Pins[ 1 ] == sclPin &&
              i2c0Pins[ 2 ] == speed ) {
@@ -643,8 +672,9 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
         // Bound any single I2C1 transaction to 15ms so a hot-unplugged
         // OLED can't wedge show()/display() for the Earle pico Wire
         // default (hundreds of ms) before checkConnection() flips
-        // oledConnected to false.
-        Wire1.setTimeout( 15 );
+        // oledConnected to false. reset_with_timeout=true recovers a
+        // stuck bus (see Wire.setTimeout above).
+        Wire1.setTimeout( 15, true );
 
         i2cSpeed = speed;
 

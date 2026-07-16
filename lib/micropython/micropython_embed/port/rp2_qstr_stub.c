@@ -23,6 +23,9 @@ MP_REGISTER_ROOT_POINTER(void *rp2_state_machine_irq_obj[3 * 4]);
 // NUM_DMA_CHANNELS is typically 12-16; use 16 as safe max
 MP_REGISTER_ROOT_POINTER(void *rp2_dma_irq_obj[16]);
 
+// From machine_pin_jl.c: root pointers for Pin.irq() objects (GPIO 0..29)
+MP_REGISTER_ROOT_POINTER(void *machine_pin_irq_obj[30]);
+
 // Force all PIO/DMA/rp2 QSTRs into the QSTR scan.
 // These are used by the actual source files but can't be scanned directly
 // because those files include Pico SDK hardware headers.
@@ -47,6 +50,9 @@ static void rp2_qstr_refs(void) {
 
     // rp2_pio_jl.c: PIO.irq() args
     (void)MP_QSTR_handler; (void)MP_QSTR_trigger; (void)MP_QSTR_hard;
+
+    // machine_pin_jl.c: Pin.irq() trigger constants
+    (void)MP_QSTR_IRQ_RISING; (void)MP_QSTR_IRQ_FALLING;
 
     // rp2_pio_jl.c: StateMachine type methods
     (void)MP_QSTR_active; (void)MP_QSTR_restart;

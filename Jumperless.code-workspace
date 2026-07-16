@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../Jumperless"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../Jumperless-docs"
+		},
+		{
+			"path": "../Large Breadboard Model"
+		}
+	],
+	"settings": {}
+}

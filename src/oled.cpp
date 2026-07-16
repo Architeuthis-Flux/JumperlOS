@@ -647,10 +647,14 @@ int oled::init( ) {
     // user sees on hot-unplug. 15ms is generous for any normal OLED frame
     // chunk at 400kHz but still keeps a single failed transfer below one
     // frame of visible lag.
+    // reset_with_timeout=true: a timed-out transaction (hot-unplug mid-write)
+    // also reinits the I2C block and clocks a stuck-low SDA free, so the
+    // shared bus (INA219s + DAC live on Wire) recovers instead of failing
+    // every transaction until reboot.
     if ( jumperlessConfig.top_oled.connection_type == 2 ) {
-        Wire.setTimeout( 15 );
+        Wire.setTimeout( 3, true );
     } else {
-        Wire1.setTimeout( 15 );
+        Wire1.setTimeout( 3, true );
     }
     charPos = 0;
     refreshConnections( -1 );
@@ -4259,7 +4263,8 @@ bool probeOledOnInternalI2C0(uint8_t address) {
     // Caller must have initialized Wire (initDAC()/initINA219() do so during
     // boot). We don't call Wire.begin() here on purpose -- we don't want to
     // step on the DAC/INA bus configuration that's already up and running.
-    Wire.setTimeout(5);
+    // reset_with_timeout=true so a wedged bus gets clocked free here too.
+    Wire.setTimeout(5, true);
 
     bool found = false;
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -4276,7 +4281,7 @@ bool probeOledOnInternalI2C0(uint8_t address) {
     // can't wedge a 1024-byte display() write for an unbounded amount of
     // time. 15ms matches the Wire1 timeout the OLED code sets elsewhere
     // and is plenty for any single DAC/INA transaction on the same bus.
-    Wire.setTimeout(15);
+    Wire.setTimeout(15, true);
 
     return found;
 }

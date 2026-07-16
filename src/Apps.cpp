@@ -28,6 +28,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <SPI.h>
+#include <algorithm> // std::sort for medianInPlace
 
 #include "Images.h"
 #include "externVars.h"
@@ -227,6 +228,51 @@ void leaveApp( void ) {
 
 void fileManagerApp( void ) { filesystemApp( true ); }
 
+// Median of the calibration readings (sorts in place; callers don't reuse the
+// array). The reading distribution is bimodal when the probe LED drops out
+// mid-sample (its supply is the rail being measured): a mean gets dragged
+// toward the artifact, the median ignores it as long as good samples are the
+// majority.
+static float medianInPlace( float* vals, int n ) {
+    std::sort( vals, vals + n );
+    return ( n & 1 ) ? vals[ n / 2 ] : 0.5f * ( vals[ n / 2 - 1 ] + vals[ n / 2 ] );
+}
+
+// Drive the probe LED the same way runtime does: hand the requested mode to
+// core1's probeLEDhandler via showProbeLEDs and wait for it to latch. Calling
+// probeLEDs.showBlocking() directly from core0 pushes pixel data at the shared
+// PIO state machine WITHOUT pausing the button-polling program that owns it,
+// so the LED ends up dark/garbage - and since the LED is powered from the
+// rail the calibration measures, that corrupts the readings themselves.
+static void setProbeLEDModeAndSettle( int mode ) {
+    showProbeLEDs = mode;
+    unsigned long start = millis( );
+    while ( showProbeLEDs != 0 && millis( ) - start < 200 ) {
+        delay( 1 );
+    }
+    delay( 200 ); // let the LED's supply current settle before sampling
+}
+
+// Hot-plug poll for the OLED while a calibration app is running, so a display
+// plugged in mid-calibration comes up without restarting the app. Reuses the
+// boot-time autodetect (internal I2C0 ping + config fixup), which is a cheap
+// addressed ping when nothing is plugged. Crossbar-attached OLEDs can't be
+// hot-plugged here: connecting one would add bridges that disturb the
+// calibration in progress. Returns true the moment a new connection comes up
+// so callers can redraw their instructions.
+static bool oledCalibHotplugPoll( void ) {
+    static unsigned long lastPoll = 0;
+    if ( oled.isConnected( ) || millis( ) - lastPoll < 1000 ) {
+        return false;
+    }
+    lastPoll = millis( );
+    if ( !autoDetectAndConfigureOled( ) ) {
+        return false;
+    }
+    oled.init( );
+    return oled.isConnected( );
+}
+
 void calibrateProbeSwitchThresholds( void ) {
     b.clear( );
 
@@ -291,6 +337,9 @@ int row = 0;
     // Wait for user confirmation
     encoderButtonState = IDLE;
     while ( encoderButtonState != HELD && encoderButtonState != PRESSED ) {
+        if ( oledCalibHotplugPoll( ) ) {
+            oled.showMultiLineSmallText( "Switch to MEASURE\n\r(AWAY from TIP)\n\n\rClick wheel = start", true, true );
+        }
         delay( 10 );
     }
     delay( 50 );
@@ -298,9 +347,10 @@ int row = 0;
 
     row = 22;
     // Take readings in MEASURE mode
-    probeLEDs.setPixelColor( 0, 0x003600 ); // measure
-    probeLEDs.showBlocking( ); // Use blocking for immediate display
-    delay(200);
+    setProbeLEDModeAndSettle( 3 ); // measure green, latched by core1 like at runtime
+    (void)checkProbeCurrent( );    // throwaway read: flush the conversion that
+                                   // straddled the LED/switch change (the old
+                                   // first-reading outlier)
     Serial.println( "Taking MEASURE mode readings..." );
     b.clear( 0 );
     b.print( "Read ", 0x100010, 0x000000, 0, -1, -1 );
@@ -315,13 +365,10 @@ int row = 0;
         b.printRawRow( 0xFF << ( ( 5 - ( i % 6 ) ) ), row, 0x001010, 0x000000 );
     }
 
-    // Calculate average for MEASURE mode
-    float measureAvg = 0;
-    for ( int i = 0; i < NUM_READINGS; i++ ) {
-        measureAvg += measureReadings[ i ];
-    }
-    measureAvg /= NUM_READINGS;
-    Serial.printf( "\nMEASURE mode average: %.3f mA\n\n\r", measureAvg );
+    // Median, not mean: robust against the occasional sample taken while the
+    // LED was mid-relatch or an I2C read hiccuped.
+    float measureAvg = medianInPlace( measureReadings, NUM_READINGS );
+    Serial.printf( "\nMEASURE mode median: %.3f mA\n\n\r", measureAvg );
 
     delay( 1000 );
 
@@ -349,6 +396,9 @@ int row = 0;
     // Wait for user confirmation
     encoderButtonState = IDLE;
     while ( encoderButtonState != HELD && encoderButtonState != PRESSED ) {
+        if ( oledCalibHotplugPoll( ) ) {
+            oled.showMultiLineSmallText( "Switch to SELECT\n\r(TOWARDS TIP)\n\n\rClick wheel = start", true, true );
+        }
         delay( 10 );
     }
     delay( 500 );
@@ -357,9 +407,8 @@ int row = 0;
 
     // Take readings in SELECT mode
     Serial.println( "Taking SELECT mode readings..." );
-   probeLEDs.setPixelColor( 0, 0x170c17 ); // select idle
-    probeLEDs.showBlocking( ); // Use blocking for immediate display
-    delay(200);
+    setProbeLEDModeAndSettle( 4 ); // select idle, latched by core1 like at runtime
+    (void)checkProbeCurrent( );    // throwaway read (see MEASURE step)
     b.clear( 0 );
     b.print( "Read  ", 0x101010, 0x000000, 0, -1, -1 );
     for ( int i = 0; i < NUM_READINGS; i++ ) {
@@ -376,13 +425,29 @@ int row = 0;
         b.printRawRow( 0xFF << ( ( 5 - ( i % 6 ) ) ), row, 0x001010, 0x000000 );
     }
 
-    // Calculate average for SELECT mode
-    float selectAvg = 0;
-    for ( int i = 0; i < NUM_READINGS; i++ ) {
-        selectAvg += selectReadings[ i ];
+    float selectAvg = medianInPlace( selectReadings, NUM_READINGS );
+    Serial.printf( "\nSELECT mode median: %.3f mA\n\n\r", selectAvg );
+
+    // Sanity window: a healthy probe reads ~0 mA in MEASURE and ~1.8 mA in
+    // SELECT. Averages far outside that (or with no usable separation) mean
+    // the readings can't be trusted - usually a bad or unplugged probe cable -
+    // so fall back to the known-good defaults instead of saving garbage
+    // thresholds.
+    bool badReadings = measureAvg < -0.4f || measureAvg > 0.6f ||
+                       selectAvg < 1.0f || selectAvg > 3.0f ||
+                       ( selectAvg - measureAvg ) < 0.5f;
+    if ( badReadings ) {
+        changeTerminalColor( 196, true ); // Red
+        Serial.printf( "\n\rWARNING: readings out of expected range "
+                       "(measured %.3f / %.3f mA, expected ~0.0 / ~1.8 mA)\n\r",
+                       measureAvg, selectAvg );
+        Serial.println( "Using default thresholds instead - this may mean a bad probe cable!\n\r" );
+        changeTerminalColor( -1, true );
+        oled.showMultiLineSmallText( "Bad readings!\n\rUsing defaults\n\r(check probe cable)", true, true );
+        delay( 2000 );
+        measureAvg = 0.0f;
+        selectAvg = 1.8f;
     }
-    selectAvg /= NUM_READINGS;
-    Serial.printf( "\nSELECT mode average: %.3f mA\n\n\r", selectAvg );
 
     // Clamp the zero-corrected averages to >= 0. In the calibrated frame the
     // MEASURE-mode current sits at ~0 and INA noise can push the average
@@ -409,8 +474,8 @@ int row = 0;
     jumperlessConfig.calibration.probe_switch_threshold_high = midpoint + buffer;
 
     Serial.println( "\n\r=== Calibration Results ===" );
-    Serial.printf( "MEASURE mode average: %.3f mA\n\r", lowerAvg );
-    Serial.printf( "SELECT mode average:  %.3f mA\n\r", higherAvg );
+    Serial.printf( "MEASURE mode median: %.3f mA\n\r", lowerAvg );
+    Serial.printf( "SELECT mode median:  %.3f mA\n\r", higherAvg );
     Serial.printf( "Midpoint: %.3f mA\n\r", midpoint );
     Serial.printf( "Range: %.3f mA\n\r", range );
     Serial.printf( "\nLow threshold:  %.3f mA (switch to MEASURE)\n\r",
@@ -542,6 +607,9 @@ void probeCalibApp( void ) {
     // }
 
     while ( done == false ) {
+        if ( oledCalibHotplugPoll( ) ) {
+            oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rhold click = save", true, true );
+        }
         probeRead = readProbeRaw( 0, true );
 
         if ( probeRead != -1 ) {
