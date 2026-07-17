@@ -27,6 +27,7 @@
     "0x843D1F2A"
   ],
   "jumperless.pyi": [
+    "0x81BD6C21",
     "0xB35468E2",
     "0x591678B8",
     "0x05D64A8B",
@@ -35,6 +36,10 @@
   ],
   "led_brightness_control.py": [
     "0xD4DA5B3C"
+  ],
+  "machine_pin_basics.py": [
+    "0x5F1BD55C",
+    "0x01D476DE"
   ],
   "node_connections.py": [
     "0x49A84734"
@@ -68,6 +73,14 @@
   ],
   "output_test.py": [
     "0xE0324632"
+  ],
+  "pin_irq_freq_counter.py": [
+    "0x332F8E3F"
+  ],
+  "pin_irq_reaction_game.py": [
+    "0x8E48E014",
+    "0x8F5404D9",
+    "0xB6E62937"
   ],
   "psram_test.py": [
     "0x41730D6D"

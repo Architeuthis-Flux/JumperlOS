@@ -683,7 +683,12 @@ void jl_gpio_claim_pin( int pin ) {
     // Use the system's existing pin-to-index mapping
     int index = getGPIOIndexFromPin(pin);
     if (index >= 0 && index < 10) {
-        // globalState.config.gpioPythonOwned[index] = true;
+        // Mark the pin as MicroPython-owned so core 2's readGPIO() skips it.
+        // Without this, gpioReadWithFloating() leaves the pad's input buffer
+        // DISABLED between scans (RP2350-E9 workaround), which makes SIO reads
+        // and Pin.irq() see a dead pin plus phantom pull-twiddle edges.
+        // Released by jl_gpio_release_all_pins() on Python exit / soft reboot.
+        globalState.config.gpioPythonOwned[index] = true;
         
         // CRITICAL: Update the gpio_function_map to indicate this pin is in SIO mode
         // This prevents other parts of the system from changing the function

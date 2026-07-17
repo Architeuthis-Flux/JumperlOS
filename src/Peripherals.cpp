@@ -795,10 +795,18 @@ int gpioReadWithFloating(
     int reading = -1;
     int readingPulldown = -1;
     int readingPullup = -1;
-    readingGPIO = true;
+    // readingGPIO is a real lock, not just a status flag: this function is
+    // called concurrently from core 1 (jl_gpio_get / MicroPython) and core 2
+    // (readGPIO background scan). Both twiddle the SAME pad's input-enable and
+    // pulls; unserialized overlap makes a driven-HIGH pin read low ~40% of the
+    // time (one core disables IE right as the other core reads). Spin here
+    // until the other core's read finishes (worst case ~200us).
+    while ( __atomic_test_and_set( (volatile char *)&readingGPIO, __ATOMIC_ACQUIRE ) ) {
+        delayMicroseconds( 1 );
+    }
 
     if (gpio_get_function(pin) == GPIO_FUNC_I2C || gpio_get_function(pin) == GPIO_FUNC_UART || pin < 2){
-        readingGPIO = false;  // CRITICAL: Reset flag before early return
+        __atomic_clear( (volatile char *)&readingGPIO, __ATOMIC_RELEASE );  // unlock before early return
         return 0;
         return gpio_get( pin );
     }
@@ -813,7 +821,7 @@ int gpioReadWithFloating(
         gpio_set_input_enabled(pin, true);
         }
         int result = gpio_get( pin );
-        readingGPIO = false;  // CRITICAL: Reset flag before early return
+        __atomic_clear( (volatile char *)&readingGPIO, __ATOMIC_RELEASE );  // unlock before early return
         return result;
     }
 
@@ -834,7 +842,7 @@ int gpioReadWithFloating(
         if ( gpio_get( pin ) == 0 ) { /// don't mess with the pullups if the pin is
                                       /// already being pulled down by external source
             // state = high;
-            readingGPIO = false;  // CRITICAL: Reset flag before early return
+            __atomic_clear( (volatile char *)&readingGPIO, __ATOMIC_RELEASE );  // unlock before early return
             return low;
         }
         gpio_disable_pulls( pin );
@@ -853,7 +861,7 @@ int gpioReadWithFloating(
         
         if ( gpio_get( pin ) == 1 ) { /// pin is still HIGH despite pulldown - external pull-up detected
             //gpio_set_pulls(pin, pullupState, pulldownState);
-            readingGPIO = false;  // CRITICAL: Reset flag before early return
+            __atomic_clear( (volatile char *)&readingGPIO, __ATOMIC_RELEASE );  // unlock before early return
             return high;
         }
 
@@ -918,7 +926,7 @@ int gpioReadWithFloating(
         /// gpio_set_dir(pin, true); //set the pin back to whatever it was
     }
 
-    readingGPIO = false;
+    __atomic_clear( (volatile char *)&readingGPIO, __ATOMIC_RELEASE );
 
     return state;
 }
@@ -1193,7 +1201,13 @@ CurrentSenseState currentSenseState;
 
 void __not_in_flash_func(readGPIO)( ) {
 
-    if ( false ) {
+    // Symmetric guard for the core1/core2 race: jl_gpio_get() (MicroPython,
+    // core 1) spins on readingGPIO before its own gpioReadWithFloating(), but
+    // nothing stopped THIS scan from starting mid-read and disabling the input
+    // buffer under it, corrupting the reading. Skip this scan pass instead.
+    // ponytail: flag check is not atomic - a microsecond overlap window
+    // remains; a real fix would be a spinlock shared by both callers.
+    if ( readingGPIO ) {
         return;
     }
 

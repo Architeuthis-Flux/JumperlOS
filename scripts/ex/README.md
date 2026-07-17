@@ -84,6 +84,7 @@ while True:
 - **`adc_basics.py`** - Read analog voltages from ADC channels
 - **`dac_basics.py`** - Set DAC output voltages
 - **`gpio_basics.py`** - Digital I/O, direction control, pull resistors
+- **`machine_pin_basics.py`** - The TWO ways to control a GPIO (jumperless `gpio_*()` builtins vs stock `machine.Pin`), ending with a `pin.irq()` interrupt demo
 - **`node_connections.py`** - Connect/disconnect nodes, check connections
 
 ### Communication
@@ -91,6 +92,8 @@ while True:
 - **`uart_loopback.py`** - UART loopback test
 
 ### Interactive Demos
+- **`pin_irq_reaction_game.py`** - Reaction-timer game: tap a wire into the breadboard when the LEDs flash; a hard GPIO interrupt timestamps your tap with microsecond precision
+- **`pin_irq_freq_counter.py`** - Frequency counter: PWM routed through the crossbar, measured by counting edges in a `Pin.irq(hard=True)` handler; tune with the click wheel
 - **`interaction_demo.py`** - Use probe, encoder, and buttons together
 - **`led_brightness_control.py`** - Touch-controlled LED brightness
 - **`voltage_monitor.py`** - Real-time voltage monitoring with OLED

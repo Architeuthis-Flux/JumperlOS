@@ -1221,20 +1221,20 @@ def fs_cwd() -> str:
 # Overlay Functions
 # ============================================================================
 
-def overlay_set(netNum: int, r: int, g: int, b: int) -> None:
-    """Set overlay color for a net (RGB 0-255)"""
+def overlay_set(name: str, x: int, y: int, width: int, height: int, colors: list[int]) -> int:
+    """Create/update a named overlay block at (x, y) from a list of packed 0xRRGGBB colors"""
     ...
 
-def overlay_clear(netNum: int) -> None:
-    """Clear overlay for a net"""
+def overlay_clear(name: str) -> None:
+    """Clear a named overlay"""
     ...
 
 def overlay_clear_all() -> None:
     """Clear all overlays"""
     ...
 
-def overlay_set_pixel(x: int, y: int, r: int, g: int, b: int) -> None:
-    """Set overlay pixel at (x, y) to RGB"""
+def overlay_set_pixel(x: int, y: int, color: int) -> None:
+    """Set overlay pixel at (x, y) to a packed 0xRRGGBB color"""
     ...
 
 def overlay_count() -> int:

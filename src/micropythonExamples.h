@@ -19,6 +19,7 @@
 #define INCLUDE_GPIO_BASICS
 #define INCLUDE_INTERACTION_DEMO
 #define INCLUDE_LED_BRIGHTNESS_CONTROL
+#define INCLUDE_MACHINE_PIN_BASICS
 #define INCLUDE_NODE_CONNECTIONS
 #define INCLUDE_OLED_DEMO
 #define INCLUDE_OLED_LAYOUT_EDITOR
@@ -26,6 +27,8 @@
 #define INCLUDE_OLEDGUI
 #define INCLUDE_OSCILLOSCOPE
 #define INCLUDE_OUTPUT_TEST
+#define INCLUDE_PIN_IRQ_FREQ_COUNTER
+#define INCLUDE_PIN_IRQ_REACTION_GAME
 #define INCLUDE_PSRAM_TEST
 #define INCLUDE_STYLOPHONE
 #define INCLUDE_TEST_NEOPIXEL
@@ -34,17 +37,11 @@
 #define INCLUDE_UART_LOOPBACK
 #define INCLUDE_VOLTAGE_MONITOR
 
-// Always include the jumperless Python module wrapper.
-// OG (RP2040) has too little heap to write these (36KB .py + 45KB .pyi) to
-// FatFS, and they're optional: the native C `jumperless` module already
-// satisfies `import jumperless` on its own. The .py wrapper only re-exports it
-// for autocomplete/discoverability, and the .pyi is IDE-only type stubs.
-#if !defined(OG_JUMPERLESS)
+// Always include the jumperless Python module wrapper
 #define INCLUDE_JUMPERLESS_MODULE
 
 // Optional: Include type stub and init files for ViperIDE support
 #define INCLUDE_JUMPERLESS_STUB // jumperless.pyi for autocomplete
-#endif
 // #define INCLUDE_VIPER_INIT      // viper_init.py for ViperIDE
 
 // Convenience defines to disable groups of examples
@@ -63,6 +60,7 @@
 #undef INCLUDE_GPIO_BASICS
 #undef INCLUDE_INTERACTION_DEMO
 #undef INCLUDE_LED_BRIGHTNESS_CONTROL
+#undef INCLUDE_MACHINE_PIN_BASICS
 #undef INCLUDE_NODE_CONNECTIONS
 #undef INCLUDE_OLED_DEMO
 #undef INCLUDE_OLED_LAYOUT_EDITOR
@@ -70,6 +68,8 @@
 #undef INCLUDE_OLEDGUI
 #undef INCLUDE_OSCILLOSCOPE
 #undef INCLUDE_OUTPUT_TEST
+#undef INCLUDE_PIN_IRQ_FREQ_COUNTER
+#undef INCLUDE_PIN_IRQ_REACTION_GAME
 #undef INCLUDE_PSRAM_TEST
 #undef INCLUDE_STYLOPHONE
 #undef INCLUDE_TEST_NEOPIXEL
@@ -819,6 +819,139 @@ while True:
 )";
 const uint32_t LED_BRIGHTNESS_CONTROL_PY_HASHES[1] = { 0xD4DA5B3C };
 const int LED_BRIGHTNESS_CONTROL_PY_HASH_COUNT = 1;
+#endif
+
+#ifdef INCLUDE_MACHINE_PIN_BASICS
+const char* MACHINE_PIN_BASICS_PY = R"===("""
+Machine Pin Basics - Two ways to control the same GPIO
+The Jumperless gives you TWO ways to talk to a GPIO pin:
+
+  1. Jumperless builtins:  gpio_set(), gpio_get(), gpio_set_dir(), ...
+     - take breadboard NODE names (GPIO_1..GPIO_8)
+     - plays nice with the routing fabric and LED colors
+
+  2. Standard MicroPython: machine.Pin
+     - the same API you'd use on any Pico / ESP32 / etc.
+     - unlocks stock-MicroPython goodies like pin.irq() callbacks
+
+Both drive the SAME physical pins. GPIO_1..GPIO_8 are RP2350
+GPIOs 20..27 under the hood, and Pin() accepts either name.
+
+Hardware Setup:
+- None! Everything is wired internally through the crossbar.
+"""
+
+import time
+from machine import Pin
+
+print("=== Two ways to control a GPIO ===\n")
+
+# Wire GPIO_1 to GPIO_2 through the crossbar so we can
+# drive one pin and listen on the other. No jumper wires needed.
+connect(GPIO_1, GPIO_2)
+time.sleep_ms(50)  # let the crossbar settle
+
+# ---------------------------------------------------------------
+# Way 1: Jumperless builtins (node names)
+# ---------------------------------------------------------------
+print("Way 1: gpio_set() / gpio_get() with node names")
+
+gpio_set_dir(GPIO_1, True)    # True = OUTPUT
+gpio_set_dir(GPIO_2, False)   # False = INPUT
+
+for i in range(3):
+    gpio_set(GPIO_1, True)
+    time.sleep_ms(50)
+    print("  drove GPIO_1 HIGH -> gpio_get(GPIO_2) =", gpio_get(GPIO_2))
+    gpio_set(GPIO_1, False)
+    time.sleep_ms(50)
+    print("  drove GPIO_1 LOW  -> gpio_get(GPIO_2) =", gpio_get(GPIO_2))
+
+# ---------------------------------------------------------------
+# Way 2: machine.Pin (standard MicroPython)
+# ---------------------------------------------------------------
+print("\nWay 2: machine.Pin - same pins, stock MicroPython API")
+
+# Pin() accepts a Jumperless node OR the raw RP2350 GPIO number.
+# GPIO_1 is node 131 on the breadboard, but RP2350 GPIO 20 inside.
+out_pin = Pin(GPIO_1, Pin.OUT)    # same as Pin(20, Pin.OUT)
+in_pin = Pin(GPIO_2, Pin.IN)      # same as Pin(21, Pin.IN)
+print("  int(GPIO_1) =", int(GPIO_1), " but ", out_pin, "<- RP2350 numbering")
+
+out_pin.high()
+time.sleep_ms(50)
+print("  out_pin.high() -> in_pin.value() =", in_pin.value())
+
+out_pin.low()
+time.sleep_ms(50)
+print("  out_pin.low()  -> in_pin.value() =", in_pin.value())
+
+# All the stock aliases work too:
+out_pin.on()       # same as .high()
+out_pin.off()      # same as .low()
+out_pin.toggle()   # flip it
+out_pin(0)         # calling the pin sets it, like value(0)
+print("  on()/off()/toggle()/value() all available")
+
+# Pull resistors, the stock way:
+pulled = Pin(GPIO_3, Pin.IN, Pin.PULL_UP)
+print("  GPIO_3 floating with PULL_UP reads:", pulled.value())
+connect(GPIO_3, GND)  # a real driver always beats a pull resistor
+time.sleep_ms(50)
+print("  GPIO_3 wired to GND (pull-up loses):", pulled.value())
+disconnect(GPIO_3, GND)
+# (Fun fact: we skip the PULL_DOWN demo because of RP2350 erratum E9 -
+#  a floating pin with internal pull-down latches at ~2V and reads 1!)
+
+# ---------------------------------------------------------------
+# Mix and match - they are literally the same pin
+# ---------------------------------------------------------------
+print("\nMix them: drive with gpio_set(), read with machine.Pin")
+gpio_set(GPIO_1, True)
+time.sleep_ms(50)
+print("  gpio_set(GPIO_1, True) -> in_pin.value() =", in_pin.value())
+gpio_set(GPIO_1, False)
+
+# ---------------------------------------------------------------
+# The payoff: pin.irq() - hardware interrupts!
+# ---------------------------------------------------------------
+# Instead of polling in a loop, ask the chip to call a function
+# the instant the pin changes. Only machine.Pin can do this.
+print("\npin.irq(): interrupt fires the moment the pin changes")
+
+edges = {"rising": 0, "falling": 0}
+
+def on_edge(pin):
+    # .flags() tells you which edge(s) woke us up
+    f = irq_handle.flags()
+    if f & Pin.IRQ_RISING:
+        edges["rising"] += 1
+    if f & Pin.IRQ_FALLING:
+        edges["falling"] += 1
+
+irq_handle = in_pin.irq(handler=on_edge, trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING)
+
+print("  toggling GPIO_1 six times (= 3 rising + 3 falling edges)...")
+for i in range(6):
+    out_pin.toggle()
+    time.sleep_ms(20)
+time.sleep_ms(100)  # let the last callbacks run
+
+print("  IRQ counted:", edges["rising"], "rising,", edges["falling"], "falling edges")
+print("  (no polling loop needed - the handler was CALLED by the hardware)")
+
+# Tip: pass hard=True to run the handler in interrupt context for
+# microsecond response - see pin_irq_reaction_game.py
+
+# Cleanup: detach the interrupt and remove our crossbar wire
+in_pin.irq(handler=None)
+disconnect(GPIO_1, GPIO_2)
+
+oled_print("Pin basics done!")
+print("\nDone! Try pin_irq_reaction_game.py next.")
+)===";
+const uint32_t MACHINE_PIN_BASICS_PY_HASHES[2] = { 0x5F1BD55C, 0x01D476DE };
+const int MACHINE_PIN_BASICS_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_NODE_CONNECTIONS
@@ -2357,6 +2490,251 @@ freq = (50 / (fastConnectTime)) * 1000
 print(f"Frequency = {freq} kHz"))";
 const uint32_t OUTPUT_TEST_PY_HASHES[1] = { 0xE0324632 };
 const int OUTPUT_TEST_PY_HASH_COUNT = 1;
+#endif
+
+#ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
+const char* PIN_IRQ_FREQ_COUNTER_PY = R"===("""
+Frequency Counter - count PWM edges with a hard GPIO interrupt
+Generates a PWM signal on GPIO_1, routes it through the crossbar
+to GPIO_2, and measures its frequency by counting rising edges in
+an interrupt handler. Turn the click wheel to change the frequency
+and watch the measurement track it. Click the wheel to quit.
+
+This is the "two ways" idea in one script:
+  - jumperless builtins generate the signal:  pwm(GPIO_1, ...)
+  - stock machine.Pin.irq() measures it:      sense.irq(...)
+
+Hardware Setup:
+- None! The signal is routed internally. (But you can also probe
+  row 20 with a scope - the signal is really there.)
+"""
+
+import time
+from machine import Pin
+
+FREQ_MIN = 50
+FREQ_MAX = 10000
+STEP = 50        # Hz per click-wheel detent
+GATE_MS = 250    # measurement window
+
+# Route the signal: GPIO_1 (PWM out) -> GPIO_2 (counter in),
+# and also to breadboard row 20 so you can see/probe it.
+connect(GPIO_1, GPIO_2)
+connect(GPIO_1, 20)
+time.sleep_ms(50)
+
+# --- signal source: the Jumperless way -----------------------------
+freq = 1000
+pwm(GPIO_1, freq, 0.5)  # node name, Hz, 50% duty
+# (stock alternative: from machine import PWM; PWM(Pin(GPIO_1), freq=1000))
+
+# --- counter: the stock MicroPython way -----------------------------
+sense = Pin(GPIO_2, Pin.IN)
+count = [0]
+
+def on_rise(pin):
+    # hard=True: runs in interrupt context on EVERY edge.
+    # Keep it to one line - at 10 kHz this runs 10,000x per second!
+    count[0] += 1
+
+sense.irq(handler=on_rise, trigger=Pin.IRQ_RISING, hard=True)
+
+# --- UI loop --------------------------------------------------------
+print("=== FREQUENCY COUNTER ===")
+print("Turn the click wheel to change frequency, press it to quit.\n")
+
+clickwheel_reset_position()
+last_pos = clickwheel_get_position()
+
+try:
+    while True:
+        # open the gate: zero the counter, wait, read it back
+        count[0] = 0
+        t0 = time.ticks_ms()
+        time.sleep_ms(GATE_MS)
+        elapsed = time.ticks_diff(time.ticks_ms(), t0)
+        measured = count[0] * 1000 // elapsed
+
+        print("set: %5d Hz   measured: %5d Hz   (%d edges in %d ms)"
+              % (freq, measured, count[0], elapsed))
+        oled_print("set  %d Hz\nmeas %d Hz" % (freq, measured))
+
+        # click wheel: rotate = tune, press = quit
+        pos = clickwheel_get_position()
+        if pos != last_pos:
+            freq += (last_pos - pos) * STEP
+            freq = max(FREQ_MIN, min(FREQ_MAX, freq))
+            last_pos = pos
+            pwm_set_frequency(GPIO_1, freq)
+
+        if clickwheel_get_button() == CLICKWHEEL_PRESSED:
+            break
+finally:
+    # always clean up, even on Ctrl+Q
+    sense.irq(handler=None)
+    pwm_stop(GPIO_1)
+    disconnect(GPIO_1, GPIO_2)
+    disconnect(GPIO_1, 20)
+    oled_print("freq counter\nstopped")
+    print("\nStopped. Interrupts detached, PWM off, wires removed.")
+)===";
+const uint32_t PIN_IRQ_FREQ_COUNTER_PY_HASHES[1] = { 0x332F8E3F };
+const int PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT = 1;
+#endif
+
+#ifdef INCLUDE_PIN_IRQ_REACTION_GAME
+const char* PIN_IRQ_REACTION_GAME_PY = R"===("""
+Reaction Timer Game - hardware interrupts with microsecond timing
+Wait for the LEDs to flash green, then tap your jumper wire into
+the breadboard as fast as you can. A hard GPIO interrupt timestamps
+your tap with microsecond precision - something a polling loop
+could never do accurately.
+
+This shows off machine.Pin.irq() with hard=True: the handler runs
+IN interrupt context, so time.ticks_us() is captured the instant
+the pin sees the edge (not whenever a polling loop gets around to
+checking).
+
+Hardware Setup:
+1. Place a tact switch with one pair of legs in row 28 and the
+   other pair in row 30 (it skips row 29). Pressing the button
+   connects the two rows.
+   - No tact switch handy? A jumper wire works too: one end in
+     row 30, tap the other end into row 28 when you see GREEN.
+2. When the middle of the board flashes green: SMASH IT!
+"""
+
+import time
+import random
+from machine import Pin
+
+TAP_ROW = 28
+GND_ROW = 30
+ROUNDS = 5
+
+# Route the game rows through the crossbar:
+#  - row 28 -> GPIO_2 (our interrupt pin, pulled up)
+#  - row 30 -> GND    (pressing the switch pulls GPIO_2 low)
+connect(GPIO_2, TAP_ROW)
+connect(GND, GND_ROW)
+time.sleep_ms(100)
+
+sense = Pin(GPIO_2, Pin.IN, Pin.PULL_UP)
+
+# --- interrupt plumbing -------------------------------------------
+# state: 0=idle  1=waiting (tap now = cheating!)  2=GO!  3=tapped  4=foul
+state = [0]
+t_tap = [0]
+
+def on_tap(pin):
+    # hard=True handler: runs in interrupt context. Keep it tiny,
+    # don't allocate memory, just grab the timestamp and a flag.
+    if state[0] == 2:
+        t_tap[0] = time.ticks_us()
+        state[0] = 3
+    elif state[0] == 1:
+        state[0] = 4  # tapped before GO - foul!
+
+sense.irq(handler=on_tap, trigger=Pin.IRQ_FALLING, hard=True)
+
+# --- helpers ------------------------------------------------------
+# One big 8x8 block in the middle of the board. (Don't light the game
+# rows themselves - net colors override overlays on rows that are
+# wired to the GPIO/GND nets, so it would just get stomped.)
+def flash(color):
+    # overlay_set(name, x, y, w, h, colors) - named overlay block
+    overlay_set("game_flash", 12, 2, 8, 8, [color] * 64)
+
+def unflash():
+    overlay_clear("game_flash")
+
+def wait_released():
+    # wait until the button is released / wire pulled out (pin back high)
+    while sense.value() == 0:
+        time.sleep_ms(20)
+    time.sleep_ms(200)  # debounce
+
+# --- game ---------------------------------------------------------
+print("=== REACTION TIMER ===")
+print("Button between rows %d and %d - press when you see GREEN!\n" % (TAP_ROW, GND_ROW))
+oled_print("Reaction game!\nbutton rows %d+%d" % (TAP_ROW, GND_ROW))
+time.sleep(3)
+
+best_us = None
+times = []
+
+r = 1
+while r <= ROUNDS:
+    wait_released()
+    unflash()
+    oled_print("Round %d\nwait for it..." % r)
+    print("Round %d: wait for it..." % r)
+
+    # random suspense, watching for early taps the whole time
+    state[0] = 1
+    foul = False
+    for _ in range(random.randint(100, 400)):  # 1.0 - 4.0 s
+        if state[0] == 4:
+            foul = True
+            break
+        time.sleep_ms(10)
+
+    if foul:
+        flash(0x780000)  # red
+        oled_print("TOO SOON!\nno cheating")
+        print("  too soon! round doesn't count")
+        time.sleep(1.5)
+        state[0] = 0
+        continue
+
+    # GO!
+    t_go = time.ticks_us()
+    state[0] = 2
+    flash(0x008C00)  # green
+    oled_print("GO!!!")
+
+    # wait for the interrupt to catch the tap (3 s timeout)
+    deadline = time.ticks_add(time.ticks_ms(), 3000)
+    while state[0] == 2 and time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        time.sleep_ms(1)
+
+    if state[0] != 3:
+        unflash()
+        oled_print("too slow!\n(3s timeout)")
+        print("  no tap within 3 seconds - round counts as a miss")
+        state[0] = 0
+        time.sleep(1.5)
+        r += 1
+        continue
+
+    reaction_us = time.ticks_diff(t_tap[0], t_go)
+    times.append(reaction_us)
+    if best_us is None or reaction_us < best_us:
+        best_us = reaction_us
+
+    ms = reaction_us / 1000
+    oled_print("%.1f ms!" % ms)
+    print("  reaction: %.1f ms  (%d microseconds)" % (ms, reaction_us))
+    state[0] = 0
+    time.sleep(2)
+    r += 1
+
+# --- results ------------------------------------------------------
+unflash()
+if times:
+    avg = sum(times) / len(times) / 1000
+    print("\nBest: %.1f ms   Average: %.1f ms" % (best_us / 1000, avg))
+    oled_print("best %.1f ms\navg %.1f ms" % (best_us / 1000, avg))
+    if best_us < 150000:
+        print("Lightning reflexes!")
+
+# cleanup: detach irq, remove our crossbar wires
+sense.irq(handler=None)
+disconnect(GPIO_2, TAP_ROW)
+disconnect(GND, GND_ROW)
+)===";
+const uint32_t PIN_IRQ_REACTION_GAME_PY_HASHES[3] = { 0x8E48E014, 0x8F5404D9, 0xB6E62937 };
+const int PIN_IRQ_REACTION_GAME_PY_HASH_COUNT = 3;
 #endif
 
 #ifdef INCLUDE_PSRAM_TEST
@@ -5408,20 +5786,20 @@ def fs_cwd() -> str:
 # Overlay Functions
 # ============================================================================
 
-def overlay_set(netNum: int, r: int, g: int, b: int) -> None:
-    """Set overlay color for a net (RGB 0-255)"""
+def overlay_set(name: str, x: int, y: int, width: int, height: int, colors: list[int]) -> int:
+    """Create/update a named overlay block at (x, y) from a list of packed 0xRRGGBB colors"""
     ...
 
-def overlay_clear(netNum: int) -> None:
-    """Clear overlay for a net"""
+def overlay_clear(name: str) -> None:
+    """Clear a named overlay"""
     ...
 
 def overlay_clear_all() -> None:
     """Clear all overlays"""
     ...
 
-def overlay_set_pixel(x: int, y: int, r: int, g: int, b: int) -> None:
-    """Set overlay pixel at (x, y) to RGB"""
+def overlay_set_pixel(x: int, y: int, color: int) -> None:
+    """Set overlay pixel at (x, y) to a packed 0xRRGGBB color"""
     ...
 
 def overlay_count() -> int:
@@ -5898,8 +6276,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[5] = { 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 5;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[6] = { 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 6;
 #endif
 
 //==============================================================================
@@ -5980,6 +6358,9 @@ const int VIPERIDE_REINIT_PY_HASH_COUNT = 4;
 // #ifdef INCLUDE_LED_BRIGHTNESS_CONTROL
 //     { "/python_scripts/examples/led_brightness_control.py", LED_BRIGHTNESS_CONTROL_PY, "led_brightness_control.py", LED_BRIGHTNESS_CONTROL_PY_HASHES, LED_BRIGHTNESS_CONTROL_PY_HASH_COUNT },
 // #endif
+// #ifdef INCLUDE_MACHINE_PIN_BASICS
+//     { "/python_scripts/examples/machine_pin_basics.py", MACHINE_PIN_BASICS_PY, "machine_pin_basics.py", MACHINE_PIN_BASICS_PY_HASHES, MACHINE_PIN_BASICS_PY_HASH_COUNT },
+// #endif
 // #ifdef INCLUDE_NODE_CONNECTIONS
 //     { "/python_scripts/examples/node_connections.py", NODE_CONNECTIONS_PY, "node_connections.py", NODE_CONNECTIONS_PY_HASHES, NODE_CONNECTIONS_PY_HASH_COUNT },
 // #endif
@@ -6000,6 +6381,12 @@ const int VIPERIDE_REINIT_PY_HASH_COUNT = 4;
 // #endif
 // #ifdef INCLUDE_OUTPUT_TEST
 //     { "/python_scripts/examples/output_test.py", OUTPUT_TEST_PY, "output_test.py", OUTPUT_TEST_PY_HASHES, OUTPUT_TEST_PY_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
+//     { "/python_scripts/examples/pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY, "pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY_HASHES, PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_PIN_IRQ_REACTION_GAME
+//     { "/python_scripts/examples/pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY, "pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY_HASHES, PIN_IRQ_REACTION_GAME_PY_HASH_COUNT },
 // #endif
 // #ifdef INCLUDE_PSRAM_TEST
 //     { "/python_scripts/examples/psram_test.py", PSRAM_TEST_PY, "psram_test.py", PSRAM_TEST_PY_HASHES, PSRAM_TEST_PY_HASH_COUNT },

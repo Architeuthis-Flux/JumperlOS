@@ -3278,6 +3278,15 @@ void initializeMicroPythonExamples( bool forceInitialization ) {
 #ifdef INCLUDE_GPIO_BASICS
         { "/python_scripts/examples/gpio_basics.py", GPIO_BASICS_PY, "gpio_basics.py", GPIO_BASICS_PY_HASHES, GPIO_BASICS_PY_HASH_COUNT },
 #endif
+#ifdef INCLUDE_MACHINE_PIN_BASICS
+        { "/python_scripts/examples/machine_pin_basics.py", MACHINE_PIN_BASICS_PY, "machine_pin_basics.py", MACHINE_PIN_BASICS_PY_HASHES, MACHINE_PIN_BASICS_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_PIN_IRQ_REACTION_GAME
+        { "/python_scripts/examples/pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY, "pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY_HASHES, PIN_IRQ_REACTION_GAME_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
+        { "/python_scripts/examples/pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY, "pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY_HASHES, PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT },
+#endif
 #ifdef INCLUDE_NODE_CONNECTIONS
         { "/python_scripts/examples/node_connections.py", NODE_CONNECTIONS_PY, "node_connections.py", NODE_CONNECTIONS_PY_HASHES, NODE_CONNECTIONS_PY_HASH_COUNT },
 #endif
@@ -3699,6 +3708,15 @@ bool verifyMicroPythonExamples( ) {
 #endif
 #ifdef INCLUDE_GPIO_BASICS
         { "/python_scripts/examples/gpio_basics.py", GPIO_BASICS_PY, "gpio_basics.py", GPIO_BASICS_PY_HASHES, GPIO_BASICS_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_MACHINE_PIN_BASICS
+        { "/python_scripts/examples/machine_pin_basics.py", MACHINE_PIN_BASICS_PY, "machine_pin_basics.py", MACHINE_PIN_BASICS_PY_HASHES, MACHINE_PIN_BASICS_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_PIN_IRQ_REACTION_GAME
+        { "/python_scripts/examples/pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY, "pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY_HASHES, PIN_IRQ_REACTION_GAME_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
+        { "/python_scripts/examples/pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY, "pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY_HASHES, PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT },
 #endif
 #ifdef INCLUDE_NODE_CONNECTIONS
         { "/python_scripts/examples/node_connections.py", NODE_CONNECTIONS_PY, "node_connections.py", NODE_CONNECTIONS_PY_HASHES, NODE_CONNECTIONS_PY_HASH_COUNT },
