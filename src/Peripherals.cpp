@@ -740,6 +740,14 @@ void setGPIO( void ) {
             continue;
         }
 
+        // Skip MicroPython-claimed pins (same contract as readGPIO()).
+        // machine.Pin owns dir/pulls until jl_gpio_release_all_pins(); without
+        // this, every refreshConnections() stomps e.g. a Pin.PULL_UP back to
+        // the persisted config's pulldown and Pin.irq() edges get swallowed.
+        if ( globalState.config.gpioPythonOwned[ i ] ) {
+            continue;
+        }
+
         // Set direction
         if ( globalState.config.gpioDirection[ i ] == 0 ) {
             gpio_set_dir( gpio_pin, true ); // Set as output

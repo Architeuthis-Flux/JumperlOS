@@ -35,6 +35,19 @@ connect(GND, GND_ROW)
 time.sleep_ms(100)
 
 sense = Pin(GPIO_2, Pin.IN, Pin.PULL_UP)
+time.sleep_ms(50)
+
+# Self-check: verify the routes actually landed and the pin idles high.
+# If this fails, the game cannot work - bail with a clear message instead
+# of silently missing every press.
+ok1 = is_connected(GPIO_2, TAP_ROW)
+ok2 = is_connected(GND, GND_ROW)
+idle = sense.value()
+print("wiring check: GPIO_2-%d: %s   GND-%d: %s   idle reads: %d (want 1)"
+      % (TAP_ROW, ok1, GND_ROW, ok2, idle))
+assert str(ok1) == "CONNECTED" and str(ok2) == "CONNECTED", "crossbar route failed - try nodes_clear() first"
+if idle == 0:
+    print("NOTE: pin reads LOW at rest - button stuck/shorted, or rows bridged?")
 
 # --- interrupt plumbing -------------------------------------------
 # state: 0=idle  1=waiting (tap now = cheating!)  2=GO!  3=tapped  4=foul

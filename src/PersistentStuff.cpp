@@ -455,6 +455,13 @@ void updateGPIOConfigFromState(void) {
 
     int gpio_pin = gpioDef[i][0];  // Map GPIO 0-7 to pins 20-27
 
+    // Skip MicroPython-claimed pins (same contract as readGPIO()/setGPIO()):
+    // machine.Pin owns dir/pulls until jl_gpio_release_all_pins(), and claimed
+    // pins report GPIO_FUNC_SIO so they'd otherwise be stomped right here.
+    if (globalState.config.gpioPythonOwned[i]) {
+      continue;
+    }
+
     if (gpio_function_map[i] == GPIO_FUNC_SIO) {
 
       switch (gpioState[i]) {
