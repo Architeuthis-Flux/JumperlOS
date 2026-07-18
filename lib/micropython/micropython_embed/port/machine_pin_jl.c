@@ -94,26 +94,24 @@ static const mp_irq_methods_t machine_pin_irq_methods;
 // Whether our shared IO_IRQ_BANK0 handler is currently installed
 static bool jl_pin_irq_handler_installed;
 
-static void jl_gpio_irq(void) {
-    // Only service the registers covering GPIO 0..JL_NUM_GPIOS-1
-    for (int i = 0; i < (JL_NUM_GPIOS + 7) / 8; ++i) {
-        uint32_t intr = iobank0_hw->intr[i];
-        if (intr) {
-            for (int j = 0; j < 8; ++j) {
-                if (intr & 0xf) {
-                    uint32_t gpio = 8 * i + j;
-                    if (gpio >= JL_NUM_GPIOS) {
-                        break;
-                    }
-                    gpio_acknowledge_irq(gpio, intr & 0xf);
-                    machine_pin_irq_obj_t *irq = MP_STATE_PORT(machine_pin_irq_obj[gpio]);
-                    if (irq != NULL && (intr & irq->trigger)) {
-                        irq->flags = intr & irq->trigger;
-                        mp_irq_handler(&irq->base);
-                    }
-                }
-                intr >>= 4;
-            }
+// RAM-resident (__not_in_flash_func): a GPIO IRQ can fire while a flash
+// erase/program has XIP disabled (SPIFTL/EEPROM saves) — a flash-resident
+// handler would hard-fault fetching its own code. Also read the per-core
+// MASKED event status (gpio_get_irq_event_mask) instead of the raw shared
+// iobank0_hw->intr[] latches: the raw register shows events for ALL pins on
+// BOTH cores, so acking from it would swallow edges belonging to other
+// IO_IRQ_BANK0 users (e.g. a future Arduino attachInterrupt on this core).
+static void __not_in_flash_func(jl_gpio_irq)(void) {
+    for (uint gpio = 0; gpio < JL_NUM_GPIOS; ++gpio) {
+        uint32_t events = gpio_get_irq_event_mask(gpio) & JL_GPIO_IRQ_ALL;
+        if (events == 0) {
+            continue;
+        }
+        gpio_acknowledge_irq(gpio, events);
+        machine_pin_irq_obj_t *irq = MP_STATE_PORT(machine_pin_irq_obj[gpio]);
+        if (irq != NULL && (events & irq->trigger)) {
+            irq->flags = events & irq->trigger;
+            mp_irq_handler(&irq->base);
         }
     }
 }
@@ -129,17 +127,29 @@ void machine_pin_irq_init(void) {
     }
 }
 
-// Called from mp_embed_deinit() (before mp_deinit); disables all pin IRQs so
+// Called from mp_embed_deinit() (before mp_deinit) and from session-teardown
+// paths (jl_exit_micropython_restore_entry_state); disables all pin IRQs so
 // no callback can fire into a torn-down VM. The shared handler stays installed
 // (removing/re-adding shared handlers repeatedly can exhaust SDK handler slots).
+//
+// IO_IRQ_BANK0 is masked at the NVIC for the duration: without this, an edge
+// that latched just before we clear a pin's enable can vector into jl_gpio_irq
+// mid-teardown and dispatch a handler whose object we're about to NULL (or
+// whose heap is about to be freed). Masking makes clear-enables + NULL-roots
+// atomic w.r.t. the ISR; pending latches are acked before re-enabling.
 void machine_pin_irq_deinit(void) {
     if (!jl_pin_irq_handler_installed) {
         return;
     }
+    irq_set_enabled(IO_IRQ_BANK0, false);
     for (int i = 0; i < JL_NUM_GPIOS; ++i) {
         gpio_set_irq_enabled(i, JL_GPIO_IRQ_ALL, false);
+        gpio_acknowledge_irq(i, JL_GPIO_IRQ_ALL);
         MP_STATE_PORT(machine_pin_irq_obj[i]) = NULL;
     }
+    // Re-enable the bank IRQ: the shared handler stays installed and other
+    // subsystems may add their own IO_IRQ_BANK0 handlers on this core.
+    irq_set_enabled(IO_IRQ_BANK0, true);
 }
 
 static void machine_pin_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {

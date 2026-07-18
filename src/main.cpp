@@ -463,7 +463,7 @@ void setup( ) {
     }
 
 
-    jOS.registerService( &mpRemoteService ); // HIGH - mpremote/ViperIDE raw REPL on USBSer2
+    jOS.registerService( &mpRemoteService ); // CRITICAL - mpremote/ViperIDE raw REPL on USBSer2 (also run by serviceCritical loop)
 
     
     

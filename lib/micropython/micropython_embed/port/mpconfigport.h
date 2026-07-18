@@ -514,10 +514,15 @@ void jl_after_python_exec_hook(int parse_input_kind, unsigned int exec_flags, vo
 #define MP_HAL_CHECK_INTERRUPT_DECLARED 1
 #define MICROPY_VM_HOOK_LOOP  mp_hal_check_interrupt();
 
-// // Hook called before script execution begins
-// // This allows notification when a script is about to execute
-// #define MICROPY_BOARD_BEFORE_PYTHON_EXEC jl_before_python_exec_hook
-
-// // CRITICAL: Hook called after every script execution to perform cleanup
-// // This is where we trigger garbage collection to free memory for the next script
-// #define MICROPY_BOARD_AFTER_PYTHON_EXEC  jl_after_python_exec_hook
+// Hooks around pyexec's parse_compile_execute (raw REPL / USBSer2 event REPL
+// only — mp_embed_exec_str does not run these). They fire the MpRemoteService
+// onScriptExecutionBegin/Complete callbacks (core-1 GPIO-scan throttling
+// during raw scripts), run GC after each raw-REPL script (ViperIDE memory
+// stability), and close leaked file handles outside raw REPL mode.
+//
+// HISTORY: these were commented out in d01cf75 alongside the input() fix, but
+// the actual root cause there was the dangling readline state, fixed by the
+// readline_init() patch in pyexec.c (scripts/patch_micropython_sources.py).
+// With the hooks off, all of the above plumbing was silently dead code.
+#define MICROPY_BOARD_BEFORE_PYTHON_EXEC jl_before_python_exec_hook
+#define MICROPY_BOARD_AFTER_PYTHON_EXEC  jl_after_python_exec_hook

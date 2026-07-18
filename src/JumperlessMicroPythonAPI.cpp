@@ -135,6 +135,9 @@ extern "C" {
 int justReadProbe( bool allowDuplicates );
 extern "C" void jl_vfs_mount_root( void );   // VFS mounting
 extern void setupFilesystemAndPaths( void ); // Filesystem setup
+// Pin.irq() lifecycle hooks (machine_pin_jl.c) - must be callable from session
+// teardown so no GPIO IRQ stays armed after Python exits.
+extern "C" void machine_pin_irq_deinit( void );
 // jl_close_all_jfs_files is defined later in the extern "C" block
 
 // Include JumperlOS for service management
@@ -467,12 +470,12 @@ void jl_gpio_set( int pin, int value ) {
 
 int jl_gpio_get( int pin ) {
     if ( pin >= 1 && pin <= 10 ) {
-        while ( readingGPIO ) {
-            delayMicroseconds( 1 );
-        }
-
+        // No pre-wait on readingGPIO here: gpioReadWithFloating() acquires the
+        // lock itself (with a 100ms steal timeout). The old timeout-less
+        // `while (readingGPIO)` spin could hang this core forever if the
+        // holder crashed or was parked during a flash write.
         int reading = gpioReadWithFloating( gpioDef[ pin - 1 ][ 0 ], 50 );
-        
+
         return reading;
 
     } else if ( pin >= 20 && pin <= 27 ) {
@@ -1375,7 +1378,10 @@ extern "C" void jl_soft_reboot( void ) {
     // Deinitialize VM completely - this frees all Python objects
     mp_embed_deinit( );
 
-    // Get stack pointer for reinit
+    // Get stack pointer for reinit. NOTE: mp_embed_init persists the
+    // shallowest stack_top it has ever seen and ignores deeper values like
+    // this one — passing a deep-call-site address used to make later GC
+    // stack scans (stack_top - &regs) underflow and scan ~4GB.
     char stack_dummy;
     char* stack_top = &stack_dummy;
 
@@ -1441,6 +1447,14 @@ extern "C" void jl_soft_reboot( void ) {
 }
 
 void jl_exit_micropython_restore_entry_state( void ) {
+    // CRITICAL: Disarm all Pin.irq() interrupts BEFORE releasing pin ownership.
+    // Once gpioPythonOwned[] clears, Core 2's readGPIO()/gpioReadWithFloating()
+    // resumes pull/input-enable twiddling on these pins, which manufactures
+    // edges. A still-armed hard=True handler would then run Python bytecode in
+    // ISR context at arbitrary points in Arduino-side code (TinyUSB reentrancy,
+    // readingGPIO lock spins) — the delayed post-session crash signature.
+    machine_pin_irq_deinit( );
+
     // Release all GPIO pins claimed by MicroPython
     jl_gpio_release_all_pins( );
 

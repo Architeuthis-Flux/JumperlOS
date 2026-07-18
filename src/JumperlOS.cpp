@@ -362,11 +362,11 @@ void jOSmanager::serviceCritical() {
     // This ensures marching ants visualization stays current in probe mode
     Peripherals::getInstance().pollCurrentSense();
 
-    // CRITICAL FIX: Also execute MpRemoteService to check for interrupts
-    // even though it's technically HIGH priority, not CRITICAL.
-    // This is needed because MicroPython's time.sleep() calls serviceCritical()
-    // via jOS.serviceCritical(), and we need MpRemoteService to peek() for Ctrl-C.
-    MpRemoteService::getInstance().service();
+    // NOTE: MpRemoteService is CRITICAL priority and registered, so the loop
+    // above already ran it — the old explicit second call here made it run
+    // twice per serviceCritical(). Its own reentrancy guard also defers any
+    // USBSer2 REPL processing while a script is executing (Ctrl-C is still
+    // caught via mp_hal_check_interrupt's direct stream peek).
 }
 
 /**

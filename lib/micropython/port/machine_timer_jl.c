@@ -50,6 +50,55 @@ typedef struct _machine_timer_obj_t {
     mp_obj_t callback;
 } machine_timer_obj_t;
 
+// ---------------------------------------------------------------------------
+// Live-alarm registry (Jumperless embed addition)
+//
+// Hardware alarms otherwise outlive mp_deinit: a periodic alarm keeps firing
+// with user_data pointing into the freed/reinitialized GC heap, and
+// mp_sched_schedule then corrupts the fresh VM — the classic delayed crash
+// after a soft reboot with a Timer left running. machine_timer_deinit_all()
+// is called from mp_embed_deinit() (before mp_deinit) to cancel everything.
+//
+// Sized to the default alarm pool capacity (PICO_TIME_DEFAULT_ALARM_POOL_MAX_TIMERS
+// is 16 by default); machine.Timer only ever uses alarm_pool_get_default().
+// ---------------------------------------------------------------------------
+#define JL_TIMER_REGISTRY_SIZE (16)
+static machine_timer_obj_t *jl_timer_registry[JL_TIMER_REGISTRY_SIZE];
+
+static void jl_timer_register(machine_timer_obj_t *self) {
+    for (int i = 0; i < JL_TIMER_REGISTRY_SIZE; ++i) {
+        if (jl_timer_registry[i] == NULL || jl_timer_registry[i] == self) {
+            jl_timer_registry[i] = self;
+            return;
+        }
+    }
+    // ponytail: registry full (can't happen with the 16-alarm default pool —
+    // alarm_pool_add_alarm_in_us fails first). Upgrade path: grow the array.
+}
+
+static void jl_timer_unregister(machine_timer_obj_t *self) {
+    for (int i = 0; i < JL_TIMER_REGISTRY_SIZE; ++i) {
+        if (jl_timer_registry[i] == self) {
+            jl_timer_registry[i] = NULL;
+        }
+    }
+}
+
+// Cancel every live alarm. Must run while the GC heap is still valid (i.e.
+// BEFORE mp_deinit) since registry entries point at heap objects.
+void machine_timer_deinit_all(void) {
+    for (int i = 0; i < JL_TIMER_REGISTRY_SIZE; ++i) {
+        machine_timer_obj_t *t = jl_timer_registry[i];
+        if (t != NULL) {
+            if (t->alarm_id != ALARM_ID_INVALID) {
+                alarm_pool_cancel_alarm(t->pool, t->alarm_id);
+                t->alarm_id = ALARM_ID_INVALID;
+            }
+            jl_timer_registry[i] = NULL;
+        }
+    }
+}
+
 static int64_t alarm_callback(alarm_id_t id, void *user_data) {
     machine_timer_obj_t *self = user_data;
     mp_sched_schedule(self->callback, MP_OBJ_FROM_PTR(self));
@@ -106,6 +155,7 @@ static mp_obj_t machine_timer_init_helper(machine_timer_obj_t *self, size_t n_ar
     if (self->alarm_id == -1) {
         mp_raise_OSError(MP_ENOMEM);
     }
+    jl_timer_register(self);
 
     return mp_const_none;
 }
@@ -152,6 +202,7 @@ static mp_obj_t machine_timer_deinit(mp_obj_t self_in) {
         alarm_pool_cancel_alarm(self->pool, self->alarm_id);
         self->alarm_id = ALARM_ID_INVALID;
     }
+    jl_timer_unregister(self);
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(machine_timer_deinit_obj, machine_timer_deinit);

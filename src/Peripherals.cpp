@@ -809,7 +809,17 @@ int gpioReadWithFloating(
     // pulls; unserialized overlap makes a driven-HIGH pin read low ~40% of the
     // time (one core disables IE right as the other core reads). Spin here
     // until the other core's read finishes (worst case ~200us).
+    //
+    // 100ms steal timeout (same pattern as readingADC): a legit hold is
+    // ~200us, so a wait this long means the holder crashed or was hard-parked
+    // (doorbell idleOtherCore during a flash write) while holding the lock.
+    // Stealing risks one corrupted reading; spinning forever wedges this core
+    // (and, from core 0, kills USB).
+    unsigned long gpioWaitStart = micros( );
     while ( __atomic_test_and_set( (volatile char *)&readingGPIO, __ATOMIC_ACQUIRE ) ) {
+        if ( micros( ) - gpioWaitStart > 100000 ) {
+            break; // steal it
+        }
         delayMicroseconds( 1 );
     }
 
@@ -1209,13 +1219,12 @@ CurrentSenseState currentSenseState;
 
 void __not_in_flash_func(readGPIO)( ) {
 
-    // Symmetric guard for the core1/core2 race: jl_gpio_get() (MicroPython,
-    // core 1) spins on readingGPIO before its own gpioReadWithFloating(), but
-    // nothing stopped THIS scan from starting mid-read and disabling the input
-    // buffer under it, corrupting the reading. Skip this scan pass instead.
-    // ponytail: flag check is not atomic - a microsecond overlap window
-    // remains; a real fix would be a spinlock shared by both callers.
-    if ( readingGPIO ) {
+    // Symmetric guard for the core1/core2 race: if the other core is mid-read
+    // (jl_gpio_get / MicroPython), skip this scan pass instead of contending.
+    // Atomic acquire-load pairs with the __atomic_test_and_set/__atomic_clear
+    // in gpioReadWithFloating(); a microsecond overlap window remains but the
+    // real serialization is that lock — this check only avoids wasting a pass.
+    if ( __atomic_load_n( (volatile char *)&readingGPIO, __ATOMIC_ACQUIRE ) ) {
         return;
     }
 

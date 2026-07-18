@@ -593,8 +593,12 @@ void updateConfigFromFile(const char* filename) {
         if (line[0] == '\0' || line[0] == '#' || (line[0] == '/' && line[1] == '/')) continue;
 
         if (line[0] == '[' && line[strlen(line)-1] == ']') {
-            strncpy(section, line+1, strlen(line)-2);
-            section[strlen(line)-2] = '\0';
+            // Bounded copy: a section name longer than the buffer (user/tool
+            // editable config.txt) must truncate, not smash the stack.
+            size_t secLen = strlen(line) - 2;
+            if (secLen >= sizeof(section)) secLen = sizeof(section) - 1;
+            memcpy(section, line+1, secLen);
+            section[secLen] = '\0';
             toLower(section);
             continue;
         }
@@ -603,8 +607,12 @@ void updateConfigFromFile(const char* filename) {
         if (!equalsPos) continue;
         
         *equalsPos = '\0';
-        strcpy(key, line);
-        strcpy(value, equalsPos + 1);
+        // Bounded copies: line[] is 128 bytes but key/value are 32/64 —
+        // unbounded strcpy here was a stack smash on long config lines.
+        strncpy(key, line, sizeof(key) - 1);
+        key[sizeof(key) - 1] = '\0';
+        strncpy(value, equalsPos + 1, sizeof(value) - 1);
+        value[sizeof(value) - 1] = '\0';
         trim(key);
         trim(value);
         
@@ -1509,13 +1517,18 @@ bool saveConfigIncremental(const char* filename) {
         
         // Trim the line for parsing
         char trimmedLine[256];
-        strncpy(trimmedLine, line, sizeof(trimmedLine));
+        strncpy(trimmedLine, line, sizeof(trimmedLine) - 1);
+        trimmedLine[sizeof(trimmedLine) - 1] = '\0';
         trim(trimmedLine);
         
         // Check for section header
         if (trimmedLine[0] == '[' && trimmedLine[strlen(trimmedLine)-1] == ']') {
-            strncpy(currentSection, trimmedLine + 1, strlen(trimmedLine) - 2);
-            currentSection[strlen(trimmedLine) - 2] = '\0';
+            // Bounded copy: section name can be up to 253 chars of a garbled
+            // line but currentSection is 32 bytes — truncate, don't overflow.
+            size_t secLen = strlen(trimmedLine) - 2;
+            if (secLen >= sizeof(currentSection)) secLen = sizeof(currentSection) - 1;
+            memcpy(currentSection, trimmedLine + 1, secLen);
+            currentSection[secLen] = '\0';
             toLower(currentSection);
             
             // Copy section header as-is
@@ -2733,7 +2746,13 @@ void cleanWhitespace(const char* input, char* output) {
     output[j] = '\0';
 }
 
-// Helper function to parse setting
+// Helper function to parse setting.
+// All callers pass section[32], key[32], value[64] (see call sites) while the
+// input line can be up to 256 bytes — every copy below is capped to those
+// sizes so a long/garbled line truncates instead of smashing the stack.
+#define PARSE_SECTION_CAP (31)
+#define PARSE_KEY_CAP     (31)
+#define PARSE_VALUE_CAP   (63)
 bool parseSetting(const char* line, char* section, char* key, char* value) {
     // Serial.print("Parsing line: '");
     // Serial.print(line);
@@ -2747,19 +2766,24 @@ bool parseSetting(const char* line, char* section, char* key, char* value) {
         
         if (firstDot && equals && firstDot < equals) {
             // Extract section
-            strncpy(section, start, firstDot - start);
-            section[firstDot - start] = '\0';
+            size_t secLen = (size_t)(firstDot - start);
+            if (secLen > PARSE_SECTION_CAP) secLen = PARSE_SECTION_CAP;
+            memcpy(section, start, secLen);
+            section[secLen] = '\0';
             
             // Extract key
             const char* keyStart = firstDot + 1;
-            strncpy(key, keyStart, equals - keyStart);
-            key[equals - keyStart] = '\0';
+            size_t keyLen = (size_t)(equals - keyStart);
+            if (keyLen > PARSE_KEY_CAP) keyLen = PARSE_KEY_CAP;
+            memcpy(key, keyStart, keyLen);
+            key[keyLen] = '\0';
             trim(key);
             
             // Extract value
             const char* valueStart = equals + 1;
             while (isspace(*valueStart)) valueStart++; // Skip leading whitespace
-            strcpy(value, valueStart);
+            strncpy(value, valueStart, PARSE_VALUE_CAP);
+            value[PARSE_VALUE_CAP] = '\0';
             
             // Trim trailing whitespace and semicolon from value
             char* end = value + strlen(value) - 1;
@@ -2788,12 +2812,15 @@ bool parseSetting(const char* line, char* section, char* key, char* value) {
     }
     
     // Extract section (skip the [)
-    strncpy(section, line + 1, sectionEnd - line - 1);
-    section[sectionEnd - line - 1] = '\0';
+    size_t bsecLen = (size_t)(sectionEnd - line - 1);
+    if (bsecLen > PARSE_SECTION_CAP) bsecLen = PARSE_SECTION_CAP;
+    memcpy(section, line + 1, bsecLen);
+    section[bsecLen] = '\0';
     
     // Convert section to lowercase for comparison
     char sectionLower[32];
-    strcpy(sectionLower, section);
+    strncpy(sectionLower, section, sizeof(sectionLower) - 1);
+    sectionLower[sizeof(sectionLower) - 1] = '\0';
     for(int i = 0; sectionLower[i]; i++) {
         sectionLower[i] = tolower(sectionLower[i]);
     }
@@ -2813,13 +2840,16 @@ bool parseSetting(const char* line, char* section, char* key, char* value) {
     const char* keyEnd = equalsPos;
     while (keyEnd > keyStart && isspace(*(keyEnd-1))) keyEnd--; // Skip trailing whitespace
     
-    strncpy(key, keyStart, keyEnd - keyStart);
-    key[keyEnd - keyStart] = '\0';
+    size_t bkeyLen = (size_t)(keyEnd - keyStart);
+    if (bkeyLen > PARSE_KEY_CAP) bkeyLen = PARSE_KEY_CAP;
+    memcpy(key, keyStart, bkeyLen);
+    key[bkeyLen] = '\0';
     
     // Extract value (skip the =)
     const char* valueStart = equalsPos + 1;
     while (isspace(*valueStart)) valueStart++; // Skip leading whitespace
-    strcpy(value, valueStart);
+    strncpy(value, valueStart, PARSE_VALUE_CAP);
+    value[PARSE_VALUE_CAP] = '\0';
     
     // Trim trailing whitespace and semicolon from value
     char* end = value + strlen(value) - 1;

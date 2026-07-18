@@ -69,6 +69,9 @@ const mp_obj_type_t *jl_retain_machine_uart_type = &machine_uart_type;
 // Pin.irq() lifecycle hooks (machine_pin_jl.c)
 extern void machine_pin_irq_init(void);
 extern void machine_pin_irq_deinit(void);
+// machine.Timer lifecycle hook (machine_timer_jl.c): cancels all live hardware
+// alarms so none can fire mp_sched_schedule into a freed/reinitialized heap.
+extern void machine_timer_deinit_all(void);
 
 // Minimal stubs for modmachine low-level hooks to satisfy linker
 void mp_machine_idle(void) {}
@@ -89,13 +92,30 @@ mp_int_t mp_machine_reset_cause(void) { return 0; }
 
 // Initialize MicroPython runtime with optional PSRAM support
 int mp_embed_init(void *heap, size_t heap_size, void *stack_top) {
-    // Use the newer cstack API with proper stack limit initialization
-    // Define a reasonable stack size for embedded systems (8KB)
-    #if OG_JUMPERLESS == 1
-    const size_t stack_size = 16 * 1024;  // 16KB stack size
-    #else
-    const size_t stack_size = 32 * 1024;  // 32KB stack size
-    #endif
+    // Persist the shallowest (highest-address, i.e. boot-time) stack_top ever
+    // seen across VM reinits. jl_soft_reboot() re-captured a local's address
+    // at its own (deep) call site; if Python later ran at a SHALLOWER depth,
+    // gc_helper_collect_regs_and_stack computed (stack_top - &regs) as a
+    // negative number cast to size_t and the GC scanned ~4GB of address space
+    // -> hard fault. The stack grows down, so taking the max is always the
+    // real top.
+    static void *jl_boot_stack_top = NULL;
+    if (jl_boot_stack_top == NULL || (uintptr_t)stack_top > (uintptr_t)jl_boot_stack_top) {
+        jl_boot_stack_top = stack_top;
+    }
+    stack_top = jl_boot_stack_top;
+
+    // Use the newer cstack API with proper stack limit initialization.
+    //
+    // Core 0's stack is the two 4KB scratch banks (8KB total: Core 1 is moved
+    // to a separate heap stack via core1_separate_stack in src/main.cpp, and
+    // MSPLIM guards the floor). The previous 32KB/16KB values here were
+    // fiction: MICROPY_STACK_CHECK could never fire before the hardware STKOF
+    // fault, so deep Python recursion hard-faulted instead of raising
+    // RecursionError. 7KB (minus the 1KB MICROPY_STACK_CHECK_MARGIN) allows
+    // ~6KB of checked descent from the real stack top, leaving ~2KB of C/ISR
+    // headroom above the MSPLIM floor.
+    const size_t stack_size = 7 * 1024;
     mp_cstack_init_with_top(stack_top, stack_size);
     
     // Initialize primary GC heap (SRAM)
@@ -141,17 +161,28 @@ size_t mp_embed_get_psram_size(void) {
 
 // Deinitialize MicroPython runtime
 void mp_embed_deinit(void) {
-    // Disable all Pin.irq() interrupts BEFORE tearing down the VM, so no GPIO
-    // ISR can call into freed heap objects.
+    // Disable all Pin.irq() interrupts and cancel all machine.Timer alarms
+    // BEFORE tearing down the VM, so no ISR/alarm can call into freed heap
+    // objects. Timer cancel must run while the heap is still valid (the
+    // registry points at heap objects).
     machine_pin_irq_deinit();
+    machine_timer_deinit_all();
     mp_deinit();
 }
+
+// Non-zero while the VM is executing code via mp_embed_exec_str. Read by
+// MpRemoteService::service() so it never feeds USBSer2 characters into
+// pyexec (nested VM execution) or soft-reboots the VM out from under a
+// script that is still on the C stack (both were live crash paths: service()
+// is reached from inside time.sleep via mp_hal_delay_ms -> serviceCritical).
+volatile int jl_vm_exec_depth = 0;
 
 // Execute a string of Python code
 int mp_embed_exec_str(const char *str) {
     if (!str) return -1;
     
     nlr_buf_t nlr;
+    jl_vm_exec_depth++;
     if (nlr_push(&nlr) == 0) {
         // Compile and execute the string
         qstr source_name = qstr_from_str("<stdin>");
@@ -175,6 +206,7 @@ int mp_embed_exec_str(const char *str) {
             }
         }
         nlr_pop();
+        jl_vm_exec_depth--;
         return 0;
     } else {
         // Uncaught exception (e.g. KeyboardInterrupt from input()/sleep())
@@ -192,6 +224,7 @@ int mp_embed_exec_str(const char *str) {
         mp_handle_pending(false);       // Discard any stale pending exception/callbacks
         
         mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(nlr.ret_val));
+        jl_vm_exec_depth--;
         return -1;
     }
 }
@@ -356,6 +389,7 @@ void nlr_jump_fail(void *val) {
     // Reinit MicroPython to allow potential recovery by the REPL loop,
     // then spin forever since the caller's stack frame is invalidated.
     machine_pin_irq_deinit();
+    machine_timer_deinit_all();
     mp_deinit();
     delay(1000);
     mp_init();

@@ -236,6 +236,14 @@ void printMicroPythonStatus(void);
 // Memory management - run garbage collection to free memory before editor
 void forceGarbageCollection(void);
 
+// USB-CDC back-pressure guard: wait (pumping USB) until `stream` can accept
+// `need` bytes. Returns false on timeout — the caller must DROP its output
+// instead of handing it to a CDC write() that would spin forever when the
+// host holds DTR but has stopped draining (browser/IDE holding the port).
+// Non-CDC streams return true immediately.
+bool jl_cdc_wait_writable(Stream *stream, size_t need = 1,
+                          unsigned long timeoutMs = 100);
+
 // Interrupt handling
 extern bool mp_interrupt_requested; // Global interrupt flag for Ctrl+Q
 extern bool mp_soft_reset_requested; // Soft reset request flag

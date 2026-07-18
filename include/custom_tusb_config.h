@@ -78,6 +78,22 @@ extern "C" {
 
 #define CFG_TUD_CDC USB_CDC_ENABLE_COUNT
 
+// CRITICAL: Fix a core-0 live-lock (SWD-confirmed backtrace, Jul 2026).
+// With this Adafruit default ON (1), every host DTR toggle makes
+// cdcd_control_xfer_cb (running in TinyUSB's soft-IRQ context via
+// usb_task_irq) call tu_fifo_set_overwritable(), which takes the CDC TX
+// FIFO's write mutex with OSAL_TIMEOUT_WAIT_FOREVER. If the IRQ lands while
+// thread-context code is inside tud_cdc_n_write/ff_push_n HOLDING that same
+// mutex (i.e. any print racing a host connect/disconnect), the ISR blocks
+// forever on a mutex owned by the thread it preempted -> core 0 spins
+// inside the IRQ, USB dies, board wedges until power cycle. This was the
+// "board dies when the browser/IDE opens or drops the port mid-print" bug.
+// Setting 0 makes the overwritable flag constant (init false, set false), so
+// tu_fifo_set_overwritable early-returns and never locks in ISR context.
+// Cost: TX FIFO no longer overwrites stale data while disconnected — writes
+// to a disconnected port just fill the FIFO and drop, which is fine here.
+#define CFG_TUD_CDC_TX_OVERWRITABLE_IF_NOT_CONNECTED 0
+
 // Enable multiple CDC descriptors - OPTIMIZED FOR STREAMING
 #define CFG_TUD_CDC_EP_BUFSIZE 64   // Match USB 2.0 bulk packet size for efficiency
 

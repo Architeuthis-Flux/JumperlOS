@@ -92,28 +92,47 @@ MpRemoteService& MpRemoteService::getInstance( ) {
     return *instance;
 }
 
+// Non-zero while the VM is executing code via mp_embed_exec_str
+// (lib/micropython/port/micropython_embed.c). See guard below.
+extern "C" volatile int jl_vm_exec_depth;
+
 ServiceStatus MpRemoteService::service( ) {
     if ( !m_enabled ) {
         jl_in_raw_repl_mode = false; // Ensure flag is cleared when service is disabled
         return ServiceStatus::IDLE;
     }
 
-    // Track DTR state for detecting new connections
-    static bool prev_dtr = false;
+    // REENTRANCY GUARD. service() is reached from inside running scripts:
+    // time.sleep() -> mp_hal_delay_ms -> jOS.serviceCritical() -> here (and
+    // the jOS CRITICAL-priority loop can reach us the same way). Feeding
+    // USBSer2 bytes into pyexec_event_repl_process_char while a script is
+    // already on the C stack is nested VM execution (stack blowup / GC / NLR
+    // corruption), and a nested jl_soft_reboot() frees the GC heap out from
+    // under the outer script's live frames. Two conditions cover both shapes:
+    //   - s_in_service: we are already inside service() (raw-REPL script
+    //     executing inside pyexec_event_repl_process_char below).
+    //   - jl_vm_exec_depth: a script entered via mp_embed_exec_str (friendly
+    //     Serial REPL, apps, boot.py) is still running.
+    // Ctrl-C on USBSer2 still works while deferred: mp_hal_check_interrupt()
+    // peeks the stream directly and is called throughout script execution.
+    static bool s_in_service = false;
+    if ( s_in_service || jl_vm_exec_depth > 0 ) {
+        return m_in_raw_repl ? ServiceStatus::BUSY : ServiceStatus::IDLE;
+    }
+    s_in_service = true;
+
     static bool repl_initialized = false;
-    bool current_dtr = USBSer2; // CDC bool returns true if connected and DTR asserted
 
     // CRITICAL: Save current stream state BEFORE any setGlobalStreamWithInterrupt calls.
-    // During script execution (e.g. time.sleep()), serviceCritical() calls us.
     // Without save/restore, setGlobalStreamWithInterrupt(&USBSer2) permanently
     // redirects stdout to USBSer2, making print() output from Serial REPL scripts
     // invisible — characters appear "dropped" on the Serial terminal.
     Stream* saved_stream = global_mp_stream;
 
-    // When DTR goes from low to high (new connection), initialize event REPL
+    // One-time event REPL setup on first service pass
     if ( !repl_initialized) {
         if ( m_debug ) {
-            Serial.println( "[MpRemote] DTR asserted - new connection detected" );
+            Serial.println( "[MpRemote] Initializing event REPL" );
         }
         // Ensure MicroPython is initialized
         ensureMicroPythonInitialized( );
@@ -128,7 +147,6 @@ ServiceStatus MpRemoteService::service( ) {
         repl_initialized = true;
         // m_in_raw_repl = false;
     }
-    prev_dtr = current_dtr;
 
     // Check if USBSer2 has data available
     if ( !USBSer2 || USBSer2.available( ) == 0 ) {
@@ -136,6 +154,7 @@ ServiceStatus MpRemoteService::service( ) {
         if (saved_stream && global_mp_stream != saved_stream) {
             setGlobalStreamWithInterrupt(saved_stream);
         }
+        s_in_service = false;
         return m_in_raw_repl ? ServiceStatus::BUSY : ServiceStatus::IDLE;
     }
 
@@ -233,7 +252,7 @@ ServiceStatus MpRemoteService::service( ) {
             // - If ViperIDE already got both \x04s, the extra ones start a new
             //   (empty) response which it will handle gracefully.
             // - If it was waiting for markers, this unblocks it.
-            if (m_in_raw_repl && USBSer2) {
+            if (m_in_raw_repl && USBSer2 && jl_cdc_wait_writable(&USBSer2, 3, 500)) {
                 USBSer2.write('\x04');
                 USBSer2.write('\x04');
                 USBSer2.write('>');
@@ -271,18 +290,26 @@ ServiceStatus MpRemoteService::service( ) {
             Serial.println( "[MpRemote] Executing soft reset via jl_soft_reboot()" );
         }
 
+        // Announce the reset first (mpremote/ViperIDE expect "soft reboot"
+        // before the new banner/prompt).
+        if ( m_in_raw_repl ) {
+            writeResponse( "soft reboot\r\n" );
+        }
+
         // Call our custom soft reset that doesn't corrupt pointers
         jl_soft_reboot( );
 
-        // Send soft reboot message and raw REPL prompt
-        if ( m_in_raw_repl ) {
-            writeResponse( "soft reboot\r\n" );
-            sendRawReplPrompt( );
-        }
-                // USBSer2.write('\x04');
-                // USBSer2.write('\x04');
-                // USBSer2.write('>');
-                // USBSer2.flush();
+        // CRITICAL: Re-initialize the event REPL. jl_soft_reboot() wiped
+        // MP_STATE_VM(repl_line) with the rest of the VM state; feeding the
+        // next USBSer2 character into pyexec_event_repl_process_char without
+        // this dereferences the NULL repl_line and crashes the board (the
+        // "dies right after Ctrl-D / mpremote reset" signature).
+        // pyexec_event_repl_init() re-enters the mode recorded in
+        // pyexec_mode_kind (which survives the VM reset), printing the raw
+        // REPL prompt or friendly banner itself.
+        setGlobalStreamWithInterrupt(&USBSer2);
+        pyexec_event_repl_init( );
+        USBSer2.flush( );
     }
 
     // CRITICAL: Restore the stream that was active before we switched to USBSer2.
@@ -291,6 +318,7 @@ ServiceStatus MpRemoteService::service( ) {
         setGlobalStreamWithInterrupt(saved_stream);
     }
 
+    s_in_service = false;
     return m_in_raw_repl ? ServiceStatus::BUSY : ServiceStatus::IDLE;
 }
 
@@ -382,8 +410,8 @@ void MpRemoteService::writeResponse( const char* str ) {
         Serial.println( );
     }
     if ( USBSer2 ) {
-        USBSer2.print( str );
-        USBSer2.flush( );
+        writeResponse( str, strlen( str ) );
+        return;
     }
 }
 
@@ -395,7 +423,22 @@ void MpRemoteService::writeResponse( const char* str, size_t len ) {
     }
 
     if ( USBSer2 ) {
-        USBSer2.write( (const uint8_t*)str, len );
+        // Chunked write with back-pressure: CDC write() spins forever when the
+        // host holds DTR but stops reading. Longer timeout than plain prints
+        // (raw REPL protocol markers matter), but still bounded — drop rather
+        // than hang the board.
+        size_t off = 0;
+        while ( off < len ) {
+            if ( !jl_cdc_wait_writable( &USBSer2, 1, 500 ) ) {
+                Serial.printf( "[MpRemote] WARNING: USBSer2 TX stalled, dropped %u bytes\r\n",
+                               (unsigned)( len - off ) );
+                return;
+            }
+            size_t room = (size_t)USBSer2.availableForWrite( );
+            size_t n = ( len - off < room ) ? ( len - off ) : room;
+            USBSer2.write( (const uint8_t*)str + off, n );
+            off += n;
+        }
         USBSer2.flush( );
     }
 }
@@ -405,6 +448,9 @@ void MpRemoteService::writeByte( uint8_t b ) {
         Serial.printf( "[MpRemote] TxByte: 0x%02X\r\n", b );
     }
     if ( USBSer2 ) {
+        if ( !jl_cdc_wait_writable( &USBSer2, 1, 500 ) ) {
+            return; // host stopped draining — drop instead of hanging
+        }
         USBSer2.write( b );
         USBSer2.flush( );
     }

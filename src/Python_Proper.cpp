@@ -123,6 +123,9 @@ int mp_hal_stdin_rx_chr(void);
 mp_uint_t mp_hal_stdout_tx_strn(const char *str, size_t len);
 void mp_hal_delay_ms(mp_uint_t ms);
 mp_uint_t mp_hal_ticks_ms(void);
+// Full VM soft reboot (JumperlessMicroPythonAPI.cpp) - used to honor Ctrl-D
+// soft-reset requests from the friendly REPL.
+void jl_soft_reboot(void);
 
 // Forward declaration for interrupt checking  
 // (Note: Actual function is C++ linkage for use by other modules)
@@ -233,9 +236,13 @@ extern "C" void mp_hal_delay_ms(mp_uint_t ms) {
       // AND_EXCEPTIONS == the old `true` (run callbacks and raise the exception).
       mp_handle_pending(MP_HANDLE_PENDING_CALLBACKS_AND_EXCEPTIONS);
 
-      // Fast-path check for flags that mp_handle_pending doesn't cover
+      // Fast-path check for flags that mp_handle_pending doesn't cover.
+      // Deliberately do NOT clear mp_soft_reset_requested here: the flag must
+      // survive until the friendly-REPL outer loop (or MpRemoteService) can
+      // perform the actual jl_soft_reboot(). Clearing it here silently turned
+      // Ctrl-D into a no-op "soft reset" that left Pin IRQs and Timer alarms
+      // armed against a VM everyone believed had been reset.
       if (mp_soft_reset_requested) {
-          mp_soft_reset_requested = false;
           return;
       }
     }
@@ -290,6 +297,36 @@ extern "C" void service_usb_task(void) {
   #endif
 }
 
+// USB-CDC back-pressure guard. Adafruit_USBD_CDC::write() spins forever
+// (yield loop) when the port is "connected" (host holds DTR) but the host has
+// stopped reading and the TX FIFO is full — the classic "browser/IDE holding
+// the port wedges the board on any print()". Wait for room while pumping USB;
+// on timeout the caller must DROP its output instead of writing.
+bool jl_cdc_wait_writable(Stream *stream, size_t need, unsigned long timeoutMs) {
+  // Only USB-CDC ports have the blocking-write hazard. Other streams (Jerial,
+  // OLEDOut, ...) may not override availableForWrite() (Print's default
+  // returns 0), so gating them here would wrongly drop all their output.
+  bool is_cdc = (stream == (Stream *)&Serial) || (stream == (Stream *)&USBSer1) ||
+                (stream == (Stream *)&USBSer2) || (stream == (Stream *)&USBSer3);
+  if (!stream || !is_cdc) {
+    return true;
+  }
+  if ((size_t)stream->availableForWrite() >= need) {
+    return true;
+  }
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    #ifdef USE_TINYUSB
+    tud_task(); // give the host a chance to drain the TX FIFO
+    #endif
+    if ((size_t)stream->availableForWrite() >= need) {
+      return true;
+    }
+    delayMicroseconds(100);
+  }
+  return false;
+}
+
 extern "C" void arduino_serial_write(const char *str, int len, void *stream) {
   Stream *s = (Stream *)stream;
   if (s) {
@@ -299,6 +336,11 @@ extern "C" void arduino_serial_write(const char *str, int len, void *stream) {
 
     // Convert \n to \r\n for proper terminal display
     for (int i = 0; i < len; i++) {
+      // Back-pressure: drop the rest of the output if the host holds DTR but
+      // has stopped draining (a blocking write here hangs the whole board).
+      if (!jl_cdc_wait_writable(s, 2)) {
+        return;
+      }
       if (!is_raw_repl_stream && str[i] == '\n') {
         // Friendly REPL / main Serial: normalize to CRLF
         s->write('\r');
@@ -453,16 +495,22 @@ extern "C" void mp_hal_stdout_tx_strn_cooked(const char *str, size_t len) {
 
         bool is_raw_repl_stream = (out_stream == &USBSer2);
 
-        for (size_t i = 0; i < len; i++) {
-            // CRITICAL: Service USB every 32 characters to prevent CDC buffer deadlock
-            // Without this, Serial.write() can block if CDC TX buffer is full,
-            // and USB never gets serviced, causing a permanent freeze
-            if (i % 50 == 0) {
-                tud_task();  // Service USB to drain CDC TX buffer
-                mp_hal_check_interrupt();
-            }
+    for (size_t i = 0; i < len; i++) {
+      // CRITICAL: Service USB every 32 characters to prevent CDC buffer deadlock
+      // Without this, Serial.write() can block if CDC TX buffer is full,
+      // and USB never gets serviced, causing a permanent freeze
+      if (i % 50 == 0) {
+        tud_task();  // Service USB to drain CDC TX buffer
+        mp_hal_check_interrupt();
+      }
 
-            if (!is_raw_repl_stream && str[i] == '\n') {
+      // Back-pressure: if the host holds DTR but stopped draining, drop the
+      // rest of this output instead of letting CDC write() spin forever.
+      if (!jl_cdc_wait_writable(out_stream, 2)) {
+        return;
+      }
+
+      if (!is_raw_repl_stream && str[i] == '\n') {
                 // Friendly REPL / main Serial: normalize to CRLF
                 out_stream->write('\r');
                 out_stream->write('\n');
@@ -515,8 +563,9 @@ static inline bool check_stream_for_interrupt(Stream* stream, uint32_t current_t
   if (c == 0x04) {
     stream->read(); // consume control byte
     mp_soft_reset_requested = true;
-    // Schedule a SystemExit to unwind the VM immediately; executeCode will
-    // also see mp_soft_reset_requested and reinit afterward.
+    // Schedule a SystemExit to unwind the VM immediately; the flag is then
+    // handled (jl_soft_reboot) by the friendly-REPL outer loop in
+    // enterMicroPythonREPLWithFile, or by MpRemoteService for raw REPL.
     mp_sched_exception(MP_OBJ_FROM_PTR(&mp_type_SystemExit));
     last_interrupt_time = current_time;
     return true;
@@ -1095,7 +1144,24 @@ void enterMicroPythonREPLWithFile(Stream *stream, const String& filepath) {
       // CRITICAL: Use repl_stream (the original stream), not global_mp_stream
       // because global_mp_stream can be changed by MpRemoteService when ViperIDE connects
       processMicroPythonInput(repl_stream);
-      
+
+      // Honor a Ctrl-D soft-reset request now that the script/input has fully
+      // unwound (no Python frames on the stack). Previously the flag was
+      // silently swallowed in mp_hal_delay_ms, so a friendly-REPL "soft reset"
+      // never ran machine_pin_irq_deinit / VM reinit — Pin IRQs and Timer
+      // alarms stayed armed against a VM the user believed was reset.
+      if (mp_soft_reset_requested) {
+        mp_soft_reset_requested = false;
+        mp_interrupt_requested = false;
+        changeTerminalColor(replColors[4], true, repl_stream);
+        repl_stream->println("\r\nsoft reboot");
+        jl_soft_reboot();
+        setGlobalStreamWithInterrupt(repl_stream);
+        changeTerminalColor(replColors[1], true, repl_stream);
+        repl_stream->print(">>> ");
+        repl_stream->flush();
+      }
+
       // Run essential services every 50ms to keep measurements and animations running
       // This includes MpRemoteService which handles ViperIDE/mpremote on USBSer2
       if (millis() - lastServiceTime >= 50) {
@@ -1125,7 +1191,8 @@ void enterMicroPythonREPLWithFile(Stream *stream, const String& filepath) {
       // raw REPL completion markers. Send \x04\x04> to unblock it.
       // This is safe even if markers were already sent — extra \x04s just
       // produce an empty response that ViperIDE handles gracefully.
-      if (MpRemoteService::getInstance().isInRawRepl() && USBSer2) {
+      if (MpRemoteService::getInstance().isInRawRepl() && USBSer2 &&
+          jl_cdc_wait_writable(&USBSer2, 3, 500)) {
         USBSer2.write('\x04');
         USBSer2.write('\x04');
         USBSer2.write('>');
