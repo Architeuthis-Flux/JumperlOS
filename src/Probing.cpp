@@ -4874,6 +4874,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
 
             jOS.serviceCritical( );
             int reading = justReadProbe( );
+
             rotaryEncoderStuff( );
 
             int encodeEdit = 0;
@@ -6936,3 +6937,4 @@ int Probing::readRails( int pin ) {
 
     return state;
 }
+

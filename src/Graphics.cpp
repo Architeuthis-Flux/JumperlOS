@@ -3511,6 +3511,7 @@ void printTextFromMenu(int print) {
   while (Jerial.available() == 0) {
     if (scroll == 1) {
       rotaryEncoderStuff();
+
       if (encoderDirectionState == UP) {
         if (speed > 10000) {
           speed = speed - 10000;
@@ -3522,13 +3523,12 @@ void printTextFromMenu(int print) {
         }
         // Jerial.print("\r                          \rspeed = ");
         // Jerial.print(speed);
-
-        // encoderDirectionState = NONE;
+        encoderDirectionState = NONE; // ack latched direction
       } else if (encoderDirectionState == DOWN) {
         speed = speed + 10000;
         //           Jerial.print("\r                          \rspeed = ");
         // Jerial.print(speed);
-        // encoderDirectionState = NONE;
+        encoderDirectionState = NONE; // ack latched direction
         if (speed > 1000000) {
           speed = 1000000;
         }
