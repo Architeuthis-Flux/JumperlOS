@@ -23,6 +23,7 @@
 #include "LogicAnalyzer.h"
 #include "MCP4728.h"
 #include "MatrixState.h"
+#include "MeasureMode.h"
 #include "Menus.h"
 #include "NetManager.h"
 #include "NetsToChipConnections.h"
@@ -716,6 +717,13 @@ void SingleCharCommands::initializeCommands( ) {
     registerCommand( 'j', "Test overlay",
                      "Test overlay.",
                      cmd_testOverlay, MENU_DEBUG, CAT_ADVANCED, true, SER3_IRRELEVANT );
+
+    registerCommand( 'V', "measurement overlay (V=table Vr=rows V!=cycle V?=check)",
+                     "Measurement overlay: V dumps the per-path current comparison table "
+                     "(INA one-shot vs deltaV/R estimate), Vr dumps per-row sweep state, "
+                     "V! toggles current cycling, V? runs the crossbar lane self-check, "
+                     "Vc clears the row set.",
+                     cmd_measurementOverlay, MENU_ADVANCED, CAT_HARDWARE );
 }
 
 
@@ -745,6 +753,60 @@ CommandResult cmd_showSwitchPosition( char c, const String& line ) {
 
 CommandResult cmd_testOverlay( char c, const String& line ) {
     graphicOverlayState.debugMenu();
+    return CMD_DONT_SHOW_MENU;
+}
+
+CommandResult cmd_measurementOverlay( char c, const String& line ) {
+    Stream* target = Jerial.getResponseTarget( );
+    if ( target == nullptr ) target = &Jerial;
+
+    if ( !jumperlessConfig.experimental.dev_features ) {
+        target->println( "measurement overlay is experimental - enable with "
+                         "`[experimental] dev_features = 1;" );
+        target->flush( );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    String arg = getCommandArgs( line, 20 );
+    if ( arg.length( ) > 0 && arg[ 0 ] == '?' ) {
+        measurementOverlay.runLaneSelfCheck( target );
+    } else if ( arg.length( ) > 0 && ( arg[ 0 ] == 'r' || arg[ 0 ] == 'R' ) ) {
+        measurementOverlay.printRowSweep( target );
+    } else if ( arg.length( ) > 0 && arg[ 0 ] == '!' ) {
+        extern bool configChanged;
+        jumperlessConfig.display.current_cycling = !jumperlessConfig.display.current_cycling;
+        configChanged = true;
+        target->printf( "current cycling %s\n\r",
+                        jumperlessConfig.display.current_cycling ? "on" : "off" );
+    } else if ( arg.length( ) > 1 && arg[ 0 ] == '+' ) {
+        // V+17-28 (explicit pair) or V+17 (first bridge touching row 17)
+        int a = 0, b = 0;
+        if ( sscanf( arg.c_str( ) + 1, "%d-%d", &a, &b ) == 2 ||
+             sscanf( arg.c_str( ) + 1, "%d,%d", &a, &b ) == 2 ) {
+            target->printf( measurementOverlay.addCurrentTap( a, b )
+                                ? "current tap %d-%d added\n\r"
+                                : "can't tap %d-%d (no such bridge, or taps full)\n\r",
+                            a, b );
+        } else if ( sscanf( arg.c_str( ) + 1, "%d", &a ) == 1 ) {
+            target->printf( measurementOverlay.addCurrentTapForNode( a )
+                                ? "current tap added on row %d's bridge\n\r"
+                                : "row %d isn't part of a bridge\n\r",
+                            a );
+        }
+    } else if ( arg.length( ) > 1 && arg[ 0 ] == '-' ) {
+        int a = atoi( arg.c_str( ) + 1 );
+        target->printf( measurementOverlay.removeCurrentTap( a )
+                            ? "current tap on row %d removed\n\r"
+                            : "no current tap touches row %d\n\r",
+                        a );
+    } else if ( arg.length( ) > 0 && ( arg[ 0 ] == 'c' || arg[ 0 ] == 'C' ) ) {
+        measurementOverlay.clearRowSet( );
+        measurementOverlay.clearCurrentTaps( );
+        target->println( "overlay row set + current taps cleared" );
+    } else {
+        measurementOverlay.printCurrentComparison( target );
+    }
+    target->flush( );
     return CMD_DONT_SHOW_MENU;
 }
 

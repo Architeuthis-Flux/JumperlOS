@@ -46,6 +46,10 @@ volatile uint32_t irq_flags = 0;
 
 chipXYBitfield lastChipXY[12];
 
+// Bumped every time paths are (re)sent to the crossbar. Consumers (measurement
+// overlay path caches) compare against this to know routing may have moved.
+volatile uint32_t crossbarPathGeneration = 0;
+
 // OPTIMIZATION: Track which chips have connections to avoid scanning empty chips
 static bool chipHadConnections[12] = {false};
 
@@ -179,6 +183,9 @@ void __not_in_flash_func(sendPaths)(int clean) {
   core2_step = micros();
   #endif
   
+  // Routing may have moved - invalidate measurement overlay path caches
+  crossbarPathGeneration = crossbarPathGeneration + 1;
+
   core2busy = false;
   sendAllPathsCore2 = 0;
   __dmb();  // Memory barrier so Core 0 sees the update

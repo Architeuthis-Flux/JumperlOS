@@ -155,6 +155,12 @@ String menuLines[150] = {
        "Display\31Options",
       //  "-$Demo$",
       //  "--*On**Off*",
+       // '!' = experimental (hidden unless [experimental] dev_features = 1;
+       // stripped by parseMenuFile)
+       "!-$Overlay$",
+       "!--*Off**Color**Bar**Dot*",
+       "!-$I Cycle$",
+       "!--*Off**On**Clear*",
        "-$Colors$",
        "--*Rainbow**Shuffle*",
        "-$Jumpers$",

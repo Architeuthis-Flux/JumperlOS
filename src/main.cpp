@@ -453,6 +453,11 @@ void setup( ) {
     // has no probe pads (its scanning probe is Phase 2 work), so registering
     // these would poll nonexistent ADC channels and spam measure mode. Runtime
     // cap instead of #ifdef so the contract - not a board macro - drives it.
+    // Registered BEFORE the probe stack so it can consume connect/remove
+    // presses for overlay row-set edits while measure mode is active,
+    // before Probing sees them.
+    jOS.registerService( &measurementOverlay ); // HIGH - measurement overlay coordination + current-sense windows
+
     if ( board::currentBoard( ).caps.hasProbePads ) {
         jOS.registerService( &probeButton );      // HIGH - high-frequency button checking
         jOS.registerService( &probing );          // HIGH - user interaction sensitive (probe reading)
@@ -1577,6 +1582,12 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
         showLEDsCore2 = 2;
     }
 
+    // Measurement overlay voltage sweep - self-throttled (~8ms slices), and
+    // gated internally on pauseCore2 / pending path sends / probe activity.
+    // Runs here (while holding core_sync) so it can never race sendPaths or
+    // the FakeGPIO TDM crosspoint switching below.
+    measurementOverlayCore2Tick( );
+
     // Check for negative values (clear before show)
     // Also preserve blocking mode flag (>= 10) through the abs() operation
     bool useBlockingMode = false;
@@ -1683,6 +1694,17 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 
                     t[ 10 ] = micros( );
                     showAllRowAnimations( );
+
+                    // Marching ants paint AFTER row animations (which used to
+                    // overwrite them) - the pixel lists were built inside
+                    // drawWires()/showNets() above while the virtual path was
+                    // in wireStatus.
+                    paintCurrentSenseOverlay( );
+
+                    // Measurement overlay paints its row LEDs over the net
+                    // wires (that's the point of the overlay), but under the
+                    // user graphic overlays below.
+                    measurementOverlayPaint( );
 
                     // Render graphic overlays on top of all other LED visualizations
                     renderGraphicOverlays( );

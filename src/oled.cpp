@@ -1419,9 +1419,12 @@ void oled::clearPrintShow( const char* text, int textSize, bool clear, bool show
     // Handle multi-line text
     if ( isMultiLine ) {
 #if OLED_SCALE_LINES_INDEPENDENTLY
-        // When per-line scaling is enabled, skip the global scaling for multi-line
-        // and let displayMultiLineText handle it per line
-        setFontPointSize( currentFontFamily, desiredPointSize );
+        // Start per-line scaling from the pt the fit loop above converged on
+        // (NOT desiredPointSize - per-line scaling only shrinks for WIDTH, so
+        // resetting here discarded the height fit and made 3-line text
+        // overlap vertically on the 32px panel). When everything already fit
+        // at desiredPointSize, currentPt equals it and nothing changes.
+        setFontPointSize( currentFontFamily, currentPt );
         setTextSize( 1 );
         this->currentTextSize = 1;
 #endif

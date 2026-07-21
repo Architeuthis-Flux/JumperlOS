@@ -109,6 +109,8 @@ int jl_get_num_paths( int include_duplicates );
 const char* jl_get_path_info( int pathIdx );
 const char* jl_get_all_path_info( void );
 const char* jl_get_path_between( int node1, int node2 );
+float jl_path_resistance( int pathIdx );
+float jl_resistance_between( int node1, int node2 );
 
 // Fast toggle functions
 int jl_fake_gpio_disconnect( int node1, int node2 );
@@ -2745,6 +2747,8 @@ static mp_obj_t jl_get_path_info_func( mp_obj_t idx_obj ) {
     
     mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_duplicate ), mp_obj_new_int( vals[ 19 ] ) );
     
+    mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_resistance ), mp_obj_new_float( jl_path_resistance( idx ) ) );
+    
     return dict;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_get_path_info_obj, jl_get_path_info_func );
@@ -2883,6 +2887,26 @@ static mp_obj_t jl_get_path_between_func( mp_obj_t node1_obj, mp_obj_t node2_obj
     return dict;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2( jl_get_path_between_obj, jl_get_path_between_func );
+
+// path_resistance(path_idx) - Estimated crossbar ohms of one path, None if invalid
+static mp_obj_t jl_path_resistance_func( mp_obj_t idx_obj ) {
+    float r = jl_path_resistance( mp_obj_get_int( idx_obj ) );
+    if ( r < 0.0f ) {
+        return mp_const_none;
+    }
+    return mp_obj_new_float( r );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_path_resistance_obj, jl_path_resistance_func );
+
+// resistance_between(node1, node2) - Parallel combination of all stacked lanes, None if unrouted
+static mp_obj_t jl_resistance_between_func( mp_obj_t node1_obj, mp_obj_t node2_obj ) {
+    float r = jl_resistance_between( get_node_value( node1_obj ), get_node_value( node2_obj ) );
+    if ( r < 0.0f ) {
+        return mp_const_none;
+    }
+    return mp_obj_new_float( r );
+}
+static MP_DEFINE_CONST_FUN_OBJ_2( jl_resistance_between_obj, jl_resistance_between_func );
 
 // Fast GPIO Toggle Functions
 // fake_gpio_disconnect(node1, node2) - Context manager for temporary disconnection
@@ -6392,6 +6416,8 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_get_path_info ), MP_ROM_PTR( &jl_get_path_info_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_all_paths ), MP_ROM_PTR( &jl_get_all_paths_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_path_between ), MP_ROM_PTR( &jl_get_path_between_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_path_resistance ), MP_ROM_PTR( &jl_path_resistance_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_resistance_between ), MP_ROM_PTR( &jl_resistance_between_obj ) },
     // Fake GPIO fast toggle
     { MP_ROM_QSTR( MP_QSTR_FakeGpioDisconnect ), MP_ROM_PTR( &fake_gpio_disconnect_type ) },
     // Fake GPIO pin class

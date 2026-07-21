@@ -32,6 +32,7 @@
 #include "LEDs.h"
 #include "LogicAnalyzer.h"
 #include "MatrixState.h"
+#include "MeasureMode.h"
 #include "Menus.h"
 #include "NetManager.h"
 #include "NetsToChipConnections.h"
@@ -94,6 +95,9 @@ static Ser3Verb usbSer3_verbs[] = {
     { "yaml",      "Full state YAML dump",                         "",               "---YAML_START---..---YAML_END---", ":yaml",         6000 },
     { "nets",      "Net list",                                     "",               "json",                          ":nets",            2000 },
     { "adc",       "ADC voltages + INA current",                   "",               "json",                          ":adc",             4000 },
+    { "overlay",         "Measurement overlay current table (V)",  "[:rows|:check]", "text table",                    ":overlay",         0 },
+    { "overlay:rows",    "Overlay per-row sweep dump (Vr)",        "",               "text table",                    ":overlay:rows",    0 },
+    { "overlay:check",   "Overlay crossbar lane self-check (V?)",  "",               "PASS or mismatches",            ":overlay:check",   0 },
     { "all",       "Full status (version+adc+current+gpio+nets+power)", "",          "json",                          ":all",             9000 },
     { "status",    "Alias of all",                                 "",               "json",                          ":status",          9000 },
     { "slot",      "Active slot query",                            "",               "slot info",                     ":slot",            30 },
@@ -786,6 +790,19 @@ static void usbSer3_dispatchVerb(Stream* out, const String& verb) {
         Jerial.clearCurrentResponseTarget();
     } else if (head == "gpiojson") {
         usbSer3_sendGpioJson(out);
+    } else if (head == "overlay") {
+        // Read-only mirrors of the V command's dumps (bare 'V' is shadowed by
+        // the ADC fast-query on this port, and single-char dispatch never
+        // collects args, so Vr/V? are otherwise unreachable here).
+        if (!jumperlessConfig.experimental.dev_features) {
+            out->println("measurement overlay is experimental - enable with "
+                         "`[experimental] dev_features = 1;");
+            return;
+        }
+        String rl = rest; rl.toLowerCase();
+        if (rl.startsWith("row"))        measurementOverlay.printRowSweep(out);
+        else if (rl.startsWith("check")) measurementOverlay.runLaneSelfCheck(out);
+        else                             measurementOverlay.printCurrentComparison(out);
     } else {
         // Single-char passthrough: ":n" == bare 'n', ":J" == bare 'J', etc.
         // Special machine-query chars (A/V/G/N/K) route to `out` directly.

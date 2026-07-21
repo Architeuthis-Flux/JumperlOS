@@ -93,6 +93,54 @@ void clearAllCustomNetNames() {
 }
 
 // ============================================================================
+// Path resistance estimate
+// ============================================================================
+// Each closed CH446Q crosspoint contributes roughly CROSSPOINT_OHMS of series
+// resistance. Summing the path's crosspoints gives a usable estimate of the
+// end-to-end crossbar resistance - the measurement overlay uses it as a
+// "shunt" for the passive deltaV current estimate.
+// ponytail: 43 ohms is a fixed estimate; on-resistance actually varies with
+// signal level and part. Upgrade path: per-board calibration constant.
+#define CROSSPOINT_OHMS 43.0f
+
+static float laneOhms(const pathStruct& p) {
+    int crosspoints = 0;
+    for (int j = 0; j < 4; j++) {
+        if (p.chip[j] != -1 && p.x[j] != -1 && p.y[j] != -1) crosspoints++;
+    }
+    return crosspoints * CROSSPOINT_OHMS;
+}
+
+// Stacked duplicate lanes live in paths[] beyond numPaths; the routing
+// engine's numberOfPaths includes them.
+int totalRoutedPaths(void) {
+    extern volatile int numberOfPaths;
+    int total = numberOfPaths;
+    if (total < globalState.connections.numPaths) total = globalState.connections.numPaths;
+    if (total > MAX_BRIDGES) total = MAX_BRIDGES;
+    return total;
+}
+
+float pathResistanceOhms(int pathIndex) {
+    if (pathIndex < 0 || pathIndex >= totalRoutedPaths()) return 0.0f;
+    return laneOhms(globalState.connections.paths[pathIndex]);
+}
+
+float connectionResistanceOhms(int node1, int node2) {
+    int total = totalRoutedPaths();
+    float conductance = 0.0f;
+    for (int i = 0; i < total; i++) {
+        const pathStruct& p = globalState.connections.paths[i];
+        if ((p.node1 != node1 || p.node2 != node2) &&
+            (p.node1 != node2 || p.node2 != node1)) continue;
+        float r = laneOhms(p);
+        if (r <= 0.0f) continue;  // 0 means unrouted lane, not a superconductor
+        conductance += 1.0f / r;
+    }
+    return conductance > 0.0f ? 1.0f / conductance : -1.0f;
+}
+
+// ============================================================================
 // ConnectionState Implementation
 // ============================================================================
 
@@ -588,7 +636,8 @@ void JumperlessState::clearDirty() {
 }
 
 // Connection management
-bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int duplicates) {
+bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int duplicates,
+                                    bool quiet) {
     // Validate nodes
     if (!isNodeValid(node1)) {
         errorMsg = "Invalid node 1: " + String(node1);
@@ -620,7 +669,7 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
                 connections.bridges[i][2]++;
             }
             connections.invalidateCache(config.autoRefreshOnChange);
-            markDirty();
+            if (!quiet) markDirty();
             return true;
         }
     }
@@ -651,19 +700,20 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
     
     // Invalidate caches - paths need to be recalculated
     connections.invalidateCache(config.autoRefreshOnChange);
-    markDirty();
-
-    // Phase 4.1: undo log hook. Skip while we're applying a delta -
-    // we don't want to record our own undo/redo as new history.
-    if (!g_undoApplying) {
-        uint32_t color = connections.bridgeColors[idx];
-        undoRecordConnect(node1, node2, color);
+    if (!quiet) {
+        markDirty();
+        // Phase 4.1: undo log hook. Skip while we're applying a delta -
+        // we don't want to record our own undo/redo as new history.
+        if (!g_undoApplying) {
+            uint32_t color = connections.bridgeColors[idx];
+            undoRecordConnect(node1, node2, color);
+        }
     }
-    
+
     return true;
 }
 
-bool JumperlessState::removeConnection(int node1, int node2, String& errorMsg) {
+bool JumperlessState::removeConnection(int node1, int node2, String& errorMsg, bool quiet) {
     // Find the connection
     int foundIdx = -1;
     for (int i = 0; i < connections.numBridges; i++) {
@@ -698,12 +748,13 @@ bool JumperlessState::removeConnection(int node1, int node2, String& errorMsg) {
     
     // Invalidate caches
     connections.invalidateCache(config.autoRefreshOnChange);
-    markDirty();
-
-    if (!g_undoApplying) {
-        undoRecordDisconnect(node1, node2, removedColor);
+    if (!quiet) {
+        markDirty();
+        if (!g_undoApplying) {
+            undoRecordDisconnect(node1, node2, removedColor);
+        }
     }
-    
+
     return true;
 }
 
@@ -1431,10 +1482,20 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
     return isValid;
 }
 
+// Implemented in MeasureMode.cpp: while a current tap is inserted, the
+// tapped bridge is quietly removed from the array (replaced by ephemeral
+// ISENSE bridges). It must still serialize or a save mid-tap would lose the
+// user's wire.
+extern bool overlayTapDisplacedBridge(int* n1, int* n2, int* dup, uint32_t* color);
+
 // YAML serialization helpers
 void JumperlessState::serializeBridges(String& output) const {
+    int dispN1, dispN2, dispDup;
+    uint32_t dispColor;
+    bool hasDisplaced = overlayTapDisplacedBridge(&dispN1, &dispN2, &dispDup, &dispColor);
+
     // Count non-ephemeral bridges first
-    int persistentBridges = 0;
+    int persistentBridges = hasDisplaced ? 1 : 0;
     for (int i = 0; i < connections.numBridges; i++) {
         int node1 = connections.bridges[i][0];
         int node2 = connections.bridges[i][1];
@@ -1449,6 +1510,15 @@ void JumperlessState::serializeBridges(String& output) const {
     }
     
     output += "bridges:\n";
+    if (hasDisplaced) {
+        output += "  - {n1: " + nodeValueToString(dispN1) +
+                  ", n2: " + nodeValueToString(dispN2) +
+                  ", dup: " + String(dispDup);
+        if (dispColor != 0xFFFFFFFF) {
+            output += ", color: " + rgbToWokwiColorName(dispColor);
+        }
+        output += "}\n";
+    }
     for (int i = 0; i < connections.numBridges; i++) {
         int node1 = connections.bridges[i][0];
         int node2 = connections.bridges[i][1];

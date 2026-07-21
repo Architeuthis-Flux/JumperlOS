@@ -23,6 +23,7 @@
 // #include "TuiGlue.h"
 
 #include "Jerial.h"
+#include "MeasureMode.h"
 #include "hardware/gpio.h"
 #include "hardware/structs/io_bank0.h"
 #ifdef DONOTUSE_SERIALWRAPPER
@@ -373,7 +374,7 @@ struct PathSegment {
 // };
 
 // static CurrentSenseOverlayState currentSenseOverlayState;
-static void renderCurrentSenseOverlay();
+static void buildCurrentSenseOverlay();
 
 int colorCycle = 0;
 int defNudge = 0;
@@ -611,7 +612,12 @@ static int virtualCurrentSensePathIndex = -1;
 
 static void addVirtualCurrentSensePath() {
   virtualCurrentSensePathIndex = -1;
-  
+
+  // Reset here (not in removeVirtualCurrentSensePath) so the endpoints stay
+  // valid for paintCurrentSenseOverlay(), which runs after drawWires().
+  currentSenseOverlayState.virtualWireNode1 = -1;
+  currentSenseOverlayState.virtualWireNode2 = -1;
+
   if (!currentSenseState.plusConnected || !currentSenseState.minusConnected) {
     return;
   }
@@ -731,10 +737,8 @@ static void removeVirtualCurrentSensePath() {
     }
   }
   virtualCurrentSensePathIndex = -1;
-  
-  // Clear virtual wire tracking
-  currentSenseOverlayState.virtualWireNode1 = -1;
-  currentSenseOverlayState.virtualWireNode2 = -1;
+  // virtualWireNode1/2 intentionally survive until the next
+  // addVirtualCurrentSensePath() - paintCurrentSenseOverlay() needs them.
 }
 
 void drawWires(int net) {
@@ -1037,8 +1041,8 @@ void drawWires(int net) {
     // lightUpNet(net);
   }
   
-  renderCurrentSenseOverlay();
-  
+  buildCurrentSenseOverlay();
+
   // Clean up virtual path after rendering
   removeVirtualCurrentSensePath();
 }
@@ -1171,12 +1175,16 @@ static int selectPrimaryRowForNet(int netNumber, int previousRow) {
   return fallbackAny;
 }
 
+// Exported for the measurement voltage overlay (see Graphics.h)
+bool currentSenseVirtualRow[61] = {false};
+
 static void rebuildCurrentSensePath(CurrentSenseOverlayState &state, int plusNet, int minusNet) {
   // Reset all lengths
   state.plusNetLength = 0;
   state.virtualWireLength = 0;
   state.minusNetLength = 0;
-  
+  memset((void*)currentSenseVirtualRow, 0, sizeof(currentSenseVirtualRow));
+
   if (plusNet <= 0 && minusNet <= 0) {
     state.pathValid = false;
     return;
@@ -1202,6 +1210,7 @@ static void rebuildCurrentSensePath(CurrentSenseOverlayState &state, int plusNet
       isVirtualWireRow[node2] = true;
     }
   }
+  memcpy((void*)currentSenseVirtualRow, isVirtualWireRow, sizeof(isVirtualWireRow));
   
   // STEP 1: Collect PLUS NET pixels (non-virtual-wire rows only)
   for (int row = 1; row <= 60; row++) {
@@ -1605,14 +1614,21 @@ static void tintRow(int row, uint32_t color) {
 float kCurrentSenseBaseSpeed = 0.25f;
 float kCurrentSenseSpeedScale = 0.95f;
 
-static void renderCurrentSenseOverlay() {
+// Set by the build pass (drawWires), consumed by the paint pass. Guarantees
+// the ants never paint stale pixel lists in frames where drawWires didn't run
+// (node mode, too many nets for wires).
+static bool currentSenseBuiltThisFrame = false;
+
+// Build pass: runs inside drawWires() while the virtual path is in wireStatus.
+// Caches the plus/virtual/minus pixel lists; painting happens later in
+// paintCurrentSenseOverlay() so animations can't overwrite the ants.
+static void buildCurrentSenseOverlay() {
   if (!currentSenseState.plusConnected && !currentSenseState.minusConnected) {
     currentSenseOverlayState.pathValid = false;
     currentSenseOverlayState.plusRow = -1;
     currentSenseOverlayState.minusRow = -1;
     currentSenseOverlayState.lastUpdateMs = 0;
-    // Serial.println("renderCurrentSenseOverlay: no plus or minus connected");
-    // Serial.flush();
+    memset((void*)currentSenseVirtualRow, 0, sizeof(currentSenseVirtualRow));
     return;
   }
 
@@ -1635,6 +1651,22 @@ static void renderCurrentSenseOverlay() {
   
   currentSenseOverlayState.plusRow = plusRow;
   currentSenseOverlayState.minusRow = minusRow;
+
+  currentSenseBuiltThisFrame = true;
+}
+
+void paintCurrentSenseOverlay() {
+  if (!currentSenseBuiltThisFrame) {
+    return;
+  }
+  currentSenseBuiltThisFrame = false;
+
+  if (!currentSenseState.plusConnected && !currentSenseState.minusConnected) {
+    return;
+  }
+
+  int plusNet = currentSenseState.plusNet;
+  int minusNet = currentSenseState.minusNet;
 
   if (!currentSenseOverlayState.pathValid) {
     return;
@@ -1705,7 +1737,21 @@ static void renderCurrentSenseOverlay() {
 bool isBrightenedNode = (brightenedNode == currentSenseOverlayState.virtualWireNode1 || brightenedNode == currentSenseOverlayState.virtualWireNode2);
 
   
-  uint32_t measurementColor = measurementToColor((currentSenseState.current_mA * 0.3f) , -8.0f, 8.0f);
+  // Background color of the virtual wire: VOLTAGE when the overlay sweep has
+  // a live reading for the plus-side row (current already drives the ants'
+  // speed/direction, so the color channel is free to show voltage). Falls
+  // back to the old current-derived color when the sweep has nothing (LED
+  // overlay off, OG, non-row nodes).
+  float bgMeasurement = currentSenseState.current_mA * 0.3f;
+  {
+    int vRow = currentSenseOverlayState.virtualWireNode1;
+    if (vRow >= 1 && vRow <= 60 &&
+        measurementOverlay.rowStatus[vRow] != OVERLAY_ROW_NONE &&
+        measurementOverlay.rowStatus[vRow] != OVERLAY_ROW_FLOATING) {
+      bgMeasurement = measurementOverlay.rowVolts[vRow];
+    }
+  }
+  uint32_t measurementColor = measurementToColor(bgMeasurement, -8.0f, 8.0f);
   if (isBrightenedNode) {
     measurementColor = scaleBrightness(measurementColor, 50);
   } else {
@@ -2162,6 +2208,68 @@ void initRowAnimations() {
 /// index is the net, value is the animation index
 int assignedAnimations[MAX_NETS] = {-1};
 
+// One decoration per net per frame (see Graphics.h). The current-sense nets
+// belong to the marching ants (which paint AFTER animations); everything else
+// with an assigned animation gets ANIM. This replaces the old commented-out
+// isCurrentSenseNet early-return in showRowAnimation() with an actual
+// mechanism.
+uint8_t netDecor[MAX_NETS] = {DECOR_NONE};
+
+// Runnable check (ponytail): after arbitration the sense nets must be claimed
+// by ANTS, never ANIM. Wired into the V? / :overlay:check self-check.
+int netDecorSelfCheck(Stream* out) {
+  int fails = 0;
+  int senseNets[2] = {currentSenseState.plusConnected ? currentSenseState.plusNet : -1,
+                      currentSenseState.minusConnected ? currentSenseState.minusNet : -1};
+  for (int i = 0; i < 2; i++) {
+    int net = senseNets[i];
+    if (net > 0 && net < MAX_NETS && netDecor[net] != DECOR_ANTS) {
+      out->printf("FAIL netDecor: sense net %d = %d, expected ANTS(%d)\n\r", net,
+                  netDecor[net], (int)DECOR_ANTS);
+      fails++;
+    }
+  }
+  return fails;
+}
+
+void arbitrateNetDecorations(void) {
+  for (int i = 0; i < MAX_NETS; i++) {
+    netDecor[i] = (assignedAnimations[i] != -1) ? DECOR_ANIM : DECOR_NONE;
+  }
+  // ponytail: ants claim their nets whenever the sense wiring is connected,
+  // even in node mode where the ants can't render (drawWires never runs).
+  // Suppressing the animation there too is the intended behavior - sense
+  // nets show their plain net color. Upgrade path: qualify on wire mode.
+  if (currentSenseState.plusConnected && currentSenseState.plusNet > 0 &&
+      currentSenseState.plusNet < MAX_NETS) {
+    netDecor[currentSenseState.plusNet] = DECOR_ANTS;
+  }
+  if (currentSenseState.minusConnected && currentSenseState.minusNet > 0 &&
+      currentSenseState.minusNet < MAX_NETS) {
+    netDecor[currentSenseState.minusNet] = DECOR_ANTS;
+  }
+  // Every net touched by a REGISTERED tap stays ANTS-claimed while cycling,
+  // even between its turns on the shunt - otherwise the mux rotation flaps
+  // each tapped net between animation and ants at every dwell (inactive
+  // tapped nets just show their plain net color; ants render only on the
+  // active pair).
+  measurementOverlay.claimTapNets(netDecor, DECOR_ANTS);
+
+  // User-interactive feedback (highlight/warning) must still work on IDLE
+  // tapped nets - a tap claim there only exists to stop the mux flap, not
+  // to eat the probe highlight. The LIVE sense pair keeps ANTS: the ants
+  // renderer does its own highlight boost (isHighlighted path).
+  int interactive[2] = {brightenedNet, warningNet};
+  for (int i = 0; i < 2; i++) {
+    int net = interactive[i];
+    if (net <= 0 || net >= MAX_NETS) continue;
+    if (net == currentSenseState.plusNet || net == currentSenseState.minusNet) continue;
+    if (netDecor[net] == DECOR_ANTS && assignedAnimations[net] != -1) {
+      netDecor[net] = DECOR_ANIM;
+    }
+  }
+}
+
 // int rowAnimations[100] = {0};
 
 void __not_in_flash_func(assignRowAnimations)(void) {
@@ -2292,6 +2400,10 @@ void __not_in_flash_func(assignRowAnimations)(void) {
 void __not_in_flash_func(showRowAnimation)(int net) {
   if (net < 0 || net >= MAX_NETS) {
     return;
+  }
+
+  if (netDecor[net] == DECOR_ANTS) {
+    return;  // net is claimed by the marching-ants overlay this frame
   }
 
   if (assignedAnimations[net] == -1) {
@@ -2763,6 +2875,7 @@ void __not_in_flash_func(showAllRowAnimations)() {
   //   }
 
   assignRowAnimations();
+  arbitrateNetDecorations();
 
   for (int i = 0; i <= numberOfNets; i++) {
 

@@ -148,7 +148,19 @@ struct config {
         int dump_leds = -1;
         int dump_format = 0;
         int terminal_line_buffering = 1;
+        // Measurement overlay: 0 = off, 1 = color (center LED), 2 = bargraph, 3 = dot
+        volatile int measurement_overlay = 0;
+        // Cycle the current sense (INA0) across paths (invasive: briefly breaks
+        // each path while measuring). 0 = off, 1 = on.
+        volatile int current_cycling = 1;
     } display;
+
+    // Master switch for in-development features (measurement overlay, current
+    // taps, ...). Ships 0; releasing a feature = flipping this default to 1
+    // (or removing its gate) - nothing gets ripped out.
+    struct experimental {
+        volatile int dev_features = 0;
+    } experimental;
 
     
         struct serial_1 {

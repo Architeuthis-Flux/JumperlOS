@@ -334,6 +334,7 @@ CommandResult cmd_loadSlot(char c, const String& line);
 // Advanced/Test commands
 CommandResult cmd_testStates(char c, const String& line);
 CommandResult cmd_testOverlay(char c, const String& line);
+CommandResult cmd_measurementOverlay(char c, const String& line);
 CommandResult cmd_printYAML(char c, const String& line);
 CommandResult cmd_loadYAMLState(char c, const String& line);
 CommandResult cmd_rawSpeedTest(char c, const String& line);

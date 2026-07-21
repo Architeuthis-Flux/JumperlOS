@@ -1203,6 +1203,20 @@ const char* jl_get_path_between( int node1, int node2 ) {
     return pathBuffer;
 }
 
+// Estimated crossbar resistance of one routed path (stacked duplicate lane
+// indices included), or -1 if index invalid
+float jl_path_resistance( int pathIdx ) {
+    if ( pathIdx < 0 || pathIdx >= totalRoutedPaths( ) ) {
+        return -1.0f;
+    }
+    return pathResistanceOhms( pathIdx );
+}
+
+// Parallel combination of all stacked lanes between two nodes, or -1 if unrouted
+float jl_resistance_between( int node1, int node2 ) {
+    return connectionResistanceOhms( node1, node2 );
+}
+
 // Node Functions
 int jl_nodes_connect( int node1, int node2, int save, int duplicates ) {
 

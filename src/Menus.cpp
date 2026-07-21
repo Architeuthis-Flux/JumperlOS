@@ -18,6 +18,7 @@
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MatrixState.h"
+#include "MeasureMode.h"
 #include "MenuTransitions.h"
 #include "NetManager.h"
 #include "NetsToChipConnections.h"
@@ -203,7 +204,17 @@ void parseMenuFile( void ) {
     for ( int i = 0; i < menuLineIndex + 1;
           i++ ) { // remove comments and empty lines
 
+        // '!' marks experimental entries (menuTree.h): shown (prefix
+        // stripped) when dev_features is on, dropped like a comment when
+        // off. Parsed once at boot - flipping the flag needs a reboot to
+        // change menu visibility (the action handlers gate regardless).
+        if ( menuLines[ i ].startsWith( "!" ) &&
+             jumperlessConfig.experimental.dev_features ) {
+            menuLines[ i ].remove( 0, 1 );
+        }
+
         if ( menuLines[ i ].startsWith( "/" ) || menuLines[ i ].startsWith( "#" ) ||
+             menuLines[ i ].startsWith( "!" ) ||
              menuLines[ i ].startsWith( "\n" ) || menuLines[ i ].length( ) < 2 ) {
 
             for ( int j = i; j < menuLineIndex; j++ ) {
@@ -4642,6 +4653,28 @@ int doMenuAction( int menuPosition, int selection ) {
                 netColorMode = 1;
             }
             debugFlagSet( 13 );
+        } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf(
+                        "Overlay" ) != -1 ) {
+            // Measurement overlay display mode: Off / Color / Bar / Dot
+            // (entries hidden when dev_features is off, but gate anyway in
+            // case a stale parsed menu is live)
+            if ( jumperlessConfig.experimental.dev_features ) {
+                jumperlessConfig.display.measurement_overlay = currentAction.from[ 0 ];
+                configChanged = true;
+                showLEDsCore2 = -1; // full refresh so a disabled overlay clears
+            }
+        } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf(
+                        "I Cycle" ) != -1 ) {
+            // Current taps: Off / On / Clear (clears row set + current taps)
+            if ( jumperlessConfig.experimental.dev_features ) {
+                if ( currentAction.from[ 0 ] == 2 ) {
+                    measurementOverlay.clearRowSet( );
+                    measurementOverlay.clearCurrentTaps( );
+                } else {
+                    jumperlessConfig.display.current_cycling = currentAction.from[ 0 ];
+                    configChanged = true;
+                }
+            }
         }
         // Serial.print( "Display Action\n\r" );
 

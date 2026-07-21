@@ -737,6 +737,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "dump_leds") == 0) jumperlessConfig.display.dump_leds = parseSerialPort(value);
             else if (strcmp(key, "dump_format") == 0) jumperlessConfig.display.dump_format = parseDumpFormat(value);
             else if (strcmp(key, "terminal_line_buffering") == 0) jumperlessConfig.display.terminal_line_buffering = parseBool(value);
+            else if (strcmp(key, "measurement_overlay") == 0) jumperlessConfig.display.measurement_overlay = parseInt(value);
+            else if (strcmp(key, "current_cycling") == 0) jumperlessConfig.display.current_cycling = parseBool(value);
         } else if (strcmp(section, "serial_1") == 0) {
             if (strcmp(key, "function") == 0) jumperlessConfig.serial_1.function = parseUartFunction(value);
             else if (strcmp(key, "baud_rate") == 0) jumperlessConfig.serial_1.baud_rate = parseInt(value);
@@ -805,6 +807,8 @@ void updateConfigFromFile(const char* filename) {
         } else if (strcmp(section, "usb_cdc") == 0) {
             // USB CDC flow control settings
             if (strcmp(key, "ignore_dtr") == 0) jumperlessConfig.usb_cdc.ignore_dtr = parseBool(value);
+        } else if (strcmp(section, "experimental") == 0) {
+            if (strcmp(key, "dev_features") == 0) jumperlessConfig.experimental.dev_features = parseBool(value);
         }
     }
     safeFileClose(file, false);  // Read-only, no flush
@@ -1093,6 +1097,8 @@ bool saveConfigToFile(const char* filename) {
     file.print("dump_leds = "); file.print(jumperlessConfig.display.dump_leds); file.println(";");
     file.print("dump_format = "); file.print(jumperlessConfig.display.dump_format); file.println(";");
     file.print("terminal_line_buffering = "); file.print(jumperlessConfig.display.terminal_line_buffering); file.println(";");
+    file.print("measurement_overlay = "); file.print(jumperlessConfig.display.measurement_overlay); file.println(";");
+    file.print("current_cycling = "); file.print(jumperlessConfig.display.current_cycling); file.println(";");
     file.println();
 
     // Write serial section
@@ -1139,6 +1145,11 @@ bool saveConfigToFile(const char* filename) {
     // Write usb_cdc section
     file.println("[usb_cdc]");
     file.print("ignore_dtr = "); file.print(jumperlessConfig.usb_cdc.ignore_dtr ? 1 : 0); file.println(";");
+    file.println();
+    
+    // Write experimental section
+    file.println("[experimental]");
+    file.print("dev_features = "); file.print(jumperlessConfig.experimental.dev_features ? 1 : 0); file.println(";");
     file.println();
     
     file.flush();
@@ -1261,6 +1272,8 @@ bool configHasChanges() {
     if (jumperlessConfig.display.dump_leds != lastSavedConfig.display.dump_leds) return true;
     if (jumperlessConfig.display.dump_format != lastSavedConfig.display.dump_format) return true;
     if (jumperlessConfig.display.terminal_line_buffering != lastSavedConfig.display.terminal_line_buffering) return true;
+    if (jumperlessConfig.display.measurement_overlay != lastSavedConfig.display.measurement_overlay) return true;
+    if (jumperlessConfig.display.current_cycling != lastSavedConfig.display.current_cycling) return true;
     
     // Serial 1 section
     if (jumperlessConfig.serial_1.function != lastSavedConfig.serial_1.function) return true;
@@ -1299,6 +1312,9 @@ bool configHasChanges() {
     if (jumperlessConfig.top_oled.font != lastSavedConfig.top_oled.font) return true;
     if (strcmp(jumperlessConfig.top_oled.startup_message, lastSavedConfig.top_oled.startup_message) != 0) return true;
     
+    // Experimental section
+    if (jumperlessConfig.experimental.dev_features != lastSavedConfig.experimental.dev_features) return true;
+    
     return false;  // No changes detected
 }
 
@@ -1334,7 +1350,7 @@ static bool configFileIsComplete(const char* fileContent) {
     const char* requiredSections[] = {
         "[config]", "[firmware]", "[hardware]", "[dacs]", "[debug]",
         "[routing]", "[calibration]", "[logo_pads]", "[display]",
-        "[serial_1]", "[serial_2]", "[top_oled]", "[usb_cdc]"
+        "[serial_1]", "[serial_2]", "[top_oled]", "[usb_cdc]", "[experimental]"
     };
     const int numRequired = sizeof(requiredSections) / sizeof(requiredSections[0]);
     
@@ -1801,6 +1817,12 @@ bool saveConfigIncremental(const char* filename) {
                 } else if (strcmp(key, "terminal_line_buffering") == 0) {
                     snprintf(newLine, sizeof(newLine), "terminal_line_buffering = %d;", jumperlessConfig.display.terminal_line_buffering);
                     updated = true;
+                } else if (strcmp(key, "measurement_overlay") == 0) {
+                    snprintf(newLine, sizeof(newLine), "measurement_overlay = %d;", jumperlessConfig.display.measurement_overlay);
+                    updated = true;
+                } else if (strcmp(key, "current_cycling") == 0) {
+                    snprintf(newLine, sizeof(newLine), "current_cycling = %d;", jumperlessConfig.display.current_cycling);
+                    updated = true;
                 }
             }
             //! [serial_1] section
@@ -1912,6 +1934,13 @@ bool saveConfigIncremental(const char* filename) {
             else if (strcmp(currentSection, "usb_cdc") == 0) {
                 if (strcmp(key, "ignore_dtr") == 0) {
                     snprintf(newLine, sizeof(newLine), "ignore_dtr = %d;", jumperlessConfig.usb_cdc.ignore_dtr ? 1 : 0);
+                    updated = true;
+                }
+            }
+            //! [experimental] section
+            else if (strcmp(currentSection, "experimental") == 0) {
+                if (strcmp(key, "dev_features") == 0) {
+                    snprintf(newLine, sizeof(newLine), "dev_features = %d;", jumperlessConfig.experimental.dev_features ? 1 : 0);
                     updated = true;
                 }
             }
@@ -2426,6 +2455,7 @@ int parseSectionName(const char* sectionName) {
     else if (strcmp(sectionName, "serial_2") == 0) return 8;
     else if (strcmp(sectionName, "top_oled") == 0) return 9;
     else if (strcmp(sectionName, "usb_cdc") == 0) return 11;
+    else if (strcmp(sectionName, "experimental") == 0) return 12;
     return -1;
 }
 
@@ -2626,6 +2656,10 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("dump_format = "); Serial.print(getStringFromTable(jumperlessConfig.display.dump_format, dumpFormatTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[display] ");
         Serial.print("terminal_line_buffering = "); Serial.print(jumperlessConfig.display.terminal_line_buffering); Serial.println(";");
+        if (pasteable == true) Serial.print("`[display] ");
+        Serial.print("measurement_overlay = "); Serial.print(jumperlessConfig.display.measurement_overlay); Serial.println(";");
+        if (pasteable == true) Serial.print("`[display] ");
+        Serial.print("current_cycling = "); Serial.print(jumperlessConfig.display.current_cycling); Serial.println(";");
     }
     cycleTerminalColor();
     // Print serial_1 section
@@ -2728,6 +2762,13 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("\n`[usb_cdc] ");
         if (pasteable == false) Serial.println();
         Serial.print("ignore_dtr = "); Serial.print(getStringFromTable(jumperlessConfig.usb_cdc.ignore_dtr, boolTable)); Serial.println(";");
+    }
+    cycleTerminalColor();
+    // Print experimental section
+    if (section == -1 || section == 12) {
+        Serial.print("\n`[experimental] ");
+        if (pasteable == false) Serial.println();
+        Serial.print("dev_features = "); Serial.print(getStringFromTable(jumperlessConfig.experimental.dev_features, boolTable)); Serial.println(";");
     }
     cycleTerminalColor();
     // if (section == -1) {
@@ -3538,6 +3579,9 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
     else if (strcmp(section, "usb_cdc") == 0) {
         if (strcmp(key, "ignore_dtr") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_cdc.ignore_dtr);
     }
+    else if (strcmp(section, "experimental") == 0) {
+        if (strcmp(key, "dev_features") == 0) sprintf(oldValue, "%d", jumperlessConfig.experimental.dev_features);
+    }
     else if (strcmp(section, "calibration") == 0) {
         if (strcmp(key, "top_rail_zero") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.top_rail_zero);
         else if (strcmp(key, "top_rail_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.top_rail_spread);
@@ -3584,6 +3628,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "dump_leds") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.dump_leds);
         else if (strcmp(key, "dump_format") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.dump_format);
         else if (strcmp(key, "terminal_line_buffering") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.terminal_line_buffering);
+        else if (strcmp(key, "measurement_overlay") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.measurement_overlay);
+        else if (strcmp(key, "current_cycling") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.current_cycling);
     }
     else if (strcmp(section, "serial_1") == 0) {
         if (strcmp(key, "function") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.function);
@@ -3695,6 +3741,9 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
             usb_cdc_apply_config();
         }
     }
+    else if (strcmp(section, "experimental") == 0) {
+        if (strcmp(key, "dev_features") == 0) jumperlessConfig.experimental.dev_features = parseBool(value);
+    }
     else if (strcmp(section, "calibration") == 0) {
         if (strcmp(key, "top_rail_zero") == 0) jumperlessConfig.calibration.top_rail_zero = parseInt(value);
         else if (strcmp(key, "top_rail_spread") == 0) jumperlessConfig.calibration.top_rail_spread = parseFloat(value);
@@ -3742,6 +3791,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "dump_leds") == 0) jumperlessConfig.display.dump_leds = parseSerialPort(value);
         else if (strcmp(key, "dump_format") == 0) jumperlessConfig.display.dump_format = parseDumpFormat(value);
         else if (strcmp(key, "terminal_line_buffering") == 0) jumperlessConfig.display.terminal_line_buffering = parseBool(value);
+        else if (strcmp(key, "measurement_overlay") == 0) jumperlessConfig.display.measurement_overlay = parseInt(value);
+        else if (strcmp(key, "current_cycling") == 0) jumperlessConfig.display.current_cycling = parseBool(value);
     }
     else if (strcmp(section, "serial_1") == 0) {
         if (strcmp(key, "function") == 0) jumperlessConfig.serial_1.function = parseUartFunction(value);
@@ -4014,7 +4065,8 @@ bool fastParseAndUpdateConfig(const char* configString) {
         strcmp(section, "serial_1") != 0 && 
         strcmp(section, "serial_2") != 0 && 
         strcmp(section, "top_oled") != 0 &&
-        strcmp(section, "usb_cdc") != 0) {
+        strcmp(section, "usb_cdc") != 0 &&
+        strcmp(section, "experimental") != 0) {
         Serial.println("section not found");
         Serial.println(section);
         return false;

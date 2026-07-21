@@ -31,6 +31,10 @@ struct chipXYBitfield {
 // Use bitfield version for lastChipXY (global state tracking)
 extern chipXYBitfield lastChipXY[12];
 
+// Incremented by sendPaths() whenever crosspoints are (re)sent - lets cached
+// row->ADC paths (measurement overlay) detect that routing may have changed.
+extern volatile uint32_t crossbarPathGeneration;
+
 // Bitfield helper functions
 inline bool getConnectionBit(const chipXYBitfield& state, int x, int y) {
     if (x < 0 || x >= 16 || y < 0 || y >= 8) return false;

@@ -148,6 +148,33 @@ struct CurrentSenseOverlayState {
 
 static CurrentSenseOverlayState currentSenseOverlayState;
 
+// Per-net LED decoration arbiter: exactly one decoration may claim a net each
+// frame. Filled by arbitrateNetDecorations() (called from
+// showAllRowAnimations()); showRowAnimation() yields nets claimed by the
+// marching-ants current-sense overlay, which paints after animations.
+enum NetDecoration : uint8_t {
+  DECOR_NONE = 0,
+  DECOR_ANIM = 1,
+  DECOR_ANTS = 2,
+};
+extern uint8_t netDecor[MAX_NETS];
+void arbitrateNetDecorations(void);
+
+// Marching-ants paint pass, split out of drawWires() so it runs AFTER
+// showAllRowAnimations() in core2stuff() (animations used to overwrite the
+// ants). drawWires() still builds the pixel lists each wire-mode frame.
+void paintCurrentSenseOverlay(void);
+
+// Rows occupied by the ants' virtual wire this frame (index 1-60). The
+// measurement voltage overlay skips these so it can't stomp the ant bridge.
+extern bool currentSenseVirtualRow[61];
+
+// Net painted on each row LED by the last drawWires() pass (columns stored in
+// physical pixel order). The measurement overlay consults this for exact
+// clears: a masked pixel the wire renderer repainted this frame must not be
+// blacked out.
+extern int wireStatus[64][5];
+
 extern int defNudge;
 
 extern specialRowAnimation rowAnimations[ROW_ANIMATION_COUNT];

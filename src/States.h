@@ -268,8 +268,11 @@ public:
     JumperlessState& operator=(const JumperlessState&) = delete;
     
     // Connection management
-    bool addConnection(int node1, int node2, String& errorMsg, int duplicates = -1);  // -1 = use default from config
-    bool removeConnection(int node1, int node2, String& errorMsg);
+    // quiet: skip markDirty + undo record - for firmware-managed rewiring
+    // (current tap shunt swaps) that must not persist or pollute undo history
+    bool addConnection(int node1, int node2, String& errorMsg, int duplicates = -1,
+                       bool quiet = false);  // -1 = use default from config
+    bool removeConnection(int node1, int node2, String& errorMsg, bool quiet = false);
     bool hasConnection(int node1, int node2) const;
     int getConnectionDuplicates(int node1, int node2) const;  // Get number of parallel copies
     bool setConnectionDuplicates(int node1, int node2, int duplicates, String& errorMsg);
@@ -536,6 +539,19 @@ void clearAllCustomNetNames(void);                     // Reset all names to def
 // ============================================================================
 
 void applyStateToHardware(void);  // Apply globalState settings to hardware (DACs, GPIO, etc.)
+
+// Number of entries in globalState.connections.paths[] including stacked
+// duplicate lanes (which live beyond numPaths), clamped to MAX_BRIDGES.
+int totalRoutedPaths(void);
+
+// Estimated crossbar resistance of a routed path (~43 ohms per crosspoint).
+// Accepts stacked duplicate lane indices (< totalRoutedPaths()).
+// Returns 0 for invalid indices or paths with no crosspoints.
+float pathResistanceOhms(int pathIndex);
+
+// Parallel combination of every routed lane (including stacked duplicates)
+// between two nodes, matched in either order. Returns -1 if none are routed.
+float connectionResistanceOhms(int node1, int node2);
 
 // ============================================================================
 // State Backup/Restore Functions (for MicroPython entry/exit, undo, etc.)

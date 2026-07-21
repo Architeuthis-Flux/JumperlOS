@@ -160,4 +160,142 @@ private:
 // NOTE: Named measureModeService to avoid conflict with Probing::measureMode() function
 extern MeasureMode& measureModeService;
 
+// ============================================================================
+// Measurement Overlay (V5 only)
+// ============================================================================
+// Time-multiplexes free ADCs across breadboard rows to show a live voltage
+// overlay on the center-channel row LEDs, plus user-designated CURRENT TAPS:
+// row-to-row bridges whose direct crossbar path is swapped for the INA219
+// shunt (in series, continuous measurement), with the one shunt multiplexed
+// across all taps.
+//
+// Split across cores:
+//  - Core 0: MeasurementOverlay service (config, row-set buttons via probe,
+//    current-sense windows - all I2C stays on core 0 like every other INA use)
+//  - Core 2: measurementOverlayCore2Tick() (crossbar voltage sweep) and
+//    measurementOverlayPaint() (LED rendering), called from core2stuff()
+//    while the core_sync mutex is held.
+
+// Display modes (stored in jumperlessConfig.display.measurement_overlay)
+#define OVERLAY_MODE_OFF   0
+#define OVERLAY_MODE_COLOR 1  // center-channel LED colored by voltage
+#define OVERLAY_MODE_BAR   2  // rail-style bargraph, 1V per LED
+#define OVERLAY_MODE_DOT   3  // only the tip LED of where the bar would end
+
+// Per-row sweep status
+#define OVERLAY_ROW_NONE     0  // never measured
+#define OVERLAY_ROW_FRESH    1  // measured this sweep
+#define OVERLAY_ROW_STALE    2  // lanes congested this sweep - holding last value
+#define OVERLAY_ROW_FLOATING 3  // not in a net + reading in deadband - render dark
+
+class MeasurementOverlay : public Service {
+public:
+    static MeasurementOverlay& getInstance();
+    MeasurementOverlay(const MeasurementOverlay&) = delete;
+    MeasurementOverlay& operator=(const MeasurementOverlay&) = delete;
+
+    // Service interface (core 0). HIGH priority but only does cheap
+    // coordination: probe-button row-set edits and current-sense windows.
+    ServiceStatus service() override;
+    const char* getName() const override { return "MeasureOverlay"; }
+    ServicePriority getPriority() const override { return ServicePriority::HIGH; }
+
+    // ------------------------------------------------------------------
+    // Row set (session-only). Empty mask = scan all 60 rows.
+    // ------------------------------------------------------------------
+    void addRow(int row);
+    void removeRow(int row);
+    void clearRowSet();
+    bool rowInSet(int row) const;      // honors empty-mask = all-rows rule
+    uint64_t getRowMask() const { return rowMask; }
+
+    // ------------------------------------------------------------------
+    // Current taps: user-designated node pairs measured in series.
+    // The ACTIVE tap's bridge is displaced from the bridge array and
+    // replaced with ephemeral ISENSE_PLUS->A / ISENSE_MINUS->B bridges,
+    // routed by the normal router - the bridge array stays the source of
+    // truth for what's physically on the crossbar, and the existing
+    // currentSenseState machinery (Peripherals INA polling, marching-ants
+    // overlay, OLED readouts) drives itself. Inactive taps keep their
+    // normal bridge. A single tap stays inserted permanently. Added by
+    // probing a bridged row in measure mode, or V+<a>-<b> in the terminal.
+    // ------------------------------------------------------------------
+    static constexpr int MAX_CURRENT_TAPS = 8;
+    struct CurrentTap {
+        int16_t nodeA = -1;        // ISENSE+ side (positive mA = A -> B)
+        int16_t nodeB = -1;        // ISENSE- side
+        float ma = NAN;            // last reading (NAN = not measured yet)
+        unsigned long lastMs = 0;
+        bool valid = false;
+    };
+    bool addCurrentTap(int nodeA, int nodeB);   // idempotent; needs a routed bridge
+    bool addCurrentTapForNode(int node);        // tap the first bridge touching node
+    bool removeCurrentTap(int node);            // remove any tap touching node
+    void clearCurrentTaps();
+    int tapCount() const;
+    const CurrentTap* tapForNode(int node) const;
+    // The tap currently wired through the shunt (nullptr if none)
+    const CurrentTap* activeTapInfo() const {
+        return (activeTap >= 0 && taps[activeTap].valid) ? &taps[activeTap] : nullptr;
+    }
+
+    // Mark every net touched by a registered tap (active or not) in the LED
+    // decoration table so row animations don't flap between ANIM and ANTS
+    // while the mux rotates. Called by arbitrateNetDecorations() each frame;
+    // no-op when cycling is disabled.
+    void claimTapNets(uint8_t* netDecor, uint8_t antsValue) const;
+
+    void printCurrentComparison(Stream* out);   // terminal tap table
+    void printRowSweep(Stream* out);            // per-row volts/status/path debug dump
+    void runLaneSelfCheck(Stream* out);         // verify deterministic tables vs router
+
+    // ------------------------------------------------------------------
+    // Shared sweep state - written on core 2, read on both cores.
+    // ------------------------------------------------------------------
+    float rowVolts[61];              // index by row 1-60
+    volatile uint8_t rowStatus[61];  // OVERLAY_ROW_*
+    volatile int16_t rowNet[61];     // net number per row (-1 = none), rebuilt per generation
+
+private:
+    MeasurementOverlay();
+    ~MeasurementOverlay() = default;
+    static MeasurementOverlay* instance;
+
+    volatile uint64_t rowMask = 0;   // bit (row-1) set = row explicitly selected
+
+    CurrentTap taps[MAX_CURRENT_TAPS];
+    int activeTap = -1;              // tap currently wired through ISENSE (-1 none)
+    unsigned long tapDwellStartMs = 0;
+    unsigned long tapInsertedMs = 0; // readings older than this belong to the previous tap
+    // With >1 tap, how long each stays inserted before rotating. A rotation
+    // is ONE incremental reroute (restore + insert edits batched); the INA
+    // continuous poll runs every 50ms, so 400ms gives several fresh
+    // readings per dwell.
+    //
+    // DON'T lower this much: a 150ms dwell was tried (2026-07-20) and the
+    // reroute-per-150ms storm broke routing and display behavior in practice
+    // (user-reported; each swap is a full incremental reroute that races
+    // user edits, redraws the LEDs, and re-arms the voltage sweep's 100ms
+    // route-settle hold). Faster multiplexing needs a design that doesn't
+    // reroute per swap, not a smaller constant.
+    static constexpr unsigned long TAP_DWELL_MS = 400;
+
+    void handleRowSetButtons();
+    void serviceCurrentCycling();
+    // reroute=false batches the netlist edits for a combined swap (caller
+    // must reroute afterwards - insertTap(_, true) or refreshLocalConnections)
+    bool insertTap(int idx, bool reroute = true);
+    void restoreTap(int idx, bool reroute = true);
+    void readActiveTap();            // copy currentSenseState into taps[activeTap]
+
+    friend void measurementOverlayCore2Tick();
+    friend void measurementOverlayPaint();
+};
+
+// Core-2 entry points (no-ops when overlay + cycling are disabled)
+void measurementOverlayCore2Tick();
+void measurementOverlayPaint();
+
+extern MeasurementOverlay& measurementOverlay;
+
 #endif // MEASUREMODE_H
