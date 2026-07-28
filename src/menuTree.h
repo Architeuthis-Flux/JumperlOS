@@ -130,6 +130,11 @@ String menuLines[150] = {
   "-Probe  \31Pads",
   "-Switch \31Thresh",
   "-DACs   \31Calib",
+  "-Full   \31Test",
+  "-Probe  \31Cable",
+  "-Xbar   \31Route",
+  "-Tip    \31Voltage",
+  "-PSRAM  \31Check",
 
 
   "Files",

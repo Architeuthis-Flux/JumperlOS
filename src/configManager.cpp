@@ -19,6 +19,7 @@
 #include "AsyncPassthrough.h"
 #include "Probing.h"
 #include "Python_Proper.h"
+#include "SelfTest.h"
 #include "FileCache.h"  // fileCacheFlushNow / fileCacheSpiftlSync - force config durable
 
 #ifdef DONOTUSE_SERIALWRAPPER
@@ -2947,6 +2948,8 @@ void printConfigHelp() {
     Serial.println("                 `reset_all = reset to defaults and clear all settings");
     cycleTerminalColor(false, 1.0, true,  &Serial, 0, 1);
     Serial.println("         `force_first_start = clears everything to factory settings and runs first startup calibration");
+    Serial.println("                 `self_test = run the hardware self test (non-destructive)");
+    Serial.println("          `self_test_report = re-print the stored self test report");
 
     cycleTerminalColor(true, 15.0, true,  &Serial, 18, 1);
     Serial.println("\n\r");
@@ -3159,6 +3162,16 @@ bool dacChange = false;
                 Serial.println("Filesystem contents deleted.");
                 return;
             }
+            else if (strcmp(line, "self_test") == 0 || strcmp(line, "selftest") == 0) {
+                // Non-destructive hardware self test (no FS wipe, no reboot)
+                runFullSelfTest(false);
+                return;
+            }
+            else if (strcmp(line, "self_test_report") == 0 || strcmp(line, "selftest_report") == 0) {
+                // Re-print the stored report without re-running the tests
+                selfTestPrintStoredReport();
+                return;
+            }
             else if (strcmp(line, "force_first_start") == 0 || strcmp(line, "factory_reset") == 0) {
                 cycleTerminalColor(true, 100.0, true, &Serial, 0, 1);
                 safeFileDelete("/config.txt");
@@ -3323,6 +3336,14 @@ bool dacChange = false;
                     Serial.println("Filesystem contents deleted.");
                     continue;
                 
+                } else if (strcmp(line, "self_test") == 0 || strcmp(line, "selftest") == 0) {
+                    runFullSelfTest(false);
+                    continue;
+
+                } else if (strcmp(line, "self_test_report") == 0 || strcmp(line, "selftest_report") == 0) {
+                    selfTestPrintStoredReport();
+                    continue;
+
                 } else if (strcmp(line, "force_first_start") == 0 || strcmp(line, "factory_reset") == 0) {
                     //firstStart = 1;
                     cycleTerminalColor(true, 100.0, true,  &Serial, 0, 1);

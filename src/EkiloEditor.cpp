@@ -1531,11 +1531,16 @@ int ekilo_save() {
         // Write to flash
         bool was_paused = pauseCore2ForFlash(100);
         File file = safeFileOpen(E.filename, "w", 2000);
-        if (file) {
-            file.write((uint8_t*)buf.data(), len);
-            file.flush();
-            safeFileClose(file, true);
+        if (!file) {
+            // Must NOT clear dirty or report success here - that silently loses
+            // the user's edits if they quit believing the save worked
+            unpauseCore2ForFlash(was_paused);
+            ekilo_set_status_message("ERROR: Could not open file for writing");
+            return 0;
         }
+        file.write((uint8_t*)buf.data(), len);
+        file.flush();
+        safeFileClose(file, true);
         unpauseCore2ForFlash(was_paused);
         
         ContextManager::getInstance().setTransferPath(E.filename);

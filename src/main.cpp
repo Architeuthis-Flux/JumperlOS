@@ -59,6 +59,7 @@ KevinC@ppucc.io
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "SelfTest.h"
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "States.h" // New state management system
@@ -702,6 +703,11 @@ menu:
         // routableBufferPower() internally honors jumperlessConfig.dacs.auto_connect_probe,
         // so this is a no-op when probe auto-connect is disabled.
         routableBufferPower( 1, 0 );
+
+        // If the first-start self test ran before the restart that got us
+        // here, repaint its pass/fail LED overlay from the one-shot marker
+        // (deleted inside, so the overlay clears on the next reset).
+        selfTestShowSavedResultIfPending( );
 
         printColorJogoSmall( );
 #if TEST_PSRAM == 1

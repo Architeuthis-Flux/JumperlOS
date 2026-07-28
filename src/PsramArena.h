@@ -80,6 +80,10 @@ void* psram_header_ptr(void);
 // Print arena status to Serial - used by the `psram_status` debug command.
 void psram_arena_dump_status(void);
 
+// Run the pattern write/read self test against the raw PSRAM window
+// (save/restore, safe on a live arena). Used by the hardware self test.
+bool psram_pattern_test(size_t chipBytes);
+
 // ---------------------------------------------------------------------------
 // Introspection for the granular memory-map viewer (Debugs.cpp).
 // ---------------------------------------------------------------------------

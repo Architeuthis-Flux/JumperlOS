@@ -19,6 +19,7 @@
 #include "Probing.h"
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
+#include "SelfTest.h"
 #include "States.h"
 #include "Undo.h"
 #include "config.h"
@@ -89,6 +90,11 @@ struct app apps[ NUM_APPS ] = {
     { "Switch Calib", 15, 1, calibrateProbeSwitchThresholds },
     { "Python", 18, 1, pythonScriptsAppLauncher },
     { "Files", 19, 1, pythonScriptsAppLauncher },
+    { "Full   Test", 20, 1, fullSelfTestApp },
+    { "Probe  Cable", 21, 1, probeCableTestApp },
+    { "Xbar   Test", 22, 1, crossbarTestApp },
+    { "Tip    Voltage", 23, 1, tipVoltageTestApp },
+    { "PSRAM  Test", 24, 1, psramTestApp },
     // others can remain uninitialized (works=0)
 };
 
@@ -2255,8 +2261,14 @@ if ( yesNo == 1 ) {
 
     if ( firstStart == 1 ) {
         initializeMicroPythonExamples( false );
-        calibrateProbeSwitchThresholds( );
-        probeCalibApp( );
+
+        // Unattended hardware self test replaces the interactive probe apps
+        // (calibrateProbeSwitchThresholds / probeCalibApp) so mass flashing
+        // needs no operator input. Both remain available from the clickwheel
+        // calibration menu for manual fine-tuning. This writes /selftest.json
+        // plus the one-shot marker that repaints the result overlay after the
+        // restart below.
+        runFullSelfTest( true );
 
         // Start the device with a clean undo/redo history: the calibration
         // connects/disconnects above are internal setup, not user actions, and
@@ -2264,8 +2276,10 @@ if ( yesNo == 1 ) {
         // the user. Wipe it before the reboot that ends first-start.
         undoWipeHistory( );
 
-        delay( 1300 );
-        rp2040.restart( );
+        // Hold the result overlay on the breadboard LEDs until an operator
+        // touches a probe button / the encoder (or sends a serial byte),
+        // then restart into normal operation.
+        selfTestWaitForInputThenReset( );
     }
 }
 

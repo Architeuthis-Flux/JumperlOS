@@ -183,11 +183,14 @@ protected:
 
     static int _getFlags(OpenMode openMode, AccessMode accessMode) {
         int mode = 0;
-        if (openMode & OM_CREATE) {
-            mode |= FA_CREATE_ALWAYS;
-        }
         if (openMode & OM_APPEND) {
+            // FA_OPEN_APPEND implies FA_OPEN_ALWAYS (creates if missing) and
+            // seeks to EOF. It must NOT be combined with FA_CREATE_ALWAYS:
+            // sflags() maps "a"/"a+" to OM_CREATE|OM_APPEND, and FA_CREATE_ALWAYS
+            // makes f_open() truncate an existing file, turning append into "w".
             mode |= FA_OPEN_APPEND;
+        } else if (openMode & OM_CREATE) {
+            mode |= FA_CREATE_ALWAYS;
         }
         if (openMode & OM_TRUNCATE) {
             mode |= 0; // TODO - no truncate?
@@ -232,7 +235,7 @@ public:
                 return bw;
             }
         }
-        return -1; // some kind of error
+        return 0; // error - returning -1 here would be SIZE_MAX ("wrote 4GB") since the return type is size_t
     }
 
     int read(uint8_t* buf, size_t size) override {
@@ -262,9 +265,23 @@ public:
         case SeekSet:
             return FR_OK == f_lseek(_fd.get(), pos);
         case SeekEnd:
+            // pos counts back from EOF. Unsigned underflow here would ask f_lseek
+            // for a ~4GB offset, and f_lseek on a writable file EXPANDS the file
+            // to the target offset - allocating every free cluster on the volume.
+            if (pos > f_size(_fd.get())) {
+                return false;
+            }
             return FR_OK == f_lseek(_fd.get(), f_size(_fd.get()) - pos); // TODO again, odd from POSIX
-        case SeekCur:
-            return FR_OK == f_lseek(_fd.get(), f_tell(_fd.get()) + pos);
+        case SeekCur: {
+            // pos may be a negative offset cast to uint32_t; do signed math and
+            // reject before-start targets instead of wrapping to a huge offset
+            // (which would trigger the same f_lseek write-mode expansion as above)
+            int64_t target = (int64_t)f_tell(_fd.get()) + (int64_t)(int32_t)pos;
+            if (target < 0) {
+                return false;
+            }
+            return FR_OK == f_lseek(_fd.get(), (FSIZE_t)target);
+        }
         default:
             // Should not be hit, we've got an invalid seek mode
             DEBUGV("FatFSFileImpl::seek: invalid seek mode %d\n", mode);
@@ -459,7 +476,7 @@ protected:
     FatFSImpl*              _fs;
     std::shared_ptr<DIR>    _dir;
     bool                    _valid;
-    char                    _lfn[64];
+    char                    _lfn[65]; // FF_LFN_BUF(64) + NUL - a 64-byte buffer leaves max-length names unterminated
     time_t                  _time;
     time_t                  _creation;
     std::shared_ptr<char>   _dirPath;

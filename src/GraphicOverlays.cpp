@@ -337,7 +337,14 @@ void __not_in_flash_func(renderGraphicOverlays)() {
 // ============================================================================
 
 void serializeOverlaysToYAML(String& output, int injectANSI ) {
-    if (graphicOverlayState.numOverlays == 0) {
+    // Self-test results are session-only (must clear on reset) - never
+    // persist them into a slot file.
+    int persistable = 0;
+    for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
+        const GraphicOverlay& overlay = graphicOverlayState.overlays[i];
+        if (overlay.enabled && strcmp(overlay.name, "_SELFTEST_") != 0) persistable++;
+    }
+    if (persistable == 0) {
         return;
     }
     
@@ -346,7 +353,8 @@ void serializeOverlaysToYAML(String& output, int injectANSI ) {
     for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
         const GraphicOverlay& overlay = graphicOverlayState.overlays[i];
         if (!overlay.enabled) continue;
-        
+        if (strcmp(overlay.name, "_SELFTEST_") == 0) continue;
+
         output += "  - name: \"";
         output += overlay.name;
         output += "\"\n";

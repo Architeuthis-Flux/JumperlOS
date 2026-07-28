@@ -2357,6 +2357,14 @@ char* jl_fs_listdir( const char* path ) {
             continue;
         }
 
+        // Prevent buffer overflow: check BEFORE appending, against the actual
+        // buffer size (768 on OG, 2048 on V5). The old post-append ">1900" check
+        // could never fire before the 768-byte OG buffer was already smashed.
+        // Entries past this point are silently omitted.
+        if ( strlen( listBuffer ) + fileNameStr.length( ) + 2 >= sizeof( listBuffer ) ) {
+            break;
+        }
+
         if ( !first ) {
             strcat( listBuffer, "," );
         }
@@ -2365,12 +2373,6 @@ char* jl_fs_listdir( const char* path ) {
             strcat( listBuffer, "/" );
         }
         first = false;
-
-        // Prevent buffer overflow
-        if ( strlen( listBuffer ) > 1900 ) {
-            strcat( listBuffer, "..." );
-            break;
-        }
     }
 
     fs_mutex_release( ); // THREAD SAFETY: Unlock filesystem
@@ -2488,7 +2490,7 @@ int jl_fs_stat_isdir( const char* path ) {
 static void* jfs_open_files[ MAX_JFS_OPEN_FILES ] = { nullptr };
 int debug_fs = 0;
 
-static void jfs_track_file( void* handle ) {
+static bool jfs_track_file( void* handle ) {
     for ( int i = 0; i < MAX_JFS_OPEN_FILES; i++ ) {
         if ( jfs_open_files[ i ] == nullptr ) {
             jfs_open_files[ i ] = handle;
@@ -2496,14 +2498,17 @@ static void jfs_track_file( void* handle ) {
                 Serial.println( "DEBUG: jfs_track_file: File is tracked" );
                 Serial.flush( );
             }
-            return;
+            return true;
         }
     }
-    // No space - file won't be tracked (will still work but won't auto-close)
+    // No space. The open must FAIL in this case: an untracked handle could never
+    // be closed (jl_fs_close_file treats "not tracked" as "already closed") and
+    // would leak its heap File + FatFS FIL for the rest of the session.
     if ( debug_fs ) {
-        Serial.println( "DEBUG: jfs_track_file: No space - file won't be tracked (will still work but won't auto-close)" );
+        Serial.println( "DEBUG: jfs_track_file: No space - rejecting open (max concurrent JFS files reached)" );
         Serial.flush( );
     }
+    return false;
 }
 
 static void jfs_untrack_file( void* handle ) {
@@ -2640,8 +2645,14 @@ void* jl_fs_open_file( const char* path, const char* mode ) {
         return nullptr;
     }
 
-    // Track the file handle for cleanup on exit
-    jfs_track_file( file );
+    // Track the file handle for cleanup on exit. If the tracking table is full
+    // the open fails - see jfs_track_file for why an untracked handle is unsafe.
+    if ( !jfs_track_file( file ) ) {
+        file->close( );
+        delete file;
+        fs_mutex_release( ); // THREAD SAFETY: Unlock before returning
+        return nullptr;
+    }
 
     fs_mutex_release( ); // THREAD SAFETY: Unlock filesystem
 
@@ -2725,6 +2736,15 @@ int jl_fs_read_bytes( void* file_handle, char* buffer, int size ) {
     
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
+    // Stale-handle guard: jl_close_all_jfs_files() deletes the File* after each
+    // script/REPL execution; a Python object surviving that still holds the old
+    // pointer. Dereferencing it would be use-after-free.
+    if ( !jfs_is_tracked( file_handle ) ) {
+        fs_mutex_release( );
+        unpauseCore2ForFlash( was_paused );
+        return -1; // Handle already closed/deleted
+    }
+
     File* file = (File*)file_handle;
     if ( !*file ) {
         fs_mutex_release( );
@@ -2753,6 +2773,14 @@ int jl_fs_write_bytes( void* file_handle, const char* data, int size ) {
 
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
+    // Stale-handle guard (see jl_fs_read_bytes)
+    if ( !jfs_is_tracked( file_handle ) ) {
+        fs_mutex_release( );
+        unpauseCore2ForFlash( was_paused );
+        AsyncPassthrough::resumeUARTRxIRQ( );
+        return -1; // Handle already closed/deleted
+    }
+
     File* file = (File*)file_handle;
     if ( !*file ) {
         fs_mutex_release( );
@@ -2780,6 +2808,12 @@ int jl_fs_seek( void* file_handle, int position, int mode ) {
 
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
+    // Stale-handle guard (see jl_fs_read_bytes)
+    if ( !jfs_is_tracked( file_handle ) ) {
+        fs_mutex_release( );
+        return 0; // Handle already closed/deleted
+    }
+
     File* file = (File*)file_handle;
     if ( !*file ) {
         fs_mutex_release( );
@@ -2806,6 +2840,12 @@ int jl_fs_position( void* file_handle ) {
 
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
+    // Stale-handle guard (see jl_fs_read_bytes)
+    if ( !jfs_is_tracked( file_handle ) ) {
+        fs_mutex_release( );
+        return -1; // Handle already closed/deleted
+    }
+
     File* file = (File*)file_handle;
     if ( !*file ) {
         fs_mutex_release( );
@@ -2827,6 +2867,12 @@ int jl_fs_size( void* file_handle ) {
 
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
+    // Stale-handle guard (see jl_fs_read_bytes)
+    if ( !jfs_is_tracked( file_handle ) ) {
+        fs_mutex_release( );
+        return -1; // Handle already closed/deleted
+    }
+
     File* file = (File*)file_handle;
     if ( !*file ) {
         fs_mutex_release( );
@@ -2843,6 +2889,12 @@ int jl_fs_available( void* file_handle ) {
         return 0;
 
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
+
+    // Stale-handle guard (see jl_fs_read_bytes)
+    if ( !jfs_is_tracked( file_handle ) ) {
+        fs_mutex_release( );
+        return 0; // Handle already closed/deleted
+    }
 
     File* file = (File*)file_handle;
     if ( !*file ) {
@@ -2865,8 +2917,9 @@ void jl_fs_flush( void* file_handle ) {
 
         fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
-        File* file = (File*)file_handle;
-        if ( *file ) { // Only flush if file is actually open
+        // Stale-handle guard (see jl_fs_read_bytes)
+        File* file = jfs_is_tracked( file_handle ) ? (File*)file_handle : nullptr;
+        if ( file && *file ) { // Only flush if file is actually open
             file->flush( );
         }
 

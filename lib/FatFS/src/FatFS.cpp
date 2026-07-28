@@ -157,7 +157,7 @@ FileImplPtr FatFSImpl::open(const char* path, OpenMode openMode, AccessMode acce
         return FileImplPtr();
     }
     BYTE flags = _getFlags(openMode, accessMode);
-    if ((openMode && OM_CREATE) && strchr(path, '/')) {
+    if ((openMode & OM_CREATE) && strchr(path, '/')) {
         // For file creation, silently make subdirs as needed.  If any fail,
         // it will be caught by the real file open later on
         char *pathStr = strdup(path);
@@ -289,7 +289,7 @@ DRESULT disk_read(BYTE p, BYTE *buff, LBA_t sect, UINT count) {
         if (_ftl) {
             _ftl->read(sect + i, buff + i * _sectorSize);
         } else {
-            _fi->read(sect + i, 0, buff, _sectorSize);
+            _fi->read(sect + i, 0, buff + i * _sectorSize, _sectorSize);
         }
     }
     return RES_OK;
@@ -354,7 +354,7 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
     }
     case CTRL_TRIM: {
         LBA_t *lba = (LBA_t *)buff;
-        for (unsigned int i = lba[0]; i < lba[1]; i++) {
+        for (unsigned int i = lba[0]; i <= lba[1]; i++) { // lba[1] is inclusive (ff.cpp passes "End of data area to be freed")
             if (_ftl) {
                 _ftl->trim(i);
             } else {
@@ -375,7 +375,11 @@ DWORD get_fattime() {
     } else {
         now = time(nullptr);
     }
-    struct tm *stm = localtime(&now);
+    struct tm tmbuf;
+    struct tm *stm = localtime_r(&now, &tmbuf); // localtime()'s shared static buffer races with other callers
+    if (!stm) {
+        return 0;
+    }
     if (stm->tm_year < 80) {
         // FAT can't report years before 1980
         stm->tm_year = 80;

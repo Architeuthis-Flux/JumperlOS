@@ -1729,6 +1729,12 @@ void FileManager::run( ) {
                 Serial.print( "\033[?25h" );
                 Serial.flush( );
 
+                // Drain any already-buffered input so a queued byte (paste of
+                // "xy", key auto-repeat, terminal burst) can't auto-confirm the delete
+                while ( Serial.available( ) ) {
+                    Serial.read( );
+                }
+
                 // Wait for confirmation and echo the character
                 char confirm = 0;
                 while ( confirm == 0 ) {

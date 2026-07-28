@@ -121,17 +121,26 @@ void initEmptyPool() {
 
 // Walk the free list and merge adjacent free blocks. O(n) but n is small.
 void coalesce() {
+    BlockHeader* prev = nullptr;
     BlockHeader* cur = g_freeList;
     while (cur) {
         BlockHeader* next = cur->next;
         if (!next) break;
         // sort by address as we go - bubble pass per call
         if (reinterpret_cast<uintptr_t>(next) < reinterpret_cast<uintptr_t>(cur)) {
-            // swap their links (simple bubble - rare path)
-            BlockHeader* tmp = next->next;
+            // swap adjacent nodes: prev -> next -> cur -> (next's old tail).
+            // The predecessor (or list head) MUST be re-pointed at `next`,
+            // otherwise `next` becomes unreachable and its bytes silently
+            // leak out of the free list on every swap.
+            cur->next = next->next;
             next->next = cur;
-            cur->next = tmp;
+            if (prev) {
+                prev->next = next;
+            } else {
+                g_freeList = next;
+            }
             // advance from the head again - cost is bounded
+            prev = nullptr;
             cur = g_freeList;
             continue;
         }
@@ -141,6 +150,7 @@ void coalesce() {
             cur->next = next->next;
             continue;
         }
+        prev = cur;
         cur = next;
     }
 }
@@ -239,6 +249,10 @@ bool psramSelfTest(size_t chipBytes) {
 // =============================================================================
 
 extern "C" {
+
+bool psram_pattern_test(size_t chipBytes) {
+    return psramSelfTest(chipBytes);
+}
 
 bool psram_arena_init(size_t detectedPsramBytes, int appSizeKb) {
     if (!g_arenaMutexInited) {

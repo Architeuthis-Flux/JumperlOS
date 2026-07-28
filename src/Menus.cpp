@@ -4484,6 +4484,16 @@ int doMenuAction( int menuPosition, int selection ) {
             appName = "Switch Calib";
         } else if ( menuItem.indexOf( "DACs" ) != -1 ) {
             appName = "Calib  DACs";
+        } else if ( menuItem.indexOf( "Full" ) != -1 ) {
+            appName = "Full   Test";
+        } else if ( menuItem.indexOf( "Cable" ) != -1 ) {
+            appName = "Probe  Cable";
+        } else if ( menuItem.indexOf( "Xbar" ) != -1 ) {
+            appName = "Xbar   Test";
+        } else if ( menuItem.indexOf( "Tip" ) != -1 ) {
+            appName = "Tip    Voltage";
+        } else if ( menuItem.indexOf( "PSRAM" ) != -1 ) {
+            appName = "PSRAM  Test";
         } else {
             // Fallback: try the menu item directly
             appName = menuItem;
