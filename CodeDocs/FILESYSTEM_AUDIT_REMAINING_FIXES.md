@@ -119,6 +119,13 @@ Firmware builds clean with all fixes.
   and firmware writes refused until USB mode is exited. Arguably correct
   while the drive stays exported; nothing handles `tud_umount_cb`/
   `tud_suspend_cb`. Decide deliberately.
+- **Host eject -> auto-remount** (observed on macOS during on-device
+  validation): after a Finder/diskutil eject the LUN keeps reporting READY,
+  so macOS re-probes and silently re-mounts within seconds (re-latching the
+  write gate). The unmount-side reload DID run correctly in the eject window.
+  Proper fix: report medium-not-present after a host eject until MSC mode is
+  toggled (this is what the deleted dead `usb_msc_ejected` flag was probably
+  meant to do). Pre-existing gap, now visible because detection works.
 - **Lock-order inversion** (write helpers pause->mutex vs open/close
   mutex->pause): investigated - cannot hard-deadlock (pause is a
   timeout-bounded flag, XIP safety comes from `idleOtherCore` inside the
@@ -151,6 +158,14 @@ Durability / correctness:
   exists-check and mkdir -> EIO instead of EEXIST).
 - `modjumperless.c` file-object `seek()` flushes, module-level `jfs.seek()`
   doesn't (read-after-write staleness inconsistency).
+- `modjumperless.c` module-level `jfs.read/write/seek/close(fileobj, ...)`
+  don't type-check their first arg: `jfs.read("some/path")` reinterprets the
+  string object as a file struct (found during on-device testing - the ABA
+  generation tag rejected the garbage handle with EIO where pre-fix firmware
+  would have dereferenced a garbage File*). Add an mp_obj_is_type check.
+- `jl_fs_remove/rename` failures always map to ENOENT even when the real
+  cause is FR_LOCKED (file open under FF_FS_LOCK); same exists->EBUSY
+  inference `jl_fs_open_file` now uses would fit.
 - `mphalport.c:53` stale duplicate `mp_obj_jfs_file_t` struct (layout
   landmine if ever used); two independent CWDs (`modos_jl.c` vs `jl_vfs_cwd`).
 
@@ -177,15 +192,27 @@ USB / UX / minor:
 - `configManager.cpp:588` unconditional 200ms boot delay annotated
   `//!son of a bitch` - masks an unresolved race worth root-causing.
 
-## Hardware validation checklist (needs a connected V5)
+## Hardware validation - RUN 2026-07-29 on a V5, all PASS
 
-1. Flash, then run `/python_scripts/examples/file_io_basics.py` and
-   `pin_irq_basics.py` (assert + print PASS). Section 5 now expects the
-   8-handle limit and exercises FF_FS_LOCK read-sharing (4 concurrent reads).
-2. `jfs.listdir('/python_scripts')` (reworked openDir + '\n' listdir).
-3. USB MSC on macOS + Windows: mount, host-copy a file, firmware-side write
-   attempt must refuse; eject; verify slot reload sees host changes; watch
-   for TEST UNIT READY remount blips (dmesg).
-4. Editor save + config save while MSC mounted -> clean refusal, dirty kept.
-5. Dual-core FS stress (Python file I/O loop + FM browsing) - watch for
-   FR_LOCKED surfacing anywhere legitimate (FF_FS_LOCK=16 headroom).
+1. `file_io_basics.py` + `pin_irq_basics.py` (provisioned copies): PASS,
+   including the 8-handle limit (9th open OSError) and 8-reader FF_FS_LOCK
+   sharing.
+2. Targeted jfs checks: comma filename = ONE listdir entry; `read(0)`=='' ;
+   `read(-1)` returns all 20480 bytes of a >8KB file; double-close harmless;
+   `listdir('/missing')` raises ENOENT; `stat(dir)` reports S_IFDIR;
+   `fs_read`/`fs_write` path API roundtrip.
+3. USB MSC full cycle (macOS): mount detection latched from the host's own
+   READ10s; `jfs.open` w/a/r+ all refused with EROFS while mounted, reads
+   fine; host-written file visible with correct content after eject (the
+   remount+reload path); gate re-latched when macOS auto-remounted; `u`
+   disable -> volume gone, writes resumed. (Windows still untested.)
+4. Stress: 60 append/close cycles in 3.3s (>=2 live journal ring rollovers
+   on-device - the rewritten doFullSnapshot path), 6 rename churn files
+   intact, writer-excludes-reader refused with truthful EBUSY (fix added
+   during this run), remove-while-open refused.
+5. Reboot persistence: file written immediately before `machine.reset()`
+   intact after boot (journal replay on hardware).
+
+Still to do on hardware: Windows MSC pass; editor/config save refusal UX
+while mounted (interactive); dual-core stress with FM browsing (interactive);
+TEST UNIT READY blip confirmation with an analyzer/dmesg.

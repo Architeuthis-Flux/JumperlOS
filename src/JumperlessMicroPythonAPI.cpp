@@ -2688,7 +2688,14 @@ void* jl_fs_open_file( const char* path, const char* mode ) {
             Serial.flush( );
         }
         delete file;
-        jfs_open_errno = ENOENT; // ponytail: FatFS gives no detail; could be disk-full on write modes
+        // The File wrapper swallows the FRESULT, but we can still be truthful:
+        // a file that EXISTS yet refuses to open is FR_LOCKED (FF_FS_LOCK
+        // sharing rule - e.g. reader while a writer holds it) or a full lock
+        // table -> EBUSY. A missing file is the plain ENOENT.
+        // ponytail: write-mode disk-full also lands on EBUSY's exists-check
+        // (file may have been created); plumbing the real FRESULT through
+        // the wrapper is the upgrade path.
+        jfs_open_errno = FatFS.exists( path ) ? EBUSY : ENOENT;
         fs_mutex_release( ); // THREAD SAFETY: Unlock before returning
         return nullptr;
     }
