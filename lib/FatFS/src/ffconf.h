@@ -274,7 +274,16 @@
 */
 
 
-#define FF_FS_LOCK		0
+/*  JumperlOS: 8 (was 0). Two write handles on one file (e.g. File Manager +
+    /  a Python script) each carry their own sector buffer; interleaved syncs
+    /  silently corrupt that file. With the lock, the second conflicting open -
+    /  and unlink/rename of any open object - fails cleanly (FR_LOCKED) instead.
+    /  Concurrent read-only opens of one file still work and share one of the
+    /  entries (16 B static each). Every open file and subdirectory DIR uses a
+    /  slot; a full table fails opens with FR_TOO_MANY_OPEN_FILES. Sized 16:
+    /  worst case is ~12 distinct objects (MAX_JFS_OPEN_FILES=8 Python handles
+    /  + nodeFile + a config/slot save + FM dir listing + temp file). */
+#define FF_FS_LOCK		16
 /*  The option FF_FS_LOCK switches file lock function to control duplicated file open
     /  and illegal operation to open objects. This option must be 0 when FF_FS_READONLY
     /  is 1.

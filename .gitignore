@@ -34,3 +34,4 @@ CodeDocs/current_task_plan.md
 src/fonts/TTF2GFX*
 scripts/repro_menufx.py
 CodeDocs/MENU_SYSTEM_BUG_HUNT_HANDOFF.md
+__pycache__/

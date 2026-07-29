@@ -2,14 +2,13 @@
 UART Loopback Demo
 """
 
-import jumperless as j
 from machine import UART
 import time
     
 uart = UART(0, 115200)
 uart.init(115200, 8, None, 1)
-j.connect(j.UART_TX, j.D0, 0)
-j.connect(j.UART_RX, j.D0, 0)
+connect(UART_TX, D0, 0)
+connect(UART_RX, D0, 0)
 
 buffer = "UART looped back!"
 

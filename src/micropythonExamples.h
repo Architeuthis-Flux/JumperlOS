@@ -16,6 +16,7 @@
 #define INCLUDE_ASYNC_READ
 #define INCLUDE_DAC_BASICS
 #define INCLUDE_EXCEL_LISTENER
+#define INCLUDE_FILE_IO_BASICS
 #define INCLUDE_GPIO_BASICS
 #define INCLUDE_INTERACTION_DEMO
 #define INCLUDE_LED_BRIGHTNESS_CONTROL
@@ -27,6 +28,7 @@
 #define INCLUDE_OLEDGUI
 #define INCLUDE_OSCILLOSCOPE
 #define INCLUDE_OUTPUT_TEST
+#define INCLUDE_PIN_IRQ_BASICS
 #define INCLUDE_PIN_IRQ_FREQ_COUNTER
 #define INCLUDE_PIN_IRQ_REACTION_GAME
 #define INCLUDE_PSRAM_TEST
@@ -57,6 +59,7 @@
 #undef INCLUDE_ASYNC_READ
 #undef INCLUDE_DAC_BASICS
 #undef INCLUDE_EXCEL_LISTENER
+#undef INCLUDE_FILE_IO_BASICS
 #undef INCLUDE_GPIO_BASICS
 #undef INCLUDE_INTERACTION_DEMO
 #undef INCLUDE_LED_BRIGHTNESS_CONTROL
@@ -68,6 +71,7 @@
 #undef INCLUDE_OLEDGUI
 #undef INCLUDE_OSCILLOSCOPE
 #undef INCLUDE_OUTPUT_TEST
+#undef INCLUDE_PIN_IRQ_BASICS
 #undef INCLUDE_PIN_IRQ_FREQ_COUNTER
 #undef INCLUDE_PIN_IRQ_REACTION_GAME
 #undef INCLUDE_PSRAM_TEST
@@ -112,7 +116,6 @@ Basic ADC (Analog-to-Digital Converter) operations.
 This example shows how to read analog voltages.
 """
 
-import jumperless as j
 import time
 
 print("ADC Basics Demo")
@@ -127,13 +130,13 @@ print("Connect voltage sources to ADC inputs")
 while True:
     print("\nADC Readings:")
     for channel in channels:
-        voltage = j.adc_get(channel)
+        voltage = adc_get(channel)
         print("  ADC" + str(channel) + ": " + str(round(voltage, 3)) + "V")
     time.sleep(0.5)
             
 )";
-const uint32_t ADC_BASICS_PY_HASHES[1] = { 0x5BB58CA2 };
-const int ADC_BASICS_PY_HASH_COUNT = 1;
+const uint32_t ADC_BASICS_PY_HASHES[2] = { 0x9940E0D3, 0x5BB58CA2 };
+const int ADC_BASICS_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_ASYNC_READ
@@ -242,7 +245,6 @@ const char* EXCEL_LISTENER_PY = R"===("""
 Excel GUI Listener Script (V1.0.2)
 """
 
-import jumperless as j
 import sys
 import select
 import time
@@ -271,12 +273,12 @@ def debug_msg(msg, level=1):
         print(msg)
 
 def reset_breadboard():
-    j.nodes_clear()
+    nodes_clear()
     for channel in range(4):
-        j.set_dac(channel, 0)
+        set_dac(channel, 0)
     for pin in range(1, 9):
-        j.gpio_set_dir(pin, False) ## False --> INPUT
-        j.gpio_set_pull(pin, 0) ## -1, 0, 1 --> down, none, up
+        gpio_set_dir(pin, False) ## False --> INPUT
+        gpio_set_pull(pin, 0) ## -1, 0, 1 --> down, none, up
 
 ## Reset all breadboard settings since Excel will be setting them
 reset_breadboard()
@@ -324,7 +326,7 @@ def apply_gpio(gpio_chars, freq_list, duty_list, status_list):
 
 def apply_voltages(voltage_list):
     for channel, voltage in enumerate(voltage_list):
-        j.set_dac(channel, float(voltage))
+        set_dac(channel, float(voltage))
 
 def apply_connections(connection_list, net_name_list):
     ''' Attempts to create each connection, adds new nets to list, and updates & returns sensor_state'''
@@ -336,14 +338,14 @@ def apply_connections(connection_list, net_name_list):
     if len(connection_list[0]) > 1:
         for net_name, nodes_str in connection_list:
             node_1, node_2 = nodes_str.split('-', 1)
-            j.connect(node_1, node_2, 0)
+            connect(node_1, node_2, 0)
             ## Query to confirm the connection was formed
-            if j.is_connected(node_1,node_2):
+            if is_connected(node_1,node_2):
                 debug_msg(f"Connected {node_1} — {node_2}", level=2)
                 ## Add the net_name to the list if it's new
                 if net_name not in net_name_list:
                     net_name_list.append(net_name)
-                    j.set_net_name(len(net_name_list) - 1, net_name)
+                    set_net_name(len(net_name_list) - 1, net_name)
                 ## Check both endpoints against sensor node lists
                 for node in (node_1, node_2):
                     if node in ADC_NODES:
@@ -374,18 +376,18 @@ def build_response(net_name_list, net_colors_list, measurements, status_list):
     return f"{'|'.join(net_name_list)},{'|'.join(net_colors_list)},{adc_fields}|{power_field}|{current_field},{placeholder_values},LED_DETAIL,{'|'.join(status_list)}"
 
 def set_gpio_from_char(pin_id, setting_char, frequency_setting, duty_cycle_setting):
-    j.pwm_stop(pin_id)
+    pwm_stop(pin_id)
     if setting_char == 'H':
-        j.gpio_set_dir(pin_id, True) ## true --> OUTPUT
-        j.gpio_set(pin_id, True) ## True --> OUTPUT HIGH
+        gpio_set_dir(pin_id, True) ## true --> OUTPUT
+        gpio_set(pin_id, True) ## True --> OUTPUT HIGH
         debug_msg(f"setting {pin_id} to {setting_char}")
     elif setting_char == 'L':
-        j.gpio_set_dir(pin_id, True) ## true --> OUTPUT
-        j.gpio_set(pin_id, False) ## False --> OUTPUT LOW
+        gpio_set_dir(pin_id, True) ## true --> OUTPUT
+        gpio_set(pin_id, False) ## False --> OUTPUT LOW
         debug_msg(f"setting {pin_id} to {setting_char}")
     elif setting_char == 'P':
-        j.gpio_set_dir(pin_id, True) ## true --> OUTPUT
-        j.pwm(pin_id, frequency_setting, duty_cycle_setting)
+        gpio_set_dir(pin_id, True) ## true --> OUTPUT
+        pwm(pin_id, frequency_setting, duty_cycle_setting)
         debug_msg(f"setting {pin_id} to {setting_char} with a frequency of {frequency_setting} and duty cycle of {duty_cycle_setting}")
     else:
         try:
@@ -397,8 +399,8 @@ def set_gpio_from_char(pin_id, setting_char, frequency_setting, duty_cycle_setti
             status_message_list.append(f"Error message: {e}")
             debug_msg(status_message_list[-1])
             setting_int = 0
-        j.gpio_set_dir(pin_id, False) ## False --> INPUT
-        j.gpio_set_pull(pin_id, setting_int) ## -1, 0, 1 --> down, none, up
+        gpio_set_dir(pin_id, False) ## False --> INPUT
+        gpio_set_pull(pin_id, setting_int) ## -1, 0, 1 --> down, none, up
         debug_msg(f"setting {pin_id} to {setting_int}")
 
 def sample_measurements(sensor_state):
@@ -406,15 +408,15 @@ def sample_measurements(sensor_state):
     adc_readings = []
     for i, enabled in enumerate(sensor_state["adc"]):
         if enabled:
-            adc_readings.append(j.adc_get(i))
+            adc_readings.append(adc_get(i))
             debug_msg(f"ADC{i}: {adc_readings[-1]:.3f}V", level=2)
         else:
             adc_readings.append(None)
 
     if all(sensor_state["current"]):
-        power_reading = j.get_power(0)
+        power_reading = get_power(0)
         debug_msg(f"Power: {power_reading*1000:.2f}mW", level=2)
-        current_reading = j.ina_get_current(0)
+        current_reading = ina_get_current(0)
         debug_msg(f"Current: {current_reading*1000:.2f}mA", level=2)
     else:
         power_reading = None
@@ -424,8 +426,8 @@ def sample_measurements(sensor_state):
 
 def try_connecting_oled():
     try:
-        j.oled_connect() ## Connect OLED
-        j.oled_clear()
+        oled_connect() ## Connect OLED
+        oled_clear()
         oled_enabled = True
     except (ValueError, TypeError) as e:
         print("WARNING: Unable to connect OLED. OLED features disabled.")
@@ -435,14 +437,14 @@ def try_connecting_oled():
 
 ## Connect the OLED and display Excel
 if try_connecting_oled():
-    j.oled_show_bitmap_file("/images/excelGUI.bin", 0, 0) ## when new firmware is available...
-    # j.oled_show_bitmap_file("/images/excel_gui.bin", 0, 0)
-    j.oled_disconnect()
+    oled_show_bitmap_file("/images/excelGUI.bin", 0, 0) ## when new firmware is available...
+    # oled_show_bitmap_file("/images/excel_gui.bin", 0, 0)
+    oled_disconnect()
 
 ## Debug code: initial net info
 # debug_msg("Initial Net Info:")
-# for net_num in range(0, j.get_num_nets()):
-#     debug_msg(f"Net {j.get_net_name(net_num)} is colored {j.get_net_color(net_num):06x}")
+# for net_num in range(0, get_num_nets()):
+#     debug_msg(f"Net {get_net_name(net_num)} is colored {get_net_color(net_num):06x}")
 
 ## Check if the config.txt file has "ignore_dtr = 1;" in the [usb_cdc] section
 connection_allowed = True ## an override value used for testing
@@ -493,15 +495,15 @@ if is_setting_in_config() and connection_allowed:
                         parsed = parse_command("".join(char_list))
                         if parsed:
                             ## Perform setup operations
-                            j.nodes_clear()
+                            nodes_clear()
                             status_message_list = []
                             ## Set the default net names to match Excel
                             net_name_list = ["Empty Net", "G", "T", "B", "0DAC", "1DAC"]
                             for i, net in enumerate(net_name_list):
-                                 j.set_net_name(i, net)
+                                 set_net_name(i, net)
                             ## Take a look at the default nets:
-                            # for net_num in range(0, j.get_num_nets()):
-                            #     debug_msg(f"Net {j.get_net_name(net_num)} is colored {j.get_net_color(net_num):06x}")
+                            # for net_num in range(0, get_num_nets()):
+                            #     debug_msg(f"Net {get_net_name(net_num)} is colored {get_net_color(net_num):06x}")
     
                             ## Ignore element 0 (the "EXCEL" lead text because it might be missing the first few characters)
                             
@@ -519,20 +521,20 @@ if is_setting_in_config() and connection_allowed:
                             measurements = sample_measurements(sensor_state)
                         
                             ## After all commands have been issued, query the resulting colors for each net
-                            net_colors_list = [f"{j.get_net_color(n):06x}" for n in range(j.get_num_nets())]
-                            # for net_num in range(0, j.get_num_nets()):
-                            #     debug_msg(f"Net {j.get_net_name(net_num)} is colored {j.get_net_color(net_num):06x}")
-                            #     debug_msg(f"The nodes are: {j.get_net_nodes(net_num)}")
+                            net_colors_list = [f"{get_net_color(n):06x}" for n in range(get_num_nets())]
+                            # for net_num in range(0, get_num_nets()):
+                            #     debug_msg(f"Net {get_net_name(net_num)} is colored {get_net_color(net_num):06x}")
+                            #     debug_msg(f"The nodes are: {get_net_nodes(net_num)}")
 
                             ## Print any status messages to the OLED
                             if len(status_message_list) > 0:
                                 reset_breadboard()
                                 if try_connecting_oled():
-                                    j.oled_set_font("Berkeley Mono")
-                                    j.oled_print("\n\n\n\n", 0)
+                                    oled_set_font("Berkeley Mono")
+                                    oled_print("\n\n\n\n", 0)
                                     for message in status_message_list:
-                                        j.oled_print(f"{message}\n", 0)
-                                    j.oled_disconnect()
+                                        oled_print(f"{message}\n", 0)
+                                    oled_disconnect()
                             
                             ## Return the '|' delimited lists separated by ','s with placeholders for future data
                             print(build_response(net_name_list, net_colors_list, measurements, status_message_list))
@@ -552,14 +554,157 @@ else:
     print('Unable to transmit to Excel, please set "ignore_dtr = 1;" in the [usb_cdc] section of config.txt')
     ## Connect OLED to print message about needed config setting(s)
     if try_connecting_oled():
-        j.oled_set_font("Berkeley Mono")
-        j.oled_print("\n\n\n\nPlease set\nignore_dtr = 1;\nin config.txt\nand reboot", 0)
-        j.oled_disconnect()
+        oled_set_font("Berkeley Mono")
+        oled_print("\n\n\n\nPlease set\nignore_dtr = 1;\nin config.txt\nand reboot", 0)
+        oled_disconnect()
     
 ## abort script by reaching the end
 print("script will now exit"))===";
-const uint32_t EXCEL_LISTENER_PY_HASHES[2] = { 0xF832B96C, 0x06CDA6A3 };
-const int EXCEL_LISTENER_PY_HASH_COUNT = 2;
+const uint32_t EXCEL_LISTENER_PY_HASHES[3] = { 0x83EB52CF, 0xF832B96C, 0x06CDA6A3 };
+const int EXCEL_LISTENER_PY_HASH_COUNT = 3;
+#endif
+
+#ifdef INCLUDE_FILE_IO_BASICS
+const char* FILE_IO_BASICS_PY = R"===("""
+File I/O basics with the jfs filesystem module.
+
+A guided tour of reading and writing files on the Jumperless flash
+filesystem, framed as a tiny data logger. Everything shown here works
+the same way in your own scripts.
+
+jfs is available globally - no import needed. (MicroPython's built-in
+open() and the os module work on the same files too, if you prefer them.)
+"""
+
+import time
+
+LOG = '/python_scripts/file_io_demo.log'
+
+
+def section(title):
+    print()
+    print("-" * 46)
+    print(" " + title)
+    print("-" * 46)
+    time.sleep(0.3)
+
+
+print("=" * 46)
+print(" jfs File I/O Basics")
+print("=" * 46)
+
+# ----------------------------------------------------------------------
+section("1. Writing a file ('w' creates or truncates)")
+
+f = jfs.open(LOG, 'w')
+f.print("Jumperless data log")          # like print(), but into the file
+f.print("column:", "voltage")           # multiple args, joined with spaces
+f.flush()                               # commit to flash NOW (see note)
+f.close()
+
+print("Wrote header with f.print() - it adds a newline for you.")
+print("NOTE: writes are buffered. Data is committed when you close()")
+print("or seek(), or when you call f.flush() yourself. If your script")
+print("might crash or lose power mid-run, flush() at checkpoints.")
+
+# ----------------------------------------------------------------------
+section("2. Append mode ('a') - the data logger pattern")
+
+print("Reopening in 'a' adds to the end instead of overwriting,")
+print("so your log survives across runs, resets, and reboots.")
+print()
+
+for i in range(3):
+    voltage = adc_get(0)                 # read a real "sensor"
+    f = jfs.open(LOG, 'a')               # reopen fresh each sample -
+    f.print("sample", i, "=", voltage)   # exactly what a logger does
+    f.close()
+    print("  logged sample %d: %.3f V" % (i, voltage))
+    time.sleep(0.2)
+
+f = jfs.open(LOG, 'r')
+content = f.read()
+f.close()
+print("\nThe whole log so far:")
+print(content)
+lines = content.count('\n')
+assert lines == 5, "expected 5 log lines, found %d - append lost data!" % lines
+print("All 5 lines survived reopening - append works.")
+
+# ----------------------------------------------------------------------
+section("3. Reading: size, seek, tell, chunks")
+
+f = jfs.open(LOG, 'r')
+print("file size:", f.size(), "bytes")
+print("position after open:", f.tell())
+
+first = f.read(19)                       # read a fixed number of bytes
+print("first 19 bytes: %r" % first)
+print("position now:", f.tell())
+
+f.seek(0)                                # jump back to the start
+print("after seek(0), read() returns the rest of the file:")
+print(f.read())
+
+# whence=2 (jfs.SEEK_END) counts BACK from the end of the file:
+f.seek(5, jfs.SEEK_END)
+print("last 5 bytes: %r" % f.read())
+
+# ...and seeking farther back than the file is long just fails safely:
+ok = f.seek(10000, jfs.SEEK_END)
+assert not ok, "seek past start should return False"
+print("seek(10000, SEEK_END) returned False - too far, safely refused.")
+f.close()
+
+# ----------------------------------------------------------------------
+section("4. Directories: exists, listdir, stat, rename, remove")
+
+print("exists:", jfs.exists(LOG))
+print("size via stat:", jfs.stat(LOG)[6], "bytes")
+
+moved = '/python_scripts/file_io_demo_old.log'
+jfs.rename(LOG, moved)
+print("renamed to", moved)
+print("/python_scripts now contains:")
+for name in jfs.listdir('/python_scripts'):
+    print("   ", name)
+
+jfs.remove(moved)
+print("removed the demo log - cleanup done.")
+
+# ----------------------------------------------------------------------
+section("5. The open-file limit (and why 'with' is your friend)")
+
+print("Up to 8 jfs files can be open at once. A 9th open raises OSError:")
+scratch = '/python_scripts/limit_demo.tmp'
+f = jfs.open(scratch, 'w')
+f.write('x')
+f.close()
+
+handles = [jfs.open(scratch, 'r') for _ in range(8)]
+try:
+    jfs.open(scratch, 'r')
+    raised = False
+except OSError:
+    raised = True
+    print("  9th open -> OSError, as expected")
+assert raised, "9th concurrent open should raise OSError"
+
+for h in handles:
+    h.close()
+
+# 'with' closes the file for you even if your code raises:
+with jfs.open(scratch, 'r') as f:
+    print("  with-block read: %r" % f.read())
+jfs.remove(scratch)
+
+print()
+print("=" * 46)
+print(" PASS - file I/O basics all good")
+print("=" * 46)
+)===";
+const uint32_t FILE_IO_BASICS_PY_HASHES[2] = { 0x14CF2D78, 0x91F8B2A7 };
+const int FILE_IO_BASICS_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_GPIO_BASICS
@@ -656,7 +801,6 @@ Hardware Setup:
 - Use buttons to change colors
 """
 
-import jumperless as j
 import time
 
 node_1 = 1
@@ -671,31 +815,31 @@ sleepTime_us = 1000 # controls how fast things move
 
 hue = 230
 
-j.clickwheel_reset_position() # the clickwheel is read by PIO and keeps an internal count, let's reset it to 0
-last_pos = j.clickwheel_get_position() # should be 0 unless you're really fast
+clickwheel_reset_position() # the clickwheel is read by PIO and keeps an internal count, let's reset it to 0
+last_pos = clickwheel_get_position() # should be 0 unless you're really fast
 
-switchPosition = j.get_switch_position() 
+switchPosition = get_switch_position() 
 
 while True:
     
 # Probe stuff
-    j.force_service("ProbeSwitch")
-    switchPosition = j.get_switch_position() # this is fairly slow so we need to force service it
+    force_service("ProbeSwitch")
+    switchPosition = get_switch_position() # this is fairly slow so we need to force service it
 
-    if switchPosition == j.SWITCH_MEASURE: # make the bridge move if the switch is in measure
+    if switchPosition == SWITCH_MEASURE: # make the bridge move if the switch is in measure
         node_1 += 1
         node_2 += 1
     
-    tappedNode = j.read_probe(False) # False for non-blocking
+    tappedNode = read_probe(False) # False for non-blocking
     
-    if (tappedNode != j.NO_PAD):
+    if (tappedNode != NO_PAD):
         # print(tappedNode)
         if (tappedNode <= 60):
             node_1 = int(tappedNode) # read_probe returns a PAD type so let's convert it to int so it can become a NODE
             node_2 = int(tappedNode + bridgeSpread)
 
 # Encoder stuff
-    pos = -j.clickwheel_get_position() # invert so it moves the right way
+    pos = -clickwheel_get_position() # invert so it moves the right way
     
     if pos != last_pos:
         # print((pos-last_pos))
@@ -703,13 +847,13 @@ while True:
         node_2 = node_1+bridgeSpread
         last_pos = pos
     
-    encoder_button = j.clickwheel_get_button()
+    encoder_button = clickwheel_get_button()
     
-    if encoder_button == j.CLICKWHEEL_PRESSED:
+    if encoder_button == CLICKWHEEL_PRESSED:
         bridgeSpread += 1
         node_2 = node_1 + bridgeSpread
         
-    elif encoder_button == j.CLICKWHEEL_HELD:
+    elif encoder_button == CLICKWHEEL_HELD:
         bridgeSpread -=1
         node_2 = node_1 + bridgeSpread
 
@@ -728,36 +872,36 @@ while True:
 
 # Send connections if they've changed
     if (node_1 != last_node_1) or (node_2 != last_node_2):
-        j.oled_print("node 1 = " + str(node_1) + "\n\rnode 2 = " + str(node_2))
+        oled_print("node 1 = " + str(node_1) + "\n\rnode 2 = " + str(node_2))
         # print("node 2 =" + str(node_2))
 
-        j.disconnect(last_node_1, last_node_2)
+        disconnect(last_node_1, last_node_2)
         
-        j.pause_core2(True) # we'll pause core 2 so the color of this net is set atomically
+        pause_core2(True) # we'll pause core 2 so the color of this net is set atomically
         
-        j.connect(node_1, node_2)
+        connect(node_1, node_2)
         
     last_node_1 = node_1
     last_node_2 = node_2
 
 # Net info stuff
-    lastNet = j.get_num_nets() - 1
-    j.set_net_color_hsv(lastNet,hue)
-    j.pause_core2(False) # unpause so the LEDs can update with the new net color (if the nets are unchanged this does nothing)
+    lastNet = get_num_nets() - 1
+    set_net_color_hsv(lastNet,hue)
+    pause_core2(False) # unpause so the LEDs can update with the new net color (if the nets are unchanged this does nothing)
 
 # Probe button stuff 
     if (sleepTime_us < 50000):
-        j.force_service("ProbeButton") # this is needed if there's not enough time in the time.sleep to check the button
+        force_service("ProbeButton") # this is needed if there's not enough time in the time.sleep to check the button
 
-    button = j.check_button()
+    button = check_button()
     
-    if (button == j.BUTTON_CONNECT):
+    if (button == BUTTON_CONNECT):
         # print("CONNECT")
         hue += 3
         if (hue > 255):
             hue = 0
         # print(hue)
-    if (button == j.BUTTON_REMOVE):
+    if (button == BUTTON_REMOVE):
         # print("REMOVE")
         hue -= 1
         if (hue < 0):
@@ -768,8 +912,8 @@ while True:
     time.sleep_us(sleepTime_us)
 
 )";
-const uint32_t INTERACTION_DEMO_PY_HASHES[1] = { 0x85135235 };
-const int INTERACTION_DEMO_PY_HASH_COUNT = 1;
+const uint32_t INTERACTION_DEMO_PY_HASHES[2] = { 0xB7072318, 0x85135235 };
+const int INTERACTION_DEMO_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_LED_BRIGHTNESS_CONTROL
@@ -782,43 +926,42 @@ Hardware Setup:
 2. Connect LED cathode to GND
 """
 
-import jumperless as j
 import time
 
 print("LED Brightness Control Demo")
     
-j.oled_print("LED Brightness")
+oled_print("LED Brightness")
 
 print("Hardware Setup:")
 print("  Connect LED anode to row 15")
 print("  Connect LED cathode to GND")
 
-j.disconnect(j.DAC0, -1)
-j.disconnect(15, -1)
-j.connect(j.DAC0, 15)
+disconnect(DAC0, -1)
+disconnect(15, -1)
+connect(DAC0, 15)
 
 while True:
-    pad = j.probe_read(False)
+    pad = probe_read(False)
 
-    if pad != j.NO_PAD:
+    if pad != NO_PAD:
 
         voltage = (float(pad) / 60.0) * 5.0
         
-        j.dac_set(j.DAC0, voltage)
+        dac_set(DAC0, voltage)
         
         print("\r                      ", end="\r")
         
         print(str(pad) + ": " + str(round(voltage, 1)) + "V", end="")
    
-    current_ma = j.get_current(1) * 1000 #current sensor 1 is inline with DAC 0
+    current_ma = get_current(1) * 1000 #current sensor 1 is inline with DAC 0
     
-    j.oled_print("Voltage:  " + str(round(voltage, 2)) + " V \n\rCurrent:  " + str(round(current_ma, 2)) + " mA")
+    oled_print("Voltage:  " + str(round(voltage, 2)) + " V \n\rCurrent:  " + str(round(current_ma, 2)) + " mA")
             
     time.sleep(0.1)
     
 )";
-const uint32_t LED_BRIGHTNESS_CONTROL_PY_HASHES[1] = { 0xD4DA5B3C };
-const int LED_BRIGHTNESS_CONTROL_PY_HASH_COUNT = 1;
+const uint32_t LED_BRIGHTNESS_CONTROL_PY_HASHES[2] = { 0x6AB2EF73, 0xD4DA5B3C };
+const int LED_BRIGHTNESS_CONTROL_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_MACHINE_PIN_BASICS
@@ -960,54 +1103,53 @@ Node connection and routing operations.
 This example shows how to connect/disconnect nodes and check connections.
 """
 
-import jumperless as j
 import time
 
 print("Node Connections Demo")
     
 # Clear all existing connections
-j.nodes_clear()
+nodes_clear()
 print("Cleared all connections")
 
 # Test connections
 test_connections = [
     (1, 30),
     (15, 45),
-    (j.DAC0, 20),
-    (j.GPIO_1, 25)
+    (DAC0, 20),
+    (GPIO_1, 25)
 ]
 
 for node1, node2 in test_connections:
-    j.oled_print("\nConnecting " + str(node1) + " to " + str(node2))
+    oled_print("\nConnecting " + str(node1) + " to " + str(node2))
     
     # Connect nodes
-    j.connect(node1, node2)
+    connect(node1, node2)
     
     # Check connection
-    connected = j.is_connected(node1, node2)
-    j.oled_print("Is connected: " + str(connected))
+    connected = is_connected(node1, node2)
+    oled_print("Is connected: " + str(connected))
     
     time.sleep(0.5)
     
     # Disconnect
-    j.disconnect(node1, node2)
+    disconnect(node1, node2)
     
     # Verify disconnection
-    connected = j.is_connected(node1, node2)
-    j.oled_print("Is connected: " + str(connected))
+    connected = is_connected(node1, node2)
+    oled_print("Is connected: " + str(connected))
     
     time.sleep(0.5)
 
 # Show final status
 print("\nFinal status:")
-j.print_bridges()
+print_bridges()
 
 print("Node Connections complete!")
-j.nodes_clear()
+nodes_clear()
 
 )";
-const uint32_t NODE_CONNECTIONS_PY_HASHES[1] = { 0x49A84734 };
-const int NODE_CONNECTIONS_PY_HASH_COUNT = 1;
+const uint32_t NODE_CONNECTIONS_PY_HASHES[2] = { 0x69692DB7, 0x49A84734 };
+const int NODE_CONNECTIONS_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_OLED_DEMO
@@ -1694,7 +1836,6 @@ API Demonstrations:
 
 """
 
-import jumperless as j
 import time
 
 # ============================================================================
@@ -1702,7 +1843,7 @@ import time
 # ============================================================================
 
 # Display parameters
-WIDTH, HEIGHT, _ = j.oled_get_framebuffer_size()
+WIDTH, HEIGHT, _ = oled_get_framebuffer_size()
 PLOT_HEIGHT = HEIGHT - 8  # Leave room for status bar
 PLOT_WIDTH = WIDTH
 
@@ -1756,7 +1897,7 @@ state = OscopeState()
 def init_connections():
     """Initialize ADC connection to default node."""
     print(f"Connecting ADC0 to node {state.connected_node}")
-    j.connect(j.ADC0, state.connected_node)
+    connect(ADC0, state.connected_node)
 
 def voltage_to_pixel(voltage):
     """Convert voltage to Y pixel coordinate (inverted for display).
@@ -1781,18 +1922,18 @@ def draw_grid():
     # Draw dots at intersections for speed
     for x in range(0, PLOT_WIDTH, 16):
         for y in range(0, PLOT_HEIGHT, 3):
-            j.oled_set_pixel(x, y, 1)
+            oled_set_pixel(x, y, 1)
     
     # Horizontal center line (dotted) - most important reference
     for x in range(0, PLOT_WIDTH, 4):
-        j.oled_set_pixel(x, center_y, 1)
+        oled_set_pixel(x, center_y, 1)
     
     # Horizontal quarter divisions
     y_quarter = PLOT_HEIGHT // 4
     y_3quarter = 3 * PLOT_HEIGHT // 4
     for x in range(0, PLOT_WIDTH, 4):
-        j.oled_set_pixel(x, y_quarter, 1)
-        j.oled_set_pixel(x, y_3quarter, 1)
+        oled_set_pixel(x, y_quarter, 1)
+        oled_set_pixel(x, y_3quarter, 1)
 
 def draw_char(char, x, y):
     """Draw a simple 3x5 character using basic patterns."""
@@ -1833,7 +1974,7 @@ def draw_char(char, x, y):
     for row in range(5):
         for col in range(3):
             if pattern[row][col]:
-                j.oled_set_pixel(x + col, y + row, 1)
+                oled_set_pixel(x + col, y + row, 1)
 
 def draw_text(text, x, y):
     """Draw text string using mini font."""
@@ -1849,11 +1990,11 @@ def draw_status_bar():
     # Clear status area
     for y in range(y_start, HEIGHT):
         for x in range(WIDTH):
-            j.oled_set_pixel(x, y, 0)
+            oled_set_pixel(x, y, 0)
     
     # Draw separator line
     for x in range(WIDTH):
-        j.oled_set_pixel(x, y_start, 1)
+        oled_set_pixel(x, y_start, 1)
     
     text_y = y_start + 2
     
@@ -1931,11 +2072,11 @@ def capture_waveform():
     # Fast trigger detection if not in free-run mode
     if state.trigger_mode != 0:
         start_time = time.ticks_ms()
-        last_voltage = j.adc_get(0)
+        last_voltage = adc_get(0)
         trig_level = state.trigger_level
         
         while time.ticks_diff(time.ticks_ms(), start_time) < state.trigger_timeout_ms:
-            voltage = j.adc_get(0)
+            voltage = adc_get(0)
             
             # Optimized trigger check (avoid branching)
             if state.trigger_mode == 1:  # Rising edge
@@ -1957,7 +2098,7 @@ def capture_waveform():
     # Optimized sampling loop
     if delay_us > 10:  # Only delay if necessary
         for i in range(PLOT_WIDTH):
-            voltage = j.adc_get(0)
+            voltage = adc_get(0)
             samples[i] = voltage
             
             # Track statistics (branchless min/max)
@@ -1971,7 +2112,7 @@ def capture_waveform():
     else:
         # No delay - maximum speed sampling
         for i in range(PLOT_WIDTH):
-            voltage = j.adc_get(0)
+            voltage = adc_get(0)
             samples[i] = voltage
             if voltage < min_v:
                 min_v = voltage
@@ -2007,13 +2148,13 @@ def draw_waveform():
         # Draw vertical line segment between points (faster than Bresenham for vertical lines)
         if y1 == y2:
             # Horizontal segment - single pixel
-            j.oled_set_pixel(x, y1, 1)
+            oled_set_pixel(x, y1, 1)
         else:
             # Vertical segment
             y_min = min(y1, y2)
             y_max = max(y1, y2)
             for y in range(y_min, y_max + 1):
-                j.oled_set_pixel(x, y, 1)
+                oled_set_pixel(x, y, 1)
 
 def draw_trigger_indicator():
     """Draw trigger level indicator on display."""
@@ -2023,22 +2164,22 @@ def draw_trigger_indicator():
             # Draw trigger marker on right edge (dashed line)
             for x in range(PLOT_WIDTH - 5, PLOT_WIDTH):
                 if x % 2 == 0:
-                    j.oled_set_pixel(x, y, 1)
+                    oled_set_pixel(x, y, 1)
             
             # Draw arrow pointing to trigger level on right edge
             # Arrow: >
-            j.oled_set_pixel(PLOT_WIDTH - 2, y, 1)
+            oled_set_pixel(PLOT_WIDTH - 2, y, 1)
             if y > 0:
-                j.oled_set_pixel(PLOT_WIDTH - 3, y - 1, 1)
+                oled_set_pixel(PLOT_WIDTH - 3, y - 1, 1)
             if y < PLOT_HEIGHT - 1:
-                j.oled_set_pixel(PLOT_WIDTH - 3, y + 1, 1)
+                oled_set_pixel(PLOT_WIDTH - 3, y + 1, 1)
     
     # If adjusting trigger level, draw full-width line for reference
     if state.current_mode == 2 and state.show_overlay:
         y = voltage_to_pixel(state.trigger_level)
         if 0 <= y < PLOT_HEIGHT:
             for x in range(0, PLOT_WIDTH, 2):  # Dashed line across screen
-                j.oled_set_pixel(x, y, 1)
+                oled_set_pixel(x, y, 1)
 
 
 def print_statistics():
@@ -2062,7 +2203,7 @@ def print_statistics():
 def update_display():
     """Complete display update - grid, waveform, status."""
     # Note: oled_clear(False) = don't call show() after clear (prevents flashing)
-    j.oled_clear(False)
+    oled_clear(False)
     draw_grid()
     draw_trigger_indicator()
     draw_waveform()
@@ -2076,7 +2217,7 @@ def update_display():
         else:
             state.show_overlay = False  # Hide overlay after timeout
     
-    j.oled_show()  # Single update for efficiency
+    oled_show()  # Single update for efficiency
 
 # ============================================================================
 # CONTROL HANDLERS
@@ -2085,21 +2226,21 @@ def update_display():
 def handle_probe_touch():
     """Handle non-blocking probe touch to reconnect ADC."""
     # Note: Use positional args - MicroPython C modules don't support keyword args
-    pad = j.probe_read(False)  # Non-blocking read (False = blocking=False)
+    pad = probe_read(False)  # Non-blocking read (False = blocking=False)
     
-    if pad != j.NO_PAD:
+    if pad != NO_PAD:
         # Check if it's a valid breadboard node (1-60)
         pad_num = int(pad)
         if 1 <= pad_num <= 60:
             # Disconnect from old node and connect to new
             if state.last_node is not None:
-                j.disconnect(j.ADC0, state.last_node)
+                disconnect(ADC0, state.last_node)
                 print(f"\nProbe touched: Row {pad_num} (disconnected from row {state.last_node})")
             else:
                 print(f"\nProbe touched: Row {pad_num}")
             
             state.connected_node = pad_num
-            j.connect(j.ADC0, state.connected_node)
+            connect(ADC0, state.connected_node)
             state.last_node = state.connected_node
             
             print(f"ADC0 -> Row {state.connected_node} (measuring voltage)")
@@ -2108,8 +2249,8 @@ def handle_probe_touch():
 def handle_clickwheel():
     """Handle clickwheel rotation and button for settings adjustment."""
     # Check for mode change (button click)
-    button = j.clickwheel_get_button()
-    if button == j.CLICKWHEEL_PRESSED:
+    button = clickwheel_get_button()
+    if button == CLICKWHEEL_PRESSED:
         # Cycle through modes (5 modes now: Time, V/div, Level, Trig, Auto)
         state.current_mode = (state.current_mode + 1) % 5
         
@@ -2149,11 +2290,11 @@ def handle_clickwheel():
     
     # Check for value adjustment (rotation)
     # Note: Use positional args (True = consume=True for one-shot detection)
-    direction = j.clickwheel_get_direction(True)
+    direction = clickwheel_get_direction(True)
     
-    if direction == j.CLICKWHEEL_UP:
+    if direction == CLICKWHEEL_UP:
         adjust_setting(1)
-    elif direction == j.CLICKWHEEL_DOWN:
+    elif direction == CLICKWHEEL_DOWN:
         adjust_setting(-1)
 
 def draw_adjustment_overlay():
@@ -2161,15 +2302,15 @@ def draw_adjustment_overlay():
     # Clear center area for overlay
     for y in range(8, 20):
         for x in range(20, 108):
-            j.oled_set_pixel(x, y, 0)
+            oled_set_pixel(x, y, 0)
     
     # Draw border
     for x in range(20, 108):
-        j.oled_set_pixel(x, 8, 1)
-        j.oled_set_pixel(x, 19, 1)
+        oled_set_pixel(x, 8, 1)
+        oled_set_pixel(x, 19, 1)
     for y in range(8, 20):
-        j.oled_set_pixel(20, y, 1)
-        j.oled_set_pixel(107, y, 1)
+        oled_set_pixel(20, y, 1)
+        oled_set_pixel(107, y, 1)
     
     # Build overlay text based on mode
     if state.current_mode == 0:  # Timebase
@@ -2300,9 +2441,9 @@ def adjust_setting(delta):
 def handle_probe_button():
     """Handle probe button for reset and exit."""
     # Note: Use positional args (False=non-blocking, True=consume)
-    button = j.probe_button(False, True)
+    button = probe_button(False, True)
     
-    if button == j.CONNECT_BUTTON:
+    if button == CONNECT_BUTTON:
         # Reset to defaults
         print("\n" + "="*50)
         print("RESET TO DEFAULTS")
@@ -2322,7 +2463,7 @@ def handle_probe_button():
         time.sleep(0.3)
         return False
     
-    elif button == j.REMOVE_BUTTON:
+    elif button == REMOVE_BUTTON:
         # Exit oscilloscope
         print("\n" + "="*50)
         print("Exiting oscilloscope")
@@ -2366,7 +2507,7 @@ def main():
     print("-"*60 + "\n")
     
     # Initialize
-    j.oled_connect()
+    oled_connect()
     init_connections()
     state.last_node = state.connected_node
     state.last_stats_print = time.ticks_ms()  # Initialize stats timer
@@ -2392,8 +2533,8 @@ def main():
     
     finally:
         # Cleanup 
-        j.oled_clear()
-        j.oled_print("Oscilloscope\nExited", 1)
+        oled_clear()
+        oled_print("Oscilloscope\nExited", 1)
         print("\n\nCleanup complete")
 
 # ============================================================================
@@ -2402,13 +2543,12 @@ def main():
 
 if __name__ == "__main__":
     main())===";
-const uint32_t OSCILLOSCOPE_PY_HASHES[1] = { 0xD2CABB55 };
-const int OSCILLOSCOPE_PY_HASH_COUNT = 1;
+const uint32_t OSCILLOSCOPE_PY_HASHES[2] = { 0xE27BC796, 0xD2CABB55 };
+const int OSCILLOSCOPE_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_OUTPUT_TEST
 const char* OUTPUT_TEST_PY = R"(
-import jumperless as j
 import time
 
 
@@ -2416,14 +2556,14 @@ fakeGPIOtime = 0
 regularConnectTime = 0
 fastConnectTime = 0
 
-j. nodes_clear()
-j. set_dac(j. TOP_RAIL, 8.0)
-j. set_dac(j.BOTTOM_RAIL, -8.0)
+nodes_clear()
+set_dac(TOP_RAIL, 8.0)
+set_dac(BOTTOM_RAIL, -8.0)
 
-pin = j.FakeGpioPin(10, j.OUTPUT, j.TOP_RAIL, j.BOTTOM_RAIL)
-pin2 = j.FakeGpioPin(19, j.OUTPUT, j.TOP_RAIL, j.BOTTOM_RAIL)
+pin = FakeGpioPin(10, OUTPUT, TOP_RAIL, BOTTOM_RAIL)
+pin2 = FakeGpioPin(19, OUTPUT, TOP_RAIL, BOTTOM_RAIL)
 
-j. pause_core2 (True)
+pause_core2 (True)
 time.sleep (0.1)
 
 startTime = time.ticks_us ()
@@ -2436,39 +2576,39 @@ for i in range (5000):
     pin2.on()
 
     
-j.pause_core2(False)
+pause_core2(False)
 endTime = time.ticks_us()
 fakeGPIOtime = (endTime - startTime)
 
 
 
-j. nodes_clear()
+nodes_clear()
 time.sleep(0.5)
 
-# j. pause_core2 (True)
+# pause_core2 (True)
 
 time.sleep (0.1)
 startTime = time.ticks_us ()
 
 for i in range (50):
-    j.connect(21, j.TOP_RAIL)
-    j.disconnect(21, j.TOP_RAIL)
+    connect(21, TOP_RAIL)
+    disconnect(21, TOP_RAIL)
 
-j.pause_core2(False)
+pause_core2(False)
 endTime = time.ticks_us()
 regularConnectTime = (endTime - startTime)
 
-j. nodes_clear()
+nodes_clear()
 
-# j. pause_core2 (True)
+# pause_core2 (True)
 time.sleep (0.1)
 startTime = time.ticks_us ()
 
 for i in range (50):
-    j.fast_connect(21, j.TOP_RAIL)
-    j.fast_disconnect(21, j.TOP_RAIL)
+    fast_connect(21, TOP_RAIL)
+    fast_disconnect(21, TOP_RAIL)
 
-j.pause_core2(False)
+pause_core2(False)
 endTime = time.ticks_us()
 fastConnectTime = (endTime - startTime)
 
@@ -2488,8 +2628,91 @@ print (f"Took {fastConnectTime} us for 50 toggles with fake gpio")
 
 freq = (50 / (fastConnectTime)) * 1000
 print(f"Frequency = {freq} kHz"))";
-const uint32_t OUTPUT_TEST_PY_HASHES[1] = { 0xE0324632 };
-const int OUTPUT_TEST_PY_HASH_COUNT = 1;
+const uint32_t OUTPUT_TEST_PY_HASHES[2] = { 0xA3804673, 0xE0324632 };
+const int OUTPUT_TEST_PY_HASH_COUNT = 2;
+#endif
+
+#ifdef INCLUDE_PIN_IRQ_BASICS
+const char* PIN_IRQ_BASICS_PY = R"===("""
+machine.Pin interrupt (IRQ) basics.
+
+Routes GPIO_1 to GPIO_2 through the crossbar, then uses one pin to
+generate edges and the other to catch them with an interrupt handler -
+no external wiring needed.
+
+Shows: attaching a Pin.irq() handler, picking triggers, telling rising
+from falling edges with irq.flags(), and cleanly detaching when done.
+"""
+
+import time
+from machine import Pin
+
+print("=" * 46)
+print(" machine.Pin IRQ Basics")
+print("=" * 46)
+
+# --- 1. Wire it up (in software!) -------------------------------------
+# GPIO_1..GPIO_8 are the Jumperless's routable GPIO. GPIO_1 is RP2350
+# pin 20, GPIO_2 is pin 21. Connecting them through the crossbar means
+# whatever we drive on GPIO_1 shows up on GPIO_2.
+print("\nRouting GPIO_1 -> GPIO_2 through the crossbar...")
+connect(GPIO_1, GPIO_2)
+time.sleep(0.05)                      # let the crossbar settle
+
+drv = Pin(20, Pin.OUT, value=0)       # GPIO_1: we drive this one
+sense = Pin(21, Pin.IN, Pin.PULL_DOWN)  # GPIO_2: this one listens
+
+# --- 2. Attach the interrupt handler ----------------------------------
+# The handler runs whenever the trigger condition happens - your main
+# code doesn't have to poll. Keep handlers SHORT: update a counter or
+# set a flag, and do the real work in your main loop.
+counts = {"rise": 0, "fall": 0}
+
+def on_edge(pin):
+    f = irq_obj.flags()               # which trigger(s) fired?
+    if f & Pin.IRQ_RISING:
+        counts["rise"] += 1
+    if f & Pin.IRQ_FALLING:
+        counts["fall"] += 1
+
+irq_obj = sense.irq(handler=on_edge,
+                    trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING)
+print("IRQ handler attached (rising + falling edges).")
+
+# --- 3. Generate edges and watch them arrive --------------------------
+print("\nPulsing GPIO_1 five times:")
+for i in range(5):
+    drv.high()
+    time.sleep_ms(20)
+    drv.low()
+    time.sleep_ms(20)
+    print("  pulse %d -> rising=%d falling=%d"
+          % (i + 1, counts["rise"], counts["fall"]))
+
+time.sleep_ms(100)                    # let scheduled callbacks drain
+
+# --- 4. Detach and clean up -------------------------------------------
+# Always detach handlers and undo routing when you're done, so the pins
+# behave normally for the next script.
+sense.irq(handler=None)
+disconnect(GPIO_1, GPIO_2)
+print("\nHandler detached, crossbar route removed.")
+
+assert counts["rise"] == 5, "rising: got %d, want 5" % counts["rise"]
+assert counts["fall"] == 5, "falling: got %d, want 5" % counts["fall"]
+
+print()
+print("=" * 46)
+print(" PASS - caught %d rising and %d falling edges"
+      % (counts["rise"], counts["fall"]))
+print("=" * 46)
+print()
+print("Try it yourself: connect(GPIO_2, 25), attach the IRQ again, and")
+print("tap a wire between row 25 and TOP_RAIL to fire real interrupts")
+print("(expect bounce - one tap often lands several edges!)")
+)===";
+const uint32_t PIN_IRQ_BASICS_PY_HASHES[1] = { 0x0F0D4858 };
+const int PIN_IRQ_BASICS_PY_HASH_COUNT = 1;
 #endif
 
 #ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
@@ -2951,23 +3174,22 @@ Hardware Setup:
 """
 
 import time
-import jumperless as j
 
 speaker_pos_row = 25
 speaker_neg_row = 55
 freq_multiplier = 40.0
 
 def setup_audio():
-    j.disconnect(speaker_pos_row, -1)
-    j.disconnect(speaker_neg_row, -1)
-    j.connect(j.GPIO_1, speaker_pos_row)
-    j.connect(j.GND, speaker_neg_row)
-    j.pwm(j.GPIO_1, 10, 0.5)
+    disconnect(speaker_pos_row, -1)
+    disconnect(speaker_neg_row, -1)
+    connect(GPIO_1, speaker_pos_row)
+    connect(GND, speaker_neg_row)
+    pwm(GPIO_1, 10, 0.5)
     print("Connect speaker: positive to row " + str(speaker_pos_row) + ", negative to row " + str(speaker_neg_row))
     time.sleep(0.1)
 
 print("Jumperless Stylophone")
-j.oled_print("Touch pads!")
+oled_print("Touch pads!")
 
 setup_audio()
 
@@ -2977,36 +3199,36 @@ sustain_timer = sustain
 
 while True:
     
-    pad = j.probe_read_nonblocking()
-    if pad != j.NO_PAD:
+    pad = probe_read_nonblocking()
+    if pad != NO_PAD:
 
         frequency = float(pad) * freq_multiplier
-        j.pwm(j.GPIO_1, frequency, 0.5)
-        # j.pwm_set_frequency(j.GPIO_1, frequency)
+        pwm(GPIO_1, frequency, 0.5)
+        # pwm_set_frequency(GPIO_1, frequency)
 
         print("\r                                 ", end="\r")
         print("Pad: " + str(pad) + " " + str(frequency) + " Hz", end="")
-        j.oled_print(str(frequency) + " Hz")
+        oled_print(str(frequency) + " Hz")
         sustain_timer = time.ticks_ms() + sustain
 
 
     if time.ticks_ms() > sustain_timer:
-        j.pwm_stop(j.GPIO_1)
+        pwm_stop(GPIO_1)
 
-    j.force_service("ProbeButton")
-    button = j.probe_button(False)
-    if button == j.BUTTON_CONNECT:
+    force_service("ProbeButton")
+    button = probe_button(False)
+    if button == BUTTON_CONNECT:
         sustain += 10
-        j.oled_print("Sustain: " + str(sustain))
+        oled_print("Sustain: " + str(sustain))
         time.sleep(0.1)
 
-    if button == j.BUTTON_REMOVE:
+    if button == BUTTON_REMOVE:
         sustain -= 10 
-        j.oled_print("Sustain: " + str(sustain))
+        oled_print("Sustain: " + str(sustain))
         time.sleep(0.1)
 )";
-const uint32_t STYLOPHONE_PY_HASHES[1] = { 0xA5108DD7 };
-const int STYLOPHONE_PY_HASH_COUNT = 1;
+const uint32_t STYLOPHONE_PY_HASHES[2] = { 0x86AA6536, 0xA5108DD7 };
+const int STYLOPHONE_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_TEST_NEOPIXEL
@@ -3027,7 +3249,6 @@ Controls:
 
 import machine
 import time
-import jumperless as j
 import neopixel
 
 NUM_PIXELS = 15
@@ -3041,10 +3262,10 @@ print("  🔘 Press button   = Change mode\n")
 
 # Setup connections
 print("Setting up connections...")
-j.nodes_clear()
-j.connect(j.GPIO_1, 15)  # Data to breadboard row 15
-j.connect(j.GND, 14)      # Ground
-j.connect(j.TOP_RAIL, 16) # Power (5V)
+nodes_clear()
+connect(GPIO_1, 15)  # Data to breadboard row 15
+connect(GND, 14)      # Ground
+connect(TOP_RAIL, 16) # Power (5V)
 
 # Create NeoPixel strip using the library
 print("Initializing NeoPixels...")
@@ -3083,7 +3304,7 @@ last_speed = 0
 speed = 50
 
 # Reset encoder position for clean start
-j.clickwheel_reset_position()
+clickwheel_reset_position()
 
 print(f"Mode: {modes[current_mode]}")
 print(f"Speed: 50/100 (turn encoder to adjust)\n")
@@ -3091,23 +3312,23 @@ print(f"Speed: 50/100 (turn encoder to adjust)\n")
 try:
     while True:
         # Check encoder button
-        button = j.clickwheel_get_button()
+        button = clickwheel_get_button()
         if button and not last_button_state:
             current_mode = (current_mode + 1) % len(modes)
             frame = 0
             print(f"\n🎨 Mode: {modes[current_mode]}")
-            j.oled_print(f"{modes[current_mode]}")
+            oled_print(f"{modes[current_mode]}")
             time.sleep(0.8)
             
         last_button_state = button
         
         # Get absolute encoder position and map to speed
-        position = j.clickwheel_get_position()
+        position = clickwheel_get_position()
        
         # Position can be negative or positive, so we clamp to 1-1000 range
         speed = max(1, min(1000,speed + position))
         
-        j.clickwheel_reset_position()
+        clickwheel_reset_position()
         
         # Show speed changes
         if speed != last_speed:
@@ -3115,7 +3336,7 @@ try:
             last_speed = speed
             delay_us = 50000 // speed
             print(f"\r                       \r⚡ Delay: {delay_us} us", end="")
-            j.oled_print("Delay " + str(delay_us) + " us")
+            oled_print("Delay " + str(delay_us) + " us")
             time.sleep(0.01)
             continue
         # Calculate delay based on speed (inverse relationship)
@@ -3189,8 +3410,8 @@ except KeyboardInterrupt:
     print("✓ Demo stopped! Press Ctrl+C again to exit.")
     print("=" * 60)
 )";
-const uint32_t TEST_NEOPIXEL_PY_HASHES[1] = { 0xE91E4AD8 };
-const int TEST_NEOPIXEL_PY_HASH_COUNT = 1;
+const uint32_t TEST_NEOPIXEL_PY_HASHES[2] = { 0x86A76D21, 0xE91E4AD8 };
+const int TEST_NEOPIXEL_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_TEST_OLED_FEATURES
@@ -3198,7 +3419,6 @@ const char* TEST_OLED_FEATURES_PY = R"===("""
 Test script for new OLED MicroPython features
 Run this on the Jumperless device to test all new OLED functions
 """
-import jumperless as j
 import time
 
 def test_text_size_control():
@@ -3207,21 +3427,21 @@ def test_text_size_control():
     
     # Test setting text size
     print("Setting text size to 0 (small)...")
-    j.oled_set_text_size(0)
-    assert j.oled_get_text_size() == 0, "Text size should be 0"
-    j.oled_print("Small text mode")
+    oled_set_text_size(0)
+    assert oled_get_text_size() == 0, "Text size should be 0"
+    oled_print("Small text mode")
     time.sleep(2)
     
     print("Setting text size to 1 (normal)...")
-    j.oled_set_text_size(1)
-    assert j.oled_get_text_size() == 1, "Text size should be 1"
-    j.oled_print("Normal text")
+    oled_set_text_size(1)
+    assert oled_get_text_size() == 1, "Text size should be 1"
+    oled_print("Normal text")
     time.sleep(2)
     
     print("Setting text size to 2 (large)...")
-    j.oled_set_text_size(2)
-    assert j.oled_get_text_size() == 2, "Text size should be 2"
-    j.oled_print("Large text")
+    oled_set_text_size(2)
+    assert oled_get_text_size() == 2, "Text size should be 2"
+    oled_print("Large text")
     time.sleep(2)
     
     print("✓ Text size control works!")
@@ -3232,7 +3452,7 @@ def test_print_redirection():
     
     # Enable print copying
     print("Enabling print copy to OLED...")
-    j.oled_copy_print(True)
+    oled_copy_print(True)
     
     # Test printing
     print("Line 1 on OLED")
@@ -3244,7 +3464,7 @@ def test_print_redirection():
     
     # Disable print copying
     print("Disabling print copy...")
-    j.oled_copy_print(False)
+    oled_copy_print(False)
     print("This should NOT appear on OLED")
     time.sleep(2)
     
@@ -3255,20 +3475,20 @@ def test_font_system():
     print("\n=== Testing Font System ===")
     
     # Get available fonts
-    fonts = j.oled_get_fonts()
+    fonts = oled_get_fonts()
     print(f"Available fonts: {fonts}")
     assert len(fonts) > 0, "Should have fonts available"
     
     # Test setting fonts
     for font in fonts[:3]:  # Test first 3 fonts
         print(f"Setting font to: {font}")
-        result = j.oled_set_font(font)
+        result = oled_set_font(font)
         assert result, f"Should be able to set font {font}"
         
-        current = j.oled_get_current_font()
+        current = oled_get_current_font()
         print(f"Current font: {current}")
         
-        j.oled_print(f"Font: {font}", 2)
+        oled_print(f"Font: {font}", 2)
         time.sleep(1.5)
     
     print("✓ Font system works!")
@@ -3281,19 +3501,19 @@ def test_bitmap_functions():
     test_file = "/jogo32h.bin"
     
     print(f"Attempting to load bitmap: {test_file}")
-    result = j.oled_load_bitmap(test_file)
+    result = oled_load_bitmap(test_file)
     
     if result:
         print("✓ Bitmap loaded successfully")
         
         # Display the loaded bitmap
         print("Displaying bitmap at (0, 0)...")
-        j.oled_display_bitmap(0, 0, 0, 0)  # Use loaded bitmap
+        oled_display_bitmap(0, 0, 0, 0)  # Use loaded bitmap
         time.sleep(2)
         
         # Try convenience function
         print("Using convenience function...")
-        j.oled_show_bitmap_file(test_file, 0, 0)
+        oled_show_bitmap_file(test_file, 0, 0)
         time.sleep(2)
     else:
         print(f"⚠ Bitmap file not found: {test_file}")
@@ -3306,44 +3526,44 @@ def test_framebuffer_access():
     print("\n=== Testing Framebuffer Access ===")
     
     # Get framebuffer size
-    width, height, buffer_size = j.oled_get_framebuffer_size()
+    width, height, buffer_size = oled_get_framebuffer_size()
     print(f"Framebuffer: {width}x{height}, {buffer_size} bytes")
     
     # Get current framebuffer
-    fb = j.oled_get_framebuffer()
+    fb = oled_get_framebuffer()
     print(f"Got framebuffer: {len(fb)} bytes")
     assert len(fb) == buffer_size, "Framebuffer size should match"
     
     # Test pixel manipulation
     print("Drawing test pattern...")
-    j.oled_clear()
+    oled_clear()
     
     # Draw a border
     for x in range(width):
-        j.oled_set_pixel(x, 0, 1)  # Top
-        j.oled_set_pixel(x, height-1, 1)  # Bottom
+        oled_set_pixel(x, 0, 1)  # Top
+        oled_set_pixel(x, height-1, 1)  # Bottom
     
     for y in range(height):
-        j.oled_set_pixel(0, y, 1)  # Left
-        j.oled_set_pixel(width-1, y, 1)  # Right
+        oled_set_pixel(0, y, 1)  # Left
+        oled_set_pixel(width-1, y, 1)  # Right
     
     # Draw diagonal lines
     for i in range(min(width, height)):
-        j.oled_set_pixel(i, i, 1)
-        j.oled_set_pixel(width-1-i, i, 1)
+        oled_set_pixel(i, i, 1)
+        oled_set_pixel(width-1-i, i, 1)
     
-    j.oled_show()
+    oled_show()
     time.sleep(2)
     
     # Test reading pixels
     print("Testing pixel reading...")
-    assert j.oled_get_pixel(0, 0) == 1, "Corner pixel should be set"
-    assert j.oled_get_pixel(width//2, height//2) == 0, "Center should be clear"
+    assert oled_get_pixel(0, 0) == 1, "Corner pixel should be set"
+    assert oled_get_pixel(width//2, height//2) == 0, "Center should be clear"
     
     # Test framebuffer set/get round-trip
     print("Testing framebuffer round-trip...")
     fb_copy = bytearray(fb)
-    result = j.oled_set_framebuffer(fb_copy)
+    result = oled_set_framebuffer(fb_copy)
     assert result, "Should be able to set framebuffer"
     
     print("✓ Framebuffer access works!")
@@ -3352,12 +3572,12 @@ def test_small_text_scrolling():
     """Test small text scrolling mode"""
     print("\n=== Testing Small Text Scrolling ===")
     
-    j.oled_set_text_size(0)  # Small scrolling mode
-    j.oled_clear()
+    oled_set_text_size(0)  # Small scrolling mode
+    oled_clear()
     
     # Print multiple lines to test scrolling
     for i in range(10):
-        j.oled_print(f"Scroll line {i+1}")
+        oled_print(f"Scroll line {i+1}")
         time.sleep(0.3)
     
     time.sleep(2)
@@ -3371,7 +3591,7 @@ def run_all_tests():
     
     try:
         # Ensure OLED is connected
-        j.oled_connect()
+        oled_connect()
         time.sleep(0.5)
         
         # Run tests
@@ -3383,9 +3603,9 @@ def run_all_tests():
         test_small_text_scrolling()
         
         # Final success message
-        j.oled_clear()
-        j.oled_set_text_size(2)
-        j.oled_print("All tests passed!")
+        oled_clear()
+        oled_set_text_size(2)
+        oled_print("All tests passed!")
         
         print("\n" + "=" * 50)
         print("✓ ALL TESTS PASSED!")
@@ -3393,9 +3613,9 @@ def run_all_tests():
         
     except Exception as e:
         print(f"\n✗ TEST FAILED: {e}")
-        j.oled_clear()
-        j.oled_set_text_size(1)
-        j.oled_print("Test failed!")
+        oled_clear()
+        oled_set_text_size(1)
+        oled_print("Test failed!")
         raise
 
 # Run tests if executed directly
@@ -3403,8 +3623,8 @@ if __name__ == "__main__":
     run_all_tests()
 
 )===";
-const uint32_t TEST_OLED_FEATURES_PY_HASHES[1] = { 0x5DEB2A46 };
-const int TEST_OLED_FEATURES_PY_HASH_COUNT = 1;
+const uint32_t TEST_OLED_FEATURES_PY_HASHES[2] = { 0x7DA20201, 0x5DEB2A46 };
+const int TEST_OLED_FEATURES_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_UART_BASICS
@@ -3413,15 +3633,14 @@ Basic UART operations.
 This example shows how to use UART.
 """
 
-import jumperless as j
 from machine import UART
 import time
 
 uart = UART(0, 115200)
 uart.init(115200, 8, None, 1)
 
-j.connect(j.UART_TX, j.D0, 0)
-j.connect(j.UART_RX, j.D1, 0)
+connect(UART_TX, D0, 0)
+connect(UART_RX, D1, 0)
 
 print("UART Basics Demo")
 print("This example will send a message to the Arduino Nano over UART")
@@ -3432,8 +3651,8 @@ buffer = "Sup Arduino"
 while True:
     uart.write(buffer)
     time.sleep(1.5))";
-const uint32_t UART_BASICS_PY_HASHES[2] = { 0x21E769C0, 0xAE8DFFE1 };
-const int UART_BASICS_PY_HASH_COUNT = 2;
+const uint32_t UART_BASICS_PY_HASHES[3] = { 0xFC7AA683, 0x21E769C0, 0xAE8DFFE1 };
+const int UART_BASICS_PY_HASH_COUNT = 3;
 #endif
 
 #ifdef INCLUDE_UART_LOOPBACK
@@ -3441,14 +3660,13 @@ const char* UART_LOOPBACK_PY = R"("""
 UART Loopback Demo
 """
 
-import jumperless as j
 from machine import UART
 import time
     
 uart = UART(0, 115200)
 uart.init(115200, 8, None, 1)
-j.connect(j.UART_TX, j.D0, 0)
-j.connect(j.UART_RX, j.D0, 0)
+connect(UART_TX, D0, 0)
+connect(UART_RX, D0, 0)
 
 buffer = "UART looped back!"
 
@@ -3463,8 +3681,8 @@ while True:
     time.sleep(0.5)
 
 )";
-const uint32_t UART_LOOPBACK_PY_HASHES[1] = { 0x8E02DF89 };
-const int UART_LOOPBACK_PY_HASH_COUNT = 1;
+const uint32_t UART_LOOPBACK_PY_HASHES[2] = { 0x9AE1FED2, 0x8E02DF89 };
+const int UART_LOOPBACK_PY_HASH_COUNT = 2;
 #endif
 
 #ifdef INCLUDE_VOLTAGE_MONITOR
@@ -3478,29 +3696,28 @@ Hardware Setup:
 """
 
 import time
-import jumperless as j
 
 print("Voltage Monitor Demo")
 
-j.disconnect(12, -1)
-j.disconnect(j.ADC0, -1)
-j.connect(j.ADC0, 12)
+disconnect(12, -1)
+disconnect(ADC0, -1)
+connect(ADC0, 12)
 print("ADC0 connected to row 12")
 print("Connect voltage source to row 12")
 
-j.oled_print("Voltage Monitor")
+oled_print("Voltage Monitor")
 time.sleep(1)
 
 while True:
-    voltage = j.adc_get(0)
-    j.oled_print(str(round(voltage, 3)) + " V")
+    voltage = adc_get(0)
+    oled_print(str(round(voltage, 3)) + " V")
     print("\r                      ", end="\r")
     print("Voltage: " + str(round(voltage, 3)) + "V", end="")
     time.sleep(0.15)
 
 )";
-const uint32_t VOLTAGE_MONITOR_PY_HASHES[1] = { 0x3F2C7F36 };
-const int VOLTAGE_MONITOR_PY_HASH_COUNT = 1;
+const uint32_t VOLTAGE_MONITOR_PY_HASHES[2] = { 0x634FB59F, 0x3F2C7F36 };
+const int VOLTAGE_MONITOR_PY_HASH_COUNT = 2;
 #endif
 
 //==============================================================================
@@ -6362,6 +6579,9 @@ const int VIPERIDE_REINIT_PY_HASH_COUNT = 4;
 // #ifdef INCLUDE_EXCEL_LISTENER
 //     { "/python_scripts/examples/excel_listener.py", EXCEL_LISTENER_PY, "excel_listener.py", EXCEL_LISTENER_PY_HASHES, EXCEL_LISTENER_PY_HASH_COUNT },
 // #endif
+// #ifdef INCLUDE_FILE_IO_BASICS
+//     { "/python_scripts/examples/file_io_basics.py", FILE_IO_BASICS_PY, "file_io_basics.py", FILE_IO_BASICS_PY_HASHES, FILE_IO_BASICS_PY_HASH_COUNT },
+// #endif
 // #ifdef INCLUDE_GPIO_BASICS
 //     { "/python_scripts/examples/gpio_basics.py", GPIO_BASICS_PY, "gpio_basics.py", GPIO_BASICS_PY_HASHES, GPIO_BASICS_PY_HASH_COUNT },
 // #endif
@@ -6394,6 +6614,9 @@ const int VIPERIDE_REINIT_PY_HASH_COUNT = 4;
 // #endif
 // #ifdef INCLUDE_OUTPUT_TEST
 //     { "/python_scripts/examples/output_test.py", OUTPUT_TEST_PY, "output_test.py", OUTPUT_TEST_PY_HASHES, OUTPUT_TEST_PY_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_PIN_IRQ_BASICS
+//     { "/python_scripts/examples/pin_irq_basics.py", PIN_IRQ_BASICS_PY, "pin_irq_basics.py", PIN_IRQ_BASICS_PY_HASHES, PIN_IRQ_BASICS_PY_HASH_COUNT },
 // #endif
 // #ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
 //     { "/python_scripts/examples/pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY, "pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY_HASHES, PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT },

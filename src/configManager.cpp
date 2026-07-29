@@ -974,16 +974,15 @@ bool saveConfigToFile(const char* filename) {
     // Core 1 was running was the hardfault path).
     eepromPersistFromConfig();
     
-    // Delete existing file if it exists
-    if (safeFileExists(filename, 500)) {
-        safeFileDelete(filename, 1000);
-    }
-    
-    // Open file for writing using safe function
-    File file = safeFileOpen(filename, "w", 2000);
+    // Write to a temp file first so a power cut mid-save can't destroy the
+    // only copy of config.txt (a missing/truncated config silently resets to
+    // defaults on the next boot - see updateConfigFromFile).
+    String tempPath = String(filename) + ".tmp";
+    File file = safeFileOpen(tempPath.c_str(), "w", 2000);
     if (!file) {
         Serial.println("Failed to create config file");
         unpauseCore2ForFlash(was_paused);
+        AsyncPassthrough::resumeUARTRxIRQ();
         return false;
     }
  //! this is a place to add new config options
@@ -1140,10 +1139,36 @@ bool saveConfigToFile(const char* filename) {
     // Write usb_cdc section
     file.println("[usb_cdc]");
     file.print("ignore_dtr = "); file.print(jumperlessConfig.usb_cdc.ignore_dtr ? 1 : 0); file.println(";");
-    file.println();
     
+    // ponytail: f_write failures are sticky (volume-full stays full; hard I/O
+    // errors set FIL.err and abort the file), so this final write failing
+    // catches any earlier print() failure without checking all ~180 of them.
+    bool writeOk = (file.println() == 2);
+    size_t written = file.size();
     file.flush();
     safeFileClose(file, true);  // Write mode, needs flush
+    
+    // ponytail: 1KB sanity floor (a full save is ~3KB); the exact check would
+    // be summing every print() return value above.
+    if (!writeOk || written < 1024) {
+        Serial.println("Config write failed - keeping existing config.txt");
+        safeFileDelete(tempPath.c_str(), 1000);
+        unpauseCore2ForFlash(was_paused);
+        AsyncPassthrough::resumeUARTRxIRQ();
+        return false;
+    }
+    
+    // Temp file is fully written and flushed - replace the canonical file.
+    // (FatFS rename won't overwrite, so delete first. A power cut in this
+    // tiny window leaves the full config in config.txt.tmp; the old code's
+    // loss window was the entire multi-ms rewrite.)
+    safeFileDelete(filename, 1000);
+    if (!safeFileRename(tempPath.c_str(), filename, 2000)) {
+        Serial.println("Config rename failed");
+        unpauseCore2ForFlash(was_paused);
+        AsyncPassthrough::resumeUARTRxIRQ();
+        return false;
+    }
     unpauseCore2ForFlash(was_paused);
     AsyncPassthrough::resumeUARTRxIRQ();
     
@@ -1995,6 +2020,7 @@ bool saveConfigIncremental(const char* filename) {
         if (!file) {
             Serial.println("saveConfigIncremental: failed to open file for writing");
             unpauseCore2ForFlash(was_paused);
+            AsyncPassthrough::resumeUARTRxIRQ();
             free(fileContent);
             free(newContent);
             return false;

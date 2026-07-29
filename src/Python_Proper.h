@@ -97,7 +97,6 @@ public:
   // Thread-safe write batching methods
   void checkPeriodicFlush();          // Called from REPL idle loop
   void forceFlush();                  // Immediate flush (Ctrl+S, exit)
-  void appendEmergencyLog(const String &script);  // Crash-safe append
 
 private:
   void findNextScriptNumber();

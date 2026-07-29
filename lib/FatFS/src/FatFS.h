@@ -192,9 +192,9 @@ protected:
         } else if (openMode & OM_CREATE) {
             mode |= FA_CREATE_ALWAYS;
         }
-        if (openMode & OM_TRUNCATE) {
-            mode |= 0; // TODO - no truncate?
-        }
+        // No FA_ flag expresses OM_TRUNCATE without OM_CREATE (FA_CREATE_ALWAYS
+        // covers the OM_CREATE case); FatFSImpl::open() f_truncate()s after a
+        // successful open instead.
         if ((accessMode & (AM_READ | AM_WRITE)) == (AM_READ | AM_WRITE)) {
             mode |= FA_READ | FA_WRITE;
         } else if (accessMode & AM_READ) {
@@ -468,7 +468,6 @@ public:
     bool rewind() override {
         _valid = false;
         return FR_OK == f_rewinddir(_dir.get());
-        return false;
     }
 
 protected:

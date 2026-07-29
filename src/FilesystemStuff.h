@@ -71,6 +71,7 @@ private:
     int selectedIndex;
     int displayOffset;
     int maxDisplayLines;
+    bool listingTruncated; // refreshListing() dropped entries beyond maxFiles
     
     // OLED update batching
     unsigned long lastInputTime;
@@ -296,10 +297,15 @@ void safeFileClose(File& file, bool was_write_mode = false);
  * @param buffer_size Size of buffer
  * @param bytes_read Output: actual bytes read
  * @param timeout_ms Mutex timeout (default 2000ms)
+ * @param truncated Output (optional): set true when the file was larger than
+ *        the buffer and the read was clamped to buffer_size-1. The return
+ *        value stays true in that case, so callers doing deliberately bounded
+ *        reads keep their existing behavior by passing nullptr.
  * @return true on success, false on error
  */
 bool safeFileReadAll(const char* path, char* buffer, size_t buffer_size, 
-                     size_t* bytes_read, uint32_t timeout_ms = 2000);
+                     size_t* bytes_read, uint32_t timeout_ms = 2000,
+                     bool* truncated = nullptr);
 
 /**
  * Safely write entire contents to a file (overwrites existing)

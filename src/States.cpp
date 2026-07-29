@@ -3703,7 +3703,6 @@ ServiceStatus SlotManager::service() {
     }
     
     static unsigned long lastFileCheckTime = 0;
-    static unsigned long lastFileModTime = 0;
     static int lastEditingSlotNumber = -1;  // Track which slot is being edited
     
     // Get editor state once at the start (used by multiple sections below)
@@ -3729,7 +3728,6 @@ ServiceStatus SlotManager::service() {
                 String errorMsg;
                 if (enterPreviewMode(editingSlotNumber, errorMsg)) {
                     lastEditingSlotNumber = editingSlotNumber;
-                    lastFileModTime = 0;  // Reset to trigger initial load
                 } else {
                     #if debugFP
                     Serial.print("Failed to enter preview mode: ");
@@ -3749,23 +3747,19 @@ ServiceStatus SlotManager::service() {
                 String errorMsg;
                 exitPreview(false, errorMsg);  // Don't apply changes
                 lastEditingSlotNumber = -1;
-                lastFileModTime = 0;  // Reset for next edit
             }
         }
     }
     
     // ============================================================================
-    // FILE MONITORING: Only check files if editor is open, in preview mode, or USB mode is active
-    // This is the most expensive operation, so we skip it when not needed
+    // The live file-monitor (f_stat polling + auto-reload) that used to live here
+    // was permanently disabled with `&& false` and has been DELETED. Host changes
+    // are picked up on eject/unmount instead (usbUnplugCallback reloads the slot).
+    // The bookkeeping below is kept because skipFileMonitoring/lastFileMonitorTime
+    // still throttle this service's early-exit cadence.
     // ============================================================================
     unsigned long timeSinceLastFileCheck = millis() - lastFileCheckTime;
     
-    // OPTIMIZATION: Only monitor files when we have a REAL reason to:
-    // - Editor is open (internal editing via Ekilo)  
-    // - Preview mode is active (viewing changes in slot browser)
-    // - Host is actually mounted and editing files (USB MSC mounted by PC)
-    // This avoids ~60 f_stat() calls per minute during normal UART operation
-    // CRITICAL: needsFileMonitoring is already the correct check (usbMountedByHost || hasEditorOpen)
     bool shouldMonitorFiles = (needsFileMonitoring || inPreviewMode) && !skipFileMonitoring;
     
     // Update file monitor time if we're actually checking
@@ -3780,329 +3774,6 @@ ServiceStatus SlotManager::service() {
         Serial.flush();
     }
     
-    if (shouldMonitorFiles && timeSinceLastFileCheck > 1000 && false) {
-        lastFileCheckTime = millis();
-        slowReason = "file monitoring";
-        
-        if (mscModeEnabled && debugUSB) {
-            Serial.println("USB: ▶ File check cycle starting");
-            Serial.flush();
-        }
-        
-        // Determine which slot to monitor
-        int slotToMonitor = netSlot;
-        bool useEditorBuffer = false;
-        
-        if (mscModeEnabled && debugUSB) {
-            Serial.print("USB:   netSlot=");
-            Serial.print(netSlot);
-            Serial.print(", activeSlotNumber=");
-            Serial.print(activeSlotNumber);
-            Serial.print(", previewMode=");
-            Serial.println(previewModeActive ? "true" : "false");
-            Serial.flush();
-        }
-        
-        if (previewModeActive && editingSlotNumber >= 0) {
-            // In preview mode - monitor the editor buffer or file
-            slotToMonitor = editingSlotNumber;
-            useEditorBuffer = (currentlyEditing != nullptr);  // Use buffer if editor is open
-        } else if (!activeState.isDirty() && activeSlotNumber >= 0) {
-            // Normal mode - monitor active slot file if no unsaved changes
-            slotToMonitor = activeSlotNumber;
-            useEditorBuffer = false;
-        }
-        
-        if (mscModeEnabled && debugUSB) {
-            Serial.print("USB:   Monitoring slot ");
-            Serial.print(slotToMonitor);
-            Serial.print(", useEditorBuffer=");
-            Serial.println(useEditorBuffer ? "true" : "false");
-            Serial.flush();
-        }
-        
-        if (slotToMonitor >= 0) {
-            static String lastBufferContent = "";  // Track last buffer content
-            static unsigned long lastReloadTime = 0;  // Debounce reload operations
-            static bool reloadInProgress = false;  // Prevent concurrent reloads
-            const unsigned long RELOAD_COOLDOWN = 500; // Wait 500ms between reloads
-            bool contentChanged = false;
-            String newContent;
-            
-            // CRITICAL: If a reload is already in progress, skip this cycle
-            // This prevents cascading reloads that can cause crashes
-            if (reloadInProgress) {
-                if (mscModeEnabled && debugUSB && (millis() - lastReloadTime > 5000)) {
-                    Serial.println("USB: ⚠ Reload still in progress after 5s - forcing reset");
-                    reloadInProgress = false;  // Force reset after timeout
-                }
-                return ServiceStatus::BUSY;
-            }
-            
-            if (useEditorBuffer) {
-                // Get content directly from editor buffer (unsaved changes)
-                extern String ekilo_get_current_buffer_content();
-                newContent = ekilo_get_current_buffer_content();
-                
-                // Check if buffer content changed
-                if (newContent != lastBufferContent) {
-                    contentChanged = true;
-                    lastBufferContent = newContent;
-                }
-            } else {
-                // Get file modification time (saved changes)
-                if (mscModeEnabled && debugUSB) {
-                    Serial.println("USB:   Getting filename for slot...");
-                    Serial.flush();
-                }
-                
-                String filename = getSlotFilename(slotToMonitor);
-                
-                if (mscModeEnabled && debugUSB) {
-                    Serial.print("USB:   Filename: ");
-                    Serial.println(filename);
-                    Serial.println("USB:   Checking f_stat (no sync yet to avoid filesystem strain)...");
-                    Serial.flush();
-                }
-                
-                // OPTIMIZATION: Check file mod time WITHOUT syncing first
-                // We only sync if we detect a change. This dramatically reduces
-                // disk_ioctl(CTRL_SYNC) calls from ~60/minute to only when files change.
-                // Excessive SYNC calls cause filesystem crashes after many operations.
-                
-                // CRITICAL FIX: Service USB before potentially blocking filesystem operation
-                // f_stat() can take 10-100ms and block USB servicing
-                #ifdef USE_TINYUSB
-                extern void tud_task(void);
-                tud_task();
-                #endif
-                
-                fatfs::FILINFO fno;
-                memset(&fno, 0, sizeof(fno));  // Zero out structure for safety
-                
-                fatfs::FRESULT stat_result = fatfs::f_stat(filename.c_str(), &fno);
-                
-                // CRITICAL FIX: Service USB after filesystem operation
-                #ifdef USE_TINYUSB
-                tud_task();
-                #endif
-                
-                if (mscModeEnabled && debugUSB) {
-                    Serial.print("USB:   f_stat returned: ");
-                    Serial.println(stat_result);
-                    Serial.flush();
-                }
-                
-                if (stat_result == fatfs::FR_OK) {
-                    unsigned long fileModTime = ((unsigned long)fno.fdate << 16) | fno.ftime;
-                    
-                    if (lastFileModTime == 0) {
-                        // First time - just record the time
-                        lastFileModTime = fileModTime;
-                        if (mscModeEnabled && debugUSB) {
-                            Serial.print("USB: Initial mod time for ");
-                            Serial.print(filename);
-                            Serial.print(" = ");
-                            Serial.println(fileModTime, HEX);
-                        }
-                    } else if (fileModTime != lastFileModTime) {
-                        // Potential change detected! Try to sync and re-check to confirm
-                        // BUT: disk_ioctl(CTRL_SYNC) can crash after many operations in USB mode
-                        // So we make it optional - if it fails, we still proceed with the reload
-                        
-                        if (mscModeEnabled && debugUSB) {
-                            Serial.println("USB: Potential file change detected - attempting sync...");
-                            Serial.flush();
-                        }
-                        
-                        delay(150);  // Let host finish writing
-                        
-                        // CRITICAL FIX: Service USB before blocking sync operation
-                        #ifdef USE_TINYUSB
-                        tud_task();
-                        #endif
-                        
-                        // Track sync failures to avoid repeated crashes
-                        static int consecutiveSyncFailures = 0;
-                        const int MAX_SYNC_FAILURES = 3;
-                        bool syncSucceeded = false;
-                        
-                        // Only attempt sync if we haven't had too many recent failures
-                        if (consecutiveSyncFailures < MAX_SYNC_FAILURES) {
-                            // CRITICAL: Pause Core2 during disk_ioctl(CTRL_SYNC)
-                            bool was_paused_sync = pauseCore2ForFlash(100);
-                            
-                            // Attempt sync with basic error detection
-                            // Note: disk_ioctl may crash instead of returning error, but we try
-                            fatfs::DRESULT sync_result = fatfs::disk_ioctl(0, CTRL_SYNC, nullptr);
-                            
-                            // Restore Core2 state
-                            unpauseCore2ForFlash(was_paused_sync);
-                            
-                            if (sync_result == fatfs::RES_OK) {
-                                __sync_synchronize();  // Memory barrier
-                                syncSucceeded = true;
-                                consecutiveSyncFailures = 0;  // Reset on success
-                                
-                                if (mscModeEnabled && debugUSB) {
-                                    Serial.println("USB: Sync succeeded");
-                                    Serial.flush();
-                                }
-                            } else {
-                                consecutiveSyncFailures++;
-                                if (mscModeEnabled && debugUSB) {
-                                    Serial.print("USB: ⚠ Sync failed with code ");
-                                    Serial.print(sync_result);
-                                    Serial.print(" (failure #");
-                                    Serial.print(consecutiveSyncFailures);
-                                    Serial.println(")");
-                                    Serial.flush();
-                                }
-                            }
-                        } else {
-                            if (mscModeEnabled && debugUSB) {
-                                Serial.println("USB: ⚠ Skipping sync (too many recent failures)");
-                                Serial.flush();
-                            }
-                        }
-                        
-                        // Re-check file mod time (even if sync failed)
-                        memset(&fno, 0, sizeof(fno));
-                        stat_result = fatfs::f_stat(filename.c_str(), &fno);
-                        
-                        if (stat_result == fatfs::FR_OK) {
-                            unsigned long confirmedModTime = ((unsigned long)fno.fdate << 16) | fno.ftime;
-                            
-                            if (confirmedModTime != lastFileModTime) {
-                                // Change confirmed! Proceed with reload even if sync failed
-                                contentChanged = true;
-                                if (mscModeEnabled && debugUSB) {
-                                    Serial.print("USB: File change confirmed");
-                                    if (!syncSucceeded) {
-                                        Serial.print(" (without sync)");
-                                    }
-                                    Serial.print("! ");
-                                    Serial.print(filename);
-                                    Serial.print(" old=");
-                                    Serial.print(lastFileModTime, HEX);
-                                    Serial.print(" new=");
-                                    Serial.println(confirmedModTime, HEX);
-                                }
-                                lastFileModTime = confirmedModTime;
-                                lastBufferContent = "";  // Clear buffer cache
-                            } else {
-                                // False alarm - mod time returned to original
-                                if (mscModeEnabled && debugUSB) {
-                                    Serial.println("USB: False alarm - file unchanged");
-                                }
-                            }
-                        } else {
-                            if (mscModeEnabled && debugUSB) {
-                                Serial.print("USB: Re-check f_stat failed: ");
-                                Serial.println(stat_result);
-                            }
-                        }
-                    }
-                    // If fileModTime == lastFileModTime, no change, no sync needed
-                } else {
-                    // File stat failed - might be mid-write by host
-                    if (mscModeEnabled && debugUSB) {
-                        Serial.print("USB: f_stat failed with error ");
-                        Serial.print(stat_result);
-                        Serial.println(" - file might be locked by host, will retry");
-                    }
-                    // Don't mark as changed, just skip this check cycle
-                    contentChanged = false;
-                }
-            }
-            
-            // Reload if content changed AND we're past the cooldown period
-            if (contentChanged && (millis() - lastReloadTime > RELOAD_COOLDOWN)) {
-                // Mark reload as in progress to prevent concurrent operations
-                reloadInProgress = true;
-                lastReloadTime = millis();
-                String errorMsg;
-                
-                if (mscModeEnabled && debugUSB) {
-                    Serial.println("USB: Starting file reload...");
-                }
-                
-                if (useEditorBuffer && newContent.length() > 0) {
-                    // Parse YAML directly from editor buffer
-                    if (activeState.fromYAML(newContent, errorMsg)) {
-                        // Compute nets and refresh hardware
-                        extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
-                        refreshConnections(-1, 1, 0);
-                        lastStatus = ServiceStatus::BUSY;
-                        
-                        if (mscModeEnabled && debugUSB) {
-                            Serial.println("USB: ✓ Buffer reload complete");
-                        }
-                    } else {
-                        // Parse error - don't spam, just skip this update
-                        if (mscModeEnabled && debugUSB) {
-                            Serial.print("USB: ✗ Parse error: ");
-                            Serial.println(errorMsg);
-                        }
-                        lastStatus = ServiceStatus::IDLE;
-                    }
-                } else {
-                    // Load from disk (normal file change or save)
-                    // Add small delay to ensure host has finished writing
-                    if (mscModeEnabled && debugUSB) {
-                        Serial.println("USB: About to reload file - delaying 100ms for host write completion");
-                        Serial.flush();
-                        delay(100);  // Give host time to finish write
-                        // NOTE: We already called disk_ioctl(CTRL_SYNC) before f_stat above,
-                        // so we don't need to sync again here. Calling it twice in quick succession
-                        // causes crashes during the second reload.
-                        Serial.println("USB: Calling loadSlot()...");
-                        Serial.flush();
-                    }
-                    
-                    // Defensive: Check slot number is valid before attempting load
-                    if (slotToMonitor < 0 || slotToMonitor >= NUM_SLOTS) {
-                        if (mscModeEnabled && debugUSB) {
-                            Serial.print("USB: ✗ Invalid slot number: ");
-                            Serial.println(slotToMonitor);
-                        }
-                        lastStatus = ServiceStatus::ERROR;
-                    } else if (loadSlot(slotToMonitor, errorMsg)) {
-                        if (!previewModeActive) {
-                            Serial.print("✓ Slot ");
-                            Serial.print(slotToMonitor);
-                            Serial.println(" reloaded from disk");
-                        }
-                        lastStatus = ServiceStatus::BUSY;
-                        
-                        if (mscModeEnabled && debugUSB) {
-                            Serial.println("USB: ✓ File reload complete");
-                            Serial.flush();
-                        }
-                    } else {
-                        if (!previewModeActive || mscModeEnabled) {
-                            Serial.print("✗ Failed to reload slot: ");
-                            Serial.println(errorMsg);
-                            Serial.flush();
-                        }
-                        lastStatus = ServiceStatus::ERROR;
-                        
-                        // Reset file mod time on error to force retry next cycle
-                        lastFileModTime = 0;
-                    }
-                }
-                
-                // Clear reload in progress flag
-                reloadInProgress = false;
-                
-            } else if (contentChanged && (millis() - lastReloadTime <= RELOAD_COOLDOWN)) {
-                // Change detected but we're in cooldown period
-                if (mscModeEnabled && debugUSB) {
-                    Serial.println("USB: Change detected but in cooldown period - will reload next cycle");
-                }
-            }
-        }
-    }
     
     // ============================================================================
     // AUTO-SAVE: Only runs if state is dirty and USB is not mounted
@@ -4154,13 +3825,6 @@ ServiceStatus SlotManager::service() {
                 lastStatus = ServiceStatus::BUSY;
                 if (debugWaitLoopTiming) {
                     Serial.printf("DEBUG: Auto-save completed\n");
-                }
-                
-                // Update file mod time after save
-                String filename = getSlotFilename(activeSlotNumber);
-                fatfs::FILINFO fno;
-                if (fatfs::f_stat(filename.c_str(), &fno) == fatfs::FR_OK) {
-                    lastFileModTime = ((unsigned long)fno.fdate << 16) | fno.ftime;
                 }
             } else {
                 // Don't clear dirty on failure - retry on next loop

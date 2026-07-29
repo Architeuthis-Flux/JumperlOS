@@ -2336,6 +2336,15 @@ char* jl_fs_listdir( const char* path ) {
 
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
+    // Distinguish "missing dir" (nullptr -> Python raises ENOENT) from
+    // "empty dir" (empty buffer -> []). Root always exists.
+    // ponytail: a path that names a plain FILE still lists as empty instead of
+    // raising ENOTDIR; upgrade path is a jl_fs_stat_isdir() check here.
+    if ( !( path[ 0 ] == '/' && path[ 1 ] == '\0' ) && !FatFS.exists( path ) ) {
+        fs_mutex_release( );
+        return nullptr;
+    }
+
     // Use static buffer to avoid memory management issues
 #if defined(OG_JUMPERLESS)
     static char listBuffer[ 768 ]; // RP2040: scarce SRAM
@@ -2366,7 +2375,9 @@ char* jl_fs_listdir( const char* path ) {
         }
 
         if ( !first ) {
-            strcat( listBuffer, "," );
+            // '\n' separator: illegal in FAT filenames, so it can never collide
+            // with a name. The old ',' split "a,b.txt" into two phantom entries.
+            strcat( listBuffer, "\n" );
         }
         strcat( listBuffer, fileName );
         if ( dir.isDirectory( ) ) {
@@ -2379,6 +2390,11 @@ char* jl_fs_listdir( const char* path ) {
     return listBuffer;
 }
 
+// ponytail: this string-returning API inherently truncates - at the static
+// buffer size (4KB / 1KB on OG) and, on the Python side, at the first NUL byte
+// (callers strlen it). Not fixable without changing the char* contract, which
+// is also declared in lib/micropython/port/mphalport.c (out of reach here).
+// Binary-safe, unbounded reads go through jfs.open()+read() instead.
 char* jl_fs_read_file( const char* path ) {
     if ( !path )
         return nullptr;
@@ -2405,11 +2421,14 @@ char* jl_fs_read_file( const char* path ) {
     return fileBuffer;
 }
 
-int jl_fs_write_file( const char* path, const char* content ) {
-    if ( !path || !content )
+int jl_fs_write_file( const char* path, const char* content, int len ) {
+    if ( !path || !content || len < 0 )
         return 0;
 
-    return safeFileWriteAll( path, content, 0, 2000 ) ? 1 : 0;
+    // len is the true byte count from the Python string/bytes object, so data
+    // with embedded NULs is written intact (the old strlen-based path stopped
+    // at the first NUL). len == 0 writes/truncates to an empty file.
+    return safeFileWriteAll( path, content, (size_t)len, 2000 ) ? 1 : 0;
 }
 
 char* jl_fs_get_current_dir( void ) {
@@ -2426,18 +2445,16 @@ int jl_fs_stat_size( const char* path ) {
 
     int result = -1;
     if ( FatFS.exists( path ) ) {
-        // Check if it's a directory
-        Dir dir = FatFS.openDir( path );
-        if ( dir.next( ) && dir.isDirectory( ) ) {
-            // For directories, return 0 (they have no size in our implementation)
-            result = 0;
+        // Try to open as a file; directories can't be opened as files (the
+        // same probe jl_fs_stat_isdir uses). The old openDir()+next() check
+        // actually inspected the dir's FIRST CHILD, so empty dirs and dirs
+        // whose first entry is a file misreported as -1.
+        File file = FatFS.open( path, "r" );
+        if ( file ) {
+            result = file.size( );
+            file.close( );
         } else {
-            // Try to open as file to get size
-            File file = FatFS.open( path, "r" );
-            if ( file ) {
-                result = file.size( );
-                file.close( );
-            }
+            result = 0; // exists but not openable as a file -> directory
         }
     }
 
@@ -2485,20 +2502,34 @@ int jl_fs_stat_isdir( const char* path ) {
 // JFS File Handle Tracking
 // Keeps track of all open JFS file handles so they can be
 // closed when exiting MicroPython (prevents file conflicts)
+//
+// The handle given to Python is NOT the raw File* - the heap can reuse a freed
+// File's address for the next open, so pointer identity alone cannot detect a
+// stale handle (ABA). Instead each slot carries a generation counter and the
+// opaque handle encodes (generation << 4) | 0x8 | slot. A stale handle fails
+// the generation check even after its slot is reused by a newer open.
 // ============================================================
-#define MAX_JFS_OPEN_FILES 4
-static void* jfs_open_files[ MAX_JFS_OPEN_FILES ] = { nullptr };
+#define MAX_JFS_OPEN_FILES 8
+static_assert( MAX_JFS_OPEN_FILES <= 8, "slot index must fit in the handle's 3 low bits" );
+static void* jfs_open_files[ MAX_JFS_OPEN_FILES ] = { nullptr }; // File* per slot
+// ponytail: generation is 28 bits (32-bit uintptr_t minus tag+slot); it wraps
+// after ~268M opens of one slot, at which point a handle from exactly that many
+// opens ago could false-positive. Upgrade path: widen the handle to 64 bits.
+static uint32_t jfs_open_gens[ MAX_JFS_OPEN_FILES ] = { 0 };
 int debug_fs = 0;
 
-static bool jfs_track_file( void* handle ) {
+// Register a freshly opened File* and return the opaque handle for Python,
+// or nullptr if the table is full.
+static void* jfs_track_file( File* file ) {
     for ( int i = 0; i < MAX_JFS_OPEN_FILES; i++ ) {
         if ( jfs_open_files[ i ] == nullptr ) {
-            jfs_open_files[ i ] = handle;
+            jfs_open_files[ i ] = file;
+            jfs_open_gens[ i ]++; // new generation: invalidates handles from prior occupants
             if ( debug_fs ) {
                 Serial.println( "DEBUG: jfs_track_file: File is tracked" );
                 Serial.flush( );
             }
-            return true;
+            return (void*)( ( (uintptr_t)( jfs_open_gens[ i ] & 0x0FFFFFFFu ) << 4 ) | 0x8u | (uintptr_t)i );
         }
     }
     // No space. The open must FAIL in this case: an untracked handle could never
@@ -2508,46 +2539,41 @@ static bool jfs_track_file( void* handle ) {
         Serial.println( "DEBUG: jfs_track_file: No space - rejecting open (max concurrent JFS files reached)" );
         Serial.flush( );
     }
-    return false;
+    return nullptr;
+}
+
+// Decode + validate an opaque handle. Returns the live File*, or nullptr if the
+// handle is stale: its slot was closed (by close/jl_close_all_jfs_files) or has
+// since been reused by a newer open. This is the use-after-free guard for
+// Python file objects that outlive their underlying File.
+static File* jfs_resolve( void* handle ) {
+    uintptr_t h = (uintptr_t)handle;
+    if ( !( h & 0x8u ) )
+        return nullptr; // not a handle we issued (includes NULL)
+    int slot = (int)( h & 0x7u );
+    if ( ( jfs_open_gens[ slot ] & 0x0FFFFFFFu ) != (uint32_t)( ( h >> 4 ) & 0x0FFFFFFFu ) ) {
+        if ( debug_fs ) {
+            Serial.println( "DEBUG: jfs_resolve: Stale handle (generation mismatch)" );
+            Serial.flush( );
+        }
+        return nullptr; // slot was closed and reused by a newer open
+    }
+    return (File*)jfs_open_files[ slot ]; // nullptr if slot freed since issue
 }
 
 static void jfs_untrack_file( void* handle ) {
-    for ( int i = 0; i < MAX_JFS_OPEN_FILES; i++ ) {
-        if ( jfs_open_files[ i ] == handle ) {
-            jfs_open_files[ i ] = nullptr;
-            if ( debug_fs ) {
-                Serial.println( "DEBUG: jfs_untrack_file: File is untracked" );
-                Serial.flush( );
-            }
-            return;
+    if ( jfs_resolve( handle ) == nullptr ) {
+        if ( debug_fs ) {
+            Serial.println( "DEBUG: jfs_untrack_file: File is not found in tracked files" );
+            Serial.flush( );
         }
+        return;
     }
+    jfs_open_files[ (uintptr_t)handle & 0x7u ] = nullptr;
     if ( debug_fs ) {
-        Serial.println( "DEBUG: jfs_untrack_file: File is not found in tracked files" );
+        Serial.println( "DEBUG: jfs_untrack_file: File is untracked" );
         Serial.flush( );
     }
-}
-
-// Check if a file handle is still tracked (i.e., not already closed by jl_close_all_jfs_files)
-// This is used to detect use-after-free scenarios where a Python file object
-// holds a stale pointer to an already-deleted File* object
-static bool jfs_is_tracked( void* handle ) {
-    if ( !handle )
-        return false;
-    for ( int i = 0; i < MAX_JFS_OPEN_FILES; i++ ) {
-        if ( jfs_open_files[ i ] == handle ) {
-            if ( debug_fs ) {
-                Serial.println( "DEBUG: jfs_is_tracked: File is tracked" );
-                Serial.flush( );
-            }
-            return true;
-        }
-    }
-    if ( debug_fs ) {
-        Serial.println( "DEBUG: jfs_is_tracked: File is not tracked" );
-        Serial.flush( );
-    }
-    return false;
 }
 
 // Close all open JFS files - called when exiting MicroPython
@@ -2589,11 +2615,22 @@ void jl_close_all_jfs_files( void ) {
     }
 }
 
+// Why the last jl_fs_open_file returned nullptr: ENOENT (open failed) or
+// EMFILE (handle table full). Lets the Python layer raise the truthful errno.
+// ponytail: single global, not per-call - fine because only the MicroPython
+// core opens JFS files and it is single-threaded.
+static int jfs_open_errno = ENOENT;
+int jl_fs_open_errno( void ) {
+    return jfs_open_errno;
+}
+
 // File operations
 // THREAD SAFETY: All file operations acquire fs_mutex to prevent concurrent access
 void* jl_fs_open_file( const char* path, const char* mode ) {
-    if ( !path || !mode )
+    if ( !path || !mode ) {
+        jfs_open_errno = EINVAL;
         return nullptr;
+    }
     if ( debug_fs ) {
         Serial.print( "DEBUG: jl_fs_open_file: Opening " );
         Serial.print( path );
@@ -2618,6 +2655,15 @@ void* jl_fs_open_file( const char* path, const char* mode ) {
         sanitizedMode[ 1 ] = '\0';
     }
 
+    // USB MSC guard (same chokepoint rule as safeFileOpen): while a host has
+    // the disk mounted it caches the FAT, so a firmware write behind its back
+    // corrupts the host's view. Read-only opens are still allowed.
+    extern bool usbMountedByHost; // USBfs.h
+    if ( usbMountedByHost && strpbrk( sanitizedMode, "wa+" ) != nullptr ) {
+        jfs_open_errno = EROFS; // read-only while the USB host holds the disk
+        return nullptr;
+    }
+
     // NOTE: File open is primarily flash READS (directory lookup, FAT scan)
     // Flash reads don't disable XIP, so Core2 pause may not be needed here.
     // Only flash WRITES disable XIP and require Core2 synchronization.
@@ -2632,7 +2678,8 @@ void* jl_fs_open_file( const char* path, const char* mode ) {
         Serial.print( " in mode: " );
         Serial.println( sanitizedMode );
         Serial.print( "DEBUG: jl_fs_open_file: File handle: " );
-        Serial.println( (String)file->name( ) );
+        // name() can return NULL for a failed open - don't deref it
+        Serial.println( *file ? (String)file->name( ) : String( "(not open)" ) );
         Serial.flush( );
     }
     if ( !*file ) {
@@ -2641,15 +2688,18 @@ void* jl_fs_open_file( const char* path, const char* mode ) {
             Serial.flush( );
         }
         delete file;
+        jfs_open_errno = ENOENT; // ponytail: FatFS gives no detail; could be disk-full on write modes
         fs_mutex_release( ); // THREAD SAFETY: Unlock before returning
         return nullptr;
     }
 
     // Track the file handle for cleanup on exit. If the tracking table is full
     // the open fails - see jfs_track_file for why an untracked handle is unsafe.
-    if ( !jfs_track_file( file ) ) {
+    void* handle = jfs_track_file( file );
+    if ( !handle ) {
         file->close( );
         delete file;
+        jfs_open_errno = EMFILE;
         fs_mutex_release( ); // THREAD SAFETY: Unlock before returning
         return nullptr;
     }
@@ -2660,70 +2710,63 @@ void* jl_fs_open_file( const char* path, const char* mode ) {
         Serial.println( "DEBUG: jl_fs_open_file: File opened" );
         Serial.flush( );
     }
-    return file;
+    return handle;
 }
 
-void jl_fs_close_file( void* file_handle ) {
-    if ( file_handle ) {
-        // CRITICAL FIX: Use non-blocking mutex acquire to prevent GC finaliser deadlock
-        //
-        // Problem: Pico SDK mutexes are NOT recursive. If this function is called from
-        // a GC finaliser while another JFS operation (like jl_fs_write_bytes) holds the
-        // mutex, we would deadlock trying to acquire it again on the same core.
-        //
-        // Solution: Try non-blocking acquire. If we can't get the mutex, we're likely
-        // in a GC finaliser during another JFS operation. In that case, just return
-        // without closing - the file handle stays tracked and will be properly cleaned
-        // up by jl_close_all_jfs_files() when exiting Python.
-        if ( !fs_mutex_try_acquire( ) ) {
-            // Can't get mutex - likely called from GC finaliser during JFS operation
-            // Leave file tracked - jl_close_all_jfs_files() will clean it up on exit
-            if ( debug_fs ) {
-                Serial.println( "DEBUG: jl_fs_close_file: Can't get mutex - likely called from GC finaliser during JFS operation" );
-                Serial.flush( );
-            }
+// Returns 1 when the handle is closed (or was already closed/stale), 0 when
+// fs_mutex could not be acquired - the file then stays OPEN and TRACKED so the
+// caller can retry or jl_close_all_jfs_files() reclaims it at script exit.
+int jl_fs_close_file( void* file_handle ) {
+    if ( !file_handle )
+        return 1; // nothing to close
+    // fs_mutex is per-core RECURSIVE (depth-counted, see externVars.h), so the
+    // GC-finaliser self-deadlock that the old non-blocking try_acquire guarded
+    // against cannot happen: re-acquiring on the owning core just nests. A
+    // bounded blocking acquire only ever waits out the OTHER core; on timeout
+    // we report failure instead of silently leaking the slot.
+    if ( !fs_mutex_acquire_timeout_ms( 250 ) ) {
+        if ( debug_fs ) {
+            Serial.println( "DEBUG: jl_fs_close_file: fs_mutex timeout - file left open and tracked" );
             Serial.flush( );
-            return;
         }
-
-        // CRITICAL: Check if file is still tracked before closing
-        // This prevents use-after-free crashes when:
-        // 1. jl_close_all_jfs_files() already closed and deleted the File*
-        // 2. A GC finalizer later tries to close the same (now invalid) handle
-        // If not tracked, the file was already closed - skip to avoid crash
-        if ( !jfs_is_tracked( file_handle ) ) {
-            if ( debug_fs ) {
-                Serial.println( "DEBUG: jl_fs_close_file: File not tracked - already closed by jl_close_all_jfs_files()" );
-                Serial.flush( );
-            }
-            Serial.flush( );
-            fs_mutex_release( );
-            return; // Already closed by jl_close_all_jfs_files()
-        }
-
-        // Untrack the file handle
-        jfs_untrack_file( file_handle );
-
-        File* file = (File*)file_handle;
-        // Only close if the file is actually open (prevents double-close crashes)
-        if ( *file ) {
-            AsyncPassthrough::suspendUARTRxIRQ( );
-            // CRITICAL: Pause Core2 during flash operations (flush writes to flash)
-            bool was_paused = pauseCore2ForFlash( 100 );
-
-            // CRITICAL: Flush before close to ensure all buffered data is written
-            // This is essential for GC finalizers where files may have pending writes
-            // Without flush, close might lose unflushed buffer data
-            file->flush( );
-            file->close( );
-
-            unpauseCore2ForFlash( was_paused );
-            AsyncPassthrough::resumeUARTRxIRQ( );
-        }
-        delete file;
-
-        fs_mutex_release( ); // THREAD SAFETY: Unlock filesystem
+        return 0;
     }
+
+    // Stale-handle guard: resolves to nullptr when the slot was already closed
+    // (explicit close, jl_close_all_jfs_files, or reuse by a newer open) - in
+    // that case there is nothing left to do.
+    File* file = jfs_resolve( file_handle );
+    if ( !file ) {
+        if ( debug_fs ) {
+            Serial.println( "DEBUG: jl_fs_close_file: File not tracked - already closed" );
+            Serial.flush( );
+        }
+        fs_mutex_release( );
+        return 1;
+    }
+
+    // Untrack the file handle
+    jfs_untrack_file( file_handle );
+
+    // Only close if the file is actually open (prevents double-close crashes)
+    if ( *file ) {
+        AsyncPassthrough::suspendUARTRxIRQ( );
+        // CRITICAL: Pause Core2 during flash operations (flush writes to flash)
+        bool was_paused = pauseCore2ForFlash( 100 );
+
+        // CRITICAL: Flush before close to ensure all buffered data is written
+        // This is essential for GC finalizers where files may have pending writes
+        // Without flush, close might lose unflushed buffer data
+        file->flush( );
+        file->close( );
+
+        unpauseCore2ForFlash( was_paused );
+        AsyncPassthrough::resumeUARTRxIRQ( );
+    }
+    delete file;
+
+    fs_mutex_release( ); // THREAD SAFETY: Unlock filesystem
+    return 1;
 }
 
 int jl_fs_read_bytes( void* file_handle, char* buffer, int size ) {
@@ -2738,18 +2781,12 @@ int jl_fs_read_bytes( void* file_handle, char* buffer, int size ) {
 
     // Stale-handle guard: jl_close_all_jfs_files() deletes the File* after each
     // script/REPL execution; a Python object surviving that still holds the old
-    // pointer. Dereferencing it would be use-after-free.
-    if ( !jfs_is_tracked( file_handle ) ) {
+    // handle. jfs_resolve() rejects it (generation check), so no use-after-free.
+    File* file = jfs_resolve( file_handle );
+    if ( !file || !*file ) {
         fs_mutex_release( );
         unpauseCore2ForFlash( was_paused );
-        return -1; // Handle already closed/deleted
-    }
-
-    File* file = (File*)file_handle;
-    if ( !*file ) {
-        fs_mutex_release( );
-        unpauseCore2ForFlash( was_paused );
-        return -1; // File not open
+        return -1; // Handle stale/closed, or file not open
     }
     int result = file->readBytes( buffer, size );
 
@@ -2774,19 +2811,12 @@ int jl_fs_write_bytes( void* file_handle, const char* data, int size ) {
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
     // Stale-handle guard (see jl_fs_read_bytes)
-    if ( !jfs_is_tracked( file_handle ) ) {
+    File* file = jfs_resolve( file_handle );
+    if ( !file || !*file ) {
         fs_mutex_release( );
         unpauseCore2ForFlash( was_paused );
         AsyncPassthrough::resumeUARTRxIRQ( );
-        return -1; // Handle already closed/deleted
-    }
-
-    File* file = (File*)file_handle;
-    if ( !*file ) {
-        fs_mutex_release( );
-        unpauseCore2ForFlash( was_paused );
-        AsyncPassthrough::resumeUARTRxIRQ( );
-        return -1; // File not open
+        return -1; // Handle stale/closed, or file not open
     }
     int result = file->write( (const uint8_t*)data, size );
 
@@ -2809,15 +2839,10 @@ int jl_fs_seek( void* file_handle, int position, int mode ) {
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
     // Stale-handle guard (see jl_fs_read_bytes)
-    if ( !jfs_is_tracked( file_handle ) ) {
+    File* file = jfs_resolve( file_handle );
+    if ( !file || !*file ) {
         fs_mutex_release( );
-        return 0; // Handle already closed/deleted
-    }
-
-    File* file = (File*)file_handle;
-    if ( !*file ) {
-        fs_mutex_release( );
-        return 0; // File not open
+        return 0; // Handle stale/closed, or file not open
     }
     SeekMode seekMode = SeekSet;
     if ( mode == 1 )
@@ -2841,15 +2866,10 @@ int jl_fs_position( void* file_handle ) {
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
     // Stale-handle guard (see jl_fs_read_bytes)
-    if ( !jfs_is_tracked( file_handle ) ) {
+    File* file = jfs_resolve( file_handle );
+    if ( !file || !*file ) {
         fs_mutex_release( );
-        return -1; // Handle already closed/deleted
-    }
-
-    File* file = (File*)file_handle;
-    if ( !*file ) {
-        fs_mutex_release( );
-        return -1; // File not open
+        return -1; // Handle stale/closed, or file not open
     }
     int result = file->position( );
 
@@ -2868,15 +2888,10 @@ int jl_fs_size( void* file_handle ) {
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
     // Stale-handle guard (see jl_fs_read_bytes)
-    if ( !jfs_is_tracked( file_handle ) ) {
+    File* file = jfs_resolve( file_handle );
+    if ( !file || !*file ) {
         fs_mutex_release( );
-        return -1; // Handle already closed/deleted
-    }
-
-    File* file = (File*)file_handle;
-    if ( !*file ) {
-        fs_mutex_release( );
-        return -1; // File not open
+        return -1; // Handle stale/closed, or file not open
     }
     int result = file->size( );
 
@@ -2891,15 +2906,10 @@ int jl_fs_available( void* file_handle ) {
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
     // Stale-handle guard (see jl_fs_read_bytes)
-    if ( !jfs_is_tracked( file_handle ) ) {
+    File* file = jfs_resolve( file_handle );
+    if ( !file || !*file ) {
         fs_mutex_release( );
-        return 0; // Handle already closed/deleted
-    }
-
-    File* file = (File*)file_handle;
-    if ( !*file ) {
-        fs_mutex_release( );
-        return 0; // File not open
+        return 0; // Handle stale/closed, or file not open
     }
     int result = file->available( );
 
@@ -2918,7 +2928,7 @@ void jl_fs_flush( void* file_handle ) {
         fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
 
         // Stale-handle guard (see jl_fs_read_bytes)
-        File* file = jfs_is_tracked( file_handle ) ? (File*)file_handle : nullptr;
+        File* file = jfs_resolve( file_handle );
         if ( file && *file ) { // Only flush if file is actually open
             file->flush( );
         }
@@ -2931,25 +2941,6 @@ void jl_fs_flush( void* file_handle ) {
         unpauseCore2ForFlash( was_paused );
         AsyncPassthrough::resumeUARTRxIRQ( );
     }
-}
-
-// WARNING: This function uses a static buffer and should NOT be used for VFS file operations
-// during import, as nested calls will corrupt the buffer. VFS file objects now store
-// the filename directly in the mp_obj_jfs_file_t structure to avoid this issue.
-// This function is kept for backwards compatibility with non-VFS direct file operations.
-char* jl_fs_name( void* file_handle ) {
-    if ( !file_handle )
-        return nullptr;
-
-    fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
-
-    File* file = (File*)file_handle;
-    static char nameBuffer[ 256 ];
-    strncpy( nameBuffer, file->name( ), sizeof( nameBuffer ) - 1 );
-    nameBuffer[ sizeof( nameBuffer ) - 1 ] = '\0';
-
-    fs_mutex_release( ); // THREAD SAFETY: Unlock filesystem
-    return nameBuffer;
 }
 
 // Directory operations - all require mutex for thread safety

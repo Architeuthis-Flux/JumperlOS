@@ -2,7 +2,6 @@
 Test script for new OLED MicroPython features
 Run this on the Jumperless device to test all new OLED functions
 """
-import jumperless as j
 import time
 
 def test_text_size_control():
@@ -11,21 +10,21 @@ def test_text_size_control():
     
     # Test setting text size
     print("Setting text size to 0 (small)...")
-    j.oled_set_text_size(0)
-    assert j.oled_get_text_size() == 0, "Text size should be 0"
-    j.oled_print("Small text mode")
+    oled_set_text_size(0)
+    assert oled_get_text_size() == 0, "Text size should be 0"
+    oled_print("Small text mode")
     time.sleep(2)
     
     print("Setting text size to 1 (normal)...")
-    j.oled_set_text_size(1)
-    assert j.oled_get_text_size() == 1, "Text size should be 1"
-    j.oled_print("Normal text")
+    oled_set_text_size(1)
+    assert oled_get_text_size() == 1, "Text size should be 1"
+    oled_print("Normal text")
     time.sleep(2)
     
     print("Setting text size to 2 (large)...")
-    j.oled_set_text_size(2)
-    assert j.oled_get_text_size() == 2, "Text size should be 2"
-    j.oled_print("Large text")
+    oled_set_text_size(2)
+    assert oled_get_text_size() == 2, "Text size should be 2"
+    oled_print("Large text")
     time.sleep(2)
     
     print("✓ Text size control works!")
@@ -36,7 +35,7 @@ def test_print_redirection():
     
     # Enable print copying
     print("Enabling print copy to OLED...")
-    j.oled_copy_print(True)
+    oled_copy_print(True)
     
     # Test printing
     print("Line 1 on OLED")
@@ -48,7 +47,7 @@ def test_print_redirection():
     
     # Disable print copying
     print("Disabling print copy...")
-    j.oled_copy_print(False)
+    oled_copy_print(False)
     print("This should NOT appear on OLED")
     time.sleep(2)
     
@@ -59,20 +58,20 @@ def test_font_system():
     print("\n=== Testing Font System ===")
     
     # Get available fonts
-    fonts = j.oled_get_fonts()
+    fonts = oled_get_fonts()
     print(f"Available fonts: {fonts}")
     assert len(fonts) > 0, "Should have fonts available"
     
     # Test setting fonts
     for font in fonts[:3]:  # Test first 3 fonts
         print(f"Setting font to: {font}")
-        result = j.oled_set_font(font)
+        result = oled_set_font(font)
         assert result, f"Should be able to set font {font}"
         
-        current = j.oled_get_current_font()
+        current = oled_get_current_font()
         print(f"Current font: {current}")
         
-        j.oled_print(f"Font: {font}", 2)
+        oled_print(f"Font: {font}", 2)
         time.sleep(1.5)
     
     print("✓ Font system works!")
@@ -85,19 +84,19 @@ def test_bitmap_functions():
     test_file = "/jogo32h.bin"
     
     print(f"Attempting to load bitmap: {test_file}")
-    result = j.oled_load_bitmap(test_file)
+    result = oled_load_bitmap(test_file)
     
     if result:
         print("✓ Bitmap loaded successfully")
         
         # Display the loaded bitmap
         print("Displaying bitmap at (0, 0)...")
-        j.oled_display_bitmap(0, 0, 0, 0)  # Use loaded bitmap
+        oled_display_bitmap(0, 0, 0, 0)  # Use loaded bitmap
         time.sleep(2)
         
         # Try convenience function
         print("Using convenience function...")
-        j.oled_show_bitmap_file(test_file, 0, 0)
+        oled_show_bitmap_file(test_file, 0, 0)
         time.sleep(2)
     else:
         print(f"⚠ Bitmap file not found: {test_file}")
@@ -110,44 +109,44 @@ def test_framebuffer_access():
     print("\n=== Testing Framebuffer Access ===")
     
     # Get framebuffer size
-    width, height, buffer_size = j.oled_get_framebuffer_size()
+    width, height, buffer_size = oled_get_framebuffer_size()
     print(f"Framebuffer: {width}x{height}, {buffer_size} bytes")
     
     # Get current framebuffer
-    fb = j.oled_get_framebuffer()
+    fb = oled_get_framebuffer()
     print(f"Got framebuffer: {len(fb)} bytes")
     assert len(fb) == buffer_size, "Framebuffer size should match"
     
     # Test pixel manipulation
     print("Drawing test pattern...")
-    j.oled_clear()
+    oled_clear()
     
     # Draw a border
     for x in range(width):
-        j.oled_set_pixel(x, 0, 1)  # Top
-        j.oled_set_pixel(x, height-1, 1)  # Bottom
+        oled_set_pixel(x, 0, 1)  # Top
+        oled_set_pixel(x, height-1, 1)  # Bottom
     
     for y in range(height):
-        j.oled_set_pixel(0, y, 1)  # Left
-        j.oled_set_pixel(width-1, y, 1)  # Right
+        oled_set_pixel(0, y, 1)  # Left
+        oled_set_pixel(width-1, y, 1)  # Right
     
     # Draw diagonal lines
     for i in range(min(width, height)):
-        j.oled_set_pixel(i, i, 1)
-        j.oled_set_pixel(width-1-i, i, 1)
+        oled_set_pixel(i, i, 1)
+        oled_set_pixel(width-1-i, i, 1)
     
-    j.oled_show()
+    oled_show()
     time.sleep(2)
     
     # Test reading pixels
     print("Testing pixel reading...")
-    assert j.oled_get_pixel(0, 0) == 1, "Corner pixel should be set"
-    assert j.oled_get_pixel(width//2, height//2) == 0, "Center should be clear"
+    assert oled_get_pixel(0, 0) == 1, "Corner pixel should be set"
+    assert oled_get_pixel(width//2, height//2) == 0, "Center should be clear"
     
     # Test framebuffer set/get round-trip
     print("Testing framebuffer round-trip...")
     fb_copy = bytearray(fb)
-    result = j.oled_set_framebuffer(fb_copy)
+    result = oled_set_framebuffer(fb_copy)
     assert result, "Should be able to set framebuffer"
     
     print("✓ Framebuffer access works!")
@@ -156,12 +155,12 @@ def test_small_text_scrolling():
     """Test small text scrolling mode"""
     print("\n=== Testing Small Text Scrolling ===")
     
-    j.oled_set_text_size(0)  # Small scrolling mode
-    j.oled_clear()
+    oled_set_text_size(0)  # Small scrolling mode
+    oled_clear()
     
     # Print multiple lines to test scrolling
     for i in range(10):
-        j.oled_print(f"Scroll line {i+1}")
+        oled_print(f"Scroll line {i+1}")
         time.sleep(0.3)
     
     time.sleep(2)
@@ -175,7 +174,7 @@ def run_all_tests():
     
     try:
         # Ensure OLED is connected
-        j.oled_connect()
+        oled_connect()
         time.sleep(0.5)
         
         # Run tests
@@ -187,9 +186,9 @@ def run_all_tests():
         test_small_text_scrolling()
         
         # Final success message
-        j.oled_clear()
-        j.oled_set_text_size(2)
-        j.oled_print("All tests passed!")
+        oled_clear()
+        oled_set_text_size(2)
+        oled_print("All tests passed!")
         
         print("\n" + "=" * 50)
         print("✓ ALL TESTS PASSED!")
@@ -197,9 +196,9 @@ def run_all_tests():
         
     except Exception as e:
         print(f"\n✗ TEST FAILED: {e}")
-        j.oled_clear()
-        j.oled_set_text_size(1)
-        j.oled_print("Test failed!")
+        oled_clear()
+        oled_set_text_size(1)
+        oled_print("Test failed!")
         raise
 
 # Run tests if executed directly

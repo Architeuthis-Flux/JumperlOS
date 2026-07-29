@@ -5,6 +5,7 @@
 #include "JumperlOS.h"   // ContextManager for auto-suspend under modal UI
 #include "States.h"
 #include "WaveGen.h"     // wavegen.isRunning() - shared I2C0 bus arbitration
+#include "FilesystemStuff.h" // safeFileOpen/safeFileClose (fs_mutex + core pause)
 #include <FatFS.h>
 #include <ArduinoJson.h>
 #include <string.h>
@@ -782,7 +783,7 @@ void screenJsonPath( const char* name, char* out, size_t cap ) {
 bool oledGuiSaveScreen( OledScreen* screen, const char* name ) {
     if ( !screen ) return false;
 
-    if ( !FatFS.exists( "/screens" ) ) FatFS.mkdir( "/screens" );
+    if ( !safeFileExists( "/screens" ) ) safeMkdir( "/screens" );
 
     char path[80];
     screenJsonPath( name, path, sizeof( path ) );
@@ -819,10 +820,12 @@ bool oledGuiSaveScreen( OledScreen* screen, const char* name ) {
         // "bitmap" (base64) reserved here for the deferred Image element type.
     }
 
-    File f = FatFS.open( path, "w" );
+    // safeFileOpen/safeFileClose: fs_mutex + Core-1 pause, like every other
+    // firmware writer (raw FatFS.open here raced USB MSC / Python FS access).
+    File f = safeFileOpen( path, "w" );
     if ( !f ) return false;
     serializeJsonPretty( doc, f );
-    f.close();
+    safeFileClose( f, true );
     return true;
 }
 
@@ -830,12 +833,12 @@ int oledGuiLoadScreen( const char* name ) {
     char path[80];
     screenJsonPath( name, path, sizeof( path ) );
 
-    File f = FatFS.open( path, "r" );
+    File f = safeFileOpen( path, "r" );
     if ( !f ) return 0;
 
     JsonDocument doc;
     DeserializationError err = deserializeJson( doc, f );
-    f.close();
+    safeFileClose( f, false );
     if ( err ) return 0;
 
     int handle = oledGuiCreateScreen();

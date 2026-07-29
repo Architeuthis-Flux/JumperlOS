@@ -75,8 +75,6 @@ File wokwiFile;
 
 File nodeFileBuffer;
 
-File menuTreeFile;
-
 File colorFile; // Added for net color storage
 
 unsigned long timeToFP = 0;
@@ -112,6 +110,12 @@ void closeAllFiles() {
   fs_mutex_release();  // THREAD SAFETY: Unlock filesystem
 }
 
+// CONTRACT: this only opens the global nodeFile - it does NOT protect the
+// subsequent read/write/close. The sole live caller (openNodeFile) wraps the
+// whole open->read->close in its own fs_mutex_acquire/release; fs_mutex is
+// per-core recursive, so the acquire/release here just nests inside that.
+// core1busy is owned by the caller for the same reason - it has to stay set
+// across the read, not just the open.
 int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
 
   // THREAD SAFETY: Use proper mutex instead of busy-wait
@@ -122,7 +126,9 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
     unsigned long _t = micros();
     while (core2busy) {
       __dmb();
-      if (micros() - _t > 25000) { core2busy = false; break; }
+      // ponytail: timeout-and-proceed only; core2busy belongs to core 2,
+      // force-clearing it here lied to every other waiter
+      if (micros() - _t > 25000) break;
       #ifdef USE_TINYUSB
       extern void tud_task(void);
       tud_task();
@@ -130,7 +136,6 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
     }
   }
   core1request = 0;
-  core1busy = true;
 
   // Jerial.println(micros() - start);
   if (nodeFile) {
@@ -167,7 +172,6 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
     // if (debugFP)
     //  Jerial.println("\n\n\rFailed to open nodeFile\n\n\r");
     // openFileThreadSafe(w, slot);
-    core1busy = false;
     fs_mutex_release();  // THREAD SAFETY: Unlock on early return
     return 0;
   } else {
@@ -177,59 +181,17 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
   }
   // Jerial.print("openFileThreadSafe done   ");
   // Jerial.println(micros() - start);
-  //core1busy = false;
   fs_mutex_release();  // THREAD SAFETY: Unlock filesystem
   return 1;
 }
 
-void writeMenuTree(void) {
-  fs_mutex_acquire();  // THREAD SAFETY: Lock filesystem
-  {
-    unsigned long _t = micros();
-    while (core2busy) {
-      __dmb();
-      if (micros() - _t > 25000) { core2busy = false; break; }
-      #ifdef USE_TINYUSB
-      extern void tud_task(void);
-      tud_task();
-      #endif
-    }
-  }
-  core1busy = true;
-  // FatFS.begin();
-  //    delay(100);
-  //    FatFS.remove("/MenuTree.txt");
-  //   delay(100);
-  menuTreeFile = FatFS.open("/MenuTree.txt", "w");
-  if (!menuTreeFile) {
-
-    Jerial.println("Failed to open menuTree.txt");
-
-  } else {
-    // if (debugFP)
-    // {
-    //     Jerial.println("\n\ropened menuTree.txt\n\r");
-    // }
-    // else
-    // {
-    //     // Jerial.println("\n\r");
-    // }
-  }
-  int menuIndex = 0;
-
-  // while (menuTree[menuIndex] != '\0') {
-  //   menuTreeFile.print(menuTree[menuIndex]);
-  //   // Jerial.print(menuTree[menuIndex]);
-  //   menuIndex++;
-  // }
-
-  // menuTreeFile.write(menuTree);
-  // menuTreeFile.print(menuTreeString);
-  menuTreeFile.flush();
-  menuTreeFile.close();
-  core1busy = false;
-  fs_mutex_release();  // THREAD SAFETY: Unlock filesystem
-}
+// ponytail: gutted to a no-op. The old body opened /MenuTree.txt with "w"
+// while every content write was commented out, so a call truncated the file
+// to zero bytes. The symbol has to survive because Menus.cpp readMenuFile(0)
+// still links against it (out of this fix's edit scope); that branch is dead
+// at runtime - readMenuFile is only ever called with 1. Delete this stub,
+// the FileParsing.h declaration, and the Menus.cpp call together.
+void writeMenuTree(void) {}
 
 // void createLocalNodeFile(int slot) {
 //   // MIGRATED: Now loads slot into globalState via SlotManager
@@ -2358,9 +2320,14 @@ void openNodeFile(int slot, int flashOrLocal) {
   // core1busy = true;
   if ((nodeFileString.length() < 3 && flashOrLocal == 1) || flashOrLocal == 0) {
 
-    // if (flashOrLocal == 0) {
-    // multicore_lockout_start_blocking();
-    // Jerial.println("opening nodeFileSlot" + String(slot) + ".txt");
+    // Hold fs_mutex across the whole open->read->close so nothing else (the
+    // USB-MSC mount callback closing nodeFile from tud_task on the other
+    // core, or any other fs user) can yank the global nodeFile out from
+    // under the read loop. fs_mutex is per-core recursive, so the
+    // acquire/release inside openFileThreadSafe() just nests within this
+    // one. core1busy pairs with the clear at the end of this function.
+    fs_mutex_acquire();
+    core1busy = true;
 
     // nodeFile = FatFS.open("nodeFileSlot" + String(slot) + ".txt", "r");
     openFileThreadSafe(r, slot);
@@ -2391,6 +2358,8 @@ void openNodeFile(int slot, int flashOrLocal) {
     // Jerial.println(nodeFileString);
 
     nodeFile.close();
+
+    fs_mutex_release();
 
     // multicore_lockout_end_blocking();
   }
@@ -3080,7 +3049,8 @@ int printChangedNetColorFile(int slot, int flashOrLocal) {
       unsigned long _t = micros();
       while (core2busy) {
         __dmb();
-        if (micros() - _t > 25000) { core2busy = false; break; }
+        // ponytail: timeout-and-proceed only; never falsify core 2's flag
+        if (micros() - _t > 25000) break;
         #ifdef USE_TINYUSB
         extern void tud_task(void);
         tud_task();

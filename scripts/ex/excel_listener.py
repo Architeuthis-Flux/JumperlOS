@@ -2,7 +2,6 @@
 Excel GUI Listener Script (V1.0.2)
 """
 
-import jumperless as j
 import sys
 import select
 import time
@@ -31,12 +30,12 @@ def debug_msg(msg, level=1):
         print(msg)
 
 def reset_breadboard():
-    j.nodes_clear()
+    nodes_clear()
     for channel in range(4):
-        j.set_dac(channel, 0)
+        set_dac(channel, 0)
     for pin in range(1, 9):
-        j.gpio_set_dir(pin, False) ## False --> INPUT
-        j.gpio_set_pull(pin, 0) ## -1, 0, 1 --> down, none, up
+        gpio_set_dir(pin, False) ## False --> INPUT
+        gpio_set_pull(pin, 0) ## -1, 0, 1 --> down, none, up
 
 ## Reset all breadboard settings since Excel will be setting them
 reset_breadboard()
@@ -84,7 +83,7 @@ def apply_gpio(gpio_chars, freq_list, duty_list, status_list):
 
 def apply_voltages(voltage_list):
     for channel, voltage in enumerate(voltage_list):
-        j.set_dac(channel, float(voltage))
+        set_dac(channel, float(voltage))
 
 def apply_connections(connection_list, net_name_list):
     ''' Attempts to create each connection, adds new nets to list, and updates & returns sensor_state'''
@@ -96,14 +95,14 @@ def apply_connections(connection_list, net_name_list):
     if len(connection_list[0]) > 1:
         for net_name, nodes_str in connection_list:
             node_1, node_2 = nodes_str.split('-', 1)
-            j.connect(node_1, node_2, 0)
+            connect(node_1, node_2, 0)
             ## Query to confirm the connection was formed
-            if j.is_connected(node_1,node_2):
+            if is_connected(node_1,node_2):
                 debug_msg(f"Connected {node_1} — {node_2}", level=2)
                 ## Add the net_name to the list if it's new
                 if net_name not in net_name_list:
                     net_name_list.append(net_name)
-                    j.set_net_name(len(net_name_list) - 1, net_name)
+                    set_net_name(len(net_name_list) - 1, net_name)
                 ## Check both endpoints against sensor node lists
                 for node in (node_1, node_2):
                     if node in ADC_NODES:
@@ -134,18 +133,18 @@ def build_response(net_name_list, net_colors_list, measurements, status_list):
     return f"{'|'.join(net_name_list)},{'|'.join(net_colors_list)},{adc_fields}|{power_field}|{current_field},{placeholder_values},LED_DETAIL,{'|'.join(status_list)}"
 
 def set_gpio_from_char(pin_id, setting_char, frequency_setting, duty_cycle_setting):
-    j.pwm_stop(pin_id)
+    pwm_stop(pin_id)
     if setting_char == 'H':
-        j.gpio_set_dir(pin_id, True) ## true --> OUTPUT
-        j.gpio_set(pin_id, True) ## True --> OUTPUT HIGH
+        gpio_set_dir(pin_id, True) ## true --> OUTPUT
+        gpio_set(pin_id, True) ## True --> OUTPUT HIGH
         debug_msg(f"setting {pin_id} to {setting_char}")
     elif setting_char == 'L':
-        j.gpio_set_dir(pin_id, True) ## true --> OUTPUT
-        j.gpio_set(pin_id, False) ## False --> OUTPUT LOW
+        gpio_set_dir(pin_id, True) ## true --> OUTPUT
+        gpio_set(pin_id, False) ## False --> OUTPUT LOW
         debug_msg(f"setting {pin_id} to {setting_char}")
     elif setting_char == 'P':
-        j.gpio_set_dir(pin_id, True) ## true --> OUTPUT
-        j.pwm(pin_id, frequency_setting, duty_cycle_setting)
+        gpio_set_dir(pin_id, True) ## true --> OUTPUT
+        pwm(pin_id, frequency_setting, duty_cycle_setting)
         debug_msg(f"setting {pin_id} to {setting_char} with a frequency of {frequency_setting} and duty cycle of {duty_cycle_setting}")
     else:
         try:
@@ -157,8 +156,8 @@ def set_gpio_from_char(pin_id, setting_char, frequency_setting, duty_cycle_setti
             status_message_list.append(f"Error message: {e}")
             debug_msg(status_message_list[-1])
             setting_int = 0
-        j.gpio_set_dir(pin_id, False) ## False --> INPUT
-        j.gpio_set_pull(pin_id, setting_int) ## -1, 0, 1 --> down, none, up
+        gpio_set_dir(pin_id, False) ## False --> INPUT
+        gpio_set_pull(pin_id, setting_int) ## -1, 0, 1 --> down, none, up
         debug_msg(f"setting {pin_id} to {setting_int}")
 
 def sample_measurements(sensor_state):
@@ -166,15 +165,15 @@ def sample_measurements(sensor_state):
     adc_readings = []
     for i, enabled in enumerate(sensor_state["adc"]):
         if enabled:
-            adc_readings.append(j.adc_get(i))
+            adc_readings.append(adc_get(i))
             debug_msg(f"ADC{i}: {adc_readings[-1]:.3f}V", level=2)
         else:
             adc_readings.append(None)
 
     if all(sensor_state["current"]):
-        power_reading = j.get_power(0)
+        power_reading = get_power(0)
         debug_msg(f"Power: {power_reading*1000:.2f}mW", level=2)
-        current_reading = j.ina_get_current(0)
+        current_reading = ina_get_current(0)
         debug_msg(f"Current: {current_reading*1000:.2f}mA", level=2)
     else:
         power_reading = None
@@ -184,8 +183,8 @@ def sample_measurements(sensor_state):
 
 def try_connecting_oled():
     try:
-        j.oled_connect() ## Connect OLED
-        j.oled_clear()
+        oled_connect() ## Connect OLED
+        oled_clear()
         oled_enabled = True
     except (ValueError, TypeError) as e:
         print("WARNING: Unable to connect OLED. OLED features disabled.")
@@ -195,14 +194,14 @@ def try_connecting_oled():
 
 ## Connect the OLED and display Excel
 if try_connecting_oled():
-    j.oled_show_bitmap_file("/images/excelGUI.bin", 0, 0) ## when new firmware is available...
-    # j.oled_show_bitmap_file("/images/excel_gui.bin", 0, 0)
-    j.oled_disconnect()
+    oled_show_bitmap_file("/images/excelGUI.bin", 0, 0) ## when new firmware is available...
+    # oled_show_bitmap_file("/images/excel_gui.bin", 0, 0)
+    oled_disconnect()
 
 ## Debug code: initial net info
 # debug_msg("Initial Net Info:")
-# for net_num in range(0, j.get_num_nets()):
-#     debug_msg(f"Net {j.get_net_name(net_num)} is colored {j.get_net_color(net_num):06x}")
+# for net_num in range(0, get_num_nets()):
+#     debug_msg(f"Net {get_net_name(net_num)} is colored {get_net_color(net_num):06x}")
 
 ## Check if the config.txt file has "ignore_dtr = 1;" in the [usb_cdc] section
 connection_allowed = True ## an override value used for testing
@@ -253,15 +252,15 @@ if is_setting_in_config() and connection_allowed:
                         parsed = parse_command("".join(char_list))
                         if parsed:
                             ## Perform setup operations
-                            j.nodes_clear()
+                            nodes_clear()
                             status_message_list = []
                             ## Set the default net names to match Excel
                             net_name_list = ["Empty Net", "G", "T", "B", "0DAC", "1DAC"]
                             for i, net in enumerate(net_name_list):
-                                 j.set_net_name(i, net)
+                                 set_net_name(i, net)
                             ## Take a look at the default nets:
-                            # for net_num in range(0, j.get_num_nets()):
-                            #     debug_msg(f"Net {j.get_net_name(net_num)} is colored {j.get_net_color(net_num):06x}")
+                            # for net_num in range(0, get_num_nets()):
+                            #     debug_msg(f"Net {get_net_name(net_num)} is colored {get_net_color(net_num):06x}")
     
                             ## Ignore element 0 (the "EXCEL" lead text because it might be missing the first few characters)
                             
@@ -279,20 +278,20 @@ if is_setting_in_config() and connection_allowed:
                             measurements = sample_measurements(sensor_state)
                         
                             ## After all commands have been issued, query the resulting colors for each net
-                            net_colors_list = [f"{j.get_net_color(n):06x}" for n in range(j.get_num_nets())]
-                            # for net_num in range(0, j.get_num_nets()):
-                            #     debug_msg(f"Net {j.get_net_name(net_num)} is colored {j.get_net_color(net_num):06x}")
-                            #     debug_msg(f"The nodes are: {j.get_net_nodes(net_num)}")
+                            net_colors_list = [f"{get_net_color(n):06x}" for n in range(get_num_nets())]
+                            # for net_num in range(0, get_num_nets()):
+                            #     debug_msg(f"Net {get_net_name(net_num)} is colored {get_net_color(net_num):06x}")
+                            #     debug_msg(f"The nodes are: {get_net_nodes(net_num)}")
 
                             ## Print any status messages to the OLED
                             if len(status_message_list) > 0:
                                 reset_breadboard()
                                 if try_connecting_oled():
-                                    j.oled_set_font("Berkeley Mono")
-                                    j.oled_print("\n\n\n\n", 0)
+                                    oled_set_font("Berkeley Mono")
+                                    oled_print("\n\n\n\n", 0)
                                     for message in status_message_list:
-                                        j.oled_print(f"{message}\n", 0)
-                                    j.oled_disconnect()
+                                        oled_print(f"{message}\n", 0)
+                                    oled_disconnect()
                             
                             ## Return the '|' delimited lists separated by ','s with placeholders for future data
                             print(build_response(net_name_list, net_colors_list, measurements, status_message_list))
@@ -312,9 +311,9 @@ else:
     print('Unable to transmit to Excel, please set "ignore_dtr = 1;" in the [usb_cdc] section of config.txt')
     ## Connect OLED to print message about needed config setting(s)
     if try_connecting_oled():
-        j.oled_set_font("Berkeley Mono")
-        j.oled_print("\n\n\n\nPlease set\nignore_dtr = 1;\nin config.txt\nand reboot", 0)
-        j.oled_disconnect()
+        oled_set_font("Berkeley Mono")
+        oled_print("\n\n\n\nPlease set\nignore_dtr = 1;\nin config.txt\nand reboot", 0)
+        oled_disconnect()
     
 ## abort script by reaching the end
 print("script will now exit")

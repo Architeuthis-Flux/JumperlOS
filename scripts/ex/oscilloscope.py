@@ -34,7 +34,6 @@ API Demonstrations:
 
 """
 
-import jumperless as j
 import time
 
 # ============================================================================
@@ -42,7 +41,7 @@ import time
 # ============================================================================
 
 # Display parameters
-WIDTH, HEIGHT, _ = j.oled_get_framebuffer_size()
+WIDTH, HEIGHT, _ = oled_get_framebuffer_size()
 PLOT_HEIGHT = HEIGHT - 8  # Leave room for status bar
 PLOT_WIDTH = WIDTH
 
@@ -96,7 +95,7 @@ state = OscopeState()
 def init_connections():
     """Initialize ADC connection to default node."""
     print(f"Connecting ADC0 to node {state.connected_node}")
-    j.connect(j.ADC0, state.connected_node)
+    connect(ADC0, state.connected_node)
 
 def voltage_to_pixel(voltage):
     """Convert voltage to Y pixel coordinate (inverted for display).
@@ -121,18 +120,18 @@ def draw_grid():
     # Draw dots at intersections for speed
     for x in range(0, PLOT_WIDTH, 16):
         for y in range(0, PLOT_HEIGHT, 3):
-            j.oled_set_pixel(x, y, 1)
+            oled_set_pixel(x, y, 1)
     
     # Horizontal center line (dotted) - most important reference
     for x in range(0, PLOT_WIDTH, 4):
-        j.oled_set_pixel(x, center_y, 1)
+        oled_set_pixel(x, center_y, 1)
     
     # Horizontal quarter divisions
     y_quarter = PLOT_HEIGHT // 4
     y_3quarter = 3 * PLOT_HEIGHT // 4
     for x in range(0, PLOT_WIDTH, 4):
-        j.oled_set_pixel(x, y_quarter, 1)
-        j.oled_set_pixel(x, y_3quarter, 1)
+        oled_set_pixel(x, y_quarter, 1)
+        oled_set_pixel(x, y_3quarter, 1)
 
 def draw_char(char, x, y):
     """Draw a simple 3x5 character using basic patterns."""
@@ -173,7 +172,7 @@ def draw_char(char, x, y):
     for row in range(5):
         for col in range(3):
             if pattern[row][col]:
-                j.oled_set_pixel(x + col, y + row, 1)
+                oled_set_pixel(x + col, y + row, 1)
 
 def draw_text(text, x, y):
     """Draw text string using mini font."""
@@ -189,11 +188,11 @@ def draw_status_bar():
     # Clear status area
     for y in range(y_start, HEIGHT):
         for x in range(WIDTH):
-            j.oled_set_pixel(x, y, 0)
+            oled_set_pixel(x, y, 0)
     
     # Draw separator line
     for x in range(WIDTH):
-        j.oled_set_pixel(x, y_start, 1)
+        oled_set_pixel(x, y_start, 1)
     
     text_y = y_start + 2
     
@@ -271,11 +270,11 @@ def capture_waveform():
     # Fast trigger detection if not in free-run mode
     if state.trigger_mode != 0:
         start_time = time.ticks_ms()
-        last_voltage = j.adc_get(0)
+        last_voltage = adc_get(0)
         trig_level = state.trigger_level
         
         while time.ticks_diff(time.ticks_ms(), start_time) < state.trigger_timeout_ms:
-            voltage = j.adc_get(0)
+            voltage = adc_get(0)
             
             # Optimized trigger check (avoid branching)
             if state.trigger_mode == 1:  # Rising edge
@@ -297,7 +296,7 @@ def capture_waveform():
     # Optimized sampling loop
     if delay_us > 10:  # Only delay if necessary
         for i in range(PLOT_WIDTH):
-            voltage = j.adc_get(0)
+            voltage = adc_get(0)
             samples[i] = voltage
             
             # Track statistics (branchless min/max)
@@ -311,7 +310,7 @@ def capture_waveform():
     else:
         # No delay - maximum speed sampling
         for i in range(PLOT_WIDTH):
-            voltage = j.adc_get(0)
+            voltage = adc_get(0)
             samples[i] = voltage
             if voltage < min_v:
                 min_v = voltage
@@ -347,13 +346,13 @@ def draw_waveform():
         # Draw vertical line segment between points (faster than Bresenham for vertical lines)
         if y1 == y2:
             # Horizontal segment - single pixel
-            j.oled_set_pixel(x, y1, 1)
+            oled_set_pixel(x, y1, 1)
         else:
             # Vertical segment
             y_min = min(y1, y2)
             y_max = max(y1, y2)
             for y in range(y_min, y_max + 1):
-                j.oled_set_pixel(x, y, 1)
+                oled_set_pixel(x, y, 1)
 
 def draw_trigger_indicator():
     """Draw trigger level indicator on display."""
@@ -363,22 +362,22 @@ def draw_trigger_indicator():
             # Draw trigger marker on right edge (dashed line)
             for x in range(PLOT_WIDTH - 5, PLOT_WIDTH):
                 if x % 2 == 0:
-                    j.oled_set_pixel(x, y, 1)
+                    oled_set_pixel(x, y, 1)
             
             # Draw arrow pointing to trigger level on right edge
             # Arrow: >
-            j.oled_set_pixel(PLOT_WIDTH - 2, y, 1)
+            oled_set_pixel(PLOT_WIDTH - 2, y, 1)
             if y > 0:
-                j.oled_set_pixel(PLOT_WIDTH - 3, y - 1, 1)
+                oled_set_pixel(PLOT_WIDTH - 3, y - 1, 1)
             if y < PLOT_HEIGHT - 1:
-                j.oled_set_pixel(PLOT_WIDTH - 3, y + 1, 1)
+                oled_set_pixel(PLOT_WIDTH - 3, y + 1, 1)
     
     # If adjusting trigger level, draw full-width line for reference
     if state.current_mode == 2 and state.show_overlay:
         y = voltage_to_pixel(state.trigger_level)
         if 0 <= y < PLOT_HEIGHT:
             for x in range(0, PLOT_WIDTH, 2):  # Dashed line across screen
-                j.oled_set_pixel(x, y, 1)
+                oled_set_pixel(x, y, 1)
 
 
 def print_statistics():
@@ -402,7 +401,7 @@ def print_statistics():
 def update_display():
     """Complete display update - grid, waveform, status."""
     # Note: oled_clear(False) = don't call show() after clear (prevents flashing)
-    j.oled_clear(False)
+    oled_clear(False)
     draw_grid()
     draw_trigger_indicator()
     draw_waveform()
@@ -416,7 +415,7 @@ def update_display():
         else:
             state.show_overlay = False  # Hide overlay after timeout
     
-    j.oled_show()  # Single update for efficiency
+    oled_show()  # Single update for efficiency
 
 # ============================================================================
 # CONTROL HANDLERS
@@ -425,21 +424,21 @@ def update_display():
 def handle_probe_touch():
     """Handle non-blocking probe touch to reconnect ADC."""
     # Note: Use positional args - MicroPython C modules don't support keyword args
-    pad = j.probe_read(False)  # Non-blocking read (False = blocking=False)
+    pad = probe_read(False)  # Non-blocking read (False = blocking=False)
     
-    if pad != j.NO_PAD:
+    if pad != NO_PAD:
         # Check if it's a valid breadboard node (1-60)
         pad_num = int(pad)
         if 1 <= pad_num <= 60:
             # Disconnect from old node and connect to new
             if state.last_node is not None:
-                j.disconnect(j.ADC0, state.last_node)
+                disconnect(ADC0, state.last_node)
                 print(f"\nProbe touched: Row {pad_num} (disconnected from row {state.last_node})")
             else:
                 print(f"\nProbe touched: Row {pad_num}")
             
             state.connected_node = pad_num
-            j.connect(j.ADC0, state.connected_node)
+            connect(ADC0, state.connected_node)
             state.last_node = state.connected_node
             
             print(f"ADC0 -> Row {state.connected_node} (measuring voltage)")
@@ -448,8 +447,8 @@ def handle_probe_touch():
 def handle_clickwheel():
     """Handle clickwheel rotation and button for settings adjustment."""
     # Check for mode change (button click)
-    button = j.clickwheel_get_button()
-    if button == j.CLICKWHEEL_PRESSED:
+    button = clickwheel_get_button()
+    if button == CLICKWHEEL_PRESSED:
         # Cycle through modes (5 modes now: Time, V/div, Level, Trig, Auto)
         state.current_mode = (state.current_mode + 1) % 5
         
@@ -489,11 +488,11 @@ def handle_clickwheel():
     
     # Check for value adjustment (rotation)
     # Note: Use positional args (True = consume=True for one-shot detection)
-    direction = j.clickwheel_get_direction(True)
+    direction = clickwheel_get_direction(True)
     
-    if direction == j.CLICKWHEEL_UP:
+    if direction == CLICKWHEEL_UP:
         adjust_setting(1)
-    elif direction == j.CLICKWHEEL_DOWN:
+    elif direction == CLICKWHEEL_DOWN:
         adjust_setting(-1)
 
 def draw_adjustment_overlay():
@@ -501,15 +500,15 @@ def draw_adjustment_overlay():
     # Clear center area for overlay
     for y in range(8, 20):
         for x in range(20, 108):
-            j.oled_set_pixel(x, y, 0)
+            oled_set_pixel(x, y, 0)
     
     # Draw border
     for x in range(20, 108):
-        j.oled_set_pixel(x, 8, 1)
-        j.oled_set_pixel(x, 19, 1)
+        oled_set_pixel(x, 8, 1)
+        oled_set_pixel(x, 19, 1)
     for y in range(8, 20):
-        j.oled_set_pixel(20, y, 1)
-        j.oled_set_pixel(107, y, 1)
+        oled_set_pixel(20, y, 1)
+        oled_set_pixel(107, y, 1)
     
     # Build overlay text based on mode
     if state.current_mode == 0:  # Timebase
@@ -640,9 +639,9 @@ def adjust_setting(delta):
 def handle_probe_button():
     """Handle probe button for reset and exit."""
     # Note: Use positional args (False=non-blocking, True=consume)
-    button = j.probe_button(False, True)
+    button = probe_button(False, True)
     
-    if button == j.CONNECT_BUTTON:
+    if button == CONNECT_BUTTON:
         # Reset to defaults
         print("\n" + "="*50)
         print("RESET TO DEFAULTS")
@@ -662,7 +661,7 @@ def handle_probe_button():
         time.sleep(0.3)
         return False
     
-    elif button == j.REMOVE_BUTTON:
+    elif button == REMOVE_BUTTON:
         # Exit oscilloscope
         print("\n" + "="*50)
         print("Exiting oscilloscope")
@@ -706,7 +705,7 @@ def main():
     print("-"*60 + "\n")
     
     # Initialize
-    j.oled_connect()
+    oled_connect()
     init_connections()
     state.last_node = state.connected_node
     state.last_stats_print = time.ticks_ms()  # Initialize stats timer
@@ -732,8 +731,8 @@ def main():
     
     finally:
         # Cleanup 
-        j.oled_clear()
-        j.oled_print("Oscilloscope\nExited", 1)
+        oled_clear()
+        oled_print("Oscilloscope\nExited", 1)
         print("\n\nCleanup complete")
 
 # ============================================================================

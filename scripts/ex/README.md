@@ -53,7 +53,7 @@ To exclude additional files, edit the `exclude_files` set in `scripts/generate_m
 
 ## 📝 Example Structure
 
-Each example should follow this structure:
+Each example should follow this structure. Note that the jumperless API (functions and node constants) is auto-imported into globals on the device, so call it bare — no `import jumperless` needed:
 
 ```python
 """
@@ -66,7 +66,6 @@ Hardware Setup:
 3. Expected behavior
 """
 
-import jumperless as j
 import time
 
 # Your example code here
@@ -106,7 +105,7 @@ while True:
 
 1. Create a new `.py` file in `pythonStuff/ex/`
 2. Add a docstring at the top describing the example
-3. Import `jumperless as j` and any other needed modules
+3. Import any needed modules (`time`, `machine`, etc.) — the jumperless API is already in globals
 4. Write your example code
 5. Run the generator script to update the firmware header
 6. Rebuild the firmware
@@ -122,7 +121,6 @@ Hardware Setup:
 - List any required connections
 """
 
-import jumperless as j
 import time
 
 print("My New Example")

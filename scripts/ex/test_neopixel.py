@@ -15,7 +15,6 @@ Controls:
 
 import machine
 import time
-import jumperless as j
 import neopixel
 
 NUM_PIXELS = 15
@@ -29,10 +28,10 @@ print("  🔘 Press button   = Change mode\n")
 
 # Setup connections
 print("Setting up connections...")
-j.nodes_clear()
-j.connect(j.GPIO_1, 15)  # Data to breadboard row 15
-j.connect(j.GND, 14)      # Ground
-j.connect(j.TOP_RAIL, 16) # Power (5V)
+nodes_clear()
+connect(GPIO_1, 15)  # Data to breadboard row 15
+connect(GND, 14)      # Ground
+connect(TOP_RAIL, 16) # Power (5V)
 
 # Create NeoPixel strip using the library
 print("Initializing NeoPixels...")
@@ -71,7 +70,7 @@ last_speed = 0
 speed = 50
 
 # Reset encoder position for clean start
-j.clickwheel_reset_position()
+clickwheel_reset_position()
 
 print(f"Mode: {modes[current_mode]}")
 print(f"Speed: 50/100 (turn encoder to adjust)\n")
@@ -79,23 +78,23 @@ print(f"Speed: 50/100 (turn encoder to adjust)\n")
 try:
     while True:
         # Check encoder button
-        button = j.clickwheel_get_button()
+        button = clickwheel_get_button()
         if button and not last_button_state:
             current_mode = (current_mode + 1) % len(modes)
             frame = 0
             print(f"\n🎨 Mode: {modes[current_mode]}")
-            j.oled_print(f"{modes[current_mode]}")
+            oled_print(f"{modes[current_mode]}")
             time.sleep(0.8)
             
         last_button_state = button
         
         # Get absolute encoder position and map to speed
-        position = j.clickwheel_get_position()
+        position = clickwheel_get_position()
        
         # Position can be negative or positive, so we clamp to 1-1000 range
         speed = max(1, min(1000,speed + position))
         
-        j.clickwheel_reset_position()
+        clickwheel_reset_position()
         
         # Show speed changes
         if speed != last_speed:
@@ -103,7 +102,7 @@ try:
             last_speed = speed
             delay_us = 50000 // speed
             print(f"\r                       \r⚡ Delay: {delay_us} us", end="")
-            j.oled_print("Delay " + str(delay_us) + " us")
+            oled_print("Delay " + str(delay_us) + " us")
             time.sleep(0.01)
             continue
         # Calculate delay based on speed (inverse relationship)

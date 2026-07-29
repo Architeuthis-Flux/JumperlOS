@@ -78,7 +78,6 @@ void refreshUSBFilesystem(void);
 void debugUSBFilesystem(void);
 bool isUSBMassStorageActive(void);
 bool isUSBMassStorageMounted(void);
-bool isUSBMassStorageEjected(void);
 void printUSBMassStorageStatus(void);
 void testUSBMassStorage(void);
 bool getUSBMountedStatus(void);

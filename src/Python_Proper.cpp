@@ -3432,6 +3432,7 @@ void ScriptHistory::saveHistoryToFile() {
 // Core flush implementation with thread safety and atomic write
 void ScriptHistory::flushToDisk() {
   if (!dirty || flush_in_progress) return;
+  // ponytail: non-atomic test-and-set; fine while history is only touched from core 0
   flush_in_progress = true;
   
   // Capture current state before file operations
@@ -3445,8 +3446,9 @@ void ScriptHistory::flushToDisk() {
   // Use safe file functions for all operations
   File file = safeFileOpen(tempPath.c_str(), "w", 500);
   if (file) {
+    bool ok = true;
     // Write entries in chronological order (oldest first)
-    for (int i = 0; i < save_count; i++) {
+    for (int i = 0; ok && i < save_count; i++) {
       int idx = (save_head - save_count + i + MAX_HISTORY) % MAX_HISTORY;
       
       // Skip empty entries (from pruning)
@@ -3454,19 +3456,27 @@ void ScriptHistory::flushToDisk() {
       
       // New format with metadata: ===ENTRY:timestamp:parent_id===
       String header = "===ENTRY:" + String(history[idx].timestamp) + ":" + history[idx].parent_id + "===\n";
-      file.write((const uint8_t*)header.c_str(), header.length());
-      file.write((const uint8_t*)history[idx].content.c_str(), history[idx].content.length());
-      file.write((const uint8_t*)"\n===END===\n", 11);
+      ok = file.write((const uint8_t*)header.c_str(), header.length()) == header.length() &&
+           file.write((const uint8_t*)history[idx].content.c_str(), history[idx].content.length()) == history[idx].content.length() &&
+           file.write((const uint8_t*)"\n===END===\n", 11) == 11;
     }
     file.flush();
     safeFileClose(file, true);  // Write mode, needs flush
     
-    // Atomic rename: remove old file, rename temp to final
-    safeFileDelete(finalPath.c_str());
-    safeFileRename(tempPath.c_str(), finalPath.c_str());
-    
-    dirty = false;
-    last_flush_time = millis();
+    if (ok) {
+      // Replace only now that the temp is fully written and flushed
+      // (FatFS rename won't overwrite, so delete first)
+      safeFileDelete(finalPath.c_str());
+      if (safeFileRename(tempPath.c_str(), finalPath.c_str())) {
+        dirty = false;
+        last_flush_time = millis();
+      }
+      // rename failed: keep dirty so a later flush retries
+    } else {
+      // Write failed (disk full / I/O error): drop the temp, keep the old
+      // history.txt on disk, and leave dirty set so a later flush retries.
+      safeFileDelete(tempPath.c_str());
+    }
   }
 
   flush_in_progress = false;
@@ -3486,7 +3496,17 @@ void ScriptHistory::loadHistoryFromFile() {
     return; // Fail silently
   }
 
-  String content = file.readString();
+  // Bounded read (same 64KB cap as States.cpp readSlotFile) - don't let a
+  // huge/corrupt history file exhaust the heap
+  String content;
+  size_t bytesRead = 0;
+  const size_t maxBytes = 65536;  // 64KB safety limit
+  while (file.available() && bytesRead < maxBytes) {
+    int c = file.read();
+    if (c < 0) break;
+    content += (char)c;
+    bytesRead++;
+  }
   safeFileClose(file, false);  // Read-only, no flush
 
   // Parse saved history - supports both old and new formats
@@ -3574,23 +3594,6 @@ void ScriptHistory::checkPeriodicFlush() {
 void ScriptHistory::forceFlush() {
   if (!dirty) return;
   flushToDisk();
-}
-
-// Emergency append for crash safety - uses separate file
-void ScriptHistory::appendEmergencyLog(const String &script) {
-  if (script.length() == 0) return;
-  
-  // Use safe file functions - they handle mutex internally
-  String emergencyPath = scripts_dir + "/emergency.log";
-  File f = safeFileOpen(emergencyPath.c_str(), "a", 200);
-  if (f) {
-    String header = "===" + String(millis()) + "===\n";
-    f.write((const uint8_t*)header.c_str(), header.length());
-    f.write((const uint8_t*)script.c_str(), script.length());
-    f.write((const uint8_t*)"\n===END===\n", 11);
-    f.flush();
-    safeFileClose(f, true);  // Write mode, needs flush
-  }
 }
 
 // Helper: count newlines in script

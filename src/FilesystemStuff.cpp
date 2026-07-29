@@ -9,6 +9,8 @@
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SharedBuffer.h" // For zero-copy transfer debugging
+#include "USBfs.h"      // usbMountedByHost - refuse firmware writes while a host has the disk mounted
+#include "FileCache.h"  // fileCacheInvalidate + cache-aware wrappers
 #include "config.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
 #include "AsyncPassthrough.h" // For suspendUARTRxIRQ/resumeUARTRxIRQ during flash ops
@@ -200,8 +202,11 @@ FileManager::FileManager( ) {
     // Check available memory before allocating file list
     size_t freeHeap = rp2040.getFreeHeap( );
     if ( freeHeap < sizeof( FileEntry ) * maxFiles + 10240 ) { // Need array + 10KB overhead
-        // Reduce maxFiles if memory is limited
-        maxFiles = min( 50, (int)( ( freeHeap - 10240 ) / sizeof( FileEntry ) ) );
+        // Reduce maxFiles if memory is limited. Clamp the subtraction: with
+        // freeHeap < 10240 the unsigned math underflowed to ~4GB and kept
+        // maxFiles at 50 on exactly the boards that couldn't afford it.
+        size_t availForList = ( freeHeap > 10240 ) ? freeHeap - 10240 : 0;
+        maxFiles = min( 50, (int)( availForList / sizeof( FileEntry ) ) );
         if ( maxFiles < 10 )
             maxFiles = 10; // Minimum usable size
     }
@@ -213,6 +218,7 @@ FileManager::FileManager( ) {
         fileList = new FileEntry[ maxFiles ];
     }
     fileCount = 0;
+    listingTruncated = false;
     selectedIndex = 0;
     displayOffset = 0;
     maxDisplayLines = ::DEFAULT_DISPLAY_LINES; // Use configurable display lines
@@ -338,8 +344,8 @@ FileType FileManager::getFileType( const String& filename ) {
     if ( lower.endsWith( ".py" ) || lower.endsWith( ".pyw" ) || lower.endsWith( ".pyi" ) ) {
         return FILE_TYPE_PYTHON;
 
-    } else if ( lower.endsWith( ".json" ) ) {
-        return FILE_TYPE_JSON;
+    } else if ( lower.endsWith( ".json" ) || lower.endsWith( ".yaml" ) || lower.endsWith( ".yml" ) ) {
+        return FILE_TYPE_JSON; // YAML (e.g. slot*.yaml) is JSON-ish structured config
     } else if ( lower.endsWith( ".cfg" ) || lower.endsWith( ".conf" ) || lower.startsWith( "config" ) || filename == "config.txt" ) {
         return FILE_TYPE_CONFIG;
     } else if ( lower.startsWith( "nodefileslot" ) && lower.endsWith( ".txt" ) ) {
@@ -634,6 +640,7 @@ void FileManager::refreshListing( ) {
     }
 
     fileCount = 0;
+    listingTruncated = false;
 
     // Handle special case where filesystem is not available
     if ( currentPath == "[NO_FS]" ) {
@@ -748,7 +755,13 @@ void FileManager::refreshListing( ) {
     // Re-open directory to start from beginning for actual listing
     dir = FatFS.openDir( currentPath );
 
-    while ( dir.next( ) && fileCount < maxFiles ) { // (Core 1 still parked here)
+    while ( dir.next( ) ) { // (Core 1 still parked here)
+        if ( fileCount >= maxFiles ) {
+            // Remember entries were dropped so the UI can say so.
+            // ponytail: a skipped hidden file can also trip this - fine for an indicator
+            listingTruncated = true;
+            break;
+        }
         // Service USB periodically during long directory reads to prevent disconnect
         #ifdef USE_TINYUSB
         if ( ( fileCount & 0x03 ) == 0 ) tud_task( );
@@ -766,7 +779,7 @@ void FileManager::refreshListing( ) {
         entry.path = getFullPath( currentPath, entry.name );
         entry.isDirectory = dir.isDirectory( );
         entry.size = dir.isDirectory( ) ? 0 : dir.fileSize( );
-        entry.lastModified = dir.fileCreationTime( ); // Use creation time
+        entry.lastModified = dir.fileTime( ); // FAT modified time ("Modified:" label; the wrapper's fileCreationTime() is just an alias of it)
 
         if ( entry.isDirectory ) {
             entry.type = FILE_TYPE_DIRECTORY;
@@ -963,6 +976,9 @@ void FileManager::showCurrentListing( bool showHeader ) {
         changeTerminalColor( FileColors::STATUS, true );
         Serial.println( "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌" );
         Serial.println( "Showing " + String( startIdx + 1 ) + "-" + String( endIdx ) + " of " + String( fileCount ) + " files" );
+        if ( listingTruncated ) {
+            Serial.println( "(listing truncated at " + String( maxFiles ) + " entries)" );
+        }
     }
 
     changeTerminalColor( -1, false ); // Reset colors
@@ -1126,8 +1142,22 @@ static bool runPythonScript( const String& fullPath ) {
         Serial.println( "\r\nFailed to open " + fullPath );
         return false;
     }
+    // Cap: the whole script is slurped into one heap String before exec, so
+    // refuse anything implausibly large (matches writeStringToFile's 64KB cap)
+    // instead of letting a big binary exhaust the heap.
+    size_t scriptSize = f.size( );
+    if ( scriptSize > 64 * 1024 ) {
+        safeFileClose( f, false );
+        Serial.println( "\r\nScript too large to run (" + String( scriptSize / 1024 ) + "KB, max 64KB): " + fullPath );
+        return false;
+    }
     String content = f.readString( );
     safeFileClose( f, false );  // Release fs_mutex before running the script
+    if ( content.length( ) != scriptSize ) {
+        // Short read = heap allocation failed mid-readString; don't exec a truncated script
+        Serial.println( "\r\nFailed to read " + fullPath + " (out of memory?)" );
+        return false;
+    }
     if ( content.length( ) == 0 ) {
         Serial.println( "\r\nScript is empty: " + fullPath );
         return false;
@@ -1190,8 +1220,19 @@ bool runPythonScriptByPath( const String& fullPath ) {
         Serial.println( "\r\nFailed to open " + fullPath );
         return false;
     }
+    // Same 64KB heap-safety cap as runPythonScript above.
+    size_t scriptSize = f.size( );
+    if ( scriptSize > 64 * 1024 ) {
+        safeFileClose( f, false );
+        Serial.println( "\r\nScript too large to run (" + String( scriptSize / 1024 ) + "KB, max 64KB): " + fullPath );
+        return false;
+    }
     String content = f.readString( );
     safeFileClose( f, false );
+    if ( content.length( ) != scriptSize ) {
+        Serial.println( "\r\nFailed to read " + fullPath + " (out of memory?)" );
+        return false;
+    }
     if ( content.length( ) == 0 ) {
         Serial.println( "\r\nScript is empty: " + fullPath );
         return false;
@@ -1391,6 +1432,22 @@ bool FileManager::editFileWithEkilo( const String& filename ) {
     return true;
 }
 
+// Bounded line read for file previews. Reads to '\n' or maxLen chars,
+// whichever comes first, so a large binary with no newlines can't slurp
+// the whole file into one heap String (readStringUntil is unbounded).
+// ponytail: a line longer than maxLen just continues on the next preview
+// line instead of skipping to EOL - fine for a truncated preview.
+static String readLineBounded( File& f, size_t maxLen ) {
+    String line;
+    while ( f.available( ) && line.length( ) < maxLen ) {
+        char ch = (char)f.read( );
+        if ( ch == '\n' )
+            break;
+        line += ch;
+    }
+    return line;
+}
+
 bool FileManager::viewFile( const String& filename ) {
     File file = safeFileOpen( filename.c_str( ), "r" );
     if ( !file ) {
@@ -1411,7 +1468,7 @@ bool FileManager::viewFile( const String& filename ) {
 
     int lineCount = 0;
     while ( file.available( ) && lineCount < 50 ) { // Limit to 50 lines for viewing
-        String line = file.readStringUntil( '\n' );
+        String line = readLineBounded( file, 200 );
         Serial.println( line );
         lineCount++;
     }
@@ -1755,11 +1812,20 @@ void FileManager::run( ) {
                 outputAreaCurrentRow++; // Move to next line
 
                 if ( confirm == 'y' || confirm == 'Y' ) {
+                    // Capture before refreshListing() rebuilds fileList under `file`
+                    bool wasDirectory = file->isDirectory;
                     outputToArea( "Deleting...", FileColors::STATUS );
-                    deleteFile( file->name );
+                    bool deleted = deleteFile( file->name );
                     refreshListing( );
                     drawInterface( );
                     blockInputBriefly( ); // Block input after interface refresh
+                    if ( !deleted && wasDirectory ) {
+                        // FatFS.remove (f_unlink) deletes files and EMPTY dirs;
+                        // a populated directory is the usual failure here.
+                        // (Printed after drawInterface so the redraw's
+                        // clearOutputArea doesn't immediately wipe it.)
+                        outputToArea( "Delete failed: directory not empty - delete its contents first", FileColors::ERROR );
+                    }
                 } else {
                     outputToArea( "Delete cancelled", FileColors::STATUS );
                 }
@@ -1768,15 +1834,26 @@ void FileManager::run( ) {
         }
 
         case 27: { // ESC key or escape sequence (arrow keys)
-            // Wait briefly to see if this is an escape sequence or standalone ESC
-
-            if ( Serial.available( ) == 0 ) {
-                delayMicroseconds( 2000 ); // 5ms delay to wait for escape sequence
+            // Wait for the rest of an escape sequence: over USB CDC the '['
+            // and final byte can land in a later packet, so poll up to ~25ms
+            // instead of the old 2ms one-shot (which misparsed arrow keys as
+            // bare ESC and bounced the user up a directory).
+            unsigned long escWaitStart = millis( );
+            while ( Serial.available( ) == 0 && millis( ) - escWaitStart < 25 ) {
+                delayMicroseconds( 250 );
             }
 
             if ( Serial.available( ) ) {
                 char seq1 = Serial.read( );
-                if ( seq1 == '[' && Serial.available( ) ) {
+                bool isCSI = ( seq1 == '[' );
+                if ( isCSI && Serial.available( ) == 0 ) {
+                    // Same tolerant wait for the sequence's final byte
+                    escWaitStart = millis( );
+                    while ( Serial.available( ) == 0 && millis( ) - escWaitStart < 25 ) {
+                        delayMicroseconds( 250 );
+                    }
+                }
+                if ( isCSI && Serial.available( ) ) {
                     char seq2 = Serial.read( );
                     switch ( seq2 ) {
                     case 'A':
@@ -2201,6 +2278,11 @@ void FileManager::updateFileListDisplay( ) {
         Serial.print( " of " );
         Serial.print( fileCount );
         Serial.print( " files" );
+        if ( listingTruncated ) {
+            Serial.print( " (listing truncated at " );
+            Serial.print( maxFiles );
+            Serial.print( " entries)" );
+        }
         changeTerminalColor( 0, false );
     }
 
@@ -2361,7 +2443,7 @@ void FileManager::showInteractiveFileView( const String& filename ) {
     int lineCount = 0;
     int row = 6;
     while ( file.available( ) && lineCount < 15 && row < 21 ) {
-        String line = file.readStringUntil( '\n' );
+        String line = readLineBounded( file, 200 );
         moveCursor( row, 3 );
         Serial.print( line.substring( 0, 75 ) ); // Truncate long lines
         row++;
@@ -2445,8 +2527,13 @@ bool isValidFilename( const String& filename ) {
     if ( filename.length( ) == 0 )
         return false;
 
-    // Check for invalid characters
-    String invalidChars = "<>:\"|?*";
+    // "." and ".." are directory references, not creatable names
+    if ( filename == "." || filename == ".." )
+        return false;
+
+    // Check for invalid characters. '/' and '\' are rejected so new-file/
+    // rename can't create entries outside the visible directory.
+    String invalidChars = "<>:\"|?*/\\";
     for ( int i = 0; i < invalidChars.length( ); i++ ) {
         if ( filename.indexOf( invalidChars[ i ] ) >= 0 ) {
             return false;
@@ -3002,8 +3089,8 @@ FileType getFileTypeFromFilename( const String& filename ) {
 
     if ( lower.endsWith( ".py" ) || lower.endsWith( ".pyw" ) || lower.endsWith( ".pyi" ) ) {
         return FILE_TYPE_PYTHON;
-    } else if ( lower.endsWith( ".json" ) ) {
-        return FILE_TYPE_JSON;
+    } else if ( lower.endsWith( ".json" ) || lower.endsWith( ".yaml" ) || lower.endsWith( ".yml" ) ) {
+        return FILE_TYPE_JSON; // YAML (e.g. slot*.yaml) is JSON-ish structured config
     } else if ( lower.endsWith( ".cfg" ) || lower.endsWith( ".conf" ) || lower.startsWith( "config" ) || filename == "config.txt" ) {
         return FILE_TYPE_CONFIG;
     } else if ( lower.startsWith( "nodefileslot" ) && lower.endsWith( ".txt" ) ) {
@@ -3190,6 +3277,12 @@ bool writeStringToFile( const char* filename, const char* content ) {
         return false;
     }
 
+    // This writer bypasses safeFileOpen, so enforce the USB MSC guard here too
+    if ( usbMountedByHost ) {
+        addFilesystemMessage( "Write to " + String( filename ) + " refused: USB host has the filesystem mounted; eject first", 196 );
+        return false;
+    }
+
     // Check memory availability and file size limits
     size_t freeHeap = rp2040.getFreeHeap( );
     if ( freeHeap < contentLength + 2048 ) { // Need content size + 2KB overhead
@@ -3197,7 +3290,7 @@ bool writeStringToFile( const char* filename, const char* content ) {
         return false;
     }
 
-    if ( contentLength > 64 * 1024 ) { // Limit individual files to 32KB
+    if ( contentLength > 64 * 1024 ) { // Limit individual files to 64KB
         addFilesystemMessage( "ERROR: File too large (" + String( contentLength / 1024 ) + "KB, max 64KB)", 196 );
         return false;
     }
@@ -3246,23 +3339,19 @@ bool writeStringToFile( const char* filename, const char* content ) {
 // Initialize MicroPython Examples Function - Conditional Compilation
 //==============================================================================
 
-void initializeMicroPythonExamples( bool forceInitialization ) {
-    // Safety check - don't do anything if Serial is not available
-    // if ( !Serial ) {
-    //     return;
-    // }
+// Single source of truth for the provisioned examples: the provisioner
+// (initializeMicroPythonExamples) writes these and verifyMicroPythonExamples
+// checks the same list. (The verifier used to keep its own copy, which had
+// drifted out of sync.)
+struct ExampleInfo {
+    const char*     path;
+    const char*     content;
+    const char*     name;
+    const uint32_t* knownHashes; // [0] = current firmware hash, [1..] = older versions
+    int             hashCount;
+};
 
-    // Build arrays dynamically based on enabled examples
-    struct ExampleInfo {
-        const char*     path;
-        const char*     content;
-        const char*     name;
-        const uint32_t* knownHashes; // [0] = current firmware hash, [1..] = older versions
-        int             hashCount;
-    };
-
-    // Create array of enabled examples
-    ExampleInfo examples[] = {
+static const ExampleInfo examples[] = {
 #ifdef INCLUDE_JUMPERLESS_MODULE
         { "/python_scripts/lib/jumperless.py", JUMPERLESS_MODULE_PY, "jumperless.py", JUMPERLESS_MODULE_PY_HASHES, JUMPERLESS_MODULE_PY_HASH_COUNT },
 #endif
@@ -3292,6 +3381,12 @@ void initializeMicroPythonExamples( bool forceInitialization ) {
 #endif
 #ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
         { "/python_scripts/examples/pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY, "pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY_HASHES, PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_PIN_IRQ_BASICS
+        { "/python_scripts/examples/pin_irq_basics.py", PIN_IRQ_BASICS_PY, "pin_irq_basics.py", PIN_IRQ_BASICS_PY_HASHES, PIN_IRQ_BASICS_PY_HASH_COUNT },
+#endif
+#ifdef INCLUDE_FILE_IO_BASICS
+        { "/python_scripts/examples/file_io_basics.py", FILE_IO_BASICS_PY, "file_io_basics.py", FILE_IO_BASICS_PY_HASHES, FILE_IO_BASICS_PY_HASH_COUNT },
 #endif
 #ifdef INCLUDE_NODE_CONNECTIONS
         { "/python_scripts/examples/node_connections.py", NODE_CONNECTIONS_PY, "node_connections.py", NODE_CONNECTIONS_PY_HASHES, NODE_CONNECTIONS_PY_HASH_COUNT },
@@ -3348,14 +3443,21 @@ void initializeMicroPythonExamples( bool forceInitialization ) {
 #endif
 #ifdef INCLUDE_TEST_OLED_FEATURES
         { "/python_scripts/examples/test_oled_features.py", TEST_OLED_FEATURES_PY, "test_oled_features.py", TEST_OLED_FEATURES_PY_HASHES, TEST_OLED_FEATURES_PY_HASH_COUNT },
-
-        #ifdef INCLUDE_EXCEL_LISTENER
-            { "/python_scripts/examples/excel_listener.py", EXCEL_LISTENER_PY, "excel_listener.py", EXCEL_LISTENER_PY_HASHES, EXCEL_LISTENER_PY_HASH_COUNT },
-            #endif
+#endif
+// NOTE: was nested inside INCLUDE_TEST_OLED_FEATURES - disabling that would
+// have silently stopped provisioning excel_listener too
+#ifdef INCLUDE_EXCEL_LISTENER
+        { "/python_scripts/examples/excel_listener.py", EXCEL_LISTENER_PY, "excel_listener.py", EXCEL_LISTENER_PY_HASHES, EXCEL_LISTENER_PY_HASH_COUNT },
 #endif
     };
 
-    int totalExamples = sizeof( examples ) / sizeof( examples[ 0 ] );
+static const int totalExamples = sizeof( examples ) / sizeof( examples[ 0 ] );
+
+void initializeMicroPythonExamples( bool forceInitialization ) {
+    // Safety check - don't do anything if Serial is not available
+    // if ( !Serial ) {
+    //     return;
+    // }
 
     // If no examples are enabled, exit early
     if ( totalExamples == 0 ) {
@@ -3687,89 +3789,8 @@ void initializeMicroPythonExamples( bool forceInitialization ) {
 }
 
 bool verifyMicroPythonExamples( ) {
-    // Reuse the same example list as initializeMicroPythonExamples
-    struct ExampleInfo {
-        const char*     path;
-        const char*     content;
-        const char*     name;
-        const uint32_t* knownHashes;
-        int             hashCount;
-    };
-
-    ExampleInfo examples[] = {
-#ifdef INCLUDE_JUMPERLESS_MODULE
-        { "/python_scripts/lib/jumperless.py", JUMPERLESS_MODULE_PY, "jumperless.py", JUMPERLESS_MODULE_PY_HASHES, JUMPERLESS_MODULE_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_JUMPERLESS_STUB
-        { "/python_scripts/lib/jumperless.pyi", JUMPERLESS_STUB_PYI, "jumperless.pyi", JUMPERLESS_STUB_PYI_HASHES, JUMPERLESS_STUB_PYI_HASH_COUNT },
-#endif
-#ifdef INCLUDE_DAC_BASICS
-        { "/python_scripts/examples/dac_basics.py", DAC_BASICS_PY, "dac_basics.py", DAC_BASICS_PY_HASHES, DAC_BASICS_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_ADC_BASICS
-        { "/python_scripts/examples/adc_basics.py", ADC_BASICS_PY, "adc_basics.py", ADC_BASICS_PY_HASHES, ADC_BASICS_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_ASYNC_READ
-        { "/python_scripts/examples/async_read.py", ASYNC_READ_PY, "async_read.py", ASYNC_READ_PY_HASHES, ASYNC_READ_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_GPIO_BASICS
-        { "/python_scripts/examples/gpio_basics.py", GPIO_BASICS_PY, "gpio_basics.py", GPIO_BASICS_PY_HASHES, GPIO_BASICS_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_MACHINE_PIN_BASICS
-        { "/python_scripts/examples/machine_pin_basics.py", MACHINE_PIN_BASICS_PY, "machine_pin_basics.py", MACHINE_PIN_BASICS_PY_HASHES, MACHINE_PIN_BASICS_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_PIN_IRQ_REACTION_GAME
-        { "/python_scripts/examples/pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY, "pin_irq_reaction_game.py", PIN_IRQ_REACTION_GAME_PY_HASHES, PIN_IRQ_REACTION_GAME_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_PIN_IRQ_FREQ_COUNTER
-        { "/python_scripts/examples/pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY, "pin_irq_freq_counter.py", PIN_IRQ_FREQ_COUNTER_PY_HASHES, PIN_IRQ_FREQ_COUNTER_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_NODE_CONNECTIONS
-        { "/python_scripts/examples/node_connections.py", NODE_CONNECTIONS_PY, "node_connections.py", NODE_CONNECTIONS_PY_HASHES, NODE_CONNECTIONS_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_LED_BRIGHTNESS_CONTROL
-        { "/python_scripts/examples/led_brightness_control.py", LED_BRIGHTNESS_CONTROL_PY, "led_brightness_control.py", LED_BRIGHTNESS_CONTROL_PY_HASHES, LED_BRIGHTNESS_CONTROL_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_VOLTAGE_MONITOR
-        { "/python_scripts/examples/voltage_monitor.py", VOLTAGE_MONITOR_PY, "voltage_monitor.py", VOLTAGE_MONITOR_PY_HASHES, VOLTAGE_MONITOR_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_STYLOPHONE
-        { "/python_scripts/examples/stylophone.py", STYLOPHONE_PY, "stylophone.py", STYLOPHONE_PY_HASHES, STYLOPHONE_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_UART_BASICS
-        { "/python_scripts/examples/uart_basics.py", UART_BASICS_PY, "uart_basics.py", UART_BASICS_PY_HASHES, UART_BASICS_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_UART_LOOPBACK
-        { "/python_scripts/examples/uart_loopback.py", UART_LOOPBACK_PY, "uart_loopback.py", UART_LOOPBACK_PY_HASHES, UART_LOOPBACK_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_INTERACTION_DEMO
-        { "/python_scripts/examples/interaction_demo.py", INTERACTION_DEMO_PY, "interaction_demo.py", INTERACTION_DEMO_PY_HASHES, INTERACTION_DEMO_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_TEST_NEOPIXEL
-        { "/python_scripts/examples/test_neopixel.py", TEST_NEOPIXEL_PY, "test_neopixel.py", TEST_NEOPIXEL_PY_HASHES, TEST_NEOPIXEL_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_OSCILLOSCOPE
-        { "/python_scripts/examples/oscilloscope.py", OSCILLOSCOPE_PY, "oscilloscope.py", OSCILLOSCOPE_PY_HASHES, OSCILLOSCOPE_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_TEST_OLED_FEATURES
-        { "/python_scripts/examples/test_oled_features.py", TEST_OLED_FEATURES_PY, "test_oled_features.py", TEST_OLED_FEATURES_PY_HASHES, TEST_OLED_FEATURES_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_EXCEL_LISTENER
-        { "/python_scripts/examples/excel_listener.py", EXCEL_LISTENER_PY, "excel_listener.py", EXCEL_LISTENER_PY_HASHES, EXCEL_LISTENER_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_OLEDGUI
-        { "/python_scripts/lib/oledgui.py", OLEDGUI_PY, "oledgui.py", OLEDGUI_PY_HASHES, OLEDGUI_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_OLED_STATS_PAGE
-        { "/python_scripts/examples/oled_stats_page.py", OLED_STATS_PAGE_PY, "oled_stats_page.py", OLED_STATS_PAGE_PY_HASHES, OLED_STATS_PAGE_PY_HASH_COUNT },
-#endif
-#ifdef INCLUDE_OLED_LAYOUT_EDITOR
-        { "/python_scripts/examples/oled_layout_editor.py", OLED_LAYOUT_EDITOR_PY, "oled_layout_editor.py", OLED_LAYOUT_EDITOR_PY_HASHES, OLED_LAYOUT_EDITOR_PY_HASH_COUNT },
-#endif
-    };
-
-    int totalExamples = sizeof( examples ) / sizeof( examples[ 0 ] );
-
+    // Uses the file-scope examples[] list - single source of truth shared
+    // with initializeMicroPythonExamples (this used to be a drifted copy).
     bool allOk = true;
 
     Serial.println( "Verifying MicroPython examples (hash-based)..." );
@@ -3848,6 +3869,20 @@ File safeFileOpen( const char* path, const char* mode, uint32_t timeout_ms ) {
     if ( !path || !mode )
         return File( );
 
+    // Write-capable modes: "w", "a", and the '+' variants ("r+" writes too).
+    bool write_mode = ( strpbrk( mode, "wa+" ) != nullptr );
+
+    // USB MSC guard: while a host has the disk mounted it caches the FAT, so
+    // a firmware write behind its back corrupts the host's view (and ours).
+    // Read-only opens are still allowed. Failure signal matches the existing
+    // contract: an invalid File() with the fs_mutex NOT held.
+    if ( write_mode && usbMountedByHost ) {
+        Serial.print( "[FS] write to " );
+        Serial.print( path );
+        Serial.println( " refused: USB host has the filesystem mounted; eject first" );
+        return File( );
+    }
+
     // Acquire filesystem mutex
     if ( timeout_ms == 0 ) {
         fs_mutex_acquire( );
@@ -3861,6 +3896,11 @@ File safeFileOpen( const char* path, const char* mode, uint32_t timeout_ms ) {
     // This keeps the file exclusively locked while in use
     if ( !file ) {
         fs_mutex_release( ); // Release if open failed
+    } else if ( write_mode ) {
+        // Keep the cache honest: handle-based writes bypass the cache, and
+        // "w" truncates at open even if nothing is written. FileCache.h says
+        // direct writers must invalidate - this is the chokepoint for it.
+        fileCacheInvalidate( path );
     }
 
     return file;
@@ -3892,12 +3932,19 @@ void safeFileClose( File& file, bool was_write_mode ) {
 // below call into the cache first.
 // =============================================================================
 
-bool safeFileReadAllRaw( const char* path, char* buffer, size_t buffer_size,
-                         size_t* bytes_read, uint32_t timeout_ms ) {
+// Shared body for safeFileReadAllRaw / safeFileReadAll. `truncated` (optional)
+// is set when the file was larger than the buffer and the read was clamped -
+// the return value stays true so bounded-read callers keep their old behavior.
+// ponytail: safeFileReadAllRaw keeps its historical 5-arg signature because
+// FileCache.cpp and States.cpp re-declare it via extern; the truncation flag
+// is only reachable through safeFileReadAll's new optional out-param.
+static bool fileReadAllRawImpl( const char* path, char* buffer, size_t buffer_size,
+                                size_t* bytes_read, uint32_t timeout_ms, bool* truncated ) {
     if ( !path || !buffer || buffer_size == 0 )
         return false;
 
     if ( bytes_read ) *bytes_read = 0;
+    if ( truncated ) *truncated = false;
 
     if ( !fs_mutex_acquire_timeout_ms( timeout_ms ) ) {
         return false;
@@ -3911,6 +3958,7 @@ bool safeFileReadAllRaw( const char* path, char* buffer, size_t buffer_size,
 
     size_t file_size = file.size( );
     size_t to_read = ( file_size < buffer_size - 1 ) ? file_size : buffer_size - 1;
+    if ( truncated && file_size > to_read ) *truncated = true;
 
     size_t read_n = file.readBytes( buffer, to_read );
     buffer[ read_n ] = '\0';
@@ -3920,6 +3968,11 @@ bool safeFileReadAllRaw( const char* path, char* buffer, size_t buffer_size,
     fs_mutex_release( );
 
     return true;
+}
+
+bool safeFileReadAllRaw( const char* path, char* buffer, size_t buffer_size,
+                         size_t* bytes_read, uint32_t timeout_ms ) {
+    return fileReadAllRawImpl( path, buffer, buffer_size, bytes_read, timeout_ms, nullptr );
 }
 
 // Trace macros: psram_debug acts as a master, fc_debug is the per-area
@@ -4032,13 +4085,13 @@ bool safeFileWriteAllRaw( const char* path, const char* content, size_t content_
 // =============================================================================
 // Cache-aware public wrappers
 // =============================================================================
-
-#include "FileCache.h"
+// (FileCache.h is included at the top of this file.)
 
 bool safeFileReadAll( const char* path, char* buffer, size_t buffer_size,
-                      size_t* bytes_read, uint32_t timeout_ms ) {
+                      size_t* bytes_read, uint32_t timeout_ms, bool* truncated ) {
     if ( !path || !buffer || buffer_size == 0 )
         return false;
+    if ( truncated ) *truncated = false;
 
     // Cache hit? fileCacheReadInto copies under the cache mutex so a
     // concurrent fileCacheWrite from another core can't realloc the entry
@@ -4047,9 +4100,10 @@ bool safeFileReadAll( const char* path, char* buffer, size_t buffer_size,
     size_t copied = 0;
     if ( fileCacheReadInto( path, (uint8_t*)buffer, buffer_size, &copied ) ) {
         if ( bytes_read ) *bytes_read = copied;
+        if ( truncated ) *truncated = ( fileCacheSize( path ) > (int32_t)copied );
         return true;
     }
-    return safeFileReadAllRaw( path, buffer, buffer_size, bytes_read, timeout_ms );
+    return fileReadAllRawImpl( path, buffer, buffer_size, bytes_read, timeout_ms, truncated );
 }
 
 bool safeFileWriteAll( const char* path, const char* content, size_t content_len,
@@ -4057,6 +4111,15 @@ bool safeFileWriteAll( const char* path, const char* content, size_t content_len
     if ( !path || !content )
         return false;
     if ( content_len == 0 ) content_len = strlen( content );
+
+    // USB MSC guard: see safeFileOpen - a firmware write while the host has
+    // the disk mounted corrupts the host's cached FAT view.
+    if ( usbMountedByHost ) {
+        Serial.print( "[FS] write to " );
+        Serial.print( path );
+        Serial.println( " refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
 
     // Try the cache first. On success the data is in PSRAM and will be
     // flushed in the background.

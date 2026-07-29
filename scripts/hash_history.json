@@ -1,5 +1,6 @@
 {
   "adc_basics.py": [
+    "0x9940E0D3",
     "0x5BB58CA2"
   ],
   "async_read.py": [
@@ -10,14 +11,20 @@
     "0x0B371883"
   ],
   "excel_listener.py": [
+    "0x83EB52CF",
     "0xF832B96C",
     "0x06CDA6A3"
+  ],
+  "file_io_basics.py": [
+    "0x14CF2D78",
+    "0x91F8B2A7"
   ],
   "gpio_basics.py": [
     "0xADAABAA1",
     "0x172C4358"
   ],
   "interaction_demo.py": [
+    "0xB7072318",
     "0x85135235"
   ],
   "jumperless.py": [
@@ -35,6 +42,7 @@
     "0x2E64EB37"
   ],
   "led_brightness_control.py": [
+    "0x6AB2EF73",
     "0xD4DA5B3C"
   ],
   "machine_pin_basics.py": [
@@ -42,6 +50,7 @@
     "0x01D476DE"
   ],
   "node_connections.py": [
+    "0x69692DB7",
     "0x49A84734"
   ],
   "oled_demo.py": [
@@ -69,10 +78,15 @@
     "0xCA1A418F"
   ],
   "oscilloscope.py": [
+    "0xE27BC796",
     "0xD2CABB55"
   ],
   "output_test.py": [
+    "0xA3804673",
     "0xE0324632"
+  ],
+  "pin_irq_basics.py": [
+    "0x0F0D4858"
   ],
   "pin_irq_freq_counter.py": [
     "0x332F8E3F"
@@ -90,19 +104,24 @@
     "0x94ADEA4E"
   ],
   "stylophone.py": [
+    "0x86AA6536",
     "0xA5108DD7"
   ],
   "test_neopixel.py": [
+    "0x86A76D21",
     "0xE91E4AD8"
   ],
   "test_oled_features.py": [
+    "0x7DA20201",
     "0x5DEB2A46"
   ],
   "uart_basics.py": [
+    "0xFC7AA683",
     "0x21E769C0",
     "0xAE8DFFE1"
   ],
   "uart_loopback.py": [
+    "0x9AE1FED2",
     "0x8E02DF89"
   ],
   "viperide_reinit.py": [
@@ -112,6 +131,7 @@
     "0xAF5CFBD0"
   ],
   "voltage_monitor.py": [
+    "0x634FB59F",
     "0x3F2C7F36"
   ]
 }

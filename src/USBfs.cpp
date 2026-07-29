@@ -34,6 +34,9 @@ bool usbMountedByHost = false;  // Track when host has mounted the drive (filesy
 bool usbFilesystemBusy = false; // Track when device is accessing filesystem (host must wait)
 FatFSUSBClass FatFSUSB;
 
+// Defined below; called from SCSI/read10/write10 context on the mount edge.
+void usbPlugCallback(uint32_t cbData);
+
 // Periodic maintenance (called from main loop)
 // NOTE: This function no longer calls SlotManager::service() to prevent race conditions.
 // Service is called from the main loop via jOS.serviceAll() or from the USB mode loop in main.cpp
@@ -208,8 +211,12 @@ int32_t FatFSUSBClass::handleSCSICommand(uint8_t lun, uint8_t const scsi_cmd[16]
 
     switch (scsi_cmd[0]) {
     case SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
-        // Host is about to read/write etc ... acknowledge without triggering callbacks
-        // The start/stop callback handles mount/eject status properly
+        // prevent=1 (scsi_cmd[4] bit 0) is the earliest command most hosts send
+        // when mounting. START STOP UNIT only reliably arrives at eject, so
+        // treat this as the mount edge (read10/write10 wrappers catch the rest).
+        if ((scsi_cmd[4] & 0x01) && mscModeEnabled && !usbMountedByHost) {
+            usbPlugCallback(0);
+        }
         resplen = 0;
         break;
     case SCSI_CMD_START_STOP_UNIT:
@@ -339,9 +346,14 @@ void FatFSUSBClass::setVolumeLabel() {
     // Set the volume label to "JUMPERLESS" so it appears correctly in file managers
     // This is more robust than trying to override USB device strings
     
+    // f_getlabel/f_setlabel read/write the root directory - serialize with
+    // every other filesystem user (this runs during MSC startup).
+    fs_mutex_acquire();
+    
     // Check if FatFS is available first
     if (!FatFS.begin()) {
         Serial.println("Warning: Could not mount FatFS to set volume label");
+        fs_mutex_release();
         return;
     }
     
@@ -354,6 +366,7 @@ void FatFSUSBClass::setVolumeLabel() {
         // Check if label is already set to JUMPERLESS
         if (strcmp(currentLabel, "JUMPERLESS") == 0) {
            // Serial.println("Volume label already set to 'JUMPERLESS'");
+            fs_mutex_release();
             return;
         }
         
@@ -389,6 +402,7 @@ void FatFSUSBClass::setVolumeLabel() {
                 break;
         }
     }
+    fs_mutex_release();
 }
 
 // TinyUSB callbacks removed - handled by wrapper system
@@ -399,7 +413,6 @@ void FatFSUSBClass::setVolumeLabel() {
 
 // Using volatile to prevent compiler optimization issues
 static volatile bool usb_msc_mounted = false;   // Host has mounted the device
-static volatile bool usb_msc_ejected = false;   // Host has ejected the device
 static volatile bool flash_ready = false;       // Flash is initialized and ready
 
 // Debug control for USB filesystem operations
@@ -460,7 +473,7 @@ void validateAllSlots(bool verbose) {
         unsigned long _t = micros();
         while (core2busy) {
             __dmb();
-            if (micros() - _t > 25000) { core2busy = false; break; }
+            if (micros() - _t > 25000) { break; }  // timeout-and-proceed; don't falsify the other core's flag
             #ifdef USE_TINYUSB
             extern void tud_task(void);
             tud_task();
@@ -547,7 +560,7 @@ void manualRefreshFromUSB() {
         unsigned long _t = micros();
         while (core2busy) {
             __dmb();
-            if (micros() - _t > 25000) { core2busy = false; break; }
+            if (micros() - _t > 25000) { break; }  // timeout-and-proceed; don't falsify the other core's flag
             #ifdef USE_TINYUSB
             extern void tud_task(void);
             tud_task();
@@ -645,7 +658,7 @@ bool usbDriveReadyCallback(uint32_t cbData) {
 void usbPlugCallback(uint32_t cbData) {
     (void)cbData;
     
-    Serial.println("◆ USB MOUNTED BY HOST - Switching to READ-ONLY mode for live monitoring");
+    Serial.println("◆ USB MOUNTED BY HOST - Switching to READ-ONLY mode");
     
     // Close any open file handles to prevent write conflicts
     extern File nodeFile;
@@ -660,18 +673,17 @@ void usbPlugCallback(uint32_t cbData) {
     extern void fileCacheFlushNowAll(const char* reason);
     fileCacheFlushNowAll("usb_mount");
 
-    // Set flag - this allows READs (for monitoring) but blocks WRITEs
+    // Set flag - this allows READs but blocks WRITEs
     __sync_synchronize();  // Memory barrier
     usbMountedByHost = true;
+    usb_msc_mounted = true;  // Status flag (gates the manual-refresh menu)
     __sync_synchronize();
     
     if (usb_debug_enabled) {
         Serial.println("◆ USB: Device in READ-ONLY mode");
-        Serial.println("  - Device can READ files to monitor host changes");
         Serial.println("  - Device CANNOT WRITE (host has exclusive write access)");
     }
     
-    Serial.println("◆ Live file monitoring ACTIVE - device will detect host changes in real-time");
     promptRefreshConnections();
 }
 
@@ -691,11 +703,30 @@ void usbUnplugCallback(uint32_t cbData) {
     // Clear mounted flag to allow device to write again
     __sync_synchronize();
     usbMountedByHost = false;
+    usb_msc_mounted = false;
     __sync_synchronize();
     
     // Sync filesystem to ensure all host writes are visible to device
     fatfs::disk_ioctl(0, CTRL_SYNC, nullptr);
     __sync_synchronize();
+    
+    // CTRL_SYNC only flushes device->flash; the host may have rewritten the
+    // FAT/directories, so FatFS's in-RAM FAT window and free-cluster hints are
+    // stale. Remount to drop them (same pattern as manualRefreshFromUSB) and
+    // drop the file cache before anything reads through the old state.
+    // ponytail: if this core is already inside a firmware FS operation (tud_task
+    // gets pumped from FS wait loops, which is how we can be re-entered here),
+    // FatFS.end() would unmount under an in-flight write - skip the remount and
+    // let disableUSBMassStorage()/manual refresh redo it with the FS quiescent.
+    if (!fs_mutex_held_by_this_core()) {
+        fs_mutex_acquire();
+        FatFS.end();
+        delay(10);  // Brief delay for hardware to settle
+        FatFS.begin();
+        fs_mutex_release();
+        extern void fileCacheDropAll();
+        fileCacheDropAll();  // has its own locking; keep outside fs_mutex
+    }
     
     if (usb_debug_enabled) {
         Serial.println("◆ USB: Full filesystem access restored to device");
@@ -763,21 +794,9 @@ bool initUSBMassStorage(void) {
 bool disableUSBMassStorage(void) {
     Serial.println("◆ Disabling USB Mass Storage...");
     
-    // First, ensure any pending dirty state is saved before we disconnect
-    // This handles the case where user made changes but USB was still mounted
-    if (SlotManager::getInstance().getActiveState().isDirty()) {
-        Serial.println("◆ Saving pending changes before USB disconnect...");
-        String errorMsg;
-        extern int netSlot;
-        if (SlotManager::getInstance().saveSlot(netSlot, errorMsg)) {
-            Serial.println("✓ Pending changes saved");
-        } else {
-            Serial.print("⚠ Warning: Could not save pending changes: ");
-            Serial.println(errorMsg);
-        }
-    }
-    
-    // Force disconnect from host perspective first
+    // Force disconnect from host perspective FIRST - writing to the filesystem
+    // while the host still holds a cached FAT is the two-writer corruption bug.
+    // Any pending dirty state is saved below, after the host is gone.
     Serial.println("◆ Disconnecting USB device from host...");
     
     // Disconnect the USB device - this will force the host to see it as ejected
@@ -793,7 +812,6 @@ bool disableUSBMassStorage(void) {
     __sync_synchronize();
     mscModeEnabled = false;
     usb_msc_mounted = false;
-    usb_msc_ejected = false;
     usbMountedByHost = false;
     usbFilesystemBusy = false;
     flash_ready = false;
@@ -809,6 +827,38 @@ bool disableUSBMassStorage(void) {
     // Sync filesystem one more time to ensure all changes are visible
     fatfs::disk_ioctl(0, CTRL_SYNC, nullptr);
     __sync_synchronize();
+    
+    // Host may have rewritten the FAT/directories while mounted - remount so
+    // the save/reload below go through fresh FatFS state, and drop the file
+    // cache (same pattern as manualRefreshFromUSB / usbUnplugCallback).
+    // ponytail: same re-entrancy guard as usbUnplugCallback - if we were reached
+    // from a tud_task pump inside a firmware FS operation, don't unmount under it.
+    if (!fs_mutex_held_by_this_core()) {
+        fs_mutex_acquire();
+        FatFS.end();
+        delay(10);  // Brief delay for hardware to settle
+        FatFS.begin();
+        fs_mutex_release();
+        extern void fileCacheDropAll();
+        fileCacheDropAll();  // has its own locking; keep outside fs_mutex
+    }
+    
+    // Now that the host is disconnected and FatFS state is fresh, persist any
+    // dirty state the user built up while USB was mounted.
+    // ponytail: if the host ALSO edited the active slot file, this save (and the
+    // reload of it below) makes the firmware's in-RAM state win. Real conflict
+    // resolution would need a diff/prompt; today last-writer-wins.
+    if (SlotManager::getInstance().getActiveState().isDirty()) {
+        Serial.println("◆ Saving pending changes...");
+        String errorMsg;
+        extern int netSlot;
+        if (SlotManager::getInstance().saveSlot(netSlot, errorMsg)) {
+            Serial.println("✓ Pending changes saved");
+        } else {
+            Serial.print("⚠ Warning: Could not save pending changes: ");
+            Serial.println(errorMsg);
+        }
+    }
     
     // Reload active slot to pick up any external changes made during USB mode
     extern int netSlot;
@@ -898,7 +948,6 @@ void debugUSBFilesystem() {
     Serial.println("├─────────────────────────────────────┤");
     Serial.printf("│ FatFSUSB ready: %s\n", FatFSUSB.testUnitReady() ? "YES" : "NO");
     Serial.printf("│ USB mounted: %s\n", usb_msc_mounted ? "YES" : "NO");
-    Serial.printf("│ USB ejected: %s\n", usb_msc_ejected ? "YES" : "NO");
     
     Serial.println("│ Direct access mode: Host reads/writes");
     Serial.println("│ actual FatFS flash sectors directly");
@@ -926,17 +975,12 @@ bool isUSBMassStorageMounted(void) {
     return usb_msc_mounted;
 }
 
-bool isUSBMassStorageEjected(void) {
-    return usb_msc_ejected;
-}
-
 void printUSBMassStorageStatus(void) {
     Serial.println("╭─────────────────────────────────╮");
     Serial.println("│    USB Mass Storage Status      │");
     Serial.println("├─────────────────────────────────┤");
     Serial.printf("│ Flash Ready:   %-16s │\n", flash_ready ? "YES" : "NO");
     Serial.printf("│ Host Mounted:  %-16s │\n", usb_msc_mounted ? "YES" : "NO");
-    Serial.printf("│ Host Ejected:  %-16s │\n", usb_msc_ejected ? "YES" : "NO");
     Serial.printf("│ FatFSUSB:      %-16s │\n", FatFSUSB.testUnitReady() ? "READY" : "NOT READY");
     Serial.printf("│ Debug Mode:    %-16s │\n", usb_debug_enabled ? "ENABLED" : "DISABLED");
     Serial.println("├─────────────────────────────────┤");
@@ -1068,7 +1112,6 @@ __attribute__((used)) bool __wrap_tud_msc_start_stop_cb(uint8_t lun, uint8_t pow
                 Serial.printf("USB start_stop_cb: Setting usb_msc_mounted = true (start=%d, load_eject=%d)\n", start, load_eject);
             }
             usb_msc_mounted = true;
-            usb_msc_ejected = false;
             if (usb_debug_enabled) {
                 Serial.println("USB drive mounted by host");
             }
@@ -1110,7 +1153,6 @@ __attribute__((used)) bool __wrap_tud_msc_start_stop_cb(uint8_t lun, uint8_t pow
                     Serial.printf("USB start_stop_cb: Maintaining usb_msc_mounted = true after temporary stop\n");
                 }
                 usb_msc_mounted = true;  // Maintain mounted state
-                usb_msc_ejected = false;
             }
         }
     }
@@ -1120,11 +1162,47 @@ __attribute__((used)) bool __wrap_tud_msc_start_stop_cb(uint8_t lun, uint8_t pow
 
 bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, bool load_eject) __attribute__((alias("__wrap_tud_msc_start_stop_cb")));
 
+// Shared prologue for host READ10/WRITE10: defer while the firmware is inside
+// a filesystem operation, and treat the first media access as the mount edge.
+//
+// Returning 0 = TUD_MSC_RET_BUSY in the vendored TinyUSB (msc_device.h): the
+// driver fakes a transfer-complete and re-invokes us with the SAME parameters
+// on a later tud_task(), so deferring is lossless. If fs_mutex were ever leaked
+// held, the host would see the drive hang and reset us - annoying but strictly
+// better than interleaving sector writes into a firmware save.
+//
+// NOTE: tud_task() is pumped from INSIDE firmware FS critical sections
+// (pauseCore2ForFlash, FS wait loops), and fs_mutex is per-core recursive, so
+// a plain try-acquire would falsely succeed on this core mid-save. The
+// held-by-this-core check is what actually closes that interleaving window.
+// It also makes these callbacks safely re-entrant when the mount-edge flush
+// below pumps tud_task itself.
+static bool hostDiskIOAllowed(void) {
+    if (fs_mutex_held_by_this_core()) {
+        return false;  // firmware is mid-FS-operation on this core
+    }
+    if (!fs_mutex_try_acquire()) {
+        return false;  // other core holds fs_mutex
+    }
+    // Mount edge: most hosts never send START STOP UNIT at mount, so the first
+    // READ10/WRITE10 is the reliable "host has mounted us" signal. Only on the
+    // edge (flag not yet set) so the hot path stays a single flag test.
+    if (mscModeEnabled && !usbMountedByHost) {
+        usbPlugCallback(0);
+    }
+    return true;  // caller must fs_mutex_release() after the disk I/O
+}
+
 __attribute__((used)) int32_t __wrap_tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
     (void) lun;
 
+    if (!hostDiskIOAllowed()) {
+        return 0;  // TUD_MSC_RET_BUSY - TinyUSB retries later
+    }
     // Use FatFSUSB to handle read operations directly from flash
-    return FatFSUSB.read10(lba, offset, buffer, bufsize);
+    int32_t ret = FatFSUSB.read10(lba, offset, buffer, bufsize);
+    fs_mutex_release();
+    return ret;
 }
 
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) __attribute__((alias("__wrap_tud_msc_read10_cb")));
@@ -1132,8 +1210,13 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buff
 __attribute__((used)) int32_t __wrap_tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
     (void) lun;
 
+    if (!hostDiskIOAllowed()) {
+        return 0;  // TUD_MSC_RET_BUSY - TinyUSB retries later
+    }
     // Use FatFSUSB to handle write operations directly to flash
-    return FatFSUSB.write10(lba, offset, buffer, bufsize);
+    int32_t ret = FatFSUSB.write10(lba, offset, buffer, bufsize);
+    fs_mutex_release();
+    return ret;
 }
 
 __attribute__((used)) int32_t __wrap_tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void* buffer, uint16_t bufsize) {

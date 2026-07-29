@@ -57,6 +57,8 @@ bool hasNodeFileChanges(void);
 const char* getNodeFileBackup(void);
 
 // Note: State backup functions have been moved to States.h/States.cpp   
+// DEAD: no-op stub kept only because Menus.cpp readMenuFile(0) links against
+// it (a branch never taken at runtime). Remove together with that call.
 void writeMenuTree(void);
 void createSlots(int slot = -1,  int overwrite = 0);
 void inputNodeFileList(int addRotaryConnections = 0);

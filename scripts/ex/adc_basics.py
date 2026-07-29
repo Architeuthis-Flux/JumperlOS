@@ -3,7 +3,6 @@ Basic ADC (Analog-to-Digital Converter) operations.
 This example shows how to read analog voltages.
 """
 
-import jumperless as j
 import time
 
 print("ADC Basics Demo")
@@ -18,7 +17,7 @@ print("Connect voltage sources to ADC inputs")
 while True:
     print("\nADC Readings:")
     for channel in channels:
-        voltage = j.adc_get(channel)
+        voltage = adc_get(channel)
         print("  ADC" + str(channel) + ": " + str(round(voltage, 3)) + "V")
     time.sleep(0.5)
             

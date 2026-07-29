@@ -70,8 +70,8 @@ extern int32_t safeFileSizeRaw(const char* path, uint32_t timeout_ms);
 extern bool safeFileDeleteRaw(const char* path, uint32_t timeout_ms);
 extern bool safeFileRenameRaw(const char* pathFrom, const char* pathTo, uint32_t timeout_ms);
 
-
-#define USE_FILE_CACHE 0
+// USE_FILE_CACHE comes from FileCache.h (build flag -DUSE_FILE_CACHE=1
+// overrides; the header defaults it to 0).
 
 #if USE_FILE_CACHE
 // ===========================================================================
@@ -143,21 +143,38 @@ constexpr uint32_t META_BACKSTOP_MS = 60000;
 constexpr size_t SRAM_FALLBACK_MAX_BYTES = 16 * 1024;
 size_t g_sramFallbackBytes = 0;
 
-inline void canonicalize(const char* in, char* out, size_t outCap) {
-    if (!in) { out[0] = '\0'; return; }
-    // Ensure leading slash for consistency. Strip duplicate slashes.
+// Canonicalize `in` into `out`: leading slash ensured, duplicate/trailing
+// slashes stripped, '.' segments dropped, '..' segments resolved against
+// the parent (clamped at root) - so "/a/../b" and "/b" share one cache
+// slot. Returns false when `in` doesn't fit in outCap: callers must treat
+// such paths as UNCACHEABLE, because a silently truncated path would
+// alias a different file's slot and serve that file's contents.
+inline bool canonicalize(const char* in, char* out, size_t outCap) {
+    out[0] = '\0';
+    if (!in || outCap < 2) return false;
     size_t o = 0;
-    bool prevSlash = false;
-    if (in[0] != '/') {
-        if (o < outCap - 1) out[o++] = '/';
-        prevSlash = true;
-    }
-    while (*in && o < outCap - 1) {
-        if (*in == '/' && prevSlash) { in++; continue; }
-        prevSlash = (*in == '/');
-        out[o++] = *in++;
+    out[o++] = '/';
+    while (*in) {
+        while (*in == '/') in++;
+        const char* seg = in;
+        while (*in && *in != '/') in++;
+        size_t len = (size_t)(in - seg);
+        if (len == 0 || (len == 1 && seg[0] == '.')) continue;
+        if (len == 2 && seg[0] == '.' && seg[1] == '.') {
+            while (o > 1 && out[o - 1] != '/') o--;  // drop last segment
+            if (o > 1) o--;                          // and its separating '/'
+            continue;
+        }
+        if (out[o - 1] != '/') {
+            if (o >= outCap - 1) { out[o] = '\0'; return false; }
+            out[o++] = '/';
+        }
+        if (o + len > outCap - 1) { out[o] = '\0'; return false; }
+        memcpy(out + o, seg, len);
+        o += len;
     }
     out[o] = '\0';
+    return true;
 }
 
 inline bool pathMatch(const Entry& e, const char* canonPath) {
@@ -233,6 +250,7 @@ bool ensureCapacity(Entry& e, size_t needed) {
     // released after the swap, so subtract them from the projected total.
     if (!p) {
         size_t freeingBytes = (e.bodyHeap == BODY_HEAP_SRAM) ? e.capacity : 0;
+        if (freeingBytes > g_sramFallbackBytes) freeingBytes = g_sramFallbackBytes;  // drift clamp (matches freeEntryBody); prevents underflow wrap
         size_t projected = (g_sramFallbackBytes - freeingBytes) + newCap;
         if (projected <= SRAM_FALLBACK_MAX_BYTES) {
             p = (uint8_t*)malloc(newCap);
@@ -250,7 +268,16 @@ bool ensureCapacity(Entry& e, size_t needed) {
     if (e.data) {
         if (e.bodyHeap == BODY_HEAP_SRAM) {
             free(e.data);
-            // accounting already adjusted above via `freeingBytes`
+            if (newHeap == BODY_HEAP_SRAM) {
+                // SRAM -> SRAM: accounting already folded in via `projected`.
+            } else if (g_sramFallbackBytes >= e.capacity) {
+                // SRAM -> PSRAM: the SRAM-fallback branch above never ran,
+                // so return the freed body's bytes to the budget here
+                // (previously leaked - the 16KB budget shrank permanently).
+                g_sramFallbackBytes -= e.capacity;
+            } else {
+                g_sramFallbackBytes = 0;  // drift clamp (matches freeEntryBody)
+            }
         } else if (e.bodyHeap == BODY_HEAP_PSRAM) {
             psram_free(e.data);
         }
@@ -284,12 +311,16 @@ bool ensureCapacity(Entry& e, size_t needed) {
 static constexpr size_t FC_CHUNK = 4096;
 static uint8_t g_chunkBounce[FC_CHUNK];
 
-// Suffix appended to the real path while we stage the new content. Kept
-// short to leave room within FILE_CACHE_PATH_MAX + a small slack.
-// (Legacy: retained only so boot-recovery can clean up orphan .new files
-// from the previous write+delete+rename flusher. The current ABA-pair
-// flusher never creates these.)
-static constexpr const char* FC_TMP_SUFFIX = ".new";
+// Suffix for the cache's atomic-write temp files. Deliberately weird
+// (".~flc") so the boot-time orphan sweep in scanDirForOrphans can never
+// eat a user's hand-made file - the previous ".new" suffix would have
+// deleted e.g. a user's "notes.new" at boot. Kept short so suffixed
+// max-length paths still fit the FILE_CACHE_PATH_MAX + 8 buffers.
+// (Only the orphan scanner uses it today - the current ABA-pair flusher
+// writes canonical + /.bak mirror in place and never stages temp files.
+// ponytail: orphan ".new" files left by pre-ABA firmware are no longer
+// swept; they're harmless stale files the user can delete by hand.)
+static constexpr const char* FC_TMP_SUFFIX = ".~flc";
 
 // Hidden mirror directory used by the ABA-pair flusher. Each canonical
 // file `/foo/bar.yaml` gets a backup at `/.bak/foo/bar.yaml`. The leading
@@ -598,24 +629,69 @@ static bool flushEntryChunked(const char* path, const uint8_t* psramData, size_t
     return overallOk;
 }
 
-// Flush an entry's body to its canonical path. Does NOT update the
-// /.bak mirror - that happens in a separate pass via flushEntryMirror()
-// so the user-visible freeze stays at ~700ms instead of ~1.4s.
+// Synchronously flush one entry's body to its canonical path WITHOUT
+// holding core_sync across the ~700 ms flash write (which starves
+// Core 1). Same snapshot-clone pattern as FileCacheFlushService::
+// service() - see the use-after-free war story in the comment there:
+// clone the body under the lock, release, write the clone, then re-take
+// the lock and clear dirty only if the entry still holds the same
+// path + version. If a concurrent write/evict/rename changed the entry
+// during the unlocked window it stays dirty and a later flush picks up
+// the NEW content - a stale snapshot never masks a newer version.
+//
+// Does NOT update the /.bak mirror - that happens in a separate pass
+// via flushEntryMirror() so the user-visible freeze stays at ~700ms
+// instead of ~1.4s.
 //
 // On success, version book-keeping:
-//   - flushedVersion <- version  (canonical is now at this version)
-//   - dirty <- false
+//   - flushedVersion <- snapshot version
+//   - dirty <- false (only when the path/version re-check passes)
 //   - mirroredVersion stays at whatever it was (mirror is now stale by
 //     `flushedVersion - mirroredVersion` saves)
-bool flushEntry(Entry& e) {
-    if (!e.used || !e.dirty) return true;
-    FCDBG("flushEntry ENTER path=%s size=%u (canonical-only)", e.path, (unsigned)e.size);
-    bool ok = flushEntryChunked(e.path, e.data, e.size, WT_CANONICAL_ONLY);
-    FCDBG("flushEntry EXIT path=%s ok=%d", e.path, (int)ok);
-    if (ok) {
-        e.dirty = false;
-        e.flushedVersion = e.version;
+bool flushEntrySnapshot(Entry& e) {
+    char path[FILE_CACHE_PATH_MAX];
+    uint8_t* dataClone = nullptr;
+    size_t size = 0;
+    uint16_t version = 0;
+
+    FC_LOCK("flushSnap");
+    if (!e.used || !e.dirty) { FC_UNLOCK("flushSnap/clean"); return true; }
+    memcpy(path, e.path, sizeof(path));
+    size = e.size;
+    version = e.version;
+    if (size > 0 && e.data) {
+        // Prefer PSRAM for the clone if available (keeps SRAM heap free).
+        if (psram_available()) dataClone = (uint8_t*)psram_alloc(size);
+        if (!dataClone) dataClone = (uint8_t*)malloc(size);
+        if (dataClone) memcpy(dataClone, e.data, size);
     }
+    FC_UNLOCK("flushSnap");
+
+    if (size > 0 && !dataClone) {
+        FCDBG("flushSnap clone alloc FAILED for %s (size=%u)", path, (unsigned)size);
+        return false;  // entry stays dirty; caller / next tick retries
+    }
+
+    FCDBG("flushSnap ENTER path=%s size=%u (canonical-only)", path, (unsigned)size);
+    bool ok = flushEntryChunked(path, dataClone, size, WT_CANONICAL_ONLY);
+    FCDBG("flushSnap EXIT path=%s ok=%d", path, (int)ok);
+    if (dataClone) {
+        // Free with the matching allocator. PSRAM allocations live in the
+        // 0x11000000-0x12000000 address window; everything else is SRAM.
+        uintptr_t addr = reinterpret_cast<uintptr_t>(dataClone);
+        if (addr >= 0x11000000u && addr < 0x12000000u) psram_free(dataClone);
+        else free(dataClone);
+    }
+
+    FC_LOCK("flushSnap/mark");
+    // Re-validate the slot didn't get recycled / rewritten during the
+    // unlocked window before clearing its dirty flag.
+    if (ok && e.used && e.version == version &&
+        strncmp(e.path, path, FILE_CACHE_PATH_MAX) == 0) {
+        e.dirty = false;
+        e.flushedVersion = version;
+    }
+    FC_UNLOCK("flushSnap/mark");
     return ok;
 }
 
@@ -729,13 +805,12 @@ bool flushEntryMirror(Entry& e) {
 // because PSRAM doesn't survive cold power-off, which is the common
 // shutdown path on this hardware - the journal could only ever cover
 // watchdog/soft reboots, but those are rare relative to cold yanks. The
-// orphan-.new recovery scan below is the actual safety net and works
+// orphan-temp-file recovery scan below is the actual safety net and works
 // across cold boots since it reads from flash.)
 
 // Recovery scan: on boot, walk directories that the cache touches and:
-//   1. Sweep up any orphan <path>.new files left by the OLD write+rename
-//      flusher (no longer created, but a firmware-upgrade reboot may
-//      find them still on disk).
+//   1. Sweep up any orphan <path>.~flc temp files left by an atomic
+//      write that was interrupted by a power loss.
 //   2. For each canonical file that's missing or empty, restore it from
 //      the /.bak mirror written by the current ABA flusher.
 //
@@ -814,10 +889,11 @@ static void scanDirForOrphans(const char* dirPath) {
     }
     fs_mutex_release();
 
-    // Phase 2: legacy cleanup - the ABA flusher doesn't create .new files,
-    // but an upgrade from an older firmware may leave some behind. Drop them.
+    // Phase 2: drop orphan temp files. The ABA flusher doesn't create them
+    // today, but a future atomic-write flusher (or an interrupted one from
+    // another firmware) may leave some behind.
     for (int i = 0; i < ncand; i++) {
-        Serial.printf("[FileCache] recover: removing legacy orphan %s\n", cand[i].tmp);
+        Serial.printf("[FileCache] recover: removing orphan temp %s\n", cand[i].tmp);
         safeFileDeleteRaw(cand[i].tmp, 2000);
     }
 }
@@ -844,7 +920,7 @@ static void recoverFromBakMirror(const char* dirPath) {
         while (dir.next() && nfiles < MAX_FILES) {
             if (dir.isDirectory()) continue;
             String name = dir.fileName();
-            // Skip legacy .new artifacts (already handled by scanDirForOrphans).
+            // Skip cache temp artifacts (already handled by scanDirForOrphans).
             if (name.endsWith(FC_TMP_SUFFIX)) continue;
             String full;
             if (strcmp(dirPath, "/") == 0) full = "/" + name;
@@ -911,8 +987,8 @@ static void recoverFromBakMirror(const char* dirPath) {
 }
 
 void fileCacheRecoverPendingWrites() {
-    // Clean up legacy <path>.new orphans from the previous flusher
-    // design. Once these are gone, future boots see nothing to do here.
+    // Clean up orphan <path>.~flc temp files from an interrupted
+    // atomic write. Once these are gone, future boots see nothing to do.
     scanDirForOrphans("/slots");
     scanDirForOrphans("/");
 
@@ -933,7 +1009,8 @@ void fileCacheInit() {
 
 bool fileCacheRead(const char* path, const uint8_t** outData, size_t* outSize) {
     if (!g_initialized || !path) return false;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return false;  // uncacheable path
     FCDBG("read entry path=%s", cp);
     FC_LOCK("read");
     Entry* e = findEntry(cp);
@@ -951,22 +1028,36 @@ bool fileCacheRead(const char* path, const uint8_t** outData, size_t* outSize) {
 
 bool fileCacheReadInto(const char* path, uint8_t* dst, size_t dstSize, size_t* outSize) {
     if (!g_initialized || !path || !dst || dstSize == 0) return false;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    if (outSize) *outSize = 0;
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return false;  // uncacheable path
     FCDBG("readInto entry path=%s dstSize=%u", cp, (unsigned)dstSize);
     FC_LOCK("readInto");
     Entry* e = findEntry(cp);
     bool hit = false;
     size_t copied = 0;
+    size_t body = 0;
     if (e && e->data && e->size > 0) {
         e->lastAccessMs = millis();
-        copied = e->size < dstSize - 1 ? e->size : dstSize - 1;
-        memcpy(dst, e->data, copied);
-        hit = true;
+        body = e->size;
+        if (body <= dstSize - 1) {
+            memcpy(dst, e->data, body);
+            copied = body;
+            hit = true;
+        }
+        // else: body doesn't fit - copy NOTHING and miss (see below).
     }
     FC_UNLOCK("readInto");
     if (hit) {
         dst[copied] = '\0';
         if (outSize) *outSize = copied;
+    } else if (body > 0) {
+        // Truncation is now detectable instead of silent: report the
+        // required body size through *outSize and return false so the
+        // caller falls back to the raw read (or resizes and retries).
+        if (outSize) *outSize = body;
+        FCDBG("readInto REFUSED (would truncate): body=%u dst=%u",
+              (unsigned)body, (unsigned)(dstSize - 1));
     }
     FCDBG("readInto exit hit=%d copied=%u", (int)hit, (unsigned)copied);
     return hit;
@@ -974,8 +1065,18 @@ bool fileCacheReadInto(const char* path, uint8_t* dst, size_t dstSize, size_t* o
 
 bool fileCacheWrite(const char* path, const uint8_t* data, size_t size) {
     if (!g_initialized || !path) return false;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return false;  // uncacheable -> caller raw-writes
     FCDBG("write entry path=%s size=%u", cp, (unsigned)size);
+    // ponytail: the cache can't represent an EMPTY body (every read hook
+    // treats size==0 as a miss and would fall through to STALE flash), so
+    // route empty writes straight to flash via the caller's raw fallback
+    // and drop any cached entry so reads follow. Upgrade path: an explicit
+    // `empty` flag on Entry + hit-path support.
+    if (size == 0) {
+        fileCacheInvalidate(cp);
+        return false;
+    }
     FC_LOCK("write");
     Entry* e = findEntry(cp);
     if (!e) {
@@ -1017,8 +1118,14 @@ bool fileCacheWrite(const char* path, const uint8_t* data, size_t size) {
 
     FCDBG("write ensureCapacity needed=%u currentCap=%u", (unsigned)size, (unsigned)e->capacity);
     if (!ensureCapacity(*e, size)) {
+        // Drop the entry rather than keep it. The caller falls back to a
+        // raw flash write of the NEW content; a kept entry would either be
+        // a phantom (fresh slot with path set but no body - fileCacheExists
+        // would report a file that may not exist) or hold the OLD body,
+        // whose later flush would clobber that newer flash content.
+        resetEntry(*e);
         FC_UNLOCK("write/oom");
-        FCDBG("write FAIL ensureCapacity");
+        FCDBG("write FAIL ensureCapacity (entry dropped)");
         return false;
     }
     FCDBG("write memcpy");
@@ -1035,7 +1142,8 @@ bool fileCacheWrite(const char* path, const uint8_t* data, size_t size) {
 
 bool fileCacheInvalidate(const char* path) {
     if (!g_initialized || !path) return false;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return false;  // uncacheable -> no entry possible
     FCDBG("invalidate %s", cp);
     FC_LOCK("invalidate");
     Entry* e = findEntry(cp);
@@ -1047,31 +1155,32 @@ bool fileCacheInvalidate(const char* path) {
 
 bool fileCacheFlushNow(const char* path) {
     if (!g_initialized) return true;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return true;  // uncacheable -> nothing to flush
     FCDBG("flushNow %s", cp);
     FC_LOCK("flushNow");
     Entry* e = findEntry(cp);
-    if (!e || !e->dirty) { FC_UNLOCK("flushNow/clean"); return true; }
-    // NB: holding core_sync across flushEntry is bad - flushEntry calls
-    // safeFileWriteAllRaw which can take hundreds of ms. Acceptable for
-    // the explicit "force flush" path (rare), but we trace it.
-    FCDBG("flushNow calling flushEntry while holding core_sync");
-    bool ok = flushEntry(*e);
     FC_UNLOCK("flushNow");
-    FCDBG("flushNow result=%d", (int)ok);
+    if (!e) return true;
+    // ponytail: e is re-validated under flushEntrySnapshot's own lock, but in
+    // the gap between these two lock windows the slot could be recycled to a
+    // DIFFERENT path; we'd then flush that (self-consistent) entry instead,
+    // and the requested path - just invalidated - has nothing left to flush.
+    // Upgrade path: fold findEntry into flushEntrySnapshot's snapshot lock.
+    bool ok = flushEntrySnapshot(*e);
+    FCDBG("flushNow %s result=%d", cp, (int)ok);
     return ok;
 }
 
 bool fileCacheFlushAll() {
     if (!g_initialized) return true;
     bool allOk = true;
-    core_sync_acquire();
+    // One snapshot-clone flush per entry: core_sync is held only for the
+    // clone + dirty-mark steps, never across the ~700 ms flash writes
+    // (which used to freeze Core 1's LED/input loop for the whole drain).
     for (auto& e : g_entries) {
-        if (e.used && e.dirty) {
-            if (!flushEntry(e)) allOk = false;
-        }
+        if (!flushEntrySnapshot(e)) allOk = false;
     }
-    core_sync_release();
     return allOk;
 }
 
@@ -1123,7 +1232,8 @@ void fileCacheDropAll() {
 
 bool fileCacheExists(const char* path) {
     if (!g_initialized || !path) return false;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return false;  // uncacheable -> consult flash
     core_sync_acquire();
     Entry* e = findEntry(cp);
     bool present = (e != nullptr);
@@ -1133,7 +1243,8 @@ bool fileCacheExists(const char* path) {
 
 int32_t fileCacheSize(const char* path) {
     if (!g_initialized || !path) return -1;
-    char cp[FILE_CACHE_PATH_MAX]; canonicalize(path, cp, sizeof(cp));
+    char cp[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(path, cp, sizeof(cp))) return -1;  // uncacheable -> consult flash
     core_sync_acquire();
     Entry* e = findEntry(cp);
     int32_t sz = (e && e->data) ? (int32_t)e->size : -1;
@@ -1147,16 +1258,25 @@ bool fileCacheDelete(const char* path) {
 
 bool fileCacheRename(const char* pathFrom, const char* pathTo) {
     if (!g_initialized || !pathFrom || !pathTo) return false;
-    char from[FILE_CACHE_PATH_MAX]; canonicalize(pathFrom, from, sizeof(from));
-    char to[FILE_CACHE_PATH_MAX]; canonicalize(pathTo, to, sizeof(to));
+    char from[FILE_CACHE_PATH_MAX];
+    char to[FILE_CACHE_PATH_MAX];
+    if (!canonicalize(pathFrom, from, sizeof(from))) return false;  // no entry possible
+    bool toFits = canonicalize(pathTo, to, sizeof(to));
     core_sync_acquire();
     Entry* eFrom = findEntry(from);
-    Entry* eTo = findEntry(to);
+    Entry* eTo = toFits ? findEntry(to) : nullptr;
     if (eTo) resetEntry(*eTo);
     if (eFrom) {
-        strncpy(eFrom->path, to, FILE_CACHE_PATH_MAX - 1);
-        eFrom->path[FILE_CACHE_PATH_MAX - 1] = '\0';
-        // dirty stays as-is so a flush will write under the new name
+        if (toFits) {
+            strncpy(eFrom->path, to, FILE_CACHE_PATH_MAX - 1);
+            eFrom->path[FILE_CACHE_PATH_MAX - 1] = '\0';
+            // dirty stays as-is so a flush will write under the new name
+        } else {
+            // Destination too long to track: drop the entry rather than
+            // leave it flushing to the OLD name, which the caller's raw
+            // rename is about to remove from flash.
+            resetEntry(*eFrom);
+        }
     }
     core_sync_release();
     return true;
@@ -1339,9 +1459,9 @@ ServiceStatus FileCacheFlushService::service() {
         return lastStatus;
     }
 
-    // IMPORTANT: do NOT pre-acquire fs_mutex here. flushEntry() calls
-    // safeFileWriteAllRaw which acquires fs_mutex itself - holding it here
-    // would self-deadlock until the safe-wrapper's 5s timeout.
+    // IMPORTANT: do NOT pre-acquire fs_mutex here. flushEntryChunked()
+    // acquires fs_mutex itself - holding it here would self-deadlock
+    // until its 5s timeout.
     //
     // We snapshot path/size/version while holding core_sync, then release it
     // for the actual flash write so Core 2 can keep using core_sync for LED
@@ -1439,12 +1559,15 @@ void fileCacheInit() {
     Serial.println("FileCache: disabled (compile-time pass-through to FatFS)");
 }
 
-void fileCacheRecoverPendingWrites() { /* no atomic .new commits in pass-through */ }
+void fileCacheRecoverPendingWrites() { /* no atomic temp-file commits in pass-through */ }
 
 // Read/write hooks always "miss" so FilesystemStuff falls back to the Raw call
 // (which carries the caller's timeout and does the real flash I/O).
 bool fileCacheRead(const char*, const uint8_t**, size_t*) { return false; }
-bool fileCacheReadInto(const char*, uint8_t*, size_t, size_t*) { return false; }
+bool fileCacheReadInto(const char*, uint8_t*, size_t, size_t* outSize) {
+    if (outSize) *outSize = 0;  // plain miss per the header contract
+    return false;
+}
 bool fileCacheWrite(const char*, const uint8_t*, size_t) { return false; }
 
 // Coherence hooks: nothing is cached, so nothing to invalidate/drop.

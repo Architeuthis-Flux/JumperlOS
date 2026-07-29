@@ -82,30 +82,26 @@ static mp_obj_t mp_os_listdir(size_t n_args, const mp_obj_t *args) {
     
     char* result = jl_fs_listdir(path);
     if (result == NULL) {
-        return mp_obj_new_list(0, NULL);
+        mp_raise_OSError(MP_ENOENT); // directory doesn't exist
     }
     
-    // Parse comma-separated result into list
+    // Entries are '\n'-separated ('\n' is illegal in FAT filenames; the old ','
+    // separator split names like "a,b.txt" into phantom entries). Parse straight
+    // out of the producer's static buffer - no copy, no strtok, and nothing
+    // leaks if mp_obj_new_str raises UnicodeError.
     mp_obj_t list_obj = mp_obj_new_list(0, NULL);
-    size_t buf_len = strlen(result) + 1;
-    char* result_copy = (char *)malloc(buf_len);
-    if (result_copy) {
-        memcpy(result_copy, result, buf_len);
-        char* token = strtok(result_copy, ",");
-        while (token != NULL) {
-            // Skip empty tokens
-            if (token[0] != '\0') {
-                // Normalize: strip trailing slash to match standard os.listdir
-                size_t name_len = strlen(token);
-                if (name_len > 0 && token[name_len - 1] == '/') {
-                    token[name_len - 1] = '\0';
-                    name_len -= 1;
-                }
-                mp_obj_list_append(list_obj, mp_obj_new_str(token, name_len));
-            }
-            token = strtok(NULL, ",");
+    for (const char* p = result; *p;) {
+        const char* nl = strchr(p, '\n');
+        size_t entry_len = nl ? (size_t)(nl - p) : strlen(p);
+        // Normalize: strip trailing slash to match standard os.listdir
+        size_t name_len = entry_len;
+        if (name_len > 0 && p[name_len - 1] == '/') {
+            name_len -= 1;
         }
-        free(result_copy);
+        if (name_len > 0) {
+            mp_obj_list_append(list_obj, mp_obj_new_str(p, name_len));
+        }
+        p += entry_len + (nl ? 1 : 0);
     }
     
     return list_obj;
@@ -127,49 +123,43 @@ static mp_obj_t mp_os_ilistdir(size_t n_args, const mp_obj_t *args) {
     
     char* result = jl_fs_listdir(path);
     if (result == NULL) {
-        return mp_obj_new_list(0, NULL);
+        mp_raise_OSError(MP_ENOENT); // directory doesn't exist
     }
     
-    // Parse comma-separated result and create ilistdir tuples: (name, type, inode, size)
-    // type: 0x4000 for directory, 0x8000 for file
+    // Parse '\n'-separated entries into ilistdir tuples: (name, type, inode, size)
+    // type: 0x4000 for directory, 0x8000 for file (see mp_os_listdir for why '\n')
     mp_obj_t list_obj = mp_obj_new_list(0, NULL);
-    size_t buf_len = strlen(result) + 1;
-    char* result_copy = (char *)malloc(buf_len);
-    if (result_copy) {
-        memcpy(result_copy, result, buf_len);
-        char* token = strtok(result_copy, ",");
-        while (token != NULL) {
-            if (token[0] != '\0') {
-                // Build full path for stat
-                char fullpath[256];
-                if (path[0] == '/' && path[1] == '\0') {
-                    snprintf(fullpath, sizeof(fullpath), "/%s", token);
-                } else {
-                    snprintf(fullpath, sizeof(fullpath), "%s/%s", path, token);
-                }
-                
-                // Normalize: strip trailing slash to match standard os.ilistdir
-                size_t name_len = strlen(token);
-                if (name_len > 0 && token[name_len - 1] == '/') {
-                    token[name_len - 1] = '\0';
-                    name_len -= 1;
-                }
-
-                int isdir = jl_fs_stat_isdir(fullpath);
-                int size = jl_fs_stat_size(fullpath);
-                
-                // Create tuple: (name, type, inode, size)
-                mp_obj_t items[4] = {
-                    mp_obj_new_str(token, name_len),
-                    MP_OBJ_NEW_SMALL_INT(isdir ? 0x4000 : 0x8000),
-                    MP_OBJ_NEW_SMALL_INT(0),  // inode (not supported)
-                    MP_OBJ_NEW_SMALL_INT(size < 0 ? 0 : size)
-                };
-                mp_obj_list_append(list_obj, mp_obj_new_tuple(4, items));
-            }
-            token = strtok(NULL, ",");
+    for (const char* p = result; *p;) {
+        const char* nl = strchr(p, '\n');
+        size_t entry_len = nl ? (size_t)(nl - p) : strlen(p);
+        // Normalize: strip trailing slash to match standard os.ilistdir
+        // (stat on the stripped name - the old code stat'ed "name/" for dirs)
+        size_t name_len = entry_len;
+        if (name_len > 0 && p[name_len - 1] == '/') {
+            name_len -= 1;
         }
-        free(result_copy);
+        if (name_len > 0) {
+            // Build full path for stat
+            char fullpath[256];
+            if (path[0] == '/' && path[1] == '\0') {
+                snprintf(fullpath, sizeof(fullpath), "/%.*s", (int)name_len, p);
+            } else {
+                snprintf(fullpath, sizeof(fullpath), "%s/%.*s", path, (int)name_len, p);
+            }
+
+            int isdir = jl_fs_stat_isdir(fullpath);
+            int size = jl_fs_stat_size(fullpath);
+            
+            // Create tuple: (name, type, inode, size)
+            mp_obj_t items[4] = {
+                mp_obj_new_str(p, name_len),
+                MP_OBJ_NEW_SMALL_INT(isdir ? 0x4000 : 0x8000),
+                MP_OBJ_NEW_SMALL_INT(0),  // inode (not supported)
+                MP_OBJ_NEW_SMALL_INT(size < 0 ? 0 : size)
+            };
+            mp_obj_list_append(list_obj, mp_obj_new_tuple(4, items));
+        }
+        p += entry_len + (nl ? 1 : 0);
     }
     
     return list_obj;

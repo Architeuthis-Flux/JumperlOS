@@ -61,9 +61,9 @@
 // will simply pass-through. Called from main.cpp setup() after the arena.
 void fileCacheInit();
 
-// Reconcile orphan <path>.new files left by an atomic-write commit that
-// was interrupted by a power loss. Called from fileCacheInit() but also
-// exposed so reset / format paths can re-run it.
+// Reconcile orphan <path>.~flc temp files left by an atomic-write commit
+// that was interrupted by a power loss. Called from fileCacheInit() but
+// also exposed so reset / format paths can re-run it.
 void fileCacheRecoverPendingWrites();
 
 // Per-area debug flags. fc_debug enables FileCache + Filesystem trace,
@@ -84,9 +84,14 @@ extern "C" volatile int fc_atomic_debug;
 bool fileCacheRead(const char* path, const uint8_t** outData, size_t* outSize);
 
 // Cache lookup + copy in one atomic step. The cached body is memcpy'd
-// into `dst` (truncated to `dstSize - 1` bytes, NUL-terminated) under
-// the cache mutex so concurrent writers can't realloc out from under us.
-// Returns true on hit, false on miss.
+// into `dst` (NUL-terminated, so the body must fit in `dstSize - 1`
+// bytes) under the cache mutex so concurrent writers can't realloc out
+// from under us. Returns true on hit-and-fit. Returns false on miss OR
+// when the cached body would not fit: nothing is copied and *outSize is
+// set to the required body size (0 on a plain miss) so truncation is
+// detectable. Callers fall back to the raw flash read on false - note
+// that for a DIRTY oversized entry that fallback serves the older flash
+// copy, so size buffers from safeFileSize (which consults the cache).
 bool fileCacheReadInto(const char* path, uint8_t* dst, size_t dstSize, size_t* outSize);
 
 // Write content into the cache (write-back). Returns true on success.

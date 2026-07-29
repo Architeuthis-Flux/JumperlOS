@@ -8,22 +8,21 @@ Hardware Setup:
 """
 
 import time
-import jumperless as j
 
 print("Voltage Monitor Demo")
 
-j.disconnect(12, -1)
-j.disconnect(j.ADC0, -1)
-j.connect(j.ADC0, 12)
+disconnect(12, -1)
+disconnect(ADC0, -1)
+connect(ADC0, 12)
 print("ADC0 connected to row 12")
 print("Connect voltage source to row 12")
 
-j.oled_print("Voltage Monitor")
+oled_print("Voltage Monitor")
 time.sleep(1)
 
 while True:
-    voltage = j.adc_get(0)
-    j.oled_print(str(round(voltage, 3)) + " V")
+    voltage = adc_get(0)
+    oled_print(str(round(voltage, 3)) + " V")
     print("\r                      ", end="\r")
     print("Voltage: " + str(round(voltage, 3)) + "V", end="")
     time.sleep(0.15)

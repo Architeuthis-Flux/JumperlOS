@@ -154,14 +154,15 @@ void jl_logic_analyzer_set_trigger_value( float trigger_value );
 
 // Filesystem functions - bridge to existing FatFS
 int jl_fs_exists( const char* path );
-char* jl_fs_listdir( const char* path );
+char* jl_fs_listdir( const char* path ); // '\n'-separated entries; NULL if dir missing
 char* jl_fs_read_file( const char* path );
-int jl_fs_write_file( const char* path, const char* content );
+int jl_fs_write_file( const char* path, const char* content, int len );
 char* jl_fs_get_current_dir( void );
 
 // Extended file operations
 void* jl_fs_open_file( const char* path, const char* mode );
-void jl_fs_close_file( void* file_handle );
+int jl_fs_open_errno( void );        // errno explaining the last NULL return (ENOENT/EMFILE)
+int jl_fs_close_file( void* file_handle ); // 1 = closed/already closed, 0 = mutex timeout (still open+tracked)
 void jl_close_all_jfs_files( void ); // Close all open JFS files (for cleanup)
 int jl_fs_read_bytes( void* file_handle, char* buffer, int size );
 int jl_fs_write_bytes( void* file_handle, const char* data, int size );
@@ -169,7 +170,6 @@ int jl_fs_seek( void* file_handle, int position, int mode );
 int jl_fs_position( void* file_handle );
 int jl_fs_size( void* file_handle );
 int jl_fs_available( void* file_handle );
-char* jl_fs_name( void* file_handle );
 void jl_fs_flush( void* file_handle );
 
 // Directory operations
@@ -4610,33 +4610,22 @@ static mp_obj_t jl_fs_listdir_func( mp_obj_t path_obj ) {
     const char* path = mp_obj_str_get_str( path_obj );
     char* result = jl_fs_listdir( path );
     if ( result == NULL ) {
-        return mp_const_none;
+        mp_raise_OSError( MP_ENOENT ); // directory doesn't exist
     }
 
-    // Make a copy since strtok modifies the string
-    size_t len = strlen( result );
-    char* result_copy = malloc( len + 1 );
-    if ( result_copy == NULL ) {
-        return mp_const_none;
-    }
-    strcpy( result_copy, result );
-
-    // Parse comma-separated string into Python list
+    // Entries are '\n'-separated ('\n' is illegal in FAT filenames, so it can
+    // never collide with a name the way the old ',' separator did). Build the
+    // strings straight out of the producer's static buffer - no copy, no
+    // strtok, and nothing leaks if mp_obj_new_str raises UnicodeError.
     mp_obj_t list_obj = mp_obj_new_list( 0, NULL );
-
-    char* token = strtok( result_copy, "," );
-    while ( token != NULL ) {
-        // Remove any leading/trailing whitespace if needed
-        while ( *token == ' ' )
-            token++; // Skip leading spaces
-
-        mp_obj_t item = mp_obj_new_str( token, strlen( token ) );
-        mp_obj_list_append( list_obj, item );
-
-        token = strtok( NULL, "," );
+    for ( const char* p = result; *p; ) {
+        const char* nl = strchr( p, '\n' );
+        size_t n = nl ? (size_t)( nl - p ) : strlen( p );
+        if ( n > 0 ) {
+            mp_obj_list_append( list_obj, mp_obj_new_str( p, n ) );
+        }
+        p += n + ( nl ? 1 : 0 );
     }
-
-    free( result_copy );
     return list_obj;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_fs_listdir_obj, jl_fs_listdir_func );
@@ -4647,16 +4636,21 @@ static mp_obj_t jl_fs_read_file_func( mp_obj_t path_obj ) {
     if ( content == NULL ) {
         return mp_const_none;
     }
+    // ponytail: this convenience API truncates at the C side's static buffer
+    // (4KB) and at the first NUL byte (strlen below - the char* contract has no
+    // length channel). Binary-safe reads: jfs.open(path).read().
     mp_obj_t content_obj = mp_obj_new_str( content, strlen( content ) );
-    // Note: caller should free content if needed
     return content_obj;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_fs_read_file_obj, jl_fs_read_file_func );
 
 static mp_obj_t jl_fs_write_file_func( mp_obj_t path_obj, mp_obj_t content_obj ) {
     const char* path = mp_obj_str_get_str( path_obj );
-    const char* content = mp_obj_str_get_str( content_obj );
-    int result = jl_fs_write_file( path, content );
+    // Pass the true byte length so content with embedded NULs is written
+    // intact (the old strlen-based path silently truncated at the first NUL).
+    size_t len;
+    const char* content = mp_obj_str_get_data( content_obj, &len );
+    int result = jl_fs_write_file( path, content, (int)len );
     return mp_obj_new_bool( result == 1 );
 }
 static MP_DEFINE_CONST_FUN_OBJ_2( jl_fs_write_file_obj, jl_fs_write_file_func );
@@ -4696,22 +4690,23 @@ static mp_obj_t jfs_file_read( size_t n_args, const mp_obj_t* args ) {
     }
 
     // Determine how many bytes to read
-    size_t size;
+    mp_int_t requested = -1; // no size (or a negative one) means read-all
     if ( n_args > 1 ) {
-        // User specified size
-        size = mp_obj_get_int( args[ 1 ] );
-    } else {
-        // Read remaining bytes in file (from current position to end)
-        size = jl_fs_available( self->file_handle );
-        if ( size == 0 ) {
-            // Nothing to read
-            return self->is_binary ? mp_obj_new_bytes( (const byte*)"", 0 ) : mp_obj_new_str( "", 0 );
-        }
+        requested = mp_obj_get_int( args[ 1 ] );
     }
-
-    // Cap at reasonable size to prevent huge allocations
-    if ( size > 8192 ) {
-        size = 8192;
+    size_t size;
+    if ( requested < 0 ) {
+        // True read-all: sized by the bytes remaining from the current
+        // position (no more silent 8KB cap). A file too big for the GC heap
+        // raises MemoryError, same as upstream VFS reads.
+        int avail = jl_fs_available( self->file_handle );
+        size = avail > 0 ? (size_t)avail : 0;
+    } else {
+        size = (size_t)requested;
+    }
+    if ( size == 0 ) {
+        // read(0) or nothing left to read: empty result, not an error
+        return self->is_binary ? mp_obj_new_bytes( (const byte*)"", 0 ) : mp_obj_new_str( "", 0 );
     }
 
     // Use MicroPython's memory allocator for better GC integration
@@ -4765,6 +4760,10 @@ static mp_obj_t jfs_file_write( mp_obj_t self_in, mp_obj_t data_obj ) {
         } else {
             data = mp_obj_str_get_data( data_obj, &len );
         }
+    }
+
+    if ( len == 0 ) {
+        return mp_obj_new_int( 0 ); // write('') is a no-op, not an EIO (C side rejects size<=0)
     }
 
     int bytes_written = jl_fs_write_bytes( self->file_handle, data, len );
@@ -4899,7 +4898,12 @@ static mp_obj_t jfs_file_close( mp_obj_t self_in ) {
     mp_obj_jfs_file_t* self = MP_OBJ_TO_PTR( self_in );
     
     if ( self->is_open && self->file_handle ) {
-        jl_fs_close_file( self->file_handle );
+        if ( !jl_fs_close_file( self->file_handle ) ) {
+            // fs_mutex held by the other core past the timeout: the file is
+            // still open and tracked. Report it (caller may retry close())
+            // instead of marking the object closed and leaking the slot.
+            mp_raise_OSError( MP_EBUSY );
+        }
         self->file_handle = NULL;
         self->is_open = false;
     }
@@ -4920,7 +4924,10 @@ static mp_obj_t jfs_file_exit( size_t n_args, const mp_obj_t* args ) {
 
     // Always close the file when exiting context
     if ( self->is_open && self->file_handle ) {
-        jl_fs_close_file( self->file_handle );
+        if ( !jl_fs_close_file( self->file_handle ) ) {
+            // See jfs_file_close: don't silently mark a still-open file closed
+            mp_raise_OSError( MP_EBUSY );
+        }
         self->file_handle = NULL;
         self->is_open = false;
     }
@@ -4978,7 +4985,9 @@ static mp_obj_t jfs_file_del( mp_obj_t self_in ) {
     mp_obj_jfs_file_t* self = MP_OBJ_TO_PTR( self_in );
     if ( self->is_open && self->file_handle ) {
         // jl_fs_close_file() includes flush before close - do NOT call jl_fs_flush separately!
-        jl_fs_close_file( self->file_handle );
+        // A finaliser can't raise: on mutex-timeout failure the handle stays
+        // tracked and jl_close_all_jfs_files() reclaims it at script exit.
+        (void)jl_fs_close_file( self->file_handle );
         self->file_handle = NULL;
         self->is_open = false;
     }
@@ -5043,7 +5052,11 @@ static mp_uint_t jfs_file_stream_ioctl( mp_obj_t self_in, mp_uint_t request, uin
         case MP_STREAM_CLOSE:
             // Close the file handle
             if ( self->is_open && self->file_handle ) {
-                jl_fs_close_file( self->file_handle );
+                if ( !jl_fs_close_file( self->file_handle ) ) {
+                    // Mutex timeout: still open+tracked - report, don't leak
+                    *errcode = MP_EBUSY;
+                    return MP_STREAM_ERROR;
+                }
                 self->file_handle = NULL;
                 self->is_open = false;
             }
@@ -5064,9 +5077,17 @@ static mp_uint_t jfs_file_stream_ioctl( mp_obj_t self_in, mp_uint_t request, uin
                 return MP_STREAM_ERROR;
             }
             
-            // Return new position
+            // ioctl contract (see py/stream.h and objstringio.c): write the
+            // resulting position back into seek_s->offset and return 0.
+            // Returning the position directly would be misread as an error
+            // code by C-level stream consumers.
             int new_pos = jl_fs_position( self->file_handle );
-            return (mp_uint_t)new_pos;
+            if ( new_pos < 0 ) {
+                *errcode = MP_EIO;
+                return MP_STREAM_ERROR;
+            }
+            seek_s->offset = new_pos;
+            return 0;
         }
             
         case MP_STREAM_FLUSH:
@@ -5117,7 +5138,9 @@ static mp_obj_t jfs_open( size_t n_args, const mp_obj_t* args ) {
 
     void* file_handle = jl_fs_open_file( path, mode );
     if ( !file_handle ) {
-        mp_raise_OSError( 2 ); // ENOENT
+        // ENOENT when the open itself failed, EMFILE when the 8-slot handle
+        // table is full - tells the user to close files, not chase paths
+        mp_raise_OSError( jl_fs_open_errno( ) );
     }
 
     // CRITICAL: Use mp_obj_malloc_with_finaliser() to register for GC finalizer callback
@@ -5146,36 +5169,9 @@ static mp_obj_t jfs_exists( mp_obj_t path_obj ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jfs_exists_obj, jfs_exists );
 
-static mp_obj_t jfs_listdir( mp_obj_t path_obj ) {
-    const char* path = mp_obj_str_get_str( path_obj );
-    char* result = jl_fs_listdir( path );
-    if ( result == NULL ) {
-        return mp_obj_new_list( 0, NULL );
-    }
-
-    // Parse comma-separated string into Python list
-    mp_obj_t list_obj = mp_obj_new_list( 0, NULL );
-
-    size_t len = strlen( result );
-    char* result_copy = malloc( len + 1 );
-    if ( result_copy == NULL ) {
-        return mp_obj_new_list( 0, NULL );
-    }
-    strcpy( result_copy, result );
-
-    char* token = strtok( result_copy, "," );
-    while ( token != NULL ) {
-        while ( *token == ' ' )
-            token++; // Skip leading spaces
-        mp_obj_t item = mp_obj_new_str( token, strlen( token ) );
-        mp_obj_list_append( list_obj, item );
-        token = strtok( NULL, "," );
-    }
-
-    free( result_copy );
-    return list_obj;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1( jfs_listdir_obj, jfs_listdir );
+// Same behavior as jl.fs_listdir: raises ENOENT on a missing dir, parses the
+// '\n'-separated producer buffer (see jl_fs_listdir_func).
+static MP_DEFINE_CONST_FUN_OBJ_1( jfs_listdir_obj, jl_fs_listdir_func );
 
 static mp_obj_t jfs_mkdir( mp_obj_t path_obj ) {
     const char* path = mp_obj_str_get_str( path_obj );
@@ -5227,17 +5223,17 @@ static mp_obj_t jfs_stat( mp_obj_t path_obj ) {
         mp_raise_OSError( 2 ); // ENOENT
     }
 
-    // Try to open file to get size info
-    void* file_handle = jl_fs_open_file( path, "r" );
-    int size = 0;
-    if ( file_handle ) {
-        size = jl_fs_size( file_handle );
-        jl_fs_close_file( file_handle );
+    // Path-based size/type queries: doesn't burn one of the 8 handle slots
+    // (the old open-for-size did, and reported directories as regular files)
+    int isdir = jl_fs_stat_isdir( path );
+    int size = isdir ? 0 : jl_fs_stat_size( path );
+    if ( size < 0 ) {
+        size = 0;
     }
 
     // Return a simple tuple with (mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime)
     mp_obj_t tuple[ 10 ];
-    tuple[ 0 ] = mp_obj_new_int( 0x8000 ); // S_IFREG - regular file
+    tuple[ 0 ] = mp_obj_new_int( isdir ? 0x4000 : 0x8000 ); // S_IFDIR : S_IFREG
     tuple[ 1 ] = mp_obj_new_int( 0 );      // inode
     tuple[ 2 ] = mp_obj_new_int( 0 );      // device
     tuple[ 3 ] = mp_obj_new_int( 1 );      // nlink
@@ -5273,26 +5269,36 @@ static mp_obj_t jfs_read( size_t n_args, const mp_obj_t* args ) {
         mp_raise_ValueError( "I/O operation on closed file" );
     }
 
-    size_t size = 1024; // Default read size
+    mp_int_t requested = 1024; // Default read size
     if ( n_args > 1 ) {
-        size = mp_obj_get_int( args[ 1 ] );
+        requested = mp_obj_get_int( args[ 1 ] );
+    }
+    size_t size;
+    if ( requested < 0 ) {
+        // Negative size: read everything from the current position
+        int avail = jl_fs_available( file->file_handle );
+        size = avail > 0 ? (size_t)avail : 0;
+    } else {
+        size = (size_t)requested;
+    }
+    if ( size == 0 ) {
+        return mp_obj_new_str( "", 0 );
     }
 
-    char* buffer = malloc( size + 1 );
-    if ( !buffer ) {
-        mp_raise_OSError( 12 ); // ENOMEM
-    }
+    // GC-heap buffer (like jfs_file_read): if mp_obj_new_str_from_vstr raises
+    // UnicodeError on non-UTF-8 data, the buffer is collected - the old libc
+    // malloc here leaked on that path.
+    vstr_t vstr;
+    vstr_init_len( &vstr, size );
 
-    int bytes_read = jl_fs_read_bytes( file->file_handle, buffer, size );
+    int bytes_read = jl_fs_read_bytes( file->file_handle, vstr.buf, size );
     if ( bytes_read < 0 ) {
-        free( buffer );
+        vstr_clear( &vstr );
         mp_raise_OSError( 5 ); // EIO
     }
 
-    buffer[ bytes_read ] = '\0';
-    mp_obj_t result = mp_obj_new_str( buffer, bytes_read );
-    free( buffer );
-    return result;
+    vstr.len = bytes_read;
+    return mp_obj_new_str_from_vstr( &vstr );
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jfs_read_obj, 1, 2, jfs_read );
 
@@ -5302,8 +5308,14 @@ static mp_obj_t jfs_write( mp_obj_t file_obj, mp_obj_t data_obj ) {
         mp_raise_ValueError( "I/O operation on closed file" );
     }
 
-    const char* data = mp_obj_str_get_str( data_obj );
-    size_t len = strlen( data );
+    // True byte length: data with embedded NULs is written intact (the old
+    // strlen-based path silently truncated at the first NUL)
+    size_t len;
+    const char* data = mp_obj_str_get_data( data_obj, &len );
+
+    if ( len == 0 ) {
+        return mp_const_none; // write('') is a no-op, not an EIO (C side rejects size<=0)
+    }
 
     int bytes_written = jl_fs_write_bytes( file->file_handle, data, len );
     if ( bytes_written < 0 ) {
@@ -5317,7 +5329,10 @@ static MP_DEFINE_CONST_FUN_OBJ_2( jfs_write_obj, jfs_write );
 static mp_obj_t jfs_close( mp_obj_t file_obj ) {
     mp_obj_jfs_file_t* file = MP_OBJ_TO_PTR( file_obj );
     if ( file->is_open && file->file_handle ) {
-        jl_fs_close_file( file->file_handle );
+        if ( !jl_fs_close_file( file->file_handle ) ) {
+            // See jfs_file_close: don't silently mark a still-open file closed
+            mp_raise_OSError( MP_EBUSY );
+        }
         file->file_handle = NULL;
         file->is_open = false;
     }
@@ -5515,7 +5530,8 @@ static mp_obj_t jl_vfs_open_method( mp_obj_t self_in, mp_obj_t path_obj, mp_obj_
 
     void* file_handle = jl_fs_open_file( path, mode );
     if ( !file_handle ) {
-        mp_raise_OSError( MP_ENOENT );
+        // ENOENT for open failures, EMFILE when the handle table is full
+        mp_raise_OSError( jl_fs_open_errno( ) );
     }
 
     // Allocate file object with finalizer for automatic cleanup
@@ -5576,44 +5592,41 @@ static mp_obj_t jl_vfs_ilistdir_method( mp_obj_t self_in, mp_obj_t path_obj ) {
 
     char* result = jl_fs_listdir( path );
     if ( result == NULL ) {
-        return mp_obj_new_list( 0, NULL );
+        mp_raise_OSError( MP_ENOENT ); // directory doesn't exist
     }
 
+    // Entries are '\n'-separated (see jl_fs_listdir_func); parse straight out
+    // of the producer's static buffer - no copy, no strtok, and nothing leaks
+    // if an allocation below raises. The per-entry stat calls don't touch the
+    // producer's buffer, so parsing in place is safe.
     mp_obj_t list_obj = mp_obj_new_list( 0, NULL );
-    size_t buf_len = strlen( result ) + 1;
-    char* result_copy = (char*)malloc( buf_len );
-    if ( result_copy ) {
-        memcpy( result_copy, result, buf_len );
-        char* token = strtok( result_copy, "," );
-        while ( token != NULL ) {
-            if ( token[ 0 ] != '\0' ) {
-                // Strip any trailing slash returned by jl_fs_listdir to match standard os.listdir
-                size_t name_len = strlen( token );
-                if ( name_len > 0 && token[ name_len - 1 ] == '/' ) {
-                    token[ name_len - 1 ] = '\0';
-                    name_len -= 1;
-                }
-
-                char fullpath[ 256 ];
-                if ( path[ 0 ] == '/' && path[ 1 ] == '\0' ) {
-                    snprintf( fullpath, sizeof( fullpath ), "/%s", token );
-                } else {
-                    snprintf( fullpath, sizeof( fullpath ), "%s/%s", path, token );
-                }
-
-                int isdir = jl_fs_stat_isdir( fullpath );
-                int size = jl_fs_stat_size( fullpath );
-
-                mp_obj_t items[ 4 ] = {
-                    mp_obj_new_str( token, name_len ),
-                    MP_OBJ_NEW_SMALL_INT( isdir ? 0x4000 : 0x8000 ),
-                    MP_OBJ_NEW_SMALL_INT( 0 ),
-                    MP_OBJ_NEW_SMALL_INT( size < 0 ? 0 : size ) };
-                mp_obj_list_append( list_obj, mp_obj_new_tuple( 4, items ) );
-            }
-            token = strtok( NULL, "," );
+    for ( const char* p = result; *p; ) {
+        const char* nl = strchr( p, '\n' );
+        size_t entry_len = nl ? (size_t)( nl - p ) : strlen( p );
+        // Strip any trailing slash returned by jl_fs_listdir to match standard os.listdir
+        size_t name_len = entry_len;
+        if ( name_len > 0 && p[ name_len - 1 ] == '/' ) {
+            name_len -= 1;
         }
-        free( result_copy );
+        if ( name_len > 0 ) {
+            char fullpath[ 256 ];
+            if ( path[ 0 ] == '/' && path[ 1 ] == '\0' ) {
+                snprintf( fullpath, sizeof( fullpath ), "/%.*s", (int)name_len, p );
+            } else {
+                snprintf( fullpath, sizeof( fullpath ), "%s/%.*s", path, (int)name_len, p );
+            }
+
+            int isdir = jl_fs_stat_isdir( fullpath );
+            int size = jl_fs_stat_size( fullpath );
+
+            mp_obj_t items[ 4 ] = {
+                mp_obj_new_str( p, name_len ),
+                MP_OBJ_NEW_SMALL_INT( isdir ? 0x4000 : 0x8000 ),
+                MP_OBJ_NEW_SMALL_INT( 0 ),
+                MP_OBJ_NEW_SMALL_INT( size < 0 ? 0 : size ) };
+            mp_obj_list_append( list_obj, mp_obj_new_tuple( 4, items ) );
+        }
+        p += entry_len + ( nl ? 1 : 0 );
     }
 
     return mp_getiter( list_obj, NULL );

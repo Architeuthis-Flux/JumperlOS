@@ -359,6 +359,7 @@ void* psram_alloc(size_t bytes) {
 }
 
 void* psram_calloc(size_t n, size_t bytes) {
+    if (bytes && n > SIZE_MAX / bytes) return nullptr; // n*bytes would overflow
     size_t total = n * bytes;
     void* p = psram_alloc(total);
     if (p) memset(p, 0, total);
@@ -391,9 +392,15 @@ void* psram_realloc(void* p, size_t bytes) {
 
     BlockHeader* h = reinterpret_cast<BlockHeader*>(
         reinterpret_cast<uint8_t*>(p) - sizeof(BlockHeader));
-    if (h->magic != BLOCK_MAGIC_USED) return nullptr;
+    // Read the header under the arena lock: it's the memory barrier against
+    // the other core's alloc/free/coalesce header writes. (The lock can't be
+    // held across psram_alloc below - Pico mutex_t is non-recursive.)
+    arenaLock();
+    bool valid = (h->magic == BLOCK_MAGIC_USED);
+    size_t oldUserSize = valid ? h->size - sizeof(BlockHeader) : 0;
+    arenaUnlock();
+    if (!valid) return nullptr;
 
-    size_t oldUserSize = h->size - sizeof(BlockHeader);
     if (bytes <= oldUserSize) return p;  // shrink in place
 
     void* np = psram_alloc(bytes);

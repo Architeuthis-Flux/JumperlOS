@@ -107,6 +107,11 @@ extern "C" void fatFsSetTimingDebug(bool enable) {
 
 namespace fatfs {
 
+// Set once disk_initialize() has run _ftl->start() for the CURRENT _ftl
+// instance. Must be cleared whenever a new SPIFTL is constructed, or an
+// end()/setUseFTL()/begin() re-toggle would use an un-start()ed FTL
+// (uninitialized l2p/peCount).
+static bool started = false;
 
 bool FatFSImpl::begin() {
     if (_mounted) {
@@ -116,6 +121,7 @@ bool FatFSImpl::begin() {
     if (_cfg._useFTL) {
         if (!_ftl) {
             _ftl = new SPIFTL(_fi, FATFS_SPIFTL_JOURNAL);
+            started = false; // fresh instance, disk_initialize() must start() it
         }
         _sectorSize = 512;
     } else {
@@ -173,6 +179,11 @@ FileImplPtr FatFSImpl::open(const char* path, OpenMode openMode, AccessMode acce
     }
     auto sharedFd = std::make_shared<FIL>();
     if (FR_OK == f_open(sharedFd.get(), path, flags)) {
+        if ((openMode & OM_TRUNCATE) && !(openMode & OM_CREATE)) {
+            // No FA_ flag maps to truncate-without-create (see _getFlags), and
+            // FA_CREATE_ALWAYS already truncated the OM_CREATE case.
+            f_truncate(sharedFd.get());
+        }
         return std::make_shared<FatFSFileImpl>(this, sharedFd, path, FA_WRITE & flags ? true : false);
     }
     sharedFd = nullptr;
@@ -193,56 +204,31 @@ DirImplPtr FatFSImpl::openDir(const char* path) {
     while (strlen(pathStr) && (pathStr[strlen(pathStr) - 1] == '/')) {
         pathStr[strlen(pathStr) - 1] = 0;
     }
-    // At this point we have a name of "/blah/blah/blah" or "blah" or ""
-    // If that references a directory, just open it and we're done.
-    DIR dirFile;
+    // At this point we have a name of "/blah/blah/blah" or "blah" or "".
+    // If it's an existing dir, open it; otherwise open the containing dir and
+    // use the final name part as a prefix filter.
+    // The FatFSDirImpl ctor below does the one and only f_opendir(dirPath).
+    // (Opening here too would clobber that DIR and, with FF_FS_LOCK, leak a
+    // share-table slot per openDir on a subdirectory.)
     FILINFO fno;
     const char *filter = "";
-    if (!pathStr[0]) {
-        // openDir("") === openDir("/")
-        f_opendir(&dirFile, "/");
-        filter = "";
-    } else if (FR_OK == f_stat(pathStr, &fno)) {
-        if (fno.fattrib & AM_DIR) {
-            // Easy peasy, path specifies an existing dir!
-            f_opendir(&dirFile, pathStr);
-            filter = "";
-        } else {
-            // This is a file, so open the containing dir
-            char *ptr = strrchr(pathStr, '/');
-            if (!ptr) {
-                // No slashes, open the root dir
-                f_opendir(&dirFile, "/");
-                filter = pathStr;
-            } else {
-                // We've got slashes, open the dir one up
-                *ptr = 0; // Remove slash, truncare string
-                f_opendir(&dirFile, pathStr);
-                filter = ptr + 1;
-            }
-        }
-    } else {
-        // Name doesn't exist, so use the parent dir of whatever was sent in
-        // This is a file, so open the containing dir
+    const char *dirPath = pathStr; // "" opens the root dir
+    if (pathStr[0] && !((FR_OK == f_stat(pathStr, &fno)) && (fno.fattrib & AM_DIR))) {
+        // A file or a nonexistent name, not a dir
         char *ptr = strrchr(pathStr, '/');
         if (!ptr) {
-            // No slashes, open the root dir
-            f_opendir(&dirFile, "/");
+            // No slashes: filter within the root dir. filter aliases pathStr,
+            // so point dirPath at root separately instead of truncating.
+            dirPath = "";
             filter = pathStr;
         } else {
             // We've got slashes, open the dir one up
-            *ptr = 0; // Remove slash, truncare string
-            f_opendir(&dirFile, pathStr);
+            *ptr = 0; // Remove slash, truncate string
             filter = ptr + 1;
         }
     }
-    // TODO -can this ever happen?
-    //    if (!dirFile) {
-    //        DEBUGV("FatFSImpl::openDir: path=`%s`\n", path);
-    //        return DirImplPtr();
-    //    }
-    auto sharedDir = std::make_shared<DIR>(dirFile);
-    auto ret = std::make_shared<FatFSDirImpl>(filter, this, sharedDir, pathStr);
+    auto sharedDir = std::make_shared<DIR>(); // value-init: zeroed obj.fs marks it invalid until the ctor opens it
+    auto ret = std::make_shared<FatFSDirImpl>(filter, this, sharedDir, dirPath);
     free(pathStr);
     return ret;
 }
@@ -252,7 +238,13 @@ bool FatFSImpl::format() {
         return false;
     }
     BYTE *work = new BYTE[4096]; /* Work area (larger is better for processing time) */
-    MKFS_PARM opt = { FM_FAT | FM_SFD, _cfg._fatCopies, 1, _sectorSize, _cfg._dirEntries};
+    // MKFS_PARM is {fmt, n_fat, align, n_root, au_size}. Upstream's positional
+    // initializer was field-scrambled: _sectorSize landed in n_root and
+    // _dirEntries in au_size. Values below keep the geometry every shipped
+    // device was formatted with: n_root = 512 (what the scrambled code
+    // effectively passed; _dirEntries was never honored - au_size=128 *bytes*
+    // rounds down to 0 sectors in f_mkfs, i.e. auto cluster size).
+    MKFS_PARM opt = { FM_FAT | FM_SFD, _cfg._fatCopies, 1 /*align*/, 512 /*n_root*/, 0 /*au_size: auto*/ };
     auto ret = f_mkfs("", &opt, work, 4096);
     delete[] work;
 
@@ -263,8 +255,6 @@ DSTATUS disk_status(BYTE p) {
     (void) p;
     return 0;
 }
-
-static bool started = false;
 
 void disk_format() {
     if (!started && _ftl) {
@@ -349,7 +339,7 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
     }
     case GET_BLOCK_SIZE: {
         DWORD *dw = (DWORD *)buff;
-        *dw = _sectorSize;
+        *dw = 4096 / _sectorSize; // flash erase block in SECTORS (8 with FTL, 1 without), not bytes; only f_mkfs alignment reads this
         return RES_OK;
     }
     case CTRL_TRIM: {

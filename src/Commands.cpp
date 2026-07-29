@@ -62,9 +62,10 @@ unsigned long waitCore2() {
     __dmb();  // Memory barrier to ensure we see latest values from Core 2
     
     if (micros() - timeout > 25000) {  // 25ms timeout
-      core2busy = false;
-      sendAllPathsCore2 = 0;
-      __dmb();  // Ensure Core 2 sees the reset
+      // ponytail: timeout-and-proceed only. core2busy is core 2's status and
+      // sendAllPathsCore2 is a pending crossbar path send - force-clearing
+      // them here falsified the flag for every other waiter and cancelled
+      // path sends core 2 hadn't gotten to yet.
       break;
     }
     
@@ -111,7 +112,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
 
   // CRITICAL: This should ONLY be called from Core 0
   if (rp2040.cpuid() != 0) {
-    Serial.println("ERROR: refreshConnections() called from Core 0.");
+    Serial.println("ERROR: refreshConnections() called from Core 2! This should only run on Core 0.");
     return;
   }
 
@@ -403,9 +404,7 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
     // (was 20ms which caused race conditions during rapid connect/disconnect)
     if (micros() - core2_wait_start > 200000) {  // 200ms timeout
       Serial.println("WARNING: Core 2 timeout (200ms)! Forcing proceed.");
-      // Force clear busy flag to prevent permanent deadlock
-      core2busy = false;
-      __dmb();
+      // ponytail: timeout-and-proceed only; core2busy is core 2's to clear
       break;
     }
     // Service USB periodically during the wait to prevent port disconnect
