@@ -881,6 +881,24 @@ void rotaryEncoderButtonStuff( void ) {
     rotaryEncoderButtonStuffLocked( );
 }
 
+// Re-arm a synthetic click event: the RELEASED + lastButtonEncoderState ==
+// PRESSED edge every menu poller checks for. Lives here (not at the call
+// site) because buttonEventTimestamp is static to this file - refreshing it
+// gives the consumer the full BUTTON_EVENT_MIN_DURATION_US window instead of
+// racing Core 1's auto-clear against a stale timestamp. Write order matters
+// for the lock-free handoff to Core 1's poll: timestamp first (arms the
+// hold window), then RELEASED (poll now freezes lastButtonEncoderState and
+// won't auto-clear), then PRESSED into the frozen slot.
+//
+// Used to hand a click from one blocking Core 0 UI loop to another, e.g.
+// probeMode handing its exit click to clickMenu(). The Menu FX tuner in
+// Debugs.cpp predates this helper and pokes the two states directly.
+void synthesizeEncoderClick( void ) {
+    buttonEventTimestamp = micros( );
+    encoderButtonState = RELEASED;
+    lastButtonEncoderState = PRESSED;
+}
+
 static void rotaryEncoderStuffLocked( void ) {
 
     // Handle button state checking and updates

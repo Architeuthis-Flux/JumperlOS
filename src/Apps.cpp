@@ -238,8 +238,8 @@ void fileManagerApp( void ) { filesystemApp( true ); }
 // array). The reading distribution is bimodal when the probe LED drops out
 // mid-sample (its supply is the rail being measured): a mean gets dragged
 // toward the artifact, the median ignores it as long as good samples are the
-// majority.
-static float medianInPlace( float* vals, int n ) {
+// majority. Shared (non-static): Probing.cpp and SelfTest.cpp extern it.
+float medianInPlace( float* vals, int n ) {
     std::sort( vals, vals + n );
     return ( n & 1 ) ? vals[ n / 2 ] : 0.5f * ( vals[ n / 2 - 1 ] + vals[ n / 2 ] );
 }
@@ -250,7 +250,9 @@ static float medianInPlace( float* vals, int n ) {
 // PIO state machine WITHOUT pausing the button-polling program that owns it,
 // so the LED ends up dark/garbage - and since the LED is powered from the
 // rail the calibration measures, that corrupts the readings themselves.
-static void setProbeLEDModeAndSettle( int mode ) {
+// Shared (non-static): SelfTest.cpp externs it to latch a known LED load
+// before its current measurements.
+void setProbeLEDModeAndSettle( int mode ) {
     showProbeLEDs = mode;
     unsigned long start = millis( );
     while ( showProbeLEDs != 0 && millis( ) - start < 200 ) {
@@ -295,6 +297,14 @@ void calibrateProbeSwitchThresholds( void ) {
     // routableBufferPower( 1, 1, 1 );
     //delay( 50 );
     checkProbeCurrentZero( );
+
+    // The thresholds ARE current signatures through INA1's DAC path, so
+    // force classic DAC power for the sampling even when
+    // debug.probe_power_gpio has the buffer GPIO-powered (INA1 would see
+    // ~0mA in both positions and the saved thresholds would be garbage).
+    // Restored below BEFORE saveConfig() so the flag isn't persisted off.
+    bool savedGpioPower = jumperlessConfig.debug.probe_power_gpio;
+    jumperlessConfig.debug.probe_power_gpio = false;
 
     routableBufferPower( 1, 1, 1 );
 
@@ -504,6 +514,10 @@ int row = 0;
     b.clear( );
     b.print( "Done!", 0x002000, 0x000000, 1, -1, -1 );
 
+    // Restore BEFORE saveConfig() so the user's flag survives in the file;
+    // the runtime re-claims its GPIO on the next routableBufferPower(1).
+    jumperlessConfig.debug.probe_power_gpio = savedGpioPower;
+
     saveConfig( );
     delay( 2000 );
 
@@ -566,6 +580,12 @@ void probeCalibApp( void ) {
     int lastReading = -1;
 
     int probeMax = jumperlessConfig.calibration.probe_max;
+    // Measure-position endpoint (3.3V frame; the decode scales it by the
+    // live ADC7 tip voltage). The old app nudged measure_mode_output_voltage
+    // to align measure-mode rows - the ratiometric decode now cancels a
+    // drive-voltage change (and under debug.probe_power_gpio the DAC isn't
+    // even driving the tip), so the knob adjusts probe_max_measure directly.
+    int probeMaxMeasure = jumperlessConfig.calibration.probe_max_measure;
 
     int nodeSelected = -1;
     int lastNodeSelected = -1;
@@ -577,8 +597,6 @@ void probeCalibApp( void ) {
     int lastSwitchPosition = -1;
 
     int measureOrSelect = 0;
-
-    float measureModeOutputVoltage = jumperlessConfig.calibration.measure_mode_output_voltage;
 
     b.printRawRow( 0b00011110, 0, 0x100005, 0x000000 );
     b.printRawRow( 0b00011000, 1, 0x100005, 0x000000 );
@@ -628,18 +646,16 @@ void probeCalibApp( void ) {
             }
         }
 
-        int rowProbed = map( lastValidProbeRead, jumperlessConfig.calibration.probe_min, jumperlessConfig.calibration.probe_max, 101, 0 );
-        int rowProbedWithOldMapping = map( lastValidProbeRead, jumperlessConfig.calibration.probe_min, probeMax, 101, 0 );
-
-        nodeSelected = probeRowMap[ rowProbed ];
-        nodeSelectedWithOldMapping = probeRowMapByPad[ rowProbedWithOldMapping ];
+        // Update the switch position FIRST: probeMapRange() keys off it, and
+        // measure/select decode with different endpoint pairs - mapping with
+        // last loop's position would mis-map rows for a frame after a flip.
         jOS.forceServiceByName("ProbeSwitch");
         int checkSwitch = Probing::getInstance( ).switchPosition;
         if ( checkSwitch != lastSwitchPosition ) {
             if ( checkSwitch == 0 ) {
                 lastSwitchPosition = 0;
                 measureOrSelect = 0;
-                measureModeOutputVoltage = jumperlessConfig.calibration.measure_mode_output_voltage;
+                probeMaxMeasure = jumperlessConfig.calibration.probe_max_measure;
             } else {
                 lastSwitchPosition = 1;
                 measureOrSelect = 1;
@@ -647,6 +663,17 @@ void probeCalibApp( void ) {
             }
             resetEncoderPosition = true;
         }
+
+        // Decode with the SAME mode-aware endpoints the runtime uses (base
+        // pair in select, ADC7-scaled measure pair in measure), so what
+        // lights up here is exactly what normal probing will decode.
+        int mapMin, mapMax;
+        probeMapRange( &mapMin, &mapMax );
+        int rowProbed = map( lastValidProbeRead, mapMin, mapMax, 101, 0 );
+        int rowProbedWithOldMapping = map( lastValidProbeRead, jumperlessConfig.calibration.probe_min, probeMax, 101, 0 );
+
+        nodeSelected = probeRowMap[ rowProbed ];
+        nodeSelectedWithOldMapping = probeRowMapByPad[ rowProbedWithOldMapping ];
         if ( probeRead != -1 ) {
 
             reading = rowProbed;
@@ -659,13 +686,10 @@ void probeCalibApp( void ) {
         if ( encoderPosition != lastEncoderPosition || reading != lastReading ) {
             lastEncoderPosition = encoderPosition;
             if ( measureOrSelect == 0 ) {
-                jumperlessConfig.calibration.measure_mode_output_voltage = measureModeOutputVoltage + ( (float)encoderPosition / 2000.0 );
-                if ( jumperlessConfig.calibration.measure_mode_output_voltage < 2.8 ) {
-                    jumperlessConfig.calibration.measure_mode_output_voltage = 2.8;
-                } else if ( jumperlessConfig.calibration.measure_mode_output_voltage > 4.5 ) {
-                    jumperlessConfig.calibration.measure_mode_output_voltage = 5.0;
+                jumperlessConfig.calibration.probe_max_measure = probeMaxMeasure - encoderPosition;
+                if ( jumperlessConfig.calibration.probe_max_measure < 15 ) {
+                    jumperlessConfig.calibration.probe_max_measure = 15;
                 }
-                setDac0voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0, false );
             } else {
                 jumperlessConfig.calibration.probe_max = probeMax - encoderPosition;
                 if ( jumperlessConfig.calibration.probe_max < 15 ) {
@@ -674,10 +698,10 @@ void probeCalibApp( void ) {
             }
             char debugOutput[100];
             if (measureOrSelect == 0) {
-                snprintf(debugOutput, sizeof(debugOutput), "MEASURE  raw: %d\n\rread: %d\n\rnode: %s\n\rv: %0.4f",
+                snprintf(debugOutput, sizeof(debugOutput), "MEASURE  raw: %d\n\rread: %d\n\rnode: %s\n\rmax: %d",
                            lastValidProbeRead, rowProbed,
                            definesToChar( nodeSelected ),
-                           jumperlessConfig.calibration.measure_mode_output_voltage );
+                           jumperlessConfig.calibration.probe_max_measure );
             } else {
                 snprintf(debugOutput, sizeof(debugOutput), "SELECT   raw: %d\n\rread: %d\n\rnode: %s\n\rmax: %d",
                            lastValidProbeRead, rowProbed,
@@ -695,10 +719,11 @@ void probeCalibApp( void ) {
             // \r first (return to column 0), then content, then EL (\033[K) to
             // wipe leftover chars from a longer previous line. Spaces-before-\r
             // only extends the line rightward and never clears it.
-            Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s mode: %s v: %0.4f \033[K",
-                           lastValidProbeRead, encoderPosition, rowProbed, jumperlessConfig.calibration.probe_max,
-                           definesToChar( nodeSelected ), measureOrSelect ? "measure" : "select",
-                           jumperlessConfig.calibration.measure_mode_output_voltage );
+            Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s mode: %s \033[K",
+                           lastValidProbeRead, encoderPosition, rowProbed,
+                           measureOrSelect == 0 ? jumperlessConfig.calibration.probe_max_measure
+                                                : jumperlessConfig.calibration.probe_max,
+                           definesToChar( nodeSelected ), measureOrSelect ? "select" : "measure" );
             Serial.flush( );
         }
 
@@ -2270,16 +2295,24 @@ if ( yesNo == 1 ) {
         // restart below.
         runFullSelfTest( true );
 
+        // Hold the result overlay on the breadboard LEDs; the operator's
+        // touch (probe button / encoder / serial byte) chains into the
+        // interactive probe pad calibration instead of resetting - they are
+        // already at the board, so use the moment to align the pad map.
+        selfTestWaitForInput( "start probe pad calibration" );
+        selfTestClearOverlay( );
+        probeCalibApp( ); // saves config (incl. pad endpoints) on finish
+
         // Start the device with a clean undo/redo history: the calibration
         // connects/disconnects above are internal setup, not user actions, and
         // any history carried over from a factory/test image shouldn't ship to
         // the user. Wipe it before the reboot that ends first-start.
         undoWipeHistory( );
 
-        // Hold the result overlay on the breadboard LEDs until an operator
-        // touches a probe button / the encoder (or sends a serial byte),
-        // then restart into normal operation.
-        selfTestWaitForInputThenReset( );
+        Serial.println( "Resetting..." );
+        Serial.flush( );
+        delay( 150 );
+        rp2040.restart( );
     }
 }
 

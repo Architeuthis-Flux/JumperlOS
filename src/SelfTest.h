@@ -39,13 +39,21 @@ struct SelfTestReport {
 // before starting (USB isn't open yet on a fresh first boot) and writes the
 // one-shot marker so the report is re-printed after the ending restart.
 // Manual full runs (fromFirstStart=false) end in the hold-then-reset below;
-// the first-start path calls it from the calibrateDacs tail after wiping the
-// undo history.
+// the first-start path (calibrateDacs tail) holds for input, chains into the
+// interactive probe pad calibration, wipes the undo history, then resets.
 void runFullSelfTest( bool fromFirstStart );
 
 // Hold the finished result on the breadboard LEDs until any human input
 // (probe button, encoder click/turn, or a serial byte), then restart.
 void selfTestWaitForInputThenReset( void );
+
+// Same hold-for-input, but WITHOUT the restart - nextWhat names what the
+// touch will do (e.g. "start probe pad calibration"). The first-start flow
+// uses it to chain into the interactive pad calibration before resetting.
+void selfTestWaitForInput( const char* nextWhat );
+
+// Remove the self-test result overlay from the breadboard LEDs.
+void selfTestClearOverlay( void );
 
 // Individual test apps (registered in apps[] / clickwheel calibration menu)
 void probeCableTestApp( void );

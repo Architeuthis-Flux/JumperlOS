@@ -4534,8 +4534,11 @@ int doMenuAction( int menuPosition, int selection ) {
         exitMenuModeForAction( );
 
         // Enter probe mode with encoder support
-        // This works exactly like clicking the probe button, but with encoder cursor support
-        probeMode( setOrClear, -1 );
+        // This works exactly like clicking the probe button, but with encoder
+        // cursor support. fromClickMenu = true: a wheel click with no cursor
+        // showing re-shows the cursor here, instead of the probe-button-entry
+        // behavior of bailing out to the click menu.
+        probeMode( setOrClear, -1, true );
 
         // Refresh display after exiting probe mode (negative = clear the
         // probe-mode leftovers out of the buffer before drawing wires)

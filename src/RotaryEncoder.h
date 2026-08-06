@@ -78,6 +78,11 @@ void unInitRotaryEncoder(void);
 void printRotaryEncoderHelp(void);
 void rotaryEncoderStuff(void);
 void rotaryEncoderButtonStuff(void);
+
+// Re-arm a synthetic click event (RELEASED with lastButtonEncoderState =
+// PRESSED and a fresh event timestamp) so a blocking UI loop can hand a
+// click it detected to another poller, e.g. probeMode -> clickMenu().
+void synthesizeEncoderClick(void);
 bool isRotaryEncoderInitialized(void);
 void printRotaryEncoderStatus(void);
 

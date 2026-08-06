@@ -662,6 +662,7 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "probe_revision") == 0) jumperlessConfig.hardware.probe_revision = parseInt(value);
             else if (strcmp(key, "psram_installed") == 0) jumperlessConfig.hardware.psram_installed = parseBool(value);
             else if (strcmp(key, "psram_app_size_kb") == 0) jumperlessConfig.hardware.psram_app_size_kb = parseInt(value);
+            else if (strcmp(key, "probe_led_on_button_pin") == 0) jumperlessConfig.hardware.probe_led_on_button_pin = parseBool(value);
         } else if (strcmp(section, "dacs") == 0) {
             // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
             if (strcmp(key, "set_dacs_on_boot") == 0) jumperlessConfig.dacs.set_dacs_on_boot = parseBool(value);
@@ -684,6 +685,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
             else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);
             else if (strcmp(key, "show_node_errors") == 0) jumperlessConfig.debug.show_node_errors = parseBool(value);
+            else if (strcmp(key, "probe_power_gpio") == 0) jumperlessConfig.debug.probe_power_gpio = parseBool(value);
+            else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
         } else if (strcmp(section, "routing") == 0) {
             if (strcmp(key, "stack_paths") == 0) {
                 jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -716,6 +719,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "adc_7_spread") == 0) jumperlessConfig.calibration.adc_7_spread = parseFloat(value);
             else if (strcmp(key, "probe_max") == 0) jumperlessConfig.calibration.probe_max = parseInt(value);
             else if (strcmp(key, "probe_min") == 0) jumperlessConfig.calibration.probe_min = parseInt(value);
+            else if (strcmp(key, "probe_max_measure") == 0) jumperlessConfig.calibration.probe_max_measure = parseInt(value);
+            else if (strcmp(key, "probe_min_measure") == 0) jumperlessConfig.calibration.probe_min_measure = parseInt(value);
             else if (strcmp(key, "probe_switch_threshold_high") == 0) jumperlessConfig.calibration.probe_switch_threshold_high = parseFloat(value);
             else if (strcmp(key, "probe_switch_threshold_low") == 0) jumperlessConfig.calibration.probe_switch_threshold_low = parseFloat(value);
             else if (strcmp(key, "probe_switch_threshold") == 0) jumperlessConfig.calibration.probe_switch_threshold = parseFloat(value);
@@ -1004,6 +1009,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("probe_revision = "); file.print(jumperlessConfig.hardware.probe_revision); file.println(";");
     file.print("psram_installed = "); file.print(jumperlessConfig.hardware.psram_installed); file.println(";");
     file.print("psram_app_size_kb = "); file.print(jumperlessConfig.hardware.psram_app_size_kb); file.println(";");
+    file.print("probe_led_on_button_pin = "); file.print(jumperlessConfig.hardware.probe_led_on_button_pin ? 1:0); file.println(";");
     file.println();
 
     // Write DAC settings section (voltage state moved to globalState.power in YAML files)
@@ -1031,6 +1037,8 @@ bool saveConfigToFile(const char* filename) {
     file.print("usb_mass_storage = "); file.print(jumperlessConfig.debug.usb_mass_storage ? 1:0); file.println(";");
     file.print("show_probe_current = "); file.print(jumperlessConfig.debug.show_probe_current); file.println(";");
     file.print("show_node_errors = "); file.print(jumperlessConfig.debug.show_node_errors ? 1:0); file.println(";");
+    file.print("probe_power_gpio = "); file.print(jumperlessConfig.debug.probe_power_gpio ? 1:0); file.println(";");
+    file.print("probe_switch_stats = "); file.print(jumperlessConfig.debug.probe_switch_stats ? 1:0); file.println(";");
     file.println();
 
     // Write routing settings section
@@ -1065,6 +1073,8 @@ bool saveConfigToFile(const char* filename) {
     file.print("adc_7_spread = "); file.print(jumperlessConfig.calibration.adc_7_spread); file.println(";");
     file.print("probe_max = "); file.print(jumperlessConfig.calibration.probe_max); file.println(";");
     file.print("probe_min = "); file.print(jumperlessConfig.calibration.probe_min); file.println(";");
+    file.print("probe_max_measure = "); file.print(jumperlessConfig.calibration.probe_max_measure); file.println(";");
+    file.print("probe_min_measure = "); file.print(jumperlessConfig.calibration.probe_min_measure); file.println(";");
     file.print("probe_switch_threshold_high = "); file.print(jumperlessConfig.calibration.probe_switch_threshold_high); file.println(";");
     file.print("probe_switch_threshold_low = "); file.print(jumperlessConfig.calibration.probe_switch_threshold_low); file.println(";");
     file.print("probe_switch_threshold = "); file.print(jumperlessConfig.calibration.probe_switch_threshold); file.println(";");
@@ -1209,6 +1219,7 @@ bool configHasChanges() {
     if (jumperlessConfig.hardware.probe_revision != lastSavedConfig.hardware.probe_revision) return true;
     if (jumperlessConfig.hardware.psram_installed != lastSavedConfig.hardware.psram_installed) return true;
     if (jumperlessConfig.hardware.psram_app_size_kb != lastSavedConfig.hardware.psram_app_size_kb) return true;
+    if (jumperlessConfig.hardware.probe_led_on_button_pin != lastSavedConfig.hardware.probe_led_on_button_pin) return true;
     
     // DACs section
     if (jumperlessConfig.dacs.set_dacs_on_boot != lastSavedConfig.dacs.set_dacs_on_boot) return true;
@@ -1233,6 +1244,8 @@ bool configHasChanges() {
     if (jumperlessConfig.debug.usb_mass_storage != lastSavedConfig.debug.usb_mass_storage) return true;
     if (jumperlessConfig.debug.show_probe_current != lastSavedConfig.debug.show_probe_current) return true;
     if (jumperlessConfig.debug.show_node_errors != lastSavedConfig.debug.show_node_errors) return true;
+    if (jumperlessConfig.debug.probe_power_gpio != lastSavedConfig.debug.probe_power_gpio) return true;
+    if (jumperlessConfig.debug.probe_switch_stats != lastSavedConfig.debug.probe_switch_stats) return true;
     
     // Routing section
     if (jumperlessConfig.routing.stack_paths != lastSavedConfig.routing.stack_paths) return true;
@@ -1263,6 +1276,8 @@ bool configHasChanges() {
     if (jumperlessConfig.calibration.adc_7_spread != lastSavedConfig.calibration.adc_7_spread) return true;
     if (jumperlessConfig.calibration.probe_max != lastSavedConfig.calibration.probe_max) return true;
     if (jumperlessConfig.calibration.probe_min != lastSavedConfig.calibration.probe_min) return true;
+    if (jumperlessConfig.calibration.probe_max_measure != lastSavedConfig.calibration.probe_max_measure) return true;
+    if (jumperlessConfig.calibration.probe_min_measure != lastSavedConfig.calibration.probe_min_measure) return true;
     if (jumperlessConfig.calibration.probe_switch_threshold_high != lastSavedConfig.calibration.probe_switch_threshold_high) return true;
     if (jumperlessConfig.calibration.probe_switch_threshold_low != lastSavedConfig.calibration.probe_switch_threshold_low) return true;
     if (jumperlessConfig.calibration.probe_switch_threshold != lastSavedConfig.calibration.probe_switch_threshold) return true;
@@ -1614,6 +1629,9 @@ bool saveConfigIncremental(const char* filename) {
                 } else if (strcmp(key, "psram_app_size_kb") == 0) {
                     snprintf(newLine, sizeof(newLine), "psram_app_size_kb = %d;", jumperlessConfig.hardware.psram_app_size_kb);
                     updated = true;
+                } else if (strcmp(key, "probe_led_on_button_pin") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_led_on_button_pin = %d;", jumperlessConfig.hardware.probe_led_on_button_pin ? 1 : 0);
+                    updated = true;
                 }
             }
             //! [dacs] section
@@ -1672,6 +1690,12 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "usb_mass_storage") == 0) {
                     snprintf(newLine, sizeof(newLine), "usb_mass_storage = %d;", jumperlessConfig.debug.usb_mass_storage ? 1 : 0);
+                    updated = true;
+                } else if (strcmp(key, "probe_power_gpio") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_power_gpio = %d;", jumperlessConfig.debug.probe_power_gpio ? 1 : 0);
+                    updated = true;
+                } else if (strcmp(key, "probe_switch_stats") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_switch_stats = %d;", jumperlessConfig.debug.probe_switch_stats ? 1 : 0);
                     updated = true;
                 }
             }
@@ -1758,6 +1782,12 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "probe_min") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_min = %d;", jumperlessConfig.calibration.probe_min);
+                    updated = true;
+                } else if (strcmp(key, "probe_max_measure") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_max_measure = %d;", jumperlessConfig.calibration.probe_max_measure);
+                    updated = true;
+                } else if (strcmp(key, "probe_min_measure") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_min_measure = %d;", jumperlessConfig.calibration.probe_min_measure);
                     updated = true;
                 } else if (strcmp(key, "probe_switch_threshold_high") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_switch_threshold_high = %.2f;", jumperlessConfig.calibration.probe_switch_threshold_high);
@@ -2423,7 +2453,19 @@ void loadConfig(void) {
         jumperlessConfig.calibration.probe_min = 15;
         jumperlessConfig.calibration.probe_max = 4060;
     }
-    
+
+    // Seed the MEASURE-position pad endpoints from the base (select) pair so
+    // the config holds real, individually-adjustable numbers instead of a 0
+    // sentinel. They are stored in the 3.3V frame; the decode scales them by
+    // the live tip voltage (ADC7) at runtime, so seeding with the base pair
+    // is correct for a fresh board.
+    if (jumperlessConfig.calibration.probe_min_measure <= 0) {
+        jumperlessConfig.calibration.probe_min_measure = jumperlessConfig.calibration.probe_min;
+    }
+    if (jumperlessConfig.calibration.probe_max_measure <= 0) {
+        jumperlessConfig.calibration.probe_max_measure = jumperlessConfig.calibration.probe_max;
+    }
+
     readSettingsFromConfig();
     
     // Initialize shadow config for dirty tracking
@@ -2492,6 +2534,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("psram_installed = "); Serial.print(jumperlessConfig.hardware.psram_installed); Serial.println(";");
         if (pasteable == true) Serial.print("`[hardware] ");
         Serial.print("psram_app_size_kb = "); Serial.print(jumperlessConfig.hardware.psram_app_size_kb); Serial.println(";");
+        if (pasteable == true) Serial.print("`[hardware] ");
+        Serial.print("probe_led_on_button_pin = "); Serial.print(getStringFromTable(jumperlessConfig.hardware.probe_led_on_button_pin, boolTable)); Serial.println(";");
     }
     cycleTerminalColor();
     // Print DAC settings section
@@ -2541,6 +2585,10 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("show_probe_current = "); Serial.print(jumperlessConfig.debug.show_probe_current); Serial.println(";");
         if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("show_node_errors = "); Serial.print(getStringFromTable(jumperlessConfig.debug.show_node_errors, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[debug] ");
+        Serial.print("probe_power_gpio = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_power_gpio, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[debug] ");
+        Serial.print("probe_switch_stats = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_switch_stats, boolTable)); Serial.println(";");
     }
     cycleTerminalColor();
     // Print routing settings section
@@ -2603,6 +2651,10 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_max = "); Serial.print(jumperlessConfig.calibration.probe_max); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("probe_min = "); Serial.print(jumperlessConfig.calibration.probe_min); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_max_measure = "); Serial.print(jumperlessConfig.calibration.probe_max_measure); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_min_measure = "); Serial.print(jumperlessConfig.calibration.probe_min_measure); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("probe_switch_threshold_high = "); Serial.print(jumperlessConfig.calibration.probe_switch_threshold_high); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
@@ -3551,6 +3603,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_revision") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_revision);
         else if (strcmp(key, "psram_installed") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.psram_installed);
         else if (strcmp(key, "psram_app_size_kb") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.psram_app_size_kb);
+        else if (strcmp(key, "probe_led_on_button_pin") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_led_on_button_pin);
     }
     else if (strcmp(section, "dacs") == 0) {
         // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
@@ -3575,6 +3628,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "usb_mass_storage") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.usb_mass_storage);
         else if (strcmp(key, "show_probe_current") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.show_probe_current);
         else if (strcmp(key, "show_node_errors") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.show_node_errors);
+        else if (strcmp(key, "probe_power_gpio") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_power_gpio);
+        else if (strcmp(key, "probe_switch_stats") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_stats);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_paths);
@@ -3608,6 +3663,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "adc_7_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_7_spread);
         else if (strcmp(key, "probe_max") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max);
         else if (strcmp(key, "probe_min") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_min);
+        else if (strcmp(key, "probe_max_measure") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max_measure);
+        else if (strcmp(key, "probe_min_measure") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_min_measure);
         else if (strcmp(key, "probe_switch_threshold_high") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold_high);
         else if (strcmp(key, "probe_switch_threshold_low") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold_low);
         else if (strcmp(key, "probe_switch_threshold") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold);
@@ -3695,6 +3752,10 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
             // since MicroPython has already mapped its heap.
             jumperlessConfig.hardware.psram_app_size_kb = parseInt(value);
         }
+        else if (strcmp(key, "probe_led_on_button_pin") == 0) {
+            // Pin binding happens once at initLEDs(); takes effect on next boot.
+            jumperlessConfig.hardware.probe_led_on_button_pin = parseBool(value);
+        }
     }
     else if (strcmp(section, "dacs") == 0) {
         // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
@@ -3724,6 +3785,13 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
         else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);
         else if (strcmp(key, "show_node_errors") == 0) jumperlessConfig.debug.show_node_errors = parseBool(value);
+        else if (strcmp(key, "probe_power_gpio") == 0) {
+            jumperlessConfig.debug.probe_power_gpio = parseBool(value);
+            // Re-apply so the buffer power source swaps immediately (and a
+            // stale GPIO bridge is torn down when turning the flag off).
+            routableBufferPower(1, 0, 1);
+        }
+        else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -3765,6 +3833,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "adc_7_spread") == 0) jumperlessConfig.calibration.adc_7_spread = parseFloat(value);
         else if (strcmp(key, "probe_max") == 0) jumperlessConfig.calibration.probe_max = parseInt(value);
         else if (strcmp(key, "probe_min") == 0) jumperlessConfig.calibration.probe_min = parseInt(value);
+        else if (strcmp(key, "probe_max_measure") == 0) jumperlessConfig.calibration.probe_max_measure = parseInt(value);
+        else if (strcmp(key, "probe_min_measure") == 0) jumperlessConfig.calibration.probe_min_measure = parseInt(value);
         else if (strcmp(key, "measure_mode_output_voltage") == 0) jumperlessConfig.calibration.measure_mode_output_voltage = parseFloat(value);
         else if (strcmp(key, "probe_switch_threshold_high") == 0) jumperlessConfig.calibration.probe_switch_threshold_high = parseFloat(value);
         else if (strcmp(key, "probe_switch_threshold_low") == 0) jumperlessConfig.calibration.probe_switch_threshold_low = parseFloat(value);

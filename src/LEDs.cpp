@@ -593,8 +593,17 @@ void initLEDs(void) {
 
 
 #if !defined(OG_JUMPERLESS)
-  // OG has no dedicated probe LED (V5-only, on pin 2). Skipping avoids claiming
+  // OG has no dedicated probe LED (V5-only). Skipping avoids claiming
   // a PIO SM that the OG's oversubscribed PIO blocks can't spare.
+  //
+  // GPIO2 (PROBE_LED_PIN) and GPIO9 (BUTTON_PIN) land on the same TRRS plug
+  // ring, and the GPIO2-side jack contact is the common flaky one - so by
+  // default the WS2812 data (and the shared-SM button sampling, which follows
+  // probeLEDs.getPin()) lives on GPIO9 and GPIO2 becomes the parked spare.
+  // configLoaded is guaranteed by setupCore2stuff() before we get here.
+  if (jumperlessConfig.hardware.probe_led_on_button_pin) {
+    probeLEDs.setPin(BUTTON_PIN);
+  }
   probeLEDs.begin();
   probeLEDs.setPixelColor(0, 0x000000);
   probeLEDs.show();

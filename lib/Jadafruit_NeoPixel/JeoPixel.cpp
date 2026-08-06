@@ -343,17 +343,38 @@ void JeoPixel::show(void) {
   // Shift each byte to top 8 bits and push directly to PIO FIFO
   uint32_t numBytes = numLEDs * ((wOffset == rOffset) ? 3 : 4);
   uint8_t *ptr = pixels;
-  
+
+  // Every wait below is DEADLINE-BOUNDED. On the Jumperless the probe LED
+  // shares its state machine with a button-polling PIO program; if another
+  // core swaps the SM to the button program mid-show (multiplex race), the
+  // button program never pulls from the TX FIFO and an unbounded wait spins
+  // this core forever (hardware-confirmed: core1 wedged here during the
+  // self test, freezing LEDs and the path-refresh handshake). One garbled
+  // frame is recoverable; a dead core is not. Budget: 10us/byte at 800kHz
+  // (20us at 400kHz) for the stream itself + 1ms slop.
+#ifdef NEO_KHZ400
+  uint32_t streamUs = numBytes * (is800KHz ? 10 : 20);
+#else
+  uint32_t streamUs = numBytes * 10;
+#endif
+  uint32_t deadline = micros() + streamUs + 1000;
+
   while (numBytes--) {
-    pio_sm_put_blocking(pio, pio_sm, ((uint32_t)*ptr++) << 24);
+    while (pio_sm_is_tx_fifo_full(pio, pio_sm)) {
+      if ((int32_t)(micros() - deadline) >= 0) {
+        return; // SM stopped consuming - bail instead of wedging the core
+      }
+      tight_loop_contents();
+    }
+    pio_sm_put(pio, pio_sm, ((uint32_t)*ptr++) << 24);
   }
 
-  // The put_blocking loop only blocks until the LAST word is in the 4-deep
-  // TX FIFO. The PIO state machine is still clocking those bits out for up
-  // to (FIFO_DEPTH * 8 bits * 1.25us) + last-bit time after we return.
+  // The put loop only blocks until the LAST word is in the 4-deep TX FIFO.
+  // The PIO state machine is still clocking those bits out for up to
+  // (FIFO_DEPTH * 8 bits * 1.25us) + last-bit time after we return.
   // If a caller multiplexes this pin (e.g. the Jumperless probe button
-  // share with PROBE_LED_PIN) the instant we return, we cut the WS2812
-  // stream mid-byte and get shifted/garbled output.
+  // share) the instant we return, we cut the WS2812 stream mid-byte and
+  // get shifted/garbled output.
   //
   // Spin until the FIFO has fully drained, then add the trailing bit time
   // so the PIO state machine is genuinely idle before we let the caller
@@ -361,6 +382,9 @@ void JeoPixel::show(void) {
   // strip update, which is negligible vs. the 300us latch already eaten
   // by canShow().
   while (!pio_sm_is_tx_fifo_empty(pio, pio_sm)) {
+    if ((int32_t)(micros() - deadline) >= 0) {
+      return; // SM stopped consuming - bail instead of wedging the core
+    }
     tight_loop_contents();
   }
   // 8 bits * 1.25us = 10us for the last byte to shift out of the OSR

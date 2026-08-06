@@ -321,7 +321,10 @@ int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
     void clearPendingInput() { pendingInput = '\0'; }
     
     // Public methods (existing function interfaces)
-    int probeMode(int setOrClear = 1, int firstConnection = -1);
+    // fromClickMenu: true when the click menu launched this session. When
+    // false (probe-button entry), a short wheel click with no encoder
+    // cursor showing exits probing and opens the click menu.
+    int probeMode(int setOrClear = 1, int firstConnection = -1, bool fromClickMenu = false);
     float measureMode(int updateSpeed = 150);
     void checkPads(void);
     int delayWithButton(int delayTime = 1000);
@@ -349,6 +352,7 @@ int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
     float checkProbeCurrentRaw(void);   // ABSOLUTE INA1 current, NO probe_current_zero subtraction (internal building block / diagnostics)
     float checkProbeCurrent(void);      // zero-corrected current (raw - probe_current_zero); used for switch detection, calibration, and display
     float checkProbeCurrentZero(void);
+    float probeCurrentMedian(int n);    // median of n independent CNVR-armed samples, zero-corrected frame (~17ms each; calibration/self-test only)
     
     void routableBufferPower(int offOn, int flash = 0, int force = 0);
     
@@ -414,7 +418,8 @@ private:
         int* connectedRows,
         int& connectedRowsIndex,
         EncoderAccelerator& encoderAccel,
-        unsigned long encoderHideTimeout
+        unsigned long encoderHideTimeout,
+        bool clickExitsToMenu
     );
 };
 
@@ -451,8 +456,8 @@ extern int& showProbeCurrent;
 
 // Legacy wrapper functions for backward compatibility
 // These call the corresponding methods on the singleton instance
-inline int probeMode(int setOrClear = 1, int firstConnection = -1) {
-    return Probing::getInstance().probeMode(setOrClear, firstConnection);
+inline int probeMode(int setOrClear = 1, int firstConnection = -1, bool fromClickMenu = false) {
+    return Probing::getInstance().probeMode(setOrClear, firstConnection, fromClickMenu);
 }
 
 inline float measureMode(int updateSpeed = 150) {
@@ -499,12 +504,28 @@ inline int readProbeRaw(int readNothingTouched = 0, bool allowDuplicates = false
     return Probing::getInstance().readProbeRaw(readNothingTouched, allowDuplicates);
 }
 
+// Pad-decode endpoints for the CURRENT switch position (defined in
+// Probing.cpp): the base probe_min/max pair in SELECT, the
+// probe_min_measure/max_measure pair scaled by the live ADC7 tip voltage in
+// MEASURE. Use this instead of reading the calibration values directly so
+// displays/calibration match what the runtime decode actually does.
+void probeMapRange(int* mapMin, int* mapMax);
+
+// Evict stale routable-GPIO -> BUFFER_IN power-claim bridges (persisted into
+// slots by debug.probe_power_gpio) that don't belong to the live claim.
+// Called by routableBufferPower(1) and by the slot-load path in main.cpp.
+void scrubStaleGpioBufferBridges(bool autoRefresh = true);
+
 inline float checkProbeCurrent(void) {
     return Probing::getInstance().checkProbeCurrent();
 }
 
 inline float checkProbeCurrentRaw(void) {
     return Probing::getInstance().checkProbeCurrentRaw();
+}
+
+inline float probeCurrentMedian(int n) {
+    return Probing::getInstance().probeCurrentMedian(n);
 }
 
 inline int delayWithButton(int delayTime = 1000) {

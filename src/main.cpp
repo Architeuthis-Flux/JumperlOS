@@ -325,8 +325,15 @@ void setup( ) {
 
     #if !defined(OG_JUMPERLESS)
     pinMode( PROBE_PIN, OUTPUT_8MA );
-    pinMode( BUTTON_PIN, INPUT_PULLDOWN );
-    // pinMode(buttonPin, INPUT_PULLDOWN);
+    // Park whichever side of the shared TRRS net is NOT the WS2812 data pin.
+    // When probe_led_on_button_pin is set, GPIO9 belongs to probeLEDs (claimed
+    // in initLEDs() on core1, possibly concurrently with this code) - touching
+    // it here would clobber its PIO funcsel.
+    if ( jumperlessConfig.hardware.probe_led_on_button_pin ) {
+        pinMode( PROBE_LED_PIN, INPUT_PULLDOWN );
+    } else {
+        pinMode( BUTTON_PIN, INPUT_PULLDOWN );
+    }
     digitalWrite( PROBE_PIN, HIGH );
     #endif
 
@@ -1260,6 +1267,13 @@ loadfile:
     // Initialize fake GPIO pins from loaded state (before refreshing connections)
     // This restores FakeGpioOutput/Input entries from FAKE_GPIO bridges in the state
     initializeFakeGpioFromLoadedState( );
+
+    // A slot saved while debug.probe_power_gpio held a power claim carries
+    // the claim bridge (+ output-high pin direction). Evict any that don't
+    // belong to the live claim BEFORE the refresh below routes them, so a
+    // phantom GPIO can't source the buffer until the next
+    // routableBufferPower(1) pass happens to run.
+    scrubStaleGpioBufferBridges( false );
 
     slotChanged = 0;
     loadingFile = 0;

@@ -45,8 +45,13 @@
 
 // Defined in Apps.cpp / Probing.cpp (not exported in headers)
 void leaveApp( void );
-extern void probeButtonPausePolling( void );
-extern void probeButtonResumePolling( void );
+// Core0-safe SM pause/resume: parks core1's probeLEDhandler before touching
+// the shared button/LED PIO state machine. NEVER call the raw
+// probeButtonPausePolling/ResumePolling from this file - those are core1's
+// (see the banner above their definitions in Probing.cpp; the raw calls
+// hardware-wedged core1 in showBlocking during the crossbar phase).
+extern void probeButtonPausePollingFromCore0( void );
+extern void probeButtonResumePollingFromCore0( void );
 
 static const char* selfTestNames[ SELFTEST_NUM_TESTS ] = {
     "probe_cable", "crossbar", "tip_voltage", "psram", "peripherals",
@@ -64,6 +69,8 @@ static const char* SELFTEST_OVERLAY_NAME = "_SELFTEST_";
 // The OG has no crossbar-routable buffer, single-LED rows, and a different
 // analog front end - none of this test suite applies.
 void runFullSelfTest( bool ) { Serial.println( "Self test is not supported on Jumperless OG." ); }
+void selfTestWaitForInput( const char* ) { }
+void selfTestClearOverlay( void ) { }
 void selfTestWaitForInputThenReset( void ) { rp2040.restart( ); }
 void probeCableTestApp( void ) { runFullSelfTest( false ); }
 void crossbarTestApp( void ) { runFullSelfTest( false ); }
@@ -285,11 +292,19 @@ static void writeTextFile( const char* path, const String& contents ) {
 // ============================================================================
 // Test 0: probe cable
 // ============================================================================
-// A healthy TRRS cable shorts PROBE_LED_PIN (GPIO 2, the probe LED data
-// line) to BUTTON_PIN (GPIO 9) at the jack - the most common cable failure
-// is that short being open. Verify it by driving each pin and reading the
-// other, with the sense pin pulled toward the OPPOSITE level so an open
-// cable reads back the pull, not the drive.
+// A healthy TRRS cable shorts PROBE_LED_PIN (GPIO 2) to BUTTON_PIN (GPIO 9)
+// at the jack - the most common cable failure is that short being open,
+// almost always on the GPIO2-side contact. Verify it by driving each pin
+// and reading the other, with the sense pin pulled toward the OPPOSITE
+// level so an open cable reads back the pull, not the drive.
+//
+// The firmware's WS2812 data + button sampling live on ONE pin
+// (probeLEDs.getPin(), GPIO9 by default via probe_led_on_button_pin), so a
+// flaky contact on the OTHER (spare) pin no longer breaks anything - when
+// the functional checks below prove the data pin reaches the probe, an
+// open short is reported as a warning instead of a failure.
+
+#define SHORT_SAMPLES 8
 
 static int countShortAgreement( uint drivePin, uint sensePin, const char* driveName,
                                 const char* senseName ) {
@@ -303,52 +318,71 @@ static int countShortAgreement( uint drivePin, uint sensePin, const char* driveN
         gpio_set_function( drivePin, GPIO_FUNC_SIO );
         gpio_disable_pulls( drivePin );
         gpio_set_dir( drivePin, true );
-        gpio_put( drivePin, lv );
-        delayMicroseconds( 50 );
 
-        int got = gpio_get( sensePin );
-        bool ok = ( got == lv );
-        Serial.printf( "    drive %s %s with %s pulled %s -> %s reads %d %s\n\r",
+        // Sample repeatedly with a wiggle to the opposite level in between,
+        // so every read is a fresh edge instead of a re-read of a settled
+        // line - an intermittent contact that holds still for one sample
+        // shows up here as a dropped edge.
+        int agree = 0;
+        for ( int s = 0; s < SHORT_SAMPLES; s++ ) {
+            gpio_put( drivePin, lv );
+            delayMicroseconds( 50 );
+            if ( gpio_get( sensePin ) == lv )
+                agree++;
+            gpio_put( drivePin, !lv );
+            delayMicroseconds( 20 );
+        }
+        bool ok = ( agree == SHORT_SAMPLES );
+        Serial.printf( "    drive %s %s with %s pulled %s -> %s follows drive %d/%d %s\n\r",
                        driveName, lv ? "HIGH" : "LOW", senseName,
-                       lv ? "down" : "up", senseName, got,
-                       ok ? "(follows drive: shorted, ok)" : "(follows pull: NO SHORT)" );
+                       lv ? "down" : "up", senseName, agree, SHORT_SAMPLES,
+                       ok ? "(shorted, ok)" : "(NO SHORT / intermittent)" );
         if ( ok )
             good++;
 
         gpio_set_dir( drivePin, false );
         gpio_disable_pulls( sensePin );
     }
-    return good; // 2 = solidly shorted
+    return good; // 2 = solidly shorted at both levels, every sample
 }
 
 // No-button float check (the "0 1" decode from the button reader): drive the
 // shared line to a rail, release to HiZ, and sample - a floating line stays
 // where parasitic capacitance left it, while a pressed button or a cable
-// short to a rail snaps it back.
-static bool probeLineFloatCheck( void ) {
-    gpio_set_function( BUTTON_PIN, GPIO_FUNC_SIO );
-    gpio_disable_pulls( BUTTON_PIN );
-    gpio_set_input_enabled( BUTTON_PIN, true );
+// short to a rail snaps it back. Runs on the ACTIVE data pin (the one the
+// firmware actually samples the button on) and repeats each direction so an
+// intermittent rail short can't hide behind a single lucky read.
+static bool probeLineFloatCheck( uint pin ) {
+    gpio_set_function( pin, GPIO_FUNC_SIO );
+    gpio_disable_pulls( pin );
+    gpio_set_input_enabled( pin, true );
 
-    gpio_set_dir( BUTTON_PIN, true );
-    gpio_put( BUTTON_PIN, false );
-    delayMicroseconds( 50 );
-    gpio_set_dir( BUTTON_PIN, false );
-    delayMicroseconds( 5 );
-    int low = gpio_get( BUTTON_PIN );
-    Serial.printf( "    drive line LOW, release to HiZ -> reads %d %s\n\r", low,
-                   low == 0 ? "(held by capacitance, ok)" : "(SNAPPED HIGH: button/rail short)" );
+    int lowGood = 0, highGood = 0;
+    for ( int s = 0; s < SHORT_SAMPLES; s++ ) {
+        gpio_set_dir( pin, true );
+        gpio_put( pin, false );
+        delayMicroseconds( 50 );
+        gpio_set_dir( pin, false );
+        delayMicroseconds( 5 );
+        if ( gpio_get( pin ) == 0 )
+            lowGood++;
 
-    gpio_set_dir( BUTTON_PIN, true );
-    gpio_put( BUTTON_PIN, true );
-    delayMicroseconds( 50 );
-    gpio_set_dir( BUTTON_PIN, false );
-    delayMicroseconds( 5 );
-    int high = gpio_get( BUTTON_PIN );
-    Serial.printf( "    drive line HIGH, release to HiZ -> reads %d %s\n\r", high,
-                   high == 1 ? "(held by capacitance, ok)" : "(SNAPPED LOW: button/rail short)" );
+        gpio_set_dir( pin, true );
+        gpio_put( pin, true );
+        delayMicroseconds( 50 );
+        gpio_set_dir( pin, false );
+        delayMicroseconds( 5 );
+        if ( gpio_get( pin ) == 1 )
+            highGood++;
+    }
+    Serial.printf( "    drive line LOW, release to HiZ -> holds %d/%d %s\n\r", lowGood,
+                   SHORT_SAMPLES, lowGood == SHORT_SAMPLES ? "(held by capacitance, ok)"
+                                                           : "(SNAPPED HIGH: button/rail short)" );
+    Serial.printf( "    drive line HIGH, release to HiZ -> holds %d/%d %s\n\r", highGood,
+                   SHORT_SAMPLES, highGood == SHORT_SAMPLES ? "(held by capacitance, ok)"
+                                                            : "(SNAPPED LOW: button/rail short)" );
 
-    return low == 0 && high == 1;
+    return lowGood == SHORT_SAMPLES && highGood == SHORT_SAMPLES;
 }
 
 static void runProbeCableTest( SelfTestReport& r ) {
@@ -357,73 +391,162 @@ static void runProbeCableTest( SelfTestReport& r ) {
     b.print( "Probe", (uint32_t)0x000a12 );
     showLEDsCore2 = 2;
 
+    // The firmware's WS2812-data/button pin follows probeLEDs; the other pin
+    // of the shared TRRS ring is the parked spare (GPIO2 when
+    // probe_led_on_button_pin is set, the default).
+    const uint dataPin = (uint)probeLEDs.getPin( );
+    const uint sparePin = ( dataPin == (uint)BUTTON_PIN ) ? (uint)PROBE_LED_PIN
+                                                          : (uint)BUTTON_PIN;
+    char dataName[ 8 ], spareName[ 8 ];
+    snprintf( dataName, sizeof( dataName ), "GPIO%u", dataPin );
+    snprintf( spareName, sizeof( spareName ), "GPIO%u", sparePin );
+
     // The PIO button poller owns the shared line; park it while we drive.
-    probeButtonPausePolling( );
-    gpio_function_t savedLedFunc = gpio_get_function( PROBE_LED_PIN );
+    probeButtonPausePollingFromCore0( );
+    gpio_function_t savedLedFunc = gpio_get_function( dataPin );
 
     // Release the 3.3V feed (PROBE_PIN) so the switch network can't bias the line
     gpio_set_function( PROBE_PIN, GPIO_FUNC_SIO );
     gpio_disable_pulls( PROBE_PIN );
     gpio_set_dir( PROBE_PIN, false );
 
-    Serial.println( "  step 1/5: cable short, driving from GPIO9 (button line):" );
-    int fwd = countShortAgreement( BUTTON_PIN, PROBE_LED_PIN, "GPIO9", "GPIO2" );
-    Serial.printf( "  GPIO9 -> GPIO2 short: %d/2 %s\n\r", fwd, fwd == 2 ? "ok" : "OPEN" );
+    Serial.printf( "  step 1/5: cable short, driving from %s (data/button pin):\n\r", dataName );
+    int fwd = countShortAgreement( dataPin, sparePin, dataName, spareName );
+    Serial.printf( "  %s -> %s short: %d/2 %s\n\r", dataName, spareName, fwd,
+                   fwd == 2 ? "ok" : "OPEN" );
     paintRowStatus( 1, fwd == 2 );
 
-    Serial.println( "  step 2/5: cable short, driving from GPIO2 (probe LED data line):" );
-    int rev = countShortAgreement( PROBE_LED_PIN, BUTTON_PIN, "GPIO2", "GPIO9" );
-    Serial.printf( "  GPIO2 -> GPIO9 short: %d/2 %s\n\r", rev, rev == 2 ? "ok" : "OPEN" );
+    Serial.printf( "  step 2/5: cable short, driving from %s (spare pin):\n\r", spareName );
+    int rev = countShortAgreement( sparePin, dataPin, spareName, dataName );
+    Serial.printf( "  %s -> %s short: %d/2 %s\n\r", spareName, dataName, rev,
+                   rev == 2 ? "ok" : "OPEN" );
     paintRowStatus( 2, rev == 2 );
 
-    Serial.println( "  step 3/5: no-button float check (line must not be tied to a rail):" );
-    gpio_set_dir( PROBE_LED_PIN, false );
-    bool floats = probeLineFloatCheck( );
+    Serial.printf( "  step 3/5: no-button float check on %s (line must not be tied to a rail):\n\r",
+                   dataName );
+    gpio_set_dir( sparePin, false );
+    bool floats = probeLineFloatCheck( dataPin );
     Serial.printf( "  line float (no button): %s\n\r", floats ? "ok" : "STUCK" );
     paintRowStatus( 3, floats );
 
-    // Restore the line to the button reader's expected idle state
-    gpio_set_pulls( BUTTON_PIN, false, true );
-    gpio_set_function( PROBE_LED_PIN, savedLedFunc );
-    probeButtonResumePolling( );
+    // Restore: spare pin parked as input-pulldown (its boot state), data pin
+    // back to its PIO function with the pad input the button program needs,
+    // and PROBE_PIN re-driven HIGH - the old version left the 3.3V feed HiZ
+    // after the test, which degraded PIO button decode until the next
+    // CPU-path read happened to re-drive it.
+    gpio_set_pulls( sparePin, false, true );
+    gpio_set_input_enabled( sparePin, true );
+    gpio_set_function( dataPin, savedLedFunc );
+    gpio_set_input_enabled( dataPin, true );
+    gpio_set_dir( PROBE_PIN, true );
+    gpio_put( PROBE_PIN, true );
+    probeButtonResumePollingFromCore0( );
 
-    // Power the probe through the routable buffer, then sanity-check the
-    // LED-current path and the tip-sense ADC (channel 5).
-    // ponytail: the current window is wide (-1..8 mA) because the expected
-    // value depends on the (unattended) switch position; exact reading and
-    // inferred position go in the detail string for the host to judge.
+    // Power the probe through the routable buffer and measure the cable's
+    // current signature with the LED latched in KNOWN states. (The old
+    // version took ONE reading with the LED in whatever state the last
+    // animation left it - judged against thresholds calibrated with a
+    // latched LED. That mismatch was the main source of flaky verdicts.)
+    extern void setProbeLEDModeAndSettle( int mode ); // Apps.cpp
     Serial.println( "  step 4/5: probe power path (routable buffer -> cable -> LED):" );
+    // This step measures the DAC -> INA1 -> buffer -> cable -> LED current
+    // signature, so force classic DAC power for the test even when
+    // debug.probe_power_gpio has the buffer GPIO-powered (INA1 sits on the
+    // DAC path and would see nothing on the GPIO feed - no LED delta, no
+    // end-to-end proof). Restored at the end of the test.
+    bool savedGpioPower = jumperlessConfig.debug.probe_power_gpio;
+    jumperlessConfig.debug.probe_power_gpio = false;
     routableBufferPower( 1, 0, 1 );
     delay( 150 );
-    float curRaw = checkProbeCurrentRaw( );
-    float cur = checkProbeCurrent( );
-    int sw = checkSwitchPosition( );
-    Serial.printf( "    INA1 raw: %.3f mA, zero offset: %.3f mA, corrected: %.3f mA\n\r",
-                   (double)curRaw, (double)jumperlessConfig.calibration.probe_current_zero,
-                   (double)cur );
-    Serial.printf( "    inferred switch position: %s (thresholds: <%.2f meas, >%.2f sel)\n\r",
-                   sw == 0 ? "measure" : "select",
-                   (double)jumperlessConfig.calibration.probe_switch_threshold_low,
-                   (double)jumperlessConfig.calibration.probe_switch_threshold_high );
+
+    // Baseline: LED off, median of 9 independent conversions. The button
+    // poller's drive edges ride the same net INA1 measures behind, so park
+    // it across each sampling window.
+    setProbeLEDModeAndSettle( 10 ); // off
+    probeButtonPausePollingFromCore0( );
+    float curOff = probeCurrentMedian( 9 );
+    probeButtonResumePollingFromCore0( );
+
+    // LED full white: in SELECT position the WS2812's supply current flows
+    // from DAC0 through INA1, so a healthy DATA path shows up as a current
+    // step - an end-to-end proof that pixels reach the probe through the
+    // cable. In MEASURE position the LED is fed from PROBE_PIN instead and
+    // the step is invisible to INA1, so the delta only gates the verdict
+    // when the baseline says SELECT.
+    setProbeLEDModeAndSettle( 8 ); // full white
+    probeButtonPausePollingFromCore0( );
+    float curOn = probeCurrentMedian( 9 );
+    probeButtonResumePollingFromCore0( );
+    float ledDelta = curOn - curOff;
+
+    // Fresh classification from the medians - NOT checkSwitchPosition(),
+    // whose internal 500ms gate usually hands back a stale cached position.
+    bool selectPos = ( curOff > jumperlessConfig.calibration.probe_switch_threshold_high ) ||
+                     ( ledDelta >= 0.8f );
+    bool dataPathProven = ( ledDelta >= 0.8f );
+
+    Serial.printf( "    LED off: %.3f mA, LED white: %.3f mA, delta: %.3f mA (zero offset %.3f)\n\r",
+                   (double)curOff, (double)curOn, (double)ledDelta,
+                   (double)jumperlessConfig.calibration.probe_current_zero );
+    Serial.printf( "    inferred switch position: %s%s\n\r",
+                   selectPos ? "select" : "measure",
+                   dataPathProven ? " (LED data path proven end-to-end)"
+                   : ( selectPos ? " (NO LED current step: data conductor broken?)"
+                                 : " (delta not measurable in measure position)" ) );
+
+    // Hand the LED back to the runtime color for the inferred position.
+    showProbeLEDs = selectPos ? 4 : 3;
 
     Serial.println( "  step 5/5: probe tip sense ADC (channel 5, pin 45):" );
-    int tipRaw = readAdc( 5, 8 );
-    Serial.printf( "    idle raw reading: %d/4095 (probe_min:%d probe_max:%d)\n\r", tipRaw,
-                   jumperlessConfig.calibration.probe_min,
+    extern float medianInPlace( float* vals, int n ); // Apps.cpp
+    float tipSamples[ 9 ];
+    for ( int i = 0; i < 9; i++ ) {
+        tipSamples[ i ] = (float)readAdc( 5, 8 );
+        delay( 3 );
+    }
+    int tipRaw = (int)medianInPlace( tipSamples, 9 );
+    Serial.printf( "    idle raw reading (median of 9x8): %d/4095 (probe_min:%d probe_max:%d)\n\r",
+                   tipRaw, jumperlessConfig.calibration.probe_min,
                    jumperlessConfig.calibration.probe_max );
 
     bool shortOk = ( fwd == 2 && rev == 2 );
-    bool curOk = ( cur > -1.0f && cur < 8.0f );
+    // ponytail: the absolute window stays wide (-1.5..8 mA) because the
+    // expected baseline depends on the unattended switch position; the
+    // position-specific signal is the LED delta gate below.
+    bool curOk = ( curOff > -1.5f && curOff < 8.0f );
     bool tipOk = ( tipRaw < 4090 ); // pegged high = tip divider shorted to supply
-    paintRowStatus( 4, curOk );
+    // In SELECT position a healthy cable MUST show the LED current step.
+    bool dataOk = !selectPos || dataPathProven;
+    paintRowStatus( 4, curOk && dataOk );
     paintRowStatus( 5, tipOk );
 
+    // Short-open policy: with data+button on BUTTON_PIN, the GPIO2-side
+    // contact is unused by firmware - an open short with a PROVEN data path
+    // is downgraded to a warning in the detail string. When the data pin is
+    // still GPIO2 (flag off), an open short means the CPU-fallback sense pin
+    // is flaky, so it stays a failure.
+    bool shortWaived = !shortOk && dataPathProven && ( dataPin == (uint)BUTTON_PIN );
+    if ( shortWaived ) {
+        changeTerminalColor( 214, true ); // orange
+        Serial.printf( "  WARNING: %s<->%s short open, but the %s data path works "
+                       "end-to-end - firmware is unaffected (spare contact flaky)\n\r",
+                       dataName, spareName, dataName );
+        changeTerminalColor( -1, true );
+    }
+
     snprintf( r.detail[ SELFTEST_PROBE_CABLE ], sizeof( r.detail[ 0 ] ),
-              "short:%d/2+%d/2 float:%s cur:%.2fmA sw:%s tip:%d",
-              fwd, rev, floats ? "ok" : "stuck", (double)cur,
-              sw == 0 ? "meas" : "sel", tipRaw );
+              "short:%d/2+%d/2%s float:%s off:%.2fmA dLED:%.2fmA sw:%s tip:%d",
+              fwd, rev, shortWaived ? "(waived)" : "", floats ? "ok" : "stuck",
+              (double)curOff, (double)ledDelta, selectPos ? "sel" : "meas", tipRaw );
     r.status[ SELFTEST_PROBE_CABLE ] =
-        ( shortOk && floats && curOk && tipOk ) ? SELFTEST_PASS : SELFTEST_FAIL;
+        ( ( shortOk || shortWaived ) && floats && curOk && tipOk && dataOk )
+            ? SELFTEST_PASS
+            : SELFTEST_FAIL;
+
+    // Direct struct write doesn't set configChanged, so this can't trigger a
+    // spurious config save; the runtime re-claims its GPIO on the next
+    // routableBufferPower(1) pass.
+    jumperlessConfig.debug.probe_power_gpio = savedGpioPower;
 }
 
 // ============================================================================
@@ -547,7 +670,7 @@ static void runCrossbarTest( SelfTestReport& r ) {
 // ============================================================================
 // Servo the measure-mode buffer voltage (config name:
 // calibration.measure_mode_output_voltage) until the buffer output - which
-// ADC7 is hardwired to - exactly matches what a GPIO driven high reads
+// ADC7 is hardwired to - exactly matches what DAC1 at 3.300V reads
 // through the same ADC calibration. Replaces the "watch the probe accuracy"
 // step of probeCalibApp for factory purposes.
 
@@ -583,28 +706,45 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     b.print( "Tip V", (uint32_t)0x0a0a00 );
     showLEDsCore2 = 2;
 
+    // In SELECT position the probe LED is powered FROM the buffer output this
+    // test measures: any lit color is a steady load that drags the node down
+    // (hardware: dim select-idle color read 2.70V where LED-off reads 3.10V).
+    // Latch the LED off BEFORE parking the handler so the reference and servo
+    // see the same unloaded buffer that measure mode has at runtime (there the
+    // LED is fed from PROBE_PIN instead).
+    extern void setProbeLEDModeAndSettle( int mode ); // Apps.cpp
+    setProbeLEDModeAndSettle( 10 ); // off
+
     // The probe button PIO poller periodically drives the shared cable line,
     // which couples onto the tip node at the millivolt scale this servo
     // works at. Park it for the whole test (mirrors the cable test).
-    probeButtonPausePolling( );
+    probeButtonPausePollingFromCore0( );
 
-    // 1) Reference: GPIO 1 driven high, fed through the SAME buffer + ADC7
-    //    path the servo uses. Using one sensor for both readings makes this
-    //    a comparison, so ADC calibration error cancels - measuring the
+    // 1) Reference: DAC1 at 3.300V, fed through the SAME buffer + ADC7 path
+    //    the servo uses. Using one sensor for both readings makes this a
+    //    comparison, so ADC calibration error cancels - measuring the
     //    reference on a different ADC put the tip ~1% off (one probe row).
-    Serial.println( "  step 1/2: measuring the GPIO-high reference\n\r"
-                    "    routing GPIO1 (pin 20) -> ROUTABLE_BUFFER_IN, driving pin 20 HIGH,\n\r"
+    //
+    //    Why DAC1 and not a GPIO driven high: BUFFER_IN is not an unloaded
+    //    node - the buffer's quiescent draw plus (in SELECT position) the
+    //    probe LED's supply hang on it, and the load is nonlinear. On
+    //    hardware a GPIO-high reference settled to a deterministic 2.70V
+    //    (2.73V even at 12mA pad drive) where the low-impedance DAC path
+    //    reads ~3.2V. There is no routable fixed 3.3V rail (NANO_3V3 is a
+    //    probe pad, not a crossbar node), so the calibrated DAC1 is the
+    //    stiffest honest 3.3V source available - and since reference and
+    //    servo see the SAME load, matching them still equalizes voltages.
+    Serial.println( "  step 1/2: measuring the 3.3V reference\n\r"
+                    "    routing DAC1 (3.300V) -> ROUTABLE_BUFFER_IN,\n\r"
                     "    reading via ADC7 (same buffer + ADC the servo uses, so ADC\n\r"
                     "    calibration error cancels out of the comparison)" );
     globalState.clearAllConnections( );
-    addBridgeToState( RP_GPIO_1, ROUTABLE_BUFFER_IN );
+    addBridgeToState( DAC1, ROUTABLE_BUFFER_IN );
     refreshConnections( -1, 0, 1 );
     waitCore2( );
     delay( 8 );
-    int pin = gpioDef[ 0 ][ 0 ];
-    pinMode( pin, OUTPUT );
-    digitalWrite( pin, HIGH );
-    delay( 5 );
+    setDacByNumber( 1, 3.3f, 0 );
+    delay( 25 );
     // Average 6 bursts and require them to agree: a wandering reference
     // poisons the servo target. Retry a couple of times - transients die -
     // then fail loudly so the operator knows the tip is being disturbed.
@@ -618,9 +758,8 @@ static void runTipVoltageTest( SelfTestReport& r ) {
                        (double)( refSpread * 1000.0f ) );
         delay( 250 );
     }
-    digitalWrite( pin, LOW );
-    pinMode( pin, INPUT );
-    Serial.printf( "  GPIO-high reference (via buffer/ADC7): %.3f V (spread %.1f mV over 6 bursts)\n\r",
+    setDacByNumber( 1, 0.0f, 0 );
+    Serial.printf( "  DAC1 3.3V reference (via buffer/ADC7): %.3f V (spread %.1f mV over 6 bursts)\n\r",
                    (double)vTarget, (double)( refSpread * 1000.0f ) );
 
     if ( refSpread > TIP_SPREAD_MAX_V ) {
@@ -628,19 +767,21 @@ static void runTipVoltageTest( SelfTestReport& r ) {
                   "tip unstable: ref spread %.0fmV (external disturbance?)",
                   (double)( refSpread * 1000.0f ) );
         r.status[ SELFTEST_TIP_VOLTAGE ] = SELFTEST_FAIL;
-        probeButtonResumePolling( );
+        probeButtonResumePollingFromCore0( );
+        showProbeLEDs = ( switchPosition == 0 ) ? 3 : 4; // back to runtime color
         return;
     }
     if ( vTarget < 2.8f || vTarget > 3.6f ) {
         snprintf( r.detail[ SELFTEST_TIP_VOLTAGE ], sizeof( r.detail[ 0 ] ),
-                  "bad gpio reference: %.3fV", (double)vTarget );
+                  "bad 3.3V reference: %.3fV", (double)vTarget );
         r.status[ SELFTEST_TIP_VOLTAGE ] = SELFTEST_FAIL;
-        probeButtonResumePolling( );
+        probeButtonResumePollingFromCore0( );
+        showProbeLEDs = ( switchPosition == 0 ) ? 3 : 4; // back to runtime color
         return;
     }
 
     // 2) Servo DAC0 -> ROUTABLE_BUFFER_IN until ADC7 (buffer output / probe
-    //    tip) matches the GPIO-high reference.
+    //    tip) matches the DAC1 3.3V reference.
     Serial.println( "  step 2/2: servoing the probe tip voltage to match\n\r"
                     "    routing DAC0 -> ROUTABLE_BUFFER_IN; ADC7 is hardwired to the\n\r"
                     "    buffer output (= probe tip), adjusting DAC0 until they match" );
@@ -649,6 +790,41 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     refreshConnections( -1, 0, 1 );
     waitCore2( );
     delay( 8 );
+
+    // 2a) DAC sanity sweep before servoing: three points across the working
+    //     range must track through the buffer within a coarse tolerance and
+    //     be monotonic. Catches a dead DAC0, a wrong-slope calibration, or a
+    //     mis-routed buffer in one readable line instead of 40 confused
+    //     servo iterations walking into a rail.
+    {
+        const float sweepSet[ 3 ] = { 3.0f, 3.5f, 4.0f };
+        float sweepGot[ 3 ];
+        bool sweepOk = true;
+        for ( int i = 0; i < 3; i++ ) {
+            setDac0voltage( sweepSet[ i ], 0 );
+            delay( 25 );
+            sweepGot[ i ] = readTipAveraged( 3, 32, nullptr );
+            if ( fabsf( sweepGot[ i ] - sweepSet[ i ] ) > 0.15f )
+                sweepOk = false;
+        }
+        if ( !( sweepGot[ 0 ] < sweepGot[ 1 ] && sweepGot[ 1 ] < sweepGot[ 2 ] ) )
+            sweepOk = false;
+        Serial.printf( "  DAC sanity sweep: 3.0->%.3fV 3.5->%.3fV 4.0->%.3fV %s\n\r",
+                       (double)sweepGot[ 0 ], (double)sweepGot[ 1 ], (double)sweepGot[ 2 ],
+                       sweepOk ? "(tracks, ok)" : "(NOT TRACKING)" );
+        if ( !sweepOk ) {
+            setDac0voltage( 0.0f, 0 );
+            globalState.clearAllConnections( );
+            refreshConnections( -1, 0, 1 );
+            probeButtonResumePollingFromCore0( );
+            showProbeLEDs = ( switchPosition == 0 ) ? 3 : 4; // back to runtime color
+            snprintf( r.detail[ SELFTEST_TIP_VOLTAGE ], sizeof( r.detail[ 0 ] ),
+                      "dac sweep not tracking: 3.0->%.2f 3.5->%.2f 4.0->%.2f",
+                      (double)sweepGot[ 0 ], (double)sweepGot[ 1 ], (double)sweepGot[ 2 ] );
+            r.status[ SELFTEST_TIP_VOLTAGE ] = SELFTEST_FAIL;
+            return;
+        }
+    }
 
     float set = jumperlessConfig.calibration.measure_mode_output_voltage;
     if ( set < 2.8f || set > 5.0f )
@@ -698,10 +874,11 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     setDac0voltage( 0.0f, 0 );
     globalState.clearAllConnections( );
     refreshConnections( -1, 0, 1 );
-    probeButtonResumePolling( );
+    probeButtonResumePollingFromCore0( );
+    showProbeLEDs = ( switchPosition == 0 ) ? 3 : 4; // back to runtime color
 
     snprintf( r.detail[ SELFTEST_TIP_VOLTAGE ], sizeof( r.detail[ 0 ] ),
-              "gpio:%.3fV tip:%.3fV err:%+.1fmV spr:%.1fmV dac0set:%.3fV%s",
+              "ref:%.3fV tip:%.3fV err:%+.1fmV spr:%.1fmV dac0set:%.3fV%s",
               (double)vTarget, (double)v, (double)( finalErr * 1000.0f ),
               (double)( finalSpread * 1000.0f ), (double)set,
               done ? "" : " no-converge" );
@@ -940,8 +1117,9 @@ void runFullSelfTest( bool fromFirstStart ) {
         writeTextFile( SELFTEST_MARKER_PATH, String( marker ) );
     }
 
-    // Manual full runs hold + reset here; the first-start path does it from
-    // the calibrateDacs tail so the undo-history wipe can run first.
+    // Manual full runs hold + reset here; the first-start path (calibrateDacs
+    // tail) instead chains the touch into the interactive probe pad
+    // calibration, wipes the undo history, and resets when that finishes.
     if ( !fromFirstStart ) {
         selfTestWaitForInputThenReset( );
     }
@@ -970,13 +1148,22 @@ static void waitForAnyInput( void ) {
     }
 }
 
-void selfTestWaitForInputThenReset( void ) {
+void selfTestWaitForInput( const char* nextWhat ) {
     Serial.println( "\n\rResults are showing on the breadboard LEDs." );
-    Serial.println( "Touch a probe button, click or turn the encoder, or send any" );
-    Serial.println( "serial byte to reset the board." );
+    Serial.printf( "Touch a probe button, click or turn the encoder, or send any\n\r"
+                   "serial byte to %s.\n\r", nextWhat );
     Serial.flush( );
 
     waitForAnyInput( );
+}
+
+void selfTestClearOverlay( void ) {
+    graphicOverlayState.removeOverlay( SELFTEST_OVERLAY_NAME );
+    showLEDsCore2 = -2;
+}
+
+void selfTestWaitForInputThenReset( void ) {
+    selfTestWaitForInput( "reset the board" );
 
     Serial.println( "Resetting..." );
     Serial.flush( );
@@ -998,8 +1185,7 @@ static void runSingleTest( int idx ) {
     Serial.println( "serial byte to clear it." );
     Serial.flush( );
     waitForAnyInput( );
-    graphicOverlayState.removeOverlay( SELFTEST_OVERLAY_NAME );
-    showLEDsCore2 = -2;
+    selfTestClearOverlay( );
 }
 
 void probeCableTestApp( void ) { runSingleTest( SELFTEST_PROBE_CABLE ); }

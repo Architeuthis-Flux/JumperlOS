@@ -46,6 +46,12 @@ struct config {
         // race that caused WS2812 shifting artifacts. Falls back to the
         // CPU path automatically if PIO program memory can't be claimed.
         bool use_pio_probe_button = true;
+        // Drive the probe's WS2812 data (and the shared button sampling)
+        // on BUTTON_PIN (GPIO 9) instead of PROBE_LED_PIN (GPIO 2). The
+        // two pins land on the same TRRS plug ring, and the most common
+        // cable failure is the GPIO2-side jack contact going flaky - with
+        // everything on GPIO9 that contact stops mattering entirely.
+        bool probe_led_on_button_pin = true;
     } hardware;
 
     struct dacs {
@@ -72,6 +78,16 @@ struct config {
         bool  usb_mass_storage = false;
         int  show_probe_current = 0;  // moved out of EEPROM - config is source of truth
         bool show_node_errors = true;
+        // EXPERIMENTAL: power the probe's measure-mode buffer from an
+        // unused routable GPIO driven HIGH instead of DAC0, swapping to
+        // DAC0 only briefly on each switch-position check (INA1 only sees
+        // current when DAC0 sources the buffer). Tip voltage then sits
+        // exactly at the GPIO-high level the tip servo calibrates against.
+        bool probe_power_gpio = true;
+        // Print one line per switch-position evaluation: sensing source
+        // (ADC7 droop / DAC swap / INA), estimated current, droop anchor,
+        // thresholds, and the resulting position.
+        bool probe_switch_stats = false;
     } debug;
 
     struct routing {
@@ -112,6 +128,16 @@ struct config {
         float adc_7_spread = 18.28;
         int probe_max = 4055;
         int probe_min = 10;
+        // MEASURE-position pad decode endpoints, stored in the 3.3V frame
+        // (seeded from probe_min/probe_max, individually adjustable). The
+        // base pair is calibrated with the SELECT feed (PROBE_PIN at ~3.3V)
+        // driving the tip; in MEASURE the buffer drives it instead (DAC at
+        // measure_mode_output_voltage, or the drooped GPIO level under
+        // debug.probe_power_gpio), and the resistive pad ladder scales every
+        // reading with that voltage - so the decode multiplies these
+        // endpoints by (live ADC7 tip voltage / 3.3V) at runtime.
+        int probe_max_measure = 4055;
+        int probe_min_measure = 10;
         // Hysteresis thresholds to prevent oscillation between modes
         // Switch to SELECT mode when current > high threshold
         // Switch to MEASURE mode when current < low threshold

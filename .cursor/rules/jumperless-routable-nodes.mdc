@@ -1,0 +1,41 @@
+---
+description: Which Jumperless V5 nodes are crossbar-routable vs probe-pad-only
+alwaysApply: true
+---
+
+# Jumperless V5: routable nodes vs pad-only nodes
+
+Ground truth is `rev5plusXmap` in `src/MatrixState.cpp` (chips I/J/K/L x-pin
+rows): a node is routable ONLY if it appears there (or is a breadboard row on
+chips A-H). Everything else named in `src/JumperlessDefines.h` is a probe-pad
+position, an LED position, or a hardwired signal - `connect()` /
+`addBridgeToState()` on it does nothing.
+
+## Crossbar-routable
+
+- Breadboard rows `1`-`60`
+- Nano header signals: `NANO_D0`-`NANO_D13`, `NANO_A0`-`NANO_A7`, `NANO_AREF`
+- `DAC0`, `DAC1`
+- `ADC0`-`ADC3`, `ADC4` (`ADC4_5V`, 5V-tolerant divider)
+- `TOP_RAIL`, `BOTTOM_RAIL`, `GND`
+- `ISENSE_PLUS` / `ISENSE_MINUS` (INA0 shunt; took the V5 crosspoints of the
+  old `NANO_RESET_0/1`)
+- `RP_GPIO_1`-`RP_GPIO_8` (nodes 131-138, RP2350 pins 20-27)
+- `RP_UART_TX` / `RP_UART_RX` (= `RP_GPIO_16/17`)
+- `ROUTABLE_BUFFER_IN` / `ROUTABLE_BUFFER_OUT` (probe measure buffer)
+
+## NOT routable
+
+- `NANO_3V3`, `NANO_5V`, `NANO_VIN`, `NANO_GND_0/1`, `NANO_RESET_0/1`,
+  `NANO_RESET` - probe-sense pad positions on the Nano header only. There is
+  NO routable fixed 3.3V or 5V rail; the stiffest routable 3.3V source is a
+  DAC set to 3.3V (or a GPIO driven high, which droops ~41 ohm-ish under
+  load).
+- `LOGO_PAD_TOP/BOTTOM`, `GPIO_PAD`, `DAC_PAD`, `ADC_PAD`,
+  `BUILDING_PAD_TOP/BOTTOM` - capacitive/logo probe pads.
+- `SUPPLY_3V3`, `SUPPLY_5V`, `SUPPLY_8V_P/N` - LED/legacy positions
+  (8V ones "not actually connected to anything").
+- `ADC5` (probe tip sense divider), `ADC7` (hardwired to buffer output =
+  probe tip in measure mode), `ADC6` (power monitor) - fixed wiring, read
+  them but don't route them.
+- `RP_GPIO_18/19` - dedicated Arduino reset lines, not crosspoints.
