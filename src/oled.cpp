@@ -1557,6 +1557,18 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
 
     int y = yTop;
     for ( int r = 0; r < rowCount; r++ ) {
+        if ( topAnchor && r == 1 ) {
+            // Header stays pinned at the top; center the VALUE rows in the
+            // space below it. Without this, a single big value row sat
+            // right under the header with dead space at the bottom.
+            int rest = 0;
+            for ( int rr = 1; rr < rowCount; rr++ ) {
+                rest += rowH[rr];
+                if ( rr > 1 ) rest += rowGap;
+            }
+            int pad = ( displayHeight - y - rest ) / 2;
+            if ( pad > 0 ) y += pad;
+        }
         const OledTextRow& row = rows[r];
         int n = row.segCount;
         if ( n > OLED_RICH_MAX_SEGS ) n = OLED_RICH_MAX_SEGS;
