@@ -845,13 +845,25 @@ static void showNetReading( const char* name, const char* value,
     // on board - because most families have no readable sub-8pt cut and
     // three family-sized rows don't fit 32px.
     FontFamily fam = mapConfigValueToFontFamily( jumperlessConfig.top_oled.font );
-    int16_t bigFont = (int16_t)FontManager::getFontForPointSize( fam, 12 );
     int16_t medFont = (int16_t)FontManager::getFontForPointSize( fam, 8 );
     int16_t labelFont = 12; // Andale Mono 5pt
 
     bool haveValues = ( haveV1 || haveV2 );
-    int16_t nameFont = haveValues ? labelFont : bigFont;
-    int16_t valueFont = ( haveV1 && haveV2 ) ? medFont : bigFont;
+
+    // Single value / name-only rows render as big as actually FITS: a fixed
+    // 12pt overflowed the panel on long words ("FLOATING").
+    auto bestFitFont = [&]( const char* text ) -> int16_t {
+        uint8_t pt = FontManager::findBestFitPointSize( fam, text, 120, 12, 6 );
+        return (int16_t)FontManager::getFontForPointSize( fam, pt );
+    };
+
+    int16_t nameFont = haveValues ? labelFont : bestFitFont( name );
+    int16_t valueFont;
+    if ( haveV1 && haveV2 ) {
+        valueFont = medFont;
+    } else {
+        valueFont = bestFitFont( haveV1 ? value : value2 );
+    }
 
     OledTextRow rows[ 3 ] = {};
     int n = 0;
