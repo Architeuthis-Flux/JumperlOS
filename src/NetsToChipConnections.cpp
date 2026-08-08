@@ -30,6 +30,7 @@ extern char *strcpy(char *dest, const char *src);
 #include "Peripherals.h"
 #include "Probing.h"
 #include "FakeGpio.h"
+#include "RouteSafety.h"
 //#include "SerialWrapper.h"
 
 //#define Serial SerialWrap
@@ -1244,6 +1245,7 @@ void frontloadPriorityConnections(void) {
 void clearAllNTCC(void) {
 
   // digitalWrite(RESETPIN,HIGH);
+  routingGeneration++;
 
   for (int i = 0; i < 12; i++) {
     chipsLeastToMostCrowded[i] = i;
@@ -1751,6 +1753,7 @@ void bridgesToPaths(
   couldntFindPath(1);
   // couldntFindPath();
   checkForOverlappingPaths();
+  validateAllPaths();
   #if PROFILE_BRIDGES_TO_PATHS
   Serial.print("  validation: "); Serial.print(micros() - btp_step); Serial.println(" us");
   btp_step = micros();

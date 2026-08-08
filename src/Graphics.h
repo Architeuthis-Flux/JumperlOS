@@ -197,6 +197,10 @@ void printString(const char *s, uint32_t color = 0xFFFFFF,
                  int nudge = 0, int lowercase = 0);
 
 void drawWires(int net = -1);
+void renderNetCurrentAnts(void);
+// Debug: verify every animated path's ant pixel sequence is physically
+// continuous (printed by the 'i!' net voltage scan report).
+void printAntPathContinuity(Stream* out);
 void printWireStatus(Stream* target = nullptr);
 
 // void defcon(int start, int spread, int color = 0, int nudge = 1);

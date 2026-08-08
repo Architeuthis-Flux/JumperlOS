@@ -148,6 +148,10 @@ struct OledTextRow {
     uint8_t     segCount;
     OledAlign   align;
     int8_t      segGap;     // px between adjacent segments
+    int8_t      fixedH;     // >0: use this as the row height instead of the
+                            // measured ink box, so rows with different text
+                            // (descenders, ascender mixes) share a stable
+                            // baseline; descender tails draw into the gap
 };
 
 // Comprehensive text information structure
@@ -241,11 +245,15 @@ public:
     // independently. Shares the same priority-flush + hold-stash behavior
     // as clearPrintShowSmall, so it is safe for back-to-back toasts.
     // clearPrintShowSmall is implemented on top of this.
+    // topAnchor: pin the block to the top of the panel instead of
+    // vertically centering it (highlight readings put their small header
+    // row flush against the top edge).
     void clearPrintShowRich(const OledTextRow* rows,
                             int rowCount,
                             int rowGap = 2,
                             bool clear = true,
-                            bool show = true);
+                            bool show = true,
+                            bool topAnchor = false);
 
     // Priority-flush the CURRENT live framebuffer to the panel, bypassing the
     // hold gate, then run the oledHoldBegin stash so any writes during the hold

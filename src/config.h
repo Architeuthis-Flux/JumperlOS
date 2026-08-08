@@ -78,16 +78,22 @@ struct config {
         bool  usb_mass_storage = false;
         int  show_probe_current = 0;  // moved out of EEPROM - config is source of truth
         bool show_node_errors = true;
-        // EXPERIMENTAL: power the probe's measure-mode buffer from an
-        // unused routable GPIO driven HIGH instead of DAC0, swapping to
-        // DAC0 only briefly on each switch-position check (INA1 only sees
-        // current when DAC0 sources the buffer). Tip voltage then sits
-        // exactly at the GPIO-high level the tip servo calibrates against.
+        // Power the probe's measure-mode buffer from an unused routable
+        // GPIO driven HIGH instead of DAC0, keeping the DAC free. Switch-
+        // position sensing then reads the load current as ADC7 voltage
+        // droop against a continuously-tracked unloaded peak V0 (persisted
+        // as calibration.probe_droop_v0); the DAC bridge swap survives only
+        // as a fallback while no GPIO is claimed. Default ON since 5.7:
+        // the droop path got a clamped median-confirmed V0 tracker and no
+        // longer freezes when DAC0 is reassigned.
         bool probe_power_gpio = true;
         // Print one line per switch-position evaluation: sensing source
         // (ADC7 droop / DAC swap / INA), estimated current, droop anchor,
         // thresholds, and the resulting position.
         bool probe_switch_stats = false;
+        // Print net voltage scan stats once a second: every scanned node's
+        // voltage and every routed path's estimated current.
+        bool net_voltage_scan = false;
     } debug;
 
     struct routing {
@@ -147,6 +153,15 @@ struct config {
         float measure_mode_output_voltage = 3.33;
         float probe_current_zero = 2.0;
         int minimum_probe_reading = 85;
+        // GPIO-powered measure buffer: ADC7 tip voltage (volts) that maps to
+        // zero droop-current. Persisted so boot works before both switch
+        // positions have been visited; seeded from hardware (~3.35V MEASURE
+        // unloaded at 12mA GPIO drive). Runtime peak-tracker may raise it.
+        float probe_droop_v0 = 3.35f;
+        // On-resistance of one CH446Q crosspoint, used by the net voltage
+        // scan to turn node voltage deltas into per-connection currents.
+        // A single 2-crosspoint path measures ~80 ohms, so ~40 each.
+        float crosspoint_resistance = 40.0;
     } calibration;
 
     struct logo_pads {
@@ -171,6 +186,13 @@ struct config {
         int rail_brightness = 55;
         int special_net_brightness = 20;
         int net_color_mode = 0;
+        // Scan node voltages in the background and show per-connection
+        // current as faint voltage-colored marching ants (V5 only).
+        int net_currents = 1;
+        // Direction the current ants march: 0 = conventional (+ to -),
+        // 1 = electron (- to +). Only flips the LED animation; reported
+        // current values stay conventional-signed.
+        int current_flow = 0;
         int dump_leds = -1;
         int dump_format = 0;
         int terminal_line_buffering = 1;

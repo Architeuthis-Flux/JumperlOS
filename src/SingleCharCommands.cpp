@@ -25,7 +25,9 @@
 #include "MatrixState.h"
 #include "Menus.h"
 #include "NetManager.h"
+#include "NetVoltageScan.h"
 #include "NetsToChipConnections.h"
+#include "RouteSafety.h"
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
@@ -69,6 +71,7 @@ extern const int highSaturationBrightColors[];
 // Forward declarations for command handlers
 CommandResult cmd_showCrossbarFull( char c, const String& line );
 CommandResult cmd_fakeGpioDebug( char c, const String& line );
+CommandResult cmd_netCurrents( char c, const String& line );
 
 // Forward declaration for the shared arg-reader (defined below).
 // Needed so handlers earlier in the file (e.g. cmd_cycleSlots) can read
@@ -598,6 +601,11 @@ void SingleCharCommands::initializeCommands( ) {
     registerCommand( 'H', "fakeGPIO debug (live)",
                      "Live-updating FakeGPIO status showing TDM voltages and pin states.",
                      cmd_fakeGpioDebug, MENU_ADVANCED, CAT_DEBUG, true, SER3_INTERACTIVE );
+
+    registerCommand( 'i', "toggle net current scan (i!/i?/i#)",
+                     "Toggle the background net voltage scan / current ants (persists to config).\n\r"
+                     "'i!' report  'i?' RouteSafety self-check+audit  'i#' toggle sendXYraw short-check.",
+                     cmd_netCurrents, MENU_ADVANCED, CAT_SETTINGS, true, SER3_MODIFIES_STATE );
 
     registerCommand( 'D', "status diagnostics menu",
                      "Interactive status & diagnostics menu with arrow key navigation.",
@@ -2611,6 +2619,36 @@ CommandResult cmd_psramDebugToggle( char c, const String& line ) {
     if ( target == nullptr ) target = &Jerial;
     psram_debug = !psram_debug;
     target->printf( "\rpsram_debug = %d\n", psram_debug );
+    return CMD_DONT_SHOW_MENU;
+}
+
+CommandResult cmd_netCurrents( char c, const String& line ) {
+    Stream* target = Jerial.getResponseTarget( );
+    if ( target == nullptr ) target = &Jerial;
+
+    String arg = getCommandArgs( line, 100 );
+    if ( arg.length( ) > 0 ) {
+        if ( arg[ 0 ] == '!' ) {
+            printNetVoltageScanStats( target );
+            return CMD_DONT_SHOW_MENU;
+        }
+        if ( arg[ 0 ] == '?' ) {
+            routeSafetySelfCheck( target );
+            return CMD_DONT_SHOW_MENU;
+        }
+        if ( arg[ 0 ] == '#' ) {
+            sendXYrawCheckEnabled = !sendXYrawCheckEnabled;
+            target->printf( "\rsendXYraw short-check %s (blocked=%lu)\n\r",
+                            sendXYrawCheckEnabled ? "on" : "off",
+                            (unsigned long)sendxy_blocked_count );
+            return CMD_DONT_SHOW_MENU;
+        }
+    }
+
+    bool enable = !jumperlessConfig.display.net_currents;
+    // Applies immediately and persists to /config.txt
+    updateConfigValue( "display", "net_currents", enable ? "1" : "0" );
+    target->printf( "\rnet current scan %s\n\r", enable ? "on" : "off" );
     return CMD_DONT_SHOW_MENU;
 }
 

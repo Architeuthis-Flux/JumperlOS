@@ -179,6 +179,18 @@ get_all_paths = _native.get_all_paths
 get_path_between = _native.get_path_between
 
 # ============================================================================
+# Net Current Scan Functions
+# ============================================================================
+get_node_voltage = _native.get_node_voltage
+get_net_current = _native.get_net_current
+get_path_current = _native.get_path_current
+
+# Net Current Scan Aliases
+node_voltage = _native.node_voltage
+net_current = _native.net_current
+path_current = _native.path_current
+
+# ============================================================================
 # Slot Management
 # ============================================================================
 switch_slot = _native.switch_slot
@@ -904,6 +916,10 @@ __all__ = [
     # Path Query Functions
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
     
+    # Net Current Scan Functions
+    'get_node_voltage', 'get_net_current', 'get_path_current',
+    'node_voltage', 'net_current', 'path_current',
+    
     # Slot Management
     'switch_slot', 'CURRENT_SLOT',
     
@@ -1041,6 +1057,8 @@ __all__ = [
     'fast_connect', 'fast_disconnect',
     'set_net_color_hsv', 'get_all_nets',
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
+    'get_node_voltage', 'get_net_current', 'get_path_current',
+    'node_voltage', 'net_current', 'path_current',
     'FakeGpioDisconnect', 'FakeGpioPin', 'FAKE_GPIO_INPUT', 'FAKE_GPIO_OUTPUT',
     'oled_set_text_size', 'oled_get_text_size', 'oled_copy_print',
     'oled_get_fonts', 'oled_set_font', 'oled_get_current_font',

@@ -257,6 +257,10 @@ int parseNetColorMode(const char* str) {
     return parseFromTable(netColorModeTable, netColorModeTableSize, str);
 }
 
+int parseCurrentFlow(const char* str) {
+    return parseFromTable(currentFlowTable, currentFlowTableSize, str);
+}
+
 int parseArbitraryFunction(const char* str) {
     return parseFromTable(arbitraryFunctionTable, arbitraryFunctionTableSize, str);
 }
@@ -687,6 +691,7 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "show_node_errors") == 0) jumperlessConfig.debug.show_node_errors = parseBool(value);
             else if (strcmp(key, "probe_power_gpio") == 0) jumperlessConfig.debug.probe_power_gpio = parseBool(value);
             else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
+            else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
         } else if (strcmp(section, "routing") == 0) {
             if (strcmp(key, "stack_paths") == 0) {
                 jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -727,6 +732,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "measure_mode_output_voltage") == 0) jumperlessConfig.calibration.measure_mode_output_voltage = parseFloat(value);
             else if (strcmp(key, "probe_current_zero") == 0) jumperlessConfig.calibration.probe_current_zero = parseFloat(value);
             else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
+            else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
+            else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
         } else if (strcmp(section, "logo_pads") == 0) {
             if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);
             else if (strcmp(key, "bottom_guy") == 0) jumperlessConfig.logo_pads.bottom_guy = parseArbitraryFunction(value);
@@ -740,6 +747,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "rail_brightness") == 0) jumperlessConfig.display.rail_brightness = parseInt(value);
             else if (strcmp(key, "special_net_brightness") == 0) jumperlessConfig.display.special_net_brightness = parseInt(value);
             else if (strcmp(key, "net_color_mode") == 0) jumperlessConfig.display.net_color_mode = parseNetColorMode(value);
+            else if (strcmp(key, "net_currents") == 0) jumperlessConfig.display.net_currents = parseBool(value);
+            else if (strcmp(key, "current_flow") == 0) jumperlessConfig.display.current_flow = parseCurrentFlow(value);
             else if (strcmp(key, "dump_leds") == 0) jumperlessConfig.display.dump_leds = parseSerialPort(value);
             else if (strcmp(key, "dump_format") == 0) jumperlessConfig.display.dump_format = parseDumpFormat(value);
             else if (strcmp(key, "terminal_line_buffering") == 0) jumperlessConfig.display.terminal_line_buffering = parseBool(value);
@@ -1039,6 +1048,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("show_node_errors = "); file.print(jumperlessConfig.debug.show_node_errors ? 1:0); file.println(";");
     file.print("probe_power_gpio = "); file.print(jumperlessConfig.debug.probe_power_gpio ? 1:0); file.println(";");
     file.print("probe_switch_stats = "); file.print(jumperlessConfig.debug.probe_switch_stats ? 1:0); file.println(";");
+    file.print("net_voltage_scan = "); file.print(jumperlessConfig.debug.net_voltage_scan ? 1:0); file.println(";");
     file.println();
 
     // Write routing settings section
@@ -1081,6 +1091,8 @@ bool saveConfigToFile(const char* filename) {
     file.print("measure_mode_output_voltage = "); file.print(jumperlessConfig.calibration.measure_mode_output_voltage); file.println(";");
     file.print("probe_current_zero = "); file.print(jumperlessConfig.calibration.probe_current_zero); file.println(";");
     file.print("minimum_probe_reading = "); file.print(jumperlessConfig.calibration.minimum_probe_reading); file.println(";");
+    file.print("probe_droop_v0 = "); file.print(jumperlessConfig.calibration.probe_droop_v0, 3); file.println(";");
+    file.print("crosspoint_resistance = "); file.print(jumperlessConfig.calibration.crosspoint_resistance); file.println(";");
     file.println();
 
     // Write logo pad settings section
@@ -1100,6 +1112,8 @@ bool saveConfigToFile(const char* filename) {
     file.print("rail_brightness = "); file.print(jumperlessConfig.display.rail_brightness); file.println(";");
     file.print("special_net_brightness = "); file.print(jumperlessConfig.display.special_net_brightness); file.println(";");
     file.print("net_color_mode = "); file.print(jumperlessConfig.display.net_color_mode); file.println(";");
+    file.print("net_currents = "); file.print(jumperlessConfig.display.net_currents); file.println(";");
+    file.print("current_flow = "); file.print(jumperlessConfig.display.current_flow); file.println(";");
     file.print("dump_leds = "); file.print(jumperlessConfig.display.dump_leds); file.println(";");
     file.print("dump_format = "); file.print(jumperlessConfig.display.dump_format); file.println(";");
     file.print("terminal_line_buffering = "); file.print(jumperlessConfig.display.terminal_line_buffering); file.println(";");
@@ -1246,6 +1260,7 @@ bool configHasChanges() {
     if (jumperlessConfig.debug.show_node_errors != lastSavedConfig.debug.show_node_errors) return true;
     if (jumperlessConfig.debug.probe_power_gpio != lastSavedConfig.debug.probe_power_gpio) return true;
     if (jumperlessConfig.debug.probe_switch_stats != lastSavedConfig.debug.probe_switch_stats) return true;
+    if (jumperlessConfig.debug.net_voltage_scan != lastSavedConfig.debug.net_voltage_scan) return true;
     
     // Routing section
     if (jumperlessConfig.routing.stack_paths != lastSavedConfig.routing.stack_paths) return true;
@@ -1284,6 +1299,8 @@ bool configHasChanges() {
     if (jumperlessConfig.calibration.measure_mode_output_voltage != lastSavedConfig.calibration.measure_mode_output_voltage) return true;
     if (jumperlessConfig.calibration.probe_current_zero != lastSavedConfig.calibration.probe_current_zero) return true;
     if (jumperlessConfig.calibration.minimum_probe_reading != lastSavedConfig.calibration.minimum_probe_reading) return true;
+    if (jumperlessConfig.calibration.probe_droop_v0 != lastSavedConfig.calibration.probe_droop_v0) return true;
+    if (jumperlessConfig.calibration.crosspoint_resistance != lastSavedConfig.calibration.crosspoint_resistance) return true;
     
     // Logo pads section
     if (jumperlessConfig.logo_pads.top_guy != lastSavedConfig.logo_pads.top_guy) return true;
@@ -1299,6 +1316,8 @@ bool configHasChanges() {
     if (jumperlessConfig.display.rail_brightness != lastSavedConfig.display.rail_brightness) return true;
     if (jumperlessConfig.display.special_net_brightness != lastSavedConfig.display.special_net_brightness) return true;
     if (jumperlessConfig.display.net_color_mode != lastSavedConfig.display.net_color_mode) return true;
+    if (jumperlessConfig.display.net_currents != lastSavedConfig.display.net_currents) return true;
+    if (jumperlessConfig.display.current_flow != lastSavedConfig.display.current_flow) return true;
     if (jumperlessConfig.display.dump_leds != lastSavedConfig.display.dump_leds) return true;
     if (jumperlessConfig.display.dump_format != lastSavedConfig.display.dump_format) return true;
     if (jumperlessConfig.display.terminal_line_buffering != lastSavedConfig.display.terminal_line_buffering) return true;
@@ -1395,6 +1414,7 @@ static bool configFileIsComplete(const char* fileContent) {
         "probe_switch_threshold_low",
         "measure_mode_output_voltage",
         "probe_current_zero",
+        "probe_droop_v0",
         "async_passthrough"
     };
     const int numKeys = sizeof(requiredKeys) / sizeof(requiredKeys[0]);
@@ -1697,6 +1717,9 @@ bool saveConfigIncremental(const char* filename) {
                 } else if (strcmp(key, "probe_switch_stats") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_switch_stats = %d;", jumperlessConfig.debug.probe_switch_stats ? 1 : 0);
                     updated = true;
+                } else if (strcmp(key, "net_voltage_scan") == 0) {
+                    snprintf(newLine, sizeof(newLine), "net_voltage_scan = %d;", jumperlessConfig.debug.net_voltage_scan ? 1 : 0);
+                    updated = true;
                 }
             }
             //! [routing] section
@@ -1807,6 +1830,12 @@ bool saveConfigIncremental(const char* filename) {
                 } else if (strcmp(key, "minimum_probe_reading") == 0) {
                     snprintf(newLine, sizeof(newLine), "minimum_probe_reading = %d;", jumperlessConfig.calibration.minimum_probe_reading);
                     updated = true;
+                } else if (strcmp(key, "probe_droop_v0") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_droop_v0 = %.3f;", jumperlessConfig.calibration.probe_droop_v0);
+                    updated = true;
+                } else if (strcmp(key, "crosspoint_resistance") == 0) {
+                    snprintf(newLine, sizeof(newLine), "crosspoint_resistance = %.2f;", jumperlessConfig.calibration.crosspoint_resistance);
+                    updated = true;
                 }
             }
             //! [logo_pads] section
@@ -1847,6 +1876,12 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "net_color_mode") == 0) {
                     snprintf(newLine, sizeof(newLine), "net_color_mode = %d;", jumperlessConfig.display.net_color_mode);
+                    updated = true;
+                } else if (strcmp(key, "net_currents") == 0) {
+                    snprintf(newLine, sizeof(newLine), "net_currents = %d;", jumperlessConfig.display.net_currents);
+                    updated = true;
+                } else if (strcmp(key, "current_flow") == 0) {
+                    snprintf(newLine, sizeof(newLine), "current_flow = %d;", jumperlessConfig.display.current_flow);
                     updated = true;
                 } else if (strcmp(key, "dump_leds") == 0) {
                     snprintf(newLine, sizeof(newLine), "dump_leds = %d;", jumperlessConfig.display.dump_leds);
@@ -2466,6 +2501,12 @@ void loadConfig(void) {
         jumperlessConfig.calibration.probe_max_measure = jumperlessConfig.calibration.probe_max;
     }
 
+    // GPIO droop V0: persisted unloaded tip voltage for switch detection.
+    if (jumperlessConfig.calibration.probe_droop_v0 < 3.0f ||
+        jumperlessConfig.calibration.probe_droop_v0 > 3.6f) {
+        jumperlessConfig.calibration.probe_droop_v0 = 3.35f;
+    }
+
     readSettingsFromConfig();
     
     // Initialize shadow config for dirty tracking
@@ -2589,6 +2630,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_power_gpio = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_power_gpio, boolTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("probe_switch_stats = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_switch_stats, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[debug] ");
+        Serial.print("net_voltage_scan = "); Serial.print(getStringFromTable(jumperlessConfig.debug.net_voltage_scan, boolTable)); Serial.println(";");
     }
     cycleTerminalColor();
     // Print routing settings section
@@ -2667,6 +2710,10 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_current_zero = "); Serial.print(jumperlessConfig.calibration.probe_current_zero); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("minimum_probe_reading = "); Serial.print(jumperlessConfig.calibration.minimum_probe_reading); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_droop_v0 = "); Serial.print(jumperlessConfig.calibration.probe_droop_v0, 3); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("crosspoint_resistance = "); Serial.print(jumperlessConfig.calibration.crosspoint_resistance); Serial.println(";");
     }
     cycleTerminalColor();
     // Print logo pad settings section
@@ -2699,6 +2746,10 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("special_net_brightness = "); Serial.print(jumperlessConfig.display.special_net_brightness); Serial.println(";");
         if (pasteable == true) Serial.print("`[display] ");
         Serial.print("net_color_mode = "); Serial.print(getStringFromTable(jumperlessConfig.display.net_color_mode, netColorModeTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[display] ");
+        Serial.print("net_currents = "); Serial.print(getStringFromTable(jumperlessConfig.display.net_currents, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[display] ");
+        Serial.print("current_flow = "); Serial.print(getStringFromTable(jumperlessConfig.display.current_flow, currentFlowTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[display] ");
         Serial.print("dump_leds = "); Serial.print(getStringFromTable(jumperlessConfig.display.dump_leds, serialPortTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[display] ");
@@ -2953,6 +3004,9 @@ void printSettingChange(const char* section, const char* key, const char* oldVal
     } else if (strcmp(section, "display") == 0 && strcmp(key, "net_color_mode") == 0) {
         oldName = getStringFromTable(atoi(oldValue), netColorModeTable);
         newName = getStringFromTable(atoi(newValue), netColorModeTable);
+    } else if (strcmp(section, "display") == 0 && strcmp(key, "current_flow") == 0) {
+        oldName = getStringFromTable(atoi(oldValue), currentFlowTable);
+        newName = getStringFromTable(atoi(newValue), currentFlowTable);
     } else if ((strcmp(section, "serial_1") == 0 || strcmp(section, "serial_2") == 0 || strcmp(section, "gpio") == 0) && (strstr(key, "function") != NULL)) {
         oldName = getStringFromTable(atoi(oldValue), uartFunctionTable);
         newName = getStringFromTable(atoi(newValue), uartFunctionTable);
@@ -3630,6 +3684,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "show_node_errors") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.show_node_errors);
         else if (strcmp(key, "probe_power_gpio") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_power_gpio);
         else if (strcmp(key, "probe_switch_stats") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_stats);
+        else if (strcmp(key, "net_voltage_scan") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_voltage_scan);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_paths);
@@ -3670,6 +3725,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_switch_threshold") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold);
         else if (strcmp(key, "probe_current_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_current_zero);
         else if (strcmp(key, "minimum_probe_reading") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.minimum_probe_reading);
+        else if (strcmp(key, "probe_droop_v0") == 0) sprintf(oldValue, "%.3f", jumperlessConfig.calibration.probe_droop_v0);
+        else if (strcmp(key, "crosspoint_resistance") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.crosspoint_resistance);
         }
     else if (strcmp(section, "logo_pads") == 0) {
         if (strcmp(key, "top_guy") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.top_guy);
@@ -3685,6 +3742,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "rail_brightness") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.rail_brightness);
         else if (strcmp(key, "special_net_brightness") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.special_net_brightness);
         else if (strcmp(key, "net_color_mode") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.net_color_mode);
+        else if (strcmp(key, "net_currents") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.net_currents);
+        else if (strcmp(key, "current_flow") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.current_flow);
         else if (strcmp(key, "dump_leds") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.dump_leds);
         else if (strcmp(key, "dump_format") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.dump_format);
         else if (strcmp(key, "terminal_line_buffering") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.terminal_line_buffering);
@@ -3792,6 +3851,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
             routableBufferPower(1, 0, 1);
         }
         else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
+        else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -3841,6 +3901,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_switch_threshold") == 0) jumperlessConfig.calibration.probe_switch_threshold = parseFloat(value);
         else if (strcmp(key, "probe_current_zero") == 0) jumperlessConfig.calibration.probe_current_zero = parseFloat(value);
         else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
+        else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
+        else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
         }
     else if (strcmp(section, "logo_pads") == 0) {
         if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);
@@ -3856,6 +3918,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "rail_brightness") == 0) jumperlessConfig.display.rail_brightness = parseInt(value);
         else if (strcmp(key, "special_net_brightness") == 0) jumperlessConfig.display.special_net_brightness = parseInt(value);
         else if (strcmp(key, "net_color_mode") == 0) jumperlessConfig.display.net_color_mode = parseNetColorMode(value);
+        else if (strcmp(key, "net_currents") == 0) jumperlessConfig.display.net_currents = parseBool(value);
+        else if (strcmp(key, "current_flow") == 0) jumperlessConfig.display.current_flow = parseCurrentFlow(value);
         else if (strcmp(key, "dump_leds") == 0) jumperlessConfig.display.dump_leds = parseSerialPort(value);
         else if (strcmp(key, "dump_format") == 0) jumperlessConfig.display.dump_format = parseDumpFormat(value);
         else if (strcmp(key, "terminal_line_buffering") == 0) jumperlessConfig.display.terminal_line_buffering = parseBool(value);

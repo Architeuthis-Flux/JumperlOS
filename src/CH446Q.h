@@ -49,9 +49,23 @@ inline void setConnectionBit(chipXYBitfield& state, int x, int y, bool value) {
 void copyJustXYToBitfield(const struct justXY& src, chipXYBitfield& dst);
 void copyBitfieldToJustXY(const chipXYBitfield& src, struct justXY& dst);
 
+extern int ch446q_timeout_count;
+
 void sendPaths(int clean = 0);
 void initCH446Q(void);
-void sendXYraw(int chip, int x, int y, int setorclear);
+// timeoutUs bounds the PIO-handshake wait before silent recovery. Default is
+// 100ms (the historical wait was 1s; a sick handshake still recovers, just
+// 10x sooner). Background callers (NetVoltageScan sense taps) pass a short
+// budget so a bad handshake degrades to a failed tap instead of freezing
+// core 1 per hop.
+// Returns 0 on success, -1 if the short-check refused a closing crosspoint.
+int sendXYraw(int chip, int x, int y, int setorclear,
+              unsigned long timeoutUs = 100000);
+
+// Bypass RouteSafety short-check. Use only for paths already vetted by
+// validateAllPaths / fastConnectPath, or FakeGpio/TDM intentional switches.
+void sendXYrawUnchecked(int chip, int x, int y, int setorclear,
+                        unsigned long timeoutUs = 100000);
 
 void sendAllPaths(int clean = 0); // should we sort them by chip? for now, no
 

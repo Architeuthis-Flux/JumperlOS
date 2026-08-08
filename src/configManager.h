@@ -257,6 +257,15 @@ const StringIntEntry netColorModeTable[] = {
 };
 const int netColorModeTableSize = sizeof(netColorModeTable) / sizeof(netColorModeTable[0]);
 
+// Table for parseCurrentFlow
+const StringIntEntry currentFlowTable[] = {
+    {"conventional", 0},
+    {"electron", 1},
+    {"0", 0},
+    {"1", 1}
+};
+const int currentFlowTableSize = sizeof(currentFlowTable) / sizeof(currentFlowTable[0]);
+
 
 const StringIntEntry displayTypeTable[] = {
     {"ssd1306", 0},

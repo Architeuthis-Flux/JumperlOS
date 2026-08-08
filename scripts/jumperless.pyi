@@ -650,6 +650,64 @@ def get_path_between(node1: int, node2: int) -> Optional[Dict]:
     ...
 
 # ============================================================================
+# Net Current Scan (background voltage/current sensing)
+# ============================================================================
+
+def get_node_voltage(node: Union[int, str, "Node"]) -> Optional[float]:
+    """Get the voltage of a routed node measured by the background net
+    voltage scan (enabled by [display] net_currents / the 'i' command)
+
+    Args:
+        node: Node number, name, or node object (e.g. 15, "D2", TOP_RAIL)
+
+    Returns:
+        Voltage in volts, or None when the scan has no fresh sample
+        (scan disabled, node not routed, or the node is floating)
+
+    Example:
+        v = get_node_voltage(15)
+        if v is not None:
+            print(f"Row 15 sits at {v:.2f} V")
+    """
+    ...
+
+def get_net_current(netNum: int) -> Optional[Dict]:
+    """Get the current flowing in a net's dominant path
+
+    Args:
+        netNum: Net number (1 to get_num_nets())
+
+    Returns:
+        Dict with keys: current_mA (magnitude), voltage (midpoint),
+        from_node, to_node (conventional current flows from -> to).
+        None when the scan has no data for this net.
+
+    Example:
+        info = get_net_current(4)
+        if info:
+            print(f"{info['current_mA']:.2f} mA from {info['from_node']} to {info['to_node']}")
+    """
+    ...
+
+def get_path_current(path_idx: int) -> Optional[float]:
+    """Get the signed current through one routing path
+
+    Args:
+        path_idx: Path index (same index space as get_path_info())
+
+    Returns:
+        Current in mA; positive means conventional current flows
+        node1 -> node2 (matching get_path_info() fields).
+        None when the scan has no data for this path.
+
+    Example:
+        i = get_path_current(0)
+        if i is not None:
+            print(f"Path 0 carries {abs(i):.2f} mA")
+    """
+    ...
+
+# ============================================================================
 # Slot Management
 # ============================================================================
 

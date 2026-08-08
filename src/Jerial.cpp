@@ -458,11 +458,22 @@ void TermControl::handleNormalChar( char c ) {
         break;
 
     case '?':
-        if (stream) {
-            extern const char firmwareVersion[]; // Assume this is defined somewhere
-            stream->print( "Jumperless firmware version: " );
-            stream->println( firmwareVersion );
-            stream->flush( );
+        // Version query ONLY on an empty line. A mid-line '?' must insert
+        // normally or command arguments like 'i?' (RouteSafety self-check)
+        // can never be typed - the old unconditional intercept silently
+        // turned 'i?' into 'i' + a version banner.
+        if ( line_length == 0 ) {
+            if (stream) {
+                extern const char firmwareVersion[]; // Assume this is defined somewhere
+                stream->print( "Jumperless firmware version: " );
+                stream->println( firmwareVersion );
+                stream->flush( );
+            }
+            break;
+        }
+        insertCharAtCursor( c );
+        if ( echo_enabled && !currentLineIsMultiline( ) ) {
+            renderCurrentLine( );
         }
         break;
 

@@ -79,6 +79,13 @@ void printRotaryEncoderHelp(void);
 void rotaryEncoderStuff(void);
 void rotaryEncoderButtonStuff(void);
 
+// Core-1 yield contract: call this from ANY blocking wait/spin on core 1
+// that can exceed ~100us (PIO handshakes, ADC-lock spins, settle delays) so
+// the single-owner encoder poll never starves. It's a no-op on core 0 and
+// internally throttled to 2kHz, so calling it every spin iteration is free.
+// (Thin alias of rotaryEncoderStuff() - the name documents the intent.)
+static inline void encoderServiceYield(void) { rotaryEncoderStuff(); }
+
 // Re-arm a synthetic click event (RELEASED with lastButtonEncoderState =
 // PRESSED and a fresh event timestamp) so a blocking UI loop can hand a
 // click it detected to another poller, e.g. probeMode -> clickMenu().

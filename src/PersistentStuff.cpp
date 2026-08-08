@@ -269,6 +269,8 @@ void debugFlagSet(int flag) {
       debugWaitLoopTiming = false;
       debugArduino = 0;
       showProbeCurrent = 0;
+      debugProbing = 0;
+      jumperlessConfig.debug.probing           = false;
       jumperlessConfig.debug.file_parsing      = false;
       jumperlessConfig.debug.net_manager       = false;
       jumperlessConfig.debug.nets_to_chips     = false;
@@ -286,6 +288,8 @@ void debugFlagSet(int flag) {
       debugNTCC = debugNTCC2 = debugLEDs = debugLA = true;
       debugWaitLoopTiming = true;
       showProbeCurrent = 1;
+      debugProbing = 1;
+      jumperlessConfig.debug.probing           = true;
       jumperlessConfig.debug.file_parsing      = true;
       jumperlessConfig.debug.net_manager       = true;
       jumperlessConfig.debug.nets_to_chips     = true;
@@ -375,7 +379,7 @@ void saveLEDbrightness(int forceDefaults) {
   }
 
 
-void updateStateFromGPIOConfig(void) {
+void updateStateFromGPIOConfig(int onlyIdx) {
 #if defined(OG_JUMPERLESS)
   // SKIPPED on OG: same hazard as readSettingsFromConfig()/setGPIO() etc - the
   // gpioDef bank (pins 20-27) is the V5 routable-GPIO map, but on the OG pins
@@ -384,20 +388,36 @@ void updateStateFromGPIOConfig(void) {
   // would re-mux those CS lines to inputs and break all SF routing.
   return;
 #endif
+  // NOTE: the probe's GPIO buffer-power claim (debug.probe_power_gpio) holds
+  // one of these pins output-HIGH; forcing it through the "output starts
+  // low" default here grounded ROUTABLE_BUFFER_IN and killed measure-mode
+  // probing with the claim bridge still in place. Skip the claimed pin.
+  // (An old stray `break` also made this function only ever touch the FIRST
+  // SIO pin - i.e. GPIO_1, the usual claim - regardless of which pin the
+  // caller had changed. Callers now pass the index they modified.)
+  extern int probeGpioPowerClaimIdx(void);
+  int claimIdx = probeGpioPowerClaimIdx();
+
   for (int i = 0; i < 10; i++) {  // Changed from 8 to 10 to include UART pins
     // Map gpioState to direction and pull settings
 
     int gpio_pin = gpioDef[i][0];  // Map GPIO 0-7 to pins 20-27
+    if (onlyIdx >= 0 && i != onlyIdx) {
+      continue;
+    }
+    if (i == claimIdx) {
+      continue;
+    }
     if (gpio_function_map[i] == GPIO_FUNC_SIO) {
 
       switch (globalState.config.gpioDirection[i]) {
-        case 0: // output low
+        case 0: // output (starts low)
           gpioState[i] = 0;
           gpio_set_dir(gpio_pin, true);  // Set as output
           gpio_set_pulls(gpio_pin, false, false);  // No pulls
           // gpio_put(gpio_pin, 0);
           break;
-        case 1: // output high
+        case 1: // input (pulls per config)
           switch (globalState.config.gpioPulls[i]) {
             case 0: // pulldown
               gpioState[i] = 4;
@@ -425,11 +445,7 @@ void updateStateFromGPIOConfig(void) {
 
         }
 
-      break;
       }
-
-
-
     }
   }
 
@@ -555,6 +571,7 @@ void readSettingsFromConfig() {
   debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
   debugLEDs = jumperlessConfig.debug.leds;
   debugLA = jumperlessConfig.debug.logic_analyzer;
+  debugProbing = jumperlessConfig.debug.probing ? 1 : 0;
   // Sync Arduino debug level to global
   debugArduino = jumperlessConfig.debug.arduino;
   showProbeCurrent = jumperlessConfig.debug.show_probe_current;

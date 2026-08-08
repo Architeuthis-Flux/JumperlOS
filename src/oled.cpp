@@ -1469,7 +1469,8 @@ void oled::clearPrintShow( const char* text, int textSize, bool clear, bool show
 // the first 2 are used. Defaults are tuned for the undo toast (larger
 // verb + smaller detail); pass equal top/bot indices for matched sizes.
 void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
-                               int rowGap, bool clear, bool show ) {
+                               int rowGap, bool clear, bool show,
+                               bool topAnchor ) {
     if ( jumperlessConfig.top_oled.enabled == 0 ) return;
     if ( ( !oledConnected || !rows ) && stillWriteToFramebuffer == false ) return;
     if ( rowCount < 1 ) return;
@@ -1531,20 +1532,22 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
             }
         }
         flowW[r] = flowTotal;
-        rowH[r] = maxH;
-        blockHeight += maxH;
+        rowH[r] = ( row.fixedH > 0 ) ? row.fixedH : maxH;
+        blockHeight += rowH[r];
         if ( r > 0 ) blockHeight += rowGap;
     }
 
-    int yTop = ( displayHeight - blockHeight ) / 2;
+    int yTop = topAnchor ? 0 : ( displayHeight - blockHeight ) / 2;
     if ( yTop < 0 ) yTop = 0;
 
     // Resolve a left-edge x for a given alignment and content width.
+    // Right-aligned segments keep a margin so the last glyphs don't sit
+    // hard against (or clip at) the panel edge.
     auto anchorX = [&]( OledAlign a, int w ) -> int {
         int x;
         switch ( a ) {
             case OLED_ALIGN_CENTER: x = ( displayWidth - w ) / 2; break;
-            case OLED_ALIGN_RIGHT:  x = displayWidth - w;          break;
+            case OLED_ALIGN_RIGHT:  x = displayWidth - w - 5;      break;
             case OLED_ALIGN_LEFT:
             default:                x = LEFT_JUSTIFY_TOP;          break;
         }

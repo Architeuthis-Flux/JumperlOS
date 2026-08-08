@@ -44,6 +44,12 @@ float jl_ina_get_voltage( int sensor );
 float jl_ina_get_bus_voltage( int sensor );
 float jl_ina_get_power( int sensor );
 
+// Net voltage scan queries (return 1 on success, 0 when no fresh data)
+int jl_scan_node_voltage( int node, float* voltage );
+int jl_scan_net_current( int net, float* current_mA, float* voltage,
+                         int* fromNode, int* toNode );
+int jl_scan_path_current( int pathIndex, float* current_mA );
+
 // Wavegen C wrappers (C linkage)
 void jl_wavegen_set_output( int channel );
 void jl_wavegen_set_freq( float hz );
@@ -2884,6 +2890,54 @@ static mp_obj_t jl_get_path_between_func( mp_obj_t node1_obj, mp_obj_t node2_obj
 }
 static MP_DEFINE_CONST_FUN_OBJ_2( jl_get_path_between_obj, jl_get_path_between_func );
 
+// Net Current Scan API - values measured by the background net voltage scan
+// (enabled by [display] net_currents / the 'i' serial command). All return
+// None when the scan has no fresh data.
+
+// get_node_voltage(node) - scanned voltage of a routed node in volts
+static mp_obj_t jl_get_node_voltage_func( mp_obj_t node_obj ) {
+    int node = get_node_value( node_obj );
+    float voltage = 0.0f;
+    if ( !jl_scan_node_voltage( node, &voltage ) ) {
+        return mp_const_none;
+    }
+    return mp_obj_new_float( voltage );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_get_node_voltage_obj, jl_get_node_voltage_func );
+
+// get_net_current(net_num) - dict {current_mA, voltage, from_node, to_node}
+// for the net's dominant path; conventional current flows from -> to
+static mp_obj_t jl_get_net_current_func( mp_obj_t net_num_obj ) {
+    int net = mp_obj_get_int( net_num_obj );
+    float current_mA = 0.0f;
+    float voltage = 0.0f;
+    int from_node = -1;
+    int to_node = -1;
+    if ( !jl_scan_net_current( net, &current_mA, &voltage, &from_node, &to_node ) ) {
+        return mp_const_none;
+    }
+    mp_obj_t dict = mp_obj_new_dict( 4 );
+    mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_current_mA ), mp_obj_new_float( current_mA ) );
+    mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_voltage ), mp_obj_new_float( voltage ) );
+    mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_from_node ), mp_obj_new_int( from_node ) );
+    mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_to_node ), mp_obj_new_int( to_node ) );
+    return dict;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_get_net_current_obj, jl_get_net_current_func );
+
+// get_path_current(path_idx) - signed mA through one routing path; positive
+// means conventional current flows node1 -> node2 (same fields and index
+// space as get_path_info)
+static mp_obj_t jl_get_path_current_func( mp_obj_t idx_obj ) {
+    int idx = mp_obj_get_int( idx_obj );
+    float current_mA = 0.0f;
+    if ( !jl_scan_path_current( idx, &current_mA ) ) {
+        return mp_const_none;
+    }
+    return mp_obj_new_float( current_mA );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_get_path_current_obj, jl_get_path_current_func );
+
 // Fast GPIO Toggle Functions
 // fake_gpio_disconnect(node1, node2) - Context manager for temporary disconnection
 typedef struct _mp_obj_fake_gpio_disconnect_t {
@@ -4459,7 +4513,10 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "   get_net_nodes(netNum)            - Get comma-separated node list\n" );
         mp_printf( &mp_plat_print, "   get_bridge(bridgeIdx)            - Get bridge info tuple\n" );
         mp_printf( &mp_plat_print, "   get_net_info(netNum)             - Get full net info as dict\n" );
-        mp_printf( &mp_plat_print, "   get_num_paths(include_duplicates=True) - Get number of paths (optionally exclude duplicates)\n\n" );
+        mp_printf( &mp_plat_print, "   get_num_paths(include_duplicates=True) - Get number of paths (optionally exclude duplicates)\n" );
+        mp_printf( &mp_plat_print, "   get_node_voltage(node)           - Scanned node voltage (None if no data)\n" );
+        mp_printf( &mp_plat_print, "   get_net_current(netNum)          - Net current dict (None if no data)\n" );
+        mp_printf( &mp_plat_print, "   get_path_current(pathIdx)        - Signed path current in mA (None if no data)\n\n" );
         mp_printf( &mp_plat_print, "  Colors: red, orange, yellow, green, cyan, blue, purple, pink, etc.\n" );
         mp_printf( &mp_plat_print, "  HSV: h=0.0-1.0 or 0-255 (auto), s=0-1/0-255 (default max), v=0-1/0-255 (default 32)\n\n" );
     }
@@ -6405,6 +6462,10 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_get_path_info ), MP_ROM_PTR( &jl_get_path_info_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_all_paths ), MP_ROM_PTR( &jl_get_all_paths_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_path_between ), MP_ROM_PTR( &jl_get_path_between_obj ) },
+    // Net current scan queries (background voltage/current sensing)
+    { MP_ROM_QSTR( MP_QSTR_get_node_voltage ), MP_ROM_PTR( &jl_get_node_voltage_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_get_net_current ), MP_ROM_PTR( &jl_get_net_current_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_get_path_current ), MP_ROM_PTR( &jl_get_path_current_obj ) },
     // Fake GPIO fast toggle
     { MP_ROM_QSTR( MP_QSTR_FakeGpioDisconnect ), MP_ROM_PTR( &fake_gpio_disconnect_type ) },
     // Fake GPIO pin class
@@ -6422,6 +6483,10 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_get_net_info ), MP_ROM_PTR( &jl_get_net_info_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_all_nets ), MP_ROM_PTR( &jl_get_all_nets_obj ) },
     { MP_ROM_QSTR( MP_QSTR_net_info ), MP_ROM_PTR( &jl_get_net_info_obj ) },
+    // Aliases for net current scan queries
+    { MP_ROM_QSTR( MP_QSTR_node_voltage ), MP_ROM_PTR( &jl_get_node_voltage_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_net_current ), MP_ROM_PTR( &jl_get_net_current_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_path_current ), MP_ROM_PTR( &jl_get_path_current_obj ) },
 
     // Raw hardware functions
     { MP_ROM_QSTR( MP_QSTR_send_raw ), MP_ROM_PTR( &jl_send_raw_obj ) },

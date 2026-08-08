@@ -11,6 +11,8 @@
 #include "States.h"
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
+#include "RotaryEncoder.h" // encoderServiceYield() in the PIO handshake wait
+#include "RouteSafety.h"
 #include "externVars.h"
 
 
@@ -163,6 +165,7 @@ void __not_in_flash_func(sendPaths)(int clean) {
     digitalWrite(RESETPIN, HIGH);
     delayMicroseconds(1000);
     digitalWrite(RESETPIN, LOW);
+    clearChipXYSuspect();
     #if PROFILE_CORE2_SENDPATHS
     Serial.print("Core 2: RESET pulse: "); 
     Serial.print(micros() - core2_step); 
@@ -170,6 +173,8 @@ void __not_in_flash_func(sendPaths)(int clean) {
     core2_step = micros();
     #endif
   }
+
+  routingGeneration++;
   
   sendAllPaths(clean);
   #if PROFILE_CORE2_SENDPATHS
@@ -933,7 +938,7 @@ void __not_in_flash_func(updateChipStateArray)() {
       if (removed) {
         for (int x = 0; x < 16; x++) {
           if (removed & (1 << x)) {
-            sendXYraw(chip, x, y, 0);
+            sendXYrawUnchecked(chip, x, y, 0);
           }
         }
       }
@@ -976,51 +981,46 @@ void sendPath(int i, int setOrClear, int newOrLast) {
           continue;
           }
 
-        sendXYraw(chipToConnect, globalState.connections.paths[i].x[chip], globalState.connections.paths[i].y[chip], setOrClear);
+        // Bulk path send was vetted by validateAllPaths(); skip per-crosspoint check.
+        sendXYrawUnchecked(chipToConnect, globalState.connections.paths[i].x[chip],
+                           globalState.connections.paths[i].y[chip], setOrClear);
         }
       }
   
   }
 
-void sendXYraw(int chip, int x, int y, int setOrClear) {
+void sendXYrawUnchecked(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
   uint32_t chAddress = 0;
   chipSelect = chip;
 
-    // are sent to the same chip K Y position within a single batch.
-    if (chip >= 0 && chip < 12 && x >= 0 && x < 16 && y >= 0 && y < 8) {
-      if (setOrClear == 1) {
-        lastChipXY[chip].connected[y] |= (1 << x);   // Set bit
-      } else {
-        lastChipXY[chip].connected[y] &= ~(1 << x);  // Clear bit
-      }
+  if (chip >= 0 && chip < 12 && x >= 0 && x < 16 && y >= 0 && y < 8) {
+    if (setOrClear == 1) {
+      lastChipXY[chip].connected[y] |= (1 << x);
+    } else {
+      lastChipXY[chip].connected[y] &= ~(1 << x);
     }
+  }
 
-  #if !defined(OG_JUMPERLESS)
+#if !defined(OG_JUMPERLESS)
   // CRITICAL SAFETY: Chip K voltage source protection
   // Chip K X positions: 4=TOP_RAIL, 5=BOTTOM_RAIL, 6=DAC1, 7=DAC0, 15=GND
   // NEVER allow multiple voltage sources on the same Y (would short them together!)
-  #define CHIP_K 10
-  #define CHIP_K_VOLTAGE_SOURCES 0x80F0  // Bits: 15,7,6,5,4
-  
+#define CHIP_K_VOLTAGE_SOURCES 0x80F0 // Bits: 15,7,6,5,4
+
   if (chip == CHIP_K && setOrClear == 1 && x >= 0 && x < 16 && y >= 0 && y < 8) {
-    // Check if this X is a voltage source
     if ((1 << x) & CHIP_K_VOLTAGE_SOURCES) {
-      // Check lastChipXY for conflicts (handles most cases)
       uint16_t otherVoltages = CHIP_K_VOLTAGE_SOURCES & ~(1 << x);
       uint16_t conflicting = lastChipXY[CHIP_K].connected[y] & otherVoltages;
-      
       if (conflicting) {
-        // Disconnect conflicting voltage sources before connecting the new one
         for (int conflictX = 0; conflictX < 16; conflictX++) {
           if (conflicting & (1 << conflictX)) {
-            sendXYraw(CHIP_K, conflictX, y, 0);
+            sendXYrawUnchecked(CHIP_K, conflictX, y, 0, timeoutUs);
           }
         }
       }
     }
   }
-  #endif
-  //unsigned long start = micros();
+#endif
 
   int chYdata = y;
   int chXdata = x;
@@ -1034,46 +1034,66 @@ void sendXYraw(int chip, int x, int y, int setOrClear) {
   chAddress = chYdata | chXdata;
 
   if (setOrClear == 1) {
-    chAddress = chAddress | 0b00000001; // this last bit determines whether we set or unset the path
-    }
+    chAddress = chAddress | 0b00000001;
+  }
 
   chAddress = chAddress << 24;
 
-
   pio_sm_put(pio, sm, chAddress);
 
-  // CRITICAL: Update lastChipXY IMMEDIATELY so subsequent calls in the same batch
-  // see this connection. This prevents voltage source shorts when multiple paths
-
-
-
   unsigned long wait_start = micros();
-  unsigned long wait_end = micros() + 1000000;
   while (chipSelect != -1) {
-    //delayMicroseconds(1);
     tight_loop_contents();
-    
-    // Recover if the PIO ISR never cleared chipSelect within 1 second.
-    if (micros() > wait_end) {  // 1 second timeout
+    encoderServiceYield();
+
+    if (micros() - wait_start > timeoutUs) {
       ch446q_timeout_count++;
-      // CRITICAL: sendXYraw() runs on Core 1. Do NOT do Serial/USB I/O here -
-      // on RP2040 arduino-pico that pumps TinyUSB_Device_Task() via yield() ON
-      // CORE 1 and races Core 0's USB servicing, which can wedge the board (this
-      // is the same dual-core USB hazard that moved replyWithSerialInfo to
-      // Core 0). Recover the PIO SILENTLY; ch446q_timeout_count is readable from
-      // Core 0 for diagnostics. (delayMicroseconds busy-waits, no yield.)
+      markChipXYSuspect(chip);
+      // CRITICAL: sendXYraw() runs on Core 1. Do NOT do Serial/USB I/O here.
       chipSelect = -1;
       pio_sm_set_enabled(pio, sm, false);
       delayMicroseconds(100);
       pio_sm_set_enabled(pio, sm, true);
       pio_interrupt_clear(pio, sm);
       isrFromPio();
-      break;  // Break out of the loop to prevent infinite hang
+      break;
     }
   }
+}
 
+int sendXYraw(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
+#if !defined(OG_JUMPERLESS)
+  if (setOrClear == 1 && sendXYrawCheckEnabled &&
+      chip >= 0 && chip < 12 && x >= 0 && x < 16 && y >= 0 && y < 8) {
+    // Chip-K source switch: find conflicting sources on this Y, but only
+    // SIMULATE their disconnect for the short check - hardware stays
+    // untouched unless the connect is approved.
+#define CHIP_K_VOLTAGE_SOURCES_CHK 0x80F0
+    uint16_t conflicting = 0;
+    if (chip == CHIP_K && ((1 << x) & CHIP_K_VOLTAGE_SOURCES_CHK)) {
+      uint16_t otherVoltages = CHIP_K_VOLTAGE_SOURCES_CHK & ~(1 << x);
+      conflicting = lastChipXY[CHIP_K].connected[y] & otherVoltages;
+    }
 
+    if (wouldShortCrosspointMasked(chip, x, y, conflicting ? CHIP_K : -1, y,
+                                   conflicting)) {
+      sendxy_blocked_count++;
+      // No USB I/O on Core 1 — counter is readable from Core 0.
+      return -1;
+    }
+
+    if (conflicting) {
+      for (int conflictX = 0; conflictX < 16; conflictX++) {
+        if (conflicting & (1 << conflictX)) {
+          sendXYrawUnchecked(CHIP_K, conflictX, y, 0, timeoutUs);
+        }
+      }
+    }
   }
+#endif
+  sendXYrawUnchecked(chip, x, y, setOrClear, timeoutUs);
+  return 0;
+}
 
 void createXYarray(void) { }
 
@@ -1158,7 +1178,7 @@ void applyChipXYState(const chipXYBitfield targetState[12]) {
         for (int x = 0; x < 16; x++) {
           if (changes & (1 << x)) {
             bool newState = (targetRow & (1 << x)) != 0;
-            sendXYraw(chip, x, y, newState ? 1 : 0);
+            sendXYrawUnchecked(chip, x, y, newState ? 1 : 0);
             // Update lastChipXY bitfield
             if (newState) {
               lastChipXY[chip].connected[y] |= (1 << x);   // Set bit
@@ -1209,7 +1229,7 @@ void applyChipXYStateExcludeChipK(const chipXYBitfield targetState[12]) {
         for (int x = 0; x < 16; x++) {
           if (changes & (1 << x)) {
             bool newState = (targetRow & (1 << x)) != 0;
-            sendXYraw(chip, x, y, newState ? 1 : 0);
+            sendXYrawUnchecked(chip, x, y, newState ? 1 : 0);
             // Update lastChipXY bitfield
             if (newState) {
               lastChipXY[chip].connected[y] |= (1 << x);   // Set bit

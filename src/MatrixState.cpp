@@ -5,6 +5,7 @@
 #include "MatrixState.h"
 #include "config.h"
 #include "CH446Q.h"
+#include "RouteSafety.h"
 #include "States.h"  // For globalState access (but not GlobalStateMacros.h)
 #include "boards/board.h"
 
@@ -640,6 +641,7 @@ void initNets(void) {
   }
 
   initChipStatus();
+  initRouteSafety();
   // if (jumperlessConfig.hardware.revision <= 4) {
   //   for (int i = 0; i < 12; i++) {
   //     for (int j = 0; j < 16; j++) {

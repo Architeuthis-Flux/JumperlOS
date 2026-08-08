@@ -362,7 +362,6 @@ int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
     int selectSFprobeMenu(int function = 0);
     
     int getNothingTouched(int samples = 8);
-    int scanRows(int pin = 0);
     
     int readRails(int pin = 0);
     int justReadProbe(bool allowDuplicates = false, int rawPad = 0);

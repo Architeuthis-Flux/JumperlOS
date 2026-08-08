@@ -855,6 +855,14 @@ void rotaryEncoderStuff( void ) {
         return;
     }
 
+    // encoderServiceYield() made this reachable from any core-1 blocking wait
+    // (sendXYraw's PIO handshake included), which can run before setup1's
+    // initRotaryEncoder() or after a failed PIO allocation - don't touch the
+    // quadrature SM until it exists.
+    if ( !isRotaryEncoderInitialized( ) ) {
+        return;
+    }
+
     if ( encoderOverride > 0 ) {
         encoderOverride--;
         // Serial.print("encoderOverride: ");
@@ -900,6 +908,34 @@ void synthesizeEncoderClick( void ) {
 }
 
 static void rotaryEncoderStuffLocked( void ) {
+
+#if !defined( OG_JUMPERLESS )
+    // RP2350-E9 pad-latch mitigation. The quadrature pins rely on the
+    // internal ~50k pull-ups; per erratum E9 a pulled-up input released from
+    // ground can latch around ~2.1V (input-buffer leakage holds the pad
+    // mid-rail and the weak pull-up never recovers it), so quadrature edges
+    // silently vanish for hundreds of ms - unit-dependent silicon lottery.
+    // Dropping the pad's input-enable for a couple of us kills the leakage
+    // path so the pull-up wins, then re-enables. One pin at a time: a
+    // single-pin blip decodes as one step out + one step back (net zero),
+    // and the 4-8 count step hysteresis absorbs the +/-1 wiggle.
+    // ponytail: the real fix is external pull-ups <=8.2k on GPIO 12/13
+    // (board rev); this is the firmware bandaid.
+    {
+        static unsigned long lastUnlatchUs = 0;
+        unsigned long nowUnlatchUs = micros( );
+        if ( nowUnlatchUs - lastUnlatchUs > 5000 ) { // 200Hz; latch windows are 100ms+
+            lastUnlatchUs = nowUnlatchUs;
+            hw_clear_bits( &pads_bank0_hw->io[ QUADRATURE_A_PIN ], PADS_BANK0_GPIO0_IE_BITS );
+            busy_wait_us_32( 2 );
+            hw_set_bits( &pads_bank0_hw->io[ QUADRATURE_A_PIN ], PADS_BANK0_GPIO0_IE_BITS );
+            busy_wait_us_32( 2 );
+            hw_clear_bits( &pads_bank0_hw->io[ QUADRATURE_B_PIN ], PADS_BANK0_GPIO0_IE_BITS );
+            busy_wait_us_32( 2 );
+            hw_set_bits( &pads_bank0_hw->io[ QUADRATURE_B_PIN ], PADS_BANK0_GPIO0_IE_BITS );
+        }
+    }
+#endif
 
     // Handle button state checking and updates
     rotaryEncoderButtonStuffLocked( );
@@ -1079,7 +1115,22 @@ static void rotaryEncoderStuffLocked( void ) {
     int steps = 0;
     if ( detentDelta >= stepThreshold || detentDelta <= -stepThreshold ) {
         steps = (int)( detentDelta / rotaryDivider ); // truncates toward zero; |steps| >= 1 here
-        lastDetentRaw += (long)steps * rotaryDivider;
+
+        // Glitch-storm clamp: more than 4 detents landing inside ONE 500us
+        // poll window is not human rotation (a hard flick peaks well under 1
+        // detent per poll) - it's a failing encoder or a noise burst on the
+        // quadrature lines delivering a storm of ordered edges (seen on a
+        // unit with dying encoder contacts: dead for 300ms, then 24 detents
+        // in a few polls). Commit a single step in the storm's direction and
+        // swallow the rest so the UI can't be raced through a dozen items.
+        constexpr int kMaxStepsPerPoll = 4;
+        if ( steps > kMaxStepsPerPoll || steps < -kMaxStepsPerPoll ) {
+            steps = ( steps > 0 ) ? 1 : -1;
+            lastDetentRaw = rawCount; // rebase under the shaft, no catch-up
+        } else {
+            lastDetentRaw += (long)steps * rotaryDivider;
+        }
+
         int stepDir = ( steps > 0 ) ? 1 : -1;
         if ( lastStepDir != 0 && stepDir != lastStepDir ) {
             // Genuine reversal: any queued events from the old direction are

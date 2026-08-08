@@ -362,7 +362,13 @@ void JeoPixel::show(void) {
   while (numBytes--) {
     while (pio_sm_is_tx_fifo_full(pio, pio_sm)) {
       if ((int32_t)(micros() - deadline) >= 0) {
-        return; // SM stopped consuming - bail instead of wedging the core
+        // SM stopped consuming - bail instead of wedging the core. Clear the
+        // FIFOs so the queued partial frame can't prefix (and garble) the
+        // next show once the LED program owns the SM again. Register-only
+        // (no forced instructions), so the button program now on the SM is
+        // undisturbed beyond possibly losing one polled sample.
+        pio_sm_clear_fifos(pio, pio_sm);
+        return;
       }
       tight_loop_contents();
     }

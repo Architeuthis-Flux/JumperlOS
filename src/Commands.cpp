@@ -15,6 +15,7 @@
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "RotaryEncoder.h"
+#include "RouteSafety.h"
 
 #include "USBfs.h"
 #include "externVars.h"
@@ -177,6 +178,11 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   core1busy = false;
 
   // Signal Core 2 to send paths (Core 2 handles this in loop1 -> core2stuff)
+  // If any chip's bookkeeping is suspect after a PIO timeout, force a clean
+  // refresh so hardware and lastChipXY reconverge.
+  if (anyChipXYSuspect()) {
+    clean = 1;
+  }
   if (clean == 1) {
     sendAllPathsCore2 = -1;  // -1 means clean/reset paths first
   } else {

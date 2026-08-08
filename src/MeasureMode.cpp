@@ -237,6 +237,7 @@ void MeasureMode::stopMeasurement() {
     // Disconnect ADC
     disconnectADC();
     
+    int wasNode = measuredNode;
     measurementActive = false;
     // Note: measureModeActive is controlled by switch position in service(), not here
     measuredNode = -1;
@@ -252,8 +253,22 @@ void MeasureMode::stopMeasurement() {
     hl.highlightedNet = -1;
     hl.clearHighlighting();
     
-    // Force LED update with clear
-    showLEDsCore2 = -1;  // Negative triggers clearBeforeSend for full refresh
+    // Redraw the nets WITHOUT a clear-first refresh - the old unconditional
+    // clear blanked the ENTIRE board on every tip lift / row change while
+    // probing around in measure mode. The one thing the clear actually
+    // handled was a measured node with no net (nothing repaints its
+    // highlight pixels), so unpaint just that node's row instead.
+    extern int8_t nodeToNetIndex[256];
+    bool nodeHasNet = wasNode > 0 && wasNode < 256 && nodeToNetIndex[wasNode] > 0;
+    if (!nodeHasNet && wasNode >= 1 && wasNode <= 60) {
+        for (int col = 0; col < 5; col++) {
+            int pixel = (wasNode - 1) * 5 + col;
+            if (pixel >= 0 && pixel < LED_COUNT) {
+                leds.setPixelColor(pixel, 0);
+            }
+        }
+    }
+    showLEDsCore2 = 1;
 }
 
 // ============================================================================
@@ -323,11 +338,16 @@ bool MeasureMode::connectADCToNode(int node) {
 void MeasureMode::disconnectADC() {
     if (measuredNode != -1 && adcDefine != -1) {
         // Remove the ephemeral ADC connection
-        // Pass applyRouting=true to immediately update hardware
+        // Pass applyRouting=true to immediately update hardware.
+        // ledShowOption 1 = plain redraw. It used to pass -1 assuming
+        // "default", but refreshLocalConnections feeds this straight into
+        // showLEDsCore2 where negative means CLEAR-before-send - which
+        // blanked the whole board for a few ms on every tip lift / row
+        // change in measure mode.
         String errorMsg;
         globalState.removeEphemeralConnection(measuredNode, adcDefine, errorMsg,
                                               true,   // applyRouting - immediately apply to hardware
-                                              -1);    // ledShowOption - restore normal LED display
+                                              1);     // ledShowOption - plain redraw, no clear
     }
 }
 

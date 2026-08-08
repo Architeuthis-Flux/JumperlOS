@@ -109,6 +109,7 @@ extern "C" void *jl_mp_commit_exec( void *buf, size_t len ) {
 #include "CH446Q.h"
 #include "FatFS.h"
 #include "NetManager.h"
+#include "NetVoltageScan.h"
 #include "Probing.h"
 #include "Python_Proper.h"
 #include "config.h"
@@ -455,6 +456,45 @@ float jl_ina_get_power( int sensor ) {
 
     pauseCore2 = was_paused;
     return result;
+}
+
+// Net voltage scan queries (NetVoltageScan.cpp). Plain array reads written
+// on core 2 - non-blocking and safe at REPL speed. All return 1 on success,
+// 0 when the scan has no fresh data (scan off, node unrouted, floating).
+int jl_scan_node_voltage( int node, float* voltage ) {
+    if ( !nodeVoltageValid( node ) ) {
+        return 0;
+    }
+    *voltage = nodeVoltage[ node ];
+    return 1;
+}
+
+int jl_scan_net_current( int net, float* current_mA, float* voltage,
+                         int* fromNode, int* toNode ) {
+#if defined(OG_JUMPERLESS)
+    return 0; // scanner is V5-only; netCurrentInfo is a single dummy slot
+#else
+    if ( net <= 0 || net >= MAX_NETS ) {
+        return 0;
+    }
+    const NetCurrentInfo& info = netCurrentInfo[ net ];
+    if ( !info.valid ) {
+        return 0;
+    }
+    *current_mA = info.current_mA;
+    *voltage = info.voltage;
+    *fromNode = info.fromNode;
+    *toNode = info.toNode;
+    return 1;
+#endif
+}
+
+int jl_scan_path_current( int pathIndex, float* current_mA ) {
+    if ( !pathCurrentKnown( pathIndex ) ) {
+        return 0;
+    }
+    *current_mA = pathCurrentSigned_mA( pathIndex );
+    return 1;
 }
 
 // GPIO Functions

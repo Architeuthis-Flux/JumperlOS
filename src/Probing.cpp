@@ -502,6 +502,16 @@ int ProbeButton::getButtonPress( bool consume ) {
 // .side_set 1 means bit 12 is the side-set value (controls pin LATCH, not
 // OE - we toggle OE via SET PINDIRS). Bits 11:8 are delay 0..15.
 //
+// NOTE on the shared-LED flicker (probe_led_on_button_pin): the ~875ns
+// drive-high sample phase is a valid WS2812 data bit, and probeLEDhandler
+// shows on every core-2 pass, so the sampler and the LED interact. Two
+// fixes were tried and BOTH made the flicker worse on real hardware:
+//   1. fast-clock sampler (divider 1, ~113ns sub-bit pulse, 12mA drive) -
+//      hard edges ring on the unterminated probe cable into extra bits;
+//   2. resume-entry latch guard (~386us delay after each show before the
+//      first sample pulse, so it can't append to the un-latched frame).
+// Reverted to the original timing below; revisit with a scope on the line.
+//
 // Program structure:
 //   offset 0..8 : sample sequence (drive low / release / IN / drive high /
 //                 release / IN / push / IRQ)
@@ -721,7 +731,7 @@ void probeButtonPausePollingFromCore0( void ) {
     // Cover the gap where core1 passed the call-site check just before the
     // write above but hasn't asserted showingProbeLEDs yet (the switch body
     // between the two is a handful of RAM writes - microseconds).
-    delay( 2 );
+    delay( 1 );
     unsigned long start = millis( );
     while ( showingProbeLEDs != 0 && millis( ) - start < 20 ) {
         delayMicroseconds( 50 ); // wait out an in-flight showBlocking
@@ -1456,14 +1466,15 @@ void Probing::handleEncoderCursorNavigation(
     if ( encoderDelta != 0 && ( millis( ) - probeModeStartTime > 100 ) ) {
         idleTime = millis( );
 
-        // Wake hysteresis: encoder probing is an unusual way to make
-        // connections, so a grazed/settling wheel shouldn't paint the
-        // cursor over the user's board. While the cursor is hidden,
-        // swallow motion until 5 counts accumulate inside a rolling
-        // 1-second window; only then wake the cursor (which starts
-        // moving from this final count). Once visible it moves per
-        // count as before.
-        if ( !encoderCursorVisible ) {
+        // Wake hysteresis - CONNECT mode only: encoder probing is an
+        // unusual way to make connections, so a grazed/settling wheel
+        // shouldn't paint the cursor over the user's board. While the
+        // cursor is hidden, swallow motion until 5 counts accumulate
+        // inside a rolling 1-second window; only then wake the cursor
+        // (which starts moving from this final count). Once visible it
+        // moves per count as before. Clear mode (and everything else)
+        // keeps the immediate wake-on-first-count behavior.
+        if ( !encoderCursorVisible && setOrClear == 1 ) {
             // ponytail: statics, not more ref params - probeMode is one
             // blocking session at a time, and the 1s staleness reset makes
             // cross-session carryover moot.
@@ -1860,7 +1871,9 @@ void Probing::handleEncoderCursorNavigation(
             // 5. Try highlighting nets if we're on a regular node
             int netOnNode = 0;
             if ( actualNode > 0 && ( cursorZone == ZONE_BREADBOARD || cursorZone == ZONE_NANO ) ) {
-                netOnNode = Highlighting::getInstance( ).highlightNets( actualNode, 0, 1 );
+                // -1 = "resolve from the node like a probe tap" (0 used to
+                // be misread as an encoder-driven highlight by UART display)
+                netOnNode = Highlighting::getInstance( ).highlightNets( actualNode, -1, 1 );
             }
 
             // 6. Display name on Serial and OLED
@@ -2261,6 +2274,11 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
 restartProbing:
 
     probeActive = 1;
+    // A NetVoltageScan sense tap checks probeActive before starting but can
+    // be mid-flight right now (it raises core2busy for the tap's ~1ms).
+    // Wait it out so probe raw crosspoint sends never overlap a tap's PIO
+    // handshake from the other core.
+    waitCore2( );
     brightenNet( -1 );
 
     if ( switchPosition == 0 && globalState.hasConnection( probePowerDAC == 0 ? DAC0 : DAC1, ROUTABLE_BUFFER_IN ) ) {
@@ -4815,7 +4833,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {
             globalState.config.gpioDirection[ gpioChosen ] = 1;
-            updateStateFromGPIOConfig( );
+            updateStateFromGPIOConfig( gpioChosen );
             // gpioState[gpioChosen] = 4;
             // updateGPIOConfigFromState();
             // configChanged = true;
@@ -4825,7 +4843,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 4;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 1) {
             globalState.config.gpioDirection[ gpioChosen ] = 0;
-            updateStateFromGPIOConfig( );
+            updateStateFromGPIOConfig( gpioChosen );
             // gpioState[gpioChosen] = 0;
             // updateGPIOConfigFromState();
             // configChanged = true;
@@ -5106,8 +5124,11 @@ volatile unsigned long lastProbeCurrentCheckTime = 0;
 // Defined below with the GPIO-powered buffer experiment (debug.probe_power_gpio):
 // returns the RP_GPIO_x node currently powering the buffer, or -1 for DAC power.
 static int gpioBufferPowerNode( void );
-// Estimates the buffer load current from ADC7 droop (see banner at definition);
-// false when no claim-time anchor exists yet (caller falls back to the DAC swap).
+// Re-asserts the claimed pin's output-high drive if some other subsystem
+// stomped it (see definition banner). No-op when nothing is claimed.
+static void reassertGpioBufferDrive( void );
+// Estimates the buffer load current from ADC7 droop with continuous V0
+// normalization (see banner at definition); false when no GPIO is claimed.
 static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V );
 // debug.probe_switch_stats: one line per switch evaluation (source, current,
 // droop anchor, thresholds, resulting position).
@@ -5157,9 +5178,13 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         return switchPosition;
     }
     last_check_millis = now_ms;
-    if ( probePowerDAC == 1 ) {
-        // Serial.println( "probePowerDAC == 1" );
-        // Serial.flush();
+    if ( probePowerDAC == 1 &&
+         !( jumperlessConfig.debug.probe_power_gpio && gpioBufferPowerNode( ) > 0 ) ) {
+        // INA1 only sits on the DAC0 path, so DAC1-powered sensing is blind.
+        // EXCEPTION: under GPIO buffer power the ADC7 droop estimate works
+        // regardless of which DAC is nominal - without this exception,
+        // adjusting DAC0 (which flips probePowerDAC to 1) froze switch
+        // detection in SELECT forever, defeating the GPIO-power feature.
         return 1;
     }
     checkingButton = 0;
@@ -5173,6 +5198,22 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 
     // Update global timestamp BEFORE reading current so other code knows we're about to read
     lastProbeCurrentCheckTime = millis();
+
+    if ( jumperlessConfig.debug.probe_power_gpio &&
+         ( !bufferPowerConnected || gpioBufferPowerNode( ) <= 0 ) ) {
+        routableBufferPower( 1, 0, 0 );
+    }
+
+    // Self-heal the claim's pin drive. Several subsystems write gpioState /
+    // pin registers for the routable GPIO bank (setGPIO on every refresh,
+    // updateStateFromGPIOConfig from the probe GPIO menu, MicroPython, PWM
+    // teardown); any of them flipping the claimed pin low kills the tip
+    // while the bridge bookkeeping still says "connected", so the reclaim
+    // above never fires. Seen on hardware: GPIO_1 OUTPUT-LOW with the claim
+    // bridge intact - measure probing dead after the first tap. Cheap
+    // idempotent register check every switch-check pass (~500ms).
+    reassertGpioBufferDrive( );
+
     // Use the zero-corrected current (raw - probe_current_zero). The switch
     // thresholds are calibrated against this same corrected value, so existing
     // users keep their saved thresholds across firmware updates without having
@@ -5181,10 +5222,10 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // Under the EXPERIMENTAL GPIO buffer power (debug.probe_power_gpio),
     // INA1 sits on the DAC path and sees nothing while a GPIO sources the
     // buffer. Default sensing: read the load current as voltage droop on
-    // ADC7 (see the droop-anchor banner by routableBufferPower) - passive,
-    // sub-ms, no tip glitch. Fallback while no anchor exists yet: swap the
-    // bridge to the DAC (parked at the measure-mode voltage) for one median
-    // read, then swap back (a ~70ms tip glitch).
+    // ADC7 with a continuously-normalized unloaded peak (V0) - passive,
+    // sub-ms, no tip glitch, no dependency on the unknown boot switch
+    // position. Fallback if no GPIO is claimed: swap the bridge to the DAC
+    // for one median read, then swap back.
     float current_mA;
     float adc7V = 0.0f;
     const char* swSource = "ina";
@@ -5561,9 +5602,9 @@ int dontSwitchPowerDac = 1;
 // EXPERIMENTAL debug.probe_power_gpio: power the routable buffer from an
 // unused RP GPIO driven HIGH instead of DAC0/DAC1, keeping the DAC free.
 // INA1 only sees current when the DAC sources the buffer, so switch-position
-// sensing reads the load current as ADC7 voltage droop instead (anchored by
-// one INA1/ADC7 pair at claim time - see the droop banner below). The DAC
-// bridge swap survives only as a fallback while no anchor exists.
+// sensing reads the load current as ADC7 voltage droop instead (continuous
+// unloaded-voltage normalization - see the droop banner below). The DAC
+// bridge swap survives only as a fallback while no V0 exists yet.
 // ---------------------------------------------------------------------------
 
 // gpioDef index currently powering the buffer, -1 = DAC power (normal).
@@ -5580,27 +5621,49 @@ static uint8_t s_gpioPowerSavedState = 0;
 // can keep using the SAME calibrated select/measure current thresholds
 // without the periodic DAC bridge swap (and its tip glitch).
 //
-// The mapping needs one (current, voltage) anchor pair, taken at claim time
-// while the DAC still powers the buffer (INA1 sees the current there), then
-// re-read on ADC7 moments later under the same load:
-//   I(v) = anchorI + (anchorV - v) / R_droop
-// Measured on hardware: 82mV droop at ~2mA -> ~41 ohm effective.
-static float s_gpioDroopAnchorI = 0.0f; // zero-corrected mA, INA1 frame
-static float s_gpioDroopAnchorV = 0.0f; // ADC7 volts under the same load
+// Zero is continuous, not claim-time: we don't know the switch position at
+// boot, so a one-shot (I,V) anchor taken while SELECT is loading the tip
+// puts MEASURE at a large NEGATIVE current and SELECT near zero - and the
+// detector latches the wrong side of the hysteresis forever. Instead track
+// V0 = the unloaded tip voltage (seeded from persisted probe_droop_v0 on
+// GPIO claim, fast attack to any higher ADC7 reading, slow track while the
+// estimate looks unloaded) and map:
+//   I(v) = max(0, (V0 - v) / R_droop)
+// New peaks persist back into config; rail drift is absorbed by the slow
+// track. Seen on hardware: measure 3.339V / select 3.196V -> ~4.8mA of real
+// separation once V0 is the unloaded peak.
+static float s_gpioDroopV0 = 0.0f; // continuously-normalized unloaded volts
 static bool s_gpioDroopValid = false;
 // ponytail: fixed nominal shunt. 41 ohm was measured at the default 4mA pad
 // drive; at the 12mA drive the claim now uses, the pad's ~15 ohm share drops
 // to ~5, leaving ~30 total (crosspoints dominate). Crosspoint resistance
-// varies part-to-part (~+/-30%) but only scales the DELTA from the anchor
-// point (~0.3mA worst case near the thresholds), and rail drift is absorbed
-// by the anchor. Upgrade path: measure it per-board in the calibration app.
+// varies part-to-part (~+/-30%) but only scales absolute I (~0.3mA near the
+// thresholds). Upgrade path: measure it per-board in the calibration app.
 static const float kGpioDroopOhms = 30.0f;
+// Slow-track gain while I looks unloaded (~0). At the ~500ms switch-check
+// interval, 0.08 settles V0 onto a new rail level in a couple of seconds
+// without pulling V0 down during SELECT (I is large then, so no track).
+static const float kGpioDroopV0Track = 0.08f;
+// Below this, treat the tip as unloaded and slow-track V0. Wide enough that
+// a few mV of ADC noise / rail wander after a peak attack still re-zeros,
+// but well under probe_switch_threshold_low so SELECT never decays V0.
+static const float kGpioDroopUnloadedMax_mA = 0.50f;
+
+static void seedGpioDroopV0FromConfig( void ) {
+    float v0 = jumperlessConfig.calibration.probe_droop_v0;
+    if ( v0 < 3.0f || v0 > 3.6f )
+        v0 = 3.35f;
+    s_gpioDroopV0 = v0;
+    s_gpioDroopValid = true;
+}
 
 // Find a routable RP GPIO (gpioDef[0..7]) that nothing is using: no net on
 // its node, not owned by MicroPython, no PWM, not reserved by the top OLED's
 // I2C connection. Returns the gpioDef index, or -1 if none is free.
+// Scans GPIO 8 down to 1: users reach for GPIO 1 first, so claim from the
+// far end to keep the low-numbered pins free for them.
 static int findUnusedRoutableGpio( void ) {
-    for ( int i = 0; i < 8; i++ ) {
+    for ( int i = 7; i >= 0; i-- ) {
         int node = gpioDef[ i ][ 1 ];
         if ( globalState.config.gpioPythonOwned[ i ] )
             continue;
@@ -5641,22 +5704,120 @@ static int gpioBufferPowerNode( void ) {
     return ( s_gpioPowerIdx >= 0 ) ? gpioDef[ s_gpioPowerIdx ][ 1 ] : -1;
 }
 
+// Exposed (via Probing.h) so GPIO-bank config appliers can skip the claim.
+int probeGpioPowerClaimIdx( void ) {
+    return s_gpioPowerIdx;
+}
+
+// The claim's pin must stay SIO / output / driving HIGH or the measure tip
+// dies. gpioState[] doubles as the display state AND setGPIO()'s output
+// value, and several writers can zero it (updateStateFromGPIOConfig's
+// "output low" default, PWM teardown, MicroPython) - after which the next
+// refreshConnections drives the pin low with the claim bridge still in
+// place. Re-assert everything the claim needs; all writes are idempotent.
+static void reassertGpioBufferDrive( void ) {
+    if ( s_gpioPowerIdx < 0 )
+        return;
+    if ( globalState.config.gpioPythonOwned[ s_gpioPowerIdx ] )
+        return; // Python owns it now; routableBufferPower(1) will re-claim
+    int pin = gpioDef[ s_gpioPowerIdx ][ 0 ];
+    bool stomped = gpio_get_function( pin ) != GPIO_FUNC_SIO ||
+                   !gpio_get_dir( pin ) || gpio_get_out_level( pin ) == 0 ||
+                   gpioState[ s_gpioPowerIdx ] != 1 ||
+                   globalState.config.gpioDirection[ s_gpioPowerIdx ] != 0;
+    if ( !stomped )
+        return;
+    globalState.config.gpioDirection[ s_gpioPowerIdx ] = 0;
+    gpioState[ s_gpioPowerIdx ] = 1;
+    gpio_set_function( pin, GPIO_FUNC_SIO );
+    gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_12MA );
+    gpio_set_dir( pin, true );
+    gpio_put( pin, true );
+}
+
 static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
-    if ( !s_gpioDroopValid )
+    if ( s_gpioPowerIdx < 0 )
         return false;
     float v = readAdcVoltage( 7, 16 );
     if ( adc7V )
         *adc7V = v;
-    *current_mA = s_gpioDroopAnchorI +
-                  ( s_gpioDroopAnchorV - v ) * ( 1000.0f / kGpioDroopOhms );
+
+    // Step re-anchor: a big jump between consecutive checks IS a load state
+    // change (switch flip / button), and the higher-voltage side of the step
+    // is by definition the unloaded level - anchor V0 there so the lower
+    // reading becomes a true 0 mA. This is the only recovery from a
+    // persisted V0 that's too HIGH for this board's actual rail (seen on
+    // hardware: V0 3.350 vs real unloaded 3.297 = phantom 1.8 mA that sits
+    // above the slow-track band forever and parks the detector in SELECT).
+    static float s_lastDroopV = -1.0f;
+    if ( s_lastDroopV >= 0.0f &&
+         fabsf( v - s_lastDroopV ) * ( 1000.0f / kGpioDroopOhms ) > 2.0f ) {
+        float unloaded = ( v > s_lastDroopV ) ? v : s_lastDroopV;
+        if ( unloaded > 3.6f )
+            unloaded = 3.6f;
+        if ( unloaded >= 3.0f ) {
+            s_gpioDroopV0 = unloaded;
+            s_gpioDroopValid = true;
+            // Persist in BOTH directions here (the peak attack below only
+            // persists rises): a stale-high saved V0 would otherwise reseed
+            // the same phantom current on every boot/claim.
+            if ( fabsf( unloaded - jumperlessConfig.calibration.probe_droop_v0 ) > 0.002f ) {
+                jumperlessConfig.calibration.probe_droop_v0 = unloaded;
+                configChanged = true;
+            }
+        }
+    }
+    s_lastDroopV = v;
+
+    if ( !s_gpioDroopValid || v > s_gpioDroopV0 ) {
+        // New unloaded peak candidate (MEASURE, or a higher rail): zero
+        // current is "the highest tip voltage we've seen". Confirm with a
+        // median of 3 fresh reads - a single glitched-high sample would
+        // latch an inflated V0 the slow track can never pull back down (the
+        // resulting phantom current stays above the track band forever) -
+        // and clamp to the plausible GPIO-high band.
+        float m1 = readAdcVoltage( 7, 8 );
+        float m2 = readAdcVoltage( 7, 8 );
+        float lo = ( m1 < m2 ) ? m1 : m2;
+        float hi = ( m1 < m2 ) ? m2 : m1;
+        float peak = ( v < lo ) ? lo : ( ( v > hi ) ? hi : v ); // median of 3
+        if ( peak > 3.6f )
+            peak = 3.6f;
+        if ( !s_gpioDroopValid || peak > s_gpioDroopV0 ) {
+            s_gpioDroopV0 = peak;
+            s_gpioDroopValid = true;
+            // Persist rises (clamped to the load-time 3.0-3.6 sanity band)
+            // so the next boot/claim starts with a sane V0 even if SELECT
+            // was never visited.
+            if ( peak >= 3.0f &&
+                 peak > jumperlessConfig.calibration.probe_droop_v0 + 0.002f ) {
+                jumperlessConfig.calibration.probe_droop_v0 = peak;
+                configChanged = true;
+            }
+        }
+    }
+    float i = ( s_gpioDroopV0 - v ) * ( 1000.0f / kGpioDroopOhms );
+    if ( i < 0.0f )
+        i = 0.0f;
+    // Continuous re-zero while unloaded: pull V0 toward the live voltage so
+    // a claim that started in SELECT (V0 seeded low) self-corrects the
+    // moment MEASURE raises the tip, and so slow rail drift can't walk a
+    // true MEASURE reading up into the SELECT threshold band. Skip the
+    // track when loaded - that would collapse the SELECT signal into V0.
+    if ( i < kGpioDroopUnloadedMax_mA ) {
+        s_gpioDroopV0 += ( v - s_gpioDroopV0 ) * kGpioDroopV0Track;
+        i = ( s_gpioDroopV0 - v ) * ( 1000.0f / kGpioDroopOhms );
+        if ( i < 0.0f )
+            i = 0.0f;
+    }
+    *current_mA = i;
     return true;
 }
 
 static void printProbeSwitchStats( const char* src, float mA, float adc7V, int pos, bool changed ) {
     Serial.printf( "[switch] %-5s %6.2f mA", src, (double)mA );
     if ( strcmp( src, "droop" ) == 0 ) {
-        Serial.printf( "  ADC7 %.3fV  anchor %.2fmA@%.3fV", (double)adc7V,
-                       (double)s_gpioDroopAnchorI, (double)s_gpioDroopAnchorV );
+        Serial.printf( "  ADC7 %.3fV  V0 %.3fV", (double)adc7V, (double)s_gpioDroopV0 );
     }
     Serial.printf( "  thr lo/hi %.2f/%.2f  -> %s%s\n\r",
                    (double)jumperlessConfig.calibration.probe_switch_threshold_low,
@@ -5749,6 +5910,7 @@ void Probing::routableBufferPower( int offOn, int flash, int force ) {
                 // to the persisted input config.
                 globalState.config.gpioDirection[ idx ] = 0;
                 gpioState[ idx ] = 1;
+                seedGpioDroopV0FromConfig( );
             }
         }
         if ( s_gpioPowerIdx >= 0 ) {
@@ -5756,23 +5918,14 @@ void Probing::routableBufferPower( int offOn, int flash, int force ) {
             int pin = gpioDef[ s_gpioPowerIdx ][ 0 ];
             // Keep the DAC parked at the measure-mode voltage so the (rare)
             // DAC-swap fallback in checkSwitchPosition reads the level the
-            // thresholds were calibrated against.
+            // thresholds were calibrated against. Droop zeroing is continuous
+            // (V0 peak tracker in gpioDroopCurrentEstimate) - no claim-time
+            // INA anchor, which would bake in whatever switch position we
+            // happened to boot into.
             if ( probePowerDAC == 0 ) {
                 setDac0voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
             } else {
                 setDac1voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            }
-            // Droop anchor, half 1: while the DAC still feeds the buffer,
-            // grab the load current through INA1 (only the DAC0 path crosses
-            // the shunt, and switch detection is DAC0-only anyway).
-            bool takeAnchor = !s_gpioDroopValid && probePowerDAC == 0;
-            if ( takeAnchor ) {
-                if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC0 ) == 0 ) {
-                    addBridgeToState( ROUTABLE_BUFFER_IN, DAC0 );
-                    waitCore2( );
-                }
-                delay( 3 ); // crosspoint + DAC settle before the INA windows count
-                s_gpioDroopAnchorI = probeCurrentMedian( 3 );
             }
             if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC0 ) ) {
                 removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC0, 1 );
@@ -5794,15 +5947,6 @@ void Probing::routableBufferPower( int offOn, int flash, int force ) {
             gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_12MA );
             gpio_set_dir( pin, true );
             gpio_put( pin, true );
-            // Droop anchor, half 2: same load, now GPIO-fed - the ADC7
-            // voltage this current maps to. LED state hasn't had time to
-            // change between the halves, so the pair is consistent.
-            if ( takeAnchor ) {
-                waitCore2( );
-                delay( 5 ); // crosspoint + buffer settle
-                s_gpioDroopAnchorV = readAdcVoltage( 7, 32 );
-                s_gpioDroopValid = true;
-            }
             bufferPowerConnected = true;
             lastProbePowerDAC = probePowerDAC;
             probePowerDACChanged = false;
@@ -6123,7 +6267,9 @@ void probeMapRange( int* mapMin, int* mapMax ) {
     // of the several probeMapRange() calls in a single decode pass.
     if ( lastScaleRead == 0 || millis( ) - lastScaleRead > 25 ) {
         lastScaleRead = millis( );
-        float vTip = readAdcVoltage( 7, 8 );
+        // 16 samples: the scale multiplies BOTH decode endpoints, so ADC7
+        // noise moves every row boundary at once - worth the extra ~64us.
+        float vTip = readAdcVoltage( 7, 16 );
         if ( vTip > 0.5f && vTip < 5.5f ) {
             cachedScale = vTip / 3.3f; // the pair's stored frame is 3.3V
         }
@@ -6147,27 +6293,24 @@ void Probing::checkPads( void ) {
     // startProbe();
     checkingPads = 1;
 
-    int probeReadings[ 8 ] = { 0 };
+    int probeReadings[ 12 ] = { 0 };
 
-    for ( int i = 0; i < 8; i++ ) {
+    for ( int i = 0; i < 12; i++ ) {
         probeReadings[ i ] = readProbeRaw( 0, 1 );
     }
 
     int probeReading = 0;
     int numberOfGoodReadings = 0;
-    for ( int i = 0; i < 8; i++ ) {
+    for ( int i = 0; i < 12; i++ ) {
         if ( probeReadings[ i ] > 0 ) {
             probeReading += probeReadings[ i ];
             numberOfGoodReadings++;
         }
     }
-    // Serial.print("probeReadings: ");
-    // for (int i = 0; i < 4; i++) {
-    //   Serial.print(probeReadings[i]);
-    //   Serial.print(" ");
-    // }
-    // Serial.println();
-    // Serial.flush();
+    if ( numberOfGoodReadings == 0 ) {
+        checkingPads = 0;
+        return;
+    }
     probeReading = probeReading / numberOfGoodReadings;
 
     int mapMin, mapMax;
@@ -6306,11 +6449,87 @@ void Probing::checkPads( void ) {
 float longRunningAverage = 0.0;
 int longRunningAverageDamping = 10;
 
+// Median of n probe burst averages (n <= 16). Rejects single glitch bursts
+// better than a mean when the outer read count is raised.
+static int medianProbeBursts( const int* v, int n ) {
+    int tmp[ 16 ];
+    for ( int i = 0; i < n; i++ )
+        tmp[ i ] = v[ i ];
+    for ( int i = 1; i < n; i++ ) {
+        int key = tmp[ i ];
+        int j = i - 1;
+        while ( j >= 0 && tmp[ j ] > key ) {
+            tmp[ j + 1 ] = tmp[ j ];
+            j--;
+        }
+        tmp[ j + 1 ] = key;
+    }
+    if ( n & 1 )
+        return tmp[ n / 2 ];
+    return ( tmp[ n / 2 - 1 ] + tmp[ n / 2 ] + 1 ) / 2;
+}
+
+// Phantom-touch gate: the pad ladder is only ever energized by the tip feed
+// (PROBE_PIN in select, the GPIO powering the buffer in measure under
+// debug.probe_power_gpio). Blink that feed off for one short burst before
+// accepting a changed reading - a real probe contact collapses to the dark
+// floor, while a reading injected from anywhere else (a finger bridging a
+// powered row onto a pad, body coupling from holding the board) persists,
+// and gets rejected. ~115us per blink.
+static bool probeReadingIsPhantom( int average, int mapMin ) {
+    int pin = -1;
+#if defined(OG_JUMPERLESS)
+    pin = PROBE_PIN; // OG's tip feed is always PROBE_PIN (switchPosition parks at 0)
+#else
+    if ( switchPosition != 0 ) {
+        pin = PROBE_PIN; // select: tip fed directly from PROBE_PIN
+    } else if ( s_gpioPowerIdx >= 0 ) {
+        pin = gpioDef[ s_gpioPowerIdx ][ 0 ]; // measure: GPIO-powered buffer
+    }
+#endif
+    if ( pin < 0 ) {
+        return false; // DAC-powered measure buffer: nothing we can blink
+    }
+
+    // ponytail: a steady contact re-blinks at most every 250ms (a >5 count
+    // move re-checks immediately), so the tip feed isn't chopped on every
+    // accepted read in the allowDuplicates flows. Ceiling: a phantom landing
+    // within 5 counts of a just-verified reading rides the stale verdict for
+    // up to 250ms. Upgrade path: invalidate the cache on no-contact gaps.
+    static int lastCheckedValue = -1000;
+    static unsigned long lastCheckedMs = 0;
+    if ( millis( ) - lastCheckedMs < 250 && abs( average - lastCheckedValue ) <= 5 ) {
+        return false;
+    }
+
+    gpio_put( pin, false );
+    delayMicroseconds( 25 ); // sense node RC ~1us, buffer slew a few us
+    int dark = readAdc( 5, 8 );
+    gpio_put( pin, true );
+    delayMicroseconds( 25 );
+
+    if ( dark > mapMin + 10 ) {
+        lastCheckedMs = 0; // never cache a rejection
+        if ( debugProbing == 1 ) {
+            Serial.print( "phantom reading rejected: dark " );
+            Serial.print( dark );
+            Serial.print( " > " );
+            Serial.print( mapMin + 10 );
+            Serial.print( ", lit " );
+            Serial.println( average );
+        }
+        return true;
+    }
+    lastCheckedValue = average;
+    lastCheckedMs = millis( );
+    return false;
+}
+
 int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // nothingTouchedReading = 165;
     // lastReadRaw = 0;
 
-    int numberOfReads = 4;
+    int numberOfReads = 8;
     int lowReads = 0;
     int mapMin, mapMax;
     probeMapRange( &mapMin, &mapMax );
@@ -6326,7 +6545,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     if ( connectOrClearProbe == 1 ) {
 
         for ( int i = 0; i < numberOfReads; i++ ) {
-            measurements[ i ] = readAdc( 5, 12 );
+            measurements[ i ] = readAdc( 5, 16 );
 
             if ( measurements[ i ] < 300 && measurements[ i ] > ( mapMin + 10 ) && i < 4 ) {
                 lowReads++;
@@ -6339,7 +6558,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
         //  Serial.print("connect: ");
     } else if ( checkingPads == 1 ) {
         for ( int i = 0; i < numberOfReads; i++ ) {
-            measurements[ i ] = readAdc( 5, 8 );
+            measurements[ i ] = readAdc( 5, 16 );
             if ( measurements[ i ] < 300 && measurements[ i ] > ( mapMin + 10 ) && i < 4 ) {
                 lowReads++;
             }
@@ -6354,8 +6573,8 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
         // Measure position gets deeper bursts: its tip feed comes through
         // the crossbar (droopier, noisier than select's direct PROBE_PIN
         // feed), and this row-highlight path is measure mode's main
-        // consumer. Select keeps the faster 6-sample burst.
-        int burstSamples = ( switchPosition == 0 ) ? 10 : 6;
+        // consumer. Select keeps a shorter burst but still more than before.
+        int burstSamples = ( switchPosition == 0 ) ? 24 : 16;
         for ( int i = 0; i < numberOfReads; i++ ) {
             measurements[ i ] = readAdc( 5, burstSamples );
             if ( measurements[ i ] < 300 && measurements[ i ] > ( mapMin + 10 ) && i < 4 ) {
@@ -6369,7 +6588,6 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
         // Serial.print("s: ");
     }
 
-    int sum = 0;
     int maxVariance = 0;
     int variance = 0;
 
@@ -6379,17 +6597,13 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     //     Serial.print(" ");
     // }
     // Serial.println();
-    for ( int i = 0; i < numberOfReads; i++ ) {
-        sum += measurements[ i ];
-        
-        if ( i < 3 ) {
-            variance = abs( measurements[ i ] - measurements[ i + 1 ] );
-            if ( variance > maxVariance ) {
-                maxVariance = variance;
-            }
+    for ( int i = 0; i < numberOfReads - 1; i++ ) {
+        variance = abs( measurements[ i ] - measurements[ i + 1 ] );
+        if ( variance > maxVariance ) {
+            maxVariance = variance;
         }
     }
-    int average = sum / numberOfReads;
+    int average = medianProbeBursts( measurements, numberOfReads );
     // Serial.print("average ");
     // Serial.println(average);
     int rowProbed = -1;
@@ -6407,8 +6621,11 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     //   //lastReadRaw = 4096;
     // }
 
-    if ( maxVariance <= 4 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) ) {
+    if ( maxVariance <= 6 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) ) {
 
+        if ( probeReadingIsPhantom( average, mapMin ) ) {
+            return -1;
+        }
         // if (checkingPads != 1) {
         lastReadRaw = average;
         // }
@@ -6423,7 +6640,20 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
 
     } else {
 
+        if ( allowDuplicates && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) &&
+             maxVariance <= 6 &&
+             abs( average - lastReadRaw ) <= 10 ) {
+            if ( probeReadingIsPhantom( average, mapMin ) ) {
+                return -1;
+            }
+            lastReadRaw = average;
+            return average;
+        }
+
         if ( ( abs( average - lastReadRaw ) < 2 ) && allowDuplicates && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) ) {
+            if ( probeReadingIsPhantom( average, mapMin ) ) {
+                return -1;
+            }
             // Serial.print("allowDuplicates: ");
             // Serial.println(average);
             return average;
@@ -6482,20 +6712,26 @@ int Probing::smoothProbeReading( int probeRead, bool reset ) {
     // finger touch settling in - the reading ramps 10-20 counts per cycle as
     // contact resistance drops, so the smoothed value crawled through the
     // NEIGHBORING row's band for ~250ms before landing on the touched row.
-    // readProbeRaw already averages 4-16 ADC bursts, so residual jitter is
-    // small; only blend steps below 8 counts and snap to anything larger.
+    // readProbeRaw already median-filters 8-16 ADC bursts; blend small steps
+    // only and snap to anything larger.
     const int resetThreshold = 8;
 
     if ( smoothedProbeRead < 0 || abs( probeRead - smoothedProbeRead ) > resetThreshold ) {
         smoothedProbeRead = probeRead;
     } else {
-        smoothedProbeRead = ( ( smoothedProbeRead * 3 ) + probeRead + 2 ) / 4;
+        smoothedProbeRead = ( ( smoothedProbeRead * 5 ) + probeRead + 3 ) / 6;
     }
 
     return smoothedProbeRead;
 }
 
 int Probing::justReadProbe( bool allowDuplicates, int rawPad ) {
+
+    // Call sequence number: lets the row-change confirmation below require
+    // STRICTLY consecutive reads (any intervening no-read/blocked call
+    // advances the sequence and voids a pending row change).
+    static uint32_t callSeq = 0;
+    callSeq++;
 
     // Check if probing is blocked and if the block timer has expired
     if ( blockProbing > 0 && ( millis( ) - blockProbingTimer < blockProbing ) ) {
@@ -6553,7 +6789,24 @@ int Probing::justReadProbe( bool allowDuplicates, int rawPad ) {
                 }
             }
         } else {
-            // Different row, reset timer and update last values
+            // A row DIFFERENT from the current one must be seen on two
+            // CONSECUTIVE reads before it's reported. This branch used to
+            // accept instantly while duplicates of the true row are
+            // rate-limited to one per 500ms - so a single noisy decode into
+            // a neighboring pad's band was preferentially reported, and
+            // MeasureMode/Highlighting latched it from the 10ms service
+            // cache. One confirming read at the 100Hz service cadence adds
+            // ~10ms to a genuine row change.
+            static int pendingNewRow = -1;
+            static uint32_t pendingNewRowSeq = 0;
+            if ( probeRowMapByPad[ rowProbed ] != pendingNewRow ||
+                 callSeq != pendingNewRowSeq + 1 ) {
+                pendingNewRow = probeRowMapByPad[ rowProbed ];
+                pendingNewRowSeq = callSeq;
+                return -1;
+            }
+            pendingNewRow = -1;
+            // Confirmed: reset timer and update last values
             lastDuplicateTime = millis( );
             lastProbeRead = probeRead;
             lastRowProbed = probeRowMapByPad[ rowProbed ];
@@ -6672,13 +6925,13 @@ int Probing::readProbe( ) {
 
     // int padRead = 0;
     if ( probeRead < 300 ) { // take an average if it's a logo pad
-        int probeReadings[ 4 ] = { 0 };
-        for ( int i = 0; i < 4; i++ ) {
+        int probeReadings[ 8 ] = { 0 };
+        for ( int i = 0; i < 8; i++ ) {
             probeReadings[ i ] = readProbeRaw( 0, 1 );
         }
         int probeReading = 0;
         int numberOfGoodReadings = 0;
-        for ( int i = 0; i < 4; i++ ) {
+        for ( int i = 0; i < 8; i++ ) {
             if ( probeReadings[ i ] > 0 ) {
                 probeReading += probeReadings[ i ];
                 numberOfGoodReadings++;
@@ -7295,201 +7548,9 @@ int Probing::checkLastFound( int found ) {
 
 void Probing::clearLastFound( ) {}
 
-int Probing::scanRows( int pin ) {
-    // return readProbe();
-    return 0;
-    int found = -1;
-    connectedRows[ 0 ] = -1;
-
-    if ( checkProbeButton( ) == 1 ) {
-        return -18;
-    }
-
-    // pin = ADC1_PIN;
-
-    // digitalWrite(RESETPIN, HIGH);
-    // delayMicroseconds(20);
-    // digitalWrite(RESETPIN, LOW);
-    // delayMicroseconds(20);
-
-    pinMode( PROBE_PIN, INPUT );
-    delayMicroseconds( 400 );
-    int probeRead = readFloatingOrState( PROBE_PIN, -1 );
-
-    if ( probeRead == high ) {
-        found = voltageSelection;
-        connectedRows[ connectedRowsIndex ] = found;
-        connectedRowsIndex++;
-        found = -1;
-        // return connectedRows[connectedRowsIndex];
-        // Serial.print("high");
-        // return found;
-    }
-
-    else if ( probeRead == low ) {
-        found = GND;
-        connectedRows[ connectedRowsIndex ] = found;
-        connectedRowsIndex++;
-        // return found;
-        found = -1;
-        // return connectedRows[connectedRowsIndex];
-        // Serial.print(connectedRows[connectedRowsIndex]);
-
-        // return connectedRows[connectedRowsIndex];
-    }
-
-    startProbe( );
-    int chipToConnect = 0;
-    int rowBeingScanned = 0;
-
-    int xMapRead = 15;
-
-    if ( pin == ADC0_PIN ) {
-        xMapRead = 2;
-    } else if ( pin == ADC1_PIN ) {
-        xMapRead = 3;
-    } else if ( pin == ADC2_PIN ) {
-        xMapRead = 4;
-    } else if ( pin == ADC3_PIN ) {
-        xMapRead = 5;
-    }
-
-    for ( int chipScan = CHIP_A; chipScan < 8;
-          chipScan++ ) // scan the breadboard (except the corners)
-    {
-
-        sendXYraw( CHIP_L, xMapRead, chipScan, 1 );
-
-        for ( int yToScan = 1; yToScan < 8; yToScan++ ) {
-
-            sendXYraw( chipScan, 0, 0, 1 );
-            sendXYraw( chipScan, 0, yToScan, 1 );
-
-            rowBeingScanned = globalState.connections.chipStates[ chipScan ].yMap[ yToScan ];
-            if ( readFloatingOrState( pin, rowBeingScanned ) == probe ) {
-                found = rowBeingScanned;
-
-                if ( found != -1 ) {
-                    connectedRows[ connectedRowsIndex ] = found;
-                    connectedRowsIndex++;
-                    found = -1;
-                    // delayMicroseconds(100);
-                    // stopProbe();
-                    // break;
-                }
-            }
-
-            sendXYraw( chipScan, 0, 0, 0 );
-            sendXYraw( chipScan, 0, yToScan, 0 );
-        }
-        sendXYraw( CHIP_L, 2, chipScan, 0 );
-    }
-
-    int corners[ 4 ] = { 1, 30, 31, 60 };
-    sendXYraw( CHIP_L, xMapRead, 0, 1 );
-    for ( int cornerScan = 0; cornerScan < 4; cornerScan++ ) {
-
-        sendXYraw( CHIP_L, cornerScan + 8, 0, 1 );
-
-        rowBeingScanned = corners[ cornerScan ];
-        if ( readFloatingOrState( pin, rowBeingScanned ) == probe ) {
-            found = rowBeingScanned;
-            // if (nextIsSupply)
-            // {
-            //     leds.setPixelColor(nodesToPixelMap[rowBeingScanned], 65, 10, 10);
-            // }
-            // else if (nextIsGnd)
-            // {
-            //     leds.setPixelColor(nodesToPixelMap[rowBeingScanned], 10, 65, 10);
-            // }
-            // else
-            // {
-            //     leds.setPixelColor(nodesToPixelMap[rowBeingScanned],
-            //     rainbowList[rainbowIndex][0], rainbowList[rainbowIndex][1],
-            //     rainbowList[rainbowIndex][2]);
-            // }
-            // showLEDsCore2 = 1;
-            if ( found != -1 ) {
-                connectedRows[ connectedRowsIndex ] = found;
-                connectedRowsIndex++;
-                found = -1;
-                // stopProbe();
-                // break;
-            }
-        }
-
-        sendXYraw( CHIP_L, cornerScan + 8, 0, 0 );
-    }
-    sendXYraw( CHIP_L, xMapRead, 0, 0 );
-
-    for ( int chipScan2 = CHIP_I; chipScan2 <= CHIP_J;
-          chipScan2++ ) // scan the breadboard (except the corners)
-    {
-
-        int pinHeader = ADC0_PIN + ( chipScan2 - CHIP_I );
-
-        for ( int xToScan = 0; xToScan < 12; xToScan++ ) {
-
-            sendXYraw( chipScan2, xToScan, 0, 1 );
-            sendXYraw( chipScan2, 13, 0, 1 );
-
-            // analogRead(ADC0_PIN);
-
-            rowBeingScanned = globalState.connections.chipStates[ chipScan2 ].xMap[ xToScan ];
-            //   Serial.print("rowBeingScanned: ");
-            //     Serial.println(rowBeingScanned);
-            //     Serial.print("chipScan2: ");
-            //     Serial.println(chipScan2);
-            //     Serial.print("xToScan: ");
-            //     Serial.println(xToScan);
-
-            if ( readFloatingOrState( pinHeader, rowBeingScanned ) == probe ) {
-
-                found = rowBeingScanned;
-
-                // if (nextIsSupply)
-                // {
-                //     //leds.setPixelColor(nodesToPixelMap[rowBeingScanned], 65, 10,
-                //     10);
-                // }
-                // else if (nextIsGnd)
-                // {
-                //    // leds.setPixelColor(nodesToPixelMap[rowBeingScanned], 10, 65,
-                //    10);
-                // }
-                // else
-                // {
-                //     //leds.setPixelColor(nodesToPixelMap[rowBeingScanned],
-                //     rainbowList[rainbowIndex][0], rainbowList[rainbowIndex][1],
-                //     rainbowList[rainbowIndex][2]);
-                // }
-                // //showLEDsCore2 = 1;
-                // // leds.show();
-
-                if ( found != -1 ) {
-                    connectedRows[ connectedRowsIndex ] = found;
-                    connectedRowsIndex++;
-                    found = -1;
-                    // stopProbe();
-                    // break;
-                }
-            }
-            sendXYraw( chipScan2, xToScan, 0, 0 );
-            sendXYraw( chipScan2, 13, 0, 0 );
-        }
-    }
-
-    // stopProbe();
-    // probeTimeout = millis();
-
-    digitalWrite( RESETPIN, HIGH );
-    delayMicroseconds( 20 );
-    digitalWrite( RESETPIN, LOW );
-    return connectedRows[ 0 ];
-    // return found;
-
-    // return 0;
-}
+// scanRows() deleted: dead code (no callers, immediate return 0), and its
+// unreachable body carried a real bug (connected CHIP_L xMapRead but
+// disconnected hardcoded x2). Row detection is the ADC5 resistor ladder now.
 
 int Probing::readRails( int pin ) {
     int state = -1;

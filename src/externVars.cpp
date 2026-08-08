@@ -238,6 +238,8 @@ bool systemIdleForFlush(uint32_t quietMs) {
 
     extern volatile int probeActive;
     if (probeActive) return false;            // probe mode is mid-session
+    extern int& inClickMenu;
+    if (inClickMenu != 0) return false;       // click-wheel menu is open
     if (refreshInProgress) return false;      // mid-reroute
     if (loadingFile) return false;            // parsing a slot/script
     if (core1busy) return false;              // Core 0 is doing critical work

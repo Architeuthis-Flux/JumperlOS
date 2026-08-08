@@ -1612,19 +1612,21 @@ void erattaClearGPIO( int gpio ) {
 
         // we should check if thse connections are already made
 
-        sendXYraw( 11, 15, freeYL, 1 );
+        // Unchecked on purpose: this momentary GND<->GPIO bridge IS the
+        // discharge - RouteSafety would (correctly) refuse it as a short.
+        sendXYrawUnchecked( 11, 15, freeYL, 1 );
 
         for ( int i = 0; i < 8; i++ ) {
             if ( gpio_get( gpioDef[ i ][ 0 ] ) == 0 ) {
                 continue;
             }
-            sendXYraw( 11, 4 + i, freeYL, 1 );
+            sendXYrawUnchecked( 11, 4 + i, freeYL, 1 );
 
 
-            sendXYraw( 11, 4 + i, freeYL, 0 );
+            sendXYrawUnchecked( 11, 4 + i, freeYL, 0 );
         }
 
-        sendXYraw( 11, 15, freeYL, 0 );
+        sendXYrawUnchecked( 11, 15, freeYL, 0 );
     }
 }
 

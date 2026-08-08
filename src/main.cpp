@@ -40,6 +40,7 @@ KevinC@ppucc.io
 #include "CommandBuffer.h" // New simplified command buffer system
 #include "Debugs.h"
 #include "FakeGpio.h"
+#include "NetVoltageScan.h"
 #include "FileParsing.h"
 #include "FilesystemStuff.h"
 #include "GraphicOverlays.h"
@@ -925,6 +926,10 @@ dontshowmenu:
             // USB-CDC I/O which must stay on Core 0 (the USB-owning core); see the
             // note at its old call site in loop1. Throttled with secondSerialHandler.
             replyWithSerialInfo( );
+
+            // Net voltage scan debug report - same rule: Serial stays on
+            // Core 0, scanner itself runs on Core 2. Self-throttled to 1Hz.
+            serviceNetVoltageScanDebug( );
         }
         busyTimers[ 2 ] = micros( );
 
@@ -1688,6 +1693,11 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                         }
                     }
 
+                    // showNets() can take several ms - service the encoder
+                    // mid-pass so clickwheel latency doesn't stack up with
+                    // the rest of this block (self-throttled, owner core).
+                    rotaryEncoderStuff( );
+
                     t[ 8 ] = micros( );
                     readGPIO( );     // if want, I can make this update the LEDs like 10 times
                                      // faster by putting outside this loop,
@@ -1865,6 +1875,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // own atomic ADC lock) can never extend the core_sync hold and stall core0.
     // Compiled out when LAZY_ADC_READINGS == 0.
     updateLazyAdcReadings( );
+
+    // Board-wide node voltage scan for per-connection currents. Runs AFTER
+    // core_sync_release like the lazy ADC reads, so a multi-ms sense tap can
+    // never extend the LED-frame core_sync/core2busy hold that Core 0's
+    // waitCore2() blocks on - stacking it inside the frame was the "clickwheel
+    // super laggy" regression. Still core 1 only (taps stay serialized with
+    // sendPaths); internally gated on pauseCore2/sendAllPathsCore2, preempted
+    // by recent user input, and raises core2busy around its hardware work.
+    serviceNetVoltageScan( );
 
     // TIMING DEBUG OUTPUT - Smart accumulation and periodic printing
     if ( debugWaitLoopTimingCore2 ) {

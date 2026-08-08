@@ -823,7 +823,8 @@ bool statusDiagnosticsMenu() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // External function declarations - these are now included via headers
-extern void sendXYraw(int, int, int, int);
+// (sendXYraw comes from CH446Q.h - a local re-declaration would miss its
+// default timeout argument and make every call ambiguous)
 extern volatile bool pauseCore2;
 
 void action_resourceStatus() {

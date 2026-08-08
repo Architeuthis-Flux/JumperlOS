@@ -77,11 +77,11 @@ static void syncAliases() {
 // Fast voltage source switch on chip K for outputs
 static inline void fastSwitchChipK(int8_t oldX, int8_t newX, int8_t y) {
     if (oldX >= 0 && oldX != newX) {
-        sendXYraw(CHIP_K, oldX, y, 0);
+        sendXYrawUnchecked(CHIP_K, oldX, y, 0);
         lastChipXY[CHIP_K].connected[y] &= ~(1 << oldX);
     }
     if (newX >= 0) {
-        sendXYraw(CHIP_K, newX, y, 1);
+        sendXYrawUnchecked(CHIP_K, newX, y, 1);
         lastChipXY[CHIP_K].connected[y] |= (1 << newX);
     }
 }
@@ -739,13 +739,13 @@ int fakeGpioConfigInput(int node, float thresholdHigh, float thresholdLow) {
     if (chipKY >= 0) {
         int8_t adcX = tdmInputs.getChipKX();
         // Disconnect ADC crosspoint
-        sendXYraw(CHIP_K, adcX, chipKY, 0);
+        sendXYrawUnchecked(CHIP_K, adcX, chipKY, 0);
         lastChipXY[CHIP_K].connected[chipKY] &= ~(1 << adcX);
     }
     // Disconnect breadboard-side hops too
     for (int h = 0; h < numHops; h++) {
         if (hopChips[h] >= 0 && hopX[h] >= 0 && hopY[h] >= 0) {
-            sendXYraw(hopChips[h], hopX[h], hopY[h], 0);
+            sendXYrawUnchecked(hopChips[h], hopX[h], hopY[h], 0);
             lastChipXY[hopChips[h]].connected[hopY[h]] &= ~(1 << hopX[h]);
         }
     }
@@ -1184,12 +1184,12 @@ void finalizeFakeGpioAfterRouting() {
             // Disconnect the entire path for TDM isolation
             if (chipKY >= 0) {
                 int8_t adcX = tdmInputs.getChipKX();
-                sendXYraw(CHIP_K, adcX, chipKY, 0);
+                sendXYrawUnchecked(CHIP_K, adcX, chipKY, 0);
                 lastChipXY[CHIP_K].connected[chipKY] &= ~(1 << adcX);
             }
             for (int h = 0; h < numHops; h++) {
                 if (hopChips[h] >= 0 && hopX[h] >= 0 && hopY[h] >= 0) {
-                    sendXYraw(hopChips[h], hopX[h], hopY[h], 0);
+                    sendXYrawUnchecked(hopChips[h], hopX[h], hopY[h], 0);
                     lastChipXY[hopChips[h]].connected[hopY[h]] &= ~(1 << hopX[h]);
                 }
             }
@@ -1386,7 +1386,7 @@ int fakeGpioDisconnect(int node1, int node2) {
 
     for (int i = 0; i < 4 && i < toggle.num_connections; i++) {
         if (toggle.chips[i] >= 0 && toggle.x[i] >= 0 && toggle.y[i] >= 0)
-            sendXYraw(toggle.chips[i], toggle.x[i], toggle.y[i], 0);
+            sendXYrawUnchecked(toggle.chips[i], toggle.x[i], toggle.y[i], 0);
     }
     return 1;
 }
@@ -1407,7 +1407,7 @@ int fakeGpioReconnect(int node1, int node2) {
     FakeGpioToggle& toggle = fakeGpioToggles[slot];
     for (int i = 0; i < 4 && i < toggle.num_connections; i++) {
         if (toggle.chips[i] >= 0 && toggle.x[i] >= 0 && toggle.y[i] >= 0)
-            sendXYraw(toggle.chips[i], toggle.x[i], toggle.y[i], 1);
+            sendXYrawUnchecked(toggle.chips[i], toggle.x[i], toggle.y[i], 1);
     }
     toggle.active = false;
     toggle.node1 = -1;

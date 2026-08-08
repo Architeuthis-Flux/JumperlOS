@@ -185,7 +185,7 @@ void TimeDomainMultiplexer::updateChannelChipKY(int slot, int8_t newChipKY) {
 static void setChannelPath(TdmChannel& ch, int connect) {
     for (int i = 0; i < ch.numHops; i++) {
         if (ch.hopChip[i] < 0 || ch.hopX[i] < 0 || ch.hopY[i] < 0) continue;
-        sendXYraw(ch.hopChip[i], ch.hopX[i], ch.hopY[i], connect);
+        sendXYrawUnchecked(ch.hopChip[i], ch.hopX[i], ch.hopY[i], connect);
         if (connect) {
             lastChipXY[ch.hopChip[i]].connected[ch.hopY[i]] |= (1 << ch.hopX[i]);
         } else {
@@ -210,7 +210,7 @@ bool TimeDomainMultiplexer::switchTo(int slot) {
         TdmChannel& old = channels[activeChannel];
         // Disconnect ADC X from old Y
         if (old.chipKY >= 0 && old.chipKY < 8) {
-            sendXYraw(CHIP_K, adcX, old.chipKY, 0);
+            sendXYrawUnchecked(CHIP_K, adcX, old.chipKY, 0);
             lastChipXY[CHIP_K].connected[old.chipKY] &= ~(1 << adcX);
         }
         // Disconnect breadboard-side hops
@@ -225,7 +225,7 @@ bool TimeDomainMultiplexer::switchTo(int slot) {
     if (ch.numHops > 0) {
         setChannelPath(ch, 1);
     }
-    sendXYraw(CHIP_K, adcX, ch.chipKY, 1);
+    sendXYrawUnchecked(CHIP_K, adcX, ch.chipKY, 1);
     lastChipXY[CHIP_K].connected[ch.chipKY] |= (1 << adcX);
     activeChannel = slot;
 
@@ -244,7 +244,7 @@ void TimeDomainMultiplexer::disconnectActive() {
 
         // Disconnect ADC X from Y
         if (ch.chipKY >= 0 && ch.chipKY < 8) {
-            sendXYraw(CHIP_K, adcX, ch.chipKY, 0);
+            sendXYrawUnchecked(CHIP_K, adcX, ch.chipKY, 0);
             lastChipXY[CHIP_K].connected[ch.chipKY] &= ~(1 << adcX);
         }
         // Disconnect breadboard-side hops
@@ -361,7 +361,7 @@ int TimeDomainMultiplexer::reassignAdc() {
 
     // Disconnect from old ADC X, reconnect on new ADC X
     if (oldY >= 0 && oldY < 8) {
-        sendXYraw(CHIP_K, oldAdcX, oldY, 0);
+        sendXYrawUnchecked(CHIP_K, oldAdcX, oldY, 0);
         lastChipXY[CHIP_K].connected[oldY] &= ~(1 << oldAdcX);
     }
 
@@ -370,7 +370,7 @@ int TimeDomainMultiplexer::reassignAdc() {
     // Reconnect active channel on new ADC if there was one
     if (oldY >= 0 && oldY < 8 && activeChannel >= 0) {
         int8_t newAdcX = getChipKX();
-        sendXYraw(CHIP_K, newAdcX, oldY, 1);
+        sendXYrawUnchecked(CHIP_K, newAdcX, oldY, 1);
         lastChipXY[CHIP_K].connected[oldY] |= (1 << newAdcX);
     }
 

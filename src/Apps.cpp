@@ -444,13 +444,14 @@ int row = 0;
     float selectAvg = medianInPlace( selectReadings, NUM_READINGS );
     Serial.printf( "\nSELECT mode median: %.3f mA\n\n\r", selectAvg );
 
-    // Sanity window: a healthy probe reads ~0 mA in MEASURE and ~1.8 mA in
-    // SELECT. Averages far outside that (or with no usable separation) mean
-    // the readings can't be trusted - usually a bad or unplugged probe cable -
-    // so fall back to the known-good defaults instead of saving garbage
-    // thresholds.
-    bool badReadings = measureAvg < -0.4f || measureAvg > 0.6f ||
-                       selectAvg < 1.0f || selectAvg > 3.0f ||
+    // Sanity window: MEASURE historically read ~0 mA, but the probe LED's
+    // idle draw rides on INA1 in the corrected frame and shifts with the LED
+    // wiring (probe_led_on_button_pin boards idle near ~1 mA), so allow up
+    // to 1.4 mA there. What actually matters for detection is SEPARATION -
+    // no usable gap (or values wildly out of range) means a bad/unplugged
+    // probe cable, so fall back to defaults instead of saving garbage.
+    bool badReadings = measureAvg < -0.4f || measureAvg > 1.4f ||
+                       selectAvg < 1.0f || selectAvg > 3.6f ||
                        ( selectAvg - measureAvg ) < 0.5f;
     if ( badReadings ) {
         changeTerminalColor( 196, true ); // Red

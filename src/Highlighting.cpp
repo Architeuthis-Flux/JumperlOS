@@ -8,6 +8,7 @@
 #include "MatrixState.h"
 #include "States.h"
 #include "NetManager.h"
+#include "NetVoltageScan.h"
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
 #include "ArduinoStuff.h"
@@ -190,6 +191,9 @@ void Highlighting::clearHighlighting( int updateLEDs) {
     highlightedRow = -1;
 
     firstConnection = -1;
+
+    // Re-tapping the same net after the highlight cleared must reprint.
+    lastPrintedNet = -1;
 
     // Reset timers
     highlightTimer = 0;
@@ -737,6 +741,153 @@ void Highlighting::warnNetTimeout( int clearAll ) {
     }
 }
 
+// ============================================================================
+// Unified highlight display sink
+// ============================================================================
+// Every net-highlight reading - probe tap, clickwheel scroll, and the ~40ms
+// live updater (checkForReadingChanges) - funnels through these two helpers
+// so name resolution and the OLED/Serial formats can never drift apart
+// between input sources again.
+
+// Display name for a net: ISENSE fixed labels win (the live and one-shot
+// paths used to disagree here), then the user's custom name, then the
+// net's own name, then "Net N". buf must outlive the returned pointer.
+static const char* netDisplayName( int net, char* buf, size_t bufLen ) {
+    if ( currentSenseState.plusConnected && currentSenseState.minusConnected ) {
+        if ( net == currentSenseState.plusNet )
+            return "I Sense +";
+        if ( net == currentSenseState.minusNet )
+            return "I Sense -";
+    }
+    const char* name = globalState.display.getNetName( net );
+    if ( name != nullptr && name[ 0 ] != '\0' )
+        return name;
+    name = globalState.connections.nets[ net ].name;
+    if ( name != nullptr && name[ 0 ] != '\0' )
+        return name;
+    snprintf( buf, bufLen, "Net %d", net );
+    return buf;
+}
+
+// The net's estimated current (net voltage scan) as a display string.
+// ALWAYS returns a value ("0.0 mA" when nothing measurable) so voltage-
+// bearing displays show both readings at all times. buf outlives the return.
+static const char* netCurrentValue( int net, char* buf, size_t len ) {
+    snprintf( buf, len, "%.1f mA", netCurrent_mA( net ) );
+    return buf;
+}
+
+// Scanned voltage for the highlighted node (or the net's dominant-path
+// midpoint) as a display string; nullptr when the scanner has no fresh
+// sample. This is what lets PLAIN bridge nets - no ADC/DAC/rail attached -
+// show a voltage line: the background scan already measured their nodes.
+static const char* netScanVoltageValue( int net, char* buf, size_t len ) {
+    float v;
+    if ( brightenedNode > 0 && brightenedNode < NODE_VOLTAGE_MAX &&
+         nodeVoltageValid( brightenedNode ) ) {
+        v = nodeVoltage[ brightenedNode ];
+    } else if ( net > 0 && net < NET_CURRENT_INFO_COUNT &&
+                netCurrentInfo[ net ].valid ) {
+        v = netCurrentInfo[ net ].voltage;
+    } else {
+        return nullptr;
+    }
+    snprintf( buf, len, "%.2f V", v );
+    return buf;
+}
+
+// The ONE place a highlight reading becomes pixels + serial text.
+//
+// OLED layout:
+//   [ name (small, left)      row X (small, right) ]   <- 5pt header
+//   [           3.40 V (family font)               ]
+//   [           4.8 mA (family font)               ]
+// The header's row label comes from brightenedNode HERE, in the sink, so
+// the one-shot and live-updater paths can't render different layouts (the
+// old split - one-shot with row, live fallback without - made the display
+// visibly restructure itself ~0.5s after selecting a row).
+// Value rows use the USER'S configured font family: 8pt each when two
+// readings are present (12pt pairs clipped/overlapped on the 32px panel),
+// 12pt for a single reading. Name-only (e.g. "GND") renders large.
+// Serial gets the same content as a single overwritten line.
+static void showNetReading( const char* name, const char* value,
+                            const char* value2 = nullptr ) {
+    bool haveV1 = ( value != nullptr && value[ 0 ] != '\0' );
+    bool haveV2 = ( value2 != nullptr && value2[ 0 ] != '\0' );
+
+    // Row label for the header's right side (row number / node name).
+    char rowBuf[ 16 ] = "";
+    const char* rowLabel = nullptr;
+    if ( ( haveV1 || haveV2 ) && brightenedNode > 0 ) {
+        snprintf( rowBuf, sizeof( rowBuf ), "%s", definesToChar( brightenedNode, 0 ) );
+        if ( rowBuf[ 0 ] != '\0' )
+            rowLabel = rowBuf;
+    }
+
+    Serial.print( "\r                                              \r" );
+    Serial.print( name );
+    if ( rowLabel != nullptr ) {
+        Serial.print( "  " );
+        Serial.print( rowLabel );
+    }
+    if ( haveV1 ) {
+        Serial.print( "  " );
+        Serial.print( value );
+    }
+    if ( haveV2 ) {
+        Serial.print( "  " );
+        Serial.print( value2 );
+    }
+    Serial.flush( );
+
+    // Value rows honor the configured font family at the closest point
+    // size; the header uses Andale Mono 5pt (index 12) - the smallest font
+    // on board - because most families have no readable sub-8pt cut and
+    // three family-sized rows don't fit 32px.
+    FontFamily fam = mapConfigValueToFontFamily( jumperlessConfig.top_oled.font );
+    int16_t bigFont = (int16_t)FontManager::getFontForPointSize( fam, 12 );
+    int16_t medFont = (int16_t)FontManager::getFontForPointSize( fam, 8 );
+    int16_t labelFont = 12; // Andale Mono 5pt
+
+    bool haveValues = ( haveV1 || haveV2 );
+    int16_t nameFont = haveValues ? labelFont : bigFont;
+    int16_t valueFont = ( haveV1 && haveV2 ) ? medFont : bigFont;
+
+    OledTextRow rows[ 3 ] = {};
+    int n = 0;
+    rows[ n ].segs[ 0 ] = { name, nameFont, OLED_ALIGN_INHERIT };
+    rows[ n ].segCount = 1;
+    if ( haveValues && rowLabel != nullptr ) {
+        rows[ n ].segs[ 1 ] = { rowLabel, labelFont, OLED_ALIGN_RIGHT };
+        rows[ n ].segCount = 2;
+    }
+    rows[ n ].align = haveValues ? OLED_ALIGN_LEFT : OLED_ALIGN_CENTER;
+    // Fixed header height: measured ink boxes vary per string (descenders,
+    // ascender mixes), which made some labels render 2px lower than others.
+    // Pinning the row to the 5pt cap height gives every header the same
+    // baseline; descender tails hang into the row gap below.
+    if ( haveValues ) {
+        rows[ n ].fixedH = 7;
+    }
+    n++;
+    if ( haveV1 ) {
+        rows[ n ].segs[ 0 ] = { value, valueFont, OLED_ALIGN_INHERIT };
+        rows[ n ].segCount = 1;
+        rows[ n ].align = OLED_ALIGN_CENTER;
+        n++;
+    }
+    if ( haveV2 ) {
+        rows[ n ].segs[ 0 ] = { value2, valueFont, OLED_ALIGN_INHERIT };
+        rows[ n ].segCount = 1;
+        rows[ n ].align = OLED_ALIGN_CENTER;
+        n++;
+    }
+    // Top-anchored: header hugs the top edge, readings fill the remaining
+    // height. rowGap 1 keeps the three-row stack inside 32px so the bottom
+    // reading's descenders don't clip.
+    oled.clearPrintShowRich( rows, n, 1, true, true, haveValues );
+}
+
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
     // Serial.print("justReadProbe = ");
     // Serial.println(probeReading);
@@ -785,21 +936,18 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         }
         clearColorOverrides( 1, 1, 0 );
         brightenedRail = -1;
-        lastPrintedNet = -1;
+        // NOTE: lastPrintedNet is deliberately NOT cleared here anymore.
+        // Clearing it every call re-pushed the OLED on every loop while the
+        // probe tip was held on a net. Net changes reprint below; value
+        // changes are the live updater's job (checkForReadingChanges);
+        // clearHighlighting() resets it so a re-tap after timeout reprints.
         switch ( netHighlighted ) {
         case 0:
             break;
         case 1:
             if ( lastPrintedNet != netHighlighted ) {
                 if ( print == 1 ) {
-                    Serial.print( "GND" );
-                    Serial.flush( );
-                    char oledString[ 30 ];
-                    sprintf( oledString, "GND" );
-
-                    //oled.clear( );
-                    oled.clearPrintShow( oledString, 2, true, true, true );
-                    //oled.show( );
+                    showNetReading( "GND", "" );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -809,18 +957,10 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             if ( lastPrintedNet != netHighlighted ) {
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
-                    Serial.print( "Top Rail  " );
-
-                    Serial.print( globalState.power.topRail );
-                    Serial.print( " V" );
-                    Serial.flush( );
-
-                    char oledString[ 30 ];
-                    sprintf( oledString, "Top Rail\n%0.2f V", (float)globalState.power.topRail );
-
-                    //oled.clear( );
-                    oled.clearPrintShow( oledString, 2, true, true, true );
-                    //oled.show( );
+                    char value[ 28 ];
+                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.topRail );
+                    char curBuf[ 16 ];
+                    showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                 }
             }
             brightenedRail = 0;
@@ -829,18 +969,10 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             if ( lastPrintedNet != netHighlighted ) {
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
-                    Serial.print( "Bottom Rail  " );
-
-                    Serial.print( globalState.power.bottomRail );
-                    Serial.print( " V" );
-                    Serial.flush( );
-
-                    char oledString[ 30 ];
-                    sprintf( oledString, "Bottom Rail\n%0.2f V", (float)globalState.power.bottomRail );
-
-                    //oled.clear( );
-                    oled.clearPrintShow( oledString, 2, true, true, true );
-                    //oled.show( );
+                    char value[ 28 ];
+                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.bottomRail );
+                    char curBuf[ 16 ];
+                    showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                 }
             }
             brightenedRail = 2;
@@ -851,17 +983,10 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 DACcolorOverride0 = -2;
                 DACcolorOverride1 = 0x000000;
                 if ( print == 1 ) {
-                    Serial.print( "DAC 0  " );
-                    Serial.print( globalState.power.dac0 );
-                    Serial.print( " V" );
-                    Serial.flush( );
-
-                    char oledString[ 30 ];
-                    sprintf( oledString, "DAC 0\n%0.2f V", (float)globalState.power.dac0 );
-
-                    //  oled.clear( );
-                    oled.clearPrintShow( oledString, 2, true, true, true );
-                    //oled.show( );
+                    char value[ 28 ];
+                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.dac0 );
+                    char curBuf[ 16 ];
+                    showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -872,17 +997,10 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 DACcolorOverride0 = 0x000000;
                 DACcolorOverride1 = -2;
                 if ( print == 1 ) {
-                    Serial.print( "DAC 1  " );
-                    Serial.print( globalState.power.dac1 );
-                    Serial.print( " V" );
-                    Serial.flush( );
-
-                    char oledString[ 30 ];
-                    sprintf( oledString, "DAC 1\n%0.2f V", (float)globalState.power.dac1 );
-
-                    //oled.clear( );
-                    oled.clearPrintShow( oledString, 2, true, true, true );
-                    //oled.show( );
+                    char value[ 28 ];
+                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.dac1 );
+                    char curBuf[ 16 ];
+                    showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -975,35 +1093,14 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 }
 
                 if ( print == 1 && shouldPrint ) {
-                    const char* baseName = globalState.connections.nets[ netHighlighted ].name;
+                    (void)direction;
                     char nameBuffer[ 16 ];
-                    if ( baseName == nullptr || baseName[ 0 ] == '\0' ) {
-                        snprintf( nameBuffer, sizeof( nameBuffer ), "Net %d", netHighlighted );
-                        baseName = nameBuffer;
-                    }
-
-                    const char* directionStr = "||";
-                    if ( direction > 0 ) {
-                        directionStr = "->";
-                    } else if ( direction < 0 ) {
-                        directionStr = "<-";
-                    }
-
-                    Serial.print( "\r                                              \r" );
-                    Serial.printf( "%s %+.2f mA", baseName,  current);
-                    Serial.flush( );
-
-                    char oledBuffer[ 48 ];
-                    if (netHighlighted == currentSenseState.plusNet) {
-                        snprintf( oledBuffer, sizeof( oledBuffer ), "I Sense +\n %+.2f mA",
-                              baseName,  current );
-                    } else {
-                        snprintf( oledBuffer, sizeof( oledBuffer ), "I Sense -\n %+.2f mA",
-                              baseName,  current );
-                    }
-                    snprintf( oledBuffer, sizeof( oledBuffer ), "%s\n %+.2f mA",
-                              baseName,  current );
-                    oled.clearPrintShow( oledBuffer, 2, true, true, true );
+                    const char* baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
+                    char vBuf[ 16 ];
+                    char value[ 16 ];
+                    snprintf( vBuf, sizeof( vBuf ), "%.2f V", voltage );
+                    snprintf( value, sizeof( value ), "%+.2f mA", current );
+                    showNetReading( baseName, vBuf, value );
 
                     lastSenseCurrentPrinted = current;
                     lastSenseVoltagePrinted = voltage;
@@ -1066,8 +1163,11 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         default: parityChar = 'N'; break;
                         }
 
-                        // If caller is encoder (encoderNetHighlighted != -1) show only static UART info
-                        bool calledFromEncoder = ( encoderNetHighlighted != -1 );
+                        // Encoder-driven highlights show only static UART
+                        // info. Callers signal "probe/node" with <= 0
+                        // (Probing's connect cursor passes 0; the old
+                        // `!= -1` test misclassified it as encoder).
+                        bool calledFromEncoder = ( encoderNetHighlighted > 0 );
 
                         if ( calledFromEncoder || !haveLiveData ) {
                             // No live data OR encoder-driven highlight -> keep old single-shot OLED behavior
@@ -1191,34 +1291,18 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 if ( lastPrintedNet != netHighlighted ) {
                     if ( print == 1 ) {
                         // Simple I2C label without scanning
-                        Serial.print( "I2C  " );
-                        //Serial.flush( );
                         const char* line = "I2C";
                         if ( functionOnNetIndex >= 0 ) {
                             int pin = gpioDef[ functionOnNetIndex ][ 0 ];
-                            if ( pin == jumperlessConfig.top_oled.sda_pin ) 
-                            {
-                              line = "I2C  SDA";
-                              Serial.print("SDA   ");
-                              Serial.flush();
-                            }
-                            else if ( pin == jumperlessConfig.top_oled.scl_pin ) 
-                            {
-                              line = "I2C  SCL";
-                              Serial.print("SCL   ");
-                              Serial.flush();
+                            if ( pin == jumperlessConfig.top_oled.sda_pin ) {
+                                line = "I2C  SDA";
+                            } else if ( pin == jumperlessConfig.top_oled.scl_pin ) {
+                                line = "I2C  SCL";
                             }
                         }
-                        char oledString[ 32 ];
-
-                       // Serial.print("i2cSpeed = ");
-                        Serial.print(i2cSpeed/1000);
-                        Serial.print(" KHz");
-                        Serial.flush();
-               
-                        snprintf( oledString, sizeof( oledString ), "%s\n%d KHz", line, i2cSpeed/1000 );
-                        oled.clearPrintShow( oledString, 2, true, true, true );
-                       // oled.show( );
+                        char value[ 16 ];
+                        snprintf( value, sizeof( value ), "%d KHz", i2cSpeed / 1000 );
+                        showNetReading( line, value );
                     }
                     lastPrintedNet = netHighlighted;
                 }
@@ -1230,18 +1314,9 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     if ( print == 1 ) {
                         float freq = gpioPWMFrequency[ functionOnNetIndex ];
                         float duty = gpioPWMDutyCycle[ functionOnNetIndex ] * 100.0f;
-                        Serial.print( "PWM  " );
-                        Serial.print( freq, 2 );
-                        Serial.print( " Hz  " );
-                        Serial.print( duty, 1 );
-                        Serial.print( "%" );
-                        Serial.flush( );
-
-                        char oledString[ 32 ];
-                        sprintf( oledString, "PWM\n%0.0f Hz  %0.0f%%", freq, (duty) );
-                        //oled.clear( );
-                        oled.clearPrintShow( oledString, 2, true, true, true );
-                        //oled.show( );
+                        char value[ 24 ];
+                        snprintf( value, sizeof( value ), "%0.0f Hz  %0.0f%%", freq, duty );
+                        showNetReading( "PWM", value );
                     }
                     lastPrintedNet = netHighlighted;
                 }
@@ -1280,19 +1355,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
 
                         
                         const char* fname = gpio_function_name_for_pin( gpioPin, fun );
-
-
-                        Serial.print( fname );
-                        Serial.flush( );
-
-                        char oledString[ 32 ];
-                        sprintf( oledString, "%s", fname );
-                        // Serial.print("oledString: ");
-                        // Serial.println(oledString);
-
-                        //oled.clear( );
-                        oled.clearPrintShow( oledString, 2, true, true, true );
-                        //oled.show( );
+                        showNetReading( fname, "" );
                     }
                     lastPrintedNet = netHighlighted;
                 }
@@ -1309,20 +1372,13 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         logoOverrideMap[ 1 ].colorOverride = logoOverrideMap[ 1 ].defaultOverride;
                         logoOverriden = true;
                         if ( print == 1 ) {
-                            Serial.print( "ADC " );
-                            Serial.print( adc );
-                            Serial.print( "   " );
-
-                            Serial.print( (float)readAdcVoltage( adc, 32 ) );
-                            Serial.print( " V" );
-                            Serial.flush( );
-
-                            char oledString[ 30 ];
-                            sprintf( oledString, "ADC %d\n%0.2f V", adc, (float)readAdcVoltage( adc, 32 ) );
-
-                            //oled.clear();
-                            oled.clearPrintShow( oledString, 2, true, true, true );
-                            //oled.show();
+                            float adcV = readAdcVoltage( adc, 32 ); // one read, not two
+                            char name[ 12 ];
+                            char value[ 28 ];
+                            snprintf( name, sizeof( name ), "ADC %d", adc );
+                            snprintf( value, sizeof( value ), "%0.2f V", adcV );
+                            char curBuf[ 16 ];
+                            showNetReading( name, value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                         }
                         specialPrint = 1;
                     }
@@ -1334,38 +1390,19 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         logoOverrideMap[ 5 ].colorOverride = logoOverrideMap[ 5 ].defaultOverride;
                         logoOverriden = true;
                         if ( print == 1 ) {
-                            Serial.print( "GPIO " );
-                            Serial.print( gpioInputNumber + 1 );
-                            Serial.print( " input " );
-                            Serial.flush( );
-
-                            int gpioInputState = gpioReadWithFloating( gpioDef[ gpioInputNumber ][ 0 ] );
-                            char stateString[ 10 ];
-                            switch ( gpioInputState ) {
-                            case 0:
-                                Serial.print( "low" );
-                                strcpy( stateString, "low" );
-                                break;
-                            case 1:
-                                Serial.print( "high" );
-                                strcpy( stateString, "high" );
-                                break;
-                            case 2:
-                                Serial.print( "floating" );
-                                strcpy( stateString, "floating" );
-                                break;
-                            default:
-                                Serial.print( "?" );
-                                strcpy( stateString, "?" );
-                                break;
-                            }
-
-                            char oledString[ 30 ];
-                            sprintf( oledString, "GPIO %d input\n %s", gpioInputNumber + 1, stateString );
-                            //oled.clear( );
-                            oled.clearPrintShow( oledString, 2, true, true, true );
-                            //oled.show( );
-                            // Serial.println();
+                            // Same source the ~40ms live updater reads
+                            // (gpioReading[], which encodes 2 = floating) -
+                            // the one-shot used gpioReadWithFloating() and
+                            // the two could disagree on first show.
+                            int gpioInputState = gpioReading[ gpioInputNumber ];
+                            const char* stateString =
+                                ( gpioInputState == 0 )   ? "LOW"
+                                : ( gpioInputState == 1 ) ? "HIGH"
+                                : ( gpioInputState == 2 ) ? "FLOATING"
+                                                          : "?";
+                            char name[ 16 ];
+                            snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
+                            showNetReading( name, stateString );
                         }
                         specialPrint = 1;
                     }
@@ -1377,63 +1414,39 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         logoOverrideMap[ 5 ].colorOverride = logoOverrideMap[ 5 ].defaultOverride;
                         logoOverriden = true;
                         if ( print == 1 ) {
-                            Serial.print( "GPIO " );
-                            Serial.print( gpioOutputNumber + 1 );
-                            Serial.print( " output " );
-                            Serial.flush( );
-
-                            char stateString[ 7 ];
                             int gpioOutputState = gpio_get_out_level( gpioDef[ gpioOutputNumber ][ 0 ] );
-
-                            if ( gpioOutputState == 0 ) {
-                                Serial.print( "low" );
-                                strcpy( stateString, "low" );
-                            } else {
-                                Serial.print( "high" );
-                                strcpy( stateString, "high" );
-                            }
-
-                            char oledString[ 30 ];
-                            sprintf( oledString, "GPIO %d out\n %s", gpioOutputNumber + 1, stateString );
-
-                            oled.clearPrintShow( oledString, 2, true, true, true );
-
-                            // Serial.println();
+                            char name[ 16 ];
+                            snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
+                            showNetReading( name, gpioOutputState ? "HIGH" : "LOW" );
                         }
                         specialPrint = 1;
                     }
                 }
             } else {
                 if ( netHighlighted > 0 ) {
-                    int length = 0;
-                    if ( print == 1 ) {
-                        // Check for custom net name
-                        const char* customName = globalState.display.getNetName( netHighlighted );
-                        if ( customName != nullptr ) {
-                            Serial.print( customName );
-                        } else {
-                            Serial.print( "Net " );
-                            Serial.print( netHighlighted );
-                        }
-                        Serial.print( "\t " );
-                        Serial.print( "row " );
-                        length = printNodeOrName( brightenedNode );
-                        Serial.flush( );
+                    // Reprint on net OR row change (the encoder scrolls
+                    // rows within one net), NOT on every pass: this branch
+                    // was the only one without a lastPrintedNet guard, so a
+                    // held probe tip re-pushed "Net N / row X" every service
+                    // loop and stomped the live updater's voltage/current
+                    // line whenever the scan current happened to read 0.
+                    static int lastPrintedRowNode = -1;
+                    if ( print == 1 && ( lastPrintedNet != netHighlighted ||
+                                         lastPrintedRowNode != brightenedNode ) ) {
+                        lastPrintedRowNode = brightenedNode;
+                        char nameBuffer[ 16 ];
+                        const char* baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
 
-                        char oledString[ 30 ];
-                        if ( customName != nullptr ) {
-                            sprintf( oledString, "%s\n  row %s", customName, definesToChar( brightenedNode, 0 ) );
-                        } else {
-                            sprintf( oledString, "Net %d       \n  row %s", netHighlighted, definesToChar( brightenedNode, 0 ) );
-                        }
-                        //oled.clear( );
-                        oled.clearPrintShow( oledString, 2, true, true, true );
-                        //oled.show( );
-
-                        // for (int i = 0; i < 8 - length; i++) {
-                        //   Serial.print(" ");
+                        // Row shows in the sink's header (right side); the
+                        // value lines are the SCANNED node voltage (plain
+                        // nets have one too - the background scan measured
+                        // it) and the net's estimated current.
+                        char vBuf[ 16 ];
+                        char curBuf[ 16 ];
+                        showNetReading( baseName,
+                                        netScanVoltageValue( netHighlighted, vBuf, sizeof( vBuf ) ),
+                                        netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                     }
-                    Serial.flush( );
                 }
                 if ( specialPrint == 0 ) {
                     // Serial.println();
@@ -1485,6 +1498,10 @@ int Highlighting::checkForReadingChanges( void ) {
         return -1;
     }
 
+    // Estimated current shown alongside voltages (ADC/DAC/rail branches
+    // below); tracked so a current change alone also refreshes the display.
+    static float prevShownCurrent = -1.0f;
+
     // Reset stored values if we switched to a different net
     if ( lastMeasuredNet != showReadingNet ) {
         prevAdcReading = 0.0;
@@ -1492,6 +1509,7 @@ int Highlighting::checkForReadingChanges( void ) {
         prevGpioOutputState = -1;
         prevDacVoltage = 0.0;
         prevRailVoltage = 0.0;
+        prevShownCurrent = -1.0f;
 
         // Reset UART live-display state when net changes
         prevUartTxLen = 0; prevUartTx[0] = '\0';
@@ -1503,25 +1521,24 @@ int Highlighting::checkForReadingChanges( void ) {
     }
 
     bool displayUpdated = false;
-    char oledString[ 30 ];
+    char valueString[ 30 ];
 
     // Check for ADC measurements
     int adcChannel = anyAdcConnected( showReadingNet );
     if ( adcChannel != -1 ) {
         float currentAdcReading = readAdcVoltage( adcChannel, 64 );
+        float estCurrent = netCurrent_mA( showReadingNet );
 
-        // Check if change is significant (>0.05V dead zone)
-        if ( fabs( currentAdcReading - prevAdcReading ) > 0.009 ) {
+        if ( fabs( currentAdcReading - prevAdcReading ) > 0.009 ||
+             fabs( estCurrent - prevShownCurrent ) > 0.1f ) {
             prevAdcReading = currentAdcReading;
+            prevShownCurrent = estCurrent;
 
-            sprintf( oledString, "ADC %d\n%0.2f V", adcChannel, currentAdcReading );
-            // oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
-            Serial.print( "\r                                 \r" );
-
-            Serial.printf( "ADC %d   %0.2f V", adcChannel, currentAdcReading );
-            Serial.flush( );
+            char name[ 12 ];
+            snprintf( name, sizeof( name ), "ADC %d", adcChannel );
+            snprintf( valueString, sizeof( valueString ), "%0.2f V", currentAdcReading );
+            char curBuf[ 16 ];
+            showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ) );
 
             displayUpdated = true;
         }
@@ -1537,30 +1554,14 @@ int Highlighting::checkForReadingChanges( void ) {
         if ( currentGpioInputState != prevGpioInputState ) {
             prevGpioInputState = currentGpioInputState;
 
-            char stateString[ 10 ];
-            switch ( currentGpioInputState ) {
-            case 0:
-                strcpy( stateString, "low" );
-                break;
-            case 1:
-                strcpy( stateString, "high" );
-                break;
-            case 2:
-                strcpy( stateString, "floating" );
-                break;
-            default:
-                strcpy( stateString, "?" );
-                break;
-            }
-
-            sprintf( oledString, "GPIO %d input\n %s", gpioInputNumber + 1, stateString );
-            // oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
-
-            Serial.print( "\r                                 \r" );
-            Serial.printf( "GPIO %d input %s", gpioInputNumber + 1, stateString );
-            Serial.flush( );
+            const char* stateString =
+                ( currentGpioInputState == 0 )   ? "LOW"
+                : ( currentGpioInputState == 1 ) ? "HIGH"
+                : ( currentGpioInputState == 2 ) ? "FLOATING"
+                                                 : "?";
+            char name[ 16 ];
+            snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
+            showNetReading( name, stateString );
 
             displayUpdated = true;
         }
@@ -1576,25 +1577,22 @@ int Highlighting::checkForReadingChanges( void ) {
         if ( currentGpioOutputState != prevGpioOutputState ) {
             prevGpioOutputState = currentGpioOutputState;
 
-            char stateString[ 7 ];
-            if ( currentGpioOutputState == 0 ) {
-                strcpy( stateString, "low" );
-            } else {
-                strcpy( stateString, "high" );
-            }
-
-            sprintf( oledString, "GPIO %d out\n %s", gpioOutputNumber + 1, stateString );
-            // oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
+            char name[ 16 ];
+            snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
+            showNetReading( name, currentGpioOutputState ? "HIGH" : "LOW" );
 
             displayUpdated = true;
         }
         showReadingRow = showReadingNet;
+    }
 
-        // --- UART live display: update OLED while this net stays highlighted ---
-        bool uartTxOnNet = false;
-        bool uartRxOnNet = false;
+    // --- UART live display: update OLED while this net stays highlighted ---
+    // Top level on purpose: this used to be nested inside the GPIO-output
+    // branch, so a pure UART net (whose pins are FUNC_UART, not SIO outputs)
+    // never got its live Tx/Rx stream here.
+    bool uartTxOnNet = false;
+    bool uartRxOnNet = false;
+    {
         if ( showReadingNet > 0 ) {
             if ( gpioNet[ 8 ] == showReadingNet && gpio_function_map[ 8 ] == GPIO_FUNC_UART ) uartTxOnNet = true;
             if ( gpioNet[ 9 ] == showReadingNet && gpio_function_map[ 9 ] == GPIO_FUNC_UART ) uartRxOnNet = true;
@@ -1622,15 +1620,6 @@ int Highlighting::checkForReadingChanges( void ) {
             char rxSnapshot[64];
             size_t txLen = AsyncPassthrough::getLastUsbToUartSnapshot(txSnapshot, sizeof(txSnapshot));
             size_t rxLen = AsyncPassthrough::getLastUartRxSnapshot(rxSnapshot, sizeof(rxSnapshot));
-            // Serial.print("txLen = ");
-            // Serial.println(txLen);
-            // Serial.print("rxLen = ");
-            // Serial.println(rxLen);
-            // Serial.print("txSnapshot = ");
-            // Serial.println(txSnapshot);
-            // Serial.print("rxSnapshot = ");
-            // Serial.println(rxSnapshot);
-            // Serial.flush();
 
             if ( txLen > 0 ) {
                 OLEDOut.print("Tx: ");
@@ -1650,63 +1639,44 @@ int Highlighting::checkForReadingChanges( void ) {
     }
 
     // Check for DAC connections (nets 4 and 5)
-    if ( showReadingNet == 4 ) { // DAC 0
-        float currentDacVoltage = getDacVoltage( 0 );
+    if ( showReadingNet == 4 || showReadingNet == 5 ) {
+        int dacNum = showReadingNet - 4;
+        float currentDacVoltage = getDacVoltage( dacNum );
+        float estCurrent = netCurrent_mA( showReadingNet );
 
-        // Check if change is significant (>0.05V dead zone)
-        if ( fabs( currentDacVoltage - prevDacVoltage ) > 0.05 ) {
+        // Check if change is significant (>0.05V dead zone / >0.1mA)
+        if ( fabs( currentDacVoltage - prevDacVoltage ) > 0.05 ||
+             fabs( estCurrent - prevShownCurrent ) > 0.1f ) {
             prevDacVoltage = currentDacVoltage;
+            prevShownCurrent = estCurrent;
 
-            sprintf( oledString, "DAC 0\n%0.2f V", currentDacVoltage );
-            // oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
-
-            displayUpdated = true;
-        }
-    } else if ( showReadingNet == 5 ) { // DAC 1
-        float currentDacVoltage = getDacVoltage( 1 );
-
-        // Check if change is significant (>0.05V dead zone)
-        if ( fabs( currentDacVoltage - prevDacVoltage ) > 0.05 ) {
-            prevDacVoltage = currentDacVoltage;
-
-            sprintf( oledString, "DAC 1\n%0.2f V", currentDacVoltage );
-            // oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
+            char name[ 12 ];
+            snprintf( name, sizeof( name ), "DAC %d", dacNum );
+            snprintf( valueString, sizeof( valueString ), "%0.2f V", currentDacVoltage );
+            char curBuf[ 16 ];
+            showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ) );
 
             displayUpdated = true;
         }
         showReadingRow = showReadingNet;
     }
 
-    // Check for rail connections (nets 1, 2, 3)
-    if ( showReadingNet == 2 ) { // Top Rail
-        float currentRailVoltage = globalState.power.topRail;
+    // Check for rail connections (nets 2, 3)
+    if ( showReadingNet == 2 || showReadingNet == 3 ) {
+        bool top = ( showReadingNet == 2 );
+        float currentRailVoltage = top ? globalState.power.topRail
+                                       : globalState.power.bottomRail;
+        float estCurrent = netCurrent_mA( showReadingNet );
 
-        // Check if change is significant (>0.05V dead zone)
-        if ( fabs( currentRailVoltage - prevRailVoltage ) > 0.05 ) {
+        // Check if change is significant (>0.05V dead zone / >0.1mA)
+        if ( fabs( currentRailVoltage - prevRailVoltage ) > 0.05 ||
+             fabs( estCurrent - prevShownCurrent ) > 0.1f ) {
             prevRailVoltage = currentRailVoltage;
+            prevShownCurrent = estCurrent;
 
-            sprintf( oledString, "Top Rail\n%0.2f V", currentRailVoltage );
-            // oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
-
-            displayUpdated = true;
-        }
-    } else if ( showReadingNet == 3 ) { // Bottom Rail
-        float currentRailVoltage = globalState.power.bottomRail;
-
-        // Check if change is significant (>0.05V dead zone)
-        if ( fabs( currentRailVoltage - prevRailVoltage ) > 0.05 ) {
-            prevRailVoltage = currentRailVoltage;
-
-            sprintf( oledString, "Bottom Rail\n%0.2f V", currentRailVoltage );
-            //  oled.clear();
-            oled.clearPrintShow( oledString, 2, true, true, true );
-            // oled.show();
+            snprintf( valueString, sizeof( valueString ), "%0.2f V", currentRailVoltage );
+            char curBuf[ 16 ];
+            showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ) );
 
             displayUpdated = true;
         }
@@ -1737,37 +1707,62 @@ int Highlighting::checkForReadingChanges( void ) {
             if (( fabs( current - lastCurrentPrinted ) > 0.05 || fabs( voltage - lastVoltagePrinted ) > 0.1)  && millis() - lastUpdateTime > 15) {
                 lastCurrentPrinted = current;
                 lastVoltagePrinted = voltage;
-                
-                const char* baseName = globalState.connections.nets[ showReadingNet ].name;
+
                 char nameBuffer[ 16 ];
-                if ( baseName == nullptr || baseName[ 0 ] == '\0' ) {
-                    snprintf( nameBuffer, sizeof( nameBuffer ), "Net %d", showReadingNet );
-                    baseName = nameBuffer;
-                }
-                if (showReadingNet == currentSenseState.plusNet) {
-                    baseName = "I Sense +";
-                } else if (showReadingNet == currentSenseState.minusNet) {
-                    baseName = "I Sense -";
-                }
-                int direction = currentSenseState.currentDirection;
-                const char* directionStr = "||";
-                if ( direction > 0 ) {
-                    directionStr = "->";
-                } else if ( direction < 0 ) {
-                    directionStr = "<-";
-                }
-                
-                Serial.print( "\r                                              \r" );
-                Serial.printf( "%s %+.2f mA", baseName, current );
-                Serial.flush( );
-                
-                char oledBuffer[ 48 ];
-                snprintf( oledBuffer, sizeof( oledBuffer ), "%s\n %+.2f mA", baseName, current );
-                oled.clearPrintShow( oledBuffer, 2, true, true, true );
-                
+                const char* baseName = netDisplayName( showReadingNet, nameBuffer, sizeof( nameBuffer ) );
+                char vBuf[ 16 ];
+                snprintf( vBuf, sizeof( vBuf ), "%.2f V", voltage );
+                snprintf( valueString, sizeof( valueString ), "%+.2f mA", current );
+                showNetReading( baseName, vBuf, valueString );
+
                 displayUpdated = true;
             }
             showReadingRow = showReadingNet;
+        }
+    }
+
+    // Estimated scan readings, for nets with NO display type of their own.
+    // ADC/DAC/rail nets show "V + mA" in their branches above; GPIO and
+    // UART nets own their state/stream displays. Without these exclusions
+    // this generic fallback fired between their refreshes and stomped them
+    // with the plain net view (seen live: "GPIO 3 out / high" replaced by
+    // "Net 15 / 3.27 V / 0.0 mA" half a second after highlighting).
+    bool hasOwnDisplay =
+        ( adcChannel != -1 ) ||
+        ( gpioInputNumber != -1 ) ||
+        ( gpioOutputNumber != -1 ) ||
+        uartTxOnNet || uartRxOnNet ||
+        ( showReadingNet >= 2 && showReadingNet <= 5 ); // rails + DACs
+    if ( !displayUpdated && !hasOwnDisplay &&
+         showReadingNet > 0 && showReadingNet < MAX_NETS ) {
+        bool isIsenseNet =
+            currentSenseState.plusConnected && currentSenseState.minusConnected &&
+            ( showReadingNet == currentSenseState.plusNet ||
+              showReadingNet == currentSenseState.minusNet );
+        if ( !isIsenseNet ) {
+            float estCurrent_mA = netCurrent_mA( showReadingNet );
+            char vBuf[ 16 ];
+            const char* scanV = netScanVoltageValue( showReadingNet, vBuf, sizeof( vBuf ) );
+            static float lastEstCurrentPrinted = 0.0f;
+            static int lastEstNetPrinted = -1;
+            static char lastScanVPrinted[ 16 ] = "";
+            bool changed = ( lastEstNetPrinted != showReadingNet ) ||
+                           ( fabs( estCurrent_mA - lastEstCurrentPrinted ) > 0.1f ) ||
+                           ( strcmp( scanV ? scanV : "", lastScanVPrinted ) != 0 );
+            if ( changed && millis( ) - lastUpdateTime > 100 ) {
+                lastEstCurrentPrinted = estCurrent_mA;
+                lastEstNetPrinted = showReadingNet;
+                snprintf( lastScanVPrinted, sizeof( lastScanVPrinted ), "%s",
+                          scanV ? scanV : "" );
+
+                char nameBuffer[ 16 ];
+                const char* baseName = netDisplayName( showReadingNet, nameBuffer, sizeof( nameBuffer ) );
+                snprintf( valueString, sizeof( valueString ), "%.1f mA", estCurrent_mA );
+                showNetReading( baseName, scanV, valueString );
+
+                displayUpdated = true;
+                showReadingRow = showReadingNet;
+            }
         }
     }
 

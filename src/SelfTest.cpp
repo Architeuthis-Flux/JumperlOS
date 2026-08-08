@@ -563,6 +563,14 @@ static void runCrossbarTest( SelfTestReport& r ) {
     b.print( "Xbar", (uint32_t)0x120400 );
     showLEDsCore2 = 2;
 
+    // Phase 2 drives ALL eight routable GPIOs as outputs. If probe_power_gpio
+    // holds a buffer-power claim, that pin would be fought mid-test (and the
+    // claim's HIGH drive would corrupt its loopback reading). Force DAC power
+    // to release any claim first - same guard the cable test uses.
+    bool savedGpioPower = jumperlessConfig.debug.probe_power_gpio;
+    jumperlessConfig.debug.probe_power_gpio = false;
+    routableBufferPower( 1, 0, 1 );
+
     const float target = 2.5f;
     const float tol = 0.35f;
     setDacByNumber( 1, target, 0 );
@@ -651,6 +659,10 @@ static void runCrossbarTest( SelfTestReport& r ) {
 
     globalState.clearAllConnections( );
     refreshConnections( -1, 0, 1 );
+
+    // Restore the GPIO buffer-power preference; the next
+    // routableBufferPower(1) pass re-claims a pin if enabled.
+    jumperlessConfig.debug.probe_power_gpio = savedGpioPower;
 
     if ( rowFails || gpioFails || railFails ) {
         printChipStateArray( ); // routing model dump to help diagnose

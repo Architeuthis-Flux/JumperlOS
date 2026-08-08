@@ -23,6 +23,7 @@
 // #include "TuiGlue.h"
 
 #include "Jerial.h"
+#include "NetVoltageScan.h"
 #include "hardware/gpio.h"
 #include "hardware/structs/io_bank0.h"
 #ifdef DONOTUSE_SERIALWRAPPER
@@ -1107,6 +1108,43 @@ static void tintPixel(int pixel, uint32_t tintColor, uint8_t alpha) {
   leds.setPixelColor(pixel, blended);
 }
 
+// Ant pixel with a fully deterministic brightness: built from the net's
+// static wire color (baseColor), never from the live buffer. Row animations
+// (GND/rail shimmer) cycle bright and dark cells through the row, and any
+// ant derived from the underlying pixel pulses as the shimmer slides past -
+// first it vanished in the troughs, and with a brightness floor it still
+// flared on the crests. Ignoring the buffer entirely gives a constant-
+// brightness ant along the whole path; at these boost levels it stays
+// clearly visible over the animation crests too.
+static void drawCurrentAntPixel(int pixel, uint32_t antColor, uint8_t antAlpha,
+                                float current_mA, uint32_t baseColor) {
+  if (pixel < 0 || pixel >= LED_COUNT) {
+    return;
+  }
+  uint8_t r = (baseColor >> 16) & 0xFF;
+  uint8_t g = (baseColor >> 8) & 0xFF;
+  uint8_t b = baseColor & 0xFF;
+
+  uint8_t ar = (antColor >> 16) & 0xFF;
+  uint8_t ag = (antColor >> 8) & 0xFF;
+  uint8_t ab = antColor & 0xFF;
+
+  r = r + ((int(ar) - r) * antAlpha) / 255;
+  g = g + ((int(ag) - g) * antAlpha) / 255;
+  b = b + ((int(ab) - b) * antAlpha) / 255;
+
+  float boost = 1.0f + (60.0f + current_mA * 20.0f) / 100.0f;
+  if (boost > 3.0f) {
+    boost = 3.0f;
+  }
+  uint8_t bump = 6 + (uint8_t)(current_mA * 3.0f);
+  r = min(255, (int)(r * boost) + bump);
+  g = min(255, (int)(g * boost) + bump);
+  b = min(255, (int)(b * boost) + bump);
+
+  leds.setPixelColor(pixel, packRgb(r, g, b));
+}
+
 static int selectPrimaryRowForNet(int netNumber, int previousRow) {
   if (netNumber <= 0 || netNumber >= MAX_NETS) {
     return -1;
@@ -1856,6 +1894,9 @@ if (isBrightenedNode) {
   // BUT: minus net should always flow in opposite direction to plus net to show divergence/convergence
   
   int baseDirection = (direction > 0) ? 1 : -1;
+  if (jumperlessConfig.display.current_flow == 1) {
+    baseDirection = -baseDirection; // electron flow: everything reverses
+  }
   
   // STEP 1: Render PLUS NET pixels - ants converge toward virtual wire when positive current
   if (currentSenseOverlayState.plusNetLength > 0) {
@@ -1881,6 +1922,438 @@ if (isBrightenedNode) {
                       false,  // Not virtual wire
                       -baseDirection);  // Opposite direction for divergence effect
   }
+}
+
+// ============================================================================
+// Net current ants - faint voltage-colored marching ants on every connection
+// that carries measurable current, fed by the NetVoltageScan module (per-node
+// voltages + crosspoint path resistance). Unlike the ISENSE overlay above,
+// the rest of the net keeps its normal color: only the ant pixels get a
+// faint voltage-colored tint, marching in the direction of flow at a speed
+// that follows its magnitude.
+//
+// Rendering is per PATH (bridge), not per net: each path animates along its
+// actual drawn wire geometry (tip -> down the endpoint row -> across the
+// horizontal run -> up the far row -> tip), with direction taken from that
+// path's own signed current. Multi-connection nets therefore show current
+// splitting/merging at junction rows for free.
+// ============================================================================
+
+// Rails/DACs are scanned differentially now, so the noise floor sits well
+// below this and small real currents can show (very faintly - visibility
+// scales with magnitude below).
+static constexpr float kNetAntsMinCurrent_mA = 0.25f;
+static constexpr uint8_t kNetAntsAlphaMin = 45;  // barely-there at threshold
+static constexpr float kNetAntsAlphaScale = 26.0f; // ~8mA saturates to 255
+
+#if !defined(OG_JUMPERLESS)
+
+// This is a cosmetic background job in the tight core 2 loop: hard cap on
+// time spent per call, checked between paths.
+static constexpr unsigned long kNetAntsBudgetUs = 250;
+
+// Geometry of one path's drawn wire as an ordered pixel sequence in
+// post-reversal wireStatus space (position 0 = the outer tip of the
+// lower-numbered end). Shared by the renderer and the continuity self-check.
+struct AntPathGeom {
+  int len = 0;         // total pixels; 0 = nothing drawn on the breadboard
+  bool staple = false; // same-level staple vs plain row segment(s)
+  int first = -1;      // staple: lower row
+  int last = -1;       // staple: higher row
+  int fillCol = 0;     // staple: horizontal run column (pre-reversal space)
+  bool bottomHalf = false; // staple lives on rows 31-60
+  int rowA = -1;       // segments: first row (lower-numbered when two)
+  int rowB = -1;       // segments: second row, or -1
+  int startNode = -1;  // the node sitting at position 0
+};
+
+static bool antPathGeometry(int pathIndex, const pathStruct &p,
+                            AntPathGeom *g) {
+  int lowNode = (p.node1 < p.node2) ? p.node1 : p.node2;
+  int highNode = (p.node1 < p.node2) ? p.node2 : p.node1;
+
+  int first = filledPaths[pathIndex][0];
+  int last = filledPaths[pathIndex][1];
+  int fillCol = filledPaths[pathIndex][2];
+  // Staple only when drawWires actually recorded this path this frame AND
+  // the record matches the node pair (a stale entry from a mid-frame
+  // netlist change would put ants on someone else's pixels).
+  if (first >= 1 && last <= 60 && first < last && first == lowNode &&
+      last == highNode && fillCol >= 0 && fillCol <= 4) {
+    g->staple = true;
+    g->first = first;
+    g->last = last;
+    g->fillCol = fillCol;
+    g->bottomHalf = (first > 30);
+    g->len = 2 * (5 - fillCol) + (last - first - 1);
+    g->startNode = first;
+    return true;
+  }
+
+  // Otherwise the path is cross-half or ends on a special node: drawWires
+  // filled each breadboard endpoint row fully, with no visible horizontal.
+  int rowA = isBreadboardRow(lowNode) ? lowNode : -1;
+  int rowB = isBreadboardRow(highNode) ? highNode : -1;
+  if (rowA < 0 && rowB < 0) {
+    return false; // both ends are special nodes; nothing on the breadboard
+  }
+  if (rowA < 0) {
+    rowA = rowB;
+    rowB = -1;
+    g->startNode = highNode;
+  } else {
+    g->startNode = lowNode;
+  }
+  g->staple = false;
+  g->rowA = rowA;
+  g->rowB = rowB;
+  g->len = (rowB > 0) ? 10 : 5;
+  return true;
+}
+
+static void antPathPixel(const AntPathGeom &g, int pos, int *row, int *col) {
+  if (g.staple) {
+    int nV = 5 - g.fillCol;          // pixels on each endpoint row
+    int nMid = g.last - g.first - 1; // one pixel per intermediate row
+    int r, c;
+    if (pos < nV) { // along the first row, tip -> junction
+      r = g.first;
+      c = 4 - pos;
+    } else if (pos < nV + nMid) { // across the horizontal run
+      r = g.first + 1 + (pos - nV);
+      c = g.fillCol;
+    } else { // along the last row, junction -> tip
+      r = g.last;
+      c = g.fillCol + (pos - nV - nMid);
+    }
+    // filledPaths cols are recorded pre-reversal; drawWires flips rows
+    // 31-60 in wireStatus after filling, so mirror to match.
+    if (g.bottomHalf) {
+      c = 4 - c;
+    }
+    *row = r;
+    *col = c;
+    return;
+  }
+  // Row segments: positions 0-4 on rowA, 5-9 on rowB. v is a consistent
+  // physical direction on both halves (bottom rows' wireStatus cols are
+  // visually mirrored relative to top rows'), so a cross-half stream
+  // marches the same way on both rows and reads as one continuous flow.
+  int v = pos % 5;
+  int r = (pos < 5) ? g.rowA : g.rowB;
+  *row = r;
+  *col = (r <= 30) ? v : 4 - v;
+}
+
+#endif // !OG_JUMPERLESS
+
+void renderNetCurrentAnts() {
+#if defined(OG_JUMPERLESS)
+  return; // scanner is V5-only and netCurrentInfo is a dummy slot on OG
+#else
+  // Cheapest guards first - this is a background cosmetic job and must cost
+  // near-zero when it has nothing to do.
+  if (jumperlessConfig.display.lines_wires != 1) {
+    return; // wireStatus only populated in wire-display mode
+  }
+  if (!jumperlessConfig.display.net_currents) {
+    return;
+  }
+  if (inClickMenu != 0 || inPadMenu != 0) {
+    return; // menus own the LEDs; keep core 2 snappy for the clickwheel
+  }
+  if (numberOfShownNets > MAX_NETS_FOR_WIRES) {
+    return; // showNets fell back to line rendering this frame, so
+            // wireStatus/filledPaths describe a stale layout
+  }
+
+  static float accumulators[MAX_BRIDGES] = {0.0f};
+  static int offsets[MAX_BRIDGES] = {0};
+  static unsigned long lastUpdateMs = 0;
+  static int resumeSlot = 0; // round-robin start after a budget overrun
+  // Scan hiccups (a missed tap ages a node past its freshness window) make
+  // pathCurrentKnown() flicker false for a moment; without a hold the ants
+  // visibly blink out. Keep animating on the last reading briefly.
+  // ponytail: after a netlist change path indices shift, so a held value
+  // can animate a rebuilt path with the old path's current for <=1.5s -
+  // cosmetic, and the scanner invalidates on its own fingerprint change.
+  static constexpr uint32_t kNetAntsHoldMs = 1500;
+  static float holdSigned[MAX_BRIDGES] = {0.0f};
+  static uint32_t holdMs[MAX_BRIDGES] = {0};
+  // Threshold hysteresis: a path hovering right at the minimum current
+  // would otherwise blink its ants on/off as the (smoothed) reading
+  // crosses back and forth. Once animating, keep going until the current
+  // drops well below the entry threshold.
+  static bool wasAnimated[MAX_BRIDGES] = {false};
+
+  unsigned long nowMs = millis();
+  float deltaSeconds =
+      (lastUpdateMs == 0) ? 0.0f : (nowMs - lastUpdateMs) / 1000.0f;
+  lastUpdateMs = nowMs;
+
+  // Collect the paths that get ants this frame and advance their phases
+  // (cheap arithmetic; the pixel pass below is the budgeted part).
+  static int16_t animated[MAX_BRIDGES];
+  static float animatedMag[MAX_BRIDGES];
+  int count = 0;
+
+  int pathLimit = (numberOfPaths < MAX_BRIDGES) ? numberOfPaths : MAX_BRIDGES;
+  for (int i = 0; i < pathLimit; i++) {
+    const pathStruct &p = globalState.connections.paths[i];
+    if (p.skip || p.net <= 0 || p.net >= MAX_NETS) {
+      continue;
+    }
+    if (p.pathType == VIRTUAL) {
+      continue;
+    }
+    if (p.duplicate != 0) {
+      continue; // stacked copies fold into the main path's current
+    }
+    // ISENSE nets keep their INA-driven overlay (rendered above).
+    if ((currentSenseState.plusConnected &&
+         p.net == currentSenseState.plusNet) ||
+        (currentSenseState.minusConnected &&
+         p.net == currentSenseState.minusNet)) {
+      continue;
+    }
+    float signedI;
+    if (pathCurrentKnown(i)) {
+      signedI = pathCurrentSigned_mA(i);
+      holdSigned[i] = signedI;
+      holdMs[i] = nowMs;
+    } else if (holdMs[i] != 0 && nowMs - holdMs[i] < kNetAntsHoldMs) {
+      signedI = holdSigned[i]; // scan hiccup - ride it out on the last value
+    } else {
+      continue;
+    }
+    float mag = fabsf(signedI);
+    float enterThreshold =
+        wasAnimated[i] ? kNetAntsMinCurrent_mA * 0.6f : kNetAntsMinCurrent_mA;
+    if (mag < enterThreshold) {
+      wasAnimated[i] = false;
+      continue;
+    }
+    wasAnimated[i] = true;
+
+    // Advance this path's ant phase; speed follows current magnitude.
+    float stepsPerSecond =
+        kCurrentSenseBaseSpeed + mag * kCurrentSenseSpeedScale;
+    if (stepsPerSecond > 55.0f) {
+      stepsPerSecond = 55.0f;
+    }
+    accumulators[i] += deltaSeconds * stepsPerSecond;
+    int steps = static_cast<int>(accumulators[i]);
+    if (steps != 0) {
+      accumulators[i] -= steps;
+      // Modulo 60 = LCM(1..5): the phase below is taken mod the pattern
+      // length OR mod a shorter owned-pixel run, and 60 divides evenly by
+      // all of them, so the march never hiccups at the wrap.
+      offsets[i] = (offsets[i] + steps) % 60;
+    }
+
+    animated[count] = (int16_t)i;
+    animatedMag[count] = mag;
+    count++;
+  }
+
+  if (count == 0) {
+    resumeSlot = 0;
+    return;
+  }
+
+  // Strongest current first, so shared junction pixels belong to the
+  // dominant flow. ponytail: insertion sort, O(count^2) - count is the
+  // handful of current-carrying paths; index by net if that ever grows.
+  for (int a = 1; a < count; a++) {
+    int16_t idxA = animated[a];
+    float magA = animatedMag[a];
+    int b = a - 1;
+    while (b >= 0 && animatedMag[b] < magA) {
+      animated[b + 1] = animated[b];
+      animatedMag[b + 1] = animatedMag[b];
+      b--;
+    }
+    animated[b + 1] = idxA;
+    animatedMag[b + 1] = magA;
+  }
+
+  int flowSign = (jumperlessConfig.display.current_flow == 1) ? -1 : 1;
+  uint8_t claimed[61] = {0}; // per-row column bitmask
+
+  unsigned long t0 = micros();
+  if (resumeSlot >= count) {
+    resumeSlot = 0;
+  }
+
+  for (int s = 0; s < count; s++) {
+    if (micros() - t0 > kNetAntsBudgetUs) {
+      // Out of time - pick up here next frame so no path starves.
+      // ponytail: the resume rotation temporarily bypasses strongest-first
+      // claiming; only matters in sustained-overrun frames the budget
+      // makes rare.
+      resumeSlot = (resumeSlot + s) % count;
+      return;
+    }
+    int slot = (resumeSlot + s) % count;
+    int idx = animated[slot];
+    const pathStruct &p = globalState.connections.paths[idx];
+
+    AntPathGeom g;
+    if (!antPathGeometry(idx, p, &g)) {
+      continue;
+    }
+
+    // holdSigned is the operative value for every animated path (fresh
+    // reading, or the held one during a scan hiccup).
+    float current = holdSigned[idx];
+    float mag = fabsf(current);
+    // Conventional current enters the wire at node1 when positive.
+    int srcNode = (current >= 0) ? p.node1 : p.node2;
+    int dirSign = ((srcNode == g.startNode) ? 1 : -1) * flowSign;
+
+    uint32_t color =
+        measurementToColor(netCurrentInfo[p.net].voltage, -8.0f, 8.0f);
+    // Static wire color of this net - the stable base the ant builds on
+    // even when a row animation cycles dark cells underneath it.
+    rgbColor netRGB = netColors[p.net];
+    uint32_t netBase = packRgb(netRGB.r, netRGB.g, netRGB.b);
+    // Visibility follows magnitude: threshold currents barely register,
+    // heavy currents get a solid bright ant.
+    float a = kNetAntsAlphaMin + mag * kNetAntsAlphaScale;
+    uint8_t alpha = (a > 255.0f) ? 255 : (uint8_t)a;
+    int offset = offsets[idx];
+
+    // Pass 1: count the pixels this path still owns in wireStatus. Another
+    // net's wire can cross this one (drawWires writes horizontal-run pixels
+    // unconditionally), and if those ceded pixels kept their position slot
+    // the ant would blink out for a step every time it marched across one.
+    int owned = 0;
+    for (int pos = 0; pos < g.len; pos++) {
+      int row, col;
+      antPathPixel(g, pos, &row, &col);
+      if (row < 1 || row > 60 || col < 0 || col > 4) {
+        continue;
+      }
+      if (wireStatus[row][col] == p.net) {
+        owned++;
+      }
+    }
+    if (owned == 0) {
+      continue;
+    }
+    // A run shorter than the pattern would otherwise have offsets that
+    // light nothing (another whole-step blink); wrap at the run length so
+    // exactly one ant is always visible on short segments.
+    int wrap = (owned < kCurrentSensePatternLength) ? owned
+                                                    : kCurrentSensePatternLength;
+
+    // Pass 2: draw. Positions count only owned pixels, so the ant slides
+    // past a foreign crossing pixel instead of disappearing under it.
+    int drawPos = 0;
+    for (int pos = 0; pos < g.len; pos++) {
+      int row, col;
+      antPathPixel(g, pos, &row, &col);
+      if (row < 1 || row > 60 || col < 0 || col > 4) {
+        continue;
+      }
+      if (wireStatus[row][col] != p.net) {
+        continue; // another net's wire overwrote this pixel
+      }
+      int pp = drawPos++;
+      uint8_t bit = (uint8_t)(1 << col);
+      if (claimed[row] & bit) {
+        continue; // a stronger path owns this pixel (ant or gap)
+      }
+      claimed[row] |= bit;
+      if (row == probeHighlight) {
+        continue; // leave the probe highlight untouched
+      }
+      // The lit spots satisfy pp*dirSign == offset (mod wrap), so as the
+      // offset advances they slide from the source end toward the
+      // destination.
+      int phase = (pp * dirSign - offset) % wrap;
+      if (phase < 0) {
+        phase += wrap;
+      }
+      if (phase != 0) {
+        continue;
+      }
+      int pixel = wireStatusToPixelIndex(row, col);
+      if (pixel >= 0) {
+        drawCurrentAntPixel(pixel, color, alpha, mag, netBase);
+      }
+    }
+  }
+  resumeSlot = 0; // finished everything within budget
+#endif // OG_JUMPERLESS
+}
+
+// The runnable check for the geometry above: walks every live path's
+// generated pixel sequence and verifies each consecutive pair is physically
+// adjacent (same row neighboring cols, or neighboring rows on the horizontal
+// run). Fails loudly if the staple traversal or the bottom-half mirror is
+// ever wrong. On-demand only (the 'i!' report) - never in the render loop.
+void printAntPathContinuity(Stream *out) {
+#if defined(OG_JUMPERLESS)
+  out->println("[ants] net current ants are V5-only");
+#else
+  int pathLimit = (numberOfPaths < MAX_BRIDGES) ? numberOfPaths : MAX_BRIDGES;
+  for (int i = 0; i < pathLimit; i++) {
+    const pathStruct &p = globalState.connections.paths[i];
+    if (p.skip || p.net <= 0 || p.net >= MAX_NETS) {
+      continue;
+    }
+    if (p.pathType == VIRTUAL || p.duplicate != 0) {
+      continue;
+    }
+
+    AntPathGeom g;
+    if (!antPathGeometry(i, p, &g)) {
+      continue; // both ends special - nothing drawn, nothing to check
+    }
+
+    int gaps = 0;    // non-adjacent consecutive pixels (geometry bug)
+    int badPix = 0;  // out-of-range rows/cols (geometry bug)
+    int ceded = 0;   // pixels overwritten by another net (informational)
+    int prevRow = -1, prevCol = -1;
+    for (int pos = 0; pos < g.len; pos++) {
+      int row, col;
+      antPathPixel(g, pos, &row, &col);
+      if (row < 1 || row > 60 || col < 0 || col > 4 ||
+          wireStatusToPixelIndex(row, col) < 0) {
+        badPix++;
+      } else if (wireStatus[row][col] != p.net) {
+        ceded++;
+      }
+      if (pos > 0) {
+        // Cross-half / special-endpoint rows connect through the fabric,
+        // so the jump between the two row segments is expected.
+        bool segmentBoundary = (!g.staple && pos == 5);
+        bool adjacent = (row == prevRow && abs(col - prevCol) == 1) ||
+                        (col == prevCol && abs(row - prevRow) == 1);
+        if (!adjacent && !segmentBoundary) {
+          gaps++;
+        }
+      }
+      prevRow = row;
+      prevCol = col;
+    }
+
+    out->printf("[ants] path %d net %d  %d-%d  %s len %d  %s", i, p.net,
+                p.node1, p.node2, g.staple ? "staple" : "rows", g.len,
+                (gaps == 0 && badPix == 0) ? "OK" : "FAIL");
+    if (gaps) {
+      out->printf("  gaps:%d", gaps);
+    }
+    if (badPix) {
+      out->printf("  badpix:%d", badPix);
+    }
+    if (ceded) {
+      out->printf("  ceded:%d", ceded);
+    }
+    out->println();
+  }
+#endif // OG_JUMPERLESS
 }
 
 // warningRowAnimation.index = warningRow;
@@ -2700,11 +3173,17 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
           if (i == probeHighlight) {
 
           } else if (brightenedNode > 0 && i == brightenedNode) {
-            leds.setPixelColor(((i - 1) * 5) + j, brightenedNodeColors[j]);
+            int pixel = wireStatusToPixelIndex(i, j);
+            if (pixel >= 0) {
+              leds.setPixelColor(pixel, brightenedNodeColors[j]);
+            }
             // Jerial.print("brightenedNode: ");
             // Jerial.println(brightenedNode);
           } else {
-            leds.setPixelColor(((i - 1) * 5) + j, frameColors[j]);
+            int pixel = wireStatusToPixelIndex(i, j);
+            if (pixel >= 0) {
+              leds.setPixelColor(pixel, frameColors[j]);
+            }
           }
         }
       }
@@ -2774,6 +3253,11 @@ void __not_in_flash_func(showAllRowAnimations)() {
       // Jerial.println(millis());
     }
   }
+
+  // Ants must land on top of the row animations above (GND/rails/GPIO paint
+  // whole rows and would otherwise bury them), so they render here rather than
+  // in drawWires().
+  renderNetCurrentAnts();
   // Serial.println("showAllRowAnimations");
   // Serial.println(numberOfNets);
   // Serial.flush();
