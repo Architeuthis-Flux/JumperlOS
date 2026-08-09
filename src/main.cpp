@@ -60,6 +60,7 @@ KevinC@ppucc.io
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "Probing/Pads.h" // probe engine v2 + service dispatchers
 #include "SelfTest.h"
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
@@ -448,14 +449,30 @@ void setup( ) {
     // Register all services in priority order using clean global names
     // CRITICAL priority services - run every loop for instant response
   
+    // Several services must not run while a probe session owns the board
+    // (they react to probe/encoder input, or repaint/flush mid-session).
+    // The legacy blocking probeMode suspended them implicitly by never
+    // returning to the main loop; the v2 session service runs FROM the main
+    // loop, so they're wrapped in an explicit probeActive gate. This is a
+    // no-op for the legacy engine (probeActive only ever set while these
+    // couldn't run anyway) and required for parity under v2.
+    static ProbeActiveGate menusGate( menus );                    // reacts to wheel clicks
+    static ProbeActiveGate slotManagerGate( slotManager );        // sessions drive their own idle-save
+    static ProbeActiveGate highlightingGate( highlighting );      // reacts to probe hover + wheel
+    static ProbeActiveGate measureModeGate( measureModeService ); // reacts to probe readings
+    static ProbeActiveGate peripheralsGate( peripherals );        // periodic monitoring output
+    static ProbeActiveGate oledServiceGate( oledService );        // session owns the panel
+    static ProbeActiveGate fileCacheFlushGate( fileCacheFlushService ); // ~700ms stalls mid-probe
+    static ProbeActiveGate configSaveGate( configSaveService );   // flash writes stall probing
+
     jOS.registerService( &termSerialService );       // CRITICAL - terminal input (when line buffering enabled)
     jOS.registerService( &injectedCommandService );  // CRITICAL - immediate command execution from injection buffer
     jOS.registerService( &asyncPassthroughService ); // CRITICAL - USB CDC1<->UART0 bridging (prevent data loss)
-    jOS.registerService( &menus );                   // CRITICAL - direct user input
+    jOS.registerService( &menusGate );               // CRITICAL - direct user input
 
     // HIGH priority services - time-sensitive operations
-    jOS.registerService( &tinyUSBService );  // HIGH - USB communication
-    jOS.registerService( &slotManager );     // HIGH - states auto-save
+    jOS.registerService( &tinyUSBService );   // HIGH - USB communication
+    jOS.registerService( &slotManagerGate );  // HIGH - states auto-save
    
 
     // Probe stack is gated on the board having resistive probe pads (V5). The OG
@@ -463,12 +480,12 @@ void setup( ) {
     // these would poll nonexistent ADC channels and spam measure mode. Runtime
     // cap instead of #ifdef so the contract - not a board macro - drives it.
     if ( board::currentBoard( ).caps.hasProbePads ) {
-        jOS.registerService( &probeButton );      // HIGH - high-frequency button checking
-        jOS.registerService( &probing );          // HIGH - user interaction sensitive (probe reading)
-        jOS.registerService( &highlighting );     // HIGH - visual feedback
-        jOS.registerService( &measureModeService );
-        jOS.registerService( &probeSwitch );      // LOW - switch position (not time-critical)
-        jOS.registerService( &probePads );        // LOW - expensive ADC pad reading
+        jOS.registerService( &probeButton );        // HIGH - high-frequency button checking (shared driver, both engines)
+        jOS.registerService( &probeEngineService ); // HIGH - probe reading, dispatches legacy/v2 by debug.probe_engine_v2
+        jOS.registerService( &highlightingGate );   // HIGH - visual feedback
+        jOS.registerService( &measureModeGate );
+        jOS.registerService( &probeSwitchGate );    // NORMAL - switch position (suspended during sessions)
+        jOS.registerService( &probePadsGate );      // LOW - expensive ADC pad reading (engine-dispatched)
     }
 
 
@@ -479,17 +496,17 @@ void setup( ) {
 
     // NORMAL priority services - periodic tasks
     jOS.registerService( &usbPeriodicService ); // NORMAL - USB housekeeping (when MSC enabled)
-    jOS.registerService( &peripherals );        // NORMAL - periodic monitoring
+    jOS.registerService( &peripheralsGate );    // NORMAL - periodic monitoring
     jOS.registerService( &singleCharCommands ); // NORMAL - command execution (synchronous, not periodic)
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
 
     // LOW priority services - background tasks
-    jOS.registerService( &oledService );         // LOW - display updates (OLED preserved on OG: a user can wire a panel to GP18/19)
+    jOS.registerService( &oledServiceGate );     // LOW - display updates (OLED preserved on OG: a user can wire a panel to GP18/19)
     jOS.registerService( &liveCrossbarService ); // LOW - live crossbar terminal display
-    jOS.registerService( &configSaveService );   // LOW - background config save (non-blocking)
+    jOS.registerService( &configSaveGate );      // LOW - background config save (suppressed during probe sessions)
     // Write-back file cache lives in PSRAM; only boards with PSRAM run its flush.
     if ( board::currentBoard( ).caps.hasPsram ) {
-        jOS.registerService( &fileCacheFlushService ); // LOW - write-back PSRAM cache flush
+        jOS.registerService( &fileCacheFlushGate ); // LOW - write-back PSRAM cache flush
     }
 
     // Initialize context stack with MAIN_MENU as the root context

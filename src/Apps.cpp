@@ -17,6 +17,8 @@
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "Probing/PadDecode.h"
+#include "Probing/Pads.h"
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
@@ -538,6 +540,24 @@ void testSwitchThresholds( void ) {
 }
 
 void probeCalibApp( void ) {
+    if ( probeEngineV2Active( ) ) {
+        // Probe engine v2 decodes pads from the physics table + the
+        // self-adjusting trims - there is nothing interactive to calibrate.
+        // Just report the decoder state and go home. (To live-verify pad
+        // decode, probe normally and watch the highlight, or nudge
+        // calibration.probe_ladder_trim in the config if a mid-chain row
+        // ever decodes one off.)
+        cycleTerminalColor( true, 5.0, true );
+        Serial.println( "Probe engine v2: pads decode from the physics table," );
+        Serial.println( "no calibration needed. Current decoder state:\n\r" );
+        cycleTerminalColor( );
+        PadDecode::printStatus( );
+        oled.clearPrintShow( "no calib needed", 2, true, true, true );
+        delay( 1200 );
+        oled.showJogo32h( );
+        leaveApp( );
+        return;
+    }
     b.clear( );
 
     cycleTerminalColor( true, 5.0, true );
@@ -2296,13 +2316,22 @@ if ( yesNo == 1 ) {
         // restart below.
         runFullSelfTest( true );
 
-        // Hold the result overlay on the breadboard LEDs; the operator's
-        // touch (probe button / encoder / serial byte) chains into the
-        // interactive probe pad calibration instead of resetting - they are
-        // already at the board, so use the moment to align the pad map.
-        selfTestWaitForInput( "start probe pad calibration" );
-        selfTestClearOverlay( );
-        probeCalibApp( ); // saves config (incl. pad endpoints) on finish
+        if ( !probeEngineV2Active( ) ) {
+            // Hold the result overlay on the breadboard LEDs; the operator's
+            // touch (probe button / encoder / serial byte) chains into the
+            // interactive probe pad calibration instead of resetting - they
+            // are already at the board, so use the moment to align the pad
+            // map.
+            selfTestWaitForInput( "start probe pad calibration" );
+            selfTestClearOverlay( );
+            probeCalibApp( ); // saves config (incl. pad endpoints) on finish
+        } else {
+            // Probe engine v2 decodes pads from the physics table - there is
+            // no pad calibration to run on first start. Just hold the
+            // self-test overlay for the operator's ack and move on.
+            selfTestWaitForInput( "continue" );
+            selfTestClearOverlay( );
+        }
 
         // Start the device with a clean undo/redo history: the calibration
         // connects/disconnects above are internal setup, not user actions, and

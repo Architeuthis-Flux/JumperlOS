@@ -17,8 +17,10 @@ Flow when `pio run -e jumperless_v5_erase -t upload` runs:
   1. SCons runs this pre-action on the `upload` alias.
      a. Detect whether a Pico is already in BOOTSEL via
         `picotool info -d` (zero exit + "type:" line means yes).
-     b. If not, do the standard 1200 bps DTR=0 touch on $UPLOAD_PORT
-        and poll picotool until BOOTSEL appears (or give up).
+     b. If not, do the standard 1200 bps DTR=0 touch and poll picotool
+        until BOOTSEL appears (or give up). The tty comes from the USB
+        descriptors rather than $UPLOAD_PORT when the two disagree - see
+        _choose_port() for why $UPLOAD_PORT goes stale.
      c. Generate a $BUILD_DIR/fs_erase.bin blob of 0xFF bytes sized to
         the FatFS partition pinned by scripts/lock_fs_partition.py
         (FS_END - FS_START), then run
@@ -44,12 +46,25 @@ FAT volume. SPIFTL likewise sees no valid metadata and re-initialises.
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
 from os.path import join
 
-Import("env")  # noqa: F821 - provided by SCons / PlatformIO
+try:
+    Import("env")  # noqa: F821 - provided by SCons / PlatformIO
+except NameError:
+    # Imported outside SCons (scripts/test_erase_fs_port_choice.py).
+    env = None
+
+# Jumperless USB IDs / serial prefixes, mirroring
+# autoUploader/flash_loop_gui.py.
+JL_USB_IDS = {
+    (0x1D50, 0xACAB),  # JumperlOS
+    (0xACAB, 0x1312),  # OG factory firmware
+}
+JL_SERIAL_PREFIXES = ("JLV5port", "JLOGport")
 
 
 def _picotool_path(env):
@@ -73,6 +88,67 @@ def _bootsel_device_count(picotool):
         return out.count(b"type:")
     except Exception:
         return 0
+
+
+def _tty_sort_key(device):
+    """Sort /dev/cu.usbmodem646 after 618, not before it."""
+    m = re.search(r"(\d+)$", device)
+    return (int(m.group(1)) if m else 0, device)
+
+
+def _jumperless_ttys():
+    """{USB location -> lowest-numbered tty} for each connected Jumperless.
+
+    A board exposes several CDCs and enters BOOTSEL on a 1200 bps touch of any
+    of them, so one tty per board is enough. Keyed by USB location because all
+    Jumperlesses report the same serial string, which makes macOS fall back to
+    anonymous /dev/cu.usbmodemNNN names once two are plugged in.
+    """
+    try:
+        import serial.tools.list_ports  # PIO ships pyserial
+    except Exception:  # pylint: disable=broad-except
+        return {}
+    boards = {}
+    for p in serial.tools.list_ports.comports():
+        sn = p.serial_number or ""
+        if (p.vid, p.pid) not in JL_USB_IDS and not sn.startswith(JL_SERIAL_PREFIXES):
+            continue
+        boards.setdefault((p.location or p.device).split(":")[0], []).append(p.device)
+    return {k: sorted(v, key=_tty_sort_key)[0] for k, v in boards.items()}
+
+
+def _choose_port(upload_port, ttys):
+    """Decide which tty to touch, trusting USB descriptors over $UPLOAD_PORT.
+
+    $UPLOAD_PORT is not reliable: the PlatformIO IDE keeps a per-project
+    "customPort" in its extension global state and appends it as
+    --upload-port, which overrides platformio.ini. A port picked once (e.g. an
+    anonymous /dev/cu.usbmodemNNN handed out while several boards shared a hub)
+    keeps being passed long after that name is gone.
+
+    Erasing the wrong board's filesystem is unrecoverable, so guessing is only
+    allowed when exactly one Jumperless is present.
+    """
+    if not ttys:
+        return upload_port
+    if upload_port in ttys:
+        return upload_port
+    if len(ttys) == 1:
+        if upload_port:
+            print("[erase_fs] $UPLOAD_PORT %s is not a Jumperless; using %s instead"
+                  % (upload_port, ttys[0]))
+        return ttys[0]
+    sys.stderr.write(
+        "[erase_fs] %d Jumperless boards connected (%s) and $UPLOAD_PORT (%s) is "
+        "not one of them. Refusing to guess whose filesystem to erase - pass "
+        "--upload-port explicitly.\n"
+        % (len(ttys), ", ".join(ttys), upload_port or "unset")
+    )
+    sys.exit(1)
+
+
+def _resolve_upload_port(upload_port):
+    return _choose_port(upload_port, sorted(_jumperless_ttys().values()))
 
 
 def _trigger_bootsel(upload_port):
@@ -122,7 +198,7 @@ def _erase_fs(target, source, env):  # pylint: disable=W0613,W0621
         sys.exit(1)
 
     if _bootsel_device_count(picotool) == 0:
-        upload_port = env.subst("$UPLOAD_PORT")
+        upload_port = _resolve_upload_port(env.subst("$UPLOAD_PORT"))
         print("[erase_fs] Triggering BOOTSEL via 1200bps touch on %s" % upload_port)
         _trigger_bootsel(upload_port)
         if not _wait_for_bootsel(picotool):
@@ -169,5 +245,6 @@ def _erase_fs(target, source, env):  # pylint: disable=W0613,W0621
     print("[erase_fs] FatFS partition erased. Continuing with firmware upload...")
 
 
-env.AddPreAction("upload", _erase_fs)  # noqa: F821
-print("[erase_fs] Hooked pre-upload erase for [env:%s]" % env["PIOENV"])
+if env is not None:
+    env.AddPreAction("upload", _erase_fs)  # noqa: F821
+    print("[erase_fs] Hooked pre-upload erase for [env:%s]" % env["PIOENV"])

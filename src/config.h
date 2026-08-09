@@ -94,6 +94,12 @@ struct config {
         // Print net voltage scan stats once a second: every scanned node's
         // voltage and every routed path's estimated current.
         bool net_voltage_scan = false;
+        // Probe engine v2 (src/Probing/): calibration-free physics-table pad
+        // decode + non-blocking probe-mode session service. Off = legacy
+        // Probing.cpp engine (probe_min/probe_max linear map, blocking
+        // probeMode loop). Takes effect at the next probe session entry.
+        // Forced off on OG hardware (no ADC7 / measure buffer).
+        bool probe_engine_v2 = true;
     } debug;
 
     struct routing {
@@ -162,6 +168,30 @@ struct config {
         // scan to turn node voltage deltas into per-connection currents.
         // A single 2-crosspoint path measures ~80 ohms, so ~40 each.
         float crosspoint_resistance = 40.0;
+        // ---- Probe engine v2 (calibration-free decode) ----
+        // Source resistance of the SELECT tip feed: PROBE_PIN pad Rout plus
+        // the two 47R protection resistors in the tip path. Used to build
+        // the expected-count table; per-board variation is absorbed by the
+        // trim below, so this rarely needs touching.
+        float probe_rsrc_ohms = 125.0;
+        // Bounded fine-trim on the SELECT decode scale (1.0 = nominal 4095
+        // counts full-scale). Auto-adjusted by the residual tracker from
+        // high-confidence decodes; also nudgeable in the probe verification
+        // app. Clamped to [0.95, 1.05] on load.
+        float probe_scale_trim = 1.0;
+        // Same, for the MEASURE decode scale (multiplies the ADC7-derived
+        // tip counts; absorbs the ADC7 front-end divider tolerance).
+        float probe_scale_trim_measure = 1.0;
+        // Multiplies every ladder resistance in the physics table. The real
+        // boards read ~2.3% more resistive than the schematic nominals
+        // relative to the 10K sense divider (sense resistor + ladder batch
+        // tolerance); because the ladder is designed for uniform count
+        // steps, a proportional R error shifts EVERY mid-chain pad by the
+        // same fraction of a band - at 1.0 the decode read one row high
+        // from ~row 28 onward (measured on hardware). Auto-trimmed by
+        // deep-ladder confident decodes; wheel-adjustable in the probe
+        // verification app. Clamped to [0.95, 1.10] on load.
+        float probe_ladder_trim = 1.023;
     } calibration;
 
     struct logo_pads {

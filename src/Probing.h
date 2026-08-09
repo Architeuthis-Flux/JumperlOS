@@ -453,9 +453,55 @@ extern bool& probePowerDACChanged;
 extern int& showProbeCurrent;
 
 
+// ----------------------------------------------------------------------------
+// Probe engine v2 dispatch (implementations in src/Probing/Pads.cpp).
+// jumperlessConfig.debug.probe_engine_v2 selects which engine services the
+// probe; the wrappers below branch on it, so call sites don't change.
+// Hardware paths (button, switch sensing, LEDs, buffer power) are shared
+// drivers and are NOT dispatched.
+// ----------------------------------------------------------------------------
+extern volatile int probeActive; // set for the duration of a probe session (both engines)
+
+bool probeEngineV2Active();
+int padsProbeMode(int setOrClear, int firstConnection, bool fromClickMenu);
+int padsJustReadProbe(bool allowDuplicates, int rawPad);
+int padsReadProbeRaw(int readNothingTouched, bool allowDuplicates);
+int padsReadProbe();
+void padsCheckPads();
+int padsGetNothingTouched(int samples);
+int padsLastProbeReading();
+
+// Suppress a service while a probe session owns the board. The legacy
+// blocking probeMode implicitly suspended every non-CRITICAL service; the
+// v2 session runs from the main loop, so services that react to probe or
+// encoder input (menus, highlighting, measure mode) or would repaint /
+// flush mid-session (OLED, slot autosave, file cache flush) get wrapped
+// with this gate at registration in main.cpp. Passing through the wrapped
+// service's name keeps jOS.forceServiceByName() working.
+class ProbeActiveGate : public Service {
+public:
+    explicit ProbeActiveGate(Service& wrapped) : inner(wrapped) {}
+    ServiceStatus service() override {
+        if (probeActive) {
+            return ServiceStatus::IDLE;
+        }
+        return inner.service();
+    }
+    const char* getName() const override { return inner.getName(); }
+    ServicePriority getPriority() const override { return inner.getPriority(); }
+private:
+    Service& inner;
+};
+
 // Legacy wrapper functions for backward compatibility
-// These call the corresponding methods on the singleton instance
+// These call the corresponding methods on the singleton instance.
+// NOTE v2 semantics: probeMode() STARTS a non-blocking probe session and
+// returns immediately (the session advances via the Pads service); the
+// legacy engine blocks until the session ends, as before.
 inline int probeMode(int setOrClear = 1, int firstConnection = -1, bool fromClickMenu = false) {
+    if (probeEngineV2Active()) {
+        return padsProbeMode(setOrClear, firstConnection, fromClickMenu);
+    }
     return Probing::getInstance().probeMode(setOrClear, firstConnection, fromClickMenu);
 }
 
@@ -464,6 +510,10 @@ inline float measureMode(int updateSpeed = 150) {
 }
 
 inline void checkPads(void) {
+    if (probeEngineV2Active()) {
+        padsCheckPads();
+        return;
+    }
     Probing::getInstance().checkPads();
 }
 
@@ -480,6 +530,9 @@ inline int checkSwitchPosition(void) {
 }
 
 inline int justReadProbe(bool allowDuplicates = false, int rawPad = 0) {
+    if (probeEngineV2Active()) {
+        return padsJustReadProbe(allowDuplicates, rawPad);
+    }
     return Probing::getInstance().justReadProbe(allowDuplicates, rawPad);
 }
 
@@ -488,6 +541,9 @@ inline void routableBufferPower(int offOn, int flash = 0, int force = 0) {
 }
 
 inline int getNothingTouched(int samples = 8) {
+    if (probeEngineV2Active()) {
+        return padsGetNothingTouched(samples);
+    }
     return Probing::getInstance().getNothingTouched(samples);
 }
 
@@ -500,6 +556,9 @@ inline void probeLEDhandler(void) {
 }
 
 inline int readProbeRaw(int readNothingTouched = 0, bool allowDuplicates = false) {
+    if (probeEngineV2Active()) {
+        return padsReadProbeRaw(readNothingTouched, allowDuplicates);
+    }
     return Probing::getInstance().readProbeRaw(readNothingTouched, allowDuplicates);
 }
 
@@ -556,7 +615,19 @@ inline float voltageSelect(int fiveOrEight = 8) {
 }
 
 inline int readProbe(void) {
+    if (probeEngineV2Active()) {
+        return padsReadProbe();
+    }
     return Probing::getInstance().readProbe();
+}
+
+// Cached idle-hover probe reading from whichever engine is servicing the
+// probe (consumers: Highlighting, MeasureMode).
+inline int probeLastReading(void) {
+    if (probeEngineV2Active()) {
+        return padsLastProbeReading();
+    }
+    return Probing::getInstance().getLastProbeReading();
 }
 
 inline void startProbe(long probeSpeed = 25000) {

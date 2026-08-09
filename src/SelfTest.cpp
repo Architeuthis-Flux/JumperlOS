@@ -33,6 +33,7 @@
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "Probing/PadDecode.h"
 #include "PsramArena.h"
 #include "RotaryEncoder.h"
 #include "States.h"
@@ -505,9 +506,14 @@ static void runProbeCableTest( SelfTestReport& r ) {
         delay( 3 );
     }
     int tipRaw = (int)medianInPlace( tipSamples, 9 );
-    Serial.printf( "    idle raw reading (median of 9x8): %d/4095 (probe_min:%d probe_max:%d)\n\r",
-                   tipRaw, jumperlessConfig.calibration.probe_min,
-                   jumperlessConfig.calibration.probe_max );
+    if ( probeEngineV2Active( ) ) {
+        Serial.printf( "    idle raw reading (median of 9x8): %d/4095\n\r", tipRaw );
+        PadDecode::printStatus( ); // v2 decoder: floor / scales / trims
+    } else {
+        Serial.printf( "    idle raw reading (median of 9x8): %d/4095 (probe_min:%d probe_max:%d)\n\r",
+                       tipRaw, jumperlessConfig.calibration.probe_min,
+                       jumperlessConfig.calibration.probe_max );
+    }
 
     bool shortOk = ( fwd == 2 && rev == 2 );
     // ponytail: the absolute window stays wide (-1.5..8 mA) because the

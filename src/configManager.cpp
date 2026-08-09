@@ -692,6 +692,7 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "probe_power_gpio") == 0) jumperlessConfig.debug.probe_power_gpio = parseBool(value);
             else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
             else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
+            else if (strcmp(key, "probe_engine_v2") == 0) jumperlessConfig.debug.probe_engine_v2 = parseBool(value);
         } else if (strcmp(section, "routing") == 0) {
             if (strcmp(key, "stack_paths") == 0) {
                 jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -734,6 +735,10 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
             else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
             else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
+            else if (strcmp(key, "probe_rsrc_ohms") == 0) jumperlessConfig.calibration.probe_rsrc_ohms = parseFloat(value);
+            else if (strcmp(key, "probe_scale_trim") == 0) jumperlessConfig.calibration.probe_scale_trim = parseFloat(value);
+            else if (strcmp(key, "probe_scale_trim_measure") == 0) jumperlessConfig.calibration.probe_scale_trim_measure = parseFloat(value);
+            else if (strcmp(key, "probe_ladder_trim") == 0) jumperlessConfig.calibration.probe_ladder_trim = parseFloat(value);
         } else if (strcmp(section, "logo_pads") == 0) {
             if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);
             else if (strcmp(key, "bottom_guy") == 0) jumperlessConfig.logo_pads.bottom_guy = parseArbitraryFunction(value);
@@ -1049,6 +1054,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("probe_power_gpio = "); file.print(jumperlessConfig.debug.probe_power_gpio ? 1:0); file.println(";");
     file.print("probe_switch_stats = "); file.print(jumperlessConfig.debug.probe_switch_stats ? 1:0); file.println(";");
     file.print("net_voltage_scan = "); file.print(jumperlessConfig.debug.net_voltage_scan ? 1:0); file.println(";");
+    file.print("probe_engine_v2 = "); file.print(jumperlessConfig.debug.probe_engine_v2 ? 1:0); file.println(";");
     file.println();
 
     // Write routing settings section
@@ -1093,6 +1099,10 @@ bool saveConfigToFile(const char* filename) {
     file.print("minimum_probe_reading = "); file.print(jumperlessConfig.calibration.minimum_probe_reading); file.println(";");
     file.print("probe_droop_v0 = "); file.print(jumperlessConfig.calibration.probe_droop_v0, 3); file.println(";");
     file.print("crosspoint_resistance = "); file.print(jumperlessConfig.calibration.crosspoint_resistance); file.println(";");
+    file.print("probe_rsrc_ohms = "); file.print(jumperlessConfig.calibration.probe_rsrc_ohms, 1); file.println(";");
+    file.print("probe_scale_trim = "); file.print(jumperlessConfig.calibration.probe_scale_trim, 4); file.println(";");
+    file.print("probe_scale_trim_measure = "); file.print(jumperlessConfig.calibration.probe_scale_trim_measure, 4); file.println(";");
+    file.print("probe_ladder_trim = "); file.print(jumperlessConfig.calibration.probe_ladder_trim, 4); file.println(";");
     file.println();
 
     // Write logo pad settings section
@@ -1261,6 +1271,7 @@ bool configHasChanges() {
     if (jumperlessConfig.debug.probe_power_gpio != lastSavedConfig.debug.probe_power_gpio) return true;
     if (jumperlessConfig.debug.probe_switch_stats != lastSavedConfig.debug.probe_switch_stats) return true;
     if (jumperlessConfig.debug.net_voltage_scan != lastSavedConfig.debug.net_voltage_scan) return true;
+    if (jumperlessConfig.debug.probe_engine_v2 != lastSavedConfig.debug.probe_engine_v2) return true;
     
     // Routing section
     if (jumperlessConfig.routing.stack_paths != lastSavedConfig.routing.stack_paths) return true;
@@ -1301,6 +1312,10 @@ bool configHasChanges() {
     if (jumperlessConfig.calibration.minimum_probe_reading != lastSavedConfig.calibration.minimum_probe_reading) return true;
     if (jumperlessConfig.calibration.probe_droop_v0 != lastSavedConfig.calibration.probe_droop_v0) return true;
     if (jumperlessConfig.calibration.crosspoint_resistance != lastSavedConfig.calibration.crosspoint_resistance) return true;
+    if (jumperlessConfig.calibration.probe_rsrc_ohms != lastSavedConfig.calibration.probe_rsrc_ohms) return true;
+    if (jumperlessConfig.calibration.probe_scale_trim != lastSavedConfig.calibration.probe_scale_trim) return true;
+    if (jumperlessConfig.calibration.probe_scale_trim_measure != lastSavedConfig.calibration.probe_scale_trim_measure) return true;
+    if (jumperlessConfig.calibration.probe_ladder_trim != lastSavedConfig.calibration.probe_ladder_trim) return true;
     
     // Logo pads section
     if (jumperlessConfig.logo_pads.top_guy != lastSavedConfig.logo_pads.top_guy) return true;
@@ -1415,7 +1430,11 @@ static bool configFileIsComplete(const char* fileContent) {
         "measure_mode_output_voltage",
         "probe_current_zero",
         "probe_droop_v0",
-        "async_passthrough"
+        "async_passthrough",
+        "probe_engine_v2",
+        "probe_rsrc_ohms",
+        "probe_scale_trim",
+        "probe_ladder_trim"
     };
     const int numKeys = sizeof(requiredKeys) / sizeof(requiredKeys[0]);
     
@@ -2507,6 +2526,26 @@ void loadConfig(void) {
         jumperlessConfig.calibration.probe_droop_v0 = 3.35f;
     }
 
+    // Probe engine v2 decode parameters: keep the trims inside their bounded
+    // band (a corrupted/hand-edited value outside it would shift every pad
+    // boundary) and the source resistance physically plausible.
+    if (jumperlessConfig.calibration.probe_rsrc_ohms < 0.0f ||
+        jumperlessConfig.calibration.probe_rsrc_ohms > 500.0f) {
+        jumperlessConfig.calibration.probe_rsrc_ohms = 125.0f;
+    }
+    if (jumperlessConfig.calibration.probe_scale_trim < 0.95f ||
+        jumperlessConfig.calibration.probe_scale_trim > 1.05f) {
+        jumperlessConfig.calibration.probe_scale_trim = 1.0f;
+    }
+    if (jumperlessConfig.calibration.probe_scale_trim_measure < 0.95f ||
+        jumperlessConfig.calibration.probe_scale_trim_measure > 1.05f) {
+        jumperlessConfig.calibration.probe_scale_trim_measure = 1.0f;
+    }
+    if (jumperlessConfig.calibration.probe_ladder_trim < 0.95f ||
+        jumperlessConfig.calibration.probe_ladder_trim > 1.10f) {
+        jumperlessConfig.calibration.probe_ladder_trim = 1.023f;
+    }
+
     readSettingsFromConfig();
     
     // Initialize shadow config for dirty tracking
@@ -2632,6 +2671,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_switch_stats = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_switch_stats, boolTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("net_voltage_scan = "); Serial.print(getStringFromTable(jumperlessConfig.debug.net_voltage_scan, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[debug] ");
+        Serial.print("probe_engine_v2 = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_engine_v2, boolTable)); Serial.println(";");
     }
     cycleTerminalColor();
     // Print routing settings section
@@ -2714,6 +2755,14 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_droop_v0 = "); Serial.print(jumperlessConfig.calibration.probe_droop_v0, 3); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("crosspoint_resistance = "); Serial.print(jumperlessConfig.calibration.crosspoint_resistance); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_rsrc_ohms = "); Serial.print(jumperlessConfig.calibration.probe_rsrc_ohms, 1); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_scale_trim = "); Serial.print(jumperlessConfig.calibration.probe_scale_trim, 4); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_scale_trim_measure = "); Serial.print(jumperlessConfig.calibration.probe_scale_trim_measure, 4); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_ladder_trim = "); Serial.print(jumperlessConfig.calibration.probe_ladder_trim, 4); Serial.println(";");
     }
     cycleTerminalColor();
     // Print logo pad settings section
@@ -3685,6 +3734,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_power_gpio") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_power_gpio);
         else if (strcmp(key, "probe_switch_stats") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_stats);
         else if (strcmp(key, "net_voltage_scan") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_voltage_scan);
+        else if (strcmp(key, "probe_engine_v2") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_engine_v2);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_paths);
@@ -3727,6 +3777,10 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "minimum_probe_reading") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.minimum_probe_reading);
         else if (strcmp(key, "probe_droop_v0") == 0) sprintf(oldValue, "%.3f", jumperlessConfig.calibration.probe_droop_v0);
         else if (strcmp(key, "crosspoint_resistance") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.crosspoint_resistance);
+        else if (strcmp(key, "probe_rsrc_ohms") == 0) sprintf(oldValue, "%.1f", jumperlessConfig.calibration.probe_rsrc_ohms);
+        else if (strcmp(key, "probe_scale_trim") == 0) sprintf(oldValue, "%.4f", jumperlessConfig.calibration.probe_scale_trim);
+        else if (strcmp(key, "probe_scale_trim_measure") == 0) sprintf(oldValue, "%.4f", jumperlessConfig.calibration.probe_scale_trim_measure);
+        else if (strcmp(key, "probe_ladder_trim") == 0) sprintf(oldValue, "%.4f", jumperlessConfig.calibration.probe_ladder_trim);
         }
     else if (strcmp(section, "logo_pads") == 0) {
         if (strcmp(key, "top_guy") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.top_guy);
@@ -3852,6 +3906,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         }
         else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
         else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
+        else if (strcmp(key, "probe_engine_v2") == 0) jumperlessConfig.debug.probe_engine_v2 = parseBool(value);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -3903,6 +3958,10 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
         else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
         else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
+        else if (strcmp(key, "probe_rsrc_ohms") == 0) jumperlessConfig.calibration.probe_rsrc_ohms = parseFloat(value);
+        else if (strcmp(key, "probe_scale_trim") == 0) jumperlessConfig.calibration.probe_scale_trim = parseFloat(value);
+        else if (strcmp(key, "probe_scale_trim_measure") == 0) jumperlessConfig.calibration.probe_scale_trim_measure = parseFloat(value);
+        else if (strcmp(key, "probe_ladder_trim") == 0) jumperlessConfig.calibration.probe_ladder_trim = parseFloat(value);
         }
     else if (strcmp(section, "logo_pads") == 0) {
         if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);

@@ -4540,11 +4540,16 @@ int doMenuAction( int menuPosition, int selection ) {
         // behavior of bailing out to the click menu.
         probeMode( setOrClear, -1, true );
 
-        // Refresh display after exiting probe mode (negative = clear the
-        // probe-mode leftovers out of the buffer before drawing wires)
-        b.clear( );
-        showLEDsCore2 = -1;
-        oled.showJogo32h( );
+        if ( !probeEngineV2Active( ) ) {
+            // Legacy blocking probeMode has returned: refresh the display
+            // (negative = clear the probe-mode leftovers out of the buffer
+            // before drawing wires). Under v2 the call above only STARTED a
+            // session - it's running now, owns the display, and does this
+            // same cleanup itself in endSession().
+            b.clear( );
+            showLEDsCore2 = -1;
+            oled.showJogo32h( );
+        }
 
     } else if ( currentCategory == ROUTINGACTION ) { //! Routing Options
 

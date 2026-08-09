@@ -103,8 +103,8 @@ ServiceStatus Highlighting::service() {
 #endif
     
 
-    // Get probe reading from Probing service (cheap - cached value)
-    int probeReading = probing.getLastProbeReading();
+    // Get probe reading from the active probe engine (cheap - cached value)
+    int probeReading = probeLastReading();
     
     // Handle probe-based highlighting (only if probe is touching something)
     if (probeReading > 0) {

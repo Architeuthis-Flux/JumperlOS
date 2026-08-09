@@ -88,7 +88,7 @@ ServiceStatus MeasureMode::service() {
         // Get probe reading - but only if safe to read (not too close to INA219 check)
         int currentProbeReading = -1;
         if (safeToReadProbe) {
-            currentProbeReading = probing.getLastProbeReading();
+            currentProbeReading = probeLastReading();
             
             // Track consecutive stable readings
             if (currentProbeReading > 0) {
@@ -257,13 +257,25 @@ void MeasureMode::stopMeasurement() {
     // clear blanked the ENTIRE board on every tip lift / row change while
     // probing around in measure mode. The one thing the clear actually
     // handled was a measured node with no net (nothing repaints its
-    // highlight pixels), so unpaint just that node's row instead.
+    // highlight pixels), so unpaint just that node's pixels instead.
     extern int8_t nodeToNetIndex[256];
     bool nodeHasNet = wasNode > 0 && wasNode < 256 && nodeToNetIndex[wasNode] > 0;
-    if (!nodeHasNet && wasNode >= 1 && wasNode <= 60) {
-        for (int col = 0; col < 5; col++) {
-            int pixel = (wasNode - 1) * 5 + col;
-            if (pixel >= 0 && pixel < LED_COUNT) {
+    if (!nodeHasNet) {
+        if (wasNode >= 1 && wasNode <= 60) {
+            for (int col = 0; col < 5; col++) {
+                int pixel = (wasNode - 1) * 5 + col;
+                if (pixel >= 0 && pixel < LED_COUNT) {
+                    leds.setPixelColor(pixel, 0);
+                }
+            }
+        } else {
+            // Nano header (and other single-pixel) nodes: without this, a
+            // netless measured nano pin's highlight stays lit forever when
+            // the user taps a different node. NOTE: nano header pixels live
+            // at 400-429, ABOVE LED_COUNT (300 = breadboard section only) -
+            // a "< LED_COUNT" bounds check here silently skips all of them.
+            int pixel = getNanoHeaderPixel(wasNode);
+            if (pixel >= 0) {
                 leds.setPixelColor(pixel, 0);
             }
         }
