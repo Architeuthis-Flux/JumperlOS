@@ -27,6 +27,7 @@
 #include "NetManager.h"
 #include "NetVoltageScan.h"
 #include "NetsToChipConnections.h"
+#include "InfraPaths.h"
 #include "RouteSafety.h"
 #include "Peripherals.h"
 #include "PersistentStuff.h"
@@ -597,9 +598,10 @@ void SingleCharCommands::initializeCommands( ) {
                      "Live-updating FakeGPIO status showing TDM voltages and pin states.",
                      cmd_fakeGpioDebug, MENU_ADVANCED, CAT_DEBUG, true, SER3_INTERACTIVE );
 
-    registerCommand( 'i', "toggle net current scan (i!/i?/i#)",
+    registerCommand( 'i', "toggle net current scan (i!/i?/i#/i@)",
                      "Toggle the background net voltage scan / current ants (persists to config).\n\r"
-                     "'i!' report  'i?' RouteSafety self-check+audit  'i#' toggle sendXYraw short-check.",
+                     "'i!' report  'i?' RouteSafety self-check+audit  'i#' toggle sendXYraw short-check\n\r"
+                     "'i@' infra connections status (probe power / OLED / UART arbitration).",
                      cmd_netCurrents, MENU_ADVANCED, CAT_SETTINGS, true, SER3_MODIFIES_STATE );
 
     registerCommand( 'D', "status diagnostics menu",
@@ -2636,6 +2638,15 @@ CommandResult cmd_netCurrents( char c, const String& line ) {
             target->printf( "\rsendXYraw short-check %s (blocked=%lu)\n\r",
                             sendXYrawCheckEnabled ? "on" : "off",
                             (unsigned long)sendxy_blocked_count );
+            return CMD_DONT_SHOW_MENU;
+        }
+        if ( arg[ 0 ] == '@' ) {
+            target->println( "\r[infra] function     en   candidate / pairs" );
+            infraPrintStatus( target );
+            target->printf( "[infra] droop ohms: %.1f (%s)\n\r",
+                            (double)infraProbeDroopOhms( ),
+                            jumperlessConfig.calibration.probe_droop_ohms > 0.0f
+                                ? "calibrated" : "computed" );
             return CMD_DONT_SHOW_MENU;
         }
     }
