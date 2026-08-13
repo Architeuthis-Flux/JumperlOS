@@ -16,7 +16,6 @@
 #include "FileParsing.h"   // checkIfBridgeExists-style helpers not needed; addBridge decl for wrapper paths
 #include "JumperlessDefines.h"
 #include "Peripherals.h"   // gpioDef, setDacXvoltage, getDacVoltage
-#include "NetsToChipConnections.h" // numberOfPaths (droop-ohms path scan)
 #include "Probing.h"       // probeGpioPowerHwClaim/Release, bufferPowerConnected
 #include "States.h"
 #include "config.h"
@@ -412,15 +411,13 @@ void infraEvaluate(void) {
         int pairCount = 0;
         for (int walk = 0; walk < fn.numCandidates; walk++) {
             int cIdx = walk;
-#if !defined(OG_JUMPERLESS)
-            // DEPRECATED debug.probe_power_gpio (defaults false now): as a
-            // one-release transition override it reorders the probe-power
-            // walk to GPIO-first, its old meaning. Remove with the flag.
-            if (f == 0 && jumperlessConfig.debug.probe_power_gpio) {
-                static const int gpioFirst[] = {1, 0, 2}; // GPIO, DAC1, DAC0
-                cIdx = gpioFirst[walk];
-            }
-#endif
+            // (debug.probe_power_gpio is parsed but IGNORED: it was briefly
+            // honored as a GPIO-first transition override, but every board
+            // that ran the old GPIO-power firmware has true persisted in
+            // config.txt - which silently kept the 4-crosspoint GPIO feed
+            // and its droop model in play when the whole point of the
+            // candidate order is the 2-crosspoint DAC1 feed. Use
+            // infraForceCandidate for debugging instead.)
             if (s_forced[f] >= 0 && cIdx != s_forced[f]) continue;
             pairCount = fn.candidates[cIdx].resolvePairs(pairs);
             if (pairCount <= 0) continue;
@@ -519,28 +516,16 @@ float infraProbeDroopOhms(void) {
     float calibrated = jumperlessConfig.calibration.probe_droop_ohms;
     if (calibrated > 0.0f) return calibrated;
 
-    float rXpoint = jumperlessConfig.calibration.crosspoint_resistance;
-    if (rXpoint < 1.0f) rXpoint = 1.0f;
-
-    // Count crosspoints on the routed feed path (the single dup=0 path whose
-    // node pair is the active probe-power pair).
-    int src = infraProbePowerSource();
-    int hops = 0;
-    if (src >= 0) {
-        for (int i = 0; i < numberOfPaths && i < MAX_BRIDGES; i++) {
-            const pathStruct& p = globalState.connections.paths[i];
-            if (p.duplicate != 0 || p.skip) continue;
-            if (!((p.node1 == ROUTABLE_BUFFER_IN && p.node2 == src) ||
-                  (p.node2 == ROUTABLE_BUFFER_IN && p.node1 == src))) continue;
-            for (int h = 0; h < 4; h++) {
-                if (p.chip[h] != -1 && p.x[h] >= 0 && p.y[h] >= 0) hops++;
-            }
-            break;
-        }
-    }
-    if (hops <= 0) hops = 4; // not routed yet: the standard GPIO->L->K shape
-
-    return jumperlessConfig.calibration.probe_pad_ohms + (float)hops * rXpoint;
+    // Uncalibrated fallback: the EMPIRICAL 30 ohms measured on real hardware
+    // for the GPIO->L->K feed at 12mA pad drive. An earlier version computed
+    // pad + hops x calibration.crosspoint_resistance (= 165 ohms), which
+    // shrank every droop-current estimate ~5.5x and skewed the switch
+    // detector thresholds and measure-mode V0 tracking - the 40-ohm
+    // crosspoint figure comes from the net scan's small-signal voltage
+    // divider regime and clearly does not transfer to the feed's ~10mA
+    // regime. Until the INA-referenced calibration writes a real value, the
+    // measured constant beats a model with the wrong per-crosspoint number.
+    return 30.0f;
 }
 
 // ===========================================================================

@@ -84,12 +84,13 @@ struct config {
         // droop against a continuously-tracked unloaded peak V0 (persisted
         // as calibration.probe_droop_v0); the DAC bridge swap survives only
         // as a fallback while no GPIO is claimed.
-        // DEPRECATED: probe power is now arbitrated by routing/InfraPaths
-        // (DAC1 -> GPIO8..1 -> DAC0, relocating automatically when the user
-        // claims a resource). This flag survives one release as a debug
-        // override that reorders the walk GPIO-first; default OFF because
-        // the DAC1 feed is 2 crosspoints on chip K vs the GPIO's 4 through
-        // the K<->L interchip lane.
+        // DEPRECATED AND IGNORED: probe power is arbitrated by
+        // routing/InfraPaths (DAC1 -> GPIO8..1 -> DAC0, relocating when the
+        // user claims a resource). The key is still parsed so existing
+        // config.txt files load cleanly, but it no longer selects anything -
+        // boards that ran the old GPIO-power firmware have true persisted
+        // here, which must not silently keep the 4-crosspoint GPIO feed.
+        // Use the infraForceCandidate test hook for debugging.
         bool probe_power_gpio = false;
         // Print one line per switch-position evaluation: sensing source
         // (ADC7 droop / DAC swap / INA), estimated current, droop anchor,
@@ -164,8 +165,9 @@ struct config {
         float probe_droop_v0 = 3.35f;
         // GPIO-powered buffer feed: total source resistance for the droop
         // current model I = (V0 - ADC7) / R. 0 = uncalibrated - the model
-        // then computes probe_pad_ohms + N x crosspoint_resistance from the
-        // ACTUAL routed feed path (dup=0 infra bridge = N is exact). Set by
+        // then falls back to the empirical 30-ohm constant measured on this
+        // feed at 12mA drive (crosspoint_resistance's 40-ohm figure is from
+        // the net scan's small-signal regime and does not transfer). Set by
         // the INA-referenced phase of the tip-voltage calibration.
         float probe_droop_ohms = 0.0f;
         // The GPIO pad's own share of that resistance at the 12mA drive the

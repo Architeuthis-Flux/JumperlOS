@@ -6577,8 +6577,14 @@ int Probing::justReadProbe( bool allowDuplicates, int rawPad ) {
             // If the timer hasn't elapsed, reject the duplicate reading
             if ( millis( ) - lastDuplicateTime < 500 ) {
                 if ( debugProbing == 1 ) {
-                    Serial.print( "Rejected duplicate row: " );
-                    Serial.println( probeRowMap[ rowProbed ] );
+                    // Once per second, not per read: a probe HELD on a row
+                    // rejects ~100 duplicates/sec and flooded the terminal.
+                    static unsigned long lastDupPrintMs = 0;
+                    if ( millis( ) - lastDupPrintMs > 1000 ) {
+                        lastDupPrintMs = millis( );
+                        Serial.print( "Rejected duplicate row: " );
+                        Serial.println( probeRowMap[ rowProbed ] );
+                    }
                 }
                 return -1;
             } else {
