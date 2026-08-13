@@ -98,6 +98,12 @@ void infraNudge(void);
 // Periodic (~500ms) retry of pending nudges + viability re-check of active
 // candidates (catches claims that never touch the bridge array, e.g.
 // MicroPython taking the claim pin or PWM being enabled on it mid-claim).
+//
+// KNOWN GAP (behavior parity with the old handleLockedConnections): toggling
+// top_oled/serial_1 lock_connection at runtime changes enabled() but nothing
+// nudges a rebuild, so the lock appears/disappears at the next refresh from
+// any source - same latency the old clear/load-only mechanism had. Wire an
+// infraNudge() into the config appliers if that ever matters.
 void infraServiceTick(void);
 
 // ---------------------------------------------------------------------------
