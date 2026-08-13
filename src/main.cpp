@@ -1746,6 +1746,12 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 core2busy = true;
                 needsLedShow = menuTransitionRender( );
                 core2busy = false;
+            } else if ( rails == 2 ) {
+                // holdAnimationStuff() uses showLEDsCore2=2 for press/hold/reboot
+                // sweeps on the header + logo. That mode is shared with menu
+                // text flushes, but outside menus there is no buffer paint — still
+                // need leds.show() or the animation never reaches the strip.
+                needsLedShow = true;
             }
 
             // Call leds.show() if either showNets() was called OR if we're in menu mode.

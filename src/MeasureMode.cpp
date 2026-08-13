@@ -257,15 +257,30 @@ void MeasureMode::stopMeasurement() {
     // clear blanked the ENTIRE board on every tip lift / row change while
     // probing around in measure mode. The one thing the clear actually
     // handled was a measured node with no net (nothing repaints its
-    // highlight pixels), so unpaint just that node's row instead.
+    // highlight pixels), so unpaint just that node's LED(s) instead.
     extern int8_t nodeToNetIndex[256];
     bool nodeHasNet = wasNode > 0 && wasNode < 256 && nodeToNetIndex[wasNode] > 0;
-    if (!nodeHasNet && wasNode >= 1 && wasNode <= 60) {
-        for (int col = 0; col < 5; col++) {
-            int pixel = (wasNode - 1) * 5 + col;
-            if (pixel >= 0 && pixel < LED_COUNT) {
-                leds.setPixelColor(pixel, 0);
+    if (!nodeHasNet) {
+        if (wasNode >= 1 && wasNode <= 60) {
+            // Breadboard row: 5 pixels per row.
+            for (int col = 0; col < 5; col++) {
+                int pixel = (wasNode - 1) * 5 + col;
+                if (pixel >= 0 && pixel < LED_COUNT) {
+                    leds.setPixelColor(pixel, 0);
+                }
             }
+        } else if (wasNode >= NANO_D0 && wasNode < 120 && nodesToPixelMap[wasNode] >= 0) {
+            // Nano header / special-function pin: a single LED in the top
+            // strip. showNets() only ever REPAINTS pixels that still belong
+            // to a net, so once the ephemeral ADC net is gone nothing clears
+            // this one - it stayed lit after selecting a new node ("measure
+            // mode isn't clearing the nano header"). Mirror the +320 top-strip
+            // offset showNets() paints it at.
+#if defined(OG_JUMPERLESS)
+            leds.setPixelColor(nodesToPixelMap[wasNode], 0);
+#else
+            leds.setPixelColor(nodesToPixelMap[wasNode] + 320, 0);
+#endif
         }
     }
     showLEDsCore2 = 1;

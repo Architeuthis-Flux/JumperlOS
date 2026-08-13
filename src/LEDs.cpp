@@ -3750,7 +3750,14 @@ logoLedAccess = true;
   // fall through to the hold/reboot sweep (button press animation) for handoff.
   // ========================================================================
   if (logoRing.enabled) {
-    if (renderLogoRing()) {
+    // Once past the press window the hold/reboot sweep owns the logo ring
+    // (rainbow + state flashes). renderLogoRing() already returns false for
+    // that when holdStepLengthMs==0; during menu hold-to-back the ring would
+    // otherwise stay up and block buttonPressAnimActive entirely.
+    bool holdAnimOwnsLogo = buttonPressAnimActive &&
+        (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+         encoderButtonState == LONG_HELD);
+    if (!holdAnimOwnsLogo && renderLogoRing()) {
       logoLedAccess = false;
       return;
     }

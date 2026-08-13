@@ -6357,35 +6357,35 @@ void Probing::checkPads( void ) {
 
     switch ( probeReading ) {
     case LOGO_PAD_TOP:
-        Serial.print( "Top guy" );
+        // Serial.print( "Top guy" );
         clearColorOverrides( 1, 1, 0 );
         setLogoOverride( LOGO_TOP, -2 );
         break;
     case LOGO_PAD_BOTTOM:
-        Serial.print( "Bottom guy" );
+        // Serial.print( "Bottom guy" );
         clearColorOverrides( 1, 1, 0 );
         setLogoOverride( LOGO_BOTTOM, -2 );
         break;
     case ADC_PAD:
-        Serial.print( "ADC pad" );
+        // Serial.print( "ADC pad" );
         clearColorOverrides( 1, 1, 0 );
         setLogoOverride( ADC_0, -2 );
         setLogoOverride( ADC_1, -2 );
         break;
     case DAC_PAD:
-        Serial.print( "DAC pad" );
+        // Serial.print( "DAC pad" );
         clearColorOverrides( 1, 1, 0 );
         setLogoOverride( DAC_0, -2 );
         setLogoOverride( DAC_1, -2 );
         break;
     case GPIO_PAD:
-        Serial.print( "GPIO pad" );
+        // Serial.print( "GPIO pad" );
         clearColorOverrides( 1, 1, 0 );
         setLogoOverride( GPIO_0, -2 );
         setLogoOverride( GPIO_1, -2 );
         break;
     case BUILDING_PAD_TOP:
-        Serial.print( "Building top" );
+        // Serial.print( "Building top" );
         clearColorOverrides( 1, 1, 0 ); //! highlighted net
         if ( brightenedNet != -1 && false) {
             hsvColor hsv = RgbToHsv( netColors[ brightenedNet ] );
@@ -6408,7 +6408,7 @@ void Probing::checkPads( void ) {
         }
         break;
     case BUILDING_PAD_BOTTOM:
-        Serial.print( "Building bottom" );
+        // Serial.print( "Building bottom" );
         clearColorOverrides( 1, 1, 0 );
         if ( brightenedNet != -1 && false) {
             hsvColor hsv = RgbToHsv( netColors[ brightenedNet ] );
@@ -6503,18 +6503,31 @@ static bool probeReadingIsPhantom( int average, int mapMin ) {
     }
 
     gpio_put( pin, false );
-    delayMicroseconds( 25 ); // sense node RC ~1us, buffer slew a few us
+    // 60us: the top of the pad ladder (rows ~45-60) is the far,
+    // highest-resistance leg, so its sense node discharges much slower than
+    // the "~1us" low rows. 25us left those rows only partway collapsed and
+    // the tight floor below false-rejected them ("slow to register").
+    delayMicroseconds( 60 );
     int dark = readAdc( 5, 8 );
     gpio_put( pin, true );
-    delayMicroseconds( 25 );
+    delayMicroseconds( 30 );
 
-    if ( dark > mapMin + 10 ) {
+    // A real contact collapses the pad toward the dark floor once its only
+    // feed (the tip) is off; a phantom source (finger bridging a powered row,
+    // body coupling) holds the pad near the lit value. Reject only when the
+    // pad stays HIGH relative to this reading, not against a tight absolute
+    // floor - so a slow-discharging high row that only fell partway still
+    // passes. Threshold: 60% of the lit span, never below the old +10 floor.
+    int darkFloor = mapMin + 10;
+    int fracThresh = mapMin + ( ( average - mapMin ) * 6 ) / 10;
+    int rejectAbove = ( fracThresh > darkFloor ) ? fracThresh : darkFloor;
+    if ( dark > rejectAbove ) {
         lastCheckedMs = 0; // never cache a rejection
         if ( debugProbing == 1 ) {
             Serial.print( "phantom reading rejected: dark " );
             Serial.print( dark );
             Serial.print( " > " );
-            Serial.print( mapMin + 10 );
+            Serial.print( rejectAbove );
             Serial.print( ", lit " );
             Serial.println( average );
         }
@@ -6528,6 +6541,14 @@ static bool probeReadingIsPhantom( int average, int mapMin ) {
 int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // nothingTouchedReading = 165;
     // lastReadRaw = 0;
+
+    // Keep the GPIO-powered measure tip alive on the hot path. checkSwitchPosition()
+    // is the only other re-driver and it's gated to 500ms (and skipped during LED
+    // settle / button checks), so a pin stomped low by a refresh/PWM/MicroPython
+    // writer stayed dead - and every read here returned the dark floor - until a
+    // button press forced a switch re-check. Re-asserting per read (self-guards to
+    // a cheap register check when no GPIO is claimed) keeps the feed always on.
+    reassertGpioBufferDrive( );
 
     int numberOfReads = 8;
     int lowReads = 0;

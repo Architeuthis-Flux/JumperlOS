@@ -661,9 +661,7 @@ void holdAnimationStuff( void ) {
                 // Center LEDs stay white
                 // pressAnimLogoColors[ 6 ] = PRESS_WHITE;
                 pressAnimLogoColors[ 7 ] = PRESS_WHITE;
-                if ( lastButtonEncoderState == encoderButtonState ) {
-                    showLEDsCore2 = 2;
-                }
+                showLEDsCore2 = 2;
             }
         }
     }
