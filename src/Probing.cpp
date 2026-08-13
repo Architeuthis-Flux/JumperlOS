@@ -5644,12 +5644,10 @@ static uint8_t s_gpioPowerSavedState = 0;
 // separation once V0 is the unloaded peak.
 static float s_gpioDroopV0 = 0.0f; // continuously-normalized unloaded volts
 static bool s_gpioDroopValid = false;
-// ponytail: fixed nominal shunt. 41 ohm was measured at the default 4mA pad
-// drive; at the 12mA drive the claim now uses, the pad's ~15 ohm share drops
-// to ~5, leaving ~30 total (crosspoints dominate). Crosspoint resistance
-// varies part-to-part (~+/-30%) but only scales absolute I (~0.3mA near the
-// thresholds). Upgrade path: measure it per-board in the calibration app.
-static const float kGpioDroopOhms = 30.0f;
+// The droop shunt resistance now comes from infraProbeDroopOhms():
+// calibration.probe_droop_ohms when the INA-referenced calibration has run,
+// else probe_pad_ohms + crosspoints-of-the-actual-routed-feed x
+// crosspoint_resistance (exact - infra feed bridges are never duplicated).
 // Slow-track gain while I looks unloaded (~0). At the ~500ms switch-check
 // interval, 0.08 settles V0 onto a new rail level in a couple of seconds
 // without pulling V0 down during SELECT (I is large then, so no track).
@@ -5758,6 +5756,9 @@ static void reassertGpioBufferDrive( void ) {
 static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
     if ( s_gpioPowerIdx < 0 )
         return false;
+    // Source resistance for I = (V0 - v)/R: calibrated value or computed
+    // from the actual routed feed path (see infraProbeDroopOhms).
+    const float droopOhms = infraProbeDroopOhms( );
     float v = readAdcVoltage( 7, 16 );
     if ( adc7V )
         *adc7V = v;
@@ -5771,7 +5772,7 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
     // above the slow-track band forever and parks the detector in SELECT).
     static float s_lastDroopV = -1.0f;
     if ( s_lastDroopV >= 0.0f &&
-         fabsf( v - s_lastDroopV ) * ( 1000.0f / kGpioDroopOhms ) > 2.0f ) {
+         fabsf( v - s_lastDroopV ) * ( 1000.0f / droopOhms ) > 2.0f ) {
         float unloaded = ( v > s_lastDroopV ) ? v : s_lastDroopV;
         if ( unloaded > 3.6f )
             unloaded = 3.6f;
@@ -5828,7 +5829,7 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
             }
         }
     }
-    float i = ( s_gpioDroopV0 - v ) * ( 1000.0f / kGpioDroopOhms );
+    float i = ( s_gpioDroopV0 - v ) * ( 1000.0f / droopOhms );
     if ( i < 0.0f )
         i = 0.0f;
     // Continuous re-zero while unloaded: pull V0 toward the live voltage so
@@ -5838,7 +5839,7 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
     // track when loaded - that would collapse the SELECT signal into V0.
     if ( i < kGpioDroopUnloadedMax_mA ) {
         s_gpioDroopV0 += ( v - s_gpioDroopV0 ) * kGpioDroopV0Track;
-        i = ( s_gpioDroopV0 - v ) * ( 1000.0f / kGpioDroopOhms );
+        i = ( s_gpioDroopV0 - v ) * ( 1000.0f / droopOhms );
         if ( i < 0.0f )
             i = 0.0f;
     }

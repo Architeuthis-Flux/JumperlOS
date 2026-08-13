@@ -77,6 +77,14 @@ int infraProbePowerGpioIdx(void);
 void infraSetProbePowerEnabled(bool on);
 bool infraProbePowerWanted(void);
 
+// Total source resistance of the GPIO-powered buffer feed for the droop
+// current model: calibration.probe_droop_ohms when calibrated (> 0), else
+// probe_pad_ohms + N x crosspoint_resistance where N is counted from the
+// ACTUAL routed feed path - exact because infra bridges are never
+// duplicated. Falls back to pad + 4 crosspoints when the path isn't routed
+// yet (the standard GPIO->L->K shape).
+float infraProbeDroopOhms(void);
+
 // ---------------------------------------------------------------------------
 // Nudges
 // ---------------------------------------------------------------------------

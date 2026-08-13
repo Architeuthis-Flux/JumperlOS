@@ -16,6 +16,7 @@
 #include "FileParsing.h"   // checkIfBridgeExists-style helpers not needed; addBridge decl for wrapper paths
 #include "JumperlessDefines.h"
 #include "Peripherals.h"   // gpioDef, setDacXvoltage, getDacVoltage
+#include "NetsToChipConnections.h" // numberOfPaths (droop-ohms path scan)
 #include "Probing.h"       // probeGpioPowerHwClaim/Release, bufferPowerConnected
 #include "States.h"
 #include "config.h"
@@ -512,6 +513,34 @@ void infraSetProbePowerEnabled(bool on) {
 
 bool infraProbePowerWanted(void) {
     return s_probePowerOn;
+}
+
+float infraProbeDroopOhms(void) {
+    float calibrated = jumperlessConfig.calibration.probe_droop_ohms;
+    if (calibrated > 0.0f) return calibrated;
+
+    float rXpoint = jumperlessConfig.calibration.crosspoint_resistance;
+    if (rXpoint < 1.0f) rXpoint = 1.0f;
+
+    // Count crosspoints on the routed feed path (the single dup=0 path whose
+    // node pair is the active probe-power pair).
+    int src = infraProbePowerSource();
+    int hops = 0;
+    if (src >= 0) {
+        for (int i = 0; i < numberOfPaths && i < MAX_BRIDGES; i++) {
+            const pathStruct& p = globalState.connections.paths[i];
+            if (p.duplicate != 0 || p.skip) continue;
+            if (!((p.node1 == ROUTABLE_BUFFER_IN && p.node2 == src) ||
+                  (p.node2 == ROUTABLE_BUFFER_IN && p.node1 == src))) continue;
+            for (int h = 0; h < 4; h++) {
+                if (p.chip[h] != -1 && p.x[h] >= 0 && p.y[h] >= 0) hops++;
+            }
+            break;
+        }
+    }
+    if (hops <= 0) hops = 4; // not routed yet: the standard GPIO->L->K shape
+
+    return jumperlessConfig.calibration.probe_pad_ohms + (float)hops * rXpoint;
 }
 
 // ===========================================================================

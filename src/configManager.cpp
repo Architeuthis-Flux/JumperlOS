@@ -756,6 +756,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "probe_current_zero") == 0) jumperlessConfig.calibration.probe_current_zero = parseFloat(value);
             else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
             else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
+            else if (strcmp(key, "probe_droop_ohms") == 0) jumperlessConfig.calibration.probe_droop_ohms = parseFloat(value);
+            else if (strcmp(key, "probe_pad_ohms") == 0) jumperlessConfig.calibration.probe_pad_ohms = parseFloat(value);
             else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
         } else if (strcmp(section, "logo_pads") == 0) {
             if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);
@@ -1115,6 +1117,8 @@ bool saveConfigToFile(const char* filename) {
     file.print("probe_current_zero = "); file.print(jumperlessConfig.calibration.probe_current_zero); file.println(";");
     file.print("minimum_probe_reading = "); file.print(jumperlessConfig.calibration.minimum_probe_reading); file.println(";");
     file.print("probe_droop_v0 = "); file.print(jumperlessConfig.calibration.probe_droop_v0, 3); file.println(";");
+    file.print("probe_droop_ohms = "); file.print(jumperlessConfig.calibration.probe_droop_ohms, 1); file.println(";");
+    file.print("probe_pad_ohms = "); file.print(jumperlessConfig.calibration.probe_pad_ohms, 1); file.println(";");
     file.print("crosspoint_resistance = "); file.print(jumperlessConfig.calibration.crosspoint_resistance); file.println(";");
     file.println();
 
@@ -1323,6 +1327,8 @@ bool configHasChanges() {
     if (jumperlessConfig.calibration.probe_current_zero != lastSavedConfig.calibration.probe_current_zero) return true;
     if (jumperlessConfig.calibration.minimum_probe_reading != lastSavedConfig.calibration.minimum_probe_reading) return true;
     if (jumperlessConfig.calibration.probe_droop_v0 != lastSavedConfig.calibration.probe_droop_v0) return true;
+    if (jumperlessConfig.calibration.probe_droop_ohms != lastSavedConfig.calibration.probe_droop_ohms) return true;
+    if (jumperlessConfig.calibration.probe_pad_ohms != lastSavedConfig.calibration.probe_pad_ohms) return true;
     if (jumperlessConfig.calibration.crosspoint_resistance != lastSavedConfig.calibration.crosspoint_resistance) return true;
     
     // Logo pads section
@@ -1438,6 +1444,8 @@ static bool configFileIsComplete(const char* fileContent) {
         "measure_mode_output_voltage",
         "probe_current_zero",
         "probe_droop_v0",
+        "probe_droop_ohms",
+        "probe_pad_ohms",
         "async_passthrough"
     };
     const int numKeys = sizeof(requiredKeys) / sizeof(requiredKeys[0]);
@@ -1855,6 +1863,10 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "probe_droop_v0") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_droop_v0 = %.3f;", jumperlessConfig.calibration.probe_droop_v0);
+                } else if (strcmp(key, "probe_droop_ohms") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_droop_ohms = %.1f;", jumperlessConfig.calibration.probe_droop_ohms);
+                } else if (strcmp(key, "probe_pad_ohms") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_pad_ohms = %.1f;", jumperlessConfig.calibration.probe_pad_ohms);
                     updated = true;
                 } else if (strcmp(key, "crosspoint_resistance") == 0) {
                     snprintf(newLine, sizeof(newLine), "crosspoint_resistance = %.2f;", jumperlessConfig.calibration.crosspoint_resistance);
@@ -2735,6 +2747,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("minimum_probe_reading = "); Serial.print(jumperlessConfig.calibration.minimum_probe_reading); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("probe_droop_v0 = "); Serial.print(jumperlessConfig.calibration.probe_droop_v0, 3); Serial.println(";");
+        Serial.print("probe_droop_ohms = "); Serial.print(jumperlessConfig.calibration.probe_droop_ohms, 1); Serial.println(";");
+        Serial.print("probe_pad_ohms = "); Serial.print(jumperlessConfig.calibration.probe_pad_ohms, 1); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("crosspoint_resistance = "); Serial.print(jumperlessConfig.calibration.crosspoint_resistance); Serial.println(";");
     }

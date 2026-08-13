@@ -162,6 +162,15 @@ struct config {
         // positions have been visited; seeded from hardware (~3.35V MEASURE
         // unloaded at 12mA GPIO drive). Runtime peak-tracker may raise it.
         float probe_droop_v0 = 3.35f;
+        // GPIO-powered buffer feed: total source resistance for the droop
+        // current model I = (V0 - ADC7) / R. 0 = uncalibrated - the model
+        // then computes probe_pad_ohms + N x crosspoint_resistance from the
+        // ACTUAL routed feed path (dup=0 infra bridge = N is exact). Set by
+        // the INA-referenced phase of the tip-voltage calibration.
+        float probe_droop_ohms = 0.0f;
+        // The GPIO pad's own share of that resistance at the 12mA drive the
+        // claim uses (~5 ohms; was ~15 at the default 4mA drive).
+        float probe_pad_ohms = 5.0f;
         // On-resistance of one CH446Q crosspoint, used by the net voltage
         // scan to turn node voltage deltas into per-connection currents.
         // A single 2-crosspoint path measures ~80 ohms, so ~40 each.
