@@ -451,12 +451,10 @@ static void runProbeCableTest( SelfTestReport& r ) {
     extern void setProbeLEDModeAndSettle( int mode ); // Apps.cpp
     Serial.println( "  step 4/5: probe power path (routable buffer -> cable -> LED):" );
     // This step measures the DAC -> INA1 -> buffer -> cable -> LED current
-    // signature, so force classic DAC power for the test even when
-    // debug.probe_power_gpio has the buffer GPIO-powered (INA1 sits on the
-    // DAC path and would see nothing on the GPIO feed - no LED delta, no
-    // end-to-end proof). Restored at the end of the test.
-    bool savedGpioPower = jumperlessConfig.debug.probe_power_gpio;
-    jumperlessConfig.debug.probe_power_gpio = false;
+    // signature, so pin the probe-power function to its DAC1 candidate
+    // (INA1 sits on the DAC path and would see nothing on a GPIO feed - no
+    // LED delta, no end-to-end proof). Unforced at the end of the test.
+    infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC1
     routableBufferPower( 1, 0, 1 );
     delay( 150 );
 
@@ -547,7 +545,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // Direct struct write doesn't set configChanged, so this can't trigger a
     // spurious config save; the runtime re-claims its GPIO on the next
     // routableBufferPower(1) pass.
-    jumperlessConfig.debug.probe_power_gpio = savedGpioPower;
+    infraForceCandidate( "probe_power", -1 );
 }
 
 // ============================================================================
@@ -564,12 +562,11 @@ static void runCrossbarTest( SelfTestReport& r ) {
     b.print( "Xbar", (uint32_t)0x120400 );
     showLEDsCore2 = 2;
 
-    // Phase 2 drives ALL eight routable GPIOs as outputs. If probe_power_gpio
-    // holds a buffer-power claim, that pin would be fought mid-test (and the
-    // claim's HIGH drive would corrupt its loopback reading). Force DAC power
-    // to release any claim first - same guard the cable test uses.
-    bool savedGpioPower = jumperlessConfig.debug.probe_power_gpio;
-    jumperlessConfig.debug.probe_power_gpio = false;
+    // Phase 2 drives ALL eight routable GPIOs as outputs. A GPIO buffer-power
+    // claim would be fought mid-test (and the claim's HIGH drive would
+    // corrupt its loopback reading) - pin the function to DAC1 so any claim
+    // releases first. Same guard the cable test uses; unforced at the end.
+    infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC1
     routableBufferPower( 1, 0, 1 );
 
     const float target = 2.5f;
@@ -663,7 +660,7 @@ static void runCrossbarTest( SelfTestReport& r ) {
 
     // Restore the GPIO buffer-power preference; the next
     // routableBufferPower(1) pass re-claims a pin if enabled.
-    jumperlessConfig.debug.probe_power_gpio = savedGpioPower;
+    infraForceCandidate( "probe_power", -1 );
 
     if ( rowFails || gpioFails || railFails ) {
         printChipStateArray( ); // routing model dump to help diagnose
@@ -887,13 +884,75 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     setDac0voltage( 0.0f, 0 );
     globalState.clearAllConnections( );
     refreshConnections( -1, 0, 1 );
+
+    // ------------------------------------------------------------------
+    // GPIO-variant phase: measure the droop model's constants for real.
+    // Force the probe-power GPIO candidate, read the unloaded tip (-> V0
+    // seed), then pull a known load through the ISENSE shunt so INA0 -
+    // the most accurate measurement on the board - reads the true feed
+    // current while ADC7 reads the drooped tip:
+    //     probe_droop_ohms = (V0 - V_loaded) / I
+    // V5-only, and non-fatal: a failed phase leaves probe_droop_ohms = 0,
+    // which keeps the computed pad+crosspoints fallback in play.
+    // ------------------------------------------------------------------
+    float droopOhmsMeasured = 0.0f;
+    if ( done ) {
+        Serial.println( "  GPIO droop phase: forcing GPIO probe-power candidate..." );
+        infraSetProbePowerEnabled( true );
+        infraForceCandidate( "probe_power", 1 ); // candidate 1 = GPIO scan
+        refreshConnections( -1, 0, 0 );
+        waitCore2( );
+        delay( 30 );
+        if ( infraProbePowerGpioIdx( ) >= 0 ) {
+            float spread0 = 0.0f;
+            float v0 = readTipAveraged( 4, 32, &spread0 );
+            // Load: BUFFER_IN -> INA0 shunt (ISENSE) -> GND. Reserved-node
+            // allowance is already open for the session.
+            addBridgeToState( ROUTABLE_BUFFER_IN, ISENSE_PLUS, 0, false );
+            addBridgeToState( ISENSE_MINUS, GND, 0, false );
+            refreshConnections( -1, 0, 0 );
+            waitCore2( );
+            delay( 50 ); // INA conversion + settle
+            float vL = readTipAveraged( 4, 32, nullptr );
+            float i1 = INA0.getCurrent_mA( );
+            delay( 20 );
+            float i2 = INA0.getCurrent_mA( );
+            float i_mA = ( i1 + i2 ) * 0.5f;
+            removeBridgeFromState( ROUTABLE_BUFFER_IN, ISENSE_PLUS, false );
+            removeBridgeFromState( ISENSE_MINUS, GND, false );
+            refreshConnections( -1, 0, 1 );
+            if ( i_mA > 1.0f && v0 > vL ) {
+                droopOhmsMeasured = ( v0 - vL ) * 1000.0f / i_mA;
+            }
+            Serial.printf( "  droop: V0=%.4fV loaded=%.4fV I=%.2fmA -> R=%.1f ohm\n\r",
+                          (double)v0, (double)vL, (double)i_mA,
+                          (double)droopOhmsMeasured );
+            if ( droopOhmsMeasured >= 10.0f && droopOhmsMeasured <= 400.0f ) {
+                jumperlessConfig.calibration.probe_droop_ohms = droopOhmsMeasured;
+                if ( v0 >= 3.0f && v0 <= 3.6f ) {
+                    jumperlessConfig.calibration.probe_droop_v0 = v0;
+                }
+            } else {
+                Serial.println( "  droop R out of sanity band - keeping computed fallback" );
+                droopOhmsMeasured = 0.0f;
+            }
+        } else {
+            Serial.println( "  no free GPIO for the droop phase - skipping (computed fallback stays)" );
+        }
+        infraForceCandidate( "probe_power", -1 );
+        infraSetProbePowerEnabled( false ); // session teardown restores the real state
+        globalState.clearAllConnections( );
+        refreshConnections( -1, 0, 1 );
+    }
+
     probeButtonResumePollingFromCore0( );
     showProbeLEDs = ( switchPosition == 0 ) ? 3 : 4; // back to runtime color
 
     snprintf( r.detail[ SELFTEST_TIP_VOLTAGE ], sizeof( r.detail[ 0 ] ),
-              "ref:%.3fV tip:%.3fV err:%+.1fmV spr:%.1fmV dac0set:%.3fV%s",
+              "ref:%.3fV tip:%.3fV err:%+.1fmV spr:%.1fmV dac0set:%.3fV droopR:%.0f%s",
               (double)vTarget, (double)v, (double)( finalErr * 1000.0f ),
               (double)( finalSpread * 1000.0f ), (double)set,
+              (double)droopOhmsMeasured,
               done ? "" : " no-converge" );
     if ( done ) {
         // Do NOT touch probe_max here. An earlier version rescaled it by the
