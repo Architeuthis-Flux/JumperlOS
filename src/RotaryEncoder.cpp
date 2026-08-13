@@ -177,6 +177,25 @@ bool isRotaryEncoderInitialized( void ) {
     return ( pioEnc != nullptr && smEnc != (uint)-1 );
 }
 
+// Bounded quadrature count read. The generated helper
+// quadrature_encoder_get_count() reads fifo_level + 1 words, and that +1 is
+// an UNBOUNDED pio_sm_get_blocking() waiting on a fresh push.
+// encoderServiceYield() made this poll reachable from inside NetVoltageScan
+// sense taps (readingADC held, crosspoints closed, core2busy raised) and
+// from sendXYraw's PIO handshake wait - a quadrature SM that ever stops
+// pushing would wedge core 1 with all of that claimed. Drain only what's
+// already queued and keep the last value across a momentarily-empty FIFO:
+// the program pushes continuously (~4 SM cycles/sample), so the newest
+// queued word is at most microseconds stale - fresh enough for a clickwheel.
+static long s_lastQuadCount = 0;
+static long quadratureCountBounded( void ) {
+    uint n = pio_sm_get_rx_fifo_level( pioEnc, smEnc );
+    while ( n-- > 0 ) {
+        s_lastQuadCount = (long)(int32_t)pio_sm_get( pioEnc, smEnc );
+    }
+    return s_lastQuadCount;
+}
+
 // Read the raw quadrature count straight from the PIO state machine. Safe to
 // call from Core 1 only while Core 2's rotaryEncoderStuff() is suspended via
 // encoderOverride (otherwise both cores drain the same RX FIFO and race).
@@ -184,7 +203,7 @@ long getEncoderRawCount( void ) {
     if ( !isRotaryEncoderInitialized( ) ) {
         return 0;
     }
-    return (long)quadrature_encoder_get_count( pioEnc, smEnc );
+    return quadratureCountBounded( );
 }
 
 // Function to get rotary encoder status
@@ -861,18 +880,23 @@ void rotaryEncoderStuff( void ) {
         return;
     }
 
-    if ( encoderOverride > 0 ) {
-        encoderOverride--;
-        // Serial.print("encoderOverride: ");
-        // Serial.println(encoderOverride);
-        return;
-    }
-
     uint32_t now = micros( );
     if ( (uint32_t)( now - lastEncoderPollUs ) < ENCODER_POLL_INTERVAL_US ) {
         return;
     }
     lastEncoderPollUs = now;
+
+    // Decrement AFTER the 2kHz throttle so encoderOverride counts throttled
+    // polls (~500us each), the unit its users assume: Debugs' 100000 means
+    // ~50s and MicroPython's 10 means ~5ms. Before this, every
+    // encoderServiceYield() call decremented it - and the yield now runs from
+    // kHz-rate spin loops (sendXYraw handshake, NetVoltageScan waits), which
+    // drained a 100000-count suspension in well under a second.
+    if ( encoderOverride > 0 ) {
+        encoderOverride--;
+        return;
+    }
+
     rotaryEncoderStuffLocked( );
 }
 
@@ -960,7 +984,7 @@ static void rotaryEncoderStuffLocked( void ) {
     //   resetPosition = false;
     // }
 
-    long rawCount = quadrature_encoder_get_count( pioEnc, smEnc );
+    long rawCount = quadratureCountBounded( );
 
     encoderPosition = rawCount - encoderPositionOffset;
     if ( resetEncoderPosition == true ) {

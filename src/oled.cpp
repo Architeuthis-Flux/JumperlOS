@@ -17,6 +17,7 @@
 #include "Probing.h"
 #include "RotaryEncoder.h"
 #include "States.h"
+#include "WaveGen.h" // shared-I2C0 gate in show() checks wavegen.isRunning()
 #include "Wire.h"
 #include "config.h"
 #include "configManager.h"
@@ -1230,6 +1231,8 @@ void OLEDprintFromTerminal( void ) {
 // pre-toast background, not on top of the just-painted toast pixels.
 bool oledHoldActive();
 extern volatile bool oledNeedsFlushAfterHold;
+// Set by show()'s shared-I2C0 gate; oledPeriodic flushes once wavegen stops.
+static volatile bool oledNeedsFlushAfterWavegen = false;
 static void oledHoldStashAfterPriorityFlush();
 
 // SIMPLIFIED DISPLAY FUNCTIONS
@@ -1627,6 +1630,18 @@ void oled::priorityFlushHeldFrame() {
     // whatever was painted by an earlier toast that is still inside its hold
     // window. Clearing the dirty flag here means oledPeriodic won't
     // double-flush at hold expiry.
+    //
+    // This bypasses show(), so it must honor show()'s shared-I2C0 gate
+    // itself: no panel transmit while wavegen streams the DAC on Wire from
+    // core 1 (no cross-core bus lock exists). Defer: the toast stays in the
+    // live framebuffer and oledPeriodic flushes it once streaming stops.
+    {
+        extern WaveGen wavegen;
+        if ( _currentDisplayWire == 0 && wavegen.isRunning( ) ) {
+            oledNeedsFlushAfterWavegen = true;
+            return;
+        }
+    }
     if ( _displayPtr ) {
         _displayPtr->display();
     }
@@ -2226,6 +2241,20 @@ bool oled::show( int waitToFinish ) {
     if ( oledHoldActive() ) {
         oledNeedsFlushAfterHold = true;
         return true;
+    }
+    // Shared-bus gate: on Wire (I2C0, connection_type 2) this panel shares
+    // the bus with the MCP4728 that wavegen streams from core 1 - with no
+    // lock between the cores. OledGui::renderNow() already defers for this,
+    // but measure mode and the highlight sink call show()/clearPrintShow()
+    // directly and bypassed that gate; putting it here covers every
+    // ship-to-panel path. Skip the transmit and let oledPeriodic flush the
+    // (still-mutating) framebuffer once streaming stops.
+    {
+        extern WaveGen wavegen;
+        if ( _currentDisplayWire == 0 && wavegen.isRunning( ) ) {
+            oledNeedsFlushAfterWavegen = true;
+            return true;
+        }
     }
     // Opportunistic liveness check: checkConnection() caches for 1s
     // internally, so this is a 1-byte I2C ping at most once per second
@@ -3180,7 +3209,28 @@ void oled::oledPeriodic( ) {
         // Skip OLED maintenance while command processing is active
         return;
     }
-    
+
+    // Frames skipped by show()'s shared-I2C0 gate: flush the accumulated
+    // framebuffer once wavegen's core-1 DAC streaming has stopped.
+    {
+        extern WaveGen wavegen;
+        if ( oledNeedsFlushAfterWavegen && !wavegen.isRunning( ) ) {
+            oledNeedsFlushAfterWavegen = false;
+            show( );
+        }
+    }
+
+    // Same shared-I2C0 rule as show(): even the 1-byte liveness ping below is
+    // this core poking the Wire controller that core 1's wavegen streaming is
+    // actively driving - no cross-core lock exists. Defer all connection
+    // maintenance until streaming stops.
+    {
+        extern WaveGen wavegen;
+        if ( _currentDisplayWire == 0 && wavegen.isRunning( ) ) {
+            return;
+        }
+    }
+
     // Adaptive check interval. Faster polling when connected lets us catch a
     // hot-unplug *before* dozens of slow display() writes pile up and stall
     // the UI; the cost is one 1-byte I2C ping every ~750ms, which is far

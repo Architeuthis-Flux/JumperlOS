@@ -115,11 +115,20 @@ bool core_sync_acquire_timeout_ms(uint32_t timeout_ms) {
 static volatile int      fs_owner_core = -1;  // -1 = unheld; else owning core id
 static volatile uint32_t fs_recursion  = 0;
 
+// INVARIANT COUNTER: fs_mutex is a core-0 lock in practice, and that is what
+// keeps the pauseCore2ForFlash/fs_mutex acquisition-order split across the
+// filesystem code a single-threaded ordering quirk instead of a cross-core
+// AB-BA deadlock. If core 1 ever starts taking fs_mutex, that assumption is
+// gone - count it (no Serial here: this can run on core 1, where USB I/O
+// wedges the board; read the counter from a debugger or core-0 debug print).
+volatile uint32_t fs_mutex_core1_acquires = 0;
+
 static inline int currentCoreId(void) { return (int)(sio_hw->cpuid & 1); }
 
 void fs_mutex_acquire(void) {
     if (!sync_initialized) return;
     int core = currentCoreId();
+    if (core == 1) { fs_mutex_core1_acquires++; }
     if (fs_owner_core == core) { fs_recursion++; filesystemActive = true; return; }
     mutex_enter_blocking(&fs_mutex);
     fs_owner_core = core;

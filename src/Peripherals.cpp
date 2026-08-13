@@ -2079,8 +2079,18 @@ void __not_in_flash_func(showLEDmeasurements)( void ) {
 
         if ( showADCreadings[ i ] > 0 && showADCreadings[ i ] <= numberOfNets ) {
             numReadings++;
-            adcReading = readAdcVoltage( i, samples );
-            adcReadings[ i ] = adcReading;
+            // This runs on core 1 INSIDE core2stuff's core_sync hold - never
+            // wait on a contested ADC lock here (every stalled microsecond
+            // extends the hold that core 0's blocking core_sync_acquire()
+            // callers sit behind). If the lock is busy (probe read on core 0,
+            // scan tap), adcReadings[] was refreshed within the last few tens
+            // of ms by updateLazyAdcReadings - show that instead of stalling.
+            if ( !readingADC ) {
+                adcReading = readAdcVoltage( i, samples );
+                adcReadings[ i ] = adcReading;
+            } else {
+                adcReading = adcReadings[ i ];
+            }
             color = measurementToColor( adcReading, adcRange[ i ][ 0 ], adcRange[ i ][ 1 ] );
 
             int brightness =
@@ -2580,16 +2590,20 @@ float __not_in_flash_func(readAdcVoltage)( int channel, int samples ) {
 int __not_in_flash_func(readAdc)( int channel, int samples ) {
     // Claim the single ADC peripheral for this core. CRITICAL: the acquire must
     // be ATOMIC - a plain "while(flag) flag=true" is a check-then-set race that
-    // lets both cores pass simultaneously, then both call adc_select_input() +
-    // adc_read() concurrently. That corrupts the ADC state machine and makes
-    // adc_read() busy-wait forever (it has no internal timeout), hanging the
-    // core - and if that core was holding core_sync, the other core deadlocks.
-    // __atomic_test_and_set serializes the two cores; the 100ms steal-timeout is
-    // only a safety net for a crashed/stalled holder.
+    // lets both cores pass simultaneously, then both drive the ADC mux/state
+    // machine concurrently. That corrupts it and (with the SDK's adc_read())
+    // wedges a core - and if that core was holding core_sync, the other core
+    // deadlocks. __atomic_test_and_set serializes the two cores.
+    //
+    // NEVER steal the lock on timeout: the old 100ms steal fired against any
+    // legitimate long hold (the logic analyzer keeps readingADC for a whole
+    // capture) and produced exactly the two-driver corruption above. A failed
+    // acquire now degrades to a 0 reading - the ADC goes briefly blind instead
+    // of a core going permanently dead.
     unsigned long adcWaitStart = micros();
     while ( __atomic_test_and_set( &readingADC, __ATOMIC_ACQUIRE ) ) {
-        if (micros() - adcWaitStart > 100000) {  // 100ms timeout - steal it
-            break;
+        if (micros() - adcWaitStart > 100000) {
+            return 0; // holder is busy/stuck - do NOT touch the ADC or the lock
         }
         tight_loop_contents( );
     }
@@ -2615,8 +2629,24 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
             break;
         }
 
-        adcReadingAverage += adc_read( );
-        // adcReadingAverage += analogRead(ADC0_PIN + channel); //(int)adc_read();
+        // Manually triggered conversion with a per-conversion deadline (same
+        // pattern as NetVoltageScan's readScanAdcVoltage). The SDK's adc_read()
+        // busy-waits on READY with no timeout, so a corrupted state machine
+        // hangs the calling core forever - and this function runs on core 1
+        // inside the core_sync hold, where that hang deadlocks the whole board.
+        // A conversion is ~2us; 100us of no READY means the ADC is sick and the
+        // sample is abandoned, not waited for.
+        hw_set_bits( &adc_hw->cs, ADC_CS_START_ONCE_BITS );
+        unsigned long convStart = micros( );
+        while ( !( adc_hw->cs & ADC_CS_READY_BITS ) ) {
+            if ( micros( ) - convStart > 100 ) {
+                break;
+            }
+        }
+        if ( !( adc_hw->cs & ADC_CS_READY_BITS ) ) {
+            continue;
+        }
+        adcReadingAverage += ( adc_hw->result & 0xFFF );
         actualSamples++;
         delayMicroseconds( 6 );
     }

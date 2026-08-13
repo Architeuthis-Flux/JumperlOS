@@ -473,6 +473,13 @@ void reassertOpenOnLanes(const int8_t* hopChip, const int8_t* hopX,
                          const int8_t* hopY, int nHops) {
     // For every hop lane (chip,x) and (chip,y bus), re-send open for any
     // crosspoint bookkeeping believes is open on that x column / involved y.
+    //
+    // Bail on the first handshake timeout: this can issue ~90 sends across a
+    // 4-hop route, and when the PIO handshake is actually dead each one costs
+    // its full timeout - that stacked up to ~180ms with readingADC held and
+    // core2busy raised (a tap must stay well under waitCore2's 25ms). A sick
+    // handshake means bookkeeping can't be trusted anyway; the clean refresh
+    // that anyChipXYSuspect() forces is the real recovery, not more sends.
     for (int h = 0; h < nHops; h++) {
         int c = hopChip[h];
         int x = hopX[h];
@@ -488,7 +495,9 @@ void reassertOpenOnLanes(const int8_t* hopChip, const int8_t* hopX,
                 // Only touch the X column or Y row we're about to use
                 if (xi != x && y != yFocus) continue;
                 // Bookkeeping says open; re-assert open
-                sendXYrawUnchecked(c, xi, y, 0, 2000);
+                int timeoutsBefore = ch446q_timeout_count;
+                sendXYrawUnchecked(c, xi, y, 0, 500);
+                if (ch446q_timeout_count != timeoutsBefore) return;
             }
         }
     }
@@ -832,7 +841,10 @@ void fastDisconnectPath(FastPathHandle* p) {
     for (int h = 3; h >= 0; h--) {
         int c = p->path.chip[h], x = p->path.x[h], y = p->path.y[h];
         if (c < 0 || x < 0 || y < 0) continue;
-        sendXYrawUnchecked(c, x, y, 0, 2000);
+        // 1000us/hop, and keep trying every hop even after a timeout (a
+        // stranded closed crosspoint is a short risk, so best-effort all
+        // four): 4ms worst case, part of the tap's <25ms total budget.
+        sendXYrawUnchecked(c, x, y, 0, 1000);
     }
     releasePathLanes(p->path, EPHEMERAL_PATH_NET);
     p->active = false;

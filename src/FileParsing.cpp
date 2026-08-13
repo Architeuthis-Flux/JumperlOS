@@ -2318,6 +2318,12 @@ void openNodeFile(int slot, int flashOrLocal) {
   //   // Jerial.println("waiting for core2 to finish");
   // }
   // core1busy = true;
+  // Save/restore rather than set/clear: this loader can run nested under an
+  // outer core1busy holder (the refresh paths raise it around the whole
+  // netlist rebuild), and the old unconditional clear at the end dropped the
+  // OUTER claim mid-rebuild - reopening the gates that NetVoltageScan,
+  // OledGui, and systemIdleForFlush key off while chipStates was still torn.
+  bool wasCore1Busy = core1busy;
   if ((nodeFileString.length() < 3 && flashOrLocal == 1) || flashOrLocal == 0) {
 
     // Hold fs_mutex across the whole open->read->close so nothing else (the
@@ -2325,7 +2331,7 @@ void openNodeFile(int slot, int flashOrLocal) {
     // core, or any other fs user) can yank the global nodeFile out from
     // under the read loop. fs_mutex is per-core recursive, so the
     // acquire/release inside openFileThreadSafe() just nests within this
-    // one. core1busy pairs with the clear at the end of this function.
+    // one. core1busy pairs with the restore at the end of this function.
     fs_mutex_acquire();
     core1busy = true;
 
@@ -2385,8 +2391,8 @@ void openNodeFile(int slot, int flashOrLocal) {
   // nodeFileString.printTo(Serial);
 
   splitStringToFields();
-  
-  core1busy = false;
+
+  core1busy = wasCore1Busy;
   // parseStringToBridges();
 }
 

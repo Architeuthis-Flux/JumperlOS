@@ -26,9 +26,18 @@ static inline void softI2C_sdaLow() {
   pinMode(SOFT_SDA_PIN, OUTPUT); 
   digitalWrite(SOFT_SDA_PIN, LOW); 
 }
-static inline void softI2C_sclHigh() { 
+static inline void softI2C_sclHigh() {
   pinMode(SOFT_SCL_PIN, INPUT_PULLUP);
-  while(digitalRead(SOFT_SCL_PIN) == LOW); // Clock stretching
+  // Clock stretching, DEADLINE-BOUNDED. Pins 4/5 are also hardware I2C0
+  // (INA219s, OLED type 2, wavegen's DAC streaming from the other core) -
+  // an unbounded wait here spins this core forever if the bus is held low
+  // by a device mid-transaction with someone else. The MCP4728 doesn't
+  // stretch anywhere near 5ms; a low SCL past that means the bus is not
+  // ours and the transfer is already lost - proceed and let the ACK fail.
+  unsigned long start = micros();
+  while (digitalRead(SOFT_SCL_PIN) == LOW) {
+    if (micros() - start > 5000) break;
+  }
 }
 static inline void softI2C_sclLow() { 
   pinMode(SOFT_SCL_PIN, OUTPUT); 

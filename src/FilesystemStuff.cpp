@@ -3230,7 +3230,15 @@ bool writeStringToFileSimple( const char* filename, const char* content ) {
     // Pause Core2 for entire flash operation (FTL can trigger flash writes mid-write)
     bool was_paused = pauseCore2ForFlash( 100 );
 
-    fs_mutex_acquire( );
+    // Bounded acquire (same pattern as eepromCommitSafe): pauseCore2 is
+    // already raised, so an unbounded blocking acquire here would park core 1
+    // (LEDs, crossbar sends) for as long as the mutex holder takes - and the
+    // holder can be a path that itself waits out core-1 flags. 5s is far past
+    // any legitimate hold; give up rather than freeze the board.
+    if ( !fs_mutex_acquire_timeout_ms( 5000 ) ) {
+        unpauseCore2ForFlash( was_paused );
+        return false;
+    }
 
     File file = FatFS.open( filename, "w" );
     if ( !file ) {
@@ -3298,7 +3306,12 @@ bool writeStringToFile( const char* filename, const char* content ) {
     // Pause Core2 for entire flash operation (FTL can trigger flash writes mid-write)
     bool was_paused = pauseCore2ForFlash( 100 );
 
-    fs_mutex_acquire( );
+    // Bounded acquire with pauseCore2 raised - see writeStringToFileSimple.
+    if ( !fs_mutex_acquire_timeout_ms( 5000 ) ) {
+        unpauseCore2ForFlash( was_paused );
+        addFilesystemMessage( "ERROR: filesystem busy, could not write " + String( filename ), 196 );
+        return false;
+    }
 
     File file = FatFS.open( filename, "w" );
     if ( !file ) {

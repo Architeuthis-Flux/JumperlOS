@@ -169,7 +169,13 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
 
     FastPathHandle handle;
     int adcNode = ADC0 + adc;
-    int rc = fastConnectPath(node, adcNode, &handle, 2000);
+    // 500us/hop: normal handshakes complete in microseconds, so this only
+    // matters when the PIO handshake is sick - and then the whole tap must
+    // stay well under waitCore2()'s 25ms, or refreshConnections() times out
+    // and rebuilds chipStates while we're still mid-tap (torn route state,
+    // possible short). Budget: 2ms lock spin + 4x500us connect + unwind +
+    // ~1ms reads + 4x1ms disconnect ~= 11ms hard worst case.
+    int rc = fastConnectPath(node, adcNode, &handle, 500);
     if (rc != 0) {
         __atomic_clear(&readingADC, __ATOMIC_RELEASE);
         tapFailNoRoute++;
@@ -546,11 +552,6 @@ void serviceNetVoltageScan(void) {
         return;
     }
 
-    // Everything below touches crosspoints/ADC or takes ~0.5ms of compute -
-    // raise core2busy so pauseCore2ForFlash() waits for us (same contract as
-    // updateLazyAdcReadings), and so Core 0 sees a busy core, not a hung one.
-    core2busy = true;
-
     uint32_t fingerprint = connectionsFingerprint();
     if (fingerprint != lastFingerprint) {
         lastFingerprint = fingerprint;
@@ -565,8 +566,18 @@ void serviceNetVoltageScan(void) {
 
     // One tap per pass. Skip while the probe owns raw crosspoint scanning or
     // the wavegen owns the ADC/DAC path.
+    //
+    // core2busy brackets ONLY the tap (the crosspoint/ADC hardware work), not
+    // the bookkeeping above/below: raising it for the whole service body put
+    // the flag at a high duty cycle on every core-1 pass, which starved
+    // OledGui::renderNow()'s core2busy gate and made pauseCore2ForFlash()/
+    // waitCore2() waiters burn their timeouts. pauseCore2ForFlash still sees
+    // the tap window (same contract as updateLazyAdcReadings); the pure-CPU
+    // bookkeeping needs no flag - idleOtherCore() is what actually parks this
+    // core for flash safety.
     if (scanNodeCount > 0 && probeActive == 0 && !wavegen.isRunning() &&
         micros() - lastScanUs > kScanIntervalUs) {
+        core2busy = true;
         lastScanUs = micros();
         int adc = pickScanAdc();
         if (adc >= 0) {
@@ -602,6 +613,7 @@ void serviceNetVoltageScan(void) {
                 }
             }
         }
+        core2busy = false;
     }
 
     // The duplicate-folding pass is O(paths^2) - up to ~0.5ms on a full
@@ -616,8 +628,6 @@ void serviceNetVoltageScan(void) {
     // debug.net_voltage_scan printing happens on core 0 (see
     // serviceNetVoltageScanDebug) - Serial I/O from this core races core 0's
     // USB servicing and can wedge the board.
-
-    core2busy = false;
 }
 
 // Core 0 only: the once-a-second debug.net_voltage_scan report. Reads

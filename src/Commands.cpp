@@ -18,6 +18,7 @@
 #include "RouteSafety.h"
 
 #include "USBfs.h"
+#include "WaveGen.h"
 #include "externVars.h"
 #include "config.h"
 #include "configManager.h"
@@ -192,8 +193,13 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
 
   // CRITICAL: Wait for core 2 to actually process the sendAllPathsCore2 signal
   // IMPORTANT: Must call tud_task() during wait to prevent USB disconnect!
+  // While wavegen streams, core 2 sits in wavegen.service()'s blocking loop
+  // and can't process the flag at all - don't burn the full second on every
+  // refresh; leave it pending and it sends the moment streaming stops.
+  extern WaveGen wavegen;
   unsigned long pathsTimeout = millis();
-  while (sendAllPathsCore2 != 0 && (millis() - pathsTimeout < 1000)) {
+  while (sendAllPathsCore2 != 0 && (millis() - pathsTimeout < 1000) &&
+         !wavegen.isRunning()) {
     __dmb();  // Memory barrier to see Core 2's update
     delayMicroseconds(100);
     // CRITICAL: Service USB during wait to prevent disconnect
@@ -203,11 +209,17 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
     #endif
   }
   t[ti++] = millis(); // t[6] = after sendAllPathsCore2 wait
-  
+
   if (sendAllPathsCore2 != 0) {
-    Serial.println("WARNING: Core 2 did not process sendAllPathsCore2 in time!");
-    sendAllPathsCore2 = 0;
-    __dmb();  // Ensure the clear is visible
+    // Do NOT force-clear the flag here (it used to be zeroed): that cancelled
+    // a path send core 2 hadn't gotten to yet - waitCore2()'s own comment
+    // calls this out - and it fired every time a refresh landed while wavegen
+    // was streaming or a menu held the LED branch, leaving the crossbar
+    // silently diverged from the netlist. Leave it pending: core 2 processes
+    // it on its next free pass, and waitCore2() callers already tolerate a
+    // pending send (25ms timeout-and-proceed).
+    Serial.println("WARNING: Core 2 has not processed sendAllPathsCore2 yet "
+                   "(send still pending)");
   }
 
   if (ledShowOption != 0) {
