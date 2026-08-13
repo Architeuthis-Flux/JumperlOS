@@ -5761,7 +5761,17 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
             // Persist in BOTH directions here (the peak attack below only
             // persists rises): a stale-high saved V0 would otherwise reseed
             // the same phantom current on every boot/claim.
-            if ( fabsf( unloaded - jumperlessConfig.calibration.probe_droop_v0 ) > 0.002f ) {
+            //
+            // 20mV hysteresis, NOT 2mV: every probe tap IS a droop step that
+            // lands here, and ADC7 noise is +/-20mV, so a 2mV threshold
+            // marked the config dirty on essentially every tap AND re-marked
+            // it right after each save - hardware-confirmed storms of
+            // several full config.txt flash writes per second DURING active
+            // probing (pauseCore2 ~700ms each: missed pads, dimmed probe
+            // LED, stale row registrations). The runtime V0 stays exact
+            // either way; only the boot seed is 20mV coarse (~0.7mA, well
+            // under the 2mA detection band).
+            if ( fabsf( unloaded - jumperlessConfig.calibration.probe_droop_v0 ) > 0.02f ) {
                 jumperlessConfig.calibration.probe_droop_v0 = unloaded;
                 configChanged = true;
             }
@@ -5788,9 +5798,11 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
             s_gpioDroopValid = true;
             // Persist rises (clamped to the load-time 3.0-3.6 sanity band)
             // so the next boot/claim starts with a sane V0 even if SELECT
-            // was never visited.
+            // was never visited. Same 20mV hysteresis as the step re-anchor
+            // above - see that comment for the tap-triggered save storms a
+            // 2mV threshold caused.
             if ( peak >= 3.0f &&
-                 peak > jumperlessConfig.calibration.probe_droop_v0 + 0.002f ) {
+                 peak > jumperlessConfig.calibration.probe_droop_v0 + 0.02f ) {
                 jumperlessConfig.calibration.probe_droop_v0 = peak;
                 configChanged = true;
             }

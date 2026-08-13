@@ -64,10 +64,33 @@ ServiceStatus ConfigSaveService::service() {
     if (!configSavePending && !configChanged) {
         return ServiceStatus::IDLE;
     }
-    
+
     // Don't save during early boot
     if (millis() < 3000) {
         return ServiceStatus::IDLE;
+    }
+
+    // Implicit dirty-flag saves (configChanged with no explicit request)
+    // never run during active probing, and debounce on recent input. The
+    // probe droop tracker marks the config dirty DURING probing (every tap
+    // re-anchors V0), and saving right then stalls the whole probe pipeline
+    // mid-tap: pauseCore2 held up to ~700ms per save with storms of several
+    // full config.txt writes per second (hardware-confirmed over SWD) - the
+    // user sees missed pads, a dimmed probe LED, and taps registering rows
+    // late. The flag stays set, so the value persists in ONE save right
+    // after the probe session / input burst ends. Deliberately NARROWER than
+    // systemIdleForFlush(): menu and app settings changes still save ~2s
+    // after the last click (a menu left open must not strand a dirty config
+    // past a power cycle). Explicit requestConfigSave() still saves
+    // promptly.
+    if (!configSavePending) {
+        extern volatile int probeActive;
+        if (probeActive) {
+            return ServiceStatus::IDLE;
+        }
+        if ((uint32_t)(millis() - lastUserInputMs) < 2000) {
+            return ServiceStatus::IDLE;
+        }
     }
     
     if (debugConfigSaveTiming) {
