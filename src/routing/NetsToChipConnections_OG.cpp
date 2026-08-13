@@ -40,6 +40,7 @@ extern char *strcpy(char *dest, const char *src);
 #include "Graphics.h"
 #include "JumperlessDefines.h"
 #include "MatrixState.h"
+#include "InfraPaths.h"
 #include "States.h"
 #include "NetManager.h"
 #include "Peripherals.h"
@@ -2012,7 +2013,11 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
     int node1 = globalState.connections.bridges[bridgeIdx][0];
     int node2 = globalState.connections.bridges[bridgeIdx][1];
     int bridgeDuplicates = globalState.connections.bridges[bridgeIdx][2];
-    
+
+    // Infra bridges are never duplicated - mirrored from the V5 router's
+    // fillUnusedPaths (see the comment there).
+    if (infraIsBridge(node1, node2)) continue;
+
     // Find the path index for this bridge
     int pathIdx = -1;
     for (int p = 0; p < numberOfPaths; p++) {

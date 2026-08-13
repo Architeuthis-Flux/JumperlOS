@@ -161,13 +161,8 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         }
     }
 
-    if ( lastProbePowerDAC != probePowerDAC ) {
-        probePowerDACChanged = true;
-        // delay(1000);
-        Jerial.print( "probePowerDACChanged = " );
-        Jerial.println( probePowerDACChanged );
-        routableBufferPower( 1, 1 );
-    }
+    // (The lastProbePowerDAC change detector is gone: probe-power source
+    // moves are handled by InfraPaths' rebuild-head evaluation + nudges.)
 
     // Jerial.print("clearing highlighting");
     // Jerial.flush();

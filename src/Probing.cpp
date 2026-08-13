@@ -1,6 +1,7 @@
 #include "Probing.h"
 #include "CH446Q.h"
 #include "FileParsing.h"
+#include "InfraPaths.h"
 #include "JumperlOS.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
@@ -5136,6 +5137,11 @@ static void printProbeSwitchStats( const char* src, float mA, float adc7V, int p
 
 int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 
+    // Pending-nudge retry + claim-pin viability re-check for InfraPaths.
+    // Piggybacks on this service's ~500ms cadence, same as
+    // reassertGpioBufferDrive below.
+    infraServiceTick( );
+
     // Debounce/glitch filter and timing: only sample at a fixed interval.
     static bool have_previous_read = false;
     static float previous_current_mA[ 5 ] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
@@ -5243,7 +5249,10 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     } else if ( gpioPowerNode > 0 ) {
         swSource = "swap";
         UndoIngestGuard _undoGuard; // auto-managed power plumbing, not a user action
-        int dacNode = ( probePowerDAC == 1 ) ? DAC1 : DAC0;
+        // System plumbing on the reserved BUFFER_IN node - open the
+        // allowance for the whole swap window (closed below).
+        infraSetSystemBridgeAllowance( true );
+        int dacNode = ( infraProbePowerSource( ) == DAC0 ) ? DAC0 : DAC1;
         // Single refresh per swap: remove without refresh, let the add apply both.
         removeBridgeFromState( ROUTABLE_BUFFER_IN, gpioPowerNode, false );
         addBridgeToState( ROUTABLE_BUFFER_IN, dacNode );
@@ -5258,6 +5267,7 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         current_mA = probeCurrentMedian( 3 );
         removeBridgeFromState( ROUTABLE_BUFFER_IN, dacNode, false );
         addBridgeToState( ROUTABLE_BUFFER_IN, gpioPowerNode );
+        infraSetSystemBridgeAllowance( false );
         waitCore2( );
         if ( showProbeCurrent == 1 ) {
             Serial.print( "                          \rSwitch-check current (DAC swap): " );
@@ -5657,43 +5667,53 @@ static void seedGpioDroopV0FromConfig( void ) {
     s_gpioDroopValid = true;
 }
 
-// Find a routable RP GPIO (gpioDef[0..7]) that nothing is using: no net on
-// its node, not owned by MicroPython, no PWM, not reserved by the top OLED's
-// I2C connection. Returns the gpioDef index, or -1 if none is free.
-// Scans GPIO 8 down to 1: users reach for GPIO 1 first, so claim from the
-// far end to keep the low-numbered pins free for them.
-static int findUnusedRoutableGpio( void ) {
-    for ( int i = 7; i >= 0; i-- ) {
-        int node = gpioDef[ i ][ 1 ];
-        if ( globalState.config.gpioPythonOwned[ i ] )
-            continue;
-        if ( globalState.config.gpioPwmEnabled[ i ] )
-            continue;
-        if ( jumperlessConfig.top_oled.enabled &&
-             ( node == jumperlessConfig.top_oled.gpio_sda ||
-               node == jumperlessConfig.top_oled.gpio_scl ) )
-            continue;
-        if ( checkIfBridgeExistsLocal( node ) )
-            continue;
-        return i;
+// (Candidate SELECTION - which GPIO to claim, whether a DAC is free - moved
+// into routing/InfraPaths.cpp. Probing keeps only the PIN-LEVEL hardware
+// work below, because it owns the droop model and the gpioState/direction
+// bookkeeping that refreshConnections' setGPIO pass re-asserts.)
+
+// Pin-level GPIO power claim, called from InfraPaths' GPIO candidate
+// onActivate. The bridge itself is InfraPaths' business; this does the pin:
+// save the previous config (fresh claims only - a re-assert of the same
+// index must NOT capture our own forced output-high as the "previous"
+// config), force output-high in the config model so refreshConnections'
+// setGPIO pass re-asserts instead of stomping it, seed the droop model,
+// and drive the pad. 12mA drive: stiffer feed -> less droop while the pad
+// ladder / probe LED load the tip; setGPIO() never touches drive strength,
+// so it survives refreshes.
+void probeGpioPowerHwClaim( int idx ) {
+    if ( idx < 0 || idx > 7 )
+        return;
+    int pin = gpioDef[ idx ][ 0 ];
+    if ( s_gpioPowerIdx != idx ) {
+        s_gpioPowerIdx = idx;
+        s_gpioPowerSavedDir = globalState.config.gpioDirection[ idx ];
+        s_gpioPowerSavedState = gpioState[ idx ];
+        seedGpioDroopV0FromConfig( );
     }
-    return -1;
+    globalState.config.gpioDirection[ idx ] = 0;
+    gpioState[ idx ] = 1;
+    gpio_set_function( pin, GPIO_FUNC_SIO );
+    gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_12MA );
+    gpio_set_dir( pin, true );
+    gpio_put( pin, true );
 }
 
-// Tear down the GPIO power claim: bridge off, pin back to its previous
-// config. Callers hold UndoIngestGuard.
-static void releaseGpioBufferPower( void ) {
-    if ( s_gpioPowerIdx < 0 )
+// Pin-level release, called from InfraPaths' GPIO candidate onDeactivate.
+// If MicroPython took the pin, dir/pulls are Python's business now - only
+// the 12mA pad drive was ours to undo.
+void probeGpioPowerHwRelease( int idx ) {
+    if ( idx < 0 || idx > 7 || s_gpioPowerIdx != idx )
         return;
-    int node = gpioDef[ s_gpioPowerIdx ][ 1 ];
-    int pin = gpioDef[ s_gpioPowerIdx ][ 0 ];
-    if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, node ) ) {
-        removeBridgeFromState( ROUTABLE_BUFFER_IN, node, 1 );
+    int pin = gpioDef[ idx ][ 0 ];
+    if ( globalState.config.gpioPythonOwned[ idx ] ) {
+        gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_4MA );
+    } else {
+        globalState.config.gpioDirection[ idx ] = s_gpioPowerSavedDir;
+        gpioState[ idx ] = s_gpioPowerSavedState;
+        gpio_set_dir( pin, false );
+        gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_4MA ); // pad default
     }
-    globalState.config.gpioDirection[ s_gpioPowerIdx ] = s_gpioPowerSavedDir;
-    gpioState[ s_gpioPowerIdx ] = s_gpioPowerSavedState;
-    gpio_set_dir( pin, false );
-    gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_4MA ); // pad default
     s_gpioPowerIdx = -1;
     s_gpioDroopValid = false;
 }
@@ -5838,282 +5858,32 @@ static void printProbeSwitchStats( const char* src, float mA, float adc7V, int p
     Serial.flush( );
 }
 
-// Remove any routable-GPIO -> BUFFER_IN bridge that isn't the live claim.
-// The claim bridge and the pin's output direction persist into the saved
-// slot, so after a reboot (s_gpioPowerIdx reset to -1) or a runtime slot
-// load, the previous claim survives as a phantom second power source:
-// findUnusedRoutableGpio() sees its node as busy and claims ANOTHER GPIO on
-// top of it, and during switch-position current reads the stale pin keeps
-// sourcing the buffer, so INA1 reads ~0mA and a SELECT switch latches as
-// MEASURE. Seen on hardware. BUFFER_IN's power feed is system-managed, so
-// any GPIO bridged to it that we don't own is either our stale claim or
-// would fight the feed - evict it and put the pin back to an input either
-// way. Called from routableBufferPower(1) and from the slot-load path in
-// main.cpp (autoRefresh=false there: the load's own refresh applies it).
-void scrubStaleGpioBufferBridges( bool autoRefresh ) {
-#if defined(OG_JUMPERLESS)
-    return; // no routable buffer / GPIO bank on OG
-#endif
-    for ( int i = 0; i < 8; i++ ) {
-        if ( i == s_gpioPowerIdx )
-            continue;
-        int node = gpioDef[ i ][ 1 ];
-        if ( !checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, node ) )
-            continue;
-        removeBridgeFromState( ROUTABLE_BUFFER_IN, node, autoRefresh );
-        if ( globalState.config.gpioPythonOwned[ i ] )
-            continue; // evict the bridge but leave Python's dir/pull config alone
-        globalState.config.gpioDirection[ i ] = 1; // input (undo the leaked output-high)
-        gpio_set_dir( gpioDef[ i ][ 0 ], false );
-    }
-}
+// (scrubStaleGpioBufferBridges is gone: infra bridges are never serialized
+// into slots anymore, and stale claims in OLD slot files are dropped by
+// infraScrubLoadedBridges() in the state load sanitizer.)
 
+// Thin wrapper over the InfraPaths probe_power function. Kept because ~15
+// call sites (boot, config appliers, self test, serial commands, probe
+// entry) speak this signature. The candidate machinery (DAC1 -> GPIO8..1 ->
+// DAC0, user-claim detection, bridge add/remove) all lives in
+// routing/InfraPaths.cpp and runs at the head of every netlist rebuild.
 void Probing::routableBufferPower( int offOn, int flash, int force ) {
 #if defined(OG_JUMPERLESS)
+    (void)offOn; (void)flash; (void)force;
     return;
 #endif
-    // The probe buffer power rail (DAC0/DAC1 <-> BUFFER_IN bridge + its
-    // measure-mode output voltage) is auto-managed by the system, not a user
-    // action. Suppress undo recording for the whole function so neither the
-    // bridge add/remove nor the DAC voltage set pollutes the undo history.
-    // RAII so every early return below is covered.
-    UndoIngestGuard _undoGuard;
-
-    if ( offOn == 1 ) {
-        // A previous boot's GPIO power claim can persist in the loaded slot
-        // (bridge + output direction) - tear it down before choosing this
-        // boot's power source. Runs before the auto_connect_probe gate so
-        // the stale claim gets cleaned even when auto-connect is disabled.
-        scrubStaleGpioBufferBridges( );
+    bool wantOn = ( offOn == 1 );
+    bool changed = ( infraProbePowerWanted( ) != wantOn );
+    infraSetProbePowerEnabled( wantOn );
+    // Re-evaluate when the desired state changed, when the caller forces it,
+    // or when power should be on but no source is active yet (e.g. every
+    // candidate was claimed last time - resources may have freed up).
+    // infraNudge() refreshes only outside an in-flight rebuild and leaves a
+    // sticky retry flag otherwise, so this is safe from any core-0 context.
+    (void)flash; // flash-vs-local no longer matters: state is the backing store
+    if ( changed || force == 1 || ( wantOn && infraProbePowerSource( ) < 0 ) ) {
+        infraNudge( );
     }
-
-    if ( jumperlessConfig.dacs.auto_connect_probe <= 0 && offOn == 1 ) {
-        bufferPowerConnected = false;
-        return;
-    }
-
-    // GPIO-powered path (see banner above releaseGpioBufferPower). Claims a
-    // free routable GPIO the first time through, re-drives it on subsequent
-    // calls, and releases it when the flag turns off, power goes down, or
-    // MicroPython claims the pin out from under us mid-run.
-    if ( offOn == 1 && jumperlessConfig.debug.probe_power_gpio ) {
-        if ( s_gpioPowerIdx >= 0 &&
-             globalState.config.gpioPythonOwned[ s_gpioPowerIdx ] ) {
-            // Claimed by the user since we took it - give it up (skip the
-            // pin-config restore: Python owns dir/pulls now).
-            int stolenNode = gpioDef[ s_gpioPowerIdx ][ 1 ];
-            if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, stolenNode ) ) {
-                removeBridgeFromState( ROUTABLE_BUFFER_IN, stolenNode, 1 );
-            }
-            // Python owns dir/pulls now, but the 12mA drive was ours - put
-            // the pad back to its default so the pin behaves stock for them.
-            gpio_set_drive_strength( gpioDef[ s_gpioPowerIdx ][ 0 ], GPIO_DRIVE_STRENGTH_4MA );
-            s_gpioPowerIdx = -1;
-            s_gpioDroopValid = false;
-        }
-        if ( s_gpioPowerIdx < 0 ) {
-            int idx = findUnusedRoutableGpio( );
-            if ( idx >= 0 ) {
-                s_gpioPowerIdx = idx;
-                s_gpioPowerSavedDir = globalState.config.gpioDirection[ idx ];
-                s_gpioPowerSavedState = gpioState[ idx ];
-                // Output-high in the config model too, so refreshConnections'
-                // setGPIO() pass re-asserts it instead of stomping it back
-                // to the persisted input config.
-                globalState.config.gpioDirection[ idx ] = 0;
-                gpioState[ idx ] = 1;
-                seedGpioDroopV0FromConfig( );
-            }
-        }
-        if ( s_gpioPowerIdx >= 0 ) {
-            int node = gpioDef[ s_gpioPowerIdx ][ 1 ];
-            int pin = gpioDef[ s_gpioPowerIdx ][ 0 ];
-            // Keep the DAC parked at the measure-mode voltage so the (rare)
-            // DAC-swap fallback in checkSwitchPosition reads the level the
-            // thresholds were calibrated against. Droop zeroing is continuous
-            // (V0 peak tracker in gpioDroopCurrentEstimate) - no claim-time
-            // INA anchor, which would bake in whatever switch position we
-            // happened to boot into.
-            if ( probePowerDAC == 0 ) {
-                setDac0voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            } else {
-                setDac1voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            }
-            if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC0 ) ) {
-                removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC0, 1 );
-            }
-            if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC1 ) ) {
-                removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC1, 1 );
-            }
-            if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, node ) == 0 ) {
-                // Default duplicates: this is the buffer's POWER feed, so take
-                // the stacked (lowest-resistance) routing, not a single path.
-                addBridgeToState( ROUTABLE_BUFFER_IN, node );
-            }
-            gpio_set_function( pin, GPIO_FUNC_SIO );
-            // 12mA pad drive: stiffer power feed -> less droop while the pad
-            // ladder / probe LED load the tip, so measure-mode pad readings
-            // land near their final value on the first samples instead of
-            // ramping in "soft". setGPIO() never touches drive strength, so
-            // this survives refreshConnections; restored to 4mA on release.
-            gpio_set_drive_strength( pin, GPIO_DRIVE_STRENGTH_12MA );
-            gpio_set_dir( pin, true );
-            gpio_put( pin, true );
-            bufferPowerConnected = true;
-            lastProbePowerDAC = probePowerDAC;
-            probePowerDACChanged = false;
-            return;
-        }
-        // No free GPIO - fall through to the normal DAC path.
-    } else if ( s_gpioPowerIdx >= 0 ) {
-        // Powering down, or the flag was turned off: release the GPIO and
-        // let the normal path below handle the rest.
-        releaseGpioBufferPower( );
-    }
-
-    int flashOrLocal;
-
-    if ( flash == 1 ) {
-        flashOrLocal = 0;
-    } else {
-        flashOrLocal = 1;
-    }
-    // Serial.print("probePowerDAC = "); Serial.println(probePowerDAC);
-    // Serial.print("offOn = "); Serial.println(offOn);
-    // Serial.print("flash = "); Serial.println(flash);
-    // Serial.print("flashOrLocal = "); Serial.println(flashOrLocal);
-    bool needToRefresh = true;
-
-    bufferPowerConnected = false;
-
-    if ( probePowerDAC == 0 ) {
-        if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC0 ) == 0 ) {
-            // Serial.print("bufferPowerConnected dac 0 = "); Serial.println(bufferPowerConnected);
-            bufferPowerConnected = false;
-            needToRefresh = true;
-        } else if ( /*getDacVoltage( 0 ) < jumperlessConfig.calibration.measure_mode_output_voltage - 0.02 || getDacVoltage( 0 ) > jumperlessConfig.calibration.measure_mode_output_voltage + 0.02 && */ offOn == 1 ) {
-            // Serial.println("DAC 0 voltage is out of range, setting to 3.30 V");
-            // Serial.print("getDacVoltage(0) = ");
-            // Serial.println(getDacVoltage(0));
-            setDac0voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            return;
-        } else if ( offOn == 1 ) {
-            bufferPowerConnected = true;
-            if ( force == 0 ) {
-                return;
-            }
-        }
-
-    } else if ( probePowerDAC == 1 ) {
-        if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC1 ) == 0 ) {
-            //   Serial.print("bufferPowerConnected dac 1 = "); Serial.println(bufferPowerConnected);
-            bufferPowerConnected = false;
-            needToRefresh = true;
-        } else if ( /*getDacVoltage( 1 ) < 2.9 || getDacVoltage( 1 ) > 3.64 && */offOn == 1 ) {
-            // Serial.println("DAC 1 voltage is out of range, setting to 3.30 V");
-            // Serial.print("getDacVoltage(1) = ");
-            // Serial.println(getDacVoltage(1));
-            setDac1voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            return;
-        } else if ( offOn == 1 ) {
-            bufferPowerConnected = true;
-            if ( force == 0 ) {
-                return;
-            }
-        }
-    }
-    // Serial.print("bufferPowerConnected = "); Serial.println(bufferPowerConnected);
-
-    if ( offOn == 1 ) {
-        // Serial.println("power on\n\r");
-        //  delay(10);
-        if ( probePowerDAC == 0 ) {
-            setDac0voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            if ( probePowerDACChanged == true ) {
-                removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC1 );
-                addBridgeToState( ROUTABLE_BUFFER_IN, DAC0, 1 );
-                // State functions already call refresh, no need to set needToRefresh
-                needToRefresh = false; // Already refreshed by state functions
-            }
-        } else if ( probePowerDAC == 1 ) {
-            setDac1voltage( jumperlessConfig.calibration.measure_mode_output_voltage, 1, 0 );
-            if ( probePowerDACChanged == true ) {
-                removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC0 );
-                addBridgeToState( ROUTABLE_BUFFER_IN, DAC1, 1 );
-                // State functions already call refresh, no need to set needToRefresh
-                needToRefresh = false; // Already refreshed by state functions
-            }
-        }
-
-        // removeBridgeFromNodeFile(DAC0, -1, netSlot, 1);
-        //   pinMode(27, OUTPUT);
-        //    digitalWrite(27, HIGH);
-
-        // Add buffer power connection to state (RAM-based)
-        // No need to distinguish flash vs local - state system handles it
-        if ( probePowerDAC == 0 ) {
-            if ( bufferPowerConnected == false ) {
-                addBridgeToState( ROUTABLE_BUFFER_IN, DAC0, 0 );
-                // State function already refreshes, but force if needed
-                if ( force == 1 ) {
-                    if ( flash == 1 ) {
-                        refreshConnections( 0, 0, 0 );
-                    } else {
-                        refreshLocalConnections( 0, 0, 0 );
-                    }
-                }
-            }
-        } else if ( probePowerDAC == 1 ) {
-            if ( bufferPowerConnected == false ) {
-                addBridgeToState( ROUTABLE_BUFFER_IN, DAC1, 0 );
-                // State function already refreshes, but force if needed
-                if ( force == 1 ) {
-                    if ( flash == 1 ) {
-                        refreshConnections( 0, 0, 0 );
-                    } else {
-                        refreshLocalConnections( 0, 0, 0 );
-                    }
-                }
-            }
-        }
-
-        bufferPowerConnected = true;
-
-    } else {
-
-        // if ( bufferPowerConnected == true || true) {
-            // Serial.println("removing bridge");
-            if ( probePowerDAC == 0 ) {
-                if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC0 ) == 1 ) {
-                    // Serial.println("bridge exists");
-                    bufferPowerConnected = true;
-                    removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC0 , 1);
-                    bufferPowerConnected = false;
-                }
-            } else if ( probePowerDAC == 1 ) {
-                if ( checkIfBridgeExistsLocal( ROUTABLE_BUFFER_IN, DAC1 ) == 1 ) {
-                    // Serial.println("bridge exists");
-                    bufferPowerConnected = true;
-                    removeBridgeFromState( ROUTABLE_BUFFER_IN, DAC1 , 1);
-                    bufferPowerConnected = false;
-                }
-            }
-
-                // if (probePowerDAC == 0) {
-                //   setDac0voltage(0.0, 1);
-                // } else if (probePowerDAC == 1) {
-                //   setDac1voltage(0.0, 1);
-                // }
-
-                // Extra refresh to ensure everything is synced
-                //refreshConnections( 0, 0, 0 );
-            // }
-        // }
-        bufferPowerConnected = false;
-    }
-
-    lastProbePowerDAC = probePowerDAC;
-    probePowerDACChanged = false;
 }
 
 int probeADCmap[ 102 ];

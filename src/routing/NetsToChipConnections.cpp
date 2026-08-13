@@ -31,6 +31,7 @@ extern char *strcpy(char *dest, const char *src);
 #include "Probing.h"
 #include "FakeGpio.h"
 #include "RouteSafety.h"
+#include "InfraPaths.h"
 //#include "SerialWrapper.h"
 
 //#define Serial SerialWrap
@@ -1428,21 +1429,21 @@ void sortPathsByNet(
         globalState.connections.paths[pathIndex].node2 = node2;
         globalState.connections.paths[pathIndex].duplicate = 0;
 
-        // OPTIMIZATION: Only check routableBufferPower for DAC nets (net <= 5)
-        // Skip this expensive check for most paths
         if (globalState.connections.paths[pathIndex].net <= 5) {
           lastPowerPath = pathIndex;
-          
-          if (probePowerDAC == 0) {
-            if ((node1 == ROUTABLE_BUFFER_IN && node2 == DAC0) ||
-                (node1 == DAC0 && node2 == ROUTABLE_BUFFER_IN)) {
-              routableBufferPowerFound = pathIndex;
-            }
-          } else if (probePowerDAC == 1) {
-            if ((node1 == ROUTABLE_BUFFER_IN && node2 == DAC1) ||
-                (node1 == DAC1 && node2 == ROUTABLE_BUFFER_IN)) {
-              routableBufferPowerFound = pathIndex;
-            }
+        }
+
+        // The probe power feed gets routed FIRST (shifted to path 0 below)
+        // so its crosspoints land on predictable lanes. Match the ACTIVE
+        // infra pair, whatever its source: the old DAC0/DAC1 check missed
+        // the GPIO-powered variant entirely (its net is not <= 5, which is
+        // also why the old net<=5 gate can't wrap this).
+        {
+          int src = infraProbePowerSource();
+          if (src >= 0 &&
+              ((node1 == ROUTABLE_BUFFER_IN && node2 == src) ||
+               (node1 == src && node2 == ROUTABLE_BUFFER_IN))) {
+            routableBufferPowerFound = pathIndex;
           }
         }
 
@@ -1876,7 +1877,14 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
     int node1 = globalState.connections.bridges[bridgeIdx][0];
     int node2 = globalState.connections.bridges[bridgeIdx][1];
     int bridgeDuplicates = globalState.connections.bridges[bridgeIdx][2];
-    
+
+    // Infra bridges (probe power feed, lock bridges) are NEVER duplicated,
+    // regardless of the stored count: their resistance must stay a single
+    // known crosspoint path (the droop-current model depends on it). This
+    // guards even when the stored count isn't 0 - addConnection's
+    // dedupe-into-existing INCREMENTS the count if a user re-adds the pair.
+    if (infraIsBridge(node1, node2)) continue;
+
     // Find the path index for this bridge
     int pathIdx = -1;
     for (int p = 0; p < numberOfPaths; p++) {

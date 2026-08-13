@@ -19,6 +19,7 @@
 #include "FilesystemStuff.h"  // For safe file operations
 #include "FileCache.h"  // fileCacheFlushNowAll() big-event triggers
 #include "Undo.h"  // Phase 4.1 - undo log mutation hooks
+#include "InfraPaths.h"  // infraIsBridge / infraScrubLoadedBridges / system allowance
 
 // ============================================================================
 // CRITICAL MEMORY SAFETY NOTES
@@ -153,13 +154,13 @@ void ConnectionState::syncBridgesFromNets() {
     // Generate bridges from net node lists
     // Used when NETS_PRIMARY mode is active
     numBridges = 0;
-    
+
     for (int netIdx = 0; netIdx < numNets && netIdx < MAX_NETS; netIdx++) {
         netStruct& currentNet = nets[netIdx];
-        
+
         // Skip empty nets
         if (currentNet.nodes[0] == 0) continue;
-        
+
         // Connect all nodes in this net
         for (int i = 0; i < MAX_NODES && currentNet.nodes[i] != 0; i++) {
             for (int j = i + 1; j < MAX_NODES && currentNet.nodes[j] != 0; j++) {
@@ -167,16 +168,23 @@ void ConnectionState::syncBridgesFromNets() {
                     Serial.println("Warning: Maximum bridges reached during sync");
                     return;
                 }
-                
+
                 // Add bridge
                 bridges[numBridges][0] = currentNet.nodes[i];
                 bridges[numBridges][1] = currentNet.nodes[j];
                 bridges[numBridges][2] = currentNet.numberOfDuplicates;
+                // bridgeColors is index-parallel to bridges and this rebuild
+                // just re-derived every row - a leftover color from whatever
+                // used to sit at this index would attach to the wrong bridge.
+                bridgeColors[numBridges] = 0xFFFFFFFF;
                 numBridges++;
             }
         }
     }
-    
+    for (int i = numBridges; i < MAX_BRIDGES; i++) {
+        bridgeColors[i] = 0xFFFFFFFF;
+    }
+
     invalidateCache(false);
 }
 
@@ -1168,13 +1176,33 @@ bool JumperlessState::isNodeValid(int node) const {
     return ::isNodeValid(node) == 1;
 }
 
+void JumperlessState::adjustEphemeralIndicesAfterBridgeRemoval(int removedBridgeIdx) {
+    for (int i = 0; i < numEphemeralConnections; i++) {
+        if (ephemeralConnections[i].bridgeIndex > removedBridgeIdx) {
+            ephemeralConnections[i].bridgeIndex--;
+        }
+    }
+}
+
 bool JumperlessState::isConnectionAllowed(int node1, int node2, String& errorMsg) const {
     // Check for same node
     if (node1 == node2) {
         errorMsg = "Cannot connect node to itself: " + String(node1);
         return false;
     }
-    
+
+    // ROUTABLE_BUFFER_IN is system-reserved: its feed (DAC or GPIO power
+    // claim) is owned by InfraPaths. A user bridge here would either fight
+    // the live power feed or, worse, save into a slot and vanish on load
+    // (the load sanitizer scrubs everything touching this node). System
+    // code that legitimately manipulates it through this API (self test,
+    // the checkSwitchPosition DAC-swap fallback) opens the allowance first.
+    if ((node1 == ROUTABLE_BUFFER_IN || node2 == ROUTABLE_BUFFER_IN) &&
+        !infraSystemBridgeAllowed()) {
+        errorMsg = "ROUTABLE_BUFFER_IN is system-managed (probe power feed)";
+        return false;
+    }
+
     // Use existing validation logic
     extern bool connectionAllowed(int node1, int node2);
     if (!::connectionAllowed(node1, node2)) {
@@ -1424,6 +1452,16 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         }
     }
 
+    // System-owned bridges don't belong to a loaded slot: drop stale probe
+    // power claims (anything touching ROUTABLE_BUFFER_IN, persisted by older
+    // firmware) and lock-function pairs (re-added fresh by infraEvaluate at
+    // the next rebuild). Only for the ACTIVE state - a previewed slot goes
+    // through validate() too, and scrubbing is idempotent/read-only-safe
+    // there (it only drops rows and restores stale pin config).
+    if (this == &globalState) {
+        infraScrubLoadedBridges();
+    }
+
     bool isValid = validate(errorMsg);
     if (isValid) {
         clearDirty();
@@ -1438,7 +1476,14 @@ void JumperlessState::serializeBridges(String& output) const {
     for (int i = 0; i < connections.numBridges; i++) {
         int node1 = connections.bridges[i][0];
         int node2 = connections.bridges[i][1];
-        // Skip ephemeral connections - they should NEVER be saved to flash
+        // Skip ephemeral + infra connections - they should NEVER be saved to
+        // flash (infra bridges are re-created by infraEvaluate every rebuild;
+        // persisting them is how phantom power claims got into slots).
+        // BUFFER_IN pairs are skipped even unregistered - system-reserved.
+        if (infraIsBridge(node1, node2) ||
+            node1 == ROUTABLE_BUFFER_IN || node2 == ROUTABLE_BUFFER_IN) {
+            continue;
+        }
         if (!isEphemeralConnection(node1, node2)) {
             persistentBridges++;
         }
@@ -1452,8 +1497,12 @@ void JumperlessState::serializeBridges(String& output) const {
     for (int i = 0; i < connections.numBridges; i++) {
         int node1 = connections.bridges[i][0];
         int node2 = connections.bridges[i][1];
-        
-        // Skip ephemeral connections - they should NEVER be saved to flash
+
+        // Skip ephemeral + infra connections - see the count loop above.
+        if (infraIsBridge(node1, node2) ||
+            node1 == ROUTABLE_BUFFER_IN || node2 == ROUTABLE_BUFFER_IN) {
+            continue;
+        }
         if (isEphemeralConnection(node1, node2)) {
             continue;
         }
@@ -1658,12 +1707,34 @@ void JumperlessState::serializeNets(String& output) const {
         for (int j = 0; j < MAX_NODES && state.connections.nets[i].nodes[j] != 0; j++) {
             nodeCount++;
         }
-        
+
         // Skip nets with only one node
         if (nodeCount <= 1) {
             continue;
         }
-        
+
+        // Skip system-owned nets, mirroring serializeBridges' infra skip:
+        // the probe power net (contains ROUTABLE_BUFFER_IN) and any net
+        // that is exactly one active infra pair. Persisting them was how
+        // stale power-claim entries got into slot files.
+        {
+            bool infraNet = false;
+            for (int j = 0; j < nodeCount; j++) {
+                if (state.connections.nets[i].nodes[j] == ROUTABLE_BUFFER_IN) {
+                    infraNet = true;
+                    break;
+                }
+            }
+            if (!infraNet && nodeCount == 2 &&
+                infraIsBridge(state.connections.nets[i].nodes[0],
+                              state.connections.nets[i].nodes[1])) {
+                infraNet = true;
+            }
+            if (infraNet) {
+                continue;
+            }
+        }
+
         // Collect node list for this net (using SHORT names)
         String nodesList = "[";
         bool firstNode = true;

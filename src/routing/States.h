@@ -291,6 +291,10 @@ public:
     void clearAllEphemeralConnections(bool applyRouting = false, int ledShowOption = -1);
     bool isEphemeralConnection(int node1, int node2) const;
     int getEphemeralConnectionCount() const;
+    // InfraPaths' raw bridge removal shifts the bridge array under the
+    // ephemeral side-list; this applies the same bridgeIndex fixup that
+    // removeEphemeralConnection does internally.
+    void adjustEphemeralIndicesAfterBridgeRemoval(int removedBridgeIdx);
     
     // Power management
     void setDacVoltage(int dacNum, float voltage);

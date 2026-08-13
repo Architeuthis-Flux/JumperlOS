@@ -26,6 +26,7 @@
 #include <Wire.h>
 #include "Commands.h"
 #include "Graphics.h"
+#include "InfraPaths.h"
 #include "Probing.h"
 #include "Highlighting.h"
 #include "LogicAnalyzer.h"
@@ -1450,16 +1451,6 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     // int dacValue = (voltage * 4095 / 19.8) + 1641;
     int dacValue = ( voltage * 4095 / dacSpread[ 0 ] ) + dacZero[ 0 ];
 
-    if ( checkProbePower && probePowerDAC == 0 &&
-         ( voltage > 3.9 || voltage < 2.80 ) ) {
-        Serial.println(
-            "DAC 0 connected to probe LEDs, swapping LED power to DAC 1" );
-        // removeBridgeFromNodeFile(DAC0, ROUTABLE_BUFFER_IN, netSlot, 0, 0);
-        probePowerDAC = 1;
-        probePowerDACChanged = true;
-        routableBufferPower( 1, 1 );
-    }
-
     if ( dacValue > 4095 ) {
         dacValue = 4095;
     }
@@ -1488,8 +1479,20 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
         globalState.setDacVoltage(0, voltage);
     }
 
+    // A user parking this DAC outside the probe-power window claims it: the
+    // nudged rebuild's infra evaluation sees the candidate non-viable (it
+    // reads globalState.power.dac0, updated just above - which is why this
+    // runs AFTER the state write) and relocates the buffer feed. Replaces
+    // the old inline probePowerDAC swap.
+    if ( checkProbePower && save && infraProbePowerSource( ) == DAC0 &&
+         ( voltage > 3.9 || voltage < 2.80 ) ) {
+        Serial.println(
+            "DAC 0 was powering the probe - relocating the buffer feed" );
+        infraNudge( );
+    }
+
     if ( saveEEPROM && false) {
-        saveVoltages( globalState.power.topRail, globalState.power.bottomRail, 
+        saveVoltages( globalState.power.topRail, globalState.power.bottomRail,
                       globalState.power.dac0, globalState.power.dac1 );
     }
 }
@@ -1511,29 +1514,28 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
     if ( dacValue < 0 ) {
         dacValue = 0;
     }
-    if ( checkProbePower && probePowerDAC == 1 &&
-         ( voltage > 3.9 || voltage < 2.80 ) ) {
-
-        Serial.println(
-            "DAC 1 connected to probe LEDs, \n\rswapping LED power to DAC 0" );
-        // removeBridgeFromNodeFile(DAC0, ROUTABLE_BUFFER_IN, netSlot, 0, 0);
-        probePowerDAC = 0;
-        probePowerDACChanged = true;
-        routableBufferPower( 1, 1 );
-    }
-
     digitalWrite( LDAC, HIGH );
     mcp.setChannelValue( MCP4728_CHANNEL_B, dacValue );
     digitalWrite( LDAC, LOW );
-    
+
     // Update globalState for YAML persistence (single source of truth)
     // ONLY update state if save == 1 to avoid marking state dirty unnecessarily
     if ( save ) {
         globalState.setDacVoltage(1, voltage);
     }
 
+    // See setDac0voltage: out-of-window saved voltage = user claim; the
+    // nudged rebuild reads globalState.power.dac1 (written just above) and
+    // relocates the buffer feed. Replaces the old inline probePowerDAC swap.
+    if ( checkProbePower && save && infraProbePowerSource( ) == DAC1 &&
+         ( voltage > 3.9 || voltage < 2.80 ) ) {
+        Serial.println(
+            "DAC 1 was powering the probe - relocating the buffer feed" );
+        infraNudge( );
+    }
+
     if ( saveEEPROM && false) {
-        saveVoltages( globalState.power.topRail, globalState.power.bottomRail, 
+        saveVoltages( globalState.power.topRail, globalState.power.bottomRail,
                       globalState.power.dac0, globalState.power.dac1 );
     }
 }

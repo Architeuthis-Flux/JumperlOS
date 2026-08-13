@@ -513,7 +513,13 @@ void probeMapRange(int* mapMin, int* mapMax);
 // Evict stale routable-GPIO -> BUFFER_IN power-claim bridges (persisted into
 // slots by debug.probe_power_gpio) that don't belong to the live claim.
 // Called by routableBufferPower(1) and by the slot-load path in main.cpp.
-void scrubStaleGpioBufferBridges(bool autoRefresh = true);
+// Pin-level hardware for the GPIO probe-power claim; called ONLY from
+// routing/InfraPaths.cpp's probe_power candidate callbacks. Claim saves the
+// pin's previous config and drives it SIO/12mA/output-high; release
+// restores (unless MicroPython owns the pin now) and invalidates the droop
+// model. Candidate selection lives in InfraPaths.
+void probeGpioPowerHwClaim(int gpioDefIdx);
+void probeGpioPowerHwRelease(int gpioDefIdx);
 
 inline float checkProbeCurrent(void) {
     return Probing::getInstance().checkProbeCurrent();

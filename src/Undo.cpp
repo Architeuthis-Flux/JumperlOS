@@ -22,7 +22,8 @@
 #include "oled.h"
 #include "OledGui.h"  // OledVars::setStr() - publish last undo/redo label to live screens
 #include "NetManager.h"  // definesToChar() - friendly node names (GND/D2/...)
-#include "JumperlessDefines.h"  // DAC0/DAC1/ROUTABLE_BUFFER_IN node IDs
+#include "JumperlessDefines.h"
+#include "InfraPaths.h"  // infraIsBridge - the auto-managed authority
 #include "RotaryEncoder.h"  // NUM_SLOTS, extern netSlot
 
 extern volatile unsigned long undoActivityUntil;
@@ -2092,16 +2093,16 @@ static void recordOneAction(const UndoOp& op) {
     if (weOpened) undoEndTxn();
 }
 
-// Connections that are auto-managed by the system (routableBufferPower
-// re-attaches them on boot and whenever the probe needs power) should
-// NOT pollute the user-visible undo history - the user didn't make them
-// and can't meaningfully reason about undoing them.
+// Connections that are auto-managed by the system should NOT pollute the
+// user-visible undo history - the user didn't make them and can't
+// meaningfully reason about undoing them. The InfraPaths registry is the
+// authority (the old node-pair heuristic only knew BUFFER_IN<->DAC and let
+// the GPIO power claim and OLED/UART lock bridges leak into history).
+// BUFFER_IN pairs are covered even when transiently unregistered (self
+// test / calibration manipulate them under the system allowance).
 static inline bool isAutoManagedBridge(int n1, int n2) {
-    auto isBufferPair = [](int a, int b) {
-        return (a == ROUTABLE_BUFFER_IN || a == DAC0 || a == DAC1) &&
-               (b == DAC0 || b == DAC1 || b == ROUTABLE_BUFFER_IN);
-    };
-    return isBufferPair(n1, n2) || isBufferPair(n2, n1);
+    return infraIsBridge(n1, n2) ||
+           n1 == ROUTABLE_BUFFER_IN || n2 == ROUTABLE_BUFFER_IN;
 }
 
 void undoRecordConnect(int node1, int node2, uint32_t color) {

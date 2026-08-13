@@ -4,6 +4,7 @@
 #include "CH446Q.h"
 #include "FileParsing.h"
 #include "Graphics.h"
+#include "InfraPaths.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MatrixState.h"
@@ -145,6 +146,12 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   pauseCore2 = true;
   unsigned long start = millis();
   core1busy = true;
+  // Converge system-owned connections (probe power, lock bridges) BEFORE
+  // loading bridges into the router. Lives here - at the head of each
+  // HARDWARE-APPLYING rebuild - and deliberately NOT inside
+  // loadBridgesFromState(): slot preview calls that without applying to
+  // hardware, and evaluation fires DAC/GPIO hardware callbacks.
+  infraEvaluate();
   clearAllNTCC();
   //core1busy = true;
   // return;
@@ -435,7 +442,10 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
 unsigned long start2 = millis();
   clearAllNTCC();
   core1busy = true;
-  
+  // See refreshConnections: infra convergence runs at every hardware-applying
+  // rebuild head, never inside loadBridgesFromState (slot preview uses it).
+  infraEvaluate();
+
   // NEW: Load bridges from globalState instead of local files
   loadBridgesFromState();
 
@@ -638,7 +648,11 @@ void fastRefresh(int ledShowOption) {
   #endif
   
   core1busy = true;
-  
+
+  // See refreshConnections: infra convergence at every hardware-applying
+  // rebuild head.
+  infraEvaluate();
+
   // FAST PATH: Streamlined full refresh (incremental approach was fundamentally broken)
   // The key optimizations:
   // 1. Skip fillUnused (don't route duplicate paths)

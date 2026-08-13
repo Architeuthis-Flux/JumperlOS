@@ -83,10 +83,14 @@ struct config {
         // position sensing then reads the load current as ADC7 voltage
         // droop against a continuously-tracked unloaded peak V0 (persisted
         // as calibration.probe_droop_v0); the DAC bridge swap survives only
-        // as a fallback while no GPIO is claimed. Default ON since 5.7:
-        // the droop path got a clamped median-confirmed V0 tracker and no
-        // longer freezes when DAC0 is reassigned.
-        bool probe_power_gpio = true;
+        // as a fallback while no GPIO is claimed.
+        // DEPRECATED: probe power is now arbitrated by routing/InfraPaths
+        // (DAC1 -> GPIO8..1 -> DAC0, relocating automatically when the user
+        // claims a resource). This flag survives one release as a debug
+        // override that reorders the walk GPIO-first; default OFF because
+        // the DAC1 feed is 2 crosspoints on chip K vs the GPIO's 4 through
+        // the K<->L interchip lane.
+        bool probe_power_gpio = false;
         // Print one line per switch-position evaluation: sensing source
         // (ADC7 droop / DAC swap / INA), estimated current, droop anchor,
         // thresholds, and the resulting position.

@@ -749,13 +749,8 @@ menu:
     //     }
     // }
 
-    if ( lastProbePowerDAC != probePowerDAC ) {
-        probePowerDACChanged = true;
-        // delay(1000);
-        Jerial.print( "probePowerDACChanged = " );
-        Jerial.println( probePowerDACChanged );
-        routableBufferPower( 1, 1 );
-    }
+    // (The lastProbePowerDAC change detector is gone: probe-power source
+    // moves are handled by InfraPaths' rebuild-head evaluation + nudges.)
 
     // Jerial.print("clearing highlighting");
     // Jerial.flush();
@@ -1273,12 +1268,9 @@ loadfile:
     // This restores FakeGpioOutput/Input entries from FAKE_GPIO bridges in the state
     initializeFakeGpioFromLoadedState( );
 
-    // A slot saved while debug.probe_power_gpio held a power claim carries
-    // the claim bridge (+ output-high pin direction). Evict any that don't
-    // belong to the live claim BEFORE the refresh below routes them, so a
-    // phantom GPIO can't source the buffer until the next
-    // routableBufferPower(1) pass happens to run.
-    scrubStaleGpioBufferBridges( false );
+    // (Stale power-claim bridges in old slot files are dropped by
+    // infraScrubLoadedBridges() inside the state load sanitizer, and the
+    // refresh below re-adds the live infra bridges via infraEvaluate().)
 
     slotChanged = 0;
     loadingFile = 0;
