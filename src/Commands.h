@@ -31,7 +31,6 @@ void fastRefresh(int ledShowOption = 1);
 // Check and restore all locked connections from config
 // Call after clear, load, or any operation that might remove connections
 // Returns number of locked connections added (0 if all were already present)
-int handleLockedConnections();
 
 void updateLEDs(void);
 

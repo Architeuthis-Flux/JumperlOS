@@ -288,14 +288,71 @@ static bool enProbePower(void) { return false; }
 
 #endif
 
+// --- oled_i2c --------------------------------------------------------------
+//
+// The top OLED's I2C lock bridges: sda_row<->gpio_sda + scl_row<->gpio_scl,
+// resolved from live config each evaluation (the pins/rows are menu-editable
+// at runtime - a change simply resolves new pairs and the diff rewires).
+// Replaces handleLockedConnections' OLED block and its clones. viable() is
+// unconditionally true, preserving the old unconditional-add semantics;
+// user-conflict handling on the rows is future work.
+
+extern bool oledUsingHardwiredPins; // oled.cpp
+
+static int rpOledI2c(InfraPair out[2]) {
+    out[0] = {(int16_t)jumperlessConfig.top_oled.sda_row,
+              (int16_t)jumperlessConfig.top_oled.gpio_sda};
+    out[1] = {(int16_t)jumperlessConfig.top_oled.scl_row,
+              (int16_t)jumperlessConfig.top_oled.gpio_scl};
+    return 2;
+}
+static bool viAlways(void) { return true; }
+static void actNone(void) {}
+static void deactNone(void) {}
+
+static const InfraCandidate s_oledCandidates[] = {
+    { "config_pins", rpOledI2c, viAlways, actNone, deactNone },
+};
+
+static bool enOledI2c(void) {
+    // Exact gate from the old handleLockedConnections: either lock flag, and
+    // never when the panel sits on hardwired pins (no bridges needed at all).
+    return (jumperlessConfig.top_oled.lock_connection == 1 ||
+            globalState.config.oledLockConnection == 1) &&
+           !oledUsingHardwiredPins;
+}
+
+// --- serial_1 --------------------------------------------------------------
+
+static int rpSerial1(InfraPair out[2]) {
+    out[0] = {RP_UART_TX, NANO_D0};
+    out[1] = {RP_UART_RX, NANO_D1};
+    return 2;
+}
+
+static const InfraCandidate s_serial1Candidates[] = {
+    { "uart0_d0_d1", rpSerial1, viAlways, actNone, deactNone },
+};
+
+static bool enSerial1(void) {
+    return jumperlessConfig.serial_1.lock_connection == 1;
+}
+
+// --- serial_2 --------------------------------------------------------------
+// TODO (carried over from handleLockedConnections): determine node mappings
+// for serial_2 / the routable UART before enabling this row.
+
+static bool enSerial2(void) { return false; }
+
 // --- table -----------------------------------------------------------------
 
 static InfraFunction s_functions[] = {
     { "probe_power", enProbePower, s_probePowerCandidates,
       (int)(sizeof(s_probePowerCandidates) / sizeof(s_probePowerCandidates[0])),
       -1, -1, {}, 0 },
-    // oled_i2c / serial_1 / serial_2 land here in the lock-connection
-    // migration milestone.
+    { "oled_i2c", enOledI2c, s_oledCandidates, 1, -1, -1, {}, 0 },
+    { "serial_1", enSerial1, s_serial1Candidates, 1, -1, -1, {}, 0 },
+    { "serial_2", enSerial2, nullptr, 0, -1, -1, {}, 0 },
 };
 static const int s_numFunctions = (int)(sizeof(s_functions) / sizeof(s_functions[0]));
 

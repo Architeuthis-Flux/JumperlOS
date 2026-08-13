@@ -4237,9 +4237,10 @@ int oled::connect( void ) {
             jumperlessConfig.top_oled.gpio_scl, jumperlessConfig.top_oled.scl_row);
         #endif
 
-        // Use RAM-based state system for crossbar connections
-        addBridgeToState( jumperlessConfig.top_oled.gpio_sda, jumperlessConfig.top_oled.sda_row, 0 );
-        addBridgeToState( jumperlessConfig.top_oled.gpio_scl, jumperlessConfig.top_oled.scl_row, 0 );
+        // The I2C bridges are an infra function now: raise the runtime lock
+        // flag and let the refresh below re-evaluate (infraEvaluate resolves
+        // the pairs from live config and adds them dup=0, unserialized).
+        globalState.config.oledLockConnection = 1;
 
         // Extra refresh to ensure OLED connections are applied
         #if OLED_DEBUG
@@ -4528,9 +4529,10 @@ void oled::disconnect( void ) {
 
     // Only remove crossbar bridges if not using hardwired pins
     if ( !oledUsingHardwiredPins ) {
-        // Use RAM-based state system
-        removeBridgeFromState( jumperlessConfig.top_oled.gpio_sda, jumperlessConfig.top_oled.sda_row );
-        removeBridgeFromState( jumperlessConfig.top_oled.gpio_scl, jumperlessConfig.top_oled.scl_row );
+        // Drop the runtime lock flag; the refresh below re-evaluates and
+        // (unless top_oled.lock_connection keeps the gate open in config)
+        // tears the infra pairs down.
+        globalState.config.oledLockConnection = 0;
         // Restore pins to unassigned in net map so they show as normal when disconnected
         // gpioNet[jumperlessConfig.top_oled.sda_pin - 20] = -1;
         // gpioNet[jumperlessConfig.top_oled.scl_pin - 20] = -1;

@@ -129,8 +129,7 @@ void ConnectionState::clear() {
     }
 
     // Restore locked connections after all state has been reset.
-    extern int handleLockedConnections();
-    handleLockedConnections();
+    // (locked connections are re-added by infraEvaluate at the next rebuild)
 }
 
 void ConnectionState::invalidateCache(bool autoRefresh) {
@@ -738,8 +737,7 @@ void JumperlessState::clearAllConnections() {
     markDirty();
     
     // Restore locked connections after clearing
-    extern int handleLockedConnections();
-    handleLockedConnections();
+    // (locked connections are re-added by infraEvaluate at the next rebuild)
 
     // Big-event flush: clear-all is destructive and the user already
     // expects a brief moment of "saving" - we may as well commit now so

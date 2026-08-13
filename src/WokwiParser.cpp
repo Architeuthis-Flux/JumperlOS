@@ -733,98 +733,11 @@ bool parseWokwiDiagram(const String& jsonContent, JumperlessState& outState,
     // The actual net-to-color mapping will be done after nets are generated
     // by the system when the state is loaded and nets are computed
     
-    // Add locked OLED connections if enabled
-    // Skip if using hardwired pins (RP6/RP7 or internal I2C0) - no crossbar needed
-    extern struct config jumperlessConfig;
-    extern JumperlessState globalState;
-    extern bool oledUsingHardwiredPins;
-    
-    if ((jumperlessConfig.top_oled.lock_connection == 1 || globalState.config.oledLockConnection == 1) 
-        && !oledUsingHardwiredPins) {
-        // Check if OLED connections already exist in the parsed diagram
-        bool hasSdaConnection = false;
-        bool hasSclConnection = false;
-        
-        for (int i = 0; i < outState.connections.numBridges; i++) {
-            int n1 = outState.connections.bridges[i][0];
-            int n2 = outState.connections.bridges[i][1];
-            
-            // Check for SDA connection
-            if ((n1 == jumperlessConfig.top_oled.sda_row && n2 == jumperlessConfig.top_oled.gpio_sda) ||
-                (n2 == jumperlessConfig.top_oled.sda_row && n1 == jumperlessConfig.top_oled.gpio_sda)) {
-                hasSdaConnection = true;
-            }
-            
-            // Check for SCL connection
-            if ((n1 == jumperlessConfig.top_oled.scl_row && n2 == jumperlessConfig.top_oled.gpio_scl) ||
-                (n2 == jumperlessConfig.top_oled.scl_row && n1 == jumperlessConfig.top_oled.gpio_scl)) {
-                hasSclConnection = true;
-            }
-        }
-        
-        // Add missing OLED connections (only for crossbar-connected types)
-        if (!hasSdaConnection && outState.connections.numBridges < MAX_BRIDGES) {
-            int bridgeIdx = outState.connections.numBridges;
-            outState.connections.bridges[bridgeIdx][0] = jumperlessConfig.top_oled.sda_row;
-            outState.connections.bridges[bridgeIdx][1] = jumperlessConfig.top_oled.gpio_sda;
-            outState.connections.bridges[bridgeIdx][2] = -1;
-            outState.connections.numBridges++;
-            if (debugFP || !quietMode) {
-                Serial.println("  + Added locked OLED SDA connection: " + 
-                             String(jumperlessConfig.top_oled.sda_row) + " ↔ " + 
-                             String(jumperlessConfig.top_oled.gpio_sda));
-            }
-        }
-        
-        if (!hasSclConnection && outState.connections.numBridges < MAX_BRIDGES) {
-            int bridgeIdx = outState.connections.numBridges;
-            outState.connections.bridges[bridgeIdx][0] = jumperlessConfig.top_oled.scl_row;
-            outState.connections.bridges[bridgeIdx][1] = jumperlessConfig.top_oled.gpio_scl;
-            outState.connections.bridges[bridgeIdx][2] = -1;
-            outState.connections.numBridges++;
-            if (debugFP || !quietMode) {
-                Serial.println("  + Added locked OLED SCL connection: " + 
-                             String(jumperlessConfig.top_oled.scl_row) + " ↔ " + 
-                             String(jumperlessConfig.top_oled.gpio_scl));
-            }
-        }
-    }
-    
-    // Add locked probe power connection if switch is in connect mode (switchPosition == 1)
-    // switchPosition and probePowerDAC are already declared in Probing.h
-    
-    if (switchPosition == 1) {  // Only lock when in SELECT/CONNECT mode
-        // Determine which DAC to connect to based on probePowerDAC setting
-        int targetDAC = (probePowerDAC == 0) ? DAC0 : DAC1;
-        
-        // Check if probe power connection already exists
-        bool hasProbeConnection = false;
-        for (int i = 0; i < outState.connections.numBridges; i++) {
-            int n1 = outState.connections.bridges[i][0];
-            int n2 = outState.connections.bridges[i][1];
-            
-            if ((n1 == ROUTABLE_BUFFER_IN && n2 == targetDAC) ||
-                (n2 == ROUTABLE_BUFFER_IN && n1 == targetDAC)) {
-                hasProbeConnection = true;
-                break;
-            }
-        }
-        
-        // Add missing probe power connection
-        if (!hasProbeConnection && outState.connections.numBridges < MAX_BRIDGES) {
-            int bridgeIdx = outState.connections.numBridges;
-            outState.connections.bridges[bridgeIdx][0] = ROUTABLE_BUFFER_IN;
-            outState.connections.bridges[bridgeIdx][1] = targetDAC;
-            outState.connections.bridges[bridgeIdx][2] = -1;
-            outState.connections.numBridges++;
-            if (debugFP || !quietMode) {
-                Serial.println("  + Added locked probe power connection: ROUTABLE_BUFFER_IN ↔ " + 
-                             String(targetDAC == DAC0 ? "DAC0" : "DAC1") + 
-                             " (switch in connect mode)");
-            }
-        }
-    }
-    
+    // (Locked OLED / probe-power connections are infra functions now -
+    // routing/InfraPaths.cpp re-adds them at the rebuild that applies this
+    // import. The inline add-if-missing clones are gone; a BUFFER_IN pair
+    // in an imported diagram gets scrubbed by the load sanitizer anyway.)
+
     return connCount > 0;
 }
 
@@ -1103,58 +1016,10 @@ bool parseWokwiDiagramDirectToFile(const String& jsonContent, int slotNum,
         connIdx = connEnd + 1;
     }
     
-    // Add locked OLED connections if enabled
-    extern struct config jumperlessConfig;
-    extern JumperlessState globalState;
-    
-    if (jumperlessConfig.top_oled.lock_connection == 1 || globalState.config.oledLockConnection == 1) {
-        // Check if OLED connections were already parsed from the diagram
-        // We need to search the yamlContent string for these specific connections
-        String sdaConnectionStr1 = "n1: " + String(jumperlessConfig.top_oled.sda_row) + ", n2: " + String(jumperlessConfig.top_oled.gpio_sda);
-        String sdaConnectionStr2 = "n1: " + String(jumperlessConfig.top_oled.gpio_sda) + ", n2: " + String(jumperlessConfig.top_oled.sda_row);
-        String sclConnectionStr1 = "n1: " + String(jumperlessConfig.top_oled.scl_row) + ", n2: " + String(jumperlessConfig.top_oled.gpio_scl);
-        String sclConnectionStr2 = "n1: " + String(jumperlessConfig.top_oled.gpio_scl) + ", n2: " + String(jumperlessConfig.top_oled.scl_row);
-        
-        bool hasSdaConnection = (yamlContent.indexOf(sdaConnectionStr1) >= 0) || (yamlContent.indexOf(sdaConnectionStr2) >= 0);
-        bool hasSclConnection = (yamlContent.indexOf(sclConnectionStr1) >= 0) || (yamlContent.indexOf(sclConnectionStr2) >= 0);
-        
-        // Add missing OLED connections to YAML
-        if (!hasSdaConnection) {
-            yamlContent += "  - {n1: " + String(jumperlessConfig.top_oled.sda_row) + 
-                          ", n2: " + String(jumperlessConfig.top_oled.gpio_sda) + "}\n";
-            connCount++;
-            if (debugFP || !quietMode) {
-                Serial.println("  + Added locked OLED SDA connection: " + 
-                             String(jumperlessConfig.top_oled.sda_row) + " ↔ " + 
-                             String(jumperlessConfig.top_oled.gpio_sda));
-            }
-        }
-        
-        if (!hasSclConnection) {
-            yamlContent += "  - {n1: " + String(jumperlessConfig.top_oled.scl_row) + 
-                          ", n2: " + String(jumperlessConfig.top_oled.gpio_scl) + "}\n";
-            connCount++;
-            if (debugFP || !quietMode) {
-                Serial.println("  + Added locked OLED SCL connection: " + 
-                             String(jumperlessConfig.top_oled.scl_row) + " ↔ " + 
-                             String(jumperlessConfig.top_oled.gpio_scl));
-            }
-        }
-    }
-    
-    // Ensure probe power connection is established if switch is in connect mode
-    // switchPosition is already declared in Probing.h (included above)
-    
-    if (switchPosition == 1) {  // Only when in SELECT/CONNECT mode
-        // Use the existing routableBufferPower function to ensure connection
-        // This handles all the state management, voltage checks, and proper connection logic
-        Probing::getInstance().routableBufferPower(1, 1, 1);  // on, flash=true, force=true
-        
-        if (debugFP || !quietMode) {
-            Serial.println("  ✓ Ensured probe power connection via routableBufferPower()");
-        }
-    }
-    
+    // (Locked OLED / probe-power connections are infra functions now -
+    // routing/InfraPaths.cpp re-adds them at the rebuild that applies this
+    // import, so nothing needs to be injected into the YAML here.)
+
     // Add power section if voltages were detected (check for -9999 which means parse failed)
     yamlContent += "\npower:\n";
     if (topRailVoltage != -9999) {

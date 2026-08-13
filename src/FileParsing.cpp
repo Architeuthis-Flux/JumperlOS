@@ -643,8 +643,7 @@ void inputNodeFileList(int addRotaryConnections) {
     }
 
     // Use centralized locked connections handler instead of inline logic
-    extern int handleLockedConnections();
-    handleLockedConnections();
+    // (locked connections are re-added by infraEvaluate at the next rebuild)
     
    // Jerial.println("◆ Active slot " + String(slotNum) + ": parsed " + String(connCount) + " connections");
     
@@ -777,8 +776,7 @@ void inputNodeFileList(int addRotaryConnections) {
     }
     
     // Use centralized locked connections handler
-    extern int handleLockedConnections();
-    handleLockedConnections();
+    // (locked connections are re-added by infraEvaluate at the next rebuild)
     
     Jerial.println("◆ Slot " + String(slotNum) + ": parsed " + String(connCount) + " connections");
     
@@ -1262,22 +1260,9 @@ void clearNodeFile(int slot, int flashOrLocal) {
   // Clear all connections in globalState
   globalState.clearAllConnections();
   
-  // Re-add locked connections if configured
+  // (Locked connections are infra functions now - re-added by
+  // infraEvaluate() at the next rebuild; this inline clone is gone.)
   String errorMsg;
-  
-  if (jumperlessConfig.serial_1.lock_connection == 1) {
-    // Add UART locked connections (116-70, 117-71)
-    globalState.addConnection(116, 70, errorMsg);
-    globalState.addConnection(117, 71, errorMsg);
-  }
-  
-  if (jumperlessConfig.top_oled.lock_connection == 1 && !oledUsingHardwiredPins) {
-    // Add OLED locked connections
-    globalState.addConnection(jumperlessConfig.top_oled.sda_row, 
-                             jumperlessConfig.top_oled.gpio_sda, errorMsg);
-    globalState.addConnection(jumperlessConfig.top_oled.scl_row, 
-                             jumperlessConfig.top_oled.gpio_scl, errorMsg);
-  }
   
   if (flashOrLocal == 0) {
     // Save the cleared state to the slot

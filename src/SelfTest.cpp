@@ -32,6 +32,7 @@
 #include "LEDs.h"
 #include "Peripherals.h"
 #include "PersistentStuff.h"
+#include "InfraPaths.h"
 #include "Probing.h"
 #include "PsramArena.h"
 #include "RotaryEncoder.h"
@@ -1013,6 +1014,15 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     SlotManager::getInstance( ).enterTemporarySlot( 8 );
     selfTestNormalizeHardware( );
 
+    // The tests own the crossbar and the buffer feed for the whole session:
+    // park the probe-power infra function (or infraEvaluate would keep
+    // re-adding the DAC1->BUFFER_IN feed into every test's refresh) and open
+    // the reserved-node allowance for the tip test's direct BUFFER_IN
+    // bridges. Both restored in the teardown below.
+    bool wasProbePowerOn = infraProbePowerWanted( );
+    infraSetProbePowerEnabled( false );
+    infraSetSystemBridgeAllowance( true );
+
     for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
         if ( !runMask[ i ] )
             continue;
@@ -1035,6 +1045,8 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     // Teardown: never let a test voltage / crosspoint / driven GPIO leak
     // into the user's session or survive the first-start restart.
     selfTestNormalizeHardware( );
+    infraSetSystemBridgeAllowance( false );
+    infraSetProbePowerEnabled( wasProbePowerOn );
     leaveApp( ); // restore original slot
     setRailsAndDACs( 0 );
     refreshConnections( -1 );
