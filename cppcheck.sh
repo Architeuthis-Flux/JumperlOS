@@ -33,6 +33,7 @@ cppcheck \
   -D__packed= \
   -Iinclude \
   -Isrc \
+  -Isrc/routing \
   -Ilib \
   -Iboards/jumperless_v5 \
   -I.pio/libdeps/jumperless_v5/*/src \

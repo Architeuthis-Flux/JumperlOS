@@ -36,7 +36,8 @@ cppcheck \
   -D__packed= \
   -DPROGMEM= \
   -Isrc \
-  src/*.cpp src/*.c \
+  -Isrc/routing \
+  src/*.cpp src/*.c src/routing/*.cpp \
   2>&1 | grep -vE "^Checking |files checked|% done" | tee cppcheck_results.txt
 
 echo ""
