@@ -641,6 +641,77 @@ static bool s_systemBridgeAllowance = false;
 void infraSetSystemBridgeAllowance(bool allow) { s_systemBridgeAllowance = allow; }
 bool infraSystemBridgeAllowed(void) { return s_systemBridgeAllowance; }
 
+// ===========================================================================
+// Ephemeral ADC resource pool
+// ===========================================================================
+//
+// Cross-core note: TDM and the scan acquire on core 1, measure mode on
+// core 0. Owner slots are single-byte writes; the worst race is two users
+// grabbing the same just-freed channel in the same instant, which costs one
+// electrically-overlapped tap - the same exposure the old uncoordinated
+// per-consumer scans had, minus their systematic collisions.
+
+static volatile uint8_t s_adcOwner[5] = {INFRA_ADC_NONE, INFRA_ADC_NONE,
+                                         INFRA_ADC_NONE, INFRA_ADC_NONE,
+                                         INFRA_ADC_NONE};
+
+bool infraAdcUserClaimed(int adcChannel) {
+    if (adcChannel < 0 || adcChannel > 4) return true; // invalid = occupied
+    int adcNode = ADC0 + adcChannel;
+    ConnectionState& c = globalState.connections;
+    for (int i = 0; i < c.numBridges; i++) {
+        int n1 = c.bridges[i][0], n2 = c.bridges[i][1];
+        if (n1 != adcNode && n2 != adcNode) continue;
+        // FakeGPIO input bridges are the TDM's own plumbing, not a user claim.
+        if (IS_FAKE_GP_IN(n1) || IS_FAKE_GP_IN(n2)) continue;
+        // A measure-mode ephemeral bridge is pool-tracked via its owner slot,
+        // not treated as a user claim.
+        if (globalState.isEphemeralConnection(n1, n2)) continue;
+        return true;
+    }
+    return false;
+}
+
+int infraAcquireAdc(InfraAdcUser user, uint8_t candidateMask, bool allowSharedTdm) {
+    // Already own a still-viable channel? Keep it (TDM's keep-if-free rule).
+    for (int adc = 0; adc < 5; adc++) {
+        if (s_adcOwner[adc] == user && (candidateMask & (1u << adc)) &&
+            !infraAdcUserClaimed(adc)) {
+            return adc;
+        }
+    }
+    int sharedFallback = -1;
+    for (int adc = 0; adc < 5; adc++) {
+        if (!(candidateMask & (1u << adc))) continue;
+        if (infraAdcUserClaimed(adc)) continue;
+        if (s_adcOwner[adc] == INFRA_ADC_NONE) {
+            s_adcOwner[adc] = user;
+            return adc;
+        }
+        if (allowSharedTdm && s_adcOwner[adc] == INFRA_ADC_TDM && sharedFallback < 0) {
+            sharedFallback = adc; // ride along, ownership stays TDM's
+        }
+    }
+    return sharedFallback;
+}
+
+void infraReleaseAdc(InfraAdcUser user) {
+    for (int adc = 0; adc < 5; adc++) {
+        if (s_adcOwner[adc] == user) s_adcOwner[adc] = INFRA_ADC_NONE;
+    }
+}
+
+uint8_t infraFreeAdcMask(uint8_t candidateMask) {
+    uint8_t free = 0;
+    for (int adc = 0; adc < 5; adc++) {
+        if (!(candidateMask & (1u << adc))) continue;
+        if (infraAdcUserClaimed(adc)) continue;
+        if (s_adcOwner[adc] != INFRA_ADC_NONE) continue;
+        free |= (1u << adc);
+    }
+    return free;
+}
+
 int infraForceCandidate(const char* fnName, int candIdx) {
     for (int f = 0; f < s_numFunctions; f++) {
         if (strcmp(s_functions[f].name, fnName) != 0) continue;

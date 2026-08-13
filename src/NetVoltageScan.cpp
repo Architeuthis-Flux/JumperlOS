@@ -30,6 +30,7 @@
 #include "MatrixState.h"
 #include "Peripherals.h"
 #include "RotaryEncoder.h" // encoderServiceYield() - serviced during our waits
+#include "InfraPaths.h"
 #include "RouteSafety.h"
 #include "States.h"
 #include "externVars.h" // pauseCore2 / core2busy / lastUserInputMs
@@ -42,8 +43,6 @@ extern volatile bool refreshInProgress; // Commands.h
 extern volatile int probeActive;
 extern int& inClickMenu;          // Menus.h
 extern volatile int& inPadMenu;   // Probing.h
-// Defined in TimeDomainMultiplexer.cpp
-extern bool isAdcInUseByOtherConnections(int adcChannel);
 // Defined in Graphics.cpp - ant geometry continuity check for the report
 extern void printAntPathContinuity(Stream* out);
 
@@ -425,8 +424,10 @@ static void printScanStats(Stream* out) {
     out->println();
     out->printf("[nvscan] taps ok:%lu noroute:%lu adcbusy:%lu drift:%lu\n",
                 tapOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift);
-    // Sense routes as the taps would compute them right now
-    int adc = pickScanAdc();
+    // Sense routes as the taps would compute them right now (peek only -
+    // a debug print must not take pool ownership)
+    uint8_t freeMask = infraFreeAdcMask(0x0F);
+    int adc = freeMask ? __builtin_ctz(freeMask) : -1;
     if (adc >= 0) {
         for (int k = 0; k < scanNodeCount; k++) {
             printSenseRoute(scanNodes[k], adc, out);
@@ -497,18 +498,11 @@ float pathCurrentSigned_mA(int pathIndex) {
 }
 
 static int pickScanAdc() {
-    int fallback = -1;
-    for (int adc = 0; adc < 4; adc++) {
-        if (isAdcInUseByOtherConnections(adc)) continue;
-        if (adc == tdmInputs.adcChannel) {
-            // Sharing the FakeGPIO TDM's ADC is safe (both run sequentially
-            // on this core and disconnect after each read) but prefer not to.
-            fallback = adc;
-            continue;
-        }
-        return adc;
-    }
-    return fallback;
+    // Pool-arbitrated: ADC0-3, per-tap acquire (released right after the
+    // tap so measure mode / TDM aren't starved between taps). TDM's channel
+    // stays available as a shared last resort - both consumers tap
+    // sequentially on this core and disconnect after each read.
+    return infraAcquireAdc(INFRA_ADC_NVSCAN, 0x0F, true);
 }
 
 void serviceNetVoltageScan(void) {
@@ -613,6 +607,7 @@ void serviceNetVoltageScan(void) {
                 }
             }
         }
+        infraReleaseAdc(INFRA_ADC_NVSCAN); // per-tap: don't hold between taps
         core2busy = false;
     }
 

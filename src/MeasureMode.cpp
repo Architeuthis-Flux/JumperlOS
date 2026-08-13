@@ -9,6 +9,7 @@
  */
 
 #include "MeasureMode.h"
+#include "InfraPaths.h"
 #include "States.h"
 #include "Probing.h"
 #include "Peripherals.h"
@@ -291,28 +292,9 @@ void MeasureMode::stopMeasurement() {
 // ============================================================================
 
 int MeasureMode::findUnusedADC() {
-    // ADC defines: ADC0=110, ADC1=111, ADC2=112, ADC3=113, ADC4=114
-    // ADC7=115 is reserved for probe
-    const int adcDefines[] = { ADC0, ADC1, ADC2, ADC3, ADC4 };
-    
-    for (int i = 0; i < 5; i++) {
-        bool inUse = false;
-        
-        // Check if this ADC is connected to anything in bridges
-        for (int b = 0; b < globalState.connections.numBridges; b++) {
-            if (globalState.connections.bridges[b][0] == adcDefines[i] ||
-                globalState.connections.bridges[b][1] == adcDefines[i]) {
-                inUse = true;
-                break;
-            }
-        }
-        
-        if (!inUse) {
-            return i;  // Return channel number 0-4
-        }
-    }
-    
-    return -1;  // All ADCs in use
+    // Pool-arbitrated: measure mode may use ADC0-4 (mask 0x1F; ADC7 is
+    // hardwired to the probe tip). Exclusive ownership until disconnectADC.
+    return infraAcquireAdc(INFRA_ADC_MEASURE, 0x1F, false);
 }
 
 bool MeasureMode::connectADCToNode(int node) {
@@ -364,6 +346,9 @@ void MeasureMode::disconnectADC() {
                                               true,   // applyRouting - immediately apply to hardware
                                               1);     // ledShowOption - plain redraw, no clear
     }
+    // Return the channel to the ADC pool (the ephemeral machinery above owns
+    // routing/cleanup; the pool only arbitrates WHICH ADC we held).
+    infraReleaseAdc(INFRA_ADC_MEASURE);
 }
 
 // ============================================================================

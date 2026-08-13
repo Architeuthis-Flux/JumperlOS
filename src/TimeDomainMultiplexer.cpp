@@ -9,14 +9,12 @@
  */
 
 #include "TimeDomainMultiplexer.h"
+#include "InfraPaths.h"
 #include "JumperlessDefines.h"
 #include "States.h"
 #include "CH446Q.h"
 #include "Peripherals.h"
 #include <Arduino.h>
-
-// Forward declaration (defined at bottom of this file)
-bool isAdcInUseByOtherConnections(int adcChannel);
 
 // ============================================================================
 // Lifecycle
@@ -315,24 +313,20 @@ int8_t TimeDomainMultiplexer::getChipKX() {
 }
 
 int TimeDomainMultiplexer::assignFreeAdc() {
-    // Check each ADC channel (0-3) for availability
-    for (int adc = 0; adc < 4; adc++) {
-        if (!isAdcInUseByOtherConnections(adc)) {
-            adcChannel = adc;
-            return adc;
-        }
-    }
-    return -1;  // All ADCs in use
+    // Pool-arbitrated: ADC0-3 (mask 0x0F), exclusive ownership.
+    adcChannel = infraAcquireAdc(INFRA_ADC_TDM, 0x0F, false);
+    return adcChannel;
 }
 
 void TimeDomainMultiplexer::releaseAdc() {
     disconnectActive();
+    infraReleaseAdc(INFRA_ADC_TDM);
     adcChannel = -1;
 }
 
 bool TimeDomainMultiplexer::isAdcStillFree() {
     if (adcChannel < 0) return false;
-    return !isAdcInUseByOtherConnections(adcChannel);
+    return !infraAdcUserClaimed(adcChannel);
 }
 
 int TimeDomainMultiplexer::reassignAdc() {
@@ -341,21 +335,16 @@ int TimeDomainMultiplexer::reassignAdc() {
     // If current ADC is still free, keep it
     if (isAdcStillFree()) return adcChannel;
 
-    // Current ADC was taken -- find a new one
+    // Current ADC was claimed by a user bridge -- find a new one through the
+    // pool (release first so our own stale ownership doesn't block it).
     int8_t oldAdcX = getChipKX();
     int8_t oldY = -1;
     if (activeChannel >= 0 && activeChannel < TDM_MAX_CHANNELS) {
         oldY = channels[activeChannel].chipKY;
     }
 
-    int newAdc = -1;
-    for (int adc = 0; adc < 4; adc++) {
-        if (adc == adcChannel) continue;  // Skip current (taken) one
-        if (!isAdcInUseByOtherConnections(adc)) {
-            newAdc = adc;
-            break;
-        }
-    }
+    infraReleaseAdc(INFRA_ADC_TDM);
+    int newAdc = infraAcquireAdc(INFRA_ADC_TDM, (uint8_t)(0x0F & ~(1u << adcChannel)), false);
 
     if (newAdc < 0) return -1;  // No free ADC available
 
@@ -382,20 +371,5 @@ int TimeDomainMultiplexer::reassignAdc() {
 // (Implemented here to keep TDM self-contained; reads bridge array directly)
 // ============================================================================
 
-bool isAdcInUseByOtherConnections(int adcChannel) {
-    if (adcChannel < 0 || adcChannel > 3) return true;  // Invalid = occupied
-
-    int adcNode = ADC0 + adcChannel;  // ADC0=110, ADC1=111, ADC2=112, ADC3=113
-
-    for (int i = 0; i < globalState.connections.numBridges; i++) {
-        int n1 = globalState.connections.bridges[i][0];
-        int n2 = globalState.connections.bridges[i][1];
-
-        // Skip FakeGPIO input bridges (they're expected to use this ADC)
-        if (IS_FAKE_GP_IN(n1) || IS_FAKE_GP_IN(n2)) continue;
-
-        if (n1 == adcNode || n2 == adcNode) return true;
-    }
-
-    return false;
-}
+// (isAdcInUseByOtherConnections is gone: infraAdcUserClaimed in
+// routing/InfraPaths.cpp is the one user-claim predicate for the ADC pool.)

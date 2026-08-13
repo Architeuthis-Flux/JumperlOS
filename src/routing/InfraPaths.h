@@ -128,5 +128,43 @@ int infraForceCandidate(const char* fnName, int candIdx);
 void infraSetSystemBridgeAllowance(bool allow);
 bool infraSystemBridgeAllowed(void);
 
+// ---------------------------------------------------------------------------
+// Ephemeral ADC resource pool
+// ---------------------------------------------------------------------------
+//
+// The sibling of the persistent functions: system consumers that need AN adc
+// - not a specific one - for transient taps. One ownership table + one
+// user-claim predicate replaces the scattered per-consumer scans
+// (pickScanAdc, isAdcInUseByOtherConnections, MeasureMode::findUnusedADC).
+// A user bridging an ADC node claims it out of the pool the same way
+// bridging DAC1 claims it away from probe power.
+
+enum InfraAdcUser : uint8_t {
+    INFRA_ADC_NONE = 0,
+    INFRA_ADC_TDM,     // FakeGpio TimeDomainMultiplexer (core 1)
+    INFRA_ADC_NVSCAN,  // net voltage scan taps (core 1, per-tap acquire)
+    INFRA_ADC_MEASURE, // measure mode's ephemeral ADC bridge (core 0)
+};
+
+// Acquire a free ADC channel out of candidateMask (bit N = ADCN, ADC0-4).
+// Skips channels claimed by a user bridge or owned by another pool user.
+// Re-acquiring while already owning a still-viable channel returns it.
+// allowSharedTdm: with no exclusive channel free, ride along on TDM's
+// channel WITHOUT taking ownership (both consumers tap sequentially on
+// core 1 and disconnect after each read - the old pickScanAdc fallback).
+// Returns the channel, or -1.
+int infraAcquireAdc(InfraAdcUser user, uint8_t candidateMask, bool allowSharedTdm);
+
+// Release every channel this user owns. No-op for shared rides.
+void infraReleaseAdc(InfraAdcUser user);
+
+// Channels in candidateMask that are neither user-claimed nor pool-owned.
+// For dry-run displays and the future parallel multi-ADC scan.
+uint8_t infraFreeAdcMask(uint8_t candidateMask);
+
+// The single user-claim predicate: a non-ephemeral, non-FakeGPIO-input
+// bridge touches this ADC's node.
+bool infraAdcUserClaimed(int adcChannel);
+
 // Human-readable status dump (the `infra?` terminal command).
 void infraPrintStatus(Stream* out);
