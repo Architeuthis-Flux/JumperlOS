@@ -755,6 +755,39 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     delay( 8 );
     setDacByNumber( 1, 3.3f, 0 );
     delay( 25 );
+
+    // step 0 (piggybacked): two-point ADC7 self-calibration against the
+    // calibrated DAC1. calibrateDacs() covers ADC0-3 only, so boards carry
+    // ADC7's compile-time zero (8.0) forever - which reads ~+1V high
+    // (hardware-observed: this very 3.3V reference reading 4.44V, and
+    // measure mode's tip scaling off at the top of the pad ladder). The
+    // DAC1 -> buffer -> ADC7 route is already up; sample two known levels
+    // and solve spread/zero.
+    {
+        setDacByNumber( 1, 1.2f, 0 );
+        delay( 25 );
+        float raw1 = (float)readAdc( 7, 64 );
+        setDacByNumber( 1, 3.3f, 0 );
+        delay( 25 );
+        float raw2 = (float)readAdc( 7, 64 );
+        if ( raw2 - raw1 > 100.0f ) {
+            float spread7 = ( 3.3f - 1.2f ) * 4095.0f / ( raw2 - raw1 );
+            float zero7 = raw1 * spread7 / 4095.0f - 1.2f;
+            // Sanity: same bands the other bipolar channels calibrate into.
+            if ( spread7 > 15.0f && spread7 < 22.0f && zero7 > 7.0f && zero7 < 11.0f ) {
+                adcSpread[ 7 ] = spread7;
+                adcZero[ 7 ] = zero7;
+                jumperlessConfig.calibration.adc_7_spread = spread7;
+                jumperlessConfig.calibration.adc_7_zero = zero7;
+                Serial.printf( "  ADC7 calibrated: spread=%.2f zero=%.2f (raw %.0f@1.2V, %.0f@3.3V)\n\r",
+                               (double)spread7, (double)zero7, (double)raw1, (double)raw2 );
+            } else {
+                Serial.printf( "  ADC7 cal out of band (spread=%.2f zero=%.2f) - keeping current\n\r",
+                               (double)spread7, (double)zero7 );
+            }
+        }
+    }
+
     // Average 6 bursts and require them to agree: a wandering reference
     // poisons the servo target. Retry a couple of times - transients die -
     // then fail loudly so the operator knows the tip is being disturbed.
@@ -1087,6 +1120,19 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
             continue;
         oledStatus( oledNames[ i ] );
         selfTestFns[ i ]( r );
+
+        // Re-park probe power after EVERY test: the cable test switches it
+        // on for its INA signature (via routableBufferPower), and a feed
+        // left enabled poisons the next test - the tip test's DAC1->BUF_IN
+        // reference bridge matches the still-registered infra pair, so
+        // evaluation takes it over and re-parks DAC1 at
+        // measure_mode_output_voltage mid-measurement (hardware-observed as
+        // a 'bad 3.3V reference' that reads whatever the parked level is).
+        // The refresh flushes the teardown so the pair is unregistered
+        // BEFORE the next test adds its own bridges on those nodes.
+        infraForceCandidate( "probe_power", -1 );
+        infraSetProbePowerEnabled( false );
+        refreshConnections( -1, 0, 0 );
 
         // Live result: colored serial line + OLED verdict for this test
         bool fail = r.status[ i ] == SELFTEST_FAIL;

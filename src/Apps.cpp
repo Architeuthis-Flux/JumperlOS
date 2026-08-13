@@ -1,4 +1,5 @@
 #include "Apps.h"
+#include "InfraPaths.h"
 
 #include "ArduinoStuff.h"
 #include "CH446Q.h"
@@ -1502,6 +1503,15 @@ void calibrateDacs( ) {
 #endif
     // Enter temporary slot FIRST to preserve user's active slot
     SlotManager::getInstance( ).enterTemporarySlot( 8 );  // Save current slot, switch to temp slot 8
+
+    // Park probe power for the whole calibration: the infra evaluation
+    // otherwise re-parks DAC1 at measure_mode_output_voltage on every one of
+    // this app's many refreshes - IN BETWEEN this code's own set/measure
+    // pairs - which corrupts the zero/spread constants being solved for
+    // (hardware-observed as DAC1 outputting ~4.4V when told 3.3V).
+    bool wasProbePowerOn = infraProbePowerWanted( );
+    infraSetProbePowerEnabled( false );
+    refreshConnections( -1, 0, 0 ); // flush the feed teardown before measuring
     
     if ( firstStart == 1 ) {
         Serial.println( "\n\rFirst startup calibration\n\n\r" );
@@ -2271,6 +2281,7 @@ if ( yesNo == 1 ) {
 }
     changeTerminalColor( -1, true );
 
+    infraSetProbePowerEnabled( wasProbePowerOn );
     refreshConnections( -1 );
     routableBufferPower( 1, 0, 1 );
     // showProbeLEDs = 1;

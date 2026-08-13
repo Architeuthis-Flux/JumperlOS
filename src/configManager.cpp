@@ -2541,6 +2541,16 @@ void loadConfig(void) {
         jumperlessConfig.calibration.probe_droop_v0 > 3.6f) {
         jumperlessConfig.calibration.probe_droop_v0 = 3.35f;
     }
+    // Same sanity band for the measure-mode tip drive: a corrupted-high
+    // value (a tip-voltage servo chasing a bad reference can save up to
+    // 5.2V) makes infra park the probe DAC above 3.3V logic, which pushes
+    // the top of the pad ladder past ADC full-scale - hardware-observed as
+    // "measure mode off at the high end / logo pads" plus a self-test
+    // reference stuck at the bad parked level.
+    if (jumperlessConfig.calibration.measure_mode_output_voltage < 3.0f ||
+        jumperlessConfig.calibration.measure_mode_output_voltage > 3.6f) {
+        jumperlessConfig.calibration.measure_mode_output_voltage = 3.33f;
+    }
 
     readSettingsFromConfig();
     

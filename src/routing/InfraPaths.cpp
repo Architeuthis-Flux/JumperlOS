@@ -197,7 +197,10 @@ static void probeDacActivate(int dacNum) {
     // Skip when already parked - onActivate re-runs on EVERY rebuild
     // (idempotent re-assert), and an unconditional set would hit the MCP4728
     // over I2C and dirty the state each time.
+    // Clamp to the tip-drive sanity band (configManager also validates on
+    // load): parking above 3.3V logic clips the pad ladder's high end.
     float target = jumperlessConfig.calibration.measure_mode_output_voltage;
+    if (target < 3.0f || target > 3.6f) target = 3.33f;
     if (fabsf(getDacVoltage(dacNum) - target) > 0.005f) {
         if (dacNum == 0) {
             setDac0voltage(target, 1, 0, false);
