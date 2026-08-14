@@ -323,7 +323,10 @@ ServiceStatus MpRemoteService::service( ) {
 }
 
 
-volatile int probePowerDAConMpRemoteService = probePowerDAC;
+// (probePowerDAC is no longer snapshot/restored here: it is a compat view
+// owned by infraEvaluate(), which pins it - nothing a script does can
+// legitimately change "which DAC is the probe's". The old file-scope
+// initializer also read the cross-TU reference before its dynamic init.)
 volatile int switchPositionOnMpRemoteService = switchPosition;
 unsigned long lastShowLEDmeasurementsintervalinMpRemoteService = 0;
 unsigned long lastReadGPIOIntervalinMpRemoteService = 0;
@@ -338,7 +341,6 @@ void MpRemoteService::onScriptExecutionBegin() {
     if ( m_debug ) {
         Serial.println( "[MpRemote] Script execution beginning" );
     }
-    probePowerDAConMpRemoteService = probePowerDAC;
     switchPositionOnMpRemoteService = switchPosition;
     lastShowLEDmeasurementsintervalinMpRemoteService = showLEDmeasurementsInterval;
     showLEDmeasurementsInterval = 55000;
@@ -359,7 +361,6 @@ void MpRemoteService::onScriptExecutionComplete() {
     
     // Serial.println( "[MpRemote] Script execution completed" );
     pauseCore2 = 0;
-    probePowerDAC = probePowerDAConMpRemoteService;
     switchPosition = switchPositionOnMpRemoteService;
     showLEDmeasurementsInterval = lastShowLEDmeasurementsintervalinMpRemoteService;
     readGPIOInterval = lastReadGPIOIntervalinMpRemoteService;

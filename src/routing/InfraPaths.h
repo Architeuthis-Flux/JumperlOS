@@ -64,12 +64,13 @@ bool infraOwnsNode(int node);
 // Probe buffer power
 // ---------------------------------------------------------------------------
 
-// The node currently feeding ROUTABLE_BUFFER_IN (DAC1 / DAC0 / RP_GPIO_x),
+// The node currently feeding ROUTABLE_BUFFER_IN (DAC0 / RP_GPIO_x),
 // or -1 when probe power is off / no candidate was viable.
 int infraProbePowerSource(void);
 
 // gpioDef index of the active GPIO power claim, or -1 when probe power is
-// DAC-fed or off. Replaces probeGpioPowerClaimIdx().
+// DAC-fed or off. (probeGpioPowerClaimIdx() in Probing is the pin-level
+// claim this drives - still live, used by the GPIO-bank config appliers.)
 int infraProbePowerGpioIdx(void);
 
 // Turn the probe-power function on/off (the routableBufferPower wrapper and

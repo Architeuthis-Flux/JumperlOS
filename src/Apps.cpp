@@ -299,13 +299,13 @@ void calibrateProbeSwitchThresholds( void ) {
     //delay( 50 );
     checkProbeCurrentZero( );
 
-    // The thresholds ARE current signatures through INA1's DAC path, so
-    // force classic DAC power for the sampling even when
-    // debug.probe_power_gpio has the buffer GPIO-powered (INA1 would see
-    // ~0mA in both positions and the saved thresholds would be garbage).
-    // Restored below BEFORE saveConfig() so the flag isn't persisted off.
-    bool savedGpioPower = jumperlessConfig.debug.probe_power_gpio;
-    jumperlessConfig.debug.probe_power_gpio = false;
+    // The thresholds ARE current signatures through INA1 (its shunt R57 is
+    // hardwired in DAC_0's output path), so pin the feed to the DAC0
+    // candidate for the sampling - a GPIO feed would read ~0mA in both
+    // positions and the saved thresholds would be garbage. Unforced at the
+    // end of the app. (This used to toggle the now-ignored
+    // debug.probe_power_gpio flag instead.)
+    infraForceCandidate( "probe_power", 0 );
 
     routableBufferPower( 1, 1, 1 );
 
@@ -516,9 +516,9 @@ int row = 0;
     b.clear( );
     b.print( "Done!", 0x002000, 0x000000, 1, -1, -1 );
 
-    // Restore BEFORE saveConfig() so the user's flag survives in the file;
-    // the runtime re-claims its GPIO on the next routableBufferPower(1).
-    jumperlessConfig.debug.probe_power_gpio = savedGpioPower;
+    // Back to automatic candidate selection (GPIO reclaims if DAC0 is
+    // claimed) before the config save.
+    infraForceCandidate( "probe_power", -1 );
 
     saveConfig( );
     delay( 2000 );
@@ -2287,7 +2287,9 @@ if ( yesNo == 1 ) {
     infraDacParkEpochBump( );
     infraSetProbePowerEnabled( wasProbePowerOn );
     refreshConnections( -1 );
-    routableBufferPower( 1, 0, 1 );
+    if ( wasProbePowerOn ) {
+        routableBufferPower( 1, 0, 1 ); // forced nudge; unconditional 1 here used to discard the restore above
+    }
     // showProbeLEDs = 1;
     refreshConnections( -1 );
     configChanged = true;

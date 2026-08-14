@@ -315,6 +315,7 @@ static bool enProbePower(void) {
 
 static const InfraCandidate s_probePowerCandidates[] = {};
 static bool enProbePower(void) { return false; }
+void infraDacParkEpochBump(void) { /* no probe feed to re-park on OG */ }
 
 #endif
 

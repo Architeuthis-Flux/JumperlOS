@@ -3891,11 +3891,13 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
         else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);
         else if (strcmp(key, "show_node_errors") == 0) jumperlessConfig.debug.show_node_errors = parseBool(value);
+        // probe_power_gpio is DEPRECATED AND IGNORED (the feed source is
+        // candidate-driven in routing/InfraPaths.cpp) - parse it so old
+        // config files round-trip, but with NO side effects. (This used to
+        // call routableBufferPower(1,0,1), force-ENABLING probe power as a
+        // side effect of setting an ignored flag.)
         else if (strcmp(key, "probe_power_gpio") == 0) {
             jumperlessConfig.debug.probe_power_gpio = parseBool(value);
-            // Re-apply so the buffer power source swaps immediately (and a
-            // stale GPIO bridge is torn down when turning the flag off).
-            routableBufferPower(1, 0, 1);
         }
         else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
         else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);

@@ -266,11 +266,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         Jerial.println( );
         // shownMenuItems += printMenuLine(showExtraMenu, 1, "\n\r");
         //  Jerial.print("\t$ = calibrate DACs\n\r");
-        if ( probePowerDAC == 0 ) {
-            shownMenuItems += printMenuLine( showExtraMenu, 3, "\t^ = set DAC 1 voltage\n\r" );
-        } else if ( probePowerDAC == 1 ) {
-            shownMenuItems += printMenuLine( showExtraMenu, 3, "\t^ = set DAC 0 voltage\n\r" );
-        }
+        shownMenuItems += printMenuLine( showExtraMenu, 3, "\t^ = set DAC 1 voltage\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 1, "\tv = get ADC reading\n\r" );
         // Jerial.println();
 
@@ -2270,13 +2266,11 @@ CommandResult cmd_setDAC( char c, const String& line ) {
     }
 
     f1 = atof( f );
-    if ( probePowerDAC == 1 ) {
-        setDac0voltage( f1, 1, 1 );
-    } else if ( probePowerDAC == 0 ) {
-        setDac1voltage( f1, 1, 1 );
-    }
+    // The non-probe DAC is always DAC1 now: DAC0 is the probe feed (the
+    // only path INA1's switch sensing can see) and never the user's here.
+    setDac1voltage( f1, 1, 1 );
     configChanged = true;
-    Jerial.printf( "DAC %d = %0.2f V\n", !probePowerDAC, f1 );
+    Jerial.printf( "DAC 1 = %0.2f V\n", f1 );
     Jerial.flush( );
     return CMD_DONT_SHOW_MENU;
 }

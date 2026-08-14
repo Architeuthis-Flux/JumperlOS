@@ -5500,6 +5500,13 @@ float Probing::checkProbeCurrentZero( void ) {
 
     // Temporarily disconnect DAC0 from whatever it is connected to so
     // zero-calibration reads the true offset, then restore those exact links.
+    // Park the infra probe feed first: the remove's flush-refresh runs
+    // infraEvaluate, which would re-add the DAC0->BUF_IN feed from its
+    // registry mid-sampling. (The feed itself adds ~nothing to the reading -
+    // the buffer input is high-impedance - but the remove/restore below must
+    // only ever see USER routes.)
+    bool wasProbePowerOn = infraProbePowerWanted( );
+    infraSetProbePowerEnabled( false );
     extern int lastRemovedNodes[20];
     extern int lastRemovedNodesIndex;
 
@@ -5579,13 +5586,21 @@ float Probing::checkProbeCurrentZero( void ) {
     if ( hadConnections && savedCount > 0 ) {
         for ( int i = 0; i < savedCount; i++ ) {
             int otherNode = savedNodes[i];
-            if (otherNode == ROUTABLE_BUFFER_IN) {
-                addBridgeToState( DAC0, otherNode, 0, true );
-            } else if ( otherNode > 0 ) {
+            // NEVER re-add ROUTABLE_BUFFER_IN here: the feed is
+            // infra-managed and re-adds itself from its registry. A user
+            // copy created here reads as a claim on the buffer, the feed
+            // yields to it, and switch sensing goes dead (no live source).
+            if ( otherNode != ROUTABLE_BUFFER_IN && otherNode > 0 ) {
                 addBridgeToState( DAC0, otherNode, -1, true );
             }
-         
         }
+    }
+
+    // Un-park the feed; the next rebuild re-adds it (nudge if the restore
+    // loop above didn't already trigger one).
+    infraSetProbePowerEnabled( wasProbePowerOn );
+    if ( wasProbePowerOn ) {
+        infraNudge( );
     }
 
     showProbeLEDs = 4;
@@ -5593,12 +5608,11 @@ float Probing::checkProbeCurrentZero( void ) {
 #endif
 }
 
-int dontSwitchPowerDac = 1;
-
 // ---------------------------------------------------------------------------
-// EXPERIMENTAL debug.probe_power_gpio: power the routable buffer from an
-// unused RP GPIO driven HIGH instead of DAC0/DAC1, keeping the DAC free.
-// INA1 only sees current when the DAC sources the buffer, so switch-position
+// GPIO buffer power: the routable buffer fed from an unused RP GPIO driven
+// HIGH - the InfraPaths fallback when the user has claimed DAC0
+// (debug.probe_power_gpio, which once opted into this, is now ignored).
+// INA1 only sees current when DAC0 sources the buffer, so switch-position
 // sensing reads the load current as ADC7 voltage droop instead (continuous
 // unloaded-voltage normalization - see the droop banner below). The DAC
 // bridge swap survives only as a fallback while no V0 exists yet.
@@ -5988,7 +6002,7 @@ int Probing::getNothingTouched( int samples ) {
 // probe_min/probe_max pair is calibrated with the SELECT feed (PROBE_PIN at
 // ~3.3V) driving the tip. In MEASURE position the routable buffer drives the
 // tip instead - at measure_mode_output_voltage from the DAC, or the drooped
-// GPIO-high level under debug.probe_power_gpio - and the pad ladder into the
+// GPIO-high level when the feed fell through to a GPIO - and the pad ladder into the
 // 10K sense divider is purely resistive, so every reading scales linearly
 // with the tip voltage. The probe_min_measure/probe_max_measure pair holds
 // the measure endpoints in the 3.3V frame (seeded from the base pair at
@@ -6240,8 +6254,8 @@ static int medianProbeBursts( const int* v, int n ) {
 }
 
 // Phantom-touch gate: the pad ladder is only ever energized by the tip feed
-// (PROBE_PIN in select, the GPIO powering the buffer in measure under
-// debug.probe_power_gpio). Blink that feed off for one short burst before
+// (PROBE_PIN in select; in measure, the GPIO powering the buffer when the
+// feed fell through to one). Blink that feed off for one short burst before
 // accepting a changed reading - a real probe contact collapses to the dark
 // floor, while a reading injected from anywhere else (a finger bridging a
 // powered row onto a pad, body coupling from holding the board) persists,

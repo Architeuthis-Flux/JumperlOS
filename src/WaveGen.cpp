@@ -242,6 +242,14 @@ bool WaveGen::start() {
 void WaveGen::stop() {
     _running = false;
     // no  operations to abort in sync mode
+
+    // The wave streamed raw MCP4728 codes with globalState.power untouched.
+    // If the channel was DAC0 (the default - and the probe feed), the feed's
+    // skip-if-parked guard would trust the stale in-window state and leave
+    // the buffer at the last sample forever; the bump forces a re-park on
+    // the next rebuild.
+    extern void infraDacParkEpochBump(void);
+    infraDacParkEpochBump();
 }
 
 /*!

@@ -642,7 +642,12 @@ void readSettingsFromConfig() {
   // Serial.print("dac1: ");
   // Serial.println(globalState.power.dac1);
 
-  probePowerDAC = jumperlessConfig.dacs.probe_power_dac;
+  // dacs.probe_power_dac is parsed and persisted for config-file
+  // compatibility but NOT applied: probePowerDAC is a compat view owned by
+  // infraEvaluate() (routing/InfraPaths.cpp), which pins it to 0 - DAC0 is
+  // the only INA1-sensed feed. Old boards carry probe_power_dac = 1 in
+  // config.txt; re-applying it here on every config change re-tainted the
+  // view and armed stale ==1 branches downstream.
 
   //GPIO settings
 #if !defined(OG_JUMPERLESS)

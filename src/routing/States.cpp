@@ -209,31 +209,19 @@ void PowerState::setDefaults() {
     dac0 = 3.33f;
     dac1 = 0.0f;
 
-    // If probe auto-connect is enabled, the DAC that drives ROUTABLE_BUFFER_IN
-    // must sit at the calibrated measure_mode_output_voltage so the probe
-    // sense voltage divider reads correctly. Otherwise pad detection in
-    // measure mode is wrong until routableBufferPower() runs.
+    // If probe auto-connect is enabled, DAC0 - the probe feed, the only path
+    // INA1's switch sensing can see - must sit at the calibrated
+    // measure_mode_output_voltage so the probe sense voltage divider reads
+    // correctly (and so the feed's viability window [2.80, 3.90] passes at
+    // boot). DAC1 is never a feed; it keeps its plain default.
     //
-    // Honor probePowerDAC so a swapped probe-power DAC (see setDac0voltage /
-    // setDac1voltage in Peripherals.cpp) gets the calibrated value on the
-    // correct channel. Leave the other DAC at its plain default.
-    //
-    // Gating:
-    //   - configLoaded guards against static-init ordering (probePowerDAC is a
-    //     reference initialized in Probing.cpp; reading it before its
-    //     translation unit's dynamic init is UB).
-    //   - auto_connect_probe <= 0 means probe auto-wiring is off, so leave
-    //     both DACs at their non-probe defaults. Mirrors the early return in
-    //     Probing::routableBufferPower().
+    // Gating: configLoaded guards against reading jumperlessConfig before
+    // it loads; auto_connect_probe <= 0 means probe auto-wiring is off (the
+    // same gate infra's enProbePower() applies), so leave both DACs at
+    // their non-probe defaults.
     extern volatile bool configLoaded;
-    extern int& probePowerDAC;  // defined in Probing.cpp
     if (configLoaded && jumperlessConfig.dacs.auto_connect_probe > 0) {
-        const float probeV = jumperlessConfig.calibration.measure_mode_output_voltage;
-        if (probePowerDAC == 0) {
-            dac0 = probeV;
-        } else if (probePowerDAC == 1) {
-            dac1 = probeV;
-        }
+        dac0 = jumperlessConfig.calibration.measure_mode_output_voltage;
     }
 }
 

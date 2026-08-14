@@ -23,6 +23,7 @@
 #include "OledGui.h"  // retained OLED screen system (jl_oled_screen_* bridge)
 
 #include "JumperlessDefines.h"
+#include "routing/InfraPaths.h" // infraDacParkEpochBump (dac_set save=False)
 #include "SafeString.h"
 #include "hardware/gpio.h"
 
@@ -349,7 +350,15 @@ void jl_dac_set( int channel, float voltage, int save ) {
     // } else if (channel == 3) {
     //     channel = 1;
     // }
-    setDacByNumber( channel, voltage, save, 0, false );
+    // checkProbePower follows save: a saved write that parks the probe-feed
+    // DAC outside its window must relocate the feed immediately (parity with
+    // the terminal path). A save=False write moves ONLY the hardware, which
+    // the feed's state-trusting park guard cannot see - bump the epoch so
+    // the feed re-parks its DAC on the next rebuild instead of never.
+    setDacByNumber( channel, voltage, save, 0, save != 0 );
+    if ( !save && ( channel == 0 || channel == 1 ) ) {
+        infraDacParkEpochBump( );
+    }
 }
 
 float jl_dac_get( int channel ) {
