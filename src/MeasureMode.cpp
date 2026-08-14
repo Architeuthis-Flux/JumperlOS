@@ -9,6 +9,7 @@
  */
 
 #include "MeasureMode.h"
+#include "ReadingDisplay.h" // the pinned live reading line
 #include "InfraPaths.h"
 #include "States.h"
 #include "Probing.h"
@@ -136,7 +137,16 @@ ServiceStatus MeasureMode::service() {
             }
             
             lastStatus = ServiceStatus::BUSY;
-            return lastStatus;  // Don't process other services while in measure mode
+            // NB: this return skips only the REST OF THIS FUNCTION. It does
+            // not stop other services - BUSY is documented as "actively
+            // working but non-blocking" (JumperlOS.h) and serviceAll() latches
+            // blockingService only on BLOCKING. ProbePads (20Hz), ProbeSwitch
+            // (500ms), Peripherals (150ms) and Probing (100Hz) all keep
+            // running, and keep printing to the same terminal, while a
+            // measurement is live. The comment here used to claim otherwise,
+            // which is how several at-cursor prints ended up fighting the
+            // live reading line for the user's input row.
+            return lastStatus;
         }
         
         // Not in measure mode yet - check if user tapped a node (only if stable)
@@ -148,16 +158,25 @@ ServiceStatus MeasureMode::service() {
             return lastStatus;
         }
         
-    } else if (switchPosition == 1) {
-        // Switch is in select mode - stop measure mode if active
-        if (measurementActive) {
-            stopMeasurement();
-        }
-        // Turn off indicator when leaving measure mode
-        if (measureModeActive) {
-            measureModeActive = false;
-        }
-        // Reset measure mode stability tracking when leaving measure mode
+    } else if (switchPosition != 0) {
+        // ANY non-measure switch position releases measure mode. This used to
+        // be `switchPosition == 1`, which meant position -1 ("unknown" - what
+        // checkSwitchPosition() holds when it can't sense, and what
+        // jl_set_switch_position() may legally write) latched the measurement
+        // on forever: the display kept repainting one row's voltage and
+        // service() returned BUSY, starving every other service.
+        // Still scoped to != 0 so the 300ms debounce window at position 0
+        // (where switchStable is false) leaves an active measurement alone.
+        stopMeasurement();          // no-ops when nothing is active
+        measureModeActive = false;  // turn the logo indicator off
+        // Give the pinned terminal rows back (idempotent - no-ops when
+        // nothing is pinned, which is most ticks). Deliberately NOT done in
+        // stopMeasurement(): startMeasurement() calls that on every node
+        // change, and re-pinning per tap would march the reading down the
+        // screen two rows at a time.
+        ReadingDisplay::clearLiveSerialLine();
+        // Also drop stability tracking that never reached a measurement, so a
+        // half-accumulated count can't latch onto a stale node on the way back.
         stableReadingCount = 0;
         lastProbeReading = -1;
     }
@@ -245,6 +264,12 @@ void MeasureMode::stopMeasurement() {
     adcChannel = -1;
     adcDefine = -1;
     firstReading = true;
+
+    // Stability tracking has to die with the measurement, not just on the
+    // switch-position path: an external stop (Python session end) would
+    // otherwise leave a full count + stale node ready to re-latch instantly.
+    stableReadingCount = 0;
+    lastProbeReading = -1;
     
     // Clear highlighting state
     Highlighting& hl = Highlighting::getInstance();
@@ -302,8 +327,7 @@ bool MeasureMode::connectADCToNode(int node) {
     int channel = findUnusedADC();
     if (channel == -1) {
         // No ADC available - show error briefly
-        Serial.print("\r                                        \r");
-        Serial.print("No ADC available");
+        ReadingDisplay::emitLiveSerialLine("No ADC available");
         oled.clearPrintShow("No ADC\navailable", 2, true, true, true);
         return false;
     }
@@ -321,9 +345,11 @@ bool MeasureMode::connectADCToNode(int node) {
     if (!globalState.addEphemeralConnection(node, adcDefine, errorMsg, 
                                             true,   // applyRouting - immediately apply to hardware
                                             0)) {   // ledShowOption - no LED update during measurement
-        Serial.print("\r                                        \r");
-        Serial.print("Connection failed: ");
-        Serial.println(errorMsg);
+        // Single line, no newline: a newline here would scroll the reserved
+        // area out from under its own anchor.
+        char failLine[64];
+        snprintf(failLine, sizeof(failLine), "Connection failed: %s", errorMsg.c_str());
+        ReadingDisplay::emitLiveSerialLine(failLine);
         adcChannel = -1;
         adcDefine = -1;
         return false;
@@ -397,12 +423,12 @@ void MeasureMode::updateVoltageDisplay() {
     // Update OLED display
     oled.clearPrintShow(oledString, 2, true, true, true);
     
-    // Update serial output (clear line first)
-    
-    Serial.print("                                        \r");
-    Serial.print(smoothedVoltage, 2);
-    Serial.print(" V  row ");
-        Serial.print(definesToChar(measuredNode, 0));
+    // Serial output goes to the reserved status rows above the input line,
+    // so a reading that lands mid-keystroke can't eat what the user typed.
+    char statusLine[48];
+    snprintf(statusLine, sizeof(statusLine), "%.2f V  row %s",
+             smoothedVoltage, definesToChar(measuredNode, 0));
+    ReadingDisplay::emitLiveSerialLine(statusLine);
         lastVoltage = smoothedVoltage;
     }
 }

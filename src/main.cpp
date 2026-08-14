@@ -60,6 +60,7 @@ KevinC@ppucc.io
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "routing/InfraPaths.h" // infraProbePowerSource (boot feed verification)
 #include "SelfTest.h"
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
@@ -708,9 +709,18 @@ menu:
         // Without this, initDAC()/applyStateToHardware() leave the probe DAC at
         // whatever the slot's saved power.dac0/1 was (often the 3.33V default),
         // and pad detection in measure mode misreads until probeMode() runs.
-        // routableBufferPower() internally honors jumperlessConfig.dacs.auto_connect_probe,
-        // so this is a no-op when probe auto-connect is disabled.
+        // (The auto_connect_probe gate lives in infra's enProbePower(), so this
+        // is a no-op when probe auto-connect is disabled.)
         routableBufferPower( 1, 0 );
+        // Boot determinism: the nudge above refreshes immediately UNLESS a
+        // rebuild happened to be in flight (then only a sticky retry flag is
+        // left for the next ~500ms service tick). Verify the feed actually
+        // routed and force one synchronous rebuild if not - the probe must be
+        // powered and parked before the user's first tap, every boot.
+        if ( jumperlessConfig.dacs.auto_connect_probe > 0 &&
+             infraProbePowerSource( ) < 0 ) {
+            refreshLocalConnections( 0, 1, 0 );
+        }
 
         // If the first-start self test ran before the restart that got us
         // here, repaint its pass/fail LED overlay from the one-shot marker

@@ -16,7 +16,7 @@
 #include "FileParsing.h"   // checkIfBridgeExists-style helpers not needed; addBridge decl for wrapper paths
 #include "JumperlessDefines.h"
 #include "Peripherals.h"   // gpioDef, setDacXvoltage, getDacVoltage
-#include "Probing.h"       // probeGpioPowerHwClaim/Release, bufferPowerConnected
+#include "Probing.h"       // probeGpioPowerHwClaim/Release
 #include "States.h"
 #include "config.h"
 
@@ -230,7 +230,6 @@ static void parkDacAtMeasureTarget(int dacNum) {
 
 static void probeDacActivate(int dacNum) {
     parkDacAtMeasureTarget(dacNum);
-    bufferPowerConnected = true;
 }
 
 // DAC0: preferred - 2 crosspoints, same chip K as BUFFER_IN, and the ONLY
@@ -283,7 +282,6 @@ static void actGpio(void) {
     if (!nonInfraBridgeTouches(DAC0)) {
         parkDacAtMeasureTarget(0);
     }
-    bufferPowerConnected = true;
 }
 static void deactGpio(void) {
     if (s_gpioActiveIdx >= 0) {
@@ -543,9 +541,6 @@ void infraEvaluate(void) {
     }
 
 #if !defined(OG_JUMPERLESS)
-    if (s_functions[0].activeCandidate < 0) {
-        bufferPowerConnected = false;
-    }
     // Compatibility view: ~59 sites still read probePowerDAC ("which DAC is
     // the probe's"). Keep it pointing at the DAC infra is using (or would
     // prefer for fallbacks) until the reader sweep retires it.

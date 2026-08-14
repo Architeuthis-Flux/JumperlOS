@@ -1,4 +1,5 @@
 #include "Apps.h"
+#include "ReadingDisplay.h" // resetLastShown() - drop the live-reading pin
 #include "InfraPaths.h"
 
 #include "ArduinoStuff.h"
@@ -129,6 +130,12 @@ String normalizeSpaces( const char* s ) {
 
 void runApp( int index, char* name ) {
     const int APP_COUNT = NUM_APPS;
+
+    // Apps print scrolling output and own the terminal, which moves the rows a
+    // live reading pinned for itself. Drop that anchor so the next reading
+    // pins a fresh pair below the app's output rather than erasing one of its
+    // lines. (See ReadingDisplay::resetLastShown.)
+    ReadingDisplay::resetLastShown( );
 
     // Try to resolve by name
     if ( index < 0 || index >= APP_COUNT ) {

@@ -15,6 +15,7 @@
 #include "Graphics.h"
 #include "PersistentStuff.h"
 #include "RotaryEncoder.h"
+#include "ReadingDisplay.h"
 // gpio_coproc.h is RP2350-only (the single-cycle GPIO coprocessor). It
 // hard-#errors on RP2040, so include it only on RP2350.
 #if defined(PICO_RP2350)
@@ -1267,13 +1268,10 @@ volatile int& connectOrClearProbe = Probing::getInstance( ).connectOrClearProbe;
 volatile int& node1or2 = Probing::getInstance( ).node1or2;
 int& probeHighlight = Probing::getInstance( ).probeHighlight;
 volatile int& removeFade = Probing::getInstance( ).removeFade;
-volatile bool& bufferPowerConnected = Probing::getInstance( ).bufferPowerConnected;
 int& debugProbing = Probing::getInstance( ).debugProbing;
 volatile int& showingProbeLEDs = Probing::getInstance( ).showingProbeLEDs;
 int& switchPosition = Probing::getInstance( ).switchPosition;
 int& probePowerDAC = Probing::getInstance( ).probePowerDAC;
-int& lastProbePowerDAC = Probing::getInstance( ).lastProbePowerDAC;
-bool& probePowerDACChanged = Probing::getInstance( ).probePowerDACChanged;
 int& showProbeCurrent = Probing::getInstance( ).showProbeCurrent;
 
 // Additional references for global access
@@ -1883,12 +1881,7 @@ void Probing::handleEncoderCursorNavigation(
                     Highlighting::getInstance( ).clearHighlighting( );
                 }
 
-                Serial.print( "\r                                               \r" );
-                Serial.print( ">>>> " );
-                Serial.print( displayName );
-                Serial.flush( );
-
-                oled.clearPrintShow( displayName, 2, true, true );
+                ReadingDisplay::showName( displayName );
             }
 
             // 7. Save persistent cursor position
@@ -2201,6 +2194,13 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     int connectionsThisSession = 0; // Track total connections made this probe mode session
 
     routableBufferPower( 1, 1 );
+
+    // probeMode owns the terminal from here: its banners and node names
+    // scroll the rows the live reading pinned for itself, so drop that anchor
+    // rather than let the next reading erase one of OUR lines. (No reading
+    // can repaint while this loop runs - it services on jOS.serviceCritical(),
+    // which dispatches only CRITICAL services, and MeasureMode is HIGH.)
+    ReadingDisplay::resetLastShown( );
 
     // Banner deferral: on first entry of probeMode we don't yet know
     // whether this press is the first tap of a double-tap that will fire
@@ -6043,13 +6043,17 @@ void probeMapRange( int* mapMin, int* mapMax ) {
     if ( mMax <= 0 )
         mMax = jumperlessConfig.calibration.probe_max;
     // The scale must be read (nearly) simultaneously with the pad decode:
-    // the tip voltage differs between idle and touched (ladder load droops
-    // the GPIO/DAC feed), so a stale scale mis-maps by up to a third of a
-    // row at the top of the ladder DEPENDING ON TOUCH TIMING - i.e.
-    // intermittent off-by-one rows. 25ms keeps every decode within one
-    // read cycle of its scale while avoiding a redundant ADC7 read for each
-    // of the several probeMapRange() calls in a single decode pass.
-    if ( lastScaleRead == 0 || millis( ) - lastScaleRead > 25 ) {
+    // the decode is ratiometric (pad reading = tip voltage x ladder ratio,
+    // scale = tip voltage / 3.3), so the tip voltage cancels EXACTLY - but
+    // only if both reads see the same tip voltage. Hardware-measured: every
+    // connect/disconnect rebuild re-applies the crosspoints and wanders the
+    // tip ~70mV (more than a full row step at the ladder top) for a while
+    // after, on ANY feed - DAC0 and GPIO measured identically, and LED-only
+    // activity doesn't move it. A scale up to 25ms stale decoupled the two
+    // reads across that wander and smeared taps onto adjacent rows. 2ms
+    // still caches the several probeMapRange() calls within one sub-ms
+    // decode pass, but re-ratios fast enough that feed wander cancels.
+    if ( lastScaleRead == 0 || millis( ) - lastScaleRead > 2 ) {
         lastScaleRead = millis( );
         // 16 samples: the scale multiplies BOTH decode endpoints, so ADC7
         // noise moves every row boundary at once - worth the extra ~64us.
@@ -6137,7 +6141,10 @@ void Probing::checkPads( void ) {
     int foundDac = 0;
     // inPadMenu = 1;
 
-    Serial.print( "\r                                 \r" );
+    // (No line-clear here any more: every print this was clearing for - the
+    // "Top guy" / "ADC pad" pad names, and the changedNetColors dumps behind
+    // `&& false` - is commented out or dead, so all it did was wipe whatever
+    // the user was typing, ~20x/sec for as long as a pad was touched.)
 
     switch ( probeReading ) {
     case LOGO_PAD_TOP:
@@ -6411,6 +6418,20 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     int average = medianProbeBursts( measurements, numberOfReads );
     // Serial.print("average ");
     // Serial.println(average);
+
+    // CONNECT-mode one-touch-one-node latch (measure position), part 1:
+    // the RE-ARM. It must live OUT here because a released probe reads the
+    // no-touch floor (~23 raw), which fails the accept branch's
+    // minimum_probe_reading gate below and would never reach a re-arm
+    // placed inside it (field-tested: the latch accepted the first tap and
+    // then nothing, ever). Any burst at the no-touch level - or any read
+    // outside measure position - re-arms.
+    static bool measureTouchLatched = false;
+    if ( switchPosition != 0 ||
+         average < jumperlessConfig.calibration.minimum_probe_reading ) {
+        measureTouchLatched = false;
+    }
+
     int rowProbed = -1;
     // if (average < 90 && abs(average - nothingTouchedReading) > 10) {
     // Serial.print("var: ");
@@ -6427,6 +6448,41 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // }
 
     if ( maxVariance <= 6 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) ) {
+
+        // MEASURE position: contact engagement slews the pad reading over
+        // several ms (the tip feeds the ladder through the crossbar - ~150
+        // ohm + net capacitance - vs select's direct PROBE_PIN drive), so a
+        // single sub-ms burst looks flat mid-slew and passes the variance
+        // gate while decoding as a NEIGHBORING row (hardware-observed: taps
+        // reading/connecting adjacent rows). Require two consecutive bursts
+        // to agree before accepting a NEW reading; a real touch settles
+        // within a burst or two, so this only adds ~1ms of latency.
+        if ( switchPosition == 0 ) {
+            static int prevBurstAvg = -1000;
+            int prev = prevBurstAvg;
+            prevBurstAvg = average;
+            if ( abs( average - prev ) > 6 ) {
+                return -1; // mid-slew: accept on the next agreeing burst
+            }
+
+            // CONNECT-mode one-touch-one-node latch, part 2 (re-arm is up
+            // by the average computation): a HELD contact wanders with the
+            // post-rebuild tip drift (~70mV measured), and once it moves >5
+            // counts from the accepted value it re-enters this accept path
+            // as a "new" reading - decoding as the NEIGHBORING row and
+            // chaining the connection onto it (hardware-observed: taps in
+            // connect mode with the switch in measure connect adjacent
+            // rows). Latch on accept; only a burst back at the no-touch
+            // floor (a real lift) re-arms. Highlight/measure flows are
+            // untouched - they want continuous reads while dragging - and
+            // select position never latches.
+            if ( connectOrClearProbe == 1 ) {
+                if ( measureTouchLatched ) {
+                    return -1; // same touch drifting - not a new tap
+                }
+                measureTouchLatched = true; // consumes the release
+            }
+        }
 
         if ( probeReadingIsPhantom( average, mapMin ) ) {
             return -1;

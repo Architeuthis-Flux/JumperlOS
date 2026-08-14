@@ -20,7 +20,10 @@ import sys
 import tempfile
 import time
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# CSI sequences, plus the two-byte DECSC/DECRC (ESC 7 / ESC 8) that measure
+# mode's status-area writer emits around every live readout - without the
+# second alternative those bytes survive into captures and break parsing.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
 
 _failures = []
 _checks = 0

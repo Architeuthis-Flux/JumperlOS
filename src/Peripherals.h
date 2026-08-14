@@ -202,7 +202,6 @@ void setTopRail(float value, int save = 1, int saveEEPROM = 1);
 void setBotRail(int value = 1650, int save = 1, int saveEEPROM = 1);
 void setBotRail(float value, int save = 1, int saveEEPROM = 1);
 
-void dacSine(int resolution = 9);
 
 void dacTriangle(void);
 
@@ -210,8 +209,6 @@ float getDacVoltage(int dac);
 void setDacByNumber(int dac, float voltage = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);
 void setDac0voltage(float value = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);
 void setDac1voltage(float value = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);
-void setDac0voltage(uint16_t value);
-void setDac1voltage(uint16_t value);
 
 void refillTable(int amplitude = 2047, int offset = 2047, int adc = 2);
 int waveGen(void);

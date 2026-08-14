@@ -1976,8 +1976,11 @@ static MP_DEFINE_CONST_FUN_OBJ_0( jl_wavegen_is_running_obj, jl_wavegen_is_runni
 static mp_obj_t jl_adc_get_func( mp_obj_t channel_obj ) {
     int channel = mp_obj_get_int( channel_obj );
 
-    if ( channel < 0 || channel > 3 ) {
-        mp_raise_ValueError( MP_ERROR_TEXT( "ADC channel must be 0-3" ) );
+    // 0-3 = breadboard ADCs, 4 = the 0-5V channel, 5 = probe pad sense,
+    // 7 = probe tip (buffer output). readAdcVoltage() handles all of 0-7;
+    // the old 0-3 limit predated the extra channels.
+    if ( channel < 0 || channel > 7 ) {
+        mp_raise_ValueError( MP_ERROR_TEXT( "ADC channel must be 0-7" ) );
     }
 
     float voltage = jl_adc_get( channel );

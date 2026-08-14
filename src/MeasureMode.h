@@ -79,7 +79,7 @@ public:
     
     // Node validation
     static bool isValidMeasurableNode(int node);
-    
+
 private:
     MeasureMode();
     ~MeasureMode() = default;

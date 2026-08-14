@@ -1,4 +1,5 @@
 #include "Menus.h"
+#include "ReadingDisplay.h" // resetLastShown() - drop the live-reading pin
 #include "RotaryEncoder.h"
 #include "SafeString.h"
 #include "SingleCharCommands.h"
@@ -494,6 +495,12 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         inClickMenu = 0;
         return -1;
     }
+
+    // The menu owns the terminal from here and scrolls it freely, which moves
+    // the rows a live reading pinned for itself. Drop that anchor so the next
+    // reading pins a fresh pair below the menu's output instead of erasing a
+    // line the menu drew. (See ReadingDisplay::resetLastShown.)
+    ReadingDisplay::resetLastShown( );
 
     int returnedMenuPosition = -1;
     bool menuSessionRan = false;

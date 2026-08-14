@@ -24,6 +24,7 @@
 #include "FileParsing.h"
 #include "Undo.h"
 #include "Menus.h"
+#include "ReadingDisplay.h"
 #include <Arduino.h>
 #include <cmath>
 
@@ -194,6 +195,9 @@ void Highlighting::clearHighlighting( int updateLEDs) {
 
     // Re-tapping the same net after the highlight cleared must reprint.
     lastPrintedNet = -1;
+    // Whatever is on the panel is no longer ours to dedupe against (a menu,
+    // toast or script may paint over it), so force the next reading to draw.
+    ReadingDisplay::resetLastShown( );
 
     // Reset timers
     highlightTimer = 0;
@@ -206,6 +210,18 @@ void Highlighting::clearHighlighting( int updateLEDs) {
     if (updateLEDs != 0) {
     showLEDsCore2 = updateLEDs;  // Trigger full clear + LED update on core 2
     }
+}
+
+// Drop the latches that keep a reading on the panel: the live updater's
+// target net and the reprint guards. The highlight TIMEOUT deliberately
+// leaves these alone - a reading staying visible after the LEDs fade is the
+// feature - so this is the separate, explicit "someone else owns the display
+// now" reset, used when handing back from a Python script.
+void Highlighting::resetReadingState( ) {
+    showReadingNet = -1;
+    showReadingRow = -1;
+    lastPrintedNet = -1;
+    ReadingDisplay::resetLastShown( );
 }
 
 int lastReturnNode = -1;
@@ -796,108 +812,62 @@ static const char* netScanVoltageValue( int net, char* buf, size_t len ) {
     return buf;
 }
 
-// The ONE place a highlight reading becomes pixels + serial text.
-//
-// OLED layout:
-//   [ name (small, left)      row X (small, right) ]   <- 5pt header
-//   [           3.40 V (family font)               ]
-//   [           4.8 mA (family font)               ]
-// The header's row label comes from brightenedNode HERE, in the sink, so
-// the one-shot and live-updater paths can't render different layouts (the
-// old split - one-shot with row, live fallback without - made the display
-// visibly restructure itself ~0.5s after selecting a row).
-// Value rows use the USER'S configured font family: 8pt each when two
-// readings are present (12pt pairs clipped/overlapped on the 32px panel),
-// 12pt for a single reading. Name-only (e.g. "GND") renders large.
-// Serial gets the same content as a single overwritten line.
+// ---------------------------------------------------------------------------
+// Routable UART display helpers. The framing string and the scrolling live
+// view used to be spelled out inline in six near-identical copies.
+// ---------------------------------------------------------------------------
+
+// "9600 8N1"
+static const char* uartConfigText( char* buf, size_t len ) {
+    char parityChar;
+    switch ( USBSer1.paritytype( ) ) {
+    case 1: parityChar = 'O'; break;
+    case 2: parityChar = 'E'; break;
+    case 3: parityChar = 'M'; break;
+    case 4: parityChar = 'S'; break;
+    default: parityChar = 'N'; break;
+    }
+    snprintf( buf, len, "%d %d%c%d", USBSer1.baud( ), USBSer1.numbits( ),
+              parityChar, USBSer1.stopbits( ) + 1 );  // API: 0 -> 1 stop bit
+    return buf;
+}
+
+static const char* uartDirectionName( bool tx, bool rx ) {
+    if ( tx && rx )
+        return "UART Tx/Rx";
+    return tx ? "UART Tx" : "UART Rx";
+}
+
+// Repaint the scrolling byte view from scratch: header, then whatever Tx/Rx
+// we have. This renderer stays as-is - it streams live bytes into the small
+// scrolling text buffer, which the fixed rich layout can't express.
+static void uartRefreshLiveView( bool tx, bool rx, const char* txSnapshot,
+                                 size_t txLen, const char* rxSnapshot,
+                                 size_t rxLen ) {
+    char cfg[ 24 ];
+    char hdr[ 48 ];
+    snprintf( hdr, sizeof( hdr ), "%s %s\n", uartDirectionName( tx, rx ),
+              uartConfigText( cfg, sizeof( cfg ) ) );
+    OLEDOut.clear( );
+    OLEDOut.print( hdr );
+    if ( txLen > 0 ) {
+        OLEDOut.print( "Tx: " );
+        OLEDOut.print( txSnapshot );
+        OLEDOut.print( "\n" );
+    }
+    if ( rxLen > 0 ) {
+        OLEDOut.print( "Rx: " );
+        OLEDOut.print( rxSnapshot );
+        OLEDOut.print( "\n" );
+    }
+}
+
+// Highlight readings label themselves with the currently brightened node.
+// The rendering itself lives in ReadingDisplay so measure mode, the voltage
+// adjuster and the probe cursor draw the exact same way.
 static void showNetReading( const char* name, const char* value,
                             const char* value2 = nullptr ) {
-    bool haveV1 = ( value != nullptr && value[ 0 ] != '\0' );
-    bool haveV2 = ( value2 != nullptr && value2[ 0 ] != '\0' );
-
-    // Row label for the header's right side (row number / node name).
-    char rowBuf[ 16 ] = "";
-    const char* rowLabel = nullptr;
-    if ( ( haveV1 || haveV2 ) && brightenedNode > 0 ) {
-        snprintf( rowBuf, sizeof( rowBuf ), "%s", definesToChar( brightenedNode, 0 ) );
-        if ( rowBuf[ 0 ] != '\0' )
-            rowLabel = rowBuf;
-    }
-
-    Serial.print( "\r                                              \r" );
-    Serial.print( name );
-    if ( rowLabel != nullptr ) {
-        Serial.print( "  " );
-        Serial.print( rowLabel );
-    }
-    if ( haveV1 ) {
-        Serial.print( "  " );
-        Serial.print( value );
-    }
-    if ( haveV2 ) {
-        Serial.print( "  " );
-        Serial.print( value2 );
-    }
-    Serial.flush( );
-
-    // Value rows honor the configured font family at the closest point
-    // size; the header uses Andale Mono 5pt (index 12) - the smallest font
-    // on board - because most families have no readable sub-8pt cut and
-    // three family-sized rows don't fit 32px.
-    FontFamily fam = mapConfigValueToFontFamily( jumperlessConfig.top_oled.font );
-    int16_t medFont = (int16_t)FontManager::getFontForPointSize( fam, 8 );
-    int16_t labelFont = 12; // Andale Mono 5pt
-
-    bool haveValues = ( haveV1 || haveV2 );
-
-    // Single value / name-only rows render as big as actually FITS: a fixed
-    // 12pt overflowed the panel on long words ("FLOATING").
-    auto bestFitFont = [&]( const char* text ) -> int16_t {
-        uint8_t pt = FontManager::findBestFitPointSize( fam, text, 120, 12, 6 );
-        return (int16_t)FontManager::getFontForPointSize( fam, pt );
-    };
-
-    int16_t nameFont = haveValues ? labelFont : bestFitFont( name );
-    int16_t valueFont;
-    if ( haveV1 && haveV2 ) {
-        valueFont = medFont;
-    } else {
-        valueFont = bestFitFont( haveV1 ? value : value2 );
-    }
-
-    OledTextRow rows[ 3 ] = {};
-    int n = 0;
-    rows[ n ].segs[ 0 ] = { name, nameFont, OLED_ALIGN_INHERIT };
-    rows[ n ].segCount = 1;
-    if ( haveValues && rowLabel != nullptr ) {
-        rows[ n ].segs[ 1 ] = { rowLabel, labelFont, OLED_ALIGN_RIGHT };
-        rows[ n ].segCount = 2;
-    }
-    rows[ n ].align = haveValues ? OLED_ALIGN_LEFT : OLED_ALIGN_CENTER;
-    // Fixed header height: measured ink boxes vary per string (descenders,
-    // ascender mixes), which made some labels render 2px lower than others.
-    // Pinning the row to the 5pt cap height gives every header the same
-    // baseline; descender tails hang into the row gap below.
-    if ( haveValues ) {
-        rows[ n ].fixedH = 7;
-    }
-    n++;
-    if ( haveV1 ) {
-        rows[ n ].segs[ 0 ] = { value, valueFont, OLED_ALIGN_INHERIT };
-        rows[ n ].segCount = 1;
-        rows[ n ].align = OLED_ALIGN_CENTER;
-        n++;
-    }
-    if ( haveV2 ) {
-        rows[ n ].segs[ 0 ] = { value2, valueFont, OLED_ALIGN_INHERIT };
-        rows[ n ].segCount = 1;
-        rows[ n ].align = OLED_ALIGN_CENTER;
-        n++;
-    }
-    // Top-anchored: header hugs the top edge, readings fill the remaining
-    // height. rowGap 1 keeps the three-row stack inside 32px so the bottom
-    // reading's descenders don't clip.
-    oled.clearPrintShowRich( rows, n, 1, true, true, haveValues );
+    ReadingDisplay::show( name, brightenedNode, value, value2 );
 }
 
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
@@ -942,8 +912,9 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         // Serial.print("netHighlighted = ");
         // Serial.println(netHighlighted);
         if ( print == 1 ) {
-            Serial.print( "\r                                               \r" );
-            Serial.flush( );
+            // No serial pre-clear here: ReadingDisplay clears the line as part
+            // of every print, and blanking it for branches that print nothing
+            // just threw away the reading still shown on the OLED.
             oled.setTextSize( 1 );
         }
         clearColorOverrides( 1, 1, 0 );
@@ -996,7 +967,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 DACcolorOverride1 = 0x000000;
                 if ( print == 1 ) {
                     char value[ 28 ];
-                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.dac0 );
+                    snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 0 ) );
                     char curBuf[ 16 ];
                     showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                 }
@@ -1010,7 +981,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 DACcolorOverride1 = -2;
                 if ( print == 1 ) {
                     char value[ 28 ];
-                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.dac1 );
+                    snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 1 ) );
                     char curBuf[ 16 ];
                     showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
                 }
@@ -1018,11 +989,6 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             }
             break;
         default: {
-
-            if ( print == 1 ) {
-                Serial.print( "\r                                          \r" );
-                Serial.flush( );
-            }
 
             // Serial.print("  \t ");
             int specialPrint = 0;
@@ -1161,20 +1127,6 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     prevRx[0] = '\0';
 
                     if ( print == 1 ) {
-                        int baud = USBSer1.baud( );
-                        int bits = USBSer1.numbits( );
-                        int stopbits = USBSer1.stopbits( ) + 1; // API returns 0->1 stop, 1->2 stops
-                        int parity = USBSer1.paritytype( );
-
-                        char parityChar = 'N';
-                        switch ( parity ) {
-                        case 1: parityChar = 'O'; break;
-                        case 2: parityChar = 'E'; break;
-                        case 3: parityChar = 'M'; break;
-                        case 4: parityChar = 'S'; break;
-                        default: parityChar = 'N'; break;
-                        }
-
                         // Encoder-driven highlights show only static UART
                         // info. Callers signal "probe/node" with <= 0
                         // (Probing's connect cursor passes 0; the old
@@ -1182,31 +1134,16 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         bool calledFromEncoder = ( encoderNetHighlighted > 0 );
 
                         if ( calledFromEncoder || !haveLiveData ) {
-                            // No live data OR encoder-driven highlight -> keep old single-shot OLED behavior
-                            Serial.print( uartTxOnNet && uartRxOnNet ? "UART Tx/Rx  " : ( uartTxOnNet ? "UART Tx    " : "UART Rx    " ) );
-                            Serial.print( baud );
-                            Serial.print( " " );
-                            Serial.print( bits );
-                            Serial.print( parityChar );
-                            Serial.print( stopbits );
-                            Serial.flush( );
-
-                            char oledString[ 32 ];
-                            sprintf( oledString, "UART %s\n%d %d%c%d",
-                                     ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                                     baud, bits, parityChar, stopbits );
-                            oled.clear( );
-                            oled.clearPrintShow( oledString, 2, true, true, true );
-                            oled.show( );
-
+                            // No live data OR encoder-driven highlight -> the
+                            // static config reads like any other net's display.
+                            char cfg[ 24 ];
+                            showNetReading( uartDirectionName( uartTxOnNet, uartRxOnNet ),
+                                            uartConfigText( cfg, sizeof( cfg ) ) );
                         } else {
-                            // Non-encoder path + live data available — print header only; live data appended by checkForReadingChanges()
-                            OLEDOut.clear();
-                            char hdr[48];
-                            snprintf(hdr, sizeof(hdr), "UART %s %d %d%c%d\n",
-                                     ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                                     baud, bits, parityChar, stopbits );
-                            OLEDOut.print(hdr);
+                            // Live data available — header only; the bytes are
+                            // appended by checkForReadingChanges().
+                            uartRefreshLiveView( uartTxOnNet, uartRxOnNet, txSnapshot, 0,
+                                                 rxSnapshot, 0 );
                         }
                     }
                     lastPrintedNet = netHighlighted;
@@ -1219,36 +1156,14 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                             if ( prevTxLen == 0 || memcmp(prevTx, txSnapshot, prevTxLen) == 0 ) {
                                 OLEDOut.print(&txSnapshot[prevTxLen]);
                             } else {
-                                // content diverged or wrapped — refresh header+both lines
-                                OLEDOut.clear();
-                                char hdr2[48];
-                                int baud = USBSer1.baud( );
-                                int bits = USBSer1.numbits( );
-                                int stopbits = USBSer1.stopbits( ) + 1;
-                                int parity = USBSer1.paritytype( );
-                                char parityChar = (parity==1)?'O':(parity==2)?'E':(parity==3)?'M':(parity==4)?'S':'N';
-                                snprintf(hdr2, sizeof(hdr2), "UART %s %d %d%c%d\n",
-                                         ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                                         baud, bits, parityChar, stopbits );
-                                OLEDOut.print(hdr2);
-                                if ( txLen > 0 ) { OLEDOut.print("Tx: "); OLEDOut.print(txSnapshot); OLEDOut.print("\n"); }
-                                if ( rxLen > 0 ) { OLEDOut.print("Rx: "); OLEDOut.print(rxSnapshot); OLEDOut.print("\n"); }
+                                // content diverged or wrapped — full refresh
+                                uartRefreshLiveView( uartTxOnNet, uartRxOnNet, txSnapshot,
+                                                     txLen, rxSnapshot, rxLen );
                             }
                         } else if ( txLen < prevTxLen ) {
                             // wrapped/shortened -> full refresh
-                            OLEDOut.clear();
-                            char hdr3[48];
-                            int baud = USBSer1.baud( );
-                            int bits = USBSer1.numbits( );
-                            int stopbits = USBSer1.stopbits( ) + 1;
-                            int parity = USBSer1.paritytype( );
-                            char parityChar = (parity==1)?'O':(parity==2)?'E':(parity==3)?'M':(parity==4)?'S':'N';
-                            snprintf(hdr3, sizeof(hdr3), "UART %s %d %d%c%d\n",
-                                     ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                                     baud, bits, parityChar, stopbits );
-                            OLEDOut.print(hdr3);
-                            if ( txLen > 0 ) { OLEDOut.print("Tx: "); OLEDOut.print(txSnapshot); OLEDOut.print("\n"); }
-                            if ( rxLen > 0 ) { OLEDOut.print("Rx: "); OLEDOut.print(rxSnapshot); OLEDOut.print("\n"); }
+                            uartRefreshLiveView( uartTxOnNet, uartRxOnNet, txSnapshot, txLen,
+                                                 rxSnapshot, rxLen );
                         }
 
                         // RX: same logic
@@ -1256,34 +1171,12 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                             if ( prevRxLen == 0 || memcmp(prevRx, rxSnapshot, prevRxLen) == 0 ) {
                                 OLEDOut.print(&rxSnapshot[prevRxLen]);
                             } else {
-                                OLEDOut.clear();
-                                char hdr4[48];
-                                int baud = USBSer1.baud( );
-                                int bits = USBSer1.numbits( );
-                                int stopbits = USBSer1.stopbits( ) + 1;
-                                int parity = USBSer1.paritytype( );
-                                char parityChar = (parity==1)?'O':(parity==2)?'E':(parity==3)?'M':(parity==4)?'S':'N';
-                                snprintf(hdr4, sizeof(hdr4), "UART %s %d %d%c%d\n",
-                                         ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                                         baud, bits, parityChar, stopbits );
-                                OLEDOut.print(hdr4);
-                                if ( txLen > 0 ) { OLEDOut.print("Tx: "); OLEDOut.print(txSnapshot); OLEDOut.print("\n"); }
-                                if ( rxLen > 0 ) { OLEDOut.print("Rx: "); OLEDOut.print(rxSnapshot); OLEDOut.print("\n"); }
+                                uartRefreshLiveView( uartTxOnNet, uartRxOnNet, txSnapshot,
+                                                     txLen, rxSnapshot, rxLen );
                             }
                         } else if ( rxLen < prevRxLen ) {
-                            OLEDOut.clear();
-                            char hdr5[48];
-                            int baud = USBSer1.baud( );
-                            int bits = USBSer1.numbits( );
-                            int stopbits = USBSer1.stopbits( ) + 1;
-                            int parity = USBSer1.paritytype( );
-                            char parityChar = (parity==1)?'O':(parity==2)?'E':(parity==3)?'M':(parity==4)?'S':'N';
-                            snprintf(hdr5, sizeof(hdr5), "UART %s %d %d%c%d\n",
-                                     ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                                     baud, bits, parityChar, stopbits );
-                            OLEDOut.print(hdr5);
-                            if ( txLen > 0 ) { OLEDOut.print("Tx: "); OLEDOut.print(txSnapshot); OLEDOut.print("\n"); }
-                            if ( rxLen > 0 ) { OLEDOut.print("Rx: "); OLEDOut.print(rxSnapshot); OLEDOut.print("\n"); }
+                            uartRefreshLiveView( uartTxOnNet, uartRxOnNet, txSnapshot, txLen,
+                                                 rxSnapshot, rxLen );
                         }
 
                         // Update prev buffers (store full snapshot)
@@ -1613,15 +1506,13 @@ int Highlighting::checkForReadingChanges( void ) {
         if ( uartTxOnNet || uartRxOnNet ) {
             // Ensure a static header exists for this highlighted net (printed once)
             if ( lastPrintedNet != showReadingNet ) {
-                int baud = USBSer1.baud();
-                int bits = USBSer1.numbits();
-                int stopbits = USBSer1.stopbits() + 1;
-                int parity = USBSer1.paritytype();
-                char parityChar = (parity==1)?'O':(parity==2)?'E':(parity==3)?'M':(parity==4)?'S':'N';
-                char oledHeader[32];
-                snprintf(oledHeader, sizeof(oledHeader), "UART %s\n%d %d%c%d",
-                         ( uartTxOnNet && uartRxOnNet ) ? "Tx/Rx" : ( uartTxOnNet ? "Tx" : "Rx" ),
-                         baud, bits, parityChar, stopbits );
+                // Stays on the plain renderer: the scrolling byte view below
+                // writes into the small-text buffer right after this.
+                char cfg[ 24 ];
+                char oledHeader[ 48 ];
+                snprintf( oledHeader, sizeof( oledHeader ), "%s\n%s",
+                          uartDirectionName( uartTxOnNet, uartRxOnNet ),
+                          uartConfigText( cfg, sizeof( cfg ) ) );
                 oled.clear();
                 oled.clearPrintShow(oledHeader, 2, true, true, true);
                 lastPrintedNet = showReadingNet;

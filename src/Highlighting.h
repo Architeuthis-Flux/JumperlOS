@@ -39,11 +39,9 @@ public:
     int showReadingNet = -1;
     int highlightedRow = -1;
     int lastNodeHighlighted = -1;
-    int lastNetPrinted = -1;
     int lastPrintedNet = -1;
-    
+
     int currentHighlightedNode = 0;
-    int currentHighlightedNet = -2;
     
     int warningRow = -1;
     int warningNet = -1;
@@ -67,6 +65,7 @@ public:
     
     // Public methods
     void clearHighlighting(int updateLEDs = 0);
+    void resetReadingState(void);
     int encoderNetHighlight(int print = 1, int mode = 1, int divider = 4);
     int brightenNet(int node, int addBrightness = 5);
     int warnNet(int node);

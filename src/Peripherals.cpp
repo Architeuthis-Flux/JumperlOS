@@ -17,6 +17,7 @@
 #include "hardware/pwm.h"
 #include "hardware/structs/io_bank0.h"
 #include "pico/time.h" // For hardware timer support
+#include "ReadingDisplay.h"
 #include <oled.h>
 #include <stdio.h>
 //#include <Adafruit_MCP4728.h>  // Old blocking library
@@ -1497,12 +1498,6 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     }
 }
 
-void setDac0voltage( uint16_t inputCode ) {
-    digitalWrite( LDAC, HIGH );
-    mcp.setChannelValue( MCP4728_CHANNEL_A, inputCode );
-    digitalWrite( LDAC, LOW );
-}
-
 void setDac1voltage( float voltage, int save, int saveEEPROM,
                      bool checkProbePower ) {
 
@@ -1538,12 +1533,6 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
         saveVoltages( globalState.power.topRail, globalState.power.bottomRail,
                       globalState.power.dac0, globalState.power.dac1 );
     }
-}
-
-void setDac1voltage( uint16_t inputCode ) {
-    digitalWrite( LDAC, HIGH );
-    mcp.setChannelValue( MCP4728_CHANNEL_B, inputCode );
-    digitalWrite( LDAC, LOW );
 }
 
 uint8_t csToPin[ 16 ] = { 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -1718,39 +1707,6 @@ void setDacByNumber( int dac, float voltage, int save, int saveEEPROM,
         break;
     case 3:
         setBotRail( voltage, save, saveEEPROM );
-        break;
-    }
-}
-
-void dacSine( int resolution ) {
-    uint16_t i;
-    switch ( resolution ) {
-    case 0 ... 5:
-        for ( i = 0; i < 32; i++ ) {
-            setDac1voltage( DACLookup_FullSine_5Bit[ i ] );
-        }
-        break;
-    case 6:
-        for ( i = 0; i < 64; i++ ) {
-            setDac1voltage( DACLookup_FullSine_6Bit[ i ] );
-        }
-        break;
-    case 7:
-        for ( i = 0; i < 128; i++ ) {
-            setDac1voltage( DACLookup_FullSine_7Bit[ i ] );
-        }
-        break;
-
-    case 8:
-        for ( i = 0; i < 256; i++ ) {
-            setDac1voltage( DACLookup_FullSine_8Bit[ i ] );
-        }
-        break;
-
-    case 9 ... 12:
-        for ( i = 0; i < 512; i++ ) {
-            setDac1voltage( DACLookup_FullSine_9Bit[ i ] );
-        }
         break;
     }
 }
@@ -3163,15 +3119,14 @@ void VoltageAdjuster::updateDisplay(float value, uint32_t color, const VoltageAd
     uint8_t indicator = 0b00000001; // Bottom-most LED in the row
     b.printRawRow(indicator, rowPosition, 0x101010, 0xfffffe);
     
-   // Update serial
-    Serial.print("\r                        \r");
-    Serial.print(config.label);
-    Serial.print(" ");
-    Serial.print(floatString);
-    Serial.flush();
-    
-    // Update OLED
-    oled.clearPrintShow(floatString, 2, true, true, true);
+    // OLED + serial go through the shared reading display, so adjusting a rail
+    // looks like every other reading (and repeat calls dedupe - this runs on
+    // every loop pass while the probe rides the selection pads).
+    // floatString keeps its leading pad for the LED matrix; the panel doesn't
+    // want it.
+    char valueText[16];
+    snprintf(valueText, sizeof(valueText), "%0.1f V", value);
+    ReadingDisplay::show(config.label, -1, valueText);
 
     showLEDsCore2 = 2;
 }

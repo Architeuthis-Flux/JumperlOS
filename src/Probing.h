@@ -289,11 +289,8 @@ public:
     int showProbeCurrent = 0;
     
     int probePowerDAC = 0;
-    int lastProbePowerDAC = 0;
-    bool probePowerDACChanged = false;
-    
+
     volatile int removeFade = 0;
-    volatile bool bufferPowerConnected = false;
     
     int debugProbing = 0;
     
@@ -438,7 +435,6 @@ extern volatile int& connectOrClearProbe;
 extern volatile int& node1or2;
 extern int& probeHighlight;
 extern volatile int& removeFade;
-extern volatile bool& bufferPowerConnected;
 extern int& debugProbing;
 extern volatile int& showingProbeLEDs;
 extern int& switchPosition;
@@ -448,8 +444,6 @@ extern volatile int globalEncoderCursorNode;      // -1 = hidden, else breadboar
 extern volatile int globalEncoderCursorInHeader;  // 1 if in nano header
 extern volatile uint32_t globalEncoderCursorColor; // Cursor color
 extern int& probePowerDAC;
-extern int& lastProbePowerDAC;
-extern bool& probePowerDACChanged;
 extern int& showProbeCurrent;
 
 
