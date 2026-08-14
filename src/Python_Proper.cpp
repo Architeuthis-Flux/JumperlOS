@@ -21,6 +21,8 @@
 #include "externVars.h"  // For pauseCore2 synchronization
 #include "micropythonExamples.h"  // For embedded Python scripts including ViperIDE reinit
 #include "RotaryEncoder.h"  // For clickwheel interrupt during script execution
+#include "Highlighting.h"   // For handing the display back at script exit
+#include "MeasureMode.h"    // For releasing measure mode at script exit
 #include "pyexec.h"
 extern "C" {
 #include "py/gc.h"
@@ -4890,6 +4892,41 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
 }
 
 /**
+ * Hand the UI back to the firmware after Python has run.
+ *
+ * A script owns the probe, encoder and display while it runs - and services
+ * keep ticking underneath it, because jOS.serviceAll() runs inside
+ * MicroPython's delay hook. So measure mode and the highlight reader can both
+ * latch onto whatever row the script last touched, then repaint over
+ * everything forever: that is the "OLED stuck on one row's voltage until
+ * reboot" bug.
+ *
+ * Only INTERACTION state is reset. Connections, DAC voltages, overlays and
+ * whatever the script last drew on the OLED are its OUTPUT and must survive -
+ * this stops the zombie repainters, it does not blank the screen.
+ *
+ * Idempotent and silent when nothing latched, so it is safe after every exec.
+ */
+void onPythonSessionEnd( void ) {
+    measureModeService.stopMeasurement( );  // no-ops when inactive
+
+    Highlighting& hl = Highlighting::getInstance( );
+    if ( hl.brightenedNet > 0 || hl.highlightedNet > 0 || hl.brightenedNode > 0 ||
+         hl.warningNet > 0 || hl.showReadingNet > 0 ) {
+        hl.clearHighlighting( 1 );
+        hl.resetReadingState( );
+    }
+
+    // Encoder state a script can inject via clickwheel_up/down/press.
+    encoderDirectionState = NONE;
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    encoderOverride = 0;
+
+    pauseCore2 = 0;
+}
+
+/**
  * Execute raw Python source code (e.g. file contents) without syntax highlighting.
  * Initialises MicroPython if needed, runs mp_embed_exec_str(), then GC + file cleanup.
  * Unlike executeSinglePythonCommand() this does NOT echo the source to the terminal,
@@ -4922,6 +4959,15 @@ bool executePythonFileContent( const char* src ) {
     // GC + close any leaked file handles
     mp_embed_exec_str( "import gc; gc.collect()" );
     jl_close_all_jfs_files( );
+
+    // Hand the UI back. Runs even when the script raised - mp_embed_exec_str()
+    // catches Python exceptions internally and returns normally.
+    onPythonSessionEnd( );
+
+    // A file run is a whole session, so the display prefs only a script can
+    // set go back to defaults too. NOT done on the raw-REPL path, where each
+    // console line is its own exec and prefs legitimately persist between them.
+    jl_reset_python_display_prefs( );
 
     return true;
 }

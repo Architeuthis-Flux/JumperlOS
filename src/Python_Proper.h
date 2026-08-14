@@ -187,6 +187,16 @@ bool initMicroPythonQuiet(bool preserve_interrupt_char = false);
 bool executeSinglePythonCommand(const char* command, char* result_buffer = nullptr, size_t buffer_size = 0);
 bool executePythonFileContent(const char* src);
 
+// Hand the UI back to the firmware after Python ran (see Python_Proper.cpp).
+// Called from BOTH script paths: executePythonFileContent() and the raw-REPL
+// completion hook in MpRemoteService.
+void onPythonSessionEnd(void);
+
+// Reset the display preferences only a Python script can set
+// (oled_set_text_size / oled_copy_print). Defined in JumperlessMicroPythonAPI.cpp,
+// inside its extern "C" API block.
+extern "C" void jl_reset_python_display_prefs(void);
+
 // Recursive, machine-readable filesystem listing via the global Python walk().
 // Routes output to `out` (defaults to the current MP stream). Brings up
 // MicroPython if needed. Emits f|path|size / d|path|size lines.

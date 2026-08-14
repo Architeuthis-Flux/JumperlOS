@@ -1818,6 +1818,17 @@ int jl_oled_get_text_size( void ) {
     return default_oled_text_size;
 }
 
+// Put the script-settable display preferences back to their defaults at the
+// end of a Python session. Both live in this TU (oled_copy_print_enabled is
+// defined in Python_Proper.cpp but only ever set from here), and neither had
+// any clearer before - a script that enabled print-to-OLED kept it enabled
+// until reboot.
+void jl_reset_python_display_prefs( void ) {
+    extern bool oled_copy_print_enabled;
+    default_oled_text_size = 2;
+    oled_copy_print_enabled = false;
+}
+
 // Print Redirection - declared in Python_Proper.cpp
 extern bool oled_copy_print_enabled;
 
@@ -2297,10 +2308,18 @@ extern "C" int jl_get_switch_position( void ) {
     return result;
 }
 
+// Set when a script writes switchPosition, so the raw-REPL exit hook knows
+// whether its snapshot is worth restoring. Without this the hook blindly
+// wrote back a value sampled at script start, undoing a genuine mid-script
+// physical flip - and checkSwitchPosition() legitimately holds its last value
+// when it can't sense, so the bad write would not self-heal.
+volatile bool switchPositionScriptDirty = false;
+
 extern "C" void jl_set_switch_position( int position ) {
     // Validate: -1 = unknown, 0 = measure, 1 = select
     if ( position >= -1 && position <= 1 ) {
         Probing::getInstance( ).switchPosition = position;
+        switchPositionScriptDirty = true;
     }
 }
 

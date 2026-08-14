@@ -332,6 +332,7 @@ unsigned long lastShowLEDmeasurementsintervalinMpRemoteService = 0;
 unsigned long lastReadGPIOIntervalinMpRemoteService = 0;
 extern unsigned long showLEDmeasurementsInterval;
 extern unsigned long readGPIOInterval;
+extern volatile bool switchPositionScriptDirty;  // JumperlessMicroPythonAPI.cpp
 
 
 void MpRemoteService::onScriptExecutionBegin() {
@@ -342,6 +343,7 @@ void MpRemoteService::onScriptExecutionBegin() {
         Serial.println( "[MpRemote] Script execution beginning" );
     }
     switchPositionOnMpRemoteService = switchPosition;
+    switchPositionScriptDirty = false;  // re-arm: raw REPL snapshots per exec
     lastShowLEDmeasurementsintervalinMpRemoteService = showLEDmeasurementsInterval;
     showLEDmeasurementsInterval = 55000;
     lastReadGPIOIntervalinMpRemoteService = readGPIOInterval;
@@ -360,11 +362,20 @@ void MpRemoteService::onScriptExecutionComplete() {
     // This is called after each Python script completes execution in raw REPL mode
     
     // Serial.println( "[MpRemote] Script execution completed" );
-    pauseCore2 = 0;
-    switchPosition = switchPositionOnMpRemoteService;
+    // Only undo a switch position the SCRIPT wrote. Restoring unconditionally
+    // clobbered a genuine mid-script physical flip, and checkSwitchPosition()
+    // holds its last value when it can't sense, so that write didn't self-heal.
+    if ( switchPositionScriptDirty ) {
+        switchPosition = switchPositionOnMpRemoteService;
+        switchPositionScriptDirty = false;
+    }
     showLEDmeasurementsInterval = lastShowLEDmeasurementsintervalinMpRemoteService;
     readGPIOInterval = lastReadGPIOIntervalinMpRemoteService;
-    
+
+    // Restores happen FIRST so the handback below sees the final switchPosition.
+    // (This also clears pauseCore2, which used to be set here directly.)
+    onPythonSessionEnd( );
+
     // routableBufferPower( 1, 1, 0 );
     // refreshConnections( 0, 1, 0 );
     // Example: You could add cleanup, logging, or state management here
