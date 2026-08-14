@@ -431,7 +431,12 @@ void infraEvaluate(void) {
         // node wins, always. Yield - tear the infra path down FIRST so the
         // user's connection routes cleanly in this same rebuild - and stand
         // aside until they disconnect (re-convergence is automatic).
-        if (fn.userOverridden && fn.userOverridden()) {
+        // EXCEPT under a forced candidate: forcing is a deliberate
+        // test/calibration act that owns the plumbing, and those flows add
+        // their own instrumentation bridges on the service node (the tip
+        // test's droop phase loads BUFFER_IN through the ISENSE shunt -
+        // yielding there tore down the forced GPIO feed mid-measurement).
+        if (fn.userOverridden && s_forced[f] < 0 && fn.userOverridden()) {
             if (fn.activeCandidate >= 0) {
                 Serial.printf("[infra] %s yielded to a user connection on its node\n\r",
                               fn.name);
