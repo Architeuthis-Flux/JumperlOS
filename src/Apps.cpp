@@ -1511,12 +1511,6 @@ void calibrateDacs( ) {
     // (hardware-observed as DAC1 outputting ~4.4V when told 3.3V).
     bool wasProbePowerOn = infraProbePowerWanted( );
     infraSetProbePowerEnabled( false );
-    // The calibration and its test phase legitimately bridge the reserved
-    // ROUTABLE_BUFFER_IN node through the normal state API (DAC0 buffer
-    // test, the in-app ADC7 two-point cal) - without this, those adds are
-    // silently rejected: the DAC0 test ran with numberOfPaths=0 and the
-    // ADC7 cal read a flat raw ~2042 ('adcSpread out of range').
-    infraSetSystemBridgeAllowance( true );
     refreshConnections( -1, 0, 0 ); // flush the feed teardown before measuring
     
     if ( firstStart == 1 ) {
@@ -2287,7 +2281,6 @@ if ( yesNo == 1 ) {
 }
     changeTerminalColor( -1, true );
 
-    infraSetSystemBridgeAllowance( false );
     infraSetProbePowerEnabled( wasProbePowerOn );
     refreshConnections( -1 );
     routableBufferPower( 1, 0, 1 );

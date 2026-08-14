@@ -85,7 +85,7 @@ struct config {
         // as calibration.probe_droop_v0); the DAC bridge swap survives only
         // as a fallback while no GPIO is claimed.
         // DEPRECATED AND IGNORED: probe power is arbitrated by
-        // routing/InfraPaths (DAC1 -> GPIO8..1 -> DAC0, relocating when the
+        // routing/InfraPaths (DAC1 -> GPIO8..GPIO1, relocating when the
         // user claims a resource). The key is still parsed so existing
         // config.txt files load cleanly, but it no longer selects anything -
         // boards that ran the old GPIO-power firmware have true persisted

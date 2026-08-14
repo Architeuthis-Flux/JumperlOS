@@ -36,6 +36,11 @@ def feed_path_rows(dump):
     return rows
 
 
+# --- 0. clean state: a prior aborted run can leave user bridges (even a
+# BUFFER_IN one, which makes probe power yield) that poison every check ----
+jl_exec("nodes_clear()\nprint('clean')", timeout=25)
+time.sleep(4)  # let the clear's autosave land before opening port 1
+
 # --- 1. boot state: exactly one routed feed path, dup=0 ---------------------
 d = bridge_dump()
 src0 = feed_source(d)
@@ -51,14 +56,15 @@ check("probe_power" in status and "->" in status, "i@ shows probe_power with an 
 check("droop ohms" in status, "i@ reports the droop resistance")
 
 # --- 2. claim the active feed resource -> relocation ------------------------
-claim_node = src0 if src0 and src0.startswith("GP_") else "GPIO_8"
-claim_py = claim_node.replace("GP_", "GPIO_")
+# Boot feed is DAC_1; claiming it must drop the feed down the fall-through
+# chain (DAC_1 -> GPIO8..GPIO1).
+claim_py = "DAC1" if src0 == "DAC_1" else src0.replace("GP_", "GPIO_")
 out = jl_exec(f"connect({claim_py}, 25)\nprint('ok')", timeout=25)
 time.sleep(1.5)
 d = bridge_dump()
 src1 = feed_source(d)
 check(src1 is not None and src1 != src0,
-      f"feed RELOCATED after claiming {claim_node} ({src0} -> {src1})")
+      f"feed RELOCATED after claiming {claim_py} ({src0} -> {src1})")
 
 # --- 3. release -> switch-back ---------------------------------------------
 out = jl_exec(f"disconnect({claim_py}, -1)\nprint('ok')", timeout=25)
@@ -92,14 +98,25 @@ print("done")
 """, timeout=30)
 check("has_bufin= 0" in out, "fresh slot save contains no BUF_IN (bridges or nets section)")
 check("has_user_net= 1" in out, "fresh slot save DOES contain the user net (save actually ran)")
+# The disconnect above arms another autosave; its flash window stalls USB
+# briefly and breaks the next raw-REPL open (fail-fast, no retries by
+# policy). Let it land before continuing.
+time.sleep(4)
 
-# --- 6. user bridge to BUF_IN is rejected (system-reserved) -----------------
+# --- 6. user bridge to BUF_IN is ALLOWED and the feed yields ----------------
 out = jl_exec("""
 ok = connect(139, 30)
-print("connect_rc=", ok)
 print("bk=", 1 if is_connected(139, 30) else 0)
 """, timeout=25)
-check("bk= 0" in out, "user bridge to ROUTABLE_BUFFER_IN is rejected (reserved node)")
+check("bk= 1" in out, "user bridge to ROUTABLE_BUFFER_IN is allowed (permissive)")
+time.sleep(1.5)
+d = bridge_dump()
+check(feed_source(d) in (None, "30"), "probe power YIELDED to the user's BUFFER_IN bridge")
+out = jl_exec("disconnect(139, -1)\nprint('ok')", timeout=25)
+time.sleep(1.5)
+d = bridge_dump()
+check(feed_source(d) is not None and feed_source(d) != "30",
+      f"feed returned after the user disconnected (source={feed_source(d)})")
 
 # --- 7. RouteSafety self-check still passes with the infra feed live --------
 out = port1_command("i?", collect_seconds=6)

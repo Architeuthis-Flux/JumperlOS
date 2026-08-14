@@ -1189,17 +1189,10 @@ bool JumperlessState::isConnectionAllowed(int node1, int node2, String& errorMsg
         return false;
     }
 
-    // ROUTABLE_BUFFER_IN is system-reserved: its feed (DAC or GPIO power
-    // claim) is owned by InfraPaths. A user bridge here would either fight
-    // the live power feed or, worse, save into a slot and vanish on load
-    // (the load sanitizer scrubs everything touching this node). System
-    // code that legitimately manipulates it through this API (self test,
-    // the checkSwitchPosition DAC-swap fallback) opens the allowance first.
-    if ((node1 == ROUTABLE_BUFFER_IN || node2 == ROUTABLE_BUFFER_IN) &&
-        !infraSystemBridgeAllowed()) {
-        errorMsg = "ROUTABLE_BUFFER_IN is system-managed (probe power feed)";
-        return false;
-    }
+    // (ROUTABLE_BUFFER_IN was briefly hard-reserved here; connections to it
+    // are ALLOWED now - the probe-power infra function YIELDS to a user
+    // bridge on its node instead of the system blocking the user. See the
+    // userOverridden hook in routing/InfraPaths.cpp.)
 
     // Use existing validation logic
     extern bool connectionAllowed(int node1, int node2);
@@ -1476,10 +1469,9 @@ void JumperlessState::serializeBridges(String& output) const {
         int node2 = connections.bridges[i][1];
         // Skip ephemeral + infra connections - they should NEVER be saved to
         // flash (infra bridges are re-created by infraEvaluate every rebuild;
-        // persisting them is how phantom power claims got into slots).
-        // BUFFER_IN pairs are skipped even unregistered - system-reserved.
-        if (infraIsBridge(node1, node2) ||
-            node1 == ROUTABLE_BUFFER_IN || node2 == ROUTABLE_BUFFER_IN) {
+        // persisting them is how phantom power claims got into slots). A
+        // USER's deliberate BUFFER_IN bridge is real user data and persists.
+        if (infraIsBridge(node1, node2)) {
             continue;
         }
         if (!isEphemeralConnection(node1, node2)) {
@@ -1497,8 +1489,7 @@ void JumperlessState::serializeBridges(String& output) const {
         int node2 = connections.bridges[i][1];
 
         // Skip ephemeral + infra connections - see the count loop above.
-        if (infraIsBridge(node1, node2) ||
-            node1 == ROUTABLE_BUFFER_IN || node2 == ROUTABLE_BUFFER_IN) {
+        if (infraIsBridge(node1, node2)) {
             continue;
         }
         if (isEphemeralConnection(node1, node2)) {
@@ -1712,25 +1703,14 @@ void JumperlessState::serializeNets(String& output) const {
         }
 
         // Skip system-owned nets, mirroring serializeBridges' infra skip:
-        // the probe power net (contains ROUTABLE_BUFFER_IN) and any net
-        // that is exactly one active infra pair. Persisting them was how
-        // stale power-claim entries got into slot files.
-        {
-            bool infraNet = false;
-            for (int j = 0; j < nodeCount; j++) {
-                if (state.connections.nets[i].nodes[j] == ROUTABLE_BUFFER_IN) {
-                    infraNet = true;
-                    break;
-                }
-            }
-            if (!infraNet && nodeCount == 2 &&
-                infraIsBridge(state.connections.nets[i].nodes[0],
-                              state.connections.nets[i].nodes[1])) {
-                infraNet = true;
-            }
-            if (infraNet) {
-                continue;
-            }
+        // any net that is exactly one active infra pair. Persisting them was
+        // how stale power-claim entries got into slot files. (A net where a
+        // USER bridged BUFFER_IN is user data and persists - the function
+        // yields to them at evaluation time.)
+        if (nodeCount == 2 &&
+            infraIsBridge(state.connections.nets[i].nodes[0],
+                          state.connections.nets[i].nodes[1])) {
+            continue;
         }
 
         // Collect node list for this net (using SHORT names)

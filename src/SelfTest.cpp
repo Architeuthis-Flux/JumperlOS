@@ -939,8 +939,7 @@ static void runTipVoltageTest( SelfTestReport& r ) {
         if ( infraProbePowerGpioIdx( ) >= 0 ) {
             float spread0 = 0.0f;
             float v0 = readTipAveraged( 4, 32, &spread0 );
-            // Load: BUFFER_IN -> INA0 shunt (ISENSE) -> GND. Reserved-node
-            // allowance is already open for the session.
+            // Load: BUFFER_IN -> INA0 shunt (ISENSE) -> GND.
             addBridgeToState( ROUTABLE_BUFFER_IN, ISENSE_PLUS, 0, false );
             addBridgeToState( ISENSE_MINUS, GND, 0, false );
             refreshConnections( -1, 0, 0 );
@@ -1113,7 +1112,6 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     // bridges. Both restored in the teardown below.
     bool wasProbePowerOn = infraProbePowerWanted( );
     infraSetProbePowerEnabled( false );
-    infraSetSystemBridgeAllowance( true );
 
     for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
         if ( !runMask[ i ] )
@@ -1150,7 +1148,6 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     // Teardown: never let a test voltage / crosspoint / driven GPIO leak
     // into the user's session or survive the first-start restart.
     selfTestNormalizeHardware( );
-    infraSetSystemBridgeAllowance( false );
     infraSetProbePowerEnabled( wasProbePowerOn );
     leaveApp( ); // restore original slot
     setRailsAndDACs( 0 );

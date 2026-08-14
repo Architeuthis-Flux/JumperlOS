@@ -111,10 +111,11 @@ void infraServiceTick(void);
 // ---------------------------------------------------------------------------
 
 // Drop bridges from a just-deserialized slot that belong to the system, not
-// the user: anything touching ROUTABLE_BUFFER_IN (stale power claims from
-// firmware that persisted them), plus active lock-function pairs (re-added
-// fresh by evaluation). Also restores pin config for stale GPIO claims.
-// Called from the state load sanitizer.
+// the user: feed-shaped BUFFER_IN pairs (DAC/routable-GPIO to BUFFER_IN -
+// stale power claims from firmware that persisted them), plus active
+// lock-function pairs (re-added fresh by evaluation). Other BUFFER_IN
+// bridges are deliberate user data and survive. Also restores pin config
+// for stale GPIO claims. Called from the state load sanitizer.
 void infraScrubLoadedBridges(void);
 
 // ---------------------------------------------------------------------------
@@ -126,13 +127,6 @@ void infraScrubLoadedBridges(void);
 // the self test and the dual calibration. Function names: "probe_power",
 // "oled_i2c", "serial_1".
 int infraForceCandidate(const char* fnName, int candIdx);
-
-// Escape hatch for system code that legitimately manipulates
-// ROUTABLE_BUFFER_IN through the normal state API (self test bridges, the
-// checkSwitchPosition DAC-swap fallback). isConnectionAllowed rejects
-// BUFFER_IN bridges unless this is open. Pair every true with a false.
-void infraSetSystemBridgeAllowance(bool allow);
-bool infraSystemBridgeAllowed(void);
 
 // ---------------------------------------------------------------------------
 // Ephemeral ADC resource pool

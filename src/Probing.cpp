@@ -5248,14 +5248,13 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         }
     } else if ( gpioPowerNode > 0 ) {
         swSource = "swap";
-        UndoIngestGuard _undoGuard; // auto-managed power plumbing, not a user action
-        // System plumbing on the reserved BUFFER_IN node - open the
-        // allowance for the whole swap window (closed below).
-        infraSetSystemBridgeAllowance( true );
-        int dacNode = ( infraProbePowerSource( ) == DAC0 ) ? DAC0 : DAC1;
-        // Single refresh per swap: remove without refresh, let the add apply both.
-        removeBridgeFromState( ROUTABLE_BUFFER_IN, gpioPowerNode, false );
-        addBridgeToState( ROUTABLE_BUFFER_IN, dacNode );
+        // Temporarily swap the buffer feed to a DAC so INA1 (inline with the
+        // DAC path) can read the load current. Done through InfraPaths'
+        // forced-candidate hook rather than raw bridge swaps: the feed pair
+        // stays REGISTERED through both moves, so nothing leaks into slot
+        // saves / undo and no second feed can appear.
+        infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC1
+        refreshLocalConnections( 0, 1, 0 );
         waitCore2( );
         delay( 3 ); // crosspoint + DAC settle before the INA windows start counting
         // Median of 3, NOT a single conversion: the INA219's ~17ms averaging
@@ -5265,9 +5264,8 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         // flipped a SELECT switch to MEASURE every check. The median of 3
         // (~60ms) throws the stale first window away.
         current_mA = probeCurrentMedian( 3 );
-        removeBridgeFromState( ROUTABLE_BUFFER_IN, dacNode, false );
-        addBridgeToState( ROUTABLE_BUFFER_IN, gpioPowerNode );
-        infraSetSystemBridgeAllowance( false );
+        infraForceCandidate( "probe_power", -1 ); // back to automatic (GPIO reclaims)
+        refreshLocalConnections( 0, 1, 0 );
         waitCore2( );
         if ( showProbeCurrent == 1 ) {
             Serial.print( "                          \rSwitch-check current (DAC swap): " );

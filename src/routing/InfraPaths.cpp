@@ -163,6 +163,11 @@ struct InfraCandidate {
 struct InfraFunction {
     const char* name;
     bool (*enabled)(void);
+    // Optional: true when a USER connection sits on this function's own
+    // service node(s). The function then YIELDS - tears down and stands
+    // aside - instead of fighting or blocking the user (it re-converges
+    // automatically once the user disconnects). nullptr = never yields.
+    bool (*userOverridden)(void);
     const InfraCandidate* candidates;
     int numCandidates;
     // Runtime:
@@ -268,17 +273,18 @@ static void deactGpio(void) {
     }
 }
 
-// DAC0: last resort - keeps probe power alive when DAC1 AND every GPIO are
-// claimed (the old swap chain would have landed here too).
-static int rpDac0(InfraPair out[2]) { out[0] = {ROUTABLE_BUFFER_IN, DAC0}; return 1; }
-static bool viDac0(void) { return !nonInfraBridgeTouches(DAC0) && dacVoltageInProbeWindow(0); }
-static void actDac0(void) { probeDacActivate(0); }
+// (No DAC0 candidate: DAC0 is the servo'd measure-mode output and never
+// gets commandeered as a feed. The fall-through is DAC1 -> GPIO8..GPIO1;
+// with all of those claimed the function stands down until one frees up.)
 
 static const InfraCandidate s_probePowerCandidates[] = {
     { "DAC1", rpDac1, viDac1, actDac1, deactDac },
     { "GPIO", rpGpio, viGpio, actGpio, deactGpio },
-    { "DAC0", rpDac0, viDac0, actDac0, deactDac },
 };
+
+// A user bridge on ROUTABLE_BUFFER_IN itself (any shape - a row, an ADC, a
+// DAC they placed by hand) means they want the buffer: yield the feed.
+static bool ovProbePower(void) { return nonInfraBridgeTouches(ROUTABLE_BUFFER_IN); }
 
 static bool enProbePower(void) {
     return s_probePowerOn && jumperlessConfig.dacs.auto_connect_probe > 0;
@@ -317,6 +323,13 @@ static const InfraCandidate s_oledCandidates[] = {
     { "config_pins", rpOledI2c, viAlways, actNone, deactNone },
 };
 
+// A user claiming the OLED's GPIO pins wins them (the ROW side is fair
+// game for extra I2C devices and never yields).
+static bool ovOledI2c(void) {
+    return nonInfraBridgeTouches(jumperlessConfig.top_oled.gpio_sda) ||
+           nonInfraBridgeTouches(jumperlessConfig.top_oled.gpio_scl);
+}
+
 static bool enOledI2c(void) {
     // Exact gate from the old handleLockedConnections: either lock flag, and
     // never when the panel sits on hardwired pins (no bridges needed at all).
@@ -337,6 +350,10 @@ static const InfraCandidate s_serial1Candidates[] = {
     { "uart0_d0_d1", rpSerial1, viAlways, actNone, deactNone },
 };
 
+static bool ovSerial1(void) {
+    return nonInfraBridgeTouches(RP_UART_TX) || nonInfraBridgeTouches(RP_UART_RX);
+}
+
 static bool enSerial1(void) {
     return jumperlessConfig.serial_1.lock_connection == 1;
 }
@@ -350,12 +367,18 @@ static bool enSerial2(void) { return false; }
 // --- table -----------------------------------------------------------------
 
 static InfraFunction s_functions[] = {
-    { "probe_power", enProbePower, s_probePowerCandidates,
+    { "probe_power", enProbePower,
+#if !defined(OG_JUMPERLESS)
+      ovProbePower,
+#else
+      nullptr,
+#endif
+      s_probePowerCandidates,
       (int)(sizeof(s_probePowerCandidates) / sizeof(s_probePowerCandidates[0])),
       -1, -1, {}, 0 },
-    { "oled_i2c", enOledI2c, s_oledCandidates, 1, -1, -1, {}, 0 },
-    { "serial_1", enSerial1, s_serial1Candidates, 1, -1, -1, {}, 0 },
-    { "serial_2", enSerial2, nullptr, 0, -1, -1, {}, 0 },
+    { "oled_i2c", enOledI2c, ovOledI2c, s_oledCandidates, 1, -1, -1, {}, 0 },
+    { "serial_1", enSerial1, ovSerial1, s_serial1Candidates, 1, -1, -1, {}, 0 },
+    { "serial_2", enSerial2, nullptr, nullptr, 0, -1, -1, {}, 0 },
 };
 static const int s_numFunctions = (int)(sizeof(s_functions) / sizeof(s_functions[0]));
 
@@ -401,6 +424,19 @@ void infraEvaluate(void) {
 
         if (!fn.enabled()) {
             teardownFunction(fn);
+            continue;
+        }
+
+        // USER OVERRIDE: a user connection on the function's own service
+        // node wins, always. Yield - tear the infra path down FIRST so the
+        // user's connection routes cleanly in this same rebuild - and stand
+        // aside until they disconnect (re-convergence is automatic).
+        if (fn.userOverridden && fn.userOverridden()) {
+            if (fn.activeCandidate >= 0) {
+                Serial.printf("[infra] %s yielded to a user connection on its node\n\r",
+                              fn.name);
+                teardownFunction(fn);
+            }
             continue;
         }
 
@@ -487,10 +523,10 @@ void infraEvaluate(void) {
     // the probe's"). Keep it pointing at the DAC infra is using (or would
     // prefer for fallbacks) until the reader sweep retires it.
     {
-        int src = infraProbePowerSource();
-        if (src == DAC0) probePowerDAC = 0;
-        else if (src == DAC1) probePowerDAC = 1;
-        else probePowerDAC = 1; // GPIO-fed or off: DAC1 is the preferred fallback
+        // Feed is DAC1 or a GPIO now (no DAC0 candidate); DAC1 is always
+        // the answer for "which DAC is the probe's".
+        (void)infraProbePowerSource();
+        probePowerDAC = 1;
     }
 #endif
 }
@@ -577,16 +613,22 @@ void infraScrubLoadedBridges(void) {
         int n2 = c.bridges[readIdx][1];
         bool drop = false;
 
-        // ROUTABLE_BUFFER_IN is system-reserved: any bridge touching it in a
-        // saved slot is a stale power claim from firmware that persisted
-        // them (or a hand-edited slot). Evaluation re-adds the live one.
-        if (n1 == ROUTABLE_BUFFER_IN || n2 == ROUTABLE_BUFFER_IN) {
+        // Stale power claims from firmware that persisted them: only the
+        // FEED SHAPES (a DAC or routable GPIO bridged to BUFFER_IN) are
+        // system artifacts - evaluation re-adds the live one. Any OTHER
+        // bridge touching BUFFER_IN is deliberate user data (the function
+        // yields to it at evaluation time) and survives the load.
+        int other = -1;
+        if (n1 == ROUTABLE_BUFFER_IN) other = n2;
+        else if (n2 == ROUTABLE_BUFFER_IN) other = n1;
+        bool feedShape = (other == DAC0 || other == DAC1 ||
+                          (other >= RP_GPIO_1 && other <= RP_GPIO_8));
+        if (other >= 0 && feedShape) {
             drop = true;
 #if !defined(OG_JUMPERLESS)
             // Stale GPIO claim: the pin's saved output-high direction rode
             // along in the slot. Put it back to input unless MicroPython
             // owns it now (then dir/pulls are Python's business).
-            int other = (n1 == ROUTABLE_BUFFER_IN) ? n2 : n1;
             for (int i = 0; i < 8; i++) {
                 if (gpioDef[i][1] != other) continue;
                 if (i == s_gpioActiveIdx) break; // the LIVE claim, not stale
@@ -624,10 +666,6 @@ void infraScrubLoadedBridges(void) {
 // ===========================================================================
 // Test / calibration override + status
 // ===========================================================================
-
-static bool s_systemBridgeAllowance = false;
-void infraSetSystemBridgeAllowance(bool allow) { s_systemBridgeAllowance = allow; }
-bool infraSystemBridgeAllowed(void) { return s_systemBridgeAllowance; }
 
 // ===========================================================================
 // Ephemeral ADC resource pool
