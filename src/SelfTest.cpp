@@ -511,8 +511,14 @@ static void runProbeCableTest( SelfTestReport& r ) {
     bool shortOk = ( fwd == 2 && rev == 2 );
     // ponytail: the absolute window stays wide (-1.5..8 mA) because the
     // expected baseline depends on the unattended switch position; the
-    // position-specific signal is the LED delta gate below.
-    bool curOk = ( curOff > -1.5f && curOff < 8.0f );
+    // position-specific signal is the LED delta gate below. The window is a
+    // claim about the physical shunt current, so judge the RAW reading:
+    // probeCurrentMedian() subtracts probe_current_zero (2.0 default), which
+    // parks a healthy measure-position no-load baseline at -2.0 mA - below
+    // the corrected window's floor, failing every board whose switch sat in
+    // measure during an unattended test.
+    float curOffRaw = curOff + jumperlessConfig.calibration.probe_current_zero;
+    bool curOk = ( curOffRaw > -1.5f && curOffRaw < 8.0f );
     bool tipOk = ( tipRaw < 4090 ); // pegged high = tip divider shorted to supply
     // In SELECT position a healthy cable MUST show the LED current step.
     bool dataOk = !selectPos || dataPathProven;
