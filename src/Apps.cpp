@@ -2281,6 +2281,10 @@ if ( yesNo == 1 ) {
 }
     changeTerminalColor( -1, true );
 
+    // The calibration sweeps wrote the DAC hardware with save=0 (state
+    // untouched) - force the feed's next park to re-write the MCP so the
+    // probe doesn't come back at whatever the last sweep step left.
+    infraDacParkEpochBump( );
     infraSetProbePowerEnabled( wasProbePowerOn );
     refreshConnections( -1 );
     routableBufferPower( 1, 0, 1 );

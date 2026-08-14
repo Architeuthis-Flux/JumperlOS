@@ -127,6 +127,10 @@ static void selfTestNormalizeHardware( void ) {
     for ( int d = 0; d < 4; d++ ) {
         setDacByNumber( d, 0.0, 0 );
     }
+    // The zero writes above are save=0 (hardware only, state untouched) -
+    // tell the probe feed's park guard so its next activation re-writes the
+    // MCP unconditionally instead of trusting the stale in-window state.
+    infraDacParkEpochBump( );
 
     Serial.println( "    releasing routable GPIOs 1-8 (pins 20-27) to inputs" );
     for ( int g = 0; g < 8; g++ ) {
@@ -450,11 +454,12 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // latched LED. That mismatch was the main source of flaky verdicts.)
     extern void setProbeLEDModeAndSettle( int mode ); // Apps.cpp
     Serial.println( "  step 4/5: probe power path (routable buffer -> cable -> LED):" );
-    // This step measures the DAC -> INA1 -> buffer -> cable -> LED current
-    // signature, so pin the probe-power function to its DAC1 candidate
-    // (INA1 sits on the DAC path and would see nothing on a GPIO feed - no
-    // LED delta, no end-to-end proof). Unforced at the end of the test.
-    infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC1
+    // This step measures the DAC0 -> INA1 -> buffer -> cable -> LED current
+    // signature, so pin the probe-power function to its DAC0 candidate
+    // (INA1's shunt R57 is hardwired in DAC_0's output path ONLY - a GPIO
+    // or DAC1 feed routes fine but shows no LED delta, no end-to-end
+    // proof). Unforced at the end of the test.
+    infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC0 (INA1-sensed)
     routableBufferPower( 1, 0, 1 );
     delay( 150 );
 
@@ -570,9 +575,9 @@ static void runCrossbarTest( SelfTestReport& r ) {
 
     // Phase 2 drives ALL eight routable GPIOs as outputs. A GPIO buffer-power
     // claim would be fought mid-test (and the claim's HIGH drive would
-    // corrupt its loopback reading) - pin the function to DAC1 so any claim
+    // corrupt its loopback reading) - pin the function to DAC0 so any claim
     // releases first. Same guard the cable test uses; unforced at the end.
-    infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC1
+    infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC0 (INA1-sensed)
     routableBufferPower( 1, 0, 1 );
 
     const float target = 2.5f;

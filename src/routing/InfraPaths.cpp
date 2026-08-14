@@ -196,30 +196,52 @@ static bool dacVoltageInProbeWindow(int dacNum) {
     return v >= 2.80f && v <= 3.90f;
 }
 
-static void probeDacActivate(int dacNum) {
+// Skip-if-parked bookkeeping: onActivate re-runs on EVERY rebuild, and an
+// unconditional set would hit the MCP4728 over I2C each time. The skip
+// decision trusts globalState.power - but selfTestNormalizeHardware and
+// calibrateDacs write the DAC HARDWARE with save=0 (state untouched), so a
+// state-only comparison would skip the re-write and leave the feed dead at
+// whatever the blind write set. Those sites bump the epoch to force one
+// unconditional hardware write on the next park.
+static uint32_t s_dacParkEpoch = 1;
+static uint32_t s_dacParkedEpoch[2] = {0, 0};
+
+void infraDacParkEpochBump(void) { s_dacParkEpoch++; }
+
+static void parkDacAtMeasureTarget(int dacNum) {
     // Park the DAC at the calibrated measure-mode level. checkProbePower
     // stays false: the voltage-claim nudge must never re-enter evaluation.
-    // Skip when already parked - onActivate re-runs on EVERY rebuild
-    // (idempotent re-assert), and an unconditional set would hit the MCP4728
-    // over I2C and dirty the state each time.
     // Clamp to the tip-drive sanity band (configManager also validates on
     // load): parking above 3.3V logic clips the pad ladder's high end.
     float target = jumperlessConfig.calibration.measure_mode_output_voltage;
     if (target < 3.0f || target > 3.6f) target = 3.33f;
-    if (fabsf(getDacVoltage(dacNum) - target) > 0.005f) {
+    bool stateOff = fabsf(getDacVoltage(dacNum) - target) > 0.005f;
+    if (stateOff || s_dacParkedEpoch[dacNum] != s_dacParkEpoch) {
+        // save only when the state value actually moves - a post-epoch
+        // re-write of the same value must not dirty the state.
         if (dacNum == 0) {
-            setDac0voltage(target, 1, 0, false);
+            setDac0voltage(target, stateOff ? 1 : 0, 0, false);
         } else {
-            setDac1voltage(target, 1, 0, false);
+            setDac1voltage(target, stateOff ? 1 : 0, 0, false);
         }
+        s_dacParkedEpoch[dacNum] = s_dacParkEpoch;
     }
+}
+
+static void probeDacActivate(int dacNum) {
+    parkDacAtMeasureTarget(dacNum);
     bufferPowerConnected = true;
 }
 
-// DAC1: preferred - 2 crosspoints, same chip K as BUFFER_IN.
-static int rpDac1(InfraPair out[2]) { out[0] = {ROUTABLE_BUFFER_IN, DAC1}; return 1; }
-static bool viDac1(void) { return !nonInfraBridgeTouches(DAC1) && dacVoltageInProbeWindow(1); }
-static void actDac1(void) { probeDacActivate(1); }
+// DAC0: preferred - 2 crosspoints, same chip K as BUFFER_IN, and the ONLY
+// feed the switch-position sensing can see: INA219 @0x41's 2-ohm shunt
+// (R57) is hardwired in DAC_0's output path, so the probe LED's supply
+// current registers on checkProbeCurrent() only when DAC0 sources the
+// buffer. (A DAC1 feed routes identically but is invisible to INA1 -
+// hardware-observed as the switch never changing position.)
+static int rpDac0(InfraPair out[2]) { out[0] = {ROUTABLE_BUFFER_IN, DAC0}; return 1; }
+static bool viDac0(void) { return !nonInfraBridgeTouches(DAC0) && dacVoltageInProbeWindow(0); }
+static void actDac0(void) { probeDacActivate(0); }
 static void deactDac(void) { /* nothing to undo: the DAC keeps its voltage */ }
 
 // GPIO 8->1: the fallback. 4 crosspoints via the L->K interchip lane, so
@@ -255,14 +277,11 @@ static void actGpio(void) {
     }
     probeGpioPowerHwClaim(s_gpioResolvedIdx);
     s_gpioActiveIdx = s_gpioResolvedIdx;
-    // Keep a free DAC1 parked at the measure-mode voltage so the (rare)
+    // Keep a free DAC0 parked at the measure-mode voltage so the (rare)
     // DAC-swap fallback in checkSwitchPosition reads the level the
-    // thresholds were calibrated against. Same skip-if-parked guard as
-    // probeDacActivate (this re-runs every rebuild).
-    float target = jumperlessConfig.calibration.measure_mode_output_voltage;
-    if (!nonInfraBridgeTouches(DAC1) &&
-        fabsf(getDacVoltage(1) - target) > 0.005f) {
-        setDac1voltage(target, 1, 0, false);
+    // thresholds were calibrated against (INA1 senses the DAC0 path only).
+    if (!nonInfraBridgeTouches(DAC0)) {
+        parkDacAtMeasureTarget(0);
     }
     bufferPowerConnected = true;
 }
@@ -273,12 +292,14 @@ static void deactGpio(void) {
     }
 }
 
-// (No DAC0 candidate: DAC0 is the servo'd measure-mode output and never
-// gets commandeered as a feed. The fall-through is DAC1 -> GPIO8..GPIO1;
-// with all of those claimed the function stands down until one frees up.)
+// (No DAC1 candidate: DAC1 stays the user's general-purpose routable DAC.
+// DAC0 is both the servo'd measure-mode output AND the feed - they are the
+// same wire, and the tip test stores measure_mode_output_voltage as a DAC0
+// setting. The fall-through is DAC0 -> GPIO8..GPIO1; with all of those
+// claimed the function stands down until one frees up.)
 
 static const InfraCandidate s_probePowerCandidates[] = {
-    { "DAC1", rpDac1, viDac1, actDac1, deactDac },
+    { "DAC0", rpDac0, viDac0, actDac0, deactDac },
     { "GPIO", rpGpio, viGpio, actGpio, deactGpio },
 };
 
@@ -460,7 +481,7 @@ void infraEvaluate(void) {
             // that ran the old GPIO-power firmware has true persisted in
             // config.txt - which silently kept the 4-crosspoint GPIO feed
             // and its droop model in play when the whole point of the
-            // candidate order is the 2-crosspoint DAC1 feed. Use
+            // candidate order is the 2-crosspoint DAC0 feed. Use
             // infraForceCandidate for debugging instead.)
             if (s_forced[f] >= 0 && cIdx != s_forced[f]) continue;
             pairCount = fn.candidates[cIdx].resolvePairs(pairs);
@@ -528,10 +549,11 @@ void infraEvaluate(void) {
     // the probe's"). Keep it pointing at the DAC infra is using (or would
     // prefer for fallbacks) until the reader sweep retires it.
     {
-        // Feed is DAC1 or a GPIO now (no DAC0 candidate); DAC1 is always
-        // the answer for "which DAC is the probe's".
+        // Feed is DAC0 or a GPIO now (no DAC1 candidate); DAC0 is always
+        // the answer for "which DAC is the probe's" - it is the sensed
+        // path (INA1) and the servo'd measure-mode output.
         (void)infraProbePowerSource();
-        probePowerDAC = 1;
+        probePowerDAC = 0;
     }
 #endif
 }

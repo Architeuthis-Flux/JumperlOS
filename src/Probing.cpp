@@ -5184,31 +5184,21 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         return switchPosition;
     }
     last_check_millis = now_ms;
-    if ( probePowerDAC == 1 &&
-         !( jumperlessConfig.debug.probe_power_gpio && gpioBufferPowerNode( ) > 0 ) ) {
-        // INA1 only sits on the DAC0 path, so DAC1-powered sensing is blind.
-        // EXCEPTION: under GPIO buffer power the ADC7 droop estimate works
-        // regardless of which DAC is nominal - without this exception,
-        // adjusting DAC0 (which flips probePowerDAC to 1) froze switch
-        // detection in SELECT forever, defeating the GPIO-power feature.
-        return 1;
+    // Sensing strategy follows the LIVE feed source (InfraPaths), not a
+    // config flag:
+    //   DAC0    -> INA1 current (its 2-ohm shunt R57 is hardwired in DAC_0's
+    //              output path - the only feed INA1 can see)
+    //   GPIO    -> ADC7 droop estimate (INA1 is blind), DAC0-swap fallback
+    //   no feed -> buffer unpowered (yielded to a user connection, or every
+    //              candidate claimed): no current signature exists, so hold
+    //              the last known position instead of guessing.
+    if ( infraProbePowerSource( ) < 0 ) {
+        return switchPosition;
     }
     checkingButton = 0;
-    // digitalWrite(10, LOW);
-
-    if ( probePowerDAC == 0 ) {
-        // setDac0voltage( 3.33, 0, 0, false );
-    } else if ( probePowerDAC == 1 ) {
-        // setDac1voltage( 3.33, 0, 0, false );
-    }
 
     // Update global timestamp BEFORE reading current so other code knows we're about to read
     lastProbeCurrentCheckTime = millis();
-
-    if ( jumperlessConfig.debug.probe_power_gpio &&
-         ( !bufferPowerConnected || gpioBufferPowerNode( ) <= 0 ) ) {
-        routableBufferPower( 1, 0, 0 );
-    }
 
     // Self-heal the claim's pin drive. Several subsystems write gpioState /
     // pin registers for the routable GPIO bank (setGPIO on every refresh,
@@ -5225,17 +5215,16 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // users keep their saved thresholds across firmware updates without having
     // to re-run calibration.
     //
-    // Under the EXPERIMENTAL GPIO buffer power (debug.probe_power_gpio),
-    // INA1 sits on the DAC path and sees nothing while a GPIO sources the
-    // buffer. Default sensing: read the load current as voltage droop on
+    // Under GPIO buffer power INA1 sees nothing (its shunt lives in DAC_0's
+    // output path), so sensing reads the load current as voltage droop on
     // ADC7 with a continuously-normalized unloaded peak (V0) - passive,
     // sub-ms, no tip glitch, no dependency on the unknown boot switch
-    // position. Fallback if no GPIO is claimed: swap the bridge to the DAC
-    // for one median read, then swap back.
+    // position. Fallback if the droop model has no estimate: swap the feed
+    // to DAC0 for one median read, then swap back.
     float current_mA;
     float adc7V = 0.0f;
     const char* swSource = "ina";
-    int gpioPowerNode = jumperlessConfig.debug.probe_power_gpio ? gpioBufferPowerNode( ) : -1;
+    int gpioPowerNode = gpioBufferPowerNode( ); // >0 only while a GPIO claim is live
     if ( gpioPowerNode > 0 && gpioDroopCurrentEstimate( &current_mA, &adc7V ) ) {
         swSource = "droop";
         if ( showProbeCurrent == 1 ) {
@@ -5253,7 +5242,7 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         // forced-candidate hook rather than raw bridge swaps: the feed pair
         // stays REGISTERED through both moves, so nothing leaks into slot
         // saves / undo and no second feed can appear.
-        infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC1
+        infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC0 (INA1-sensed)
         refreshLocalConnections( 0, 1, 0 );
         waitCore2( );
         delay( 3 ); // crosspoint + DAC settle before the INA windows start counting
@@ -5863,7 +5852,7 @@ static void printProbeSwitchStats( const char* src, float mA, float adc7V, int p
 
 // Thin wrapper over the InfraPaths probe_power function. Kept because ~15
 // call sites (boot, config appliers, self test, serial commands, probe
-// entry) speak this signature. The candidate machinery (DAC1 -> GPIO8..1 ->
+// entry) speak this signature. The candidate machinery (DAC0 -> GPIO8..1 ->
 // DAC0, user-claim detection, bridge add/remove) all lives in
 // routing/InfraPaths.cpp and runs at the head of every netlist rebuild.
 void Probing::routableBufferPower( int offOn, int flash, int force ) {

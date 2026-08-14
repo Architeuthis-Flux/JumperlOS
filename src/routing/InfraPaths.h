@@ -128,6 +128,13 @@ void infraScrubLoadedBridges(void);
 // "oled_i2c", "serial_1".
 int infraForceCandidate(const char* fnName, int candIdx);
 
+// Call after writing DAC hardware with save=0 (state untouched) - e.g. the
+// self test's normalize step and calibrateDacs' sweeps. The probe feed's
+// skip-if-parked guard trusts globalState.power; the bump forces one
+// unconditional hardware re-write on the next park so a blinded MCP4728
+// can't hide behind an in-window state value.
+void infraDacParkEpochBump(void);
+
 // ---------------------------------------------------------------------------
 // Ephemeral ADC resource pool
 // ---------------------------------------------------------------------------

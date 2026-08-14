@@ -56,9 +56,9 @@ check("probe_power" in status and "->" in status, "i@ shows probe_power with an 
 check("droop ohms" in status, "i@ reports the droop resistance")
 
 # --- 2. claim the active feed resource -> relocation ------------------------
-# Boot feed is DAC_1; claiming it must drop the feed down the fall-through
-# chain (DAC_1 -> GPIO8..GPIO1).
-claim_py = "DAC1" if src0 == "DAC_1" else src0.replace("GP_", "GPIO_")
+# Boot feed is DAC_0 (the INA1-sensed path); claiming it must drop the feed
+# down the fall-through chain (DAC_0 -> GPIO8..GPIO1).
+claim_py = {"DAC_0": "DAC0", "DAC_1": "DAC1"}.get(src0, src0.replace("GP_", "GPIO_"))
 out = jl_exec(f"connect({claim_py}, 25)\nprint('ok')", timeout=25)
 time.sleep(1.5)
 d = bridge_dump()
