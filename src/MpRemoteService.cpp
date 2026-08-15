@@ -365,6 +365,7 @@ void MpRemoteService::onScriptExecutionComplete() {
     // Only undo a switch position the SCRIPT wrote. Restoring unconditionally
     // clobbered a genuine mid-script physical flip, and checkSwitchPosition()
     // holds its last value when it can't sense, so that write didn't self-heal.
+    const bool scriptMovedSwitch = switchPositionScriptDirty;
     if ( switchPositionScriptDirty ) {
         switchPosition = switchPositionOnMpRemoteService;
         switchPositionScriptDirty = false;
@@ -374,7 +375,12 @@ void MpRemoteService::onScriptExecutionComplete() {
 
     // Restores happen FIRST so the handback below sees the final switchPosition.
     // (This also clears pauseCore2, which used to be set here directly.)
-    onPythonSessionEnd( );
+    //
+    // Full display teardown ONLY when the script moved the switch itself - i.e.
+    // the way a script latches measure mode. This runs after every raw-REPL
+    // exec, so an unconditional teardown wiped the user's parked reading and
+    // churned the crossbar once per typed ViperIDE line.
+    onPythonSessionEnd( scriptMovedSwitch );
 
     // routableBufferPower( 1, 1, 0 );
     // refreshConnections( 0, 1, 0 );

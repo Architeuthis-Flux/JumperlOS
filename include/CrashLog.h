@@ -36,7 +36,8 @@
 struct CrashRecord {
     uint32_t seq;         // fault count since power-on, 1-based
     uint32_t core;
-    uint32_t pc, lr, xpsr, sp;
+    uint32_t pc;
+    uint32_t lr, xpsr, sp;              // RP2350 only (no scratch room on RP2040)
     uint32_t cfsr, hfsr, bfar, mmfar;   // 0 on RP2040 (no fault status registers)
     uint32_t exc_return;
     uint32_t uptime_ms;
@@ -44,6 +45,11 @@ struct CrashRecord {
 
 // True if a logged fault is waiting to be shown.
 bool crashlogPending( void );
+
+// Call ONCE, early in setup(): latches any pending record into RAM and clears
+// the pending flag. Without this a record that never found a terminal stays
+// armed across a reflash and is later reported against a different binary.
+void crashlogLatchAtBoot( void );
 
 // Print the pending record (once, and only once a terminal is connected).
 void crashlogReportOnce( Stream& out );

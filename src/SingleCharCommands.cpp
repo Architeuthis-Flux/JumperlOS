@@ -3109,6 +3109,10 @@ CommandResult cmd_usbAudio( char c, const String& line ) {
         Jerial.printf( "  ADC%d (L) + ADC%d (R) @ %lu Hz, full scale %.2f V, dc block %s\n\r",
                        s.left_ch, s.right_ch, (unsigned long) s.sample_rate, (double) s.full_scale,
                        s.dc_block ? "on" : "off" );
+        if ( s.pending_rate ) {
+            Jerial.printf( "  rate %lu Hz pending - applied when the host closes the mic\n\r",
+                           (unsigned long) s.pending_rate );
+        }
         Jerial.printf( "  frames_sent=%lu fifo_overflow=%lu adc_overrun=%lu late_irq=%lu resyncs=%lu\n\r",
                        (unsigned long) s.frames_sent, (unsigned long) s.fifo_overflow,
                        (unsigned long) s.adc_overrun, (unsigned long) s.late_irq,

@@ -34,12 +34,17 @@ static inline volatile uint32_t* __not_in_flash_func( crashSlot )( unsigned i ) 
 enum { SLOT_HDR = 0, SLOT_PC, SLOT_LR, SLOT_XPSR, SLOT_SP, SLOT_CFSR, SLOT_HFSR, SLOT_BFAR,
        SLOT_MMFAR, SLOT_EXCRET, SLOT_UPTIME };
 #else
-// RP2040: watchdog scratch 0-3 (4-7 belong to the SDK's reboot vector).
-#define CRASHLOG_SLOTS 4u
+// RP2040: only watchdog scratch 2 and 3 are actually free. scratch[0] and [1]
+// are the bootrom's reset_usb_boot() parameters (usb_activity_gpio_pin_mask and
+// disable_interface_mask) - and src/ArduinoStuff.cpp calls reset_usb_boot(0,1)
+// for the JumperIDE PICOBOOT path, which would zero the 0xC0DE tag and destroy
+// the record with the very reflash that follows a crash. scratch[4..7] are the
+// SDK's own reboot vector.
+#define CRASHLOG_SLOTS 2u
 static inline volatile uint32_t* __not_in_flash_func( crashSlot )( unsigned i ) {
-    return &watchdog_hw->scratch[ i ];
+    return &watchdog_hw->scratch[ i + 2u ];
 }
-enum { SLOT_HDR = 0, SLOT_PC, SLOT_LR, SLOT_XPSR };
+enum { SLOT_HDR = 0, SLOT_PC };
 #endif
 
 // Note: POWMAN's 0x5AFE password scheme applies only to its 16-bit control
@@ -49,6 +54,15 @@ static inline void __not_in_flash_func( slotWrite )( unsigned i, uint32_t v ) {
 }
 
 static bool g_reportedThisBoot = false;
+// Latched once at boot. The scratch registers survive far more than our own
+// reset - reset_usb_boot(), a picotool reboot and a UF2 reflash all leave them
+// intact - and PENDING was only cleared by a DELIVERED report, which needs a
+// terminal. A crash with nobody attached therefore stayed armed, and the next
+// session (different firmware) printed "the last reset was a HardFault" with a
+// PC from a binary that no longer exists. Consuming PENDING at boot means the
+// record is reported at most once per boot, by the build that recorded it.
+static CrashRecord g_bootRecord;
+static bool        g_bootRecordValid = false;
 
 extern "C" {
 
@@ -67,10 +81,10 @@ void __attribute__((used)) __not_in_flash_func( crashlog_hardfault_c )( uint32_t
     // Read BEFORE the slots below are overwritten.
     const uint32_t uptimeMs = (uint32_t) ( timer_hw->timerawl / 1000u );
 
-    slotWrite( SLOT_PC,   frame[ 6 ] );
+    slotWrite( SLOT_PC, frame[ 6 ] );
+#ifdef PICO_RP2350
     slotWrite( SLOT_LR,   frame[ 5 ] );
     slotWrite( SLOT_XPSR, frame[ 7 ] );
-#ifdef PICO_RP2350
     slotWrite( SLOT_SP,     (uint32_t) frame );
     slotWrite( SLOT_CFSR,   *(volatile uint32_t*) 0xE000ED28u );
     slotWrite( SLOT_HFSR,   *(volatile uint32_t*) 0xE000ED2Cu );
@@ -153,9 +167,9 @@ bool crashlogLast( CrashRecord* out ) {
     out->seq  = ( hdr >> CRASHLOG_SEQ_SHIFT ) & 0xFFu;
     out->core = ( hdr >> CRASHLOG_CORE_SHIFT ) & 0xFu;
     out->pc   = *crashSlot( SLOT_PC );
-    out->lr   = *crashSlot( SLOT_LR );
-    out->xpsr = *crashSlot( SLOT_XPSR );
 #ifdef PICO_RP2350
+    out->lr         = *crashSlot( SLOT_LR );
+    out->xpsr       = *crashSlot( SLOT_XPSR );
     out->sp         = *crashSlot( SLOT_SP );
     out->cfsr       = *crashSlot( SLOT_CFSR );
     out->hfsr       = *crashSlot( SLOT_HFSR );
@@ -167,28 +181,39 @@ bool crashlogLast( CrashRecord* out ) {
     return true;
 }
 
-void crashlogReportOnce( Stream& out ) {
-    if ( g_reportedThisBoot || !crashlogPending( ) ) return;
-    // Wait for a terminal: the first menu print happens at boot with nobody
-    // listening, and burning the one report there would lose it. USB CDC's
-    // bool operator is "host has DTR asserted".
-    if ( !Serial ) return;
-    CrashRecord r;
-    if ( !crashlogLast( &r ) ) return;
-    g_reportedThisBoot = true;
-    // Shown - but keep the record readable. Also zero the consecutive-fault
-    // counter: reaching a terminal proves the board boots, so three unrelated
-    // faults spread over days must not trip the bootloop guard above.
+void crashlogLatchAtBoot( void ) {
+    if ( g_bootRecordValid ) return;
+    if ( !crashlogPending( ) ) { g_bootRecordValid = false; return; }
+    if ( !crashlogLast( &g_bootRecord ) ) return;
+    g_bootRecordValid = true;
+    // Consume it now, while we still know it belongs to THIS firmware.
+    // VALID stays set so the record remains readable; only PENDING is cleared,
+    // along with the consecutive-fault counter (reaching this point means the
+    // board booted far enough to run setup()).
     uint32_t hdr = *crashSlot( SLOT_HDR );
     hdr &= ~CRASHLOG_PENDING;
     hdr &= ~( 0xFFu << CRASHLOG_SEQ_SHIFT );
     *crashSlot( SLOT_HDR ) = hdr;
+}
+
+void crashlogReportOnce( Stream& out ) {
+    if ( g_reportedThisBoot || !g_bootRecordValid ) return;
+    // Wait for a terminal: the first menu print happens at boot with nobody
+    // listening, and burning the one report there would lose it. USB CDC's
+    // bool operator is "host has DTR asserted".
+    if ( !Serial ) return;
+    const CrashRecord& r = g_bootRecord;
+    g_reportedThisBoot = true;
 
     out.printf( "\n\r[crashlog] The last reset was a HardFault on core %lu (uptime %lu ms, fault #%lu since power-on):\n\r",
                 (unsigned long) r.core, (unsigned long) r.uptime_ms, (unsigned long) r.seq );
+#ifdef PICO_RP2350
     out.printf( "[crashlog]   PC=0x%08lX LR=0x%08lX xPSR=0x%08lX SP=0x%08lX EXC_RETURN=0x%08lX\n\r",
                 (unsigned long) r.pc, (unsigned long) r.lr, (unsigned long) r.xpsr,
                 (unsigned long) r.sp, (unsigned long) r.exc_return );
+#else
+    out.printf( "[crashlog]   PC=0x%08lX\n\r", (unsigned long) r.pc );
+#endif
 #ifdef PICO_RP2350
     out.printf( "[crashlog]   CFSR=0x%08lX HFSR=0x%08lX BFAR=0x%08lX MMFAR=0x%08lX\n\r",
                 (unsigned long) r.cfsr, (unsigned long) r.hfsr,

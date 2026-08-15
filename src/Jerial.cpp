@@ -1203,6 +1203,12 @@ const char* JerialClass::getCurrentLineBuffer() {
     return "";
 }
 
+void JerialClass::redrawInputLine() {
+    if (term_control_active && term_control) {
+        term_control->renderCurrentLine();
+    }
+}
+
 int JerialClass::getInputLineColumns() {
     if (term_control_active && term_control) {
         return term_control->getPromptVisibleWidth() + term_control->getLineLength();

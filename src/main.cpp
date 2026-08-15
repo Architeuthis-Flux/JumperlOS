@@ -189,7 +189,19 @@ struct ClearStaleDoorbells {
 // silent cross-core memory corruption. Limits sit a redzone above the
 // absolute floor of each core's stack region.
 static inline void armStackLimit( uint32_t floorAddr ) {
+    // CCR.STKOFHFNMIGN: ignore the stack-limit check for the exception entry
+    // stacking of HardFault/NMI. Without it an MSPLIM violation is unrecoverable
+    // rather than debuggable: the M33 pins SP at the limit and raises STKOF,
+    // USGFAULTENA is not set so it escalates to HardFault, and that entry's own
+    // stacking is checked against the same MSPLIM - a derived fault at priority
+    // -1, which is architectural LOCKUP. No record, no reboot, nothing to read.
+    // With this bit the handler is entered and CrashLog captures it (CFSR bit
+    // 20, UFSR.STKOF). CCR is banked per core, so this must run on both.
+    // CCR is at 0xE000ED14 (M33_CCR_OFFSET); STKOFHFNMIGN is bit 10.
+    *(volatile uint32_t*)0xE000ED14u |= (1u << 10);
+    __asm volatile( "dsb" ::: "memory" );
     __asm volatile( "msr MSPLIM, %0" ::"r"( floorAddr ) : );
+    __asm volatile( "isb" ::: "memory" );
 }
 #endif
 
@@ -202,9 +214,14 @@ void setup( ) {
     // its separate heap stack, both scratch banks belong to Core 0. Floor =
     // SCRATCH_X base (0x20080000) + 64-byte redzone.
     extern uint32_t __scratch_x_start__;
-    armStackLimit( (uint32_t)&__scratch_x_start__ + 64 );
+    armStackLimit( (uint32_t)&__scratch_x_start__ + 160 );  // > extended FP exception frame
 #endif
     flashParkRegisterCore( ); // our side of the flash-write park (see FlashPark.h)
+    // Consume any pending crash record NOW, while we still know it belongs to
+    // this firmware: the scratch registers survive a reflash, and a record that
+    // never reached a terminal would otherwise be reported against a binary
+    // that no longer exists. Printed later, once a terminal shows up.
+    crashlogLatchAtBoot( );
     pinMode( RESETPIN, OUTPUT_12MA );
 
     digitalWrite( RESETPIN, HIGH );
@@ -598,7 +615,7 @@ void setup1( ) {
     // Core 1 stack: 8KB heap block (core1_separate_stack above). Floor =
     // base of that allocation + 64-byte redzone.
     if ( core1_separate_stack_address != nullptr ) {
-        armStackLimit( (uint32_t)core1_separate_stack_address + 64 );
+        armStackLimit( (uint32_t)core1_separate_stack_address + 160 );  // > extended FP exception frame
     }
 #endif
     flashParkRegisterCore( ); // core 1's side of the flash-write park (see FlashPark.h)

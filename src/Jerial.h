@@ -380,6 +380,14 @@ public:
      * input line wraps and breaks its "two rows up" cursor math.
      */
     int getInputLineColumns();
+
+    /**
+     * Repaint the prompt + current input line where the cursor is now, leaving
+     * the cursor at the user's edit position. Used by ReadingDisplay after it
+     * scrolls rows in for a pinned reading, so the input line follows its text
+     * instead of being erased by the pin's cursor math.
+     */
+    void redrawInputLine();
     
     /**
      * Set terminal prompt
@@ -729,6 +737,13 @@ private:
 
     int brace_depth; // Nesting level of curly braces
 
+public:
+    // Repaint prompt + current line at the cursor's present row, leaving the
+    // cursor at the user's edit position. Public so ReadingDisplay can put the
+    // input line back after scrolling rows in for a pinned reading.
+    void renderCurrentLine();
+
+private:
     // Internal methods
     void handleNormalChar(char c);
     void handleBackspace();
@@ -740,8 +755,7 @@ private:
     void handleCtrlU();
     void handleTab();
     void handleMainSerialENQ();
-    
-    void renderCurrentLine();
+
     void clearCurrentLine();
     void moveCursorTo(int position);
     void moveCursorToPosition(int position);

@@ -190,7 +190,9 @@ bool executePythonFileContent(const char* src);
 // Hand the UI back to the firmware after Python ran (see Python_Proper.cpp).
 // Called from BOTH script paths: executePythonFileContent() and the raw-REPL
 // completion hook in MpRemoteService.
-void onPythonSessionEnd(void);
+// fullHandback: true tears the display state down too (file runs). The raw
+// REPL passes false for ordinary console lines - see the body.
+void onPythonSessionEnd(bool fullHandback = true);
 
 // Reset the display preferences only a Python script can set
 // (oled_set_text_size / oled_copy_print). Defined in JumperlessMicroPythonAPI.cpp,

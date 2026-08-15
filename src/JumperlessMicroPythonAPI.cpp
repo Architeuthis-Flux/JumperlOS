@@ -407,7 +407,7 @@ void jl_usb_audio_set_dc_block( int on ) { usb_audio_set_dc_block( on != 0 ); }
 // Flat out-params so the MicroPython side can build the status dict without
 // this C++ translation unit ever touching an mp_obj_t.
 void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *left, int *right,
-                          float *full_scale, int *dc_block, int *sample_rate,
+                          float *full_scale, int *dc_block, int *sample_rate, int *pending_rate,
                           int *frames_sent, int *fifo_overflow, int *adc_overrun,
                           int *late_irq, int *resyncs, int *probe_pauses, int *claim_fail,
                           int *init_fail ) {
@@ -421,6 +421,7 @@ void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *lef
     if ( full_scale )    *full_scale    = s.full_scale;
     if ( dc_block )      *dc_block      = s.dc_block ? 1 : 0;
     if ( sample_rate )   *sample_rate   = (int) s.sample_rate;
+    if ( pending_rate )  *pending_rate  = (int) s.pending_rate;
     if ( frames_sent )   *frames_sent   = (int) s.frames_sent;
     if ( fifo_overflow ) *fifo_overflow = (int) s.fifo_overflow;
     if ( adc_overrun )   *adc_overrun   = (int) s.adc_overrun;
@@ -440,13 +441,19 @@ int  jl_usb_audio_enable( void )        { return 0; }
 int  jl_usb_audio_disable( void )       { return 0; }
 int  jl_usb_audio_is_enabled( void )    { return 0; }
 int  jl_usb_audio_is_streaming( void )  { return 0; }
-int  jl_usb_audio_set_channels( int left, int right ) { (void)left; (void)right; return 0; }
-int  jl_usb_audio_set_rate( int hz )    { (void)hz; return 0; }
-int  jl_usb_audio_set_full_scale( float volts ) { (void)volts; return 0; }
+// These three report SUCCESS on OG even though there is no audio hardware.
+// usb_audio_setup() calls them before jl_usb_audio_enable(), and each raises a
+// ValueError from MicroPython on a false return - so returning 0 here made
+// usb_audio_setup() throw "channels must be distinct" on a board whose only
+// real answer is "not supported". Enable is the one that reports the truth, so
+// usb_audio_setup() cleanly returns False.
+int  jl_usb_audio_set_channels( int left, int right ) { (void)left; (void)right; return 1; }
+int  jl_usb_audio_set_rate( int hz )    { (void)hz; return 1; }
+int  jl_usb_audio_set_full_scale( float volts ) { (void)volts; return 1; }
 void jl_usb_audio_set_dc_block( int on ) { (void)on; }
 void jl_usb_audio_save( void )          { }
 void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *left, int *right,
-                          float *full_scale, int *dc_block, int *sample_rate,
+                          float *full_scale, int *dc_block, int *sample_rate, int *pending_rate,
                           int *frames_sent, int *fifo_overflow, int *adc_overrun,
                           int *late_irq, int *resyncs, int *probe_pauses, int *claim_fail,
                           int *init_fail ) {
@@ -458,6 +465,7 @@ void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *lef
     if ( full_scale )    *full_scale    = 0.0f;
     if ( dc_block )      *dc_block      = 0;
     if ( sample_rate )   *sample_rate   = 0;
+    if ( pending_rate )  *pending_rate  = 0;
     if ( frames_sent )   *frames_sent   = 0;
     if ( fifo_overflow ) *fifo_overflow = 0;
     if ( adc_overrun )   *adc_overrun   = 0;

@@ -53,7 +53,7 @@ int  jl_usb_audio_set_rate( int hz );
 int  jl_usb_audio_set_full_scale( float volts );
 void jl_usb_audio_set_dc_block( int on );
 void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *left, int *right,
-                          float *full_scale, int *dc_block, int *sample_rate,
+                          float *full_scale, int *dc_block, int *sample_rate, int *pending_rate,
                           int *frames_sent, int *fifo_overflow, int *adc_overrun,
                           int *late_irq, int *resyncs, int *probe_pauses, int *claim_fail,
                           int *init_fail );
@@ -2092,18 +2092,18 @@ static MP_DEFINE_CONST_FUN_OBJ_1( jl_usb_audio_set_range_obj, jl_usb_audio_set_r
 
 static mp_obj_t jl_usb_audio_status_func( void ) {
     int enabled = 0, streaming = 0, host_open = 0, left = 0, right = 0, dc_block = 0;
-    int sample_rate = 0, frames_sent = 0, fifo_overflow = 0, adc_overrun = 0;
+    int sample_rate = 0, pending_rate = 0, frames_sent = 0, fifo_overflow = 0, adc_overrun = 0;
     int late_irq = 0, resyncs = 0, probe_pauses = 0, claim_fail = 0, init_fail = 0;
     float full_scale = 0.0f;
     jl_usb_audio_status( &enabled, &streaming, &host_open, &left, &right, &full_scale,
-                         &dc_block, &sample_rate, &frames_sent,
+                         &dc_block, &sample_rate, &pending_rate, &frames_sent,
                          &fifo_overflow, &adc_overrun,
                          &late_irq, &resyncs, &probe_pauses, &claim_fail, &init_fail );
 
     // Health counters: a clean recording has frames_sent climbing at
     // sample_rate per second and everything else flat (late_irq/resyncs tick
     // once per flash write, probe_pauses once per probe use).
-    mp_obj_t d = mp_obj_new_dict( 16 );
+    mp_obj_t d = mp_obj_new_dict( 17 );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_enabled ),      mp_obj_new_bool( enabled ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_streaming ),    mp_obj_new_bool( streaming ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_host_open ),    mp_obj_new_bool( host_open ) );
@@ -2112,6 +2112,7 @@ static mp_obj_t jl_usb_audio_status_func( void ) {
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_full_scale ),   mp_obj_new_float( full_scale ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_dc_block ),     mp_obj_new_bool( dc_block ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_sample_rate ),  mp_obj_new_int( sample_rate ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_pending_rate ), mp_obj_new_int( pending_rate ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_frames_sent ),  mp_obj_new_int( frames_sent ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_fifo_overflow ), mp_obj_new_int( fifo_overflow ) );
     mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_adc_overrun ),  mp_obj_new_int( adc_overrun ) );

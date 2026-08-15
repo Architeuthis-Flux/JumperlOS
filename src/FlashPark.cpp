@@ -21,7 +21,7 @@ bool     flashParkActive( void )   { return false; }
 #elif defined(PICO_RP2350)
 
 namespace {
-int           s_bell = -1;              // our doorbell (claimed for both cores)
+volatile int  s_bell = -1;              // our doorbell; published by core 0
 bool          s_handlerInstalled = false;         // chain slot taken (once, not per core)
 volatile bool s_ready[ 2 ]   = { false, false };  // handler registered on core n
 volatile bool s_parked[ 2 ]  = { false, false };  // core n is inside the park spin
@@ -43,7 +43,13 @@ void __not_in_flash_func( flashParkIrq )( void ) {
     // Clear FIRST. A ring that lands from here on stays pending in the sticky
     // bell and re-enters this handler after we return - never swallowed.
     multicore_doorbell_clear_current_core( (uint) s_bell );
-    s_release[ core ] = false;
+    // Do NOT clear s_release here. parkOther() already cleared it before
+    // ringing, so it is redundant on the healthy path - and fatal on the late
+    // one: if we ack after parkOther() gave up, resumeOther(false) has already
+    // posted the release, and wiping it would park this core forever. That
+    // wedge does not self-heal (the next parkOther() re-rings before noticing
+    // s_parked is set), which is exactly the half-alive board - core 1 dead,
+    // core 0 still answering - this module exists to prevent.
     __sync_synchronize( );
     s_parked[ core ] = true;
     while ( !s_release[ core ] ) { tight_loop_contents( ); }
@@ -65,6 +71,11 @@ bool __not_in_flash_func( parkOther )( void ) {
     while ( !s_parked[ other ] ) {
         if ( (uint32_t) ( time_us_32( ) - t0 ) > kAckTimeoutUs ) {
             s_timeouts++;
+            // Take the ring back so "at most one outstanding" still holds; a
+            // bell left set would fire the handler at an arbitrary later
+            // moment, parking a core nobody is waiting for.
+            multicore_doorbell_clear_other_core( (uint) s_bell );
+            s_release[ other ] = true;   // release a late acker immediately
             return false;   // proceed unparked rather than wedge the board
         }
         tight_loop_contents( );
@@ -92,11 +103,26 @@ void __not_in_flash_func( resumeOther )( bool parked ) {
 
 void flashParkRegisterCore( void ) {
     const uint core = get_core_num( );
+    // CORE 0 OWNS SETUP. arduino-pico launches core 1 BEFORE setup() runs, so
+    // both cores reach this concurrently: racing on s_bell would let each claim
+    // a different doorbell (leaking one) and both call irq_add_shared_handler,
+    // re-creating the panic the install guard exists to prevent. Core 1 waits
+    // for core 0 to publish, bounded, then only enables its own NVIC line.
+    if ( core != 0 ) {
+        const uint32_t t0 = time_us_32( );
+        while ( s_bell < 0 && (uint32_t) ( time_us_32( ) - t0 ) < 1000000u ) {
+            tight_loop_contents( );
+        }
+        if ( s_bell < 0 ) return;   // core 0 declined; flashParkTakeover() stays off
+        irq_set_enabled( multicore_doorbell_irq_num( (uint) s_bell ), true );
+        s_ready[ core ] = true;
+        return;
+    }
     if ( s_bell < 0 ) {
-        // Claim once (core 0 gets here first, at the top of setup(), before
-        // core 1 has finished starting). Non-panicking: decline gracefully.
+        // Non-panicking: decline gracefully if every doorbell is taken.
         int b = multicore_doorbell_claim_unused( 0b11, false );
         if ( b < 0 ) return;
+        __sync_synchronize( );
         s_bell = b;
     }
     const uint irq = multicore_doorbell_irq_num( (uint) s_bell );
@@ -116,6 +142,13 @@ void flashParkRegisterCore( void ) {
 }
 
 void flashParkTakeover( void ) {
+    // If the --wrap flags are missing, __wrap_flash_range_* are never
+    // referenced, --gc-sections drops them, and this would disarm the
+    // framework's park while providing nothing in its place - a build that
+    // links clean and ships with NO park at all.
+    static_assert( JL_FLASH_PARK_WRAPPED,
+                   "JL_FLASH_PARK_ENABLE=1 also needs -Wl,--wrap,flash_range_erase and "
+                   "-Wl,--wrap,flash_range_program in platformio.ini" );
     if ( s_bell < 0 || !s_ready[ 0 ] || !s_ready[ 1 ] || s_active ) return;
     // From here every flash write parks the other core through flashParkIrq;
     // the framework's idleOtherCore()/resumeOtherCore() become no-ops

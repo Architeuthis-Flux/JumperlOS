@@ -1514,9 +1514,12 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     // claim latch below is what it checks, so this holds for save=0 writes
     // too - the MicroPython dac_set() default) and relocates the buffer feed.
     // Replaces the old inline probePowerDAC swap.
-    if ( checkProbePower ) {
-        s_dacUserClaimed[ 0 ] = ( voltage > 3.9 || voltage < 2.80 );
-    }
+    // The claim tracks USER writes only (terminal / MicroPython). A blind write
+    // - self test, calibration, infra's own park - must CLEAR it: leaving it set
+    // meant probe power stayed on the GPIO fallback (ADC7 droop model instead of
+    // INA1 sensing) until reboot, because dacVoltageInProbeWindow() kept
+    // returning false for a DAC nobody was claiming any more.
+    s_dacUserClaimed[ 0 ] = checkProbePower && ( voltage > 3.9 || voltage < 2.80 );
     if ( checkProbePower && infraProbePowerSource( ) == DAC0 &&
          ( voltage > 3.9 || voltage < 2.80 ) ) {
         Serial.println(
@@ -1551,9 +1554,7 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
         globalState.setDacVoltage(1, voltage);
     }
     s_dacHwVolts[ 1 ] = voltage;   // hardware truth, persisted or not
-    if ( checkProbePower ) {
-        s_dacUserClaimed[ 1 ] = ( voltage > 3.9 || voltage < 2.80 );
-    }
+    s_dacUserClaimed[ 1 ] = checkProbePower && ( voltage > 3.9 || voltage < 2.80 );
 
     // See setDac0voltage: out-of-window saved voltage = user claim; the
     // nudged rebuild reads globalState.power.dac1 (written just above) and
@@ -2583,6 +2584,21 @@ float __not_in_flash_func(readAdcVoltage)( int channel, int samples ) {
     if ( channel < 0 || channel > 7 ) {
         return 0;
     }
+#if USB_AUDIO_ENABLE
+    // While USB audio owns the converter, readAdc() deliberately returns a 0
+    // SENTINEL for the two probe channels (5 = pad sense, 7 = tip) rather than a
+    // rolling mean, because a smeared value fed to the probe's row decoder picks
+    // the WRONG row. That sentinel must not be scaled: 0 * spread - adcZero[7]
+    // is about -9 V, a confident, completely wrong voltage that fed
+    // gpioDroopCurrentEstimate() (~400 mA against a ~1 mA threshold, enough to
+    // latch switch position) and printed as the tip voltage in three places.
+    // The sweep DOES cover these channels, so serve the cached real value that
+    // usbAudioRefreshLazy() maintains. readAdc() itself is untouched - the row
+    // decoder still gets its sentinel.
+    if ( usbAudioOwnsAdc && ( channel == 5 || channel == 7 ) ) {
+        return adcReadings[ channel ];
+    }
+#endif
     int adcReadingUnscaled = readAdc( channel, samples );
 
     float adcReading = ( adcReadingUnscaled ) * ( adcSpread[ channel ] / 4095 );

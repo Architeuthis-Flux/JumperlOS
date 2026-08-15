@@ -71,6 +71,9 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
 
 namespace {
 bool pinReserved = false;
+// Set when the width guard released the pin. Kept separate from lastLine (the
+// OLED dedupe key) so releasing the serial pin never forces an OLED repaint.
+bool serialNeedsRepin = false;
 
 void pinCursorToLiveRow(void) {
     Serial.print("\x1b" "7");   // DECSC - save the user's input-line cursor
@@ -88,9 +91,14 @@ constexpr int kMaxInputColsForPin = 70;
 
 void emitLiveSerialLine(const char* line) {
     if (Jerial.getInputLineColumns() >= kMaxInputColsForPin) {
-        // Leave the terminal alone until the line is shorter. Forget the last
-        // painted line too, so an unchanged reading re-pins the moment it can.
-        resetLastShown();
+        // Leave the terminal alone until the line is shorter. Drop the pin but
+        // NOT lastLine: lastLine is also the OLED dedupe key, and clearing it
+        // made every caller that fires per loop pass (VoltageAdjuster) repaint
+        // a full OLED frame - a blocking I2C write plus a font-fit search -
+        // on every pass for as long as the typed line stayed long. The separate
+        // flag below is what forces the serial side to re-pin.
+        pinReserved = false;
+        serialNeedsRepin = true;
         return;
     }
     if (!pinReserved) {
@@ -99,8 +107,15 @@ void emitLiveSerialLine(const char* line) {
         // a raw serial link LF moves down but holds the column, which would
         // leave the input line - and every later DECRC - at a stale column.
         Serial.print("\n\r\n\r");
+        // Those two newlines moved the user's input line down two rows, and the
+        // cursor now sits at column 0 of a blank row - so the DECSC below would
+        // capture the wrong position and the CUU+EL would erase the row the
+        // input line just moved to. Repaint it first: that puts the text back
+        // and leaves the cursor where the user actually is, mid-word.
+        Jerial.redrawInputLine();
         pinReserved = true;
     }
+    serialNeedsRepin = false;
     pinCursorToLiveRow();
     Serial.print(line);
     Serial.print("\x1b" "8");   // DECRC - back to the input line
@@ -160,8 +175,8 @@ void show(const char* name, int rowNode, const char* value, const char* value2) 
     appendField(line, len, "  ", value);
     appendField(line, len, "  ", value2);
 
-    if (strcmp(line, lastLine) == 0) {
-        return;  // already on screen
+    if (!serialNeedsRepin && strcmp(line, lastLine) == 0) {
+        return;  // already on screen, and the serial pin is intact
     }
     strncpy(lastLine, line, LINE_CAP - 1);
     lastLine[LINE_CAP - 1] = '\0';

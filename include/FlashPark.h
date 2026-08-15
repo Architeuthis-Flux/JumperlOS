@@ -52,8 +52,10 @@
 //   2. Take over the park completely and remove the framework's handler
 //      (needs the handler's address - _MFIFO::_irq is private).
 //   3. Ship a libpico.a built with a larger PICO_MAX_SHARED_IRQ_HANDLERS.
-// Then set JL_FLASH_PARK_ENABLE to 1 and re-run test/hil/swd/stress_flash.py -
-// the bug it fixes reproduces there in under ~20 iterations.
+// Then set JL_FLASH_PARK_ENABLE=1 AND JL_FLASH_PARK_WRAPPED=1 together with the
+// two -Wl,--wrap flags (all on the same platformio.ini line, so they cannot
+// drift apart), and re-run test/hil/swd/stress_flash.py - the bug it fixes
+// reproduces there in under ~20 iterations.
 //
 // NOTE the pool is at its limit WITHOUT this module too: with MicroPython
 // initialised there are ZERO slots left, so the next feature to ask for one
@@ -66,6 +68,13 @@
 
 #ifndef JL_FLASH_PARK_ENABLE
 #define JL_FLASH_PARK_ENABLE 0
+#endif
+
+// Set to 1 on the SAME platformio.ini line that adds the two --wrap flags.
+// flashParkTakeover() static_asserts on it, so an enabled-but-unwrapped build
+// fails to compile instead of silently shipping with no park at all.
+#ifndef JL_FLASH_PARK_WRAPPED
+#define JL_FLASH_PARK_WRAPPED 0
 #endif
 
 #include <stdint.h>

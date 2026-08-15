@@ -77,6 +77,9 @@ static volatile uint8_t g_hostAlt = 0;
 // resamples; it does not need a descriptor rebuild.
 #define JL_AUDIO_DEFAULT_RATE 16000u
 static uint32_t g_rateHz = JL_AUDIO_DEFAULT_RATE;
+// Set when a rate change arrives while the host has the mic open; applied by
+// the pump at the next stop. 0 = nothing pending. See usb_audio_set_rate().
+static volatile uint32_t g_pendingRateHz = 0;
 
 // Sweep EVERY ADC channel, not just the two being streamed. The audio pair is
 // whatever the user picked; the rest ride along and are demuxed straight into
@@ -130,6 +133,15 @@ static_assert((1u << JL_AUDIO_HALF_RING_BITS) == JL_AUDIO_HALF_BYTES, "ring bits
 static_assert(JL_AUDIO_MAX_PER_MS * 2u <= JL_AUDIO_HALF_BYTES, "one burst must fit in a half");
 static uint16_t __attribute__((aligned(JL_AUDIO_HALF_BYTES))) g_half[2][JL_AUDIO_HALF_BYTES / 2u];
 static int  g_dmaCh[2] = { -1, -1 };
+
+// Channels 5 and 7 are the probe's pad-sense and tip inputs. Streaming them is
+// self-defeating: ADC5 crossing the pad threshold stamps probe activity, which
+// pauses the very capture that is reading it, every 300 ms forever. They are
+// also the two channels served as a sentinel rather than a mean, so the audio
+// would be silence anyway.
+static inline bool usbAudioChannelStreamable(int ch) {
+    return ch >= 0 && ch <= 7 && ch != 5 && ch != 7;
+}
 
 // Channel selection and the derived fixed-point conversion terms, latched at
 // stream start so a mid-stream recalibration can't tear them.
@@ -502,6 +514,13 @@ static void usbAudioAdcStop(void) {
 static void usbAudioReleaseAdc(void) {
     g_streaming = false;
     usbAudioAdcStop();
+    // Capture is down: this is the one safe moment to adopt a rate the host was
+    // not consulted about (see usb_audio_set_rate()).
+    if (g_pendingRateHz != 0) {
+        g_rateHz = g_pendingRateHz;
+        g_pendingRateHz = 0;
+        usb_audio_sync_config();
+    }
     __sync_synchronize();
     usbAudioOwnsAdc = false;
     __atomic_clear(&readingADC, __ATOMIC_RELEASE);
@@ -529,13 +548,17 @@ extern "C" void usb_audio_apply_config(void) {
     // feed lroundf(inf) - undefined behaviour, and the gain it produces then
     // corrupts every sample. Mirror the same limits usb_audio_set_full_scale()
     // enforces, rather than trusting the file.
-    if (g_chL == g_chR || g_chL > 7 || g_chR > 7) { g_chL = 0; g_chR = 1; }
+    if (g_chL == g_chR || !usbAudioChannelStreamable(g_chL) ||
+        !usbAudioChannelStreamable(g_chR)) { g_chL = 0; g_chR = 1; }
     if (g_rateHz < 8000u || g_rateHz > 48000u || (g_rateHz % 1000u)) g_rateHz = JL_AUDIO_DEFAULT_RATE;
     if (!(g_fullScaleVolts >= 0.05f) || g_fullScaleVolts > 20.0f) g_fullScaleVolts = 8.0f;
 
     // Record the desired state. Do NOT cycle the bus from here: this runs deep
     // inside config loading and is not a safe place to be disconnecting USB.
     g_usb_audio_enabled = jumperlessConfig.usb_audio.enabled;
+    // Write the clamped values back, so `~config` and config.txt report what the
+    // hardware will actually do rather than the rejected value from the file.
+    usb_audio_sync_config();
 }
 
 // Make the host's view match the restored config.
@@ -555,6 +578,20 @@ extern "C" void usb_audio_boot_enumerate(void) {
 
 // Persist the current setup so the next boot comes up this way with no
 // re-enumeration at all.
+// Mirror the live g_* state into jumperlessConfig so the struct, the terminal's
+// `~config` dump and config.txt all agree with what the hardware is doing.
+// Without this the live setters moved g_* only, usb_audio_save_config() copied
+// g_* over the struct, and a value set through the config surface was silently
+// reverted on disk by the next Ms.
+extern "C" void usb_audio_sync_config(void) {
+    jumperlessConfig.usb_audio.enabled    = g_usb_audio_enabled;
+    jumperlessConfig.usb_audio.left       = g_chL;
+    jumperlessConfig.usb_audio.right      = g_chR;
+    jumperlessConfig.usb_audio.rate       = (int) (g_pendingRateHz ? g_pendingRateHz : g_rateHz);
+    jumperlessConfig.usb_audio.full_scale = g_fullScaleVolts;
+    jumperlessConfig.usb_audio.dc_block   = g_dcBlock;
+}
+
 extern "C" void usb_audio_save_config(void) {
     // Stop capture across the write. The DMA is memory-safe through a flash
     // write now (ring-wrapped halves), but the recording would still be a torn
@@ -563,12 +600,7 @@ extern "C" void usb_audio_save_config(void) {
     const bool wasStreaming = g_streaming;
     if (wasStreaming) usb_audio_yield_adc("saving config to flash");
 
-    jumperlessConfig.usb_audio.enabled    = g_usb_audio_enabled;
-    jumperlessConfig.usb_audio.left       = g_chL;
-    jumperlessConfig.usb_audio.right      = g_chR;
-    jumperlessConfig.usb_audio.rate       = (int) g_rateHz;
-    jumperlessConfig.usb_audio.full_scale = g_fullScaleVolts;
-    jumperlessConfig.usb_audio.dc_block   = g_dcBlock;
+    usb_audio_sync_config();
     saveConfig();
     // Let the pump pick capture back up if the host still has the mic open.
     if (wasStreaming) usb_audio_resume_adc();
@@ -859,10 +891,12 @@ extern "C" bool __not_in_flash_func(tud_audio_tx_done_isr)(uint8_t rhport, uint1
 // half-configured channel. Setting the flag lets core1 do the restart in the
 // one place that is allowed to.
 extern "C" bool usb_audio_set_channels(int left, int right) {
-    if (left < 0 || left > 7 || right < 0 || right > 7 || left == right) return false;
+    if (!usbAudioChannelStreamable(left) || !usbAudioChannelStreamable(right) ||
+        left == right) return false;
     g_chL = (uint8_t) left;
     g_chR = (uint8_t) right;
     if (g_streaming) g_needResync = true;
+    usb_audio_sync_config();
     return true;
 }
 
@@ -870,18 +904,39 @@ extern "C" bool usb_audio_set_channels(int left, int right) {
 // value through the clock entity on its next query.
 extern "C" bool usb_audio_set_rate(uint32_t hz) {
     if (hz < 8000u || hz > 48000u || (hz % 1000u) != 0u) return false;
+    // DEFERRED while the host has the interface open. TinyUSB sizes every
+    // isochronous IN packet from the rate the HOST negotiated via SET_CUR
+    // SAM_FREQ, not from g_rateHz - so moving this mid-stream left capture at
+    // the new rate and framing at the old one (16k->48k overruns the endpoint
+    // FIFO, 48k->16k sends near-silence). Worse, tud_audio_set_req_entity_cb()
+    // answers a SET_CUR with "want == g_rateHz", so a host that cached the
+    // clock RANGE at attach gets STALLED on the very rate it negotiated.
+    // Applying it at the next stop keeps device and host in agreement, and the
+    // host re-reads the clock entity when it next opens the mic.
+    if (g_streaming || g_hostAlt == 1) {
+        // Asking for the rate already in use is not a change - don't leave a
+        // pending value that status would report as a queued change.
+        g_pendingRateHz = (hz == g_rateHz) ? 0u : hz;
+        usb_audio_sync_config();
+        return true;
+    }
     g_rateHz = hz;
-    if (g_streaming) g_needResync = true;
+    g_pendingRateHz = 0;
+    usb_audio_sync_config();
     return true;
 }
 
 extern "C" bool usb_audio_set_full_scale(float volts) {
-    if (!(volts > 0.05f) || volts > 20.0f) return false;
+    // >= not >, to match the clamp in usb_audio_apply_config() and both error
+    // strings: exactly 0.05 was accepted from config.txt but rejected from a
+    // script, which is the sort of inconsistency that wastes an afternoon.
+    if (!(volts >= 0.05f) || volts > 20.0f) return false;
     g_fullScaleVolts = volts;
     // Recompute in place; the IRQ only ever reads these, and a torn update just
     // costs one sample at the old gain.
     usbAudioCacheCal(g_chL, 0);
     usbAudioCacheCal(g_chR, 1);
+    usb_audio_sync_config();
     return true;
 }
 
@@ -889,6 +944,7 @@ extern "C" void usb_audio_set_dc_block(bool on) {
     g_dcBlock = on;
     g_hpX1[0] = g_hpY1[0] = g_hpX1[1] = g_hpY1[1] = 0;
     g_ringHead = g_ringTail = 0;
+    usb_audio_sync_config();
 }
 
 extern "C" void usb_audio_get_status(usb_audio_status_t *out) {
@@ -901,6 +957,7 @@ extern "C" void usb_audio_get_status(usb_audio_status_t *out) {
     out->full_scale    = g_fullScaleVolts;
     out->dc_block      = g_dcBlock;
     out->sample_rate   = g_rateHz;
+    out->pending_rate  = g_pendingRateHz;
     out->frames_sent   = g_statFramesSent;
     out->fifo_overflow = g_statFifoFull;
     out->adc_overrun   = g_statAdcOver;

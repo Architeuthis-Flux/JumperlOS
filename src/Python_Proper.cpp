@@ -4906,19 +4906,28 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
  * whatever the script last drew on the OLED are its OUTPUT and must survive -
  * this stops the zombie repainters, it does not blank the screen.
  *
- * Idempotent and silent when nothing latched, so it is safe after every exec.
+ * fullHandback=false does only the script-injected input state (encoder,
+ * pauseCore2) and leaves the display alone - see the comment in the body.
  */
-void onPythonSessionEnd( void ) {
-    Highlighting& hl = Highlighting::getInstance( );
-    const bool latched = measureModeService.isMeasurementActive( ) ||
-                         hl.brightenedNet > 0 || hl.highlightedNet > 0 || hl.brightenedNode > 0 ||
-                         hl.warningNet > 0 || hl.showReadingNet > 0;
-    if ( latched ) {
+void onPythonSessionEnd( bool fullHandback ) {
+    // The display teardown is NOT unconditional. The raw REPL calls this after
+    // EVERY exec - every ViperIDE console line, tab completion and file listing
+    // - and the obvious "did anything latch?" test is a trap: showReadingNet is
+    // sticky by design (only resetReadingState() clears it), so after a single
+    // probe tap it stays true forever and the gate fires in exactly the case it
+    // was written to protect. Tearing down there wipes a reading the user parked
+    // on the main terminal, re-routes the measure-mode ADC bridge (crossbar
+    // churn, since MeasureMode re-latches immediately) and re-sends the LEDs,
+    // once per typed line.
+    //
+    // So: the file-run path always hands back, and the raw-REPL path only does
+    // when the SCRIPT itself moved the switch - the documented way a script
+    // latches measure mode, already tracked for the switch restore.
+    if ( fullHandback ) {
+        Highlighting& hl = Highlighting::getInstance( );
         // Erase the pinned live reading rows BEFORE anything drops the anchor:
         // stopMeasurement() -> clearHighlighting() -> resetLastShown() forgets
         // where the rows are, and a value left frozen there reads as current.
-        // Gated on "something was actually latched" so a plain ViperIDE console
-        // line doesn't wipe a reading the user parked on the main terminal.
         ReadingDisplay::clearLiveSerialLine( );
         measureModeService.stopMeasurement( );  // no-ops when inactive
         hl.clearHighlighting( 1 );
@@ -4970,7 +4979,7 @@ bool executePythonFileContent( const char* src ) {
 
     // Hand the UI back. Runs even when the script raised - mp_embed_exec_str()
     // catches Python exceptions internally and returns normally.
-    onPythonSessionEnd( );
+    onPythonSessionEnd( true );   // file run: the script owned the UI
 
     // A file run is a whole session, so the display prefs only a script can
     // set go back to defaults too. NOT done on the raw-REPL path, where each

@@ -1,4 +1,5 @@
 #include "FilesystemStuff.h"
+#include "USBAudio.h"   // USB_AUDIO_ENABLE (example provisioning is V5-only)
 #include "Adafruit_USBD_CDC.h"
 #include "FatFS.h"
 #include "FileParsing.h"
@@ -3380,7 +3381,10 @@ static const ExampleInfo examples[] = {
 #ifdef INCLUDE_ADC_BASICS
         { "/python_scripts/examples/adc_basics.py", ADC_BASICS_PY, "adc_basics.py", ADC_BASICS_PY_HASHES, ADC_BASICS_PY_HASH_COUNT },
 #endif
-#ifdef INCLUDE_USB_AUDIO_MIC
+// V5 only: there is no USB audio hardware on OG, and the example's own loop
+// waits forever for a re-enumeration that can never happen there.
+// micropythonExamples.h is generated, so the board gate lives here.
+#if defined(INCLUDE_USB_AUDIO_MIC) && USB_AUDIO_ENABLE
         { "/python_scripts/examples/usb_audio_mic.py", USB_AUDIO_MIC_PY, "usb_audio_mic.py", USB_AUDIO_MIC_PY_HASHES, USB_AUDIO_MIC_PY_HASH_COUNT },
 #endif
 #ifdef INCLUDE_ASYNC_READ

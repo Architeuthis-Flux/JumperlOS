@@ -60,6 +60,11 @@ void usb_audio_boot_enumerate(void);
 // Persist the current setup (enabled state, channels, rate, scaling).
 void usb_audio_save_config(void);
 
+// Mirror the live state into jumperlessConfig without saving. Called by every
+// setter so the struct, `~config` and config.txt never disagree with the
+// hardware; call it if you add another way to change the live state.
+void usb_audio_sync_config(void);
+
 // ---- streaming ------------------------------------------------------------
 
 // True while the ADC DMA is running, i.e. the host has the microphone open.
@@ -127,7 +132,12 @@ bool usb_audio_set_full_scale(float volts);
 
 // Streaming rate in Hz, 8000-48000 in 1 kHz steps. Default 16000: the ADC is
 // shared with the OLED voltage cache, probe sensing and supply sense, and
-// running it at 48 kHz starved them. Restarts capture if already running.
+// running it at 48 kHz starved them.
+//
+// DEFERRED while the host has the mic open - TinyUSB frames packets from the
+// rate the host negotiated, so changing it under a live stream desynchronises
+// device and host (and can stall the host's next SET_CUR). The new value is
+// adopted at the next stop; usb_audio_status() reports it as pending_rate.
 bool usb_audio_set_rate(uint32_t hz);
 
 // One-pole ~15 Hz high-pass, on by default so hosts don't see a standing DC
@@ -148,6 +158,7 @@ typedef struct {
     float    full_scale;
     bool     dc_block;
     uint32_t sample_rate;
+    uint32_t pending_rate;   // non-zero: adopted when the host next closes the mic
     uint32_t frames_sent;
     uint32_t fifo_overflow;  // host stalled / software FIFO full
     uint32_t adc_overrun;    // ADC FIFO overran; forced an interleave resync

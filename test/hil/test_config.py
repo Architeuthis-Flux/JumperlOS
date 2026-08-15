@@ -102,8 +102,14 @@ jfs.close(f)
 a = "probe_droop_ohms = {ohms_before};"
 b = "probe_droop_v0 = {v0_before};"
 ok = (a in data) and (b in data)
-data = data.replace(a, "probe_droop_ohms = 55.5;")
-data = data.replace(b, "probe_droop_v0 = 3.599;")
+# FAIL-SAFE sentinels: if this test dies between planting and the save that
+# overwrites them, the values left on disk must not be believable. -55.5 is
+# non-positive so infraProbeDroopOhms() falls through to its empirical default
+# (55.5 sat inside SelfTest's own 10-400 acceptance band and would have flipped
+# the board to a ~1.85x underestimate of every droop current, silently); 2.599
+# is outside the [3.0, 3.6] clamp in configManager, so it resets on load.
+data = data.replace(a, "probe_droop_ohms = -55.5;")
+data = data.replace(b, "probe_droop_v0 = 2.599;")
 f = jfs.open("/config.txt", "w")
 jfs.write(f, data)
 jfs.close(f)
@@ -111,21 +117,50 @@ print("planted" if ok else "droop lines MISSING from file")
 """, timeout=20)
 check("planted" in plant, "sentinel droop lines planted in /config.txt")
 
-resp = port1_command("k")  # dirty a key -> deferred incremental save
-check("OLED in terminal" in resp, "'k' toggle (incremental save trigger) acknowledged")
+# From here the file holds sentinels, so every exit path must put the real
+# values back. check() never aborts, but jl_exec() sys.exit()s on a transport
+# failure and the user can Ctrl-C - both unwind through finally.
+try:
+    resp = port1_command("k")  # dirty a key -> deferred incremental save
+    check("OLED in terminal" in resp, "'k' toggle (incremental save trigger) acknowledged")
 
-reverted = False
-for _ in range(20):
-    time.sleep(1.0)
-    now = read_config()
-    if (config_value(now, "probe_droop_ohms") == ohms_before
-            and config_value(now, "probe_droop_v0") == v0_before):
-        reverted = True
+    reverted = False
+    for _ in range(20):
+        time.sleep(1.0)
+        now = read_config()
+        if (config_value(now, "probe_droop_ohms") == ohms_before
+                and config_value(now, "probe_droop_v0") == v0_before):
+            reverted = True
+            break
+    check(reverted, "incremental save rewrote droop keys from memory "
+                    f"(ohms {ohms_before}, v0 {v0_before} restored over sentinels)")
+
+    resp = port1_command("k")  # restore show_in_terminal
+    check("OLED in terminal" in resp, "restore toggle acknowledged")
+finally:
+    # Belt and braces: put the originals back on device even if the save above
+    # never ran. Cheap and idempotent when the save already did the job.
+    jl_exec(f"""
+f = jfs.open("/config.txt", "r")
+data = ""
+while True:
+    chunk = jfs.read(f, 512)
+    if not chunk:
         break
-check(reverted, "incremental save rewrote droop keys from memory "
-                f"(ohms {ohms_before}, v0 {v0_before} restored over sentinels)")
-
-resp = port1_command("k")  # restore show_in_terminal
-check("OLED in terminal" in resp, "restore toggle acknowledged")
+    data += chunk
+jfs.close(f)
+changed = False
+if "probe_droop_ohms = -55.5;" in data:
+    data = data.replace("probe_droop_ohms = -55.5;", "probe_droop_ohms = {ohms_before};")
+    changed = True
+if "probe_droop_v0 = 2.599;" in data:
+    data = data.replace("probe_droop_v0 = 2.599;", "probe_droop_v0 = {v0_before};")
+    changed = True
+if changed:
+    f = jfs.open("/config.txt", "w")
+    jfs.write(f, data)
+    jfs.close(f)
+print("restored" if changed else "already clean")
+""", timeout=20)
 
 finish("test_config")
