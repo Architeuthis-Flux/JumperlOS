@@ -155,6 +155,16 @@ Everything below needs eyes, ears or fingers at the board:
 
 - **Listen test.** DAC tone through the crossbar onto ADC0's row → GarageBand or
   REAPER. Confirm it sounds right, not just that the counters are clean.
+  **Note:** late in the session the host stopped being able to open the mic at
+  all — `sounddevice` hung inside `check_input_settings()`, before any stream
+  open, while the device reported `enabled, idle, host closed, init_fail=0`.
+  A/B'd it by flashing the previous commit's firmware: **identical hang**, so
+  this is a wedged CoreAudio on the Mac (after ~15 enumerate/de-enumerate cycles
+  and several recorders killed mid-stream), not a firmware regression. A reboot
+  or `sudo killall coreaudiod` should clear it. Streaming was verified working
+  earlier on this same code — 16 kfps, zero overruns, a clean 16-minute
+  recording — so this is a host-state artefact, but it is the reason the listen
+  test still needs doing on a fresh host.
 - **Probe while recording.** Tap rows, select/connect mode, measure mode. The probe
   should behave normally; `probe_pauses` ticks once per use and capture resumes
   ~300 ms after the tip lifts.
