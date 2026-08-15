@@ -135,6 +135,18 @@ String JsonState::getJumperlessStateJSON(const char* section) {
             break;
         }
 
+        // Nets 1-5 are reserved infrastructure -- GND, the two rails, DAC 0 and DAC 1 --
+        // and exist whether or not anything is attached, each seeded with a single node:
+        // its own. A net holding one node connects nothing, so reporting it just fills
+        // the netlist with phantom supplies and a second, empty GND alongside the real
+        // one. Rail and DAC voltages are reported in the "power" section regardless.
+        int nodeCount = 0;
+        for (int j = 0; j < MAX_NODES; j++) {
+            if (globalState.connections.nets[i].nodes[j] <= 0) break;
+            nodeCount++;
+        }
+        if (nodeCount < 2) continue;
+
         if (!firstNet) json += ",\n";
         firstNet = false;
 
