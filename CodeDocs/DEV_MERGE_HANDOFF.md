@@ -1,6 +1,6 @@
 # `dev` merge — what's done, what's open, what to do next
 
-Session of 2026-08-15. Branch **`dev`** now exists at `d097ce9`, a fast-forward of
+Session of 2026-08-15. Branch **`dev`** now exists at `42f32af`, a fast-forward of
 `main` → `infra-paths` → `usb-audio-uac2` with everything below committed. Nothing
 has been pushed.
 
@@ -162,21 +162,71 @@ Everything below needs eyes, ears or fingers at the board:
 
 ---
 
-## In flight when this was written
+## The adversarial review — done, and what it changed
 
-A multi-agent adversarial review of the entire change set (7 review dimensions ×
-3 verification lenses each) was launched and had not finished. Its report will be
-at:
+A 7-dimension review with 3-lens adversarial verification (161 agents) found
+**51 issues, 38 of which survived verification**. Six were merge blockers and are
+**fixed and committed** (`42f32af`) — two of them regressions this branch had
+introduced. Summary, because each is a lesson:
 
-```
-~/.claude/projects/-Users-kevinsanto-Documents-GitHub-JumperlOS/8de8c89e-ef11-4d86-9611-765cedd133d5/subagents/workflows/wf_7ae4beca-de6/journal.jsonl
-```
+| | What | Why it mattered |
+|---|---|---|
+| M1 | `LogicAnalyzer::stop()` reset an ADC it never claimed | Ending a digital-only capture while the mic streamed froze **every** ADC reader on the board until reboot |
+| M2 | Config migration dropped `[usb_audio]` (and `[usb_cdc]`) | Every firmware version bump silently erased a saved mic setup |
+| M3 | `M?`/`Ms`/`M23` unreachable while the mic was on | `M?` — the documented health check — tore down USB instead of printing |
+| M4 | MeasureMode wiped Highlighting's pinned row every pass | Made the serial half of the new reading display unusable (my regression) |
+| M5 | Crash logger reset unconditionally | A fault reproducing at boot bootlooped, BOOTSEL-only recovery; worse than the SDK for core-1 faults |
+| M6 | `usb_audio_yield_adc()` could silently no-op | DAC calibration could solve for, and **persist**, constants from sweep means |
 
-`type: result` entries with a `findings` array are the reviewers; the rest are
-verifier verdicts (`real: true/false` + reasoning). **Read it before trusting this
-merge completely** — anything it confirms should be triaged on top of this document.
+Plus **S6**: `flash_swd.sh` aborted no DMA at all — `0x50000444` is the RP2040
+offset and is `DMA_TIMER1` on RP2350 (`CHAN_ABORT` is `0x50000464`). Fixed, and
+the false claim corrected in `USB_AUDIO_HANDOFF.md`.
 
----
+Post-fix verification: both boards build; HIL 5/6 **with the mic streaming**
+(only the pre-existing phantom-current failure); `M?` confirmed non-destructive
+on hardware; a deliberate BusFault still records, reboots and prints, with the
+new bootloop guard correctly not tripping.
+
+### Still open from the review (triaged, not blockers)
+
+Full text: `~/.claude/projects/-Users-kevinsanto-Documents-GitHub-JumperlOS/8de8c89e-ef11-4d86-9611-765cedd133d5/subagents/workflows/wf_7ae4beca-de6/journal.jsonl`
+(`type: result` entries with a `findings` array are the reviewers; the rest are
+verifier verdicts).
+
+- **S1 — `usb_audio_set_rate()` desyncs device from host.** TinyUSB sizes IN
+  packets from the host-negotiated rate, so moving `g_rateHz` mid-stream leaves
+  capture and framing disagreeing (16k→48k saturates the FIFO, 48k→16k near
+  silence), and a host that cached the clock RANGE gets **stalled** on the rate it
+  negotiated. Fix: defer via `g_pendingRateHz`, apply in the stop branch.
+- **S2 — the `latched` gate in `onPythonSessionEnd()` is inverted.** It ORs in
+  `hl.showReadingNet > 0`, which is sticky by design, so after any probe tap it is
+  permanently true and every ViperIDE console line runs the full teardown. Fix:
+  `onPythonSessionEnd(bool fullHandback)` — true from the file path, false from
+  the raw REPL.
+- **S3 — the ADC5/ADC7 raw-0 sentinel leaks.** `readAdcVoltage()` applies the
+  normal offset to the sentinel, so **ADC7 reads ≈ −8 V** rather than 0 or an
+  error, while `adcReadings[7]` holds the real sweep mean — cached and fresh paths
+  disagree for the whole recording. Worst consumer is `gpioDroopCurrentEstimate()`
+  (≈400 mA against a ~1 mA threshold, which can latch switch position); also
+  `TimeDomainMultiplexer`/`FakeGpio` have no audio guard at all. Fix sketch in the
+  review; note `usb_audio_set_channels()` should also reject 5 and 7.
+- **S4 — `[usb_audio]` struct/live divergence.** Live setters mutate `g_*` only
+  and `usb_audio_save_config()` copies `g_*` **into** the struct, so a
+  terminal-set value is reverted on disk by the next `Ms`. Fix: a
+  `usb_audio_sync_config()` mirror.
+- **S5 — three defects in the pin protocol** (`ReadingDisplay.cpp`): the width
+  guard *orphans* the row rather than freezing it; the first pin after an anchor
+  drop erases the user's echoed input; and clearing `lastLine` as the width guard
+  does also drops the OLED dedupe key, making `VoltageAdjuster` repaint a full
+  frame every loop pass. One `serialNeedsRepin` flag fixes two of the three.
+- **S7–S10, W1–W5** — the droop-sentinel test has no restore path; a crash record
+  survives a reflash and is reported against the wrong binary; the OG crash-log
+  slots collide with the bootrom's `reset_usb_boot` scratch; MSPLIM overflow
+  can't actually reach the handler (needs `CCR.STKOFHFNMIGN`); FlashPark has four
+  more latent issues to fix before enabling; `s_dacUserClaimed[]` is a one-way
+  latch that other DAC writers never clear; `full_scale` quantises at `%.2f`; and
+  the OG MicroPython stubs make `usb_audio_setup()` raise instead of returning
+  False (and the example is provisioned on OG, where it can never work).
 
 ## How to work on this board (learned the hard way)
 
@@ -213,7 +263,8 @@ the first terminal that gets the menu, with the `addr2line` command to symbolise
 
 ## Suggested order for the next session
 
-1. Read the review-workflow report (link above); triage anything confirmed.
+1. Work the S1-S10 / W1-W5 list above (the review's own text has a concrete fix
+   for each). S3 and S2 are the two most user-visible.
 2. Free a shared-IRQ slot (item 2) — it is a one-line core patch and it unblocks
    FlashPark *and* removes a latent brick. Verify with
    `irq_handler_chain_free_slot_head` over SWD.
