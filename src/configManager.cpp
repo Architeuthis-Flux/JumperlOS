@@ -1387,7 +1387,10 @@ bool configHasChanges() {
     if (jumperlessConfig.top_oled.show_in_terminal != lastSavedConfig.top_oled.show_in_terminal) return true;
     if (jumperlessConfig.top_oled.font != lastSavedConfig.top_oled.font) return true;
     if (strcmp(jumperlessConfig.top_oled.startup_message, lastSavedConfig.top_oled.startup_message) != 0) return true;
-    
+
+    if (jumperlessConfig.usb_cdc.ignore_dtr != lastSavedConfig.usb_cdc.ignore_dtr) return true;
+
+
     return false;  // No changes detected
 }
 
@@ -1503,7 +1506,15 @@ bool saveConfigIncremental(const char* filename) {
     
     // Allocate buffer for file content (config is ~4KB)
     // Use smaller buffers to reduce heap pressure - allocate sequentially
-    const size_t MAX_CONFIG_SIZE = 3000;  // 6KB should fit config
+    // Rebuild buffer for the whole file. config.txt is ~2.9 KB today and grows
+    // with every new key; the old 3000-byte value left ONE byte of headroom
+    // (2744 usable after the slack below), so from the [usb_audio] section on
+    // every save overflowed and fell back to the temp-file full writer - the
+    // path with by far the most flash erase/program traffic, each window
+    // parking core 1 with interrupts off. 8 KB keeps the incremental
+    // in-place rewrite as the normal path with years of headroom; the two
+    // buffers are transient heap.
+    const size_t MAX_CONFIG_SIZE = 8192;
     char* fileContent = (char*)malloc(MAX_CONFIG_SIZE);
     if (!fileContent) {
         Serial.println("saveConfigIncremental: malloc1 failed, falling back to full save");
@@ -1528,7 +1539,18 @@ bool saveConfigIncremental(const char* filename) {
     // Read existing file content
     stepTime = micros();
     size_t bytesRead = 0;
-    bool fileExists = safeFileReadAll(filename, fileContent, MAX_CONFIG_SIZE, &bytesRead, 2000);
+    bool fileTruncated = false;
+    bool fileExists = safeFileReadAll(filename, fileContent, MAX_CONFIG_SIZE, &bytesRead, 2000, &fileTruncated);
+    if (fileExists && fileTruncated) {
+        // The file is bigger than our buffer: an in-place rebuild of a prefix
+        // would leave a stale tail on disk. Rewrite the whole file instead.
+        Serial.println("[ConfigSave] config.txt larger than the rebuild buffer - using full writer");
+        free(fileContent);
+        free(newContent);
+        bool ok = saveConfigToFile(filename);
+        if (ok) updateShadowConfig();
+        return ok;
+    }
     if (debugConfigSaveTiming) {
         Serial.print("[ConfigSave] File read (");
         Serial.print(bytesRead);
@@ -1751,6 +1773,12 @@ bool saveConfigIncremental(const char* filename) {
                 } else if (strcmp(key, "net_voltage_scan") == 0) {
                     snprintf(newLine, sizeof(newLine), "net_voltage_scan = %d;", jumperlessConfig.debug.net_voltage_scan ? 1 : 0);
                     updated = true;
+                } else if (strcmp(key, "show_probe_current") == 0) {
+                    snprintf(newLine, sizeof(newLine), "show_probe_current = %d;", jumperlessConfig.debug.show_probe_current);
+                    updated = true;
+                } else if (strcmp(key, "show_node_errors") == 0) {
+                    snprintf(newLine, sizeof(newLine), "show_node_errors = %d;", jumperlessConfig.debug.show_node_errors ? 1 : 0);
+                    updated = true;
                 }
             }
             //! [routing] section
@@ -1863,8 +1891,10 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "probe_droop_v0") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_droop_v0 = %.3f;", jumperlessConfig.calibration.probe_droop_v0);
+                    updated = true;
                 } else if (strcmp(key, "probe_droop_ohms") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_droop_ohms = %.1f;", jumperlessConfig.calibration.probe_droop_ohms);
+                    updated = true;
                 } else if (strcmp(key, "probe_pad_ohms") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_pad_ohms = %.1f;", jumperlessConfig.calibration.probe_pad_ohms);
                     updated = true;
@@ -3773,6 +3803,9 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_current_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_current_zero);
         else if (strcmp(key, "minimum_probe_reading") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.minimum_probe_reading);
         else if (strcmp(key, "probe_droop_v0") == 0) sprintf(oldValue, "%.3f", jumperlessConfig.calibration.probe_droop_v0);
+        else if (strcmp(key, "probe_droop_ohms") == 0) sprintf(oldValue, "%.1f", jumperlessConfig.calibration.probe_droop_ohms);
+        else if (strcmp(key, "probe_pad_ohms") == 0) sprintf(oldValue, "%.1f", jumperlessConfig.calibration.probe_pad_ohms);
+        else if (strcmp(key, "measure_mode_output_voltage") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.measure_mode_output_voltage);
         else if (strcmp(key, "crosspoint_resistance") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.crosspoint_resistance);
         }
     else if (strcmp(section, "logo_pads") == 0) {
@@ -3951,6 +3984,8 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_current_zero") == 0) jumperlessConfig.calibration.probe_current_zero = parseFloat(value);
         else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
         else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
+        else if (strcmp(key, "probe_droop_ohms") == 0) jumperlessConfig.calibration.probe_droop_ohms = parseFloat(value);
+        else if (strcmp(key, "probe_pad_ohms") == 0) jumperlessConfig.calibration.probe_pad_ohms = parseFloat(value);
         else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
         }
     else if (strcmp(section, "logo_pads") == 0) {
