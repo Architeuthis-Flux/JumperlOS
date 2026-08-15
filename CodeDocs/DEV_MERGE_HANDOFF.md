@@ -1,0 +1,223 @@
+# `dev` merge — what's done, what's open, what to do next
+
+Session of 2026-08-15. Branch **`dev`** now exists at `d097ce9`, a fast-forward of
+`main` → `infra-paths` → `usb-audio-uac2` with everything below committed. Nothing
+has been pushed.
+
+Read this first; the two feature handoffs (`USB_AUDIO_HANDOFF.md`,
+`reading-display-handoff.md`) have the deep detail per feature.
+
+---
+
+## TL;DR
+
+The USB Audio microphone works and **the crash that blocked it is root-caused and
+fixed** (proven over SWD, then soak-tested for 15 minutes). The reading-display
+work is finished. Ten commits sit on `dev`, all built for both boards and
+exercised on hardware.
+
+Two things are **open and both are pre-existing, not regressions from this work**:
+
+1. **A flash-write park race in arduino-pico** takes the board off USB after
+   ~18 iterations of a flash-write soak (mic irrelevant). The fix is written and
+   in-tree but **compiled out**, because it needs a shared-IRQ handler slot and
+   there are none.
+2. **Zero free shared-IRQ handler slots** on any running board. Measured, not
+   inferred. The next feature to ask for one silently kills a core.
+
+Neither blocks using `dev` for ordinary work; both should be fixed before a
+release, and (1) is a real "the board randomly dropped off USB" report waiting to
+happen.
+
+---
+
+## What landed (all committed on `dev`)
+
+| # | Commit | What | Verified how |
+|---|---|---|---|
+| 1 | `caa413c` | JsonState: bound + JSON-escape every name reaching `get_state()` | builds; `get_state()` exercised via HIL |
+| 2 | `ecd23e2` | JsonState: drop seed-only reserved nets from the netlist (JSON-shape change, kept separate so it's revertable) | as above |
+| 3 | `c63d43e` | InfraPaths: a user DAC write claims the DAC from the probe feed, persisted or not | **HIL `test_routing` went FAIL → PASS** |
+| 4 | `3a1e1fb` | Config save: `MAX_CONFIG_SIZE` 3000→8192, truncation fallback, `updated = true` for the droop keys, 5 other table gaps | **HIL `test_config` (new droop regression test) PASS** |
+| 5 | `0060b72` | Reading display: guard promotion, `handleEnter` hook, width guard, exit-erase ordering, 2 audit bugs | builds; REPL handback exercised |
+| 6 | `5ab7d16` | Crash log (HardFault → scratch registers → reboot → printed once) + stale-doorbell boot guard | **deliberate BusFault captured end-to-end** |
+| 7 | `68b93e3` | **USB Audio Class microphone** + the WRITE_ADDR runaway fix + probe-arbitration redesign | **15-min soak, 128 iterations, 0 failures** |
+| 8 | `bd15e73` | FlashPark (disabled) + the doorbell-race evidence + SWD tooling | fix SWD-verified active, then disabled on purpose |
+| 9 | `d097ce9` | CodeDocs + `firmware.uf2` | — |
+
+### Hardware verification actually performed
+
+- **The killer experiment.** Pre-fix: mic streaming + one 3000-byte `jfs` write →
+  board off the bus instantly. SWD: `ch5.write_addr = 0x20081c50` (443 KB past
+  `g_half[]`, inside core 0's stack), `.bss` full of ADC samples, core 0 in
+  `isr_hardfault` with `CFSR=UNDEFINSTR`, core 1 spinning on a `pauseCore2` that
+  read `10`. Post-fix: three back-to-back writes, all 4 CDC ports alive, frames
+  still climbing.
+- **15-minute streaming soak**, 128 iterations cycling jfs writes, slot autosaves
+  (connect/disconnect), full config saves, probe reads, measure-mode episodes and
+  DAC sets: **0 failures**, 16000 frames/s sustained, `adc_overrun` and
+  `fifo_overflow` flat at 0, `probe_pauses` 0 at idle (arbitration no longer
+  thrashes), `claim_fail` 0. `late_irq`/`resyncs` tick once per flash write, which
+  is the design working.
+- **16-minute host recording** analysed: 9646 windows, **0 dead windows**, 0
+  discontinuities, DC-blocked mean ≈ 0.
+- **HIL suite on the final build: 5/6 files pass.** The one failure
+  (`test_net_currents`, "zero-load TOP_RAIL net shows < 1 mA phantom current") was
+  **A/B-verified against `main`** — I flashed `main`'s firmware and got the
+  identical failure, so it is pre-existing and out of scope for this merge.
+- Boot-restore: `Ms` → reboot → `bcdDevice = 257`, mic present, no port drop.
+- Both `jumperless_v5` and `jumperless_og` build clean.
+
+---
+
+## Open items — ranked
+
+### 1. The flash-write park race (pre-existing, real, reproducible)
+
+**Symptom.** The board drops off the USB bus during sustained flash writes. Mic
+off, no user interaction needed. Reproduced with
+`python3 test/hil/swd/stress_flash.py 40` — died at iteration 18.
+
+**Mechanism** (SWD autopsy): core 0 spinning in `_MFIFO::idleOtherCore()` called
+from SPIFTL's `FlashInterfaceRP2040::program`, core 1 back in `loop1()`, doorbell
+**clear**, `__otherCoreIdled` false. arduino-pico's core-1 doorbell handler clears
+the sticky bell *after* it leaves the park spin and re-enables interrupts; two
+back-to-back flash ops race, core 1's clear swallows the ring for op B, and core 0
+waits forever with interrupts off — so USB dies with it.
+
+**Fix, written and SWD-verified working, currently compiled out:**
+`src/FlashPark.cpp` + `include/FlashPark.h`. It wraps `flash_range_erase/program`
+with its own doorbell and a protocol where the parked core clears the bell FIRST
+and the resume waits until it has actually left. When enabled it took over
+correctly (`s_active = 1`, `s_timeouts = 0`).
+
+**Why it is off:** it needs one shared-IRQ handler chain slot and there are none
+(see item 2). Enabling it panics core 0 inside `mp_embed_init` the instant
+anything touches MicroPython.
+
+**Next step:** free a slot (item 2), flip `JL_FLASH_PARK_ENABLE` to 1, re-add the
+two `-Wl,--wrap` lines in `platformio.ini` (they are there, commented, right where
+they belong), then re-run `stress_flash.py 40`. The header carries the full
+rationale and three ways to free a slot.
+
+**Not yet done:** an A/B of `stress_flash.py` against `main` to *prove* it is
+pre-existing. Nothing in this branch touches that code, and the config change
+*reduces* flash traffic, so the reasoning is solid — but the empirical A/B is
+cheap and worth doing.
+
+### 2. Zero free shared-IRQ handler slots (pre-existing, latent brick)
+
+**Measured on a live board:** `irq_handler_chain_free_slot_head = -1`.
+
+The pool is 6 (`irq_handler_chain_slots[]` is 0x48 bytes in the linked ELF —
+arduino-pico already ships 6 rather than the SDK default 4). It **cannot be raised
+with a `-D`**: the array is defined in `irq_handler_chain.S` inside the *prebuilt*
+`lib/rp2350/libpico.a`. All six are taken: arduino-pico's doorbell handler
+(registered on **both** cores = 2), Adafruit TinyUSB `USBCTRL_IRQ`, CH446Q
+`PIO0_IRQ_1`, then MicroPython's `machine_pin_irq_init` and `rp2_dma_jl` on first
+REPL init.
+
+`irq_add_shared_handler()` **`hard_assert`s** — silently killing the calling core —
+when the pool is empty. So the next feature to register one bricks the board:
+`LogicAnalyzer.cpp:633`, `JulseView.cpp:672`, MicroPython's UART
+(`machine_uart_jl.c:297`). **This likely means arming the logic analyzer on a board
+that has initialised MicroPython already panics today.** Worth testing directly —
+it would explain any "LA just kills the board" reports.
+
+**Best fix:** stop arduino-pico registering its doorbell handler twice.
+`PICO_VTABLE_PER_CORE` is 0, so the vector table and the handler chain are shared
+between cores; the second registration is pure waste (it also makes the handler run
+twice per IRQ). Only the NVIC enable is genuinely per-core. That is a one-line core
+patch and frees a slot for FlashPark.
+
+### 3. Hands-on checks only Kevin can do
+
+Everything below needs eyes, ears or fingers at the board:
+
+- **Listen test.** DAC tone through the crossbar onto ADC0's row → GarageBand or
+  REAPER. Confirm it sounds right, not just that the counters are clean.
+- **Probe while recording.** Tap rows, select/connect mode, measure mode. The probe
+  should behave normally; `probe_pauses` ticks once per use and capture resumes
+  ~300 ms after the tip lifts.
+- **The reading display, visually.** OLED layouts per node type (plain net, GND,
+  rails, DAC, ADC, GPIO incl. `FLOATING`, I2C, PWM, an I Sense pair, UART static +
+  live). The pinned serial line during a live reading. Typing while readings
+  refresh. `probe_tap()` is a stub and clickwheel injection does not reach the
+  highlighter from a raw-REPL exec, so **the zombie-repaint check with a genuinely
+  latched measurement was not automatable** — that one needs a real probe tap.
+- **Logic analyzer / JulseView** with the mic open (LA yields the ADC, mic resumes)
+  — and see item 2, this may panic for unrelated reasons.
+- **Windows** boot-restore (the `bcdDevice` 0x0101 composite re-enumeration).
+
+### 4. Smaller things noticed, not acted on
+
+- `usb_audio_status()` no longer reports bring-up counters; `scripts/jumperless.pyi`
+  was not regenerated for the new field set (the example script only uses fields
+  that still exist, so nothing is broken).
+- `MeasureMode`'s `probe_tap()` MicroPython binding is a stub (`jl_probe_tap` has a
+  TODO body) — that is why the handback test had to drive `set_switch_position`
+  instead.
+- The board is left with the mic **saved disabled**, so it boots as a plain
+  composite unless you turn it on with `M`/`Ms`.
+
+---
+
+## In flight when this was written
+
+A multi-agent adversarial review of the entire change set (7 review dimensions ×
+3 verification lenses each) was launched and had not finished. Its report will be
+at:
+
+```
+~/.claude/projects/-Users-kevinsanto-Documents-GitHub-JumperlOS/8de8c89e-ef11-4d86-9611-765cedd133d5/subagents/workflows/wf_7ae4beca-de6/journal.jsonl
+```
+
+`type: result` entries with a `findings` array are the reviewers; the rest are
+verifier verdicts (`real: true/false` + reasoning). **Read it before trusting this
+merge completely** — anything it confirms should be triaged on top of this document.
+
+---
+
+## How to work on this board (learned the hard way)
+
+**Flashing.** Normal: `pio run -e jumperless_v5 -t upload` (picotool, 1200-baud
+touch on port 1). When USB is gone: **`test/hil/swd/flash_swd.sh`** — do not hand-roll
+the OpenOCD command, because:
+
+1. **OpenOCD's reset does not stop peripherals.** If the mic was streaming, the ADC
+   DMA keeps writing into RAM — including OpenOCD's flash work area — and you get
+   `** Verify Failed **` with ADC samples in flash. The helper aborts all DMA and
+   stops the ADC after `reset halt`.
+2. **Never `pkill` OpenOCD.** An un-shutdown session can leave the reset
+   vector-catch armed, after which even a BOOTSEL/picotool boot halts silently in
+   ROM with no USB. The helper always ends with `reset run; shutdown`.
+3. **Stale SIO doorbells survive a debugger reset** and wedge the next boot (core 1
+   parks itself for a resume that never comes, core 0 hangs in `setup()`). `main.cpp`
+   now clears both cores' bells from a static constructor, so this is fixed — but if
+   you see a boot hang at `main.cpp:355`, that's the shape of it.
+4. Halting core 0 over SWD for more than a moment drops the USB device on the host.
+   That is the debugger, not a firmware bug; `reset run` brings it back.
+
+**Soaking.** `test/hil/swd/stress_flash.py N` (needs OpenOCD on :4444 and a
+re-extracted address table — `sample_state.py`'s table is build-specific and the
+README says so). The streaming soak driver used for the mic lives in the session
+scratchpad and is easy to rewrite: drive `jl_exec` in a loop over jfs writes,
+connect/disconnect, config saves, probe reads and measure episodes while polling
+`usb_audio_status()` and `ls /dev/cu.usbmodemJLV5*`.
+
+**Crash evidence is now automatic.** Any HardFault records core, PC/LR/xPSR/SP and
+the fault status registers into reset-retained scratch, reboots, and prints once to
+the first terminal that gets the menu, with the `addr2line` command to symbolise it.
+
+---
+
+## Suggested order for the next session
+
+1. Read the review-workflow report (link above); triage anything confirmed.
+2. Free a shared-IRQ slot (item 2) — it is a one-line core patch and it unblocks
+   FlashPark *and* removes a latent brick. Verify with
+   `irq_handler_chain_free_slot_head` over SWD.
+3. Enable FlashPark, soak with `stress_flash.py 40`, and A/B the same soak against
+   `main` to close out the pre-existing claim.
+4. Hand the board to Kevin for the sensory checks in item 3.
+5. Then `dev` is releasable.
