@@ -1,6 +1,6 @@
 # `dev` merge — what's done, what's open, what to do next
 
-Session of 2026-08-15. Branch **`dev`** now exists at `d95b7d6`, a fast-forward of
+Session of 2026-08-15. Branch **`dev`** now exists at `4673813`, a fast-forward of
 `main` → `infra-paths` → `usb-audio-uac2` with everything below committed. Nothing
 has been pushed.
 
@@ -20,19 +20,33 @@ A 161-agent adversarial review then found 51 issues, 38 of which survived
 three-lens verification — **all of them are now fixed**, including six merge
 blockers and two regressions this branch had introduced.
 
-Two things remain open, and **both are pre-existing, not from this work**:
+One thing remains genuinely open, and it is **pre-existing, not from this work**:
 
-1. **A flash-write park race in arduino-pico** takes the board off USB after
-   ~18 iterations of a flash-write soak (mic irrelevant). The fix is written and
-   in-tree but **compiled out**, because it needs a shared-IRQ handler slot and
-   there are none.
-2. **Zero free shared-IRQ handler slots** on any running board. Measured, not
-   inferred. The next feature to ask for one silently kills a core — which
-   probably means arming the logic analyzer already does, on any board that has
-   touched MicroPython.
+**The arduino-pico flash-write park race.** Its core-1 doorbell handler clears
+the sticky bell *after* leaving the park spin, so two back-to-back flash ops can
+race and core 0 waits forever with interrupts off — the board drops off USB.
+Reproduced before this session's work at **iteration 18** of
+`test/hil/swd/stress_flash.py`, with an SWD autopsy (core 0 in
+`_MFIFO::idleOtherCore()` from SPIFTL `program()`, core 1 back in `loop1()`,
+doorbell clear).
 
-Neither blocks using `dev`; both should be fixed before a release, and (1) is a
-real "the board randomly dropped off USB" report waiting to happen.
+**It no longer reproduces: 60 iterations clean.** Be careful how much you read
+into that — a timing race that doesn't fire is not a race that's fixed. The most
+plausible cause is the shared-IRQ dedupe below, which stopped that exact handler
+being invoked twice per interrupt and removed a whole class of interleaving;
+raising `MAX_CONFIG_SIZE` also took most config saves off the heavy temp-file
+writer, so there are simply fewer park cycles. Neither is a proof. `FlashPark`
+(the actual protocol-level fix) is written, SWD-verified working, and still
+compiled out — enable it if this ever comes back.
+
+**The shared-IRQ slot exhaustion is FIXED** (it was the other open item).
+Measured before: `irq_handler_chain_free_slot_head = -1` — zero free slots, and
+`irq_add_shared_handler()` hard_asserts when full, silently halting the calling
+core. That is very likely why arming the logic analyzer killed a board that had
+touched MicroPython. `src/IrqSlots.cpp` now wraps the call to drop duplicate
+registrations (arduino-pico registers its doorbell handler from *both* cores
+into an already-shared chain) and to decline rather than panic when genuinely
+full. Measured after: `free_slot_head = 5`, `used=5 deduped=1 declined=0`.
 
 ---
 
@@ -259,9 +273,8 @@ the first terminal that gets the menu, with the `addr2line` command to symbolise
 
 ## Suggested order for the next session
 
-1. Free a shared-IRQ slot (item 2) — it is a one-line core patch and it unblocks
-   FlashPark *and* removes a latent brick. Verify with
-   `irq_handler_chain_free_slot_head` over SWD.
+1. Confirm the logic analyzer now arms (it has a slot again). This is the check
+   most likely to reveal something, since it could never have worked before.
 2. Enable FlashPark (`JL_FLASH_PARK_ENABLE=1` + `JL_FLASH_PARK_WRAPPED=1` + the
    two `--wrap` flags, all on one line), soak with `stress_flash.py 40`, and A/B
    the same soak against `main` to close out the pre-existing claim.
