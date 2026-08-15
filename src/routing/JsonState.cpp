@@ -26,12 +26,59 @@
 #include "hardware/gpio.h"
 #include "GraphicOverlays.h"
 
-// Helper to escape JSON strings
+/*
+ * JSON-escape a string, bounded, and drop anything that is not printable ASCII.
+ *
+ * Stricter than it looks, for two reasons that bite together:
+ *
+ * 1. The names that reach this JSON live in fixed char[32] buffers (DisplayState's
+ *    custom net names, GraphicOverlay::name). A buffer that ever goes unterminated
+ *    makes strlen() run off the end and pick up whatever follows it in memory, so
+ *    the length has to be capped here rather than trusted.
+ *
+ * 2. get_state() hands the finished document to mp_obj_new_str(), which validates
+ *    UTF-8 and raises UnicodeError for the *whole* string if any byte is invalid.
+ *    One stray byte in one net name therefore made the entire netlist unreadable
+ *    from MicroPython -- the failure this function exists to prevent.
+ *
+ * Escaping the backslash matters too: without it a name containing one produced
+ * invalid JSON that no parser would accept.
+ */
+String escapeJson(const char* s, size_t maxLen) {
+    String out;
+    if (s == nullptr) { return out; }
+    out.reserve(maxLen + 8);
+
+    // Trim leading space without reading past the cap.
+    size_t start = 0;
+    while (start < maxLen && s[start] == ' ') { start++; }
+
+    size_t end = start;
+    for (size_t i = start; i < maxLen && s[i] != '\0'; i++) {
+        if (s[i] != ' ') { end = i + 1; }
+    }
+
+    for (size_t i = start; i < end && s[i] != '\0'; i++) {
+        char c = s[i];
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else if (c >= 0x20 && c <= 0x7E) {
+            out += c;
+        }
+        // Control bytes, high bytes and uninitialised memory are dropped outright.
+    }
+    return out;
+}
+
 String escapeJson(String s) {
-    s.replace("\"", "\\\"");
-    s.replace("\n", "\\n");
-    s.replace("\r", "\\r");
-    return s;
+    return escapeJson(s.c_str(), s.length());
 }
 
 // Helper to get pull state name
@@ -90,15 +137,16 @@ String JsonState::getJumperlessStateJSON(const char* section) {
 
         if (!firstNet) json += ",\n";
         firstNet = false;
-        
+
         json += "    {\n";
         json += "      \"index\": " + String(i) + ",\n";
-        
-        // Name
+
+        // Name. Bounded at the buffer size rather than passed through strlen: these are
+        // fixed char[32] fields and an unterminated one would read into whatever
+        // follows it.
         const char* customName = globalState.display.getNetName(i);
-        String name = customName ? String(customName) : String(globalState.connections.nets[i].name);
-        name.trim();
-        json += "      \"name\": \"" + escapeJson(name) + "\",\n";
+        const char* rawName = customName ? customName : globalState.connections.nets[i].name;
+        json += "      \"name\": \"" + escapeJson(rawName, 31) + "\",\n";
         
         // Nodes
         json += "      \"nodes\": [";

@@ -19,6 +19,7 @@
 #include "RotaryEncoder.h"
 #include "States.h"
 #include "Probing.h"
+#include "JsonState.h"   // escapeJson() for the overlay serialiser
 
 // Global overlay state
 GraphicOverlayState graphicOverlayState;
@@ -492,7 +493,10 @@ void serializeOverlaysToJSON(String& output) {
         
         output += "\n    {";
         output += "\"name\":\"";
-        output += overlay.name;
+        // Bounded and escaped: name is a fixed char[32], and this JSON is handed to
+        // MicroPython's mp_obj_new_str(), which rejects the entire document if any
+        // byte is not valid UTF-8. An unescaped quote here also broke the JSON outright.
+        output += escapeJson(overlay.name, sizeof(overlay.name) - 1);
         output += "\",\"row\":";
         output += String(overlay.startRow);
         output += ",\"col\":";

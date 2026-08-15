@@ -12,6 +12,16 @@
 
 struct PowerState;
 
+/**
+ * JSON-escape a string, bounded to maxLen, dropping anything outside printable
+ * ASCII. Use this for every string that reaches the state JSON: the names involved
+ * live in fixed char[32] buffers, and get_state() passes the finished document
+ * through MicroPython's mp_obj_new_str(), which rejects the whole thing if any byte
+ * is not valid UTF-8.
+ */
+String escapeJson(const char* s, size_t maxLen);
+String escapeJson(String s);
+
 class JsonState {
 public:
     /** Full state if section is nullptr or empty; else single section: "power", "nets", "gpio", "overlays". */
