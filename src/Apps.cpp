@@ -1512,7 +1512,18 @@ void calibrateDacs( ) {
     // Calibration solves for ADC constants with set/measure pairs; it needs the
     // real converter, not the USB audio stream's rolling sweep. Yield for the
     // whole run; the stream resumes on exit if the host still has the mic open.
+    //
+    // If the stream will NOT let go, bail before touching a single DAC. The
+    // pump that releases the ADC only runs from core2stuff(), which loop1()
+    // skips while pauseCore2 is set or a logic-analyzer capture is running, so
+    // this is reachable - and calibrating anyway would solve every constant
+    // from sweep means (a hard 0 on the probe channels) and then PERSIST them.
     UsbAudioAdcYield audioYield( "DAC calibration" );
+    if ( !audioYield.ok( ) ) {
+        Serial.println( "DAC calibration aborted: the USB audio stream still holds the ADC." );
+        Serial.println( "Close the microphone on the host (or run M to disable it) and try again." );
+        return;
+    }
 
     // Enter temporary slot FIRST to preserve user's active slot
     SlotManager::getInstance( ).enterTemporarySlot( 8 );  // Save current slot, switch to temp slot 8

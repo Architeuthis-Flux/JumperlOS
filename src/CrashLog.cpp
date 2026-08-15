@@ -64,6 +64,8 @@ void __attribute__((used)) __not_in_flash_func( crashlog_hardfault_c )( uint32_t
         seq = ( ( oldHdr >> CRASHLOG_SEQ_SHIFT ) & 0xFFu ) + 1u;
     }
     const uint32_t core = sio_hw->cpuid & 0xFu;
+    // Read BEFORE the slots below are overwritten.
+    const uint32_t uptimeMs = (uint32_t) ( timer_hw->timerawl / 1000u );
 
     slotWrite( SLOT_PC,   frame[ 6 ] );
     slotWrite( SLOT_LR,   frame[ 5 ] );
@@ -75,13 +77,28 @@ void __attribute__((used)) __not_in_flash_func( crashlog_hardfault_c )( uint32_t
     slotWrite( SLOT_BFAR,   *(volatile uint32_t*) 0xE000ED38u );
     slotWrite( SLOT_MMFAR,  *(volatile uint32_t*) 0xE000ED34u );
     slotWrite( SLOT_EXCRET, excReturn );
-    slotWrite( SLOT_UPTIME, (uint32_t) ( timer_hw->timerawl / 1000u ) );
+    slotWrite( SLOT_UPTIME, uptimeMs );
 #else
     (void) excReturn;
 #endif
     // Header last: this is the commit.
     slotWrite( SLOT_HDR, CRASHLOG_TAG | ( ( seq & 0xFFu ) << CRASHLOG_SEQ_SHIFT ) |
                          ( core << CRASHLOG_CORE_SHIFT ) | CRASHLOG_PENDING | CRASHLOG_VALID );
+
+    // BOOTLOOP GUARD. A fault that reproduces every boot would otherwise reset
+    // forever, and a board whose USB never stays up long enough for the
+    // 1200-baud touch to land can then only be recovered with physical BOOTSEL
+    // - while the record explaining why cannot be printed either, because
+    // crashlogReportOnce() waits for a terminal that never attaches. After
+    // three consecutive faults that each landed within 10 s of boot, stop
+    // rebooting and just halt THIS core. That is exactly what the SDK's weak
+    // handler did, and for a core-1 fault it leaves core 0, USB and the REPL
+    // alive - which is the console you need to fix the offending slot or
+    // config. crashlogReportOnce() clears the counter once the board proves it
+    // can reach a terminal, so unrelated faults spread over days never trip it.
+    if ( seq >= 3u && uptimeMs < 10000u ) {
+        for ( ;; ) { __asm volatile( "wfi" ); }
+    }
 
     // Reboot the whole chip through the watchdog - the RAM-only equivalent of
     // watchdog_reboot(0, 0, 0). Reset everything except the oscillators (the
@@ -159,7 +176,13 @@ void crashlogReportOnce( Stream& out ) {
     CrashRecord r;
     if ( !crashlogLast( &r ) ) return;
     g_reportedThisBoot = true;
-    *crashSlot( SLOT_HDR ) &= ~CRASHLOG_PENDING;   // shown; keep the record readable
+    // Shown - but keep the record readable. Also zero the consecutive-fault
+    // counter: reaching a terminal proves the board boots, so three unrelated
+    // faults spread over days must not trip the bootloop guard above.
+    uint32_t hdr = *crashSlot( SLOT_HDR );
+    hdr &= ~CRASHLOG_PENDING;
+    hdr &= ~( 0xFFu << CRASHLOG_SEQ_SHIFT );
+    *crashSlot( SLOT_HDR ) = hdr;
 
     out.printf( "\n\r[crashlog] The last reset was a HardFault on core %lu (uptime %lu ms, fault #%lu since power-on):\n\r",
                 (unsigned long) r.core, (unsigned long) r.uptime_ms, (unsigned long) r.seq );

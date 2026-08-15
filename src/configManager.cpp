@@ -931,6 +931,14 @@ void updateConfigFromFile(const char* filename) {
             jumperlessConfig.serial_1 = savedConfig.serial_1;
             jumperlessConfig.serial_2 = savedConfig.serial_2;
             jumperlessConfig.top_oled = savedConfig.top_oled;
+            // KEEP THIS LIST COMPLETE. It must name every section of struct
+            // config; anything missing is silently reset to defaults AND
+            // written through by the saveConfig() below, so the user loses it
+            // with no way back. usb_cdc and usb_audio were both missing, which
+            // meant every firmware version bump (newConfigOptions is hardcoded
+            // true) wiped a saved USB mic setup.
+            jumperlessConfig.usb_cdc = savedConfig.usb_cdc;
+            jumperlessConfig.usb_audio = savedConfig.usb_audio;
             
             // Save the updated config with current firmware version
             if (debugConfigSaveTiming) Serial.println("[ConfigSave] TRIGGER: firmware version update");

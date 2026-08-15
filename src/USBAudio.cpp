@@ -640,9 +640,9 @@ extern "C" bool usb_audio_set_device_enabled(bool on) {
 // ADC ownership
 //--------------------------------------------------------------------+
 
-extern "C" void usb_audio_yield_adc(const char *why) {
+extern "C" bool usb_audio_yield_adc(const char *why) {
     (void) why;   // no Serial from here: this can run on core 1 (see below)
-    if (!g_streaming && !usbAudioOwnsAdc) return;
+    if (!g_streaming && !usbAudioOwnsAdc) return true;
     g_stopRequested = true;
 
     // Only the core-1 pump may execute the stop, so there is exactly one
@@ -651,14 +651,22 @@ extern "C" void usb_audio_yield_adc(const char *why) {
     // core 1 (the logic analyzer arms from loop1) run the pump right here - the
     // regular pump call is downstream in this same loop1 pass and cannot help
     // us. Otherwise wait for it, bounded so a wedged core 1 cannot hang core 0.
+    //
+    // RETURNS whether the ADC is actually free now. It can legitimately fail:
+    // the pump only runs from core2stuff(), which loop1() skips entirely while
+    // pauseCore2 is set or a logic-analyzer capture is running. A caller that
+    // ignores this and reads anyway gets the audio sweep means - and a hard 0
+    // on the probe channels - which is how DAC calibration could solve for, and
+    // then PERSIST, constants derived from sentinel values.
     if (get_core_num() == 1) {
         serviceUSBAudio();
-        return;
+        return !usbAudioOwnsAdc;
     }
     const uint32_t t0 = micros();
     while (usbAudioOwnsAdc && (micros() - t0) < 250000u) {
         tight_loop_contents();
     }
+    return !usbAudioOwnsAdc;
 }
 
 extern "C" void usb_audio_resume_adc(void) {
@@ -670,11 +678,6 @@ extern "C" void usb_audio_probe_activity(void) {
 }
 
 extern "C" void serviceUSBAudio(void) {
-    // Core 0 wants core 1 quiesced (flash write, refresh). Same gate as our
-    // neighbours updateLazyAdcReadings()/serviceNetVoltageScan(); a start or
-    // restart of the ADC/DMA inside that window is the wrong moment.
-    if (pauseCore2) return;
-
     // Single-entry, even though the only regular caller is core1's loop1().
     // Anything that reconfigures the ADC/DMA from another core while this is
     // mid-teardown would corrupt both. Cheap: uncontended in the normal path.
@@ -685,10 +688,22 @@ extern "C" void serviceUSBAudio(void) {
         ~SvcGuard() { __atomic_clear(f, __ATOMIC_RELEASE); }
     } guard{ &svcBusy };
 
+    // STOP FIRST, before any quiesce gate. This is the ONLY releaser of
+    // readingADC/usbAudioOwnsAdc, and a stop is precisely what a pauseCore2
+    // window wants - gating it behind pauseCore2 meant usb_audio_yield_adc()
+    // could return with the ADC still held, and its callers (logic analyzer
+    // arming, self test, DAC calibration) then proceeded as if they had the
+    // real converter while every read was served from the audio sweep.
     if (g_stopRequested) {
         g_stopRequested = false;
         if (g_streaming || usbAudioOwnsAdc) usbAudioReleaseAdc();
     }
+
+    // Core 0 wants core 1 quiesced (flash write, refresh). Same gate as our
+    // neighbours updateLazyAdcReadings()/serviceNetVoltageScan(): STARTING or
+    // restarting the ADC/DMA inside that window is the wrong moment. Releasing
+    // it, handled above, never is.
+    if (pauseCore2) return;
 
     if (g_startRequested) {
         g_startRequested = false;

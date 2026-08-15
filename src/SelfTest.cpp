@@ -1097,7 +1097,16 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     // Every test below reads the ADC directly and expects the real converter,
     // not the USB audio stream's rolling sweep. Yield for the whole session;
     // capture resumes on return if the host still has the mic open.
+    //
+    // A failed yield is reported rather than silently producing a page of
+    // structural-zero FAILs: every reading would come from the audio sweep,
+    // with a hard 0 on the probe channels.
     UsbAudioAdcYield audioYield( "self test" );
+    if ( !audioYield.ok( ) ) {
+        Serial.println( "\n\rSelf test aborted: the USB audio stream still holds the ADC." );
+        Serial.println( "Close the microphone on the host (or run M to disable it) and try again.\n\r" );
+        return;
+    }
 
     if ( fromFirstStart ) {
         // First start runs before any host has opened the CDC port, and

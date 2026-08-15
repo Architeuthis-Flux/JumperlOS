@@ -177,8 +177,10 @@ analyzer yields on arm and resumes on stop.
    and SIO doorbells keep their state. If the mic was streaming, the ADC DMA keeps
    writing samples into RAM — including OpenOCD's flash work area — and you get
    `** Verify Failed **` with ADC-looking bytes in flash. Use
-   `test/hil/swd/flash_swd.sh`, which aborts all DMA channels and stops the ADC
-   after `reset halt` before programming.
+   `test/hil/swd/flash_swd.sh`, which stops the ADC and then aborts all DMA
+   channels after `reset halt`, before programming. (Watch the register:
+   `CHAN_ABORT` is `0x50000464` on RP2350 - the RP2040 offset `0x...444` is
+   `DMA_TIMER1` here and aborts nothing while appearing to succeed.)
 2. **Stale SIO doorbells wedge the boot.** A SYSRESETREQ-style reset (debugger)
    that lands while `idleOtherCore()` has a doorbell rung leaves that bit set;
    arduino-pico's core 1 then parks itself forever at boot and core 0 hangs in

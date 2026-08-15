@@ -13,6 +13,10 @@
 
 // True only while this LA instance actually holds the global readingADC lock.
 static bool la_holds_adc = false;
+// True from the moment we ask USB audio to yield until stop() resumes it.
+// Tracked separately from la_holds_adc because the bounded acquire below can
+// yield the stream and then still fail to take the lock.
+static bool la_yielded_audio = false;
 
 // // ADC register definitions (matching JulseView)
 // #define ADC_BASE 0x40040000
@@ -457,7 +461,14 @@ bool LogicAnalyzer::setup_adc_for_analog() {
 	// open - which could be minutes. Ask it to hand the ADC back rather than
 	// spinning below. Stops the stream but leaves the device enumerated; the
 	// host just hears silence.
-	if (usbAudioOwnsAdc) usb_audio_yield_adc("logic analyzer arming");
+	if (usbAudioOwnsAdc) {
+		const bool yielded = usb_audio_yield_adc("logic analyzer arming");
+		la_yielded_audio = true;   // resume it in stop(), even if the claim below fails
+		if (!yielded) {
+			Serial.println("[LA] USB audio still holds the ADC - close the mic on the host, or run M");
+			return false;
+		}
+	}
 #endif
 
 	// Wait for ADC to be free, then claim it for exclusive use during LA operation.
@@ -838,27 +849,28 @@ void LogicAnalyzer::stop() {
 	if (lasm >= 0) pio_sm_set_enabled(lapio, lasm, false);
 
 
-	//JULSEDEBUG_STA("adc fifo left: %d\n\r", adc_fifo_get_level());
-	if (adc_fifo_get_level() > 0) {
-		JULSEDEBUG_STA("adc fifo left: %d\n\r", adc_fifo_get_level());
-		adc_fifo_drain();
-	}
-
-		// ADC stop
-		adc_run(false);
-
-		JULSEDEBUG_STA("adc fifo left after stop: %d\n\r", adc_fifo_get_level());
-
-		// Release ADC for other cores to use
-		if (la_holds_adc) {
-			la_holds_adc = false;
-			__atomic_clear(&readingADC, __ATOMIC_RELEASE);
-#if USB_AUDIO_ENABLE
-			// The ADC is free again: let the USB mic pick capture back up if
-			// the host still has it open (no-op otherwise).
-			usb_audio_resume_adc();
-#endif
+	// ADC teardown ONLY if this capture actually claimed the ADC. A digital-only
+	// capture never touches it (setup_adc_for_analog() returns early when no
+	// analog channel is enabled), and resetting it here anyway destroyed whoever
+	// did own it: initADC() -> adc_init() reset-blocks the peripheral, clearing
+	// CS.RROBIN/START_MANY and FCS.DREQ_EN, so a live USB-audio capture stops
+	// getting DREQ_ADC, its chained DMA stalls, the completion IRQ never fires
+	// again and g_streaming/usbAudioOwnsAdc/readingADC stay set forever - the
+	// mic goes silent and every readAdc() on the board is served frozen sweep
+	// means until reboot.
+	if (la_holds_adc) {
+		if (adc_fifo_get_level() > 0) {
+			JULSEDEBUG_STA("adc fifo left: %d\n\r", adc_fifo_get_level());
+			adc_fifo_drain();
 		}
+		adc_run(false);
+		JULSEDEBUG_STA("adc fifo left after stop: %d\n\r", adc_fifo_get_level());
+		// Put the peripheral back the way Peripherals.cpp left it BEFORE handing
+		// the lock over, so the next owner never sees a half-configured ADC.
+		initADC();
+		la_holds_adc = false;
+		__atomic_clear(&readingADC, __ATOMIC_RELEASE);
+	}
 	// Reset DMA write addrs and counts to safe defaults
 	if (dig_taddr0) *dig_taddr0 = (uint32_t)dig_half0;
 	if (dig_taddr1) *dig_taddr1 = (uint32_t)dig_half1;
@@ -873,7 +885,16 @@ void LogicAnalyzer::stop() {
 	pio_sm_clear_fifos(lapio, lasm);
 
 	JULSEDEBUG_STA("LA stop()\n\r");
-	initADC();
+
+#if USB_AUDIO_ENABLE
+	// Resume the mic on its OWN flag, not on la_holds_adc: the bounded acquire
+	// in setup_adc_for_analog() can yield the stream and then still fail to get
+	// the lock, which would otherwise leave the mic yielded forever.
+	if (la_yielded_audio) {
+		la_yielded_audio = false;
+		usb_audio_resume_adc();   // no-op unless the host still has the mic open
+	}
+#endif
 
 //erattaClearGPIO();
 

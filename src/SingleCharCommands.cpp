@@ -3087,21 +3087,19 @@ CommandResult cmd_logicAnalyzer( char c, const String& line ) {
 // Optional argument picks the channel pair, e.g. "M23" streams ADC2/ADC3.
 CommandResult cmd_usbAudio( char c, const String& line ) {
 #if USB_AUDIO_ENABLE
-    if ( usb_audio_device_enabled( ) ) {
-        Jerial.println( "USB audio device disabled - re-enumerating..." );
-        Jerial.flush( );
-        usb_audio_set_device_enabled( false );
-        return CMD_DONT_SHOW_MENU;
-    }
-
-    // "M23" -> left = ADC2, right = ADC3. Bare "M" keeps whatever is configured.
+    // Sub-commands are parsed FIRST and work in BOTH states. They used to sit
+    // below the enabled-toggle early return, which made every one of them
+    // unreachable while the mic was on - so "M?" (the documented way to check
+    // whether a recording is healthy) tore the USB stack down and dropped the
+    // host's recording instead of printing anything.
     String arg = line;
     arg.trim( );
+    const char sub = ( arg.length( ) >= 2 ) ? arg[ 1 ] : '\0';
 
-    // "M?" -> status and health counters, no toggle. A clean recording has
+    // "M?" -> status and health counters, never a toggle. A clean recording has
     // frames_sent climbing at the sample rate and everything else flat
     // (late_irq/resyncs tick once per flash write, probe_pauses per probe use).
-    if ( arg.length( ) >= 2 && arg[ 1 ] == '?' ) {
+    if ( sub == '?' ) {
         usb_audio_status_t s;
         usb_audio_get_status( &s );
         Jerial.printf( "USB audio: %s, %s, host %s\n\r",
@@ -3109,7 +3107,7 @@ CommandResult cmd_usbAudio( char c, const String& line ) {
                        s.streaming ? "streaming" : "idle",
                        s.host_open ? "open" : "closed" );
         Jerial.printf( "  ADC%d (L) + ADC%d (R) @ %lu Hz, full scale %.2f V, dc block %s\n\r",
-                       s.left_ch, s.right_ch, (unsigned long) s.sample_rate, s.full_scale,
+                       s.left_ch, s.right_ch, (unsigned long) s.sample_rate, (double) s.full_scale,
                        s.dc_block ? "on" : "off" );
         Jerial.printf( "  frames_sent=%lu fifo_overflow=%lu adc_overrun=%lu late_irq=%lu resyncs=%lu\n\r",
                        (unsigned long) s.frames_sent, (unsigned long) s.fifo_overflow,
@@ -3123,7 +3121,9 @@ CommandResult cmd_usbAudio( char c, const String& line ) {
 
     // "Ms" saves the setup so the mic comes back at the NEXT BOOT already
     // enumerated - the only way to run with audio and never drop a port.
-    if ( arg.length( ) >= 2 && ( arg[ 1 ] == 's' || arg[ 1 ] == 'S' ) ) {
+    // Enabling when it is already on is a no-op inside
+    // usb_audio_set_device_enabled(), so this never re-enumerates.
+    if ( sub == 's' || sub == 'S' ) {
         usb_audio_set_device_enabled( true );
         usb_audio_save_config( );
         Jerial.println( "USB audio saved - it will be enumerated from boot, "
@@ -3131,13 +3131,29 @@ CommandResult cmd_usbAudio( char c, const String& line ) {
         return CMD_DONT_SHOW_MENU;
     }
 
-    if ( arg.length( ) >= 3 ) {
-        int l = arg[ 1 ] - '0';
-        int r = arg[ 2 ] - '0';
+    // "M23" -> left = ADC2, right = ADC3.
+    if ( arg.length( ) >= 3 && isdigit( (unsigned char) arg[ 1 ] ) &&
+         isdigit( (unsigned char) arg[ 2 ] ) ) {
+        const int l = arg[ 1 ] - '0';
+        const int r = arg[ 2 ] - '0';
         if ( !usb_audio_set_channels( l, r ) ) {
             Jerial.println( "Channels must be two distinct ADC channels 0-7, e.g. M01" );
             return CMD_DONT_SHOW_MENU;
         }
+        if ( usb_audio_device_enabled( ) ) {
+            // Already live: retune in place rather than dropping every port.
+            Jerial.printf( "USB audio: now streaming ADC%d (left) + ADC%d (right)\n\r", l, r );
+            return CMD_DONT_SHOW_MENU;
+        }
+        // Not enabled yet - fall through and bring it up with the new pair.
+    }
+
+    // Bare "M" toggles.
+    if ( usb_audio_device_enabled( ) ) {
+        Jerial.println( "USB audio device disabled - re-enumerating..." );
+        Jerial.flush( );
+        usb_audio_set_device_enabled( false );
+        return CMD_DONT_SHOW_MENU;
     }
 
     usb_audio_status_t s;

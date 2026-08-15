@@ -173,19 +173,28 @@ ServiceStatus MeasureMode::service() {
         // service() returned BUSY, starving every other service.
         // Still scoped to != 0 so the 300ms debounce window at position 0
         // (where switchStable is false) leaves an active measurement alone.
-        // Give the pinned terminal rows back FIRST (idempotent - no-ops when
-        // nothing is pinned, which is most ticks). It has to run before
-        // stopMeasurement(): that calls clearHighlighting(), which drops the
-        // ReadingDisplay anchor via resetLastShown(), after which
-        // clearLiveSerialLine() is a no-op and the last voltage stays frozen
-        // on screen above the prompt looking current. Deliberately NOT done
-        // inside stopMeasurement(): startMeasurement() calls that on every
-        // node change, and re-pinning per tap would march the reading down
-        // the screen two rows at a time.
-        ReadingDisplay::clearLiveSerialLine();
-        stopMeasurement();          // no-ops when nothing is active
-        measureModeActive = false;  // turn the logo indicator off
-        // Also drop stability tracking that never reached a measurement, so a
+        // EDGE-TRIGGERED. This branch runs on every service pass while the
+        // switch sits in the normal select position, so the teardown must fire
+        // only on the transition out of measure mode. Unconditionally it was
+        // ruinous: Highlighting is registered immediately before this service
+        // at the same priority, so in the SAME pass it pins a live reading and
+        // we wipe it - clearLiveSerialLine() keys off the shared pinReserved
+        // flag and has no idea who owns the row. A changing value re-pinned and
+        // got erased at up to 25 Hz, scrolling the terminal and eating the
+        // user's typed line every ~40 ms.
+        if ( measurementActive || measureModeActive ) {
+            // Erase BEFORE stopMeasurement(): that calls clearHighlighting(),
+            // which drops the ReadingDisplay anchor via resetLastShown(), after
+            // which clearLiveSerialLine() is a no-op and the last voltage stays
+            // frozen above the prompt looking current. Deliberately NOT done
+            // inside stopMeasurement(): startMeasurement() calls that on every
+            // node change, and re-pinning per tap would march the reading down
+            // the screen two rows at a time.
+            ReadingDisplay::clearLiveSerialLine();
+            stopMeasurement();          // no-ops when nothing is active
+            measureModeActive = false;  // turn the logo indicator off
+        }
+        // Stability tracking is cheap and must reset every pass, so a
         // half-accumulated count can't latch onto a stale node on the way back.
         stableReadingCount = 0;
         lastProbeReading = -1;

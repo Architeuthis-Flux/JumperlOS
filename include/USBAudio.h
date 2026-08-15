@@ -76,7 +76,13 @@ extern volatile bool usbAudioOwnsAdc;
 // re-enumerate: the device stays visible, the host just hears silence. Safe
 // from either core (on core 1 it runs the pump inline; on core 0 it waits,
 // bounded, for core 1 to carry it out). No Serial output - may run on core 1.
-void usb_audio_yield_adc(const char *why);
+//
+// RETURNS true if the ADC is free when it returns. It can fail: the pump runs
+// only from core2stuff(), which loop1() skips while pauseCore2 is set or a
+// logic-analyzer capture is running. ANYTHING that calibrates or measures must
+// check this - reading anyway yields sweep means and a hard 0 on the probe
+// channels, which silently poisons whatever is solved from them.
+bool usb_audio_yield_adc(const char *why);
 
 // The counterpart: after a yield, ask the pump to restart capture - but ONLY
 // if the host still has the microphone open. Cheap and idempotent; call it
@@ -162,9 +168,14 @@ void usb_audio_get_status(usb_audio_status_t *out);
 // the pump to resume - which it only does if the host still has the mic open.
 struct UsbAudioAdcYield {
     explicit UsbAudioAdcYield(const char *why) {
-        if (usbAudioOwnsAdc) usb_audio_yield_adc(why);
+        if (usbAudioOwnsAdc) got_ = usb_audio_yield_adc(why);
     }
     ~UsbAudioAdcYield() { usb_audio_resume_adc(); }
+    // False when the stream would not let go - the caller is NOT looking at the
+    // real converter and must not persist anything derived from it.
+    bool ok() const { return got_; }
+private:
+    bool got_ = true;
 };
 #endif
 
@@ -174,6 +185,7 @@ struct UsbAudioAdcYield {
 #ifdef __cplusplus
 struct UsbAudioAdcYield {
     explicit UsbAudioAdcYield(const char *) {}
+    bool ok() const { return true; }   // no audio on this board: always the real ADC
 };
 #endif
 
