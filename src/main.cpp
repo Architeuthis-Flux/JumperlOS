@@ -58,6 +58,7 @@ KevinC@ppucc.io
 #include "NetManager.h"
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
+#include "CrashLog.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "routing/InfraPaths.h" // infraProbePowerSource (boot feed verification)
@@ -72,6 +73,7 @@ KevinC@ppucc.io
 #include "externVars.h"
 #include "oled.h"
 #include <hardware/adc.h>
+#include <hardware/structs/sio.h> // stale doorbell guard below
 
 #include "MeasureMode.h"
 #include "MpRemoteService.h"    // mpremote/ViperIDE raw REPL service
@@ -156,6 +158,30 @@ bool newConfigOptions = true; //! set to true with new config options //!
 bool core1_separate_stack = true;
 
 #ifdef PICO_RP2350
+// ── Stale doorbell guard ──
+// arduino-pico parks the other core for every flash erase/program by ringing
+// an SIO doorbell (rp2040.idleOtherCore()); core 1's doorbell IRQ handler then
+// spins with interrupts off until resumeOtherCore() clears __otherCoreIdled.
+// RP2350's SIO doorbell bits are NOT cleared by a SYSRESETREQ-style reset
+// (debugger reset, and any reset that isn't a full power cycle), so a reset
+// that lands while a doorbell is rung leaves that bit set. On the next boot
+// core 1 enables its doorbell IRQ inside main1(), sees the stale bell, parks
+// itself for a resume that never comes, and core 0 hangs in setup() waiting
+// for core2initFinished. Caught live over SWD (2026-08-15): DOORBELL_IN=0x80
+// on core 1 immediately after `reset halt`, both cores wedged at boot, no
+// firmware bug involved. This constructor runs before main() launches core 1,
+// so it is the one place that can clear both cores' bells before anyone
+// listens for them. DOORBELL_OUT_CLR clears the bells this core posted to the
+// other core; DOORBELL_IN_CLR clears our own.
+namespace {
+struct ClearStaleDoorbells {
+    ClearStaleDoorbells( ) {
+        sio_hw->doorbell_out_clr = 0xFFu;
+        sio_hw->doorbell_in_clr = 0xFFu;
+    }
+} s_clearStaleDoorbells;
+} // namespace
+
 // Cortex-M33 hardware stack-limit guard: a future overflow becomes an
 // immediate, debuggable STKOF UsageFault at the faulting push instead of
 // silent cross-core memory corruption. Limits sit a redzone above the
@@ -728,6 +754,9 @@ menu:
         selfTestShowSavedResultIfPending( );
 
         printColorJogoSmall( );
+        // If the previous run ended in a HardFault, say so right here - once -
+        // so a crash leaves a trail instead of a mystery reboot.
+        crashlogReportOnce( Serial );
 #if TEST_PSRAM == 1
         while ( 1 ) {
             initBuff( );

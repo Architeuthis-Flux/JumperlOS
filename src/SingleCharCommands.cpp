@@ -30,6 +30,7 @@
 #include "InfraPaths.h"
 #include "RouteSafety.h"
 #include "Peripherals.h"
+#include "CrashLog.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "Python_Proper.h"
@@ -168,6 +169,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
     // Jerial.print("clearing highlighting");
     // Jerial.flush();
 
+    crashlogReportOnce( Jerial ); // once per boot, if the last reset was a fault
     clearHighlighting( );
 
     // Jerial.print("clearHighlighting");
