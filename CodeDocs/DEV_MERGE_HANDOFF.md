@@ -1,6 +1,6 @@
 # `dev` merge — what's done, what's open, what to do next
 
-Session of 2026-08-15. Branch **`dev`** now exists at `42f32af`, a fast-forward of
+Session of 2026-08-15. Branch **`dev`** now exists at `d95b7d6`, a fast-forward of
 `main` → `infra-paths` → `usb-audio-uac2` with everything below committed. Nothing
 has been pushed.
 
@@ -16,18 +16,23 @@ fixed** (proven over SWD, then soak-tested for 15 minutes). The reading-display
 work is finished. Ten commits sit on `dev`, all built for both boards and
 exercised on hardware.
 
-Two things are **open and both are pre-existing, not regressions from this work**:
+A 161-agent adversarial review then found 51 issues, 38 of which survived
+three-lens verification — **all of them are now fixed**, including six merge
+blockers and two regressions this branch had introduced.
+
+Two things remain open, and **both are pre-existing, not from this work**:
 
 1. **A flash-write park race in arduino-pico** takes the board off USB after
    ~18 iterations of a flash-write soak (mic irrelevant). The fix is written and
    in-tree but **compiled out**, because it needs a shared-IRQ handler slot and
    there are none.
 2. **Zero free shared-IRQ handler slots** on any running board. Measured, not
-   inferred. The next feature to ask for one silently kills a core.
+   inferred. The next feature to ask for one silently kills a core — which
+   probably means arming the logic analyzer already does, on any board that has
+   touched MicroPython.
 
-Neither blocks using `dev` for ordinary work; both should be fixed before a
-release, and (1) is a real "the board randomly dropped off USB" report waiting to
-happen.
+Neither blocks using `dev`; both should be fixed before a release, and (1) is a
+real "the board randomly dropped off USB" report waiting to happen.
 
 ---
 
@@ -187,46 +192,37 @@ Post-fix verification: both boards build; HIL 5/6 **with the mic streaming**
 on hardware; a deliberate BusFault still records, reboots and prints, with the
 new bootloop guard correctly not tripping.
 
-### Still open from the review (triaged, not blockers)
+### The review list is CLOSED
 
-Full text: `~/.claude/projects/-Users-kevinsanto-Documents-GitHub-JumperlOS/8de8c89e-ef11-4d86-9611-765cedd133d5/subagents/workflows/wf_7ae4beca-de6/journal.jsonl`
+All ten S-items and five W-items are fixed too (`d95b7d6`), so the branch does
+not carry a triage list. The ones worth knowing about because they changed
+behaviour you might notice:
+
+- **S3** was the worst: `readAdc()` returns a 0 sentinel for the probe channels
+  while audio owns the converter (a rolling mean would make the row decoder pick
+  the *wrong* row), but `readAdcVoltage()` scaled that sentinel and subtracted
+  the calibrated zero — so **ADC7 reported ≈ −9 V**, not 0 and not an error, to
+  the droop current estimate (~400 mA against a ~1 mA threshold, enough to latch
+  switch position) and to three places that print the tip voltage. Verified
+  fixed on hardware: 3.375 V while streaming.
+- **S1**: `usb_audio_set_rate()` now defers while the host has the mic open and
+  reports `pending_rate`. Changing it live desynchronised device and host, and
+  could stall the host on the rate it had itself negotiated.
+- **S2**: the Python handback no longer fires on every ViperIDE console line —
+  `onPythonSessionEnd(bool fullHandback)`, raw REPL only when the script moved
+  the switch.
+- **S10**: `CCR.STKOFHFNMIGN` is set on both cores, so an MSPLIM stack overflow
+  actually reaches the fault handler instead of locking up — the crash log now
+  keeps the promise its header makes.
+- **W1**: FlashPark (still compiled out) had a latent bug that would have wedged
+  core 1 permanently while core 0 kept answering — the parked core cleared the
+  release flag a timed-out park had already posted. Fixed, along with its
+  registration race, so the next session can flip the flag and soak it.
+
+Full text of the review, if you want the reasoning:
+`~/.claude/projects/-Users-kevinsanto-Documents-GitHub-JumperlOS/8de8c89e-ef11-4d86-9611-765cedd133d5/subagents/workflows/wf_7ae4beca-de6/journal.jsonl`
 (`type: result` entries with a `findings` array are the reviewers; the rest are
-verifier verdicts).
-
-- **S1 — `usb_audio_set_rate()` desyncs device from host.** TinyUSB sizes IN
-  packets from the host-negotiated rate, so moving `g_rateHz` mid-stream leaves
-  capture and framing disagreeing (16k→48k saturates the FIFO, 48k→16k near
-  silence), and a host that cached the clock RANGE gets **stalled** on the rate it
-  negotiated. Fix: defer via `g_pendingRateHz`, apply in the stop branch.
-- **S2 — the `latched` gate in `onPythonSessionEnd()` is inverted.** It ORs in
-  `hl.showReadingNet > 0`, which is sticky by design, so after any probe tap it is
-  permanently true and every ViperIDE console line runs the full teardown. Fix:
-  `onPythonSessionEnd(bool fullHandback)` — true from the file path, false from
-  the raw REPL.
-- **S3 — the ADC5/ADC7 raw-0 sentinel leaks.** `readAdcVoltage()` applies the
-  normal offset to the sentinel, so **ADC7 reads ≈ −8 V** rather than 0 or an
-  error, while `adcReadings[7]` holds the real sweep mean — cached and fresh paths
-  disagree for the whole recording. Worst consumer is `gpioDroopCurrentEstimate()`
-  (≈400 mA against a ~1 mA threshold, which can latch switch position); also
-  `TimeDomainMultiplexer`/`FakeGpio` have no audio guard at all. Fix sketch in the
-  review; note `usb_audio_set_channels()` should also reject 5 and 7.
-- **S4 — `[usb_audio]` struct/live divergence.** Live setters mutate `g_*` only
-  and `usb_audio_save_config()` copies `g_*` **into** the struct, so a
-  terminal-set value is reverted on disk by the next `Ms`. Fix: a
-  `usb_audio_sync_config()` mirror.
-- **S5 — three defects in the pin protocol** (`ReadingDisplay.cpp`): the width
-  guard *orphans* the row rather than freezing it; the first pin after an anchor
-  drop erases the user's echoed input; and clearing `lastLine` as the width guard
-  does also drops the OLED dedupe key, making `VoltageAdjuster` repaint a full
-  frame every loop pass. One `serialNeedsRepin` flag fixes two of the three.
-- **S7–S10, W1–W5** — the droop-sentinel test has no restore path; a crash record
-  survives a reflash and is reported against the wrong binary; the OG crash-log
-  slots collide with the bootrom's `reset_usb_boot` scratch; MSPLIM overflow
-  can't actually reach the handler (needs `CCR.STKOFHFNMIGN`); FlashPark has four
-  more latent issues to fix before enabling; `s_dacUserClaimed[]` is a one-way
-  latch that other DAC writers never clear; `full_scale` quantises at `%.2f`; and
-  the OG MicroPython stubs make `usb_audio_setup()` raise instead of returning
-  False (and the example is provisioned on OG, where it can never work).
+verifier verdicts.)
 
 ## How to work on this board (learned the hard way)
 
@@ -263,12 +259,11 @@ the first terminal that gets the menu, with the `addr2line` command to symbolise
 
 ## Suggested order for the next session
 
-1. Work the S1-S10 / W1-W5 list above (the review's own text has a concrete fix
-   for each). S3 and S2 are the two most user-visible.
-2. Free a shared-IRQ slot (item 2) — it is a one-line core patch and it unblocks
+1. Free a shared-IRQ slot (item 2) — it is a one-line core patch and it unblocks
    FlashPark *and* removes a latent brick. Verify with
    `irq_handler_chain_free_slot_head` over SWD.
-3. Enable FlashPark, soak with `stress_flash.py 40`, and A/B the same soak against
-   `main` to close out the pre-existing claim.
-4. Hand the board to Kevin for the sensory checks in item 3.
-5. Then `dev` is releasable.
+2. Enable FlashPark (`JL_FLASH_PARK_ENABLE=1` + `JL_FLASH_PARK_WRAPPED=1` + the
+   two `--wrap` flags, all on one line), soak with `stress_flash.py 40`, and A/B
+   the same soak against `main` to close out the pre-existing claim.
+3. Hand the board to Kevin for the sensory checks in item 3 above.
+4. Then `dev` is releasable.
