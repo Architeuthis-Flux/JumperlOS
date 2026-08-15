@@ -9,11 +9,15 @@ snapshots both cores' PCs.
 
 Run from test/hil so jl.py imports.
 """
+import os
 import sys
 import time
 
-sys.path.insert(0, "/Users/kevinsanto/Documents/GitHub/JumperlOS/test/hil")
-sys.path.insert(0, "/private/tmp/claude-501/-Users-kevinsanto-Documents-GitHub-JumperlOS/71bd2bdc-2364-4288-956f-bed51d3f7d16/scratchpad")
+# Resolve the sibling modules relative to this file, not to one machine's
+# checkout or a long-gone scratchpad directory.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))   # test/hil  -> jl.py
+sys.path.insert(0, _HERE)                    # test/hil/swd -> sample_state.py
 
 from jl import jl_exec, port1_command  # noqa: E402
 from sample_state import OOCD, sample_vars, sample_pcs  # noqa: E402

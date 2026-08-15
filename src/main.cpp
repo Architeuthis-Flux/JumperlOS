@@ -60,6 +60,7 @@ KevinC@ppucc.io
 #include "Peripherals.h"
 #include "USBAudio.h"
 #include "CrashLog.h"
+#include "FlashPark.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "routing/InfraPaths.h" // infraProbePowerSource (boot feed verification)
@@ -203,6 +204,7 @@ void setup( ) {
     extern uint32_t __scratch_x_start__;
     armStackLimit( (uint32_t)&__scratch_x_start__ + 64 );
 #endif
+    flashParkRegisterCore( ); // our side of the flash-write park (see FlashPark.h)
     pinMode( RESETPIN, OUTPUT_12MA );
 
     digitalWrite( RESETPIN, HIGH );
@@ -383,6 +385,10 @@ void setup( ) {
         // delayMicroseconds(1);
     }
     startupTimers[ 3 ] = millis( );
+    // Both cores are up and registered: from here every flash write parks the
+    // other core through FlashPark instead of arduino-pico's racy doorbell
+    // handshake (the "board drops off USB during a config save" bug).
+    flashParkTakeover( );
     // Serial.println("Core2 initialized");
     // Serial.flush();
 
@@ -595,6 +601,7 @@ void setup1( ) {
         armStackLimit( (uint32_t)core1_separate_stack_address + 64 );
     }
 #endif
+    flashParkRegisterCore( ); // core 1's side of the flash-write park (see FlashPark.h)
 
     setupCore2stuff( );
     startupCore2timers[ 7 ] = millis( );

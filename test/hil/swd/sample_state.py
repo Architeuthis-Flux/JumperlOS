@@ -10,20 +10,20 @@ import re
 import time
 
 VARS = {
-    "core1busy":            (0x20045480, 1),
-    "core2busy":            (0x20045481, 1),
-    "pauseCore2":           (0x200454bb, 1),
-    "readingADC":           (0x200454c1, 1),
-    "refreshInProgress":    (0x200454c3, 1),
-    "refreshLocalInProgress": (0x200454c4, 1),
-    "filesystemActive":     (0x2004549c, 1),
-    "usbMountedByHost":     (0x200454d6, 1),
-    "sendAllPathsCore2":    (0x200421dc, 4),
-    "showLEDsCore2":        (0x200422bc, 4),
-    "chipSelect":           (0x2002c3d0, 4),
-    "ch446q_timeout_count": (0x2002bb14, 4),
-    "sendxy_blocked_count": (0x200421e0, 4),
-    "fs_mutex_core1_acquires": (0x2002d6d4, 4),
+    "core1busy":            (0x200489af, 1),
+    "core2busy":            (0x200489b0, 1),
+    "pauseCore2":           (0x200489ea, 1),
+    "readingADC":           (0x200489f0, 1),
+    "refreshInProgress":    (0x200489f2, 1),
+    "refreshLocalInProgress": (0x200489f3, 1),
+    "filesystemActive":     (0x200489cb, 1),
+    "usbMountedByHost":     (0x20048a07, 1),
+    "sendAllPathsCore2":    (0x200456f4, 4),
+    "showLEDsCore2":        (0x200457d4, 4),
+    "chipSelect":           (0x2002f430, 4),
+    "ch446q_timeout_count": (0x2002eb74, 4),
+    "sendxy_blocked_count": (0x200456f8, 4),
+    "fs_mutex_core1_acquires": (0x20030b38, 4),
 }
 
 
