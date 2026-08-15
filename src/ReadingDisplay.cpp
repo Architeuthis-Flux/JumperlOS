@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include "Jerial.h"       // input-line width for the pin guard
 #include "NetManager.h"  // definesToChar
 #include "config.h"      // jumperlessConfig
 #include "oled.h"        // oled, OledTextRow, FontManager, mapConfigValueToFontFamily
@@ -78,7 +79,20 @@ void pinCursorToLiveRow(void) {
 }
 }  // namespace
 
+// Past this many columns a typed line is about to wrap on an 80-column
+// terminal, and the "two rows up" cursor math below would land on the wrong
+// row. Release the pin instead of guessing; the next reading re-pins once the
+// line is submitted (handleEnter drops the anchor) or shortened. No terminal
+// width query (CSI 6 n) - those block 20-200 ms and eat typed bytes.
+constexpr int kMaxInputColsForPin = 70;
+
 void emitLiveSerialLine(const char* line) {
+    if (Jerial.getInputLineColumns() >= kMaxInputColsForPin) {
+        // Leave the terminal alone until the line is shorter. Forget the last
+        // painted line too, so an unchanged reading re-pins the moment it can.
+        resetLastShown();
+        return;
+    }
     if (!pinReserved) {
         // Scroll two fresh rows into place so the reading has somewhere to
         // live that isn't the user's input line. "\n\r", not bare "\n": over
@@ -115,7 +129,12 @@ void resetLastShown(void) {
 }
 
 void show(const char* name, int rowNode, const char* value, const char* value2) {
-    const char* nameText = (name != nullptr) ? name : "";
+    // Copy the name first: definesToChar() below returns a pointer into ONE
+    // shared static buffer for values it can't map, so a caller that passed a
+    // definesToChar() result as `name` would see it replaced by the row label.
+    char nameBuf[48];
+    snprintf(nameBuf, sizeof(nameBuf), "%s", (name != nullptr) ? name : "");
+    const char* nameText = nameBuf;
     bool haveV1 = (value != nullptr && value[0] != '\0');
     bool haveV2 = (value2 != nullptr && value2[0] != '\0');
     bool haveValues = (haveV1 || haveV2);

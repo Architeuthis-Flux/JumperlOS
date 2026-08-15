@@ -372,6 +372,14 @@ public:
      * Get current line being edited (read-only)
      */
     const char* getCurrentLineBuffer();
+
+    /**
+     * Where the input-line cursor sits, in terminal columns: visible prompt
+     * width plus characters typed so far. 0 when the line editor is inactive.
+     * Used by the pinned live-reading line to release its pin before a long
+     * input line wraps and breaks its "two rows up" cursor math.
+     */
+    int getInputLineColumns();
     
     /**
      * Set terminal prompt
@@ -669,6 +677,8 @@ public:
     void injectCompletedLine(const char* line, Stream* response_target = nullptr); // Inject a completed line directly
     Stream* getResponseTarget();        // Get response target for current command
     const char* getCurrentLineBuffer(); // Get current line being edited (read-only)
+    int getLineLength() const { return line_length; }             // typed-so-far, in columns
+    int getPromptVisibleWidth() const { return prompt_visible_cols; } // prompt width WITHOUT its SGR codes
     void setPrompt(const char* prompt); // Set prompt string
     void enableEcho(bool enabled);      // Enable/disable character echoing
     ScriptHistory* getHistory() { return history; } // Get access to history instance
@@ -705,6 +715,7 @@ private:
     
     // Settings
     String prompt_text;
+    int prompt_visible_cols = 0;        // columns the prompt occupies on screen (no ANSI)
     bool echo_enabled;
     SyntaxHighlighting syntax_highlighter;
     

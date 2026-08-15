@@ -171,6 +171,64 @@ unsigned long& highlightTimer = Highlighting::getInstance().highlightTimer;
 // Existing Functions (now class methods)
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// Live-reading change-detection guards.
+//
+// Every "print only when it changed" latch used by highlightNets() and
+// checkForReadingChanges() lives here instead of in function-local statics, so
+// resetReadingState() can force the next paint. The case that needs it: a
+// Python script exits with the SAME net still selected and UNCHANGED values -
+// with the guards untouched, nothing would ever repaint after the handback.
+//
+// Reset ONLY from resetReadingState(). Never from clearHighlighting(): that
+// runs every command cycle (main loop top + printMenu) and resetting here would
+// force a repaint each time. Float sentinels are an impossible reading, not
+// 0.0 (a live 0.00 V equalled the old sentinel and skipped the first paint) and
+// not NaN (fabs(x - NaN) > t is always false, which would skip forever).
+// ---------------------------------------------------------------------------
+namespace {
+constexpr float kNoReading = -1000.0f;
+
+struct LiveReadingGuards {
+    // highlightNets(): I Sense pair
+    bool          sensePrintInitialized   = false;
+    int           lastSenseNetPrinted     = -1;
+    float         lastSenseCurrentPrinted = kNoReading;
+    float         lastSenseVoltagePrinted = kNoReading;
+    unsigned long lastSenseUpdatePrinted  = 0;
+    // highlightNets(): UART live view (append-only diff)
+    char   prevTx[64] = {0};
+    size_t prevTxLen  = 0;
+    char   prevRx[64] = {0};
+    size_t prevRxLen  = 0;
+    // highlightNets(): plain-net "Net N / row X" reprint guard
+    int lastPrintedRowNode = -1;
+    // checkForReadingChanges()
+    float         prevAdcReading      = kNoReading;
+    int           prevGpioInputState  = -1;
+    int           prevGpioOutputState = -1;
+    float         prevDacVoltage      = kNoReading;
+    float         prevRailVoltage     = kNoReading;
+    int           lastMeasuredNet     = -1;
+    unsigned long lastUpdateTime      = 0;
+    char   prevUartTx[64] = {0};
+    size_t prevUartTxLen  = 0;
+    char   prevUartRx[64] = {0};
+    size_t prevUartRxLen  = 0;
+    float  prevShownCurrent = kNoReading;
+    // checkForReadingChanges(): I Sense pair
+    float lastCurrentPrinted = kNoReading;
+    float lastVoltagePrinted = kNoReading;
+    // checkForReadingChanges(): estimated-current / scan trio
+    float lastEstCurrentPrinted = kNoReading;
+    int   lastEstNetPrinted     = -1;
+    char  lastScanVPrinted[16]  = "";
+
+    void reset( ) { *this = LiveReadingGuards( ); }
+};
+LiveReadingGuards g_readingGuards;
+} // namespace
+
 void Highlighting::clearHighlighting( int updateLEDs) {
 
     // netColors[highlightedNet] = highlightedOriginalColor;
@@ -221,6 +279,7 @@ void Highlighting::resetReadingState( ) {
     showReadingNet = -1;
     showReadingRow = -1;
     lastPrintedNet = -1;
+    g_readingGuards.reset( );   // force the next paint even for an unchanged value
     ReadingDisplay::resetLastShown( );
 }
 
@@ -890,11 +949,11 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         netHighlighted = brightenNet( probeReading );
     }
 
-    static bool sensePrintInitialized = false;
-    static int lastSenseNetPrinted = -1;
-    static float lastSenseCurrentPrinted = 0.0f;
-    static float lastSenseVoltagePrinted = 0.0f;
-    static unsigned long lastSenseUpdatePrinted = 0;
+    auto& sensePrintInitialized   = g_readingGuards.sensePrintInitialized;
+    auto& lastSenseNetPrinted     = g_readingGuards.lastSenseNetPrinted;
+    auto& lastSenseCurrentPrinted = g_readingGuards.lastSenseCurrentPrinted;
+    auto& lastSenseVoltagePrinted = g_readingGuards.lastSenseVoltagePrinted;
+    auto& lastSenseUpdatePrinted  = g_readingGuards.lastSenseUpdatePrinted;
 
     // if ( !currentSenseState.plusConnected || !currentSenseState.minusConnected ) {
     //     sensePrintInitialized = false;
@@ -1096,10 +1155,10 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             if ( uartTxOnNet || uartRxOnNet ) {
 
                     // Keep small persistent buffers so we can append only new bytes
-                static char prevTx[64] = {0};
-                static size_t prevTxLen = 0;
-                static char prevRx[64] = {0};
-                static size_t prevRxLen = 0;
+                auto& prevTx    = g_readingGuards.prevTx;
+                auto& prevTxLen = g_readingGuards.prevTxLen;
+                auto& prevRx    = g_readingGuards.prevRx;
+                auto& prevRxLen = g_readingGuards.prevRxLen;
 
                 // Snapshot buffers (small)
                 char txSnapshot[64];
@@ -1335,7 +1394,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     // held probe tip re-pushed "Net N / row X" every service
                     // loop and stomped the live updater's voltage/current
                     // line whenever the scan current happened to read 0.
-                    static int lastPrintedRowNode = -1;
+                    auto& lastPrintedRowNode = g_readingGuards.lastPrintedRowNode;
                     if ( print == 1 && ( lastPrintedNet != netHighlighted ||
                                          lastPrintedRowNode != brightenedNode ) ) {
                         lastPrintedRowNode = brightenedNode;
@@ -1372,20 +1431,20 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
 }
 
 int Highlighting::checkForReadingChanges( void ) {
-    // Static variables to store previous measurement values
-    static float prevAdcReading = 0.0;
-    static int prevGpioInputState = -1;
-    static int prevGpioOutputState = -1;
-    static float prevDacVoltage = 0.0;
-    static float prevRailVoltage = 0.0;
-    static int lastMeasuredNet = -1;
-    static unsigned long lastUpdateTime = 0;
+    // Previous-value latches (see LiveReadingGuards above)
+    auto& prevAdcReading      = g_readingGuards.prevAdcReading;
+    auto& prevGpioInputState  = g_readingGuards.prevGpioInputState;
+    auto& prevGpioOutputState = g_readingGuards.prevGpioOutputState;
+    auto& prevDacVoltage      = g_readingGuards.prevDacVoltage;
+    auto& prevRailVoltage     = g_readingGuards.prevRailVoltage;
+    auto& lastMeasuredNet     = g_readingGuards.lastMeasuredNet;
+    auto& lastUpdateTime      = g_readingGuards.lastUpdateTime;
 
     // UART live-display state (small persistent buffers, display-only)
-    static char prevUartTx[64] = {0};
-    static size_t prevUartTxLen = 0;
-    static char prevUartRx[64] = {0};
-    static size_t prevUartRxLen = 0;
+    auto& prevUartTx    = g_readingGuards.prevUartTx;
+    auto& prevUartTxLen = g_readingGuards.prevUartTxLen;
+    auto& prevUartRx    = g_readingGuards.prevUartRx;
+    auto& prevUartRxLen = g_readingGuards.prevUartRxLen;
 
     // Don't update too frequently
     unsigned long currentTime = millis( );
@@ -1405,16 +1464,16 @@ int Highlighting::checkForReadingChanges( void ) {
 
     // Estimated current shown alongside voltages (ADC/DAC/rail branches
     // below); tracked so a current change alone also refreshes the display.
-    static float prevShownCurrent = -1.0f;
+    auto& prevShownCurrent = g_readingGuards.prevShownCurrent;
 
     // Reset stored values if we switched to a different net
     if ( lastMeasuredNet != showReadingNet ) {
-        prevAdcReading = 0.0;
+        prevAdcReading = kNoReading;
         prevGpioInputState = -1;
         prevGpioOutputState = -1;
-        prevDacVoltage = 0.0;
-        prevRailVoltage = 0.0;
-        prevShownCurrent = -1.0f;
+        prevDacVoltage = kNoReading;
+        prevRailVoltage = kNoReading;
+        prevShownCurrent = kNoReading;
 
         // Reset UART live-display state when net changes
         prevUartTxLen = 0; prevUartTx[0] = '\0';
@@ -1603,8 +1662,8 @@ int Highlighting::checkForReadingChanges( void ) {
             // Serial.flush();
             
             // Always update current sense display (no dead zone, it changes frequently)
-            static float lastCurrentPrinted = 0.0f;
-            static float lastVoltagePrinted = 0.0f;
+            auto& lastCurrentPrinted = g_readingGuards.lastCurrentPrinted;
+            auto& lastVoltagePrinted = g_readingGuards.lastVoltagePrinted;
             
             // Update if current changed by more than 0.05mA or voltage by more than 0.02V
             if (( fabs( current - lastCurrentPrinted ) > 0.05 || fabs( voltage - lastVoltagePrinted ) > 0.1)  && millis() - lastUpdateTime > 15) {
@@ -1646,9 +1705,9 @@ int Highlighting::checkForReadingChanges( void ) {
             float estCurrent_mA = netCurrent_mA( showReadingNet );
             char vBuf[ 16 ];
             const char* scanV = netScanVoltageValue( showReadingNet, vBuf, sizeof( vBuf ) );
-            static float lastEstCurrentPrinted = 0.0f;
-            static int lastEstNetPrinted = -1;
-            static char lastScanVPrinted[ 16 ] = "";
+            auto& lastEstCurrentPrinted = g_readingGuards.lastEstCurrentPrinted;
+            auto& lastEstNetPrinted     = g_readingGuards.lastEstNetPrinted;
+            auto& lastScanVPrinted      = g_readingGuards.lastScanVPrinted;
             bool changed = ( lastEstNetPrinted != showReadingNet ) ||
                            ( fabs( estCurrent_mA - lastEstCurrentPrinted ) > 0.1f ) ||
                            ( strcmp( scanV ? scanV : "", lastScanVPrinted ) != 0 );

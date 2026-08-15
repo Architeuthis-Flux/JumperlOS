@@ -167,14 +167,18 @@ ServiceStatus MeasureMode::service() {
         // service() returned BUSY, starving every other service.
         // Still scoped to != 0 so the 300ms debounce window at position 0
         // (where switchStable is false) leaves an active measurement alone.
+        // Give the pinned terminal rows back FIRST (idempotent - no-ops when
+        // nothing is pinned, which is most ticks). It has to run before
+        // stopMeasurement(): that calls clearHighlighting(), which drops the
+        // ReadingDisplay anchor via resetLastShown(), after which
+        // clearLiveSerialLine() is a no-op and the last voltage stays frozen
+        // on screen above the prompt looking current. Deliberately NOT done
+        // inside stopMeasurement(): startMeasurement() calls that on every
+        // node change, and re-pinning per tap would march the reading down
+        // the screen two rows at a time.
+        ReadingDisplay::clearLiveSerialLine();
         stopMeasurement();          // no-ops when nothing is active
         measureModeActive = false;  // turn the logo indicator off
-        // Give the pinned terminal rows back (idempotent - no-ops when
-        // nothing is pinned, which is most ticks). Deliberately NOT done in
-        // stopMeasurement(): startMeasurement() calls that on every node
-        // change, and re-pinning per tap would march the reading down the
-        // screen two rows at a time.
-        ReadingDisplay::clearLiveSerialLine();
         // Also drop stability tracking that never reached a measurement, so a
         // half-accumulated count can't latch onto a stale node on the way back.
         stableReadingCount = 0;
@@ -381,8 +385,8 @@ void MeasureMode::disconnectADC() {
 // Voltage Display (Simple Mode)
 // ============================================================================
 
-float lastVoltage = 0.0f;
-int lastMeasuredNode = -1;
+static float lastVoltage = 0.0f;
+static int lastMeasuredNode = -1;
 void MeasureMode::updateVoltageDisplay() {
     if (!measurementActive || adcChannel < 0) {
         return;
@@ -414,22 +418,17 @@ void MeasureMode::updateVoltageDisplay() {
     if (smoothedVoltage == -0.00f) {
         smoothedVoltage = 0.00f;
     }
-     if (fabs(smoothedVoltage - lastVoltage) > 0.01 || measuredNode != lastMeasuredNode ) {  
+    if (fabs(smoothedVoltage - lastVoltage) > 0.01 || measuredNode != lastMeasuredNode) {
         lastMeasuredNode = measuredNode;
-    // Format voltage and node info for OLED
-    char oledString[30];
-    sprintf(oledString, "%s\n  % .2f V", definesToChar(measuredNode, 0), smoothedVoltage);
-    
-    // Update OLED display
-    oled.clearPrintShow(oledString, 2, true, true, true);
-    
-    // Serial output goes to the reserved status rows above the input line,
-    // so a reading that lands mid-keystroke can't eat what the user typed.
-    char statusLine[48];
-    snprintf(statusLine, sizeof(statusLine), "%.2f V  row %s",
-             smoothedVoltage, definesToChar(measuredNode, 0));
-    ReadingDisplay::emitLiveSerialLine(statusLine);
         lastVoltage = smoothedVoltage;
+
+        // Both halves through the shared reading display: the node name is the
+        // header, the voltage the big centered value, and the serial side lands
+        // on the pinned rows above the input line. The second value slot stays
+        // open for a current reading, the way I Sense nets show V over mA.
+        char valueString[16];
+        snprintf(valueString, sizeof(valueString), "%0.2f V", smoothedVoltage);
+        ReadingDisplay::show(definesToChar(measuredNode, 0), -1, valueString);
     }
 }
 

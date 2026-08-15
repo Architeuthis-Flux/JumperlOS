@@ -23,6 +23,7 @@
 #include "RotaryEncoder.h"  // For clickwheel interrupt during script execution
 #include "Highlighting.h"   // For handing the display back at script exit
 #include "MeasureMode.h"    // For releasing measure mode at script exit
+#include "ReadingDisplay.h" // clearLiveSerialLine() at script exit
 #include "pyexec.h"
 extern "C" {
 #include "py/gc.h"
@@ -4908,11 +4909,18 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
  * Idempotent and silent when nothing latched, so it is safe after every exec.
  */
 void onPythonSessionEnd( void ) {
-    measureModeService.stopMeasurement( );  // no-ops when inactive
-
     Highlighting& hl = Highlighting::getInstance( );
-    if ( hl.brightenedNet > 0 || hl.highlightedNet > 0 || hl.brightenedNode > 0 ||
-         hl.warningNet > 0 || hl.showReadingNet > 0 ) {
+    const bool latched = measureModeService.isMeasurementActive( ) ||
+                         hl.brightenedNet > 0 || hl.highlightedNet > 0 || hl.brightenedNode > 0 ||
+                         hl.warningNet > 0 || hl.showReadingNet > 0;
+    if ( latched ) {
+        // Erase the pinned live reading rows BEFORE anything drops the anchor:
+        // stopMeasurement() -> clearHighlighting() -> resetLastShown() forgets
+        // where the rows are, and a value left frozen there reads as current.
+        // Gated on "something was actually latched" so a plain ViperIDE console
+        // line doesn't wipe a reading the user parked on the main terminal.
+        ReadingDisplay::clearLiveSerialLine( );
+        measureModeService.stopMeasurement( );  // no-ops when inactive
         hl.clearHighlighting( 1 );
         hl.resetReadingState( );
     }

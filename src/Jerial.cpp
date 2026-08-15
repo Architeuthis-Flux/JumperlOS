@@ -6,6 +6,7 @@
 
 #include "Jerial.h"
 #include "ArduinoStuff.h"
+#include "ReadingDisplay.h" // resetLastShown() when Enter scrolls the pinned rows
 #include "Python_Proper.h" // For ScriptHistory
 #include "SingleCharCommands.h"
 
@@ -417,8 +418,10 @@ const char* TermControl::getCurrentLineBuffer( ) {
 void TermControl::setPrompt( const char* prompt ) {
     if ( prompt ) {
         prompt_text = String( prompt );
+        prompt_visible_cols = (int) strlen( prompt );
     } else {
         prompt_text = "";
+        prompt_visible_cols = 0;
     }
 }
 
@@ -431,8 +434,10 @@ void TermControl::setColoredPrompt( const char* prompt, int color_code ) {
         char colored_prompt[ 128 ];
         snprintf( colored_prompt, sizeof( colored_prompt ), "\x1b[38;5;%dm%s\x1b[0m", color_code, prompt );
         prompt_text = String( colored_prompt );
+        prompt_visible_cols = (int) strlen( prompt );   // the SGR wrapper takes no columns
     } else {
         prompt_text = "";
+        prompt_visible_cols = 0;
     }
 }
 
@@ -578,6 +583,11 @@ void TermControl::handleEnter( ) {
     // brace_depth == 0, so a submitted-but-unbalanced command line (e.g.
     // "print(") printed its output glued to the end of the input line.
     if ( echo_enabled && stream && !holdForContinuation ) {
+        // This newline scrolls the terminal, so the live reading pinned two
+        // rows above the input line is now somewhere else. Drop its anchor
+        // (without erasing - a blind erase would hit the line we just moved
+        // off) so the next reading pins fresh rows below the command output.
+        ReadingDisplay::resetLastShown( );
         stream->print( JERIAL_NEWLINE_OUT );
         stream->flush( );
     }
@@ -1191,6 +1201,13 @@ const char* JerialClass::getCurrentLineBuffer() {
         return term_control->getCurrentLineBuffer();
     }
     return "";
+}
+
+int JerialClass::getInputLineColumns() {
+    if (term_control_active && term_control) {
+        return term_control->getPromptVisibleWidth() + term_control->getLineLength();
+    }
+    return 0;
 }
 
 void JerialClass::setPrompt(const char* prompt) {
