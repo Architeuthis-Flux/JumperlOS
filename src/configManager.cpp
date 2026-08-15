@@ -16,6 +16,7 @@
 #include "Jerial.h" // TermControl is now part of Jerial
 #include "externVars.h"  // For fs_mutex filesystem synchronization
 #include "usb_interface_config.h"  // For USB CDC DTR ignore configuration
+#include "USBAudio.h"              // For restoring the saved USB audio setup
 #include "AsyncPassthrough.h"
 #include "Probing.h"
 #include "Python_Proper.h"
@@ -845,6 +846,13 @@ void updateConfigFromFile(const char* filename) {
         } else if (strcmp(section, "usb_cdc") == 0) {
             // USB CDC flow control settings
             if (strcmp(key, "ignore_dtr") == 0) jumperlessConfig.usb_cdc.ignore_dtr = parseBool(value);
+        } else if (strcmp(section, "usb_audio") == 0) {
+            if (strcmp(key, "enabled") == 0) jumperlessConfig.usb_audio.enabled = parseBool(value);
+            else if (strcmp(key, "left") == 0) jumperlessConfig.usb_audio.left = atoi(value);
+            else if (strcmp(key, "right") == 0) jumperlessConfig.usb_audio.right = atoi(value);
+            else if (strcmp(key, "rate") == 0) jumperlessConfig.usb_audio.rate = atoi(value);
+            else if (strcmp(key, "full_scale") == 0) jumperlessConfig.usb_audio.full_scale = atof(value);
+            else if (strcmp(key, "dc_block") == 0) jumperlessConfig.usb_audio.dc_block = parseBool(value);
         }
     }
     safeFileClose(file, false);  // Read-only, no flush
@@ -1190,6 +1198,15 @@ bool saveConfigToFile(const char* filename) {
     // Write usb_cdc section
     file.println("[usb_cdc]");
     file.print("ignore_dtr = "); file.print(jumperlessConfig.usb_cdc.ignore_dtr ? 1 : 0); file.println(";");
+
+    // Write usb_audio section
+    file.println("[usb_audio]");
+    file.print("enabled = "); file.print(jumperlessConfig.usb_audio.enabled ? 1 : 0); file.println(";");
+    file.print("left = "); file.print(jumperlessConfig.usb_audio.left); file.println(";");
+    file.print("right = "); file.print(jumperlessConfig.usb_audio.right); file.println(";");
+    file.print("rate = "); file.print(jumperlessConfig.usb_audio.rate); file.println(";");
+    file.print("full_scale = "); file.print(jumperlessConfig.usb_audio.full_scale, 2); file.println(";");
+    file.print("dc_block = "); file.print(jumperlessConfig.usb_audio.dc_block ? 1 : 0); file.println(";");
     
     // ponytail: f_write failures are sticky (volume-full stays full; hard I/O
     // errors set FIL.err and abort the file), so this final write failing
@@ -1390,6 +1407,16 @@ bool configHasChanges() {
 
     if (jumperlessConfig.usb_cdc.ignore_dtr != lastSavedConfig.usb_cdc.ignore_dtr) return true;
 
+    // USB audio. Without these, saveConfig() takes its "nothing changed" early
+    // out and usb_audio_save_config() writes nothing at all - the terminal
+    // reports the mic as saved while config.txt still holds the old value, so
+    // it reverts on the next boot.
+    if (jumperlessConfig.usb_audio.enabled != lastSavedConfig.usb_audio.enabled) return true;
+    if (jumperlessConfig.usb_audio.left != lastSavedConfig.usb_audio.left) return true;
+    if (jumperlessConfig.usb_audio.right != lastSavedConfig.usb_audio.right) return true;
+    if (jumperlessConfig.usb_audio.rate != lastSavedConfig.usb_audio.rate) return true;
+    if (jumperlessConfig.usb_audio.full_scale != lastSavedConfig.usb_audio.full_scale) return true;
+    if (jumperlessConfig.usb_audio.dc_block != lastSavedConfig.usb_audio.dc_block) return true;
 
     return false;  // No changes detected
 }
@@ -1426,7 +1453,7 @@ static bool configFileIsComplete(const char* fileContent) {
     const char* requiredSections[] = {
         "[config]", "[firmware]", "[hardware]", "[dacs]", "[debug]",
         "[routing]", "[calibration]", "[logo_pads]", "[display]",
-        "[serial_1]", "[serial_2]", "[top_oled]", "[usb_cdc]"
+        "[serial_1]", "[serial_2]", "[top_oled]", "[usb_cdc]", "[usb_audio]"
     };
     const int numRequired = sizeof(requiredSections) / sizeof(requiredSections[0]);
     
@@ -1449,6 +1476,7 @@ static bool configFileIsComplete(const char* fileContent) {
         "probe_droop_v0",
         "probe_droop_ohms",
         "probe_pad_ohms",
+        "dc_block",
         "async_passthrough"
     };
     const int numKeys = sizeof(requiredKeys) / sizeof(requiredKeys[0]);
@@ -1479,6 +1507,25 @@ void setConfigSaveDebug(bool enable) {
 // This minimizes flash writes by only updating when necessary
 void saveConfigIncremental(const char* filename) { return false; }
 */
+
+// Append "<s>\n" to the rebuild buffer, refusing to overshoot.
+//
+// snprintf() returns the length it WOULD have written, so the previous
+// `dstPos += snprintf(...)` walked dstPos PAST dstEnd on any truncating call.
+// writeSize (dstPos - newContent) then covered never-initialised malloc'd bytes
+// and file.write() committed that raw heap into config.txt. Returns false on
+// truncation so the caller can abandon the in-place rebuild.
+static inline bool appendConfigLine(char*& dstPos, char* dstEnd, const char* s) {
+    size_t avail = (size_t)(dstEnd - dstPos);
+    if (avail == 0) return false;
+    int written = snprintf(dstPos, avail, "%s\n", s);
+    if (written < 0 || (size_t)written >= avail) {
+        *dstPos = '\0';   // drop the partial line
+        return false;
+    }
+    dstPos += written;
+    return true;
+}
 
 bool saveConfigIncremental(const char* filename) {
     uint32_t totalStartTime = micros();
@@ -1599,6 +1646,7 @@ bool saveConfigIncremental(const char* filename) {
     char* srcPos = fileContent;
     char* dstPos = newContent;
     char* dstEnd = newContent + MAX_CONFIG_SIZE - 256;  // Leave room for additions
+    bool rebuildOverflowed = false;   // set if the in-place rebuild did not fit
     
     char currentSection[32] = "";
     char line[256];
@@ -1646,8 +1694,7 @@ bool saveConfigIncremental(const char* filename) {
             toLower(currentSection);
             
             // Copy section header as-is
-            int written = snprintf(dstPos, dstEnd - dstPos, "%s\n", line);
-            dstPos += written;
+            if (!appendConfigLine(dstPos, dstEnd, line)) { rebuildOverflowed = true; break; }
             continue;
         }
         
@@ -2071,23 +2118,60 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 }
             }
-            
+
+            //! [usb_audio] section
+            // Without this branch every usb_audio key falls through to the
+            // "unknown key, keep original line" case below, so an incremental
+            // save copies the STALE values back out and updateShadowConfig()
+            // then marks them clean - the setting silently reverts on reboot.
+            else if (strcmp(currentSection, "usb_audio") == 0) {
+                if (strcmp(key, "enabled") == 0) {
+                    snprintf(newLine, sizeof(newLine), "enabled = %d;", jumperlessConfig.usb_audio.enabled ? 1 : 0);
+                    updated = true;
+                } else if (strcmp(key, "left") == 0) {
+                    snprintf(newLine, sizeof(newLine), "left = %d;", jumperlessConfig.usb_audio.left);
+                    updated = true;
+                } else if (strcmp(key, "right") == 0) {
+                    snprintf(newLine, sizeof(newLine), "right = %d;", jumperlessConfig.usb_audio.right);
+                    updated = true;
+                } else if (strcmp(key, "rate") == 0) {
+                    snprintf(newLine, sizeof(newLine), "rate = %d;", jumperlessConfig.usb_audio.rate);
+                    updated = true;
+                } else if (strcmp(key, "full_scale") == 0) {
+                    snprintf(newLine, sizeof(newLine), "full_scale = %.2f;", (double)jumperlessConfig.usb_audio.full_scale);
+                    updated = true;
+                } else if (strcmp(key, "dc_block") == 0) {
+                    snprintf(newLine, sizeof(newLine), "dc_block = %d;", jumperlessConfig.usb_audio.dc_block ? 1 : 0);
+                    updated = true;
+                }
+            }
+
             if (updated) {
-                int written = snprintf(dstPos, dstEnd - dstPos, "%s\n", newLine);
-                dstPos += written;
+                if (!appendConfigLine(dstPos, dstEnd, newLine)) { rebuildOverflowed = true; break; }
             } else {
                 // Unknown key, keep original line
-                int written = snprintf(dstPos, dstEnd - dstPos, "%s\n", line);
-                dstPos += written;
+                if (!appendConfigLine(dstPos, dstEnd, line)) { rebuildOverflowed = true; break; }
             }
         } else {
             // Comment, empty line, or other - copy as-is
-            int written = snprintf(dstPos, dstEnd - dstPos, "%s\n", line);
-            dstPos += written;
+            if (!appendConfigLine(dstPos, dstEnd, line)) { rebuildOverflowed = true; break; }
         }
     }
     
     *dstPos = '\0';
+
+    // If the rebuild did not fit, do NOT write the partial buffer - that would
+    // silently truncate config.txt. Fall back to the full writer, which rebuilds
+    // from the struct via temp file + rename and also clears any stale padded
+    // tail. Reachable now that sections keep being added to the config.
+    if (rebuildOverflowed) {
+        Serial.println("[ConfigSave] incremental rebuild overflowed - using full writer");
+        free(fileContent);
+        free(newContent);
+        if (saveConfigToFile(filename)) { updateShadowConfig(); return true; }
+        return false;
+    }
+
     size_t writeSize = dstPos - newContent;
     
     if (debugConfigSaveTiming) {
@@ -2591,6 +2675,15 @@ void loadConfig(void) {
     // Apply USB CDC configuration (DTR ignore mode)
     // This must be called after config is loaded to apply the ignore_dtr setting
     usb_cdc_apply_config();
+
+#if USB_AUDIO_ENABLE
+    // Restore the saved USB audio setup. Runs here, right after the config
+    // loads and before the USB stack enumerates, so a saved-enabled mic is
+    // present in the very first configuration descriptor the host reads - no
+    // re-enumeration, no dropped CDC ports. That is the only way to have the
+    // audio device without paying the 2s port drop.
+    usb_audio_apply_config();
+#endif
     
     // Defer initChipStatus to reduce startup time - it can be done later
     // initChipStatus();
@@ -2611,6 +2704,7 @@ int parseSectionName(const char* sectionName) {
     else if (strcmp(sectionName, "serial_2") == 0) return 8;
     else if (strcmp(sectionName, "top_oled") == 0) return 9;
     else if (strcmp(sectionName, "usb_cdc") == 0) return 11;
+    else if (strcmp(sectionName, "usb_audio") == 0) return 12;
     return -1;
 }
 
@@ -2935,6 +3029,23 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("\n`[usb_cdc] ");
         if (pasteable == false) Serial.println();
         Serial.print("ignore_dtr = "); Serial.print(getStringFromTable(jumperlessConfig.usb_cdc.ignore_dtr, boolTable)); Serial.println(";");
+    }
+    cycleTerminalColor();
+    // Print usb_audio section
+    if (section == -1 || section == 12) {
+        Serial.print("\n`[usb_audio] ");
+        if (pasteable == false) Serial.println();
+        Serial.print("enabled = "); Serial.print(getStringFromTable(jumperlessConfig.usb_audio.enabled, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[usb_audio] ");
+        Serial.print("left = "); Serial.print(jumperlessConfig.usb_audio.left); Serial.println(";");
+        if (pasteable == true) Serial.print("`[usb_audio] ");
+        Serial.print("right = "); Serial.print(jumperlessConfig.usb_audio.right); Serial.println(";");
+        if (pasteable == true) Serial.print("`[usb_audio] ");
+        Serial.print("rate = "); Serial.print(jumperlessConfig.usb_audio.rate); Serial.println(";");
+        if (pasteable == true) Serial.print("`[usb_audio] ");
+        Serial.print("full_scale = "); Serial.print(jumperlessConfig.usb_audio.full_scale, 2); Serial.println(";");
+        if (pasteable == true) Serial.print("`[usb_audio] ");
+        Serial.print("dc_block = "); Serial.print(getStringFromTable(jumperlessConfig.usb_audio.dc_block, boolTable)); Serial.println(";");
     }
     cycleTerminalColor();
     // if (section == -1) {
@@ -3772,6 +3883,14 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
     else if (strcmp(section, "usb_cdc") == 0) {
         if (strcmp(key, "ignore_dtr") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_cdc.ignore_dtr);
     }
+    else if (strcmp(section, "usb_audio") == 0) {
+        if (strcmp(key, "enabled") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.enabled ? 1 : 0);
+        else if (strcmp(key, "left") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.left);
+        else if (strcmp(key, "right") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.right);
+        else if (strcmp(key, "rate") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.rate);
+        else if (strcmp(key, "full_scale") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.usb_audio.full_scale);
+        else if (strcmp(key, "dc_block") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.dc_block ? 1 : 0);
+    }
     else if (strcmp(section, "calibration") == 0) {
         if (strcmp(key, "top_rail_zero") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.top_rail_zero);
         else if (strcmp(key, "top_rail_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.top_rail_spread);
@@ -3940,6 +4059,17 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "stack_rails") == 0) jumperlessConfig.routing.stack_rails = parseInt(value);
         else if (strcmp(key, "stack_dacs") == 0) jumperlessConfig.routing.stack_dacs = parseInt(value);
         else if (strcmp(key, "rail_priority") == 0) jumperlessConfig.routing.rail_priority = parseInt(value);
+    }
+    else if (strcmp(section, "usb_audio") == 0) {
+        // Persisted values only; the live stream reads them at the next boot /
+        // usb_audio_apply_config(). Use the M command or usb_audio_setup() to
+        // change the running mic.
+        if (strcmp(key, "enabled") == 0) jumperlessConfig.usb_audio.enabled = parseBool(value);
+        else if (strcmp(key, "left") == 0) jumperlessConfig.usb_audio.left = parseInt(value);
+        else if (strcmp(key, "right") == 0) jumperlessConfig.usb_audio.right = parseInt(value);
+        else if (strcmp(key, "rate") == 0) jumperlessConfig.usb_audio.rate = parseInt(value);
+        else if (strcmp(key, "full_scale") == 0) jumperlessConfig.usb_audio.full_scale = parseFloat(value);
+        else if (strcmp(key, "dc_block") == 0) jumperlessConfig.usb_audio.dc_block = parseBool(value);
     }
     else if (strcmp(section, "usb_cdc") == 0) {
         if (strcmp(key, "ignore_dtr") == 0) {
@@ -4279,7 +4409,8 @@ bool fastParseAndUpdateConfig(const char* configString) {
         strcmp(section, "serial_1") != 0 && 
         strcmp(section, "serial_2") != 0 && 
         strcmp(section, "top_oled") != 0 &&
-        strcmp(section, "usb_cdc") != 0) {
+        strcmp(section, "usb_cdc") != 0 &&
+        strcmp(section, "usb_audio") != 0) {
         Serial.println("section not found");
         Serial.println(section);
         return false;

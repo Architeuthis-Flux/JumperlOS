@@ -23,6 +23,7 @@
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
 #include "States.h"
+#include "USBAudio.h"
 #include "Undo.h"
 #include "config.h"
 #include "configManager.h"
@@ -1508,6 +1509,11 @@ void calibrateDacs( ) {
     Serial.println( "DAC calibration is not supported on Jumperless OG." );
     return;
 #endif
+    // Calibration solves for ADC constants with set/measure pairs; it needs the
+    // real converter, not the USB audio stream's rolling sweep. Yield for the
+    // whole run; the stream resumes on exit if the host still has the mic open.
+    UsbAudioAdcYield audioYield( "DAC calibration" );
+
     // Enter temporary slot FIRST to preserve user's active slot
     SlotManager::getInstance( ).enterTemporarySlot( 8 );  // Save current slot, switch to temp slot 8
 

@@ -34,6 +34,7 @@
 #include "RouteSafety.h"
 #include "States.h"
 #include "externVars.h" // pauseCore2 / core2busy / lastUserInputMs
+#include "USBAudio.h"   // usbAudioOwnsAdc
 #include "WaveGen.h"
 #include "config.h"
 #include "hardware/adc.h"
@@ -536,6 +537,17 @@ void serviceNetVoltageScan(void) {
     if (pauseCore2) return;
     if (sendAllPathsCore2 != 0) return;
     if (core1busy || refreshInProgress) return;
+#if USB_AUDIO_ENABLE
+    // The USB microphone holds the ADC for as long as the host has it open,
+    // and its round-robin sweep is useless for a 5 ms connect->settle->read
+    // tap. Stand down entirely rather than sneaking taps into the few moments
+    // the audio path lets go of the converter (config-save yields, resyncs) -
+    // those are exactly the moments the ADC is being reconfigured, and a
+    // sample taken there fed "fresh" phantom currents into the display.
+    // Voltages age out through the normal freshness window; the scan picks
+    // up again within one cycle of the mic closing.
+    if (usbAudioOwnsAdc) return;
+#endif
 
     // User input preempts the scan outright: the wheel/probe/serial always
     // win, and Core 0 work that follows input (refreshes, waitCore2) never

@@ -101,6 +101,53 @@ extern "C" {
 #define CFG_TUD_MIDI USB_MIDI_ENABLE
 #define CFG_TUD_VENDOR USB_VENDOR_ENABLE
 
+// -------- USB Audio Class 2.0 microphone (2ch / 48 kHz / 16-bit) -------------
+// Compiling the class in costs static RAM unconditionally (~1 KB: _audiod_fct,
+// the control buffer and the EP IN software FIFO) even while the audio function
+// is hidden from the descriptor. That's the price of not rebuilding TinyUSB
+// state at runtime, and it's noise against the ~160 KB of headroom this build
+// has (.bss is 220 KB of the RP2350's 520 KB).
+#define CFG_TUD_AUDIO USB_AUDIO_ENABLE
+
+#if USB_AUDIO_ENABLE
+#define CFG_TUD_AUDIO_ENABLE_EP_IN 1
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT 0
+#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP 0
+#define CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP 0
+#define CFG_TUD_AUDIO_CTRL_BUF_SZ 64
+
+// 196, NOT 192. With flow control on, audiod_calc_tx_packet_sz() computes
+// packet_sz_tx_max = (48+1) frames * 2ch * 2B = 196 and then asserts
+// packet_sz_tx_max <= ep_in_sz, where ep_in_sz is read straight out of the
+// descriptor's wMaxPacketSize. Put 192 here (or there) and the microphone
+// enumerates perfectly but SET_INTERFACE alt-1 stalls: it never streams.
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX 196
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ 1024
+
+// The ADC samples off the RP2350's crystal; the host's SOF runs off its own
+// clock. Those drift, so a fixed 48 samples/frame would eventually over- or
+// under-run the software FIFO and click. Flow control lets the driver send
+// 188/192/196-byte packets to track the host's actual consumption instead.
+#define CFG_TUD_AUDIO_EP_IN_FLOW_CONTROL 1
+
+// TWO TinyUSB trees are in this build and both see this config file.
+//
+// The audio class driver that actually links is Adafruit's TinyUSB 0.20
+// (libraries/Adafruit_TinyUSB_Arduino) - it is the only audio_device.c
+// compiled. But the arduino-pico core also builds cores/rp2040/sdkoverride/
+// {hid,midi,msc,ncm}_device.c against the pico-sdk's bundled TinyUSB *0.18*
+// headers, and tusb.h there pulls in 0.18's audio_device.h, which #errors
+// unless these three older macros exist. 0.20 dropped all three (audiod_open()
+// parses the descriptor at runtime instead), so they are inert for the driver
+// we actually run - they exist purely to get the core's own files to compile.
+//
+// FUNC_1_DESC_LEN must still be right: keep it equal to JL_AUDIO_DESC_LEN,
+// which usb_descriptors.cpp static_asserts against the emitted bytes.
+#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN     JL_AUDIO_DESC_LEN
+#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT     1
+#define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ  64
+#endif
+
 // CDC FIFO size of TX and RX - OPTIMIZED FOR HIGH-THROUGHPUT STREAMING.
 // Each enabled CDC interface allocates RX+TX FIFOs in TinyUSB's static state
 // (_cdcd_itf ~= 8.5 KB for 4 CDC at 1024/1024). On the RP2040 (OG) that static

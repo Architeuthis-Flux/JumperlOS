@@ -58,6 +58,7 @@ KevinC@ppucc.io
 #include "NetManager.h"
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
+#include "USBAudio.h"
 #include "CrashLog.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
@@ -535,6 +536,14 @@ void setup( ) {
     // Clear any non-scrolling region that may persist from a previous session
     // This resets terminal state in case LED dump or crossbar display was active before reboot
     clearNonScrollingRegion( );
+
+#if USB_AUDIO_ENABLE
+    // Last thing in setup(), once USB and the config are both up: if the saved
+    // config wants the USB mic, re-enumerate so the host actually sees it. USB
+    // came up before the config was read, so the host already has the base
+    // descriptor by now. No-op unless audio is enabled.
+    usb_audio_boot_enumerate( );
+#endif
     // Serial.println("Service registration complete");
     // Serial.flush();
 }
@@ -1912,6 +1921,18 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // own atomic ADC lock) can never extend the core_sync hold and stall core0.
     // Compiled out when LAZY_ADC_READINGS == 0.
     updateLazyAdcReadings( );
+
+#if USB_AUDIO_ENABLE
+    // Start/stop the USB audio capture the host asked for. The class callbacks
+    // run in USB IRQ context and only raise a flag, because claiming the ADC
+    // there could spin on readingADC for 100 ms inside an interrupt.
+    //
+    // Lives on core1 next to the lazy ADC refresh rather than in loop(): this
+    // is the path that provably runs every iteration, whereas core0's loop()
+    // can sit inside the menu/REPL for long stretches. It also keeps the DMA
+    // completion IRQ on core1, away from core0's LED/USB frame work.
+    serviceUSBAudio( );
+#endif
 
     // Board-wide node voltage scan for per-connection currents. Runs AFTER
     // core_sync_release like the lazy ADC reads, so a multi-ms sense tap can

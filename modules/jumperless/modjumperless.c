@@ -39,6 +39,24 @@ extern void jl_cycle_term_color( bool reset, float step, bool flush );
 void jl_dac_set( int channel, float voltage, int save );
 float jl_dac_get( int channel );
 float jl_adc_get( int channel );
+
+// USB Audio (UAC2 microphone) - two ADC channels streamed to the host as
+// 2ch/16kHz/16-bit. enable/disable re-enumerate the device; the host itself
+// starts and stops capture by opening the input device.
+int  jl_usb_audio_enable( void );
+int  jl_usb_audio_disable( void );
+int  jl_usb_audio_is_enabled( void );
+int  jl_usb_audio_is_streaming( void );
+int  jl_usb_audio_set_channels( int left, int right );
+void jl_usb_audio_save( void );
+int  jl_usb_audio_set_rate( int hz );
+int  jl_usb_audio_set_full_scale( float volts );
+void jl_usb_audio_set_dc_block( int on );
+void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *left, int *right,
+                          float *full_scale, int *dc_block, int *sample_rate,
+                          int *frames_sent, int *fifo_overflow, int *adc_overrun,
+                          int *late_irq, int *resyncs, int *probe_pauses, int *claim_fail,
+                          int *init_fail );
 float jl_ina_get_current( int sensor );
 float jl_ina_get_voltage( int sensor );
 float jl_ina_get_bus_voltage( int sensor );
@@ -1989,6 +2007,122 @@ static mp_obj_t jl_adc_get_func( mp_obj_t channel_obj ) {
     return mp_obj_new_float( voltage );
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_adc_get_obj, jl_adc_get_func );
+
+// USB Audio Functions
+//
+// Two layers, on purpose. usb_audio_enable()/disable() control whether the
+// device advertises a microphone at all - they rewrite the USB config
+// descriptor and re-enumerate, so THIS SERIAL PORT DROPS and comes back with
+// the same name a couple of seconds later. Capture itself is started by the
+// host opening the input device, not from here: MicroPython could never feed
+// 48 kHz through the interpreter, so a C-side DMA pump does it.
+static mp_obj_t jl_usb_audio_enable_func( void ) {
+    return mp_obj_new_bool( jl_usb_audio_enable( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_usb_audio_enable_obj, jl_usb_audio_enable_func );
+
+static mp_obj_t jl_usb_audio_disable_func( void ) {
+    return mp_obj_new_bool( jl_usb_audio_disable( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_usb_audio_disable_obj, jl_usb_audio_disable_func );
+
+static mp_obj_t jl_usb_audio_is_enabled_func( void ) {
+    return mp_obj_new_bool( jl_usb_audio_is_enabled( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_usb_audio_is_enabled_obj, jl_usb_audio_is_enabled_func );
+
+static mp_obj_t jl_usb_audio_active_func( void ) {
+    return mp_obj_new_bool( jl_usb_audio_is_streaming( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_usb_audio_active_obj, jl_usb_audio_active_func );
+
+// usb_audio_setup(left=0, right=1, full_scale=8.0, dc_block=True)
+// Routes the two ADC channels to L/R and makes the device visible.
+static mp_obj_t jl_usb_audio_setup_func( size_t n_args, const mp_obj_t *pos_args,
+                                         mp_map_t *kw_args ) {
+    static const mp_arg_t allowed_args[] = {
+        // Positional-or-keyword, so both usb_audio_setup(0, 1) and
+        // usb_audio_setup(left=0, right=1, full_scale=8.0) read naturally.
+        { MP_QSTR_left,       MP_ARG_INT,  { .u_int = 0 } },
+        { MP_QSTR_right,      MP_ARG_INT,  { .u_int = 1 } },
+        { MP_QSTR_full_scale, MP_ARG_OBJ,  { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_dc_block,   MP_ARG_BOOL, { .u_bool = true } },
+    };
+    mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
+    mp_arg_parse_all( n_args, pos_args, kw_args,
+                      MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
+
+    if ( !jl_usb_audio_set_channels( args[ 0 ].u_int, args[ 1 ].u_int ) ) {
+        mp_raise_ValueError( MP_ERROR_TEXT(
+            "left/right must be distinct ADC channels 0-7" ) );
+    }
+    if ( args[ 2 ].u_obj != MP_OBJ_NULL ) {
+        if ( !jl_usb_audio_set_full_scale( mp_obj_get_float( args[ 2 ].u_obj ) ) ) {
+            mp_raise_ValueError( MP_ERROR_TEXT( "full_scale must be 0.05-20.0 volts" ) );
+        }
+    }
+    jl_usb_audio_set_dc_block( args[ 3 ].u_bool ? 1 : 0 );
+
+    return mp_obj_new_bool( jl_usb_audio_enable( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW( jl_usb_audio_setup_obj, 0, jl_usb_audio_setup_func );
+
+static mp_obj_t jl_usb_audio_save_func( void ) {
+    jl_usb_audio_save( );
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_usb_audio_save_obj, jl_usb_audio_save_func );
+
+static mp_obj_t jl_usb_audio_set_rate_func( mp_obj_t hz_obj ) {
+    if ( !jl_usb_audio_set_rate( mp_obj_get_int( hz_obj ) ) ) {
+        mp_raise_ValueError( MP_ERROR_TEXT(
+            "rate must be 8000-48000 Hz in 1 kHz steps" ) );
+    }
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_usb_audio_set_rate_obj, jl_usb_audio_set_rate_func );
+
+static mp_obj_t jl_usb_audio_set_range_func( mp_obj_t volts_obj ) {
+    if ( !jl_usb_audio_set_full_scale( mp_obj_get_float( volts_obj ) ) ) {
+        mp_raise_ValueError( MP_ERROR_TEXT( "full scale must be 0.05-20.0 volts" ) );
+    }
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_usb_audio_set_range_obj, jl_usb_audio_set_range_func );
+
+static mp_obj_t jl_usb_audio_status_func( void ) {
+    int enabled = 0, streaming = 0, host_open = 0, left = 0, right = 0, dc_block = 0;
+    int sample_rate = 0, frames_sent = 0, fifo_overflow = 0, adc_overrun = 0;
+    int late_irq = 0, resyncs = 0, probe_pauses = 0, claim_fail = 0, init_fail = 0;
+    float full_scale = 0.0f;
+    jl_usb_audio_status( &enabled, &streaming, &host_open, &left, &right, &full_scale,
+                         &dc_block, &sample_rate, &frames_sent,
+                         &fifo_overflow, &adc_overrun,
+                         &late_irq, &resyncs, &probe_pauses, &claim_fail, &init_fail );
+
+    // Health counters: a clean recording has frames_sent climbing at
+    // sample_rate per second and everything else flat (late_irq/resyncs tick
+    // once per flash write, probe_pauses once per probe use).
+    mp_obj_t d = mp_obj_new_dict( 16 );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_enabled ),      mp_obj_new_bool( enabled ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_streaming ),    mp_obj_new_bool( streaming ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_host_open ),    mp_obj_new_bool( host_open ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_left ),         mp_obj_new_int( left ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_right ),        mp_obj_new_int( right ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_full_scale ),   mp_obj_new_float( full_scale ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_dc_block ),     mp_obj_new_bool( dc_block ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_sample_rate ),  mp_obj_new_int( sample_rate ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_frames_sent ),  mp_obj_new_int( frames_sent ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_fifo_overflow ), mp_obj_new_int( fifo_overflow ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_adc_overrun ),  mp_obj_new_int( adc_overrun ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_late_irq ),     mp_obj_new_int( late_irq ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_resyncs ),      mp_obj_new_int( resyncs ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_probe_pauses ), mp_obj_new_int( probe_pauses ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_claim_fail ),   mp_obj_new_int( claim_fail ) );
+    mp_obj_dict_store( d, MP_ROM_QSTR( MP_QSTR_init_fail ),    mp_obj_new_int( init_fail ) );
+    return d;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_usb_audio_status_obj, jl_usb_audio_status_func );
 
 // INA Functions
 static mp_obj_t jl_ina_get_current_func( mp_obj_t sensor_obj ) {
@@ -6345,6 +6479,22 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
 
     // ADC function aliases
     { MP_ROM_QSTR( MP_QSTR_get_adc ), MP_ROM_PTR( &jl_adc_get_obj ) },
+
+    // USB Audio functions (UAC2 microphone - see the note by the wrappers)
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_setup ), MP_ROM_PTR( &jl_usb_audio_setup_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_enable ), MP_ROM_PTR( &jl_usb_audio_enable_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_disable ), MP_ROM_PTR( &jl_usb_audio_disable_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_teardown ), MP_ROM_PTR( &jl_usb_audio_disable_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_is_enabled ), MP_ROM_PTR( &jl_usb_audio_is_enabled_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_active ), MP_ROM_PTR( &jl_usb_audio_active_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_status ), MP_ROM_PTR( &jl_usb_audio_status_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_set_range ), MP_ROM_PTR( &jl_usb_audio_set_range_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_set_rate ), MP_ROM_PTR( &jl_usb_audio_set_rate_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_usb_audio_save ), MP_ROM_PTR( &jl_usb_audio_save_obj ) },
+
+    // USB Audio aliases (house style: adc_get/get_adc)
+    { MP_ROM_QSTR( MP_QSTR_audio_setup ), MP_ROM_PTR( &jl_usb_audio_setup_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_audio_status ), MP_ROM_PTR( &jl_usb_audio_status_obj ) },
 
     // INA functions
     { MP_ROM_QSTR( MP_QSTR_ina_get_current ), MP_ROM_PTR( &jl_ina_get_current_obj ) },

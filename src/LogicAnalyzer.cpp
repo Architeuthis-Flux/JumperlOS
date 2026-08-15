@@ -9,6 +9,10 @@
 #include "hardware/watchdog.h"
 #include "configManager.h"
 #include "Peripherals.h"
+#include "USBAudio.h"
+
+// True only while this LA instance actually holds the global readingADC lock.
+static bool la_holds_adc = false;
 
 // // ADC register definitions (matching JulseView)
 // #define ADC_BASE 0x40040000
@@ -448,11 +452,34 @@ bool LogicAnalyzer::setup_adc_for_analog() {
 	for (int i = 0; i < 8; i++) if ((a_mask >> i) & 1) { a_cnt++; adc_rr_mask |= (1u << i); }
 	if (a_cnt == 0) return true; // no analog - don't claim ADC
 
+#if USB_AUDIO_ENABLE
+	// USB audio holds readingADC for the whole time the host has the microphone
+	// open - which could be minutes. Ask it to hand the ADC back rather than
+	// spinning below. Stops the stream but leaves the device enumerated; the
+	// host just hears silence.
+	if (usbAudioOwnsAdc) usb_audio_yield_adc("logic analyzer arming");
+#endif
+
 	// Wait for ADC to be free, then claim it for exclusive use during LA operation.
 	// Atomic acquire to match readAdc() (a plain check-then-set races across cores).
+	//
+	// BOUNDED: this used to spin forever, so any holder that never released
+	// wedged core 0 permanently with no diagnostic. Failing the arm is always
+	// better than hanging the board.
+	unsigned long laAdcWaitStart = micros();
 	while (__atomic_test_and_set(&readingADC, __ATOMIC_ACQUIRE)) {
+		if (micros() - laAdcWaitStart > 250000) {
+			Serial.println("[LA] timed out claiming the ADC - aborting arm");
+			return false;
+		}
 		tight_loop_contents();
 	}
+	// Record that WE own it. stop() used to clear readingADC unconditionally,
+	// which was safe only while the wait above was unbounded and could not fail.
+	// Now that arming can abort without the lock, an unconditional clear would
+	// release a lock held by someone else (the USB audio stream) and put two
+	// drivers on the ADC.
+	la_holds_adc = true;
 
 	adc_init();
 	// Configure FIFO: EN write results, DREQ_EN, THRESH=1 (trigger DREQ when 1+ samples ready)
@@ -823,7 +850,15 @@ void LogicAnalyzer::stop() {
 		JULSEDEBUG_STA("adc fifo left after stop: %d\n\r", adc_fifo_get_level());
 
 		// Release ADC for other cores to use
-		__atomic_clear(&readingADC, __ATOMIC_RELEASE);
+		if (la_holds_adc) {
+			la_holds_adc = false;
+			__atomic_clear(&readingADC, __ATOMIC_RELEASE);
+#if USB_AUDIO_ENABLE
+			// The ADC is free again: let the USB mic pick capture back up if
+			// the host still has it open (no-op otherwise).
+			usb_audio_resume_adc();
+#endif
+		}
 	// Reset DMA write addrs and counts to safe defaults
 	if (dig_taddr0) *dig_taddr0 = (uint32_t)dig_half0;
 	if (dig_taddr1) *dig_taddr1 = (uint32_t)dig_half1;

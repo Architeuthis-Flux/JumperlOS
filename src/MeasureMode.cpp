@@ -20,6 +20,7 @@
 #include "oled.h"
 #include "Highlighting.h"
 #include "externVars.h"  // For measureModeActive indicator
+#include "USBAudio.h"    // usb_audio_probe_activity()
 
 // External references
 extern JumperlessState globalState;
@@ -123,6 +124,11 @@ ServiceStatus MeasureMode::service() {
         
         // If measure mode is active, update the display
         if (measurementActive) {
+#if USB_AUDIO_ENABLE
+            // Measuring means the probe tip is parked on a node: keep the USB
+            // audio capture yielded so the tip/pad channels read live.
+            usb_audio_probe_activity();
+#endif
             if (oscopeEnabled) {
                 updateOscopeDisplay();
             } else {

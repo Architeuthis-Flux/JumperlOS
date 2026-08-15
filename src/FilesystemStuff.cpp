@@ -3380,6 +3380,9 @@ static const ExampleInfo examples[] = {
 #ifdef INCLUDE_ADC_BASICS
         { "/python_scripts/examples/adc_basics.py", ADC_BASICS_PY, "adc_basics.py", ADC_BASICS_PY_HASHES, ADC_BASICS_PY_HASH_COUNT },
 #endif
+#ifdef INCLUDE_USB_AUDIO_MIC
+        { "/python_scripts/examples/usb_audio_mic.py", USB_AUDIO_MIC_PY, "usb_audio_mic.py", USB_AUDIO_MIC_PY_HASHES, USB_AUDIO_MIC_PY_HASH_COUNT },
+#endif
 #ifdef INCLUDE_ASYNC_READ
         { "/python_scripts/examples/async_read.py", ASYNC_READ_PY, "async_read.py", ASYNC_READ_PY_HASHES, ASYNC_READ_PY_HASH_COUNT },
 #endif

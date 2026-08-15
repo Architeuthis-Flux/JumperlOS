@@ -116,6 +116,29 @@ struct config {
                 bool ignore_dtr = false;
             } usb_cdc;
 
+            // USB Audio Class microphone.
+            //
+            // The USB spec gives no way to add or remove an interface without
+            // re-enumerating, so switching the mic on at runtime necessarily
+            // drops every CDC port for ~2s. These settings are how you avoid
+            // ever paying that cost interactively:
+            //
+            //   enabled = true   restore the mic at BOOT, before the host has
+            //                    enumerated anything, so there is nothing to
+            //                    drop. Set it once, and every power-on comes up
+            //                    with the audio device already present.
+            //
+            // Everything else here just persists the last configuration so the
+            // mic comes back on the same channels at the same rate.
+            struct usb_audio {
+                bool  enabled     = false;   // advertise the mic from boot
+                int   left        = 0;       // ADC channel -> left
+                int   right       = 1;       // ADC channel -> right
+                int   rate        = 16000;   // Hz
+                float full_scale  = 8.0f;    // volts at full-scale PCM
+                bool  dc_block    = true;
+            } usb_audio;
+
     struct calibration {
         int top_rail_zero = 1650;
         float top_rail_spread = 21.5;

@@ -23,6 +23,7 @@
 //#include <Adafruit_MCP4728.h>  // Old blocking library
 
 #include "PersistentStuff.h"
+#include "USBAudio.h"
 #include "FakeGpio.h"
 #include <Wire.h>
 #include "Commands.h"
@@ -2145,6 +2146,18 @@ void __not_in_flash_func(updateLazyAdcReadings)( void ) {
     extern volatile bool core2busy;
     if ( pauseCore2 ) return;   // core0 wants core1 quiesced (e.g. flash write)
 
+#if USB_AUDIO_ENABLE
+    // This is the single most important audio guard. It runs on core1 every
+    // loop; without it every tick would call readAdcVoltage() on a channel the
+    // audio stream owns and the whole cache would decay to 0. The two streamed
+    // channels refresh for free from the DMA half-buffer mean; every other
+    // entry keeps its last good value instead of being zeroed.
+    if ( usbAudioOwnsAdc ) {
+        usbAudioRefreshLazy( adcReadings );
+        return;
+    }
+#endif
+
     unsigned long nowUs = micros();
     static unsigned long lastFastUs = 0;
     static unsigned long lastSlowUs = 0;
@@ -2593,6 +2606,25 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
     // capture) and produced exactly the two-driver corruption above. A failed
     // acquire now degrades to a 0 reading - the ADC goes briefly blind instead
     // of a core going permanently dead.
+#if USB_AUDIO_ENABLE
+    // USB audio streaming reconfigures the ADC for free-running round-robin
+    // capture into a DMA FIFO, which makes everything below structurally
+    // invalid: adc_select_input() writes an AINSEL that round-robin immediately
+    // overwrites, START_ONCE means nothing while START_MANY is set, results go
+    // to adc_hw->fifo rather than adc_hw->result, and ADC_CS_READY toggles
+    // continuously so the wait loop exits at a random phase.
+    //
+    // Bail out BEFORE the lock, not on its timeout: the audio path holds
+    // readingADC for the whole stream, so waiting would burn the full 100 ms on
+    // every call - and updateLazyAdcReadings() calls this from core1 on every
+    // loop, which would make the board feel hung. The two streamed channels are
+    // still served, from the DMA half-buffer mean.
+    if ( usbAudioOwnsAdc ) {
+        int raw = 0;
+        return usbAudioSnapshotRaw( channel, &raw ) ? raw : 0;
+    }
+#endif
+
     unsigned long adcWaitStart = micros();
     while ( __atomic_test_and_set( &readingADC, __ATOMIC_ACQUIRE ) ) {
         if (micros() - adcWaitStart > 100000) {

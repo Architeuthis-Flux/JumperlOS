@@ -37,6 +37,7 @@
 #include "PsramArena.h"
 #include "RotaryEncoder.h"
 #include "States.h"
+#include "USBAudio.h"
 #include "config.h"
 #include "configManager.h"
 #include "oled.h"
@@ -1093,6 +1094,11 @@ static const SelfTestFn selfTestFns[ SELFTEST_NUM_TESTS ] = {
 // tests, then teardown, overlay, and reports.
 static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_NUM_TESTS ],
                                 bool fromFirstStart ) {
+    // Every test below reads the ADC directly and expects the real converter,
+    // not the USB audio stream's rolling sweep. Yield for the whole session;
+    // capture resumes on return if the host still has the mic open.
+    UsbAudioAdcYield audioYield( "self test" );
+
     if ( fromFirstStart ) {
         // First start runs before any host has opened the CDC port, and
         // TinyUSB drops writes when no DTR is asserted - so the whole live

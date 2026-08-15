@@ -18,6 +18,7 @@
 #include "Graphics.h"
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
+#include "USBAudio.h"
 #include "RotaryEncoder.h"
 #include "oled.h"
 #include "OledGui.h"  // retained OLED screen system (jl_oled_screen_* bridge)
@@ -381,6 +382,92 @@ float jl_dac_get( int channel ) {
 float jl_adc_get( int channel ) {
     return readAdcVoltage( channel, 16 );
 }
+
+// USB Audio (UAC2 microphone). See include/USBAudio.h for the two-layer design:
+// these control VISIBILITY and configuration; the host starts and stops the
+// actual capture by opening or closing the input device.
+#if USB_AUDIO_ENABLE
+int jl_usb_audio_enable( void )  { return usb_audio_set_device_enabled( true )  ? 1 : 0; }
+int jl_usb_audio_disable( void ) { return usb_audio_set_device_enabled( false ) ? 1 : 0; }
+int jl_usb_audio_is_enabled( void ) { return usb_audio_device_enabled( ) ? 1 : 0; }
+int jl_usb_audio_is_streaming( void ) { return usb_audio_is_streaming( ) ? 1 : 0; }
+
+int jl_usb_audio_set_channels( int left, int right ) {
+    return usb_audio_set_channels( left, right ) ? 1 : 0;
+}
+void jl_usb_audio_save( void ) { usb_audio_save_config( ); }
+int jl_usb_audio_set_rate( int hz ) {
+    return usb_audio_set_rate( (uint32_t) hz ) ? 1 : 0;
+}
+int jl_usb_audio_set_full_scale( float volts ) {
+    return usb_audio_set_full_scale( volts ) ? 1 : 0;
+}
+void jl_usb_audio_set_dc_block( int on ) { usb_audio_set_dc_block( on != 0 ); }
+
+// Flat out-params so the MicroPython side can build the status dict without
+// this C++ translation unit ever touching an mp_obj_t.
+void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *left, int *right,
+                          float *full_scale, int *dc_block, int *sample_rate,
+                          int *frames_sent, int *fifo_overflow, int *adc_overrun,
+                          int *late_irq, int *resyncs, int *probe_pauses, int *claim_fail,
+                          int *init_fail ) {
+    usb_audio_status_t s;
+    usb_audio_get_status( &s );
+    if ( enabled )       *enabled       = s.enabled ? 1 : 0;
+    if ( streaming )     *streaming     = s.streaming ? 1 : 0;
+    if ( host_open )     *host_open     = s.host_open ? 1 : 0;
+    if ( left )          *left          = s.left_ch;
+    if ( right )         *right         = s.right_ch;
+    if ( full_scale )    *full_scale    = s.full_scale;
+    if ( dc_block )      *dc_block      = s.dc_block ? 1 : 0;
+    if ( sample_rate )   *sample_rate   = (int) s.sample_rate;
+    if ( frames_sent )   *frames_sent   = (int) s.frames_sent;
+    if ( fifo_overflow ) *fifo_overflow = (int) s.fifo_overflow;
+    if ( adc_overrun )   *adc_overrun   = (int) s.adc_overrun;
+    if ( late_irq )      *late_irq      = (int) s.late_irq;
+    if ( resyncs )       *resyncs       = (int) s.resyncs;
+    if ( probe_pauses )  *probe_pauses  = (int) s.probe_pauses;
+    if ( claim_fail )    *claim_fail    = (int) s.claim_fail;
+    if ( init_fail )     *init_fail     = (int) s.init_fail;
+}
+#else
+// OG / RP2040 has no USB audio (4 ADC channels, no SRAM headroom for a DMA ring
+// plus an ISO endpoint). The MicroPython wrappers in modjumperless.c are built
+// for every board, so provide stubs rather than leaving them unresolved at
+// link time - calling usb_audio_setup() on OG returns False instead of blowing
+// up with a NameError, which keeps the scripting surface identical.
+int  jl_usb_audio_enable( void )        { return 0; }
+int  jl_usb_audio_disable( void )       { return 0; }
+int  jl_usb_audio_is_enabled( void )    { return 0; }
+int  jl_usb_audio_is_streaming( void )  { return 0; }
+int  jl_usb_audio_set_channels( int left, int right ) { (void)left; (void)right; return 0; }
+int  jl_usb_audio_set_rate( int hz )    { (void)hz; return 0; }
+int  jl_usb_audio_set_full_scale( float volts ) { (void)volts; return 0; }
+void jl_usb_audio_set_dc_block( int on ) { (void)on; }
+void jl_usb_audio_save( void )          { }
+void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *left, int *right,
+                          float *full_scale, int *dc_block, int *sample_rate,
+                          int *frames_sent, int *fifo_overflow, int *adc_overrun,
+                          int *late_irq, int *resyncs, int *probe_pauses, int *claim_fail,
+                          int *init_fail ) {
+    if ( enabled )       *enabled       = 0;
+    if ( streaming )     *streaming     = 0;
+    if ( host_open )     *host_open     = 0;
+    if ( left )          *left          = 0;
+    if ( right )         *right         = 1;
+    if ( full_scale )    *full_scale    = 0.0f;
+    if ( dc_block )      *dc_block      = 0;
+    if ( sample_rate )   *sample_rate   = 0;
+    if ( frames_sent )   *frames_sent   = 0;
+    if ( fifo_overflow ) *fifo_overflow = 0;
+    if ( adc_overrun )   *adc_overrun   = 0;
+    if ( late_irq )      *late_irq      = 0;
+    if ( resyncs )       *resyncs       = 0;
+    if ( probe_pauses )  *probe_pauses  = 0;
+    if ( claim_fail )    *claim_fail    = 0;
+    if ( init_fail )     *init_fail     = 0;
+}
+#endif
 
 // INA Functions
 // NOTE: INA219 uses I2C which may conflict with Core 2 operations (OLED, etc.)

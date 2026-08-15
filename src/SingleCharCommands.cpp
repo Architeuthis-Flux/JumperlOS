@@ -30,6 +30,7 @@
 #include "InfraPaths.h"
 #include "RouteSafety.h"
 #include "Peripherals.h"
+#include "USBAudio.h"
 #include "CrashLog.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
@@ -524,6 +525,14 @@ void SingleCharCommands::initializeCommands( ) {
     registerCommand( '^', "set DAC voltage",
                      "Set DAC output voltage. Usage: ^ followed by voltage.",
                      cmd_setDAC, MENU_DEBUG, CAT_HARDWARE, true, SER3_INTERACTIVE );
+
+    registerCommand( 'M', "toggle USB audio mic (M01/Ms/M?)",
+                     "Toggle the USB Audio microphone. Streams two ADC channels to "
+                     "the host as a 2ch/16kHz input device. Optional channel pair, "
+                     "e.g. M01 or M23. Ms saves it so it is enumerated from boot "
+                     "with no port drop. M? prints status. Re-enumerates USB, so "
+                     "this port drops and returns with the same name.",
+                     cmd_usbAudio, MENU_STANDARD, CAT_HARDWARE, true, SER3_MODIFIES_STATE );
 
     registerCommand( '@', "scan I2C",
                      "Scan for I2C devices. Usage: @[row] or @[sda],[scl]",
@@ -3065,6 +3074,95 @@ CommandResult cmd_logicAnalyzer( char c, const String& line ) {
         la_enabled = true;
     }
     return CMD_SHOW_MENU;
+}
+
+// Toggle the USB Audio Class microphone on and off.
+//
+// This is the friendlier way in than the MicroPython API: enabling rewrites the
+// USB config descriptor and re-enumerates the device, which drops every CDC
+// port - including whichever one you typed this on. The port name is unchanged
+// (the serial string is deliberately left alone), so terminals reconnect on
+// their own after a couple of seconds.
+//
+// Optional argument picks the channel pair, e.g. "M23" streams ADC2/ADC3.
+CommandResult cmd_usbAudio( char c, const String& line ) {
+#if USB_AUDIO_ENABLE
+    if ( usb_audio_device_enabled( ) ) {
+        Jerial.println( "USB audio device disabled - re-enumerating..." );
+        Jerial.flush( );
+        usb_audio_set_device_enabled( false );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // "M23" -> left = ADC2, right = ADC3. Bare "M" keeps whatever is configured.
+    String arg = line;
+    arg.trim( );
+
+    // "M?" -> status and health counters, no toggle. A clean recording has
+    // frames_sent climbing at the sample rate and everything else flat
+    // (late_irq/resyncs tick once per flash write, probe_pauses per probe use).
+    if ( arg.length( ) >= 2 && arg[ 1 ] == '?' ) {
+        usb_audio_status_t s;
+        usb_audio_get_status( &s );
+        Jerial.printf( "USB audio: %s, %s, host %s\n\r",
+                       s.enabled ? "enabled" : "disabled",
+                       s.streaming ? "streaming" : "idle",
+                       s.host_open ? "open" : "closed" );
+        Jerial.printf( "  ADC%d (L) + ADC%d (R) @ %lu Hz, full scale %.2f V, dc block %s\n\r",
+                       s.left_ch, s.right_ch, (unsigned long) s.sample_rate, s.full_scale,
+                       s.dc_block ? "on" : "off" );
+        Jerial.printf( "  frames_sent=%lu fifo_overflow=%lu adc_overrun=%lu late_irq=%lu resyncs=%lu\n\r",
+                       (unsigned long) s.frames_sent, (unsigned long) s.fifo_overflow,
+                       (unsigned long) s.adc_overrun, (unsigned long) s.late_irq,
+                       (unsigned long) s.resyncs );
+        Jerial.printf( "  probe_pauses=%lu claim_fail=%lu init_fail=%lu\n\r",
+                       (unsigned long) s.probe_pauses, (unsigned long) s.claim_fail,
+                       (unsigned long) s.init_fail );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // "Ms" saves the setup so the mic comes back at the NEXT BOOT already
+    // enumerated - the only way to run with audio and never drop a port.
+    if ( arg.length( ) >= 2 && ( arg[ 1 ] == 's' || arg[ 1 ] == 'S' ) ) {
+        usb_audio_set_device_enabled( true );
+        usb_audio_save_config( );
+        Jerial.println( "USB audio saved - it will be enumerated from boot, "
+                        "so no port drop next time." );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    if ( arg.length( ) >= 3 ) {
+        int l = arg[ 1 ] - '0';
+        int r = arg[ 2 ] - '0';
+        if ( !usb_audio_set_channels( l, r ) ) {
+            Jerial.println( "Channels must be two distinct ADC channels 0-7, e.g. M01" );
+            return CMD_DONT_SHOW_MENU;
+        }
+    }
+
+    usb_audio_status_t s;
+    usb_audio_get_status( &s );
+
+    changeTerminalColor( 46, true, &Jerial );
+    Jerial.printf( "USB audio: streaming ADC%d (left) + ADC%d (right) at %lu Hz\n\r",
+                   s.left_ch, s.right_ch, (unsigned long) s.sample_rate );
+    changeTerminalColor( 39, true, &Jerial );
+    Jerial.println( "Route rows to them first, e.g.  connect(ADC0, 20)" );
+    Jerial.println( "Then pick 'JL Audio In' as an input device on your computer." );
+    Jerial.println( "Re-enumerating - this port will drop and come back shortly..." );
+    changeTerminalColor( -1, true, &Jerial );
+    Jerial.flush( );
+
+    if ( !usb_audio_set_device_enabled( true ) ) {
+        Jerial.println( "Could not enable USB audio (no free DMA channel?)" );
+    }
+    return CMD_DONT_SHOW_MENU;
+#else
+    ( void ) c;
+    ( void ) line;
+    Jerial.println( "USB audio is not available on this board" );
+    return CMD_DONT_SHOW_MENU;
+#endif
 }
 
 CommandResult cmd_showBoardLEDs( char c, const String& line ) {

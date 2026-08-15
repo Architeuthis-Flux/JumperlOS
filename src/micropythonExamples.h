@@ -37,6 +37,7 @@
 #define INCLUDE_TEST_OLED_FEATURES
 #define INCLUDE_UART_BASICS
 #define INCLUDE_UART_LOOPBACK
+#define INCLUDE_USB_AUDIO_MIC
 #define INCLUDE_VOLTAGE_MONITOR
 
 // Always include the jumperless Python module wrapper
@@ -80,6 +81,7 @@
 #undef INCLUDE_TEST_OLED_FEATURES
 #undef INCLUDE_UART_BASICS
 #undef INCLUDE_UART_LOOPBACK
+#undef INCLUDE_USB_AUDIO_MIC
 #undef INCLUDE_VOLTAGE_MONITOR
 #endif
 
@@ -3685,6 +3687,98 @@ const uint32_t UART_LOOPBACK_PY_HASHES[2] = { 0x9AE1FED2, 0x8E02DF89 };
 const int UART_LOOPBACK_PY_HASH_COUNT = 2;
 #endif
 
+#ifdef INCLUDE_USB_AUDIO_MIC
+const char* USB_AUDIO_MIC_PY = R"===("""
+USB Audio Microphone Demo
+Stream two ADC channels to your computer as a 2ch / 48kHz USB microphone.
+
+Hardware Setup:
+1. Connect your left signal to breadboard row 20  (routed to ADC0)
+2. Connect your right signal to breadboard row 40 (routed to ADC1)
+3. Input range is +/-8V. Signals past full_scale clip.
+
+No host software needed - the Jumperless shows up as a real input device, so
+QuickTime, Audacity, a DAW, or any browser can record straight from a circuit.
+
+HOW IT WORKS - two separate layers:
+  usb_audio_setup()  makes the audio device VISIBLE. It rewrites the USB
+                     descriptor and re-enumerates, so THIS SERIAL PORT DROPS
+                     and comes back with the same name a couple of seconds
+                     later. Run the script, wait, run it again.
+  the host           starts and stops CAPTURE by opening or closing the input
+                     device. Nothing in Python pumps samples - a C-side DMA
+                     engine does, because MicroPython could never keep up with
+                     48kHz.
+
+While the host is recording, ADC0/ADC1 belong to the audio engine. adc_get()
+still works on those two (served from the capture buffer), but the probe and
+the other ADC channels are paused until recording stops.
+
+API Demonstrations:
+- usb_audio_is_enabled() - is the audio device currently advertised?
+- usb_audio_setup(left, right, full_scale, dc_block) - configure and show it
+- usb_audio_active() - is the host actually recording right now?
+- usb_audio_status() - channels, rate, frames sent, dropouts
+- usb_audio_teardown() - hide the audio device again
+- connect() - route breadboard rows to the ADC channels
+"""
+
+import time
+
+print("USB Audio Microphone Demo")
+
+if not usb_audio_is_enabled():
+    print("")
+    print("Audio device is not enabled yet.")
+    print("Enabling it now - THIS PORT WILL DROP and reconnect in ~2 seconds.")
+    print("Wait for it to come back, then run this script again.")
+    time.sleep(1)
+    usb_audio_setup(0, 1, 8.0, True)
+    raise SystemExit
+
+# Route two breadboard rows to the stereo pair.
+disconnect(20, -1)
+disconnect(40, -1)
+disconnect(ADC0, -1)
+disconnect(ADC1, -1)
+connect(ADC0, 20)
+connect(ADC1, 40)
+print("ADC0 -> row 20 (left), ADC1 -> row 40 (right)")
+print("")
+print("Pick 'JL Audio In' as an input device on your computer, then record.")
+print("Ctrl+Q to stop.")
+
+oled_print("USB Mic Live")
+
+was_active = False
+try:
+    while True:
+        st = usb_audio_status()
+        active = st['streaming']
+
+        if active != was_active:
+            was_active = active
+            oled_print("Recording" if active else "USB Mic Idle")
+
+        line = "REC  " if active else "idle "
+        line += "L=" + str(round(adc_get(0), 2)) + "V "
+        line += "R=" + str(round(adc_get(1), 2)) + "V"
+        drops = st['fifo_overflow'] + st['adc_overrun']
+        if drops:
+            line += "  drops=" + str(drops)
+
+        print("\r                                                    ", end="\r")
+        print(line, end="")
+        time.sleep(0.25)
+finally:
+    print("")
+    print("Stopped. The audio device is still advertised - run")
+    print("usb_audio_teardown() to hide it again.")
+)===";
+const uint32_t USB_AUDIO_MIC_PY_HASHES[1] = { 0xE0B26F2E };
+const int USB_AUDIO_MIC_PY_HASH_COUNT = 1;
+#endif
+
 #ifdef INCLUDE_VOLTAGE_MONITOR
 const char* VOLTAGE_MONITOR_PY = R"("""
 Voltage Monitor Demo
@@ -3905,6 +3999,18 @@ get_num_paths = _native.get_num_paths
 get_path_info = _native.get_path_info
 get_all_paths = _native.get_all_paths
 get_path_between = _native.get_path_between
+
+# ============================================================================
+# Net Current Scan Functions
+# ============================================================================
+get_node_voltage = _native.get_node_voltage
+get_net_current = _native.get_net_current
+get_path_current = _native.get_path_current
+
+# Net Current Scan Aliases
+node_voltage = _native.node_voltage
+net_current = _native.net_current
+path_current = _native.path_current
 
 # ============================================================================
 # Slot Management
@@ -4632,6 +4738,10 @@ __all__ = [
     # Path Query Functions
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
     
+    # Net Current Scan Functions
+    'get_node_voltage', 'get_net_current', 'get_path_current',
+    'node_voltage', 'net_current', 'path_current',
+    
     # Slot Management
     'switch_slot', 'CURRENT_SLOT',
     
@@ -4769,6 +4879,8 @@ __all__ = [
     'fast_connect', 'fast_disconnect',
     'set_net_color_hsv', 'get_all_nets',
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
+    'get_node_voltage', 'get_net_current', 'get_path_current',
+    'node_voltage', 'net_current', 'path_current',
     'FakeGpioDisconnect', 'FakeGpioPin', 'FAKE_GPIO_INPUT', 'FAKE_GPIO_OUTPUT',
     'oled_set_text_size', 'oled_get_text_size', 'oled_copy_print',
     'oled_get_fonts', 'oled_set_font', 'oled_get_current_font',
@@ -4784,8 +4896,8 @@ __all__ = [
 ]
 
 )";
-const uint32_t JUMPERLESS_MODULE_PY_HASHES[4] = { 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
-const int JUMPERLESS_MODULE_PY_HASH_COUNT = 4;
+const uint32_t JUMPERLESS_MODULE_PY_HASHES[5] = { 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
+const int JUMPERLESS_MODULE_PY_HASH_COUNT = 5;
 #endif
 
 //==============================================================================
@@ -5441,6 +5553,64 @@ def get_path_between(node1: int, node2: int) -> Optional[Dict]:
         path = get_path_between(1, 5)
         if path:
             print(f"Route uses chips: {path['chips']}")
+    """
+    ...
+
+# ============================================================================
+# Net Current Scan (background voltage/current sensing)
+# ============================================================================
+
+def get_node_voltage(node: Union[int, str, "Node"]) -> Optional[float]:
+    """Get the voltage of a routed node measured by the background net
+    voltage scan (enabled by [display] net_currents / the 'i' command)
+
+    Args:
+        node: Node number, name, or node object (e.g. 15, "D2", TOP_RAIL)
+
+    Returns:
+        Voltage in volts, or None when the scan has no fresh sample
+        (scan disabled, node not routed, or the node is floating)
+
+    Example:
+        v = get_node_voltage(15)
+        if v is not None:
+            print(f"Row 15 sits at {v:.2f} V")
+    """
+    ...
+
+def get_net_current(netNum: int) -> Optional[Dict]:
+    """Get the current flowing in a net's dominant path
+
+    Args:
+        netNum: Net number (1 to get_num_nets())
+
+    Returns:
+        Dict with keys: current_mA (magnitude), voltage (midpoint),
+        from_node, to_node (conventional current flows from -> to).
+        None when the scan has no data for this net.
+
+    Example:
+        info = get_net_current(4)
+        if info:
+            print(f"{info['current_mA']:.2f} mA from {info['from_node']} to {info['to_node']}")
+    """
+    ...
+
+def get_path_current(path_idx: int) -> Optional[float]:
+    """Get the signed current through one routing path
+
+    Args:
+        path_idx: Path index (same index space as get_path_info())
+
+    Returns:
+        Current in mA; positive means conventional current flows
+        node1 -> node2 (matching get_path_info() fields).
+        None when the scan has no data for this path.
+
+    Example:
+        i = get_path_current(0)
+        if i is not None:
+            print(f"Path 0 carries {abs(i):.2f} mA")
     """
     ...
 
@@ -6506,8 +6676,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[6] = { 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 6;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[7] = { 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 7;
 #endif
 
 //==============================================================================
@@ -6641,6 +6811,9 @@ const int VIPERIDE_REINIT_PY_HASH_COUNT = 4;
 // #endif
 // #ifdef INCLUDE_UART_LOOPBACK
 //     { "/python_scripts/examples/uart_loopback.py", UART_LOOPBACK_PY, "uart_loopback.py", UART_LOOPBACK_PY_HASHES, UART_LOOPBACK_PY_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_USB_AUDIO_MIC
+//     { "/python_scripts/examples/usb_audio_mic.py", USB_AUDIO_MIC_PY, "usb_audio_mic.py", USB_AUDIO_MIC_PY_HASHES, USB_AUDIO_MIC_PY_HASH_COUNT },
 // #endif
 // #ifdef INCLUDE_VOLTAGE_MONITOR
 //     { "/python_scripts/examples/voltage_monitor.py", VOLTAGE_MONITOR_PY, "voltage_monitor.py", VOLTAGE_MONITOR_PY_HASHES, VOLTAGE_MONITOR_PY_HASH_COUNT },

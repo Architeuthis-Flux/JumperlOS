@@ -59,6 +59,7 @@ extern WaveGen wavegen; // defined in main.cpp
 #include "config.h"
 #include "externVars.h"
 #include "oled.h"
+#include "USBAudio.h" // usb_audio_probe_activity()
 
 // Button timing constants
 #define BUTTON_SETTLE_US 8
@@ -6418,6 +6419,17 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     int average = medianProbeBursts( measurements, numberOfReads );
     // Serial.print("average ");
     // Serial.println(average);
+
+#if USB_AUDIO_ENABLE
+    // Tip is on a pad: tell the USB audio capture the probe is in use so it
+    // yields the ADC to us (it resumes ~300 ms after the tip lifts). This is
+    // the ONE place every probe path - idle service, pad check, probe mode,
+    // measure mode - decodes a touch, which is why the hook lives here and not
+    // in the callers.
+    if ( average >= jumperlessConfig.calibration.minimum_probe_reading ) {
+        usb_audio_probe_activity( );
+    }
+#endif
 
     // CONNECT-mode one-touch-one-node latch (measure position), part 1:
     // the RE-ARM. It must live OUT here because a released probe reads the

@@ -28,12 +28,14 @@
     "0x85135235"
   ],
   "jumperless.py": [
+    "0x8BBCCB9B",
     "0x211A88F7",
     "0x7ED8BA57",
     "0xAA5F9F89",
     "0x843D1F2A"
   ],
   "jumperless.pyi": [
+    "0x77D4B7CA",
     "0x81BD6C21",
     "0xB35468E2",
     "0x591678B8",
@@ -123,6 +125,9 @@
   "uart_loopback.py": [
     "0x9AE1FED2",
     "0x8E02DF89"
+  ],
+  "usb_audio_mic.py": [
+    "0xE0B26F2E"
   ],
   "viperide_reinit.py": [
     "0x74FA711A",
