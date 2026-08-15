@@ -60,6 +60,7 @@ KevinC@ppucc.io
 #include "Peripherals.h"
 #include "USBAudio.h"
 #include "CrashLog.h"
+#include "IrqSlots.h"
 #include "FlashPark.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
@@ -790,6 +791,9 @@ menu:
         // If the previous run ended in a HardFault, say so right here - once -
         // so a crash leaves a trail instead of a mystery reboot.
         crashlogReportOnce( Serial );
+        // Say so if any shared-IRQ registration had to be refused - that feature
+        // is running without its interrupt (silent, but not a dead core).
+        jlIrqSlotsReport( Serial );
 #if TEST_PSRAM == 1
         while ( 1 ) {
             initBuff( );
