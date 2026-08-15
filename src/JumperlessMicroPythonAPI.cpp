@@ -350,24 +350,24 @@ void jl_dac_set( int channel, float voltage, int save ) {
     // } else if (channel == 3) {
     //     channel = 1;
     // }
-    // checkProbePower follows save: a saved write that parks the probe-feed
-    // DAC outside its window must relocate the feed immediately (parity with
-    // the terminal path). A save=False write moves ONLY the hardware, which
-    // the feed's state-trusting park guard cannot see - bump the epoch so
-    // the feed re-parks its DAC on the next rebuild instead of never.
-    setDacByNumber( channel, voltage, save, 0, save != 0 );
-    if ( !save && ( channel == 0 || channel == 1 ) ) {
-        infraDacParkEpochBump( );
-    }
+    // Any user write that parks the probe-feed DAC outside its window claims
+    // it and relocates the feed immediately - persisted or not (dac_set()
+    // defaults to save=False, and a script's DAC voltage silently reverting to
+    // the probe-power park on the next rebuild is exactly the surprise this
+    // avoids). Viability is judged from the hardware voltage the write just
+    // recorded, so no epoch games are needed here.
+    setDacByNumber( channel, voltage, save, 0, true );
 }
 
 float jl_dac_get( int channel ) {
     float voltage = 0.0f;
 
+    // DAC 0/1 report the voltage actually on the pin, including save=False
+    // writes; the rails only ever move through the state.
     if ( channel == 0 ) {
-        voltage = globalState.power.dac0;
+        voltage = getDacHardwareVoltage( 0 );
     } else if ( channel == 1 ) {
-        voltage = globalState.power.dac1;
+        voltage = getDacHardwareVoltage( 1 );
     } else if ( channel == 2 ) {
         voltage = globalState.power.topRail;
     } else if ( channel == 3 ) {

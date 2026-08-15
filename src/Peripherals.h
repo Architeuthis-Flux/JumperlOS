@@ -206,6 +206,10 @@ void setBotRail(float value, int save = 1, int saveEEPROM = 1);
 void dacTriangle(void);
 
 float getDacVoltage(int dac);
+// Last voltage actually written to DAC 0/1 (save=0 writes included); falls back to state.
+float getDacHardwareVoltage(int dac);
+// True while a user write has parked DAC 0/1 outside the probe-power window (see setDac0voltage).
+bool dacUserClaimed(int dac);
 void setDacByNumber(int dac, float voltage = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);
 void setDac0voltage(float value = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);
 void setDac1voltage(float value = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);

@@ -191,7 +191,12 @@ static int s_gpioActiveIdx = -1;
 
 static bool dacVoltageInProbeWindow(int dacNum) {
     // Same window the old setDacXvoltage swap used: a user parking a DAC
-    // outside [2.80, 3.90] V has claimed it for their own purposes.
+    // outside [2.80, 3.90] V has claimed it for their own purposes. The
+    // user-claim latch covers save=0 writes (MicroPython's dac_set() default
+    // moves only the hardware, and judging from state alone let the feed
+    // re-park a DAC the user had just set - a silent revert); the state check
+    // still covers persisted writes and boot.
+    if (dacUserClaimed(dacNum)) return false;
     float v = getDacVoltage(dacNum);
     return v >= 2.80f && v <= 3.90f;
 }
@@ -209,13 +214,21 @@ static uint32_t s_dacParkedEpoch[2] = {0, 0};
 void infraDacParkEpochBump(void) { s_dacParkEpoch++; }
 
 static void parkDacAtMeasureTarget(int dacNum) {
+    // A DAC the user has parked outside the probe window is theirs: never
+    // write it. Without this, the nudge that a user dac_set() fires
+    // re-activated the still-current DAC feed - parking it at 3.33 V ON TOP
+    // OF the value the user had just written - and only then relocated the
+    // feed, so the user's DAC read back at the park voltage (HIL routing test:
+    // "DAC0 2.5V reads 3.18V"). The evaluation will find the DAC non-viable
+    // and move the feed; the DAC keeps the user's voltage meanwhile.
+    if (dacUserClaimed(dacNum)) return;
     // Park the DAC at the calibrated measure-mode level. checkProbePower
     // stays false: the voltage-claim nudge must never re-enter evaluation.
     // Clamp to the tip-drive sanity band (configManager also validates on
     // load): parking above 3.3V logic clips the pad ladder's high end.
     float target = jumperlessConfig.calibration.measure_mode_output_voltage;
     if (target < 3.0f || target > 3.6f) target = 3.33f;
-    bool stateOff = fabsf(getDacVoltage(dacNum) - target) > 0.005f;
+    bool stateOff = fabsf(getDacHardwareVoltage(dacNum) - target) > 0.005f;
     if (stateOff || s_dacParkedEpoch[dacNum] != s_dacParkEpoch) {
         // save only when the state value actually moves - a post-epoch
         // re-write of the same value must not dirty the state.

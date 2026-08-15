@@ -1431,6 +1431,33 @@ void setBotRail( float value, int save, int saveEEPROM ) {
 }
 
 
+// The voltage most recently WRITTEN to each DAC, whether or not the write was
+// persisted (save=0 writes - the MicroPython dac_set() default - move only the
+// hardware and leave globalState alone). This is the hardware truth that the
+// probe-power feed must respect: a user script that sets DAC0 to 2.5 V without
+// "save" has still taken DAC0, and the feed re-parking it at 3.33 V on the
+// next rebuild (which is what happened when viability was judged from
+// globalState) reads as "my DAC voltage silently reverted".
+static float s_dacHwVolts[ 2 ] = { -100.0f, -100.0f };   // -100 = never written
+
+// Set when a USER write (terminal / MicroPython - the checkProbePower paths)
+// parks DAC 0/1 outside the probe-power window; cleared when a user write puts
+// it back inside. Blind writes from calibration and the self test
+// (checkProbePower=false) don't touch it - those WANT the feed to re-park the
+// DAC afterwards (they bump the park epoch for that).
+static bool s_dacUserClaimed[ 2 ] = { false, false };
+
+bool dacUserClaimed( int dac ) {
+    return ( dac == 0 || dac == 1 ) ? s_dacUserClaimed[ dac ] : false;
+}
+
+float getDacHardwareVoltage( int dac ) {
+    if ( dac == 0 || dac == 1 ) {
+        return ( s_dacHwVolts[ dac ] > -99.0f ) ? s_dacHwVolts[ dac ] : getDacVoltage( dac );
+    }
+    return getDacVoltage( dac );
+}
+
 float getDacVoltage( int dac ) {
     if ( dac == 0 ) {
         return globalState.power.dac0;
@@ -1479,13 +1506,17 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     if ( save ) {
         globalState.setDacVoltage(0, voltage);
     }
+    s_dacHwVolts[ 0 ] = voltage;   // hardware truth, persisted or not
 
     // A user parking this DAC outside the probe-power window claims it: the
-    // nudged rebuild's infra evaluation sees the candidate non-viable (it
-    // reads globalState.power.dac0, updated just above - which is why this
-    // runs AFTER the state write) and relocates the buffer feed. Replaces
-    // the old inline probePowerDAC swap.
-    if ( checkProbePower && save && infraProbePowerSource( ) == DAC0 &&
+    // nudged rebuild's infra evaluation sees the candidate non-viable (the
+    // claim latch below is what it checks, so this holds for save=0 writes
+    // too - the MicroPython dac_set() default) and relocates the buffer feed.
+    // Replaces the old inline probePowerDAC swap.
+    if ( checkProbePower ) {
+        s_dacUserClaimed[ 0 ] = ( voltage > 3.9 || voltage < 2.80 );
+    }
+    if ( checkProbePower && infraProbePowerSource( ) == DAC0 &&
          ( voltage > 3.9 || voltage < 2.80 ) ) {
         Serial.println(
             "DAC 0 was powering the probe - relocating the buffer feed" );
@@ -1518,11 +1549,15 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
     if ( save ) {
         globalState.setDacVoltage(1, voltage);
     }
+    s_dacHwVolts[ 1 ] = voltage;   // hardware truth, persisted or not
+    if ( checkProbePower ) {
+        s_dacUserClaimed[ 1 ] = ( voltage > 3.9 || voltage < 2.80 );
+    }
 
     // See setDac0voltage: out-of-window saved voltage = user claim; the
     // nudged rebuild reads globalState.power.dac1 (written just above) and
     // relocates the buffer feed. Replaces the old inline probePowerDAC swap.
-    if ( checkProbePower && save && infraProbePowerSource( ) == DAC1 &&
+    if ( checkProbePower && infraProbePowerSource( ) == DAC1 &&
          ( voltage > 3.9 || voltage < 2.80 ) ) {
         Serial.println(
             "DAC 1 was powering the probe - relocating the buffer feed" );
