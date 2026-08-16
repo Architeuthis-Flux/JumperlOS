@@ -27,6 +27,12 @@ review's 38 verified findings are all fixed. Then, in the second session:
   remove/re-add cycle would have been dropped as a "duplicate".
 - `X` (resource status) now prints the **shared-IRQ slot census** and which
   flash-write park is in charge, so nobody has to guess at this again.
+- **The live reading line repaints in place again** (2026-08-16). It was
+  scrolling one line + one blank per reading: `clickMenu()` - polled every
+  main-loop pass - dropped the pin ~1000x/s. Fixed, and the pin now
+  invalidates itself off a port-1 linefeed counter instead of trusting
+  callers. `probe_tap()` became a real simulated tap to make this
+  reproducible.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -53,6 +59,7 @@ it wasn't this session.
 | 12 | `66b0eb5` | IrqSlots: forget a handler on `irq_remove_handler`; slot census in `X` | census measured (below); UART(0)/UART(1) from REPL take no slot; HIL 5/6 |
 | 13 | `b4fd719` | **Enable FlashPark**; probe-less `stress_flash.py`; ELF-resolved SWD addresses | **40-iteration soak clean, `timeouts 0`** |
 | 14 | `46d9d0f` | IrqSlots: swallow the `irq_remove_handler` of a handler it declined (the SDK would assert on the miss) | both boards build; census unchanged; HIL 5/6 |
+| 15 | `6046b30` | Reading line repaints in place: fix `clickMenu()`'s polled pin-drop; self-invalidating pin via a port-1 LF counter (`--wrap,tud_cdc_n_write`); `probe_tap()` simulation | raw port-1 capture: one pin, in-place repaints, one re-pin after foreign output; both boards build; HIL 5/6 |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

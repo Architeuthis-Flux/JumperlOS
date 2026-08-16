@@ -27,6 +27,11 @@
 // linefeeds, so the pin now invalidates itself exactly when one of them
 // actually prints - not when a poll loop merely might have.
 //
+// KNOWN BLIND SPOT: output that scrolls WITHOUT a linefeed - a long non-LF
+// write autowrapping past the terminal edge. The width guard below covers the
+// one common case (the user's own typed line); other writers emitting 80+
+// LF-free columns are rare enough to accept.
+//
 // Counted at write-call time on core 0 only (TinyUSB is only ever serviced
 // from core 0 - see loop1()'s notes), so a plain volatile is enough.
 static volatile uint32_t s_port1LineFeeds = 0;
