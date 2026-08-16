@@ -108,6 +108,9 @@ void printDirectoryContents( const char* dirname, int level );
 void core2stuff( void );
 
 // volatile uint8_t pauseCore2 = 0;
+// Core-1 LED-frame aborts caused by pauseCore2 (X prints it). Was ~20 Hz
+// from the current-sense poll's pause toggle until 2026-08-16.
+volatile uint32_t ledFrameAbortsPause = 0;
 
 volatile int loadingFile = 0;
 
@@ -525,7 +528,7 @@ void setup( ) {
 
     // NORMAL priority services - periodic tasks
     jOS.registerService( &usbPeriodicService ); // NORMAL - USB housekeeping (when MSC enabled)
-    jOS.registerService( &peripherals );        // NORMAL - periodic monitoring
+    jOS.registerService( &peripherals );        // CRITICAL (Peripherals.h) - current-sense poll; also runs in serviceCritical()
     jOS.registerService( &singleCharCommands ); // NORMAL - command execution (synchronous, not periodic)
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
 
@@ -1593,6 +1596,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // If Core1 set pauseCore2=true while we were waiting for mutex, we need to
     // release and return immediately to avoid flash XIP crashes during file writes
     if ( pauseCore2 ) {
+        ledFrameAbortsPause++;
         core_sync_release( );
         return;
     }
@@ -1684,6 +1688,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 
                     // Check pauseCore2 before long-running showNets() to allow quick exit for flash ops
                     if ( pauseCore2 ) {
+                        ledFrameAbortsPause++;
                         core2busy = false;
                         core_sync_release( );
                         return;
@@ -1745,6 +1750,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 // during its flash writes; serial entry has inClickMenu==0
                 // and never hit it).
                 if ( pauseCore2 ) {
+                    ledFrameAbortsPause++;
                     core_sync_release( );
                     return;
                 }

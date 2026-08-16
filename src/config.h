@@ -52,6 +52,17 @@ struct config {
         // cable failure is the GPIO2-side jack contact going flaky - with
         // everything on GPIO9 that contact stops mattering entirely.
         bool probe_led_on_button_pin = true;
+        // EXPERIMENT KNOB (2026-08-16). Minimum interval between two probe
+        // LED frames when nothing requested a new colour, in microseconds.
+        // 0 = legacy: core 1 re-sends the frame on every idle pass (~350 us).
+        // With probe_led_on_button_pin the LED data and the button sampler
+        // share GPIO 9, and every sampler pulse is a valid WS2811 data bit
+        // that shifts the LED's registers - the constant re-send is what
+        // hides that. Raising this exposes the corruption in proportion; it
+        // exists so the effect can be measured on a scope, not as a setting
+        // to leave on. With the LED on its own pin (probe_led_on_button_pin
+        // = 0) frames are event-driven regardless of this value.
+        int probe_led_refresh_us = 0;
     } hardware;
 
     struct dacs {

@@ -2811,6 +2811,13 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // probe feed re-parks DAC0 on every rebuild, so "writes A" flat across
     // connects/disconnects is the set-once guarantee holding.
     MCP4728::printWriteStats( target );
+    // Probe LED / button line: frames vs colour requests (shows >> requests
+    // is the shared-GPIO9 constant re-send), button samples decoded.
+    extern volatile uint32_t ledFrameAbortsPause; // main.cpp
+    target->printf( "probe led frames %lu (requests %lu)  button samples %lu  led-frame aborts(pause) %lu  uptime %lus\n\r",
+                    (unsigned long)probeLedShowCount, (unsigned long)probeLedRequestCount,
+                    (unsigned long)probeButtonPIOReadCount, (unsigned long)ledFrameAbortsPause,
+                    (unsigned long)( millis( ) / 1000 ) );
     target->println( "\r" );
     target->flush( );
     

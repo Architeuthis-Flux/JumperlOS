@@ -635,6 +635,7 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "psram_installed") == 0) jumperlessConfig.hardware.psram_installed = parseBool(value);
             else if (strcmp(key, "psram_app_size_kb") == 0) jumperlessConfig.hardware.psram_app_size_kb = parseInt(value);
             else if (strcmp(key, "probe_led_on_button_pin") == 0) jumperlessConfig.hardware.probe_led_on_button_pin = parseBool(value);
+            else if (strcmp(key, "probe_led_refresh_us") == 0) jumperlessConfig.hardware.probe_led_refresh_us = parseInt(value);
         } else if (strcmp(section, "dacs") == 0) {
             // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
             if (strcmp(key, "set_dacs_on_boot") == 0) jumperlessConfig.dacs.set_dacs_on_boot = parseBool(value);
@@ -1007,6 +1008,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("psram_installed = "); file.print(jumperlessConfig.hardware.psram_installed); file.println(";");
     file.print("psram_app_size_kb = "); file.print(jumperlessConfig.hardware.psram_app_size_kb); file.println(";");
     file.print("probe_led_on_button_pin = "); file.print(jumperlessConfig.hardware.probe_led_on_button_pin ? 1:0); file.println(";");
+    file.print("probe_led_refresh_us = "); file.print(jumperlessConfig.hardware.probe_led_refresh_us); file.println(";");
     file.println();
 
     // Write DAC settings section (voltage state moved to globalState.power in YAML files)
@@ -1239,6 +1241,7 @@ bool configHasChanges() {
     if (jumperlessConfig.hardware.psram_installed != lastSavedConfig.hardware.psram_installed) return true;
     if (jumperlessConfig.hardware.psram_app_size_kb != lastSavedConfig.hardware.psram_app_size_kb) return true;
     if (jumperlessConfig.hardware.probe_led_on_button_pin != lastSavedConfig.hardware.probe_led_on_button_pin) return true;
+    if (jumperlessConfig.hardware.probe_led_refresh_us != lastSavedConfig.hardware.probe_led_refresh_us) return true;
     
     // DACs section
     if (jumperlessConfig.dacs.set_dacs_on_boot != lastSavedConfig.dacs.set_dacs_on_boot) return true;
@@ -1444,6 +1447,7 @@ static bool configFileIsComplete(const char* fileContent) {
         "probe_switch_select_max_ma",
         "probe_switch_blink_hold_pct",
         "probe_switch_agree",
+        "probe_led_refresh_us",
         "dc_block",
         "async_passthrough"
     };
@@ -1719,6 +1723,9 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "probe_led_on_button_pin") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_led_on_button_pin = %d;", jumperlessConfig.hardware.probe_led_on_button_pin ? 1 : 0);
+                    updated = true;
+                } else if (strcmp(key, "probe_led_refresh_us") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_led_refresh_us = %d;", jumperlessConfig.hardware.probe_led_refresh_us);
                     updated = true;
                 }
             }
@@ -2742,6 +2749,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("psram_app_size_kb = "); Serial.print(jumperlessConfig.hardware.psram_app_size_kb); Serial.println(";");
         if (pasteable == true) Serial.print("`[hardware] ");
         Serial.print("probe_led_on_button_pin = "); Serial.print(getStringFromTable(jumperlessConfig.hardware.probe_led_on_button_pin, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[hardware] ");
+        Serial.print("probe_led_refresh_us = "); Serial.print(jumperlessConfig.hardware.probe_led_refresh_us); Serial.println(";");
     }
     cycleTerminalColor();
     // Print DAC settings section
@@ -3845,6 +3854,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "psram_installed") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.psram_installed);
         else if (strcmp(key, "psram_app_size_kb") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.psram_app_size_kb);
         else if (strcmp(key, "probe_led_on_button_pin") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_led_on_button_pin);
+        else if (strcmp(key, "probe_led_refresh_us") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_led_refresh_us);
     }
     else if (strcmp(section, "dacs") == 0) {
         // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
@@ -4015,6 +4025,10 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_led_on_button_pin") == 0) {
             // Pin binding happens once at initLEDs(); takes effect on next boot.
             jumperlessConfig.hardware.probe_led_on_button_pin = parseBool(value);
+        }
+        else if (strcmp(key, "probe_led_refresh_us") == 0) {
+            int v = parseInt(value);
+            jumperlessConfig.hardware.probe_led_refresh_us = (v < 0) ? 0 : v;
         }
     }
     else if (strcmp(section, "dacs") == 0) {

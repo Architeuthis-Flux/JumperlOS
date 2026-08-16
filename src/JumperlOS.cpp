@@ -358,9 +358,9 @@ void jOSmanager::serviceCritical() {
         svc->service();
     }
     
-    // Also keep current sense measurements updating during blocking operations
-    // This ensures marching ants visualization stays current in probe mode
-    Peripherals::getInstance().pollCurrentSense();
+    // (Peripherals is a CRITICAL service, so the loop above already ran its
+    // current-sense poll; the explicit second pollCurrentSense() that used
+    // to sit here made every serviceCritical() poll twice.)
 
     // NOTE: MpRemoteService is CRITICAL priority and registered, so the loop
     // above already ran it — the old explicit second call here made it run

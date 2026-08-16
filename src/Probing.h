@@ -48,6 +48,8 @@ extern volatile bool g_probeDoubleTapBail;
 // ----------------------------------------------------------------------------
 extern volatile int      probe_button_trace;
 extern volatile uint32_t probeButtonPIOReadCount;
+extern volatile uint32_t probeLedShowCount;     // WS2811 frames sent to the probe LED
+extern volatile uint32_t probeLedRequestCount;  // colour-change requests consumed
 extern volatile uint32_t probeButtonCPUReadCount;
 extern volatile uint32_t probeButtonPIOTimeoutCount;
 extern volatile uint32_t probeButtonPIOLastResult;

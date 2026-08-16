@@ -584,6 +584,12 @@ volatile uint8_t  probeBtnLatestState = 0;
 // Counters / diagnostics for the debug menu and trace output. Updated
 // from the IRQ handler so they're approximately monotonic.
 volatile uint32_t probeButtonPIOReadCount    = 0; // total samples processed by IRQ
+// Probe LED frame accounting (X prints them): frames actually sent by
+// probeLEDhandler, and colour-change REQUESTS it consumed (showProbeLEDs
+// != 0). shows >> requests is the constant re-send the shared GPIO 9 line
+// needs (see hardware.probe_led_refresh_us).
+volatile uint32_t probeLedShowCount    = 0;
+volatile uint32_t probeLedRequestCount = 0;
 volatile uint32_t probeButtonCPUReadCount    = 0; // CPU bit-bang reads
 volatile uint32_t probeButtonPIOTimeoutCount = 0; // unused in IRQ mode (kept for menu compat)
 volatile uint32_t probeButtonPIOLastResult   = 0; // last raw 2-bit value from PIO
@@ -6890,7 +6896,9 @@ int Probing::justReadProbe( bool allowDuplicates, int rawPad ) {
     // Serial.print("rowProbed: ");
     // Serial.println(rowProbed);
 
-    if ( rowProbed <= 0 || rowProbed > sizeof( probeRowMap ) ) {
+    // Bound is the ELEMENT count (108), not sizeof (432 bytes) - the old
+    // check let indices 108..431 through to a read past the array.
+    if ( rowProbed <= 0 || rowProbed >= (int)( sizeof( probeRowMap ) / sizeof( probeRowMap[ 0 ] ) ) ) {
         if ( debugProbing == 1 ) {
             Serial.print( "out of bounds of probeRowMap[" );
             Serial.println( rowProbed );
@@ -7097,7 +7105,7 @@ int Probing::readProbe( ) {
     // Serial.flush();
     // rowProbed = convertPadsToRows( rowProbed );
 
-    if ( rowProbed <= 0 || rowProbed >= sizeof( probeRowMap ) ) {
+    if ( rowProbed <= 0 || rowProbed >= (int)( sizeof( probeRowMap ) / sizeof( probeRowMap[ 0 ] ) ) ) {
         // if ( debugProbing == 1 ) {
         Serial.print( "out of bounds of probeRowMap[" );
         Serial.println( rowProbed );
@@ -7144,6 +7152,30 @@ void Probing::probeLEDhandler( void ) {
     //     return;
     // }
     lastProbeLEDsTime = currentTime;
+
+    // Cadence (2026-08-16). A colour REQUEST always gets a frame. Without
+    // one:
+    //   - LED on its own pin (probe_led_on_button_pin = 0): nothing else
+    //     drives that line, so a frame that changes nothing is pure cost -
+    //     event-driven (the 5 s keep-alive in checkSwitchPosition re-requests
+    //     the idle pattern for a chip that reset).
+    //   - LED sharing GPIO 9 with the button sampler (the default): every
+    //     sampler pulse is a valid WS2811 bit that shifts the LED's
+    //     registers, and the constant re-send is what overwrites that before
+    //     it can latch as a wrong colour - keep re-sending every idle pass
+    //     (probe_led_refresh_us = 0), or at that interval for the experiment.
+    {
+        static uint32_t s_lastFrameUs = 0;
+        bool requested = ( showProbeLEDs != 0 );
+        if ( !requested ) {
+            if ( !jumperlessConfig.hardware.probe_led_on_button_pin ) return;
+            uint32_t minUs = (uint32_t)jumperlessConfig.hardware.probe_led_refresh_us;
+            if ( minUs > 0 && (uint32_t)( micros( ) - s_lastFrameUs ) < minUs ) return;
+        } else {
+            probeLedRequestCount++;
+        }
+        s_lastFrameUs = micros( );
+    }
 
     int waitedForButtonCheck = 0;
 
@@ -7312,6 +7344,7 @@ void Probing::probeLEDhandler( void ) {
     probeLEDs.showBlocking( );
     probeButtonResumePolling( );
     showingProbeLEDs = 0;
+    probeLedShowCount++;
 
     // Track when LED MODE was changed so we can wait for current to stabilize
     // Don't update for every fade step - that would block current reading continuously

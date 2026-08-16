@@ -207,6 +207,32 @@ non-calibration key it changed back.
 
 ---
 
+## Probe LED cadence and the shared GPIO 9 line (2026-08-16)
+
+`probeLEDhandler()` (core 1, every idle `core2stuff` pass) re-sends the probe LED frame
+~2,560 times a second (`X`: `probe led frames N (requests M)`; requests are the ~7 real colour
+changes per 30 s). That looks wasteful and the plan was to make it event-driven - but with
+`hardware.probe_led_on_button_pin = 1` (default) the LED data and the button sampler share
+GPIO 9, and every sampler pulse (~2,600/s) is a valid WS2811 data bit that shifts the LED's
+registers; the constant re-send is what overwrites the shifted frame before it latches as a
+visibly wrong colour (the "shared-LED flicker" comment above the PIO program is this
+interaction). An event-driven or core-0 show would expose it - a bit shifted in per
+millisecond, dark within ~24 ms of the last frame - so **neither 3.2 (event-driven) nor 3.3
+(show from core 0) was done**; the fix that removes the constant re-send is one PIO program that
+owns GPIO 9 and emits the frame + the sample pulses itself (recommendations doc, Tier 2). What
+did land: with the LED on its own pin (`probe_led_on_button_pin = 0`) frames are event-driven
+(nothing else drives that line; the 5 s keep-alive re-requests), and
+`hardware.probe_led_refresh_us` (default 0 = every pass) is an experiment knob to *measure* the
+corruption on a scope with the shared line - not a setting to leave on.
+
+Also landed: `X` prints LED frames / requests / button samples / core-1 LED-frame aborts caused
+by `pauseCore2`; the current-sense poll no longer toggles `pauseCore2` around its I2C read
+(I2C0 is core-0-only - WaveGen is the sanctioned exception, excluded by `isRunning()`), gates
+attempts to ≥ 10 ms, and `serviceCritical()` no longer polls it twice; the two
+`sizeof(probeRowMap)` row bounds are element counts now.
+
+---
+
 ## Measure-mode decode: why taps hit neighboring rows
 
 Two independent causes, both fixed, both worth understanding before touching

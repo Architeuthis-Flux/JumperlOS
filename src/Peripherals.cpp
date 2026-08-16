@@ -114,6 +114,16 @@ static bool pollCurrentSenseMeasurement() {
     if ( now - lastCurrentSensePollMs < CURRENT_SENSE_POLL_INTERVAL_MS ) {
         return false;
     }
+    // Attempt gate, stamped BEFORE any bus traffic: this runs from
+    // serviceCritical() too (probeMode's ~20 us loop), and the poll stamp
+    // above only advances on a completed read - so a not-ready conversion
+    // used to be re-asked over I2C on every single pass. >= 10 ms between
+    // attempts bounds the CNVR read to 100 Hz whatever the loop rate.
+    static unsigned long lastAttemptMs = 0;
+    if ( now - lastAttemptMs < 10 ) {
+        return false;
+    }
+    lastAttemptMs = now;
 
     // if (now - lastCurrentSenseOffsetPollMs > 20000 && false) {
     //     // Temporarily disconnect ISENSE_PLUS from whatever it is connected to,
@@ -165,21 +175,24 @@ static bool pollCurrentSenseMeasurement() {
     // }
 
     // While the function generator runs, core1 sits inside wavegen.service()'s
-    // blocking streaming loop writing DAC samples on this same Wire bus - it
-    // doesn't re-check pauseCore2 mid-stream, so the pause below can't protect
-    // us. TwoWire has no cross-core lock; skip the poll entirely.
+    // blocking streaming loop writing DAC samples on this same Wire bus.
+    // TwoWire has no cross-core lock; skip the poll entirely.
+    //
+    // (2026-08-16) No pauseCore2 toggle around the read any more. I2C0 is
+    // core-0-only - the INA219s, the MCP4728 (Peripherals' mcp) and the
+    // internal-I2C0 OLED are all driven from core 0; core 1's only Wire
+    // user is WaveGen, and it is excluded above by isRunning(). The old
+    // "pauseCore2 = true; delay 50 us; read; restore" made core 1 abort
+    // whatever LED frame it was in 20 times a second for nothing.
     if ( wavegen.isRunning( ) ) {
         return false;
     }
 
-    // Pause Core 2 during I2C operations to prevent bus conflicts
-    extern volatile bool pauseCore2;
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
-    delayMicroseconds(50);  // Allow Core 2 to finish any in-progress I2C
-    
+    // (CNVR is sticky on the INA219 until the POWER register is read, which
+    // this path never does - so after the first conversion this is one bus
+    // read that always says yes. Kept as the cheap sanity check it is; the
+    // attempt gate above bounds its rate.)
     if ( !INA0.getConversionFlag() ) {
-        pauseCore2 = was_paused;
         return false;
     }
 
@@ -190,7 +203,6 @@ static bool pollCurrentSenseMeasurement() {
     if ( INA0.getLastError() != 0 ) {
         // Failed I2C read: the driver returns 0, which would show up as a
         // fake (-offset) current. Keep the previous state instead.
-        pauseCore2 = was_paused;
         return false;
     }
     float busVoltage = 0.0f;//min(8.0f, fabs(current_mA * 0.5f));
@@ -219,9 +231,6 @@ static bool pollCurrentSenseMeasurement() {
     currentSenseState.active = true;
     currentSenseState.lastUpdatedMs = now;
 
-    // Restore Core 2 state after I2C operations
-    pauseCore2 = was_paused;
-    
     return true;
 }
 
