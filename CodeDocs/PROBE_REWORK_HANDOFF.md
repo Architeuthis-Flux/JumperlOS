@@ -425,6 +425,55 @@ PIO/DMA, the `probeMode` state machine, encoder/core-1 queues, and the watchdog.
 
 ---
 
+## UNCOMMITTED in the working tree: two sequential measure calibrations
+
+`src/Apps.cpp` has a **~126-line uncommitted change** to the Probe Calib app, written at
+Kevin's request at the end of the session and **left uncommitted on purpose** — it is an
+interactive app (tap pads, turn the wheel, hold to save) and cannot be verified without a
+hand on the probe. If a new session starts with a dirty `Apps.cpp`, this is what it is:
+either finish verifying it with Kevin and commit, or `git checkout src/Apps.cpp` to drop it.
+
+**What it does.** Kevin's note: *"our calibration is running on the map max and min values
+rather than the DAC output voltage when we're using the DAC. there will be 2 different
+calibrations for measure mode and the app should let us set each one separately"*, and when
+asked, he chose: the DAC-voltage-vs-GPIO-endpoints split, **with the app doing one, then
+the other**. So MEASURE now has two phases, advanced with a **short click** (hold still
+saves and exits, as before):
+
+| Phase | Feed (forced) | The wheel adjusts |
+|---|---|---|
+| measure/DAC | DAC0 (2 crosspoints, stiff) | `calibration.measure_mode_output_voltage`, 5 mV/detent, clamped 3.0–3.6 V, applied to the DAC live (`save=0`, `checkProbePower=false`) |
+| measure/GPIO | a routable GPIO (~183 Ω) | `calibration.probe_max_measure` (as before) |
+
+SELECT still adjusts `probe_max` and leaves feed arbitration alone (there the tip is driven
+from PROBE_PIN and the feed is only the LED supply). The feed is **forced** per phase so
+each calibration measures its own source, re-forced only when the phase changes, and
+unforced on exit. If every routable GPIO is claimed the GPIO phase says so and falls back
+to the DAC phase rather than silently calibrating the wrong source.
+
+**The open question this needs to answer on hardware.** On the current decode, moving the
+DAC drive should have **no effect on the decoded row**: `probeMapRange()` scales the measure
+endpoints by `live ADC7 / 3.3`, and the pad reading scales with tip voltage too, so the
+drive cancels — which is precisely why the app had been switched off that knob. The
+measure/DAC phase therefore prints **tip voltage and decoded row together**, so:
+
+- rows stay put while the voltage moves → the ratio is cancelling, and the DAC knob is a
+  physical-level setting (what the self test servos), not a row-alignment control;
+- rows move → **the ratio is not cancelling and that is a real decode bug** — most likely
+  the 2 ms ADC7 cache decoupling the two reads, or a non-proportional offset term that
+  should not be scaled along with the endpoints.
+
+Either answer is worth having, and this is the cheapest way to get it.
+
+**How to verify** (needs hands): run `Probe Calib` from the apps menu; in SELECT tap rows
+and confirm `probe_max` still aligns them; flip to MEASURE and confirm `i@` shows
+`FORCED:0` with the feed on DAC0; turn the wheel and watch `dac:` and `tip:` move together
+while `reading:` holds; short-click and confirm `FORCED:1`, the feed on `GP_x` `xp:4`, and
+that the wheel now moves `max:`; hold to save; then confirm `i@` shows **no** `FORCED` and
+the feed back on its configured preference.
+
+---
+
 ## What the board is left with
 
 Restored at the end of the session, verified by reading `/config.txt` back:
