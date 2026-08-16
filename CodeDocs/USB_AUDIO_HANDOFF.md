@@ -89,9 +89,10 @@ chained channels — on top of never letting the mic actually run.
   core-1 CDC wedge, `main.cpp:~1500`); `irq_set_exclusive_handler` is pre-checked
   with the non-panicking getters; a failed resync/start releases the ADC lock
   (`usbAudioReleaseAdc()`); `usb_audio_yield_adc()` runs the pump inline when
-  called on core 1 (the logic analyzer arms from `loop1`) instead of waiting 250 ms
-  for a pump that can't run; `usb_audio_resume_adc()` restarts capture after LA /
-  self test / DAC calibration only if the host still has the mic open;
+  called on core 1 instead of waiting 250 ms for a pump that can't run (its only
+  core-1 caller, the logic analyzer, has since been removed - the branch stays
+  as a guard); `usb_audio_resume_adc()` restarts capture after self test / DAC
+  calibration only if the host still has the mic open;
   `serviceUSBAudio()` honours `pauseCore2` like its neighbours; the DMA IRQ handler
   is verified flash-free (`objdump`: only calls `usbAudioDcBlock`, no `memset`).
 
@@ -245,8 +246,8 @@ typed.
 - Probe while recording: tap rows, select/connect mode, measure mode — probe
   behaves normally, `probe_pauses` ticks per use, capture resumes ~300 ms after
   the tip lifts.
-- Logic analyzer / JulseView session while the mic is open (LA yields the ADC,
-  mic resumes after).
+- ~~Logic analyzer / JulseView session while the mic is open~~ - both were
+  removed as dead code (2026-08-15, `dev`), nothing to test.
 - Boot-restore on Windows (`bcdDevice` 0x0101 re-enumerates the composite).
 - Kevin's board is left with the mic **saved disabled** (opt-in via `M`/`Ms`).
 
