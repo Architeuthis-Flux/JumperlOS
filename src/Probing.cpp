@@ -1013,8 +1013,15 @@ Probing::Probing( ) {
     memcpy( probeRowMap, probeRowMapInit, sizeof( probeRowMap ) );
     memcpy( probeRowMapByPad, probeRowMapByPadInit, sizeof( probeRowMapByPad ) );
 
-    // Initialize other defaults
-    switchPosition = 1;
+    // Deliberately NOT touching switchPosition here: it boots as -1
+    // (unknown, the Probing.h initializer) and checkSwitchPosition()'s
+    // absolute-classification branch names it from the measured current
+    // within a check or two. This used to hard-code 1 (select) - an
+    // ASSUMPTION, not a measurement - so a board booted with the switch at
+    // measure spent its first second wrong, and any boot where sensing
+    // couldn't run (feed not up, LED chip dark) kept the wrong guess until
+    // the user flipped the switch hard enough to cross a transition
+    // threshold.
     lastSwitchPositions[ 0 ] = 1;
     lastSwitchPositions[ 1 ] = 1;
     lastSwitchPositions[ 2 ] = 1;
@@ -5322,7 +5329,41 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // Serial.print("  Current: ");
     // Serial.println(current_mA);
     bool changed = false;
-    if ( switchPosition == 0 ) {
+    if ( switchPosition == -1 ) {
+        // Boot / unknown: nothing to be relative to, so classify from the
+        // ABSOLUTE signatures - MEASURE drives the high-impedance tip
+        // (~0 mA), SELECT powers the probe LEDs (~1-1.5 mA). Before this
+        // branch existed the classifier only had transition rules, so a
+        // board booted in SELECT sat at "unknown" until the user flipped
+        // the switch through MEASURE and back: the high-current side had
+        // no rule that could fire from -1.
+        //
+        // A low reading alone can't be trusted yet: if the LED chip is dark
+        // (boot never sent it a frame, or it reset), SELECT also reads
+        // ~0 mA. So on the first low reading, light the select-idle pattern
+        // and read again next check - current appearing means SELECT with a
+        // dark LED; still-low means genuinely MEASURE. In the hysteresis
+        // dead band, stay unknown and sample again.
+        if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+            int padSense = readAdc( 5, 4 ); // same touch veto as MEASURE->SELECT
+            if ( padSense < jumperlessConfig.calibration.minimum_probe_reading ) {
+                switchPosition = 1;
+                changed = true;
+            }
+            s_pendingMeasureFlip = false;
+        } else if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+            if ( !s_pendingMeasureFlip ) {
+                s_pendingMeasureFlip = true;
+                if ( showProbeLEDs == 0 ) {
+                    showProbeLEDs = 4;
+                }
+            } else {
+                s_pendingMeasureFlip = false;
+                switchPosition = 0;
+                changed = true;
+            }
+        }
+    } else if ( switchPosition == 0 ) {
         s_pendingMeasureFlip = false;  // only meaningful while in SELECT
         // Currently in MEASURE mode - only switch to SELECT if current exceeds HIGH threshold
         if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
@@ -5920,7 +5961,8 @@ static void printProbeSwitchStats( const char* src, float mA, float adc7V, int p
     Serial.printf( "  thr lo/hi %.2f/%.2f  -> %s%s\n\r",
                    (double)jumperlessConfig.calibration.probe_switch_threshold_low,
                    (double)jumperlessConfig.calibration.probe_switch_threshold_high,
-                   pos ? "SELECT" : "MEASURE", changed ? "  (CHANGED)" : "" );
+                   pos == 1 ? "SELECT" : ( pos == 0 ? "MEASURE" : "UNKNOWN" ),
+                   changed ? "  (CHANGED)" : "" );
     Serial.flush( );
 }
 

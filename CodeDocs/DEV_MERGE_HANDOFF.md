@@ -27,6 +27,13 @@ review's 38 verified findings are all fixed. Then, in the second session:
   remove/re-add cycle would have been dropped as a "duplicate".
 - `X` (resource status) now prints the **shared-IRQ slot census** and which
   flash-write park is in charge, so nobody has to guess at this again.
+- **Boot names the switch position instead of assuming it** (2026-08-16):
+  the Probing constructor hard-coded switchPosition = 1 (select) and the
+  classifier had only transition rules, so a wrong guess stood until the
+  user flipped the switch. Boot now starts at "unknown" and an absolute
+  branch classifies from the signature itself (~0 mA = measure, ~1-1.5 mA =
+  select), with the dark-LED guard on the low side. Verified live: first
+  check after a reboot with the switch at select -> SELECT (CHANGED).
 - **Switch sensing survives a dark probe LED** (2026-08-16): a DAC claim
   relocating the buffer feed could reset the probe LED chip, whose idle draw
   IS the position signature - the sensed position flipped and latched until
@@ -66,6 +73,7 @@ it wasn't this session.
 | 14 | `46d9d0f` | IrqSlots: swallow the `irq_remove_handler` of a handler it declined (the SDK would assert on the miss) | both boards build; census unchanged; HIL 5/6 |
 | 15 | `6046b30` | Reading line repaints in place: fix `clickMenu()`'s polled pin-drop; self-invalidating pin via a port-1 LF counter (`--wrap,tud_cdc_n_write`); `probe_tap()` simulation | raw port-1 capture: one pin, in-place repaints, one re-pin after foreign output; both boards build; HIL 5/6 |
 | 16 | `f441fdb`+ | Switch sensing: release-side `infraNudge()`, SELECT→MEASURE flip needs two lows + an LED re-send, 5s LED keep-alive | claim/relocate/release replayed on hardware with stats on; release-nudge verified (feed back to DAC0/INA in ~1.5s); SELECT-side discard needs the physical switch (open item 1) |
+| 17 | (next) | Boot classifies the switch from absolute signatures instead of assuming SELECT; `-1` renders as UNKNOWN in stats | reboot with switch at select: first check UNKNOWN→SELECT (CHANGED), no flip; both boards build; HIL 5/6 |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
