@@ -183,13 +183,11 @@ ServiceStatus MeasureMode::service() {
         // got erased at up to 25 Hz, scrolling the terminal and eating the
         // user's typed line every ~40 ms.
         if ( measurementActive || measureModeActive ) {
-            // Erase BEFORE stopMeasurement(): that calls clearHighlighting(),
-            // which drops the ReadingDisplay anchor via resetLastShown(), after
-            // which clearLiveSerialLine() is a no-op and the last voltage stays
-            // frozen above the prompt looking current. Deliberately NOT done
-            // inside stopMeasurement(): startMeasurement() calls that on every
-            // node change, and re-pinning per tap would march the reading down
-            // the screen two rows at a time.
+            // Leaving measure mode: erase the live line so the last voltage
+            // doesn't sit above the prompt looking current. Deliberately NOT
+            // done inside stopMeasurement(): startMeasurement() calls that on
+            // every node change, and erasing per node change would blank the
+            // reading between rows instead of letting it repaint in place.
             ReadingDisplay::clearLiveSerialLine();
             stopMeasurement();          // no-ops when nothing is active
             measureModeActive = false;  // turn the logo indicator off

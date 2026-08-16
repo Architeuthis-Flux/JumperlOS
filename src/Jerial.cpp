@@ -583,10 +583,10 @@ void TermControl::handleEnter( ) {
     // brace_depth == 0, so a submitted-but-unbalanced command line (e.g.
     // "print(") printed its output glued to the end of the input line.
     if ( echo_enabled && stream && !holdForContinuation ) {
-        // This newline scrolls the terminal, so the live reading pinned two
-        // rows above the input line is now somewhere else. Drop its anchor
-        // (without erasing - a blind erase would hit the line we just moved
-        // off) so the next reading pins fresh rows below the command output.
+        // This newline scrolls the terminal; the port-1 linefeed counter in
+        // ReadingDisplay sees it and the live reading re-pins fresh rows below
+        // the command output on its next paint. The dedupe reset just makes
+        // that next paint happen even if the value hasn't changed.
         ReadingDisplay::resetLastShown( );
         stream->print( JERIAL_NEWLINE_OUT );
         stream->flush( );

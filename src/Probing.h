@@ -309,6 +309,15 @@ int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
     
     // Track last probe reading for other services
     int getLastProbeReading() const { return lastProbeReading; }
+
+    // Simulated probe tap (the MicroPython jl_probe_tap hook): while the hold
+    // lasts, the CACHED reading above reports `node` whenever the real ladder
+    // reads nothing, so MeasureMode and the probe highlighter latch exactly as
+    // they would for a held tip. Only the cache is faked - readProbeRaw() and
+    // probeMode() are untouched, so it cannot fake button presses or connect
+    // mode, and a genuine tap always wins over the simulation.
+    // node <= 0 cancels an active hold.
+    void simulateProbeTap(int node, unsigned long holdMs);
     
     // Check if we need to trigger a goto (for backward compatibility during transition)
     bool needsProbeConnect() const { return triggerProbeConnect; }
@@ -378,6 +387,8 @@ private:
     
     static Probing* instance;
     int lastProbeReading = 0;
+    volatile int simTapNode = -1;            // simulateProbeTap()
+    volatile unsigned long simTapUntil = 0;  // millis() deadline; 0 = inactive
     int smoothedProbeRead = -1;
     unsigned long lastButtonCheckTime = 0;
     unsigned long waitTimer = 0;

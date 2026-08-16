@@ -2116,8 +2116,13 @@ int jl_run_app( char* appName ) {
 
 // Probe Functions
 void jl_probe_tap( int node ) {
-    // TODO: Implement probe simulation
-    // This would simulate tapping the probe on a specific node
+    // Simulated tap: hold the cached probe reading on `node` for ~1.2s - long
+    // enough for MeasureMode's stability window and the probe highlighter to
+    // latch, the same way a real held tip does. The hold survives the end of
+    // the raw-REPL exec (it expires on wall time), so a script can tap and
+    // exit and the reading display reacts in the normal service loop.
+    // node <= 0 cancels an active hold. See Probing::simulateProbeTap().
+    Probing::getInstance( ).simulateProbeTap( node, 1200 );
 }
 
 int jl_probe_read_blocking( void ) {

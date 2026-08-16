@@ -151,7 +151,11 @@ future feature that asks gets the same treatment.
   GPIO 20/21 as UART until the routing test reconfigured them.
 - `usb_audio_status()` no longer reports bring-up counters; `scripts/jumperless.pyi`
   not regenerated for the new field set (nothing broken).
-- `MeasureMode`'s `probe_tap()` MicroPython binding is still a stub.
+- `probe_tap(node)` is now a real (simulated) tap: it holds the cached probe
+  reading on `node` for ~1.2 s, so MeasureMode and the probe highlighter latch
+  like they would for a held tip. It cannot fake button presses/connect mode,
+  and a genuine tap wins over it. Used to reproduce and verify the pinned
+  reading-line fix.
 - `test/hil/swd/tap_session.py` still carries a hardcoded address table
   (`sample_state.py`/`stress_flash.py` now resolve from the ELF).
 - The board is left with the mic **saved disabled** (opt-in via `M`/`Ms`).

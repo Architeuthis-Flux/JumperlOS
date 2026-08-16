@@ -185,11 +185,16 @@ terminal moves it. Two things keep it honest:
 
 **Verified on hardware (2026-08-15):** the final build boots, runs the HIL suite,
 and a raw-REPL script that flips the switch position hands it back cleanly on
-exit (no stray output on port 1 after exit). **Not** verifiable without hands -
-`probe_tap()` is a stub and the clickwheel injection doesn't reach the highlighter
-from a raw-REPL exec - so the zombie-repaint check with a *latched* measurement /
-highlight, and the pinned line's ESC7/CUU2/EL2/ESC8 framing during a real reading,
-are on the checklist below. The ordering fixes themselves are straightforward and
+exit (no stray output on port 1 after exit). **Update (2026-08-16):**
+`probe_tap()` is no longer a stub - it simulates a held tip - and the pinned
+line's ESC7/CUU2/EL2/ESC8 framing was captured raw on port 1 during simulated
+taps: one pin, then in-place repaints, one re-pin after foreign terminal
+output. That capture also caught `clickMenu()`'s polled `resetLastShown()`
+re-pinning every reading at ~1 kHz (each reading scrolled two fresh rows);
+fixed, and the pin now invalidates itself off a port-1 linefeed counter
+instead of trusting callers. The zombie-repaint check with a *latched*
+measurement still needs a physical probe (the switch must really sit at
+measure). The ordering fixes themselves are straightforward and
 were reviewed against the call chain (`stopMeasurement()` → `clearHighlighting()`
 → `resetLastShown()`).
 

@@ -1217,6 +1217,16 @@ ServiceStatus ProbePads::service( ) {
  * OPTIMIZATION: Expensive operations (checkPads, checkSwitchPosition) are now
  * handled by separate LOW priority services, keeping this service fast.
  */
+void Probing::simulateProbeTap( int node, unsigned long holdMs ) {
+    if ( node <= 0 ) {
+        simTapUntil = 0;
+        simTapNode = -1;
+        return;
+    }
+    simTapNode = node;
+    simTapUntil = millis( ) + ( holdMs == 0 ? 1 : holdMs );
+}
+
 ServiceStatus Probing::service( ) {
     // Update last status for base class tracking
     lastStatus = ServiceStatus::IDLE;
@@ -1240,6 +1250,16 @@ ServiceStatus Probing::service( ) {
 
         // Read probe position (moderately expensive: ADC + mapping)
         probeReading = justReadProbe( true );
+        // Simulated tap (simulateProbeTap / jl_probe_tap): stand in for the
+        // ladder only when it read nothing, so a real tip always wins.
+        if ( simTapUntil != 0 ) {
+            if ( (long)( millis( ) - simTapUntil ) >= 0 ) {
+                simTapUntil = 0;
+                simTapNode = -1;
+            } else if ( probeReading <= 0 ) {
+                probeReading = simTapNode;
+            }
+        }
         lastProbeReading = probeReading;
 
         // If we did any work, mark as BUSY

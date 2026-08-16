@@ -8,6 +8,48 @@
 #include "config.h"      // jumperlessConfig
 #include "oled.h"        // oled, OledTextRow, FontManager, mapConfigValueToFontFamily
 
+// ----------------------------------------------------------------------------
+// Port-1 linefeed counter - the pin's invalidation signal
+// ----------------------------------------------------------------------------
+// Every write to a CDC port funnels through tud_cdc_n_write() (both
+// Adafruit_USBD_CDC::write overloads call it), so wrapping it (-Wl,--wrap in
+// platformio.ini) sees every byte that reaches the user's main terminal,
+// including raw Serial prints that bypass Jerial. Only LINEFEEDS are counted:
+// a '\n' is what scrolls the terminal and moves the pinned rows, while echoed
+// keystrokes, CRs and cursor-movement escapes leave them where they are. The
+// pin logic below snapshots this counter after each paint; a later mismatch
+// means someone else has scrolled the terminal since, so the anchor is stale
+// and the next reading must pin fresh rows (and an exit-erase must not fire -
+// it would wipe a line that is no longer ours).
+//
+// This replaces most of the guesswork resetLastShown() call sites used to do:
+// the terminal owners (menus, probeMode, apps, command output) all print
+// linefeeds, so the pin now invalidates itself exactly when one of them
+// actually prints - not when a poll loop merely might have.
+//
+// Counted at write-call time on core 0 only (TinyUSB is only ever serviced
+// from core 0 - see loop1()'s notes), so a plain volatile is enough.
+static volatile uint32_t s_port1LineFeeds = 0;
+
+extern "C" {
+uint32_t __real_tud_cdc_n_write(uint8_t itf, const void* buffer, uint32_t bufsize);
+
+uint32_t __wrap_tud_cdc_n_write(uint8_t itf, const void* buffer, uint32_t bufsize) {
+    uint32_t n = __real_tud_cdc_n_write(itf, buffer, bufsize);
+    if (itf == 0 && n > 0) {
+        const uint8_t* p = (const uint8_t*)buffer;
+        uint32_t lf = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            lf += (p[i] == '\n');
+        }
+        if (lf) {
+            s_port1LineFeeds += lf;
+        }
+    }
+    return n;
+}
+}  // extern "C"
+
 namespace ReadingDisplay {
 
 namespace {
@@ -63,17 +105,29 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
 // the whole thing as ONE overlong hex escape, not ESC followed by '7'.
 //
 // The anchor is cursor-relative, so anything that scrolls the terminal moves
-// it. Blocking contexts that take over the terminal (probeMode, menus, apps)
-// run their loops on jOS.serviceCritical(), which dispatches only CRITICAL
-// services - no reading can repaint underneath them - and they announce
-// themselves through resetLastShown(), which drops the anchor so the next
-// reading pins a fresh pair of rows below their output.
+// it. Whether it HAS moved is decided by the port-1 linefeed counter at the
+// top of this file, not by the callers: a paint whose snapshot still matches
+// repaints in place, one whose snapshot is stale pins a fresh pair of rows
+// below whatever scrolled. Blocking contexts that take over the terminal
+// (probeMode, menus, apps) additionally run their loops on
+// jOS.serviceCritical(), which dispatches only CRITICAL services - so no
+// reading can repaint mid-takeover - and announce themselves through
+// resetLastShown(), which now only drops the OLED dedupe.
 
 namespace {
 bool pinReserved = false;
+// s_port1LineFeeds as of our last paint. While it still matches, nothing has
+// scrolled the terminal and the pinned rows are exactly where we left them.
+uint32_t pinLineFeedSnapshot = 0;
 // Set when the width guard released the pin. Kept separate from lastLine (the
 // OLED dedupe key) so releasing the serial pin never forces an OLED repaint.
 bool serialNeedsRepin = false;
+
+// The reserved rows are still ours: reserved, and nobody has printed a
+// linefeed on port 1 since we last painted them.
+bool pinStillValid(void) {
+    return pinReserved && (s_port1LineFeeds == pinLineFeedSnapshot);
+}
 
 void pinCursorToLiveRow(void) {
     Serial.print("\x1b" "7");   // DECSC - save the user's input-line cursor
@@ -101,7 +155,7 @@ void emitLiveSerialLine(const char* line) {
         serialNeedsRepin = true;
         return;
     }
-    if (!pinReserved) {
+    if (!pinStillValid()) {
         // Scroll two fresh rows into place so the reading has somewhere to
         // live that isn't the user's input line. "\n\r", not bare "\n": over
         // a raw serial link LF moves down but holds the column, which would
@@ -120,10 +174,21 @@ void emitLiveSerialLine(const char* line) {
     Serial.print(line);
     Serial.print("\x1b" "8");   // DECRC - back to the input line
     Serial.flush();
+    // Snapshot AFTER our own writes: the re-pin above shipped exactly two
+    // linefeeds, a repaint shipped none, and either way the count now on
+    // record is "the terminal as we left it".
+    pinLineFeedSnapshot = s_port1LineFeeds;
 }
 
 void clearLiveSerialLine(void) {
     if (!pinReserved) {
+        return;
+    }
+    pinReserved = false;
+    if (s_port1LineFeeds != pinLineFeedSnapshot) {
+        // The terminal scrolled since our last paint: the reading is already
+        // somewhere in the scrollback and "two rows above the cursor" is one
+        // of somebody else's lines now. Erasing would wipe THEIR output.
         return;
     }
     // Wipe on the way out: the value is live, and one left frozen on screen
@@ -131,16 +196,19 @@ void clearLiveSerialLine(void) {
     pinCursorToLiveRow();
     Serial.print("\x1b" "8");
     Serial.flush();
-    pinReserved = false;
 }
 
 void resetLastShown(void) {
+    // Something else has painted over the OLED: drop the dedupe key so the
+    // next reading repaints even if its text is unchanged.
     lastLine[0] = '\0';
-    // Something else has painted over the display - and, on the serial side,
-    // has almost certainly scrolled our pinned rows somewhere unknown. Drop
-    // the anchor WITHOUT erasing: a blind CUU+EL now would wipe one of THEIR
-    // lines. The next reading pins a fresh pair.
-    pinReserved = false;
+    // The SERIAL pin is deliberately NOT dropped here. Whether the pinned
+    // rows are still ours is not something callers can know - a poll loop
+    // that merely might own the terminal is not a scroll - so the pin
+    // invalidates itself instead, off the port-1 linefeed counter above:
+    // if the caller really printed, the next paint sees the count moved and
+    // pins fresh rows below their output; if it printed nothing, the reading
+    // keeps repainting in place.
 }
 
 void show(const char* name, int rowNode, const char* value, const char* value2) {
@@ -175,7 +243,11 @@ void show(const char* name, int rowNode, const char* value, const char* value2) 
     appendField(line, len, "  ", value);
     appendField(line, len, "  ", value2);
 
-    if (!serialNeedsRepin && strcmp(line, lastLine) == 0) {
+    // A stale pin (someone scrolled since our last paint) bypasses the
+    // dedupe: the reading is buried in scrollback, so resurface it below the
+    // new output even if the text itself is unchanged.
+    bool serialPinStale = pinReserved && (s_port1LineFeeds != pinLineFeedSnapshot);
+    if (!serialNeedsRepin && !serialPinStale && strcmp(line, lastLine) == 0) {
         return;  // already on screen, and the serial pin is intact
     }
     strncpy(lastLine, line, LINE_CAP - 1);

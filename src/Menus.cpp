@@ -496,12 +496,6 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         return -1;
     }
 
-    // The menu owns the terminal from here and scrolls it freely, which moves
-    // the rows a live reading pinned for itself. Drop that anchor so the next
-    // reading pins a fresh pair below the menu's output instead of erasing a
-    // line the menu drew. (See ReadingDisplay::resetLastShown.)
-    ReadingDisplay::resetLastShown( );
-
     int returnedMenuPosition = -1;
     bool menuSessionRan = false;
     if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) {
@@ -516,6 +510,14 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         encoderButtonState = IDLE;
         inClickMenu = 1;
         menuSessionRan = true;
+        // The menu owns the terminal for this session and scrolls it freely,
+        // which moves the rows a live reading pinned for itself. Drop the OLED
+        // dedupe so the next reading repaints once the menu is gone. MUST stay
+        // inside this branch: clickMenu() is POLLED from Menus::service()
+        // every main-loop pass (see the cleanup note below), and calling this
+        // unconditionally re-pinned every live reading at ~1kHz - each reading
+        // scrolled two fresh rows instead of repainting in place.
+        ReadingDisplay::resetLastShown( );
         logoRing.enabled = true; // ring owns the logo LEDs for this menu session
         logoRing.holdStepLengthMs = 0; // no stale hold-stepping state from last session
         // if (menuRead == 0) {
