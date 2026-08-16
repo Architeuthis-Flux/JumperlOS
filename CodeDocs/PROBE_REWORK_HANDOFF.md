@@ -1,8 +1,9 @@
 # Probe rework 5.7.2.0 — what landed, what's open, what the next session does
 
-Session of **2026-08-16**, branch **`dev`**, nothing pushed. Seven commits on top of the
-`5.7.2.0` checkpoint tag (five code, two docs/test). The board was attached the whole time; every claim below says
-how it was verified.
+Session of **2026-08-16**, branch **`dev`**, nothing pushed. **Ten commits** on top of the
+`5.7.2.0` checkpoint tag (five code, five docs/test), **plus an uncommitted probe-calibration
+change** described in its own section below. The board was attached the whole time; every
+claim below says how it was verified.
 
 The task was three things: (1) checkpoint the tree, (2) **make probe handling solid** —
 taps, switch sensing, the tip feed in measure position, the DAC set once and *not* re-sent
@@ -425,53 +426,96 @@ PIO/DMA, the `probeMode` state machine, encoder/core-1 queues, and the watchdog.
 
 ---
 
-## UNCOMMITTED in the working tree: per-feed measure endpoints + feed convergence
+## UNCOMMITTED in the working tree: measure-mode calibration rework
 
-`src/Apps.cpp`, `src/Probing.cpp`, `src/config.h` and `src/configManager.cpp` carry an
-**uncommitted change** written at Kevin's request at the end of the session, left
-uncommitted because it is an interactive app (tap, wheel, hold) that only he can verify.
-If a new session starts with a dirty tree, this is what it is.
+Five files carry an **uncommitted change** — `src/Apps.cpp`, `src/Probing.cpp`,
+`src/config.h`, `src/configManager.cpp` (+ the rebuilt uf2), ~360 insertions. It is
+uncommitted on purpose: it is an interactive app (tap a pad, turn the wheel, hold to save)
+and only Kevin can verify it. **If a new session starts with a dirty tree, this is what it
+is** — finish verifying it with him and commit, or `git checkout` the four sources to drop it.
+The firmware on the board *is* this build.
 
-**How it got here.** Kevin's first note was that the calibration runs on the map endpoints
-"rather than the DAC output voltage when we're using the DAC", and that measure mode needs
-two calibrations set separately. A first cut gave MEASURE two click-advanced phases, the
-DAC one adjusting `measure_mode_output_voltage`. He ran it and reported: *"the voltage
-adjustment isn't changing anything in the calibration."* **That is the correct and expected
-result, now confirmed on hardware:** the decode is ratiometric — `probeMapRange()` scales
-the endpoints by `live ADC7 / 3.3` and the pad reading scales with tip voltage too — so the
-drive voltage cancels *exactly* out of row alignment. It can never be a calibration knob.
+### How it got here (the reasoning matters more than the diff)
 
-**The design that replaced it** (Kevin's): fix the DAC at a steady drive, give the DAC feed
-map endpoints like the GPIO feed has, then flip between the two feeds quickly in the app,
-auto-adjusting until they converge on the same tapped row, and finally move both together
-with the wheel.
+Kevin's opening note: the calibration "is running on the map max and min values rather than
+the DAC output voltage when we're using the DAC", and measure mode needs two calibrations
+set separately. A first cut gave MEASURE two click-advanced phases, the DAC one adjusting
+`measure_mode_output_voltage`. He ran it: *"the voltage adjustment isn't changing anything
+in the calibration."*
 
-- `calibration.probe_max_measure` = the **DAC0-fed** top endpoint;
-  new `calibration.probe_max_measure_gpio` = the **GPIO-fed** one (seeded from the first on
-  upgrade). `probe_min_measure` stays shared — convergence solves one degree of freedom per
-  feed, at the tapped row. `probeMapRange()` picks the pair matching the live feed
-  (`s_gpioPowerIdx >= 0`).
-- `measure_mode_output_voltage` default is now **3.30 V** and nothing in the app touches it;
-  the tip-voltage self test still servos it so the *tip* lands at 3.30.
-- The app, in MEASURE, alternates the forced feed while a pad is held (one step per loop
-  pass, ≥40 ms apart, median of 3 raws per step because a rebuild wanders the tip ~70 mV),
-  solves the GPIO endpoint that reproduces the DAC feed's normalized pad position —
-  `max = min + (raw − min)/norm`, damped to a third per alternation — and declares
-  convergence after 3 alternations agreeing on the row. Then it unforces the feed. A short
-  click re-runs convergence; the wheel moves **both** endpoints by the same delta.
+**That is the correct result and it is now settled on hardware, not by argument.** The
+decode is ratiometric — `probeMapRange()` scales the endpoints by `live ADC7 / 3.3`, and the
+pad reading scales with tip voltage too — so the drive voltage cancels *exactly* out of row
+alignment. It can never be a calibration knob. What does **not** cancel is the two feeds'
+**source impedance**: DAC0 is a stiff ~2-crosspoint feed, a routable GPIO is ~170–185 Ω
+through 4 crosspoints and sags under the pad ladder's load.
+
+So the design Kevin then specified, and what is implemented:
+
+### 1. Per-feed measure endpoints, converged against each other
+
+- `calibration.probe_max_measure` = the **DAC0-fed** top endpoint; new
+  `calibration.probe_max_measure_gpio` = the **GPIO-fed** one, seeded from the first on
+  upgrade (full configManager touchpoints + `requiredKeys`). `probe_min_measure` stays
+  shared — convergence solves one degree of freedom per feed, at the tapped row.
+  `probeMapRange()` picks the pair matching the live feed (`s_gpioPowerIdx >= 0`).
+- `measure_mode_output_voltage` default is now **3.30 V** and nothing in the app touches it.
+  The tip-voltage self test still servos it so the *tip* lands at 3.30.
+- **The app converges the two feeds automatically.** Hold the tip on one pad in MEASURE and
+  it alternates the forced feed (one step per loop pass, ≥40 ms apart, median of 3 raw reads
+  per step because a rebuild wanders the tip ~70 mV), solves the GPIO endpoint that
+  reproduces the DAC feed's normalized pad position — `max = min + (raw − min)/norm`, damped
+  to a third per alternation — and declares convergence after 3 alternations agreeing on the
+  row, then unforces the feed. Short click re-runs it. **The wheel then moves both endpoints
+  by the same delta**, so aligning the row can't re-open the gap convergence just closed.
 - The ratiometric scale is recovered from the **top** endpoint (`cMax/usedMax`), never the
-  bottom: `probe_min_measure` is ~10 counts, so `cMin/mMin` quantises to 0.9 or 1.0 and
-  would inject a 10 % error into the solved endpoint.
-- If every routable GPIO is claimed, convergence says so once and parks on DAC0 rather than
+  bottom: `probe_min_measure` is ~10 counts, so `cMin/mMin` quantises to 0.9 or 1.0 and would
+  inject a 10 % error into the solved endpoint.
+- Every routable GPIO claimed → convergence says so once and parks on DAC0 rather than
   silently calibrating the wrong source. The feed is unforced on every exit.
 
-**Observed working on hardware** (Kevin driving, 2026-08-16): convergence completed and
-separated the feeds by 9 counts — `maxD: 4119  maxG: 4110`, `measure (converged - wheel
-moves both)` — which is the source-impedance difference the split exists to remove.
+**Observed working** (Kevin driving): convergence completed and separated the feeds by 9
+counts — `maxD: 4119  maxG: 4110`, `measure (converged - wheel moves both)`. That 9-count
+gap is the source-impedance difference the split exists to remove.
 
-**Still to confirm before committing:** that the converged endpoints make a tapped row land
-correctly under *both* feeds in normal use (claim DAC0 to force the GPIO feed and re-tap),
-that `probe_max_measure_gpio` persists through the save, and a `` `reset `` round-trip.
+### 2. Switch current measured, so SELECT can be calibrated too
+
+Kevin: *"we need to also be able to measure switch current so we can also calibrate the
+select mode."* Two problems had to be solved:
+
+- **The app couldn't see the switch flip.** It took its position from the runtime
+  classifier, which is gated to 500 ms and reads either INA1 (~17 ms conversion windows) or
+  the ADC7 droop model — both disturbed by the convergence loop's feed thrashing. The app
+  now takes the position from the **tip sense** (`probeSwitchTipSenseNow()`): ~6 µs, no ADC,
+  no I2C, indifferent to which source feeds the buffer. Two agreeing reads to debounce, with
+  a fallback to the runtime position when it skips (a probe button held).
+- **A bug that came with that:** `probeMapRange()` — the decode this app calibrates — picks
+  its endpoint pair from the **global** `switchPosition`, which the runtime ProbeSwitch
+  service keeps rewriting from the disturbed classifier. The app would have displayed SELECT
+  while the decode used MEASURE endpoints. It now re-asserts the tip sense's answer into that
+  global every pass, so display and decode cannot disagree.
+- **Measuring the current.** In SELECT the tip is driven straight from PROBE_PIN, so the feed
+  does not affect the pad reading at all — which frees the app to pin the feed to **DAC0**
+  there. In that position the feed *is* the probe LED supply, and INA1's shunt (R57) is in
+  DAC0's output path, so that current is exactly the switch signature the thresholds are
+  calibrated against. Sampled every 100 ms (bounded I2C), displayed live with the thresholds
+  beside it — `select  sw: 1.42 mA (thr 0.90/1.20)` — and the exit summary warns when the
+  measured current does not actually clear the SELECT threshold.
+
+### What still needs Kevin's hands before this can be committed
+
+- SELECT engages promptly on a physical flip, and `sw:` reads a plausible ~1.4 mA there.
+- MEASURE convergence still lands after a SELECT round-trip.
+- A tapped row decodes correctly under **both** feeds in normal use (claim DAC0 from
+  MicroPython to force the GPIO feed, then re-tap).
+- `probe_max_measure_gpio` survives the save and a `` `reset `` round-trip (it is in
+  `requiredKeys`, so the first save after this firmware rewrites `/config.txt` in full).
+
+**Caveat to carry:** the tip sense is still formally unverified in SELECT — that is the
+touch-matrix promotion gate in open item 1, and why `debug.probe_switch_agree` is still 0 for
+the runtime. Every observation this session had it right (H in measure, L in select, under
+both feeds), and inside this app a wrong call is immediately visible because the mode is on
+screen. If the app ever claims the wrong position, suspect the detector, not the calibration.
 
 ---
 
