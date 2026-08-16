@@ -27,6 +27,11 @@ review's 38 verified findings are all fixed. Then, in the second session:
   remove/re-add cycle would have been dropped as a "duplicate".
 - `X` (resource status) now prints the **shared-IRQ slot census** and which
   flash-write park is in charge, so nobody has to guess at this again.
+- **Switch sensing survives a dark probe LED** (2026-08-16): a DAC claim
+  relocating the buffer feed could reset the probe LED chip, whose idle draw
+  IS the position signature - the sensed position flipped and latched until
+  reboot. Fixed three ways (release-nudge, confirmed flips, LED keep-alive);
+  one hands-on confirm remains (open item 1).
 - **The live reading line repaints in place again** (2026-08-16). It was
   scrolling one line + one blank per reading: `clickMenu()` - polled every
   main-loop pass - dropped the pin ~1000x/s. Fixed, and the pin now
@@ -60,6 +65,7 @@ it wasn't this session.
 | 13 | `b4fd719` | **Enable FlashPark**; probe-less `stress_flash.py`; ELF-resolved SWD addresses | **40-iteration soak clean, `timeouts 0`** |
 | 14 | `46d9d0f` | IrqSlots: swallow the `irq_remove_handler` of a handler it declined (the SDK would assert on the miss) | both boards build; census unchanged; HIL 5/6 |
 | 15 | `6046b30` | Reading line repaints in place: fix `clickMenu()`'s polled pin-drop; self-invalidating pin via a port-1 LF counter (`--wrap,tud_cdc_n_write`); `probe_tap()` simulation | raw port-1 capture: one pin, in-place repaints, one re-pin after foreign output; both boards build; HIL 5/6 |
+| 16 | `f441fdb`+ | Switch sensing: release-side `infraNudge()`, SELECT→MEASURE flip needs two lows + an LED re-send, 5s LED keep-alive | claim/relocate/release replayed on hardware with stats on; release-nudge verified (feed back to DAC0/INA in ~1.5s); SELECT-side discard needs the physical switch (open item 1) |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
@@ -183,6 +189,10 @@ future feature that asks gets the same treatment.
   reading-line fix.
 - `test/hil/swd/tap_session.py` still carries a hardcoded address table
   (`sample_state.py`/`stress_flash.py` now resolve from the ELF).
+- Droop and INA report very different magnitudes for the same probe LED load
+  (~9 mA droop vs ~1.4 mA INA) against SHARED thresholds (0.90/1.20 mA). It
+  works today because both sit on the correct side with margin, but it is the
+  next robustness hole in this classifier if anything recalibrates.
 - The board is left with the mic **saved disabled** (opt-in via `M`/`Ms`).
 
 ---

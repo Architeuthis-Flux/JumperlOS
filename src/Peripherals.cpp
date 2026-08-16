@@ -1525,8 +1525,13 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     // triggered a rebuild, so the buffer feed sat on the GPIO fallback (ADC7
     // droop sensing instead of INA1) until the next unrelated refresh -
     // observed on hardware as switch sensing staying degraded after the user
-    // was done with the DAC.
-    if ( wasClaimed0 && !s_dacUserClaimed[ 0 ] && infraProbePowerSource( ) != DAC0 ) {
+    // was done with the DAC. Gated on checkProbePower like the claim side:
+    // BLIND writes (self test, calibration sweeps, infra's own park) also
+    // clear the latch, and a nudge-triggered refresh mid-sweep would churn
+    // the crossbar under an in-flight measurement - those keep the old
+    // behavior (feed returns at the next rebuild).
+    if ( checkProbePower && wasClaimed0 && !s_dacUserClaimed[ 0 ] &&
+         infraProbePowerSource( ) != DAC0 ) {
         infraNudge( );
     }
 
