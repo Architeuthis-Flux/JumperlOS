@@ -1,29 +1,129 @@
-# Scheduler & hardware offload — brief for the next session
+# Scheduler & hardware offload — recommendations
 
-> **STATUS: NOT WRITTEN YET.** This file is the *brief*: the agreed section outline plus
-> every fact verified on hardware so far, so the work can start without re-deriving
-> anything. The deliverable is this same file, rewritten as the actual recommendations
-> document. Nothing here is a recommendation yet.
-
-## The job
-
-Study Zephyr / FreeRTOS / the pico-sdk, sweep **every** `service()` and core 1's loop, and
-deliver **recommendations** for using RP2350 peripherals to make the concurrent work smooth.
-It is **recommendations-only — no behaviour changes in this pass.** Cite `file:line`
-throughout.
-
-This came out of a three-part task (2026-08-16): checkpoint the tree, make probe handling
-and its calibration solid, and write this doc. The first two are done and committed — see
-`PROBE_REWORK_HANDOFF.md` for what changed, because several of those changes are the seams
-the recommendations below would build on.
-
-**Out of scope for this pass** (they belong *in* the doc as recommendations, not as edits):
-the `tud_task` sweep, the scheduler deadline API, ADC ring promotion, CH446Q PIO/DMA, the
-`probeMode` state machine, encoder/core-1 queues, and the watchdog.
+> **STATUS: NOT WRITTEN YET.** Everything below is the *brief* — the original ask, the
+> orientation a fresh session needs, the facts already verified on hardware, and the agreed
+> section outline. **The deliverable is this same file, rewritten as the actual
+> recommendations document.** Nothing below the outline is a recommendation yet.
+>
+> This file is written to be read with **no prior context**. It should contain everything
+> needed to start; if something is missing, that is a bug in this file.
 
 ---
 
-## Verified facts to build on
+## 1. The original ask, verbatim
+
+The task was given as three parts (2026-08-16, branch `dev`):
+
+> (1) tag the current tree `5.7.2.0` as a checkpoint; (2) make probe handling solid — taps,
+> switch sensing, the tip feed in measure position, the DAC set once and *not* re-sent over
+> I2C, a config flag choosing GPIO-first vs DAC-first as the feed (always falling through),
+> and one single crossbar path (~160 Ω) for a GPIO feed; (3) **study Zephyr/FreeRTOS +
+> pico-sdk and do a broad sweep of every `service()` and core 1's loop, delivering
+> *recommendations* for using RP2350 peripherals to make the concurrent work smooth.**
+> Priority now = probing/calibration; the sweep is a doc.
+
+**(1) and (2) are done, committed and hardware-verified.** See `PROBE_REWORK_HANDOFF.md`.
+**(3) is this file, and it is the only part left.**
+
+Two standing constraints from Kevin, which apply to this work too:
+
+- **Recommendations-only this pass. No behaviour changes.** The point is a document.
+- **Never push.** Commit locally when work is verified; pushing is his call.
+
+---
+
+## 2. What this project is
+
+**JumperlOS** — firmware for the **Jumperless V5**, a breadboard whose rows are wired
+together by a 12-chip **CH446Q analog crossbar** instead of jumper wires. An RP2350B
+(dual-core Cortex-M33, arduino-pico core) drives the crossbar, a 4-channel DAC, several
+ADCs/INA219 current sensors, addressable LEDs under every row, an OLED, and a **probe** —
+a handheld tip the user taps rows with, whose DPDT switch has a SELECT and a MEASURE
+position.
+
+The board is **attached over USB** while working on this. It enumerates several CDC ports:
+
+| Port | Use |
+|---|---|
+| `…JLV5port1` | main terminal — single-char commands, the `` ` `` config interface |
+| `…JLV5port5` | MicroPython raw REPL (the HIL suite drives this) |
+| `…JLV5port7` | USBSer3 machine backchannel (`:` verbs, JSON/YAML) |
+
+### Cores, roughly
+
+- **Core 0** — `setup()` / `loop()` (`main.cpp:210` / `:718`). Runs the **service
+  scheduler** (`jOS`), USB, the terminal, MicroPython, the probe button IRQ.
+- **Core 1** — `setup1()` / `loop1()` → `core2stuff()` (`main.cpp:609` / `:1399` / `:1540`).
+  Owns the **LEDs** and the **CH446Q** crossbar sends, plus the probe LED and the wave
+  generator's DAC streaming.
+
+Cross-core coordination today is a set of **shared volatile flags** (`sendAllPathsCore2`,
+`showLEDsCore2`, `showProbeLEDs`, `pauseCore2`, `core1busy`/`core2busy`, …) plus a
+`core_sync` mutex and a 25 ms `waitCore2()` guess. Replacing that is section D.
+
+### The scheduler you are reviewing
+
+`src/JumperlOS.h` / `src/JumperlOS.cpp`. Services are objects with a `service()` method and
+a `getPriority()` (`ServicePriority`, `JumperlOS.h:102`) returning CRITICAL / HIGH / NORMAL
+/ LOW, returning a `ServiceStatus` (`JumperlOS.h:91`: IDLE / BUSY / BLOCKING).
+
+- `jOSmanager::serviceAll()` — `JumperlOS.cpp:164`, the main-loop dispatcher.
+- `jOSmanager::serviceCritical()` — `JumperlOS.cpp:341`, the reduced set that blocking
+  modal loops (notably `probeMode()`) call to stay alive.
+- Registration list — `main.cpp:495–538`, one `jOS.registerService(...)` per service with a
+  trailing comment naming its priority. **Several of those comments are wrong**; the
+  authoritative answer is `getPriority()` in each service's header.
+
+**Sweep every `service()`** means: for each registered service, what it does, how often it
+actually runs, what it blocks on, and what RP2350 peripheral could do that job instead.
+
+---
+
+## 3. How to work on this repo
+
+```bash
+# build ALL THREE environments after every step - og and debug catch different things
+pio run -e jumperless_v5 -e jumperless_og -e jumperless_v5_debug
+
+pio run -e jumperless_v5 -t upload        # flash the attached board
+
+python3 test/hil/run_all.py               # hardware-in-the-loop suite; expect 5/6
+```
+
+**`run_all.py` is expected to report 5/6.** The one failure — `test_net_currents`, "zero-load
+TOP_RAIL net shows < 1 mA phantom current" — is **pre-existing and out of scope**; it fails
+identically on the `5.7.2.0` checkpoint commit. Anything *else* failing is a real regression.
+
+Individual suites worth running: `test/hil/test_infra_paths.py` (24 checks),
+`test/hil/test_config.py` (30 checks).
+
+**Config keys** are set over port 1 in **bracket** form:
+
+```
+`[dacs] probe_power_source = 1
+```
+
+or dot form `config.section.key = value`. A bare `` `dacs.probe_power_source = 1 `` is **not**
+parsed ("No ] found and not dot notation format") — this cost a debugging round.
+
+**Gotcha:** a stale process holding port 1 produces "device reports readiness to read but
+returned no data". Not a board fault. It also appears in `run_all.py` when a previous file's
+deferred config save is still in its flash window as the next file opens the port — if a
+suite run fails in a way a standalone re-run doesn't reproduce, suspect that first.
+
+**Docs worth reading before starting:**
+
+| File | Why |
+|---|---|
+| `PROBE_REWORK_HANDOFF.md` | what changed in parts (1) and (2); several changes are seams this work would build on |
+| `PROBE_INFRAPATHS_HANDOFF.md` | the probe/InfraPaths subsystem reference |
+| `DEV_MERGE_HANDOFF.md` | the branch's whole commit history + "how to work on this board" (flashing, SWD recovery, soaking) |
+| `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`, `PERFORMANCE_ROUND3.md` | prior optimisation passes; §2d of ROUND2 is marked stale |
+| `differencesRP2040RP2350B.md`, `dma_sectopn_rp2350b.md` | RP2350B specifics |
+
+---
+
+## 4. Verified facts to build on
 
 Measured or read out of the tree during the probe session — not assumptions. Where a number
 disagrees with the original plan, the number here is the one that was checked.
@@ -75,7 +175,11 @@ disagrees with the original plan, the number here is the one that was checked.
 
 ---
 
-## The agreed section outline
+
+
+---
+
+## 5. The agreed section outline
 
 Trim or reorder as the evidence warrants, but this is the shape that was agreed with Kevin.
 
@@ -147,29 +251,26 @@ probe).
 
 ---
 
-## Also on this pass
+---
 
-- Strike/update `PERFORMANCE_OPTIMIZATIONS_ROUND2` §2d "Only Check routableBufferPower for
-  Power Nets" — **already marked stale** (2026-08-16); it describes the pre-InfraPaths feed
-  and a `probePowerDAC` that is now a vestigial view pinned to 0.
+## 6. Also on this pass
+
 - Add a `DEV_MERGE_HANDOFF.md` row per landed commit (rows 18–22 are already in).
-- The electrical-model memory note is already written
-  (`memory/probe-electrical-model.md`).
+- `PERFORMANCE_OPTIMIZATIONS_ROUND2` §2d "Only Check routableBufferPower for Power Nets" is
+  **already marked stale** — no action needed unless the sweep finds more like it.
+- The electrical-model memory note is already written (`memory/probe-electrical-model.md`).
 
 ---
 
-## How to measure anything you claim
+## 7. What "done" looks like
 
-Existing hooks: `X` (resource status — now also MCP4728 write/skip counters, probe LED
-frames vs requests, button samples, core-1 LED-frame aborts caused by `pauseCore2`), `i@`
-(InfraPaths status, feed order, `paths/dup/xp`), `debugWaitLoopTiming`, the `PROFILE_*`
-macros, the HIL suite (`python3 test/hil/run_all.py`, expect **5/6** — the only failure is
-the pre-existing `test_net_currents` phantom-current check), and the SWD scripts under
-`test/hil/swd/`.
+A single document — this file — that a firmware engineer can act on:
 
-Builds: `pio run -e jumperless_v5 -e jumperless_og -e jumperless_v5_debug` — all three,
-every step. Flash: `pio run -e jumperless_v5 -t upload`.
-
-Config keys are set over port 1 in **bracket** form — `` `[dacs] probe_power_source = 1 `` —
-or dot form `config.section.key = value`. A bare `` `dacs.probe_power_source = 1 `` is *not*
-parsed ("No ] found and not dot notation format").
+- Every claim carries a `file:line`.
+- Every recommendation names the **peripheral**, the **SDK calls**, the **gain**, the
+  **risk**, and the **effort**, and is honest about payoff (the CH446Q entry, for instance,
+  should say the win is stability rather than latency, because latency is dominated by the
+  `waitCore2()` / `core_sync` handshake).
+- Anything bounded or sampled says so out loud rather than reading as full coverage.
+- The roadmap is tiered so Tier 1 could be done in an afternoon.
+- **No code changes are made in this pass.**
