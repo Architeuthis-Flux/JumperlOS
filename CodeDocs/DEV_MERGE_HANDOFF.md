@@ -73,7 +73,7 @@ it wasn't this session.
 | 14 | `46d9d0f` | IrqSlots: swallow the `irq_remove_handler` of a handler it declined (the SDK would assert on the miss) | both boards build; census unchanged; HIL 5/6 |
 | 15 | `6046b30` | Reading line repaints in place: fix `clickMenu()`'s polled pin-drop; self-invalidating pin via a port-1 LF counter (`--wrap,tud_cdc_n_write`); `probe_tap()` simulation | raw port-1 capture: one pin, in-place repaints, one re-pin after foreign output; both boards build; HIL 5/6 |
 | 16 | `f441fdb`+ | Switch sensing: release-side `infraNudge()`, SELECT→MEASURE flip needs two lows + an LED re-send, 5s LED keep-alive | claim/relocate/release replayed on hardware with stats on; release-nudge verified (feed back to DAC0/INA in ~1.5s); SELECT-side discard needs the physical switch (open item 1) |
-| 17 | (next) | Boot classifies the switch from absolute signatures instead of assuming SELECT; `-1` renders as UNKNOWN in stats | reboot with switch at select: first check UNKNOWN→SELECT (CHANGED), no flip; both boards build; HIL 5/6 |
+| 17 | `0437832` | Boot classifies the switch from absolute signatures instead of assuming SELECT; `-1` renders as UNKNOWN in stats | reboot with switch at select: first check UNKNOWN→SELECT (CHANGED), no flip; both boards build; HIL 5/6 |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
