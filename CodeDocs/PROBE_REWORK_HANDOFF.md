@@ -1,9 +1,8 @@
 # Probe rework 5.7.2.0 — what landed, what's open, what the next session does
 
-Session of **2026-08-16**, branch **`dev`**, nothing pushed. **Ten commits** on top of the
-`5.7.2.0` checkpoint tag (five code, five docs/test), **plus an uncommitted probe-calibration
-change** described in its own section below. The board was attached the whole time; every
-claim below says how it was verified.
+Session of **2026-08-16**, branch **`dev`**, nothing pushed. **Twelve commits** on top of the
+`5.7.2.0` checkpoint tag. The working tree is clean. The board was attached the whole time;
+every claim below says how it was verified.
 
 The task was three things: (1) checkpoint the tree, (2) **make probe handling solid** —
 taps, switch sensing, the tip feed in measure position, the DAC set once and *not* re-sent
@@ -26,6 +25,7 @@ session handoff.
 | 2 | `13e2313` | **Two switch detectors + agreement classifier** (shadow by default), droop off the hot path, `resetConfigToDefaults` keeps calibration | builds x3; `test_infra_paths` 24/24; `test_config` 30/30; detectors read correctly in both positions under both feeds (numbers below); agree mode classified from boot and survived the dark-LED trick |
 | 3 | `b9bfac2` | Probe **LED frame counters**, event-driven show on a dedicated pin, **INA poll off `pauseCore2`**, row bounds | builds x3; `run_all` 5/6; `X` counters over 30 s idle + 20 connect/disconnects |
 | 4 | `1036b18` | **Calibration reads both feeds and both detectors**; the self test asks the tip, not the shunt | builds x3; full `self_test` **OVERALL PASS** (`probe_cable PASS sw:meas(tip)`, `tip_voltage PASS droopR:183 sw:meas`) |
+| 5 | `a6ad4ba` | **A measure calibration per feed, converged against each other**; SELECT pins DAC0 so its switch current is measurable; the app's position comes from the tip sense | **Kevin on hardware**: SELECT engages on a flip and reads a plausible current, convergence lands after a SELECT round-trip, a tapped row decodes right under both feeds; his calibration settled the feeds **74 counts apart** (4134 DAC / 4060 GPIO). builds x3; `run_all` 5/6; `test_infra_paths` 24/24; `test_config` 30/30 |
 
 `run_all` is **5/6** throughout: the only failure is the pre-existing
 `test_net_currents` phantom-current check (`[nvscan] path 1 net 2 20->101 2xp dup0
@@ -426,14 +426,10 @@ PIO/DMA, the `probeMode` state machine, encoder/core-1 queues, and the watchdog.
 
 ---
 
-## UNCOMMITTED in the working tree: measure-mode calibration rework
+## The measure-mode calibration rework (`a6ad4ba`) — landed and hardware-verified
 
-Five files carry an **uncommitted change** — `src/Apps.cpp`, `src/Probing.cpp`,
-`src/config.h`, `src/configManager.cpp` (+ the rebuilt uf2), ~360 insertions. It is
-uncommitted on purpose: it is an interactive app (tap a pad, turn the wheel, hold to save)
-and only Kevin can verify it. **If a new session starts with a dirty tree, this is what it
-is** — finish verifying it with him and commit, or `git checkout` the four sources to drop it.
-The firmware on the board *is* this build.
+Committed after Kevin confirmed it on the board. Recorded at length because the *reasoning*
+is what a future change needs, not the diff.
 
 ### How it got here (the reasoning matters more than the diff)
 
@@ -502,14 +498,19 @@ select mode."* Two problems had to be solved:
   beside it — `select  sw: 1.42 mA (thr 0.90/1.20)` — and the exit summary warns when the
   measured current does not actually clear the SELECT threshold.
 
-### What still needs Kevin's hands before this can be committed
+### Verified by Kevin on hardware
 
-- SELECT engages promptly on a physical flip, and `sw:` reads a plausible ~1.4 mA there.
+- SELECT engages promptly on a physical flip, and `sw:` reads a plausible switch current.
 - MEASURE convergence still lands after a SELECT round-trip.
-- A tapped row decodes correctly under **both** feeds in normal use (claim DAC0 from
-  MicroPython to force the GPIO feed, then re-tap).
-- `probe_max_measure_gpio` survives the save and a `` `reset `` round-trip (it is in
-  `requiredKeys`, so the first save after this firmware rewrites `/config.txt` in full).
+- A tapped row decodes correctly under **both** feeds.
+- `probe_max_measure_gpio` persisted through the save (`/config.txt` read back:
+  `probe_max_measure = 4134`, `probe_max_measure_gpio = 4060`) and is now in
+  `test_config`'s reset-preservation list.
+
+**The 74-count separation is the headline result.** A single shared measure endpoint would
+have been wrong by that much for one of the two feeds — roughly 1.8 rows out of 101 — which
+is exactly the error the per-feed split plus convergence removes, and it is far larger than
+the 9 counts visible mid-convergence.
 
 **Caveat to carry:** the tip sense is still formally unverified in SELECT — that is the
 touch-matrix promotion gate in open item 1, and why `debug.probe_switch_agree` is still 0 for
@@ -521,23 +522,18 @@ screen. If the app ever claims the wrong position, suspect the detector, not the
 
 ## What the board is left with
 
-Restored at the end of the session, verified by reading `/config.txt` back:
-`probe_switch_stats = 0`, `show_probe_current = 1` (as found), `probe_switch_agree = 0`
-(shadow mode — the classifier still decides the old way), `probe_power_source = 0`
-(DAC0-first), `probe_led_refresh_us = 0` (legacy every-pass cadence). DAC0 was left at
-2.0 V by the HIL suite — *outside* the feed's `[2.80, 3.90]` window, which parks the feed
-on a GPIO — so it was set back to 3.33 V and the feed confirmed on DAC0 (`i@`:
-`-> DAC0 … paths:1 dup:0 xp:2`).
+Debug flags as found: `probe_switch_stats = 0`, `show_probe_current = 1`,
+`probe_switch_agree = 0` (shadow mode — the runtime classifier still decides the old way),
+`probe_power_source = 0` (DAC0-first), `probe_led_refresh_us = 0`.
 
-The physical switch is in **SELECT** as of the last check, and the classifier agrees:
-INA1 raw 3.69 mA − `probe_current_zero` 2.29 = **1.40 mA**, the measured SELECT signature,
-with ADC7 at the loaded 3.17 V. `probe_current_zero` currently reads 2.29 and
-`probe_droop_ohms` 182.9 (measured by the last self test).
+Calibration after Kevin's run: `probe_max = 4055` (select), `probe_max_measure = 4134`
+(DAC0-fed measure), `probe_max_measure_gpio = 4060` (GPIO-fed measure),
+`probe_min_measure = 10`, `measure_mode_output_voltage = 3.31` (fixed tip drive; the tip
+test servos it), `probe_droop_ohms ≈ 171–183`, `probe_current_zero ≈ 2.29` — see open item 2
+about that last one, it is not reproducible boot to boot.
 
-The flashed firmware is the `1036b18` build (the two later commits are docs and a test
-`.py` only), so what is on the board matches HEAD's sources.
-
----
+The flashed firmware is the `a6ad4ba` build and the working tree is clean, so the board
+matches HEAD.
 
 ## Assumptions to confirm with Kevin
 
