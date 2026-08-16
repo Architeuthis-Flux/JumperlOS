@@ -1512,11 +1512,21 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     // meant probe power stayed on the GPIO fallback (ADC7 droop model instead of
     // INA1 sensing) until reboot, because dacVoltageInProbeWindow() kept
     // returning false for a DAC nobody was claiming any more.
+    bool wasClaimed0 = s_dacUserClaimed[ 0 ];
     s_dacUserClaimed[ 0 ] = checkProbePower && ( voltage > 3.9 || voltage < 2.80 );
     if ( checkProbePower && infraProbePowerSource( ) == DAC0 &&
          ( voltage > 3.9 || voltage < 2.80 ) ) {
         Serial.println(
             "DAC 0 was powering the probe - relocating the buffer feed" );
+        infraNudge( );
+    }
+    // The RELEASE direction needs the same nudge as the claim. Without it,
+    // a dac_set() back inside the probe window cleared the latch but nothing
+    // triggered a rebuild, so the buffer feed sat on the GPIO fallback (ADC7
+    // droop sensing instead of INA1) until the next unrelated refresh -
+    // observed on hardware as switch sensing staying degraded after the user
+    // was done with the DAC.
+    if ( wasClaimed0 && !s_dacUserClaimed[ 0 ] && infraProbePowerSource( ) != DAC0 ) {
         infraNudge( );
     }
 

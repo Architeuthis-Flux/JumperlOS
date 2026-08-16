@@ -120,6 +120,24 @@ future feature that asks gets the same treatment.
 
 ### 1. Hands-on checks only Kevin can do
 
+- **Switch sensing after a DAC claim** (the "losing the switch state" report,
+  2026-08-16 - root-caused and fixed, needs one hands-on confirm). Chain:
+  `dac_set(0, <outside 2.80-3.90V>)` relocates the buffer feed off DAC0; the
+  relocation can reset the probe's LED chip dark; the select-idle LED's draw
+  IS the current signature the classifier reads, so a dark LED reads exactly
+  like MEASURE and the position flipped with the switch untouched - and
+  releasing the DAC never moved the feed back (no nudge), so it stayed wrong
+  until reboot. Three fixes in `checkSwitchPosition()`/`setDac0voltage()`:
+  release-side `infraNudge()` (verified on hardware: feed returns to DAC0/INA
+  within ~1.5s), SELECT->MEASURE now needs two consecutive below-low readings
+  with an LED re-send between them (a reset chip re-lights and the flip is
+  discarded), and a 5s LED keep-alive re-sends the static idle pattern so a
+  dark chip always heals. **To confirm:** switch at SELECT, probe attached,
+  run `dac_set(0, 0.5)` then `dac_set(0, 3.3)` from the REPL - position must
+  stay SELECT (worst case one discarded-flip message with
+  `probe_switch_stats = 1`), and the probe LED must visibly re-light within
+  ~5s if it blinks out.
+
 - **A/B the flash soak against `main`, with the debug probe.** FlashPark's
   positive result is in; what's missing is the empirical proof that the wedge
   is pre-existing. The `main` firmware was built at

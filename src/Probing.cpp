@@ -5169,6 +5169,8 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     static int last_candidate_position = -1; // -1 unknown, 0 measure, 1 select
     static int stable_read_count = 0;        // consecutive close readings on same side of threshold
     static unsigned long last_check_millis = 0;
+    // SELECT->MEASURE needs two consecutive below-low readings (see below).
+    static bool s_pendingMeasureFlip = false;
 
     float tolerance = 0.25;
 
@@ -5205,6 +5207,24 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         return switchPosition;
     }
     last_check_millis = now_ms;
+
+    // LED keep-alive: the addressable LED in the probe is written ONCE per
+    // mode change and never again, so a chip reset (rail glitch, cable
+    // wiggle) leaves it dark indefinitely - and with it kills the current
+    // signature this whole classifier depends on. Re-send the last static
+    // idle pattern every few seconds so a reset chip heals itself. Animated
+    // and transient modes re-send themselves; only the one-shot idle
+    // signatures (measure / select idle / measure dim) need this. The send
+    // consumes this check slot on purpose: the settle gate above needs to
+    // see the LED write before the next current read.
+    static unsigned long lastLedKeepaliveMs = 0;
+    if ( showProbeLEDs == 0 &&
+         ( lastProbeLEDs == 3 || lastProbeLEDs == 4 || lastProbeLEDs == 6 ) &&
+         ( now_ms - lastLedKeepaliveMs ) > 5000 ) {
+        lastLedKeepaliveMs = now_ms;
+        showProbeLEDs = lastProbeLEDs;
+        return switchPosition;
+    }
     // Sensing strategy follows the LIVE feed source (InfraPaths), not a
     // config flag:
     //   DAC0    -> INA1 current (its 2-ohm shunt R57 is hardwired in DAC_0's
@@ -5303,6 +5323,7 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // Serial.println(current_mA);
     bool changed = false;
     if ( switchPosition == 0 ) {
+        s_pendingMeasureFlip = false;  // only meaningful while in SELECT
         // Currently in MEASURE mode - only switch to SELECT if current exceeds HIGH threshold
         if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
             // Touch veto: the buffer is POWERED from the BUFFER_IN net, so a
@@ -5326,9 +5347,31 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     } else {
         // Currently in SELECT mode - only switch to MEASURE if current falls below LOW threshold
         if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
-            switchPosition = 0;
-            // Serial.println("Switching to MEASURE mode (LOW threshold crossed)");
-            changed = true;
+            // A below-low reading here is ambiguous: a genuine flip to
+            // MEASURE, or the probe's LED chip having reset dark (a rail
+            // glitch when the buffer feed relocates, a cable wiggle) - the
+            // select-idle LED's draw IS the signature this classifier reads,
+            // and a dark LED looks exactly like measure. Caught on hardware:
+            // dac_set(0, 0.5) relocated the feed, the LED went dark ~2s later,
+            // and the position flipped to MEASURE with the switch untouched.
+            // So: re-send the LED pattern and require the low reading to
+            // survive the NEXT check too. A reset chip re-lights and the flip
+            // is discarded; a real flip just takes one extra check (~500ms).
+            if ( !s_pendingMeasureFlip ) {
+                s_pendingMeasureFlip = true;
+                if ( showProbeLEDs == 0 ) {
+                    showProbeLEDs = ( lastProbeLEDs == 7 ) ? 7 : 4;
+                }
+            } else {
+                s_pendingMeasureFlip = false;
+                switchPosition = 0;
+                changed = true;
+            }
+        } else {
+            if ( s_pendingMeasureFlip && jumperlessConfig.debug.probe_switch_stats ) {
+                Serial.println( "[switch] measure flip discarded - LED re-lit (chip had reset)" );
+            }
+            s_pendingMeasureFlip = false;
         }
     }
 
