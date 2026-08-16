@@ -28,7 +28,7 @@ review's 38 verified findings are all fixed. Then, in the second session:
 - `X` (resource status) now prints the **shared-IRQ slot census** and which
   flash-write park is in charge, so nobody has to guess at this again.
 
-**Two things remain, both need Kevin's hands** (item 3 below): the sensory
+**Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
 and the A/B soak against `main` — which needs the debug probe on the bus, and
 it wasn't this session.
@@ -52,6 +52,7 @@ it wasn't this session.
 | 11 | `54c931d` | **Remove LogicAnalyzer + JulseView** (dead code) | both boards build; `dir(jumperless)` has no `la_*`; stale config key loads; HIL 5/6 |
 | 12 | `66b0eb5` | IrqSlots: forget a handler on `irq_remove_handler`; slot census in `X` | census measured (below); UART(0)/UART(1) from REPL take no slot; HIL 5/6 |
 | 13 | `b4fd719` | **Enable FlashPark**; probe-less `stress_flash.py`; ELF-resolved SWD addresses | **40-iteration soak clean, `timeouts 0`** |
+| 14 | `HEAD` | IrqSlots: swallow the `irq_remove_handler` of a handler it declined (the SDK would assert on the miss) | both boards build; census unchanged; HIL 5/6 |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
@@ -97,9 +98,14 @@ wrong — `rp2_dma_init()` has no callers. `machine.UART(0)` from the REPL takes
 **no** slot on V5: UART0 is already enabled by AsyncPassthrough, so the port
 piggybacks and never registers its handler; `UART(1)` uses an exclusive
 handler. Both were exercised from the REPL with the census re-read after:
-still 6/6, declined 0. So nothing reachable is displaced by FlashPark. If a
-future feature asks, IrqSlots declines it (counted, printed at boot and in `X`)
-instead of killing a core.
+still 6/6, declined 0. So nothing reachable in the shipped configuration is
+displaced by FlashPark. The one way to change that: a config where UART0 is
+*not* started at boot (`serial_1.function = 0` with async passthrough off —
+otherwise either `AsyncPassthrough::begin()` or `Serial1.begin()` brings it
+up); `machine.UART(0)` would then ask for a 7th slot and be declined — counted
+and printed at boot and in `X`, and its later `deinit()` is swallowed rather
+than handed to the SDK to assert on. Not a brick, and not the default. Any
+future feature that asks gets the same treatment.
 
 ---
 
@@ -109,9 +115,11 @@ instead of killing a core.
 
 - **A/B the flash soak against `main`, with the debug probe.** FlashPark's
   positive result is in; what's missing is the empirical proof that the wedge
-  is pre-existing. The `main` firmware is already built at
+  is pre-existing. The `main` firmware was built at
   `/private/tmp/claude-501/-Users-kevinsanto-Documents-GitHub-JumperlOS/8de8c89e-ef11-4d86-9611-765cedd133d5/scratchpad/wt-main/.pio/build/jumperless_v5/firmware.elf`
-  (commit `01c3f7a`, checked). Procedure:
+  (commit `01c3f7a`) — a temp path macOS may have purged; if it is gone,
+  `git worktree add <dir> main && (cd <dir> && pio run -e jumperless_v5)`
+  rebuilds it in a minute. Procedure:
   1. Plug in the Debug Probe, start OpenOCD (command in `test/hil/swd/README.md`).
   2. `JL_ELF=<that main ELF> python3 test/hil/swd/stress_flash.py 40` after
      flashing it (`pio run -e jumperless_v5 -t upload` from that worktree, or

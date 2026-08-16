@@ -33,9 +33,13 @@
 // silently dropped - the handler is then absent from the real chain while
 // this file believes it is present. MicroPython's machine.UART(0) does exactly
 // that (irq_add_shared_handler on init, irq_remove_handler on deinit), so
-// irq_remove_handler is wrapped too and always passes through: it is also the
+// irq_remove_handler is wrapped too and passes through: it is also the
 // removal path for EXCLUSIVE handlers (USBAudio's DMA_IRQ_1, the probe PIO),
-// which this registry never sees and must never swallow.
+// which this registry never sees and must never swallow. The ONE remove it
+// does swallow is that of a handler this file DECLINED: the SDK walks the
+// chain for it, does not find it, and asserts - the exact panic the decline
+// was there to avoid. Declined pairs are remembered so their remove is a
+// no-op here.
 #include <Arduino.h>
 #include <hardware/irq.h>
 
@@ -53,6 +57,21 @@ unsigned s_count   = 0;
 unsigned s_declined = 0;
 unsigned s_deduped  = 0;
 unsigned s_removed  = 0;
+// Registrations refused because the pool was full. Small: a decline is a
+// once-per-boot event for one feature, not a stream.
+constexpr unsigned kMaxDeclined = 4;
+Reg      s_declinedRegs[ kMaxDeclined ];
+unsigned s_declinedCount = 0;
+
+bool declinedIndex( uint num, irq_handler_t handler, unsigned* idx ) {
+    for ( unsigned i = 0; i < s_declinedCount; i++ ) {
+        if ( s_declinedRegs[ i ].num == (uint8_t) num && s_declinedRegs[ i ].handler == handler ) {
+            *idx = i;
+            return true;
+        }
+    }
+    return false;
+}
 }  // namespace
 
 extern "C" {
@@ -71,6 +90,12 @@ void __wrap_irq_add_shared_handler( uint num, irq_handler_t handler, uint8_t ord
     if ( s_count >= JL_IRQ_CHAIN_SLOTS ) {
         // See note 2. Deferred report: this can run before Serial exists.
         s_declined++;
+        unsigned idx;
+        if ( !declinedIndex( num, handler, &idx ) && s_declinedCount < kMaxDeclined ) {
+            s_declinedRegs[ s_declinedCount ].num     = (uint8_t) num;
+            s_declinedRegs[ s_declinedCount ].handler = handler;
+            s_declinedCount++;
+        }
         return;
     }
     s_regs[ s_count ].num     = (uint8_t) num;
@@ -80,6 +105,14 @@ void __wrap_irq_add_shared_handler( uint num, irq_handler_t handler, uint8_t ord
 }
 
 void __wrap_irq_remove_handler( uint num, irq_handler_t handler ) {
+    // A handler we declined was never chained: removing it would make the SDK
+    // walk the chain, miss, and assert. Forget the decline and do nothing.
+    unsigned idx;
+    if ( declinedIndex( num, handler, &idx ) ) {
+        for ( unsigned j = idx + 1; j < s_declinedCount; j++ ) s_declinedRegs[ j - 1 ] = s_declinedRegs[ j ];
+        s_declinedCount--;
+        return;
+    }
     // Forget it here so a later re-add is registered for real (see the header
     // note). Only shared registrations are in this registry; anything else
     // falls straight through.
