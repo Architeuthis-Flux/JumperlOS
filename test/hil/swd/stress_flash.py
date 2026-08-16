@@ -7,9 +7,21 @@ flags over the debug probe between operations. Logs per-op latency; on an
 anomaly (slow/failed op, or a flag stuck across consecutive samples) it
 snapshots both cores' PCs.
 
-Run from test/hil so jl.py imports.
+Without a debug probe (no OpenOCD on :4444, or --no-swd) it still runs the
+same op sequence and falls back to USB liveness as the health check: the
+failure this soak exists to catch ends with the board off the bus, and the
+op that was in flight fails. You lose the flag samples and the PC autopsy -
+and the recovery path (flash_swd.sh) - so only run probe-less on a board you
+can power-cycle.
+
+The 'X' resource status is captured before and after so the shared-IRQ census
+and the flash-write park's timeout counter bracket the run.
+
+Usage: stress_flash.py [iters] [--no-swd]
 """
+import glob
 import os
+import re
 import sys
 import time
 
@@ -22,16 +34,36 @@ sys.path.insert(0, _HERE)                    # test/hil/swd -> sample_state.py
 from jl import jl_exec, port1_command  # noqa: E402
 from sample_state import OOCD, sample_vars, sample_pcs  # noqa: E402
 
-ITER = int(sys.argv[1]) if len(sys.argv) > 1 else 12
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+ITER = int(args[0]) if args else 12
 SLOW_S = 8.0  # flag any single op slower than this
+USB_PORTS = 4  # CDC ports the V5 enumerates; fewer = it fell off the bus
 
-o = OOCD()
+o = None
+if "--no-swd" not in sys.argv:
+    try:
+        o = OOCD()
+    except OSError as e:
+        print(f"(no OpenOCD on :4444 - {e}; running without SWD sampling)", flush=True)
+else:
+    print("(--no-swd: running without SWD sampling)", flush=True)
+
 prev = None
 stuck_candidates = ("core1busy", "core2busy", "pauseCore2", "refreshInProgress",
                     "refreshLocalInProgress", "sendAllPathsCore2")
 
 
+def usb_ports():
+    return len([p for p in glob.glob("/dev/cu.usbmodem*JLV5port*")])
+
+
 def snap(tag):
+    if o is None:
+        n = usb_ports()
+        print(f"    [{tag}] usb_ports={n}", flush=True)
+        if n < USB_PORTS:
+            anomaly(tag, f"board off the bus ({n}/{USB_PORTS} ports)")
+        return {}
     vals = sample_vars(o)
     line = " ".join(f"{k}={v}" for k, v in vals.items()
                     if k in stuck_candidates or vals[k] not in (0, None))
@@ -41,9 +73,22 @@ def snap(tag):
 
 def anomaly(tag, extra=""):
     print(f"!!! ANOMALY at {tag} {extra}", flush=True)
+    if o is None:
+        print("    (no SWD: cannot snapshot PCs)", flush=True)
+        return
     pcs = sample_pcs(o)
     for core, (pc, lr) in pcs.items():
         print(f"    {core}: pc={pc} lr={lr}", flush=True)
+
+
+def status_x(tag):
+    """The shared-IRQ census + flash-write park line from 'X'."""
+    out = port1_command("X", collect_seconds=3.0)
+    m = re.search(r"shared-IRQ handler slots:.*?flash-write park[^\n]*", out, re.S)
+    print(f"=== X {tag} ===\n{m.group(0) if m else '(no census in X output)'}", flush=True)
+
+
+status_x("before")
 
 
 def timed(tag, fn):
@@ -98,4 +143,5 @@ for i in range(ITER):
 
 # cleanup
 jl_exec('jfs.remove("/hil_stress.txt") if jfs.exists("/hil_stress.txt") else 0\nprint("cleaned")', timeout=20)
+status_x("after")
 print("STRESS DONE", flush=True)

@@ -28,39 +28,33 @@
 // RP2350 only (RP2040 has no doorbells; the OG board keeps arduino-pico's
 // FIFO-based park). On RP2040 the wrappers are pure pass-throughs.
 // ─────────────────────────────────────────────────────────────────────────────
-// DISABLED (2026-08-15). Compiled out, kept in-tree as the ready-to-finish fix.
+// ENABLED (2026-08-15) - JL_FLASH_PARK_ENABLE=1, JL_FLASH_PARK_WRAPPED=1 and the
+// two -Wl,--wrap flags on one platformio.ini line (flashParkTakeover()
+// static_asserts on WRAPPED, so an enabled build without the wraps fails to
+// link rather than shipping with no park at all).
 //
-// WHY: this needs one shared-IRQ handler chain slot, and there are none free.
+// It needs one shared-IRQ handler chain slot, and for a while there was none:
 // irq_handler_chain_slots[] is defined in irq_handler_chain.S inside the
 // PREBUILT lib/rp2350/libpico.a, so PICO_MAX_SHARED_IRQ_HANDLERS cannot be
-// raised with a -D (verified: the array is 0x48 bytes = 6 slots in the linked
-// ELF; arduino-pico already ships 6 rather than the SDK's default 4).
-// The 6 are spoken for: arduino-pico's doorbell park handler (registered on
-// BOTH cores = 2), Adafruit TinyUSB USBCTRL_IRQ, CH446Q PIO0_IRQ_1, and then
-// MicroPython's machine_pin_irq_init (IO_IRQ_BANK0) + rp2_dma_jl (DMA_IRQ_0)
-// on the first REPL init. irq_add_shared_handler() hard_asserts when the pool
-// is empty, so enabling this panics core 0 inside mp_embed_init() the moment
-// anything touches MicroPython (SWD-confirmed stack: machine_pin_jl.c:125 ->
-// irq_add_shared_handler -> hard_assertion_failure -> panic).
+// raised with a -D (verified: 0x48 bytes = 6 slots in the linked ELF). Two
+// things freed one: src/IrqSlots.cpp stopped arduino-pico registering its own
+// doorbell handler from both cores into the one shared chain, and the logic
+// analyzer / JulseView - the other queued consumers - were removed as dead
+// code. Measured census with this on ('X' resource status): 6/6 used -
+// USBCTRL_IRQ x2 (TinyUSB), SIO_IRQ_BELL x2 (arduino-pico's park + ours),
+// PIO0_IRQ_1 (CH446Q), IO_IRQ_BANK0 (MicroPython pins). Nothing else in the
+// tree asks for a slot: MicroPython's machine.UART(0) piggybacks on the UART0
+// AsyncPassthrough already enabled, UART(1) uses an exclusive handler. If a
+// future feature does ask, IrqSlots declines it (counted, reported) instead
+// of hard_asserting a core.
 //
-// TO ENABLE, first free a slot. Options, best first:
-//   1. Stop arduino-pico registering its doorbell handler twice. It installs
-//      the same handler from main() and main1() but PICO_VTABLE_PER_CORE is 0,
-//      so the chain is shared and the second registration is pure waste; only
-//      the NVIC enable is per-core. A one-line core patch (or a local core
-//      override) frees a slot AND is correct on its own terms.
-//   2. Take over the park completely and remove the framework's handler
-//      (needs the handler's address - _MFIFO::_irq is private).
-//   3. Ship a libpico.a built with a larger PICO_MAX_SHARED_IRQ_HANDLERS.
-// Then set JL_FLASH_PARK_ENABLE=1 AND JL_FLASH_PARK_WRAPPED=1 together with the
-// two -Wl,--wrap flags (all on the same platformio.ini line, so they cannot
-// drift apart), and re-run test/hil/swd/stress_flash.py - the bug it fixes
-// reproduces there in under ~20 iterations.
+// The framework's own park handler still holds its slot after takeover; it is
+// dead weight (rp2040.fifo.begin(1) neuters it) but _MFIFO::_irq is private,
+// so it cannot be removed from here without a core patch.
 //
-// NOTE the pool is at its limit WITHOUT this module too: with MicroPython
-// initialised there are ZERO slots left, so the next feature to ask for one
-// silently kills a core - MicroPython's UART (machine_uart_jl.c:297) is in
-// that queue. That is pre-existing and worth fixing for its own sake.
+// TO DISABLE: change the platformio.ini line to JL_FLASH_PARK_ENABLE=0,
+// JL_FLASH_PARK_WRAPPED=0 and drop the two --wrap flags. The stubs below keep
+// main.cpp's call sites valid either way.
 // ─────────────────────────────────────────────────────────────────────────────
 #ifndef FLASHPARK_H
 #define FLASHPARK_H

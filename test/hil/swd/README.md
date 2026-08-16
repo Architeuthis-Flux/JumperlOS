@@ -22,12 +22,15 @@ $OOCD/bin/openocd -s $OOCD/share/openocd/scripts \
 - `stress_flash.py [iters]` - interleaves slot saves / jfs writes / config
   toggles with flag sampling between ops.
 
-CAVEAT: the RAM addresses in `sample_state.py`/`tap_session.py` are
-hardcoded from a specific build. After ANY firmware change, re-extract:
+Addresses: `sample_state.py` (and so `stress_flash.py`) resolves its symbols
+from the ELF with `arm-none-eabi-nm` at import - `JL_ELF` overrides the path,
+otherwise the release `jumperless_v5` ELF is used, then the debug one. Make
+sure that is the build actually flashed. `tap_session.py` still carries a
+hardcoded table from a specific build; re-extract before trusting it:
 
 ```
-arm-none-eabi-nm .pio/build/jumperless_v5_debug/firmware.elf | \
-  grep -E " (core1busy|core2busy|pauseCore2|readingADC|configChanged|lastReadRaw)$"
+arm-none-eabi-nm .pio/build/jumperless_v5/firmware.elf | \
+  grep -E " (configChanged|lastReadRaw|filesystemActive|pauseCore2)$"
 ```
 
 Known nit: the `switchPosition` symbol is a C++ reference, so sampling its

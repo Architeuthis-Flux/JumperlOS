@@ -9,10 +9,9 @@
 
 #if !JL_FLASH_PARK_ENABLE
 
-// Compiled out - see the banner in include/FlashPark.h for why (no free
-// shared-IRQ handler chain slot) and what has to change to turn it on.
-// The stubs keep the call sites in main.cpp valid, so enabling is a one-line
-// flag flip plus the two -Wl,--wrap flags in platformio.ini.
+// Compiled out (JL_FLASH_PARK_ENABLE=0) - the framework's park stays in
+// charge. The stubs keep the call sites in main.cpp valid, so enabling is the
+// one platformio.ini line described in include/FlashPark.h.
 void flashParkRegisterCore( void ) {}
 void flashParkTakeover( void ) {}
 uint32_t flashParkTimeouts( void ) { return 0; }
@@ -130,9 +129,10 @@ void flashParkRegisterCore( void ) {
     // cores dispatch through the same RAM vector table and the same shared
     // handler chain - adding it per core would both run it twice per IRQ and
     // burn a second chain slot. Only the NVIC enable is genuinely per-core.
-    // (The slot pool is PICO_MAX_SHARED_IRQ_HANDLERS deep and
-    // irq_add_shared_handler hard_asserts when it runs out - see the build flag
-    // in platformio.ini.)
+    // (The slot pool is PICO_MAX_SHARED_IRQ_HANDLERS deep; src/IrqSlots.cpp
+    // wraps irq_add_shared_handler so a full pool declines instead of
+    // hard_asserting - and this registration is one of the six. See the
+    // census note in include/FlashPark.h.)
     if ( !s_handlerInstalled ) {
         s_handlerInstalled = true;
         irq_add_shared_handler( irq, flashParkIrq, PICO_SHARED_IRQ_HANDLER_HIGHEST_ORDER_PRIORITY );
