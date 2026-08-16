@@ -103,6 +103,14 @@ bool node1Visible = (node1 <= 60) || ...;  // Use cached value
 **Savings:** ~20-30us
 
 #### 2d. Only Check routableBufferPower for Power Nets
+
+> **STALE (2026-08-16).** This section describes the pre-InfraPaths probe feed, when
+> `probePowerDAC` was a live decision variable and the feed was re-derived while walking
+> the path array. The feed is now arbitrated by `routing/InfraPaths.cpp`'s `probe_power`
+> function at the head of each rebuild, `probePowerDAC` is a vestigial compatibility view
+> pinned to 0, and the feed pair is a single `dup = 0` bridge. The *measurement* below is
+> still historically accurate; the code shape is gone. See `PROBE_INFRAPATHS_HANDOFF.md`.
+
 **Before:**
 ```cpp
 // Check EVERY path for routableBufferPower (expensive!)
