@@ -1,7 +1,7 @@
 # Probe rework 5.7.2.0 — what landed, what's open, what the next session does
 
-Session of **2026-08-16**, branch **`dev`**, nothing pushed. Five commits on top of the
-`5.7.2.0` checkpoint tag. The board was attached the whole time; every claim below says
+Session of **2026-08-16**, branch **`dev`**, nothing pushed. Seven commits on top of the
+`5.7.2.0` checkpoint tag (five code, two docs/test). The board was attached the whole time; every claim below says
 how it was verified.
 
 The task was three things: (1) checkpoint the tree, (2) **make probe handling solid** —
@@ -342,6 +342,78 @@ so the next chat doesn't have to re-derive it; cite `file:line` throughout as th
   don't vendor `async_context_poll` (not linked in this arduino-pico — borrow its
   `at_time` / `when_pending` shape instead).
 
+### The section outline the doc should follow
+
+Reproduced here in full because it lived only in the task prompt —
+`CodeDocs/current_task_plan.md` is an unrelated older plan, so there is no other copy in
+the repo. Trim or reorder as the evidence warrants, but this is the shape that was agreed.
+
+**Executive summary** — the scheduler has no notion of time (per-band divisor 1/1/3/20,
+`JumperlOS.cpp:59-62`); `probeMode()` is a nested blocking loop; TinyUSB is already
+IRQ-pumped by the Adafruit port under `__usb_mutex`, so the raw `tud_task()` calls in
+`src/` bypass it (re-entrancy hazard; fix = `TinyUSB_Device_Task()` / `yield()`); the ADC
+free-run + FIFO + DMA ring already exists in USBAudio and `readAdc` already snapshots it
+when streaming — promote it; the INA poll's `pauseCore2` toggle was 20 Hz of LED-frame
+aborts (**fixed this session**); single-SM CH446Q strobe offload is impossible on RP2350B
+(PIO GPIOBASE 0|16 per block; data/clk 14/15 vs CS 28..39) → a two-block `irq next/prev`
+design or a DMA→FIFO half-offload.
+
+**A. What RTOSes do vs jOS** — a table with rows for time-driven wake / ISR→task notify /
+software timers / cross-core messaging / mutual exclusion / poll-many / watchdog / SMP,
+and columns for FreeRTOS, Zephyr, **the pico-sdk primitive actually available**
+(`alarm_pool`, `queue_t`, doorbells, `critical_section_t`, `hardware_claim`,
+`watchdog_hw->scratch`), jOS today, and a verdict. Then a "what NOT to do" list: no
+`tud_task` from an IRQ or core 1; count shared-IRQ slots first (the pool is **6/6 used**,
+`IrqSlots.cpp` declines rather than panicking); no I2C / flash / Serial from alarm
+callbacks; don't vendor `async_context_poll` (not linked in this arduino-pico — borrow its
+`at_time` / `when_pending` shape).
+
+**B. jOS upgrade** — the corrected priority table + fixing `main.cpp`'s contradicting
+registration comments; an API of `periodUs()` / `nextDueUs` / `pending` + an ISR-safe
+`requestRun()`, plus per-service last/max/avg µs and overrun counts in `X`; `serviceAll`
+runs due-or-pending only, with no catch-up bursts; BLOCKING becomes an explicit modal set;
+`serviceInner()` = {ProbeButton, MpRemote, AsyncPassthrough, TinyUSB (mutex-guarded),
+Peripherals} exactly once; drop the no-op services (TermSerial, InjectedCmd,
+SingleCharCommands, OLED-null, FileCache); and `probeMode` → a state machine
+(OFF→ENTER→ARMED→TAP_SEEN→NODE1→ACTION→FEEDBACK→…→EXIT) with milestones: extract
+`probeTick()`, replace the `delay()`s with deadlines, move it into `service()`, delete the
+`serviceCritical()` calls. Plus `loop()` cleanup (the 10 ms block → a service, the help
+waits, the serial drain).
+
+**C. Per-service hardware-offload table** — columns: now → peripheral → SDK calls → gain →
+risk → effort. Rows: the always-on ADC ring engine (`readAdc` = a ring read; the pad-ladder
+burst 1–3 ms → ~10 µs; the ADC lock disappears; USB audio becomes one consumer; freshness
+generations after route changes); CH446Q step 1 = DMA→PIO FIFO + an IRQ STB queue
+(non-blocking `sendPaths`), step 2 = a second SM at GPIOBASE 16 with `irq set 0 next` /
+`wait 1 irq 0 prev` (payoff is stability — latency is dominated by the `waitCore2` /
+`core_sync` handshake); INA continuous + read-latest with no `pauseCore2` (**done**);
+MCP4728 dedupe (**done**) + LDAC batching; the probe LED on core 0 and its prerequisite
+**one PIO program owning GPIO 9** (button sample + WS2811 frame from a `pull noblock` /
+X-held colour word) — zero cross-core, constant refresh, no short-frame corruption; button
+IRQ → `requestRun()`; encoder events via `queue_t`; the LED frame tick via a core-1 alarm
+pool flag; the USB entry points; OLED (Wire1 for most types) chunked / DMA; watchdog +
+scratch post-mortem; `time_us_32` deadlines; and a core-1 request queue
+`{SEND_PATHS, SHOW_LEDS, PROBE_LED, DUMP_LEDS}` + a generation counter replacing
+`sendAllPathsCore2` / `showLEDsCore2` / `showProbeLEDs` and the 25 ms `waitCore2` guess.
+
+**D. Cross-core protocol cleanup** — a flag → hazard → replacement table, the ownership
+rules (I2C0 core 0 with a WaveGen token; ADC = the ring engine; USB core 0; flash =
+FlashPark; PIO0 CH446Q SM core 1; button PIO IRQ core 0), and a migration order.
+
+**E. Roadmap in three tiers** — Tier 1 (small, low risk): raw `tud_task` → guarded entry
+points; priority/comment fixes + dropping dead services; the INA no-pause + I2C0 rule
+(**done**); `inClickMenu` volatile; scheduler deadlines + stats; watchdog; the help-wait
+and drain spins. Tier 2 (medium): the ADC ring; the LED tick alarm; the CH446Q
+half-offload; a core-1 `queue_t` (SEND_PATHS first); the encoder queue; the combined GPIO 9
+PIO program; OLED. Tier 3 (large): the `probeMode` state machine; full CH446Q PIO offload;
+WaveGen via I2C DMA + a pacing timer; deleting `pauseCore2`.
+
+**F. How to measure** — the hooks that already exist (`X`, `debugWaitLoopTiming`,
+`PROFILE_*`, the HIL suite, the SWD scripts) plus the additions each recommendation needs
+(a per-service µs table, an I2C0 transaction counter, ADC ring stats, a frame-abort
+histogram — `X` already has the `pauseCore2` half of this — and a tap→crossbar latency
+probe).
+
 **Also on the Phase 5 list:** strike/update `PERFORMANCE_OPTIMIZATIONS_ROUND2`
 §routableBufferPower (stale — it describes the pre-InfraPaths feed), add a
 `DEV_MERGE_HANDOFF.md` row per landed commit, and add a memory note for the electrical
@@ -350,6 +422,26 @@ model (GPIO9 shared LED/button, C1 on the LED supply, feed = LED supply **and** 
 **Explicitly out of scope for the doc pass** (they belong *in* the doc as recommendations,
 not as edits): the `tud_task` sweep, the scheduler deadline API, ADC ring promotion, CH446Q
 PIO/DMA, the `probeMode` state machine, encoder/core-1 queues, and the watchdog.
+
+---
+
+## What the board is left with
+
+Restored at the end of the session, verified by reading `/config.txt` back:
+`probe_switch_stats = 0`, `show_probe_current = 1` (as found), `probe_switch_agree = 0`
+(shadow mode — the classifier still decides the old way), `probe_power_source = 0`
+(DAC0-first), `probe_led_refresh_us = 0` (legacy every-pass cadence). DAC0 was left at
+2.0 V by the HIL suite — *outside* the feed's `[2.80, 3.90]` window, which parks the feed
+on a GPIO — so it was set back to 3.33 V and the feed confirmed on DAC0 (`i@`:
+`-> DAC0 … paths:1 dup:0 xp:2`).
+
+The physical switch is in **SELECT** as of the last check, and the classifier agrees:
+INA1 raw 3.69 mA − `probe_current_zero` 2.29 = **1.40 mA**, the measured SELECT signature,
+with ADC7 at the loaded 3.17 V. `probe_current_zero` currently reads 2.29 and
+`probe_droop_ohms` 182.9 (measured by the last self test).
+
+The flashed firmware is the `1036b18` build (the two later commits are docs and a test
+`.py` only), so what is on the board matches HEAD's sources.
 
 ---
 
