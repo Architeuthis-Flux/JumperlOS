@@ -261,13 +261,24 @@ float medianInPlace( float* vals, int n ) {
 // rail the calibration measures, that corrupts the readings themselves.
 // Shared (non-static): SelfTest.cpp externs it to latch a known LED load
 // before its current measurements.
-void setProbeLEDModeAndSettle( int mode ) {
+// Returns true when core 1 consumed the request (a frame went out), false
+// when it timed out - core2stuff only calls probeLEDhandler while
+// checkingButton == 0 AND the probe button state machine is idle, so a
+// button the cable test's own line-driving left "pressed" silently starves
+// every frame and the calibration measures a stale colour.
+bool setProbeLEDModeAndSettle( int mode ) {
     showProbeLEDs = mode;
     unsigned long start = millis( );
     while ( showProbeLEDs != 0 && millis( ) - start < 200 ) {
         delay( 1 );
     }
+    bool latched = ( showProbeLEDs == 0 );
+    if ( !latched ) {
+        Serial.printf( "  (probe LED mode %d NOT latched by core 1 in 200 ms: checkingButton=%d buttonState=%d)\n\r",
+                       mode, (int)checkingButton, ProbeButton::getInstance( ).getButtonState( ) );
+    }
     delay( 200 ); // let the LED's supply current settle before sampling
+    return latched;
 }
 
 // Hot-plug poll for the OLED while a calibration app is running, so a display
@@ -290,6 +301,103 @@ static bool oledCalibHotplugPoll( void ) {
     return oled.isConnected( );
 }
 
+// One position step of the switch calibration: the user has just confirmed
+// the switch is in `wantPos` (0 = MEASURE, 1 = SELECT). Reads, in order:
+//   1. detector A (tip sense) - the cheap check that the switch really IS
+//      where we asked; a contradiction means the readings below would be
+//      garbage, so the caller refuses to save;
+//   2. NUM_READINGS of the INA1 zero-corrected current with the feed pinned
+//      to DAC0 (the legacy signature; median);
+//   3. with the feed pinned to the GPIO candidate: the unloaded/loaded ADC7
+//      tip voltage (median) and the feed-blink held % (detector B, GPIO).
+// Leaves the feed pinned back on DAC0.
+struct SwitchCalibStep {
+    int   detA;        // 0/1/-1
+    float inaMedian;   // mA, DAC0 feed
+    float adc7Median;  // V, GPIO feed
+    int   blinkPct;    // -1 = not measured
+    bool  gpioOk;      // a GPIO candidate was available
+};
+
+static SwitchCalibStep switchCalibReadPosition( int wantPos, int ledMode, int rowStart ) {
+    SwitchCalibStep r = { -1, 0.0f, 0.0f, -1, false };
+    const int NUM_READINGS = 20;
+    float readings[ NUM_READINGS ];
+
+    setProbeLEDModeAndSettle( ledMode ); // latched by core1 like at runtime
+    r.detA = probeSwitchTipSenseNow( );
+    (void)checkProbeCurrent( );          // throwaway read: flush the conversion that
+                                         // straddled the LED/switch change
+
+    Serial.printf( "Taking %s readings (DAC0 feed, INA1)...\n\r", wantPos ? "SELECT" : "MEASURE" );
+    b.clear( 0 );
+    b.print( "Read ", 0x100010, 0x000000, 0, -1, -1 );
+    int row = rowStart;
+    for ( int i = 0; i < NUM_READINGS; i++ ) {
+        delay( 200 );
+        float current = checkProbeCurrent( );
+        readings[ i ] = current;
+        Serial.printf( "Reading %d: %.3f mA\n\r", i + 1, current );
+        if ( i % 6 == 0 ) row++;
+        b.printRawRow( 0xFF << ( ( 5 - ( i % 6 ) ) ), row, 0x001010, 0x000000 );
+    }
+    // Median, not mean: robust against the occasional sample taken while the
+    // LED was mid-relatch or an I2C read hiccuped.
+    r.inaMedian = medianInPlace( readings, NUM_READINGS );
+    Serial.printf( "\n%s INA median: %.3f mA   tip sense: %s\n\r",
+                   wantPos ? "SELECT" : "MEASURE", r.inaMedian,
+                   r.detA == 0 ? "H (measure)" : ( r.detA == 1 ? "L (select)" : "-" ) );
+
+    // GPIO feed pass: same position, the other feed. Force candidate 1, let
+    // the rebuild land (same recipe as SelfTest's droop phase), then read the
+    // tip and blink it.
+    infraForceCandidate( "probe_power", 1 );
+    refreshConnections( -1, 0, 0 );
+    waitCore2( );
+    delay( 30 );
+    if ( infraProbePowerGpioIdx( ) >= 0 ) {
+        r.gpioOk = true;
+        for ( int i = 0; i < 9; i++ ) {
+            delay( 20 );
+            readings[ i ] = readAdcVoltage( 7, 16 );
+        }
+        r.adc7Median = medianInPlace( readings, 9 );
+        int pct = -1;
+        for ( int tries = 0; tries < 5 && pct < 0; tries++ ) {
+            (void)probeSwitchFeedBlinkNow( &pct );
+            if ( pct < 0 ) delay( 25 );
+        }
+        r.blinkPct = pct;
+        Serial.printf( "%s GPIO feed: tip %.3f V   blink held %d%%\n\r",
+                       wantPos ? "SELECT" : "MEASURE", r.adc7Median, r.blinkPct );
+    } else {
+        Serial.println( "(no free routable GPIO - skipping the GPIO-feed pass)" );
+    }
+    infraForceCandidate( "probe_power", 0 );
+    refreshConnections( -1, 0, 0 );
+    waitCore2( );
+    delay( 30 );
+    return r;
+}
+
+// Wait for a click (any button state) or a serial byte; false = aborted.
+static bool switchCalibWaitClick( const char* oledText ) {
+    encoderButtonState = IDLE;
+    while ( encoderButtonState != HELD && encoderButtonState != PRESSED ) {
+        if ( oledCalibHotplugPoll( ) ) {
+            oled.showMultiLineSmallText( oledText, true, true );
+        }
+        if ( Serial.available( ) > 0 ) {
+            while ( Serial.available( ) > 0 ) Serial.read( );
+            return false;
+        }
+        delay( 10 );
+    }
+    delay( 50 );
+    encoderButtonState = IDLE;
+    return true;
+}
+
 void calibrateProbeSwitchThresholds( void ) {
     b.clear( );
 
@@ -298,6 +406,7 @@ void calibrateProbeSwitchThresholds( void ) {
     Serial.println( "\n\rProbe Switch Threshold Calibration" );
     cycleTerminalColor( );
     Serial.println( "This will automatically set the switch position detection thresholds\n\r" );
+    Serial.println( "(any serial key aborts without saving)\n\r" );
 
     int tempSlot = 8;
     netSlot = tempSlot;
@@ -307,12 +416,12 @@ void calibrateProbeSwitchThresholds( void ) {
     //delay( 50 );
     checkProbeCurrentZero( );
 
-    // The thresholds ARE current signatures through INA1 (its shunt R57 is
-    // hardwired in DAC_0's output path), so pin the feed to the DAC0
-    // candidate for the sampling - a GPIO feed would read ~0mA in both
-    // positions and the saved thresholds would be garbage. Unforced at the
-    // end of the app. (This used to toggle the now-ignored
-    // debug.probe_power_gpio flag instead.)
+    // The current thresholds ARE signatures through INA1 (its shunt R57 is
+    // hardwired in DAC_0's output path), so the INA readings are taken with
+    // the feed pinned to the DAC0 candidate; each position step then pins
+    // the GPIO candidate for the tip / feed-blink numbers and comes back.
+    // Unforced on EVERY exit (the done: label) - a forced feed left behind
+    // would sit there until reboot.
     infraForceCandidate( "probe_power", 0 );
 
     routableBufferPower( 1, 1, 1 );
@@ -325,12 +434,9 @@ void calibrateProbeSwitchThresholds( void ) {
     // is measured at boot in checkProbeCurrentZero(); as long as calibration is
     // run after boot, both sides share the same probe_current_zero.)
 
-    // Arrays to store current readings for both positions
-    const int NUM_READINGS = 20;
-    float measureReadings[ NUM_READINGS ];
-    float selectReadings[ NUM_READINGS ];
-    int measureCount = 0;
-    int selectCount = 0;
+    SwitchCalibStep meas = { -1, 0.0f, 0.0f, -1, false };
+    SwitchCalibStep sel  = { -1, 0.0f, 0.0f, -1, false };
+    bool aborted = false;
 
     // ===== MEASURE MODE CALIBRATION =====
     b.clear( );
@@ -338,18 +444,9 @@ void calibrateProbeSwitchThresholds( void ) {
         showSwitchPosition(i, "Measure", 0x000000, 0x000000);
         delay(50);
     }
-int row = 0;
-    // oled.clear( );
-    // oled.print( "Move probe switch\n" );
-    // oled.print( "AWAY from tip\n" );
-    // oled.print( "(MEASURE mode)\n\n" );
-    // oled.print( "Press clickwheel\n" );
-    // oled.print( "when ready" );
-    // oled.show( );
 
     if (jumperlessConfig.top_oled.connection_type == 2 && oled.isConnected() == false) {
         oled.connect();
-
     }
 
     oled.showMultiLineSmallText( "Switch to MEASURE\n\r(AWAY from TIP)\n\n\rClick wheel = start", true, true );
@@ -359,42 +456,11 @@ int row = 0;
     Serial.println( "Press the clickwheel when ready\n\r" );
     Serial.flush( );
 
-    // Wait for user confirmation
-    encoderButtonState = IDLE;
-    while ( encoderButtonState != HELD && encoderButtonState != PRESSED ) {
-        if ( oledCalibHotplugPoll( ) ) {
-            oled.showMultiLineSmallText( "Switch to MEASURE\n\r(AWAY from TIP)\n\n\rClick wheel = start", true, true );
-        }
-        delay( 10 );
+    if ( !switchCalibWaitClick( "Switch to MEASURE\n\r(AWAY from TIP)\n\n\rClick wheel = start" ) ) {
+        aborted = true;
+        goto done;
     }
-    delay( 50 );
-    encoderButtonState = IDLE;
-
-    row = 22;
-    // Take readings in MEASURE mode
-    setProbeLEDModeAndSettle( 3 ); // measure green, latched by core1 like at runtime
-    (void)checkProbeCurrent( );    // throwaway read: flush the conversion that
-                                   // straddled the LED/switch change (the old
-                                   // first-reading outlier)
-    Serial.println( "Taking MEASURE mode readings..." );
-    b.clear( 0 );
-    b.print( "Read ", 0x100010, 0x000000, 0, -1, -1 );
-    for ( int i = 0; i < NUM_READINGS; i++ ) {
-        delay( 200 );
-        float current = checkProbeCurrent( );
-        measureReadings[ i ] = current;
-        Serial.printf( "Reading %d: %.3f mA\n\r", i + 1, current );
-        if ( i % 6 == 0 ) {
-            row++;
-        }
-        b.printRawRow( 0xFF << ( ( 5 - ( i % 6 ) ) ), row, 0x001010, 0x000000 );
-    }
-
-    // Median, not mean: robust against the occasional sample taken while the
-    // LED was mid-relatch or an I2C read hiccuped.
-    float measureAvg = medianInPlace( measureReadings, NUM_READINGS );
-    Serial.printf( "\nMEASURE mode median: %.3f mA\n\n\r", measureAvg );
-
+    meas = switchCalibReadPosition( 0, 3, 22 );
     delay( 1000 );
 
     // ===== SELECT MODE CALIBRATION =====
@@ -403,14 +469,6 @@ int row = 0;
         showSwitchPosition(i, "Select", 0x000000, 0x000510);
         delay(50);
     }
-
-    // oled.clear( );
-    // oled.print( "Move probe switch\n" );
-    // oled.print( "TOWARDS tip\n" );
-    // oled.print( "(SELECT mode)\n\n" );
-    // oled.print( "Press clickwheel\n" );
-    // oled.print( "when ready" );
-    // oled.show( );
     oled.showMultiLineSmallText( "Switch to SELECT\n\r(TOWARDS TIP)\n\n\rClick wheel = start", true, true );
 
     Serial.println( "\n\rStep 2: SELECT mode (switch towards tip)" );
@@ -418,119 +476,142 @@ int row = 0;
     Serial.println( "Press the clickwheel when ready\n\r" );
     Serial.flush( );
 
-    // Wait for user confirmation
-    encoderButtonState = IDLE;
-    while ( encoderButtonState != HELD && encoderButtonState != PRESSED ) {
-        if ( oledCalibHotplugPoll( ) ) {
-            oled.showMultiLineSmallText( "Switch to SELECT\n\r(TOWARDS TIP)\n\n\rClick wheel = start", true, true );
-        }
-        delay( 10 );
+    if ( !switchCalibWaitClick( "Switch to SELECT\n\r(TOWARDS TIP)\n\n\rClick wheel = start" ) ) {
+        aborted = true;
+        goto done;
     }
-    delay( 500 );
-    encoderButtonState = IDLE;
-    row = 22;
+    delay( 450 );
+    sel = switchCalibReadPosition( 1, 4, 22 );
 
-    // Take readings in SELECT mode
-    Serial.println( "Taking SELECT mode readings..." );
-    setProbeLEDModeAndSettle( 4 ); // select idle, latched by core1 like at runtime
-    (void)checkProbeCurrent( );    // throwaway read (see MEASURE step)
-    b.clear( 0 );
-    b.print( "Read  ", 0x101010, 0x000000, 0, -1, -1 );
-    for ( int i = 0; i < NUM_READINGS; i++ ) {
-        delay( 200 );
-        
-        float current = checkProbeCurrent( );
-        selectReadings[ i ] = current;
-        Serial.printf( "Reading %d: %.3f mA\n\r", i + 1, current );
+    {
+        float measureAvg = meas.inaMedian;
+        float selectAvg  = sel.inaMedian;
 
-        if ( i % 6 == 0 ) {
-            row++;
+        // Tip sense must agree with the position we asked for. If it doesn't
+        // the user (or the switch) put the probe somewhere else and every
+        // number above describes the wrong position - refuse to save rather
+        // than calibrate a lie. (-1 = the detector skipped, e.g. a button held:
+        // not a contradiction.)
+        bool tipContradicts = ( meas.detA == 1 ) || ( sel.detA == 0 );
+        if ( tipContradicts ) {
+            changeTerminalColor( 196, true );
+            Serial.printf( "\n\rWARNING: the tip sense says the switch was %s during the %s step.\n\r",
+                           meas.detA == 1 ? "in SELECT" : "in MEASURE",
+                           meas.detA == 1 ? "MEASURE" : "SELECT" );
+            Serial.println( "Nothing saved - re-run with the switch where each step asks.\n\r" );
+            changeTerminalColor( -1, true );
+            oled.showMultiLineSmallText( "Switch was in the\n\rwrong position -\n\rnothing saved", true, true );
+            delay( 2500 );
+            goto done;
         }
 
-        b.printRawRow( 0xFF << ( ( 5 - ( i % 6 ) ) ), row, 0x001010, 0x000000 );
-    }
+        // Sanity window: MEASURE historically read ~0 mA, but the probe LED's
+        // idle draw rides on INA1 in the corrected frame and shifts with the LED
+        // wiring (probe_led_on_button_pin boards idle near ~1 mA), so allow up
+        // to 1.4 mA there. What actually matters for detection is SEPARATION -
+        // no usable gap (or values wildly out of range) means a bad/unplugged
+        // probe cable, so fall back to defaults instead of saving garbage.
+        bool badReadings = measureAvg < -0.4f || measureAvg > 1.4f ||
+                           selectAvg < 1.0f || selectAvg > 3.6f ||
+                           ( selectAvg - measureAvg ) < 0.5f;
+        if ( badReadings ) {
+            changeTerminalColor( 196, true ); // Red
+            Serial.printf( "\n\rWARNING: readings out of expected range "
+                           "(measured %.3f / %.3f mA, expected ~0.0 / ~1.8 mA)\n\r",
+                           measureAvg, selectAvg );
+            Serial.println( "Using default thresholds instead - this may mean a bad probe cable!\n\r" );
+            changeTerminalColor( -1, true );
+            oled.showMultiLineSmallText( "Bad readings!\n\rUsing defaults\n\r(check probe cable)", true, true );
+            delay( 2000 );
+            measureAvg = 0.0f;
+            selectAvg = 1.8f;
+        }
 
-    float selectAvg = medianInPlace( selectReadings, NUM_READINGS );
-    Serial.printf( "\nSELECT mode median: %.3f mA\n\n\r", selectAvg );
+        // Clamp the zero-corrected averages to >= 0. In the calibrated frame the
+        // MEASURE-mode current sits at ~0 and INA noise can push the average
+        // slightly negative; clamping keeps the midpoint/threshold math well-behaved.
+        if (measureAvg < 0.0){
+            measureAvg = 0.0;
+        }
+        if (selectAvg < 0.0){
+            selectAvg = 0.0;
+        }
+        // ===== CALCULATE THRESHOLDS =====
+        // Set thresholds with hysteresis in the middle of the two averages
+        float midpoint = ( measureAvg + selectAvg ) / 2.0;
+        float range = fabs( selectAvg - measureAvg );
+        float buffer = range * 0.05; // 5% buffer
 
-    // Sanity window: MEASURE historically read ~0 mA, but the probe LED's
-    // idle draw rides on INA1 in the corrected frame and shifts with the LED
-    // wiring (probe_led_on_button_pin boards idle near ~1 mA), so allow up
-    // to 1.4 mA there. What actually matters for detection is SEPARATION -
-    // no usable gap (or values wildly out of range) means a bad/unplugged
-    // probe cable, so fall back to defaults instead of saving garbage.
-    bool badReadings = measureAvg < -0.4f || measureAvg > 1.4f ||
-                       selectAvg < 1.0f || selectAvg > 3.6f ||
-                       ( selectAvg - measureAvg ) < 0.5f;
-    if ( badReadings ) {
-        changeTerminalColor( 196, true ); // Red
-        Serial.printf( "\n\rWARNING: readings out of expected range "
-                       "(measured %.3f / %.3f mA, expected ~0.0 / ~1.8 mA)\n\r",
-                       measureAvg, selectAvg );
-        Serial.println( "Using default thresholds instead - this may mean a bad probe cable!\n\r" );
-        changeTerminalColor( -1, true );
-        oled.showMultiLineSmallText( "Bad readings!\n\rUsing defaults\n\r(check probe cable)", true, true );
+        // Ensure MEASURE mode is always the lower value
+        float lowerAvg = min( measureAvg, selectAvg );
+        float higherAvg = max( measureAvg, selectAvg );
+
+        // Set thresholds with hysteresis
+        jumperlessConfig.calibration.probe_switch_threshold_low = midpoint - buffer;
+        jumperlessConfig.calibration.probe_switch_threshold_high = midpoint + buffer;
+        // SELECT ceiling for the agreement classifier: anything above the
+        // select signature by more than the whole measure/select gap (at
+        // least 1 mA) is a touch loading the buffer, not the switch.
+        jumperlessConfig.calibration.probe_switch_select_max_ma =
+            higherAvg + ( range > 1.0f ? range : 1.0f );
+
+        // GPIO-feed numbers. Unloaded tip in MEASURE seeds the droop model's
+        // V0 (only when the tip really was unloaded: sanity band); the two
+        // blink percentages must straddle the hold threshold - if they do
+        // but the margin is thin, or they don't, put the threshold at their
+        // midpoint so the detector is calibrated to THIS probe.
+        if ( meas.gpioOk && meas.adc7Median >= 3.0f && meas.adc7Median <= 3.6f ) {
+            jumperlessConfig.calibration.probe_droop_v0 = meas.adc7Median;
+        }
+        if ( meas.blinkPct >= 0 && sel.blinkPct >= 0 && sel.blinkPct > meas.blinkPct + 20 ) {
+            jumperlessConfig.calibration.probe_switch_blink_hold_pct =
+                ( meas.blinkPct + sel.blinkPct ) / 2;
+        }
+
+        Serial.println( "\n\r=== Calibration Results ===" );
+        Serial.printf( "MEASURE mode median: %.3f mA   (tip %s)\n\r", lowerAvg,
+                       meas.detA == 0 ? "H ok" : "-" );
+        Serial.printf( "SELECT mode median:  %.3f mA   (tip %s)\n\r", higherAvg,
+                       sel.detA == 1 ? "L ok" : "-" );
+        Serial.printf( "Midpoint: %.3f mA\n\r", midpoint );
+        Serial.printf( "Range: %.3f mA\n\r", range );
+        Serial.printf( "\nLow threshold:  %.3f mA (switch to MEASURE)\n\r",
+                       jumperlessConfig.calibration.probe_switch_threshold_low );
+        Serial.printf( "High threshold: %.3f mA (switch to SELECT)\n\r",
+                       jumperlessConfig.calibration.probe_switch_threshold_high );
+        Serial.printf( "Select ceiling: %.3f mA (above = loaded by a touch)\n\r",
+                       jumperlessConfig.calibration.probe_switch_select_max_ma );
+        if ( meas.gpioOk || sel.gpioOk ) {
+            Serial.printf( "GPIO feed: tip %.3f V unloaded / %.3f V select, blink held %d%% / %d%% -> hold threshold %d%%\n\r",
+                           meas.adc7Median, sel.adc7Median, meas.blinkPct, sel.blinkPct,
+                           jumperlessConfig.calibration.probe_switch_blink_hold_pct );
+        }
+        Serial.println( "\n\rSaving configuration..." );
+
+        char oledBuffer[ 64 ] = "Calibration Done!\n\n\r";
+        snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "Low:  %.2f mA\n", jumperlessConfig.calibration.probe_switch_threshold_low );
+        snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "High: %.2f mA", jumperlessConfig.calibration.probe_switch_threshold_high );
+        oled.showMultiLineSmallText( oledBuffer, true, true );
+
+        // Show success on breadboard
+        b.clear( );
+        b.print( "Done!", 0x002000, 0x000000, 1, -1, -1 );
+
+        // Back to automatic candidate selection (GPIO reclaims if DAC0 is
+        // claimed) before the config save.
+        infraForceCandidate( "probe_power", -1 );
+        saveConfig( );
         delay( 2000 );
-        measureAvg = 0.0f;
-        selectAvg = 1.8f;
     }
 
-    // Clamp the zero-corrected averages to >= 0. In the calibrated frame the
-    // MEASURE-mode current sits at ~0 and INA noise can push the average
-    // slightly negative; clamping keeps the midpoint/threshold math well-behaved.
-    if (measureAvg < 0.0){
-        measureAvg = 0.0;
-    }
-    if (selectAvg < 0.0){
-        selectAvg = 0.0;
-    }
-    // ===== CALCULATE THRESHOLDS =====
-    // Set thresholds with hysteresis in the middle of the two averages
-    // Add 20% buffer zone on each side to ensure reliable detection
-    float midpoint = ( measureAvg + selectAvg ) / 2.0;
-    float range = fabs( selectAvg - measureAvg );
-    float buffer = range * 0.05; // 5% buffer
-
-    // Ensure MEASURE mode is always the lower value
-    float lowerAvg = min( measureAvg, selectAvg );
-    float higherAvg = max( measureAvg, selectAvg );
-
-    // Set thresholds with hysteresis
-    jumperlessConfig.calibration.probe_switch_threshold_low = midpoint - buffer;
-    jumperlessConfig.calibration.probe_switch_threshold_high = midpoint + buffer;
-
-    Serial.println( "\n\r=== Calibration Results ===" );
-    Serial.printf( "MEASURE mode median: %.3f mA\n\r", lowerAvg );
-    Serial.printf( "SELECT mode median:  %.3f mA\n\r", higherAvg );
-    Serial.printf( "Midpoint: %.3f mA\n\r", midpoint );
-    Serial.printf( "Range: %.3f mA\n\r", range );
-    Serial.printf( "\nLow threshold:  %.3f mA (switch to MEASURE)\n\r",
-                   jumperlessConfig.calibration.probe_switch_threshold_low );
-    Serial.printf( "High threshold: %.3f mA (switch to SELECT)\n\r",
-                   jumperlessConfig.calibration.probe_switch_threshold_high );
-    Serial.println( "\n\rSaving configuration..." );
-
-    // Display results on OLED
-//    oled.clear( );
-//    oled.setTextSize( 1 );
-    // oled.print( "Calibration Done!\n\n" );
-   // oled.showMultiLineSmallText( "Calibration Done!\n\rLow:  %.2f mA\n\rHigh: %.2f mA", true, true );
-    char oledBuffer[ 64 ] = "Calibration Done!\n\n\r";
-    snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "Low:  %.2f mA\n", jumperlessConfig.calibration.probe_switch_threshold_low );
-    snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "High: %.2f mA", jumperlessConfig.calibration.probe_switch_threshold_high );
-    oled.showMultiLineSmallText( oledBuffer, true, true );
-
-    // Show success on breadboard
-    b.clear( );
-    b.print( "Done!", 0x002000, 0x000000, 1, -1, -1 );
-
-    // Back to automatic candidate selection (GPIO reclaims if DAC0 is
-    // claimed) before the config save.
+done:
+    // Every exit passes here: never leave the feed pinned.
     infraForceCandidate( "probe_power", -1 );
-
-    saveConfig( );
-    delay( 2000 );
-
+    if ( aborted ) {
+        Serial.println( "\n\rSwitch calibration aborted - nothing saved." );
+        oled.showMultiLineSmallText( "Calibration\n\raborted", true, true );
+        delay( 800 );
+    }
     leaveApp( );
 }
 

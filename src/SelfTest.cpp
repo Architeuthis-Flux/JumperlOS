@@ -453,7 +453,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // version took ONE reading with the LED in whatever state the last
     // animation left it - judged against thresholds calibrated with a
     // latched LED. That mismatch was the main source of flaky verdicts.)
-    extern void setProbeLEDModeAndSettle( int mode ); // Apps.cpp
+    extern bool setProbeLEDModeAndSettle( int mode ); // Apps.cpp
     Serial.println( "  step 4/5: probe power path (routable buffer -> cable -> LED):" );
     // This step measures the DAC0 -> INA1 -> buffer -> cable -> LED current
     // signature, so pin the probe-power function to its DAC0 candidate
@@ -468,6 +468,10 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // poller's drive edges ride the same net INA1 measures behind, so park
     // it across each sampling window.
     setProbeLEDModeAndSettle( 10 ); // off
+    // Detector A alongside the current signature: the two must tell the same
+    // story (INA1 sees the LED chip only in SELECT; the tip sense reads LOW
+    // only in SELECT). Read before parking the sampler (it skips otherwise).
+    int tipPosCable = probeSwitchTipSenseNow( );
     probeButtonPausePollingFromCore0( );
     float curOff = probeCurrentMedian( 9 );
     probeButtonResumePollingFromCore0( );
@@ -484,17 +488,39 @@ static void runProbeCableTest( SelfTestReport& r ) {
     probeButtonResumePollingFromCore0( );
     float ledDelta = curOn - curOff;
 
-    // Fresh classification from the medians - NOT checkSwitchPosition(),
-    // whose internal 500ms gate usually hands back a stale cached position.
-    bool selectPos = ( curOff > jumperlessConfig.calibration.probe_switch_threshold_high ) ||
-                     ( ledDelta >= 0.8f );
+    // Fresh classification - NOT checkSwitchPosition(), whose internal 500ms
+    // gate usually hands back a stale cached position.
+    //
+    // The TIP SENSE decides when it has an opinion (2026-08-16). The old rule
+    // was "corrected current above the SELECT threshold, or an LED delta",
+    // and the current half of it is not a position at all: with the feed on
+    // DAC0 the buffer + tip draw ~1.8 mA through INA1's shunt in MEASURE too,
+    // so any board whose probe_current_zero is a real measured offset (~0.5
+    // mA) instead of the 2.0 default lands above the threshold, is called
+    // SELECT, and then FAILS on an LED delta that only exists in SELECT.
+    // Hardware-observed on this board the moment the zero was measured
+    // properly: off 1.77 mA, tip sense H, dLED 0.00 -> probe_cable FAIL on a
+    // perfectly good cable. The delta still promotes to SELECT on its own (a
+    // real LED step can only happen there), and the current rule survives
+    // only as the last resort when the tip sense skipped.
     bool dataPathProven = ( ledDelta >= 0.8f );
+    bool selectPos;
+    if ( dataPathProven ) {
+        selectPos = true;                 // LED current stepped: SELECT, whatever else says
+    } else if ( tipPosCable >= 0 ) {
+        selectPos = ( tipPosCable == 1 ); // tip sense knows
+    } else {
+        selectPos = ( curOff > jumperlessConfig.calibration.probe_switch_threshold_high );
+    }
 
-    Serial.printf( "    LED off: %.3f mA, LED white: %.3f mA, delta: %.3f mA (zero offset %.3f)\n\r",
+    Serial.printf( "    LED off: %.3f mA, LED white: %.3f mA, delta: %.3f mA (zero offset %.3f)  tip sense: %s\n\r",
                    (double)curOff, (double)curOn, (double)ledDelta,
-                   (double)jumperlessConfig.calibration.probe_current_zero );
-    Serial.printf( "    inferred switch position: %s%s\n\r",
+                   (double)jumperlessConfig.calibration.probe_current_zero,
+                   tipPosCable == 0 ? "H (measure)" : ( tipPosCable == 1 ? "L (select)" : "-" ) );
+    Serial.printf( "    inferred switch position: %s (from %s)%s\n\r",
                    selectPos ? "select" : "measure",
+                   dataPathProven ? "the LED current step"
+                                  : ( tipPosCable >= 0 ? "the tip sense" : "the current threshold" ),
                    dataPathProven ? " (LED data path proven end-to-end)"
                    : ( selectPos ? " (NO LED current step: data conductor broken?)"
                                  : " (delta not measurable in measure position)" ) );
@@ -546,9 +572,10 @@ static void runProbeCableTest( SelfTestReport& r ) {
     }
 
     snprintf( r.detail[ SELFTEST_PROBE_CABLE ], sizeof( r.detail[ 0 ] ),
-              "short:%d/2+%d/2%s float:%s off:%.2fmA dLED:%.2fmA sw:%s tip:%d",
+              "short:%d/2+%d/2%s float:%s off:%.2fmA dLED:%.2fmA sw:%s(%s) tip:%d",
               fwd, rev, shortWaived ? "(waived)" : "", floats ? "ok" : "stuck",
-              (double)curOff, (double)ledDelta, selectPos ? "sel" : "meas", tipRaw );
+              (double)curOff, (double)ledDelta, selectPos ? "sel" : "meas",
+              dataPathProven ? "led" : ( tipPosCable >= 0 ? "tip" : "cur" ), tipRaw );
     r.status[ SELFTEST_PROBE_CABLE ] =
         ( ( shortOk || shortWaived ) && floats && curOk && tipOk && dataOk )
             ? SELFTEST_PASS
@@ -734,8 +761,15 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     // Latch the LED off BEFORE parking the handler so the reference and servo
     // see the same unloaded buffer that measure mode has at runtime (there the
     // LED is fed from PROBE_PIN instead).
-    extern void setProbeLEDModeAndSettle( int mode ); // Apps.cpp
+    extern bool setProbeLEDModeAndSettle( int mode ); // Apps.cpp
     setProbeLEDModeAndSettle( 10 ); // off
+
+    // Detector A (tip sense) BEFORE the sampler is parked below (it skips
+    // while checkingButton is up). The position does not change during this
+    // test; it decides whether the GPIO droop phase's V0 is a genuinely
+    // unloaded tip (MEASURE) or the LED chip's quiescent draw sitting on
+    // BUFFER_IN (SELECT), and it goes into the summary.
+    int tipPosAtStart = probeSwitchTipSenseNow( );
 
     // The probe button PIO poller periodically drives the shared cable line,
     // which couples onto the tip node at the millivolt scale this servo
@@ -973,8 +1007,13 @@ static void runTipVoltageTest( SelfTestReport& r ) {
                           (double)droopOhmsMeasured );
             if ( droopOhmsMeasured >= 10.0f && droopOhmsMeasured <= 400.0f ) {
                 jumperlessConfig.calibration.probe_droop_ohms = droopOhmsMeasured;
-                if ( v0 >= 3.0f && v0 <= 3.6f ) {
+                // V0 is the UNLOADED tip: only trust it when the tip sense
+                // said MEASURE (or could not tell) - in SELECT the LED chip
+                // sits on BUFFER_IN and this reads its idle level instead.
+                if ( v0 >= 3.0f && v0 <= 3.6f && tipPosAtStart != 1 ) {
                     jumperlessConfig.calibration.probe_droop_v0 = v0;
+                } else if ( tipPosAtStart == 1 ) {
+                    Serial.println( "  (tip sense: SELECT - V0 not stored, the tip was not unloaded)" );
                 }
             } else {
                 Serial.println( "  droop R out of sanity band - keeping computed fallback" );
@@ -993,10 +1032,11 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     showProbeLEDs = ( switchPosition == 0 ) ? 3 : 4; // back to runtime color
 
     snprintf( r.detail[ SELFTEST_TIP_VOLTAGE ], sizeof( r.detail[ 0 ] ),
-              "ref:%.3fV tip:%.3fV err:%+.1fmV spr:%.1fmV dac0set:%.3fV droopR:%.0f%s",
+              "ref:%.3fV tip:%.3fV err:%+.1fmV spr:%.1fmV dac0set:%.3fV droopR:%.0f sw:%s%s",
               (double)vTarget, (double)v, (double)( finalErr * 1000.0f ),
               (double)( finalSpread * 1000.0f ), (double)set,
               (double)droopOhmsMeasured,
+              tipPosAtStart == 0 ? "meas" : ( tipPosAtStart == 1 ? "sel" : "?" ),
               done ? "" : " no-converge" );
     if ( done ) {
         // Do NOT touch probe_max here. An earlier version rescaled it by the

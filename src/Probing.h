@@ -533,6 +533,15 @@ void probeMapRange(int* mapMin, int* mapMax);
 void probeGpioPowerHwClaim(int gpioDefIdx);
 void probeGpioPowerHwRelease(int gpioDefIdx);
 
+// The two switch-position detectors, exposed for the calibration app and the
+// self test (both live in Probing.cpp with the classifier). Return a POSITION:
+// 0 = MEASURE, 1 = SELECT, -1 = no opinion.
+//   probeSwitchTipSenseNow(): detector A (PROBE_PIN drive-low/release/read).
+//   probeSwitchFeedBlinkNow(pct): detector B for a live GPIO feed (-1 when the
+//     feed is DAC0 / no feed / ADC busy / touch); *pct = held %.
+int probeSwitchTipSenseNow(void);
+int probeSwitchFeedBlinkNow(int* pct);
+
 inline float checkProbeCurrent(void) {
     return Probing::getInstance().checkProbeCurrent();
 }

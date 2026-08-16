@@ -5606,6 +5606,11 @@ float Probing::probeCurrentMedian( int n ) {
         }
     }
     if ( good == 0 ) {
+        // Calibration / self-test only path, so say why the caller is about
+        // to get a CACHED value: identical "readings" in a self-test summary
+        // have chased people down the wrong hole.
+        Serial.printf( "  (INA1: no valid conversion in %d tries - lastError %d, wavegen %s - using cached current)\n\r",
+                       n, INA1.getLastError( ), wavegen.isRunning( ) ? "RUNNING" : "idle" );
         return checkProbeCurrent( );
     }
     return medianInPlace( samples, good ) - jumperlessConfig.calibration.probe_current_zero;
@@ -6080,6 +6085,9 @@ static int probeSwitchFeedBlink( int* pctOut ) {
     return ( pct >= jumperlessConfig.calibration.probe_switch_blink_hold_pct ) ? 1 : 0;
 #endif
 }
+
+int probeSwitchTipSenseNow( void ) { return probeSwitchTipSense( ); }
+int probeSwitchFeedBlinkNow( int* pct ) { return probeSwitchFeedBlink( pct ); }
 
 // ---------------------------------------------------------------------------
 // Fast position tracking for probeMode. probeMode() is a blocking loop that
