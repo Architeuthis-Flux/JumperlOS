@@ -142,26 +142,68 @@ out of the pool the same way a user claims any other resource.
 
 ## Switch sensing (`Probing::checkSwitchPosition`)
 
-Dispatch follows the **live feed source**, not a config flag:
+Two detectors run on every check (~500 ms) and are always logged under
+`debug.probe_switch_stats`; `debug.probe_switch_agree` selects who DECIDES (2026-08-16):
 
-| Feed | Sensing method |
-| --- | --- |
-| DAC0 | INA1 shunt current (the only feed it can see) |
-| a routable GPIO | ADC7 voltage droop (see the dead-branch note below) |
-| none (yielded, or every candidate claimed) | hold the last known position — no current signature exists, so do not guess |
+| Detector | What it reads | MEASURE | SELECT |
+| --- | --- | --- | --- |
+| **A** tip sense (`probeSwitchTipSense`) | PROBE_PIN: 2 mA drive, LOW 2 µs, release to input (no pulls - E9), read after 3 µs, restore OUTPUT-HIGH 8 mA. ~6 µs, no ADC/I2C. | **H** (pin sits on the probe LED supply + its 100 µF C1) | **L** (pin is the floating needle / a pad ladder that drains it) |
+| **B** per feed | DAC0 feed: INA1 zero-corrected mA vs the hysteresis pair, plus `probe_switch_select_max_ma` (0 = off) above which the buffer is LOADED (a touch), never SELECT. GPIO feed: `probeSwitchFeedBlink` - ADC7 (in VOLTS - it sits behind the ±8 V scale/offset network, so 0 V reads mid-scale) before and during a 20 µs feed-pin LOW; held % vs `probe_switch_blink_hold_pct` (50). Skipped while a touch is in progress, the ADC is busy (`adcTryAcquire`, never wait with the tip dark) or the feed is dark. | INA ~0 mA / blink ~0 % (nothing else drives BUFFER_IN) | INA ~1.4 mA / blink ~98 % (C1 sits on BUFFER_IN through the cable; the predicted 78 % divider was wrong - the cable adds ~nothing) |
 
-The DAC0-swap fallback that used to sit in the GPIO branch was unreachable (its trigger —
-`gpioDroopCurrentEstimate()` failing — could only fire with no GPIO claim, i.e. when the
+`probe_switch_agree = 0` (default): the legacy classifier decides (verbatim: INA thresholds under
+DAC0, ADC7 droop-mA under GPIO), the agreement verdict is printed as `shadow:M/S/hold`.
+`= 1`: agreement decides - A == B sets (fires straight from -1 at boot, no LED needed), A ≠ B
+holds the last position, four disagreements in a row adopt A (A is right in every persistent
+case - dark LED, no probe, weak GPIO droop, measure-position load; B is only right in the
+transient select + hot-net touch), the pad-sense veto on a B "SELECT" and the dark-LED LED
+re-send stay, and `checkSwitchPositionFast()` (A only, 250 ms, two agreeing reads) tracks
+the position inside `probeMode()`'s blocking loop (ProbeSwitch is NORMAL, so the full
+classifier never runs there - the position used to freeze for up to 80 s).
+
+Stats line: `[switch] ina 1.40 mA thr lo/hi 0.90/1.20 A:L B:S agree*:S -> SELECT` (`droop … ADC7 … V0 …`
+under a GPIO feed, `B:S(98%)` carries the blink %; `shadow:` when legacy decides).
+
+**Measured 2026-08-16 (this board, probe attached, both feeds, both positions, tip free):**
+A read H in MEASURE and L in SELECT under both feeds; B read M/S correctly under both
+(DAC0: 0.00 / 1.40-1.46 mA; GPIO: 0 % / 97-99 %, droop 0.00 / 1.49-1.56 mA at the
+calibrated 183 Ω); every physical flip observed produced `shadow:` agreeing with the legacy
+verdict on the same check. Under agree mode: boot classified SELECT on the first check after
+`machine.reset()`; the dark-LED trick (`dac_set(0,0.5)` relocates the feed to GPIO, LED goes
+dark, `dac_set(0,3.33)` brings it back) never moved the position. Occasional `B:-` (blink skipped:
+ADC busy or a touch) correctly holds.
+
+**Promotion checklist (hands needed - not done):** with `probe_switch_stats = 1` and both orders of
+`dacs.probe_power_source`, in each position touch: nothing / a low pad / a top pad / a GND row /
+a 3.3 V row / a 5 V row / connect held / remove held / no probe plugged. Expect A: MEASURE→H always,
+SELECT→L except a driven-high touch; B: LOADED (`L`) or `-` on the heavy touches, never a wrong
+`S`; `shadow` never wrong. Then `` `[debug] probe_switch_agree = 1 `` and re-run the flip soak.
+Also set `probe_switch_select_max_ma` from the Switch Calib app (select median + max(1 mA, range)).
+Behavior change to release-note when promoted: a board with no probe attached settles at SELECT
+(A tiebreak) instead of MEASURE.
+
+The droop model (`gpioDroopCurrentEstimate`) is now RAM-only: it no longer writes
+`probe_droop_v0` back to config from the hot path (that was the config-save-storm source);
+`probe_droop_v0` is set only by the calibration app / self test. `infraProbeDroopOhms()`
+falls back to the empirical 30 Ω while the legacy classifier decides (it is a reverse fit that
+branch is tuned to) and to the physical `probe_pad_ohms + xp × crosspoint_resistance` under
+agree mode (nobody divides by R for a verdict there; droop is a statistic).
+
+The DAC0-swap fallback that used to sit in the GPIO branch was unreachable (its trigger -
+`gpioDroopCurrentEstimate()` failing - could only fire with no GPIO claim, i.e. when the
 branch wasn't taken) and is **deleted** (2026-08-16), along with the dead locals, the
 unconditional `checkingButton = 0` and the per-check `Serial.flush()`.
 
-The droop model treats the GPIO pad impedance plus crosspoint resistance as a free shunt:
-`I = (V0 - ADC7) / R`. `probe_droop_ohms` is measured per board by the self test
-(~167-177 ohm on this unit); the fallback when uncalibrated is an empirical 30 ohm.
-
 `debug.probe_power_gpio` is **deprecated and ignored**. It is still parsed and written so
 old config files round-trip, but it has no behavioral effect and must not regain one —
-setting it used to force-*enable* probe power as a side effect.
+setting it used to force-*enable* probe power as a side effect. `dacs.probe_power_source`
+is the deliberate replacement.
+
+`resetConfigToDefaults()` now preserves the WHOLE `calibration` and `hardware` structs by
+copy (the hand list omitted `probe_droop_ohms/v0`, `probe_pad_ohms`, `crosspoint_resistance`,
+the hysteresis pair, `probe_max/min_measure`, `use_pio_probe_button`,
+`probe_led_on_button_pin` - the "probe_droop_ohms reverts to 0.0" open item). HIL
+`test_config.py` plants a sentinel, runs `` `reset ``, asserts it survives and puts every
+non-calibration key it changed back.
 
 ---
 
@@ -283,12 +325,9 @@ spaces-*before*-CR idiom, which pads rightward and never clears. Either route it
 all, so a voltage pinned before the switch to oscope mode sits there looking live.
 `clearLiveSerialLine()` on oscope entry would do it.
 
-**`probe_droop_ohms` reverts.** The self test measures it (167 ohm, and the run summary
-confirms `droopR:167`) and `saveConfig()` persists it, yet `/config.txt` later reads
-`probe_droop_ohms = 0.0` with `probe_droop_v0` back at the validator's 3.35 fallback,
-while neighbouring calibration keys keep their values. Something zeroes both droop keys
-after the save. GPIO-feed sensing falls back to the computed 30 ohm estimate meanwhile, so
-it is degraded, not broken. (A separate session was started on this.)
+**(Closed 2026-08-16) `probe_droop_ohms` reverts.** Root cause: `resetConfigToDefaults()`
+(the `` `reset `` / menu reset paths) restored calibration from a hand list that omitted
+both droop keys (and five others). It copies the struct now; HIL-covered.
 
 **`connectArduino` / `disconnectArduino` fight `serial_1`.** They add and remove the exact
 UART pairs the infra function owns. With `lock_connection = 1` the disconnect does not

@@ -113,6 +113,11 @@ extern bool gpioPWMEnabled[10];
 
 extern volatile bool readingGPIO;
 extern volatile bool readingADC;
+// Non-waiting ADC lock for callers that hold a hardware side effect across
+// the read (see the definitions): adcTryAcquire() -> readAdcHeld() -> adcRelease().
+bool adcTryAcquire(void);
+void adcRelease(void);
+int readAdcHeld(int channel, int samples);
 extern volatile bool usingI2C;
 
 struct CurrentSenseState {

@@ -295,13 +295,15 @@ public:
     int debugProbing = 0;
     
     volatile int showingProbeLEDs = 0;
-int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
+    // volatile: written by the switch classifier on core 0, read by core 1's
+    // probeLEDhandler / LED code and by every probe path (2026-08-16).
+    volatile int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
     int lastSwitchPositions[3] = {0, 0, 0};
     
     int probeRowMapByPad[108];
     int probeRowMap[108];
     
-    int lastProbeLEDs = 0;
+    volatile int lastProbeLEDs = 0;   // written by core 1's probeLEDhandler, read on core 0
     int lastProbeButton = 0;
     
     volatile int inPadMenu = 0;
@@ -355,6 +357,9 @@ int switchPosition = -1; // -1 = unknown, 0 = measure, 1 = select
     int readFloatingOrState(int pin = 0, int row = 0);
     
     int checkSwitchPosition(void);
+    // Detector-A-only position tracking for probeMode's blocking loop
+    // (agree mode only; see the definition).
+    void checkSwitchPositionFast(void);
     float checkProbeCurrentRaw(void);   // ABSOLUTE INA1 current, NO probe_current_zero subtraction (internal building block / diagnostics)
     float checkProbeCurrent(void);      // zero-corrected current (raw - probe_current_zero); used for switch detection, calibration, and display
     float checkProbeCurrentZero(void);
@@ -448,7 +453,7 @@ extern int& probeHighlight;
 extern volatile int& removeFade;
 extern int& debugProbing;
 extern volatile int& showingProbeLEDs;
-extern int& switchPosition;
+extern volatile int& switchPosition;
 
 // Encoder cursor override for LED display functions
 extern volatile int globalEncoderCursorNode;      // -1 = hidden, else breadboard node
@@ -577,7 +582,7 @@ inline void startProbe(long probeSpeed = 25000) {
 // Additional references for backward compatibility
 extern volatile int& inPadMenu;
 extern volatile int& checkingButton;
-extern int& lastProbeLEDs;
+extern volatile int& lastProbeLEDs;
 
 // Export probe maps for Apps.cpp
 extern int (&probeRowMap)[108];

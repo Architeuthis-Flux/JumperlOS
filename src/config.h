@@ -107,6 +107,22 @@ struct config {
         // (ADC7 droop / DAC swap / INA), estimated current, droop anchor,
         // thresholds, and the resulting position.
         bool probe_switch_stats = false;
+        // Switch-position classifier selection (2026-08-16, experiment gate).
+        //   0 = the legacy classifier decides (INA current thresholds under a
+        //       DAC0 feed, ADC7 droop-mA under a GPIO feed); the new
+        //       detectors below are computed and logged as "shadow" under
+        //       probe_switch_stats but change nothing.
+        //   1 = the agreement classifier decides: detector A (tip-side digital
+        //       sense on PROBE_PIN: MEASURE holds the pin high through the
+        //       probe LED supply cap, SELECT leaves the needle floating) must
+        //       agree with the per-feed detector B (DAC0: INA current with a
+        //       select_max ceiling; GPIO: feed-side blink - ADC7 collapses in
+        //       MEASURE, is held by that same cap in SELECT). Disagreement
+        //       holds the last position; 4 in a row adopt A.
+        // Promote to 1 only after the hands-on matrix (both positions x tip
+        // free / pads / GND / 3.3V / 5V rows / buttons / no probe) shows the
+        // shadow verdict right in every cell.
+        bool probe_switch_agree = false;
         // Print net voltage scan stats once a second: every scanned node's
         // voltage and every routed path's estimated current.
         bool net_voltage_scan = false;
@@ -189,6 +205,19 @@ struct config {
         float probe_switch_threshold_high = 1.2;  // mA - switch to SELECT
         float probe_switch_threshold_low = 0.90;   // mA - switch to MEASURE
         float probe_switch_threshold = 0.40;       // DEPRECATED - kept for backward compatibility
+        // Upper bound of the SELECT current signature under a DAC0 feed (mA,
+        // zero-corrected). Above it the buffer is LOADED - a tip touch on a
+        // low-impedance net in measure position pulls many mA through the
+        // same shunt the select-LED signature rides on - and the classifier
+        // must not read it as SELECT. 0 = disabled (legacy behavior). The
+        // switch calibration app sets it to select_median + max(1 mA, range).
+        float probe_switch_select_max_ma = 0.0f;
+        // GPIO-feed detector: ADC7 during a ~20us feed-side blink as a
+        // percentage of the pre-blink reading. MEASURE collapses to ~0%
+        // (nothing else drives BUFFER_IN); SELECT is held by the probe LED
+        // supply cap through the cable at ~R_feed/(R_feed+R_cable) ~ 78%.
+        // Readings at or above this hold percentage classify SELECT.
+        int probe_switch_blink_hold_pct = 50;
         float measure_mode_output_voltage = 3.33;
         float probe_current_zero = 2.0;
         int minimum_probe_reading = 85;

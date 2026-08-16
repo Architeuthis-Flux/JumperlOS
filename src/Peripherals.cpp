@@ -2688,7 +2688,31 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
         }
         tight_loop_contents( );
     }
-    
+    int adcReading = readAdcHeld( channel, samples );
+    // Release the ADC for other cores
+    __atomic_clear( &readingADC, __ATOMIC_RELEASE );
+    return adcReading;
+}
+
+// Non-waiting acquire of the ADC lock. For callers that must not sit on a
+// hardware side effect while the other core finishes a read (the probe
+// feed-side blink holds the tip's supply LOW while it samples ADC7 - a
+// 100ms wait there would be 100ms of dark tip). Returns false when the ADC
+// is busy or USB audio owns it; on true the caller MUST call adcRelease().
+bool adcTryAcquire( void ) {
+#if USB_AUDIO_ENABLE
+    if ( usbAudioOwnsAdc ) return false;
+#endif
+    return !__atomic_test_and_set( &readingADC, __ATOMIC_ACQUIRE );
+}
+
+void adcRelease( void ) {
+    __atomic_clear( &readingADC, __ATOMIC_RELEASE );
+}
+
+// The conversion loop with the lock ALREADY HELD by the caller (readAdc()
+// wraps it; adcTryAcquire()/adcRelease() callers use it directly).
+int __not_in_flash_func(readAdcHeld)( int channel, int samples ) {
     unsigned long adcReadingAverage = 0;
     // if (channel == 0) { // I have no fucking idea why this works //future me:
     // the op amps were untamed
@@ -2698,7 +2722,6 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
     // }
 
     if ( channel > 8 ) {
-        __atomic_clear( &readingADC, __ATOMIC_RELEASE );  // Release ADC before early return
         return 0;
     }
     unsigned long timeoutTimer = micros( );
@@ -2747,9 +2770,6 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
     // Serial.print("adcReading & 0xFFF0 >> 4: ");
     // Serial.println((adcReading & 0xFFF0) >> 4, DEC);
     // Serial.flush();
-    
-    // Release the ADC for other cores
-    __atomic_clear( &readingADC, __ATOMIC_RELEASE );
     
     return adcReading;
 }

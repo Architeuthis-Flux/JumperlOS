@@ -31,6 +31,8 @@ oled = 0;
 logo_pads = 0;
 arduino = 0;
 usb_mass_storage = 0;
+probe_switch_stats = 0;
+probe_switch_agree = 0;
 
 [routing]
 stack_paths = 2;
@@ -63,6 +65,8 @@ probe_max = 4055;
 probe_min = 25;
 probe_switch_threshold_high = 1.30;
 probe_switch_threshold_low = 1.14;
+probe_switch_select_max_ma = 0.00;
+probe_switch_blink_hold_pct = 50;
 probe_switch_threshold = 0.40;
 measure_mode_output_voltage = 3.27;
 probe_current_zero = 2.41;

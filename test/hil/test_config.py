@@ -163,4 +163,79 @@ if changed:
 print("restored" if changed else "already clean")
 """, timeout=20)
 
+
+
+# --- 4. `reset preserves the WHOLE calibration (and hardware) struct --------
+# resetConfigToDefaults() used to restore calibration from a hand-maintained
+# field list that omitted probe_droop_ohms / probe_droop_v0, probe_pad_ohms,
+# crosspoint_resistance, the hysteresis pair and probe_max/min_measure - so a
+# `reset (or the menu's reset) silently zeroed the self test's droop
+# calibration ("probe_droop_ohms reverts to 0.0" in the handoff). It copies the
+# structs now. Plant a sentinel droop resistance, run `reset, and read it back.
+# Every non-calibration key the reset touched is put back afterwards through
+# the normal `[section] key = value; path, so the board leaves this test with
+# the config it came in with.
+
+def parse_cfg(text):
+    out = {}
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif "=" in line and section:
+            k, v = line.split("=", 1)
+            out[(section, k.strip())] = v.strip().rstrip(";").strip()
+    return out
+
+
+CAL_KEYS = ["probe_droop_ohms", "probe_droop_v0", "probe_pad_ohms",
+            "crosspoint_resistance", "probe_switch_threshold_high",
+            "probe_switch_threshold_low", "probe_max_measure", "probe_min_measure",
+            "measure_mode_output_voltage"]
+snapshot = read_config()
+snap = parse_cfg(snapshot)
+ohms_orig = snap.get(("calibration", "probe_droop_ohms"))
+# A believable but unmistakable sentinel (inside the self test's 10-400 band
+# so nothing clamps it away): if it survives `reset, the struct copy works.
+resp = port1_command("`[calibration] probe_droop_ohms = 123.4", collect_seconds=2)
+time.sleep(1.5)
+planted = parse_cfg(read_config()).get(("calibration", "probe_droop_ohms"))
+check(planted is not None and abs(float(planted) - 123.4) < 0.05,
+      f"sentinel probe_droop_ohms = 123.4 planted ({planted})")
+try:
+    resp = port1_command("`reset", collect_seconds=4)
+    check("reset to defaults" in resp.lower(), "`reset acknowledged")
+    time.sleep(2.5)
+    after = parse_cfg(read_config())
+    got = after.get(("calibration", "probe_droop_ohms"))
+    check(got is not None and abs(float(got) - 123.4) < 0.05,
+          f"probe_droop_ohms survived `reset (got {got})")
+    for k in CAL_KEYS:
+        if k == "probe_droop_ohms":
+            continue
+        check(after.get(("calibration", k)) == snap.get(("calibration", k)),
+              f"calibration.{k} survived `reset ({snap.get(('calibration', k))})")
+    for k in ("generation", "revision", "probe_revision", "probe_led_on_button_pin"):
+        check(after.get(("hardware", k)) == snap.get(("hardware", k)),
+              f"hardware.{k} survived `reset ({snap.get(('hardware', k))})")
+finally:
+    # Put the sentinel's original back first, then every other key `reset
+    # changed (skip [config]/[firmware] version lines the firmware owns).
+    after = parse_cfg(read_config())
+    if ohms_orig is not None:
+        port1_command(f"`[calibration] probe_droop_ohms = {ohms_orig}", collect_seconds=1.5)
+    restored = 0
+    for (sec, key), val in snap.items():
+        if sec == "calibration" or key == "firmware_version":
+            continue
+        if after.get((sec, key)) != val:
+            port1_command(f"`[{sec}] {key} = {val}", collect_seconds=1.5)
+            restored += 1
+    time.sleep(2.5)
+    final = parse_cfg(read_config())
+    diffs = [(sk, v, final.get(sk)) for sk, v in snap.items()
+             if sk[1] != "firmware_version" and final.get(sk) != v]
+    check(not diffs, f"config restored to its pre-reset contents ({restored} keys re-applied; leftover diffs: {diffs[:4]})")
+
 finish("test_config")

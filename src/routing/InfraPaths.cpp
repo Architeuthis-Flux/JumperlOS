@@ -613,20 +613,38 @@ bool infraProbePowerWanted(void) {
     return s_probePowerOn;
 }
 
+static void pairPathStats(int a, int b, int* paths, int* dups, int* xp);
+
 float infraProbeDroopOhms(void) {
     float calibrated = jumperlessConfig.calibration.probe_droop_ohms;
     if (calibrated > 0.0f) return calibrated;
 
-    // Uncalibrated fallback: the EMPIRICAL 30 ohms measured on real hardware
-    // for the GPIO->L->K feed at 12mA pad drive. An earlier version computed
-    // pad + hops x calibration.crosspoint_resistance (= 165 ohms), which
-    // shrank every droop-current estimate ~5.5x and skewed the switch
-    // detector thresholds and measure-mode V0 tracking - the 40-ohm
-    // crosspoint figure comes from the net scan's small-signal voltage
-    // divider regime and clearly does not transfer to the feed's ~10mA
-    // regime. Until the INA-referenced calibration writes a real value, the
-    // measured constant beats a model with the wrong per-crosspoint number.
-    return 30.0f;
+    // Uncalibrated fallback - two answers, because two consumers:
+    //
+    // LEGACY classifier (debug.probe_switch_agree = 0): the "empirical 30 ohm"
+    // that made the ADC7 droop-mA land on the DAC0-calibrated mA thresholds.
+    // It is a reverse fit, not a resistance (the self test measures ~170-185
+    // ohm on this feed) - ~40 mV of droop reads as ~1.4 mA through it - and
+    // the legacy GPIO branch is tuned to it. Keep it exactly while that
+    // branch decides, or SELECT under a GPIO feed drops below threshold_low.
+    //
+    // AGREEMENT classifier (= 1): nobody divides by R for a verdict any more
+    // (the GPIO feed is judged by the feed-side blink, droop is a statistic),
+    // so report the physical estimate: pad + N x crosspoint_resistance, N
+    // counted from the ACTUAL routed feed path (exact - infra pairs are never
+    // duplicated), 4 when it isn't routed yet.
+    if (!jumperlessConfig.debug.probe_switch_agree) return 30.0f;
+    int xp = 4;
+#if !defined(OG_JUMPERLESS)
+    if (s_functions[0].activeCandidate >= 0 && s_functions[0].activePairCount > 0) {
+        int paths, dups, routedXp;
+        pairPathStats(s_functions[0].activePairs[0].a, s_functions[0].activePairs[0].b,
+                      &paths, &dups, &routedXp);
+        if (routedXp > 0) xp = routedXp;
+    }
+#endif
+    return jumperlessConfig.calibration.probe_pad_ohms +
+           (float)xp * jumperlessConfig.calibration.crosspoint_resistance;
 }
 
 // ===========================================================================
@@ -660,16 +678,29 @@ void infraServiceTick(void) {
          globalState.config.gpioPwmEnabled[s_gpioActiveIdx])) {
         infraNudge();
     }
-    // Switch-back for GPIO-first: the feed fell through to DAC0 because every
-    // GPIO was taken, and a MicroPython gpio_release_pin() / PWM stop frees
-    // one WITHOUT a bridge change - nothing rebuilds, so the more-preferred
-    // candidate would sit unused until an unrelated refresh. (DAC0-first has
-    // no such gap: DAC0 frees via a disconnect or a dac_set release-nudge,
-    // both of which rebuild.) Hardware-observed on the flag's first HIL run.
-    if (infraProbePowerGpioFirst() && s_forced[0] < 0 &&
-        s_functions[0].activeCandidate == 0 /* DAC0 */) {
-        InfraPair probe[2];
-        if (rpGpio(probe) > 0) infraNudge();
+    // Switch-back safety net: rebuilds are user-action driven, but some
+    // ways a MORE-preferred candidate becomes viable again change no bridge
+    // and fire no nudge - MicroPython gpio_release_pin() / PWM stop under
+    // GPIO-first (hardware-observed on the flag's first HIL run), and under
+    // DAC0-first a dac_set() that brings DAC0 back inside the window when it
+    // had been outside by persisted STATE rather than by the user-claim latch
+    // (booted with dac0 = 0.8 V saved: no latch, so the release-nudge in
+    // setDac0voltage never fires - hardware-observed the same day). So every
+    // ~500 ms: if the walk's FIRST candidate is not the active one and it
+    // resolves + is viable right now, ask for a rebuild. The rebuild's own
+    // evaluation makes the final call; this only makes sure one happens.
+    {
+        InfraFunction& fn = s_functions[0];
+        if (fn.enabled() && s_forced[0] < 0 && fn.activeCandidate >= 0) {
+            int first = fn.order ? fn.order(0) : 0;
+            if (first != fn.activeCandidate && first >= 0 && first < fn.numCandidates) {
+                InfraPair probe[2];
+                if (fn.candidates[first].resolvePairs(probe) > 0 &&
+                    fn.candidates[first].viable()) {
+                    infraNudge();
+                }
+            }
+        }
     }
 #endif
 }

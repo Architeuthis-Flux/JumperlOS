@@ -1298,14 +1298,14 @@ int& probeHighlight = Probing::getInstance( ).probeHighlight;
 volatile int& removeFade = Probing::getInstance( ).removeFade;
 int& debugProbing = Probing::getInstance( ).debugProbing;
 volatile int& showingProbeLEDs = Probing::getInstance( ).showingProbeLEDs;
-int& switchPosition = Probing::getInstance( ).switchPosition;
+volatile int& switchPosition = Probing::getInstance( ).switchPosition;
 int& probePowerDAC = Probing::getInstance( ).probePowerDAC;
 int& showProbeCurrent = Probing::getInstance( ).showProbeCurrent;
 
 // Additional references for global access
 volatile int& inPadMenu = Probing::getInstance( ).inPadMenu;
 volatile int& checkingButton = Probing::getInstance( ).checkingButton;
-int& lastProbeLEDs = Probing::getInstance( ).lastProbeLEDs;
+volatile int& lastProbeLEDs = Probing::getInstance( ).lastProbeLEDs;
 
 // Export probe maps as references
 int ( &probeRowMap )[ 108 ] = Probing::getInstance( ).probeRowMap;
@@ -2424,6 +2424,9 @@ restartProbingNoPrint:
 
         // Keep critical services (like ProbeButton) running during blocking probeMode
         jOS.serviceCritical( );
+        // ...and the switch position (ProbeSwitch is NORMAL, so it is not in
+        // that set): detector-A-only tracking, agree mode only.
+        checkSwitchPositionFast( );
 
         // Hold-end polling. serviceCritical above may have just kicked
         // off (or extended) an undo-toast hold via the double-tap drain.
@@ -5142,8 +5145,9 @@ float Probing::voltageSelect( int fiveOrEight ) {
 }
 
 // Track when LED was last updated to allow current to stabilize
-// Must be declared before checkSwitchPosition() which uses it
-unsigned long lastProbeLEDUpdateTime = 0;
+// Must be declared before checkSwitchPosition() which uses it.
+// volatile: written by core 1's probeLEDhandler, read here on core 0.
+volatile unsigned long lastProbeLEDUpdateTime = 0;
 const unsigned long LED_SETTLE_TIME_MS = 35; // Wait 15ms after LED update before reading current
 
 // Global timestamp for when INA219 probe current was last read
@@ -5159,9 +5163,21 @@ static void reassertGpioBufferDrive( void );
 // Estimates the buffer load current from ADC7 droop with continuous V0
 // normalization (see banner at definition); false when no GPIO is claimed.
 static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V );
+// Detector A: tip-side digital sense on PROBE_PIN (see definition banner).
+// Returns a POSITION in switchPosition's convention: 0 = MEASURE (pin read
+// HIGH), 1 = SELECT (pin read LOW), -1 = skipped (button held / sampler busy).
+static int probeSwitchTipSense( void );
+// Detector B for a GPIO feed: feed-side blink, ADC7 held vs collapsed (see
+// definition banner). Returns 0 = MEASURE (collapsed), 1 = SELECT (held),
+// -1 = skipped (touch in progress / ADC busy / feed dark). *pctOut = the
+// held percentage for the stats line.
+static int probeSwitchFeedBlink( int* pctOut );
 // debug.probe_switch_stats: one line per switch evaluation (source, current,
-// droop anchor, thresholds, resulting position).
-static void printProbeSwitchStats( const char* src, float mA, float adc7V, int pos, bool changed );
+// droop anchor, thresholds, both detectors, shadow verdict, resulting position).
+static void printProbeSwitchStats( const char* src, float mA, float adc7V,
+                                   int detA, int detB, int blinkPct,
+                                   int shadow, bool agreeMode,
+                                   int pos, bool changed );
 
 int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 
@@ -5283,110 +5299,163 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
         current_mA = checkProbeCurrent( );
     }
 
-    // HYSTERESIS LOGIC to prevent oscillation:
-    // Use different thresholds depending on current state to create a "dead zone"
+    // ------------------------------------------------------------------
+    // Two detectors, evaluated on every check and always logged:
     //
-    // State transitions:
-    //   MEASURE -> SELECT: only when current > HIGH threshold (0.90 mA)
-    //   SELECT -> MEASURE: only when current < LOW threshold (0.70 mA)
+    //   A  tip-side digital sense on PROBE_PIN. In MEASURE the pin powers
+    //      the probe's LED chain + its 100uF supply cap, so a 2us drive-low
+    //      then release reads back HIGH; in SELECT the pin is the needle -
+    //      floating, or on a pad ladder that drains it - and reads LOW.
+    //      No ADC, no I2C, ~6us, and it does not care what the LEDs draw.
+    //   B  the per-feed load signature. DAC0 feed: INA1 zero-corrected mA
+    //      with the calibrated hysteresis pair plus a select_max ceiling
+    //      (above it the buffer is LOADED by a tip touch, never SELECT).
+    //      GPIO feed: a ~20us feed-side blink - ADC7 collapses in MEASURE
+    //      (nothing else drives BUFFER_IN) and is held by the LED supply
+    //      cap through the cable in SELECT.
     //
-    // This prevents oscillation because changing the LED mode affects current draw,
-    // but the new current will still be within the hysteresis band so no state change occurs.
+    // debug.probe_switch_agree selects who DECIDES: the legacy classifier
+    // (B only, current thresholds, kept verbatim below) or the agreement
+    // classifier (A == B sets, disagreement holds, four disagreements in a
+    // row adopt A - A is right in every persistent case: dark LED, no
+    // probe, weak GPIO droop, measure-position load; B is only right in
+    // the transient select + hot-net touch). Until promoted, the agreement
+    // verdict is computed as a SHADOW and printed next to the legacy one.
+    // ------------------------------------------------------------------
+    // All verdicts below use switchPosition's convention: 0 = MEASURE,
+    // 1 = SELECT; -1 = no opinion; B may also say 2 = LOADED.
+    const bool agreeMode = jumperlessConfig.debug.probe_switch_agree;
+    const int detA = probeSwitchTipSense( );
 
-    // Serial.print("Switch position (before): ");
-    // Serial.print(switchPosition);
-    // Serial.print("  Current: ");
-    // Serial.println(current_mA);
-    bool changed = false;
-    if ( switchPosition == -1 ) {
-        // Boot / unknown: nothing to be relative to, so classify from the
-        // ABSOLUTE signatures - MEASURE drives the high-impedance tip
-        // (~0 mA), SELECT powers the probe LEDs (~1-1.5 mA). Before this
-        // branch existed the classifier only had transition rules, so a
-        // board booted in SELECT sat at "unknown" until the user flipped
-        // the switch through MEASURE and back: the high-current side had
-        // no rule that could fire from -1.
-        //
-        // A low reading alone can't be trusted yet: if the LED chip is dark
-        // (boot never sent it a frame, or it reset), SELECT also reads
-        // ~0 mA. So on the first low reading, light the select-idle pattern
-        // and read again next check - current appearing means SELECT with a
-        // dark LED; still-low means genuinely MEASURE. In the hysteresis
-        // dead band, stay unknown and sample again.
-        if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
-            int padSense = readAdc( 5, 4 ); // same touch veto as MEASURE->SELECT
-            if ( padSense < jumperlessConfig.calibration.minimum_probe_reading ) {
-                switchPosition = 1;
-                changed = true;
-            }
-            s_pendingMeasureFlip = false;
-        } else if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
-            if ( !s_pendingMeasureFlip ) {
-                s_pendingMeasureFlip = true;
-                if ( showProbeLEDs == 0 ) {
-                    showProbeLEDs = 4;
-                }
-            } else {
-                s_pendingMeasureFlip = false;
-                switchPosition = 0;
-                changed = true;
-            }
-        }
-    } else if ( switchPosition == 0 ) {
-        s_pendingMeasureFlip = false;  // only meaningful while in SELECT
-        // Currently in MEASURE mode - only switch to SELECT if current exceeds HIGH threshold
-        if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
-            // Touch veto: the buffer is POWERED from the BUFFER_IN net, so a
-            // tip touch in measure position (pad ladder + whatever the
-            // decoded row routes to) loads the same rail the select-LED
-            // signature rides on - by magnitude alone it looks exactly like
-            // the switch flipping to SELECT. The pad-sense ADC knows the
-            // difference: while the tip is parked on a pad, the elevated
-            // current is touch load, not the LED, so hold MEASURE. A real
-            // flip just waits until the tip lifts. (No gate needed on the
-            // select->measure side: a touch only ADDS current, which can't
-            // fake the below-low-threshold condition.)
-            int padSense = readAdc( 5, 4 );
-            if ( padSense >= jumperlessConfig.calibration.minimum_probe_reading ) {
-                // tip is on a pad - don't classify from a loaded rail
-            } else {
-                switchPosition = 1;
-                changed = true;
-            }
-        }
+    int detB = -1;
+    int blinkPct = -1;
+    if ( gpioPowerNode > 0 ) {
+        detB = probeSwitchFeedBlink( &blinkPct );
     } else {
-        // Currently in SELECT mode - only switch to MEASURE if current falls below LOW threshold
-        if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
-            // A below-low reading here is ambiguous: a genuine flip to
-            // MEASURE, or the probe's LED chip having reset dark (a rail
-            // glitch when the buffer feed relocates, a cable wiggle) - the
-            // select-idle LED's draw IS the signature this classifier reads,
-            // and a dark LED looks exactly like measure. Caught on hardware:
-            // dac_set(0, 0.5) relocated the feed, the LED went dark ~2s later,
-            // and the position flipped to MEASURE with the switch untouched.
-            // So: re-send the LED pattern and require the low reading to
-            // survive the NEXT check too. A reset chip re-lights and the flip
-            // is discarded; a real flip just takes one extra check (~500ms).
-            if ( !s_pendingMeasureFlip ) {
-                s_pendingMeasureFlip = true;
-                if ( showProbeLEDs == 0 ) {
-                    showProbeLEDs = ( lastProbeLEDs == 7 ) ? 7 : 4;
-                }
-            } else {
-                s_pendingMeasureFlip = false;
-                switchPosition = 0;
-                changed = true;
-            }
-        } else {
-            if ( s_pendingMeasureFlip && jumperlessConfig.debug.probe_switch_stats ) {
-                Serial.println( "[switch] measure flip discarded - LED re-lit (chip had reset)" );
-            }
-            s_pendingMeasureFlip = false;
+        float selMax = jumperlessConfig.calibration.probe_switch_select_max_ma;
+        if ( selMax > 0.0f && current_mA > selMax ) {
+            detB = 2; // LOADED: a touch, not the switch
+        } else if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+            detB = 1; // SELECT signature
+        } else if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+            detB = 0; // MEASURE signature
+        }
+    }
+    // Touch veto for a B-driven claim of SELECT: while the tip sits on a
+    // pad, the elevated load is the touch, not the LED chain. (Applies to
+    // both feeds - a held pad in measure position loads either.)
+    if ( detB == 1 ) {
+        int padSense = readAdc( 5, 4 );
+        if ( padSense >= jumperlessConfig.calibration.minimum_probe_reading ) {
+            detB = -1;
         }
     }
 
-    // Serial.print("Switch position (after): ");
-    // Serial.println(switchPosition);
+    // Shadow / agreement verdict: 0 M, 1 S, -1 hold.
+    static int s_disagreeRun = 0;
+    int shadow = -1;
+    if ( detA >= 0 && detB >= 0 && detB <= 1 && detA == detB ) {
+        shadow = detA;
+        s_disagreeRun = 0;
+    } else if ( detA >= 0 || detB >= 0 ) {
+        s_disagreeRun++;
+        if ( s_disagreeRun >= 4 && detA >= 0 ) {
+            shadow = detA;
+        }
+    }
+
+    bool changed = false;
+    if ( agreeMode ) {
+        // -------- agreement classifier decides --------
+        // Dark-LED heal: SELECT position, INA/blink says MEASURE, tip says
+        // SELECT - the LED chip may have reset dark. Re-send the idle pattern
+        // once per disagreement run so B can recover; the position holds.
+        if ( switchPosition == 1 && detA == 1 && detB == 0 && s_disagreeRun == 1 &&
+             showProbeLEDs == 0 ) {
+            showProbeLEDs = ( lastProbeLEDs == 7 ) ? 7 : 4;
+        }
+        if ( shadow >= 0 && shadow != switchPosition ) {
+            switchPosition = shadow;
+            changed = true;
+        }
+        s_pendingMeasureFlip = false;
+    } else {
+        // -------- legacy classifier decides (B only) --------
+        // HYSTERESIS LOGIC to prevent oscillation:
+        //   MEASURE -> SELECT: only when current > HIGH threshold
+        //   SELECT -> MEASURE: only when current < LOW threshold
+        if ( switchPosition == -1 ) {
+            // Boot / unknown: classify from the ABSOLUTE signatures - MEASURE
+            // drives the high-impedance tip (~0 mA), SELECT powers the probe
+            // LEDs (~1-1.5 mA). A low reading alone can't be trusted yet: if
+            // the LED chip is dark, SELECT also reads ~0 mA. So on the first
+            // low reading, light the select-idle pattern and read again next
+            // check - current appearing means SELECT with a dark LED;
+            // still-low means genuinely MEASURE.
+            if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+                int padSense = readAdc( 5, 4 ); // same touch veto as MEASURE->SELECT
+                if ( padSense < jumperlessConfig.calibration.minimum_probe_reading ) {
+                    switchPosition = 1;
+                    changed = true;
+                }
+                s_pendingMeasureFlip = false;
+            } else if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+                if ( !s_pendingMeasureFlip ) {
+                    s_pendingMeasureFlip = true;
+                    if ( showProbeLEDs == 0 ) {
+                        showProbeLEDs = 4;
+                    }
+                } else {
+                    s_pendingMeasureFlip = false;
+                    switchPosition = 0;
+                    changed = true;
+                }
+            }
+        } else if ( switchPosition == 0 ) {
+            s_pendingMeasureFlip = false;  // only meaningful while in SELECT
+            // Currently in MEASURE mode - only switch to SELECT if current exceeds
+            // HIGH threshold. Touch veto: the buffer is POWERED from the
+            // BUFFER_IN net, so a tip touch in measure position loads the same
+            // rail the select-LED signature rides on - by magnitude alone it
+            // looks exactly like the switch flipping to SELECT. The pad-sense
+            // ADC knows the difference: while the tip is parked on a pad the
+            // elevated current is touch load, not the LED, so hold MEASURE.
+            if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+                int padSense = readAdc( 5, 4 );
+                if ( padSense >= jumperlessConfig.calibration.minimum_probe_reading ) {
+                    // tip is on a pad - don't classify from a loaded rail
+                } else {
+                    switchPosition = 1;
+                    changed = true;
+                }
+            }
+        } else {
+            // Currently in SELECT mode - only switch to MEASURE if current falls
+            // below LOW threshold. A below-low reading here is ambiguous: a
+            // genuine flip to MEASURE, or the probe's LED chip having reset
+            // dark (a rail glitch when the buffer feed relocates, a cable
+            // wiggle) - the select-idle LED's draw IS the signature this
+            // classifier reads. So: re-send the LED pattern and require the
+            // low reading to survive the NEXT check too.
+            if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+                if ( !s_pendingMeasureFlip ) {
+                    s_pendingMeasureFlip = true;
+                    if ( showProbeLEDs == 0 ) {
+                        showProbeLEDs = ( lastProbeLEDs == 7 ) ? 7 : 4;
+                    }
+                } else {
+                    s_pendingMeasureFlip = false;
+                    switchPosition = 0;
+                    changed = true;
+                }
+            } else {
+                if ( s_pendingMeasureFlip && jumperlessConfig.debug.probe_switch_stats ) {
+                    Serial.println( "[switch] measure flip discarded - LED re-lit (chip had reset)" );
+                }
+                s_pendingMeasureFlip = false;
+            }
+        }
+    }
 
     if ( switchPosition == 0 && changed == true ) {
         showProbeLEDs = 3; // measure
@@ -5395,7 +5464,8 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     }
 
     if ( jumperlessConfig.debug.probe_switch_stats ) {
-        printProbeSwitchStats( swSource, current_mA, adc7V, switchPosition, changed );
+        printProbeSwitchStats( swSource, current_mA, adc7V, detA, detB, blinkPct,
+                               shadow, agreeMode, switchPosition, changed );
         // (printProbeSwitchStats flushes; no unconditional flush on the hot
         // path - it stalled this service on the USB CDC buffer every check.)
     }
@@ -5849,23 +5919,11 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
         if ( unloaded >= 3.0f ) {
             s_gpioDroopV0 = unloaded;
             s_gpioDroopValid = true;
-            // Persist in BOTH directions here (the peak attack below only
-            // persists rises): a stale-high saved V0 would otherwise reseed
-            // the same phantom current on every boot/claim.
-            //
-            // 20mV hysteresis, NOT 2mV: every probe tap IS a droop step that
-            // lands here, and ADC7 noise is +/-20mV, so a 2mV threshold
-            // marked the config dirty on essentially every tap AND re-marked
-            // it right after each save - hardware-confirmed storms of
-            // several full config.txt flash writes per second DURING active
-            // probing (pauseCore2 ~700ms each: missed pads, dimmed probe
-            // LED, stale row registrations). The runtime V0 stays exact
-            // either way; only the boot seed is 20mV coarse (~0.7mA, well
-            // under the 2mA detection band).
-            if ( fabsf( unloaded - jumperlessConfig.calibration.probe_droop_v0 ) > 0.02f ) {
-                jumperlessConfig.calibration.probe_droop_v0 = unloaded;
-                configChanged = true;
-            }
+            // V0 is RAM-only from here on (2026-08-16). It used to persist
+            // back into calibration.probe_droop_v0 with a 20mV hysteresis,
+            // and even that was a config-save source on the hot path (every
+            // tap is a droop step). The seed comes from the calibration app /
+            // self test, which are the only writers of probe_droop_v0 now.
         }
     }
     s_lastDroopV = v;
@@ -5887,16 +5945,7 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
         if ( !s_gpioDroopValid || peak > s_gpioDroopV0 ) {
             s_gpioDroopV0 = peak;
             s_gpioDroopValid = true;
-            // Persist rises (clamped to the load-time 3.0-3.6 sanity band)
-            // so the next boot/claim starts with a sane V0 even if SELECT
-            // was never visited. Same 20mV hysteresis as the step re-anchor
-            // above - see that comment for the tap-triggered save storms a
-            // 2mV threshold caused.
-            if ( peak >= 3.0f &&
-                 peak > jumperlessConfig.calibration.probe_droop_v0 + 0.02f ) {
-                jumperlessConfig.calibration.probe_droop_v0 = peak;
-                configChanged = true;
-            }
+            // (No persistence: see the step re-anchor above.)
         }
     }
     float i = ( s_gpioDroopV0 - v ) * ( 1000.0f / droopOhms );
@@ -5917,17 +5966,157 @@ static bool gpioDroopCurrentEstimate( float* current_mA, float* adc7V ) {
     return true;
 }
 
-static void printProbeSwitchStats( const char* src, float mA, float adc7V, int pos, bool changed ) {
+static void printProbeSwitchStats( const char* src, float mA, float adc7V,
+                                   int detA, int detB, int blinkPct,
+                                   int shadow, bool agreeMode,
+                                   int pos, bool changed ) {
     Serial.printf( "[switch] %-5s %6.2f mA", src, (double)mA );
     if ( strcmp( src, "droop" ) == 0 ) {
         Serial.printf( "  ADC7 %.3fV  V0 %.3fV", (double)adc7V, (double)s_gpioDroopV0 );
     }
-    Serial.printf( "  thr lo/hi %.2f/%.2f  -> %s%s\n\r",
+    Serial.printf( "  thr lo/hi %.2f/%.2f",
                    (double)jumperlessConfig.calibration.probe_switch_threshold_low,
-                   (double)jumperlessConfig.calibration.probe_switch_threshold_high,
+                   (double)jumperlessConfig.calibration.probe_switch_threshold_high );
+    // A: tipSense H (pin held high = measure) / L (select) / - (skipped)
+    // B: M / S / L(oaded) / - ; blink% for the GPIO feed
+    // shadow: what the agreement classifier says (M/S/hold); "*" = it decides
+    Serial.printf( "  A:%c B:%c", detA == 0 ? 'H' : ( detA == 1 ? 'L' : '-' ),
+                   detB == 0 ? 'M' : ( detB == 1 ? 'S' : ( detB == 2 ? 'L' : '-' ) ) );
+    if ( blinkPct >= 0 ) Serial.printf( "(%d%%)", blinkPct );
+    Serial.printf( "  %s:%s", agreeMode ? "agree*" : "shadow",
+                   shadow == 0 ? "M" : ( shadow == 1 ? "S" : "hold" ) );
+    Serial.printf( "  -> %s%s\n\r",
                    pos == 1 ? "SELECT" : ( pos == 0 ? "MEASURE" : "UNKNOWN" ),
                    changed ? "  (CHANGED)" : "" );
     Serial.flush( );
+}
+
+// ---------------------------------------------------------------------------
+// Detector A: tip-side digital sense.
+//
+// The probe's DPDT switch puts PROBE_PIN (GPIO10) on one of two nets:
+//   MEASURE - the probe LED chain's supply, with its 100uF bulk cap C1
+//   SELECT  - the needle (which drives the pad ladder when it touches one)
+// So: set a soft drive, pull the pin LOW for ~2us (a 100uF cap barely
+// notices; a floating needle is now at 0V), release the pin to a plain input
+// - no pulls, RP2350-E9 says never trust a pull-down here - wait ~3us and
+// read. HIGH means the cap held it: MEASURE. LOW means nothing did: SELECT
+// (a needle on a ladder pad drains it too; only a needle on a driven-high
+// row would read HIGH in SELECT, and that is a transient touch). Restore the
+// pin to its always-on OUTPUT HIGH 8mA drive before returning. ~6us total,
+// no ADC, no I2C, same core as readProbeRaw()/probeReadingIsPhantom() (which
+// already blink PROBE_PIN for their own reasons).
+// Skipped while a probe button is held / the button sampler is mid-read.
+// ---------------------------------------------------------------------------
+static int probeSwitchTipSense( void ) {
+#if defined(OG_JUMPERLESS)
+    return -1;
+#else
+    if ( checkingButton == 1 ) return -1;
+    if ( ProbeButton::getInstance( ).getButtonState( ) != 0 ) return -1;
+    gpio_disable_pulls( PROBE_PIN );
+    gpio_set_drive_strength( PROBE_PIN, GPIO_DRIVE_STRENGTH_2MA );
+    gpio_put( PROBE_PIN, false );
+    delayMicroseconds( 2 );
+    gpio_set_dir( PROBE_PIN, false );          // release: input, no pulls
+    delayMicroseconds( 3 );
+    int level = gpio_get( PROBE_PIN );
+    gpio_put( PROBE_PIN, true );               // arm HIGH before re-enabling
+    gpio_set_dir( PROBE_PIN, true );           // ...so the pad never re-drives LOW
+    gpio_set_drive_strength( PROBE_PIN, GPIO_DRIVE_STRENGTH_8MA ); // main.cpp: OUTPUT_8MA
+    return level ? 0 /* held high: MEASURE */ : 1 /* floating/drained: SELECT */;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Detector B for a GPIO-sourced feed: feed-side blink.
+//
+// BUFFER_IN is fed from the claimed routable GPIO through ~170 ohm of
+// crosspoints. Read ADC7 (buffer out = tip), drive the feed pin LOW for
+// ~20us, read ADC7 again, restore. In MEASURE nothing else drives BUFFER_IN
+// so the tip collapses toward 0; in SELECT the probe LED chain + C1 sit on
+// BUFFER_IN through the cable and hold it at ~R_feed/(R_feed+R_cable) of the
+// pre-blink level. The held percentage is compared with
+// calibration.probe_switch_blink_hold_pct. Skipped while a touch is in
+// progress (the tip is someone's signal), when the ADC is busy (never hold
+// the tip dark waiting), or when the pre-read shows no feed at all.
+// ---------------------------------------------------------------------------
+static int probeSwitchFeedBlink( int* pctOut ) {
+    if ( pctOut ) *pctOut = -1;
+#if defined(OG_JUMPERLESS)
+    return -1;
+#else
+    if ( s_gpioPowerIdx < 0 ) return -1;
+    if ( lastReadRaw >= jumperlessConfig.calibration.minimum_probe_reading ) return -1;
+    if ( !adcTryAcquire( ) ) return -1;
+    int pin = gpioDef[ s_gpioPowerIdx ][ 0 ];
+    // ADC7 sits behind the +/-8V scale/offset network (U7B): 0 V on the tip
+    // reads ~mid-scale, not 0 counts. Work in VOLTS (same calibration as
+    // readAdcVoltage) or a fully collapsed tip looks "73% held" - which is
+    // exactly the mistake the first build of this detector made.
+    const float toVolts = adcSpread[ 7 ] / 4095.0f;
+    float preV = (float)readAdcHeld( 7, 2 ) * toVolts - adcZero[ 7 ];
+    float midV = 0.0f;
+    if ( preV >= 0.5f ) {   // below this the feed is dark, not a position
+        gpio_put( pin, false );
+        delayMicroseconds( 20 );   // hardware: the collapse is complete well inside 20us
+        midV = (float)readAdcHeld( 7, 2 ) * toVolts - adcZero[ 7 ];
+        gpio_put( pin, true );
+    }
+    adcRelease( );
+    if ( preV < 0.5f ) return -1;
+    if ( midV < 0.0f ) midV = 0.0f;
+    int pct = (int)( midV * 100.0f / preV );
+    if ( pctOut ) *pctOut = pct;
+    // held (the LED supply cap on BUFFER_IN) = SELECT; collapsed = MEASURE.
+    // Hardware (2026-08-16, GPIO_8 feed): SELECT holds at ~99%, MEASURE
+    // collapses to ~0% - the 50% default sits in the middle of a wide gap.
+    return ( pct >= jumperlessConfig.calibration.probe_switch_blink_hold_pct ) ? 1 : 0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Fast position tracking for probeMode. probeMode() is a blocking loop that
+// services CRITICAL work only, and ProbeSwitch is NORMAL, so the full
+// classifier never runs while a probe session is open (up to 80 s): flip
+// the switch mid-session and nothing notices until it exits. Detector A
+// alone (~6us, no ADC, no I2C) every 250 ms; two agreeing reads flip the
+// position and its LED pattern. Only under debug.probe_switch_agree - A is
+// unverified in SELECT until the hands-on matrix passes, so it must not
+// steer sessions while the legacy classifier is in charge.
+// ---------------------------------------------------------------------------
+void Probing::checkSwitchPositionFast( void ) {
+    if ( !jumperlessConfig.debug.probe_switch_agree ) return;
+    if ( jumperlessConfig.dacs.auto_connect_probe <= 0 ) return;
+    static unsigned long s_lastMs = 0;
+    static int s_pending = -1;
+    static int s_pendingCount = 0;
+    unsigned long now = millis( );
+    if ( now - s_lastMs < 250 ) return;
+    s_lastMs = now;
+    int a = probeSwitchTipSense( );
+    if ( a < 0 ) return;
+    if ( a == switchPosition ) {
+        s_pending = -1;
+        s_pendingCount = 0;
+        return;
+    }
+    if ( s_pending == a ) {
+        s_pendingCount++;
+    } else {
+        s_pending = a;
+        s_pendingCount = 1;
+    }
+    if ( s_pendingCount >= 2 ) {
+        switchPosition = a;
+        s_pending = -1;
+        s_pendingCount = 0;
+        showProbeLEDs = ( a == 0 ) ? 3 : 4;
+        if ( jumperlessConfig.debug.probe_switch_stats ) {
+            Serial.printf( "[switch] fast A -> %s  (CHANGED, inside probeMode)\n\r",
+                           a == 0 ? "MEASURE" : "SELECT" );
+        }
+    }
 }
 
 // (scrubStaleGpioBufferBridges is gone: infra bridges are never serialized
