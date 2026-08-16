@@ -31,6 +31,8 @@
 #include "Peripherals.h"
 #include "USBAudio.h"
 #include "CrashLog.h"
+#include "FlashPark.h"
+#include "IrqSlots.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "Python_Proper.h"
@@ -2793,6 +2795,14 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     }
     
     target->println( "\n\r          ^ = pull-up  v = pull-down     ● = claimed, ○ = free\n\r" );
+
+    // The shared-IRQ handler chain is a fixed 6-slot pool in the prebuilt SDK
+    // and the last thing to ask for one is silently declined (src/IrqSlots.cpp),
+    // so show who holds them - and whether the flash-write park is ours.
+    jlIrqSlotsDump( *target );
+    target->printf( "flash-write park: %s (timeouts %lu)\n\r\n\r",
+                    flashParkActive( ) ? "FlashPark (src/FlashPark.cpp)" : "arduino-pico idleOtherCore()",
+                    (unsigned long) flashParkTimeouts( ) );
     target->flush( );
     
     return CMD_SHOW_MENU;

@@ -27,6 +27,15 @@
 //    registration leaves that one feature without its interrupt; panicking
 //    takes the whole board down with no diagnostic. A feature that does not
 //    work is debuggable, a dead core is not.
+//
+// The dedupe registry has to FORGET a handler when it is removed, or a
+// legitimate remove/re-add cycle is misread as a duplicate and the re-add is
+// silently dropped - the handler is then absent from the real chain while
+// this file believes it is present. MicroPython's machine.UART(0) does exactly
+// that (irq_add_shared_handler on init, irq_remove_handler on deinit), so
+// irq_remove_handler is wrapped too and always passes through: it is also the
+// removal path for EXCLUSIVE handlers (USBAudio's DMA_IRQ_1, the probe PIO),
+// which this registry never sees and must never swallow.
 #include <Arduino.h>
 #include <hardware/irq.h>
 
@@ -43,11 +52,13 @@ Reg      s_regs[ JL_IRQ_CHAIN_SLOTS ];
 unsigned s_count   = 0;
 unsigned s_declined = 0;
 unsigned s_deduped  = 0;
+unsigned s_removed  = 0;
 }  // namespace
 
 extern "C" {
 
 void __real_irq_add_shared_handler( uint num, irq_handler_t handler, uint8_t order_priority );
+void __real_irq_remove_handler( uint num, irq_handler_t handler );
 
 void __wrap_irq_add_shared_handler( uint num, irq_handler_t handler, uint8_t order_priority ) {
     for ( unsigned i = 0; i < s_count; i++ ) {
@@ -68,12 +79,28 @@ void __wrap_irq_add_shared_handler( uint num, irq_handler_t handler, uint8_t ord
     __real_irq_add_shared_handler( num, handler, order_priority );
 }
 
+void __wrap_irq_remove_handler( uint num, irq_handler_t handler ) {
+    // Forget it here so a later re-add is registered for real (see the header
+    // note). Only shared registrations are in this registry; anything else
+    // falls straight through.
+    for ( unsigned i = 0; i < s_count; i++ ) {
+        if ( s_regs[ i ].num == (uint8_t) num && s_regs[ i ].handler == handler ) {
+            for ( unsigned j = i + 1; j < s_count; j++ ) s_regs[ j - 1 ] = s_regs[ j ];
+            s_count--;
+            s_removed++;
+            break;
+        }
+    }
+    __real_irq_remove_handler( num, handler );
+}
+
 }  // extern "C"
 
 unsigned jlIrqSlotsUsed( void )     { return s_count; }
 unsigned jlIrqSlotsFree( void )     { return JL_IRQ_CHAIN_SLOTS - s_count; }
 unsigned jlIrqSlotsDeclined( void ) { return s_declined; }
 unsigned jlIrqSlotsDeduped( void )  { return s_deduped; }
+unsigned jlIrqSlotsRemoved( void )  { return s_removed; }
 
 void jlIrqSlotsReport( Stream& out ) {
     if ( s_declined == 0 ) return;
@@ -81,4 +108,13 @@ void jlIrqSlotsReport( Stream& out ) {
                 "(%u/%u used).\n\r", s_declined, s_count, JL_IRQ_CHAIN_SLOTS );
     out.println( "[irq] Whatever asked last is running without its interrupt. This is a "
                  "pico-sdk limit, not a board fault - see src/IrqSlots.cpp." );
+}
+
+void jlIrqSlotsDump( Stream& out ) {
+    out.printf( "shared-IRQ handler slots: %u/%u used, %u free  (deduped %u, removed %u, declined %u)\n\r",
+                s_count, JL_IRQ_CHAIN_SLOTS, JL_IRQ_CHAIN_SLOTS - s_count, s_deduped, s_removed, s_declined );
+    for ( unsigned i = 0; i < s_count; i++ ) {
+        // Handler addresses symbolise with: arm-none-eabi-addr2line -f -e firmware.elf <addr>
+        out.printf( "  irq %2u  handler %p\n\r", (unsigned) s_regs[ i ].num, (void*) s_regs[ i ].handler );
+    }
 }
