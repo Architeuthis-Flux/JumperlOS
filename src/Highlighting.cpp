@@ -1791,16 +1791,27 @@ static void dacVoltageCallback(float value, bool isLive, void* context) {
     int dac = (int)(intptr_t)context;  // 0=DAC0, 1=DAC1
     
     if (isLive) {
-        // Live update - set the hardware AND update globalState
+        // Live update - set the hardware AND update globalState.
+        // checkProbePower=true: this is a USER write, exactly like MicroPython
+        // dac_set() - if it parks the probe feed's DAC outside the feed's
+        // window the feed relocates NOW (claim latch + nudge), and a turn back
+        // inside releases it. With false the DAC moved but the feed sat on it
+        // until the next unrelated rebuild.
         if (dac == 0) {
-            setDac0voltage(value, 1, 0);  // save=1, saveEEPROM=0
+            setDac0voltage(value, 1, 0, true);  // save=1, saveEEPROM=0
             globalState.power.dac0 = value;
         } else {
-            setDac1voltage(value, 1, 0);
+            setDac1voltage(value, 1, 0, true);
             globalState.power.dac1 = value;
         }
     } else {
-        // Preview only - update globalState for LED display but DON'T set hardware
+        // Preview only - update globalState for LED display but DON'T set
+        // hardware. The feed's viability reads this state, so a preview
+        // outside the window WOULD relocate the feed if a rebuild ran now -
+        // none does: the adjuster loop only services CRITICAL work, and both
+        // exits below (cancel restores, confirm writes) leave state and
+        // hardware agreeing again before any rebuild can look. (The only
+        // residual vector is a MicroPython script rebuilding mid-adjust.)
         if (dac == 0) {
             globalState.power.dac0 = value;
         } else {
@@ -2039,6 +2050,15 @@ void Highlighting::adjustDACVoltage(int dac) {
     AdjustResult result = VoltageAdjuster::adjust(config);
     
     if (result == AdjustResult::CONFIRMED) {
+        // Commit the confirmed value to HARDWARE as a user write. Values
+        // outside the live-update band (0..5 V) were preview-only while
+        // scrolling - state said 7 V, the chip still held the last live
+        // value - and the adjuster's own confirm-path write is commented out,
+        // so without this the DAC never moved and the feed's viability judged
+        // a voltage that wasn't there. In-band values re-write the same word
+        // and the driver skips the I2C.
+        if (dac == 0) setDac0voltage(config.initialValue, 1, 0, true);
+        else          setDac1voltage(config.initialValue, 1, 0, true);
         // User confirmed - save voltages to persistent storage
         saveVoltages(globalState.power.topRail, globalState.power.bottomRail,
                      globalState.power.dac0, globalState.power.dac1);
@@ -2047,11 +2067,17 @@ void Highlighting::adjustDACVoltage(int dac) {
         clearHighlighting();
         highlightNets(0, highlightedNet, 1);
     } else {
-        // User cancelled - restore original values in globalState
+        // User cancelled - restore the ORIGINAL value in state AND hardware.
+        // (The long-press cancel in VoltageAdjuster does not call the
+        // callback, so the chip is still at the last live value.) State goes
+        // back by assignment (no dirty mark, no undo entry for a no-op);
+        // the hardware write is save=0 but still a USER write, so the claim
+        // latch / feed follow the restored voltage too.
         globalState.power.dac0 = origDac0;
         globalState.power.dac1 = origDac1;
+        if (dac == 0) setDac0voltage(origDac0, 0, 0, true);
+        else          setDac1voltage(origDac1, 0, 0, true);
         
-        // Hardware was already restored by VoltageAdjuster callback
         // Re-highlight to refresh display
         clearHighlighting();
         highlightNets(0, highlightedNet, 1);

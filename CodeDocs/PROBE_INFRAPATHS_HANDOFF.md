@@ -33,9 +33,16 @@ and it kept DAC0 free). That is why switch sensing was dead: `checkSwitchPositio
 early-returned `1` whenever `probePowerDAC == 1`, on every call, forever. Flipping the
 physical switch did nothing.
 
-**Current model: the candidate chain is `DAC0 -> RP_GPIO_8 .. RP_GPIO_1`. There is no
-DAC1 candidate at all** — DAC1 is the user's general-purpose DAC, and a DAC1 feed would
-be sensing-blind by construction.
+**Current model: the candidate chain is `DAC0 -> RP_GPIO_8 .. RP_GPIO_1`, or
+`RP_GPIO_8 .. RP_GPIO_1 -> DAC0` when `dacs.probe_power_source = 1` (2026-08-16). There is
+no DAC1 candidate at all** — DAC1 is the user's general-purpose DAC, and a DAC1 feed would
+be sensing-blind by construction. The flag only sets which candidate is *tried first*; both
+always remain, and candidate indices for `infraForceCandidate` stay 0 = DAC0 / 1 = GPIO under
+either order (an `order(walk)` hook on the function table swaps walk positions, not indices).
+Under GPIO-first, `infraServiceTick` also nudges a rebuild when the feed had fallen to DAC0
+and a GPIO frees up — MicroPython `gpio_release_pin()` changes no bridge, so nothing else
+would notice. `i@` prints `order:DAC0>GPIO|GPIO>DAC0  paths:1 dup:0 xp:2|4` for the live
+feed.
 
 ---
 
@@ -83,16 +90,23 @@ ISENSE shunt — which looks exactly like a user claim and made the function yie
 measurement*, tearing down the feed it had just been told to use. Evaluation now skips the
 yield check while a candidate is forced.
 
-**The DAC park epoch.** The feed parks its DAC at `measure_mode_output_voltage` and skips
-the write when already parked — but that check reads `globalState.power`. Several callers
-write the MCP4728 with `save = 0` (hardware only, state untouched): the self test's
-normalize step, `calibrateDacs()`, the wave generator (whose default channel is DAC0), and
-MicroPython `dac_set(save=False)`. After any of those the MCP4728 sits at a level the state does
-not know about — 0 V after the self test's normalize, the last sweep step after
-`calibrateDacs()`, the last streamed sample after the wave generator, whatever the script
-asked for after `dac_set(save=False)` — behind an in-window state value, and the
-skip-if-parked guard never re-writes it. Probe dead until reboot. Those sites call `infraDacParkEpochBump()`, which forces one unconditional
-re-write on the next park. **Any new blind DAC write must bump the epoch.**
+**The DAC park is set-once at the driver (2026-08-16; the "park epoch" is gone).** The feed
+parks its DAC at `measure_mode_output_voltage` on every rebuild, and the dedupe now lives in
+`src/MCP4728.cpp`: a class-static per-channel shadow of the last register word delivered,
+shared by every `MCP4728` instance (Peripherals' `mcp` and WaveGen's `_dac` drive the same
+chip). `setChannelValueCached()` skips the I2C transaction when the word is already there;
+`setChannelValue()` stays unconditional (WaveGen paces on it) but updates the shadow; the
+streaming writers (`quickSetChannelValue`, `writeSampleRepeatedStart`, `fastWriteAsync`) and
+address programming invalidate it. So every blind write — the self test's normalize step,
+`calibrateDacs()`, the wave generator, MicroPython `dac_set(save=False)` — moves the shadow
+and the next park writes exactly when it must. `parkDacAtMeasureTarget()` simply calls the
+setter (state is dirtied only when the state value moves). `infraDacParkEpochBump()` survives
+as `MCP4728::invalidateCache(0/1)` for anything that moves the chip *behind* the driver; the
+existing callers are harmless. Measured: 10 connect/disconnects = 20 rebuilds → DAC0 writes
+unchanged (20 skips); wavegen on DAC0 for 2 s (62,940 sample writes) → exactly one park
+write at the next rebuild. `X` and `i@` print `mcp4728 writes A/B/C/D skips A/B/C/D`; the
+HIL infra test scrapes it. Behavior note: a rebuild while WaveGen streams DAC0 now injects one
+park sample mid-stream (the old state check skipped it) — rare and benign, not a wavegen bug.
 
 ### `probePowerDAC` is a vestige — ask `infraProbePowerSource()` instead
 
@@ -136,10 +150,10 @@ Dispatch follows the **live feed source**, not a config flag:
 | a routable GPIO | ADC7 voltage droop (see the dead-branch note below) |
 | none (yielded, or every candidate claimed) | hold the last known position — no current signature exists, so do not guess |
 
-There is a DAC0-swap fallback in the GPIO branch, but **it is currently unreachable**:
-it runs only when `gpioDroopCurrentEstimate()` fails, and that function's single failure
-return is guarded by the same `s_gpioPowerIdx < 0` condition that already skips the whole
-branch. Either give it a real trigger or delete it — do not rely on it as a safety net.
+The DAC0-swap fallback that used to sit in the GPIO branch was unreachable (its trigger —
+`gpioDroopCurrentEstimate()` failing — could only fire with no GPIO claim, i.e. when the
+branch wasn't taken) and is **deleted** (2026-08-16), along with the dead locals, the
+unconditional `checkingButton = 0` and the per-check `Serial.flush()`.
 
 The droop model treats the GPIO pad impedance plus crosspoint resistance as a free shunt:
 `I = (V0 - ADC7) / R`. `probe_droop_ohms` is measured per board by the self test
@@ -281,18 +295,24 @@ UART pairs the infra function owns. With `lock_connection = 1` the disconnect do
 stick, because evaluation re-adds them. Arguably the lock working as intended, but the
 Arduino flashing flow deserves a deliberate decision rather than a race.
 
-**Encoder DAC preview writes state without hardware.** The voltage adjuster's non-live
-preview path writes `globalState.power.dacX` so the LEDs update, without touching the
-MCP4728. A preview value outside the feed's `[2.80, 3.90]` viability window will relocate
-the probe feed off a DAC that never actually moved. The fix belongs in the adjuster's
-cancel path.
+**(Closed 2026-08-16) Encoder DAC adjuster.** The live path now passes
+`checkProbePower=true` (a user write claims/releases the feed's DAC exactly like MicroPython
+`dac_set()`), the confirm path writes the confirmed value to hardware (values outside the
+0..5 V live band were preview-only and never reached the chip - state said 7 V, the DAC held
+the last live value), and the cancel path restores state AND hardware (the long-press cancel
+never called the callback). The preview still writes state without hardware for the LED
+colour; no rebuild can run inside the adjuster loop (it services CRITICAL work only, and any
+serial byte cancels it), and both exits leave state and hardware agreeing, so the
+"relocate off a DAC that never moved" window is closed without changing the viability
+predicate. (Judging viability from hardware truth instead was considered and rejected: the
+self test's normalize step blind-writes DAC0 to 0 V and then forces the DAC0 candidate for
+the cable phase — with hardware-truth viability that candidate would never be viable again
+until a user write, because the park that fixes the voltage runs only after viability
+passes.) The Probing.cpp adjuster lambdas pass `true` too. Hands-on check still open:
+scrubbing the encoder across 2.80 V fires one claim/release nudge per crossing.
 
-**`checkSwitchPosition`'s DAC0-swap fallback is dead code.** Its guard and
-`gpioDroopCurrentEstimate()`'s only failure path test the same condition
-(`s_gpioPowerIdx < 0`), so whenever a GPIO feed is live the droop estimate always
-succeeds and the swap never runs. If it is ever revived, note the second latent bug it
-carries: with DAC0 user-claimed while the feed is GPIO-sourced, the swap reads whatever
-the user's DAC0 load draws.
+**(Closed 2026-08-16)** `checkSwitchPosition`'s DAC0-swap fallback was dead code and is
+deleted — see the switch-sensing section.
 
 ---
 

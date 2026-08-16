@@ -1382,9 +1382,15 @@ void setTopRail( float value, int save, int saveEEPROM ) {
         dacValue = 0;
     }
 
+    // Cached write: the driver skips the I2C transaction when the chip
+    // already holds this exact word (setRailsAndDACs re-sends every rail on
+    // several paths). LDAC only needs to fall when something was written.
+    bool wrote = false;
     digitalWrite( LDAC, HIGH );
-    mcp.setChannelValue( MCP4728_CHANNEL_C, dacValue );
+    mcp.setChannelValueCached( MCP4728_CHANNEL_C, dacValue, MCP4728_VREF_VDD,
+                               MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
+    (void)wrote;
     
     // Update globalState for YAML persistence (single source of truth)
     // ONLY update when save == 1 to avoid spurious dirty marks
@@ -1409,9 +1415,12 @@ void setBotRail( float value, int save, int saveEEPROM ) {
         dacValue = 0;
     }
 
+    bool wrote = false;
     digitalWrite( LDAC, HIGH );
-    mcp.setChannelValue( MCP4728_CHANNEL_D, dacValue );
+    mcp.setChannelValueCached( MCP4728_CHANNEL_D, dacValue, MCP4728_VREF_VDD,
+                               MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
+    (void)wrote;
     if ( save ) {
         // Update globalState for YAML persistence (single source of truth)
         globalState.setRailVoltage(false, value);  // false = bottom rail
@@ -1480,9 +1489,18 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
         dacValue = 0;
     }
 
+    // Set-once: the driver's per-channel shadow skips the I2C write when
+    // DAC0 already holds this word - the probe feed's park calls this on
+    // EVERY rebuild, and used to cost one MCP4728 transaction each time.
+    // Everything below the write (state, hardware-truth volts, the claim
+    // latches and their nudges) runs whether or not a byte went out: the
+    // bookkeeping is about what the caller MEANT, not about the bus.
+    bool wrote = false;
     digitalWrite( LDAC, HIGH );
     // delay(10);
-    if ( mcp.setChannelValue( MCP4728_CHANNEL_A, dacValue ) == false ) {
+    if ( mcp.setChannelValueCached( MCP4728_CHANNEL_A, dacValue, MCP4728_VREF_VDD,
+                                    MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL,
+                                    &wrote ) == false ) {
         // delay(3000);
         //Serial.println( "Failed to set DAC0 value" );
         failedToSetDac0++;
@@ -1494,6 +1512,7 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     failedToSetDac0 = 0;
     // delay(10);
     digitalWrite( LDAC, LOW );
+    (void)wrote;
     
     // Update globalState for YAML persistence (single source of truth)
     // ONLY update state if save == 1 to avoid marking state dirty unnecessarily
@@ -1552,9 +1571,12 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
     if ( dacValue < 0 ) {
         dacValue = 0;
     }
+    bool wrote = false;
     digitalWrite( LDAC, HIGH );
-    mcp.setChannelValue( MCP4728_CHANNEL_B, dacValue );
+    mcp.setChannelValueCached( MCP4728_CHANNEL_B, dacValue, MCP4728_VREF_VDD,
+                               MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
+    (void)wrote;
 
     // Update globalState for YAML persistence (single source of truth)
     // ONLY update state if save == 1 to avoid marking state dirty unnecessarily
@@ -1562,15 +1584,25 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
         globalState.setDacVoltage(1, voltage);
     }
     s_dacHwVolts[ 1 ] = voltage;   // hardware truth, persisted or not
+    bool wasClaimed1 = s_dacUserClaimed[ 1 ];
     s_dacUserClaimed[ 1 ] = checkProbePower && ( voltage > 3.9 || voltage < 2.80 );
 
     // See setDac0voltage: out-of-window saved voltage = user claim; the
     // nudged rebuild reads globalState.power.dac1 (written just above) and
     // relocates the buffer feed. Replaces the old inline probePowerDAC swap.
+    // (There is no DAC1 feed candidate today, so this fires only if one is
+    // ever added back - kept symmetric with DAC0 on purpose.)
     if ( checkProbePower && infraProbePowerSource( ) == DAC1 &&
          ( voltage > 3.9 || voltage < 2.80 ) ) {
         Serial.println(
             "DAC 1 was powering the probe - relocating the buffer feed" );
+        infraNudge( );
+    }
+    // Release direction, same as DAC0: a user write back inside the window
+    // clears the latch and re-evaluates so a candidate that was waiting on
+    // DAC1 can take over now rather than at the next unrelated rebuild.
+    if ( checkProbePower && wasClaimed1 && !s_dacUserClaimed[ 1 ] &&
+         infraProbePowerSource( ) != DAC1 ) {
         infraNudge( );
     }
 

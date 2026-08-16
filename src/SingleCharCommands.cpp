@@ -2652,6 +2652,10 @@ CommandResult cmd_netCurrents( char c, const String& line ) {
                             (double)infraProbeDroopOhms( ),
                             jumperlessConfig.calibration.probe_droop_ohms > 0.0f
                                 ? "calibrated" : "computed" );
+            // The feed's set-once proof: DAC0 (A) writes must not move across
+            // rebuilds that don't change its voltage.
+            target->print( "[infra] " );
+            MCP4728::printWriteStats( target );
             return CMD_DONT_SHOW_MENU;
         }
     }
@@ -2800,9 +2804,14 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // and the last thing to ask for one is silently declined (src/IrqSlots.cpp),
     // so show who holds them - and whether the flash-write park is ours.
     jlIrqSlotsDump( *target );
-    target->printf( "flash-write park: %s (timeouts %lu)\n\r\n\r",
+    target->printf( "flash-write park: %s (timeouts %lu)\n\r",
                     flashParkActive( ) ? "FlashPark (src/FlashPark.cpp)" : "arduino-pico idleOtherCore()",
                     (unsigned long) flashParkTimeouts( ) );
+    // MCP4728 I2C traffic per channel (A=DAC0 B=DAC1 C=top D=bottom): the
+    // probe feed re-parks DAC0 on every rebuild, so "writes A" flat across
+    // connects/disconnects is the set-once guarantee holding.
+    MCP4728::printWriteStats( target );
+    target->println( "\r" );
     target->flush( );
     
     return CMD_SHOW_MENU;

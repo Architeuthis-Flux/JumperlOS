@@ -78,6 +78,11 @@ int infraProbePowerGpioIdx(void);
 void infraSetProbePowerEnabled(bool on);
 bool infraProbePowerWanted(void);
 
+// dacs.probe_power_source == 1: the walk tries the GPIO candidate before
+// DAC0 (both remain candidates; the order only decides who is tried first).
+// Candidate INDICES are fixed regardless: 0 = DAC0, 1 = GPIO.
+bool infraProbePowerGpioFirst(void);
+
 // Total source resistance of the GPIO-powered buffer feed for the droop
 // current model: calibration.probe_droop_ohms when calibrated (> 0), else
 // probe_pad_ohms + N x crosspoint_resistance where N is counted from the
@@ -129,11 +134,15 @@ void infraScrubLoadedBridges(void);
 // "oled_i2c", "serial_1".
 int infraForceCandidate(const char* fnName, int candIdx);
 
-// Call after writing DAC hardware with save=0 (state untouched) - e.g. the
-// self test's normalize step and calibrateDacs' sweeps. The probe feed's
-// skip-if-parked guard trusts globalState.power; the bump forces one
-// unconditional hardware re-write on the next park so a blinded MCP4728
-// can't hide behind an in-window state value.
+// Forget what DAC0/DAC1 hold so the next park re-writes them. The set-once
+// guarantee lives in the MCP4728 driver's per-channel shadow (see
+// MCP4728.h): every write path through the driver - the self test's
+// normalize step, calibrateDacs' sweeps, WaveGen streaming, MicroPython
+// dac_set(save=False) - already moves the shadow, so a park after them
+// writes exactly when it must. This is only needed for something that
+// moves the chip WITHOUT going through the driver (a chip reset, a raw Wire
+// write). Kept under its old name for the existing callers; it is
+// MCP4728::invalidateCache(0) + (1).
 void infraDacParkEpochBump(void);
 
 // ---------------------------------------------------------------------------

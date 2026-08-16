@@ -122,4 +122,66 @@ check(feed_source(d) is not None and feed_source(d) != "30",
 out = port1_command("i?", collect_seconds=6)
 check("PASS" in out or "pass" in out, "RouteSafety self-check PASS with infra feed routed")
 
+
+# --- 8. GPIO-first order (dacs.probe_power_source = 1) ---------------------
+# The same function, the other preference: the feed must sit on a routable
+# GPIO through ONE 4-crosspoint path, DAC0 must not be written by rebuilds
+# that don't move it (the driver's set-once shadow), every GPIO claimed must
+# fall the feed through to DAC0, and freeing one must hop it back.
+
+def mcp_writes(status):
+    """[A,B,C,D] MCP4728 I2C write counts from the i@ 'mcp4728 writes' line."""
+    m = re.search(r"mcp4728 writes (\d+)/(\d+)/(\d+)/(\d+)", status)
+    return [int(x) for x in m.groups()] if m else None
+
+
+def probe_line(status):
+    for line in status.splitlines():
+        if line.startswith("probe_power"):
+            return line
+    return ""
+
+
+try:
+    port1_command("`[dacs] probe_power_source = 1", collect_seconds=2)
+    time.sleep(1.5)
+    st = infra_status()
+    pl = probe_line(st)
+    check("order:GPIO>DAC0" in pl, "i@ reports order:GPIO>DAC0 after setting the flag")
+    check("-> GPIO" in pl, f"feed is on the GPIO candidate under GPIO-first ({pl.strip()[:60]})")
+    check("paths:1 dup:0 xp:4" in pl, "GPIO feed: one path, dup 0, 4 crosspoints (i@)")
+    d = bridge_dump()
+    src = feed_source(d)
+    check(src is not None and src.startswith("GP_"), f"bridge array feed source is a GP_x ({src})")
+    rows = feed_path_rows(d)
+    check(len(rows) == 1, f"GPIO feed has exactly ONE routed path, got {len(rows)}")
+
+    w = mcp_writes(st)
+    check(w is not None, "i@ prints the mcp4728 write counters")
+    jl_exec("connect(12, 17)\ndisconnect(12, -1)\nprint('ok')", timeout=25)
+    time.sleep(1.5)
+    st2 = infra_status()
+    w2 = mcp_writes(st2)
+    check(w is not None and w2 is not None and w2[0] == w[0],
+          f"DAC0 (A) writes unchanged across a connect/disconnect ({w and w[0]} -> {w2 and w2[0]})")
+
+    jl_exec("for p in range(20, 28):\n    gpio_claim_pin(p)\nprint('ok')", timeout=25)
+    time.sleep(2.5)  # infraServiceTick (~500ms) notices the claim and nudges
+    pl = probe_line(infra_status())
+    check("-> DAC0" in pl and "xp:2" in pl,
+          f"all 8 GPIO claimed from MicroPython -> feed fell through to DAC0, xp:2 ({pl.strip()[:70]})")
+
+    jl_exec("gpio_release_pin(27)\nprint('ok')", timeout=25)
+    time.sleep(2.5)  # the tick's GPIO-first switch-back
+    pl = probe_line(infra_status())
+    check("-> GPIO" in pl and "xp:4" in pl,
+          f"freeing GPIO 8 -> feed hopped back to the GPIO candidate ({pl.strip()[:70]})")
+finally:
+    jl_exec("gpio_release_all_pins()\nprint('ok')", timeout=25)
+    port1_command("`[dacs] probe_power_source = 0", collect_seconds=2)
+    time.sleep(1.5)
+    pl = probe_line(infra_status())
+    check("order:DAC0>GPIO" in pl and "-> DAC0" in pl,
+          f"flag restored to 0: order DAC0>GPIO and the feed is back on DAC0 ({pl.strip()[:60]})")
+
 finish("test_infra_paths")

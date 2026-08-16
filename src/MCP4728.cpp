@@ -104,6 +104,46 @@ MCP4728::MCP4728(void) : _initialized(false), _i2c_address(0), _wire(nullptr) {}
 
 struct last_settings last_settings;
 
+// Per-channel register shadow + write accounting (see MCP4728.h). Shared by
+// every instance on purpose: Peripherals' mcp and WaveGen's _dac are the
+// same physical chip.
+volatile uint32_t MCP4728::s_shadow[4] = {0, 0, 0, 0};
+volatile uint32_t MCP4728::s_writes[4] = {0, 0, 0, 0};
+volatile uint32_t MCP4728::s_skips[4] = {0, 0, 0, 0};
+
+void MCP4728::noteWrite(int channel, uint16_t packed) {
+  if (channel < 0 || channel > 3) return;
+  s_shadow[channel] = kShadowKnown | packed;   // one aligned 32-bit store
+  s_writes[channel]++;
+}
+
+void MCP4728::invalidateCache(int channel) {
+  if (channel < 0) {
+    for (int c = 0; c < 4; c++) s_shadow[c] = 0;
+    return;
+  }
+  if (channel <= 3) s_shadow[channel] = 0;
+}
+
+uint32_t MCP4728::writeCount(int channel) {
+  return (channel >= 0 && channel <= 3) ? s_writes[channel] : 0;
+}
+
+uint32_t MCP4728::skipCount(int channel) {
+  return (channel >= 0 && channel <= 3) ? s_skips[channel] : 0;
+}
+
+// One machine-parseable line: "mcp4728 writes A/B/C/D skips A/B/C/D".
+// A = DAC0, B = DAC1, C = top rail, D = bottom rail.
+void MCP4728::printWriteStats(Stream* out) {
+  if (!out) return;
+  out->printf("mcp4728 writes %lu/%lu/%lu/%lu skips %lu/%lu/%lu/%lu\n\r",
+              (unsigned long)s_writes[0], (unsigned long)s_writes[1],
+              (unsigned long)s_writes[2], (unsigned long)s_writes[3],
+              (unsigned long)s_skips[0], (unsigned long)s_skips[1],
+              (unsigned long)s_skips[2], (unsigned long)s_skips[3]);
+}
+
 
 volatile bool started = false;
 volatile bool ended = false;
@@ -130,6 +170,11 @@ bool MCP4728::begin(uint8_t i2c_address, TwoWire *wire) {
   
   if (error == 0) {
     _initialized = true;
+    // Deliberately NOT invalidating the shadow here: begin() only probes the
+    // address, it does not touch the chip's registers, and a second instance
+    // (WaveGen's _dac) beginning must not make Peripherals' next rail write
+    // look new. The chip's registers only reset with its supply - which also
+    // resets the RP2350 and so the shadow (static, zero = unknown).
     return true;
   }
   
@@ -184,6 +229,8 @@ bool MCP4728::setMCPAddressBits(uint8_t newAddressBits, bool debug) {
     if (debug) { Serial.println("Not initialized, returning false"); }
     return false;
   }
+  // Address programming resets the chip's view of the world - and ours.
+  invalidateCache(-1);
   
   // Extract current address bits (0-7)
   uint8_t currentAddressBits = (_i2c_address - MCP4728_I2CADDR_DEFAULT) & 0x07;
@@ -312,6 +359,9 @@ bool MCP4728::fastWriteAsync(uint16_t channel_a_value, uint16_t channel_b_value,
     // Serial.println("About to call _wire->write() (synchronous)");
     // Serial.flush();
     
+    // Four channels move at once, with the header's own VREF/PD/GAIN
+    // bits - just forget the shadow rather than model the fast-write frame.
+    invalidateCache(-1);
     _wire->beginTransmission(_i2c_address);
     _wire->write(_async_buffer, 8);
     int result = _wire->endTransmission();
@@ -399,7 +449,42 @@ bool MCP4728::setChannelValue(MCP4728_channel_t channel, uint16_t new_value,
   _wire->write(output_buffer, 3);
   uint8_t error = _wire->endTransmission();
   
+  // The shadow follows the wire: on success the input register holds this
+  // word (with UDAC=1 it is only the INPUT register until LDAC falls, which
+  // every caller does right after - the shadow still tells the truth about
+  // what the next identical write would change: nothing). On failure we
+  // no longer know what the chip holds.
+  if (error == 0) noteWrite((int)channel, new_value);
+  else invalidateCache((int)channel);
   return error == 0;
+}
+
+/*!
+ *    @brief  setChannelValue() that skips the I2C transaction when the
+ *            per-channel shadow already holds the exact register word.
+ *            Bookkeeping in the caller must NOT depend on a write having
+ *            happened - see the header. Returns true on "hardware holds
+ *            the value" (written or skipped); *wrote reports which.
+ */
+bool MCP4728::setChannelValueCached(MCP4728_channel_t channel, uint16_t new_value,
+                                    MCP4728_vref_t new_vref, MCP4728_gain_t new_gain,
+                                    MCP4728_pd_mode_t new_pd_mode, bool* wrote) {
+  if (wrote) *wrote = false;
+  if (!_initialized) {
+    return false;
+  }
+  uint16_t packed = new_value;
+  packed |= (new_vref << 15);
+  packed |= (new_pd_mode << 13);
+  packed |= (new_gain << 12);
+  uint32_t shadow = s_shadow[(int)channel];   // one aligned 32-bit load
+  if (shadow == (kShadowKnown | packed)) {
+    s_skips[(int)channel]++;
+    return true;
+  }
+  bool ok = setChannelValue(channel, new_value, new_vref, new_gain, new_pd_mode, false);
+  if (wrote) *wrote = ok;
+  return ok;
 }
 
 
@@ -434,6 +519,10 @@ new_value |= (last_settings.gain << 12);
 output_buffer[1] = new_value >> 8;
 output_buffer[2] = new_value & 0xFF;
 
+// Streaming path: the bytes may sit in the Wire TX buffer until a later
+// endTransmission, so we can't vouch for the register word - mark the
+// channel unknown and let the next cached write go through.
+invalidateCache((int)channel);
 if (sendStart) {
   _wire->beginTransmission(_i2c_address);
 }
@@ -470,6 +559,9 @@ bool MCP4728::writeSampleRepeatedStart(MCP4728_channel_t channel, uint16_t value
   uint8_t b1 = (uint8_t)(packed >> 8);
   uint8_t b2 = (uint8_t)(packed & 0xFF);
 
+  // Streaming path (repeated START, chained transactions): forget the
+  // shadow rather than trust an in-flight sample - see quickSetChannelValue.
+  invalidateCache((int)channel);
   _wire->beginTransmission(_i2c_address);
   size_t n = _wire->write(&b0, 1);
   n += _wire->write(&b1, 1);

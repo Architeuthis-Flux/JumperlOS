@@ -2037,7 +2037,7 @@ void Probing::handleEncoderCursorNavigation(
                 config.initialValue = globalState.power.dac0;
                 config.label = "DAC 0";
                 config.callback = []( float newValue, bool isLive, void* context ) {
-                    setDac0voltage( newValue, 1, 0, false );
+                    setDac0voltage( newValue, 1, 0, true );
                     globalState.power.dac0 = newValue;
                 };
             } else {
@@ -2045,7 +2045,7 @@ void Probing::handleEncoderCursorNavigation(
                 config.initialValue = globalState.power.dac1;
                 config.label = "DAC 1";
                 config.callback = []( float newValue, bool isLive, void* context ) {
-                    setDac1voltage( newValue, 1, 0, false );
+                    setDac1voltage( newValue, 1, 0, true );
                     globalState.power.dac1 = newValue;
                 };
             }
@@ -4045,7 +4045,7 @@ int Probing::chooseDAC( int justPickOne ) {
         config.liveUpdateMin = 0.0;
         config.liveUpdateMax = 5.0;
         config.callback = []( float newValue, bool isLive, void* context ) {
-            setDac1voltage( newValue, 1, 0, false );
+            setDac1voltage( newValue, 1, 0, true );
             globalState.power.dac1 = newValue;
         };
 
@@ -5170,19 +5170,10 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // reassertGpioBufferDrive below.
     infraServiceTick( );
 
-    // Debounce/glitch filter and timing: only sample at a fixed interval.
-    static bool have_previous_read = false;
-    static float previous_current_mA[ 5 ] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-    static int last_candidate_position = -1; // -1 unknown, 0 measure, 1 select
-    static int stable_read_count = 0;        // consecutive close readings on same side of threshold
+    // Timing: only sample at a fixed interval.
     static unsigned long last_check_millis = 0;
     // SELECT->MEASURE needs two consecutive below-low readings (see below).
     static bool s_pendingMeasureFlip = false;
-
-    float tolerance = 0.25;
-
-    // Use the global interval if available; otherwise default to 50ms.
-    // unsigned long switchPositionCheckInterval = 200;
 
     if ( jumperlessConfig.dacs.auto_connect_probe <= 0 ) {
         switchPosition = 1;
@@ -5243,7 +5234,8 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     if ( infraProbePowerSource( ) < 0 ) {
         return switchPosition;
     }
-    checkingButton = 0;
+    // (An unconditional `checkingButton = 0` used to sit here - the button
+    // sampler owns that flag; a switch check has no business clearing it.)
 
     // Update global timestamp BEFORE reading current so other code knows we're about to read
     lastProbeCurrentCheckTime = millis();
@@ -5267,8 +5259,12 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // output path), so sensing reads the load current as voltage droop on
     // ADC7 with a continuously-normalized unloaded peak (V0) - passive,
     // sub-ms, no tip glitch, no dependency on the unknown boot switch
-    // position. Fallback if the droop model has no estimate: swap the feed
-    // to DAC0 for one median read, then swap back.
+    // position. (The old "swap the feed to DAC0 for one INA read" fallback
+    // is gone: its trigger - the droop estimate failing - could only happen
+    // with no GPIO claim, i.e. when this branch wasn't taken at all, so it
+    // never ran; and it would have read the user's DAC0 load if DAC0 had
+    // been claimed. Detector A in Phase 2 covers the "no usable current
+    // signature" case instead.)
     float current_mA;
     float adc7V = 0.0f;
     const char* swSource = "ina";
@@ -5281,33 +5277,6 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
             Serial.print( " mA at " );
             Serial.print( adc7V, 3 );
             Serial.print( " V" );
-            Serial.flush( );
-        }
-    } else if ( gpioPowerNode > 0 ) {
-        swSource = "swap";
-        // Temporarily swap the buffer feed to a DAC so INA1 (inline with the
-        // DAC path) can read the load current. Done through InfraPaths'
-        // forced-candidate hook rather than raw bridge swaps: the feed pair
-        // stays REGISTERED through both moves, so nothing leaks into slot
-        // saves / undo and no second feed can appear.
-        infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC0 (INA1-sensed)
-        refreshLocalConnections( 0, 1, 0 );
-        waitCore2( );
-        delay( 3 ); // crosspoint + DAC settle before the INA windows start counting
-        // Median of 3, NOT a single conversion: the INA219's ~17ms averaging
-        // window in flight when we arm CNVR started BEFORE the swap, so the
-        // first completed conversion is diluted with pre-swap (~0mA through
-        // the DAC) samples. On hardware that read below threshold_low and
-        // flipped a SELECT switch to MEASURE every check. The median of 3
-        // (~60ms) throws the stale first window away.
-        current_mA = probeCurrentMedian( 3 );
-        infraForceCandidate( "probe_power", -1 ); // back to automatic (GPIO reclaims)
-        refreshLocalConnections( 0, 1, 0 );
-        waitCore2( );
-        if ( showProbeCurrent == 1 ) {
-            Serial.print( "                          \rSwitch-check current (DAC swap): " );
-            Serial.print( current_mA );
-            Serial.print( " mA" );
             Serial.flush( );
         }
     } else {
@@ -5427,14 +5396,9 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 
     if ( jumperlessConfig.debug.probe_switch_stats ) {
         printProbeSwitchStats( swSource, current_mA, adc7V, switchPosition, changed );
+        // (printProbeSwitchStats flushes; no unconditional flush on the hot
+        // path - it stalled this service on the USB CDC buffer every check.)
     }
-
-    // for (int i = 0; i < 5; i++) {
-    //   Serial.print(previous_current_mA[i]);
-    //   Serial.print(" ");
-    // }
-    // Serial.println();
-    Serial.flush( );
 
     return switchPosition;
 }

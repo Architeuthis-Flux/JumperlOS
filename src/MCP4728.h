@@ -93,6 +93,41 @@ public:
                        bool udac = false);
 
 
+  // ---- Cached (set-once) write + write accounting -------------------------
+  //
+  // The MCP4728 has no readback, so the driver keeps a per-channel SHADOW of
+  // the last register word it delivered. It is class-static and shared by
+  // every instance because two objects drive the same chip: Peripherals'
+  // `mcp` (rails, DACs, the probe feed's park) and WaveGen's `_dac`
+  // (streams samples from core 1). Every write path updates or invalidates
+  // the shadow, so setChannelValueCached() can skip an I2C transaction that
+  // would land the exact word already in the input register - the probe
+  // feed re-parks DAC0 on EVERY rebuild, and before this that was one 3-byte
+  // I2C write per rebuild (per DAC) that changed nothing.
+  //
+  // setChannelValue() itself stays UNCONDITIONAL: WaveGen uses its
+  // transaction time as the sample clock, so a dedupe there would break the
+  // waveform pacing on repeated samples.
+  //
+  // Each channel's shadow is ONE 32-bit word (bit 16 = known, bits 0..15 =
+  // the packed VREF/PD/GAIN/D11..D0 register word) so core-1 stores and
+  // core-0 loads never tear.
+  bool setChannelValueCached(MCP4728_channel_t channel, uint16_t new_value,
+                             MCP4728_vref_t new_vref = MCP4728_VREF_VDD,
+                             MCP4728_gain_t new_gain = MCP4728_GAIN_1X,
+                             MCP4728_pd_mode_t new_pd_mode = MCP4728_PD_MODE_NORMAL,
+                             bool* wrote = nullptr);
+  // Forget what a channel holds (-1 = all four). Call after anything that
+  // may have moved the chip behind the shadow's back (address programming,
+  // a chip reset, a raw-Wire write).
+  static void invalidateCache(int channel = -1);
+  // Diagnostics: I2C transactions that carried a value for the channel /
+  // cached calls that were skipped as identical. Printed by `X` and `i@`;
+  // the HIL suite scrapes them.
+  static uint32_t writeCount(int channel);
+  static uint32_t skipCount(int channel);
+  static void printWriteStats(Stream* out);
+
   bool sendI2Cstart();
   bool sendI2Cend(bool sendStop = true);
   bool sendI2Cdata(uint8_t *data, size_t length);
@@ -119,6 +154,16 @@ private:
   
   // Buffer for async operations (4-byte aligned for DMA)
   alignas(4) uint8_t _async_buffer[8];
+
+  static uint16_t packWord(uint16_t value, MCP4728_vref_t vref,
+                           MCP4728_gain_t gain, MCP4728_pd_mode_t pd) {
+    return (uint16_t)((value & 0x0FFF) | (vref << 15) | (pd << 13) | (gain << 12));
+  }
+  static void noteWrite(int channel, uint16_t packed);   // shadow := packed, writes++
+  static const uint32_t kShadowKnown = 1u << 16;
+  static volatile uint32_t s_shadow[4];
+  static volatile uint32_t s_writes[4];
+  static volatile uint32_t s_skips[4];
 };
 
 #endif

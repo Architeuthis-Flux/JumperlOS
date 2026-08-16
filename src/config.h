@@ -58,10 +58,22 @@ struct config {
         // Voltage values moved to activeState.power (topRail, bottomRail, dac0, dac1)
         bool set_dacs_on_boot = true;
         bool set_rails_on_boot = true;
-        int probe_power_dac = 0;
+        int probe_power_dac = 0;   // legacy: parsed/written for file compat, NOT applied
         float limit_max = 8.00;
         float limit_min = -8.00;
         int auto_connect_probe = 1; //-1 = off (persistent), 0 = off (until reboot), 1 = on
+        // Which candidate the probe buffer's power feed tries FIRST. The feed
+        // (routing/InfraPaths.cpp "probe_power") always falls through to the
+        // other candidate when the preferred one is claimed:
+        //   0 = DAC0 first (2 crosspoints on chip K; INA1's shunt sits in
+        //       DAC0's path so its current is directly sensed), then a
+        //       routable GPIO 8..1
+        //   1 = GPIO first (4 crosspoints via L->K, ~170 ohm; keeps DAC0
+        //       free for the user; sensed via ADC7 droop / tip probing),
+        //       then DAC0
+        // Candidate indices for infraForceCandidate stay 0=DAC0 / 1=GPIO
+        // regardless of this order.
+        int probe_power_source = 0;
     } dacs;
 
     struct debug {

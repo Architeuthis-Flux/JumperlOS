@@ -15,6 +15,7 @@
 
 #include "FileParsing.h"   // checkIfBridgeExists-style helpers not needed; addBridge decl for wrapper paths
 #include "JumperlessDefines.h"
+#include "MCP4728.h"       // MCP4728::invalidateCache (the park's set-once shadow)
 #include "Peripherals.h"   // gpioDef, setDacXvoltage, getDacVoltage
 #include "Probing.h"       // probeGpioPowerHwClaim/Release
 #include "States.h"
@@ -168,6 +169,12 @@ struct InfraFunction {
     // aside - instead of fighting or blocking the user (it re-converges
     // automatically once the user disconnects). nullptr = never yields.
     bool (*userOverridden)(void);
+    // Optional: maps a walk position (0..numCandidates-1) to the candidate
+    // index tried at that position, so a function can re-order its
+    // preference at runtime from config without renumbering candidates
+    // (infraForceCandidate callers keep their fixed indices). nullptr =
+    // table order.
+    int (*order)(int walk);
     const InfraCandidate* candidates;
     int numCandidates;
     // Runtime:
@@ -201,17 +208,21 @@ static bool dacVoltageInProbeWindow(int dacNum) {
     return v >= 2.80f && v <= 3.90f;
 }
 
-// Skip-if-parked bookkeeping: onActivate re-runs on EVERY rebuild, and an
-// unconditional set would hit the MCP4728 over I2C each time. The skip
-// decision trusts globalState.power - but selfTestNormalizeHardware and
-// calibrateDacs write the DAC HARDWARE with save=0 (state untouched), so a
-// state-only comparison would skip the re-write and leave the feed dead at
-// whatever the blind write set. Those sites bump the epoch to force one
-// unconditional hardware write on the next park.
-static uint32_t s_dacParkEpoch = 1;
-static uint32_t s_dacParkedEpoch[2] = {0, 0};
-
-void infraDacParkEpochBump(void) { s_dacParkEpoch++; }
+// onActivate re-runs on EVERY rebuild, so the park is called far more often
+// than the DAC actually needs writing. The set-once guarantee lives in the
+// MCP4728 driver now: it shadows the last register word per channel and
+// setDacXvoltage() goes through its cached write, so an identical park is
+// zero I2C. Blind hardware writes that used to hide behind an in-window
+// state value (selfTestNormalizeHardware, calibrateDacs, WaveGen streaming
+// DAC0, MicroPython dac_set(save=False)) all pass through the same driver
+// and move the shadow, so the next park writes exactly when it must - the
+// old "park epoch" that forced one unconditional re-write is gone. The
+// bump entry point survives as a cache invalidation for anything that
+// moves the chip behind the driver's back.
+void infraDacParkEpochBump(void) {
+    MCP4728::invalidateCache(0);
+    MCP4728::invalidateCache(1);
+}
 
 static void parkDacAtMeasureTarget(int dacNum) {
     // A DAC the user has parked outside the probe window is theirs: never
@@ -228,16 +239,13 @@ static void parkDacAtMeasureTarget(int dacNum) {
     // load): parking above 3.3V logic clips the pad ladder's high end.
     float target = jumperlessConfig.calibration.measure_mode_output_voltage;
     if (target < 3.0f || target > 3.6f) target = 3.33f;
-    bool stateOff = fabsf(getDacHardwareVoltage(dacNum) - target) > 0.005f;
-    if (stateOff || s_dacParkedEpoch[dacNum] != s_dacParkEpoch) {
-        // save only when the state value actually moves - a post-epoch
-        // re-write of the same value must not dirty the state.
-        if (dacNum == 0) {
-            setDac0voltage(target, stateOff ? 1 : 0, 0, false);
-        } else {
-            setDac1voltage(target, stateOff ? 1 : 0, 0, false);
-        }
-        s_dacParkedEpoch[dacNum] = s_dacParkEpoch;
+    // save only when the STATE value actually moves (setDacVoltage marks the
+    // state dirty unconditionally); the hardware decision is the driver's.
+    bool stateOff = fabsf(getDacVoltage(dacNum) - target) > 0.005f;
+    if (dacNum == 0) {
+        setDac0voltage(target, stateOff ? 1 : 0, 0, false);
+    } else {
+        setDac1voltage(target, stateOff ? 1 : 0, 0, false);
     }
 }
 
@@ -289,12 +297,11 @@ static void actGpio(void) {
     }
     probeGpioPowerHwClaim(s_gpioResolvedIdx);
     s_gpioActiveIdx = s_gpioResolvedIdx;
-    // Keep a free DAC0 parked at the measure-mode voltage so the (rare)
-    // DAC-swap fallback in checkSwitchPosition reads the level the
-    // thresholds were calibrated against (INA1 senses the DAC0 path only).
-    if (!nonInfraBridgeTouches(DAC0)) {
-        parkDacAtMeasureTarget(0);
-    }
+    // (No DAC0 pre-park here any more: it existed for the DAC-swap sensing
+    // fallback, which was unreachable and is deleted. When DAC0 becomes the
+    // feed again - by preference order or by the user releasing it - its
+    // own onActivate parks it, and setDac0voltage's release-nudge already
+    // re-evaluates the moment a user write comes back inside the window.)
 }
 static void deactGpio(void) {
     if (s_gpioActiveIdx >= 0) {
@@ -309,10 +316,24 @@ static void deactGpio(void) {
 // setting. The fall-through is DAC0 -> GPIO8..GPIO1; with all of those
 // claimed the function stands down until one frees up.)
 
+// Candidate INDICES are fixed (0 = DAC0, 1 = GPIO) - the self test, the
+// calibration apps and Probing pin them through infraForceCandidate. The
+// PREFERENCE between them is config: dacs.probe_power_source = 0 walks
+// DAC0 then GPIO (the INA-sensed 2-crosspoint feed first), 1 walks GPIO
+// then DAC0 (the ~170-ohm 4-crosspoint feed first, keeping DAC0 free for
+// the user). Either way it always falls through to the other.
 static const InfraCandidate s_probePowerCandidates[] = {
     { "DAC0", rpDac0, viDac0, actDac0, deactDac },
     { "GPIO", rpGpio, viGpio, actGpio, deactGpio },
 };
+
+bool infraProbePowerGpioFirst(void) {
+    return jumperlessConfig.dacs.probe_power_source == 1;
+}
+
+static int ordProbePower(int walk) {
+    return infraProbePowerGpioFirst() ? (1 - walk) : walk;
+}
 
 // A user bridge on ROUTABLE_BUFFER_IN itself (any shape - a row, an ADC, a
 // DAC they placed by hand) means they want the buffer: yield the feed.
@@ -327,6 +348,7 @@ static bool enProbePower(void) {
 static const InfraCandidate s_probePowerCandidates[] = {};
 static bool enProbePower(void) { return false; }
 void infraDacParkEpochBump(void) { /* no probe feed to re-park on OG */ }
+bool infraProbePowerGpioFirst(void) { return false; }
 
 #endif
 
@@ -402,16 +424,16 @@ static bool enSerial2(void) { return false; }
 static InfraFunction s_functions[] = {
     { "probe_power", enProbePower,
 #if !defined(OG_JUMPERLESS)
-      ovProbePower,
+      ovProbePower, ordProbePower,
 #else
-      nullptr,
+      nullptr, nullptr,
 #endif
       s_probePowerCandidates,
       (int)(sizeof(s_probePowerCandidates) / sizeof(s_probePowerCandidates[0])),
       -1, -1, {}, 0 },
-    { "oled_i2c", enOledI2c, ovOledI2c, s_oledCandidates, 1, -1, -1, {}, 0 },
-    { "serial_1", enSerial1, ovSerial1, s_serial1Candidates, 1, -1, -1, {}, 0 },
-    { "serial_2", enSerial2, nullptr, nullptr, 0, -1, -1, {}, 0 },
+    { "oled_i2c", enOledI2c, ovOledI2c, nullptr, s_oledCandidates, 1, -1, -1, {}, 0 },
+    { "serial_1", enSerial1, ovSerial1, nullptr, s_serial1Candidates, 1, -1, -1, {}, 0 },
+    { "serial_2", enSerial2, nullptr, nullptr, nullptr, 0, -1, -1, {}, 0 },
 };
 static const int s_numFunctions = (int)(sizeof(s_functions) / sizeof(s_functions[0]));
 
@@ -487,14 +509,18 @@ void infraEvaluate(void) {
         InfraPair pairs[2];
         int pairCount = 0;
         for (int walk = 0; walk < fn.numCandidates; walk++) {
-            int cIdx = walk;
+            // The function's order hook (probe_power: dacs.probe_power_source)
+            // decides which candidate this walk position tries. Candidate
+            // indices never move, so a forced index means the same thing
+            // under either order.
+            int cIdx = fn.order ? fn.order(walk) : walk;
+            if (cIdx < 0 || cIdx >= fn.numCandidates) continue;
             // (debug.probe_power_gpio is parsed but IGNORED: it was briefly
             // honored as a GPIO-first transition override, but every board
             // that ran the old GPIO-power firmware has true persisted in
             // config.txt - which silently kept the 4-crosspoint GPIO feed
-            // and its droop model in play when the whole point of the
-            // candidate order is the 2-crosspoint DAC0 feed. Use
-            // infraForceCandidate for debugging instead.)
+            // and its droop model in play. dacs.probe_power_source is the
+            // deliberate, validated replacement.)
             if (s_forced[f] >= 0 && cIdx != s_forced[f]) continue;
             pairCount = fn.candidates[cIdx].resolvePairs(pairs);
             if (pairCount <= 0) continue;
@@ -633,6 +659,17 @@ void infraServiceTick(void) {
         (globalState.config.gpioPythonOwned[s_gpioActiveIdx] ||
          globalState.config.gpioPwmEnabled[s_gpioActiveIdx])) {
         infraNudge();
+    }
+    // Switch-back for GPIO-first: the feed fell through to DAC0 because every
+    // GPIO was taken, and a MicroPython gpio_release_pin() / PWM stop frees
+    // one WITHOUT a bridge change - nothing rebuilds, so the more-preferred
+    // candidate would sit unused until an unrelated refresh. (DAC0-first has
+    // no such gap: DAC0 frees via a disconnect or a dac_set release-nudge,
+    // both of which rebuild.) Hardware-observed on the flag's first HIL run.
+    if (infraProbePowerGpioFirst() && s_forced[0] < 0 &&
+        s_functions[0].activeCandidate == 0 /* DAC0 */) {
+        InfraPair probe[2];
+        if (rpGpio(probe) > 0) infraNudge();
     }
 #endif
 }
@@ -784,6 +821,30 @@ int infraForceCandidate(const char* fnName, int candIdx) {
     return -1;
 }
 
+// How many routed paths carry this exact node pair, how many of them are
+// duplicates, and how many crosspoints the (first) one closes. Infra pairs
+// are added dup=0 and skipped by fillUnusedPaths, so the answer for a live
+// feed must be paths:1 dup:0 with xp:2 (DAC0, same chip K) or xp:4 (GPIO,
+// L->K interchip). Printed so a human - and the HIL suite - can see the
+// single-path invariant instead of trusting it.
+static void pairPathStats(int a, int b, int* paths, int* dups, int* xp) {
+    *paths = 0; *dups = 0; *xp = 0;
+    ConnectionState& c = globalState.connections;
+    for (int i = 0; i < c.numPaths; i++) {
+        const pathStruct& p = c.paths[i];
+        bool match = (p.node1 == a && p.node2 == b) || (p.node1 == b && p.node2 == a);
+        if (!match) continue;
+        (*paths)++;
+        if (p.duplicate != 0) (*dups)++;
+        if (*xp == 0) {
+            // Same predicate sendAllPaths uses to decide a hop is real.
+            for (int j = 0; j < 4; j++) {
+                if (p.chip[j] != -1 && p.x[j] != -1 && p.y[j] != -1) (*xp)++;
+            }
+        }
+    }
+}
+
 void infraPrintStatus(Stream* out) {
     for (int f = 0; f < s_numFunctions; f++) {
         InfraFunction& fn = s_functions[f];
@@ -798,6 +859,16 @@ void infraPrintStatus(Stream* out) {
             out->print("  -> (none)");
         }
         if (s_forced[f] >= 0) out->printf("  FORCED:%d", s_forced[f]);
+#if !defined(OG_JUMPERLESS)
+        if (f == 0) {
+            out->printf("  order:%s", infraProbePowerGpioFirst() ? "GPIO>DAC0" : "DAC0>GPIO");
+            if (fn.activeCandidate >= 0 && fn.activePairCount > 0) {
+                int paths, dups, xp;
+                pairPathStats(fn.activePairs[0].a, fn.activePairs[0].b, &paths, &dups, &xp);
+                out->printf("  paths:%d dup:%d xp:%d", paths, dups, xp);
+            }
+        }
+#endif
         out->println("\r");
     }
 }

@@ -16,6 +16,7 @@ set_dacs_on_boot = 0;
 set_rails_on_boot = 1;
 probe_power_dac = 0;
 auto_connect_probe = -1;
+probe_power_source = 0;
 limit_max = 8.00;
 limit_min = -8.00;
 
