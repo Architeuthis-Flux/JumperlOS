@@ -1,9 +1,14 @@
-# Scheduler & hardware offload — recommendations
+# Scheduler & hardware offload — recommendations, then changes
 
 > **STATUS: NOT WRITTEN YET.** Everything below is the *brief* — the original ask, the
 > orientation a fresh session needs, the facts already verified on hardware, and the agreed
-> section outline. **The deliverable is this same file, rewritten as the actual
-> recommendations document.** Nothing below the outline is a recommendation yet.
+> section outline. Nothing below the outline is a recommendation yet.
+>
+> **This is a propose-then-implement job, not a document-only one.** Write the
+> recommendations into this file first, so the reasoning is on the table and reviewable.
+> Kevin then reviews them **in plan mode** and approves what to build — and the approved
+> items get implemented. Do not stop at the document; do not start editing before the
+> proposals exist and are approved.
 >
 > This file is written to be read with **no prior context**. It should contain everything
 > needed to start; if something is missing, that is a bug in this file.
@@ -25,10 +30,31 @@ The task was given as three parts (2026-08-16, branch `dev`):
 **(1) and (2) are done, committed and hardware-verified.** See `PROBE_REWORK_HANDOFF.md`.
 **(3) is this file, and it is the only part left.**
 
-Two standing constraints from Kevin, which apply to this work too:
+### How this part runs
 
-- **Recommendations-only this pass. No behaviour changes.** The point is a document.
-- **Never push.** Commit locally when work is verified; pushing is his call.
+The ask says "delivering *recommendations*", and that is the **first** step, not the whole
+job. Kevin's instruction for this session (2026-08-16): *"I do want changes after proposing
+them, I'll be doing it in plan mode."* So:
+
+1. **Do the sweep and write the recommendations into this file** — every registered
+   `service()` and core 1's loop, each proposal naming the peripheral, the SDK calls, the
+   gain, the risk and the effort, with `file:line` throughout.
+2. **Kevin reviews in plan mode** and approves which items to build. The tiered roadmap
+   (section E) exists to make that triage easy — keep the tiers honest about size and risk,
+   because he is choosing from them.
+3. **Implement what he approves.** Normal rules from there: build all three environments
+   after every step, run the HIL suite, and verify on the attached board.
+
+So the document is the deliverable of step 1 and the map for step 3 — it should be written
+to be *acted on*, and it stays in the tree afterwards as the record of why each change was
+made (and why the rejected ones were not).
+
+Standing constraints from Kevin that apply throughout:
+
+- **Commit only when verified** — not mid-investigation. Ideally confirmed by him on
+  hardware for anything he can see or feel; his own hardware verification is the gate for
+  interactive behaviour.
+- **Never push.** Commit locally; pushing is his call.
 
 ---
 
@@ -264,7 +290,7 @@ probe).
 
 ## 7. What "done" looks like
 
-A single document — this file — that a firmware engineer can act on:
+**Step 1 — the proposals** (this file, rewritten):
 
 - Every claim carries a `file:line`.
 - Every recommendation names the **peripheral**, the **SDK calls**, the **gain**, the
@@ -272,5 +298,16 @@ A single document — this file — that a firmware engineer can act on:
   should say the win is stability rather than latency, because latency is dominated by the
   `waitCore2()` / `core_sync` handshake).
 - Anything bounded or sampled says so out loud rather than reading as full coverage.
-- The roadmap is tiered so Tier 1 could be done in an afternoon.
-- **No code changes are made in this pass.**
+- The roadmap is tiered and the tiers are honest about size and risk — Kevin is picking
+  from them in plan mode, so a mis-sized Tier 1 wastes his afternoon, not just yours.
+- A recommendation that turns out to be wrong on inspection is **said so and dropped**, with
+  the reason kept. Several plan-stage assumptions in this very brief did not survive
+  contact (see the `tud_task` count, and the ratiometric-decode finding in
+  `PROBE_REWORK_HANDOFF.md`) — that is the normal outcome, not a failure.
+
+**Step 2 — the approved changes**, once he has picked them in plan mode:
+
+- All three environments build after every step; HIL suite at 5/6 (no *new* failures).
+- Verified on the attached board, and for anything with a visible or tactile effect,
+  confirmed by Kevin before it is committed.
+- This file updated to record what was built and what was consciously not.
