@@ -627,6 +627,50 @@ void testSwitchThresholds( void ) {
     Serial.flush( );
 }
 
+// Pin the probe feed to one candidate and let the rebuild land, so a
+// calibration phase measures the source it says it is measuring. Same recipe
+// the switch-threshold app and the self test's droop phase use. candIdx: 0 =
+// DAC0, 1 = GPIO scan, -1 = back to automatic.
+static void probeCalibForceFeed( int candIdx ) {
+    infraForceCandidate( "probe_power", candIdx );
+    refreshConnections( -1, 0, 0 );
+    waitCore2( );
+    delay( 30 );
+}
+
+// Switch position for the calibration app, from the TIP SENSE rather than
+// the runtime classifier. The classifier is gated to 500ms and reads either
+// INA1 (needs ~17ms conversion windows) or the ADC7 droop model - and this
+// app deliberately thrashes the feed during convergence, which disturbs
+// both and wanders the tip ~70mV per rebuild. The tip sense is ~6us, needs
+// no ADC or I2C, and does not care which source is feeding the buffer, so
+// it is the only position source that stays honest in here. Two agreeing
+// reads to debounce; falls back to the runtime position when it skips
+// (a probe button is held).
+static int probeCalibSwitchPos( int lastPos ) {
+    int a = probeSwitchTipSenseNow( );
+    if ( a < 0 ) return lastPos >= 0 ? lastPos : Probing::getInstance( ).switchPosition;
+    static int pending = -1;
+    static int pendingCount = 0;
+    if ( a == lastPos ) {
+        pending = -1;
+        pendingCount = 0;
+        return lastPos;
+    }
+    if ( pending == a ) {
+        pendingCount++;
+    } else {
+        pending = a;
+        pendingCount = 1;
+    }
+    if ( pendingCount >= 2 ) {
+        pending = -1;
+        pendingCount = 0;
+        return a;
+    }
+    return lastPos >= 0 ? lastPos : a;
+}
+
 void probeCalibApp( void ) {
     b.clear( );
 
@@ -636,6 +680,16 @@ void probeCalibApp( void ) {
     Serial.println( "\n\rTap rows with the probe and rotate the clickweel until they're lighting up the correct row" );
     cycleTerminalColor( );
     Serial.println( "be sure to check nano header rows too" );
+    cycleTerminalColor( );
+    Serial.println( "SELECT position calibrates probe_max. The feed is pinned to DAC0 there so" );
+    Serial.println( "INA1 can measure the switch (probe LED supply) current - shown as sw:." );
+    cycleTerminalColor( );
+    Serial.println( "MEASURE position: hold the tip on ONE pad and the app flips the feed" );
+    Serial.println( "between DAC0 and a GPIO, auto-trimming probe_max_measure_gpio until both" );
+    Serial.println( "feeds decode the SAME row (the drive voltage cancels out of the decode;" );
+    Serial.println( "the two feeds' source impedance does not, which is what this removes)." );
+    Serial.println( "Once converged the wheel moves BOTH endpoints together to align the row." );
+    Serial.println( "Short-click re-runs the convergence." );
     cycleTerminalColor( );
     Serial.println( "Hold the clickwheel when you're done\n\n\r" );
     cycleTerminalColor( );
@@ -648,7 +702,7 @@ void probeCalibApp( void ) {
 
     // }
 
-    oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rhold click = save", true, true );
+    oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rmeasure: hold one pad to converge feeds\n\rhold click = save", true, true );
     // oled.showMultiLineSmallText("be sure to check nano header rows too\n\r", false, true);
     // oled.showMultiLineSmallText("Hold the clickwheel when you're done\n\r", false, true);
     oled.flushFramebuffer( );
@@ -677,6 +731,41 @@ void probeCalibApp( void ) {
     // drive-voltage change (and under debug.probe_power_gpio the DAC isn't
     // even driving the tip), so the knob adjusts probe_max_measure directly.
     int probeMaxMeasure = jumperlessConfig.calibration.probe_max_measure;
+
+    // MEASURE has two calibrations because the tip is driven by two very
+    // different sources (dacs.probe_power_source picks which one the runtime
+    // prefers, and either can end up live):
+    //   phase 0 - feed = DAC0: a stiff ~2-crosspoint source. The knob here is
+    //             the DAC drive itself, calibration.measure_mode_output_voltage.
+    //   phase 1 - feed = GPIO: ~183 ohm through 4 crosspoints, so the drive is
+    //             fixed 3.3V logic minus droop and the only knob is the map
+    //             endpoint, calibration.probe_max_measure.
+    // The feed is FORCED per phase so each calibration measures its own source
+    // instead of whatever the arbitration happened to pick. Unforced on exit.
+    // Convergence state. The tip drive VOLTAGE cancels out of the decode
+    // (ratiometric: endpoints x live ADC7 / 3.3 - hardware-confirmed), so it
+    // is left fixed at the servo'd measure_mode_output_voltage and is NOT a
+    // knob here. What does not cancel is the two feeds' source impedance
+    // (DAC0 ~2 crosspoints and stiff; a routable GPIO ~170-185 ohm through 4,
+    // sagging under the pad ladder). So each feed has its own top endpoint
+    // and this app trims the GPIO one until, on the SAME held pad, both feeds
+    // decode the same row. Then the wheel moves both together.
+    int convFeed = 0;          // which feed the next sample takes (0 = DAC0, 1 = GPIO)
+    int appliedFeed = -1;      // feed currently forced (-1 = automatic)
+    float convNormDac = -1.0f; // normalized pad position measured under DAC0
+    int convRowDac = -1;
+    int convRowGpio = -1;
+    int convStable = 0;        // consecutive alternations agreeing on the row
+    bool converged = false;
+    bool gpioFeedAvailable = true;
+    unsigned long convNextMs = 0;
+    int probeMaxMeasureGpio = jumperlessConfig.calibration.probe_max_measure_gpio;
+    // Switch (probe LED supply) current, zero-corrected. Only meaningful
+    // while the feed is DAC0 - INA1's shunt R57 sits in DAC0's output path
+    // and is blind to a GPIO feed - so it is sampled in SELECT, where this
+    // app pins DAC0 for exactly that reason, and left at NAN otherwise.
+    float switchCurrent_mA = NAN;
+    unsigned long switchCurrentNextMs = 0;
 
     int nodeSelected = -1;
     int lastNodeSelected = -1;
@@ -723,7 +812,7 @@ void probeCalibApp( void ) {
 
     while ( done == false ) {
         if ( oledCalibHotplugPoll( ) ) {
-            oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rhold click = save", true, true );
+            oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rmeasure: hold one pad to converge feeds\n\rhold click = save", true, true );
         }
         probeRead = readProbeRaw( 0, true );
 
@@ -740,8 +829,16 @@ void probeCalibApp( void ) {
         // Update the switch position FIRST: probeMapRange() keys off it, and
         // measure/select decode with different endpoint pairs - mapping with
         // last loop's position would mis-map rows for a frame after a flip.
-        jOS.forceServiceByName("ProbeSwitch");
-        int checkSwitch = Probing::getInstance( ).switchPosition;
+        int checkSwitch = probeCalibSwitchPos( lastSwitchPosition );
+        // probeMapRange() - the decode this app is calibrating - picks its
+        // endpoint pair from the GLOBAL switchPosition, and the runtime
+        // ProbeSwitch service keeps writing that from the current/droop
+        // classifier this app's feed thrashing disturbs. Re-assert the tip
+        // sense's answer every pass so what the app displays and what the
+        // decode uses can never disagree.
+        if ( checkSwitch >= 0 ) {
+            Probing::getInstance( ).switchPosition = checkSwitch;
+        }
         if ( checkSwitch != lastSwitchPosition ) {
             if ( checkSwitch == 0 ) {
                 lastSwitchPosition = 0;
@@ -753,6 +850,148 @@ void probeCalibApp( void ) {
                 probeMax = jumperlessConfig.calibration.probe_max;
             }
             resetEncoderPosition = true;
+        }
+
+        // Short click (RELEASED off a PRESSED, the same edge every menu uses)
+        // re-runs the convergence. A HOLD still saves+exits; a click in SELECT
+        // does nothing - there is only one endpoint there.
+        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) {
+            encoderButtonState = IDLE;
+            if ( measureOrSelect == 0 ) {
+                converged = false;
+                convStable = 0;
+                convNormDac = -1.0f;
+                convFeed = 0;
+                gpioFeedAvailable = true;
+                Serial.println( "\n\rre-running feed convergence - hold the tip on one pad" );
+            }
+        }
+
+        // In SELECT the tip is driven straight from PROBE_PIN, so the feed
+        // does not affect the pad reading at all - which frees us to pin it
+        // to DAC0 and get the switch current for free: in this position the
+        // feed IS the probe LED supply, and INA1's shunt is in DAC0's output
+        // path, so that current is the switch signature the thresholds are
+        // calibrated against. Pinned on entry to SELECT, not every pass.
+        if ( measureOrSelect == 1 && appliedFeed != 0 ) {
+            probeCalibForceFeed( 0 );
+            appliedFeed = 0;
+            switchCurrent_mA = NAN;
+            switchCurrentNextMs = millis( ) + 120; // let the LED load settle
+            lastReading = -1;
+        }
+        if ( measureOrSelect == 1 && millis( ) >= switchCurrentNextMs ) {
+            switchCurrentNextMs = millis( ) + 100; // bound the I2C traffic
+            switchCurrent_mA = checkProbeCurrent( );
+        }
+
+        // ---- feed convergence -------------------------------------------
+        // One alternation step per loop pass while a pad is held: force a
+        // feed, let the rebuild + tip settle, sample, and when both feeds
+        // have been sampled solve the GPIO endpoint that puts them on the
+        // same row. Each step costs a crossbar rebuild, so it is gated on
+        // actually touching something and on a settle interval.
+        if ( measureOrSelect == 0 && !converged && gpioFeedAvailable &&
+             probeRead != -1 && millis( ) >= convNextMs ) {
+            int want = ( convFeed == 0 ) ? 0 : 1;
+            if ( appliedFeed != want ) {
+                probeCalibForceFeed( want );
+                appliedFeed = want;
+                if ( want == 1 && infraProbePowerGpioIdx( ) < 0 ) {
+                    // Nothing to converge against - every routable GPIO is
+                    // claimed. Say so once, park on DAC0 and let the wheel
+                    // work on the endpoints we can still set.
+                    Serial.println( "\n\rno free routable GPIO - convergence skipped, DAC endpoint only" );
+                    if ( oled.isConnected( ) ) {
+                        oled.showMultiLineSmallText( "No free GPIO -\n\rconvergence\n\rskipped", true, true );
+                    }
+                    gpioFeedAvailable = false;
+                    probeCalibForceFeed( 0 );
+                    appliedFeed = 0;
+                }
+            }
+            if ( gpioFeedAvailable ) {
+                // Median of 3 raw reads: a rebuild wanders the tip for a
+                // while afterwards (~70mV, measured), so a single sample
+                // here would chase that instead of the feed difference.
+                int samples[ 3 ];
+                int got = 0;
+                for ( int i = 0; i < 3; i++ ) {
+                    int r = readProbeRaw( 0, true );
+                    if ( r != -1 ) samples[ got++ ] = r;
+                    delay( 2 );
+                }
+                if ( got > 0 ) {
+                    if ( got == 3 ) {
+                        // tiny 3-element sort
+                        if ( samples[ 0 ] > samples[ 1 ] ) std::swap( samples[ 0 ], samples[ 1 ] );
+                        if ( samples[ 1 ] > samples[ 2 ] ) std::swap( samples[ 1 ], samples[ 2 ] );
+                        if ( samples[ 0 ] > samples[ 1 ] ) std::swap( samples[ 0 ], samples[ 1 ] );
+                    }
+                    int rawNow = samples[ got / 2 ];
+                    int cMin, cMax;
+                    probeMapRange( &cMin, &cMax );
+                    int rowNow = map( rawNow, cMin, cMax, 101, 0 );
+                    float span = (float)( cMax - cMin );
+                    float norm = ( span != 0.0f ) ? ( (float)( rawNow - cMin ) / span ) : -1.0f;
+
+                    if ( convFeed == 0 ) {
+                        convNormDac = norm;
+                        convRowDac = rowNow;
+                        convFeed = 1;
+                    } else {
+                        convRowGpio = rowNow;
+                        // Solve the GPIO endpoint that reproduces the DAC
+                        // feed's normalized position at this same pad:
+                        //   norm = (raw - min) / (max - min)  ->
+                        //   max = min + (raw - min) / norm
+                        // then undo the live ratiometric scale to store it.
+                        if ( convNormDac > 0.02f && norm > 0.0f ) {
+                            // Recover the live ratiometric scale from the TOP
+                            // endpoint, not the bottom: probeMapRange returns
+                            // ints, and probe_min_measure is ~10 counts, so
+                            // cMin/mMin quantises to 0.9 or 1.0 - a 10% error
+                            // straight into the solved endpoint. cMax is ~4000,
+                            // where the same rounding is negligible.
+                            int usedMax = jumperlessConfig.calibration.probe_max_measure_gpio;
+                            float scale = ( usedMax > 0 ) ? ( (float)cMax / (float)usedMax ) : 1.0f;
+                            if ( scale < 0.5f || scale > 1.5f ) scale = 1.0f;
+                            float wantMaxScaled =
+                                (float)cMin + ( (float)( rawNow - cMin ) / convNormDac );
+                            int wantMax = (int)( wantMaxScaled / scale + 0.5f );
+                            // Damp: move a third of the way each alternation so
+                            // one noisy pair cannot throw the endpoint.
+                            int cur = jumperlessConfig.calibration.probe_max_measure_gpio;
+                            int next = cur + ( wantMax - cur ) / 3;
+                            if ( next == cur && wantMax != cur ) next = cur + ( wantMax > cur ? 1 : -1 );
+                            if ( next < 15 ) next = 15;
+                            if ( next > 4095 ) next = 4095;
+                            jumperlessConfig.calibration.probe_max_measure_gpio = next;
+                            probeMaxMeasureGpio = next;
+                        }
+                        if ( convRowDac == convRowGpio ) {
+                            convStable++;
+                            if ( convStable >= 3 ) {
+                                converged = true;
+                                Serial.printf( "\n\rfeeds converged on row %d: DAC max %d / GPIO max %d\n\r"
+                                               "now turn the wheel to align the row (moves both)\n\r",
+                                               convRowDac,
+                                               jumperlessConfig.calibration.probe_max_measure,
+                                               jumperlessConfig.calibration.probe_max_measure_gpio );
+                                // Leave the runtime's own preference live now
+                                // that the endpoints agree.
+                                probeCalibForceFeed( -1 );
+                                appliedFeed = -1;
+                            }
+                        } else {
+                            convStable = 0;
+                        }
+                        convFeed = 0;
+                    }
+                    lastReading = -1; // repaint with the new endpoints
+                }
+                convNextMs = millis( ) + 40;
+            }
         }
 
         // Decode with the SAME mode-aware endpoints the runtime uses (base
@@ -777,10 +1016,17 @@ void probeCalibApp( void ) {
         if ( encoderPosition != lastEncoderPosition || reading != lastReading ) {
             lastEncoderPosition = encoderPosition;
             if ( measureOrSelect == 0 ) {
-                jumperlessConfig.calibration.probe_max_measure = probeMaxMeasure - encoderPosition;
-                if ( jumperlessConfig.calibration.probe_max_measure < 15 ) {
-                    jumperlessConfig.calibration.probe_max_measure = 15;
-                }
+                // Both measure endpoints move TOGETHER: convergence has already
+                // removed the difference between the feeds, so aligning the row
+                // is one shared adjustment. Moving only one would re-open the
+                // gap the convergence just closed.
+                int deltaMax = encoderPosition;
+                int newDac = probeMaxMeasure - deltaMax;
+                int newGpio = probeMaxMeasureGpio - deltaMax;
+                if ( newDac < 15 ) newDac = 15;
+                if ( newGpio < 15 ) newGpio = 15;
+                jumperlessConfig.calibration.probe_max_measure = newDac;
+                jumperlessConfig.calibration.probe_max_measure_gpio = newGpio;
             } else {
                 jumperlessConfig.calibration.probe_max = probeMax - encoderPosition;
                 if ( jumperlessConfig.calibration.probe_max < 15 ) {
@@ -789,15 +1035,18 @@ void probeCalibApp( void ) {
             }
             char debugOutput[100];
             if (measureOrSelect == 0) {
-                snprintf(debugOutput, sizeof(debugOutput), "MEASURE  raw: %d\n\rread: %d\n\rnode: %s\n\rmax: %d",
-                           lastValidProbeRead, rowProbed,
+                snprintf(debugOutput, sizeof(debugOutput), "MEASURE %s\n\rread: %d\n\rnode: %s\n\rD%d G%d",
+                           converged ? "ok" : ( gpioFeedAvailable ? "conv.." : "1feed" ),
+                           rowProbed,
                            definesToChar( nodeSelected ),
-                           jumperlessConfig.calibration.probe_max_measure );
+                           jumperlessConfig.calibration.probe_max_measure,
+                           jumperlessConfig.calibration.probe_max_measure_gpio );
             } else {
-                snprintf(debugOutput, sizeof(debugOutput), "SELECT   raw: %d\n\rread: %d\n\rnode: %s\n\rmax: %d",
+                snprintf(debugOutput, sizeof(debugOutput), "SELECT   raw: %d\n\rread: %d\n\rnode: %s\n\rmax: %d sw:%.2fmA",
                            lastValidProbeRead, rowProbed,
                            definesToChar( nodeSelected ),  
-                           jumperlessConfig.calibration.probe_max );
+                           jumperlessConfig.calibration.probe_max,
+                           isnan( switchCurrent_mA ) ? 0.0 : (double)switchCurrent_mA );
             }
             if (firstRead == false) {
                 if (oled.isConnected()) {
@@ -810,11 +1059,32 @@ void probeCalibApp( void ) {
             // \r first (return to column 0), then content, then EL (\033[K) to
             // wipe leftover chars from a longer previous line. Spaces-before-\r
             // only extends the line rightward and never clears it.
-            Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s mode: %s \033[K",
-                           lastValidProbeRead, encoderPosition, rowProbed,
-                           measureOrSelect == 0 ? jumperlessConfig.calibration.probe_max_measure
-                                                : jumperlessConfig.calibration.probe_max,
-                           definesToChar( nodeSelected ), measureOrSelect ? "select" : "measure" );
+            if ( measureOrSelect == 0 ) {
+                Serial.printf( "\rraw: %d enc: %d reading: %d maxD: %d maxG: %d node: %s measure %s\033[K",
+                               lastValidProbeRead, encoderPosition, rowProbed,
+                               jumperlessConfig.calibration.probe_max_measure,
+                               jumperlessConfig.calibration.probe_max_measure_gpio,
+                               definesToChar( nodeSelected ),
+                               converged ? "(converged - wheel moves both)"
+                                         : ( gpioFeedAvailable
+                                                 ? "(converging: hold one pad)"
+                                                 : "(no free GPIO)" ) );
+            } else {
+                if ( isnan( switchCurrent_mA ) ) {
+                    Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s select sw: --  \033[K",
+                                   lastValidProbeRead, encoderPosition, rowProbed,
+                                   jumperlessConfig.calibration.probe_max,
+                                   definesToChar( nodeSelected ) );
+                } else {
+                    Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s select sw: %.2f mA (thr %.2f/%.2f)\033[K",
+                                   lastValidProbeRead, encoderPosition, rowProbed,
+                                   jumperlessConfig.calibration.probe_max,
+                                   definesToChar( nodeSelected ),
+                                   (double)switchCurrent_mA,
+                                   (double)jumperlessConfig.calibration.probe_switch_threshold_low,
+                                   (double)jumperlessConfig.calibration.probe_switch_threshold_high );
+                }
+            }
             Serial.flush( );
         }
 
@@ -979,7 +1249,31 @@ void probeCalibApp( void ) {
             }
             
 
+            // Never leave the feed pinned: a forced candidate survives until
+            // something else unforces it, and the runtime would keep using the
+            // calibration phase's source forever.
+            probeCalibForceFeed( -1 );
+
             Serial.println( "\n\n\r" );
+            Serial.printf( "measure (DAC0 feed): probe_max_measure      = %d\n\r",
+                           jumperlessConfig.calibration.probe_max_measure );
+            Serial.printf( "measure (GPIO feed): probe_max_measure_gpio = %d%s\n\r",
+                           jumperlessConfig.calibration.probe_max_measure_gpio,
+                           gpioFeedAvailable ? ( converged ? "  (converged)" : "  (NOT converged)" )
+                                             : "  (no free GPIO - unchanged)" );
+            Serial.printf( "select:              probe_max              = %d\n\r",
+                           jumperlessConfig.calibration.probe_max );
+            if ( !isnan( switchCurrent_mA ) ) {
+                Serial.printf( "select switch current (DAC0 feed, INA1): %.2f mA   thresholds %.2f / %.2f\n\r",
+                               (double)switchCurrent_mA,
+                               (double)jumperlessConfig.calibration.probe_switch_threshold_low,
+                               (double)jumperlessConfig.calibration.probe_switch_threshold_high );
+                if ( switchCurrent_mA <= jumperlessConfig.calibration.probe_switch_threshold_high ) {
+                    Serial.println( "  NOTE: that is not above the SELECT threshold - run Switch Calib." );
+                }
+            }
+            Serial.printf( "tip drive (fixed):   measure_mode_output_voltage = %.3f V\n\r",
+                           (double)jumperlessConfig.calibration.measure_mode_output_voltage );
             Serial.println( "Saving config..." );
 
             saveConfig( );

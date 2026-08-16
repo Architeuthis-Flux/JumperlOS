@@ -208,7 +208,18 @@ struct config {
         // debug.probe_power_gpio), and the resistive pad ladder scales every
         // reading with that voltage - so the decode multiplies these
         // endpoints by (live ADC7 tip voltage / 3.3V) at runtime.
-        int probe_max_measure = 4055;
+        // MEASURE-position pad endpoints. The tip is driven by whichever
+        // source InfraPaths picked, and the two sources are not
+        // interchangeable: DAC0 is a stiff ~2-crosspoint feed, a routable
+        // GPIO is ~170-185 ohm through 4 crosspoints and droops under the
+        // pad ladder. The ratiometric decode (endpoints x live ADC7 / 3.3)
+        // cancels the DRIVE VOLTAGE exactly - hardware-confirmed 2026-08-16,
+        // moving measure_mode_output_voltage does not move a decoded row -
+        // but it does NOT cancel the source impedance, so each feed carries
+        // its own max. probe_min_measure is shared (the calibration solves
+        // one degree of freedom per feed, at the tapped row).
+        int probe_max_measure = 4055;       // feed = DAC0
+        int probe_max_measure_gpio = 4055;  // feed = a routable GPIO
         int probe_min_measure = 10;
         // Hysteresis thresholds to prevent oscillation between modes
         // Switch to SELECT mode when current > high threshold
@@ -229,7 +240,12 @@ struct config {
         // supply cap through the cable at ~R_feed/(R_feed+R_cable) ~ 78%.
         // Readings at or above this hold percentage classify SELECT.
         int probe_switch_blink_hold_pct = 50;
-        float measure_mode_output_voltage = 3.33;
+        // The measure-mode tip drive. FIXED, not a calibration knob: the
+        // decode is ratiometric so this cancels out of row alignment
+        // entirely. The tip-voltage self test servos it so the TIP sits at
+        // 3.30V (the DAC setting lands slightly above, compensating the
+        // buffer). Nothing else should move it.
+        float measure_mode_output_voltage = 3.30;
         float probe_current_zero = 2.0;
         int minimum_probe_reading = 85;
         // GPIO-powered measure buffer: ADC7 tip voltage (volts) that maps to

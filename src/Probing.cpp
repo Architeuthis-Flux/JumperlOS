@@ -6310,7 +6310,16 @@ void probeMapRange( int* mapMin, int* mapMax ) {
         lastScaleRead = 0;
     }
     int mMin = jumperlessConfig.calibration.probe_min_measure;
-    int mMax = jumperlessConfig.calibration.probe_max_measure;
+    // Per-feed top endpoint. The ratiometric scale below cancels the tip
+    // DRIVE VOLTAGE exactly (hardware-confirmed: moving
+    // measure_mode_output_voltage does not move a decoded row), but it does
+    // not cancel the SOURCE IMPEDANCE - DAC0 is a stiff ~2-crosspoint feed
+    // while a routable GPIO is ~170-185 ohm through 4 crosspoints and sags
+    // under the pad ladder's load. So each feed carries its own max, and the
+    // calibration app converges the two against the same physical pad.
+    int mMax = ( s_gpioPowerIdx >= 0 )
+                   ? jumperlessConfig.calibration.probe_max_measure_gpio
+                   : jumperlessConfig.calibration.probe_max_measure;
     if ( mMin <= 0 )
         mMin = jumperlessConfig.calibration.probe_min;
     if ( mMax <= 0 )

@@ -191,7 +191,8 @@ def parse_cfg(text):
 
 CAL_KEYS = ["probe_droop_ohms", "probe_droop_v0", "probe_pad_ohms",
             "crosspoint_resistance", "probe_switch_threshold_high",
-            "probe_switch_threshold_low", "probe_max_measure", "probe_min_measure",
+            "probe_switch_threshold_low", "probe_max_measure",
+            "probe_max_measure_gpio", "probe_min_measure",
             "measure_mode_output_voltage"]
 snapshot = read_config()
 snap = parse_cfg(snapshot)

@@ -695,6 +695,8 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "probe_max") == 0) jumperlessConfig.calibration.probe_max = parseInt(value);
             else if (strcmp(key, "probe_min") == 0) jumperlessConfig.calibration.probe_min = parseInt(value);
             else if (strcmp(key, "probe_max_measure") == 0) jumperlessConfig.calibration.probe_max_measure = parseInt(value);
+        else if (strcmp(key, "probe_max_measure_gpio") == 0) jumperlessConfig.calibration.probe_max_measure_gpio = parseInt(value);
+            else if (strcmp(key, "probe_max_measure_gpio") == 0) jumperlessConfig.calibration.probe_max_measure_gpio = parseInt(value);
             else if (strcmp(key, "probe_min_measure") == 0) jumperlessConfig.calibration.probe_min_measure = parseInt(value);
             else if (strcmp(key, "probe_switch_threshold_high") == 0) jumperlessConfig.calibration.probe_switch_threshold_high = parseFloat(value);
             else if (strcmp(key, "probe_switch_threshold_low") == 0) jumperlessConfig.calibration.probe_switch_threshold_low = parseFloat(value);
@@ -1075,6 +1077,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("probe_max = "); file.print(jumperlessConfig.calibration.probe_max); file.println(";");
     file.print("probe_min = "); file.print(jumperlessConfig.calibration.probe_min); file.println(";");
     file.print("probe_max_measure = "); file.print(jumperlessConfig.calibration.probe_max_measure); file.println(";");
+    file.print("probe_max_measure_gpio = "); file.print(jumperlessConfig.calibration.probe_max_measure_gpio); file.println(";");
     file.print("probe_min_measure = "); file.print(jumperlessConfig.calibration.probe_min_measure); file.println(";");
     file.print("probe_switch_threshold_high = "); file.print(jumperlessConfig.calibration.probe_switch_threshold_high); file.println(";");
     file.print("probe_switch_threshold_low = "); file.print(jumperlessConfig.calibration.probe_switch_threshold_low); file.println(";");
@@ -1301,6 +1304,7 @@ bool configHasChanges() {
     if (jumperlessConfig.calibration.probe_max != lastSavedConfig.calibration.probe_max) return true;
     if (jumperlessConfig.calibration.probe_min != lastSavedConfig.calibration.probe_min) return true;
     if (jumperlessConfig.calibration.probe_max_measure != lastSavedConfig.calibration.probe_max_measure) return true;
+    if (jumperlessConfig.calibration.probe_max_measure_gpio != lastSavedConfig.calibration.probe_max_measure_gpio) return true;
     if (jumperlessConfig.calibration.probe_min_measure != lastSavedConfig.calibration.probe_min_measure) return true;
     if (jumperlessConfig.calibration.probe_switch_threshold_high != lastSavedConfig.calibration.probe_switch_threshold_high) return true;
     if (jumperlessConfig.calibration.probe_switch_threshold_low != lastSavedConfig.calibration.probe_switch_threshold_low) return true;
@@ -1444,6 +1448,7 @@ static bool configFileIsComplete(const char* fileContent) {
         "probe_droop_ohms",
         "probe_pad_ohms",
         "probe_power_source",
+        "probe_max_measure_gpio",
         "probe_switch_select_max_ma",
         "probe_switch_blink_hold_pct",
         "probe_switch_agree",
@@ -1892,6 +1897,9 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "probe_max_measure") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_max_measure = %d;", jumperlessConfig.calibration.probe_max_measure);
+                    updated = true;
+                } else if (strcmp(key, "probe_max_measure_gpio") == 0) {
+                    snprintf(newLine, sizeof(newLine), "probe_max_measure_gpio = %d;", jumperlessConfig.calibration.probe_max_measure_gpio);
                     updated = true;
                 } else if (strcmp(key, "probe_min_measure") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_min_measure = %d;", jumperlessConfig.calibration.probe_min_measure);
@@ -2633,6 +2641,14 @@ void loadConfig(void) {
     if (jumperlessConfig.calibration.probe_max_measure <= 0) {
         jumperlessConfig.calibration.probe_max_measure = jumperlessConfig.calibration.probe_max;
     }
+    // The GPIO-fed endpoint seeds from the DAC-fed one: a board upgrading
+    // from a single-endpoint firmware has a calibration that was taken on
+    // whichever feed was live (almost always DAC0, the default), and the
+    // convergence step in the probe calibration app is what separates them.
+    if (jumperlessConfig.calibration.probe_max_measure_gpio <= 0) {
+        jumperlessConfig.calibration.probe_max_measure_gpio =
+            jumperlessConfig.calibration.probe_max_measure;
+    }
 
     // Feed-blink hold percentage: a ratio, so 1..99; anything else is a
     // corrupt/hand-edited file - back to the physics-derived default.
@@ -2872,6 +2888,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_min = "); Serial.print(jumperlessConfig.calibration.probe_min); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("probe_max_measure = "); Serial.print(jumperlessConfig.calibration.probe_max_measure); Serial.println(";");
+        if (pasteable == true) Serial.print("`[calibration] ");
+        Serial.print("probe_max_measure_gpio = "); Serial.print(jumperlessConfig.calibration.probe_max_measure_gpio); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
         Serial.print("probe_min_measure = "); Serial.print(jumperlessConfig.calibration.probe_min_measure); Serial.println(";");
         if (pasteable == true) Serial.print("`[calibration] ");
@@ -3925,6 +3943,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_max") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max);
         else if (strcmp(key, "probe_min") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_min);
         else if (strcmp(key, "probe_max_measure") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max_measure);
+        else if (strcmp(key, "probe_max_measure_gpio") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max_measure_gpio);
         else if (strcmp(key, "probe_min_measure") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_min_measure);
         else if (strcmp(key, "probe_switch_threshold_high") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold_high);
         else if (strcmp(key, "probe_switch_threshold_low") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold_low);
