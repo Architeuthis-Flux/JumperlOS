@@ -660,58 +660,6 @@ def clickwheel_press() -> None:
     ...
 
 # ============================================================================
-# Logic Analyzer Functions
-# ============================================================================
-
-def la_set_trigger(trigger_type: int, channel: int, value: float) -> bool:
-    """Set trigger configuration"""
-    ...
-
-def la_capture_single_sample() -> bool:
-    """Capture a single sample"""
-    ...
-
-def la_start_continuous_capture() -> bool:
-    """Start continuous capture mode"""
-    ...
-
-def la_stop_capture() -> bool:
-    """Stop capture"""
-    ...
-
-def la_is_capturing() -> bool:
-    """Check if currently capturing"""
-    ...
-
-def la_set_sample_rate(rate: int) -> None:
-    """Set sample rate"""
-    ...
-
-def la_set_num_samples(samples: int) -> None:
-    """Set number of samples"""
-    ...
-
-def la_enable_channel(channel_type: int, channel: int, enable: bool) -> None:
-    """Enable/disable a channel"""
-    ...
-
-def la_set_control_analog(channel: int, value: float) -> None:
-    """Set analog control channel value"""
-    ...
-
-def la_set_control_digital(channel: int, value: bool) -> None:
-    """Set digital control channel value"""
-    ...
-
-def la_get_control_analog(channel: int) -> float:
-    """Get analog control channel value"""
-    ...
-
-def la_get_control_digital(channel: int) -> bool:
-    """Get digital control channel value"""
-    ...
-
-# ============================================================================
 # Filesystem Functions
 # ============================================================================
 

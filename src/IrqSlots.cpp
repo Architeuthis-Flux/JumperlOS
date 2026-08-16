@@ -11,9 +11,8 @@
 // Measured on a live board: irq_handler_chain_free_slot_head = -1. ZERO free.
 // The six went to arduino-pico's doorbell park handler (registered from BOTH
 // cores), Adafruit TinyUSB's USBCTRL_IRQ, CH446Q's PIO0_IRQ_1, and MicroPython's
-// machine_pin_irq_init + rp2_dma_jl on the first REPL init. Everything after
-// that silently killed a core: the logic analyzer (LogicAnalyzer.cpp), JulseView
-// and MicroPython's UART are all in that queue.
+// machine_pin_irq_init on the first REPL init. Everything after that silently
+// killed a core - MicroPython's machine.UART(0) is next in that queue.
 //
 // TWO FIXES, both here so they cannot drift:
 //

@@ -960,12 +960,6 @@ __all__ = [
     'clickwheel_get_position', 'clickwheel_reset_position', 'clickwheel_get_direction',
     'clickwheel_get_button', 'clickwheel_is_initialized',
     
-    # Logic Analyzer Functions
-    'la_set_trigger', 'la_capture_single_sample', 'la_start_continuous_capture',
-    'la_stop_capture', 'la_is_capturing', 'la_set_sample_rate', 'la_set_num_samples',
-    'la_enable_channel', 'la_set_control_analog', 'la_set_control_digital',
-    'la_get_control_analog', 'la_get_control_digital',
-    
     # Filesystem Functions
     'fs_exists', 'fs_listdir', 'fs_read', 'fs_write', 'fs_cwd',
     

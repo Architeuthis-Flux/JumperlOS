@@ -244,15 +244,13 @@ void debugFlagSet(int flag) {
   // CURRENT jumperlessConfig field (a single source - no more EEPROM read/toggle
   // drift that desynced the menu) and updates the runtime global to match.
   // Persistence: the debug menu calls saveConfig() ONCE after applying all
-  // diffs; the bulk/standalone cases (0/6/9/13) save themselves.
+  // diffs; the bulk/standalone cases (0/9/13) save themselves.
   switch (flag) {
     case 1:  debugFP    = !jumperlessConfig.debug.file_parsing;       jumperlessConfig.debug.file_parsing      = debugFP;    break;
     case 2:  debugNM    = !jumperlessConfig.debug.net_manager;        jumperlessConfig.debug.net_manager       = debugNM;    break;
     case 3:  debugNTCC  = !jumperlessConfig.debug.nets_to_chips;      jumperlessConfig.debug.nets_to_chips     = debugNTCC;  break;
     case 4:  debugNTCC2 = !jumperlessConfig.debug.nets_to_chips_alt;  jumperlessConfig.debug.nets_to_chips_alt = debugNTCC2; break;
     case 5:  debugLEDs  = !jumperlessConfig.debug.leds;               jumperlessConfig.debug.leds              = debugLEDs;  break;
-    case 6:  debugLA    = !jumperlessConfig.debug.logic_analyzer;     jumperlessConfig.debug.logic_analyzer    = debugLA;
-             saveConfig(); break;  // standalone caller (Menus) - persist now
     case 7:  showProbeCurrent = jumperlessConfig.debug.show_probe_current ? 0 : 1;
              jumperlessConfig.debug.show_probe_current = showProbeCurrent; break;
     case 8:
@@ -265,7 +263,7 @@ void debugFlagSet(int flag) {
 
     case 0:  // all off
       debugFP = debugFPtime = debugNM = debugNMtime = false;
-      debugNTCC = debugNTCC2 = debugLEDs = debugLA = false;
+      debugNTCC = debugNTCC2 = debugLEDs = false;
       debugWaitLoopTiming = false;
       debugArduino = 0;
       showProbeCurrent = 0;
@@ -276,7 +274,6 @@ void debugFlagSet(int flag) {
       jumperlessConfig.debug.nets_to_chips     = false;
       jumperlessConfig.debug.nets_to_chips_alt = false;
       jumperlessConfig.debug.leds              = false;
-      jumperlessConfig.debug.logic_analyzer    = false;
       jumperlessConfig.debug.arduino           = 0;
       jumperlessConfig.debug.show_probe_current = 0;
       saveConfig();
@@ -285,7 +282,7 @@ void debugFlagSet(int flag) {
 
     case 9:  // all on
       debugFP = debugFPtime = debugNM = debugNMtime = true;
-      debugNTCC = debugNTCC2 = debugLEDs = debugLA = true;
+      debugNTCC = debugNTCC2 = debugLEDs = true;
       debugWaitLoopTiming = true;
       showProbeCurrent = 1;
       debugProbing = 1;
@@ -295,7 +292,6 @@ void debugFlagSet(int flag) {
       jumperlessConfig.debug.nets_to_chips     = true;
       jumperlessConfig.debug.nets_to_chips_alt = true;
       jumperlessConfig.debug.leds              = true;
-      jumperlessConfig.debug.logic_analyzer    = true;
       jumperlessConfig.debug.show_probe_current = 1;
       saveConfig();
       Serial.println("All debug flags enabled (saved to config.txt)");
@@ -570,7 +566,6 @@ void readSettingsFromConfig() {
   debugNTCC = jumperlessConfig.debug.nets_to_chips;
   debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
   debugLEDs = jumperlessConfig.debug.leds;
-  debugLA = jumperlessConfig.debug.logic_analyzer;
   debugProbing = jumperlessConfig.debug.probing ? 1 : 0;
   // Sync Arduino debug level to global
   debugArduino = jumperlessConfig.debug.arduino;

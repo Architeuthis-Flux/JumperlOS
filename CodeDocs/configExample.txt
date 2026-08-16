@@ -28,7 +28,6 @@ leds = 0;
 probing = 0;
 oled = 0;
 logo_pads = 0;
-logic_analyzer = 1;
 arduino = 0;
 usb_mass_storage = 0;
 

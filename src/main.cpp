@@ -47,11 +47,9 @@ KevinC@ppucc.io
 #include "Graphics.h"
 #include "HelpDocs.h"
 #include "Highlighting.h"
-#include "JulseView.h"
 #include "JumperlOS.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
-#include "LogicAnalyzer.h"
 #include "MatrixState.h"
 #include "MenuTransitions.h"
 #include "Menus.h"
@@ -205,9 +203,6 @@ static inline void armStackLimit( uint32_t floorAddr ) {
     __asm volatile( "isb" ::: "memory" );
 }
 #endif
-
-// julseview julseview;
-LogicAnalyzer logicAnalyzer;
 
 void setup( ) {
 #ifdef PICO_RP2350
@@ -482,7 +477,6 @@ void setup( ) {
     startupTimers[ 9 ] = millis( );
     // Serial.println("Net color tracking initialized");
     // Serial.flush();
-    //  setupLogicAnalyzer();
 
     // tuiGlue.setSerial( &USBSer3 );
     //  Defer TuiGlue activation to first loop() call to avoid DTR wait and terminal probing delays
@@ -699,8 +693,6 @@ int switchPosCount = 0;
 
 unsigned long core1Timeout = millis( );
 
-#define SETUP_LOGIC_ANALYZER_ON_BOOT 0
-
 #define debug_startup_timers 0
 #define debug_busy_timers 0
 
@@ -810,9 +802,6 @@ menu:
         startupCompletePending = true;
 #endif
 
-#if SETUP_LOGIC_ANALYZER_ON_BOOT == 1
-        goto setupla;
-#endif
     }
 
     // if ( Jerial.available( ) >
@@ -1003,12 +992,6 @@ dontshowmenu:
             serviceNetVoltageScanDebug( );
         }
         busyTimers[ 2 ] = micros( );
-
-        // Check if logic analyzer is active (blocks normal operation)
-        if ( logicAnalyzer.is_running( ) == true || logicAnalyzer.is_armed( ) == true ) {
-            delay( 100 );
-            continue;
-        }
 
         // Check for menu activation (goto loadfile)
         // Note: clickMenu() is called within menus.service(), but we need to detect result
@@ -1385,7 +1368,6 @@ int passthroughStatus = 0;
 
 unsigned long serialInfoTimer = 0;
 
-unsigned long la_timer = 0;
 bool debugWaitLoopTimingCore2 = false; // Enable via 'core2timing' command
 unsigned long lastCore2LoopStart = 5000000;
 unsigned long t[ 22 ];
@@ -1444,56 +1426,14 @@ void loop1( ) {
         core2LoopStart = micros( );
     }
 
-    // Only call logic analyzer if it's enabled and there's USB activity
-    static uint32_t last_la_check = 0;
-    uint32_t current_time = millis( );
-
-    // ENHANCED STATE-BASED HANDLER CALLING
-
     // Priority order:
     // 1) High: path/LED refresh triggered by core1 (handled in core2stuff)
     // 2) Medium: wavegen_service (function generator streaming)
     // 3) Medium-low: rotary encoder
     // 4) Low: logo swirls/animations
 
-    // Medium: service wavegen on core2 if running
-    // if (wavegen_is_running()) {
-    //     wavegen_service();
-    // }
-
-    // Use the new state variables to make smarter decisions about when to call the handler
-    bool should_call_handler = false;
-
-    // Route PulseView traffic to the new logic analyzer
-    // OPTIMIZATION: Only poll USB when logic analyzer is actually running or recently active
-    // USB polling is expensive (1-55ms!), so skip it when LA is idle
-    t[ 0 ] = micros( );
-    bool laActive = logicAnalyzer.is_running( ) || logicAnalyzer.is_armed( );
-    // Check if LA had recent command (but ignore initial boot where last_command_time = 0)
-    bool laRecentlyActive = ( logicAnalyzer.last_command_time > 0 ) &&
-                            ( millis( ) - logicAnalyzer.last_command_time < 3000 );
-
-    if ( laRecentlyActive || laActive ) {
-        // Only check every 20ms when potentially active
-        if ( millis( ) - last_la_check >= 20 ) {
-            // Check pauseCore2 before potentially long logic analyzer operation
-            if ( pauseCore2 )
-                return; // Exit early to allow flash operations
-            last_la_check = millis( );
-            logicAnalyzer.handler( );
-        }
-    }
-
-    // Check pauseCore2 after logic analyzer (can take 1-55ms!)
     if ( pauseCore2 )
-        return;
-
-    if ( debugWaitLoopTimingCore2 ) {
-        t[ 1 ] = micros( );
-        if ( ( t[ 1 ] - t[ 0 ] ) > 1000 ) {
-            // Serial.printf( "CORE2: logicAnalyzer.handler() took %lu us\n", t[1] - t[0] );
-        }
-    }
+        return; // Exit early to allow flash operations
 
 #if POWER_SUPPLY_SENSE_ENABLED == 1
 
@@ -1528,7 +1468,7 @@ void loop1( ) {
     if ( doomOn == 1 ) {
         playDoom( );
         doomOn = 0;
-    } else if ( pauseCore2 == 0 && logicAnalyzer.getIsRunning( ) == false ) {
+    } else if ( pauseCore2 == 0 ) {
         // Always call core2stuff() for logo swirls and animations
         t[ 4 ] = micros( );
         core2stuff( );
@@ -1538,9 +1478,6 @@ void loop1( ) {
             Serial.printf( "CORE2: core2stuff() took %lu us\n", t[5] - t[4] );
         }
 #endif
-    } else if ( pauseCore2 == 0 ) {
-        // Serial.println("CORE2: pauseCore2 == 0");
-        // Serial.flush();
     }
 
     // REMOVED: AsyncPassthrough::task() and secondSerialHandler() moved to Core 0

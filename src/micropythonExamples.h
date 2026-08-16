@@ -4782,12 +4782,6 @@ __all__ = [
     'clickwheel_get_position', 'clickwheel_reset_position', 'clickwheel_get_direction',
     'clickwheel_get_button', 'clickwheel_is_initialized',
     
-    # Logic Analyzer Functions
-    'la_set_trigger', 'la_capture_single_sample', 'la_start_continuous_capture',
-    'la_stop_capture', 'la_is_capturing', 'la_set_sample_rate', 'la_set_num_samples',
-    'la_enable_channel', 'la_set_control_analog', 'la_set_control_digital',
-    'la_get_control_analog', 'la_get_control_digital',
-    
     # Filesystem Functions
     'fs_exists', 'fs_listdir', 'fs_read', 'fs_write', 'fs_cwd',
     
@@ -4896,8 +4890,8 @@ __all__ = [
 ]
 
 )";
-const uint32_t JUMPERLESS_MODULE_PY_HASHES[5] = { 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
-const int JUMPERLESS_MODULE_PY_HASH_COUNT = 5;
+const uint32_t JUMPERLESS_MODULE_PY_HASHES[6] = { 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
+const int JUMPERLESS_MODULE_PY_HASH_COUNT = 6;
 #endif
 
 //==============================================================================

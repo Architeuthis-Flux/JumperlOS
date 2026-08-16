@@ -21,7 +21,6 @@
 #include "Commands.h"        // showLEDsCore2
 #include "Menus.h"           // clickMenu() — the Menu FX tuner drives the real menu
 #include "MenuTransitions.h" // menuTransitionConfig (Menu FX tuner)
-#include "JulseView.h"
 #include "Peripherals.h"
 #include "Probing.h"
 #include "NetManager.h"
@@ -69,7 +68,7 @@ debugFlags:
   printSerial1Passthrough = 0;
   printSerial2Passthrough = 0;
 
-  // Interactive main debug menu: toggle by number, Enter to apply, 'l' to open LA submenu.
+  // Interactive main debug menu: toggle by number, Enter to apply.
   // Seed from jumperlessConfig (the single source of truth) for the config-backed
   // flags so the displayed state can never drift from what's persisted.
   bool temp_debugFP = jumperlessConfig.debug.file_parsing;
@@ -77,7 +76,6 @@ debugFlags:
   bool temp_debugNTCC = jumperlessConfig.debug.nets_to_chips;
   bool temp_debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
   bool temp_debugLEDs = jumperlessConfig.debug.leds;
-  bool temp_debugLA = jumperlessConfig.debug.logic_analyzer;
   bool temp_debugWaitLoopTiming = debugWaitLoopTiming;
   bool temp_debugUSB = debugUSB;
   int temp_showProbeCurrent = jumperlessConfig.debug.show_probe_current;
@@ -102,7 +100,6 @@ debugFlags:
   bool orig_debugNTCC = jumperlessConfig.debug.nets_to_chips;
   bool orig_debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
   bool orig_debugLEDs = jumperlessConfig.debug.leds;
-  bool orig_debugLA = jumperlessConfig.debug.logic_analyzer;
   bool orig_debugWaitLoopTiming = debugWaitLoopTiming;
   bool orig_debugUSB = debugUSB;
   int orig_showProbeCurrent = jumperlessConfig.debug.show_probe_current;
@@ -150,10 +147,6 @@ debugFlags:
     Serial.print("\n\rp. async passthrough          =    "); Serial.print(temp_asyncPassthrough ? 1 : 0); lines_printed++; cycleTerminalColor();
 
     Serial.print("\n\ra. Arduino debug level        =    "); Serial.print(jumperlessConfig.debug.arduino); lines_printed++; cycleTerminalColor();
-
-    Serial.print("\n\rl. logic analyzer debug       =    "); Serial.print(temp_debugLA); lines_printed++; cycleTerminalColor();
- 
-    Serial.print("\n\rj. logic analyzer debug menu  >    "); lines_printed++; cycleTerminalColor();
 
     Serial.print("\n\rw. wait loop timing debug     =    "); Serial.print(temp_debugWaitLoopTiming); lines_printed++; cycleTerminalColor();
 
@@ -233,7 +226,6 @@ debugFlags:
         if (temp_debugNTCC != orig_debugNTCC) debugFlagSet(3);
         if (temp_debugNTCC2 != orig_debugNTCC2) debugFlagSet(4);
         if (temp_debugLEDs != orig_debugLEDs) debugFlagSet(5);
-        if (temp_debugLA != orig_debugLA) debugFlagSet(6);
         if (temp_showProbeCurrent != orig_showProbeCurrent) debugFlagSet(7);
         if (temp_debugWaitLoopTiming != orig_debugWaitLoopTiming) debugFlagSet(14);
         if (temp_debugUSB != orig_debugUSB) debugFlagSet(15);
@@ -285,58 +277,6 @@ debugFlags:
       break; // leave menu
     }
 
-    // Open JulseView LA submenu
-    if (sel == 'j' || sel == 'J') {
-      const char* categories[10] = {
-        "commands", "buffers", "digital", "analog", "dma",
-        "usb", "timing", "data", "errors", "state"
-      };
-      uint32_t local_mask = julseview_debug_mask;
-      auto print_mask_menu = [&](uint32_t mask, int &lines_printed) {
-        lines_printed = 1;
-        cycleTerminalColor(true, 2.5 );
-        Serial.print("\n\rJulseView Debug Categories (toggle by number, Enter to confirm)\n\r"); lines_printed+=2;
-        Serial.printf("mask = 0x%08lX\n\r", (unsigned long)mask); lines_printed+=2; cycleTerminalColor();
-        for (int i = 0; i < 10; i++) {
-          int enabled = (mask & (1u << i)) ? 1 : 0;
-          Serial.printf("%d. %-10s = %s\n\r", i, categories[i], enabled ? "on" : "off");
-          lines_printed++; cycleTerminalColor();
-        }
-        Serial.print("\n\r"); lines_printed++; cycleTerminalColor();
-        Serial.flush();
-      };
-      int llines = 0;
-      print_mask_menu(local_mask, llines);
-      while (true) {
-        while (Serial.available() == 0) { ; }
-        int ch = Serial.read();
-        if (ch == '\r' || ch == '\n') {
-          while (Serial.available() > 0) {
-            int c2 = Serial.peek();
-            if (c2 == '\r' || c2 == '\n') { Serial.read(); } else { break; }
-          }
-          break;
-        }
-        if (ch >= '0' && ch <= '9') {
-          int idx = ch - '0';
-          local_mask ^= (1u << idx);
-          julseview_set_debug_mask(local_mask);
-          Serial.printf("\033[%dA", llines);
-          for (int i = 0; i < llines; i++) { Serial.print("\033[2K\r\n\r"); }
-          Serial.printf("\033[%dA", llines);
-          Serial.flush();
-          print_mask_menu(local_mask, llines);
-        }
-      }
-      // After returning from submenu, re-render the main menu
-      Serial.printf("\033[%dA", lines);
-      for (int i = 0; i < lines; i++) { Serial.print("\033[2K\r\n\r"); }
-      Serial.printf("\033[%dA", lines);
-      Serial.flush();
-      print_main_debug_menu(lines);
-      continue;
-    }
-
     // One-shot action (not a toggle): wipe the persisted + in-RAM undo/redo
     // history. Clear the current menu, run the wipe, show a brief confirmation,
     // then redraw the menu beneath it.
@@ -360,7 +300,6 @@ debugFlags:
       temp_debugNTCC = false;
       temp_debugNTCC2 = false;
       temp_debugLEDs = false;
-      temp_debugLA = false;
       temp_debugWaitLoopTiming = false;
       temp_debugUSB = false;
       temp_debugFakeGpio = false;
@@ -384,7 +323,6 @@ debugFlags:
       temp_debugNTCC = true;
       temp_debugNTCC2 = true;
       temp_debugLEDs = true;
-    //   temp_debugLA = true;
     //   temp_debugWaitLoopTiming = true;
     //   temp_debugUSB = true;
     //   temp_debugFakeGpio = true;
@@ -401,7 +339,6 @@ debugFlags:
     else if (sel == 'c' || sel == 'C') { temp_debugNTCC = !temp_debugNTCC; last_bulk_cmd = -1; }
     else if (sel == 'h' || sel == 'H') { temp_debugNTCC2 = !temp_debugNTCC2; last_bulk_cmd = -1; }
     else if (sel == 'e' || sel == 'E') { temp_debugLEDs = !temp_debugLEDs; last_bulk_cmd = -1; }
-    else if (sel == 'l' || sel == 'L') { temp_debugLA = !temp_debugLA; last_bulk_cmd = -1; }
     else if (sel == 'w' || sel == 'W') { temp_debugWaitLoopTiming = !temp_debugWaitLoopTiming; last_bulk_cmd = -1; }
     else if (sel == 'b' || sel == 'B') { temp_debugUSB = !temp_debugUSB; last_bulk_cmd = -1; }
     else if (sel == 'g' || sel == 'G') { temp_debugFakeGpio = !temp_debugFakeGpio; last_bulk_cmd = -1; }

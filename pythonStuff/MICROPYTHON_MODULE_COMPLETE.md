@@ -24,7 +24,6 @@ All Jumperless C module functions and constants are now properly exposed in the 
 | Probe Functions | ✅ 9 functions | ✅ 9 functions | ✅ Full types | ✅ Complete |
 | Probe Button Functions | ✅ 8 functions | ✅ 8 functions | ✅ Full types | ✅ Complete |
 | Clickwheel Functions | ✅ 3 functions | ✅ 3 functions | ✅ Full types | ✅ Complete |
-| Logic Analyzer | ✅ 10 functions | ✅ 10 functions | ✅ Full types | ✅ Complete |
 | Filesystem Functions | ✅ 5 functions | ✅ 5 functions | ✅ Full types | ✅ Complete |
 | JFS Module | ✅ Full API | ✅ Full API | ✅ Full types | ✅ Complete |
 | Status Functions | ✅ 5 functions | ✅ 5 functions | ✅ Full types | ✅ Complete |
@@ -179,7 +178,6 @@ Run `test_autocomplete.py` and verify:
 - **Display & UI:** 10+ functions (OLED, probe, clickwheel)
 - **System Control:** 10+ functions (slots, context, apps)
 - **Filesystem:** 30+ functions (JFS module)
-- **Logic Analyzer:** 10+ functions
 - **Utilities:** 15+ functions (status, debug, help)
 
 ### All Aliases Included

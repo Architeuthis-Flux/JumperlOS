@@ -31,7 +31,6 @@
 #include "InfraPaths.h"
 #include "Probing.h"
 #include "Highlighting.h"
-#include "LogicAnalyzer.h"
 #include "ArduinoStuff.h"
 #include "Menus.h"
 #include "LEDs.h"
@@ -1250,17 +1249,11 @@ void __not_in_flash_func(readGPIO)( ) {
             continue;
         }
 
-        // **IMPROVED**: Skip logic analyzer pins during capture, but allow other GPIO reading
-        // Logic analyzer uses GPIO 20-27 (i=0 through i=7), leave UART pins (i=8,9) alone
-        if ( logicAnalyzer.is_running( ) || logicAnalyzer.is_armed( ) || flashingArduino == true ) {
-            // Skip reading logic analyzer pins during capture to avoid interference
-            // Keep previous state to avoid display issues
+        // Leave the GPIO alone while an Arduino is being flashed - keep the
+        // previous state rather than perturb the programming pins.
+        if ( flashingArduino == true ) {
             return;
-           continue;
         }
-
-
-
 
         uint8_t pin = gpioDef[ i ][ 0 ];
         if ( i == 8 ) {
@@ -2618,10 +2611,10 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
     // deadlocks. __atomic_test_and_set serializes the two cores.
     //
     // NEVER steal the lock on timeout: the old 100ms steal fired against any
-    // legitimate long hold (the logic analyzer keeps readingADC for a whole
-    // capture) and produced exactly the two-driver corruption above. A failed
-    // acquire now degrades to a 0 reading - the ADC goes briefly blind instead
-    // of a core going permanently dead.
+    // legitimate long hold (USB audio capture keeps readingADC for as long as
+    // the host has the mic open) and produced exactly the two-driver corruption
+    // above. A failed acquire now degrades to a 0 reading - the ADC goes
+    // briefly blind instead of a core going permanently dead.
 #if USB_AUDIO_ENABLE
     // USB audio streaming reconfigures the ADC for free-running round-robin
     // capture into a DMA FIFO, which makes everything below structurally

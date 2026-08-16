@@ -119,11 +119,6 @@ static const char* jumperless_functions[] = {
     "wavegen_get_amplitude", "get_wavegen_amplitude",
     "wavegen_get_offset", "get_wavegen_offset",
     "wavegen_is_running",
-    // Logic Analyzer
-    "la_set_trigger", "la_capture_single_sample", "la_start_continuous_capture",
-    "la_stop_capture", "la_is_capturing", "la_set_sample_rate", "la_set_num_samples",
-    "la_enable_channel", "la_set_control_analog", "la_set_control_digital",
-    "la_get_control_analog", "la_get_control_digital",
     // Graphic Overlays
     "overlay_set", "overlay_clear", "overlay_clear_all", "overlay_set_pixel",
     "overlay_count", "overlay_shift", "overlay_place", "overlay_serialize",

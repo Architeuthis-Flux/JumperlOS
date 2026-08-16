@@ -8,7 +8,7 @@
 // =============================================================================
 // SIMPLE STATIC USB Interface Configuration
 // =============================================================================
-// Fixed configuration: 5 CDC + 1 MSC for logic analyzer on port 3
+// Fixed configuration: 4 CDC + 1 MSC (+ the runtime UAC2 microphone below)
 
 // CDC Serial Interfaces (Communication Device Class)
 // Overridable per board via -DUSB_CDC_ENABLE_COUNT=N (see platformio.ini).

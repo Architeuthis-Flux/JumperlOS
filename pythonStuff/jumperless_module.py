@@ -491,22 +491,6 @@ clickwheel_down = _native.clickwheel_down
 clickwheel_press = _native.clickwheel_press
 
 # ============================================================================
-# Logic Analyzer Functions
-# ============================================================================
-la_set_trigger = _native.la_set_trigger
-la_capture_single_sample = _native.la_capture_single_sample
-la_start_continuous_capture = _native.la_start_continuous_capture
-la_stop_capture = _native.la_stop_capture
-la_is_capturing = _native.la_is_capturing
-la_set_sample_rate = _native.la_set_sample_rate
-la_set_num_samples = _native.la_set_num_samples
-la_enable_channel = _native.la_enable_channel
-la_set_control_analog = _native.la_set_control_analog
-la_set_control_digital = _native.la_set_control_digital
-la_get_control_analog = _native.la_get_control_analog
-la_get_control_digital = _native.la_get_control_digital
-
-# ============================================================================
 # Filesystem Functions
 # ============================================================================
 fs_exists = _native.fs_exists
@@ -979,12 +963,6 @@ __all__ = [
     
     # Clickwheel Functions
     'clickwheel_up', 'clickwheel_down', 'clickwheel_press',
-    
-    # Logic Analyzer Functions
-    'la_set_trigger', 'la_capture_single_sample', 'la_start_continuous_capture',
-    'la_stop_capture', 'la_is_capturing', 'la_set_sample_rate', 'la_set_num_samples',
-    'la_enable_channel', 'la_set_control_analog', 'la_set_control_digital',
-    'la_get_control_analog', 'la_get_control_digital',
     
     # Filesystem Functions
     'fs_exists', 'fs_listdir', 'fs_read', 'fs_write', 'fs_cwd',

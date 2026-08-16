@@ -708,7 +708,6 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "probing") == 0) jumperlessConfig.debug.probing = parseBool(value);
             else if (strcmp(key, "oled") == 0) jumperlessConfig.debug.oled = parseBool(value);
             else if (strcmp(key, "logo_pads") == 0) jumperlessConfig.debug.logo_pads = parseBool(value);
-            else if (strcmp(key, "logic_analyzer") == 0) jumperlessConfig.debug.logic_analyzer = parseBool(value);
             else if (strcmp(key, "arduino") == 0) jumperlessConfig.debug.arduino = parseInt(value);
             else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
             else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);
@@ -1082,7 +1081,6 @@ bool saveConfigToFile(const char* filename) {
     file.print("probing = "); file.print(jumperlessConfig.debug.probing ? 1:0); file.println(";");
     file.print("oled = "); file.print(jumperlessConfig.debug.oled ? 1:0); file.println(";");
     file.print("logo_pads = "); file.print(jumperlessConfig.debug.logo_pads ? 1:0); file.println(";");
-    file.print("logic_analyzer = "); file.print(jumperlessConfig.debug.logic_analyzer ? 1:0); file.println(";");
     file.print("arduino = "); file.print(jumperlessConfig.debug.arduino); file.println(";");
     file.print("usb_mass_storage = "); file.print(jumperlessConfig.debug.usb_mass_storage ? 1:0); file.println(";");
     file.print("show_probe_current = "); file.print(jumperlessConfig.debug.show_probe_current); file.println(";");
@@ -1305,7 +1303,6 @@ bool configHasChanges() {
     if (jumperlessConfig.debug.probing != lastSavedConfig.debug.probing) return true;
     if (jumperlessConfig.debug.oled != lastSavedConfig.debug.oled) return true;
     if (jumperlessConfig.debug.logo_pads != lastSavedConfig.debug.logo_pads) return true;
-    if (jumperlessConfig.debug.logic_analyzer != lastSavedConfig.debug.logic_analyzer) return true;
     if (jumperlessConfig.debug.arduino != lastSavedConfig.debug.arduino) return true;
     if (jumperlessConfig.debug.usb_mass_storage != lastSavedConfig.debug.usb_mass_storage) return true;
     if (jumperlessConfig.debug.show_probe_current != lastSavedConfig.debug.show_probe_current) return true;
@@ -1809,9 +1806,6 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "logo_pads") == 0) {
                     snprintf(newLine, sizeof(newLine), "logo_pads = %d;", jumperlessConfig.debug.logo_pads ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "logic_analyzer") == 0) {
-                    snprintf(newLine, sizeof(newLine), "logic_analyzer = %d;", jumperlessConfig.debug.logic_analyzer ? 1 : 0);
                     updated = true;
                 } else if (strcmp(key, "arduino") == 0) {
                     snprintf(newLine, sizeof(newLine), "arduino = %d;", jumperlessConfig.debug.arduino);
@@ -2794,8 +2788,6 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("logo_pads = "); Serial.print(getStringFromTable(jumperlessConfig.debug.logo_pads, boolTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("logic_analyzer = "); Serial.print(getStringFromTable(jumperlessConfig.debug.logic_analyzer, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("arduino = "); Serial.print(jumperlessConfig.debug.arduino); Serial.println(";");
         if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("usb_mass_storage = "); Serial.print(getStringFromTable(jumperlessConfig.debug.usb_mass_storage, boolTable)); Serial.println(";");
@@ -3224,9 +3216,6 @@ void printSettingChange(const char* section, const char* key, const char* oldVal
     } else if (strcmp(section, "display") == 0 && strcmp(key, "dump_format") == 0) {
         oldName = getStringFromTable(atoi(oldValue), dumpFormatTable);
         newName = getStringFromTable(atoi(newValue), dumpFormatTable);
-    } else if (strcmp(section, "debug") == 0 && strcmp(key, "logic_analyzer") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), boolTable);
-        newName = getStringFromTable(atoi(newValue), boolTable);
     } else if (
         (strcmp(section, "dacs") == 0 && (strcmp(key, "set_dacs_on_startup") == 0 || strcmp(key, "set_rails_on_startup") == 0)) ||
         (strcmp(section, "debug") == 0) ||
@@ -3873,7 +3862,6 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probing") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probing);
         else if (strcmp(key, "oled") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.oled);
         else if (strcmp(key, "logo_pads") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.logo_pads);
-        else if (strcmp(key, "logic_analyzer") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.logic_analyzer);
         else if (strcmp(key, "arduino") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.arduino);
         else if (strcmp(key, "usb_mass_storage") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.usb_mass_storage);
         else if (strcmp(key, "show_probe_current") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.show_probe_current);
@@ -4046,7 +4034,6 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probing") == 0) jumperlessConfig.debug.probing = parseBool(value);
         else if (strcmp(key, "oled") == 0) jumperlessConfig.debug.oled = parseBool(value);
         else if (strcmp(key, "logo_pads") == 0) jumperlessConfig.debug.logo_pads = parseBool(value);
-        else if (strcmp(key, "logic_analyzer") == 0) jumperlessConfig.debug.logic_analyzer = parseBool(value);
         else if (strcmp(key, "arduino") == 0) jumperlessConfig.debug.arduino = parseInt(value);
         else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
         else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);

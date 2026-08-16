@@ -30,12 +30,10 @@
 
 #include "FilesystemStuff.h" // For safe file operations
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
-#include "LogicAnalyzer.h"
 #include "States.h"
 #include "WaveGen.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
 
-extern LogicAnalyzer logicAnalyzer; // defined in main.cpp
 extern WaveGen wavegen;             // defined in main.cpp
 
 // External declarations
@@ -116,7 +114,6 @@ extern "C" void *jl_mp_commit_exec( void *buf, size_t len ) {
 #include "Python_Proper.h"
 #include "config.h"
 
-#include "JulseView.h"
 #include "MpRemoteService.h"
 #include "Jerial.h"  // For OLEDOut stream
 #include "JsonState.h"
@@ -1745,108 +1742,6 @@ int jl_switch_slot( int slot ) {
     }
 
     return slot; // Already in this slot
-}
-
-// // Logic Analyzer Functions
-
-void jl_control_set_analog( int channel, float value ) {
-    // if (channel >= 0 && channel < 4) {
-    //     control_A[channel] = value;
-    // }
-}
-
-void jl_control_set_digital( int channel, bool value ) {
-    // if (channel >= 0 && channel < 4) {
-    //     control_D[channel] = value;
-    // }
-}
-
-// Enhanced Logic Analyzer Functions
-bool jl_la_set_trigger( int trigger_type, int channel, float value ) {
-    // Triggers not implemented in LogicAnalyzer yet; accept and noop
-    (void)trigger_type;
-    (void)channel;
-    (void)value;
-    return true;
-}
-
-bool jl_la_capture_single_sample( void ) {
-    if ( logicAnalyzer.getIsRunning( ) )
-        return false;
-    logicAnalyzer.num_samples = 1;
-    logicAnalyzer.sample_rate_hz = 1000;
-    logicAnalyzer.arm( );
-    logicAnalyzer.run( );
-    while ( logicAnalyzer.getIsRunning( ) ) {
-        delayMicroseconds( 100 );
-    }
-    return true;
-}
-
-bool jl_la_start_continuous_capture( void ) {
-    if ( logicAnalyzer.getIsRunning( ) )
-        return false;
-    logicAnalyzer.num_samples = 0; // 0 => continuous not yet supported; use large value
-    logicAnalyzer.num_samples = 0x7FFFFFFF;
-    logicAnalyzer.sample_rate_hz = 1000000;
-    logicAnalyzer.arm( );
-    logicAnalyzer.run( );
-    return true;
-}
-
-bool jl_la_stop_capture( void ) {
-    if ( !logicAnalyzer.getIsRunning( ) )
-        return false;
-    logicAnalyzer.reset( );
-    return true;
-}
-
-bool jl_la_is_capturing( void ) {
-    return logicAnalyzer.getIsRunning( );
-}
-
-void jl_la_set_sample_rate( uint32_t sample_rate ) {
-    logicAnalyzer.sample_rate_hz = sample_rate;
-}
-
-void jl_la_set_num_samples( uint32_t num_samples ) {
-    logicAnalyzer.num_samples = num_samples;
-}
-
-void jl_la_enable_channel( int channel_type, int channel, bool enable ) {
-    if ( channel_type == 0 ) { // Digital
-        if ( channel >= 0 && channel < 8 ) {
-            if ( enable )
-                logicAnalyzer.d_mask |= ( 1u << channel );
-            else
-                logicAnalyzer.d_mask &= ~( 1u << channel );
-        }
-    } else if ( channel_type == 1 ) { // Analog
-        if ( channel >= 0 && channel < 8 ) {
-            if ( enable )
-                logicAnalyzer.a_mask |= ( 1u << channel );
-            else
-                logicAnalyzer.a_mask &= ~( 1u << channel );
-        }
-    }
-}
-
-void jl_la_set_control_analog( int channel, float value ) {
-    jl_control_set_analog( channel, value );
-}
-
-void jl_la_set_control_digital( int channel, bool value ) {
-    jl_control_set_digital( channel, value );
-}
-
-float jl_la_get_control_analog( int channel ) {
-    // return (channel >= 0 && channel < 4) ? control_A[channel] : 0.0f;
-    return 0.0f;
-}
-
-bool jl_la_get_control_digital( int channel ) {
-    // return (channel >= 0 && channel < 4) ? control_D[channel] : false;
-    return false;
 }
 
 // OLED Functions

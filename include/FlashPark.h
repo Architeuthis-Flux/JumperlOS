@@ -59,9 +59,8 @@
 //
 // NOTE the pool is at its limit WITHOUT this module too: with MicroPython
 // initialised there are ZERO slots left, so the next feature to ask for one
-// silently kills a core - the logic analyzer (LogicAnalyzer.cpp:633),
-// JulseView (JulseView.cpp:672) and MicroPython's UART (machine_uart_jl.c:297)
-// are all in that queue. That is pre-existing and worth fixing for its own sake.
+// silently kills a core - MicroPython's UART (machine_uart_jl.c:297) is in
+// that queue. That is pre-existing and worth fixing for its own sake.
 // ─────────────────────────────────────────────────────────────────────────────
 #ifndef FLASHPARK_H
 #define FLASHPARK_H

@@ -2135,7 +2135,7 @@ void ekilo_process_keypress() {
             break;
             
         case CTRL_U:
-            // Show detailed memory status including logic analyzer and MicroPython usage
+            // Show detailed memory status including MicroPython usage
             {
                 size_t freeHeap = rp2040.getFreeHeap();
                 size_t usedByEditor = 0;

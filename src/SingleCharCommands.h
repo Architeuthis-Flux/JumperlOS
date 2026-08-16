@@ -325,7 +325,6 @@ CommandResult cmd_cycleFont(char c, const String& line);
 CommandResult cmd_cycleOledConnectionType(char c, const String& line);
 
 // App/Special mode commands
-CommandResult cmd_logicAnalyzer(char c, const String& line);
 CommandResult cmd_usbAudio(char c, const String& line);
 CommandResult cmd_showBoardLEDs(char c, const String& line);
 CommandResult cmd_startupAnimation(char c, const String& line);

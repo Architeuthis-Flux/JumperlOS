@@ -148,34 +148,6 @@ void jl_fake_gpio_write( int node, int value );
 int jl_fake_gpio_read( int node );
 void jl_fake_gpio_reroute_chip_k( int chip_k_x, int chip_k_y, int target_node );
 
-// Logic Analyzer Functions
-void jl_logic_analyzer_set_analog( int channel, float value );
-void jl_logic_analyzer_set_digital( int channel, bool value );
-bool jl_logic_analyzer_set_trigger( int trigger_type, int channel, float value );
-bool jl_logic_analyzer_capture_single_sample( void );
-
-// Logic Analyzer Functions
-bool jl_la_set_trigger( int trigger_type, int channel, float value );
-bool jl_la_capture_single_sample( void );
-bool jl_la_start_continuous_capture( void );
-bool jl_la_stop_capture( void );
-bool jl_la_is_capturing( void );
-void jl_la_set_sample_rate( uint32_t sample_rate );
-void jl_la_set_num_samples( uint32_t num_samples );
-void jl_la_enable_channel( int channel_type, int channel, bool enable );
-void jl_la_set_control_analog( int channel, float value );
-void jl_la_set_control_digital( int channel, bool value );
-float jl_la_get_control_analog( int channel );
-bool jl_la_get_control_digital( int channel );
-
-void jl_logic_analyzer_enable_channel( int channel );
-void jl_logic_analyzer_enable_channel_mask( uint32_t channel_mask );
-void jl_logic_analyzer_set_sample_rate( int sample_rate );
-void jl_logic_analyzer_set_num_samples( int num_samples );
-void jl_logic_analyzer_set_trigger_type( int trigger_type );
-void jl_logic_analyzer_set_trigger_channel( int trigger_channel );
-void jl_logic_analyzer_set_trigger_value( float trigger_value );
-
 // Filesystem functions - bridge to existing FatFS
 int jl_fs_exists( const char* path );
 char* jl_fs_listdir( const char* path ); // '\n'-separated entries; NULL if dir missing
@@ -5988,105 +5960,6 @@ MP_REGISTER_MODULE( MP_QSTR_jumperless, jumperless_user_cmodule );
 MP_REGISTER_MODULE( MP_QSTR_jfs, jfs_user_cmodule );
 
 //=============================================================================
-// Enhanced Logic Analyzer Functions
-//=============================================================================
-
-// Logic Analyzer Trigger Control
-static mp_obj_t jl_la_set_trigger_func( size_t n_args, const mp_obj_t* args ) {
-    int trigger_type = mp_obj_get_int( args[ 0 ] );
-    int channel = mp_obj_get_int( args[ 1 ] );
-    float value = mp_obj_get_float( args[ 2 ] );
-
-    bool result = jl_la_set_trigger( trigger_type, channel, value );
-    return mp_obj_new_bool( result );
-}
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_la_set_trigger_obj, 3, 3, jl_la_set_trigger_func );
-
-// Single Sample Capture
-static mp_obj_t jl_la_capture_single_sample_func( void ) {
-    bool result = jl_la_capture_single_sample( );
-    return mp_obj_new_bool( result );
-}
-static MP_DEFINE_CONST_FUN_OBJ_0( jl_la_capture_single_sample_obj, jl_la_capture_single_sample_func );
-
-// Continuous Capture Control
-static mp_obj_t jl_la_start_continuous_capture_func( void ) {
-    bool result = jl_la_start_continuous_capture( );
-    return mp_obj_new_bool( result );
-}
-static MP_DEFINE_CONST_FUN_OBJ_0( jl_la_start_continuous_capture_obj, jl_la_start_continuous_capture_func );
-
-static mp_obj_t jl_la_stop_capture_func( void ) {
-    bool result = jl_la_stop_capture( );
-    return mp_obj_new_bool( result );
-}
-static MP_DEFINE_CONST_FUN_OBJ_0( jl_la_stop_capture_obj, jl_la_stop_capture_func );
-
-static mp_obj_t jl_la_is_capturing_func( void ) {
-    bool result = jl_la_is_capturing( );
-    return mp_obj_new_bool( result );
-}
-static MP_DEFINE_CONST_FUN_OBJ_0( jl_la_is_capturing_obj, jl_la_is_capturing_func );
-
-// Configuration Functions
-static mp_obj_t jl_la_set_sample_rate_func( mp_obj_t rate_obj ) {
-    uint32_t rate = mp_obj_get_int( rate_obj );
-    jl_la_set_sample_rate( rate );
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1( jl_la_set_sample_rate_obj, jl_la_set_sample_rate_func );
-
-static mp_obj_t jl_la_set_num_samples_func( mp_obj_t samples_obj ) {
-    uint32_t samples = mp_obj_get_int( samples_obj );
-    jl_la_set_num_samples( samples );
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1( jl_la_set_num_samples_obj, jl_la_set_num_samples_func );
-
-static mp_obj_t jl_la_enable_channel_func( size_t n_args, const mp_obj_t* args ) {
-    int channel_type = mp_obj_get_int( args[ 0 ] );
-    int channel = mp_obj_get_int( args[ 1 ] );
-    bool enable = mp_obj_is_true( args[ 2 ] );
-
-    jl_la_enable_channel( channel_type, channel, enable );
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_la_enable_channel_obj, 3, 3, jl_la_enable_channel_func );
-
-// Control Channel Functions
-static mp_obj_t jl_la_set_control_analog_func( mp_obj_t channel_obj, mp_obj_t value_obj ) {
-    int channel = mp_obj_get_int( channel_obj );
-    float value = mp_obj_get_float( value_obj );
-
-    jl_la_set_control_analog( channel, value );
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_2( jl_la_set_control_analog_obj, jl_la_set_control_analog_func );
-
-static mp_obj_t jl_la_set_control_digital_func( mp_obj_t channel_obj, mp_obj_t value_obj ) {
-    int channel = mp_obj_get_int( channel_obj );
-    bool value = mp_obj_is_true( value_obj );
-
-    jl_la_set_control_digital( channel, value );
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_2( jl_la_set_control_digital_obj, jl_la_set_control_digital_func );
-
-static mp_obj_t jl_la_get_control_analog_func( mp_obj_t channel_obj ) {
-    int channel = mp_obj_get_int( channel_obj );
-    float value = jl_la_get_control_analog( channel );
-    return mp_obj_new_float( value );
-}
-static MP_DEFINE_CONST_FUN_OBJ_1( jl_la_get_control_analog_obj, jl_la_get_control_analog_func );
-
-static mp_obj_t jl_la_get_control_digital_func( mp_obj_t channel_obj ) {
-    int channel = mp_obj_get_int( channel_obj );
-    bool value = jl_la_get_control_digital( channel );
-    return mp_obj_new_bool( value );
-}
-static MP_DEFINE_CONST_FUN_OBJ_1( jl_la_get_control_digital_obj, jl_la_get_control_digital_func );
-
-//=============================================================================
 // Module Definition
 //=============================================================================
 
@@ -6785,20 +6658,6 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     // Aliases and extras for waveforms
     { MP_ROM_QSTR( MP_QSTR_RAMP ), MP_ROM_INT( 2 ) },
     { MP_ROM_QSTR( MP_QSTR_ARBITRARY ), MP_ROM_INT( 4 ) },
-
-    // Enhanced Logic Analyzer Functions
-    { MP_ROM_QSTR( MP_QSTR_la_set_trigger ), MP_ROM_PTR( &jl_la_set_trigger_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_capture_single_sample ), MP_ROM_PTR( &jl_la_capture_single_sample_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_start_continuous_capture ), MP_ROM_PTR( &jl_la_start_continuous_capture_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_stop_capture ), MP_ROM_PTR( &jl_la_stop_capture_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_is_capturing ), MP_ROM_PTR( &jl_la_is_capturing_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_set_sample_rate ), MP_ROM_PTR( &jl_la_set_sample_rate_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_set_num_samples ), MP_ROM_PTR( &jl_la_set_num_samples_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_enable_channel ), MP_ROM_PTR( &jl_la_enable_channel_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_set_control_analog ), MP_ROM_PTR( &jl_la_set_control_analog_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_set_control_digital ), MP_ROM_PTR( &jl_la_set_control_digital_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_get_control_analog ), MP_ROM_PTR( &jl_la_get_control_analog_obj ) },
-    { MP_ROM_QSTR( MP_QSTR_la_get_control_digital ), MP_ROM_PTR( &jl_la_get_control_digital_obj ) },
 };
 
 static MP_DEFINE_CONST_DICT( jumperless_module_globals, jumperless_module_globals_table );

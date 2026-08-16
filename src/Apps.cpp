@@ -1515,7 +1515,7 @@ void calibrateDacs( ) {
     //
     // If the stream will NOT let go, bail before touching a single DAC. The
     // pump that releases the ADC only runs from core2stuff(), which loop1()
-    // skips while pauseCore2 is set or a logic-analyzer capture is running, so
+    // skips while pauseCore2 is set, so
     // this is reachable - and calibrating anyway would solve every constant
     // from sweep means (a hard 0 on the probe channels) and then PERSIST them.
     UsbAudioAdcYield audioYield( "DAC calibration" );

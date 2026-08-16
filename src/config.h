@@ -73,7 +73,6 @@ struct config {
         bool probing = false;
         bool oled = false;
         bool logo_pads = false;
-        bool logic_analyzer = true; 
         int  arduino = 0;
         bool  usb_mass_storage = false;
         int  show_probe_current = 0;  // moved out of EEPROM - config is source of truth

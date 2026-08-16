@@ -179,16 +179,6 @@ oled_clear()
 oled_disconnect()
 
 # ============================================================================
-# Test 12: Logic Analyzer (if implemented)
-# ============================================================================
-print("Test 12: Logic analyzer")
-
-# Type 'la_' and see logic analyzer functions:
-la_set_sample_rate(1000000)  # 1 MHz
-la_set_num_samples(1000)
-la_set_trigger(0, 0, 3.3)
-
-# ============================================================================
 # Test 13: Filesystem (JFS)
 # ============================================================================
 print("Test 13: Filesystem")

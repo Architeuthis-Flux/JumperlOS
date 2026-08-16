@@ -5,6 +5,7 @@
 
 #include "SingleCharCommands.h"
 #include "Apps.h"
+#include "ArduinoStuff.h"
 #include "AsyncPassthrough.h"
 #include "CH446Q.h"
 #include "Commands.h"
@@ -16,11 +17,9 @@
 #include "HelpDocs.h"
 #include "Highlighting.h"
 #include "Jerial.h" // TermControl is now part of Jerial
-#include "JulseView.h"
 #include "JumperlOS.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
-#include "LogicAnalyzer.h"
 #include "MCP4728.h"
 #include "MatrixState.h"
 #include "Menus.h"
@@ -225,7 +224,6 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         shownMenuItems += printMenuLine( showExtraMenu, 0, "\t> = send Python formatted command\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 0, "\t/ = show filesystem / run script\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 0, "\t\b\bU/u = enable/disable USB Mass Storage\n\r" );
-        // shownMenuItems += printMenuLine( showExtraMenu, 1, "\tw = enable logic analyzer\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 3, "\tX = resource status\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 1, "\tj = graphic overlay test menu\n\r" );
  
@@ -3056,26 +3054,6 @@ CommandResult cmd_cycleOledConnectionType( char c, const String& line ) {
 }
 
 // App/Special mode commands
-CommandResult cmd_logicAnalyzer( char c, const String& line ) {
-    extern bool la_enabled;
-    if ( la_enabled ) {
-        Jerial.println( "Logic analyzer disabled, deinitializing..." );
-        la_enabled = false;
-        return CMD_DONT_SHOW_MENU;
-    } else {
-        changeTerminalColor( 196, true, &Jerial );
-        Jerial.println( "Logic analyzer enabled" );
-        Jerial.println( "Note: Logic analyzer is not yet fully functional and can make a mess of your memory" );
-        Jerial.println( "Make sure to save anything important on the file system before playing with it" );
-        Jerial.println( "Worst case, you can use this to nuke the flash and start fresh:" );
-        changeTerminalColor( 39, true, &Jerial );
-        Jerial.println( "https://github.com/Gadgetoid/pico-universal-flash-nuke/releases/latest" );
-        changeTerminalColor( -1, true, &Jerial );
-        la_enabled = true;
-    }
-    return CMD_SHOW_MENU;
-}
-
 // Toggle the USB Audio Class microphone on and off.
 //
 // This is the friendlier way in than the MicroPython API: enabling rewrites the

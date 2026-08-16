@@ -63,8 +63,8 @@ static volatile bool g_streaming      = false;
 
 // What the host currently has selected on the AudioStreaming interface: 1 while
 // it has the microphone open, 0 otherwise. Every "resume capture" decision
-// (after a probe pause, after a config save, after the logic analyzer hands the
-// ADC back) checks this rather than assuming the host is still listening -
+// (after a probe pause, after a config save, after a self test or calibration
+// hands the ADC back) checks this rather than assuming the host is still listening -
 // restarting capture for a host that closed the mic would claim the ADC and
 // never release it.
 static volatile uint8_t g_hostAlt = 0;
@@ -113,8 +113,7 @@ static uint16_t g_framesMs = 0;    // stereo audio frames per millisecond
 // clk_adc is the SDK default 48 MHz and the ADC period is (1 + DIV.INT) clocks,
 // so 499 - not 500 - gives exactly 96.000 ksps round-robin = 48.000 kHz per
 // channel. 500 would give 48e6/501 = 95808 sps, a -0.2% error that shows up as
-// an audible artefact every few seconds. Peripherals.cpp's own JulseView path
-// subtracts one for the same reason.
+// an audible artefact every few seconds.
 #define JL_AUDIO_ADC_CLKDIV     499.0f
 
 // Capture buffers. Must be plain SRAM (never PSRAM) and the conversion path
@@ -680,13 +679,13 @@ extern "C" bool usb_audio_yield_adc(const char *why) {
     // Only the core-1 pump may execute the stop, so there is exactly one
     // releaser of readingADC: two cores both observing g_stopRequested and both
     // clearing the lock would hand the ADC to two owners at once. If we ARE
-    // core 1 (the logic analyzer arms from loop1) run the pump right here - the
+    // core 1 run the pump right here - the
     // regular pump call is downstream in this same loop1 pass and cannot help
     // us. Otherwise wait for it, bounded so a wedged core 1 cannot hang core 0.
     //
     // RETURNS whether the ADC is actually free now. It can legitimately fail:
     // the pump only runs from core2stuff(), which loop1() skips entirely while
-    // pauseCore2 is set or a logic-analyzer capture is running. A caller that
+    // pauseCore2 is set. A caller that
     // ignores this and reads anyway gets the audio sweep means - and a hard 0
     // on the probe channels - which is how DAC calibration could solve for, and
     // then PERSIST, constants derived from sentinel values.
@@ -723,8 +722,8 @@ extern "C" void serviceUSBAudio(void) {
     // STOP FIRST, before any quiesce gate. This is the ONLY releaser of
     // readingADC/usbAudioOwnsAdc, and a stop is precisely what a pauseCore2
     // window wants - gating it behind pauseCore2 meant usb_audio_yield_adc()
-    // could return with the ADC still held, and its callers (logic analyzer
-    // arming, self test, DAC calibration) then proceeded as if they had the
+    // could return with the ADC still held, and its callers (self test, DAC
+    // calibration) then proceeded as if they had the
     // real converter while every read was served from the audio sweep.
     if (g_stopRequested) {
         g_stopRequested = false;

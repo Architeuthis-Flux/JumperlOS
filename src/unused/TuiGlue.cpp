@@ -5,7 +5,6 @@
 
 #include <Wire.h>
 #include "ArduinoStuff.h"
-#include "LogicAnalyzer.h"
 #include "oled.h"
 #include "CH446Q.h"
 #include "NetsToChipConnections.h"

@@ -189,23 +189,6 @@ fs_write(path, data)  # Write file
 fs_cwd()              # Get current directory
 ```
 
-## 📈 Logic Analyzer
-
-```python
-la_set_trigger(type, channel, value)  # Set trigger
-la_capture_single_sample()            # Single capture
-la_start_continuous_capture()         # Start continuous
-la_stop_capture()                     # Stop capture
-la_is_capturing()                     # Check status
-la_set_sample_rate(rate)              # Set rate
-la_set_num_samples(samples)           # Set count
-la_enable_channel(type, ch, enable)   # Enable channel
-la_set_control_analog(ch, value)      # Set analog control
-la_set_control_digital(ch, value)     # Set digital control
-la_get_control_analog(ch)             # Get analog value
-la_get_control_digital(ch)            # Get digital value
-```
-
 ## 🔍 Status & Debug
 
 ```python

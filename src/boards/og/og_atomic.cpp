@@ -4,7 +4,7 @@
 //
 // The cortex-m0plus has no native atomic (LDREX/STREX) instructions, so GCC
 // lowers __atomic_test_and_set (used by the cross-core ADC lock in
-// Peripherals.cpp readAdc() and by LogicAnalyzer) to a libcall. This
+// Peripherals.cpp readAdc()) to a libcall. This
 // bare-metal toolchain ships no libatomic and libgcc for this multilib does
 // not provide __atomic_test_and_set, so we provide it here. The M33-based V5
 // inlines the instruction and never references the symbol, so this file is a

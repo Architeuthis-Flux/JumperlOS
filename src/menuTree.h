@@ -120,7 +120,6 @@ String menuLines[150] = {
  //   "--->a3",
  //   "--Upload",
  //   "--->a4",
- //   "-Logic  Analyzr",
 
    "-Scan",
    "-I2C    \31Scan",
@@ -257,7 +256,6 @@ Apps\n\
 --->a3\n\
 --Upload\n\
 --->a4\n\
--Logic  Analyzr\n\
 Slots\n\
 \n\
 -$Load$\n\

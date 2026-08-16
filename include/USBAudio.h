@@ -76,22 +76,22 @@ bool usb_audio_is_streaming(void);
 extern volatile bool usbAudioOwnsAdc;
 
 // Give the ADC back immediately, stopping any active stream. Called by things
-// that must have the real ADC - logic analyzer arming, self test, calibration -
-// so they never spin on a lock the audio path is holding. Does NOT
+// that must have the real ADC - self test, DAC calibration - so they never
+// spin on a lock the audio path is holding. Does NOT
 // re-enumerate: the device stays visible, the host just hears silence. Safe
 // from either core (on core 1 it runs the pump inline; on core 0 it waits,
 // bounded, for core 1 to carry it out). No Serial output - may run on core 1.
 //
 // RETURNS true if the ADC is free when it returns. It can fail: the pump runs
-// only from core2stuff(), which loop1() skips while pauseCore2 is set or a
-// logic-analyzer capture is running. ANYTHING that calibrates or measures must
+// only from core2stuff(), which loop1() skips while pauseCore2 is set.
+// ANYTHING that calibrates or measures must
 // check this - reading anyway yields sweep means and a hard 0 on the probe
 // channels, which silently poisons whatever is solved from them.
 bool usb_audio_yield_adc(const char *why);
 
 // The counterpart: after a yield, ask the pump to restart capture - but ONLY
 // if the host still has the microphone open. Cheap and idempotent; call it
-// when the logic analyzer / self test / calibration is done with the ADC.
+// when the self test / calibration is done with the ADC.
 void usb_audio_resume_adc(void);
 
 // "The probe is in use right now." Stamped by Probing/MeasureMode when they

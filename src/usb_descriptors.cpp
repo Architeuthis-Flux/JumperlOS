@@ -510,8 +510,6 @@ static const char* string_desc_arr [] =
   "Jumperless V5",               // 2: Product
   "JLV5port",                    // 3: Serial base -> enumerates as JLV5portX
 #endif
-  //"JLLA",            // 4: Logic Analyzer
-  
   // CDC interface names (only include if enabled)
 #if USB_CDC_ENABLE_COUNT >= 1
   USB_CDC_NAMES[0],              // 4: CDC Interface 0

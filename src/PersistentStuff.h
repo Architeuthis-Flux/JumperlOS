@@ -21,7 +21,6 @@ extern bool debugNTCC2;
 
 extern bool debugLEDs;
 extern bool debugMM;
-extern bool debugLA;
 extern bool debugWaitLoopTiming;
 extern bool debugUSB;
 
