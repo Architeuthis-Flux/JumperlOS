@@ -425,52 +425,53 @@ PIO/DMA, the `probeMode` state machine, encoder/core-1 queues, and the watchdog.
 
 ---
 
-## UNCOMMITTED in the working tree: two sequential measure calibrations
+## UNCOMMITTED in the working tree: per-feed measure endpoints + feed convergence
 
-`src/Apps.cpp` has a **~126-line uncommitted change** to the Probe Calib app, written at
-Kevin's request at the end of the session and **left uncommitted on purpose** — it is an
-interactive app (tap pads, turn the wheel, hold to save) and cannot be verified without a
-hand on the probe. If a new session starts with a dirty `Apps.cpp`, this is what it is:
-either finish verifying it with Kevin and commit, or `git checkout src/Apps.cpp` to drop it.
+`src/Apps.cpp`, `src/Probing.cpp`, `src/config.h` and `src/configManager.cpp` carry an
+**uncommitted change** written at Kevin's request at the end of the session, left
+uncommitted because it is an interactive app (tap, wheel, hold) that only he can verify.
+If a new session starts with a dirty tree, this is what it is.
 
-**What it does.** Kevin's note: *"our calibration is running on the map max and min values
-rather than the DAC output voltage when we're using the DAC. there will be 2 different
-calibrations for measure mode and the app should let us set each one separately"*, and when
-asked, he chose: the DAC-voltage-vs-GPIO-endpoints split, **with the app doing one, then
-the other**. So MEASURE now has two phases, advanced with a **short click** (hold still
-saves and exits, as before):
+**How it got here.** Kevin's first note was that the calibration runs on the map endpoints
+"rather than the DAC output voltage when we're using the DAC", and that measure mode needs
+two calibrations set separately. A first cut gave MEASURE two click-advanced phases, the
+DAC one adjusting `measure_mode_output_voltage`. He ran it and reported: *"the voltage
+adjustment isn't changing anything in the calibration."* **That is the correct and expected
+result, now confirmed on hardware:** the decode is ratiometric — `probeMapRange()` scales
+the endpoints by `live ADC7 / 3.3` and the pad reading scales with tip voltage too — so the
+drive voltage cancels *exactly* out of row alignment. It can never be a calibration knob.
 
-| Phase | Feed (forced) | The wheel adjusts |
-|---|---|---|
-| measure/DAC | DAC0 (2 crosspoints, stiff) | `calibration.measure_mode_output_voltage`, 5 mV/detent, clamped 3.0–3.6 V, applied to the DAC live (`save=0`, `checkProbePower=false`) |
-| measure/GPIO | a routable GPIO (~183 Ω) | `calibration.probe_max_measure` (as before) |
+**The design that replaced it** (Kevin's): fix the DAC at a steady drive, give the DAC feed
+map endpoints like the GPIO feed has, then flip between the two feeds quickly in the app,
+auto-adjusting until they converge on the same tapped row, and finally move both together
+with the wheel.
 
-SELECT still adjusts `probe_max` and leaves feed arbitration alone (there the tip is driven
-from PROBE_PIN and the feed is only the LED supply). The feed is **forced** per phase so
-each calibration measures its own source, re-forced only when the phase changes, and
-unforced on exit. If every routable GPIO is claimed the GPIO phase says so and falls back
-to the DAC phase rather than silently calibrating the wrong source.
+- `calibration.probe_max_measure` = the **DAC0-fed** top endpoint;
+  new `calibration.probe_max_measure_gpio` = the **GPIO-fed** one (seeded from the first on
+  upgrade). `probe_min_measure` stays shared — convergence solves one degree of freedom per
+  feed, at the tapped row. `probeMapRange()` picks the pair matching the live feed
+  (`s_gpioPowerIdx >= 0`).
+- `measure_mode_output_voltage` default is now **3.30 V** and nothing in the app touches it;
+  the tip-voltage self test still servos it so the *tip* lands at 3.30.
+- The app, in MEASURE, alternates the forced feed while a pad is held (one step per loop
+  pass, ≥40 ms apart, median of 3 raws per step because a rebuild wanders the tip ~70 mV),
+  solves the GPIO endpoint that reproduces the DAC feed's normalized pad position —
+  `max = min + (raw − min)/norm`, damped to a third per alternation — and declares
+  convergence after 3 alternations agreeing on the row. Then it unforces the feed. A short
+  click re-runs convergence; the wheel moves **both** endpoints by the same delta.
+- The ratiometric scale is recovered from the **top** endpoint (`cMax/usedMax`), never the
+  bottom: `probe_min_measure` is ~10 counts, so `cMin/mMin` quantises to 0.9 or 1.0 and
+  would inject a 10 % error into the solved endpoint.
+- If every routable GPIO is claimed, convergence says so once and parks on DAC0 rather than
+  silently calibrating the wrong source. The feed is unforced on every exit.
 
-**The open question this needs to answer on hardware.** On the current decode, moving the
-DAC drive should have **no effect on the decoded row**: `probeMapRange()` scales the measure
-endpoints by `live ADC7 / 3.3`, and the pad reading scales with tip voltage too, so the
-drive cancels — which is precisely why the app had been switched off that knob. The
-measure/DAC phase therefore prints **tip voltage and decoded row together**, so:
+**Observed working on hardware** (Kevin driving, 2026-08-16): convergence completed and
+separated the feeds by 9 counts — `maxD: 4119  maxG: 4110`, `measure (converged - wheel
+moves both)` — which is the source-impedance difference the split exists to remove.
 
-- rows stay put while the voltage moves → the ratio is cancelling, and the DAC knob is a
-  physical-level setting (what the self test servos), not a row-alignment control;
-- rows move → **the ratio is not cancelling and that is a real decode bug** — most likely
-  the 2 ms ADC7 cache decoupling the two reads, or a non-proportional offset term that
-  should not be scaled along with the endpoints.
-
-Either answer is worth having, and this is the cheapest way to get it.
-
-**How to verify** (needs hands): run `Probe Calib` from the apps menu; in SELECT tap rows
-and confirm `probe_max` still aligns them; flip to MEASURE and confirm `i@` shows
-`FORCED:0` with the feed on DAC0; turn the wheel and watch `dac:` and `tip:` move together
-while `reading:` holds; short-click and confirm `FORCED:1`, the feed on `GP_x` `xp:4`, and
-that the wheel now moves `max:`; hold to save; then confirm `i@` shows **no** `FORCED` and
-the feed back on its configured preference.
+**Still to confirm before committing:** that the converged endpoints make a tapped row land
+correctly under *both* feeds in normal use (claim DAC0 to force the GPIO feed and re-tap),
+that `probe_max_measure_gpio` persists through the save, and a `` `reset `` round-trip.
 
 ---
 
