@@ -387,7 +387,12 @@ python3 test/hil/test_config.py                                     # 30 checks
 - A stale Python process holding `/dev/cu.usbmodemJLV5port1` gives "device reports
   readiness to read but returned no data". It is not a board fault — retry, or `lsof -t`
   the port. Kevin's `jumperless` client normally holds that port; the HIL helpers coexist
-  with it fine but occasionally collide right after a flash.
+  with it fine but occasionally collide right after a flash. The same message appears in
+  `run_all.py` when a *previous* file's deferred config save is still in its flash window
+  as the next file opens the port — seen once as a spurious 3/6, both files passing
+  standalone immediately after. `test_config` now settles 5 s before finishing for exactly
+  this reason; if a suite run ever fails in a way a standalone re-run doesn't reproduce,
+  suspect this before suspecting the firmware.
 - New diagnostics this session: `X` → MCP4728 write/skip counters, probe LED frames vs
   requests, button samples, LED-frame aborts. `i@` → feed order, `paths/dup/xp`, the same
   MCP counters. `` `[debug] probe_switch_stats = 1 `` → one `[switch]` line per check with

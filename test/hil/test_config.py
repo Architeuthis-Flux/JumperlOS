@@ -237,5 +237,10 @@ finally:
     diffs = [(sk, v, final.get(sk)) for sk, v in snap.items()
              if sk[1] != "firmware_version" and final.get(sk) != v]
     check(not diffs, f"config restored to its pre-reset contents ({restored} keys re-applied; leftover diffs: {diffs[:4]})")
+    # The restore loop's last writes arm a deferred config save. Its flash
+    # window stalls USB, and in run_all.py the NEXT test file opens the port
+    # right about here - which surfaces as "device reports readiness to read
+    # but returned no data" in a test that passes standalone. Let it land.
+    time.sleep(5)
 
 finish("test_config")
