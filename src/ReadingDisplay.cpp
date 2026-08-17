@@ -115,7 +115,7 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
 // repaints in place, one whose snapshot is stale pins a fresh pair of rows
 // below whatever scrolled. Blocking contexts that take over the terminal
 // (probeMode, menus, apps) additionally run their loops on
-// jOS.serviceCritical(), which dispatches only CRITICAL services - so no
+// jOS.serviceInner(), which dispatches only the inner set - so no
 // reading can repaint mid-takeover - and announce themselves through
 // resetLastShown(), which now only drops the OLED dedupe.
 

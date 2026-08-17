@@ -629,7 +629,7 @@ void runSnakeGame(void) {
 
         unsigned long startTime = millis();
         while (millis() - startTime < (unsigned long)speed) {
-            jOS.serviceCritical();
+            jOS.serviceInner();
             // rotaryEncoderStuff();
             if (encoderButtonState == HELD) break;
             now = millis();

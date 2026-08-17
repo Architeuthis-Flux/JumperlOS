@@ -2243,7 +2243,7 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     // probeMode owns the terminal from here: its banners and node names
     // scroll the rows the live reading pinned for itself, so drop that anchor
     // rather than let the next reading erase one of OUR lines. (No reading
-    // can repaint while this loop runs - it services on jOS.serviceCritical(),
+    // can repaint while this loop runs - it services on jOS.serviceInner(),
     // which dispatches only CRITICAL services, and MeasureMode is HIGH.)
     ReadingDisplay::resetLastShown( );
 
@@ -2439,8 +2439,9 @@ restartProbingNoPrint:
 
         delayMicroseconds( 20 ); // Reduced from 500 for faster encoder response
 
-        // Keep critical services (like ProbeButton) running during blocking probeMode
-        jOS.serviceCritical( );
+        // Keep the inner set (ProbeButton, the USB pump, mpremote, the
+        // current-sense poll, the Arduino UART bridge) running during blocking probeMode
+        jOS.serviceInner( );
         // ...and the switch position (ProbeSwitch is NORMAL, so it is not in
         // that set). The pad frame follows switchPosition, so a flip during
         // a session must be seen here, not when the session ends: the same
@@ -2451,7 +2452,7 @@ restartProbingNoPrint:
         // Detector-A-only tracking at 250 ms, agree mode only (see definition).
         checkSwitchPositionFast( );
 
-        // Hold-end polling. serviceCritical above may have just kicked
+        // Hold-end polling. serviceInner above may have just kicked
         // off (or extended) an undo-toast hold via the double-tap drain.
         // We rely on the loop continuing to spin; on the iteration after
         // the hold's natural expiry, oledIsHeld() flips false and we
@@ -2473,7 +2474,7 @@ restartProbingNoPrint:
         // ============================================================
         // Double-tap fast-return / stay-alive cutoff.
         //
-        // service() (called from serviceCritical above) sets
+        // service() (called from serviceInner above) sets
         // g_probeDoubleTapBail when it actually fires an undo/redo from
         // a double-tap. We branch on how far into the OUTER probeMode
         // session we are (outerProbeEntryTime, set once before the
@@ -2780,7 +2781,7 @@ restartProbingNoPrint:
             // (see ProbeButton::processSample dbl branch), so we never
             // see -16/-18 for the second click - readProbe just returns
             // -1. The undo/redo fires via the deferred flags drained
-            // from serviceCritical() and probeMode stays alive.
+            // from serviceInner() and probeMode stays alive.
 
             // Serial.println("row[0] = " + String(row[0]));
             // Serial.println("setOrClear = " + String(setOrClear));
@@ -4110,7 +4111,7 @@ int Probing::chooseDAC( int justPickOne ) {
         function = 0;
         while ( selected == -1 ) {
 
-            jOS.serviceCritical( );
+            jOS.serviceInner( );
 
             if ( ProbeButton::getInstance( ).getButtonState( ) != 0 ) {
                 // selected = DAC1;
@@ -4261,7 +4262,7 @@ int Probing::chooseIsense( void ) {
     int selected = -1;
     while ( selected == -1 ) {
         // Keep critical services running
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
 
         // Check for encoder movement and accumulate
         long currentEncPos = encoderPosition;
@@ -4402,7 +4403,7 @@ int Probing::chooseADC( void ) {
     // while (true);
     int selected = -1;
     while ( selected == -1 && ProbeButton::getInstance( ).getButtonState( ) == 0 ) {
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         int reading = justReadProbe( );
         // Serial.print("reading: ");
         // Serial.println(reading);
@@ -4527,7 +4528,7 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
 
     while ( settingOption == -1 && ProbeButton::getInstance( ).getButtonState( ) == 0 ) {
         // Keep critical services running
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
 
         // Check for encoder movement and accumulate
         long currentEncPos = encoderPosition;
@@ -4724,7 +4725,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
     uint32_t lastReadingMs = menuStartMs;
     int lastReadingValue = -1;
     while ( selected == -1 && checkProbeButtonState( ) == 0 ) {
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         int reading = justReadProbe( );
         if ( reading != -1 ) {
             lastReadingMs = millis();
@@ -4954,7 +4955,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
         int encoderReadingPos = 45;
         rotaryDivider = 8; // one 0.1V step per physical detent (8 counts)
         while ( vSelected == -1 ) {
-            jOS.serviceCritical( );
+            jOS.serviceInner( );
             int reading = justReadProbe( );
             // rotaryEncoderStuff();
             int encodeEdit = 0;
@@ -5070,7 +5071,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
 
         while ( vSelected == -1 ) {
 
-            jOS.serviceCritical( );
+            jOS.serviceInner( );
             int reading = justReadProbe( );
             rotaryEncoderStuff( );
 
@@ -7074,7 +7075,7 @@ int Probing::readProbe( ) {
         // CRITICAL: actually service the button here. checkProbeButton()
         // only reads the cached buttonPress that ProbeButton::service
         // posts - it doesn't itself sample the hardware. probeMode's
-        // outer loop only calls jOS.serviceCritical() once per iteration,
+        // outer loop only calls jOS.serviceInner() once per iteration,
         // and the iteration time inflates to 20-50ms whenever an OLED
         // write or LED batch fires. Without this call, this inner loop
         // (up to 8 ms of ADC reads) is a sampling blackout window: any

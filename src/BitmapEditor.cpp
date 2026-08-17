@@ -1164,7 +1164,7 @@ void BitmapEditor::run() {
     
     while (running) {
         // Run critical services (probe button, menus, etc.)
-        jOS.serviceCritical();
+        jOS.serviceInner();
         
 
         // Switch now controls encoder direction (H/V)

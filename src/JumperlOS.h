@@ -161,6 +161,17 @@ public:
     virtual uint32_t periodUs() const { return 0; }
 
     /**
+     * @brief Does this service keep running while a modal loop owns core 0?
+     * The "inner set" is what jOS.serviceInner() runs: what probeMode(), the
+     * click menus, the pad menus, the apps' input loops and MicroPython
+     * delays keep alive, and what serviceAll() still runs while a BLOCKING
+     * service holds the loop. Default: CRITICAL priority. AsyncPassthrough
+     * (HIGH) opts in - the Arduino UART bridge must not stop while the probe
+     * or a menu is in use (B4, T1.5).
+     */
+    virtual bool inInnerSet() const { return getPriority() == ServicePriority::CRITICAL; }
+
+    /**
      * @brief Ask the scheduler to run this service on its very next pass,
      * whatever its period. Safe from an IRQ or the other core: one aligned
      * byte store, and the scheduler only clears the flag when it has read it
@@ -170,7 +181,11 @@ public:
     void requestRun() { __dmb(); pending = true; }
 
     // Managed by jOSmanager - read-only for everyone else (the X table).
-    uint32_t nextDueUs = 0;          // time_us_32() at which the period next elapses
+    // nextDueUs is 64-bit (time_us_64()) on purpose: a service parked behind
+    // a modal loop or a BLOCKING menu for hours is then simply "overdue" when
+    // it comes back. A 32-bit deadline compare goes "not due" again 35.8 min
+    // after it was last stamped and the service stays dead for another ~35 min.
+    uint64_t nextDueUs = 0;          // time_us_64() at which the period next elapses
     volatile bool pending = false;   // requestRun() latch
     uint32_t runs = 0;               // service() calls (scheduler + modal set + force*)
     uint32_t lastUs = 0;             // duration of the last call
@@ -225,13 +240,17 @@ public:
     void serviceAll();
 
     /**
-     * @brief Execute ONLY CRITICAL priority services
-     *
-     * This is for use within blocking operations (like probeMode) that need
-     * to keep critical services like button checking running in their inner
-     * loops. Same due-or-pending gate and stats as serviceAll().
+     * @brief One pass over the inner set (Service::inInnerSet()) - the
+     * services a modal loop keeps alive: ProbeButton, MpRemote, Peripherals,
+     * TinyUSB (mutex-guarded pump) and AsyncPassthrough. probeMode(), the
+     * click/pad menus, the apps' input loops and MicroPython delays call this
+     * instead of the scheduler; serviceAll() runs the same set while a
+     * BLOCKING service holds the loop. Same due-or-pending gate and stats as
+     * serviceAll() (the X table counts these calls). Replaces the old
+     * serviceCritical() (= "the CRITICAL priority services"), which named the
+     * set by accident of priority; the set is explicit now.
      */
-    void serviceCritical();
+    void serviceInner();
 
     /**
      * @brief Number of registered services (for the X table)
@@ -254,14 +273,13 @@ public:
     
     /**
      * @brief Execute services needed during MicroPython REPL execution
-     * 
-     * This runs a minimal set of services to keep the system responsive
-     * while the main loop is blocked by MicroPython script execution.
-     * Specifically runs:
-     * - Peripherals service (for current sense measurements and marching ants)
-     * - TinyUSB task (to keep USB alive)
-     * 
-     * Should be called periodically during MicroPython execution (e.g., in time.sleep)
+     *
+     * = serviceInner() (it used to be a hand-rolled subset: the USB pump +
+     * Peripherals; the inner set is that plus ProbeButton, MpRemote (its own
+     * reentrancy guard defers USBSer2 while a script runs) and
+     * AsyncPassthrough). No caller in src/ today - mp_hal_delay_ms in
+     * Python_Proper.cpp calls serviceInner() directly; kept as a named entry
+     * point for the MicroPython side.
      */
     void servicePython();
     
@@ -336,19 +354,19 @@ private:
     /**
      * @brief The due-or-pending gate. Captures (and, only if set, clears)
      * the service's requestRun() latch, then answers "run it this pass?".
-     * @param now time_us_32() taken by the caller
+     * @param now time_us_64() taken by the caller
      */
-    static bool isDue(Service* svc, uint32_t now);
+    static bool isDue(Service* svc, uint64_t now);
 
     /**
      * @brief Run one service and account for it: nextDueUs (stamped from the
      * run START, so a period that equals a service's own millis() gate never
      * aliases against it), runs / lastUs / maxUs / totalUs / overruns.
-     * Shared by serviceAll(), serviceCritical() and the force* paths so the
+     * Shared by serviceAll(), serviceInner() and the force* paths so the
      * X table sees every call, including the modal loops'.
      * @return the status service() returned
      */
-    ServiceStatus runService(Service* svc, uint32_t now);
+    ServiceStatus runService(Service* svc, uint64_t now);
 };
 
 /**
@@ -414,17 +432,21 @@ private:
 
 /**
  * @brief AsyncPassthrough service - handles USB CDC1 <-> UART0 bridging
- * HIGH priority - runs every loop pass to prevent data loss and maintain low latency
+ * HIGH priority - runs every loop pass to prevent data loss and maintain low
+ * latency, AND in the inner set: the Arduino UART bridge used to stop the
+ * moment the probe or a click menu owned the loop (those ran the CRITICAL
+ * set only) - B4 puts it in the modal set explicitly.
  */
 class AsyncPassthroughService : public Service {
 public:
     static AsyncPassthroughService& getInstance();
     AsyncPassthroughService(const AsyncPassthroughService&) = delete;
     AsyncPassthroughService& operator=(const AsyncPassthroughService&) = delete;
-    
+
     ServiceStatus service() override;
     const char* getName() const override { return "AsyncPassthrough"; }
     ServicePriority getPriority() const override { return ServicePriority::HIGH; }
+    bool inInnerSet() const override { return true; }
     
 private:
     AsyncPassthroughService() = default;

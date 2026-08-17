@@ -2908,15 +2908,17 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // Scheduler table: one row per registered service, in the order the
     // walk visits them (priority, then registration). period 0 = every pass.
     // runs counts EVERY service() call the scheduler made - serviceAll(),
-    // the modal loops' serviceCritical(), forceServiceBy* - so the modal
+    // the modal loops' serviceInner(), forceServiceBy* - so the modal
     // share is in here too. avg = total/runs; share = total time in the
     // service over uptime (core 0 CPU spent there); overruns = calls that
     // took longer than the period (period > 0 only). Counters wrap at 2^32.
+    // '*' after prio = in the inner set (keeps running inside the modal
+    // loops and while a BLOCKING service holds the loop).
     {
         uint64_t upUs = time_us_64( );
-        target->printf( "\n\rscheduler: %lu passes, %u services\n\r",
+        target->printf( "\n\rscheduler: %lu passes, %u services   (* = inner set: runs inside modal loops)\n\r",
                         (unsigned long)jOS.getLoopCount( ), (unsigned)jOS.getServiceCount( ) );
-        target->println( "  service           prio  period_us       runs  last_us   max_us   avg_us  overruns  share" );
+        target->println( "  service           prio   period_us       runs  last_us   max_us   avg_us  overruns  share" );
         for ( uint8_t i = 0; i < jOS.getServiceCount( ); i++ ) {
             Service* s = jOS.getServiceAt( i );
             if ( s == nullptr ) continue;
@@ -2929,8 +2931,8 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
             }
             unsigned long avg = s->runs ? (unsigned long)( s->totalUs / s->runs ) : 0;
             double share = upUs ? ( 100.0 * (double)s->totalUs / (double)upUs ) : 0.0;
-            target->printf( "  %-17s %-4s %10lu %10lu %8lu %8lu %8lu %9lu %5.1f%%\n\r",
-                            s->getName( ), prio, (unsigned long)s->periodUs( ),
+            target->printf( "  %-17s %-4s%c %10lu %10lu %8lu %8lu %8lu %9lu %5.1f%%\n\r",
+                            s->getName( ), prio, s->inInnerSet( ) ? '*' : ' ', (unsigned long)s->periodUs( ),
                             (unsigned long)s->runs, (unsigned long)s->lastUs,
                             (unsigned long)s->maxUs, avg, (unsigned long)s->overruns, share );
         }

@@ -18,10 +18,48 @@
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
-`2761825` (the switch classifier inside probe mode, row 31), and **T1.4** (the commit after
-`2761825`, `DEV_MERGE_HANDOFF.md` row 32 — hash with the next commit). **The board is flashed
-with HEAD.** **Next: T1.5** (B4 `serviceInner()` — see "Then the queue"; T1.4's stats table
-is the instrument for it: the modal-loop calls already show up in `runs`).
+`2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32), and
+**T1.5** (the commit after `e3d4d36`, `DEV_MERGE_HANDOFF.md` row 33 — hash with the next
+commit). **The board is flashed with HEAD.** **Next: T1.7** (B6 `loop()` cleanup — see "Then
+the queue"; needs Kevin's UX check that `h?`/`x?` still work, so run every automatable check
+and commit "pending Kevin hands-on" per the disposition rule).
+
+**T1.5 (B4) — what was built.** `Service::inInnerSet()` (virtual; default = CRITICAL
+priority; `AsyncPassthroughService` overrides it to true) names the modal set explicitly, and
+`jOSmanager::serviceInner()` is one due-gated pass over it (same `isDue()`/`runService()`
+path as `serviceAll()`, so the `X` table counts the modal loops' calls; the prio column now
+carries a `*` for inner-set services). `serviceCritical()` is **gone** — all 23 call sites
+(Menus.cpp ×10, Probing.cpp ×8, `BitmapEditor.cpp`, `GraphicOverlays.cpp`, `ImagesApp.cpp`,
+`Peripherals.cpp`, `Python_Proper.cpp` `mp_hal_delay_ms`) call `serviceInner()`;
+`serviceAll()` runs the same inner set (plus the blocking service) while a service is
+BLOCKING (it used to be "CRITICAL priority", which was the same set minus AsyncPassthrough);
+`servicePython()` = `serviceInner()` (it hand-rolled the USB pump + a direct
+`Peripherals::service()`; it has no caller in `src/` — kept as a named entry point).
+`classifySwitchPosition()` in `probeMode()`'s loop (row 31) is untouched and still separate
+from the set (ProbeSwitch is deliberately NOT inner: `infraServiceTick()` would ride along).
+**Kevin-visible delta, intended (B4):** the Arduino UART bridge (AsyncPassthrough) and the
+USB pump keep running inside probe mode, the click/pad menus, the apps' input loops and
+MicroPython delays — the bridge used to stop for as long as any of those owned the loop.
+Also in this commit, from the T1.4 review: **`nextDueUs` is now 64-bit (`time_us_64()`)** —
+with a 32-bit deadline a service parked behind a modal loop or a BLOCKING menu for >35.8 min
+(a click menu left open over lunch) came back "not due" for another ~35 min (OLED reconnect,
+LiveXbar, implicit config saves dark); 64-bit makes it simply overdue, no re-pinning logic.
+
+**T1.5 — verified:** builds ×3; `X` after a 3 s `time.sleep()` from the REPL: the four
+inner-set rows (TinyUSB, ProbeButton, MpRemote, **AsyncPassthrough** — `HIGH*`) each show
+`runs` = passes **+ 42** (the `mp_hal_delay_ms` → `serviceInner()` calls) while
+Menus/Probing/Highlighting show exactly `passes` — the inner set is what runs inside the
+modal path, and AsyncPassthrough is in it; `run_all.py`: run 1 **6/7** (`test_net_currents`
+FAIL — the failing check line was not captured; the file then passed standalone 4× (8/8) and
+the suite's run 2 was **7/7**, so this is the known marginal phantom-current check, not a
+regression); `test_infra_paths` 24/24. **Pending Kevin hands-on:** probe mode, click menu and
+REPL still respond as before; with an Arduino on the header, passthrough now works while
+probing / inside a menu.
+
+**T1.5 files:** `src/JumperlOS.h/.cpp`, `src/main.cpp` (registration comments), the 7 call-site
+files above, `src/SingleCharCommands.cpp` (`*` marker), comment touch-ups in
+`ReadingDisplay.cpp`, `MpRemoteService.cpp`, `Peripherals.cpp`, `Python_Proper.cpp`, the
+rebuilt `firmware.uf2`.
 
 **T1.4 (B3) — what was built.** `Service` (base, `JumperlOS.h`) grew `virtual uint32_t
 periodUs() const { return 0; }`, `requestRun()`, and the scheduler-owned fields `nextDueUs`,
@@ -248,7 +286,7 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** ~~T1.4~~ (landed — see the top of this block) → **T1.5** → T1.7 → T1.6 →
+**Then the queue:** ~~T1.4~~ ~~T1.5~~ (landed — see the top of this block) → **T1.7** → T1.6 →
 T1.10 → T2.2 → T2.3 → T2.1.
 
 **Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
@@ -276,7 +314,8 @@ with the four deviations and the ConfigSave/SlotManager correction recorded at t
 - After T1.1, `serviceCritical()` = {TinyUSB, MpRemote, Peripherals, ProbeButton}; T1.5's
   `serviceInner()` adds AsyncPassthrough and replaces the 23 `serviceCritical()` call sites
   (Menus.cpp ×10, Probing.cpp ×8, `BitmapEditor.cpp:1167`, `GraphicOverlays.cpp:632`,
-  `ImagesApp.cpp:341`, `Peripherals.cpp:3339`, `Python_Proper.cpp:256`).
+  `ImagesApp.cpp:341`, `Peripherals.cpp:3339`, `Python_Proper.cpp:256`). **Done (T1.5) —
+  the count was re-verified by grep before editing: exactly 23.**
 
 **Working rules that bit this session:** only one process on a CDC port at a time — the
 `jumperless` client on port 1 makes every port-1 test lie; check `lsof /dev/cu.usbmodemJLV5port*`
@@ -356,7 +395,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **landed** | builds ×3; HIL 5/6; `test_infra_paths` 24/24; `X`: `irq 16` handler `0x20000835` (was `0x10055931` in flash); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise |
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | **landed** | builds ×3; I2C0 register readout 60/90 = 1.00 MHz on 11/11 boots, unchanged before/during/after `wavegen_start`/`stop` and after forced OLED frames (the flip is gone); DAC1 30 352 → ~20 k writes/s (2 kHz sine, ~3.1 s; −33 %, the honest cost); 80 000 INA0/INA1 register reads at sustained 1 MHz, 0 failures, 1–2 LSB spread; 10 reboots: INA1 8-sample median 1.465 mA every boot, OLED Connected, DAC found; `probe_current_zero` on 10 further boots 1.01–1.51 mA (mean 1.28, history 0.5–2.3); HIL 5/6; `test_infra_paths` 24/24; `i@` `probe_power on -> DAC0` |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | **landed** (pending Kevin hands-on: probe/menu feel) | builds ×3; `X` table: all 16 services runs>0 with the expected periods, modal-loop calls counted; wait-loop debug 12 s: 0 SLOW SERVICE; no `refresh:` line over 20 routing ops; HIL 7/7; `test_infra_paths` 24/24. First measured numbers: ProbePads 36.8 ms/call @ 20 Hz = 64–70 % of core 0 (est. was ~12 ms) |
-| 6 | T1.5 B4 `serviceInner()` | pending | — |
+| 6 | T1.5 B4 `serviceInner()` (+ 64-bit `nextDueUs`) | **landed** (pending Kevin hands-on: probe mode / click menu / REPL feel; passthrough while probing) | builds ×3; `X` after a 3 s REPL sleep: the 4 inner-set rows (incl. AsyncPassthrough `HIGH*`) = passes + 42, non-inner rows = passes; HIL 6/7 then 7/7 (net_currents standalone 8/8 ×4); `test_infra_paths` 24/24 |
 | 7 | T1.7 B6 `loop()` cleanup | pending | — |
 | 8 | T1.6 watchdog, measure-only | pending | — |
 | 9 | T1.10 LED-dump off core 1 | pending | — |
@@ -619,7 +658,7 @@ Risk: low if periods only *encode* gates the services already apply internally (
 identical); moderate for the ones that don't (Menus, Highlighting) — leave those at 0.
 Effort: ~150 lines in JumperlOS + one line per header.
 
-### B4. BLOCKING → an explicit modal set (Tier 1, small)
+### B4. BLOCKING → an explicit modal set (Tier 1, small) — **built, T1.5 (section 0)**
 BLOCKING is live for Menus (`Menus.cpp:68,75`), Highlighting (`:81`, the encoder voltage
 adjuster) and Probing (`:1249`, pad menu open) — the latch is what stops `Menus::clickMenu()`
 running while the adjuster owns the wheel, so its *semantics* stay. What changes: the set that
@@ -730,7 +769,8 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T1.4 B3 scheduler time + stats (`periodUs`, `requestRun`, `X` table) — the largest Tier-1
   item, ~150 lines; behaviour-preserving if periods only encode existing gates. **Landed
   2026-08-17 (section 0).**
-- T1.5 B4 `serviceInner()` replacing `serviceCritical()` in the modal loops.
+- T1.5 B4 `serviceInner()` replacing `serviceCritical()` in the modal loops. **Landed
+  2026-08-17 (section 0).**
 - T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable.
 - T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain).
 - T1.8 C2-0 CH446Q hot path + ISR into RAM (`__not_in_flash_func`).

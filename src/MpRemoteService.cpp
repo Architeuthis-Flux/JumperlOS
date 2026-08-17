@@ -101,7 +101,7 @@ ServiceStatus MpRemoteService::service( ) {
     }
 
     // REENTRANCY GUARD. service() is reached from inside running scripts:
-    // time.sleep() -> mp_hal_delay_ms -> jOS.serviceCritical() -> here (and
+    // time.sleep() -> mp_hal_delay_ms -> jOS.serviceInner() -> here (and
     // the jOS CRITICAL-priority loop can reach us the same way). Feeding
     // USBSer2 bytes into pyexec_event_repl_process_char while a script is
     // already on the C stack is nested VM execution (stack blowup / GC / NLR

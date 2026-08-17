@@ -992,7 +992,7 @@ int getMenuSelection( void ) {
 
     noInputTimer = millis( );
     while ( Serial.available( ) == 0 ) {
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         rotaryEncoderButtonStuff( ); // Update button state every iteration
 
         // Finger lifted -> re-arm the hold-to-back gate so the next hold's
@@ -1084,7 +1084,7 @@ int getMenuSelection( void ) {
             encoderButtonState = IDLE;
             unsigned long releaseWaitStart = millis( );
             while ( isEncoderButtonPhysicallyPressed( ) ) {
-                jOS.serviceCritical( );
+                jOS.serviceInner( );
                 if ( millis( ) - releaseWaitStart > 2000 ) {
                     break;
                 }
@@ -1980,7 +1980,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
     while ( optionSelected == -1 ) {
         // rotaryEncoderStuff();
         rotaryEncoderButtonStuff( );
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         delayMicroseconds( 1000 );
 
         if ( encoderButtonState == HELD || Serial.available( ) > 0 || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
@@ -2488,7 +2488,7 @@ int yesNoMenu( unsigned long timeout ) {
     showLEDsCore2 = 2;
 
     while ( optionSelected == -1 ) {
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         rotaryEncoderButtonStuff( ); // Update button state
 
         if ( millis( ) - startTime > timeout ) {
@@ -2634,7 +2634,7 @@ int selectNodeAction( int whichSelection ) {
     while ( nodeSelected == -1 && Serial.available( ) == 0 ) {
         delayMicroseconds( 200 );
         // rotaryEncoderStuff( );
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
         if ( encoderButtonState == HELD || Serial.available( ) > 0 || ProbeButton::getInstance( ).getButtonPress( ) == 1 ) {
             b.clear( );
@@ -2938,7 +2938,7 @@ float getActionFloat( int menuPosition, int rail ) {
     unsigned long lastShowRequestMs = 0;
 
     while ( true ) {
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
         // rotaryEncoderStuff();  // Update encoder and button state
 
@@ -3395,7 +3395,7 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
     while ( true ) {
         delayMicroseconds( 200 );
         rotaryEncoderStuff( );
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
 
         // Check for cancellation (long press)
@@ -3657,7 +3657,7 @@ String getActionString( int maxLength ) {
     while ( true ) {
         // delayMicroseconds(300);
         rotaryEncoderStuff( );
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
         // Handle serial input for direct typing
         if ( Serial.available( ) > 0 ) {
@@ -5681,7 +5681,7 @@ void runHistoryScrubMenu( void ) {
         oled.clearPrintShow( "history\nempty", 2, true, true, true );
         uint32_t t0 = millis( );
         while ( millis( ) - t0 < 700 ) {
-            jOS.serviceCritical( );
+            jOS.serviceInner( );
             delay( 5 );
         }
         return;
@@ -5726,7 +5726,7 @@ void runHistoryScrubMenu( void ) {
     while ( true ) {
         delayMicroseconds( 200 );
         rotaryEncoderStuff( );
-        jOS.serviceCritical( );
+        jOS.serviceInner( );
 
         // Keep the yellow undo indicator lit for the duration of the
         // scrub session - re-extend the window each loop.

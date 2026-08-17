@@ -115,7 +115,7 @@ static bool pollCurrentSenseMeasurement() {
         return false;
     }
     // Attempt gate, stamped BEFORE any bus traffic: this runs from
-    // serviceCritical() too (probeMode's ~20 us loop), and the poll stamp
+    // serviceInner() too (probeMode's ~20 us loop), and the poll stamp
     // above only advances on a completed read - so a not-ready conversion
     // used to be re-asked over I2C on every single pass. >= 10 ms between
     // attempts bounds the CNVR read to 100 Hz whatever the loop rate.
@@ -237,7 +237,7 @@ static bool pollCurrentSenseMeasurement() {
 /**
  * @brief Public method to poll current sense measurements
  * 
- * This is exposed publicly so it can be called from serviceCritical()
+ * This is exposed publicly so it can be called from serviceInner()
  * to keep current measurements updating even during blocking operations
  * like probe mode.
  */
@@ -3342,7 +3342,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
     while (true) {
         //delayMicroseconds(380);
         rotaryEncoderStuff();
-        jOS.serviceCritical();
+        jOS.serviceInner();
         // Read probe pads for direct voltage selection
         int probeReading = justReadProbe(true);
         

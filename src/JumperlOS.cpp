@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "JumperlOS.h"
-#include "hardware/timer.h"  // time_us_32() - the scheduler's clock
+#include "hardware/timer.h"  // time_us_64() - the scheduler's clock
 #include "Adafruit_USBD_CDC.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
@@ -103,10 +103,8 @@ bool jOSmanager::registerService(Service* service) {
     services[serviceCount].active = true;
     serviceCount++;
 
-    // First run is due now, not "when time_us_32() catches up with 0" - a
-    // service registered late (>35 min after boot) would otherwise wait for
-    // the wraparound compare to come round.
-    service->nextDueUs = time_us_32();
+    // First run is due now.
+    service->nextDueUs = time_us_64();
 
     // Re-sort by priority
     sortServicesByPriority();
@@ -151,9 +149,11 @@ bool jOSmanager::unregisterService(Service* service) {
  * the run that follows, one that lands during the run re-pends for the next
  * pass, and a request against a service that is not run (blocked, or read
  * before it was set) is never erased. Period 0 = every pass, no timestamp
- * work at all. Wraparound-safe compare on time_us_32() (C12).
+ * work at all. 64-bit time_us_64() deadlines (C12) - no wraparound to be
+ * safe against, and a service parked behind a modal loop for hours is simply
+ * overdue when it comes back.
  */
-bool jOSmanager::isDue(Service* svc, uint32_t now) {
+bool jOSmanager::isDue(Service* svc, uint64_t now) {
     bool p = false;
     if (svc->pending) {
         svc->pending = false;
@@ -167,7 +167,7 @@ bool jOSmanager::isDue(Service* svc, uint32_t now) {
     if (period == 0) {
         return true;
     }
-    return (int32_t)(now - svc->nextDueUs) >= 0;
+    return now >= svc->nextDueUs;
 }
 
 /**
@@ -180,13 +180,13 @@ bool jOSmanager::isDue(Service* svc, uint32_t now) {
  * of the same length always passes; stamping from the end would stretch
  * every cadence by the service's own run time (ProbePads: 50 -> ~62 ms).
  */
-ServiceStatus jOSmanager::runService(Service* svc, uint32_t now) {
+ServiceStatus jOSmanager::runService(Service* svc, uint64_t now) {
     uint32_t period = svc->periodUs();
     if (period != 0) {
         svc->nextDueUs = now + period;
     }
     ServiceStatus status = svc->service();
-    uint32_t took = time_us_32() - now;
+    uint32_t took = (uint32_t)(time_us_64() - now);
     svc->runs++;
     svc->lastUs = took;
     if (took > svc->maxUs) {
@@ -230,7 +230,7 @@ void jOSmanager::serviceAll() {
     }
     #endif
 
-    uint32_t loopStart = time_us_32();
+    uint64_t loopStart = time_us_64();
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
             continue;
@@ -241,16 +241,18 @@ void jOSmanager::serviceAll() {
             continue;
         }
 
-        // If we're blocked, only allow CRITICAL priority services to run.
-        // Checked BEFORE the pending capture so a requestRun() against a
-        // blocked service survives the skip and fires once unblocked.
+        // While a service is BLOCKING (a click menu, the voltage adjuster, a
+        // pad menu), only the inner set and the blocking service itself run -
+        // the same set the modal loops keep alive via serviceInner(). Checked
+        // BEFORE the pending capture so a requestRun() against a blocked
+        // service survives the skip and fires once unblocked.
         if (blockingService != nullptr &&
             blockingService != svc &&
-            svc->getPriority() != ServicePriority::CRITICAL) {
+            !svc->inInnerSet()) {
             continue;
         }
 
-        uint32_t now = time_us_32();
+        uint64_t now = time_us_64();
         if (!isDue(svc, now)) {
             continue;
         }
@@ -282,7 +284,7 @@ void jOSmanager::serviceAll() {
         }
     }
     if (debugWaitLoopTiming) {
-        uint32_t passUs = time_us_32() - loopStart;
+        uint32_t passUs = (uint32_t)(time_us_64() - loopStart);
         if (passUs > 20000) {
             Serial.printf("DEBUG:   serviceAll() took %lu us (%.2f ms)\n", (unsigned long)passUs, passUs / 1000.0);
             Serial.flush();
@@ -291,17 +293,19 @@ void jOSmanager::serviceAll() {
 }
 
 /**
- * @brief Execute ONLY CRITICAL priority services
+ * @brief One pass over the inner set (Service::inInnerSet())
  *
- * This is used within blocking operations (like probeMode) to keep
- * critical services like button checking alive in their inner loops.
- *
- * Also keeps current sense measurements updating so marching ants
- * visualization stays current during probe mode. Same due-or-pending gate
- * and stats as serviceAll() (the X table counts these calls too); the
- * blocking latch is ignored - we are inside the blocking context already.
+ * The modal loops - probeMode(), getMenuSelection() and the other click
+ * menus, the pad menus, the apps' input loops, mp_hal_delay_ms - call this
+ * to keep the button state machine, the USB pump, the mpremote REPL, the
+ * Arduino UART bridge and the current-sense poll (marching ants) alive while
+ * they own core 0. Same due-or-pending gate and stats as serviceAll() (the X
+ * table counts these calls too); the blocking latch is ignored - we are
+ * inside the blocking context already. Before B4 this was serviceCritical()
+ * = "every CRITICAL-priority service", which left AsyncPassthrough (HIGH)
+ * dead for as long as a probe session or a menu was open.
  */
-void jOSmanager::serviceCritical() {
+void jOSmanager::serviceInner() {
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
             continue;
@@ -312,12 +316,11 @@ void jOSmanager::serviceCritical() {
             continue;
         }
 
-        // Only execute CRITICAL priority services
-        if (svc->getPriority() != ServicePriority::CRITICAL) {
+        if (!svc->inInnerSet()) {
             continue;
         }
 
-        uint32_t now = time_us_32();
+        uint64_t now = time_us_64();
         if (!isDue(svc, now)) {
             continue;
         }
@@ -325,40 +328,24 @@ void jOSmanager::serviceCritical() {
         runService(svc, now);
     }
 
-    // (Peripherals is a CRITICAL service, so the loop above already ran its
-    // current-sense poll; the explicit second pollCurrentSense() that used
-    // to sit here made every serviceCritical() poll twice.)
-
-    // NOTE: MpRemoteService is CRITICAL priority and registered, so the loop
-    // above already ran it — the old explicit second call here made it run
-    // twice per serviceCritical(). Its own reentrancy guard also defers any
-    // USBSer2 REPL processing while a script is executing (Ctrl-C is still
-    // caught via mp_hal_check_interrupt's direct stream peek).
+    // (Peripherals and MpRemote are in the inner set, so the loop above ran
+    // them; the explicit second pollCurrentSense() / MpRemote call that used
+    // to sit here made every pass poll twice. MpRemote's own reentrancy
+    // guard defers any USBSer2 REPL processing while a script is executing -
+    // Ctrl-C is still caught via mp_hal_check_interrupt's direct stream peek.)
 }
 
 /**
  * @brief Execute services needed during MicroPython REPL execution
- * 
- * This runs a minimal set of services to keep the system responsive
- * while the main loop is blocked by MicroPython script execution.
- * 
- * Runs:
- * - Peripherals service (for current sense measurements -> marching ants animation)
- * - TinyUSB task (to keep USB communication alive)
- * 
- * This is lighter weight than serviceAll() and doesn't run the full
- * priority-based scheduling - just the essentials to keep measurements
- * and visualization working during Python script execution.
+ *
+ * = serviceInner(). It used to hand-roll a subset (the USB pump +
+ * Peripherals::service() called directly, bypassing the scheduler's gate and
+ * stats); the inner set is exactly the "keep the system responsive while a
+ * script runs" set. No caller in src/ today (mp_hal_delay_ms calls
+ * serviceInner() directly) - kept as a named entry point.
  */
 void jOSmanager::servicePython() {
-    // Keep USB alive during MicroPython execution (mutex-guarded pump: the
-    // Adafruit port also runs tud_task() from its USB IRQ under __usb_mutex,
-    // so a raw tud_task() here could re-enter the stack)
-    TinyUSB_Device_Task();
-    
-    // Run peripherals service for current sense measurements
-    // This updates currentSenseState.filteredCurrent_mA which drives marching ants
-    Peripherals::getInstance().service();
+    serviceInner();
 }
 
 /**
@@ -387,7 +374,7 @@ bool jOSmanager::forceServiceByName(const char* name) {
         
         // Check if name matches
         if (strcmp(svc->getName(), name) == 0) {
-            runService(svc, time_us_32());  // forced: no due gate, but counted
+            runService(svc, time_us_64());  // forced: no due gate, but counted
             return true;
         }
     }
@@ -418,7 +405,7 @@ bool jOSmanager::forceServiceByIndex(uint8_t index) {
         return false;
     }
 
-    runService(svc, time_us_32());  // forced: no due gate, but counted
+    runService(svc, time_us_64());  // forced: no due gate, but counted
     return true;
 }
 
@@ -530,7 +517,7 @@ ServiceStatus TermSerialService::service() {
     // During REPL or script execution (e.g. time.sleep()), TermControl::service()
     // reads from Serial via stream->read(), taking characters that should go to
     // MicroPython's sys.stdin. This causes select.poll()+read(1) loops to drop
-    // characters (every-other-char pattern) because serviceCritical() calls us
+    // characters (every-other-char pattern) because serviceInner() calls us
     // every 50ms during mp_hal_delay_ms.
     if (isMicroPythonREPLActive()) {
         return lastStatus;

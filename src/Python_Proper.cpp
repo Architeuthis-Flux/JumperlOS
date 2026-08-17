@@ -110,7 +110,7 @@ extern "C" {
     void *global_mp_stream_ptr = (void *)&Serial;
     // When non-NULL, mp_hal_stdio_poll() and mp_hal_stdin_rx_chr() use this
     // instead of global_mp_stream_ptr for stdin operations.  This prevents
-    // MpRemoteService::service() (called during time.sleep via serviceCritical)
+    // MpRemoteService::service() (called during time.sleep via serviceInner)
     // from switching the stdin stream away from Serial to USBSer2, which causes
     // select.poll() to check the wrong CDC port and drop characters.
     void *mp_stdin_locked_stream_ptr = nullptr;
@@ -251,7 +251,7 @@ extern "C" void mp_hal_delay_ms(mp_uint_t ms) {
     // Run essential services every 50ms during Python delays
     // This keeps current sense measurements and marching ants animation running
     if (current - last_service_time >= 50) {
-      jOS.serviceCritical();
+      jOS.serviceInner();
       last_service_time = current;
     }
     

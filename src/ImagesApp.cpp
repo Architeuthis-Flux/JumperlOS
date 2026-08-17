@@ -338,7 +338,7 @@ String imagesApp(bool selectionMode) {
     while (true) {
         // CRITICAL: Update encoder state machine
         //rotaryEncoderStuff();
-        jOS.serviceCritical();
+        jOS.serviceInner();
         
         // Check for encoder rotation with debouncing and threshold
         if (encoderPosition != lastEncoderPosition) {

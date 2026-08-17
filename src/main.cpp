@@ -494,7 +494,11 @@ void setup( ) {
 
     // Register the services. The comment on each line is the priority its
     // getPriority() actually returns (the header is authoritative - these used
-    // to disagree). Order within a priority is registration order.
+    // to disagree). Order within a priority is registration order. "inner set"
+    // = Service::inInnerSet(): what jOS.serviceInner() keeps alive inside the
+    // modal loops (probe mode, click/pad menus, apps, MicroPython delays) and
+    // while a BLOCKING service holds the loop - CRITICAL by default, plus
+    // AsyncPassthrough. Periods (periodUs(), 0 = every pass) live in the headers.
     //
     // NOT registered any more (each verified a no-op, see
     // CodeDocs/SCHEDULER_AND_HARDWARE_OFFLOAD.md B2): TermSerialService (body
@@ -503,8 +507,8 @@ void setup( ) {
     // USBPeriodicService (usbPeriodic() is a debug print), and
     // FileCacheFlushService unless USE_FILE_CACHE is compiled in.
 
-    jOS.registerService( &tinyUSBService );          // CRITICAL - USB pump every pass (TinyUSB_Device_Task)
-    jOS.registerService( &asyncPassthroughService ); // HIGH - USB CDC1<->UART0 bridging (prevent data loss)
+    jOS.registerService( &tinyUSBService );          // CRITICAL - USB pump every pass (TinyUSB_Device_Task); inner set
+    jOS.registerService( &asyncPassthroughService ); // HIGH - USB CDC1<->UART0 bridging (prevent data loss); inner set (inInnerSet() override - the bridge keeps running inside probe mode / menus)
     jOS.registerService( &menus );                   // HIGH - click-wheel menu; BLOCKING while a menu is open
     jOS.registerService( &slotManager );             // HIGH - states auto-save (idle-gated)
 
@@ -514,7 +518,7 @@ void setup( ) {
     // these would poll nonexistent ADC channels and spam measure mode. Runtime
     // cap instead of #ifdef so the contract - not a board macro - drives it.
     if ( board::currentBoard( ).caps.hasProbePads ) {
-        jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling; also in the modal set)
+        jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling); inner set
         jOS.registerService( &probing );          // HIGH - probe reading + probeMode() entry; BLOCKING while a pad menu is open
         jOS.registerService( &highlighting );     // HIGH - encoder net highlight / voltage adjuster (BLOCKING while it owns the wheel)
         jOS.registerService( &measureModeService ); // HIGH - measure-position readings
@@ -522,8 +526,8 @@ void setup( ) {
         jOS.registerService( &probePads );        // LOW - expensive ADC pad reading (50 ms self-gated)
     }
 
-    jOS.registerService( &mpRemoteService ); // CRITICAL - mpremote/ViperIDE raw REPL on USBSer2 (also in the modal set)
-    jOS.registerService( &peripherals );     // CRITICAL - current-sense poll (also in the modal set and servicePython())
+    jOS.registerService( &mpRemoteService ); // CRITICAL - mpremote/ViperIDE raw REPL on USBSer2; inner set
+    jOS.registerService( &peripherals );     // CRITICAL - current-sense poll (10 ms); inner set
 
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
 
