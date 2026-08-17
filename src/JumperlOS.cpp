@@ -20,6 +20,7 @@
 #include "CH446Q.h"         // For LiveCrossbarService
 #include "ArduinoStuff.h"   // secondSerialHandler / replyWithSerialInfo (PortHousekeepingService)
 #include "NetVoltageScan.h" // serviceNetVoltageScanDebug (PortHousekeepingService)
+#include "KickGap.h"        // would-be watchdog kick stamp in serviceInner() (T1.6)
 #include "MatrixState.h"    // For net color access
 
 #ifdef USE_TINYUSB
@@ -309,6 +310,8 @@ void jOSmanager::serviceAll() {
  * dead for as long as a probe session or a menu was open.
  */
 void jOSmanager::serviceInner() {
+    // Would-be watchdog kick from inside the modal loops (measure-only stage).
+    kickGapStamp( 0, KICK_INNER );
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
             continue;

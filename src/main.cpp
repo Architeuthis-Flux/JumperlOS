@@ -82,6 +82,7 @@ KevinC@ppucc.io
 #include "FileCache.h"          // Write-back PSRAM file cache (Phase 2)
 #include "Undo.h"               // Delta-based undo log (Phase 4.1)
 #include "SingleCharCommands.h" // Single-character command system
+#include "KickGap.h"            // watchdog measure-only stage: would-be kick stamps (T1.6)
 #include "WaveGen.h"            // New async wavegen
 #include "externVars.h"
 
@@ -960,6 +961,9 @@ dontshowmenu:
         } // Loop start
 #endif
 
+        // Would-be watchdog kick, core 0 (measure-only stage - see KickGap.h)
+        kickGapStamp( 0, KICK_LOOP0 );
+
         // Service all registered subsystems via jOSmanager
         // This now includes: Jerial, tud_task, usbPeriodic, oledPeriodic, and all other services
         jOS.serviceAll( );
@@ -1443,6 +1447,10 @@ float supplySense = 9.10F;
 #define LED_SHOW_MIN_TIME 14
 
 void loop1( ) {
+    // Would-be watchdog kick, core 1 (measure-only stage - see KickGap.h).
+    // Stamped BEFORE the pause wait so a long pauseCore2 / FlashPark park /
+    // WaveGen capture shows up as a gap.
+    kickGapStamp( 1, KICK_LOOP1 );
 
     while ( pauseCore2 == true ) {
         // Check for immediate bypass request even while paused

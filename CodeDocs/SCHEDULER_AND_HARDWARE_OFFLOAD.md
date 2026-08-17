@@ -19,9 +19,58 @@
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
-`545b7e6` (T1.5, row 33), and **T1.7** (the commit after `545b7e6`, `DEV_MERGE_HANDOFF.md`
-row 34 — hash with the next commit). **The board is flashed with HEAD.** **Next: T1.6**
-(C11 watchdog, measure-only stage first — see "Then the queue").
+`545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), and **T1.6 measure-only** (the commit
+after `b8d00d9`, `DEV_MERGE_HANDOFF.md` row 35 — hash with the next commit). **The board is
+flashed with HEAD.** **Next: T1.10** (LED-dump off core 1 — see "Then the queue"); the
+watchdog *enable* is a separate decision on the numbers below (design sketched there), not
+part of the queue as approved.
+
+**T1.6 (C11) measure-only stage — what was built.** `src/KickGap.h/.cpp`: `kickGapStamp(core,
+site)` at the three places a watchdog kick would go — the top of `loop()`'s busy-loop pass
+(`KICK_LOOP0`), `jOS.serviceInner()` (`KICK_INNER`, the modal loops), the top of `loop1()`
+before its `pauseCore2` wait (`KICK_LOOP1`) — records per core the longest gap between two
+consecutive stamps, which two sites bracketed it and when; `X` prints it ("watchdog
+(measure-only, nothing enabled): …", plus the currently open gap), **`X!` resets the maxima**
+(port 1 — on port 7 a raw `X!` is `X` then `!`, the arg never reaches the command). **No
+`watchdog_enable()` anywhere.** Cost: one `time_us_32()` and a few compares per stamp.
+
+**T1.6 — the numbers (each after an `X!` reset, then one blocker, then `X`; scripts
+`kickgap_campaign.py` in the job tmp dir):**
+
+| blocker | core 0 max gap | core 1 max gap |
+|---|---|---|
+| idle 30 s | **42 ms** (loop0→loop0 — the ProbePads block; the calibration check) | 4 ms |
+| `usb_audio_save()` from the REPL (a full config write) | 44 ms | 4 ms (FlashPark parks core 1 per flash op, ms each) |
+| `connect(1,5); connect(10,20)`, 3 s idle, `nodes_clear()`, 3 s idle (slot auto-save) | **1 809 ms** (inner→loop0) | **1 147 ms** (loop1→loop1) — the slot file write, core 1 parked through it |
+| `wavegen_start(1)` 2 kHz on DAC1 for 10 s | 163 ms | **10 007 ms** — core 1 is captured for the whole stream (finding 8, now measured) |
+| compute-bound MicroPython (`while ticks_diff < 5000: pass`) | **5 226 ms** | 4 ms — a busy script never services; the gap is the script |
+| `time.sleep(5)` MicroPython | 202 ms (inner→inner — `mp_hal_delay_ms` services every 50 ms, with 200 ms hiccups) | 4 ms |
+| one `X` print on port 1 | 83 ms | 4 ms |
+| `~` (print the config) | **1 060 ms** — a big terminal print blocks core 0 for a second (host-paced CDC) | 4 ms |
+| the whole `run_all.py` (7/7) | **11 488 ms** (loop0→inner — one long `mpremote exec` script) | 1 192 ms (slot save) |
+| boot (never reset) | 353 ms at 2 s (init) | 60 ms at 2 s |
+
+**What they say about the enable design (for the decision, not done):** kicks from the three
+loop sites alone cannot carry a fixed timeout — (a) a compute-bound MicroPython script is an
+unbounded core-0 gap (5.2 s here, 11.5 s in the suite; `while True: pass` is infinite), so
+the kick must also come from inside the VM (`MICROPY_VM_HOOK` / `mp_hal_check_interrupt`,
+which every script passes through); (b) a WaveGen stream is an unbounded core-1 gap, so
+either `WaveGen`'s core-1 stream loop kicks or core 1's kick is not required while
+`wavegen.isRunning()`; (c) with those two, everything else measured fits under an 8 s timeout
+with margin ×4 (slot save 1.8 s, `~` 1.1 s, boot 0.35 s) — but a long print or a self-test /
+calibration (not exercised: they need the button / hands, Kevin's list) still needs checking
+against whatever timeout is picked. Also worth knowing: **any command that runs longer than
+the timeout is a reboot** unless commands kick — the busy loop stamps between commands, not
+inside them.
+
+**T1.6 — verified:** builds ×3; `X` after boot and after each blocker as tabled; the idle
+number equals the ProbePads block (so the stamps sit where they should); HIL 7/7 (with the
+gap counters running); `test_infra_paths` 24/24. Nothing behavioural changed, so no
+hands-on item — Kevin's list for the *enable* stage: self-test, calibration, a probe session,
+the click menu held open, an app.
+
+**T1.6 files:** `src/KickGap.h/.cpp` (new), `src/main.cpp` (two stamps), `src/JumperlOS.cpp`
+(one stamp), `src/SingleCharCommands.cpp` (`X` line, `X!`), the rebuilt `firmware.uf2`.
 
 **T1.7 (B6) — what was built.** (1) The 10 ms `secondSerialHandler()` /
 `replyWithSerialInfo()` / `serviceNetVoltageScanDebug()` block in `loop()`'s busy loop is
@@ -46,7 +95,10 @@ found the hard way: the first B6 test run of `M?` in char mode dropped the ports
 back off, nothing persisted). (3) The post-command "clean up serial buffer" drain
 (`delayMicroseconds(1000)` + eat raw `Serial` down to 5 bytes) is gone — it ate the tail of
 any multi-line paste after the first command; `printMenu()` still discards a >20-byte
-backlog on its own (left alone, noted).
+backlog on its own (left alone, noted). Asymmetry, pre-existing and unchanged: commands relayed
+through `<j>…</j>` tags arrive via `CommandBuffer` and bypass the help checks entirely (a relayed
+`x?` runs `x`); relayed lines that come through TermControl's queue get them — machine input,
+not the help path.
 
 **T1.7 — verified:** builds ×3; both modes, scripted over port 1 (`help`, `help probe`, `x?`
 with a bridge present — **it survives now**, `m?`, `h`, `?`, `i?`, `A?`, `M?`): every one
@@ -331,8 +383,9 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ (landed — see the top of this block) → **T1.6** →
-T1.10 → T2.2 → T2.3 → T2.1.
+**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ (landed — see the top of this
+block) → **T1.10** → T2.2 → T2.3 → T2.1. (The watchdog *enable* is its own decision, on the
+T1.6 numbers.)
 
 **Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
 with the four deviations and the ConfigSave/SlotManager correction recorded at the top of this block):**
@@ -446,7 +499,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | **landed** (pending Kevin hands-on: probe/menu feel) | builds ×3; `X` table: all 16 services runs>0 with the expected periods, modal-loop calls counted; wait-loop debug 12 s: 0 SLOW SERVICE; no `refresh:` line over 20 routing ops; HIL 7/7; `test_infra_paths` 24/24. First measured numbers: ProbePads 36.8 ms/call @ 20 Hz = 64–70 % of core 0 (est. was ~12 ms) |
 | 6 | T1.5 B4 `serviceInner()` (+ 64-bit `nextDueUs`) | **landed** (pending Kevin hands-on: probe mode / click menu / REPL feel; passthrough while probing) | builds ×3; `X` after a 3 s REPL sleep: the 4 inner-set rows (incl. AsyncPassthrough `HIGH*`) = passes + 42, non-inner rows = passes; HIL 6/7 then 7/7 (net_currents standalone 8/8 ×4); `test_infra_paths` 24/24 |
 | 7 | T1.7 B6 `loop()` cleanup | **landed** (pending Kevin hands-on: help/`x?` feel, latency in the app) | builds ×3; help/`help <cat>`/`x?`/`m?`/`h`/`?`/`i?`/`A?`/`M?` right in both modes (scripted); `n` latency line mode CR/LF 146 → 46 ms p50, char mode unchanged; `X` PortHousekeeping row; HIL 7/7; `test_infra_paths` 24/24 |
-| 8 | T1.6 watchdog, measure-only | pending | — |
+| 8 | T1.6 watchdog, measure-only | **landed** (measure-only; the enable is a separate decision) | builds ×3; `X` kick-gap lines; idle 42 ms = the ProbePads block; slot save 1.8 s / 1.1 s; wavegen 10 s = core-1 capture; compute-bound MicroPython 5.2 s; suite 11.5 s; HIL 7/7; `test_infra_paths` 24/24 |
 | 9 | T1.10 LED-dump off core 1 | pending | — |
 | 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | pending | — |
 | 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | pending | — |
@@ -820,7 +873,8 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
   2026-08-17 (section 0).**
 - T1.5 B4 `serviceInner()` replacing `serviceCritical()` in the modal loops. **Landed
   2026-08-17 (section 0).**
-- T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable.
+- T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable. **Measure-only
+  stage landed 2026-08-17 (section 0, with the numbers and what they imply for the enable).**
 - T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain). **Landed
   2026-08-17 (section 0).**
 - T1.8 C2-0 CH446Q hot path + ISR into RAM (`__not_in_flash_func`).

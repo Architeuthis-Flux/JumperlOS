@@ -18,6 +18,7 @@
 #include "Highlighting.h"
 #include "Jerial.h" // TermControl is now part of Jerial
 #include "JumperlOS.h"
+#include "KickGap.h"   // watchdog measure-only stage: X prints the kick gaps, X! resets them
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MCP4728.h"
@@ -2757,6 +2758,17 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget( );
     if ( target == nullptr ) target = &Jerial;
 
+    // "X!" resets the watchdog kick-gap maxima (measure-only stage, T1.6) so
+    // one blocker at a time can be timed; everything else in X is cumulative.
+    {
+        String arg = getCommandArgs( line, 20 );
+        if ( arg.length( ) > 0 && arg[ 0 ] == '!' ) {
+            kickGapReset( );
+            target->println( "kick-gap maxima reset" );
+            return CMD_DONT_SHOW_MENU;
+        }
+    }
+
     target->println( "\n\r╭──────────────────────────────────────────────────────────────────────╮" );
     target->println( "│                      SYSTEM RESOURCE STATUS                          │" );
     target->println( "╰──────────────────────────────────────────────────────────────────────╯\n\r" );
@@ -2937,6 +2949,10 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                             (unsigned long)s->maxUs, avg, (unsigned long)s->overruns, share );
         }
     }
+    // Watchdog measure-only stage (T1.6): the longest gap between the points
+    // where a watchdog kick would go, per core. X! resets the maxima.
+    target->println( "\r" );
+    kickGapPrint( target );
     target->println( "\r" );
     target->flush( );
 
