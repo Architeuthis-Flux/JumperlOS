@@ -121,7 +121,6 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
   // THREAD SAFETY: Use proper mutex instead of busy-wait
   fs_mutex_acquire();
 
-  core1request = 1;
   {
     unsigned long _t = micros();
     while (core2busy) {
@@ -132,7 +131,6 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
       TinyUSB_Device_Task(); // mutex-guarded pump
     }
   }
-  core1request = 0;
 
   // Jerial.println(micros() - start);
   if (nodeFile) {
@@ -3032,7 +3030,6 @@ int printChangedNetColorFile(int slot, int flashOrLocal) {
     // Print from cache (currentColorSlotColorsString)
     // The cache always refers to the current netSlot, so 'slot' param is
     // implicitly current netSlot
-    core1request = 1;
     {
       unsigned long _t = micros();
       while (core2busy) {
@@ -3042,7 +3039,6 @@ int printChangedNetColorFile(int slot, int flashOrLocal) {
         TinyUSB_Device_Task(); // mutex-guarded pump
       }
     }
-    core1request = 0;
     core1busy = true;
 
     if (debugFP) {

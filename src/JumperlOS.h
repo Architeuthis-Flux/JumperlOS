@@ -305,7 +305,9 @@ class oled;
 
 /**
  * @brief Terminal input service - handles line buffering and input processing
- * CRITICAL priority - user input must be responsive
+ * CRITICAL priority. NOT REGISTERED any more: its body is commented out
+ * (Jerial.service() is called from loop() directly). Class kept for a later
+ * cleanup pass.
  */
 class TermSerialService : public Service {
 public:
@@ -328,7 +330,8 @@ private:
 
 /**
  * @brief Injected command processor - handles commands from AsyncPassthrough immediately
- * CRITICAL priority - executes injected commands as soon as they arrive to prevent buffer pile-up
+ * CRITICAL priority. NOT REGISTERED any more: disabled in favour of CommandBuffer
+ * processed synchronously in loop(). Class kept for a later cleanup pass.
  * 
  * This service checks for completed injected commands (from Arduino via <j> tags)
  * and executes them immediately, preventing the buffer from filling up when the
@@ -352,7 +355,7 @@ private:
 
 /**
  * @brief AsyncPassthrough service - handles USB CDC1 <-> UART0 bridging
- * CRITICAL priority - must run every loop to prevent data loss and maintain low latency
+ * HIGH priority - runs every loop pass to prevent data loss and maintain low latency
  */
 class AsyncPassthroughService : public Service {
 public:
@@ -394,7 +397,8 @@ private:
 
 /**
  * @brief USB periodic service - handles USB mass storage housekeeping
- * NORMAL priority - periodic USB maintenance
+ * NORMAL priority. NOT REGISTERED any more: usbPeriodic() is a debug print.
+ * Class kept for a later cleanup pass.
  */
 class USBPeriodicService : public Service {
 public:

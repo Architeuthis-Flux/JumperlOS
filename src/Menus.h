@@ -35,7 +35,7 @@ public:
     ServicePriority getPriority() const override { return ServicePriority::HIGH; }
     
     // Member variables (previously globals)
-    int inClickMenu = 0;
+    volatile int inClickMenu = 0; // read by core 1's render every pass - volatile like the other cross-core mode flags
     int menuState = MENU_MAIN;
     int menuPosition = 0;
     int menuScroll = 0;
@@ -58,7 +58,7 @@ private:
 };
 
 // Backward compatibility
-extern int& inClickMenu;
+extern volatile int& inClickMenu;
 extern int& defconDisplay;
 extern int& selectingRotaryNode;
 

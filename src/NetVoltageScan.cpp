@@ -42,7 +42,7 @@
 extern WaveGen wavegen;
 extern volatile bool refreshInProgress; // Commands.h
 extern volatile int probeActive;
-extern int& inClickMenu;          // Menus.h
+extern volatile int& inClickMenu; // Menus.h
 extern volatile int& inPadMenu;   // Probing.h
 // Defined in Graphics.cpp - ant geometry continuity check for the report
 extern void printAntPathContinuity(Stream* out);

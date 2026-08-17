@@ -1168,8 +1168,8 @@ ProbeSwitch& ProbeSwitch::getInstance( ) {
 
 /**
  * @brief Service method for probe switch checking
- * Checks the 3-position switch state.
- * LOW priority - not time-critical, can run infrequently.
+ * Checks the probe switch position (500 ms self-gated) and runs
+ * infraServiceTick(). NORMAL priority.
  */
 ServiceStatus ProbeSwitch::service( ) {
     lastStatus = ServiceStatus::IDLE;

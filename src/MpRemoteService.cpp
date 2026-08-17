@@ -164,7 +164,7 @@ ServiceStatus MpRemoteService::service( ) {
     // Process characters one at a time using event-driven REPL
     // This is non-blocking and allows us to service other things
     int processed_count = 0;
-    while ( USBSer2.available( ) && processed_count < 8192 ) { // Process max 1024 chars per service call
+    while ( USBSer2.available( ) && processed_count < 8192 ) { // Process max 8192 chars per service call
         int c = USBSer2.read( );
         if ( c < 0 )
             break;

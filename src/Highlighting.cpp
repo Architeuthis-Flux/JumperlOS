@@ -117,11 +117,11 @@ ServiceStatus Highlighting::service() {
     
     // ============================================================================
     // NON-CRITICAL PATH: Timeout checks and change detection
-    // Rate-limit these to ~50Hz (every 20ms) - no need to check every loop
+    // Rate-limit these to 25Hz (every 40ms) - no need to check every loop
     // ============================================================================
     static unsigned long lastPeriodicCheckTime = 0;
     unsigned long now = millis();
-    if (now - lastPeriodicCheckTime >= 40) {  // 20ms = 50Hz
+    if (now - lastPeriodicCheckTime >= 40) {  // 40ms = 25Hz
         lastPeriodicCheckTime = now;
         
         // Handle warning timeouts

@@ -8,7 +8,6 @@ extern volatile int sendAllPathsCore2;
 extern volatile int showLEDsCore2;
 extern volatile int showProbeLEDs;
 
-extern volatile int core1request;
 
 // Guard flags to prevent auto-save during command processing (prevents deadlock)
 extern volatile bool refreshLocalInProgress;

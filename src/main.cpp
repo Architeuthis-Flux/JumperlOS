@@ -490,56 +490,52 @@ void setup( ) {
     // Initialize and register services with jOSmanager
     // Serial.println("Registering services with jOSmanager...");
 
-    // Wire up system services
-    termSerialService.setTermControl( &Jerial );
     // oledService.setOledDisplay( &oled );
 
-    // Register all services in priority order using clean global names
-    // CRITICAL priority services - run every loop for instant response
-  
-    jOS.registerService( &termSerialService );       // CRITICAL - terminal input (when line buffering enabled)
-    jOS.registerService( &injectedCommandService );  // CRITICAL - immediate command execution from injection buffer
-    jOS.registerService( &asyncPassthroughService ); // CRITICAL - USB CDC1<->UART0 bridging (prevent data loss)
-    jOS.registerService( &menus );                   // CRITICAL - direct user input
+    // Register the services. The comment on each line is the priority its
+    // getPriority() actually returns (the header is authoritative - these used
+    // to disagree). Order within a priority is registration order.
+    //
+    // NOT registered any more (each verified a no-op, see
+    // CodeDocs/SCHEDULER_AND_HARDWARE_OFFLOAD.md B2): TermSerialService (body
+    // commented out), InjectedCommandService (disabled - CommandBuffer in loop()
+    // does the job), SingleCharCommands (commands run synchronously from loop()),
+    // USBPeriodicService (usbPeriodic() is a debug print), and
+    // FileCacheFlushService unless USE_FILE_CACHE is compiled in.
 
-    // HIGH priority services - time-sensitive operations
-    jOS.registerService( &tinyUSBService );  // HIGH - USB communication
-    jOS.registerService( &slotManager );     // HIGH - states auto-save
-   
+    jOS.registerService( &tinyUSBService );          // CRITICAL - USB pump every pass (TinyUSB_Device_Task)
+    jOS.registerService( &asyncPassthroughService ); // HIGH - USB CDC1<->UART0 bridging (prevent data loss)
+    jOS.registerService( &menus );                   // HIGH - click-wheel menu; BLOCKING while a menu is open
+    jOS.registerService( &slotManager );             // HIGH - states auto-save (idle-gated)
+
 
     // Probe stack is gated on the board having resistive probe pads (V5). The OG
     // has no probe pads (its scanning probe is Phase 2 work), so registering
     // these would poll nonexistent ADC channels and spam measure mode. Runtime
     // cap instead of #ifdef so the contract - not a board macro - drives it.
     if ( board::currentBoard( ).caps.hasProbePads ) {
-        jOS.registerService( &probeButton );      // HIGH - high-frequency button checking
-        jOS.registerService( &probing );          // HIGH - user interaction sensitive (probe reading)
-        jOS.registerService( &highlighting );     // HIGH - visual feedback
-        jOS.registerService( &measureModeService );
-        jOS.registerService( &probeSwitch );      // LOW - switch position (not time-critical)
-        jOS.registerService( &probePads );        // LOW - expensive ADC pad reading
+        jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling; also in the modal set)
+        jOS.registerService( &probing );          // HIGH - probe reading + probeMode() entry; BLOCKING while a pad menu is open
+        jOS.registerService( &highlighting );     // HIGH - encoder net highlight / voltage adjuster (BLOCKING while it owns the wheel)
+        jOS.registerService( &measureModeService ); // HIGH - measure-position readings
+        jOS.registerService( &probeSwitch );      // NORMAL - switch position (500 ms self-gated) + infraServiceTick()
+        jOS.registerService( &probePads );        // LOW - expensive ADC pad reading (50 ms self-gated)
     }
 
+    jOS.registerService( &mpRemoteService ); // CRITICAL - mpremote/ViperIDE raw REPL on USBSer2 (also in the modal set)
+    jOS.registerService( &peripherals );     // CRITICAL - current-sense poll (also in the modal set and servicePython())
 
-    jOS.registerService( &mpRemoteService ); // CRITICAL - mpremote/ViperIDE raw REPL on USBSer2 (also run by serviceCritical loop)
-
-    
-    
-
-    // NORMAL priority services - periodic tasks
-    jOS.registerService( &usbPeriodicService ); // NORMAL - USB housekeeping (when MSC enabled)
-    jOS.registerService( &peripherals );        // CRITICAL (Peripherals.h) - current-sense poll; also runs in serviceCritical()
-    jOS.registerService( &singleCharCommands ); // NORMAL - command execution (synchronous, not periodic)
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
 
-    // LOW priority services - background tasks
-    jOS.registerService( &oledService );         // LOW - display updates (OLED preserved on OG: a user can wire a panel to GP18/19)
+    jOS.registerService( &oledService );         // LOW - OLED connection maintenance (OLED preserved on OG: a user can wire a panel to GP18/19)
     jOS.registerService( &liveCrossbarService ); // LOW - live crossbar terminal display
     jOS.registerService( &configSaveService );   // LOW - background config save (non-blocking)
+#if USE_FILE_CACHE
     // Write-back file cache lives in PSRAM; only boards with PSRAM run its flush.
     if ( board::currentBoard( ).caps.hasPsram ) {
         jOS.registerService( &fileCacheFlushService ); // LOW - write-back PSRAM cache flush
     }
+#endif
 
     // Initialize context stack with MAIN_MENU as the root context
     // This provides proper navigation tracking for all child contexts

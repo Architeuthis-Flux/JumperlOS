@@ -79,7 +79,7 @@ ServiceStatus Menus::service( ) {
 }
 
 // Backward compatibility - create references to singleton members
-int& inClickMenu = Menus::getInstance( ).inClickMenu;
+volatile int& inClickMenu = Menus::getInstance( ).inClickMenu;
 int& defconDisplay = Menus::getInstance( ).defconDisplay;
 int& selectingRotaryNode = Menus::getInstance( ).selectingRotaryNode;
 int& menuState = Menus::getInstance( ).menuState;

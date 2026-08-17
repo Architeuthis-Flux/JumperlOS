@@ -153,13 +153,10 @@ bool jOSmanager::unregisterService(Service* service) {
  * This ensures critical services (button input, menus) are ultra-responsive
  * while less time-sensitive services don't block the main loop.
  * 
- * Service ID mapping (as registered in main.cpp):
- *   0 = probeButton (CRITICAL)
- *   1 = menus (CRITICAL)
- *   2 = slotManager (HIGH)
- *   3 = probing (HIGH)
- *   4 = highlighting (HIGH)
- *   5 = peripherals (NORMAL)
+ * The registration list (and the priority each service really has) lives in
+ * main.cpp's setup(); getPriority() in each service's header is authoritative.
+ * Indices are assigned at registration and re-sorted by priority, so there is
+ * no fixed ID map - use getServiceIndex(name) if you need one.
  */
 void jOSmanager::serviceAll() {
     loopCounter++;
@@ -676,7 +673,7 @@ AsyncPassthroughService& AsyncPassthroughService::getInstance() {
 
 /**
  * @brief Service method for AsyncPassthrough
- * CRITICAL priority - must run every loop to prevent data loss and maintain low latency
+ * HIGH priority - runs every loop pass to prevent data loss and maintain low latency
  * 
  * Bridges USB CDC1 (Serial1) <-> UART0 for async passthrough communication.
  * Handles USB->UART and UART->USB data transfer, line coding updates, and

@@ -52,15 +52,11 @@ volatile int showLEDsCore2 = 0; // this signals the core 2 to show the LEDs
 volatile int showProbeLEDs =
     0; // this signals the core 2 to show the probe LEDs
 
-volatile int core1request = 0; // this signals core 1 wants to do something
-
 unsigned long waitCore2() {
 
   // delayMicroseconds(60);
   unsigned long timeout = micros();
-  core1request = 1;
-  __dmb();  // Memory barrier after setting core1request
-  
+
   while (core2busy || (sendAllPathsCore2 != 0)) {
     __dmb();  // Memory barrier to ensure we see latest values from Core 2
     
@@ -80,7 +76,6 @@ unsigned long waitCore2() {
   }
 
   __dmb();  // Final barrier before continuing
-  core1request = 0;
   return micros() - timeout;
 }
 

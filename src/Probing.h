@@ -203,10 +203,10 @@ enum measuredState
 };
 
 /**
- * @brief Probing switch service - handles probe switch position (LOW priority)
+ * @brief Probing switch service - handles probe switch position (NORMAL priority)
  * 
- * Checks the 3-position probe switch state.
- * This is not time-critical so can run infrequently.
+ * Checks the probe switch position (self-gated to interval_ms inside
+ * checkSwitchPosition()) and runs infraServiceTick() on every call.
  */
 class ProbeSwitch : public Service {
 public:
