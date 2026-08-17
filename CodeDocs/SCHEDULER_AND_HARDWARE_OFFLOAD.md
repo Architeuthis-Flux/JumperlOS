@@ -748,10 +748,16 @@ T1.8 commit).
 Each item is committed and individually `git revert`-able; nothing is pushed. `X` on port 1 (or
 port 7) is the instrument for most of them.
 
-1. **Switch flip mid-probe-session (row 31, `2761825`)** — open a probe session, flip the DPDT
-   switch, keep tapping: the pads should re-scale within ~1 s (the classifier now runs inside
-   the loop; the LED shows the new position's idle pattern on the flip). With
-   `` `[debug] probe_switch_stats = 1 `` you see the `[switch]` lines during the session.
+1. **The switch classifier (rows 31, 41, 42, 45 — `2761825`, `b03d25b`, `bd1e7bc`, `c785d0d`)**
+   — three things to check with `` `[debug] probe_switch_stats = 1 `` on: (a) at idle in SELECT
+   it must never flip on its own now (your afternoon oscillation was a 2.4 mA
+   `probe_current_zero`; `X` → `probe zero:` shows the zero and the sample spread on every boot,
+   expected 0.8–1.0 mA; a bad zero is vetoed by the tip sense — `[switch] … vetoed by tip sense
+   (A:L)` lines mean the veto is working, not that anything is wrong); (b) a real flip at idle
+   is still seen within a check both ways; (c) mid-session a SELECT→MEASURE flip re-scales the
+   pads within ~1 s (both detectors agree in MEASURE), a MEASURE→SELECT flip may wait for the
+   session to end if the LED pattern is dim (that is the agreement rule's cost — the
+   `agree*:` label in the stats lines means the session rule is deciding).
 2. **Probe feel and menu feel (T1.4 `e3d4d36`, T1.5 `545b7e6`)** — tap, connect, clear,
    double-tap undo, the click menu, the pad menus, the REPL: nothing should feel different.
    New since T1.5: with an Arduino on the header, **the UART passthrough keeps working while
@@ -766,10 +772,12 @@ port 7) is the instrument for most of them.
 5. **Tap→crossbar latency (T2.2a `de297c5`)** — after a few taps, `X` → `crossbar latency`:
    the `tap->req` row (n > 0 only from real taps) is the number the doc could not take
    hands-free; the others were measured (req→pickup ~0.1–0.3 ms, send→show ~7 ms).
-6. **The watchdog enable decision (T1.6 `574e749`)** — before enabling anything, run the
-   things the measure-only stage could not: a self-test, a calibration, a long probe session,
-   a click menu held open, an app; then `X` for the max kick gaps (the enable design that the
-   numbers so far imply is in the T1.6 block: VM-hook + WaveGen kicks, ~8 s timeout).
+6. **The watchdog enable decision (T1.6 `574e749`, T1.6b `e1fc7f8`)** — the kick sites an
+   enable needs are in (measure-only) and measured: with {loop0, inner, loop1, vm, wavegen}
+   nothing in the whole HIL suite leaves a gap above 1.8 s (the slot save). Before enabling,
+   run the things the measure-only stage could not — a self-test, a calibration, a long probe
+   session, a click menu held open, an app — then `X` for the max kick gaps; then pick the
+   timeout (8 s has ×4 margin over everything measured) and whether long file ops should kick.
 7. **The two calls the doc leaves to you:** (a) ProbePads is ~65–70 % of core 0 idle
    (36.8 ms per poll at 20 Hz — T1.4's first number): T2.1 (ADC ring, approved) or the small
    "touch pre-check in `checkPads()`" (T1.11 candidate, changes first-detection slightly);
