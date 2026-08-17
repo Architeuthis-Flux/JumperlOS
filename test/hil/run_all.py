@@ -18,6 +18,7 @@ TESTS = [
     "test_net_currents.py",
     "test_config.py",
     "test_stress.py",
+    "test_paste_state.py",     # Y->S / J->L paste round-trips on port 1
     "test_encoder_ui.py",      # last: drives the physical UI
 ]
 

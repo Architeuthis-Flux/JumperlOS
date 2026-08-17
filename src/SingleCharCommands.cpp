@@ -686,7 +686,7 @@ void SingleCharCommands::initializeCommands( ) {
                      cmd_printYAML, MENU_DEBUG, CAT_ADVANCED );
 
     registerCommand( 'S', "load YAML state",
-                     "Paste YAML state (end with empty line). Same format as Y output.",
+                     "Paste YAML state (end with an empty line). Same format as Y output.",
                      cmd_loadYAMLState, MENU_STANDARD, CAT_CONNECTIONS, true, SER3_INTERACTIVE );
 
     registerCommand( '*', "raw speed test",
@@ -1411,6 +1411,108 @@ static String getCommandArgs( const String& line, unsigned int timeoutMs = 50 ) 
     return args;
 }
 
+// ---------------------------------------------------------------------------
+// Pasted-block reader shared by L (JSON) and S (YAML). Reads RAW from Serial
+// (port 1): while a paste command is collecting, the main loop - and with it
+// Jerial - is not serviced, so the bytes are still in the CDC FIFO.
+//
+// Why this is not "read lines until an empty line" any more: Y's YAML has blank
+// lines between its sections (after sourceOfTruth:, after the bridges, after
+// power:), so a pasted Y round-trip ended at the FIRST blank line and every line
+// after it fell through to the menu as a command. It only "used to work" when the
+// terminal sent CR-only line ends: readStringUntil('\n') then swallowed the whole
+// paste as one 1-second-timeout blob (blank lines invisible) and Enter finished
+// it. The jumperless app now sends '\n' per Enter, which exposed the design.
+//
+// Rules: '\n', '\r' and "\r\n" all end a line (each line is trimmed, as before -
+// the parsers do not depend on indentation). Blank lines BEFORE any content are
+// skipped (a char-mode "S<CR><LF>" leaves its line end in the FIFO); blank lines
+// INSIDE the paste are kept. The block ends when an empty line is followed by
+// PASTE_QUIET_MS of silence - a paste burst never pauses that long, even
+// forwarded one byte per USB write - or, as before, when nothing arrives for
+// PASTE_IDLE_MS after content (a partial last line is flushed). Returns false if
+// nothing at all arrived within PASTE_IDLE_MS.
+// ---------------------------------------------------------------------------
+static const unsigned long PASTE_QUIET_MS = 500;
+static const unsigned long PASTE_IDLE_MS = 30000;
+
+static bool readPastedBlock( String& out ) {
+    out = "";
+    String lineBuf;
+    lineBuf.reserve( 256 );
+
+    bool gotContent = false;      // at least one non-empty line collected
+    bool prevWasCR = false;       // to fold "\r\n" into one line end
+    bool pendingEmpty = false;    // an empty line completed after content - the
+                                  // terminator unless more bytes follow it
+    unsigned long emptyAtMs = 0;
+    unsigned long lastByteMs = millis( );
+
+    auto completeLine = [ & ]( ) {
+        lineBuf.trim( );
+        if ( lineBuf.length( ) == 0 ) {
+            if ( gotContent ) {
+                if ( pendingEmpty ) out += "\n"; // a run of blank lines: keep the earlier one
+                pendingEmpty = true;
+                emptyAtMs = millis( );
+            }
+            return; // leading blank lines are skipped
+        }
+        if ( pendingEmpty ) {
+            out += "\n"; // that blank line was inside the paste, not the end
+            pendingEmpty = false;
+        }
+        out += lineBuf;
+        out += "\n";
+        gotContent = true;
+        lineBuf = "";
+    };
+
+    while ( true ) {
+        while ( Serial.available( ) ) {
+            char ch = (char)Serial.read( );
+            lastByteMs = millis( );
+            if ( ch == '\r' ) {
+                completeLine( );
+                lineBuf = "";
+                prevWasCR = true;
+                continue;
+            }
+            if ( ch == '\n' ) {
+                if ( !prevWasCR ) {
+                    completeLine( );
+                    lineBuf = "";
+                }
+                prevWasCR = false;
+                continue;
+            }
+            prevWasCR = false;
+            lineBuf += ch;
+        }
+
+        unsigned long now = millis( );
+        if ( pendingEmpty && now - emptyAtMs >= PASTE_QUIET_MS ) {
+            break; // empty line + quiet = end of paste
+        }
+        if ( now - lastByteMs >= PASTE_IDLE_MS ) {
+            break; // nothing for a long time: apply what we have (as before)
+        }
+        yield( );  // pump USB and flush the prompt while we wait
+        delay( 1 );
+    }
+
+    // A last line without a terminator (paste that does not end in a newline
+    // and no Enter) is still content.
+    lineBuf.trim( );
+    if ( lineBuf.length( ) > 0 ) {
+        if ( pendingEmpty ) out += "\n";
+        out += lineBuf;
+        out += "\n";
+        gotContent = true;
+    }
+    return gotContent;
+}
+
 CommandResult cmd_showJsonState( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget( );
     if ( target == nullptr ) target = &Jerial;
@@ -1427,34 +1529,18 @@ CommandResult cmd_loadJsonState( char c, const String& line ) {
     String section = getCommandArgs( line );
     bool partialLoad = ( section.length( ) > 0 );
     if ( partialLoad )
-        Jerial.print( "\n\rPaste JSON for '" + section + "' (end with empty line):\n\r" );
+        Jerial.print( "\n\rPaste JSON for '" + section + "' (end with an empty line):\n\r" );
     else
-        Jerial.print( "\n\rPaste JSON state (end with empty line):\n\r" );
+        Jerial.print( "\n\rPaste JSON state (end with an empty line):\n\r" );
+    Jerial.flush( );
 
     String jsonBuffer;
     jsonBuffer.reserve(8192);
 
-    // Read lines until empty line or timeout
-    unsigned long startTime = millis();
-    const unsigned long timeout = 30000; // 30 second timeout
-
-    while (millis() - startTime < timeout) {
-        if (Serial.available()) {
-            String inputLine = Serial.readStringUntil('\n');
-            inputLine.trim();
-
-            // Empty line signals end of input
-            if (inputLine.length() == 0 && jsonBuffer.length() > 0) {
-                break;
-            }
-
-            jsonBuffer += inputLine + "\n";
-            startTime = millis(); // Reset timeout on each line
-        }
-        delay(1);
-    }
-
-    if (jsonBuffer.length() == 0) {
+    // Blank lines inside the paste are kept; an empty line followed by quiet
+    // ends it (see readPastedBlock - the old "first empty line ends it" cut
+    // multi-section pastes short and fed the rest to the menu as commands).
+    if ( !readPastedBlock( jsonBuffer ) ) {
         Jerial.print( "\r\nNo JSON received\n\r" );
         return CMD_SHOW_MENU;
     }
@@ -3398,29 +3484,17 @@ CommandResult cmd_printYAML( char c, const String& line ) {
 }
 
 CommandResult cmd_loadYAMLState( char c, const String& line ) {
-    Jerial.print( "\n\rPaste YAML state (end with empty line):\n\r" );
+    Jerial.print( "\n\rPaste YAML state (end with an empty line):\n\r" );
+    Jerial.flush( );
 
     String yamlBuffer;
     yamlBuffer.reserve( 16384 );
 
-    unsigned long startTime = millis( );
-    const unsigned long timeout = 30000;
-
-    while ( millis( ) - startTime < timeout ) {
-        if ( Serial.available( ) ) {
-            String inputLine = Serial.readStringUntil( '\n' );
-            inputLine.trim( );
-
-            if ( inputLine.length( ) == 0 && yamlBuffer.length( ) > 0 )
-                break;
-
-            yamlBuffer += inputLine + "\n";
-            startTime = millis( );
-        }
-        delay( 1 );
-    }
-
-    if ( yamlBuffer.length( ) == 0 ) {
+    // Y's own output has blank lines between sections, so "stop at the first
+    // empty line" cut every Y round-trip at sourceOfTruth: and the rest ran as
+    // menu commands. readPastedBlock keeps inner blank lines and ends on an
+    // empty line followed by quiet.
+    if ( !readPastedBlock( yamlBuffer ) ) {
         Jerial.print( "\r\nNo YAML received\n\r" );
         return CMD_SHOW_MENU;
     }

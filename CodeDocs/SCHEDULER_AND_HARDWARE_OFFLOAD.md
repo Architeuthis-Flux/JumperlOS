@@ -17,16 +17,28 @@
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
-`f3e4f6f` (T1.8), `95fb058` (docs), **T1.9 (the commit after `95fb058` — its hash goes into
-`DEV_MERGE_HANDOFF.md` row 29 with the next commit)**. **The board is flashed with the T1.9
-build = HEAD.** T1.9's gate ran in two halves: everything not needing port 1 while Kevin's
+`f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), and the paste fix (the commit after
+`9bca7b5`, `DEV_MERGE_HANDOFF.md` row 30 — hash with the next commit). **The board is flashed
+with HEAD.** T1.9's gate ran in two halves: everything not needing port 1 while Kevin's
 `jumperless` client held `JLV5port1` (it reconnected through the flash and 21 reboots), and
 the port-1 half — clean HIL 5/6, `test_infra_paths` 24/24, `i@` — the moment Kevin closed the
-app. **Next: T1.4** (B3 — see "Then the queue" and the design refinements below). Also open,
-raised by Kevin at the end of this session: **pasting multi-line text into port 1 is broken in
-both line-buffering modes, including after `S` (paste YAML)** — the lines arrive as separate
-commands; "it used to work", so suspect the recent Jerial/relay-buffer path (`b0fd157`) or the
-`tud_task()`→`yield()` conversion (`a3e58f4`) first.
+app. **Next: T1.4** (B3 — see "Then the queue" and the design refinements below).
+
+**Side quest landed on the way (Kevin's report, 2026-08-17): pasting a state back (`S` YAML /
+`L` JSON) works again.** Not a scheduler regression: both readers stopped at the *first* empty
+line and `Y`'s own output has blank lines between sections, so a Y round-trip ended at
+`sourceOfTruth:` and the rest ran as menu commands, in both terminal modes, since `35515bc`
+(Feb 2026). It only "used to work" while pastes arrived CR-only and `readStringUntil('\n')`
+swallowed the whole thing as one 1 s-timeout blob; the jumperless app now sends `\n` per Enter.
+Fix: one shared `readPastedBlock()` in `SingleCharCommands.cpp` (`\n`/`\r`/`\r\n`, inner
+blank lines kept, ends on empty line + 500 ms quiet, 30 s idle fallback) + `test_paste_state.py`
+in the HIL suite (**the suite is 6/7 from here on**, same single phantom-current FAIL). Two
+findings for Kevin's *app* (`bridge.py`), not firmware: (1) the interactive loop does
+`select()` on the fd then `sys.stdin.read(1)` — TextIOWrapper buffers the chunk, so Enter (and a
+paste's tail) reaches the board one keystroke late (`os.read(sys.stdin.fileno(), 1)` fixes it);
+the firmware reader tolerates it (the user's Enter flushes the tail and terminates). (2) The
+app's line mode sends each line with **no terminator**, so pastes cannot work there by
+construction — interactive mode is the paste path.
 
 **T1.9 files:** `src/JumperlessDefines.h`, `src/Peripherals.cpp`, `src/MCP4728.cpp/.h`,
 `src/oled.cpp` (68+/22−), the rebuilt tracked `.pio/build/jumperless_v5/firmware.uf2`, and the
@@ -349,12 +361,12 @@ in each service's header, not the registration comment.
 ```bash
 pio run -e jumperless_v5 -e jumperless_og -e jumperless_v5_debug   # ALL THREE, every step
 pio run -e jumperless_v5 -t upload                                  # flash the attached board
-python3 test/hil/run_all.py                                         # expect 5/6 (see below)
+python3 test/hil/run_all.py                                         # expect 6/7 (see below; 5/6 before the paste fix)
 python3 test/hil/test_infra_paths.py                                # 24/24 for routing/config work
 python3 test/hil/test_config.py                                     # 30/30
 ```
 
-`run_all.py` is **expected to report 5/6**: `test_net_currents` ("zero-load TOP_RAIL net
+`run_all.py` is **expected to report 6/7** (5/6 before `test_paste_state.py` joined it on 2026-08-17): `test_net_currents` ("zero-load TOP_RAIL net
 shows < 1 mA phantom current") is pre-existing and out of scope (identical on the `5.7.2.0`
 checkpoint and on `main`). Anything else failing is a real regression. `test_encoder_ui`
 auto-skips (reports PASS) without an OpenOCD session on :4444.
