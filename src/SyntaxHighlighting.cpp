@@ -298,7 +298,7 @@ static bool is_terminal_command_char(char c) {
   return false;
 }
 
-// Returns static buffer containing input string with ANSI sequences injected
+// Returns static buffer containing input string with ANSI sequences inserted
 char* SyntaxHighlighting::highlightString(const char* string, enum SyntaxHighlightingType type) {
   static char out[1024];  // Increased to handle longer lines with ANSI codes
   if (!string) {

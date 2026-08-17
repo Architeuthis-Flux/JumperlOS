@@ -6,11 +6,11 @@
 #     streaming, its ADC DMA keeps writing samples into RAM while OpenOCD
 #     streams the image through its RAM work area, and you get "Verify Failed"
 #     with ADC-sample-looking bytes in flash. So: stop the ADC and abort every
-#     DMA channel after `reset halt`, before programming. Order matters - kill
+#     DMA channel after `reset halt`, before programming. Order matters - stop
 #     the DREQ source first, or an aborted channel can be re-triggered.
 #     NOTE the abort register is 0x50000464 on RP2350; 0x50000444 is the RP2040
 #     offset and lands on DMA_TIMER1 here, which silently aborts nothing.
-#  2. Killing OpenOCD without `shutdown` can leave the core's reset vector-catch
+#  2. Stopping OpenOCD without `shutdown` can leave the core's reset vector-catch
 #     armed, after which even a picotool/BOOTSEL reboot halts silently in ROM.
 #     This script always ends with a clean `reset run; shutdown`.
 #

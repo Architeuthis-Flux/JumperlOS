@@ -25,7 +25,7 @@
 #ifndef OG_JUMPERLESS
 
 #include "CH446Q.h"
-#include "FakeGpio.h" // tdmInputs (to avoid stealing the FakeGPIO ADC)
+#include "FakeGpio.h" // tdmInputs (to avoid taking over the FakeGPIO ADC)
 #include "NetsToChipConnections.h" // numberOfPaths (includes duplicate paths)
 #include "MatrixState.h"
 #include "Peripherals.h"
@@ -103,7 +103,7 @@ static uint32_t tapOk = 0;
 // Hang-proof ADC read
 // ============================================================================
 //
-// readAdc()'s adc_read() busy-waits with NO timeout, and its 100ms lock-steal
+// readAdc()'s adc_read() busy-waits with NO timeout, and its 100ms lock takeover
 // means two cores can end up driving the ADC state machine at once - which
 // corrupts it and hangs adc_read() forever (this wedged the whole board in
 // testing). This variant is conversion-only: the CALLER must hold the
@@ -142,7 +142,7 @@ static bool readScanAdcVoltage(int channel, int samples, float* volts) {
 
 // Threshold for the floating-node check below. A driven node reads the same
 // early and late in the tap (measured: +/-0.02V); a floating node's charge
-// gets bumped by crosspoint switching injection and then decays through the
+// gets bumped by the charge kick of crosspoint switching and then decays through the
 // ADC front end while tapped, so the two reads diverge (measured: 0.04-0.2V).
 // Rejecting those keeps undriven nets from faking currents. Oscillating
 // signals (PWM etc.) also get rejected, which is correct - this scanner is
@@ -154,7 +154,7 @@ static const float kFloatingDriftVolts = 0.05f;
 static bool senseNodeVoltage(int node, int adc, float* volts) {
     // Take the ADC lock BEFORE closing any crosspoints, so a busy ADC costs
     // nothing but this spin - which services the encoder the whole time.
-    // NEVER steal the lock: that's how the ADC state machine gets corrupted
+    // NEVER take the lock over on timeout: that's how the ADC state machine gets corrupted
     // and hangs a core. Core 0's probe poller reads almost back-to-back; a
     // ~2ms window catches the gap between its reads.
     unsigned long waitStart = micros();

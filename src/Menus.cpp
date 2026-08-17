@@ -181,7 +181,7 @@ void readMenuFile( int flashOrLocal ) {
         // No "end" sentinel found (it's consumed by the first pass — this is a
         // re-read). Without this clamp menuLineIndex lands on 150 and every
         // menu walk goes out of bounds. Shouldn't happen now that menuRead is
-        // latched below, but never let a bad table poison all menu consumers.
+        // latched below, but never let a bad table corrupt all menu consumers.
         if ( menuLineIndex >= 150 ) {
             menuLineIndex = 0;
         }
@@ -1723,7 +1723,7 @@ int getMenuSelection( void ) {
                 // No remembered pick at this level (e.g. restored from a
                 // timeout straight into a deep level). subMenuStartIndex is
                 // the parent/boundary line, not a sibling — land on the first
-                // real entry at this level. (The old firstTime=1 hack used to
+                // real entry at this level. (The old firstTime=1 workaround used to
                 // paper over this by re-scanning, at the cost of advancing the
                 // cursor one item past the restored position on every back.)
                 menuPosition = subMenuStartIndex;

@@ -111,7 +111,7 @@ tusb_desc_device_t const desc_device_audio =
 };
 #endif
 
-// Wrapped function that intercepts the library's descriptor callback
+// Wrapped function that handles the library's descriptor callback
 __attribute__((used))
 uint8_t const * __wrap_tud_descriptor_device_cb(void)
 {
@@ -428,7 +428,7 @@ static_assert(sizeof(desc_fs_configuration_audio) - sizeof(desc_fs_configuration
               "audio block is not exactly JL_AUDIO_DESC_LEN bytes");
 #endif // USB_AUDIO_ENABLE
 
-// Wrapped function that intercepts the library's configuration descriptor callback
+// Wrapped function that handles the library's configuration descriptor callback
 __attribute__((used))
 uint8_t const * __wrap_tud_descriptor_configuration_cb(uint8_t index)
 {
@@ -558,7 +558,7 @@ static_assert(STRIDX_AUDIO == (sizeof(string_desc_arr)/sizeof(string_desc_arr[0]
 
 static uint16_t _desc_str[32];
 
-// Wrapped function that intercepts the library's string descriptor callback
+// Wrapped function that handles the library's string descriptor callback
 __attribute__((used))
 uint16_t const* __wrap_tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
@@ -601,7 +601,7 @@ uint16_t const* __wrap_tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 //--------------------------------------------------------------------+
 // CDC DTR Ignore Support
 //--------------------------------------------------------------------+
-// Wrapped function that intercepts tud_cdc_n_connected() calls
+// Wrapped function that handles tud_cdc_n_connected() calls
 // When ignore_dtr is enabled, always returns true if USB device is ready
 // This allows communication with hosts that don't set the DTR line
 __attribute__((used))

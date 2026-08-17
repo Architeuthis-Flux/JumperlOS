@@ -851,14 +851,14 @@ void savePreformattedNodeFile(int source, int slot, int keepEncoder, const Strin
       serialCommandBufferIndex = 0;
     }
 
-    // Check if line buffering is enabled or if we have preformatted data (e.g., from injected commands)
+    // Check if line buffering is enabled or if we have preformatted data (e.g., from relayed commands)
     extern struct config jumperlessConfig;
-    // CRITICAL FIX: Always use preformattedData if it has content > 1 char (includes injected commands!)
-    // Line buffering check is secondary - injected commands should ALWAYS use preformatted path
+    // CRITICAL FIX: Always use preformattedData if it has content > 1 char (includes relayed commands!)
+    // Line buffering check is secondary - relayed commands should ALWAYS use preformatted path
     bool usePreformattedData = (preformattedData.length() > 1);
     
     if (usePreformattedData) {
-      // Line buffering mode OR injected command: use the pre-parsed complete line
+      // Line buffering mode OR relayed command: use the pre-parsed complete line
       // Skip the first character (command) and any leading whitespace
       String dataOnly = preformattedData;
       if (dataOnly.length() > 0) {

@@ -609,7 +609,7 @@ void jl_gpio_set( int pin, int value ) {
 int jl_gpio_get( int pin ) {
     if ( pin >= 1 && pin <= 10 ) {
         // No pre-wait on readingGPIO here: gpioReadWithFloating() acquires the
-        // lock itself (with a 100ms steal timeout). The old timeout-less
+        // lock itself (with a 100ms takeover timeout). The old timeout-less
         // `while (readingGPIO)` spin could hang this core forever if the
         // holder crashed or was parked during a flash write.
         int reading = gpioReadWithFloating( gpioDef[ pin - 1 ][ 0 ], 50 );

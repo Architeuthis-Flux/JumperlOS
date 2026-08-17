@@ -411,7 +411,7 @@ int secondSerialHandler( void ) {
         flashArduino( 0 );  // non-blocking: one-time auto-connect (+ ESP32 reset dance)
     }
 
-    // Poll for flash completion (STK500 sniff / inactivity / no-data abort).
+    // Poll for flash completion (STK500 protocol watch / inactivity / no-data abort).
     // Replaces the old blocking servicing loop - the DMA bridge self-pumps.
     if ( flashingArduino && AsyncPassthrough::checkFlashDone() ) {
         // Release ESP32 boot-strap lines if this was an ESP32 flash.
@@ -430,7 +430,7 @@ int secondSerialHandler( void ) {
 }
 
 char arduinoCommandStrings[ 10 ][ 50 ] = {
-    // commands to sniff from the Arduino
+    // commands to watch for from the Arduino
     "jumperlessConfig.serial_1.function",
     "jumperlessConfig.serial_1.connect_on_boot",
     "jumperlessConfig.serial_1.lock_connection",

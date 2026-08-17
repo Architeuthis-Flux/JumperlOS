@@ -841,7 +841,7 @@ int ProbeButton::checkProbeButtonHardware( void ) {
     // ============================================================
     // Multiplex coordination (PROBE_LED_PIN is the WS2812 data
     // line; BUTTON_PIN sits on the same external net). We MUST NOT
-    // steal the pin function from PIO while:
+    // take the pin function back from PIO while:
     //   (a) probeLEDhandler is mid showBlocking() - the writer
     //       guards this with showingProbeLEDs != 0.
     //   (b) The WS2812 latch period (300us idle) is still in
@@ -2270,7 +2270,7 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     // undo/redo and our bail handler (top of loop) clears
     // pendingInProbeButton - so click 1's mode switch / clear-in-
     // -progress effect never commits. If no second tap arrives, we
-    // inject the press back into row[0] at the top of the loop and
+    // re-queue the press into row[0] at the top of the loop and
     // the existing button handler processes it normally.
     //
     // Declared up here (before the restartProbing labels) so a goto-
@@ -2502,7 +2502,7 @@ restartProbingNoPrint:
         }
 
         // pendingCommitting is set further down (after readProbe) when
-        // the deferred-press window elapses and we inject the press
+        // the deferred-press window elapses and we re-queue the press
         // back into row[0]. Declared here so its scope covers the rest
         // of this iteration including the press handler.
         bool pendingCommitting = false;
@@ -2606,8 +2606,8 @@ restartProbingNoPrint:
         // window has elapsed without a cancel. Done here (AFTER
         // handleEncoderCursorNavigation + readProbe) because the
         // encoder function unconditionally writes row[0] = -1 when no
-        // selection is active - earlier injection got clobbered. We
-        // only inject when no fresher input (encoder selection,
+        // selection is active - the earlier re-queue got clobbered. We
+        // only re-queue when no fresher input (encoder selection,
         // probe-needle touch, or new button press from readProbe)
         // already claimed row[0] this iteration.
         if ( row[ 0 ] == -1 &&
@@ -2732,7 +2732,7 @@ restartProbingNoPrint:
             // mode switch never commits.
             //
             // pendingCommitting is true only when the top-of-loop
-            // resolver injected this press after the window elapsed -
+            // resolver re-queued this press after the window elapsed -
             // that's our signal to actually process it.
             //
             // Cross-button case: if a DIFFERENT press arrives while
@@ -5230,7 +5230,7 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 
     // LED keep-alive: the addressable LED in the probe is written ONCE per
     // mode change and never again, so a chip reset (rail glitch, cable
-    // wiggle) leaves it dark indefinitely - and with it kills the current
+    // wiggle) leaves it dark indefinitely - and with it removes the current
     // signature this whole classifier depends on. Re-send the last static
     // idle pattern every few seconds so a reset chip heals itself. Animated
     // and transient modes re-send themselves; only the one-shot idle
@@ -5265,7 +5265,7 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
     // Self-heal the claim's pin drive. Several subsystems write gpioState /
     // pin registers for the routable GPIO bank (setGPIO on every refresh,
     // updateStateFromGPIOConfig from the probe GPIO menu, MicroPython, PWM
-    // teardown); any of them flipping the claimed pin low kills the tip
+    // teardown); any of them flipping the claimed pin low drops the tip
     // while the bridge bookkeeping still says "connected", so the reclaim
     // above never fires. Seen on hardware: GPIO_1 OUTPUT-LOW with the claim
     // bridge intact - measure probing dead after the first tap. Cheap
@@ -5639,7 +5639,7 @@ float Probing::checkProbeCurrentZero( void ) {
 
     // showProbeLEDs is only a request flag consumed by probeLEDhandler() on
     // core1. Sampling INA1 while the probe LED is still lit bakes ~1.8mA of
-    // LED current into the zero offset, which then poisons every corrected
+    // LED current into the zero offset, which then corrupts every corrected
     // reading (and the switch thresholds calibrated against them). Wait for
     // the handler to consume the request, then let the current settle.
     unsigned long ledOffWaitStart = millis( );
@@ -5693,7 +5693,7 @@ float Probing::checkProbeCurrentZero( void ) {
     // Samples that fail on the bus (driver returns 0 + error flag) are
     // skipped rather than counted as fake 0mA readings. Median, not mean:
     // one sample taken while something still settles (LED relatch, crossbar
-    // apply) would drag a mean and poison every corrected reading after it.
+    // apply) would drag a mean and corrupt every corrected reading after it.
     for ( int i = 0; i < div; i++ ) {
         INA1.getLastError( );        // flush stale error flag
         (void)INA1.getPower_mW( );   // reading POWER clears CNVR
@@ -5787,7 +5787,7 @@ static uint8_t s_gpioPowerSavedState = 0;
 // puts MEASURE at a large NEGATIVE current and SELECT near zero - and the
 // detector latches the wrong side of the hysteresis forever. Instead track
 // V0 = the unloaded tip voltage (seeded from persisted probe_droop_v0 on
-// GPIO claim, fast attack to any higher ADC7 reading, slow track while the
+// GPIO claim, fast rise to any higher ADC7 reading, slow track while the
 // estimate looks unloaded) and map:
 //   I(v) = max(0, (V0 - v) / R_droop)
 // New peaks persist back into config; rail drift is absorbed by the slow
@@ -5804,7 +5804,7 @@ static bool s_gpioDroopValid = false;
 // without pulling V0 down during SELECT (I is large then, so no track).
 static const float kGpioDroopV0Track = 0.08f;
 // Below this, treat the tip as unloaded and slow-track V0. Wide enough that
-// a few mV of ADC noise / rail wander after a peak attack still re-zeros,
+// a few mV of ADC noise / rail wander after a peak rise still re-zeros,
 // but well under probe_switch_threshold_low so SELECT never decays V0.
 static const float kGpioDroopUnloadedMax_mA = 0.50f;
 
@@ -6546,7 +6546,7 @@ static int medianProbeBursts( const int* v, int n ) {
 // (PROBE_PIN in select; in measure, the GPIO powering the buffer when the
 // feed fell through to one). Blink that feed off for one short burst before
 // accepting a changed reading - a real probe contact collapses to the dark
-// floor, while a reading injected from anywhere else (a finger bridging a
+// floor, while a reading produced anywhere else (a finger bridging a
 // powered row onto a pad, body coupling from holding the board) persists,
 // and gets rejected. ~115us per blink.
 static bool probeReadingIsPhantom( int average, int mapMin ) {

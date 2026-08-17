@@ -343,7 +343,7 @@ extern "C" void arduino_serial_write(const char *str, int len, void *stream) {
         s->write('\r');
         s->write('\n');
       } else {
-        // Raw REPL stream: send bytes verbatim (no CR injection)
+        // Raw REPL stream: send bytes verbatim (no CR insertion)
         s->write(str[i]);
         extern bool oled_copy_print_enabled; // Flag for OLED print copy feature
         extern uint8_t pyexec_repl_active; // Flag to check if REPL is active (from pyexec.cpp)
@@ -513,7 +513,7 @@ extern "C" void mp_hal_stdout_tx_strn_cooked(const char *str, size_t len) {
                 out_stream->write('\n');
 
             } else {
-                // Raw REPL stream: send bytes verbatim (no CR injection)
+                // Raw REPL stream: send bytes verbatim (no CR insertion)
                 out_stream->write(str[i]);
                 if (oled_copy_print_enabled && oled.isConnected()) {
                     OLEDOut.write((const uint8_t*)&str[i], 1);
@@ -4824,7 +4824,7 @@ bool executeSinglePythonCommand(const char* command, char* result_buffer, size_t
   String parsed_command = parseCommandWithPrefix(command);
   
   // Debug output - always enabled for now to track command execution
-  #if DEBUG_INJECTED_COMMANDS
+  #if DEBUG_RELAYED_COMMANDS
   Serial.printf("executeSinglePythonCommand: input=\"%s\", parsed=\"%s\", response_target=%p\n", 
                 command, parsed_command.c_str(), response_target);
   Serial.flush();
@@ -4896,7 +4896,7 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
  * whatever the script last drew on the OLED are its OUTPUT and must survive -
  * this stops the zombie repainters, it does not blank the screen.
  *
- * fullHandback=false does only the script-injected input state (encoder,
+ * fullHandback=false does only the script-simulated input state (encoder,
  * pauseCore2) and leaves the display alone - see the comment in the body.
  */
 void onPythonSessionEnd( bool fullHandback ) {
@@ -4924,7 +4924,7 @@ void onPythonSessionEnd( bool fullHandback ) {
         hl.resetReadingState( );
     }
 
-    // Encoder state a script can inject via clickwheel_up/down/press.
+    // Encoder state a script can simulate via clickwheel_up/down/press.
     encoderDirectionState = NONE;
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;

@@ -86,7 +86,7 @@ extern volatile bool usbAudioOwnsAdc;
 // only from core2stuff(), which loop1() skips while pauseCore2 is set.
 // ANYTHING that calibrates or measures must
 // check this - reading anyway yields sweep means and a hard 0 on the probe
-// channels, which silently poisons whatever is solved from them.
+// channels, which silently corrupts whatever is solved from them.
 bool usb_audio_yield_adc(const char *why);
 
 // The counterpart: after a yield, ask the pump to restart capture - but ONLY

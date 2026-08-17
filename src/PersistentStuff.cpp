@@ -386,7 +386,7 @@ void updateStateFromGPIOConfig(int onlyIdx) {
 #endif
   // NOTE: the probe's GPIO buffer-power claim (debug.probe_power_gpio) holds
   // one of these pins output-HIGH; forcing it through the "output starts
-  // low" default here grounded ROUTABLE_BUFFER_IN and killed measure-mode
+  // low" default here grounded ROUTABLE_BUFFER_IN and broke measure-mode
   // probing with the claim bridge still in place. Skip the claimed pin.
   // (An old stray `break` also made this function only ever touch the FIRST
   // SIO pin - i.e. GPIO_1, the usual claim - regardless of which pin the

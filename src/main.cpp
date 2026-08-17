@@ -269,7 +269,7 @@ void setup( ) {
 
     // Configure Jerial for both input and output
     // Jerial automatically enables terminal control (line editing, history) for USB Serial endpoints
-    // InjectionBufferStream is automatically prioritized via MultiSourceStream layer
+    // RelayBufferStream is automatically prioritized via MultiSourceStream layer
     Jerial.setInputStream( JerialEndpoint::USB_SERIAL );  // Input with terminal control
     Jerial.addOutputStream( JerialEndpoint::USB_SERIAL ); // Output to USB
 
@@ -359,7 +359,7 @@ void setup( ) {
     // Jerial.addOutputStream(JerialEndpoint::USB_SER2);  // Output to Serial1
     // Jerial.addOutputStream(JerialEndpoint::OLED);     // Optional: also show on OLED
     // Jerial.addOutputStream(JerialEndpoint::SERIAL1);  // Optional: UART to Arduino
-    Jerial.addInputSource( Jerial.getInjectionStream( ) ); // Add injection stream as high-priority input source
+    Jerial.addInputSource( Jerial.getRelayStream( ) ); // Add relay stream as high-priority input source
     Jerial.addInputSource( JerialEndpoint::USB_SER3 );     // Add Port 4 as an input source
 
     // Enable automatic tag stripping for input
@@ -498,7 +498,7 @@ void setup( ) {
     //
     // NOT registered any more (each verified a no-op, see
     // CodeDocs/SCHEDULER_AND_HARDWARE_OFFLOAD.md B2): TermSerialService (body
-    // commented out), InjectedCommandService (disabled - CommandBuffer in loop()
+    // commented out), RelayedCommandService (disabled - CommandBuffer in loop()
     // does the job), SingleCharCommands (commands run synchronously from loop()),
     // USBPeriodicService (usbPeriodic() is a debug print), and
     // FileCacheFlushService unless USE_FILE_CACHE is compiled in.
@@ -714,7 +714,7 @@ unsigned long loopStart = millis( );
 void loop( ) {
     // Declare variables at function scope to avoid goto scope issues
     bool useLineBuffering = false;
-    bool hasInjectedData = false;
+    bool hasRelayedData = false;
     static const unsigned int HELP_WAIT_MS = 100;
 
 menu:
@@ -881,12 +881,12 @@ dontshowmenu:
     busyPrintTime = millis( );
 
     //! This is the main busy wait loop waiting for input
-    // CRITICAL: Use Jerial.available() to check injection buffer + Serial
-    // CRITICAL: Force line buffering when injection buffer has data (commands need full lines!)
+    // CRITICAL: Use Jerial.available() to check relay buffer + Serial
+    // CRITICAL: Force line buffering when relay buffer has data (commands need full lines!)
 
     // Calculate whether to use line buffering (variables declared at function scope)
-    hasInjectedData = ( Jerial.getInjectionStream( ) && Jerial.getInjectionStream( )->available( ) > 0 );
-    useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasInjectedData;
+    hasRelayedData = ( Jerial.getRelayStream( ) && Jerial.getRelayStream( )->available( ) > 0 );
+    useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasRelayedData;
 
     // DEBUG DISABLED: Heartbeat markers removed to minimize USB pressure
     static uint32_t heartbeatCounter = 0;
@@ -902,8 +902,8 @@ dontshowmenu:
         bool printHeartbeat = false; // Was: (heartbeatCounter - lastHeartbeatPrint >= 10000)
 
         // Recalculate useLineBuffering each iteration
-        hasInjectedData = ( Jerial.getInjectionStream( ) && Jerial.getInjectionStream( )->available( ) > 0 );
-        useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasInjectedData;
+        hasRelayedData = ( Jerial.getRelayStream( ) && Jerial.getRelayStream( )->available( ) > 0 );
+        useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasRelayedData;
 
         unsigned long loopStart = micros( );
 
@@ -1001,9 +1001,9 @@ dontshowmenu:
         }
         busyTimers[ 3 ] = micros( );
 
-        // Check if terminal has completed line (includes injected commands - works regardless of buffering mode)
+        // Check if terminal has completed line (includes relayed commands - works regardless of buffering mode)
         if ( Jerial.hasCompletedLine( ) ) {
-            break; // Line is ready for processing (could be user input or injected command)
+            break; // Line is ready for processing (could be user input or relayed command)
         }
 
         busyTimers[ 4 ] = micros( );
@@ -1038,14 +1038,14 @@ dontshowmenu:
         Jerial.service( );
 
         // NEW: Check for pending commands from CommandBuffer (from UART tags)
-        // This is the synchronous, simplified path that replaces InjectedCommandService
+        // This is the synchronous, simplified path that replaces RelayedCommandService
         if ( CommandBuffer::getInstance( ).hasPendingCommand( ) ) {
             break; // Exit busy loop to process the command
         }
     }
 
     // =========================================================================
-    // NEW: Handle pending commands from CommandBuffer (UART injected commands)
+    // NEW: Handle pending commands from CommandBuffer (UART relayed commands)
     // This runs BEFORE checking Jerial, ensuring UART commands are processed promptly
     // =========================================================================
     if ( CommandBuffer::getInstance( ).hasPendingCommand( ) ) {
@@ -1096,7 +1096,7 @@ dontshowmenu:
                         // Queue response to UART if command came from there
                         if ( CommandBuffer::getInstance( ).shouldRespondToUART( ) ) {
                             // Response already sent to Serial - copy to UART buffer
-                            // (The command handler writes to Serial, which we can intercept)
+                            // (The command handler writes to Serial, which we can capture)
                             // For now, the command handlers need to check shouldRespondToUART()
                             // and queue responses via CommandBuffer::getInstance().queueForUART()
                             CommandBuffer::getInstance( ).setRespondToUART( false ); // Reset flag
@@ -1125,9 +1125,9 @@ dontshowmenu:
         } // end else (firstLoop == 0)
     } // end if (hasPendingCommand)
 
-    // Check for completed lines first (includes both injected and buffered input)
-    // This works regardless of line buffering mode - injected commands always work
-    // CRITICAL: Use line buffering when injection buffer has data
+    // Check for completed lines first (includes both relayed and buffered input)
+    // This works regardless of line buffering mode - relayed commands always work
+    // CRITICAL: Use line buffering when relay buffer has data
     static unsigned long lastCommandProcessedTime = 0;
     if ( Jerial.hasCompletedLine( ) ) {
         // Track command processing latency
@@ -1156,7 +1156,7 @@ dontshowmenu:
     } else if ( !useLineBuffering ) {
         // Only read single character if NOT in line buffering mode
         // (line buffering mode already handled by Jerial.service() above)
-        // NOTE: Jerial.read() now handles injection buffer with tag filtering automatically
+        // NOTE: Jerial.read() now handles relay buffer with tag filtering automatically
         if ( Jerial.available( ) > 0 ) {
             input = Jerial.read( );
             noteUserInput( );

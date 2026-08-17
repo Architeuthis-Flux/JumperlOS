@@ -1,5 +1,5 @@
 /**
- * AsyncPassthrough - Bidirectional UART↔USB bridge with command injection
+ * AsyncPassthrough - Bidirectional UART↔USB bridge with command relay
  * 
  * Architecture (complete flow):
  * 
@@ -7,13 +7,13 @@
  *    Arduino Serial1 → UART RX (ISR) → ring buffer
  *    → bridge_uart_to_usb() reads ring buffer
  *    → Parses <j>command</j> tags
- *    → Injects command chars to Jerial.injection_buffer
+ *    → Relays command chars to Jerial.relay_buffer
  *    → Raw data (with tags) → USBSer1 (CDC 1) for debugging
  *    → Filtered data (tags removed) → Serial (CDC 0) for display
  * 
- * 2. Jerial.injection_buffer → Command Processing:
- *    InjectionBufferStream wraps injection_buffer (automatically strips tags on read)
- *    → MultiSourceStream multiplexes InjectionBufferStream + Serial
+ * 2. Jerial.relay_buffer → Command Processing:
+ *    RelayBufferStream wraps relay_buffer (automatically strips tags on read)
+ *    → MultiSourceStream multiplexes RelayBufferStream + Serial
  *    → TermControl reads from MultiSourceStream (line buffering)
  *    → Main loop calls Jerial.service() → TermControl::service()
  *    → Completed lines → SingleCharCommands → executeCommand()
@@ -24,19 +24,19 @@
  *    → Filtered/forwarded → UART TX → Arduino Serial1
  * 
  * Benefits:
- *   - Non-blocking command injection using composable Stream layers
- *   - No 8-command queue limit (uses 512-byte injection buffer)
+ *   - Non-blocking command relay using composable Stream layers
+ *   - No 8-command queue limit (uses 512-byte relay buffer)
  *   - Complete debug visibility via USBSer1 (CDC 1)
- *   - Clean separation: AsyncPassthrough injects, Jerial processes
+ *   - Clean separation: AsyncPassthrough relays, Jerial processes
  */
 
-// Debug flag for command injection tracing
-// Set to 1 to see each character being injected from <j> tags
+// Debug flag for command relay tracing
+// Set to 1 to see each character being relayed from <j> tags
 #include "ArduinoStuff.h"
 #include "Commands.h"
 #include "FileParsing.h"
 #include "hardware/structs/io_bank0.h"
-#define DEBUG_INJECTED_COMMANDS 0
+#define DEBUG_RELAYED_COMMANDS 0
 
 #include "AsyncPassthrough.h"
 #include "class/cdc/cdc_device.h"
@@ -101,7 +101,7 @@ static uint32_t s_tag_parsing_inactivity_timeout_ms = 0;  // Re-enable after thi
 
 bool async_begun = false;
 // ============================================================================
-// Flash Completion Detection (STK500 protocol sniffing)
+// Flash Completion Detection (STK500 protocol watching)
 // ============================================================================
 // STK500 protocol constants
 #define STK_LEAVE_PROGMODE  0x51   // 'Q' - last command avrdude sends
@@ -137,10 +137,10 @@ struct TagParserState {
     char tag_buffer[32];           // Buffer for tag name
     uint8_t tag_buffer_idx;
     char current_tag[32];          // Currently open tag name
-    bool needs_python_prefix;      // For <p> tags: true if we need to inject '>'
+    bool needs_python_prefix;      // For <p> tags: true if we need to relay '>'
     bool seen_first_char;          // For <p> tags: true after first non-whitespace char
     
-    // Command accumulation buffer - collect entire command before injection
+    // Command accumulation buffer - collect entire command before relay
     // This eliminates the need for per-character delays that caused blocking
     char command_buffer[256];      // Buffer for accumulating command content
     uint16_t command_buffer_idx;   // Current position in command buffer
@@ -156,9 +156,9 @@ struct TagParserState {
 static TagParserState usb_to_uart_parser = { TAG_SEARCHING, {0}, 0, {0}, false, false, {0}, 0, 0 };
 static TagParserState uart_to_usb_parser = { TAG_SEARCHING, {0}, 0, {0}, false, false, {0}, 0, 0 };
 
-// Command injection tracking (no rate limiting - process all commands immediately)
-static uint32_t s_last_command_injection_time = 0;
-static uint32_t s_injected_commands = 0;
+// Command relay tracking (no rate limiting - process all commands immediately)
+static uint32_t s_last_relayed_command_time = 0;
+static uint32_t s_relayed_commands = 0;
 
 // ============================================================================
 // UART Response Queue - Routes command responses back to UART
@@ -183,14 +183,14 @@ static volatile uint8_t s_uart_response_count = 0;
 // Track if current command came from UART (for response routing)
 static volatile bool s_command_from_uart = false;
 
-// ARCHITECTURAL NOTE: Character-by-character injection instead of line buffering
+// ARCHITECTURAL NOTE: Character-by-character relay instead of line buffering
 // ============================================================================
-// Previous approach: Accumulate complete commands in 512-byte buffer, inject as lines
+// Previous approach: Accumulate complete commands in 512-byte buffer, relay as lines
 // Problem: 8-command queue filled while bridge_uart_to_usb() blocked (900-7000ms)
 // 
-// Current approach: Inject characters one-by-one as they arrive via Jerial.injectInput()
+// Current approach: Relay characters one-by-one as they arrive via Jerial.relayInput()
 // Benefits:
-//   - Uses larger injection_buffer (no 8-command queue limit)
+//   - Uses larger relay_buffer (no 8-command queue limit)
 //   - Commands flow through normal Jerial.read() path
 //   - Main loop's line buffering handles command completion naturally
 //   - No blocking accumulation - chars available immediately for processing
@@ -201,7 +201,7 @@ static const char* COMMAND_TAGS[] = {
     "jumperlessCommand",
     "j",
     "jumperless",
-    "p"  // Python tag - works like 'j' but injects '>' prefix for Python commands
+    "p"  // Python tag - works like 'j' but relays '>' prefix for Python commands
 };
 static const uint8_t NUM_COMMAND_TAGS = 4;
 
@@ -1080,7 +1080,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                         s_command_from_uart = true;
                         
                         // NEW: Use CommandBuffer for synchronous command handling
-                        // This replaces the complex Jerial injection buffer system
+                        // This replaces the complex Jerial relay buffer system
                         if (parser->command_buffer_idx > 0) {
                             // =========================================================
                             // SAFETY CHECK: Startup, flashing, and filesystem protection
@@ -1093,7 +1093,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                             if ( !s_startup_complete ) {
                                 // System not ready - silently ignore command
                                 // This prevents crashes from early Arduino commands
-                                #if DEBUG_INJECTED_COMMANDS
+                                #if DEBUG_RELAYED_COMMANDS
                                 Serial.println("Tag command ignored (startup not complete)");
                                 #endif
                                 parser->state = TAG_SEARCHING;
@@ -1106,7 +1106,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                             extern volatile bool flashingArduino;
                             if ( flashingArduino ) {
                                 // Flashing in progress - ignore command to prevent crashes
-                                #if DEBUG_INJECTED_COMMANDS
+                                #if DEBUG_RELAYED_COMMANDS
                                 Serial.println("Tag command ignored (flashing in progress)");
                                 #endif
                                 parser->state = TAG_SEARCHING;
@@ -1122,7 +1122,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                                 extern volatile bool core2busy;
                                 if ( core2busy ) {
                                     // Core 2 still busy - defer command
-                                    #if DEBUG_INJECTED_COMMANDS
+                                    #if DEBUG_RELAYED_COMMANDS
                                     Serial.println("Tag command deferred (post-flash cooldown, Core2 busy)");
                                     #endif
                                     parser->state = TAG_SEARCHING;
@@ -1140,7 +1140,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                             } else {
                                 // Filesystem is busy - can't safely process command
                                 // Better to lose the command than crash
-                                #if DEBUG_INJECTED_COMMANDS
+                                #if DEBUG_RELAYED_COMMANDS
                                 Serial.println("Tag command deferred (filesystem busy)");
                                 #endif
                                 parser->state = TAG_SEARCHING;
@@ -1148,7 +1148,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                                 return !should_strip_tags;
                             }
                             
-                            s_injected_commands++;
+                            s_relayed_commands++;
                             
                             // Determine if this is a <p> (Python) or <j> (raw) command
                             bool isPythonTag = (strcmp(parser->current_tag, "p") == 0);
@@ -1170,7 +1170,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                             }
                         }
                         
-                        s_last_command_injection_time = millis();
+                        s_last_relayed_command_time = millis();
                         
                         // Reset state - just reset indices, no need to memset large buffers
                         parser->state = TAG_SEARCHING;
@@ -1194,7 +1194,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                     parser->command_buffer_idx = 0;
                     parser->chars_in_state = 0;  // Reset timeout counter for command accumulation
                     
-                    // For Python tags, prepare to inject '>' prefix if needed
+                    // For Python tags, prepare to relay '>' prefix if needed
                     if ( strcmp( parser->current_tag, "p" ) == 0 ) {
                         parser->needs_python_prefix = true;
                         parser->seen_first_char = false;
@@ -1244,7 +1244,7 @@ static inline bool process_command_tag_byte( uint8_t c, TagParserState* parser, 
                 }
                 
                 // NON-BLOCKING: Accumulate character into command buffer
-                // The entire command will be injected at once when closing tag is detected
+                // The entire command will be relayed at once when closing tag is detected
                 // This eliminates the need for blocking delayMicroseconds(350) per character
                 if ( parser->command_buffer_idx < sizeof(parser->command_buffer) - 1 ) {
                     parser->command_buffer[parser->command_buffer_idx++] = c;
@@ -1280,7 +1280,7 @@ static inline void bridge_usb_to_uart( uint8_t itf ) {
                 s_last_usb_to_uart_data_time = millis();
             }
 
-            // Track activity and sniff for STK_LEAVE_PROGMODE during flash mode
+            // Track activity and watch for STK_LEAVE_PROGMODE during flash mode
             if ( s_flash_mode_active ) {
                 uint32_t now = millis();
                 s_last_usb_to_uart_data_time = now;
@@ -1423,7 +1423,7 @@ static inline void bridge_uart_to_usb( uint8_t itf ) {
         }
         
         unsigned long forwardTime = micros() - forwardStart;
-        #if DEBUG_INJECTED_COMMANDS
+        #if DEBUG_RELAYED_COMMANDS
         if (forwardTime > 50000) {
             Serial.printf("⏱️  forwarding took %lu ms (%u bytes)\n", forwardTime / 1000, forwardCount);
         }
@@ -1667,7 +1667,7 @@ void begin( unsigned long baud ) {
 
     async_begun = true;
 }
-// #define DEBUG_INJECTED_COMMANDS 1
+// #define DEBUG_RELAYED_COMMANDS 1
 void processPendingLineCoding() {
  if ( s_apply_line_coding_pending) {
         // Apply to pico-sdk UART
@@ -1727,7 +1727,7 @@ void processPendingLineCoding() {
         
         
         
-        // #if DEBUG_INJECTED_COMMANDS
+        // #if DEBUG_RELAYED_COMMANDS
         // if ((t1 - t0) > 50000) {
         //     Serial.printf("⏱️  line_coding took %lu ms\n", (t1 - t0) / 1000);
         // }
@@ -1820,7 +1820,7 @@ void task( ) {
     
     if (printCheckpoints) { Serial.write('2'); yield(); }
     t1 = micros();
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     if ((t1 - t0) > 50000) {  // > 50ms
         Serial.printf("⏱️  checkDTRState took %lu ms\n", (t1 - t0) / 1000);
         Serial.flush();
@@ -1847,7 +1847,7 @@ void task( ) {
             s_startup_complete = true;
             // Also enable UART IRQ if it wasn't enabled by signalStartupComplete()
             enableUARTReceiver();
-            // #if DEBUG_INJECTED_COMMANDS
+            // #if DEBUG_RELAYED_COMMANDS
             Serial.println("Tag parsing enabled (fallback timeout)");
             // #endif
         }
@@ -1890,7 +1890,7 @@ void task( ) {
         irq_set_enabled( ASYNC_PASSTHROUGH_UART_IRQ, true );
     }
         asyncPassthroughTagParsingEnabled = true;
-        #if DEBUG_INJECTED_COMMANDS
+        #if DEBUG_RELAYED_COMMANDS
         Serial.println("Tag parsing enabled (startup complete + boot delay)");
         #endif
     }
@@ -1976,7 +1976,7 @@ void task( ) {
             s_tag_parsing_reenable_time = millis();  // Track re-enable time for cooldown
             
             // Single clean message when re-enabling (no flush - too slow!)
-            #if DEBUG_INJECTED_COMMANDS
+            #if DEBUG_RELAYED_COMMANDS
             Serial.printf("✓ Tag parsing re-enabled: %s\n", reenable_reason);
             #endif
         }
@@ -2035,13 +2035,13 @@ void task( ) {
     
     if (printCheckpoints) { Serial.write('6'); yield(); }
     t1 = micros();
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     if ((t1 - t0) > 50000) {
         Serial.printf("⏱️  bridge_usb_to_uart took %lu ms\n", (t1 - t0) / 1000);
     }
     #endif
     
-    // UART -> USB (where tag parsing and command injection happen)
+    // UART -> USB (where tag parsing and command relay happen)
     t0 = micros();
     if ( ring_available() > 0 ) {
             if (gpioReadingColors[9] != 0x1b0700) {
@@ -2062,7 +2062,7 @@ last_uart_usb = millis();
     
     if (printCheckpoints) { Serial.write('7'); yield(); }  // After UART->USB bridge
     
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     if ((t1 - t0) > 50000) {
         Serial.printf("⏱️  bridge_uart_to_usb took %lu ms\n", (t1 - t0) / 1000);
     }
@@ -2072,7 +2072,7 @@ last_uart_usb = millis();
     t0 = micros();
     process_uart_forward_prefixes();
     t1 = micros();
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     if ((t1 - t0) > 50000) {
         Serial.printf("⏱️  process_uart_forward_prefixes took %lu ms\n", (t1 - t0) / 1000);
     }
@@ -2084,7 +2084,7 @@ last_uart_usb = millis();
     t0 = micros();
     yield();
     t1 = micros();
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     if ((t1 - t0) > 50000) {
         Serial.printf("⏱️  tud_task took %lu ms\n", (t1 - t0) / 1000);
     }
@@ -2110,7 +2110,7 @@ last_uart_usb = millis();
     s_in_task = false;  // Release re-entrancy guard
     
     unsigned long taskEnd = micros();
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     if ((taskEnd - taskStart) > 100000) {  // > 100ms total
         Serial.printf("⏱️  AsyncPassthrough::task() TOTAL: %lu ms\n", (taskEnd - taskStart) / 1000);
     }
@@ -2179,7 +2179,7 @@ void signalStartupComplete() {
         // task() path after ARDUINO_BOOT_DELAY_MS. This gives the Arduino time to boot.
         // During this delay, UART data is just passed through (not parsed for tags).
 
-        #if DEBUG_INJECTED_COMMANDS
+        #if DEBUG_RELAYED_COMMANDS
         Serial.println("Startup complete - UART IRQ enabled, Arduino released from reset");
         #endif
     }
@@ -2312,7 +2312,7 @@ void clearDTRPulse() {
 }
 
 // ============================================================================
-// Flash Completion Detection (STK500 protocol sniffing + inactivity fallback)
+// Flash Completion Detection (STK500 protocol watching + inactivity fallback)
 // ============================================================================
 
 void enterFlashMode() {

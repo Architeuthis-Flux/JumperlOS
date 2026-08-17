@@ -162,7 +162,7 @@ int checkButton() {
 **Likely causes:**
 1. Pixel format mismatch (RGB vs GRB) → Check NEO_GRB flag
 2. Brightness too high causing color shift → Reduce brightness
-3. Voltage drop on long LED strips → Add power injection
+3. Voltage drop on long LED strips → Add power relay
 
 ### Performance Tuning
 

@@ -33,7 +33,7 @@ never retries or troubleshoots connections.
 | `test_net_currents.py` | Net voltage scan estimate vs INA0 on a real DAC→ISENSE→row→GND loop, zero-load deadband, `i?` self-check + audit |
 | `test_config.py` | New config keys present, runtime toggle persists through the idle flush |
 | `test_stress.py` | 40 connect/disconnect cycles with the scanner running: REPL stays responsive, no PIO timeouts, no live short |
-| `test_encoder_ui.py` | SWD-injected click menu open/scroll/close (skips without a debug probe) |
+| `test_encoder_ui.py` | SWD-simulateed click menu open/scroll/close (skips without a debug probe) |
 
 Manual pre-release checks the suite cannot do (need a human hand):
 probe tip taps near row-band edges (variance gate + duplicate-walk tuning),

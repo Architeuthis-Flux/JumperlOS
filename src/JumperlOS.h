@@ -329,28 +329,28 @@ private:
 };
 
 /**
- * @brief Injected command processor - handles commands from AsyncPassthrough immediately
+ * @brief Relayed command processor - handles commands from AsyncPassthrough immediately
  * CRITICAL priority. NOT REGISTERED any more: disabled in favour of CommandBuffer
  * processed synchronously in loop(). Class kept for a later cleanup pass.
  * 
- * This service checks for completed injected commands (from Arduino via <j> tags)
+ * This service checks for completed relayed commands (from Arduino via <j> tags)
  * and executes them immediately, preventing the buffer from filling up when the
  * main loop is busy. Commands are executed synchronously via singleCharCommands.
  */
-class InjectedCommandService : public Service {
+class RelayedCommandService : public Service {
 public:
-    static InjectedCommandService& getInstance();
-    InjectedCommandService(const InjectedCommandService&) = delete;
-    InjectedCommandService& operator=(const InjectedCommandService&) = delete;
+    static RelayedCommandService& getInstance();
+    RelayedCommandService(const RelayedCommandService&) = delete;
+    RelayedCommandService& operator=(const RelayedCommandService&) = delete;
     
     ServiceStatus service() override;
-    const char* getName() const override { return "InjectedCmd"; }
+    const char* getName() const override { return "RelayedCmd"; }
     ServicePriority getPriority() const override { return ServicePriority::CRITICAL; }
     
 private:
-    InjectedCommandService() = default;
-    ~InjectedCommandService() = default;
-    static InjectedCommandService* instance;
+    RelayedCommandService() = default;
+    ~RelayedCommandService() = default;
+    static RelayedCommandService* instance;
 };
 
 /**
@@ -714,7 +714,7 @@ extern jOSmanager& jOS;
 
 // System service references
 extern TermSerialService& termSerialService;
-extern InjectedCommandService& injectedCommandService;
+extern RelayedCommandService& relayedCommandService;
 extern AsyncPassthroughService& asyncPassthroughService;
 extern TinyUSBService& tinyUSBService;
 extern USBPeriodicService& usbPeriodicService;

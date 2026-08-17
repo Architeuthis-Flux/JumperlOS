@@ -103,7 +103,7 @@ Full encoder overhaul in `RotaryEncoder.cpp`. Root causes, in order of impact:
 
 - **`pio_sm_restart()` corrupted the quadrature count.** The PIO program
   keeps its previous-pin-state in the OSR; restart clears it, so any restart
-  with pins at 01/10 injects a signed phantom ±1 count. Restarts fired on
+  with pins at 01/10 relays a signed phantom ±1 count. Restarts fired on
   EVERY button press and EVERY `rotaryDivider` change (menus=4, probe=3,
   carousel=8, highlighting=4 → constant thrash) — raw count drifted
   thousands of counts per session. Both restart sites removed; the SM is

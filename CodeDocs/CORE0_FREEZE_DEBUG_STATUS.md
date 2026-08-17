@@ -31,13 +31,13 @@
 - Removed ALL debug prints
 - Freeze still happens with zero debug output
 
-### ✅ NOT Command Injection Race Conditions
+### ✅ NOT Command Relay Race Conditions
 - Refactored to synchronous `CommandBuffer` system
 - Single pending command slot, no queues
 - Freeze still happens
 
-### ✅ NOT InjectedCommandService Racing
-- Disabled `InjectedCommandService` entirely
+### ✅ NOT RelayedCommandService Racing
+- Disabled `RelayedCommandService` entirely
 - Commands now processed synchronously in main loop
 - Freeze still happens
 

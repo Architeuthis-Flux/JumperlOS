@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// Debug flag for injected command buffer tracing
-// Set to 1 to see buffer contents when extracting injected commands
-#define DEBUG_INJECTED_COMMANDS 0
+// Debug flag for relayed command buffer tracing
+// Set to 1 to see buffer contents when extracting relayed commands
+#define DEBUG_RELAYED_COMMANDS 0
 
 #include "Jerial.h"
 #include "ArduinoStuff.h"
@@ -197,7 +197,7 @@ bool TermControl::service( ) {
         Serial.printf("TermControl read: '%c' (%d)\n", c, (int)c);
         Serial.flush();
         #endif
-        // Note: Tag filtering now happens in InjectionBufferStream
+        // Note: Tag filtering now happens in RelayBufferStream
         // User-typed input doesn't have tags, so no filtering needed here
 
         // Line-buffering sync protocol: a bare SO (0x0E) enables / SI (0x0F)
@@ -216,7 +216,7 @@ bool TermControl::service( ) {
         if ( c == 0x0F ) {
             acknowledgeAppLineBuffering( false );
             // CRITICAL: stop reading here. The app sends SI immediately before a
-            // bulk machine payload (Wokwi JSON, netlist) so the firmware skips the
+            // bulk machine message body (Wokwi JSON, netlist) so the firmware skips the
             // line editor for it. If we kept draining this while() loop, every
             // following byte would still go through handleNormalChar (echo,
             // per-keystroke syntax-highlight re-render, history) — exactly the
@@ -243,18 +243,18 @@ bool TermControl::service( ) {
 
         // Machine-command fast-path (buffered mode only). The app pushes Wokwi
         // netlists as bare machine commands with NO trailing newline and NO
-        // separator between the 'Q' slot-query and the 'W <slot> {json}' payload.
+        // separator between the 'Q' slot-query and the 'W <slot> {json}' body.
         // The interactive line editor would mash them into one un-submittable
         // "QW 0 {json}" line — echoed and syntax-highlight re-rendered on every
         // byte (the garbage you see) — and it could never dispatch as two
         // commands anyway. When such a command appears at the start of an empty
         // line, submit just the trigger char (no echo, no history) so its handler
-        // runs immediately and reads any payload straight from the stream, exactly
+        // runs immediately and reads any message body straight from the stream, exactly
         // as it does when line buffering is off. This makes app-pushed netlists
         // work even when the app isn't using the SI/SO line-buffering handshake.
         //   'Q' : slot query, no interactive argument form -> always fast-path.
         //   'W' : Wokwi command; has human forms ("W 2", "W file [slot]"), so only
-        //         fast-path when its payload is already streaming in (a burst),
+        //         fast-path when its message body is already streaming in (a burst),
         //         which only happens for an app/paste push, never a keypress.
         if ( line_length == 0 && cursor_position == 0 &&
              ( c == 'Q' || ( c == 'W' && stream->available( ) > 8 ) ) ) {
@@ -323,7 +323,7 @@ bool TermControl::hasCompletedLine( ) const {
 }
 
 String TermControl::getCompletedLine( ) {
-    // First check queue (injected commands have priority)
+    // First check queue (relayed commands have priority)
     if ( queue_count > 0 ) {
         String result = command_queue[queue_tail];
         
@@ -331,7 +331,7 @@ String TermControl::getCompletedLine( ) {
         last_response_target = response_targets[queue_tail];
         response_targets[queue_tail] = nullptr;  // Clear slot
         
-        #if DEBUG_INJECTED_COMMANDS
+        #if DEBUG_RELAYED_COMMANDS
         Serial.printf("TermControl::getCompletedLine(): from queue[%d]: '%s', captured response_target=%p\n",
                      queue_tail, result.c_str(), last_response_target);
         Serial.flush();
@@ -358,7 +358,7 @@ Stream* TermControl::getResponseTarget( ) {
     Stream* target = last_response_target;
     last_response_target = nullptr;  // Clear after retrieval
     
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     Serial.printf("TermControl::getResponseTarget(): returning %p\n", target);
     Serial.flush();
     #endif
@@ -377,12 +377,12 @@ void TermControl::clearCompletedLine( ) {
     line_ready = false;
 }
 
-void TermControl::injectCompletedLine( const char* line, Stream* response_target ) {
+void TermControl::relayCompletedLine( const char* line, Stream* response_target ) {
     if ( !line ) {
         return;
     }
     
-    // CRITICAL: NON-BLOCKING queue-based injection
+    // CRITICAL: NON-BLOCKING queue-based relay
     // Add to circular buffer - drops oldest if full (better than blocking)
     
     if ( queue_count >= COMMAND_QUEUE_SIZE ) {
@@ -465,7 +465,7 @@ void TermControl::handleNormalChar( char c ) {
     case '?':
         // Version query ONLY on an empty line. A mid-line '?' must insert
         // normally or command arguments like 'i?' (RouteSafety self-check)
-        // can never be typed - the old unconditional intercept silently
+        // can never be typed - the old unconditional capture silently
         // turned 'i?' into 'i' + a version banner.
         if ( line_length == 0 ) {
             if (stream) {
@@ -544,7 +544,7 @@ void TermControl::handleEnter( ) {
     // Get pending response target from Jerial (set by AsyncPassthrough)
     Stream* pending_target = Jerial.getPendingResponseTarget();
     
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     Serial.printf("TermControl::handleEnter(): line_length=%d, pending_response_target=%p\n",
                  line_length, pending_target);
     Serial.flush();
@@ -603,13 +603,13 @@ void TermControl::handleEnter( ) {
     }
 
     // If there's a pending response target, queue this line with the target
-    // (This happens when line is assembled from character-by-character injection)
+    // (This happens when line is assembled from character-by-character relay)
     if ( pending_target != nullptr && line_length > 0 ) {
         current_line[ line_length ] = '\0';
         
         // Add to queue with response target instead of using completed_line
         if ( queue_count < COMMAND_QUEUE_SIZE ) {
-            #if DEBUG_INJECTED_COMMANDS
+            #if DEBUG_RELAYED_COMMANDS
             Serial.printf("TermControl::handleEnter(): Queuing '%s' with response_target=%p (queue slot %d)\n",
                          current_line, pending_target, queue_head);
             Serial.flush();
@@ -620,7 +620,7 @@ void TermControl::handleEnter( ) {
             queue_head = (queue_head + 1) % COMMAND_QUEUE_SIZE;
             queue_count++;
         } else {
-            #if DEBUG_INJECTED_COMMANDS
+            #if DEBUG_RELAYED_COMMANDS
             Serial.printf("⚠️  TermControl::handleEnter(): Queue full, dropping '%s'\n", current_line);
             Serial.flush();
             #endif
@@ -886,37 +886,37 @@ JerialClass::JerialClass()
       term_control_active(false),
       pending_response_target(nullptr),
       current_response_target(nullptr),
-      injection_read_pos(0),
-      injection_write_pos(0),
+      relay_read_pos(0),
+      relay_write_pos(0),
       tag_buffer_pos(0),
       in_tag(false),
-      injection_stream(nullptr),
+      relay_stream(nullptr),
       mux_stream(nullptr) {
     // Initialize arrays
     for (int i = 0; i < JERIAL_MAX_OUTPUTS; i++) {
         output_streams[i] = nullptr;
         input_sources[i] = nullptr;
     }
-    memset(injection_buffer, 0, sizeof(injection_buffer));
+    memset(relay_buffer, 0, sizeof(relay_buffer));
     memset(tag_buffer, 0, sizeof(tag_buffer));
     
-    // Create injection stream wrapper (with tag filtering)
-    injection_stream = new InjectionBufferStream(
-        (uint8_t*)injection_buffer,
-        sizeof(injection_buffer),
-        &injection_read_pos,
-        &injection_write_pos
+    // Create relay stream wrapper (with tag filtering)
+    relay_stream = new RelayBufferStream(
+        (uint8_t*)relay_buffer,
+        sizeof(relay_buffer),
+        &relay_read_pos,
+        &relay_write_pos
     );
     
-    // Debug: Confirm injection stream created
+    // Debug: Confirm relay stream created
     // Note: Can't Serial.println here - Serial not initialized yet!
 }
 
 JerialClass::~JerialClass() {
     destroyTermControl();
-    if (injection_stream) {
-        delete injection_stream;
-        injection_stream = nullptr;
+    if (relay_stream) {
+        delete relay_stream;
+        relay_stream = nullptr;
     }
     if (mux_stream) {
         delete mux_stream;
@@ -929,12 +929,12 @@ JerialClass::~JerialClass() {
 // ============================================================================
 #define DEBUG_JERIAL 0
 int JerialClass::available() {
-    // CRITICAL: Check InjectionBufferStream first (with tag filtering!)
+    // CRITICAL: Check RelayBufferStream first (with tag filtering!)
     // This works regardless of line buffering mode
-    if (injection_stream && injection_stream->available() > 0) {
-        int avail = injection_stream->available();
+    if (relay_stream && relay_stream->available() > 0) {
+        int avail = relay_stream->available();
         #if DEBUG_JERIAL == 1
-        Serial.printf("Jerial.available(): injection_stream has %d chars\n", avail);
+        Serial.printf("Jerial.available(): relay_stream has %d chars\n", avail);
         Serial.flush();
         #endif
         return avail;
@@ -953,13 +953,13 @@ int JerialClass::available() {
 }
 
 int JerialClass::read() {
-    // CRITICAL: Read from InjectionBufferStream first (with tag filtering!)
+    // CRITICAL: Read from RelayBufferStream first (with tag filtering!)
     // This works regardless of line buffering mode
-    if (injection_stream && injection_stream->available() > 0) {
-        int c = injection_stream->read();
+    if (relay_stream && relay_stream->available() > 0) {
+        int c = relay_stream->read();
         if (c >= 0) {
             #if DEBUG_JERIAL == 1
-            Serial.printf("Jerial.read(): got '%c' (%d) from injection_stream\n", (char)c, c);
+            Serial.printf("Jerial.read(): got '%c' (%d) from relay_stream\n", (char)c, c);
             Serial.flush();
             #endif
             return c;
@@ -981,9 +981,9 @@ int JerialClass::read() {
 }
 
 int JerialClass::peek() {
-    // Peek at injection buffer first
-    if (injection_read_pos != injection_write_pos) {
-        return injection_buffer[injection_read_pos];
+    // Peek at relay buffer first
+    if (relay_read_pos != relay_write_pos) {
+        return relay_buffer[relay_read_pos];
     }
     
     // If terminal control is active, peek through it
@@ -1069,22 +1069,22 @@ int JerialClass::availableForWrite() {
 // ============================================================================
 
 bool JerialClass::service() {
-    // CRITICAL: If there's an injected command pending, DON'T process it here!
-    // Let InjectedCommandService handle it directly for faster execution.
-    // This prevents both paths from trying to consume the same injection buffer.
-    // if (hasInjectedCommand) {
-    //     // Don't process injection buffer - InjectedCommandService will handle it
+    // CRITICAL: If there's an relayed command pending, DON'T process it here!
+    // Let RelayedCommandService handle it directly for faster execution.
+    // This prevents both paths from trying to consume the same relay buffer.
+    // if (hasRelayedCommand) {
+    //     // Don't process relay buffer - RelayedCommandService will handle it
     //     // Only process regular user input from Serial
     //     if (term_control_active && term_control && input_stream && input_stream->available() > 0) {
-    //         // There's user input, process just that (not injection buffer)
-    //         // But TermControl reads from MultiSourceStream which includes injection...
-    //         // So we skip entirely when injection is pending
+    //         // There's user input, process just that (not relay buffer)
+    //         // But TermControl reads from MultiSourceStream which includes relay...
+    //         // So we skip entirely when relay is pending
     //     }
-    //     return false;  // Signal that InjectedCommandService should handle this
+    //     return false;  // Signal that RelayedCommandService should handle this
     // }
     
     // TermControl reads from MultiSourceStream which automatically checks:
-    // 1. InjectionBufferStream (priority) - for AsyncPassthrough commands
+    // 1. RelayBufferStream (priority) - for AsyncPassthrough commands
     // 2. Real input stream (Serial) - for user input
     // No manual switching needed!
 
@@ -1092,10 +1092,10 @@ bool JerialClass::service() {
     #if DEBUG_JERIAL == 1
     if (millis() - last_debug > 1000) {
         last_debug = millis();
-        Serial.printf("Jerial.service(): term_control_active=%d, term_control=%p, injection_stream=%p, mux_stream=%p\n",
-                      term_control_active, term_control, injection_stream, mux_stream);
-        Serial.printf("  Injection buffer: r=%d w=%d (has data: %d)\n",
-                      injection_read_pos, injection_write_pos, injection_read_pos != injection_write_pos);
+        Serial.printf("Jerial.service(): term_control_active=%d, term_control=%p, relay_stream=%p, mux_stream=%p\n",
+                      term_control_active, term_control, relay_stream, mux_stream);
+        Serial.printf("  Relay buffer: r=%d w=%d (has data: %d)\n",
+                      relay_read_pos, relay_write_pos, relay_read_pos != relay_write_pos);
         Serial.flush();
     }
     #endif
@@ -1139,20 +1139,20 @@ void JerialClass::clearCompletedLine() {
     }
 }
 
-void JerialClass::injectCompletedLine(const char* line, Stream* response_target) {
+void JerialClass::relayCompletedLine(const char* line, Stream* response_target) {
     if (term_control_active && term_control) {
-        term_control->injectCompletedLine(line, response_target);
+        term_control->relayCompletedLine(line, response_target);
     }
 }
 
 Stream* JerialClass::getResponseTarget() {
-    // CRITICAL: Check current_response_target first (set by InjectedCommandService for fast-path)
+    // CRITICAL: Check current_response_target first (set by RelayedCommandService for fast-path)
     // This handles commands from UART that bypass TermControl's queue
     if (current_response_target != nullptr) {
         Stream* target = current_response_target;
         current_response_target = nullptr;  // Consume it
         
-        #if DEBUG_INJECTED_COMMANDS
+        #if DEBUG_RELAYED_COMMANDS
         Serial.printf("JerialClass::getResponseTarget(): returning current_response_target=%p\n", target);
         Serial.flush();
         #endif
@@ -1168,7 +1168,7 @@ Stream* JerialClass::getResponseTarget() {
 }
 
 void JerialClass::setPendingResponseTarget(Stream* target) {
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     Serial.printf("JerialClass::setPendingResponseTarget(%p)\n", target);
     Serial.flush();
     #endif
@@ -1185,7 +1185,7 @@ void JerialClass::clearPendingResponseTarget() {
 }
 
 void JerialClass::setCurrentResponseTarget(Stream* target) {
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     Serial.printf("JerialClass::setCurrentResponseTarget(%p)\n", target);
     Serial.flush();
     #endif
@@ -1407,7 +1407,7 @@ bool JerialClass::addInputSource(JerialEndpoint endpoint) {
 
 bool JerialClass::serviceInputs() {
     // Check all registered input sources for available data (in priority order)
-    // Injection stream should be first in the list (added in main)
+    // Relay stream should be first in the list (added in main)
     for (int i = 0; i < input_source_count; i++) {
         if (input_sources[i] && input_sources[i]->available() > 0) {
             // Switch to this input source if it has data
@@ -1420,65 +1420,65 @@ bool JerialClass::serviceInputs() {
     return false;
 }
 
-bool JerialClass::injectInput(const char* data, bool strip_tags) {
-    // Note: strip_tags parameter is legacy - InjectionBufferStream now handles tag filtering on read
+bool JerialClass::relayInput(const char* data, bool strip_tags) {
+    // Note: strip_tags parameter is legacy - RelayBufferStream now handles tag filtering on read
     (void)strip_tags;  // Suppress unused parameter warning
     
     if (!data) {
         return false;
     }
     
-    return injectInput((const uint8_t*)data, strlen(data), false);
+    return relayInput((const uint8_t*)data, strlen(data), false);
 }
 
-bool JerialClass::injectInput(const uint8_t* data, size_t size, bool strip_tags) {
-    // Note: strip_tags parameter is legacy - InjectionBufferStream now handles tag filtering on read
+bool JerialClass::relayInput(const uint8_t* data, size_t size, bool strip_tags) {
+    // Note: strip_tags parameter is legacy - RelayBufferStream now handles tag filtering on read
     (void)strip_tags;  // Suppress unused parameter warning
     
     if (!data || size == 0) {
         return false;
     }
     
-    // Write raw data to injection buffer - InjectionBufferStream will filter tags on read
+    // Write raw data to relay buffer - RelayBufferStream will filter tags on read
     for (size_t i = 0; i < size; i++) {
-        uint16_t next_write = (injection_write_pos + 1) % sizeof(injection_buffer);
+        uint16_t next_write = (relay_write_pos + 1) % sizeof(relay_buffer);
         
-        if (next_write == injection_read_pos) {
-            // Serial.printf("⚠️  Injection buffer full! Dropped %zu bytes\n", size - i);
+        if (next_write == relay_read_pos) {
+            // Serial.printf("⚠️  Relay buffer full! Dropped %zu bytes\n", size - i);
             // Serial.flush();
             return false;  // Buffer full
         }
         
-        injection_buffer[injection_write_pos] = data[i];
+        relay_buffer[relay_write_pos] = data[i];
         
-        injection_write_pos = next_write;
+        relay_write_pos = next_write;
     }
 
-    // Note: hasInjectedCommand flag is set by AsyncPassthrough when closing tag </j> is detected
+    // Note: hasRelayedCommand flag is set by AsyncPassthrough when closing tag </j> is detected
     // This ensures the flag is only set when a complete command (with closing tag) is ready,
-    // not on every character injection that happens to end with \n
+    // not on every character relay that happens to end with \n
     
-    // Debug: Confirm injection (disabled for performance)
-    // Serial.printf("✓ Injected %zu chars (buffer: %d -> %d)\n", size, injection_read_pos, injection_write_pos);
+    // Debug: Confirm relay (disabled for performance)
+    // Serial.printf("✓ Relayed %zu chars (buffer: %d -> %d)\n", size, relay_read_pos, relay_write_pos);
     // Serial.flush();
     
     return true;
 }
 
-void JerialClass::clearInjectedInput() {
-    injection_read_pos = 0;
-    injection_write_pos = 0;
-    memset(injection_buffer, 0, sizeof(injection_buffer));
+void JerialClass::clearRelayedInput() {
+    relay_read_pos = 0;
+    relay_write_pos = 0;
+    memset(relay_buffer, 0, sizeof(relay_buffer));
 }
 
 /**
- * Fast, thread-safe check for complete line in injection buffer
+ * Fast, thread-safe check for complete line in relay buffer
  * Scans buffer for newline without consuming data
  */
-bool JerialClass::hasInjectedCompleteLine() const {
+bool JerialClass::hasRelayedCompleteLine() const {
     // Read positions once for thread safety
-    uint16_t read_pos = injection_read_pos;
-    uint16_t write_pos = injection_write_pos;
+    uint16_t read_pos = relay_read_pos;
+    uint16_t write_pos = relay_write_pos;
     
     if (read_pos == write_pos) {
         return false;  // Buffer empty
@@ -1487,43 +1487,43 @@ bool JerialClass::hasInjectedCompleteLine() const {
     // Scan buffer for newline
     uint16_t pos = read_pos;
     while (pos != write_pos) {
-        if (injection_buffer[pos] == '\n') {
+        if (relay_buffer[pos] == '\n') {
             return true;  // Found complete line
         }
-        pos = (pos + 1) % sizeof(injection_buffer);
+        pos = (pos + 1) % sizeof(relay_buffer);
     }
     
     return false;  // No newline found
 }
 
 /**
- * Extract complete line directly from injection buffer (fast path)
+ * Extract complete line directly from relay buffer (fast path)
  * Bypasses slow TermControl processing for immediate command execution
  * Thread-safe: modifies read position atomically
  * 
- * NOTE: AsyncPassthrough already filters <j> and </j> tags before injection,
+ * NOTE: AsyncPassthrough already filters <j> and </j> tags before relay,
  * so we don't need tag filtering here. Just read characters directly.
  */
-String JerialClass::getInjectedCompleteLine() {
+String JerialClass::getRelayedCompleteLine() {
     String line;
     line.reserve(128);  // Pre-allocate for performance
     
     // Read positions once for thread safety
-    uint16_t read_pos = injection_read_pos;
-    uint16_t write_pos = injection_write_pos;
+    uint16_t read_pos = relay_read_pos;
+    uint16_t write_pos = relay_write_pos;
     
     if (read_pos == write_pos) {
         return line;  // Buffer empty
     }
     
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     // Debug: Show buffer contents
-    Serial.printf("DEBUG getInjectedCompleteLine: read=%d write=%d\n", read_pos, write_pos);
+    Serial.printf("DEBUG getRelayedCompleteLine: read=%d write=%d\n", read_pos, write_pos);
     Serial.print("  Buffer contents (first 100 chars): [");
     uint16_t debug_pos = read_pos;
     int char_count = 0;
     while (debug_pos != write_pos && char_count < 100) {
-        char c = injection_buffer[debug_pos];
+        char c = relay_buffer[debug_pos];
         if (c >= 32 && c < 127) {
             Serial.print(c);
         } else if (c == '\n') {
@@ -1533,7 +1533,7 @@ String JerialClass::getInjectedCompleteLine() {
         } else {
             Serial.printf("<%02X>", (unsigned char)c);
         }
-        debug_pos = (debug_pos + 1) % sizeof(injection_buffer);
+        debug_pos = (debug_pos + 1) % sizeof(relay_buffer);
         char_count++;
     }
     Serial.println("]");
@@ -1543,13 +1543,13 @@ String JerialClass::getInjectedCompleteLine() {
     // Extract characters until newline
     // AsyncPassthrough has already filtered tags, so just read directly
     while (read_pos != write_pos) {
-        char c = injection_buffer[read_pos];
-        read_pos = (read_pos + 1) % sizeof(injection_buffer);
+        char c = relay_buffer[read_pos];
+        read_pos = (read_pos + 1) % sizeof(relay_buffer);
         
         // Check for newline (line complete)
         if (c == '\n') {
             // Update read position atomically
-            injection_read_pos = read_pos;
+            relay_read_pos = read_pos;
             break;
         }
         
@@ -1559,7 +1559,7 @@ String JerialClass::getInjectedCompleteLine() {
         }
     }
     
-    #if DEBUG_INJECTED_COMMANDS
+    #if DEBUG_RELAYED_COMMANDS
     Serial.printf("  Extracted line: \"%s\"\n", line.c_str());
     Serial.flush();
     #endif
@@ -1587,9 +1587,9 @@ void JerialClass::createTermControlIfNeeded(Stream* stream) {
         mux_stream = nullptr;
     }
     
-    // Create MultiSourceStream that prioritizes injection over the real stream
-    mux_stream = new MultiSourceStream(injection_stream, stream);
-    // Serial.println("✓ MultiSourceStream created (injection + Serial)");
+    // Create MultiSourceStream that prioritizes relay over the real stream
+    mux_stream = new MultiSourceStream(relay_stream, stream);
+    // Serial.println("✓ MultiSourceStream created (relay + Serial)");
     // Serial.flush();
     
     // CRITICAL: Recreate TermControl to point at the new mux_stream
@@ -1602,7 +1602,7 @@ void JerialClass::createTermControlIfNeeded(Stream* stream) {
     }
     
     // Create terminal control with the multiplexed stream
-    // TermControl reads from mux_stream, which checks injection first, then Serial
+    // TermControl reads from mux_stream, which checks relay first, then Serial
     term_control = new TermControl(mux_stream, true);
     term_control_active = true;
     

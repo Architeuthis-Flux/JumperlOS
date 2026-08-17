@@ -91,7 +91,7 @@ its four callers stay valid.
 skips. Wavegen 2 s on DAC0 = 62,940 sample writes → exactly **one** park write at the next
 rebuild. `X` and `i@` print `mcp4728 writes A/B/C/D skips A/B/C/D`; the HIL test scrapes it.
 
-*Behaviour note:* a rebuild while WaveGen streams DAC0 now injects one park sample
+*Behaviour note:* a rebuild while WaveGen streams DAC0 now relays one park sample
 mid-stream (the old state check skipped it). Rare and benign — don't chase it as a wavegen
 glitch.
 
@@ -342,7 +342,7 @@ So the design Kevin then specified, and what is implemented:
   by the same delta**, so aligning the row can't re-open the gap convergence just closed.
 - The ratiometric scale is recovered from the **top** endpoint (`cMax/usedMax`), never the
   bottom: `probe_min_measure` is ~10 counts, so `cMin/mMin` quantises to 0.9 or 1.0 and would
-  inject a 10 % error into the solved endpoint.
+  relay a 10 % error into the solved endpoint.
 - Every routable GPIO claimed → convergence says so once and parks on DAC0 rather than
   silently calibrating the wrong source. The feed is unforced on every exit.
 

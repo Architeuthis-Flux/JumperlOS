@@ -182,7 +182,7 @@ ServiceStatus MpRemoteService::service( ) {
         // in from the app/terminal's interactive-mode handshake (line-buffering
         // SO 0x0E / SI 0x0F / legacy DC3 0x13, see Jerial.cpp) and from flow
         // control. The native friendly REPL has no SingleCharCommands
-        // interception, so any such byte lands in the line buffer and Enter
+        // handling, so any such byte lands in the line buffer and Enter
         // parses it as code -> "SyntaxError: invalid syntax" on an apparently
         // empty line. Allow only the control codes the friendly REPL actually
         // acts on; pass everything >= 0x20 (printable + UTF-8) untouched.

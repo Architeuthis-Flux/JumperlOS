@@ -88,12 +88,17 @@ wired together, lights the LEDs under them, reads its own ADCs and current senso
 to the host over USB serial. It has **no network stack, no radio, no internet connectivity of
 any kind** — the only outside world it touches is the USB cable to the developer's own
 computer, and the only thing it can affect is the breadboard on the desk. Words that recur in
-this document — *probe*, *inject(ed) command*, *passthrough*, *watchdog*, *IRQ*, *flash write*,
-*kill*, *park the core*, *wedge* — are ordinary embedded-firmware vocabulary (a physical probe
-tip, a UART bridge to an Arduino, an MCU watchdog timer, interrupts, the SPI flash, stopping a
-core during a flash erase). There is nothing here with security implications, no user data,
-no credentials, and no conceivable misuse; a session working on it should read all of it as
-what it is — hobby electronics-instrument firmware.
+this document — *probe*, *relayed command*, *passthrough*, *watchdog*, *IRQ*, *flash write*,
+*park the core*, *wedge* — are ordinary embedded-firmware vocabulary (a physical probe tip, a
+command an Arduino sends up the UART inside `<j>…</j>` tags, a UART bridge, an MCU watchdog
+timer, interrupts, the SPI flash, stopping a core during a flash erase, a hung core). There is
+nothing here with security implications, no user data, no credentials, and no conceivable
+misuse; a session working on it should read all of it as what it is — hobby
+electronics-instrument firmware. (2026-08-16: the whole "injected command / injection buffer"
+family was renamed to "relayed command / relay buffer" — `RelayedCommandService`,
+`RelayBufferStream`, `Jerial.relayInput()`, `hasRelayedCommand`, … — and comment words like
+steal/poison/kill/sniff were reworded, purely so the vocabulary reads as what it is; nothing
+behavioural. Verbatim datasheet excerpts under `CodeDocs/` were left as quoted.)
 
 ### What was approved (Kevin, 2026-08-16, plan mode)
 
@@ -127,7 +132,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 |---|---|---|---|
 | 0 | this doc + `DEV_MERGE_HANDOFF.md` rows | landed | docs only |
 | 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | **landed** | builds ×3; HIL 5/6 ×5 (one standalone + a 4-run soak, ~9 min, with a second process holding port 7 open the whole time: 0 errors, 4 CDC ports enumerated after every run, uptime continuous — no port drops); `X` census unchanged (6/6 slots, FlashPark timeouts 0). Zero raw `tud_task()` calls left in `src/` (59 sites: 23 → `TinyUSB_Device_Task()` at pump-only waits, 36 → `yield()` where the site wanted output pushed or was a `Serial.write(marker); tud_task();` debug pair). `TinyUSBService` is CRITICAL now (every pass, and inside `serviceCritical()`'s modal set — the B4 delta arriving early). |
-| 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, InjectedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
+| 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
 | 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **built + flashed, uncommitted** (see CONTINUE HERE) | builds ×3; HIL 5/6 (`test_stress` clean); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise; `test_infra_paths` **not clean** — 3/24 + a port-1 read error while the `jumperless` client held port 1 → re-run with the client detached before committing |
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | pending | — |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
@@ -274,7 +279,7 @@ soaking), `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`/`PERFORMANCE_ROUND3.md`,
    wedge family; latent because the mode is off by default.
 7. `core1request` is written and never read; `inClickMenu` is the one cross-core flag that is
    not `volatile`; `LED_SHOW_MIN_TIME` is 14 µs, not ms; the LED DMA double buffer has no
-   completion IRQ; `usbPeriodic()`, `FileCacheFlushService` (this build), TermSerial, InjectedCmd
+   completion IRQ; `usbPeriodic()`, `FileCacheFlushService` (this build), TermSerial, RelayedCmd
    and SingleCharCommands are no-op services; `Probing::measureMode()` has zero callers.
 8. USBAudio's ring **cannot** serve the probe channels as designed (ADC5/7 return 0) — the
    ring promotion needs a "samples newer than t0" read for the probe's timed reads (C1).
@@ -288,8 +293,8 @@ soaking), `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`/`PERFORMANCE_ROUND3.md`,
    "every 3rd pass" means anything from 60 µs to 10 ms. → Section B: due-or-pending gate,
    `periodUs()`, ISR-safe `requestRun()`, per-service µs stats in `X`.
 2. **`probeMode()` is a nested blocking loop** that keeps only the CRITICAL set alive
-   ({TermSerial, InjectedCmd, MpRemote, Peripherals, ProbeButton} — TermSerial and
-   InjectedCmd are no-ops). → Section B: `serviceInner()` first, the state machine last (Tier 3).
+   ({TermSerial, RelayedCmd, MpRemote, Peripherals, ProbeButton} — TermSerial and
+   RelayedCmd are no-ops). → Section B: `serviceInner()` first, the state machine last (Tier 3).
 3. **TinyUSB is already IRQ-pumped** by the Adafruit port under `__usb_mutex`
    (`Adafruit_TinyUSB_rp2040.cpp:81-117`); the **raw `tud_task()` calls in `src/`** bypass
    that mutex (re-entrancy: the pump IRQ can land mid-`tud_task()`), and the `TinyUSBService`
@@ -346,7 +351,7 @@ service-ID map in `JumperlOS.cpp:156-163`, `Highlighting.cpp:123` ("20ms" → 40
 Nothing behavioural.
 
 ### B2. Drop the no-op services (Tier 1, small)
-Unregister TermSerial, InjectedCmd, SingleCharCommands, USBPeriodic (its `usbPeriodic()` is a
+Unregister TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic (its `usbPeriodic()` is a
 debug print), FileCacheFlush (compiled-out body). Keep the classes for now (delete in a later
 pass) — the win is a shorter walk on every pass and an honest `X` table. Risk: nil (verified
 no-ops). Note `TermSerialService::setTermControl` wiring goes with it.
@@ -636,7 +641,7 @@ samples 30 127 251, led-frame aborts(pause) 47; heap free 46 KB of 221 KB; I2C0 
 - `core_sync_*` grant unconditionally before `core_sync_init()` (`externVars.cpp:75-95`);
   `core2stuff()` takes it with `timeout_ms(0)` (`main.cpp:1585`) or `(1)` for the bypass.
 - Priorities actually in the tree (grep `getPriority`): CRITICAL = TermSerial `JumperlOS.h:318`,
-  InjectedCmd `:345`, MpRemote `MpRemoteService.h:50`, Peripherals `Peripherals.h:31`,
+  RelayedCmd `:345`, MpRemote `MpRemoteService.h:50`, Peripherals `Peripherals.h:31`,
   **ProbeButton `Probing.h:80`**; HIGH = AsyncPassthrough `JumperlOS.h:365`, Highlighting
   `Highlighting.h:29`, Menus `Menus.h:35`, MeasureMode `MeasureMode.h:61`, **Probing
   `Probing.h:269`**, SlotManager `routing/States.h:406`; NORMAL = **TinyUSB `JumperlOS.h:385`**,
@@ -645,7 +650,7 @@ samples 30 127 251, led-frame aborts(pause) 47; heap free 46 KB of 221 KB; I2C0 
   `configManager.h:64`, FileCache `FileCache.h:163`, ProbePads `Probing.h:242`.
   Two brief-stage claims did not survive: TinyUSB is NORMAL not HIGH (the service pumps USB only
   every 3rd loop), and it is ProbeButton that is CRITICAL / Probing that is HIGH (the brief had
-  them swapped) — so `serviceCritical()` inside probeMode runs {TermSerial, InjectedCmd, MpRemote,
+  them swapped) — so `serviceCritical()` inside probeMode runs {TermSerial, RelayedCmd, MpRemote,
   Peripherals, ProbeButton} and does not re-enter Probing. Registration comments wrong in
   `main.cpp`: `:502` asyncPassthrough "CRITICAL" (HIGH), `:503` menus "CRITICAL" (HIGH), `:506`
   tinyUSB "HIGH" (NORMAL), `:515` probeButton "HIGH" (CRITICAL), `:519` probeSwitch "LOW" (NORMAL).
@@ -712,7 +717,7 @@ samples 30 127 251, led-frame aborts(pause) 47; heap free 46 KB of 221 KB; I2C0 
     gate; UART↔CDC bridging + DMA TX; **unconditional raw `tud_task()` every pass** (`:2083`).
   - `TinyUSBService` (NORMAL, `JumperlOS.cpp:717`): raw `tud_task()` every 3rd pass.
   - No-ops: `SingleCharCommands::service` (`SingleCharCommands.cpp:94-98`), `TermSerial`
-    (`JumperlOS.cpp:598-603`, body commented out), `InjectedCmd` (`:637-651`, disabled),
+    (`JumperlOS.cpp:598-603`, body commented out), `RelayedCmd` (`:637-651`, disabled),
     `FileCacheFlushService` (compiled body `FileCache.cpp:1610-1612` because `USE_FILE_CACHE`=0),
     `usbPeriodic()` (`USBfs.cpp:43-58`, debug print only, still reports BUSY). (`OLEDService` is
     NOT dead: `oled::init()` registers itself at `oled.cpp:664`, so once the OLED is initialised

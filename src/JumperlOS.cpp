@@ -39,7 +39,7 @@ jOSmanager& jOS = jOSmanager::getInstance();
 
 // System service references
 TermSerialService& termSerialService = TermSerialService::getInstance();
-InjectedCommandService& injectedCommandService = InjectedCommandService::getInstance();
+RelayedCommandService& relayedCommandService = RelayedCommandService::getInstance();
 AsyncPassthroughService& asyncPassthroughService = AsyncPassthroughService::getInstance();
 TinyUSBService& tinyUSBService = TinyUSBService::getInstance();
 USBPeriodicService& usbPeriodicService = USBPeriodicService::getInstance();
@@ -564,7 +564,7 @@ TermSerialService& TermSerialService::getInstance() {
  * @brief Service method for terminal input
  * CRITICAL priority - user input must be instantly responsive
  * 
- * NOTE: Injected commands are now handled by InjectedCommandService (fast path).
+ * NOTE: Relayed commands are now handled by RelayedCommandService (fast path).
  * This service only handles user-typed input via TermControl line buffering.
  */
 ServiceStatus TermSerialService::service() {
@@ -577,14 +577,14 @@ ServiceStatus TermSerialService::service() {
     extern struct config jumperlessConfig;
     
     // Only service if line buffering is enabled for user input
-    // Injected commands are handled separately by InjectedCommandService (fast path)
+    // Relayed commands are handled separately by RelayedCommandService (fast path)
     if (jumperlessConfig.display.terminal_line_buffering != 1) {
         return lastStatus;
     }
     
     // CRITICAL: Don't consume Serial input when MicroPython owns stdin.
     // During REPL or script execution (e.g. time.sleep()), TermControl::service()
-    // reads from Serial via stream->read(), stealing characters that should go to
+    // reads from Serial via stream->read(), taking characters that should go to
     // MicroPython's sys.stdin. This causes select.poll()+read(1) loops to drop
     // characters (every-other-char pattern) because serviceCritical() calls us
     // every 50ms during mp_hal_delay_ms.
@@ -600,40 +600,40 @@ ServiceStatus TermSerialService::service() {
     return lastStatus;
 }
 
-// InjectedCommandService - Immediate command execution from injection buffer
-InjectedCommandService* InjectedCommandService::instance = nullptr;
+// RelayedCommandService - Immediate command execution from relay buffer
+RelayedCommandService* RelayedCommandService::instance = nullptr;
 
-InjectedCommandService& InjectedCommandService::getInstance() {
+RelayedCommandService& RelayedCommandService::getInstance() {
     if (instance == nullptr) {
-        instance = new InjectedCommandService();
+        instance = new RelayedCommandService();
     }
     return *instance;
 }
 
 /**
- * @brief Service method for injected command processing
+ * @brief Service method for relayed command processing
  * CRITICAL priority - executes commands immediately to prevent buffer pile-up
  * 
- * This service uses a FAST PATH that directly reads from the injection buffer
+ * This service uses a FAST PATH that directly reads from the relay buffer
  * without waiting for slow TermControl processing (which takes 800ms+).
  * 
  * Flow:
  * 1. AsyncPassthrough receives data on SerialPIO
- * 2. Tag parser injects command characters + newline into injection_buffer
- * 3. Sets hasInjectedCommand flag
+ * 2. Tag parser relays command characters + newline into relay_buffer
+ * 3. Sets hasRelayedCommand flag
  * 4. This service (runs every loop as CRITICAL) detects flag
- * 5. DIRECTLY extracts line from injection_buffer (bypasses TermControl)
+ * 5. DIRECTLY extracts line from relay_buffer (bypasses TermControl)
  * 6. Executes via singleCharCommands.executeCommand()
  * 7. Continues processing if more commands are available
  * 
  * Performance: Commands execute in <1ms instead of 800ms+ via TermControl
  * Thread-safe: Uses atomic buffer position updates
  */
-ServiceStatus InjectedCommandService::service() {
+ServiceStatus RelayedCommandService::service() {
     // =========================================================================
     // DISABLED: Commands are now handled synchronously in main.cpp via CommandBuffer
     // 
-    // The new architecture uses CommandBuffer for all UART-injected commands:
+    // The new architecture uses CommandBuffer for all UART-relayed commands:
     // 1. AsyncPassthrough parses <j>/<p> tags and sets pending command in CommandBuffer
     // 2. Main loop checks CommandBuffer::hasPendingCommand() and processes synchronously
     // 3. No competing services, no race conditions, no async complexity
@@ -643,17 +643,17 @@ ServiceStatus InjectedCommandService::service() {
     lastStatus = ServiceStatus::IDLE;
     
     // Clear legacy flags that may have been set
-    Jerial.hasInjectedCommand = 0;
+    Jerial.hasRelayedCommand = 0;
     
     return lastStatus;
     
     // LEGACY CODE BELOW - KEPT FOR REFERENCE
     #if 0
-    // Fast check: is there a complete line in injection buffer?
+    // Fast check: is there a complete line in relay buffer?
     // This bypasses slow TermControl and reads directly from buffer
-    if (!Jerial.hasInjectedCompleteLine()) {
+    if (!Jerial.hasRelayedCompleteLine()) {
         // No complete lines, clear flag and return
-        Jerial.hasInjectedCommand = 0;
+        Jerial.hasRelayedCommand = 0;
         return lastStatus;
     }
     #endif

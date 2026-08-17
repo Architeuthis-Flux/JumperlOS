@@ -327,7 +327,7 @@ char defconString[16] = "Jumper less V5 ";
 // static constexpr uint8_t kCurrentSensePathTintAlpha = 50;
 
 enum class PathSegmentType : uint8_t {
-  VIRTUAL_WIRE,  // The injected virtual wire between nets (vertical)
+  VIRTUAL_WIRE,  // The inserted virtual wire between nets (vertical)
   NET,
 };
 
@@ -1662,7 +1662,7 @@ static void renderCurrentSenseOverlay() {
   int minusRow = selectPrimaryRowForNet(minusNet, currentSenseOverlayState.minusRow);
 
   // Always rebuild path from wireStatus since it's populated fresh each frame
-  // wireStatus changes based on the virtual wire we inject
+  // wireStatus changes based on the virtual wire we insert
   rebuildCurrentSensePath(currentSenseOverlayState, plusNet, minusNet);
   
   // Reset accumulator if rows changed

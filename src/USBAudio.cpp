@@ -438,7 +438,7 @@ static bool usbAudioAdcStart(void) {
 // Claim DMA channels and install the completion handler ONCE, at boot, from
 // core 0. Doing it inside the start path meant dma_claim_unused_channel(true)
 // (panic-on-exhaustion) and irq_add_shared_handler (panics if installed twice)
-// were reachable from core1 mid-session - a panic there kills core1 silently
+// were reachable from core1 mid-session - a panic there stops core1 silently
 // while core0 keeps answering, which is exactly how this first presented.
 extern "C" bool usbAudioInit(void) {
     if (g_dmaInitDone) return g_dmaCh[0] >= 0;
@@ -542,7 +542,7 @@ extern "C" void usb_audio_apply_config(void) {
     g_dcBlock        = jumperlessConfig.usb_audio.dc_block;
 
     // config.txt is a hand-editable text file, so every field here has to be
-    // treated as hostile. full_scale especially: it is a DIVISOR in
+    // treated as untrusted. full_scale especially: it is a DIVISOR in
     // usbAudioCacheCal(), so a stray "full_scale = 0;" would divide by zero and
     // feed lroundf(inf) - undefined behaviour, and the gain it produces then
     // corrupts every sample. Mirror the same limits usb_audio_set_full_scale()
@@ -615,7 +615,7 @@ extern "C" bool usb_audio_set_device_enabled(bool on) {
     // Acquire the DMA channels and IRQ handler here, on core 0 in thread
     // context, the first time audio is switched on. NOT at boot (too early in
     // setup() to be touching the DMA allocator) and NOT from the core1 pump,
-    // where dma_claim_unused_channel(true) panicking would silently kill the
+    // where dma_claim_unused_channel(true) panicking would silently stop the
     // core - which is exactly the failure this replaced.
     if (on && !usbAudioInit()) {
         Serial.printf("\n\r[usb_audio] cannot start: %s\n\r",

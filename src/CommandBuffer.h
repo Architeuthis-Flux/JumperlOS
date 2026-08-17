@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 /**
- * CommandBuffer - Simple synchronous command injection system
+ * CommandBuffer - Simple synchronous command relay system
  * 
- * This replaces the complex InjectionBufferStream/MultiSourceStream/InjectedCommandService
+ * This replaces the complex RelayBufferStream/MultiSourceStream/RelayedCommandService
  * architecture with a simple, synchronous approach:
  * 
  * INCOMING (UART → Main Loop):
@@ -39,7 +39,7 @@
 #define CMD_QUEUE_DEPTH 3
 
 /**
- * CommandBuffer - Singleton managing command injection and response routing
+ * CommandBuffer - Singleton managing command relay and response routing
  */
 class CommandBuffer {
 public:

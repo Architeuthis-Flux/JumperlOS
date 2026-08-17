@@ -146,7 +146,7 @@ void initGraphicOverlays();
 void renderGraphicOverlays();
 
 // YAML serialization helpers (called from States.cpp)
-void serializeOverlaysToYAML(String& output, int injectANSI = 0);
+void serializeOverlaysToYAML(String& output, int withANSI = 0);
 bool deserializeOverlaysFromYAML(const char* yamlContent, String& errorMsg);
 
 // JSON serialization helper (called from JsonState.cpp)

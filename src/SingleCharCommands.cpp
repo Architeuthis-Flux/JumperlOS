@@ -888,7 +888,7 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
 }
 
 CommandResult cmd_addConnections( char c, const String& line ) {
-    // Use source 3 if we have a complete command line (from line buffering or injection)
+    // Use source 3 if we have a complete command line (from line buffering or relay)
     // Otherwise use source 0 to read interactively from Jerial
     // Serial.println("Adding connections");
     int source = ( currentCommandLine.length( ) > 1 ) ? 3 : 0;
@@ -909,7 +909,7 @@ CommandResult cmd_addConnections( char c, const String& line ) {
 }
 
 CommandResult cmd_removeConnections( char c, const String& line ) {
-    // Use source 3 if we have a complete command line (from line buffering or injection)
+    // Use source 3 if we have a complete command line (from line buffering or relay)
     // Otherwise use source 0 to read interactively from Jerial
     int source = ( currentCommandLine.length( ) > 1 ) ? 3 : 0;
     readStringFromSerial( source, 1 );
@@ -1248,7 +1248,7 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                     char trailing = Jerial.read( );
                     if ( trailing == '\n' || trailing == '\r' || trailing == ' ' ) continue;
                     // The app brackets bulk sends with SI before / SO after to keep
-                    // the device out of line-buffering mode for the payload. The
+                    // the device out of line-buffering mode for the message body. The
                     // trailing SO (restore) lands right after the JSON; honor it
                     // here so it re-enables buffering instead of being appended as
                     // a stray control char that corrupts the JSON (and leaves the
@@ -1935,7 +1935,7 @@ CommandResult cmd_pythonCommand( char c, const String& line ) {
     // Get the response target for this command (if any)
     Stream* response_target = Jerial.getResponseTarget( );
 
-#if DEBUG_INJECTED_COMMANDS
+#if DEBUG_RELAYED_COMMANDS
     // Debug output - always enabled for now to track command execution
     Serial.print( "cmd_pythonCommand: Received line=[" );
     for ( size_t i = 0; i < line.length( ); i++ ) {

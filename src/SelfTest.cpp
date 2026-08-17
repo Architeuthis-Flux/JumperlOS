@@ -835,7 +835,7 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     }
 
     // Average 6 bursts and require them to agree: a wandering reference
-    // poisons the servo target. Retry a couple of times - transients die -
+    // corrupts the servo target. Retry a couple of times - transients die -
     // then fail loudly so the operator knows the tip is being disturbed.
     float refSpread = 0.0f;
     float vTarget = 0.0f;
@@ -1187,7 +1187,7 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
 
         // Re-park probe power after EVERY test: the cable test switches it
         // on for its INA signature (via routableBufferPower), and a feed
-        // left enabled poisons the next test - the tip test's DAC1->BUF_IN
+        // left enabled corrupts the next test - the tip test's DAC1->BUF_IN
         // reference bridge matches the still-registered infra pair, so
         // evaluation takes it over and re-parks DAC1 at
         // measure_mode_output_voltage mid-measurement (hardware-observed as

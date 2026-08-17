@@ -10,7 +10,7 @@
 // Forward declarations
 class ScriptHistory;
 class TermControl;
-class InjectionBufferStream;
+class RelayBufferStream;
 class MultiSourceStream;
 
 // Global variable for interactive mode tracking
@@ -80,37 +80,37 @@ enum class JerialEndpoint {
 };
 
 // ============================================================================
-// InjectionBufferStream - Stream wrapper for injection buffer
+// RelayBufferStream - Stream wrapper for relay buffer
 // ============================================================================
 /**
- * Clean Stream Architecture for Command Injection
+ * Clean Stream Architecture for Command Relay
  * 
- * Problem: AsyncPassthrough needs to inject commands (from Arduino-sent <j> tags)
+ * Problem: AsyncPassthrough needs to relay commands (from Arduino-sent <j> tags)
  *          into the terminal input flow for processing by the main loop.
  * 
  * Solution: Use composable Stream classes:
  * 
- * 1. InjectionBufferStream - Wraps JerialClass::injection_buffer as a Stream
- * 2. MultiSourceStream - Multiplexes injection + real input with priority
+ * 1. RelayBufferStream - Wraps JerialClass::relay_buffer as a Stream
+ * 2. MultiSourceStream - Multiplexes relay + real input with priority
  * 3. TermControl reads from MultiSourceStream naturally via stream->read()
  * 
  * Flow:
- *   AsyncPassthrough → Jerial.injectInput() → injection_buffer
+ *   AsyncPassthrough → Jerial.relayInput() → relay_buffer
  *   Main loop → Jerial.service() → TermControl::service()
- *   TermControl → MultiSourceStream::read() → InjectionBufferStream (priority)
+ *   TermControl → MultiSourceStream::read() → RelayBufferStream (priority)
  *   TermControl → MultiSourceStream::read() → Serial (fallback)
  *   TermControl → line buffering → completed_line
  *   Main loop → Jerial.getCompletedLine() → SingleCharCommands
  * 
  * Benefits:
- *   - No special-case injection processing logic
+ *   - No special-case relay processing logic
  *   - Natural Stream interface throughout
  *   - Composable architecture (can add more sources easily)
- *   - Injected commands flow through same line buffering as user input
+ *   - Relayed commands flow through same line buffering as user input
  */
-class InjectionBufferStream : public Stream {
+class RelayBufferStream : public Stream {
 public:
-    InjectionBufferStream(uint8_t* buffer, size_t buffer_size, uint16_t* read_pos, uint16_t* write_pos)
+    RelayBufferStream(uint8_t* buffer, size_t buffer_size, uint16_t* read_pos, uint16_t* write_pos)
         : buffer(buffer), buffer_size(buffer_size), read_pos(read_pos), write_pos(write_pos),
           tag_buffer_pos(0), skip_next_tag_char(false) {
         memset(tag_buffer, 0, sizeof(tag_buffer));
@@ -124,7 +124,7 @@ public:
                 count += buffer_size;
             }
             // Debug
-            // Serial.printf("InjectionStream::available() = %d (r=%d w=%d)\n", count, *read_pos, *write_pos);
+            // Serial.printf("RelayStream::available() = %d (r=%d w=%d)\n", count, *read_pos, *write_pos);
             // Serial.flush();
             return count;
         }
@@ -137,7 +137,7 @@ public:
             uint8_t c = buffer[*read_pos];
             *read_pos = (*read_pos + 1) % buffer_size;
             
-            // Serial.printf("InjectionStream::read(): got '%c' (%d) from buffer[%d]\n", 
+            // Serial.printf("RelayStream::read(): got '%c' (%d) from buffer[%d]\n", 
             //               (char)c, c, (*read_pos - 1 + buffer_size) % buffer_size);
             // Serial.flush();
             
@@ -163,7 +163,7 @@ public:
     }
     
     virtual void flush() override {}
-    virtual size_t write(uint8_t) override { return 0; }  // Injection buffer is read-only
+    virtual size_t write(uint8_t) override { return 0; }  // Relay buffer is read-only
     
 private:
     uint8_t* buffer;
@@ -221,7 +221,7 @@ private:
             // But we can't easily do that in this architecture, so we'll just
             // reset and treat the current character as non-tag
             // NOTE: This is a limitation - partial tags like "<x" won't be emitted correctly
-            // In practice this doesn't matter for our use case (injected commands are clean)
+            // In practice this doesn't matter for our use case (relayed commands are clean)
             tag_buffer_pos = 0;
             return false;  // Don't skip current character
         }
@@ -248,7 +248,7 @@ public:
         if (priority_stream && priority_stream->available() > 0) {
             int c = priority_stream->read();
             // Debug
-            // Serial.printf("MuxRead: injection char '%c' (%d)\n", (char)c, c);
+            // Serial.printf("MuxRead: relay char '%c' (%d)\n", (char)c, c);
             // Serial.flush();
             return c;
         }
@@ -332,16 +332,16 @@ public:
     void clearCompletedLine();
     
     /**
-     * Inject a completed line directly (for programmatic commands)
-     * @param line The command line to inject
+     * Relay a completed line directly (for programmatic commands)
+     * @param line The command line to relay
      * @param response_target Optional stream to send the response to (nullptr = use current output)
      */
-    void injectCompletedLine(const char* line, Stream* response_target = nullptr);
+    void relayCompletedLine(const char* line, Stream* response_target = nullptr);
     
     /**
-     * Set the response target for the NEXT completed line assembled from character injection
-     * This allows character-by-character injection while tracking response routing
-     * Use this when injecting characters via injectInput() - the target will be attached
+     * Set the response target for the NEXT completed line assembled from character relay
+     * This allows character-by-character relay while tracking response routing
+     * Use this when relaying characters via relayInput() - the target will be attached
      * to the line when it's completed (on newline)
      */
     void setPendingResponseTarget(Stream* target);
@@ -357,7 +357,7 @@ public:
     void clearPendingResponseTarget();
     
     /**
-     * Set the current response target for command execution (used by InjectedCommandService)
+     * Set the current response target for command execution (used by RelayedCommandService)
      * This bypasses the queue system and directly sets the response target
      * that will be returned by getResponseTarget()
      */
@@ -485,42 +485,42 @@ public:
     bool serviceInputs();
     
     /**
-     * Inject data into the input stream (makes it appear as if it was received)
+     * Relay data into the input stream (makes it appear as if it was received)
      * Useful for programmatically sending commands that should be processed normally
      * @param strip_tags If true, removes <j> and </j> tags from input
      */
-    bool injectInput(const char* data, bool strip_tags = false);
-    bool injectInput(const uint8_t* data, size_t size, bool strip_tags = false);
+    bool relayInput(const char* data, bool strip_tags = false);
+    bool relayInput(const uint8_t* data, size_t size, bool strip_tags = false);
     
     /**
-     * Clear the injection buffer
+     * Clear the relay buffer
      */
-    void clearInjectedInput();
+    void clearRelayedInput();
     
     /**
-     * Get the injection stream (for adding as high-priority input source)
-     * This stream wraps the injection buffer and automatically strips tags
+     * Get the relay stream (for adding as high-priority input source)
+     * This stream wraps the relay buffer and automatically strips tags
      */
-    Stream* getInjectionStream() { return injection_stream; }
+    Stream* getRelayStream() { return relay_stream; }
     
     /**
-     * Check if injection buffer has a complete line (ending in \n)
+     * Check if relay buffer has a complete line (ending in \n)
      * This is a fast, thread-safe check without consuming data
      * @return true if there's at least one complete line in the buffer
      */
-    bool hasInjectedCompleteLine() const;
+    bool hasRelayedCompleteLine() const;
     
     /**
-     * Extract a complete line directly from injection buffer (fast path)
-     * This bypasses TermControl and reads directly from injection_buffer
+     * Extract a complete line directly from relay buffer (fast path)
+     * This bypasses TermControl and reads directly from relay_buffer
      * Thread-safe: uses atomic positions
      * @return The completed line (without newline), or empty string if none
      */
-    String getInjectedCompleteLine();
+    String getRelayedCompleteLine();
 
-    volatile int hasInjectedCommand = 0;
-    // Note: Tag stripping is now handled automatically by InjectionBufferStream
-    // for injected commands. User-typed input doesn't have tags.
+    volatile int hasRelayedCommand = 0;
+    // Note: Tag stripping is now handled automatically by RelayBufferStream
+    // for relayed commands. User-typed input doesn't have tags.
     
     // ============================================================================
     // Utility Functions
@@ -620,25 +620,25 @@ private:
     TermControl* term_control;
     bool term_control_active;
     
-    // Pending response target for next completed line (from character-by-character injection)
+    // Pending response target for next completed line (from character-by-character relay)
     // Stored at JerialClass level since AsyncPassthrough (interrupt context) needs to set it
     Stream* pending_response_target;
     
-    // Current response target for command execution (set by InjectedCommandService)
+    // Current response target for command execution (set by RelayedCommandService)
     // This bypasses the queue system for fast-path command execution
     Stream* current_response_target;
     
-    // Injection buffer for programmatic input
-    char injection_buffer[512];
-    uint16_t injection_read_pos;
-    uint16_t injection_write_pos;
+    // Relay buffer for programmatic input
+    char relay_buffer[512];
+    uint16_t relay_read_pos;
+    uint16_t relay_write_pos;
     
     // Stream wrappers for clean architecture
-    InjectionBufferStream* injection_stream;
+    RelayBufferStream* relay_stream;
     MultiSourceStream* mux_stream;
     
     // Legacy tag buffer members (kept for compatibility but unused)
-    // Tag filtering now happens in InjectionBufferStream
+    // Tag filtering now happens in RelayBufferStream
     char tag_buffer[4];
     uint8_t tag_buffer_pos;
     bool in_tag;
@@ -682,7 +682,7 @@ public:
     String getCompletedLine();          // Get the completed line (consumes it)
     String peekCompletedLine() const;   // Get the completed line without consuming it
     void clearCompletedLine();          // Clear completed line without consuming
-    void injectCompletedLine(const char* line, Stream* response_target = nullptr); // Inject a completed line directly
+    void relayCompletedLine(const char* line, Stream* response_target = nullptr); // Relay a completed line directly
     Stream* getResponseTarget();        // Get response target for current command
     const char* getCurrentLineBuffer(); // Get current line being edited (read-only)
     int getLineLength() const { return line_length; }             // typed-so-far, in columns
@@ -710,7 +710,7 @@ private:
     String completed_line;
     bool line_ready;
     
-    // Command queue for injected commands (prevents blocking in AsyncPassthrough)
+    // Command queue for relayed commands (prevents blocking in AsyncPassthrough)
     static const int COMMAND_QUEUE_SIZE = 8;
     String command_queue[COMMAND_QUEUE_SIZE];
     Stream* response_targets[COMMAND_QUEUE_SIZE];  // Target stream for each command's response

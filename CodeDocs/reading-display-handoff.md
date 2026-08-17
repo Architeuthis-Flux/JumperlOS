@@ -51,7 +51,7 @@ intervals — nothing display-related — and only on the raw-REPL path.
   - `MpRemoteService::onScriptExecutionComplete()` — mpremote / ViperIDE raw REPL
   It stops measure mode, clears highlighting + reading state *only if something
   is actually latched* (so it's silent after every ViperIDE console line), resets
-  script-injected encoder state, and clears `pauseCore2`.
+  script-relayed encoder state, and clears `pauseCore2`.
   Both call sites are exception-safe: the raw-REPL hook fires outside
   MicroPython's success/exception branch, and `mp_embed_exec_str()` catches
   Python exceptions internally, so KeyboardInterrupt and uncaught exceptions both

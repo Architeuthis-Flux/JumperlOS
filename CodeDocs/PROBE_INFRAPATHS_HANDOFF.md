@@ -105,7 +105,7 @@ as `MCP4728::invalidateCache(0/1)` for anything that moves the chip *behind* the
 existing callers are harmless. Measured: 10 connect/disconnects = 20 rebuilds → DAC0 writes
 unchanged (20 skips); wavegen on DAC0 for 2 s (62,940 sample writes) → exactly one park
 write at the next rebuild. `X` and `i@` print `mcp4728 writes A/B/C/D skips A/B/C/D`; the
-HIL infra test scrapes it. Behavior note: a rebuild while WaveGen streams DAC0 now injects one
+HIL infra test scrapes it. Behavior note: a rebuild while WaveGen streams DAC0 now relays one
 park sample mid-stream (the old state check skipped it) — rare and benign, not a wavegen bug.
 
 ### `probePowerDAC` is a vestige — ask `infraProbePowerSource()` instead

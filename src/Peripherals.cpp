@@ -646,7 +646,7 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
         // checkConnection() catches up and clears oledConnected.
         // reset_with_timeout=true: on timeout, arduino-pico reinits the I2C
         // block and clocks SCL to release a stuck-low SDA, so one wedged
-        // transaction doesn't poison every INA/DAC read after it. Bounded
+        // transaction doesn't corrupt every INA/DAC read after it. Bounded
         // (~9 SCL toggles + reinit), no meaningful blocking.
         Wire.setTimeout( 15, true );
 
@@ -821,15 +821,15 @@ int gpioReadWithFloating(
     // time (one core disables IE right as the other core reads). Spin here
     // until the other core's read finishes (worst case ~200us).
     //
-    // 100ms steal timeout (same pattern as readingADC): a legit hold is
+    // 100ms takeover timeout (same pattern as readingADC): a legit hold is
     // ~200us, so a wait this long means the holder crashed or was hard-parked
     // (doorbell idleOtherCore during a flash write) while holding the lock.
-    // Stealing risks one corrupted reading; spinning forever wedges this core
-    // (and, from core 0, kills USB).
+    // Taking it over risks one corrupted reading; spinning forever wedges this core
+    // (and, from core 0, stops USB).
     unsigned long gpioWaitStart = micros( );
     while ( __atomic_test_and_set( (volatile char *)&readingGPIO, __ATOMIC_ACQUIRE ) ) {
         if ( micros( ) - gpioWaitStart > 100000 ) {
-            break; // steal it
+            break; // take it over
         }
         delayMicroseconds( 1 );
     }
@@ -2666,7 +2666,7 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
     // wedges a core - and if that core was holding core_sync, the other core
     // deadlocks. __atomic_test_and_set serializes the two cores.
     //
-    // NEVER steal the lock on timeout: the old 100ms steal fired against any
+    // NEVER take the lock over on timeout: the old 100ms takeover fired against any
     // legitimate long hold (USB audio capture keeps readingADC for as long as
     // the host has the mic open) and produced exactly the two-driver corruption
     // above. A failed acquire now degrades to a 0 reading - the ADC goes

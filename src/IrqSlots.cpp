@@ -1,5 +1,5 @@
 // Shared-IRQ handler chain slots: deduplicate registrations, and decline
-// instead of killing a core when the pool runs dry.
+// instead of halting a core when the pool runs dry.
 //
 // THE PROBLEM. pico-sdk keeps shared IRQ handlers in a fixed array,
 // irq_handler_chain_slots[], and irq_add_shared_handler() hard_asserts - i.e.
@@ -12,7 +12,7 @@
 // The six went to arduino-pico's doorbell park handler (registered from BOTH
 // cores), Adafruit TinyUSB's USBCTRL_IRQ, CH446Q's PIO0_IRQ_1, and MicroPython's
 // machine_pin_irq_init on the first REPL init. Everything after that silently
-// killed a core - MicroPython's machine.UART(0) is next in that queue.
+// halted a core - MicroPython's machine.UART(0) is next in that queue.
 //
 // TWO FIXES, both here so they cannot drift:
 //

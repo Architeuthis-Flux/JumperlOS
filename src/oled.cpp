@@ -3134,7 +3134,7 @@ void oled::oledHoldBegin( uint32_t durationMs ) {
 static void oledHoldStashAfterPriorityFlush() {
     if ( !oledHoldArmed ) return;
     // Defensive: clear the latch on any abnormal state so a stale arm
-    // doesn't poison the next priority flush.
+    // doesn't corrupt the next priority flush.
     if ( oledHoldShadow == nullptr || oledHoldShadowSize == 0 ||
          _displayPtr == nullptr ) {
         oledHoldArmed = false;
@@ -4458,7 +4458,7 @@ int defaultOledConnectionTypeForRevision(int revision) {
 // hardware shows up as a silent USB disconnect on the second cycle press.
 //
 // Wire (I2C0) is *shared* with the MCP4728 DAC (0x60) and both INA219 current
-// sensors (0x40, 0x41) on hardwired GPIO 4/5. Calling Wire.end() kills those
+// sensors (0x40, 0x41) on hardwired GPIO 4/5. Calling Wire.end() breaks those
 // peripherals and leaves the system retrying dead I2C transactions, which
 // surfaces as "sluggish" OLED writes elsewhere because the system is bogged
 // down on failed I2C0 traffic. So we leave Wire alone -- the OLED is just

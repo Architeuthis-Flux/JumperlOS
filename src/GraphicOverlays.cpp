@@ -337,7 +337,7 @@ void __not_in_flash_func(renderGraphicOverlays)() {
 // YAML Serialization
 // ============================================================================
 
-void serializeOverlaysToYAML(String& output, int injectANSI ) {
+void serializeOverlaysToYAML(String& output, int withANSI ) {
     // Self-test results are session-only (must clear on reset) - never
     // persist them into a slot file.
     int persistable = 0;
@@ -372,24 +372,24 @@ void serializeOverlaysToYAML(String& output, int injectANSI ) {
         output += String(overlay.height);
         output += "\n";
         output += "    colors:\n           ";
-        if (injectANSI != 2) output += "[";
+        if (withANSI != 2) output += "[";
         int numPixels = overlay.width * overlay.height;
         const char* block = "\xE2\x96\x88";  // UTF-8 FULL BLOCK (█)
         for (int j = 0; j < numPixels; j++) {
             if (j > 0) {
                 if (j % overlay.width == 0)
-                    output += (injectANSI == 2) ? "\n           " : ",\n            ";
-                else if (injectANSI != 2)
+                    output += (withANSI == 2) ? "\n           " : ",\n            ";
+                else if (withANSI != 2)
                     output += ", ";
             }
             uint32_t rgb = overlay.colors[j] & 0xFFFFFF;
-            if (injectANSI) {
+            if (withANSI) {
                 int ansi = colorToAnsi(rgb);
                 output += "\033[38;5;";
                 output += String(ansi);
                 output += "m";
             }
-            if (injectANSI == 2) {
+            if (withANSI == 2) {
                 output += block;
             } else {
                 char hexBuf[8];
@@ -397,9 +397,9 @@ void serializeOverlaysToYAML(String& output, int injectANSI ) {
                 output += "0x";
                 output += hexBuf;
             }
-            if (injectANSI) output += "\033[0m";
+            if (withANSI) output += "\033[0m";
         }
-        if (injectANSI != 2) output += "]";
+        if (withANSI != 2) output += "]";
         output += "\n";
     }
 }

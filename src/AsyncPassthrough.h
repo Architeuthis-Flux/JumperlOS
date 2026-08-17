@@ -59,10 +59,10 @@ namespace AsyncPassthrough {
     void resetArduino(int resetPin);
 
     // ============================================================================
-    // Flash Completion Detection (STK500 sniffing + inactivity fallback)
+    // Flash Completion Detection (STK500 protocol watching + inactivity fallback)
     // ============================================================================
 
-    // Enter flash mode: starts STK500 sniffing and activity tracking
+    // Enter flash mode: starts STK500 protocol watching and activity tracking
     void enterFlashMode();
 
     // Exit flash mode: clears all flash detection state

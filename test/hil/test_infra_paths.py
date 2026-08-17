@@ -37,7 +37,7 @@ def feed_path_rows(dump):
 
 
 # --- 0. clean state: a prior aborted run can leave user bridges (even a
-# BUFFER_IN one, which makes probe power yield) that poison every check ----
+# BUFFER_IN one, which makes probe power yield) that corrupt every check ----
 jl_exec("nodes_clear()\nprint('clean')", timeout=25)
 time.sleep(4)  # let the clear's autosave land before opening port 1
 

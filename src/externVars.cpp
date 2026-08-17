@@ -103,7 +103,7 @@ bool core_sync_acquire_timeout_ms(uint32_t timeout_ms) {
 // fs_mutex is made PER-CORE RECURSIVE on top of the plain pico mutex_t: a core
 // that already holds it can re-acquire without blocking (depth-counted), and
 // only the outermost release actually drops the lock. Cross-core exclusion is
-// unchanged (the other core still blocks). This kills the documented
+// unchanged (the other core still blocks). This breaks the documented
 // self-deadlock footguns where a held-mutex path calls another safe* wrapper
 // that re-acquires fs_mutex on the same core.
 //

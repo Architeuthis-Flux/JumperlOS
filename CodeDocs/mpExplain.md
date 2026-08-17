@@ -261,7 +261,7 @@ These variables allow you to fine-tune Python language compatibility, letting yo
 
 # MicroPython User C Modules & VM Dispatch Configuration Manual
 
-This document details the configuration steps, flags, and structure required to inject custom C code directly into the MicroPython core engine, along with obscure flags used to hack the internal Virtual Machine (VM) instruction dispatch layout.
+This document details the configuration steps, flags, and structure required to relay custom C code directly into the MicroPython core engine, along with obscure flags used to hack the internal Virtual Machine (VM) instruction dispatch layout.
 
 ---
 
@@ -319,9 +319,9 @@ These flags change how the main interpreter loop in `py/vm.c` transfers control 
 | :--- | :--- | :--- |
 | `MICROPY_OPT_COMPUTED_GOTO` | `(1)` | **Swaps standard switch-cases for indirect threaded code.** Uses GNU C's label-as-values feature (`&&label`). Instead of a large jump table that bounces back to the top of a `switch` statement, each opcode ends by directly jumping to the memory address of the next opcode handler. This eliminates branch mispredictions and speeds up execution by up to 15% on the RP2350's Cortex-M33 cores. |
 | `MICROPY_OPT_COMPUTED_GOTO_SAVE_SPACE` | `(0)` | **Compresses the lookup tables used by Computed GOTOs.** If enabled `(1)`, it forces the compiler to shrink the internal address jump table layout to save flash space, but introduces a minor processing delay when resolving the next instruction. Leave disabled `(0)` on your 16MB flash layout to maximize speed. |
-| `MICROPY_VM_HOOK_INIT` | *Macro Expression* | **Injects custom C code execution at VM initialization.** Allows you to insert low-level C instructions inside the interpreter initialization phase just before the bytecode loops execute. |
-| `MICROPY_VM_HOOK_LOOP` | *Macro Expression* | **Injects a C code hook at the top of every VM cycle iteration.** Executed before every single instruction fetch. Useful for custom low-level debugging systems, pinning background tasks, or refreshing thread watchers. *Warning: Injecting anything heavy here drastically slows down performance.* |
-| `MICROPY_VM_HOOK_RETURN` | *Macro Expression* | **Injects a C code hook right before a function yields control.** Executes custom cleanups or tracking logs immediately before a VM function execution block returns its values. |
+| `MICROPY_VM_HOOK_INIT` | *Macro Expression* | **Relays custom C code execution at VM initialization.** Allows you to insert low-level C instructions inside the interpreter initialization phase just before the bytecode loops execute. |
+| `MICROPY_VM_HOOK_LOOP` | *Macro Expression* | **Relays a C code hook at the top of every VM cycle iteration.** Executed before every single instruction fetch. Useful for custom low-level debugging systems, pinning background tasks, or refreshing thread watchers. *Warning: Relaying anything heavy here drastically slows down performance.* |
+| `MICROPY_VM_HOOK_RETURN` | *Macro Expression* | **Relays a C code hook right before a function yields control.** Executes custom cleanups or tracking logs immediately before a VM function execution block returns its values. |
 
 ### Example Implementation of VM Hooks
 To use VM hooks, define them as functional macro expressions directly inside your custom `mpconfigboard.h` file:

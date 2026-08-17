@@ -457,7 +457,7 @@ static void rotaryEncoderButtonStuffLocked( void ) {
         // NOTE: do NOT pio_sm_restart() here (removed). The quadrature
         // program keeps its previous-pin-state in the OSR; restart clears
         // the OSR, so if the pins aren't at 00 the program sees a phantom
-        // transition and injects a spurious +/-1 count. Restarting on every
+        // transition and adds a spurious +/-1 count. Restarting on every
         // click (plus every divider change) made the raw count drift by
         // THOUSANDS over a session - caught via the [enc] reversal
         // diagnostics. The SM is initialized once and never restarted.
@@ -937,7 +937,7 @@ static void rotaryEncoderStuffLocked( void ) {
     // ground can latch around ~2.1V (input-buffer leakage holds the pad
     // mid-rail and the weak pull-up never recovers it), so quadrature edges
     // silently vanish for hundreds of ms - unit-dependent silicon lottery.
-    // Dropping the pad's input-enable for a couple of us kills the leakage
+    // Dropping the pad's input-enable for a couple of us removes the leakage
     // path so the pull-up wins, then re-enables. One pin at a time: a
     // single-pin blip decodes as one step out + one step back (net zero),
     // and the 4-8 count step hysteresis absorbs the +/-1 wiggle.
@@ -997,7 +997,7 @@ static void rotaryEncoderStuffLocked( void ) {
         // NOTE: no pio_sm_restart() here (removed) - the divider is purely
         // software bookkeeping (raw counts per logical step); the PIO just
         // counts and must never be restarted. Restart clears the program's
-        // previous-pin-state (OSR), injecting a phantom +/-1 whenever the
+        // previous-pin-state (OSR), adding a phantom +/-1 whenever the
         // pins aren't at 00 - and since menus/probe/highlighting all set
         // different dividers, the constant restarts drifted the raw count
         // by thousands per session ("hops backwards while scrolling").

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Encoder/menu UI smoke test via SWD injection (jumperless-swd-input skill).
+"""Encoder/menu UI smoke test via SWD input simulation (jumperless-swd-input skill).
 
 Requires a Raspberry Pi Debug Probe with OpenOCD serving telnet on
 localhost:4444 and the skill's jl_input.py with a fresh ADDR table for the
@@ -62,7 +62,7 @@ if rc != 0:
     skip("jl_input.py status failed - regenerate its ADDR table for this build")
 check(in_click_menu(out) is not None, "status reports inClickMenu")
 
-# Open the menu with a forged click, then scroll one step each way. The
+# Open the menu with a simulated click, then scroll one step each way. The
 # firmware auto-retries are in jl_input itself; menu state is the assertion.
 rc, out = jl_input("click")
 time.sleep(1.0)

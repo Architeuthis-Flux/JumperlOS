@@ -1018,7 +1018,7 @@ bool parseWokwiDiagramDirectToFile(const String& jsonContent, int slotNum,
     
     // (Locked OLED / probe-power connections are infra functions now -
     // routing/InfraPaths.cpp re-adds them at the rebuild that applies this
-    // import, so nothing needs to be injected into the YAML here.)
+    // import, so nothing needs to be inserted into the YAML here.)
 
     // Add power section if voltages were detected (check for -9999 which means parse failed)
     yamlContent += "\npower:\n";
