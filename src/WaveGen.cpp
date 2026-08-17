@@ -8,6 +8,7 @@
  */
 
 #include "WaveGen.h"
+#include "KickGap.h" // would-be watchdog kick from the stream loop (T1.6 measure-only)
 #include <math.h>
 #include <new>  // For std::nothrow
 
@@ -287,6 +288,10 @@ void WaveGen::service() {
     // long buffered drains. Each sample is its own short transaction.
 
     while (_running && !_params_changed && samples_sent_this_call < samples_to_send) {
+        // Would-be watchdog kick from the core-1 stream loop (measure-only
+        // stage, KickGap.h): a >= 1 kHz stream holds core 1 here for its whole
+        // duration - the site the T1.6 numbers said an enable needs.
+        kickGapStamp( 1, KICK_WAVEGEN );
         // Synchronous per-sample write with STOP; simpler and accurate timing
         bool ok = _dac.setChannelValue((MCP4728_channel_t)_channel,
                                        _waveform_table[_table_index]);
@@ -732,6 +737,7 @@ void WaveGen::_startBufferTransfer() {
     size_t total_samples_sent = 0;
     uint32_t t0 = micros();
     while (_running && total_samples_sent < _table_size) {
+        kickGapStamp( 1, KICK_WAVEGEN ); // see above
         uint16_t sample_value = _waveform_table[_table_index];
         bool ok = _dac.setChannelValue((MCP4728_channel_t)_channel, sample_value);
         if (!ok) {

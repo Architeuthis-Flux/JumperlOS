@@ -24,10 +24,12 @@
 #include "hardware/timer.h"
 
 enum KickSite : uint8_t {
-    KICK_LOOP0 = 0, // top of loop()'s busy-loop pass (core 0)
-    KICK_INNER = 1, // jOS.serviceInner() - inside the modal loops (core 0)
-    KICK_LOOP1 = 2, // top of loop1() (core 1)
-    KICK_SITE_COUNT = 3
+    KICK_LOOP0 = 0,   // top of loop()'s busy-loop pass (core 0)
+    KICK_INNER = 1,   // jOS.serviceInner() - inside the modal loops (core 0)
+    KICK_LOOP1 = 2,   // top of loop1() (core 1)
+    KICK_VM = 3,      // MicroPython VM loop hook, mp_hal_check_interrupt() (core 0, ~1 ms throttle)
+    KICK_WAVEGEN = 4, // WaveGen's core-1 streaming loop, once per DAC sample (core 1)
+    KICK_SITE_COUNT = 5
 };
 
 struct KickGapStats {

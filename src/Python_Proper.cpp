@@ -1,4 +1,5 @@
 #include "Python_Proper.h"
+#include "KickGap.h" // would-be watchdog kick from the VM hook (T1.6 measure-only)
 #include "Adafruit_USBD_CDC.h"
 #include "ArduinoStuff.h"
 #include <Arduino.h>
@@ -666,6 +667,10 @@ extern "C" void mp_hal_check_interrupt(void) {
     return;
   }
   last_check_time = current_time;
+  // Would-be watchdog kick from inside the MicroPython VM (measure-only stage,
+  // KickGap.h): a compute-bound script passes through this hook every
+  // interruptCheckInterval ms - the site the T1.6 numbers said an enable needs.
+  kickGapStamp( 0, KICK_VM );
 
   // Cache in_raw_repl check once instead of calling getInstance() multiple times
   const bool in_raw_repl = MpRemoteService::getInstance().isInRawRepl();

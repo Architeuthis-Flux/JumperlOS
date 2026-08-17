@@ -9,6 +9,8 @@ static const char* siteName( uint8_t s ) {
     case KICK_LOOP0: return "loop0";
     case KICK_INNER: return "inner";
     case KICK_LOOP1: return "loop1";
+    case KICK_VM:    return "vm";
+    case KICK_WAVEGEN: return "wavegen";
     default:         return "?";
     }
 }

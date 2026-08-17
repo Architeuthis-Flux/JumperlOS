@@ -24,9 +24,26 @@
 mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a4806` (docs, row
 40), `b03d25b` (the in-session switch classifier decides on agreement, row 41), `bd1e7bc`
 (the tip-sense veto for the legacy classifier, row 42 — "Side quest 2, follow-up 2" below),
-`4dd3eee` (T1.7b, row 43), `ba64238` (docs, row 44), and **the probe-zero fix** (the commit after
-`ba64238`, row 45 — hash with the next commit; "Side quest 2, follow-up 3" below). **The board
-is flashed with HEAD.** **Next: T2.1 — but read the analysis first; it wants Kevin's
+`4dd3eee` (T1.7b, row 43), `ba64238` (docs, row 44), `c785d0d` (the probe-zero fix, row 45 —
+"Side quest 2, follow-up 3" below), and **T1.6b — the VM-hook and WaveGen kick sites,
+measure-only** (the commit after `c785d0d`, row 46 — hash with the next commit). **The board is
+flashed with HEAD.**
+
+**T1.6b — the two kick sites the enable needs, measured.** `KICK_VM` in
+`mp_hal_check_interrupt()` (the `MICROPY_VM_HOOK_LOOP`, after its 1 ms throttle) and
+`KICK_WAVEGEN` in both of WaveGen's core-1 streaming loops (once per DAC sample). Still no
+`watchdog_enable()`. Re-run of the T1.6 blockers with them in: **compute-bound MicroPython 5 s:
+core 0 max gap 5 226 → 173 ms** (loop0→vm — the exec entry/compile before the first VM
+iteration); `time.sleep(5)` 202 → 170 ms; **wavegen 2 kHz for 10 s: core 1 max gap 10 007 →
+3.9 ms**; idle 20–42 ms; and **over the whole `run_all.py`: core 0 max 1 820 ms (the slot save),
+core 1 1 160 ms (the park during it)** — down from 11 488 / 9 417 ms. So the enable design that
+the T1.6 numbers implied is now demonstrated: kicks at {loop0, inner, loop1, vm, wavegen}
+leave nothing measured above ~1.8 s; an 8 s timeout has ×4 margin, 4 s would still hold. Left
+for the enable decision (Kevin's): the timeout, whether long commands / file ops should kick
+(the 1.8 s slot save is a core-0 `saveSlot` with no stamps inside), and the hands-on blockers
+(self-test, calibration, a probe session, a held click menu, an app) — plus the V5-only
+`watchdog_hw->scratch[3]` stamp for a post-mortem trail (CrashLog owns 0–2). HIL 6/7 (known
+phantom check); `test_infra_paths` 24/24. **Next: T2.1 — but read the analysis first; it wants Kevin's
 hands in the loop, so it was deliberately NOT started autonomously.** T2.2c (`REQ_SHOW_LEDS`)
 likewise waits for eyes: the census is ~200 `showLEDsCore2` sites across 15 files (Menus 49,
 Probing 47, Apps 17, main 16, LEDs 12, Highlighting 9, SelfTest 8, RotaryEncoder 8, …), not the
