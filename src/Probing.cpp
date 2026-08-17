@@ -5447,6 +5447,20 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
         // HYSTERESIS LOGIC to prevent oscillation:
         //   MEASURE -> SELECT: only when current > HIGH threshold
         //   SELECT -> MEASURE: only when current < LOW threshold
+        //
+        // Tip-sense veto (2026-08-17): the legacy rule may not flip AGAINST
+        // detector A. It still decides on its own (no A-driven flips), but a
+        // flip A contradicts is held. Why: the corrected current is
+        // raw - probe_current_zero, and the zero is a boot-time measurement
+        // that lands anywhere in 0.4-2.4 mA (open item 2 of the probe
+        // handoff) against a ~1.5 mA select signature. On a boot with a high
+        // zero the select-idle draw reads 0.06-0.15 mA and the classifier
+        // oscillated SELECT/MEASURE every check while the switch sat in
+        // SELECT and A read L on every line (Kevin's board, this afternoon).
+        // A is skipped (-1) while a button is held / the sampler is mid-read,
+        // in which case the rule runs exactly as before.
+        const bool aSaysMeasure = ( detA == 0 );
+        const bool aSaysSelect  = ( detA == 1 );
         if ( switchPosition == -1 ) {
             // Boot / unknown: classify from the ABSOLUTE signatures - MEASURE
             // drives the high-impedance tip (~0 mA), SELECT powers the probe
@@ -5457,7 +5471,7 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
             // still-low means genuinely MEASURE.
             if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
                 int padSense = readAdc( 5, 4 ); // same touch veto as MEASURE->SELECT
-                if ( padSense < jumperlessConfig.calibration.minimum_probe_reading ) {
+                if ( padSense < jumperlessConfig.calibration.minimum_probe_reading && !aSaysMeasure ) {
                     switchPosition = 1;
                     changed = true;
                 }
@@ -5467,6 +5481,12 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
                     s_pendingMeasureFlip = true;
                     if ( showProbeLEDs == 0 ) {
                         showProbeLEDs = 4;
+                    }
+                } else if ( aSaysSelect ) {
+                    // tip sense says the needle is floating/drained: SELECT with
+                    // a dark or dim LED, not MEASURE - hold, try again next check
+                    if ( jumperlessConfig.debug.probe_switch_stats ) {
+                        Serial.println( "[switch] boot measure verdict vetoed by tip sense (A:L)" );
                     }
                 } else {
                     s_pendingMeasureFlip = false;
@@ -5487,6 +5507,12 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
                 int padSense = readAdc( 5, 4 );
                 if ( padSense >= jumperlessConfig.calibration.minimum_probe_reading ) {
                     // tip is on a pad - don't classify from a loaded rail
+                } else if ( aSaysMeasure ) {
+                    // tip sense still sees the LED supply cap: a load on the
+                    // rail, not the switch - hold MEASURE
+                    if ( jumperlessConfig.debug.probe_switch_stats ) {
+                        Serial.println( "[switch] select flip vetoed by tip sense (A:H)" );
+                    }
                 } else {
                     switchPosition = 1;
                     changed = true;
@@ -5505,6 +5531,13 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
                     s_pendingMeasureFlip = true;
                     if ( showProbeLEDs == 0 ) {
                         showProbeLEDs = ( lastProbeLEDs == 7 ) ? 7 : 4;
+                    }
+                } else if ( aSaysSelect ) {
+                    // second low, but the tip sense says the needle is floating /
+                    // drained = still SELECT: a dark or dim LED (or a high
+                    // probe_current_zero), not a flip - hold, keep re-checking
+                    if ( jumperlessConfig.debug.probe_switch_stats ) {
+                        Serial.println( "[switch] measure flip vetoed by tip sense (A:L)" );
                     }
                 } else {
                     s_pendingMeasureFlip = false;

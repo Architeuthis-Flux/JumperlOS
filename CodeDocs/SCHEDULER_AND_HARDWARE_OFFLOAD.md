@@ -22,8 +22,9 @@
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
 `dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), `3f02a14` (T2.2b, the
 mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a4806` (docs, row
-40), and the in-session switch classifier fix (the commit after `38a4806`, row 41 — hash with
-the next commit; see "Side quest 2, follow-up" below). **The board is flashed with HEAD.** **Next: T2.1 — but read the analysis first; it wants Kevin's hands in the loop,
+40), `b03d25b` (the in-session switch classifier decides on agreement, row 41), and the
+tip-sense veto for the legacy classifier (the commit after `b03d25b`, row 42 — hash with the
+next commit; see "Side quest 2, follow-up 2" below). **The board is flashed with HEAD.** **Next: T2.1 — but read the analysis first; it wants Kevin's hands in the loop,
 so it was deliberately NOT started autonomously.** Then T2.2c (`REQ_SHOW_LEDS`). The watchdog
 *enable* is a separate decision on the T1.6 numbers. **A consolidated "Kevin's hands-on
 checklist" is at the end of this block.**
@@ -425,9 +426,36 @@ the firmware reader tolerates it (the user's Enter flushes the tail and terminat
 app's line mode sends each line with **no terminator**, so pastes cannot work there by
 construction — interactive mode is the paste path.
 
+**Side quest 2, follow-up 2 (Kevin, ~14:15: "now I'm getting erroneous flipping sometimes
+with the switch in select"): the commit after `b03d25b` (row 42) — the legacy classifier
+may no longer flip AGAINST detector A.** The log on his board at idle: 72 checks in 40 s, 15
+position changes, `A:L` on every line, corrected current oscillating 0.06–0.15 mA (B:M) ↔
+1.4–1.7 mA (B:S) — legacy deciding (`shadow:` label, so *not* the in-session path). Raw INA1
+sampled every 10 ms for 8 s: a flat 2.5 mA (never below), with brief 4.1 mA blips — so
+`probe_current_zero` on that boot was ≈ 2.4 mA (2.5 − 0.1); three `machine.reset()`s later it
+was 0.4 / 0.8 / 1.05 mA and the classifier sat at SELECT (corrected 2.15 / 1.75 / 1.51). That is
+open item 2 of `PROBE_REWORK_HANDOFF.md` (the zero swings more than the ~1.5 mA select
+signature) hitting a bad boot: with a zero above ~1.6 the select-idle draw reads below `low`
+and the B-only rule flips to MEASURE, lights the measure pattern (which draws ~0.1 corrected in
+SELECT), and only its own re-send blips (~4 mA raw) push it back over `high` — the oscillation.
+Fix (`Probing.cpp`, legacy branch): a **tip-sense veto** — the legacy rule still decides on
+its own (A never drives a flip), but a flip A contradicts is held: SELECT→MEASURE (and the boot
+"low" verdict) is vetoed while `A:L`, MEASURE→SELECT (and the boot "high" verdict) while
+`A:H`; A abstains (−1) while a button is held / the sampler is mid-read, and then the rule runs
+exactly as before. Under `probe_switch_stats` a vetoed flip prints `[switch] … flip vetoed by
+tip sense (A:L/H)`. **Reproduced and verified on the board:** `` `[calibration]
+probe_current_zero = 2.4 `` (the bad boot's value) → corrected 0.13–0.47 mA (B:M) → before
+the veto that oscillated; now **22 vetoes, 0 changes, position holds SELECT** over 12 s;
+restored to 1.05 → SELECT at 1.51. Real flips are unaffected by construction (A agreed on every
+real flip in every log today: `A:H B:M → MEASURE`, `A:L B:S → SELECT`). HIL 6/7 (the known
+phantom-current check came back — board state), `test_infra_paths` 24/24. What this does not
+fix: the zero itself (open item 2) — a bad zero still blinds B; the veto keeps a bad zero from
+producing a wrong position while A has an opinion. **Kevin:** flip at idle and mid-session
+again; and the two logs today are the strongest data yet for promoting `probe_switch_agree`.
+
 **Side quest 2, follow-up (Kevin, later the same day: "the probe switch seems to be missing
 reads, or at least incorrectly assuming it's in measure mode when it's not"): fixed in the
-commit after `38a4806` (row 41).** The in-session classifier decided by the legacy B-only rule,
+commit after `38a4806` (row 41, `b03d25b`).** The in-session classifier decided by the legacy B-only rule,
 which is calibrated against the *idle* LED signatures (select idle ~1.4 mA > high 1.2); a
 session shows the connect / remove-fade / net-colour patterns, whose draw sits in or below the
 dead band, so B said MEASURE while the switch was in SELECT, the classifier flipped, lit the
