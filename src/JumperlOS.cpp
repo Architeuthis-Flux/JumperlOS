@@ -18,6 +18,8 @@
 #include "MpRemoteService.h"
 #include "Python_Proper.h"   // For isMicroPythonREPLActive()
 #include "CH446Q.h"         // For LiveCrossbarService
+#include "ArduinoStuff.h"   // secondSerialHandler / replyWithSerialInfo (PortHousekeepingService)
+#include "NetVoltageScan.h" // serviceNetVoltageScanDebug (PortHousekeepingService)
 #include "MatrixState.h"    // For net color access
 
 #ifdef USE_TINYUSB
@@ -43,6 +45,7 @@ TermSerialService& termSerialService = TermSerialService::getInstance();
 RelayedCommandService& relayedCommandService = RelayedCommandService::getInstance();
 AsyncPassthroughService& asyncPassthroughService = AsyncPassthroughService::getInstance();
 TinyUSBService& tinyUSBService = TinyUSBService::getInstance();
+PortHousekeepingService& portHousekeepingService = PortHousekeepingService::getInstance();
 USBPeriodicService& usbPeriodicService = USBPeriodicService::getInstance();
 OLEDService& oledService = OLEDService::getInstance();
 OledGuiService& oledGuiService = OledGuiService::getInstance();
@@ -654,6 +657,35 @@ ServiceStatus TinyUSBService::service() {
     lastStatus = ServiceStatus::BUSY;
 #endif
     
+    return lastStatus;
+}
+
+// PortHousekeepingService - the former 10 ms block in loop()
+PortHousekeepingService* PortHousekeepingService::instance = nullptr;
+
+PortHousekeepingService& PortHousekeepingService::getInstance() {
+    if (instance == nullptr) {
+        instance = new PortHousekeepingService();
+    }
+    return *instance;
+}
+
+/**
+ * @brief Arduino flash detection + UART auto-connect, ENQ port-info reply,
+ * net-voltage-scan debug report. Was `if (millis() - last > 10) {...}` in
+ * loop()'s busy loop after serviceAll(); the 10 ms is the service's period
+ * now. Everything here does USB-CDC I/O and must stay on core 0.
+ */
+ServiceStatus PortHousekeepingService::service() {
+    lastStatus = ServiceStatus::IDLE;
+    // Handles Arduino flashing - checks the DTR pulse and auto-connects UART
+    // (DTR detection itself happens in AsyncPassthrough::checkDTRState()).
+    secondSerialHandler();
+    // Port-info (ENQ 0x05) reply. USB-CDC I/O: core 0 only.
+    replyWithSerialInfo();
+    // Net voltage scan debug report - Serial stays on core 0, the scanner
+    // runs on core 1. Self-throttled to 1 Hz.
+    serviceNetVoltageScanDebug();
     return lastStatus;
 }
 

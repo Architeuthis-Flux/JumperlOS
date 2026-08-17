@@ -18,11 +18,56 @@
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
-`2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32), and
-**T1.5** (the commit after `e3d4d36`, `DEV_MERGE_HANDOFF.md` row 33 — hash with the next
-commit). **The board is flashed with HEAD.** **Next: T1.7** (B6 `loop()` cleanup — see "Then
-the queue"; needs Kevin's UX check that `h?`/`x?` still work, so run every automatable check
-and commit "pending Kevin hands-on" per the disposition rule).
+`2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
+`545b7e6` (T1.5, row 33), and **T1.7** (the commit after `545b7e6`, `DEV_MERGE_HANDOFF.md`
+row 34 — hash with the next commit). **The board is flashed with HEAD.** **Next: T1.6**
+(C11 watchdog, measure-only stage first — see "Then the queue").
+
+**T1.7 (B6) — what was built.** (1) The 10 ms `secondSerialHandler()` /
+`replyWithSerialInfo()` / `serviceNetVoltageScanDebug()` block in `loop()`'s busy loop is
+`PortHousekeepingService` (NORMAL, `periodUs()` 10 000, not inner; `JumperlOS.h/.cpp`,
+registered in `main.cpp`). (2) The two 100 ms help-wait spins are gone. **Line mode** (the
+default, and what the `jumperless` app uses): "help", "help <category>" and "[cmd]?" are
+now decided by looking at the completed line — before B6 the line path waited 100 ms on an
+*empty* stream (the line was already consumed) and then ran the bare command, so in line
+mode **"help" printed the menu, "m?" printed the menu, and "x?" CLEARED THE BOARD**
+(measured on the pre-B6 build; and *every* line-mode command with a CR- or LF-only
+terminator paid the 100 ms: `n` → netlist took 146 ms p50; CRLF short-circuited it). **Char
+mode**: the command char is parked (`helpArmed`/`helpArmedChar`/`helpDeadlineMs` statics in
+`loop()`), the busy loop keeps running `serviceAll()` and returns when the next char arrives
+or the 100 ms deadline passes, then the same peek as before (`?` → help; `h` + "elp…" → help
+docs). One list, `helpQuestionApplies()`, names the commands that own their `?` in **both**
+modes: `A?`/`a?` (Arduino status query), `i?` (RouteSafety self-check — the HIL parses it),
+`M?` (USB-audio status) — before B6, char mode showed the help page for `i?`/`M?` (that is
+why the suite needed line mode) and line mode ran the handler for everything. `cmd_usbAudio`
+now takes its sub-command through `getCommandArgs()` (it parsed `line[1]`, so in char mode a
+bare "M" *and* "M?" both toggled the device = a USB re-enumeration that drops every port —
+found the hard way: the first B6 test run of `M?` in char mode dropped the ports; toggled
+back off, nothing persisted). (3) The post-command "clean up serial buffer" drain
+(`delayMicroseconds(1000)` + eat raw `Serial` down to 5 bytes) is gone — it ate the tail of
+any multi-line paste after the first command; `printMenu()` still discards a >20-byte
+backlog on its own (left alone, noted).
+
+**T1.7 — verified:** builds ×3; both modes, scripted over port 1 (`help`, `help probe`, `x?`
+with a bridge present — **it survives now**, `m?`, `h`, `?`, `i?`, `A?`, `M?`): every one
+returns the intended thing in **both** modes; latency, 25 samples each, `n` → "netlist" p50:
+line mode CR **146 → 46 ms**, LF **146 → 46 ms**, CRLF 5 → 5 ms; char mode 4–5 ms unchanged
+(the old build was re-flashed via BOOTSEL/picotool for the before numbers). `X`:
+`PortHousekeeping NORM 10000` runs at the same ~24 Hz cadence Peripherals gets (both are
+quantised by the ProbePads block); HIL 7/7; `test_infra_paths` 24/24. **Pending Kevin
+hands-on:** `h?`/`x?`/`help` feel in his terminal, and that command latency in the app is
+visibly better. **Observation, not fixed:** in line mode with a CR-only or LF-only
+terminator there is a residual ~40 ms per command that a CRLF terminator does not have — on
+the old build too (146 = 100 + 46) — not investigated (not `getCommandArgs`: `n` doesn't call
+it). Also noted: `getCommandArgs()` waits its 20–100 ms timeout on the stream when a
+line-mode command has no argument (the args are the line; nothing more is coming) — a
+per-command wait for every arg-taking command in the app; a one-line "don't wait when line
+buffering is on" would remove it, but a handler that prompts and then reads a second line
+through it would break — audit before doing it (T1.7b candidate).
+
+**T1.7 files:** `src/main.cpp` (`helpQuestionApplies()`, `loop()`), `src/JumperlOS.h/.cpp`
+(`PortHousekeepingService`), `src/SingleCharCommands.cpp` (`cmd_usbAudio` args), the rebuilt
+`firmware.uf2`.
 
 **T1.5 (B4) — what was built.** `Service::inInnerSet()` (virtual; default = CRITICAL
 priority; `AsyncPassthroughService` overrides it to true) names the modal set explicitly, and
@@ -286,7 +331,7 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** ~~T1.4~~ ~~T1.5~~ (landed — see the top of this block) → **T1.7** → T1.6 →
+**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ (landed — see the top of this block) → **T1.6** →
 T1.10 → T2.2 → T2.3 → T2.1.
 
 **Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
@@ -328,12 +373,16 @@ exactly 0.0), and `/config.txt` — but that file is **not** a live `probe_curre
 calibration writes `jumperlessConfig` without dirtying it, so the file holds the last explicit
 save. Do NOT `import run_all` from a Python one-liner — its module body runs the suite.
 `pio run -t upload` works with the client attached (the 1200-baud touch on port 1 still resets
-the board; the client reconnects), and so does `machine.reset()`. **The suite needs
-`terminal_line_buffering = 1`** (the default): in char mode every `x?` sub-command (`i?`, the
-RouteSafety audit the tests parse) is eaten by `loop()`'s help peek and returns the help page,
-which shows up as `test_net_currents`/`test_stress` failing "no chips marked suspect" + "self-check
-PASS" while everything else passes. the `jumperless` client's interactive-mode preference ends up asserting SI (persisted on the next config save; exact trigger unconfirmed) — send
-`B1` on port 1 before `run_all.py` if the client was attached since the last boot. A stray
+the board; the client reconnects), and so does `machine.reset()`. **The suite assumes
+`terminal_line_buffering = 1`** (the default). Until T1.7 (row 34) that was a hard need: in
+char mode every `x?` sub-command (`i?`, the RouteSafety audit the tests parse) was eaten by
+`loop()`'s help peek and returned the help page, which showed up as
+`test_net_currents`/`test_stress` failing "no chips marked suspect" + "self-check PASS" while
+everything else passed. Since T1.7 `i?`/`A?`/`M?` reach their handlers in both modes, but the
+tests still send line-shaped input, so keep the rule: the `jumperless` client's
+interactive-mode preference ends up asserting SI (persisted on the next config save; exact
+trigger unconfirmed) — send `B1` on port 1 before `run_all.py` if the client was attached
+since the last boot. A stray
 `usb_audio_save()` from the REPL is a legitimate full config save when you need `/config.txt`
 to reflect live values. Add each `DEV_MERGE_HANDOFF.md` row with a
 placeholder in the item's own commit and put the real hash in with the *next* commit (a
@@ -396,7 +445,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | **landed** | builds ×3; I2C0 register readout 60/90 = 1.00 MHz on 11/11 boots, unchanged before/during/after `wavegen_start`/`stop` and after forced OLED frames (the flip is gone); DAC1 30 352 → ~20 k writes/s (2 kHz sine, ~3.1 s; −33 %, the honest cost); 80 000 INA0/INA1 register reads at sustained 1 MHz, 0 failures, 1–2 LSB spread; 10 reboots: INA1 8-sample median 1.465 mA every boot, OLED Connected, DAC found; `probe_current_zero` on 10 further boots 1.01–1.51 mA (mean 1.28, history 0.5–2.3); HIL 5/6; `test_infra_paths` 24/24; `i@` `probe_power on -> DAC0` |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | **landed** (pending Kevin hands-on: probe/menu feel) | builds ×3; `X` table: all 16 services runs>0 with the expected periods, modal-loop calls counted; wait-loop debug 12 s: 0 SLOW SERVICE; no `refresh:` line over 20 routing ops; HIL 7/7; `test_infra_paths` 24/24. First measured numbers: ProbePads 36.8 ms/call @ 20 Hz = 64–70 % of core 0 (est. was ~12 ms) |
 | 6 | T1.5 B4 `serviceInner()` (+ 64-bit `nextDueUs`) | **landed** (pending Kevin hands-on: probe mode / click menu / REPL feel; passthrough while probing) | builds ×3; `X` after a 3 s REPL sleep: the 4 inner-set rows (incl. AsyncPassthrough `HIGH*`) = passes + 42, non-inner rows = passes; HIL 6/7 then 7/7 (net_currents standalone 8/8 ×4); `test_infra_paths` 24/24 |
-| 7 | T1.7 B6 `loop()` cleanup | pending | — |
+| 7 | T1.7 B6 `loop()` cleanup | **landed** (pending Kevin hands-on: help/`x?` feel, latency in the app) | builds ×3; help/`help <cat>`/`x?`/`m?`/`h`/`?`/`i?`/`A?`/`M?` right in both modes (scripted); `n` latency line mode CR/LF 146 → 46 ms p50, char mode unchanged; `X` PortHousekeeping row; HIL 7/7; `test_infra_paths` 24/24 |
 | 8 | T1.6 watchdog, measure-only | pending | — |
 | 9 | T1.10 LED-dump off core 1 | pending | — |
 | 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | pending | — |
@@ -688,7 +737,7 @@ The pad menus (`chooseDAC` … `voltageSelect`) are their own modal loops and st
 later pass. Gate: Kevin's hands on every step (tap, connect, clear, double-tap undo, menu
 exit); the HIL suite covers the routing side only.
 
-### B6. `loop()` cleanup (Tier 1, small)
+### B6. `loop()` cleanup (Tier 1, small) — **built, T1.7 (section 0)**
 - The 10 ms `secondSerialHandler()` / `replyWithSerialInfo()` / `serviceNetVoltageScanDebug()`
   block (`main.cpp:979-996`) → a `periodUs()=10000` service.
 - The two 100 ms help-wait spins (`main.cpp:1188, 1216`): every command char waits up to
@@ -772,7 +821,8 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T1.5 B4 `serviceInner()` replacing `serviceCritical()` in the modal loops. **Landed
   2026-08-17 (section 0).**
 - T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable.
-- T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain).
+- T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain). **Landed
+  2026-08-17 (section 0).**
 - T1.8 C2-0 CH446Q hot path + ISR into RAM (`__not_in_flash_func`).
 - T1.9 C2c I2C0: one clock owner at 1 MHz (Kevin's call — approved; hardware-verify INA
   reads + wavegen + register readout). **Landed 2026-08-17 (section 0).**

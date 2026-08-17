@@ -530,6 +530,7 @@ void setup( ) {
     jOS.registerService( &peripherals );     // CRITICAL - current-sense poll (10 ms); inner set
 
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
+    jOS.registerService( &portHousekeepingService ); // NORMAL, 10 ms - Arduino DTR/flash detect + UART auto-connect, ENQ port-info reply, net-scan debug (was a 10 ms block in loop(); B6)
 
     jOS.registerService( &oledService );         // LOW - OLED connection maintenance (OLED preserved on OG: a user can wire a panel to GP18/19)
     jOS.registerService( &liveCrossbarService ); // LOW - live crossbar terminal display
@@ -715,11 +716,44 @@ String currentCommandLine = "";
 
 unsigned long loopStart = millis( );
 
+// "[command]?" help applies to every command char except whitespace and the
+// commands whose handlers take '?' as their OWN sub-command: A?/a? (Arduino
+// connect/disconnect status query - cmd_connectArduino / cmd_disconnectArduino),
+// i? (RouteSafety self-check + suspect audit - cmd_netCurrents; the HIL suite
+// parses it), M? (USB-audio status - cmd_usbAudio). Same list in both
+// terminal modes (before B6, char mode showed the help page for i?/M? and
+// line mode ran the handler for x?/m?/... - see the note in loop()).
+static bool helpQuestionApplies( int c ) {
+    switch ( c ) {
+    case '\n':
+    case '\r':
+    case ' ':
+    case '\0':
+    case 'A':
+    case 'a':
+    case 'i':
+    case 'M':
+        return false;
+    default:
+        return true;
+    }
+}
+
 void loop( ) {
     // Declare variables at function scope to avoid goto scope issues
     bool useLineBuffering = false;
     bool hasRelayedData = false;
     static const unsigned int HELP_WAIT_MS = 100;
+    // Char-mode "[command]?" / "help" look-ahead (B6): instead of spinning
+    // 100 ms with nothing serviced after every command char, the char is
+    // parked here and the busy loop keeps running services until the next
+    // char arrives or the deadline passes. Statics: the busy loop is entered
+    // through a label.
+    static bool helpArmed = false;
+    static int helpArmedChar = '\0';
+    static unsigned long helpDeadlineMs = 0;
+    static bool helpDeadlineSpent = false; // the one wait per command char has happened
+    bool gotCompletedLine = false;         // this pass's input came in as a whole line (line mode / relayed)
 
 menu:
 
@@ -899,6 +933,7 @@ dontshowmenu:
     loopStart = millis( );
     while ( !Jerial.hasCompletedLine( ) &&
             ( useLineBuffering || Jerial.available( ) == 0 ) &&
+            !( helpArmed && (int32_t)( millis( ) - helpDeadlineMs ) >= 0 ) &&
             connectFromArduino == '\0' && slotChanged == 0 ) {
 
         // Heartbeat disabled for production
@@ -968,32 +1003,10 @@ dontshowmenu:
         } // Checkpoint 1
 #endif
 
-        // CRITICAL: Handle Arduino flashing (DTR pulse detection) on Core 0
-        // This MUST run on Core 0 because it can call refreshLocalConnections()
-        // via flashArduino() -> connectArduino() -> refresh() chain
-        //
-        // AsyncPassthrough::task() is now handled by asyncPassthroughService (CRITICAL priority)
-        // but secondSerialHandler() is still needed for:
-        //   1. Detecting DTR pulse (checked via wasDTRPulseDetected())
-        //   2. Calling flashArduino() to auto-connect UART and service passthrough
-        static unsigned long lastSecondSerialCheck = 0;
-        if ( millis( ) - lastSecondSerialCheck > 10 ) {
-            lastSecondSerialCheck = millis( );
-
-            // Handle Arduino flashing - checks DTR pulse and auto-connects UART
-            // Note: DTR detection now happens in AsyncPassthrough::checkDTRState()
-            // but we still need this for the auto-connect and active servicing
-            secondSerialHandler( );
-
-            // Port-info (ENQ 0x05) reply, moved here from loop1/Core 2. It does
-            // USB-CDC I/O which must stay on Core 0 (the USB-owning core); see the
-            // note at its old call site in loop1. Throttled with secondSerialHandler.
-            replyWithSerialInfo( );
-
-            // Net voltage scan debug report - same rule: Serial stays on
-            // Core 0, scanner itself runs on Core 2. Self-throttled to 1Hz.
-            serviceNetVoltageScanDebug( );
-        }
+        // (The 10 ms secondSerialHandler() / replyWithSerialInfo() /
+        // serviceNetVoltageScanDebug() block that sat here is
+        // PortHousekeepingService now - a 10 ms service inside serviceAll().
+        // Everything in it does USB-CDC I/O and stays on core 0; B6, T1.7.)
         busyTimers[ 2 ] = micros( );
 
         // Check for menu activation (goto loadfile)
@@ -1133,7 +1146,18 @@ dontshowmenu:
     // This works regardless of line buffering mode - relayed commands always work
     // CRITICAL: Use line buffering when relay buffer has data
     static unsigned long lastCommandProcessedTime = 0;
-    if ( Jerial.hasCompletedLine( ) ) {
+    gotCompletedLine = false;
+    if ( helpArmed ) {
+        // Char mode: a command char was read on the previous pass and we went
+        // back to the busy loop (services running) to see whether a '?' - or
+        // "elp..." after an 'h' - follows within HELP_WAIT_MS. Either a char
+        // arrived or the deadline passed; resume with the armed char. Anything
+        // that arrived stays in the stream for the peek below / the next pass.
+        helpArmed = false;
+        input = helpArmedChar;
+        currentCommandLine = String( (char)input );
+    } else if ( Jerial.hasCompletedLine( ) ) {
+        gotCompletedLine = true;
         // Track command processing latency
 
         unsigned long timeSinceLastCommand = millis( ) - lastCommandProcessedTime;
@@ -1182,12 +1206,44 @@ dontshowmenu:
     // Serial.flush();
 
     // -------- Help: "help", "help <category>", and "[command]?" --------
-    // All help reads use Jerial (same stream as the first character).
-    if ( input == 'h' ) {
-        unsigned long helpTimer = millis( );
-        while ( Jerial.available( ) == 0 && millis( ) - helpTimer < HELP_WAIT_MS ) {
+    // Line mode: the whole line is already in currentCommandLine, so this is
+    // a look at the string - "help", "help <category>", "x?". (Before B6 the
+    // line path waited 100 ms on an empty stream and then ran the bare
+    // command: "help" printed the menu and "x?" CLEARED THE BOARD.)
+    // Char mode: the '?' (or "elp...") has not arrived yet when the command
+    // char is read. Instead of a 100 ms spin with nothing serviced, arm a
+    // deadline and go back to the busy loop; it returns here on the next
+    // char or when the deadline passes (see helpArmed above).
+    // Commands that take '?' as their own sub-command are left alone in both
+    // modes (they used to get the help page in char mode and their own
+    // handler in line mode - now always their handler).
+    if ( gotCompletedLine ) {
+        if ( currentCommandLine == "help" ) {
+            showGeneralHelp( );
+            goto dontshowmenu;
         }
-        if ( Jerial.available( ) > 0 ) {
+        if ( currentCommandLine.startsWith( "help " ) ) {
+            String category = currentCommandLine.substring( 5 );
+            category.trim( );
+            showCategoryHelp( category.c_str( ) );
+            goto dontshowmenu;
+        }
+        if ( currentCommandLine.length( ) == 2 && currentCommandLine[ 1 ] == '?' &&
+             helpQuestionApplies( input ) ) {
+            showCommandHelp( input );
+            goto dontshowmenu;
+        }
+    } else if ( input == 'h' || helpQuestionApplies( input ) ) {
+        if ( Jerial.available( ) == 0 && !helpDeadlineSpent ) {
+            // Nothing after the char yet: arm the deadline and keep servicing.
+            helpArmed = true;
+            helpArmedChar = input;
+            helpDeadlineMs = millis( ) + HELP_WAIT_MS;
+            helpDeadlineSpent = true; // one wait per command char
+            goto dontshowmenu;
+        }
+        helpDeadlineSpent = false;
+        if ( input == 'h' && Jerial.available( ) > 0 ) {
             String helpString = "h";
             while ( Jerial.available( ) > 0 && helpString.length( ) < 50 ) {
                 char c = Jerial.read( );
@@ -1205,17 +1261,8 @@ dontshowmenu:
                 showCategoryHelp( category.c_str( ) );
                 goto dontshowmenu;
             }
-        }
-        // Just 'h' alone: fall through to normal processing
-    }
-
-    // [command]? → show help for that command (registry first, then HelpDocs fallback)
-    if ( input != '\n' && input != '\r' && input != ' ' &&
-         ( input != 'A' && input != 'a' ) ) {
-        unsigned long helpTimer = millis( );
-        while ( Jerial.available( ) == 0 && millis( ) - helpTimer < HELP_WAIT_MS ) {
-        }
-        if ( Jerial.available( ) > 0 && Jerial.peek( ) == '?' ) {
+            // Just 'h' alone (or 'h' + something else): fall through
+        } else if ( Jerial.available( ) > 0 && Jerial.peek( ) == '?' ) {
             Jerial.read( ); // consume '?'
             showCommandHelp( input );
             goto dontshowmenu;
@@ -1245,12 +1292,11 @@ skipinput:
             goto dontshowmenu;
         case CMD_SHOW_MENU:
         default:
-            // Clean up serial buffer
-            delayMicroseconds( 1000 );
-            while ( Serial.available( ) > 5 ) {
-                Serial.read( );
-                delayMicroseconds( 1000 );
-            }
+            // (The "clean up serial buffer" drain that sat here - a 1 ms
+            // delay, then eat raw Serial down to 5 bytes - is gone (B6): it
+            // ate the tail of any multi-line paste after the first command,
+            // and Jerial.service()'s line buffering is what owns the input.
+            // printMenu() still discards a >20-byte backlog on its own.)
             goto menu;
         }
     }

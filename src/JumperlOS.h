@@ -477,6 +477,32 @@ private:
 };
 
 /**
+ * @brief Port housekeeping - the 10 ms block that used to sit in loop()
+ * after serviceAll() (B6, T1.7): secondSerialHandler() (Arduino DTR-pulse
+ * flash detection + UART auto-connect and its active servicing),
+ * replyWithSerialInfo() (the ENQ 0x05 port-info reply - USB-CDC I/O, so it
+ * lives on core 0) and serviceNetVoltageScanDebug() (1 Hz debug report,
+ * self-throttled). NORMAL priority, 10 ms period, not in the inner set (it
+ * never ran inside the modal loops before either).
+ */
+class PortHousekeepingService : public Service {
+public:
+    static PortHousekeepingService& getInstance();
+    PortHousekeepingService(const PortHousekeepingService&) = delete;
+    PortHousekeepingService& operator=(const PortHousekeepingService&) = delete;
+
+    ServiceStatus service() override;
+    const char* getName() const override { return "PortHousekeeping"; }
+    ServicePriority getPriority() const override { return ServicePriority::NORMAL; }
+    uint32_t periodUs() const override { return 10000; }
+
+private:
+    PortHousekeepingService() = default;
+    ~PortHousekeepingService() = default;
+    static PortHousekeepingService* instance;
+};
+
+/**
  * @brief USB periodic service - handles USB mass storage housekeeping
  * NORMAL priority. NOT REGISTERED any more: usbPeriodic() is a debug print.
  * Class kept for a later cleanup pass.
@@ -809,6 +835,7 @@ extern TermSerialService& termSerialService;
 extern RelayedCommandService& relayedCommandService;
 extern AsyncPassthroughService& asyncPassthroughService;
 extern TinyUSBService& tinyUSBService;
+extern PortHousekeepingService& portHousekeepingService;
 extern USBPeriodicService& usbPeriodicService;
 extern OLEDService& oledService;
 extern OledGuiService& oledGuiService;

@@ -3215,9 +3215,15 @@ CommandResult cmd_usbAudio( char c, const String& line ) {
     // unreachable while the mic was on - so "M?" (the documented way to check
     // whether a recording is healthy) tore the USB stack down and dropped the
     // host's recording instead of printing anything.
-    String arg = line;
-    arg.trim( );
-    const char sub = ( arg.length( ) >= 2 ) ? arg[ 1 ] : '\0';
+    // getCommandArgs(): in line mode the sub-command is in `line` ("M?"); in
+    // char mode `line` is the bare "M" and the '?' / "23" / "s" is still in
+    // the input stream (up to 50 ms). Parsing `line` directly here meant that
+    // in char mode EVERY "M?" / "M23" toggled the device (a USB re-enumeration
+    // that drops every port) - only loop()'s help peek used to stand in the
+    // way, and B6 (2026-08-17) made "[cmd]?" leave the '?' to commands that
+    // own it. `arg` = what follows the 'M', trimmed.
+    String arg = getCommandArgs( line, 50 );
+    const char sub = ( arg.length( ) >= 1 ) ? arg[ 0 ] : '\0';
 
     // "M?" -> status and health counters, never a toggle. A clean recording has
     // frames_sent climbing at the sample rate and everything else flat
@@ -3259,10 +3265,10 @@ CommandResult cmd_usbAudio( char c, const String& line ) {
     }
 
     // "M23" -> left = ADC2, right = ADC3.
-    if ( arg.length( ) >= 3 && isdigit( (unsigned char) arg[ 1 ] ) &&
-         isdigit( (unsigned char) arg[ 2 ] ) ) {
-        const int l = arg[ 1 ] - '0';
-        const int r = arg[ 2 ] - '0';
+    if ( arg.length( ) >= 2 && isdigit( (unsigned char) arg[ 0 ] ) &&
+         isdigit( (unsigned char) arg[ 1 ] ) ) {
+        const int l = arg[ 0 ] - '0';
+        const int r = arg[ 1 ] - '0';
         if ( !usb_audio_set_channels( l, r ) ) {
             Jerial.println( "Channels must be two distinct ADC channels 0-7, e.g. M01" );
             return CMD_DONT_SHOW_MENU;
