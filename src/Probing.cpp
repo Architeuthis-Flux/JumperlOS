@@ -2431,7 +2431,13 @@ restartProbingNoPrint:
         // Keep critical services (like ProbeButton) running during blocking probeMode
         jOS.serviceCritical( );
         // ...and the switch position (ProbeSwitch is NORMAL, so it is not in
-        // that set): detector-A-only tracking, agree mode only.
+        // that set). The pad frame follows switchPosition, so a flip during
+        // a session must be seen here, not when the session ends: the same
+        // classifier the service runs, on its own 500 ms gate (its early-outs
+        // - button held, LED settling, touch veto - all still apply), minus
+        // the infra tick (a nudge is a crossbar rebuild; not mid-session).
+        classifySwitchPosition( );
+        // Detector-A-only tracking at 250 ms, agree mode only (see definition).
         checkSwitchPositionFast( );
 
         // Hold-end polling. serviceCritical above may have just kicked
@@ -5189,8 +5195,23 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 
     // Pending-nudge retry + claim-pin viability re-check for InfraPaths.
     // Piggybacks on this service's ~500ms cadence, same as
-    // reassertGpioBufferDrive below.
+    // reassertGpioBufferDrive below. Kept OUT of classifySwitchPosition()
+    // on purpose: probeMode()'s loop runs the classifier (a mid-session
+    // flip must re-scale the pads), but an infra nudge is a full crossbar
+    // rebuild and has no business landing in the middle of a probe session.
     infraServiceTick( );
+
+    return classifySwitchPosition( );
+}
+
+// The switch classifier proper: self-gated to ProbeSwitch::interval_ms
+// (500 ms) plus the button/LED-settle/no-feed early-outs, so calling it every
+// pass costs a few compares. Runs from the ProbeSwitch service (via
+// checkSwitchPosition) AND from probeMode()'s blocking loop - the pad frame
+// (probe_max vs probe_max_measure*) follows switchPosition, so a flip during
+// a probe session used to leave every pad reading scaled for the wrong
+// position until the session ended (Kevin, 2026-08-17).
+int Probing::classifySwitchPosition( ) { // 0 = measure, 1 = select
 
     // Timing: only sample at a fixed interval.
     static unsigned long last_check_millis = 0;

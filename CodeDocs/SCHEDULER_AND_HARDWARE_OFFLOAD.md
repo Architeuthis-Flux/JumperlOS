@@ -17,9 +17,9 @@
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
-`f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), and the paste fix (the commit after
-`9bca7b5`, `DEV_MERGE_HANDOFF.md` row 30 — hash with the next commit). **The board is flashed
-with HEAD.** T1.9's gate ran in two halves: everything not needing port 1 while Kevin's
+`f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30), and
+the switch-classifier-in-probe-mode note (the commit after `f5a6cd0`, row 31 — hash with the
+next commit). **The board is flashed with HEAD.** T1.9's gate ran in two halves: everything not needing port 1 while Kevin's
 `jumperless` client held `JLV5port1` (it reconnected through the flash and 21 reboots), and
 the port-1 half — clean HIL 5/6, `test_infra_paths` 24/24, `i@` — the moment Kevin closed the
 app. **Next: T1.4** (B3 — see "Then the queue" and the design refinements below).
@@ -39,6 +39,25 @@ paste's tail) reaches the board one keystroke late (`os.read(sys.stdin.fileno(),
 the firmware reader tolerates it (the user's Enter flushes the tail and terminates). (2) The
 app's line mode sends each line with **no terminator**, so pastes cannot work there by
 construction — interactive mode is the paste path.
+
+**Side quest 2 (Kevin's note, 2026-08-17): the switch classifier runs inside probe mode.**
+"Since we're applying a different scaling depending on the switch position, if we hit the
+switch during probing, the pads are way off — we should occasionally check the switch in the
+probing loop." The pad frame (`probe_max` vs `probe_max_measure*`) follows `switchPosition`,
+but `probeMode()`'s loop only ran the CRITICAL set (+ the A-only `checkSwitchPositionFast()`,
+which is inert outside agree mode), so a mid-session flip stood uncorrected until the session
+ended. `Probing::checkSwitchPosition()` is now `infraServiceTick()` + a new
+`classifySwitchPosition()` (the classifier proper: 500 ms gate, button/LED-settle/touch vetoes,
+legacy or agreement decision — unchanged), and the loop calls `classifySwitchPosition()` every
+pass (~1 µs when not due; one INA1 read or ADC7 droop estimate every 500 ms). The infra tick
+was deliberately kept out of the loop: a nudge is a full crossbar rebuild. Verified: `[switch]`
+stats still flow at 500 ms outside probe mode, HIL 7/7 (the phantom check happened to pass —
+board state), `test_infra_paths` 24/24. **Hands-on for Kevin:** flip the switch mid-session —
+the pads should re-scale within ~1 s (the classifier also re-sends the position's idle LED
+pattern on a change, as the A-only tracker did).
+(No debug probe was attached, so probe mode could not be entered hands-free — `test_encoder_ui`
+skipped for the same reason.) The scheduler-shaped alternative — ProbeSwitch in T1.5's inner
+set — was rejected for now because it drags `infraServiceTick()` into every modal loop.
 
 **T1.9 files:** `src/JumperlessDefines.h`, `src/Peripherals.cpp`, `src/MCP4728.cpp/.h`,
 `src/oled.cpp` (68+/22−), the rebuilt tracked `.pio/build/jumperless_v5/firmware.uf2`, and the
@@ -872,8 +891,10 @@ samples 30 127 251, led-frame aborts(pause) 47; heap free 46 KB of 221 KB; I2C0 
   - `LiveCrossbarService` (LOW): 60 s / 400 ms (probe) refresh, `updateLiveCrossbarDisplay()`.
 - **`probeMode()` anatomy** (`Probing.cpp:2199-3471`, agent-located, key lines spot-checked): one
   `while (Serial.available()==0 && millis()-probeTimeout < 80000)` loop (`:2423`); per pass:
-  `delayMicroseconds(20)` (`:2429`), `jOS.serviceCritical()` (`:2432`), `checkSwitchPositionFast()`
-  (250 ms), `liveCrossbarService.service()` (`:2521`), encoder nav, `readProbe()` (`:2590`) whose
+  `delayMicroseconds(20)` (`:2429`), `jOS.serviceCritical()` (`:2432`), `classifySwitchPosition()`
+  (500 ms — the switch classifier, added 2026-08-17 on Kevin's note; see CONTINUE HERE) +
+  `checkSwitchPositionFast()` (250 ms, agree mode only), `liveCrossbarService.service()`
+  (`:2521`), encoder nav, `readProbe()` (`:2590`) whose
   inner `while (probeRead <= 0)` (`:7016`) re-runs `readProbeRaw()` + `probeButton.service()` up to
   8 ms; `delay(40)/delay(40)/delay(60)` on the node-1 latch flash (`:3009-3018` — 140 ms of
   hard delay per first node in connect mode); the commit path `addBridgeToState()` /

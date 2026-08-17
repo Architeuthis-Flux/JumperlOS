@@ -358,7 +358,12 @@ public:
     int checkProbeDoubleClick(unsigned long timeout, int waitForRelease = 0);
     int readFloatingOrState(int pin = 0, int row = 0);
     
+    // infraServiceTick() + classifySwitchPosition(): what the ProbeSwitch
+    // service (and the calibration app / MicroPython) call.
     int checkSwitchPosition(void);
+    // The classifier alone (500 ms self-gated): also called from probeMode()'s
+    // loop, where the infra tick must not run (see the definition).
+    int classifySwitchPosition(void);
     // Detector-A-only position tracking for probeMode's blocking loop
     // (agree mode only; see the definition).
     void checkSwitchPositionFast(void);
