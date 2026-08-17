@@ -1388,12 +1388,27 @@ CommandResult cmd_showNetlist( char c, const String& line ) {
 // In line-buffered mode, the full command is in `line` (e.g. "J power").
 // In char-by-char mode, only the trigger char arrived and the rest is still in the serial buffer.
 // This function handles both cases transparently.
+// True when the command being executed arrived as a COMPLETE line (line
+// mode, a relayed <j> command, the port-7 backchannel): its arguments are in
+// `line` and nothing more is coming, so getCommandArgs() must not wait on the
+// stream. loop() clears it only on the char-mode single-char read path, where
+// the arguments (if any) are still arriving. Before this every arg-taking
+// command in line mode - the jumperless app's mode - paid its 20-100 ms
+// timeout for nothing (T1.7b, 2026-08-17).
+bool g_commandInputIsLine = true;
+
 static String getCommandArgs( const String& line, unsigned int timeoutMs = 50 ) {
     // If line already has content after the trigger character, use it
     if ( line.length( ) > 1 ) {
         String args = line.substring( 1 );
         args.trim( );
         if ( args.length( ) > 0 ) return args;
+    }
+
+    // A complete line with nothing after the trigger: no arguments, and no
+    // point waiting - the terminator already came.
+    if ( g_commandInputIsLine ) {
+        return String( );
     }
 
     // Otherwise read from Jerial (char-by-char mode)

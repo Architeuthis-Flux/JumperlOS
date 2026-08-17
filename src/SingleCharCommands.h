@@ -114,6 +114,10 @@ struct Command {
  * - Clean separation of concerns (callbacks in appropriate files)
  * - Integration with jumperlOS service system
  */
+// See SingleCharCommands.cpp: set by loop() - false only while a char-mode
+// single-char command executes (its arguments may still be arriving).
+extern bool g_commandInputIsLine;
+
 class SingleCharCommands : public Service {
 public:
     static const int MAX_COMMANDS = 128;

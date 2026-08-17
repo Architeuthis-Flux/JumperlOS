@@ -802,7 +802,12 @@ static void usbSer3_dispatchVerb(Stream* out, const String& verb) {
             if (cmd && cmd->ser3Access == SER3_ALLOWED) {
                 char cmdStr[2] = { ch, 0 };
                 Jerial.setCurrentResponseTarget(out);
+                // A backchannel command is complete as sent: its handler must
+                // not wait on port 1's stream for arguments (getCommandArgs).
+                bool wasLine = g_commandInputIsLine;
+                g_commandInputIsLine = true;
                 singleCharCommands.executeCommand(ch, String(cmdStr));
+                g_commandInputIsLine = wasLine;
                 Jerial.clearCurrentResponseTarget();
                 return;
             }

@@ -1112,6 +1112,7 @@ dontshowmenu:
                         currentCommandLine = cmdPtr;
                         currentCommandLine.trim( );
                         input = cmdPtr[ 0 ];
+                        g_commandInputIsLine = true; // a relayed command is a whole line
 
                         // Service USB to prevent port disconnect during command execution
                         TinyUSB_Device_Task( ); // mutex-guarded pump
@@ -1167,8 +1168,10 @@ dontshowmenu:
         helpArmed = false;
         input = helpArmedChar;
         currentCommandLine = String( (char)input );
+        g_commandInputIsLine = false; // char mode: args may still be arriving
     } else if ( Jerial.hasCompletedLine( ) ) {
         gotCompletedLine = true;
+        g_commandInputIsLine = true;
         // Track command processing latency
 
         unsigned long timeSinceLastCommand = millis( ) - lastCommandProcessedTime;
@@ -1198,6 +1201,7 @@ dontshowmenu:
         // NOTE: Jerial.read() now handles relay buffer with tag filtering automatically
         if ( Jerial.available( ) > 0 ) {
             input = Jerial.read( );
+            g_commandInputIsLine = false; // char mode: args may still be arriving
             noteUserInput( );
 #if debugJerial
             Serial.printf( "Main: Read char '%c' (%d) from Jerial\n", (char)input, input );
