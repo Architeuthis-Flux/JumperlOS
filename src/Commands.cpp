@@ -459,8 +459,7 @@ void refreshBlind(
       uint32_t g = 0;
       uint32_t bits = core1req::take(core1req::REQ_SEND, &g);
       if (bits) {
-        sendPaths((bits & core1req::SEND_CLEAN) ? 1 : 0);
-        core1req::complete(core1req::REQ_SEND, g);
+        sendPaths((bits & core1req::SEND_CLEAN) ? 1 : 0, core1req::REQ_SEND, g);  // CH446Q completes g
       }
     }
   }

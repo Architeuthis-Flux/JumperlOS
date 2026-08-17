@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–38, plus the paste fix in row 30 and
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–39, plus the paste fix in row 30 and
 the switch-classifier-in-probe-mode note in row 31): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
@@ -78,9 +78,11 @@ drawn from core 0 now (an inner-set `LedDumpService`), core 1 no longer writes U
 **Tier 1 is complete.** T2.2a (row 37) added the tap→crossbar→LEDs latency probe to `X` with
 the before numbers (the flag handshake is ~0.1–0.3 ms; the LED show is the ~7 ms); **T2.2b
 (row 38) replaced the `sendAllPathsCore2` flag with a generation-counted mailbox** — no request
-can be lost any more, and the probe reads the same. The doc's "▶ CONTINUE HERE" block has the
-queue after it (T2.3 → T2.1 → `REQ_SHOW_LEDS`), the design refinements found on the way, and
-**a consolidated hands-on checklist for Kevin**.
+can be lost any more, and the probe reads the same; **T2.3 (row 39) made the crossbar list
+send DMA-fed and ISR-completed** — core 1 is no longer blocked for a rebuild, the crossbar
+self-test passes, 0 stalls in a 500-rebuild soak. The doc's "▶ CONTINUE HERE" block has the
+queue after it (T2.1 → `REQ_SHOW_LEDS`), the design refinements found on the way, and **a
+consolidated hands-on checklist for Kevin**.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -138,7 +140,9 @@ it wasn't this session.
 
 | 37 | `de297c5` | **T2.2a: tap→crossbar→LEDs latency probe** (`src/XbarLatency.h/.cpp`, section F). Stamps: tap (probeMode commit), req (`sendAllPathsCore2` written, 3 sites), pickup (top of `sendPaths`), sendDone (end of `sendPaths`), show (first `leds.show()` after a send); last/max/n per segment in `X`; `X!` resets. Instrumentation only | builds ×3; before numbers over 40 REPL routing ops ×2: req→pickup ~100–200 µs (max 0.3 / 2.2 ms), pickup→send ~40–50 µs, send→show ~7.1 ms (max ~10), req→show ~7.3 ms (max 10–12); tap→req n=0 (needs a real tap); HIL 7/7; `test_infra_paths` 24/24 |
 
-| 38 | _next commit after `de297c5`_ | **T2.2b: the core-1 request mailbox, `REQ_SEND_PATHS`** (`src/CoreMailbox.h/.cpp`, `core1req::`): two slots (`REQ_SEND` with sticky `SEND_CLEAN`; `REQ_BYPASS` = the old "3"), pending bits + request/done generations under a fixed SIO spinlock (OS2 — core 1 launches before `setup()`, so nothing can be claimed safely); `sendAllPathsCore2` deleted everywhere; `refreshConnections` waits on its generation, `sendPaths()` no longer zeroes a flag at its end (that erased a request landing mid-send), `waitCore2()` = `core2busy || !allIdle()` with the same 25 ms bound; call sites untouched; `X` shows the mailbox | builds ×3; latency probe same-or-better (req→pickup ~0.1–0.2 ms, send→show ~6–8 ms); 200-op REPL routing soak: 0 WARNINGs, mailbox idle after; wavegen-pending check: the send stays posted while streaming (`bypass bits 0x1 … busy`) and lands on `wavegen_stop()` (`req→pickup 7.68 s`); HIL 7/7; `test_infra_paths` 24/24 |
+| 38 | `3f02a14` | **T2.2b: the core-1 request mailbox, `REQ_SEND_PATHS`** (`src/CoreMailbox.h/.cpp`, `core1req::`): two slots (`REQ_SEND` with sticky `SEND_CLEAN`; `REQ_BYPASS` = the old "3"), pending bits + request/done generations under a fixed SIO spinlock (OS2 — core 1 launches before `setup()`, so nothing can be claimed safely); `sendAllPathsCore2` deleted everywhere; `refreshConnections` waits on its generation, `sendPaths()` no longer zeroes a flag at its end (that erased a request landing mid-send), `waitCore2()` = `core2busy || !allIdle()` with the same 25 ms bound; call sites untouched; `X` shows the mailbox | builds ×3; latency probe same-or-better (req→pickup ~0.1–0.2 ms, send→show ~6–8 ms); 200-op REPL routing soak: 0 WARNINGs, mailbox idle after; wavegen-pending check: the send stays posted while streaming (`bypass bits 0x1 … busy`) and lands on `wavegen_stop()` (`req→pickup 7.68 s`); HIL 7/7; `test_infra_paths` 24/24 |
+
+| 39 | _next commit after `3f02a14`_ | **T2.3: the DMA-fed CH446Q list send.** On core 1 (V5) `sendAllPaths()` collects the crosspoint words + chips into a snapshot (`sendXYrawUnchecked()` appends while collecting — bookkeeping and chip-K safety unchanged), one DMA channel (DREQ = the SM's TX FIFO) feeds the words, the PIO ISR strobes `dmaCs[dmaIdx++]` and completes the mailbox request on the last one; the existing PIO handshake throttles the DMA (no PIO edit, no DMA IRQ); `sendPaths(clean, reqSlot, reqGen)` returns once kicked; CPU single-crosspoint sends and DMA sends arbitrate under a fixed spinlock; a 200 ms no-progress stall (park-tolerant accounting) aborts, marks suspect, restarts the SM, completes anyway; core-0 callers and the OG keep the CPU path; `X` shows the DMA counters | builds ×3; latency probe same (pickup→send ~50 µs); 500-rebuild soak: 738 DMA sends / 15 408 words, 0 stalls, 0 pio timeouts, 0 WARNINGs, `i?` self-check PASS + `suspect=0x000`; crossbar self-test app (`run_app("Xbar   Test")`) **PASS rows 60/60 gpio 8/8 rails 2/2**; `test_net_currents` 8/8; HIL 7/7; `test_infra_paths` 24/24 |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

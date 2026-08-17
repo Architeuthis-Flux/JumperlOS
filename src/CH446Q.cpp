@@ -2,6 +2,8 @@
 
 #include <cstdint>  // For uint16_t
 #include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
+#include "CoreMailbox.h"  // core1req::complete() at the end of a list send (T2.2b/T2.3)
+#include "hardware/dma.h" // the DMA-fed list send (T2.3)
 #include "CH446Q.h"
 #include "Colors.h"       // For changeTerminalColor
 #include "JumperlessDefines.h"
@@ -60,7 +62,113 @@ static bool chipHadConnections[12] = {false};
 // __not_in_flash_func but everything they called per crosspoint ran from flash
 // (X showed the irq 16 handler at 0x1005xxxx). See
 // CodeDocs/SCHEDULER_AND_HARDWARE_OFFLOAD.md C2-0.
+// ---------------------------------------------------------------------------
+// T2.3 (C2a): the DMA-fed list send.
+//
+// A list send (sendAllPaths, from sendPaths) used to push one word per
+// crosspoint into the PIO TX FIFO and spin until the ISR had strobed that
+// chip's select - core 1 blocked for the whole send (~30 us per crosspoint,
+// ~1 ms typical, tens of ms for a clean rebuild), and NO LED frame during it.
+// Now, on core 1 (V5): the loops that used to send COLLECT instead -
+// sendXYrawUnchecked() appends the PIO word to dmaWords[] and the chip to
+// dmaCs[] (bookkeeping and the chip-K safety clears exactly as before, so the
+// order on the wire is the order that would have been sent) - and one DMA
+// channel (DREQ = this SM's TX FIFO) feeds the words while the ISR strobes
+// dmaCs[dmaIdx++] per PIO IRQ. The existing "irq nowait 1 / wait 0 irq 1 rel"
+// handshake in ch446.pio.h throttles the DMA for free: the SM will not pull
+// the next word until the ISR has cleared the flag. Completion = the ISR
+// strobing the last chip: it completes the mailbox request the caller passed
+// in (core1req::complete - the spinlock is safe from IRQ context: IRQs are off
+// while it is held, so a same-core holder cannot be preempted by this ISR, and
+// a cross-core holder releases within a few instructions) and stamps the
+// latency probe. sendPaths() returns as soon as the DMA is kicked; core 1
+// goes on rendering. The words/chips are a SNAPSHOT (statics), never the live
+// paths[] tables: a refresh that gave up its 25 ms wait may rebuild them
+// while the DMA is still strobing - harmless, the old state finishes and the
+// new request re-sends. Not done here (deliberately): the single-crosspoint
+// CPU path (sendXYrawUnchecked outside a list send - taps, FakeGpio, the
+// short check) stays; it waits for an in-flight DMA first, and the DMA kick
+// waits for an in-flight CPU send, because the ISR counts IRQs and one foreign
+// pio_sm_put mid-DMA would shift every later chip select by one. Core 0
+// callers of sendAllPaths (refreshPaths from commands / file loads) keep the
+// CPU path byte-for-byte (the ISR is core 1's). The OG keeps the CPU path
+// (no OG board attached; C2b sets the precedent). No PIO program edit, no
+// DMA IRQ (DMA_IRQ_1 is USBAudio's; completion is the PIO ISR's idx == n).
+// A stall (no PIO IRQ for 200 ms of core-1 time - a park is not a stall)
+// aborts the DMA, marks the unsent chips suspect, counts a timeout, restarts
+// the SM and completes the request anyway, so no waiter can hang on it.
+// ---------------------------------------------------------------------------
+#if !defined(OG_JUMPERLESS)
+#define CH446Q_DMA_SEND 1
+#else
+#define CH446Q_DMA_SEND 0
+#endif
+
+#define CH446Q_DMA_MAX_WORDS 2048   // 128 paths x 4 hops + every possible disconnect, with room
+static uint32_t dmaWords[CH446Q_DMA_MAX_WORDS];  // PIO TX words (address byte << 24)
+static uint8_t  dmaCs[CH446Q_DMA_MAX_WORDS];     // chip per word (the ISR's strobe list)
+static volatile uint32_t dmaCount = 0;   // words in the send in flight
+static volatile uint32_t dmaIdx = 0;     // words strobed by the ISR so far
+static volatile bool dmaActive = false;  // a DMA send is in flight (ISR strobes dmaCs[])
+static volatile bool dmaCollect = false; // sendXYrawUnchecked() appends instead of sending
+static int dmaChan = -1;                 // -1: no channel (CPU path)
+static volatile int  reqSlotPending = -1;    // mailbox slot to complete when the send is done (-1: none)
+static volatile uint32_t reqGenPending = 0;
+static uint32_t ch446q_dma_sends = 0;    // stats for X
+static uint32_t ch446q_dma_words = 0;
+static uint32_t ch446q_dma_stalls = 0;
+static uint32_t ch446q_dma_maxWords = 0;
+
+// The send-arbitration lock: a CPU single-crosspoint send (chipSelect != -1)
+// and a DMA send (dmaActive) must never overlap - see the banner. Fixed SIO
+// spinlock OS1 (the OG's atomic helper uses it, but the OG has no DMA send).
+static inline spin_lock_t* sendLock(void) { return spin_lock_instance(PICO_SPINLOCK_ID_OS1); }
+
+bool ch446qSendInFlight(void) { __dmb(); return dmaActive; }
+
+void ch446qDmaStats(uint32_t* sends, uint32_t* words, uint32_t* stalls, uint32_t* maxWords, bool* enabled) {
+  if (sends) *sends = ch446q_dma_sends;
+  if (words) *words = ch446q_dma_words;
+  if (stalls) *stalls = ch446q_dma_stalls;
+  if (maxWords) *maxWords = ch446q_dma_maxWords;
+  if (enabled) *enabled = (dmaChan >= 0);
+}
+
+// The end of a list send, whichever path did it: complete the mailbox request
+// the caller registered (if any) and stamp the latency probe. Called from the
+// ISR (DMA path) or from sendPaths() (CPU path / nothing to send).
+static void __not_in_flash_func(ch446qSendComplete)(void) {
+  int slot = reqSlotPending;
+  if (slot >= 0) {
+    reqSlotPending = -1;
+    core1req::complete((core1req::Slot)slot, reqGenPending);
+  }
+  __dmb();
+  xbarLatSendDone();  // latency probe: crossbar matches the netlist (XbarLatency.h)
+}
+
 void __not_in_flash_func(isrFromPio)(void) {
+
+  if (dmaActive) {
+    // DMA-fed list send: this IRQ is word dmaIdx of the snapshot.
+    uint32_t i = dmaIdx;
+    int cs = (i < dmaCount) ? dmaCs[i] : -1;
+    if (cs >= 0) {
+      setCSex(cs, 1);
+      setCSex(cs, 0);
+    }
+    dmaIdx = i + 1;
+    // Let the SM pull the next word (it is parked at "wait 0 irq 1 rel").
+    pio_interrupt_clear(pio, 1);
+    irq_flags = pio0_hw->irq;
+    hw_clear_bits(&pio0_hw->irq, irq_flags);
+    if (dmaIdx >= dmaCount) {
+      dmaActive = false;
+      __dmb();
+      ch446qSendComplete();
+    }
+    return;
+  }
 
   // delayMicroseconds(500);
   setCSex(chipSelect, 1);
@@ -82,6 +190,109 @@ void __not_in_flash_func(isrFromPio)(void) {
   
 
   }
+
+// Kick the collected words. Called at the end of a collecting sendAllPaths()
+// (dmaCollect already false). Waits for any CPU single-crosspoint send to
+// finish first (the arbitration described in the banner). If nothing was
+// collected, completes right away.
+static void __not_in_flash_func(ch446qDmaKick)(void) {
+  uint32_t n = dmaCount;
+  if (n == 0 || dmaChan < 0) {
+    ch446qSendComplete();
+    return;
+  }
+  // Wait out a CPU single-crosspoint send in flight (chipSelect != -1 until
+  // its ISR strobe), then claim the wire for the DMA under the lock.
+  unsigned long t0 = micros();
+  for (;;) {
+    uint32_t save = spin_lock_blocking(sendLock());
+    if (chipSelect == -1) {
+      dmaIdx = 0;
+      dmaActive = true;
+      spin_unlock(sendLock(), save);
+      break;
+    }
+    spin_unlock(sendLock(), save);
+    if (micros() - t0 > 100000) {
+      // The CPU send's own 100 ms timeout will have fired by now; take the wire.
+      uint32_t s2 = spin_lock_blocking(sendLock());
+      chipSelect = -1;
+      dmaIdx = 0;
+      dmaActive = true;
+      spin_unlock(sendLock(), s2);
+      break;
+    }
+    tight_loop_contents();
+  }
+  ch446q_dma_sends++;
+  ch446q_dma_words += n;
+  if (n > ch446q_dma_maxWords) ch446q_dma_maxWords = n;
+  dma_channel_config c = dma_channel_get_default_config(dmaChan);
+  channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+  channel_config_set_read_increment(&c, true);
+  channel_config_set_write_increment(&c, false);
+  channel_config_set_dreq(&c, pio_get_dreq(pio, sm, true));
+  __dmb();
+  dma_channel_configure(dmaChan, &c, &pio->txf[sm], dmaWords, n, true);
+}
+
+// Recovery for a wedged DMA send: abort the transfer, mark what did not go out
+// suspect, restart the SM, complete the request so nobody waits on it forever.
+static void __not_in_flash_func(ch446qDmaAbort)(void) {
+  uint32_t idx = dmaIdx;
+  dma_channel_abort(dmaChan);
+  uint32_t save = spin_lock_blocking(sendLock());
+  dmaActive = false;
+  spin_unlock(sendLock(), save);
+  ch446q_timeout_count++;
+  ch446q_dma_stalls++;
+  bool marked[12] = {false};
+  for (uint32_t i = idx; i < dmaCount && i < CH446Q_DMA_MAX_WORDS; i++) {
+    int cs = dmaCs[i];
+    if (cs >= 0 && cs < 12 && !marked[cs]) { marked[cs] = true; markChipXYSuspect(cs); }
+  }
+  pio_sm_set_enabled(pio, sm, false);
+  pio_sm_clear_fifos(pio, sm);
+  pio_sm_restart(pio, sm);
+  pio_sm_exec(pio, sm, pio_encode_jmp(offset + spi_ch446_multi_cs_offset_entry_point));
+  pio_interrupt_clear(pio, 1);
+  irq_flags = pio0_hw->irq;
+  hw_clear_bits(&pio0_hw->irq, irq_flags);
+  pio_sm_set_enabled(pio, sm, true);
+  chipSelect = -1;
+  ch446qSendComplete();
+}
+
+// Stall watchdog for the DMA path. Called every core2stuff() pass on core 1.
+// Progress = the ISR advancing dmaIdx; "stall time" accumulates in bounded
+// per-pass increments (<= 5 ms each), so a FlashPark park or a pauseCore2
+// stretch - during which the ISR cannot run and neither can this - adds at
+// most one increment when we come back, and never trips the recovery.
+void __not_in_flash_func(ch446qDmaService)(void) {
+  static uint32_t lastSeenIdx = 0;
+  static uint32_t lastPassUs = 0;
+  static uint32_t stallUs = 0;
+  if (!dmaActive) {
+    stallUs = 0;
+    lastPassUs = time_us_32();
+    lastSeenIdx = dmaIdx;
+    return;
+  }
+  uint32_t now = time_us_32();
+  uint32_t idx = dmaIdx;
+  if (idx != lastSeenIdx) {
+    lastSeenIdx = idx;
+    stallUs = 0;
+  } else {
+    uint32_t d = now - lastPassUs;
+    if (d > 5000) d = 5000;
+    stallUs += d;
+  }
+  lastPassUs = now;
+  if (stallUs < 200000) return;
+  stallUs = 0;
+  ch446qDmaAbort();
+}
 
 int changedPaths[MAX_BRIDGES];
 int changedPathsCount = 0;
@@ -145,12 +356,19 @@ void initCH446Q(void) {
   memset(lastChipXY, 0, sizeof(lastChipXY));
   
   chipOrderValid = false; // Initialize chip order as invalid
+
+#if CH446Q_DMA_SEND
+  // The DMA-fed list send (T2.3). No panic if none is free: the CPU path
+  // stays. USBAudio claims two lazily and AsyncPassthrough two more; the LED
+  // strip has its own - plenty of the 16 left.
+  dmaChan = dma_claim_unused_channel(false);
+#endif
   }
 
 // CRITICAL: Run from RAM to prevent XIP flash cache contention with Core 0
 // When both cores execute code from flash simultaneously, they compete for XIP cache
 // This causes unpredictable slowdowns. Running Core 2 from RAM eliminates this issue.
-void __not_in_flash_func(sendPaths)(int clean) {
+void __not_in_flash_func(sendPaths)(int clean, int reqSlot, uint32_t reqGen) {
   // Performance profiling (matches PROFILE_FAST_REFRESH in Commands.cpp)
   #define PROFILE_CORE2_SENDPATHS 0
   unsigned long core2_start = micros();
@@ -158,6 +376,13 @@ void __not_in_flash_func(sendPaths)(int clean) {
 
   core2busy = true;
   xbarLatPickup();  // latency probe: the send starts (XbarLatency.h)
+  // The mailbox request this send serves (if any) is completed by
+  // ch446qSendComplete(): at the end of this function on the CPU path, from
+  // the ISR when the last chip select has strobed on the DMA path (T2.3).
+  if (reqSlot >= 0) {
+    reqSlotPending = reqSlot;
+    reqGenPending = reqGen;
+  }
 
   // OPTIMIZATION: Only create chip-ordered index if invalid or doing clean refresh
   // For incremental updates (clean==0), we send paths in net order which is fine
@@ -196,10 +421,14 @@ void __not_in_flash_func(sendPaths)(int clean) {
   
   core2busy = false;
   // (sendAllPathsCore2 = 0 used to sit here - it erased any request that
-  // landed during this send. Completion is the caller's core1req::complete()
-  // now, and a request that arrived meanwhile stays posted; T2.2b.)
+  // landed during this send. Completion is core1req::complete() via
+  // ch446qSendComplete() now - right here on the CPU path, from the ISR when
+  // the DMA-fed send has strobed its last chip - and a request that arrived
+  // meanwhile stays posted; T2.2b / T2.3.)
   __dmb();  // Memory barrier so Core 0 sees the update
-  xbarLatSendDone();  // latency probe: crossbar matches the netlist (XbarLatency.h)
+  if (!dmaActive) {
+    ch446qSendComplete();
+  }
   
   #if PROFILE_CORE2_SENDPATHS
   unsigned long core2_total = micros() - core2_start;
@@ -225,6 +454,24 @@ void __not_in_flash_func(sendAllPaths)(int clean) {
   #define PROFILE_SENDALLPATHS 0
   unsigned long startTime = micros();
   unsigned long stepTime = startTime;
+
+#if CH446Q_DMA_SEND
+  // DMA-fed list send (T2.3): on core 1 with a channel, COLLECT the words the
+  // loops below would have sent (sendXYrawUnchecked appends while dmaCollect
+  // is set) and kick them at the end. Core 0 callers (refreshPaths from a
+  // command / file load) keep the CPU path. A previous DMA send still in
+  // flight is waited out first (its ISR is what completes it).
+  bool collecting = (dmaChan >= 0) && ((sio_hw->cpuid & 1) == 1);
+  if (collecting) {
+    // (the take sites do not start a send while one is in flight, so this
+    // wait is a formality; if it ever expires the DMA is wedged - recover)
+    unsigned long t0 = micros();
+    while (dmaActive && micros() - t0 < 300000) { tight_loop_contents(); }
+    if (dmaActive) ch446qDmaAbort();
+    dmaCount = 0;
+    dmaCollect = true;
+  }
+#endif
   
   if (clean == 1) {
     // OPTIMIZATION: Use memset to clear lastChipXY (faster than nested loops)
@@ -270,6 +517,9 @@ void __not_in_flash_func(sendAllPaths)(int clean) {
     
     // Request live crossbar display update via service (waits for colors)
     liveCrossbarService.requestUpdate();
+#if CH446Q_DMA_SEND
+    if (collecting) { dmaCollect = false; ch446qDmaKick(); }
+#endif
     return;
   } else {
     // INCREMENTAL: Only send changed paths
@@ -298,6 +548,9 @@ void __not_in_flash_func(sendAllPaths)(int clean) {
     
     // Request live crossbar display update via service (waits for colors)
     liveCrossbarService.requestUpdate();
+#if CH446Q_DMA_SEND
+    if (collecting) { dmaCollect = false; ch446qDmaKick(); }
+#endif
   }
 }
 
@@ -1051,6 +1304,52 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
   }
 
   chAddress = chAddress << 24;
+
+#if CH446Q_DMA_SEND
+  if (dmaCollect && ((sio_hw->cpuid & 1) == 1)) {
+    // List send being collected (T2.3, core 1 only - the buffer is core 1's;
+    // a core-0 caller landing here mid-collect takes the CPU path below and
+    // waits for the DMA like everyone else): queue the word and its chip. A full
+    // buffer flushes what is there and waits for it, so the wire order is
+    // preserved.
+    if (dmaCount >= CH446Q_DMA_MAX_WORDS) {
+      dmaCollect = false;
+      ch446qDmaKick();
+      unsigned long t0 = micros();
+      while (dmaActive && micros() - t0 < 300000) { tight_loop_contents(); }
+      if (dmaActive) ch446qDmaAbort();
+      dmaCount = 0;
+      dmaCollect = true;
+    }
+    dmaWords[dmaCount] = chAddress;
+    dmaCs[dmaCount] = (uint8_t)chip;
+    dmaCount = dmaCount + 1;
+    chipSelect = -1;
+    return;
+  }
+  // A single-crosspoint CPU send while a DMA send is in flight would put a
+  // foreign word into the FIFO and shift every later chip select by one -
+  // wait it out (bounded by the same timeout as the handshake below), then
+  // claim the wire under the arbitration lock.
+  {
+    unsigned long t0 = micros();
+    for (;;) {
+      uint32_t save = spin_lock_blocking(sendLock());
+      if (!dmaActive) {
+        chipSelect = chip;
+        spin_unlock(sendLock(), save);
+        break;
+      }
+      spin_unlock(sendLock(), save);
+      if (micros() - t0 > timeoutUs) {
+        // The stall watchdog will clear a wedged DMA; do not queue behind it.
+        chipSelect = -1;
+        return;
+      }
+      tight_loop_contents();
+    }
+  }
+#endif
 
   pio_sm_put(pio, sm, chAddress);
 

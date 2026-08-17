@@ -51,7 +51,20 @@ void copyBitfieldToJustXY(const chipXYBitfield& src, struct justXY& dst);
 
 extern int ch446q_timeout_count;
 
-void sendPaths(int clean = 0);
+// Send the paths to the crossbar (core 1's job; also called on core 0 by
+// refreshPaths). reqSlot/reqGen (T2.2b/T2.3): the core1req mailbox request
+// this send serves - completed by CH446Q when the send is DONE (at the end of
+// the call on the CPU path, from the PIO ISR when the DMA-fed list send has
+// strobed its last chip select). -1 = no request to complete.
+void sendPaths(int clean = 0, int reqSlot = -1, uint32_t reqGen = 0);
+
+// T2.3: the DMA-fed list send. ch446qDmaService() is the stall watchdog,
+// called every core2stuff() pass on core 1; ch446qSendInFlight() is true while
+// a DMA send is between kick and its last ISR strobe (the mailbox request is
+// not complete until then); ch446qDmaStats() for X.
+void ch446qDmaService(void);
+bool ch446qSendInFlight(void);
+void ch446qDmaStats(uint32_t* sends, uint32_t* words, uint32_t* stalls, uint32_t* maxWords, bool* enabled);
 void initCH446Q(void);
 // timeoutUs bounds the PIO-handshake wait before silent recovery. Default is
 // 100ms (the historical wait was 1s; a sick handshake still recovers, just

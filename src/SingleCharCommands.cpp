@@ -2912,6 +2912,18 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // probe feed re-parks DAC0 on every rebuild, so "writes A" flat across
     // connects/disconnects is the set-once guarantee holding.
     MCP4728::printWriteStats( target );
+    // CH446Q list send (T2.3): DMA-fed on core 1 when a channel was claimed;
+    // pio timeouts = the per-crosspoint handshake timeouts (CPU path) plus
+    // DMA stalls (each stall also marks the unsent chips suspect).
+    {
+        uint32_t sends = 0, words = 0, stalls = 0, maxWords = 0;
+        bool en = false;
+        ch446qDmaStats( &sends, &words, &stalls, &maxWords, &en );
+        extern int ch446q_timeout_count;
+        target->printf( "ch446q list send: %s  dma sends %lu  words %lu (max %lu per send)  dma stalls %lu  pio timeouts %d\n\r",
+                        en ? "DMA (core 1)" : "CPU", (unsigned long)sends, (unsigned long)words,
+                        (unsigned long)maxWords, (unsigned long)stalls, ch446q_timeout_count );
+    }
     // Probe LED / button line: frames vs colour requests (shows >> requests
     // is the shared-GPIO9 constant re-send), button samples decoded.
     extern volatile uint32_t ledFrameAbortsPause; // main.cpp

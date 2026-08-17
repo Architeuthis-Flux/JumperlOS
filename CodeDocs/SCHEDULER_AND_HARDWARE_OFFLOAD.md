@@ -20,15 +20,63 @@
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
-`dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), and **T2.2b — the
-core-1 mailbox, `REQ_SEND_PATHS`** (the commit after `de297c5`, `DEV_MERGE_HANDOFF.md` row 38 —
-hash with the next commit). **The board is flashed with HEAD.** **Next: T2.3** (CH446Q
-DMA→FIFO + ISR chip list, non-blocking `sendPaths` — section C2a; the latency probe and
-`test_infra_paths` + a 500-rebuild soak are its gate) — then T2.1 (ADC ring), then the second
-mailbox step `REQ_SHOW_LEDS` (section D order: `showLEDsCore2` has nine writers in probeMode
-alone; do it as its own commit after T2.3/T2.1, or when Kevin wants it). The watchdog *enable*
-is a separate decision on the T1.6 numbers (design sketched there), not part of the queue as
-approved. **A consolidated "Kevin's hands-on checklist" is at the end of this block.**
+`dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), `3f02a14` (T2.2b, the
+mailbox, row 38), and **T2.3 — the DMA-fed CH446Q list send** (the commit after `3f02a14`,
+`DEV_MERGE_HANDOFF.md` row 39 — hash with the next commit). **The board is flashed with HEAD.**
+**Next: T2.1** (the always-on ADC ring — section C1; the largest and the one whose gate has
+the most of Kevin in it: taps under both feeds and both positions, the USB mic; read the C1
+row and the "T2.1" line in the Verification section before starting), then the second mailbox
+step `REQ_SHOW_LEDS` (T2.2c). The watchdog *enable* is a separate decision on the T1.6 numbers.
+**A consolidated "Kevin's hands-on checklist" is at the end of this block.**
+
+**T2.3 — what was built (section C2a).** In `CH446Q.cpp`: on core 1 (V5) a list send —
+`sendAllPaths()` from `sendPaths()` — no longer pushes one word per crosspoint into the PIO TX
+FIFO and spins for the ISR; the loops that used to send **collect** (`sendXYrawUnchecked()`
+appends the PIO word to `dmaWords[]` and the chip to `dmaCs[]` while `dmaCollect` is set —
+bookkeeping and the chip-K safety clears exactly as before, so the wire order is the order
+that would have been sent), then one DMA channel (DREQ = the SM's TX FIFO, claimed at
+`initCH446Q()` with `dma_claim_unused_channel(false)`, CPU path if none) feeds the words while
+the ISR strobes `dmaCs[dmaIdx++]` per PIO IRQ; the existing `irq nowait 1` / `wait 0 irq 1
+rel` handshake throttles the DMA for free — **no PIO program edit, no DMA IRQ**. Completion =
+the ISR strobing the last chip: it completes the mailbox request the caller passed in
+(`sendPaths(clean, reqSlot, reqGen)` — the core2stuff/loop1 sites pass their slot+gen and no
+longer call `complete()` themselves; `core1req::complete()` from IRQ context is safe: IRQs
+are off while the spinlock is held, `CoreMailbox.h` says so now) and stamps the latency probe.
+`sendPaths()` returns as soon as the DMA is kicked; core 1 goes on rendering. The words/chips
+are a **snapshot** (statics), never the live `paths[]`. Arbitration (the ISR counts IRQs, so
+one foreign `pio_sm_put` mid-DMA would shift every later chip select by one): the CPU
+single-crosspoint path (taps, FakeGpio, the short check) waits for an in-flight DMA under a
+fixed spinlock (OS1) before it puts, the DMA kick waits for an in-flight CPU send
+(`chipSelect != -1`), and core2stuff/loop1 do not take a new request while one is in flight
+(`ch446qSendInFlight()`). Core-0 callers of `sendAllPaths` (`refreshPaths()` from `x`, file
+loads, apps) keep the CPU path byte-for-byte; the OG keeps the CPU path (stated decision: no
+OG board attached; C2b sets the precedent). Stall watchdog `ch446qDmaService()` (every
+core2stuff pass): 200 ms of core-1 time without a PIO IRQ — accumulated in ≤ 5 ms per-pass
+increments, so a FlashPark park or `pauseCore2` stretch adds one increment, never a false
+trip — aborts the DMA, marks the unsent chips suspect, counts a timeout, restarts the SM at
+its entry point, and **completes the request anyway** (no waiter can hang). `X` prints
+`ch446q list send: DMA (core 1) dma sends N words M (max K per send) dma stalls S pio
+timeouts T`.
+
+**T2.3 — verified:** builds ×3; `X`: `DMA (core 1)`; **latency probe same** (40 REPL ops ×2):
+req→pickup 144–181 µs (max 0.3 / 0.7 ms), pickup→send ~50 µs (max ~235 µs — now the whole
+DMA send incl. strobes), send→show 6.7–7.4 ms, req→show max 10.1–10.6 ms (before the mailbox:
+~7.3 / 10.4–12.4); **500-rebuild soak** (10 × 25 connects + 25 disconnects, then 20 × (10
+connects + `nodes_clear()`), 21 s): 738 DMA sends, 15 408 words, **0 stalls, 0 pio timeouts, 0
+WARNINGs**, mailbox idle after, `i?` → RouteSafety self-check PASS, audit `suspect=0x000`;
+`test_net_currents` 8/8 (the taps' CPU path interleaves with DMA sends via the arbitration);
+**the crossbar self-test app (`run_app("Xbar   Test")` from the REPL) → `crossbar: PASS
+rows:60/60 gpio:8/8 rails:2/2`, `OVERALL: PASS`**; HIL 7/7; `test_infra_paths` 24/24; after
+everything: 1 186 DMA sends, 24 278 words, max 72 words per send, 0 stalls, 0 timeouts,
+mailbox idle. Nothing user-visible changed by design ("routing feels the same" is the only
+hands-on item). Honest note on the payoff: the probe numbers say the send itself was never
+the bottleneck (~50 µs incremental) — the win is that core 1 is not blocked for a clean
+rebuild's tens of ms and that the send is hardware-owned; the LED cadence during a heavy
+routing burst is where it would show, and that was not measured separately.
+
+**T2.3 files:** `src/CH446Q.cpp/.h`, `src/main.cpp` (core2stuff / loop1 sites, the stall
+service call), `src/Commands.cpp` (`refreshBlind`), `src/CoreMailbox.h` (comment),
+`src/SingleCharCommands.cpp` (`X` line), the rebuilt `firmware.uf2`.
 
 **T2.2b — what was built (section D, migration step 2).** `src/CoreMailbox.h/.cpp`, namespace
 `core1req`: two slots — `REQ_SEND` (bits `SEND_PATHS`, `SEND_CLEAN`; a clean is sticky, never
@@ -477,7 +525,7 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
 **Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ ~~T1.10~~ ~~T2.2a (probe)~~
-~~T2.2b (mailbox, `REQ_SEND_PATHS`)~~ (landed — see the top of this block) → **T2.3** → T2.1 →
+~~T2.2b (mailbox, `REQ_SEND_PATHS`)~~ ~~T2.3~~ (landed — see the top of this block) → **T2.1** →
 T2.2c (`REQ_SHOW_LEDS`, when wanted). (The watchdog *enable* is its own decision, on the T1.6
 numbers.)
 
@@ -629,7 +677,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 8 | T1.6 watchdog, measure-only | **landed** (measure-only; the enable is a separate decision) | builds ×3; `X` kick-gap lines; idle 42 ms = the ProbePads block; slot save 1.8 s / 1.1 s; wavegen 10 s = core-1 capture; compute-bound MicroPython 5.2 s; suite 11.5 s; HIL 7/7; `test_infra_paths` 24/24 |
 | 9 | T1.10 LED-dump off core 1 | **landed** | builds ×3; `R!` dumps at ~340 ms idle and through a modal MicroPython script; `serial_1.function = leds` → 60 KB/4 s on USBSer1, board alive; `X` LedDump row; HIL 7/7; `test_infra_paths` 24/24 |
 | 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | **probe landed** (T2.2a); **`REQ_SEND_PATHS` mailbox landed** (T2.2b); `REQ_SHOW_LEDS` later (T2.2c) | probe: builds ×3; before numbers req→pickup ~0.1–0.3 ms (max 2.2 ms), pickup→send ~50 µs, send→show ~7 ms (max 10), req→show ~7.3 ms; HIL 7/7; `test_infra_paths` 24/24. Mailbox: same-or-better on the probe; 200-op soak 0 WARNINGs; wavegen-pending check (send lands on stop); HIL 7/7; `test_infra_paths` 24/24 |
-| 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | pending | — |
+| 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | **landed** | builds ×3; latency probe same; 500-rebuild soak: 738 DMA sends / 15 408 words, 0 stalls, 0 pio timeouts, `i?` audit clean; crossbar self-test app PASS 60/60 8/8 2/2; `test_net_currents` 8/8; HIL 7/7; `test_infra_paths` 24/24 |
 | 12 | T2.1 always-on ADC ring | pending | — |
 
 (The table is updated in place as items land; "pending" rows are the queue.)
@@ -1018,6 +1066,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
   **`REQ_SEND_PATHS` landed 2026-08-17 (section 0, with the latency probe); `REQ_SHOW_LEDS`
   is its own later commit.**
 - T2.3 C2a CH446Q DMA→FIFO + ISR chip list (non-blocking `sendPaths`) — **approved**.
+  **Landed 2026-08-17 (section 0).**
 - T2.4 C5 the combined GPIO 9 PIO program (needs scope time with Kevin) — **next session's opener**.
 - T2.5 C7 encoder event queue — **proposed, not built** (not approved this pass; small, low risk, no measured symptom driving it).
 - T2.6 C10 OLED I2C DMA frame — **proposed, not built** (not approved this pass; on rev 7 it needs the I2C0 arbiter first).

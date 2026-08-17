@@ -34,8 +34,13 @@
 // datasheet question the doc leaves open, so no bare atomics here. The
 // locked regions are a handful of loads/stores - never around the work.
 //
-// Rules: nobody spins on the lock from an IRQ; core 1 takes (bits cleared)
-// only when it is about to do the work - a peek is not a take.
+// Rules: core 1 takes (bits cleared) only when it is about to do the work - a
+// peek is not a take. complete() IS called from an IRQ (the CH446Q PIO ISR
+// ends a DMA-fed list send, T2.3) and that is safe: spin_lock_blocking()
+// disables IRQs on the holding core, so a same-core holder cannot be
+// preempted by that ISR, and a cross-core holder releases within a few
+// instructions - a bounded ~ns spin. post()/take() are never called from
+// IRQ context.
 // ---------------------------------------------------------------------------
 
 #include <stdint.h>

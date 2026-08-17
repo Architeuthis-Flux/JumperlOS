@@ -1460,13 +1460,13 @@ void loop1( ) {
     kickGapStamp( 1, KICK_LOOP1 );
 
     while ( pauseCore2 == true ) {
-        // Check for an immediate bypass request even while paused
-        if ( core1req::pending( core1req::REQ_BYPASS ) ) {
+        // Check for an immediate bypass request even while paused (not while a
+        // DMA-fed send is still strobing - its ISR completes that one first)
+        if ( core1req::pending( core1req::REQ_BYPASS ) && !ch446qSendInFlight( ) ) {
             uint32_t g = 0;
             if ( core1req::take( core1req::REQ_BYPASS, &g ) ) {
                 core2busy = true;
-                sendPaths( 0 ); // Send paths without cleaning
-                core1req::complete( core1req::REQ_BYPASS, g );
+                sendPaths( 0, core1req::REQ_BYPASS, g ); // Send paths without cleaning; CH446Q completes g
                 __dmb( ); // Memory barrier so Core 0 sees the update
                 core2busy = false;
             }
@@ -1606,10 +1606,16 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // cover. Internally throttled to 2kHz, so calling every pass is cheap.
     rotaryEncoderStuff( );
 
+    // T2.3: the DMA-fed list send's stall watchdog (a no-op unless a send is
+    // in flight). A send in flight also means: do not start another one - its
+    // ISR completes the request it serves; the next request waits its turn.
+    ch446qDmaService( );
+    const bool sendInFlight = ch446qSendInFlight( );
+
     // OPTIMIZATION: Check bypass flag BEFORE trying to acquire mutex
     // This prevents deadlock when Core 0 is waiting for Core 2 but Core 2 can't get mutex
     // The bypass flag (3) is specifically designed for fast, non-blocking operation
-    if ( core1req::pending( core1req::REQ_BYPASS ) ) {
+    if ( !sendInFlight && core1req::pending( core1req::REQ_BYPASS ) ) {
         // For bypass mode, try to acquire mutex with very short timeout
         // If we can't get it quickly, just skip this frame - the request stays
         // posted (a peek is not a take) and we retry next pass
@@ -1617,8 +1623,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             uint32_t g = 0;
             if ( core1req::take( core1req::REQ_BYPASS, &g ) ) {
                 core2busy = true;
-                sendPaths( 0 ); // Send paths without cleaning (runs from RAM, no XIP issues)
-                core1req::complete( core1req::REQ_BYPASS, g );
+                sendPaths( 0, core1req::REQ_BYPASS, g ); // no clean; CH446Q completes g (from the ISR on the DMA path)
                 __dmb( ); // Memory barrier so Core 0 sees the update
                 core2busy = false;
             }
@@ -1885,14 +1890,14 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             }
             core2busy = false;
 
-        } else if ( core1req::pending( core1req::REQ_SEND ) ) {
+        } else if ( !sendInFlight && core1req::pending( core1req::REQ_SEND ) ) {
             t[ 18 ] = micros( );
             uint32_t g = 0;
             uint32_t bits = core1req::take( core1req::REQ_SEND, &g );
             if ( bits ) {
                 // A sticky clean bit wins over any plain send it coalesced with.
-                sendPaths( ( bits & core1req::SEND_CLEAN ) ? 1 : 0 );
-                core1req::complete( core1req::REQ_SEND, g );
+                // CH446Q completes g when the send is done (ISR on the DMA path).
+                sendPaths( ( bits & core1req::SEND_CLEAN ) ? 1 : 0, core1req::REQ_SEND, g );
             }
             t[ 19 ] = micros( );
         } else if ( millis( ) - lastSwirlTime > 51 && loadingFile == 0 &&
