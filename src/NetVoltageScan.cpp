@@ -21,6 +21,7 @@
  */
 
 #include "NetVoltageScan.h"
+#include "CoreMailbox.h" // core1req::allIdle() (T2.2b)
 
 #ifndef OG_JUMPERLESS
 
@@ -528,14 +529,14 @@ void serviceNetVoltageScan(void) {
     // We run OUTSIDE the core_sync/core2busy LED window now (see the call
     // site after core_sync_release() in main.cpp), so gate ourselves:
     //   - pauseCore2: core 0 wants core 1 quiesced (flash write / XIP erase)
-    //   - sendAllPathsCore2: a full crossbar refresh is pending, so the
-    //     connections we'd read are mid-change on core 0
+    //   - a path send pending / in flight (core1req mailbox): a crossbar
+    //     refresh is pending, so the connections we'd read are mid-change
     //   - core1busy / refreshInProgress: core 0 is mid-rebuild of the
     //     netlist/chipStates we read and whose xStatus lanes we claim. The
     //     100ms input preempt below misses MicroPython/app/script-driven
     //     refreshes, so check the flags directly.
     if (pauseCore2) return;
-    if (sendAllPathsCore2 != 0) return;
+    if (!core1req::allIdle()) return;
     if (core1busy || refreshInProgress) return;
 #if USB_AUDIO_ENABLE
     // The USB microphone holds the ADC for as long as the host has it open,

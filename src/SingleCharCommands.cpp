@@ -4,6 +4,7 @@
  */
 
 #include "SingleCharCommands.h"
+#include "CoreMailbox.h" // core1req (path-send requests to core 1; T2.2b)
 #include "Apps.h"
 #include "ArduinoStuff.h"
 #include "AsyncPassthrough.h"
@@ -2958,6 +2959,17 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // Tap -> request -> send -> LEDs latency probe (T2.2 / T2.3 gate).
     target->println( "\r" );
     xbarLatPrint( target );
+    // Core 0 -> core 1 request mailbox (T2.2b): pending bits / request gen /
+    // done gen per slot. Idle = bits 0 and done == req.
+    {
+        uint32_t b0, r0, d0, b1, r1, d1;
+        core1req::snapshot( core1req::REQ_SEND, &b0, &r0, &d0 );
+        core1req::snapshot( core1req::REQ_BYPASS, &b1, &r1, &d1 );
+        target->printf( "core1 mailbox: send bits 0x%lx req %lu done %lu   bypass bits 0x%lx req %lu done %lu   %s\n\r",
+                        (unsigned long)b0, (unsigned long)r0, (unsigned long)d0,
+                        (unsigned long)b1, (unsigned long)r1, (unsigned long)d1,
+                        core1req::allIdle( ) ? "(idle)" : "(busy)" );
+    }
     target->println( "\r" );
     target->flush( );
 
@@ -3101,9 +3113,7 @@ CommandResult cmd_ledBrightness( char c, const String& line ) {
     if ( LEDbrightnessMenu( ) == '!' ) {
         clearLEDs( );
         delayMicroseconds( 9200 );
-        // sendAllPathsCore2 is defined in Commands.h as volatile int
-        extern volatile int sendAllPathsCore2;
-        sendAllPathsCore2 = 1;
+        core1req::post( core1req::REQ_SEND, core1req::SEND_PATHS ); // re-send the paths (mailbox, T2.2b)
     }
     return CMD_DONT_SHOW_MENU;
 }

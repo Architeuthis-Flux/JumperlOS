@@ -81,7 +81,6 @@
 #define TERM_COLOR_MAIN_MENU 1
 #define TERM_COLOR_NETS 1
 
-extern volatile int sendAllPathsCore2;
 #define PICO_RP2350A 0
 #define INPUTBUFFERLENGTH 4000
 

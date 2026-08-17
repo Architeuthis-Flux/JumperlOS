@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–37, plus the paste fix in row 30 and
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–38, plus the paste fix in row 30 and
 the switch-classifier-in-probe-mode note in row 31): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
@@ -76,9 +76,11 @@ MicroPython 5.2 s, a wavegen stream = the whole stream on core 1, slot save 1.8 
 enable needs VM-hook and WaveGen kicks. **T1.10 landed (row 36)** — the terminal LED picture is
 drawn from core 0 now (an inner-set `LedDumpService`), core 1 no longer writes USB CDC.
 **Tier 1 is complete.** T2.2a (row 37) added the tap→crossbar→LEDs latency probe to `X` with
-the before numbers (the flag handshake is ~0.1–0.3 ms; the LED show is the ~7 ms). The doc's
-"▶ CONTINUE HERE" block has the queue after it (T2.2b mailbox → T2.3 → T2.1) with the design
-refinements found on the way.
+the before numbers (the flag handshake is ~0.1–0.3 ms; the LED show is the ~7 ms); **T2.2b
+(row 38) replaced the `sendAllPathsCore2` flag with a generation-counted mailbox** — no request
+can be lost any more, and the probe reads the same. The doc's "▶ CONTINUE HERE" block has the
+queue after it (T2.3 → T2.1 → `REQ_SHOW_LEDS`), the design refinements found on the way, and
+**a consolidated hands-on checklist for Kevin**.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -134,7 +136,9 @@ it wasn't this session.
 
 | 36 | `dff24b3` | **T1.10: LED-dump mode off core 1.** The `dumpLEDs()` block in `loop1()` (a USB CDC writer on the non-USB core — the documented wedge family) is gone; core 1 raises `ledDumpFrameReady` after each shown frame and a new inner-set `LedDumpService` (NORMAL, 10 ms) on core 0 draws the terminal picture: every `dumpLEDrate` (250 ms) when a fresh frame is there, at least every 1 s, skipped while `core2busy`. Inner so the picture keeps updating through probe mode / menus / MicroPython scripts as it did | builds ×3; `R!` on port 1: dumps every ~340 ms idle and through a 2.4 s modal MicroPython script (48 KB); `serial_1.function = leds` + port 3 held open: 60 KB in 4 s on USBSer1, port 5 alive, config restored; `X`: `LedDump NORM* 10000` avg 2.6 ms/dump, max 52 ms; HIL 7/7; `test_infra_paths` 24/24 |
 
-| 37 | _next commit after `dff24b3`_ | **T2.2a: tap→crossbar→LEDs latency probe** (`src/XbarLatency.h/.cpp`, section F). Stamps: tap (probeMode commit), req (`sendAllPathsCore2` written, 3 sites), pickup (top of `sendPaths`), sendDone (end of `sendPaths`), show (first `leds.show()` after a send); last/max/n per segment in `X`; `X!` resets. Instrumentation only | builds ×3; before numbers over 40 REPL routing ops ×2: req→pickup ~100–200 µs (max 0.3 / 2.2 ms), pickup→send ~40–50 µs, send→show ~7.1 ms (max ~10), req→show ~7.3 ms (max 10–12); tap→req n=0 (needs a real tap); HIL 7/7; `test_infra_paths` 24/24 |
+| 37 | `de297c5` | **T2.2a: tap→crossbar→LEDs latency probe** (`src/XbarLatency.h/.cpp`, section F). Stamps: tap (probeMode commit), req (`sendAllPathsCore2` written, 3 sites), pickup (top of `sendPaths`), sendDone (end of `sendPaths`), show (first `leds.show()` after a send); last/max/n per segment in `X`; `X!` resets. Instrumentation only | builds ×3; before numbers over 40 REPL routing ops ×2: req→pickup ~100–200 µs (max 0.3 / 2.2 ms), pickup→send ~40–50 µs, send→show ~7.1 ms (max ~10), req→show ~7.3 ms (max 10–12); tap→req n=0 (needs a real tap); HIL 7/7; `test_infra_paths` 24/24 |
+
+| 38 | _next commit after `de297c5`_ | **T2.2b: the core-1 request mailbox, `REQ_SEND_PATHS`** (`src/CoreMailbox.h/.cpp`, `core1req::`): two slots (`REQ_SEND` with sticky `SEND_CLEAN`; `REQ_BYPASS` = the old "3"), pending bits + request/done generations under a fixed SIO spinlock (OS2 — core 1 launches before `setup()`, so nothing can be claimed safely); `sendAllPathsCore2` deleted everywhere; `refreshConnections` waits on its generation, `sendPaths()` no longer zeroes a flag at its end (that erased a request landing mid-send), `waitCore2()` = `core2busy || !allIdle()` with the same 25 ms bound; call sites untouched; `X` shows the mailbox | builds ×3; latency probe same-or-better (req→pickup ~0.1–0.2 ms, send→show ~6–8 ms); 200-op REPL routing soak: 0 WARNINGs, mailbox idle after; wavegen-pending check: the send stays posted while streaming (`bypass bits 0x1 … busy`) and lands on `wavegen_stop()` (`req→pickup 7.68 s`); HIL 7/7; `test_infra_paths` 24/24 |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

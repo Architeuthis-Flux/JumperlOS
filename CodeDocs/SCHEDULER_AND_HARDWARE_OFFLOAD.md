@@ -20,12 +20,56 @@
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
-`dff24b3` (T1.10, row 36), and **T2.2a — the tap→crossbar→LEDs latency probe** (the commit
-after `dff24b3`, `DEV_MERGE_HANDOFF.md` row 37 — hash with the next commit). **The board is
-flashed with HEAD.** **Tier 1 is complete. Next: T2.2b** (the core-1 mailbox with
-`REQ_SEND_PATHS` only, `waitCore2()` on `doneGen` in place — section D's migration step 2; the
-probe below is its gate: same-or-better); the watchdog *enable* is a separate decision on the
-T1.6 numbers (design sketched there), not part of the queue as approved.
+`dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), and **T2.2b — the
+core-1 mailbox, `REQ_SEND_PATHS`** (the commit after `de297c5`, `DEV_MERGE_HANDOFF.md` row 38 —
+hash with the next commit). **The board is flashed with HEAD.** **Next: T2.3** (CH446Q
+DMA→FIFO + ISR chip list, non-blocking `sendPaths` — section C2a; the latency probe and
+`test_infra_paths` + a 500-rebuild soak are its gate) — then T2.1 (ADC ring), then the second
+mailbox step `REQ_SHOW_LEDS` (section D order: `showLEDsCore2` has nine writers in probeMode
+alone; do it as its own commit after T2.3/T2.1, or when Kevin wants it). The watchdog *enable*
+is a separate decision on the T1.6 numbers (design sketched there), not part of the queue as
+approved. **A consolidated "Kevin's hands-on checklist" is at the end of this block.**
+
+**T2.2b — what was built (section D, migration step 2).** `src/CoreMailbox.h/.cpp`, namespace
+`core1req`: two slots — `REQ_SEND` (bits `SEND_PATHS`, `SEND_CLEAN`; a clean is sticky, never
+downgraded) and `REQ_BYPASS` (the old "3": send now, no clean, no waiter) — each with pending
+bits, a request generation and a done generation, updated under a **fixed SIO spinlock**
+(`PICO_SPINLOCK_ID_OS2`; fixed rather than claimed because arduino-pico launches core 1 *before*
+`setup()`, so there is no safe place to claim one, and a fixed instance needs no init — the same
+reasoning the OG's atomic helper uses for OS1). `post()` ORs bits in and returns the generation
+to wait for; `take()` clears bits only when the work follows (a `pending()` peek is not a
+take); `complete(gen)` moves the done generation; `isDone(gen)`, `idle(slot)`, `allIdle()`. The
+locked regions are a few loads/stores; the core-1 side is RAM-resident next to `sendPaths()`.
+**`sendAllPathsCore2` is deleted** (Commands.cpp, its two externs, every reader/writer):
+`refreshConnections` posts `SEND` (+`CLEAN`) and waits on its generation (same 1 s bound, same
+"leave it pending while wavegen streams" rule, same WARNING text minus the flag name);
+`refreshLocalConnections`, `fastRefresh` and FakeGpio's three sites post `BYPASS`; the LED
+brightness menu's re-send posts `SEND`; `refreshBlind` (no callers) posts+takes in step;
+core 1 takes `BYPASS` in `loop1()`'s `pauseCore2` spin and at the top of `core2stuff()` (still
+under the 1 ms `core_sync` try — the request stays posted if the try fails), and takes `SEND`
+in `core2stuff()`'s main branch (`sendPaths(clean = CLEAN bit)`), completing after each;
+`sendPaths()` **no longer zeroes anything at its end** (that zeroing erased a request that
+landed mid-send — the hazard the doc named); `waitCore2()` waits on `core2busy ||
+!allIdle()` with the same 25 ms proceed-anyway; RouteSafety's `fastConnectPath` and
+NetVoltageScan's "a refresh is pending" checks use `!allIdle()`; the core-1 LED gate uses
+`allIdle()`. Call sites of `waitCore2()` untouched. `X` prints the mailbox state (bits / req /
+done per slot, idle/busy).
+
+**T2.2b — verified:** builds ×3; **latency probe same-or-better** (40 REPL ops ×2, after vs
+before): req→pickup last 99 / 192 µs, max 1.6 / 0.9 ms (before 104 / 171 µs, max 0.3 / 2.2 ms);
+pickup→send ~40 µs (same); send→show 5.6–8.5 ms, max 10.2–10.4 ms (before ~7.1, max ~10);
+req→show max 10.8–11.5 ms (before 10.4–12.4); **200-op routing soak** (5 × 20 connects + 20
+disconnects from the REPL, 6.6 s): **0 WARNING lines** on port 1, mailbox idle after (bypass
+req 281 = done 281), netlist empty; **wavegen-pending check:** `wavegen_start(1)` →
+`connect(1,5)` → `X` shows `bypass bits 0x1 req 282 done 281 (busy)` while streaming →
+`wavegen_stop()` → `bits 0x0 done 282 (idle)`, `req→pickup last 7 684 589 µs` = the streaming
+interval — the send landed the moment streaming stopped, exactly as before; **HIL 7/7**;
+`test_infra_paths` 24/24; mailbox idle after the whole suite (send 32/32, bypass 623/623). No
+hands-on item beyond "routing feels the same" (nothing user-visible changed by design).
+
+**T2.2b files:** `src/CoreMailbox.h/.cpp` (new), `src/Commands.cpp/.h`, `src/CH446Q.cpp`,
+`src/main.cpp`, `src/FakeGpio.cpp`, `src/NetVoltageScan.cpp`, `src/routing/RouteSafety.cpp`,
+`src/SingleCharCommands.cpp`, `src/JumperlessDefines.h`, the rebuilt `firmware.uf2`.
 
 **T2.2a — what was built (section F's "tap→crossbar latency probe", instrumentation only).**
 `src/XbarLatency.h/.cpp`: five stamps — `tap` (probeMode accepts a tap and commits it, right
@@ -432,9 +476,10 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ ~~T1.10~~ ~~T2.2a (probe)~~ (landed
-— see the top of this block; Tier 1 done) → **T2.2b** (mailbox) → T2.3 → T2.1. (The watchdog
-*enable* is its own decision, on the T1.6 numbers.)
+**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ ~~T1.10~~ ~~T2.2a (probe)~~
+~~T2.2b (mailbox, `REQ_SEND_PATHS`)~~ (landed — see the top of this block) → **T2.3** → T2.1 →
+T2.2c (`REQ_SHOW_LEDS`, when wanted). (The watchdog *enable* is its own decision, on the T1.6
+numbers.)
 
 **Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
 with the four deviations and the ConfigSave/SlotManager correction recorded at the top of this block):**
@@ -490,6 +535,39 @@ to reflect live values. Add each `DEV_MERGE_HANDOFF.md` row with a
 placeholder in the item's own commit and put the real hash in with the *next* commit (a
 `--amend` changes the hash — row 26 says `73aee5c` and should say `3fc5c57`; fix it in the
 T1.8 commit).
+
+### Kevin's hands-on checklist (everything the 2026-08-17 commits left for your hands, in one place)
+
+Each item is committed and individually `git revert`-able; nothing is pushed. `X` on port 1 (or
+port 7) is the instrument for most of them.
+
+1. **Switch flip mid-probe-session (row 31, `2761825`)** — open a probe session, flip the DPDT
+   switch, keep tapping: the pads should re-scale within ~1 s (the classifier now runs inside
+   the loop; the LED shows the new position's idle pattern on the flip). With
+   `` `[debug] probe_switch_stats = 1 `` you see the `[switch]` lines during the session.
+2. **Probe feel and menu feel (T1.4 `e3d4d36`, T1.5 `545b7e6`)** — tap, connect, clear,
+   double-tap undo, the click menu, the pad menus, the REPL: nothing should feel different.
+   New since T1.5: with an Arduino on the header, **the UART passthrough keeps working while
+   you probe or hold a menu open** (it used to stop).
+3. **Help and latency in your terminal / the app (T1.7 `b8d00d9`)** — `help`, `help probe`,
+   `x?` (must NOT clear the board any more), `m?`, `h`, `i?` in both modes; commands from the
+   app (line mode) should answer ~100 ms sooner. If a `?`-suffixed sub-command of some other
+   command has stopped working, add its letter to `helpQuestionApplies()` in `main.cpp`.
+4. **The terminal LED picture (`R!`, T1.10 `dff24b3`)** — should look and refresh as before,
+   including inside probe mode / menus; after a long session `X`'s `LedDump` row and the T1.6
+   kick-gap line show whether it ever stalled core 0.
+5. **Tap→crossbar latency (T2.2a `de297c5`)** — after a few taps, `X` → `crossbar latency`:
+   the `tap->req` row (n > 0 only from real taps) is the number the doc could not take
+   hands-free; the others were measured (req→pickup ~0.1–0.3 ms, send→show ~7 ms).
+6. **The watchdog enable decision (T1.6 `574e749`)** — before enabling anything, run the
+   things the measure-only stage could not: a self-test, a calibration, a long probe session,
+   a click menu held open, an app; then `X` for the max kick gaps (the enable design that the
+   numbers so far imply is in the T1.6 block: VM-hook + WaveGen kicks, ~8 s timeout).
+7. **The two calls the doc leaves to you:** (a) ProbePads is ~65–70 % of core 0 idle
+   (36.8 ms per poll at 20 Hz — T1.4's first number): T2.1 (ADC ring, approved) or the small
+   "touch pre-check in `checkPads()`" (T1.11 candidate, changes first-detection slightly);
+   (b) the wavegen max frequency is −33 % since T1.9 (1 MHz bus); the "WaveGen raises the
+   clock only while `isRunning()`" alternative is a 2-line follow-up if you want the speed back.
 
 ### What this project is, and is not (read before judging any of the vocabulary here)
 
@@ -550,7 +628,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 7 | T1.7 B6 `loop()` cleanup | **landed** (pending Kevin hands-on: help/`x?` feel, latency in the app) | builds ×3; help/`help <cat>`/`x?`/`m?`/`h`/`?`/`i?`/`A?`/`M?` right in both modes (scripted); `n` latency line mode CR/LF 146 → 46 ms p50, char mode unchanged; `X` PortHousekeeping row; HIL 7/7; `test_infra_paths` 24/24 |
 | 8 | T1.6 watchdog, measure-only | **landed** (measure-only; the enable is a separate decision) | builds ×3; `X` kick-gap lines; idle 42 ms = the ProbePads block; slot save 1.8 s / 1.1 s; wavegen 10 s = core-1 capture; compute-bound MicroPython 5.2 s; suite 11.5 s; HIL 7/7; `test_infra_paths` 24/24 |
 | 9 | T1.10 LED-dump off core 1 | **landed** | builds ×3; `R!` dumps at ~340 ms idle and through a modal MicroPython script; `serial_1.function = leds` → 60 KB/4 s on USBSer1, board alive; `X` LedDump row; HIL 7/7; `test_infra_paths` 24/24 |
-| 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | **probe landed** (T2.2a); mailbox pending (T2.2b) | probe: builds ×3; before numbers req→pickup ~0.1–0.3 ms (max 2.2 ms), pickup→send ~50 µs, send→show ~7 ms (max 10), req→show ~7.3 ms; HIL 7/7; `test_infra_paths` 24/24 |
+| 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | **probe landed** (T2.2a); **`REQ_SEND_PATHS` mailbox landed** (T2.2b); `REQ_SHOW_LEDS` later (T2.2c) | probe: builds ×3; before numbers req→pickup ~0.1–0.3 ms (max 2.2 ms), pickup→send ~50 µs, send→show ~7 ms (max 10), req→show ~7.3 ms; HIL 7/7; `test_infra_paths` 24/24. Mailbox: same-or-better on the probe; 200-op soak 0 WARNINGs; wavegen-pending check (send lands on stop); HIL 7/7; `test_infra_paths` 24/24 |
 | 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | pending | — |
 | 12 | T2.1 always-on ADC ring | pending | — |
 
@@ -937,6 +1015,8 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 **Tier 2 — medium (1–2 days each)**
 - T2.1 C1 always-on ADC ring (`readAdc` = ring read; audio = consumer) — **approved**.
 - T2.2 D2/D3 core-1 mailbox: `REQ_SEND_PATHS` first, then `REQ_SHOW_LEDS` — **approved**.
+  **`REQ_SEND_PATHS` landed 2026-08-17 (section 0, with the latency probe); `REQ_SHOW_LEDS`
+  is its own later commit.**
 - T2.3 C2a CH446Q DMA→FIFO + ISR chip list (non-blocking `sendPaths`) — **approved**.
 - T2.4 C5 the combined GPIO 9 PIO program (needs scope time with Kevin) — **next session's opener**.
 - T2.5 C7 encoder event queue — **proposed, not built** (not approved this pass; small, low risk, no measured symptom driving it).

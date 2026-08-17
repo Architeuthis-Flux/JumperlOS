@@ -195,7 +195,9 @@ void __not_in_flash_func(sendPaths)(int clean) {
   #endif
   
   core2busy = false;
-  sendAllPathsCore2 = 0;
+  // (sendAllPathsCore2 = 0 used to sit here - it erased any request that
+  // landed during this send. Completion is the caller's core1req::complete()
+  // now, and a request that arrived meanwhile stays posted; T2.2b.)
   __dmb();  // Memory barrier so Core 0 sees the update
   xbarLatSendDone();  // latency probe: crossbar matches the netlist (XbarLatency.h)
   

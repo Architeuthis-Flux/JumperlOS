@@ -4,7 +4,7 @@
 #include <Arduino.h>    
 // Core 2 path sending signal
 // Values: 0 = idle/done, 1 = send paths, -1 = send paths with clean, 3 = immediate bypass (skip scheduler)
-extern volatile int sendAllPathsCore2;
+// sendAllPathsCore2 is gone (T2.2b): see CoreMailbox.h (core1req::REQ_SEND / REQ_BYPASS)
 extern volatile int showLEDsCore2;
 extern volatile int showProbeLEDs;
 

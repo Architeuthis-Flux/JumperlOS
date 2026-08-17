@@ -84,6 +84,7 @@ KevinC@ppucc.io
 #include "SingleCharCommands.h" // Single-character command system
 #include "KickGap.h"            // watchdog measure-only stage: would-be kick stamps (T1.6)
 #include "XbarLatency.h"        // tap->crossbar->LEDs latency probe (T2.2 gate)
+#include "CoreMailbox.h"        // core 0 -> core 1 request mailbox (T2.2b)
 #include "WaveGen.h"            // New async wavegen
 #include "externVars.h"
 
@@ -990,14 +991,15 @@ dontshowmenu:
         // DEBUG: Check Core 2 state
         if ( printLoop ) {
             extern volatile bool core2busy;
-            extern volatile int sendAllPathsCore2;
             extern volatile int showLEDsCore2;
+            uint32_t sendBits = 0;
+            core1req::snapshot( core1req::REQ_SEND, &sendBits, nullptr, nullptr );
             Serial.write( 'C' );
             Serial.write( '2' );
             Serial.write( '[' );
             Serial.print( (int)core2busy );
             Serial.write( ',' );
-            Serial.print( sendAllPathsCore2 );
+            Serial.print( (int)sendBits );
             Serial.write( ',' );
             Serial.print( showLEDsCore2 );
             Serial.write( ']' );
@@ -1458,13 +1460,16 @@ void loop1( ) {
     kickGapStamp( 1, KICK_LOOP1 );
 
     while ( pauseCore2 == true ) {
-        // Check for immediate bypass request even while paused
-        if ( sendAllPathsCore2 == 3 ) {
-            core2busy = true;
-            sendPaths( 0 ); // Send paths without cleaning
-            sendAllPathsCore2 = 0;
-            __dmb( ); // Memory barrier so Core 0 sees the update
-            core2busy = false;
+        // Check for an immediate bypass request even while paused
+        if ( core1req::pending( core1req::REQ_BYPASS ) ) {
+            uint32_t g = 0;
+            if ( core1req::take( core1req::REQ_BYPASS, &g ) ) {
+                core2busy = true;
+                sendPaths( 0 ); // Send paths without cleaning
+                core1req::complete( core1req::REQ_BYPASS, g );
+                __dmb( ); // Memory barrier so Core 0 sees the update
+                core2busy = false;
+            }
         }
         tight_loop_contents( );
         // replyWithSerialInfo( );
@@ -1589,7 +1594,6 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 #if DEBUG_DISABLE_CORE2_PROCESSING
     // Skip all Core 2 processing for crash debugging
     // If crash stops when this is enabled, the bug is in Core 2 code
-    sendAllPathsCore2 = 0;
     showLEDsCore2 = 0;
     return;
 #endif
@@ -1605,19 +1609,21 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // OPTIMIZATION: Check bypass flag BEFORE trying to acquire mutex
     // This prevents deadlock when Core 0 is waiting for Core 2 but Core 2 can't get mutex
     // The bypass flag (3) is specifically designed for fast, non-blocking operation
-    if ( sendAllPathsCore2 == 3 ) {
+    if ( core1req::pending( core1req::REQ_BYPASS ) ) {
         // For bypass mode, try to acquire mutex with very short timeout
-        // If we can't get it quickly, just skip this frame - Core 0 will retry
+        // If we can't get it quickly, just skip this frame - the request stays
+        // posted (a peek is not a take) and we retry next pass
         if ( core_sync_acquire_timeout_ms( 1 ) ) {
-            core2busy = true;
-            sendPaths( 0 ); // Send paths without cleaning (runs from RAM, no XIP issues)
-            sendAllPathsCore2 = 0;
-            __dmb( ); // Memory barrier so Core 0 sees the update
-            core2busy = false;
+            uint32_t g = 0;
+            if ( core1req::take( core1req::REQ_BYPASS, &g ) ) {
+                core2busy = true;
+                sendPaths( 0 ); // Send paths without cleaning (runs from RAM, no XIP issues)
+                core1req::complete( core1req::REQ_BYPASS, g );
+                __dmb( ); // Memory barrier so Core 0 sees the update
+                core2busy = false;
+            }
             core_sync_release( );
         } else {
-            // Couldn't get mutex quickly - clear flag so Core 0 doesn't wait forever
-            //  sendAllPathsCore2 = 0;
             __dmb( );
         }
         return; // Exit immediately after handling bypass
@@ -1676,9 +1682,11 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // were never written by any code and have been removed.
     if ( micros( ) - schedulerTimer > schedulerUpdateTime || showLEDsCore2 == 3 || showLEDsCore2 == 2 ) {
 
+        // (a pending path send goes first: the LED branch waits for the mailbox
+        // to be idle, exactly as it waited for sendAllPathsCore2 == 0)
         if ( ( ( ( showLEDsCore2 >= 1 && loadingFile == 0 ) || showLEDsCore2 == 3 ||
-                 ( swirled == 1 ) && sendAllPathsCore2 == 0 ) ) &&
-             sendAllPathsCore2 == 0 ) {
+                 ( swirled == 1 ) && core1req::allIdle( ) ) ) &&
+             core1req::allIdle( ) ) {
 
             // Capture the current value to process, but don't clear it yet
             // This prevents race conditions where menu code sets it again during processing
@@ -1877,16 +1885,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             }
             core2busy = false;
 
-        } else if ( sendAllPathsCore2 != 0 ) {
+        } else if ( core1req::pending( core1req::REQ_SEND ) ) {
             t[ 18 ] = micros( );
-            if ( sendAllPathsCore2 == 1 ) {
-                sendPaths( 0 );
-            } else if ( sendAllPathsCore2 == -1 ) {
-                sendPaths( 1 );
-            } else {
-                sendPaths( sendAllPathsCore2 );
+            uint32_t g = 0;
+            uint32_t bits = core1req::take( core1req::REQ_SEND, &g );
+            if ( bits ) {
+                // A sticky clean bit wins over any plain send it coalesced with.
+                sendPaths( ( bits & core1req::SEND_CLEAN ) ? 1 : 0 );
+                core1req::complete( core1req::REQ_SEND, g );
             }
-            sendAllPathsCore2 = 0;
             t[ 19 ] = micros( );
         } else if ( millis( ) - lastSwirlTime > 51 && loadingFile == 0 &&
                     showLEDsCore2 == 0 && core1busy == false ) {

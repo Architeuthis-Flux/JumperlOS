@@ -1,5 +1,6 @@
 #include "Commands.h"
 #include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
+#include "CoreMailbox.h"  // core 0 -> core 1 request mailbox (REQ_SEND / REQ_BYPASS; T2.2b)
 #include "AsyncPassthrough.h"
 #include <hardware/sync.h>  // For __dmb() memory barrier
 #include "CH446Q.h"
@@ -25,8 +26,8 @@
 #include "config.h"
 #include "configManager.h"
 
-volatile int sendAllPathsCore2 =
-    0; // this signals the core 2 to send all the paths to the CH446Q
+// (sendAllPathsCore2 - the 0/1/-1/3 "send all the paths to the CH446Q" flag -
+// is gone: T2.2b, CoreMailbox.h - core1req::REQ_SEND / REQ_BYPASS.)
 
 // showLEDsCore2 — cross-core "refresh the LEDs" request, decoded in core2stuff()
 // (main.cpp). The integer is a packed command:
@@ -58,14 +59,18 @@ unsigned long waitCore2() {
   // delayMicroseconds(60);
   unsigned long timeout = micros();
 
-  while (core2busy || (sendAllPathsCore2 != 0)) {
+  // "Core 2 idle": no render in progress (core2busy) and no path send pending
+  // or in flight (the mailbox's done generation has caught up with the
+  // request generation in every slot - CoreMailbox.h). Same 25 ms
+  // timeout-and-proceed as always; nothing is force-cleared.
+  while (core2busy || !core1req::allIdle()) {
     __dmb();  // Memory barrier to ensure we see latest values from Core 2
     
     if (micros() - timeout > 25000) {  // 25ms timeout
       // ponytail: timeout-and-proceed only. core2busy is core 2's status and
-      // sendAllPathsCore2 is a pending crossbar path send - force-clearing
-      // them here falsified the flag for every other waiter and cancelled
-      // path sends core 2 hadn't gotten to yet.
+      // a pending send belongs to core 2 - clearing either here falsified the
+      // state for every other waiter and cancelled path sends core 2 hadn't
+      // gotten to yet.
       break;
     }
     
@@ -184,39 +189,38 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   if (anyChipXYSuspect()) {
     clean = 1;
   }
-  if (clean == 1) {
-    sendAllPathsCore2 = -1;  // -1 means clean/reset paths first
-  } else {
-    sendAllPathsCore2 = 1;   // 1 means send paths without cleaning
-  }
-  __dmb();  // Ensure Core 2 sees the signal
+  // Ask core 2 to send the paths (mailbox: the request coalesces with any
+  // still pending, a clean is sticky, and completion is a generation - not
+  // "the flag reads 0" - so a request landing mid-send is never lost).
+  uint32_t sendGen = core1req::post(core1req::REQ_SEND,
+                                    core1req::SEND_PATHS |
+                                    (clean == 1 ? core1req::SEND_CLEAN : 0u));
   xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
 
-  // CRITICAL: Wait for core 2 to actually process the sendAllPathsCore2 signal
+  // CRITICAL: Wait for core 2 to actually process the send request
   // IMPORTANT: Must call tud_task() during wait to prevent USB disconnect!
   // While wavegen streams, core 2 sits in wavegen.service()'s blocking loop
-  // and can't process the flag at all - don't burn the full second on every
+  // and can't process the request at all - don't burn the full second on every
   // refresh; leave it pending and it sends the moment streaming stops.
   extern WaveGen wavegen;
   unsigned long pathsTimeout = millis();
-  while (sendAllPathsCore2 != 0 && (millis() - pathsTimeout < 1000) &&
-         !wavegen.isRunning()) {
-    __dmb();  // Memory barrier to see Core 2's update
+  while (!core1req::isDone(core1req::REQ_SEND, sendGen) &&
+         (millis() - pathsTimeout < 1000) && !wavegen.isRunning()) {
     delayMicroseconds(100);
     // CRITICAL: Service USB during wait to prevent disconnect
     TinyUSB_Device_Task(); // mutex-guarded pump
   }
-  t[ti++] = millis(); // t[6] = after sendAllPathsCore2 wait
+  t[ti++] = millis(); // t[6] = after the send-request wait
 
-  if (sendAllPathsCore2 != 0) {
-    // Do NOT force-clear the flag here (it used to be zeroed): that cancelled
-    // a path send core 2 hadn't gotten to yet - waitCore2()'s own comment
-    // calls this out - and it fired every time a refresh landed while wavegen
-    // was streaming or a menu held the LED branch, leaving the crossbar
-    // silently diverged from the netlist. Leave it pending: core 2 processes
-    // it on its next free pass, and waitCore2() callers already tolerate a
-    // pending send (25ms timeout-and-proceed).
-    Serial.println("WARNING: Core 2 has not processed sendAllPathsCore2 yet "
+  if (!core1req::isDone(core1req::REQ_SEND, sendGen)) {
+    // Nothing is force-cleared (the old flag used to be zeroed here, which
+    // cancelled a path send core 2 hadn't gotten to yet - waitCore2()'s own
+    // comment calls this out - and it fired every time a refresh landed while
+    // wavegen was streaming or a menu held the LED branch, leaving the crossbar
+    // silently diverged from the netlist). The request stays posted: core 2
+    // serves it on its next free pass, and waitCore2() callers already
+    // tolerate a pending send (25ms timeout-and-proceed).
+    Serial.println("WARNING: Core 2 has not processed the path send yet "
                    "(send still pending)");
   }
 
@@ -364,8 +368,7 @@ unsigned long start2 = millis();
   // OPTIMIZATION: Use Core 2 bypass for parallel execution (like fastRefresh)
   // This allows Core 0 to return immediately while Core 2 sends paths asynchronously
   // Result: ~13ms saved per refresh by eliminating synchronous wait
-  sendAllPathsCore2 = 3;  // 3 = bypass flag for immediate parallel execution
-  __dmb();  // Memory barrier so Core 2 sees the update
+  core1req::post(core1req::REQ_BYPASS, 1u);  // the old "3": send now, no clean, no wait
   xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
   
   // NOTE: We do NOT wait for Core 2 to finish here (unlike old synchronous approach)
@@ -447,21 +450,20 @@ void refreshBlind(
   // } else {
   //   sendAllPathsCore2 = 1; // disconnectFirst;
   // }
-  if (clean == 1) {
-    sendAllPathsCore2 = -1;
+  {
+    // (no callers today; kept in step with the mailbox)
+    core1req::post(core1req::REQ_SEND,
+                   core1req::SEND_PATHS | (clean == 1 ? core1req::SEND_CLEAN : 0u));
     xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
     if (rp2040.cpuid() == 1) {
-      sendPaths(sendAllPathsCore2);
-     // sendAllPathsCore2 = 0;
-    } 
-    } else {
-      sendAllPathsCore2 = 1;
-      xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
-      if (rp2040.cpuid() == 1) {
-        sendPaths(sendAllPathsCore2);
-        //sendAllPathsCore2 = 0;
+      uint32_t g = 0;
+      uint32_t bits = core1req::take(core1req::REQ_SEND, &g);
+      if (bits) {
+        sendPaths((bits & core1req::SEND_CLEAN) ? 1 : 0);
+        core1req::complete(core1req::REQ_SEND, g);
       }
     }
+  }
 
 
   chooseShownReadings();
@@ -597,8 +599,8 @@ void fastRefresh(int ledShowOption) {
   // CRITICAL OPTIMIZATION: Bypass Core 2 scheduler for immediate path sending
   // We set the flag and return immediately - Core 2 will process asynchronously
   // This enables parallelism: Core 0 can start next operation while Core 2 sends paths
-  sendAllPathsCore2 = 3;  // Special value for immediate bypass
-  __dmb();                // Memory barrier so Core 2 sees the update
+  core1req::post(core1req::REQ_BYPASS, 1u);  // the old "3": send now, no clean, no wait
+  xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
   
   // OPTIMIZATION: Skip terminal color assignment in fast refresh (saves ~380us)
   // This is only for display/debugging, not required for functionality

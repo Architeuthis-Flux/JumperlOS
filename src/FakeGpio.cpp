@@ -9,6 +9,7 @@
  */
 
 #include "FakeGpio.h"
+#include "CoreMailbox.h" // core1req (path-send requests to core 1; T2.2b)
 #include "TimeDomainMultiplexer.h"
 #include "JumperlessDefines.h"
 #include "States.h"
@@ -447,9 +448,7 @@ int fakeGpioConfigOutput(int node, int highNode, int lowNode,
 //  printPathsCompact();
 //  printChipStateArray();
 
-    extern volatile int sendAllPathsCore2;
-    sendAllPathsCore2 = 3;
-    __dmb();
+    core1req::post(core1req::REQ_BYPASS, 1u);  // send now, no clean, no wait (mailbox, T2.2b)
 
     return slot;
 }
@@ -562,11 +561,9 @@ int fakeGpioWrite(int node, int state) {
 
     updateFakeGpioOutputDisplay(slot);
 
-    extern volatile int sendAllPathsCore2;
     extern volatile bool pauseCore2;
     if (!pauseCore2) {
-        sendAllPathsCore2 = 3;
-        __dmb();
+        core1req::post(core1req::REQ_BYPASS, 1u);  // send now, no clean (mailbox, T2.2b)
         waitCore2();
     }
     return 1;
@@ -767,9 +764,7 @@ int fakeGpioConfigInput(int node, float thresholdHigh, float thresholdLow) {
 
     updateFakeGpioInputDisplay(slot);
 
-    extern volatile int sendAllPathsCore2;
-    sendAllPathsCore2 = 3;
-    __dmb();
+    core1req::post(core1req::REQ_BYPASS, 1u);  // send now, no clean, no wait (mailbox, T2.2b)
 
     return slot;
 }

@@ -9,6 +9,7 @@
  */
 
 #include "RouteSafety.h"
+#include "../CoreMailbox.h" // core1req::allIdle() (T2.2b)
 #include "CH446Q.h" // sendXYrawUnchecked
 
 #ifndef OG_JUMPERLESS
@@ -779,7 +780,7 @@ bool planFastPath(int nodeA, int nodeB, pathStruct* out) {
 int fastConnectPath(int nodeA, int nodeB, FastPathHandle* out,
                     unsigned long hopTimeoutUs) {
     if (!out || !wireTableReady) return -1;
-    if (pauseCore2 || sendAllPathsCore2 != 0) return -2;
+    if (pauseCore2 || !core1req::allIdle()) return -2;  // a path send pending / in flight
 
     out->active = false;
     pathStruct route;
