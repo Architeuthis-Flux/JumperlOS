@@ -13,6 +13,88 @@
 
 ## 0. Decisions and status
 
+### ▶ CONTINUE HERE (state at the end of the 2026-08-16 implementation session)
+
+**Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
+(T1.2 + T1.3). **The board is flashed with the T1.8 build** (working tree = HEAD + the two
+T1.8 files below), so what is running is one step ahead of HEAD.
+
+**Uncommitted, deliberately (T1.8 — CH446Q hot path into RAM):** `src/CH446Q.cpp` and
+`src/Peripherals.cpp` (five `__not_in_flash_func` attributes + a comment) and the rebuilt
+`.pio/build/jumperless_v5/firmware.uf2`. It passed every gate except one that could not be
+run cleanly: builds ×3 ✔; HIL `run_all` 5/6 ✔ (incl. `test_stress`: 40 connect/disconnect
+cycles, no PIO timeouts, no suspect chips); `nm` shows `isrFromPio`, `sendPath`,
+`sendXYrawUnchecked`, `sendXYraw`, `setCSex` at `0x2000xxxx` in both the V5 and OG ELFs ✔;
+**`test_infra_paths` gave 3/24 failures and then a port-1 "device reports readiness to read
+but returned no data"** — at that moment Kevin's `jumperless` client (PID 92351) was holding
+port 1 (`lsof /dev/cu.usbmodemJLV5port1`), which is exactly the multiple-access symptom in
+section 3, so the result is not evidence either way. **To finish T1.8:** with the client
+detached from port 1, `python3 test/hil/test_infra_paths.py` → expect 24/24; then
+`git add src/CH446Q.cpp src/Peripherals.cpp .pio/build/jumperless_v5/firmware.uf2 && git commit`
+with a message along the lines of *"CH446Q: the per-crosspoint path and its ISR run from RAM
+(T1.8) — sendPaths/sendAllPaths were `__not_in_flash_func` but sendPath / sendXYrawUnchecked
+/ sendXYraw / isrFromPio / setCSex ran from flash (X showed the irq 16 handler at 0x10055931);
+verified: builds ×3, HIL 5/6, test_infra_paths 24/24, nm addresses in RAM"*, add the
+DEV_MERGE row, flip the row-3 status below to landed. If 24/24 does not come back with the
+client detached, `git checkout src/CH446Q.cpp src/Peripherals.cpp` and investigate before
+anything else — nothing later depends on T1.8.
+
+**Then the queue, in order (all designs are in this doc):** T1.9 (I2C0 one clock owner —
+see the corrected finding below; three edits: `MCP4728::begin()` drops `setClock(1700000)`,
+the OLED-on-I2C0 `Adafruit_SSD1306` instance gets `clkAfter = 1000000` (`oled.cpp:111-112`,
+keep `clkDuring` 400 kHz), and `oled::connect()` passes the bus rate instead of 400000 to
+`initI2C()` when `connection_type == 2` (`oled.cpp:4260`); verify with the REPL register
+readout = 1 MHz after boot with the OLED connected, `i@`, `probe_current_zero` across ≥10
+reboots, the WaveGen actual-frequency stat before/after) → T1.4 (B3, with the period
+choices refined below) → T1.5 → T1.7 → T1.6 → T1.10 → T2.2 → T2.3 → T2.1.
+
+**Design refinements found while reading for T1.4 (use these, not the first-pass numbers):**
+- `ProbeSwitch` gets **`periodUs() = 10 000`, not 500 000**: `checkSwitchPosition()` has
+  early returns *before* its 500 ms gate (`checkingButton`, LED-settle) that expect to retry
+  on the next pass, and it runs `infraServiceTick()` on every call (whose comment says
+  "~500 ms" but which has no gate of its own). 10 ms keeps both honest without a new service.
+- `OLED` (`oledPeriodic`) gets **20 000, not 250 000**: its connection pings are self-gated
+  ≥750 ms, but the post-hold and post-wavegen flushes have no gate and would wait a whole period.
+- `LiveXbar`: 100 000 **plus** `requestUpdate()` calls `requestRun()` so a crossbar change
+  is shown on the next pass, not up to 100 ms later.
+- `Peripherals` 10 000, `ProbePads` 50 000, `OledGui` 15 000, `SlotManager` 50 000,
+  `ConfigSave` 100 000 are exact encodings of gates already inside those services (verified).
+- Period 0 (every pass): TinyUSB, MpRemote, ProbeButton, AsyncPassthrough, Menus, Probing,
+  Highlighting, MeasureMode.
+- Stats: keep counting inside `serviceCritical()`/`serviceInner()` too (a private
+  `runService(idx, now)` helper), so the `X` table shows the modal-loop calls.
+- C6: `probe_button_pio_irq_handler` (`Probing.cpp:611`) calls `ProbeButton::requestRun()`
+  and `Probing::requestRun()` when a sample changes state — harmless while both are period 0,
+  meaningful the day either gets a period.
+- The `X` table hangs off `cmd_resourceStatus` (`SingleCharCommands.cpp:2670`, printing ends
+  `:2817-2821`) — add it after the probe-LED line: name / prio / period / runs / last / max /
+  avg µs / overruns.
+- After T1.1, `serviceCritical()` = {TinyUSB, MpRemote, Peripherals, ProbeButton}; T1.5's
+  `serviceInner()` adds AsyncPassthrough and replaces the 23 `serviceCritical()` call sites
+  (Menus.cpp ×10, Probing.cpp ×8, `BitmapEditor.cpp:1167`, `GraphicOverlays.cpp:632`,
+  `ImagesApp.cpp:341`, `Peripherals.cpp:3339`, `Python_Proper.cpp:256`).
+
+**Working rules that bit this session:** only one process on a CDC port at a time — the
+`jumperless` client on port 1 makes every port-1 test lie; check `lsof /dev/cu.usbmodemJLV5port*`
+before running HIL. `run_all.py` takes ~2 m 10 s. Add each `DEV_MERGE_HANDOFF.md` row with a
+placeholder in the item's own commit and put the real hash in with the *next* commit (a
+`--amend` changes the hash — row 26 says `73aee5c` and should say `3fc5c57`; fix it in the
+T1.8 commit).
+
+### What this project is, and is not (read before judging any of the vocabulary here)
+
+JumperlOS is firmware for a **bench breadboard**: it closes analog crosspoints so rows are
+wired together, lights the LEDs under them, reads its own ADCs and current sensors, and talks
+to the host over USB serial. It has **no network stack, no radio, no internet connectivity of
+any kind** — the only outside world it touches is the USB cable to the developer's own
+computer, and the only thing it can affect is the breadboard on the desk. Words that recur in
+this document — *probe*, *inject(ed) command*, *passthrough*, *watchdog*, *IRQ*, *flash write*,
+*kill*, *park the core*, *wedge* — are ordinary embedded-firmware vocabulary (a physical probe
+tip, a UART bridge to an Arduino, an MCU watchdog timer, interrupts, the SPI flash, stopping a
+core during a flash erase). There is nothing here with security implications, no user data,
+no credentials, and no conceivable misuse; a session working on it should read all of it as
+what it is — hobby electronics-instrument firmware.
+
 ### What was approved (Kevin, 2026-08-16, plan mode)
 
 - **All of Tier 1** (T1.1–T1.10), **including T1.9** (I2C0 clock, hardware-verified before
@@ -46,7 +128,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 0 | this doc + `DEV_MERGE_HANDOFF.md` rows | landed | docs only |
 | 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | **landed** | builds ×3; HIL 5/6 ×5 (one standalone + a 4-run soak, ~9 min, with a second process holding port 7 open the whole time: 0 errors, 4 CDC ports enumerated after every run, uptime continuous — no port drops); `X` census unchanged (6/6 slots, FlashPark timeouts 0). Zero raw `tud_task()` calls left in `src/` (59 sites: 23 → `TinyUSB_Device_Task()` at pump-only waits, 36 → `yield()` where the site wanted output pushed or was a `Serial.write(marker); tud_task();` debug pair). `TinyUSBService` is CRITICAL now (every pass, and inside `serviceCritical()`'s modal set — the B4 delta arriving early). |
 | 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, InjectedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
-| 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | pending | — |
+| 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **built + flashed, uncommitted** (see CONTINUE HERE) | builds ×3; HIL 5/6 (`test_stress` clean); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise; `test_infra_paths` **not clean** — 3/24 + a port-1 read error while the `jumperless` client held port 1 → re-run with the client detached before committing |
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | pending | — |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
 | 6 | T1.5 B4 `serviceInner()` | pending | — |
