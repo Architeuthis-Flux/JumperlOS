@@ -2448,8 +2448,11 @@ restartProbingNoPrint:
         // a session must be seen here, not when the session ends: the same
         // classifier the service runs, on its own 500 ms gate (its early-outs
         // - button held, LED settling, touch veto - all still apply), minus
-        // the infra tick (a nudge is a crossbar rebuild; not mid-session).
-        classifySwitchPosition( );
+        // the infra tick (a nudge is a crossbar rebuild; not mid-session) -
+        // and, in a session, deciding only on AGREEMENT of both detectors
+        // (see classifySwitchPosition: the session's LED patterns fool the
+        // current detector, a needle on a hot row fools the tip sense).
+        classifySwitchPosition( true );
         // Detector-A-only tracking at 250 ms, agree mode only (see definition).
         checkSwitchPositionFast( );
 
@@ -5226,7 +5229,20 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 // (probe_max vs probe_max_measure*) follows switchPosition, so a flip during
 // a probe session used to leave every pad reading scaled for the wrong
 // position until the session ended (Kevin, 2026-08-17).
-int Probing::classifySwitchPosition( ) { // 0 = measure, 1 = select
+//
+// inSession (probeMode's loop): the position may only change on AGREEMENT of
+// the two detectors. The legacy B-only verdict is calibrated against the idle
+// LED signatures (select idle ~1.4 mA); a session shows the connect / remove
+// / net-colour patterns, whose draw sits in or below the dead band, so B says
+// MEASURE while the switch is in SELECT (seen on hardware the same day: A:L
+// B:M -> MEASURE, then the measure pattern it lit draws 0.2-0.9 mA in SELECT
+// and the legacy MEASURE->SELECT rule (> high) never fires again - a false
+// verdict that latches past the session). And A alone is fooled by the needle
+// resting on a driven-high row, which is exactly what happens in a session,
+// so no "adopt A after N disagreements" tiebreak either. Agreement misses at
+// most a MEASURE->SELECT flip while the pattern is dim (B has no opinion);
+// the idle classifier catches it within a check once the session ends.
+int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = select
 
     // Timing: only sample at a fixed interval.
     static unsigned long last_check_millis = 0;
@@ -5396,24 +5412,29 @@ int Probing::classifySwitchPosition( ) { // 0 = measure, 1 = select
     // Shadow / agreement verdict: 0 M, 1 S, -1 hold.
     static int s_disagreeRun = 0;
     int shadow = -1;
-    if ( detA >= 0 && detB >= 0 && detB <= 1 && detA == detB ) {
+    const bool agreeNow = ( detA >= 0 && detB >= 0 && detB <= 1 && detA == detB );
+    if ( agreeNow ) {
         shadow = detA;
         s_disagreeRun = 0;
     } else if ( detA >= 0 || detB >= 0 ) {
         s_disagreeRun++;
-        if ( s_disagreeRun >= 4 && detA >= 0 ) {
+        // In a session no tiebreak: A alone is what a needle on a hot row fools.
+        if ( s_disagreeRun >= 4 && detA >= 0 && !inSession ) {
             shadow = detA;
         }
     }
 
     bool changed = false;
-    if ( agreeMode ) {
+    if ( agreeMode || inSession ) {
         // -------- agreement classifier decides --------
         // Dark-LED heal: SELECT position, INA/blink says MEASURE, tip says
         // SELECT - the LED chip may have reset dark. Re-send the idle pattern
         // once per disagreement run so B can recover; the position holds.
-        if ( switchPosition == 1 && detA == 1 && detB == 0 && s_disagreeRun == 1 &&
-             showProbeLEDs == 0 ) {
+        // Not in a session: the probe LED is the session's (its patterns are
+        // why B says MEASURE there), and re-lighting the idle pattern would
+        // stomp it.
+        if ( !inSession && switchPosition == 1 && detA == 1 && detB == 0 &&
+             s_disagreeRun == 1 && showProbeLEDs == 0 ) {
             showProbeLEDs = ( lastProbeLEDs == 7 ) ? 7 : 4;
         }
         if ( shadow >= 0 && shadow != switchPosition ) {
@@ -5507,7 +5528,7 @@ int Probing::classifySwitchPosition( ) { // 0 = measure, 1 = select
 
     if ( jumperlessConfig.debug.probe_switch_stats ) {
         printProbeSwitchStats( swSource, current_mA, adc7V, detA, detB, blinkPct,
-                               shadow, agreeMode, switchPosition, changed );
+                               shadow, agreeMode || inSession, switchPosition, changed );
         // (printProbeSwitchStats flushes; no unconditional flush on the hot
         // path - it stalled this service on the USB CDC buffer every check.)
     }

@@ -369,8 +369,10 @@ public:
     // service (and the calibration app / MicroPython) call.
     int checkSwitchPosition(void);
     // The classifier alone (500 ms self-gated): also called from probeMode()'s
-    // loop, where the infra tick must not run (see the definition).
-    int classifySwitchPosition(void);
+    // loop with inSession = true, where the infra tick must not run and the
+    // position may only change on agreement of both detectors (see the
+    // definition for why).
+    int classifySwitchPosition(bool inSession = false);
     // Detector-A-only position tracking for probeMode's blocking loop
     // (agree mode only; see the definition).
     void checkSwitchPositionFast(void);

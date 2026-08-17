@@ -21,9 +21,9 @@
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
 `dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), `3f02a14` (T2.2b, the
-mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), and this docs commit
-(row 40 — the T2.1 analysis below; hash with the next commit). **The board is flashed with
-`9db4675`.** **Next: T2.1 — but read the analysis first; it wants Kevin's hands in the loop,
+mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a4806` (docs, row
+40), and the in-session switch classifier fix (the commit after `38a4806`, row 41 — hash with
+the next commit; see "Side quest 2, follow-up" below). **The board is flashed with HEAD.** **Next: T2.1 — but read the analysis first; it wants Kevin's hands in the loop,
 so it was deliberately NOT started autonomously.** Then T2.2c (`REQ_SHOW_LEDS`). The watchdog
 *enable* is a separate decision on the T1.6 numbers. **A consolidated "Kevin's hands-on
 checklist" is at the end of this block.**
@@ -424,6 +424,35 @@ paste's tail) reaches the board one keystroke late (`os.read(sys.stdin.fileno(),
 the firmware reader tolerates it (the user's Enter flushes the tail and terminates). (2) The
 app's line mode sends each line with **no terminator**, so pastes cannot work there by
 construction — interactive mode is the paste path.
+
+**Side quest 2, follow-up (Kevin, later the same day: "the probe switch seems to be missing
+reads, or at least incorrectly assuming it's in measure mode when it's not"): fixed in the
+commit after `38a4806` (row 41).** The in-session classifier decided by the legacy B-only rule,
+which is calibrated against the *idle* LED signatures (select idle ~1.4 mA > high 1.2); a
+session shows the connect / remove-fade / net-colour patterns, whose draw sits in or below the
+dead band, so B said MEASURE while the switch was in SELECT, the classifier flipped, lit the
+measure pattern (green), and — measured on Kevin's board right after his report, at idle:
+`[switch] ina 0.21–0.89 mA A:L B:M shadow:S -> MEASURE` for check after check — the measure
+pattern draws 0.2–0.9 mA in SELECT position, so the legacy MEASURE→SELECT rule (> 1.2 mA)
+never fires again and the false verdict **latches past the session** until something
+brightens the LED (it recovered at 1.86 mA). Detector A (tip sense) was right the whole time
+(`A:L`, `shadow:S`) — this is exactly the case the agreement classifier was built for. Fix:
+`classifySwitchPosition(bool inSession)` — in a session the position may change **only on
+agreement of both detectors** (A == B), no B-only verdict and no "adopt A after 4
+disagreements" tiebreak (a needle resting on a driven-high row is exactly what fools A in a
+session), and no dark-LED heal (the LED is the session's). Outside a session nothing changed
+(legacy decides unless `probe_switch_agree`). What agreement gives up: a MEASURE→SELECT flip
+mid-session while the pattern is dim is not seen until the session ends (B has no opinion);
+the idle classifier catches it within a check. Verified: idle classifier unchanged (`A:H B:M
+-> MEASURE`, then Kevin flipped, `A:L B:S -> SELECT (CHANGED)` — both detectors agreeing in
+both states); HIL 7/7 (a first run had two transient "non-OK raw REPL status" failures in
+`test_routing`/`test_config` while Kevin was handling the board — both 5/5 and 31/31
+standalone, and the second full run 7/7); `test_infra_paths` 24/24. **Kevin:** flip the
+switch mid-session again — SELECT→MEASURE should now be seen (both detectors agree in
+MEASURE: tip held high, ~0 mA), MEASURE→SELECT may wait for the session to end if the LED
+pattern is dim; and if the idle classifier ever latches MEASURE while `A:L`, that is the
+legacy rule — `` `[debug] probe_switch_agree = 1 `` is the promotion path your probe handoff
+describes.
 
 **Side quest 2 (Kevin's note, 2026-08-17): the switch classifier runs inside probe mode.**
 "Since we're applying a different scaling depending on the switch position, if we hit the
