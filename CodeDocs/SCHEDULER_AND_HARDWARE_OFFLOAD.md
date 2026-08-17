@@ -16,28 +16,18 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16 implementation session)
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
-(T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below). **The board is flashed with the T1.8 build** (working tree = HEAD + the two
-T1.8 files below), so what is running is one step ahead of HEAD.
+(T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below), T1.8
+(see the row-3 hash in `DEV_MERGE_HANDOFF.md`). **The board is flashed with the T1.8 build** = HEAD.
 
-**Uncommitted, deliberately (T1.8 — CH446Q hot path into RAM):** `src/CH446Q.cpp` and
-`src/Peripherals.cpp` (five `__not_in_flash_func` attributes + a comment) and the rebuilt
-`.pio/build/jumperless_v5/firmware.uf2`. It passed every gate except one that could not be
-run cleanly: builds ×3 ✔; HIL `run_all` 5/6 ✔ (incl. `test_stress`: 40 connect/disconnect
-cycles, no PIO timeouts, no suspect chips); `nm` shows `isrFromPio`, `sendPath`,
-`sendXYrawUnchecked`, `sendXYraw`, `setCSex` at `0x2000xxxx` in both the V5 and OG ELFs ✔;
-**`test_infra_paths` gave 3/24 failures and then a port-1 "device reports readiness to read
-but returned no data"** — at that moment Kevin's `jumperless` client (PID 92351) was holding
-port 1 (`lsof /dev/cu.usbmodemJLV5port1`), which is exactly the multiple-access symptom in
-section 3, so the result is not evidence either way. **To finish T1.8:** with the client
-detached from port 1, `python3 test/hil/test_infra_paths.py` → expect 24/24; then
-`git add src/CH446Q.cpp src/Peripherals.cpp .pio/build/jumperless_v5/firmware.uf2 && git commit`
-with a message along the lines of *"CH446Q: the per-crosspoint path and its ISR run from RAM
-(T1.8) — sendPaths/sendAllPaths were `__not_in_flash_func` but sendPath / sendXYrawUnchecked
-/ sendXYraw / isrFromPio / setCSex ran from flash (X showed the irq 16 handler at 0x10055931);
-verified: builds ×3, HIL 5/6, test_infra_paths 24/24, nm addresses in RAM"*, add the
-DEV_MERGE row, flip the row-3 status below to landed. If 24/24 does not come back with the
-client detached, `git checkout src/CH446Q.cpp src/Peripherals.cpp` and investigate before
-anything else — nothing later depends on T1.8.
+**T1.8 landed** after the interrupted gate was understood: the 3/24 `test_infra_paths` failures
+reproduced with the client detached and on the pre-T1.1 code too — they were **board state, not
+firmware**: DAC0 had been left at 2.0 V (outside the feed's [2.80, 3.90] V "unclaimed" window,
+`InfraPaths.cpp:199-209`), so the firmware correctly treated it as user-claimed and, with all
+8 GPIOs claimed, had no viable candidate (`-> (none)`). `dac_set(0, 3.33, True)` from the REPL
+put the feed back on DAC0 and the test went 24/24 on the T1.8 build. **Gotcha for the doc's
+section 3:** `test_infra_paths` assumes DAC0 is inside the window; a stray `dac_set` (a routing
+test, a REPL session) leaves it non-viable and the test fails 3/24 with `(none)` — check `i@`
+shows `probe_power -> DAC0` before blaming the code.
 
 **Then the queue, in order (all designs are in this doc):** T1.9 (I2C0 one clock owner —
 see the corrected finding below; three edits: `MCP4728::begin()` drops `setClock(1700000)`,
@@ -133,7 +123,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 0 | this doc + `DEV_MERGE_HANDOFF.md` rows | landed | docs only |
 | 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | **landed** | builds ×3; HIL 5/6 ×5 (one standalone + a 4-run soak, ~9 min, with a second process holding port 7 open the whole time: 0 errors, 4 CDC ports enumerated after every run, uptime continuous — no port drops); `X` census unchanged (6/6 slots, FlashPark timeouts 0). Zero raw `tud_task()` calls left in `src/` (59 sites: 23 → `TinyUSB_Device_Task()` at pump-only waits, 36 → `yield()` where the site wanted output pushed or was a `Serial.write(marker); tud_task();` debug pair). `TinyUSBService` is CRITICAL now (every pass, and inside `serviceCritical()`'s modal set — the B4 delta arriving early). |
 | 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
-| 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **built + flashed, uncommitted** (see CONTINUE HERE) | builds ×3; HIL 5/6 (`test_stress` clean); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise; `test_infra_paths` **not clean** — 3/24 + a port-1 read error while the `jumperless` client held port 1 → re-run with the client detached before committing |
+| 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **landed** | builds ×3; HIL 5/6; `test_infra_paths` 24/24; `X`: `irq 16` handler `0x20000835` (was `0x10055931` in flash); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise |
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | pending | — |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
 | 6 | T1.5 B4 `serviceInner()` | pending | — |
@@ -242,7 +232,11 @@ auto-skips (reports PASS) without an OpenOCD session on :4444.
 **Config keys** over port 1 in **bracket** form — `` `[dacs] probe_power_source = 1 `` — or
 dot form `config.section.key = value`. Bare `` `dacs.probe_power_source = 1 `` is not parsed.
 
-**Gotcha:** a stale process holding port 1 gives "device reports readiness to read but
+**Gotcha (state):** `test_infra_paths` needs DAC0 inside the feed window ([2.80, 3.90] V) — a stray
+`dac_set` leaves the feed on GPIO / `(none)` and the test fails 3/24; `dac_set(0, 3.33, True)`
+resets it. Check `i@` says `probe_power -> DAC0` first.
+
+**Gotcha (ports):** a stale process holding port 1 gives "device reports readiness to read but
 returned no data". Not a board fault. In `run_all.py` it also appears when a previous file's
 deferred config save is still in its flash window as the next file opens the port — suspect
 that first if a suite failure doesn't reproduce standalone. Only one process on a port at a

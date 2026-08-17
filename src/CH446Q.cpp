@@ -51,7 +51,15 @@ chipXYBitfield lastChipXY[12];
 // OPTIMIZATION: Track which chips have connections to avoid scanning empty chips
 static bool chipHadConnections[12] = {false};
 
-void isrFromPio(void) {
+// RAM-resident: this ISR fires once per crosspoint (shared PIO0_IRQ_1, core 1's
+// NVIC) and the SM stalls until it runs - an XIP miss here is a stall on the
+// crossbar send, and during a core-0 flash write it would fault. Same for the
+// per-crosspoint path below (sendPath / sendXYrawUnchecked / sendXYraw) and
+// setCSex in Peripherals.cpp: sendPaths/sendAllPaths were already
+// __not_in_flash_func but everything they called per crosspoint ran from flash
+// (X showed the irq 16 handler at 0x1005xxxx). See
+// CodeDocs/SCHEDULER_AND_HARDWARE_OFFLOAD.md C2-0.
+void __not_in_flash_func(isrFromPio)(void) {
 
   // delayMicroseconds(500);
   setCSex(chipSelect, 1);
@@ -959,7 +967,7 @@ void __not_in_flash_func(findDifferentPaths)(void) {
   updateChipStateArray();
   }
 
-void sendPath(int i, int setOrClear, int newOrLast) {
+void __not_in_flash_func(sendPath)(int i, int setOrClear, int newOrLast) {
 
   uint32_t chAddress = 0;
 
@@ -989,7 +997,7 @@ void sendPath(int i, int setOrClear, int newOrLast) {
   
   }
 
-void sendXYrawUnchecked(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
+void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
   uint32_t chAddress = 0;
   chipSelect = chip;
 
@@ -1061,7 +1069,7 @@ void sendXYrawUnchecked(int chip, int x, int y, int setOrClear, unsigned long ti
   }
 }
 
-int sendXYraw(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
+int __not_in_flash_func(sendXYraw)(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
 #if !defined(OG_JUMPERLESS)
   if (setOrClear == 1 && sendXYrawCheckEnabled &&
       chip >= 0 && chip < 12 && x >= 0 && x < 16 && y >= 0 && y < 8) {

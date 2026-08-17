@@ -1632,7 +1632,8 @@ uint16_t chipMask[ 16 ] = {
     0b0001000000000000, 0b0010000000000000, 0b0100000000000000,
     0b1000000000000000 };
 
-void setCSex( int chip, int value ) {
+// RAM-resident: called from the CH446Q per-crosspoint ISR (isrFromPio) - see CH446Q.cpp.
+void __not_in_flash_func( setCSex )( int chip, int value ) {
 
     if ( chip > 11 ) {
         return;

@@ -53,17 +53,15 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16, rows 24–27): see
+**Scheduler / hardware offload (2026-08-16, rows 24–28): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
 approved item as it lands (one commit each). One finding was corrected on the way in:
 **I2C0 runs at 400 kHz on this board, not 1.7 MHz** — the OLED on I2C0 (rev 7) owns the
-clock after `oled.init()`; T1.9 gives the bus one owner at 1 MHz. **Where it stopped:** T1.1
-and T1.2/1.3 landed; T1.8 (CH446Q hot path into RAM) is built, **flashed on the board, and
-uncommitted** — its last gate (`test_infra_paths` 24/24) could not be run cleanly because the
-`jumperless` client was holding port 1. The doc's "▶ CONTINUE HERE" block has the exact
-finish-and-commit steps and the queue after it (T1.9 → T1.4 → T1.5 → T1.7 → T1.6 → T1.10 →
-T2.2 → T2.3 → T2.1) with the design refinements found on the way.
+clock after `oled.init()`; T1.9 gives the bus one owner at 1 MHz. **Where it is:** T1.1,
+T1.2/1.3 and T1.8 landed; the doc's "▶ CONTINUE HERE" block has the queue after it (T1.9 →
+T1.4 → T1.5 → T1.7 → T1.6 → T1.10 → T2.2 → T2.3 → T2.1) with the design refinements found on
+the way.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -103,6 +101,7 @@ it wasn't this session.
 | 25 | `a3e58f4` | **No raw `tud_task()` anywhere in `src/`** (59 sites → `TinyUSB_Device_Task()` / `yield()`, the Adafruit port's mutex-guarded entry points; the port also pumps from its USB soft-IRQ, so a raw call could re-enter the stack); `TinyUSBService` is CRITICAL (every pass, and in the modal loops' set) instead of NORMAL (every 3rd pass) | builds ×3; HIL 5/6 ×5 incl. a 4-run soak with port 7 held open by a second process (0 errors, no port drops, uptime continuous); `X` census unchanged |
 | 26 | `3fc5c57` | Priority/comment truth (`main.cpp` registration comments, `JumperlOS.cpp` stale ID map, Highlighting 40 ms, MpRemote 8192, ProbeSwitch NORMAL); the five verified no-op services are no longer registered (TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush behind `#if USE_FILE_CACHE`); `core1request` (written, never read) deleted; `inClickMenu` is `volatile` like every other cross-core mode flag | builds ×3; HIL 5/6; `X` census unchanged |
 | 27 | `b0fd157` | **Vocabulary rename, nothing behavioural**: the "injected command / injection buffer" family is now "relayed command / relay buffer" (`RelayedCommandService`, `RelayBufferStream`, `Jerial.relayInput()`, `hasRelayedCommand`, `relay_buffer`, `DEBUG_RELAYED_COMMANDS`, `withANSI`), and comment words that read wrong out of context were reworded (steal→take over, poison→corrupt, kill→stop/break, sniff→watch, forged→simulated, attack→rise, hostile→untrusted). Datasheet excerpts left as quoted. No Python-facing API or command changed | builds ×3 |
+| 28 | `T1.8` | **CH446Q per-crosspoint path and its ISR run from RAM**: `sendPaths`/`sendAllPaths` were `__not_in_flash_func` but `sendPath` / `sendXYrawUnchecked` / `sendXYraw` / `isrFromPio` / `setCSex` ran from flash (`X` showed the irq 16 handler at `0x10055931`) | builds ×3; HIL 5/6; `test_infra_paths` 24/24 (after resetting a stray DAC0=2.0 V that made the feed non-viable — board state, reproduced on the pre-T1.1 code); `X`: irq 16 handler `0x20000835`; `nm` addresses in RAM in both ELFs |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
