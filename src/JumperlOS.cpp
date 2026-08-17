@@ -21,6 +21,7 @@
 #include "ArduinoStuff.h"   // secondSerialHandler / replyWithSerialInfo (PortHousekeepingService)
 #include "NetVoltageScan.h" // serviceNetVoltageScanDebug (PortHousekeepingService)
 #include "KickGap.h"        // would-be watchdog kick stamp in serviceInner() (T1.6)
+#include "Graphics.h"       // dumpLEDs() - LED-dump mode runs on core 0 (T1.10)
 #include "MatrixState.h"    // For net color access
 
 #ifdef USE_TINYUSB
@@ -47,6 +48,7 @@ RelayedCommandService& relayedCommandService = RelayedCommandService::getInstanc
 AsyncPassthroughService& asyncPassthroughService = AsyncPassthroughService::getInstance();
 TinyUSBService& tinyUSBService = TinyUSBService::getInstance();
 PortHousekeepingService& portHousekeepingService = PortHousekeepingService::getInstance();
+LedDumpService& ledDumpService = LedDumpService::getInstance();
 USBPeriodicService& usbPeriodicService = USBPeriodicService::getInstance();
 OLEDService& oledService = OLEDService::getInstance();
 OledGuiService& oledGuiService = OledGuiService::getInstance();
@@ -689,6 +691,44 @@ ServiceStatus PortHousekeepingService::service() {
     // Net voltage scan debug report - Serial stays on core 0, the scanner
     // runs on core 1. Self-throttled to 1 Hz.
     serviceNetVoltageScanDebug();
+    return lastStatus;
+}
+
+// LedDumpService - the terminal LED picture, drawn from core 0 (T1.10)
+LedDumpService* LedDumpService::instance = nullptr;
+
+LedDumpService& LedDumpService::getInstance() {
+    if (instance == nullptr) {
+        instance = new LedDumpService();
+    }
+    return *instance;
+}
+
+/**
+ * @brief LED-dump mode: at most every dumpLEDrate ms when core 1 has shown a
+ * fresh frame (ledDumpFrameReady), and at least every 1 s so a static picture
+ * still repaints (a cleared terminal gets it back). dumpLEDs() snapshots the
+ * pixel buffer under logoLedAccess; a frame torn by core 1 mid-render is
+ * cosmetic. Skipped while core 1 is inside a render (core2busy).
+ */
+ServiceStatus LedDumpService::service() {
+    lastStatus = ServiceStatus::IDLE;
+    extern volatile int dumpLED;
+    extern unsigned long dumpLEDTimer;
+    extern unsigned long dumpLEDrate;
+    extern volatile bool ledDumpFrameReady;
+    extern volatile bool core2busy;
+    if ( dumpLED != 1 ) {
+        return lastStatus;
+    }
+    unsigned long now = millis();
+    bool due = ( now - dumpLEDTimer > dumpLEDrate );
+    if ( due && ( ledDumpFrameReady || now - dumpLEDTimer > 1000 ) && !core2busy ) {
+        ledDumpFrameReady = false;
+        dumpLEDs();
+        dumpLEDTimer = millis();
+        lastStatus = ServiceStatus::BUSY;
+    }
     return lastStatus;
 }
 

@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–35, plus the paste fix in row 30 and
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–36, plus the paste fix in row 30 and
 the switch-classifier-in-probe-mode note in row 31): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
@@ -73,8 +73,10 @@ gone: in line mode (the app's mode) `help` works, `x?` no longer clears the boar
 CR/LF-terminated command answers ~100 ms sooner. **T1.6 measure-only landed (row 35)** — `X`
 shows the longest gap between would-be watchdog kicks per core; the numbers (compute-bound
 MicroPython 5.2 s, a wavegen stream = the whole stream on core 1, slot save 1.8 s) say the
-enable needs VM-hook and WaveGen kicks. The doc's "▶ CONTINUE HERE" block has the queue after
-it (T1.10 → T2.2 → T2.3 → T2.1) with the design refinements found on the way.
+enable needs VM-hook and WaveGen kicks. **T1.10 landed (row 36)** — the terminal LED picture is
+drawn from core 0 now (an inner-set `LedDumpService`), core 1 no longer writes USB CDC.
+**Tier 1 is complete.** The doc's "▶ CONTINUE HERE" block has the queue after it (T2.2 → T2.3
+→ T2.1) with the design refinements found on the way.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -126,7 +128,9 @@ it wasn't this session.
 
 | 34 | `b8d00d9` | **T1.7 (B6): `loop()` cleanup.** The 10 ms `secondSerialHandler()`/`replyWithSerialInfo()`/`serviceNetVoltageScanDebug()` block is `PortHousekeepingService` (NORMAL, 10 ms); the two 100 ms help-wait spins are gone — line mode decides `help` / `help <cat>` / `[cmd]?` from the completed line (**before: in line mode "help" printed the menu, "m?" the menu, and "x?" CLEARED THE BOARD — and every CR-/LF-terminated command paid the 100 ms**), char mode parks the char (`helpArmed`) and keeps servicing until the next char or the deadline; one list `helpQuestionApplies()` names the commands that own their `?` in both modes (`A?`/`a?`/`i?`/`M?` — char mode used to show the help page for `i?`/`M?`); `cmd_usbAudio` reads its sub-command via `getCommandArgs()` (in char mode "M?" used to toggle the device = USB re-enumeration); the post-command raw-Serial drain (ate multi-line pastes) is gone | builds ×3; both modes scripted over port 1: `help`, `help probe`, `x?` (bridge survives), `m?`, `h`, `?`, `i?`, `A?`, `M?` all right; `n` → netlist p50: line mode CR/LF **146 → 46 ms**, CRLF 5 → 5, char mode 4–5 unchanged (old build re-flashed for the before numbers); `X`: PortHousekeeping row at ~24 Hz; HIL **7/7**; `test_infra_paths` 24/24. **Pending Kevin hands-on:** help/`x?` feel in his terminal, latency in the app |
 
-| 35 | _next commit after `b8d00d9`_ | **T1.6 (C11) watchdog, measure-only stage.** `src/KickGap.h/.cpp`: stamps where a watchdog kick would go (top of `loop()`'s busy pass, `serviceInner()`, top of `loop1()`), the longest gap between stamps per core with the bracketing sites and time; `X` prints it, `X!` resets the maxima. **No `watchdog_enable()`.** | builds ×3; numbers (after `X!`, one blocker, `X`): idle **42 ms** core 0 (= the ProbePads block) / 4 ms core 1; config write 44 / 4 ms; slot auto-save **1.8 s / 1.1 s**; `wavegen_start(1)` 10 s → core 1 **10.0 s** (captured for the stream); compute-bound MicroPython 5 s → core 0 **5.2 s**; `time.sleep(5)` 0.2 s; `~` 1.06 s; whole `run_all.py` **11.5 s** core 0 / 1.2 s core 1; boot 353 / 60 ms. → the enable needs a kick inside the MicroPython VM hook and inside (or an exclusion for) WaveGen's core-1 stream; everything else fits an 8 s timeout ×4 margin. HIL 7/7; `test_infra_paths` 24/24 |
+| 35 | `574e749` | **T1.6 (C11) watchdog, measure-only stage.** `src/KickGap.h/.cpp`: stamps where a watchdog kick would go (top of `loop()`'s busy pass, `serviceInner()`, top of `loop1()`), the longest gap between stamps per core with the bracketing sites and time; `X` prints it, `X!` resets the maxima. **No `watchdog_enable()`.** | builds ×3; numbers (after `X!`, one blocker, `X`): idle **42 ms** core 0 (= the ProbePads block) / 4 ms core 1; config write 44 / 4 ms; slot auto-save **1.8 s / 1.1 s**; `wavegen_start(1)` 10 s → core 1 **10.0 s** (captured for the stream); compute-bound MicroPython 5 s → core 0 **5.2 s**; `time.sleep(5)` 0.2 s; `~` 1.06 s; whole `run_all.py` **11.5 s** core 0 / 1.2 s core 1; boot 353 / 60 ms. → the enable needs a kick inside the MicroPython VM hook and inside (or an exclusion for) WaveGen's core-1 stream; everything else fits an 8 s timeout ×4 margin. HIL 7/7; `test_infra_paths` 24/24 |
+
+| 36 | _next commit after `574e749`_ | **T1.10: LED-dump mode off core 1.** The `dumpLEDs()` block in `loop1()` (a USB CDC writer on the non-USB core — the documented wedge family) is gone; core 1 raises `ledDumpFrameReady` after each shown frame and a new inner-set `LedDumpService` (NORMAL, 10 ms) on core 0 draws the terminal picture: every `dumpLEDrate` (250 ms) when a fresh frame is there, at least every 1 s, skipped while `core2busy`. Inner so the picture keeps updating through probe mode / menus / MicroPython scripts as it did | builds ×3; `R!` on port 1: dumps every ~340 ms idle and through a 2.4 s modal MicroPython script (48 KB); `serial_1.function = leds` + port 3 held open: 60 KB in 4 s on USBSer1, port 5 alive, config restored; `X`: `LedDump NORM* 10000` avg 2.6 ms/dump, max 52 ms; HIL 7/7; `test_infra_paths` 24/24 |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

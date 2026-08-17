@@ -19,11 +19,40 @@
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
-`545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), and **T1.6 measure-only** (the commit
-after `b8d00d9`, `DEV_MERGE_HANDOFF.md` row 35 — hash with the next commit). **The board is
-flashed with HEAD.** **Next: T1.10** (LED-dump off core 1 — see "Then the queue"); the
-watchdog *enable* is a separate decision on the numbers below (design sketched there), not
-part of the queue as approved.
+`545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
+and **T1.10** (the commit after `574e749`, `DEV_MERGE_HANDOFF.md` row 36 — hash with the next
+commit). **The board is flashed with HEAD.** **Tier 1 is complete. Next: T2.2** (core-1
+mailbox, `REQ_SEND_PATHS` first — see "Then the queue" and section D); the watchdog *enable*
+is a separate decision on the T1.6 numbers (design sketched there), not part of the queue as
+approved.
+
+**T1.10 — what was built.** LED-dump mode (`R!`, or `serial_1/2.function = leds/oled_leds`)
+no longer writes USB CDC from core 1: the `dumpLEDs()` block in `loop1()` is gone; core 1
+only raises `ledDumpFrameReady` after a frame is shown (`core2stuff`, right after
+`leds.show()`), and a new **`LedDumpService`** on core 0 (NORMAL, `periodUs()` 10 000, **in
+the inner set**) does the dump — at most every `dumpLEDrate` (250 ms) when a fresh frame is
+there, at least every 1 s so a static picture still repaints, skipped while `core2busy`.
+Inner on purpose: the picture used to keep updating through probe mode and the menus (core 1
+did not care what core 0 was doing) and still does — first tried as part of
+`PortHousekeeping` (not inner) and the picture froze for the length of a MicroPython script;
+it costs one compare per pass while the mode is off. `dumpLEDs()` itself is unchanged (it
+snapshots the pixel buffer under `logoLedAccess`; a frame torn by core 1 mid-render is
+cosmetic — the old code had `core2busy`/`core1busy` + 2 ms of `delayMicroseconds` around it for
+the same reason).
+
+**T1.10 — verified:** builds ×3; `R!` on port 1: dumps arrive every ~340 ms (250 ms rate +
+the ProbePads quantisation), ~6.7 KB each, idle and during/after a MicroPython connect script
+(48 KB during a 2.4 s modal script — the inner-set point); `serial_1.function = leds` with
+port 3 (USBSer1) held open: 60 KB in 4 s on port 3, port 5 alive throughout, config restored
+to `passthrough` after; `X`: `LedDump NORM* 10000` (avg 2.6 ms per dump, max 52 ms — CDC
+back-pressure — 23 overruns of its 10 ms period, i.e. the dump itself is the long pole),
+`PortHousekeeping` unchanged; HIL 7/7; `test_infra_paths` 24/24. **Kevin:** the terminal LED
+view (`R!`) should look and refresh as before; if you run it for a long session, `X` after
+it (`LedDump` row, and the T1.6 kick-gap line) tells whether the dump ever stalled core 0.
+
+**T1.10 files:** `src/main.cpp` (`ledDumpFrameReady`, the flag set in `core2stuff`, the
+`loop1()` block removed, registration), `src/JumperlOS.h/.cpp` (`LedDumpService`), the
+rebuilt `firmware.uf2`.
 
 **T1.6 (C11) measure-only stage — what was built.** `src/KickGap.h/.cpp`: `kickGapStamp(core,
 site)` at the three places a watchdog kick would go — the top of `loop()`'s busy-loop pass
@@ -383,9 +412,9 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ (landed — see the top of this
-block) → **T1.10** → T2.2 → T2.3 → T2.1. (The watchdog *enable* is its own decision, on the
-T1.6 numbers.)
+**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ ~~T1.10~~ (landed — see the top
+of this block; Tier 1 done) → **T2.2** → T2.3 → T2.1. (The watchdog *enable* is its own
+decision, on the T1.6 numbers.)
 
 **Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
 with the four deviations and the ConfigSave/SlotManager correction recorded at the top of this block):**
@@ -500,7 +529,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 6 | T1.5 B4 `serviceInner()` (+ 64-bit `nextDueUs`) | **landed** (pending Kevin hands-on: probe mode / click menu / REPL feel; passthrough while probing) | builds ×3; `X` after a 3 s REPL sleep: the 4 inner-set rows (incl. AsyncPassthrough `HIGH*`) = passes + 42, non-inner rows = passes; HIL 6/7 then 7/7 (net_currents standalone 8/8 ×4); `test_infra_paths` 24/24 |
 | 7 | T1.7 B6 `loop()` cleanup | **landed** (pending Kevin hands-on: help/`x?` feel, latency in the app) | builds ×3; help/`help <cat>`/`x?`/`m?`/`h`/`?`/`i?`/`A?`/`M?` right in both modes (scripted); `n` latency line mode CR/LF 146 → 46 ms p50, char mode unchanged; `X` PortHousekeeping row; HIL 7/7; `test_infra_paths` 24/24 |
 | 8 | T1.6 watchdog, measure-only | **landed** (measure-only; the enable is a separate decision) | builds ×3; `X` kick-gap lines; idle 42 ms = the ProbePads block; slot save 1.8 s / 1.1 s; wavegen 10 s = core-1 capture; compute-bound MicroPython 5.2 s; suite 11.5 s; HIL 7/7; `test_infra_paths` 24/24 |
-| 9 | T1.10 LED-dump off core 1 | pending | — |
+| 9 | T1.10 LED-dump off core 1 | **landed** | builds ×3; `R!` dumps at ~340 ms idle and through a modal MicroPython script; `serial_1.function = leds` → 60 KB/4 s on USBSer1, board alive; `X` LedDump row; HIL 7/7; `test_infra_paths` 24/24 |
 | 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | pending | — |
 | 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | pending | — |
 | 12 | T2.1 always-on ADC ring | pending | — |
@@ -881,7 +910,8 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T1.9 C2c I2C0: one clock owner at 1 MHz (Kevin's call — approved; hardware-verify INA
   reads + wavegen + register readout). **Landed 2026-08-17 (section 0).**
 - T1.10 D `REQ_DUMP_LEDS`-lite: stop core 1 writing USB CDC in LED-dump mode (`main.cpp:1510`) —
-  move `dumpLEDs()` to core 0's 10 ms service behind a core-1 snapshot flag.
+  move `dumpLEDs()` to core 0's 10 ms service behind a core-1 snapshot flag. **Landed
+  2026-08-17 (section 0; its own inner-set `LedDumpService`, not PortHousekeeping).**
 - (done) C3 INA no-pause, C4 MCP dedupe, I2C0 rule.
 
 **Tier 2 — medium (1–2 days each)**

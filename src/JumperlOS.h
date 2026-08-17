@@ -503,6 +503,35 @@ private:
 };
 
 /**
+ * @brief LED-dump mode (R!, or serial_1/2.function 5/6): the terminal picture
+ * of the LEDs. It used to be drawn from loop1() on core 1 - a USB CDC writer
+ * on the non-USB core, the documented wedge family (T1.10). Core 1 now only
+ * raises ledDumpFrameReady after a frame is shown; this service on core 0
+ * does the dump: at most every dumpLEDrate ms when a fresh frame is there,
+ * and at least every 1 s so a static picture still repaints. In the inner set
+ * on purpose - the picture used to keep updating through probe mode and the
+ * menus (core 1 did not care what core 0 was doing) and still does; it costs
+ * nothing while the mode is off (one compare per pass).
+ */
+class LedDumpService : public Service {
+public:
+    static LedDumpService& getInstance();
+    LedDumpService(const LedDumpService&) = delete;
+    LedDumpService& operator=(const LedDumpService&) = delete;
+
+    ServiceStatus service() override;
+    const char* getName() const override { return "LedDump"; }
+    ServicePriority getPriority() const override { return ServicePriority::NORMAL; }
+    bool inInnerSet() const override { return true; }
+    uint32_t periodUs() const override { return 10000; }
+
+private:
+    LedDumpService() = default;
+    ~LedDumpService() = default;
+    static LedDumpService* instance;
+};
+
+/**
  * @brief USB periodic service - handles USB mass storage housekeeping
  * NORMAL priority. NOT REGISTERED any more: usbPeriodic() is a debug print.
  * Class kept for a later cleanup pass.
@@ -836,6 +865,7 @@ extern RelayedCommandService& relayedCommandService;
 extern AsyncPassthroughService& asyncPassthroughService;
 extern TinyUSBService& tinyUSBService;
 extern PortHousekeepingService& portHousekeepingService;
+extern LedDumpService& ledDumpService;
 extern USBPeriodicService& usbPeriodicService;
 extern OLEDService& oledService;
 extern OledGuiService& oledGuiService;

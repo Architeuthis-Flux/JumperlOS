@@ -136,6 +136,9 @@ bool startupCompletePending = false;
 volatile int dumpLED = 0;
 unsigned long dumpLEDTimer = 0;
 unsigned long dumpLEDrate = 250;
+// LED-dump mode (T1.10): core 1 only raises this after a frame is shown; the
+// terminal dump itself - USB CDC writes - runs on core 0 (PortHousekeeping).
+volatile bool ledDumpFrameReady = false;
 
 #include "FirmwareVersion.generated.h"
 
@@ -532,6 +535,7 @@ void setup( ) {
 
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
     jOS.registerService( &portHousekeepingService ); // NORMAL, 10 ms - Arduino DTR/flash detect + UART auto-connect, ENQ port-info reply, net-scan debug (was a 10 ms block in loop(); B6)
+    jOS.registerService( &ledDumpService );          // NORMAL, 10 ms, inner set - the terminal LED picture (R! / serial function 5-6), drawn on core 0 now (was loop1 on core 1; T1.10)
 
     jOS.registerService( &oledService );         // LOW - OLED connection maintenance (OLED preserved on OG: a user can wire a panel to GP18/19)
     jOS.registerService( &liveCrossbarService ); // LOW - live crossbar terminal display
@@ -1557,26 +1561,12 @@ void loop1( ) {
     // This matches the earlier move of AsyncPassthrough/secondSerialHandler off
     // Core 2 (see note above). Applies to BOTH boards.
 
-    // Check pauseCore2 before LED dump
-    if ( pauseCore2 )
-        return;
+    // (The LED-dump block that sat here - dumpLEDs() every dumpLEDrate ms from
+    // THIS core - is gone (T1.10). dumpLEDs() writes USB CDC, and USB is core
+    // 0's: the same wedge family as replyWithSerialInfo() above. Core 1 now
+    // only raises ledDumpFrameReady after a frame is shown (core2stuff);
+    // LedDumpService on core 0 does the dump.)
 
-    if ( dumpLED == 1 ) {
-
-        if ( millis( ) - dumpLEDTimer > dumpLEDrate ) {
-            if ( core1busy == false && !pauseCore2 ) {
-                core2busy = true;
-                core1busy = true;
-                delayMicroseconds( 2000 );
-                dumpLEDs( );
-                delayMicroseconds( 1000 );
-                core2busy = false;
-                core1busy = false;
-            }
-
-            dumpLEDTimer = millis( );
-        }
-    }
     // Core 2 loop timing disabled by default to prevent deadlocks
     // Enable by uncommenting and setting threshold higher (e.g., > 50000 for 50ms+)
     // unsigned long core2LoopEnd = micros( );
@@ -1852,6 +1842,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     }
                 }
                 lastForcedShow = millis( );
+                ledDumpFrameReady = true; // LED-dump mode: core 0 may dump this frame
 
                 t[ 13 ] = micros( );
 
