@@ -150,7 +150,10 @@ private:
   uint8_t _i2c_address;
   uint8_t _mcp_address_bits;
   TwoWire *_wire;
-  uint32_t _clock_hz = 1000000; // track configured I2C clock
+  uint32_t _clock_hz = 1000000; // the bus rate begin() records (I2C0_BUS_CLOCK_HZ);
+                                // only used to restore the hardware clock after
+                                // the soft-I2C address-programming path. This
+                                // driver never sets the shared bus clock itself.
   
   // Buffer for async operations (4-byte aligned for DMA)
   alignas(4) uint8_t _async_buffer[8];

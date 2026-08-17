@@ -53,16 +53,17 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16, rows 24–28): see
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
 approved item as it lands (one commit each). One finding was corrected on the way in:
 **I2C0 runs at 400 kHz on this board, not 1.7 MHz** — the OLED on I2C0 (rev 7) owns the
 clock after `oled.init()`; T1.9 gives the bus one owner at 1 MHz. **Where it is:** T1.1,
-T1.2/1.3 and T1.8 landed (rows 25–28); T1.9 is next — its "before" number is taken (30 352
-MCP4728 writes/s at 1.7 MHz) and the finding grew: the I2C0 clock is *dynamic*, every
-`wavegen_start()` flips it to 1.7 MHz and the next OLED frame drops it to 400 kHz. The doc's
-"▶ CONTINUE HERE" block has the T1.9 edits + verification and the queue after it (T1.4 → T1.5
+T1.2/1.3 and T1.8 landed (rows 25–28); **T1.9 landed (row 29)** — the I2C0 clock turned out to be *dynamic* (every `wavegen_start()`
+flipped it to 1.7 MHz, the next OLED frame dropped it to 400 kHz); now it reads 1.00 MHz on
+every boot and around every wavegen/OLED event, the INA219s are clean at sustained 1 MHz, and
+the wavegen stream costs −33 % (30.4 k → ~20 k writes/s); HIL 5/6, `test_infra_paths` 24/24.
+The doc's "▶ CONTINUE HERE" block has the queue after it (T1.4 → T1.5
 → T1.7 → T1.6 → T1.10 → T2.2 → T2.3 → T2.1) with the design refinements found on the way.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
@@ -104,6 +105,7 @@ it wasn't this session.
 | 26 | `3fc5c57` | Priority/comment truth (`main.cpp` registration comments, `JumperlOS.cpp` stale ID map, Highlighting 40 ms, MpRemote 8192, ProbeSwitch NORMAL); the five verified no-op services are no longer registered (TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush behind `#if USE_FILE_CACHE`); `core1request` (written, never read) deleted; `inClickMenu` is `volatile` like every other cross-core mode flag | builds ×3; HIL 5/6; `X` census unchanged |
 | 27 | `b0fd157` | **Vocabulary rename, nothing behavioural**: the "injected command / injection buffer" family is now "relayed command / relay buffer" (`RelayedCommandService`, `RelayBufferStream`, `Jerial.relayInput()`, `hasRelayedCommand`, `relay_buffer`, `DEBUG_RELAYED_COMMANDS`, `withANSI`), and comment words that read wrong out of context were reworded (steal→take over, poison→corrupt, kill→stop/break, sniff→watch, forged→simulated, attack→rise, hostile→untrusted). Datasheet excerpts left as quoted. No Python-facing API or command changed | builds ×3 |
 | 28 | `f3e4f6f` | **CH446Q per-crosspoint path and its ISR run from RAM**: `sendPaths`/`sendAllPaths` were `__not_in_flash_func` but `sendPath` / `sendXYrawUnchecked` / `sendXYraw` / `isrFromPio` / `setCSex` ran from flash (`X` showed the irq 16 handler at `0x10055931`) | builds ×3; HIL 5/6; `test_infra_paths` 24/24 (after resetting a stray DAC0=2.0 V that made the feed non-viable — board state, reproduced on the pre-T1.1 code); `X`: irq 16 handler `0x20000835`; `nm` addresses in RAM in both ELFs |
+| 29 | _next commit after `95fb058`_ | **I2C0 has one clock owner, `initDAC()` at 1 MHz (`I2C0_BUS_CLOCK_HZ`)**: `MCP4728::begin()` no longer forces 1.7 MHz (it ran on every `wavegen_start()`, so the shared bus flipped to 1.7 MHz mid-session until the next OLED frame dropped it to 400 kHz — the INA219s and WaveGen ran at whichever was last); the OLED-on-I2C0 driver keeps its 400 kHz per transfer but restores 1 MHz after (`clkAfter`), and `oled::connect()` passes the bus rate to `initI2C()` for `connection_type 2` (T1.9) | builds ×3; I2C0 register readout 60/90 = 1.00 MHz on 11/11 boots, before/during/after wavegen and after forced OLED frames; DAC1 stream 30.4 k → ~20 k writes/s (the −33 % is the honest cost); 80 000 INA0/INA1 reads at sustained 1 MHz, 0 failures; 10 reboots: INA1 median identical, OLED Connected; `probe_current_zero` on 10 further boots 1.01–1.51 mA (mean 1.28; history 0.5–2.3). HIL 5/6; `test_infra_paths` 24/24; `i@` `probe_power on -> DAC0`. (A first HIL pass showed `net_currents`+`stress` failing only their `i?`-audit checks — the board was in char mode, `terminal_line_buffering = 0`, where `i?` returns the help page; `B1` fixes it — see `SCHEDULER_AND_HARDWARE_OFFLOAD.md` §0 working rules) |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

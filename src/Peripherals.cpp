@@ -509,6 +509,7 @@ void initDAC( void ) {
 
     Wire.setSDA( 4 );
     Wire.setSCL( 5 );
+    // This is THE I2C0 clock owner (I2C0_BUS_CLOCK_HZ, JumperlessDefines.h).
     // 1MHz, not 1.7MHz: this bus is shared with both INA219s, and 1.7MHz is
     // far past their non-high-speed rating (Hs-mode needs a master-code
     // handshake the RP2350 I2C block never sends) - it produced intermittent
@@ -517,7 +518,11 @@ void initDAC( void ) {
     // ponytail: 1MHz is still above the INA219's 400kHz F/S rating; if reads
     // are ever still flaky, 400000 is the fully-in-spec fallback (costs 2.5x
     // wavegen sample rate).
-    Wire.setClock( 1000000 );
+    // Nobody else may setClock() this bus: MCP4728::begin() used to force
+    // 1.7MHz here (and again on every wavegen_start()), and the OLED driver on
+    // connection_type 2 used to leave it at 400kHz - both fixed (T1.9). The
+    // OLED still transfers at its own 400kHz but restores this rate after.
+    Wire.setClock( I2C0_BUS_CLOCK_HZ );
     Wire.begin( );
 
     delayMicroseconds( 100 );

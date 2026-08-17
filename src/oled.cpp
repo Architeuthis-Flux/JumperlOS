@@ -52,19 +52,23 @@ static uint32_t oledSer3StreamHash = 0;  // last streamed frame hash (change det
 // Initialize with Wire1 immediately to prevent nullptr crashes when OLED is disabled.
 // NOTE: This static instance uses the Adafruit_SSD1306 default clkAfter=100kHz,
 // which drops the bus to 100kHz between transfers and makes everything sluggish.
-// initDisplayForConnectionType() replaces this with a dynamic instance that pins
-// clkAfter to 400kHz on the very first OLED init, so the static is only used as
-// a nullptr-safety placeholder.
+// initDisplayForConnectionType() replaces this with a dynamic instance with an
+// explicit clkAfter (400kHz on I2C1, the shared-bus rate on I2C0) on the very
+// first OLED init, so the static is only used as a nullptr-safety placeholder.
 static Adafruit_SSD1306 _defaultDisplay(128, 32, &Wire1, -1);
 static Adafruit_SSD1306* _displayPtr = &_defaultDisplay;
 static int _currentDisplayWire = 1;  // Track which Wire is currently active (0 = Wire, 1 = Wire1)
 static bool _displayIsDynamic = false;  // Track if _displayPtr was dynamically allocated
 
-// Target I2C clock for OLED transfers. We pin BOTH clkDuring and clkAfter to
-// the same value so the SSD1306 driver doesn't toggle the bus speed every
-// transaction (its default is 400kHz during, 100kHz after). The 100kHz "after"
-// speed makes subsequent transfers visibly sluggish because every call has to
-// reconfigure the I2C peripheral back up to 400kHz before sending.
+// I2C clock for the OLED's own transfers (the panel's rating). On I2C1 the OLED
+// is the only device, so clkDuring == clkAfter == this and the driver never
+// toggles the bus (its default clkAfter is 100kHz, which made every following
+// transfer visibly sluggish). On I2C0 (connection_type 2) the OLED SHARES the
+// bus with the MCP4728 DAC and both INA219s, whose clock is owned by initDAC()
+// (I2C0_BUS_CLOCK_HZ): there the driver still transfers at this rate but hands
+// the bus back at the bus rate (clkAfter). Before T1.9 it left the shared bus
+// at 400kHz after every frame - the INA219s and WaveGen ran at whatever the
+// last OLED frame or wavegen_start() had set.
 static constexpr uint32_t kOledI2CClockHz = 400000;
 
 // Function to get display reference - avoids macro conflicts with display() method name
@@ -74,11 +78,12 @@ Adafruit_SSD1306& getDisplay() { return *_displayPtr; }
 // Initialize or reinitialize display with the correct Wire based on connection_type
 // Returns true if display was (re)created, false if already using correct Wire.
 //
-// The new dynamic instance is constructed with explicit clkDuring/clkAfter so
-// the bus stays at 400kHz between transactions instead of dropping to the
-// Adafruit-default 100kHz. We also force a recreate on first call (when the
-// static placeholder is still in use) so the slow-default static never runs
-// real OLED traffic.
+// The new dynamic instance is constructed with explicit clkDuring/clkAfter:
+// 400kHz during a transfer on either bus; after it, 400kHz on I2C1 (OLED-only,
+// so the driver never toggles) or the shared-bus rate on I2C0 (so the DAC and
+// INA219s get their clock back). We also force a recreate on first call (when
+// the static placeholder is still in use) so the slow-default static never
+// runs real OLED traffic.
 bool initDisplayForConnectionType(int connectionType) {
     // Determine which Wire to use based on connection_type
     // Type 0 = GPIO 26/27 -> I2C1 (Wire1)
@@ -107,9 +112,12 @@ bool initDisplayForConnectionType(int connectionType) {
     int height = jumperlessConfig.top_oled.height;
 
     TwoWire* wirePtr = (needWire == 0) ? &Wire : &Wire1;
+    // I2C0 is shared (DAC + INA219s): transfer at the panel's 400kHz, then hand
+    // the bus back at its owner's rate. I2C1 is OLED-only: never toggle.
+    const uint32_t clkAfter = (needWire == 0) ? (uint32_t)I2C0_BUS_CLOCK_HZ : kOledI2CClockHz;
     _displayPtr = new Adafruit_SSD1306(width, height, wirePtr, OLED_RESET,
                                        /*clkDuring=*/kOledI2CClockHz,
-                                       /*clkAfter=*/kOledI2CClockHz);
+                                       /*clkAfter=*/clkAfter);
 
     _displayIsDynamic = true;
     _currentDisplayWire = needWire;
@@ -4253,11 +4261,23 @@ int oled::connect( void ) {
         #endif
     }
 
+    // The clock initI2C() programs is the BUS clock, not the OLED's transfer
+    // clock (the SSD1306 driver sets its own 400kHz per transfer, see
+    // initDisplayForConnectionType). On connection_type 2 the pins are the
+    // shared I2C0 bus, whose rate is owned by initDAC() (I2C0_BUS_CLOCK_HZ) -
+    // passing 400000 here used to drop the DAC and both INA219s to 400kHz for
+    // the rest of the session (T1.9). On I2C1 the OLED is alone: 400kHz.
+    // (Wire is normally already running from initDAC(), so for I2C0 this is a
+    // setClock() on the live bus and TwoWire::begin() returns early; after the
+    // hot-plug reconnect path's Wire.end() it is a fresh begin() at this rate.)
+    const int busClockHz = ( jumperlessConfig.top_oled.connection_type == 2 )
+                               ? I2C0_BUS_CLOCK_HZ
+                               : (int)kOledI2CClockHz;
     #if OLED_DEBUG
-    Serial.printf("[OLED] Calling initI2C(sda=%d, scl=%d, 400000)...\n", 
-        jumperlessConfig.top_oled.sda_pin, jumperlessConfig.top_oled.scl_pin);
+    Serial.printf("[OLED] Calling initI2C(sda=%d, scl=%d, %d)...\n",
+        jumperlessConfig.top_oled.sda_pin, jumperlessConfig.top_oled.scl_pin, busClockHz);
     #endif
-    found = initI2C( jumperlessConfig.top_oled.sda_pin, jumperlessConfig.top_oled.scl_pin, 400000 );
+    found = initI2C( jumperlessConfig.top_oled.sda_pin, jumperlessConfig.top_oled.scl_pin, busClockHz );
     #if OLED_DEBUG
     Serial.printf("[OLED] initI2C returned %d\n", found);
     #endif

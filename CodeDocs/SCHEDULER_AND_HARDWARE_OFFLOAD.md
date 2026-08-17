@@ -13,13 +13,88 @@
 
 ## 0. Decisions and status
 
-### ▶ CONTINUE HERE (state at the end of the 2026-08-16 implementation session)
+### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 2)
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
-`f3e4f6f` (T1.8). **The board is flashed with `f3e4f6f`** = HEAD; the working tree is clean.
-**T1.9 is next and its "before" measurement is already taken (below); no T1.9 code has been
-written yet.**
+`f3e4f6f` (T1.8), `95fb058` (docs), **T1.9 (the commit after `95fb058` — its hash goes into
+`DEV_MERGE_HANDOFF.md` row 29 with the next commit)**. **The board is flashed with the T1.9
+build = HEAD.** T1.9's gate ran in two halves: everything not needing port 1 while Kevin's
+`jumperless` client held `JLV5port1` (it reconnected through the flash and 21 reboots), and
+the port-1 half — clean HIL 5/6, `test_infra_paths` 24/24, `i@` — the moment Kevin closed the
+app. **Next: T1.4** (B3 — see "Then the queue" and the design refinements below). Also open,
+raised by Kevin at the end of this session: **pasting multi-line text into port 1 is broken in
+both line-buffering modes, including after `S` (paste YAML)** — the lines arrive as separate
+commands; "it used to work", so suspect the recent Jerial/relay-buffer path (`b0fd157`) or the
+`tud_task()`→`yield()` conversion (`a3e58f4`) first.
+
+**T1.9 files:** `src/JumperlessDefines.h`, `src/Peripherals.cpp`, `src/MCP4728.cpp/.h`,
+`src/oled.cpp` (68+/22−), the rebuilt tracked `.pio/build/jumperless_v5/firmware.uf2`, and the
+new helper `test/hil/port7.py` (read-only `X`/`:verb` access on port 7 when port 1 is busy).
+
+**T1.9 — what was built** (matches the three-edit plan below, plus the shared constant):
+`I2C0_BUS_CLOCK_HZ 1000000` in `JumperlessDefines.h` (next to `I2C0_SDA/SCL`, with the
+ownership comment); `initDAC()` uses it; `MCP4728::begin()` no longer calls `setClock()` at
+all (`_clock_hz` = the constant, only used by the soft-I2C address-restore path); the
+OLED-on-I2C0 `Adafruit_SSD1306` instance is built with `clkDuring` 400 kHz / `clkAfter` =
+the constant (I2C1 keeps 400/400); `oled::connect()` passes the constant to `initI2C()`
+when `connection_type == 2` (400 kHz otherwise). No other `setClock()`/`i2c_set_baudrate`
+on I2C0 exists in `src/` (`Peripherals.cpp:1722` is inside `#if OG_JUMPERLESS`; the i2cScan
+app only touches Wire1). OG builds and is unaffected (`initDAC()` returns before the DAC).
+
+**T1.9 — verified (all without port 1; one-off scripts at
+`/Users/kevinsanto/.claude/jobs/064d2674/tmp/`: `i2c0_clk.py`, `wg_rate7.py`, `ina_soak.py`,
+`reboot_loop.py`, `pcz_loop.py`; the reusable port-7 helper is now `test/hil/port7.py`):**
+- Register readout (REPL, `IC_FS_SCL_HCNT/LCNT` at 0x40090000+0x1c/0x20): **60 / 90 =
+  1.00 MHz** right after boot with the OLED connected, on **11/11 boots**; and **before,
+  during and after** `wavegen_start(1)`/`wavegen_stop()` — the 1.7 MHz flip is gone; and
+  after forced OLED frames (`oled_print`/`oled_clear`/`oled_show` from the REPL, framebuffer
+  confirmed via port-7 `:oled:quarter`). arduino-pico's `i2c_set_baudrate` math: 400 kHz =
+  150/225, 1.7 MHz = 36/52, 1 MHz = 60/90.
+- **After number:** 2 kHz sine on DAC1 for ~3.1 s → **61 483 MCP4728 writes ≈ 19.5–20.5 k
+  writes/s** (was 30 352/s at 1.7 MHz — **−33 %**, less than the 1.7× clock ratio because the
+  per-write software overhead does not scale). Counters read via **port 7 `X`** (`X` is
+  `SER3_ALLOWED`; `i@` and `~` are not).
+- INA219 at sustained 1 MHz (the genuinely new regime — before, the steady state was 400 kHz):
+  **80 000 register reads** (INA0+INA1 bus voltage + current via `ina_get_bus_voltage()` /
+  `ina_get_current()`, a failed read returns exactly 0) → **0 failures**, spread 1–2 LSB
+  (INA0 bus 0.848–0.852 V, INA1 bus 1.988–1.996 V, INA1 current 1.434–1.465 mA).
+- 10 × `machine.reset()`: every boot 1.00 MHz, INA0/INA1 reads good, INA1 8-sample median
+  **1.465 mA on all 10 boots** (min 1.434), `X` OLED **Connected**, DAC found (`mcp4728
+  writes 3/2/2/2` at boot).
+- **`probe_current_zero` across 10 more reboots: 1.01 / 1.24 / 1.30 / 1.51 / 1.13 / 1.48 /
+  1.28 / 1.36 / 1.36 / 1.17 mA (mean 1.28), plus 1.83 and 1.75 from two earlier boots — all
+  inside the 0.5–2.3 mA history, a fresh value every boot (so the 8-sample INA1 calibration
+  never fell back to "keeping previous value").** Read without port 1: `usb_audio_save()`
+  from the REPL → `saveConfig()` writes the live value into `/config.txt` (`pcz_loop.py`).
+- Builds ×3. **HIL, once port 1 freed for ~10 min:** `run_all.py` → `test_micropython_fs`,
+  `test_routing`, `test_config` (31), `test_encoder_ui` PASS; `test_net_currents` and
+  `test_stress` each failed **two extra checks beyond the known phantom-current one — both
+  are the same artifact, not T1.9**: their `i?` (RouteSafety self-check + `suspect=0x…`
+  audit) came back as the *help page for `i`*, because the board was in **char mode
+  (`terminal_line_buffering = 0`)** — in char mode `loop()`'s `[command]?` peek
+  (`main.cpp:1214`) fires on the `?` before `cmd_netCurrents` ever sees it; in line mode the
+  whole line reaches the command. Every substantive check in those two files passed (INA0
+  loop current 4.82 mA vs scan 5.71 mA — INA0 at 1 MHz working under load; 40
+  connect/disconnect/refresh cycles; audit no live short). **Where the mode came from
+  (mechanism found, exact trigger not confirmed):** the `jumperless` client keeps a
+  persistent interactive-mode preference and syncs it to the firmware with SO/SI
+  (`bridge.py` `set_interactive_mode` → `ser.write(INTERACTIVE_OFF)`); SI →
+  `acknowledgeAppLineBuffering(false)` (`Jerial.cpp:216`) → `terminal_line_buffering = 0`,
+  which persists on the next config save. The client was the only other thing on port 1 all
+  session, and the value was 1 when the previous session's `i?` tests passed. `B1` on port 1
+  restores it ("Line buffering enabled"; `i?` then returns `self-check: PASS … suspect=0x000`).
+- **The port-1 half, once Kevin closed the app (2026-08-17):** `terminal_line_buffering` was
+  already 1 again; **`run_all.py` 5/6** (only the pre-existing phantom-current check);
+  `dac_set(0, 3.33, True)` → `i@`: `probe_power on -> DAC0 (node 106) [139-106]
+  order:DAC0>GPIO paths:1 dup:0 xp:2`; **`test_infra_paths.py` 24/24**. Committed.
+
+**Kevin, the honest cost:** the max wave frequency you see today (which came from the
+accidental 1.7 MHz after every `wavegen_start()`) drops ~⅓ — 20 k vs 30 k samples/s. That is
+what running the INA219s at the clock the code argues for costs. If you'd rather keep the
+streaming speed, the alternative is "1 MHz owner + WaveGen may raise the clock only while
+`isRunning()` and must restore it on stop" — an edit in `WaveGen::start/stop`, not in
+`MCP4728::begin()`; T1.9 as built makes that a clean 2-line follow-up.
 
 **T1.8 landed** after the interrupted gate was understood: the 3/24 `test_infra_paths` failures
 reproduced with the client detached and on the pre-T1.1 code too — they were **board state, not
@@ -31,8 +106,9 @@ section 3:** `test_infra_paths` assumes DAC0 is inside the window; a stray `dac_
 test, a REPL session) leaves it non-viable and the test fails 3/24 with `(none)` — check `i@`
 shows `probe_power -> DAC0` before blaming the code.
 
-**T1.9 — the I2C0 clock story got worse while measuring the "before" number, and the
-design changes accordingly.** The bus clock is not just "three owners", it is **dynamic**:
+**T1.9 — the "before" story, kept for the record (the finding that shaped the design):
+the I2C0 clock story got worse while measuring the "before" number, and the
+design changed accordingly.** The bus clock is not just "three owners", it is **dynamic**:
 `jl_wavegen_start()` (`JumperlessMicroPythonAPI.cpp:273`) calls `wavegen.begin()` on **every**
 start → `WaveGen::begin()` → `_dac.begin()` (`WaveGen.cpp:83`) → `MCP4728::begin()` →
 `_wire->setClock(1700000)` (`MCP4728.cpp:164`). So the bus flips to **1.7 MHz whenever the
@@ -42,7 +118,7 @@ whichever value the last of those two left. Measured on this boot: register read
 wavegen start = `FS_HCNT 36 / FS_LCNT 52` @ 150 MHz → **1.70 MHz** (the earlier 400 kHz
 readout was taken hours after boot with no wavegen since). **Before number:** wavegen 2 kHz
 sine on DAC1 for 3.0 s → **91 055 MCP4728 writes = 30 352 writes/s** at 1.7 MHz (the
-`mcp4728 writes` B counter in `i@`, script in `$CLAUDE_JOB_DIR/tmp/wg_rate.py`: read `i@`,
+`mcp4728 writes` B counter in `i@`, script `/Users/kevinsanto/.claude/jobs/064d2674/tmp/wg_rate.py`: read `i@`,
 `wavegen_set_output(1); wavegen_set_wave(0); wavegen_set_freq(2000); wavegen_start(1);
 sleep 3; wavegen_stop()`, read `i@` again). Expect ~18 k writes/s at 1 MHz after T1.9 (the
 rate WaveGen's `B_PER_SAM 4.67` model was calibrated for — that constant fits ~1 MHz, not
@@ -52,7 +128,8 @@ argues for; if he would rather keep 1.7 MHz for streaming, the alternative is "1
 WaveGen may raise the clock only while `isRunning()` and must restore it on stop", which is a
 fourth edit in `WaveGen::start/stop`, not in `MCP4728::begin()`.
 
-**T1.9 edits (still three, now with the fourth caller understood):** (1) `MCP4728::begin()`
+**T1.9 edits as planned (all three executed as written — see the top of this block for what
+landed and what was measured):** (1) `MCP4728::begin()`
 drops `setClock(1700000)` — this also fixes the every-wavegen-start flip; (2) the OLED-on-I2C0
 `Adafruit_SSD1306` instance keeps `clkDuring` 400 kHz and gets `clkAfter = 1000000`
 (`oled.cpp:109-112`; introduce one shared constant for the I2C0 bus rate next to `initDAC()`'s
@@ -98,7 +175,23 @@ T1.10 → T2.2 → T2.3 → T2.1.
 
 **Working rules that bit this session:** only one process on a CDC port at a time — the
 `jumperless` client on port 1 makes every port-1 test lie; check `lsof /dev/cu.usbmodemJLV5port*`
-before running HIL. `run_all.py` takes ~2 m 10 s. Add each `DEV_MERGE_HANDOFF.md` row with a
+before running HIL. `run_all.py` takes ~2 m 10 s. **When port 1 is taken, port 7 (USBSer3)
+still answers `X`** (`cmd_resourceStatus` is `SER3_ALLOWED` — the MCP4728 counters, OLED
+status, IRQ slots, uptime; `python3 test/hil/port7.py X`), and `:oled:quarter` dumps the
+framebuffer; `i@` (`SER3_MODIFIES_STATE`) and `~` (`SER3_IRRELEVANT`) are refused there. The
+REPL (port 5) reads registers, `ina_get_bus_voltage()/ina_get_current()` (a failed read is
+exactly 0.0), and `/config.txt` — but that file is **not** a live `probe_current_zero`: the boot
+calibration writes `jumperlessConfig` without dirtying it, so the file holds the last explicit
+save. Do NOT `import run_all` from a Python one-liner — its module body runs the suite.
+`pio run -t upload` works with the client attached (the 1200-baud touch on port 1 still resets
+the board; the client reconnects), and so does `machine.reset()`. **The suite needs
+`terminal_line_buffering = 1`** (the default): in char mode every `x?` sub-command (`i?`, the
+RouteSafety audit the tests parse) is eaten by `loop()`'s help peek and returns the help page,
+which shows up as `test_net_currents`/`test_stress` failing "no chips marked suspect" + "self-check
+PASS" while everything else passes. the `jumperless` client's interactive-mode preference ends up asserting SI (persisted on the next config save; exact trigger unconfirmed) — send
+`B1` on port 1 before `run_all.py` if the client was attached since the last boot. A stray
+`usb_audio_save()` from the REPL is a legitimate full config save when you need `/config.txt`
+to reflect live values. Add each `DEV_MERGE_HANDOFF.md` row with a
 placeholder in the item's own commit and put the real hash in with the *next* commit (a
 `--amend` changes the hash — row 26 says `73aee5c` and should say `3fc5c57`; fix it in the
 T1.8 commit).
@@ -156,7 +249,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | **landed** | builds ×3; HIL 5/6 ×5 (one standalone + a 4-run soak, ~9 min, with a second process holding port 7 open the whole time: 0 errors, 4 CDC ports enumerated after every run, uptime continuous — no port drops); `X` census unchanged (6/6 slots, FlashPark timeouts 0). Zero raw `tud_task()` calls left in `src/` (59 sites: 23 → `TinyUSB_Device_Task()` at pump-only waits, 36 → `yield()` where the site wanted output pushed or was a `Serial.write(marker); tud_task();` debug pair). `TinyUSBService` is CRITICAL now (every pass, and inside `serviceCritical()`'s modal set — the B4 delta arriving early). |
 | 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
 | 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **landed** | builds ×3; HIL 5/6; `test_infra_paths` 24/24; `X`: `irq 16` handler `0x20000835` (was `0x10055931` in flash); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise |
-| 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | **in progress — "before" measured, no code yet** | before: 30 352 MCP4728 writes/s on DAC1 (2 kHz sine, 3 s) at 1.70 MHz (register readout after `wavegen_start`); the bus is dynamic — 1.7 MHz after any wavegen start, 400 kHz after any OLED frame |
+| 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | **landed** | builds ×3; I2C0 register readout 60/90 = 1.00 MHz on 11/11 boots, unchanged before/during/after `wavegen_start`/`stop` and after forced OLED frames (the flip is gone); DAC1 30 352 → ~20 k writes/s (2 kHz sine, ~3.1 s; −33 %, the honest cost); 80 000 INA0/INA1 register reads at sustained 1 MHz, 0 failures, 1–2 LSB spread; 10 reboots: INA1 8-sample median 1.465 mA every boot, OLED Connected, DAC found; `probe_current_zero` on 10 further boots 1.01–1.51 mA (mean 1.28, history 0.5–2.3); HIL 5/6; `test_infra_paths` 24/24; `i@` `probe_power on -> DAC0` |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
 | 6 | T1.5 B4 `serviceInner()` | pending | — |
 | 7 | T1.7 B6 `loop()` cleanup | pending | — |
@@ -192,6 +285,9 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
   panel's rating) but hands the bus back at 1 MHz (`clkAfter`), and `connect()`'s probe passes
   the bus rate for the shared bus. Verification adds a register readout (must read 1 MHz
   after boot with the OLED connected) and the WaveGen actual-frequency stat before/after.
+  **Built and measured (CONTINUE HERE):** 1.00 MHz on every boot and around every wavegen
+  start/stop and OLED frame; DAC1 stream 30.4 k → ~20 k writes/s; INA219s clean at
+  sustained 1 MHz (80 k reads, 0 failures).
 - **The `tud_task()` count is 59 textual call sites, 51 compiled in this build** (8 are behind
   compile-time-0 debug macros in `main.cpp`: `DEBUG_MAIN_LOOP_CHECKPOINTS`,
   `debug_busy_timers`). The proposal said 54. T1.1 converts all of them, the compiled-out
@@ -268,7 +364,10 @@ dot form `config.section.key = value`. Bare `` `dacs.probe_power_source = 1 `` i
 
 **Gotcha (state):** `test_infra_paths` needs DAC0 inside the feed window ([2.80, 3.90] V) — a stray
 `dac_set` leaves the feed on GPIO / `(none)` and the test fails 3/24; `dac_set(0, 3.33, True)`
-resets it. Check `i@` says `probe_power -> DAC0` first.
+resets it. Check `i@` says `probe_power -> DAC0` first. Known culprits: `test_routing.py` sets
+DAC0 to 2.5 V (so `run_all.py` itself leaves it there), and a fresh boot on 2026-08-16 came up
+with DAC0 = 2.000 V (`:json:power` on port 7) restored from the slot — so assume it is wrong
+until checked.
 
 **Gotcha (ports):** a stale process holding port 1 gives "device reports readiness to read but
 returned no data". Not a board fault. In `run_all.py` it also appears when a previous file's
@@ -524,7 +623,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain).
 - T1.8 C2-0 CH446Q hot path + ISR into RAM (`__not_in_flash_func`).
 - T1.9 C2c I2C0: one clock owner at 1 MHz (Kevin's call — approved; hardware-verify INA
-  reads + wavegen + register readout).
+  reads + wavegen + register readout). **Landed 2026-08-17 (section 0).**
 - T1.10 D `REQ_DUMP_LEDS`-lite: stop core 1 writing USB CDC in LED-dump mode (`main.cpp:1510`) —
   move `dumpLEDs()` to core 0's 10 ms service behind a core-1 snapshot flag.
 - (done) C3 INA no-pause, C4 MCP dedupe, I2C0 rule.

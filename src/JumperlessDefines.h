@@ -267,6 +267,18 @@ extern int probeRev;
 #define I2C0_SDA 4
 #define I2C0_SCL 5
 
+// I2C0 (GPIO 4/5) is shared by the MCP4728 DAC, both INA219 current sensors
+// and, on a rev-7 board, the OLED. The bus has exactly ONE clock and this is
+// it: initDAC() sets it at boot, the OLED-on-I2C0 driver drops to its own
+// 400 kHz only for the duration of a panel transfer and hands the bus back at
+// this rate (clkAfter), and nothing else calls Wire.setClock(). Before this
+// (T1.9) the clock had three owners and was dynamic - 1.7 MHz after every
+// wavegen_start() (MCP4728::begin), 400 kHz after every OLED frame - so the
+// INA219s and the WaveGen stream ran at whichever the last of those left.
+// 1 MHz, not 1.7: the INA219s silently failed reads at 1.7 MHz (see initDAC);
+// WaveGen's B_PER_SAM sample-rate model was calibrated at ~1 MHz.
+#define I2C0_BUS_CLOCK_HZ 1000000
+
 #define RP6_PIN 6
 #define RP7_PIN 7
 

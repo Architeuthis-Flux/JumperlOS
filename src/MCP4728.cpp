@@ -161,9 +161,15 @@ bool MCP4728::begin(uint8_t i2c_address, TwoWire *wire) {
   if (!_wire) {
     return false;
   }
-  _wire->setClock(1700000); //I have no clue why this shaves off ~8us of the transfer time, but it does
-  _clock_hz = 1000000;//the rp2350 has a max of 1000000 for i2c
-  
+  // Deliberately NO _wire->setClock() here. This used to force 1.7MHz - and
+  // because WaveGen::begin() -> _dac.begin() runs on EVERY wavegen_start(),
+  // it flipped the shared I2C0 bus (both INA219s, the OLED on a rev-7 board)
+  // to 1.7MHz mid-session, until the next OLED frame dropped it to 400kHz.
+  // The bus has one clock owner: initDAC() (I2C0_BUS_CLOCK_HZ). This driver
+  // runs at whatever the bus is set to. _clock_hz is only what the soft-I2C
+  // address-programming path restores after it hands the pins back (below).
+  _clock_hz = I2C0_BUS_CLOCK_HZ;
+
   // Test communication with a simple read
   _wire->beginTransmission(_i2c_address);
   uint8_t error = _wire->endTransmission();
