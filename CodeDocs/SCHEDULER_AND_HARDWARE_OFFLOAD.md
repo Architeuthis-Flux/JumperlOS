@@ -22,10 +22,32 @@
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
 `dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), `3f02a14` (T2.2b, the
 mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a4806` (docs, row
-40), `b03d25b` (the in-session switch classifier decides on agreement, row 41), and the
-tip-sense veto for the legacy classifier (the commit after `b03d25b`, row 42 — hash with the
-next commit; see "Side quest 2, follow-up 2" below). **The board is flashed with HEAD.** **Next: T2.1 — but read the analysis first; it wants Kevin's hands in the loop,
-so it was deliberately NOT started autonomously.** Then T2.2c (`REQ_SHOW_LEDS`). The watchdog
+40), `b03d25b` (the in-session switch classifier decides on agreement, row 41), `bd1e7bc`
+(the tip-sense veto for the legacy classifier, row 42 — "Side quest 2, follow-up 2" below),
+`4dd3eee` (T1.7b, row 43), and this docs commit (row 44 — hash with the next commit). **The
+board is flashed with `4dd3eee`.** **Next: T2.1 — but read the analysis first; it wants Kevin's
+hands in the loop, so it was deliberately NOT started autonomously.** T2.2c (`REQ_SHOW_LEDS`)
+likewise waits for eyes: the census is ~200 `showLEDsCore2` sites across 15 files (Menus 49,
+Probing 47, Apps 17, main 16, LEDs 12, Highlighting 9, SelfTest 8, RotaryEncoder 8, …), not the
+doc's ~20, and every one of them is LED behaviour only a person can judge — a session with
+Kevin at the board, like T2.1. The watchdog
+
+**T1.7b — what was built (the "T1.7b candidate" from T1.7's observation).** `getCommandArgs()`
+no longer waits its 20–100 ms timeout on the stream when the command arrived as a **complete
+line** — a new `g_commandInputIsLine` (default true) that `loop()` clears only on the char-mode
+single-char read path (and the armed-help resume), sets on a completed line and on the
+CommandBuffer (relayed `<j>`) path, and the port-7 backchannel forces true around its
+single-char dispatch (its handlers used to wait on *port 1's* stream). Every arg-taking
+command in line mode — the app's mode — paid that wait for nothing (all 23 `getCommandArgs`
+callers audited: every one is a same-line suffix like `c!`, `M?`, `A?`, `X!`; none prompts and
+then reads). Verified: the help/mode matrix (both modes: help, help probe, x?, m?, h, ?, i?,
+A?, M?) unchanged; **`c` → "Crossbar" p50: line mode CR/LF/CRLF 4 / 4 / 3 ms** (≥ 100 ms by
+construction before — the 100 ms timeout in `cmd_showCrossbar`; ~250 ms before T1.7), char
+mode 2 ms; port-7 `X` still answers; HIL 6/7 (the known phantom check); `test_infra_paths`
+24/24. Also learned: T1.7's "residual ~40 ms" was `n`-specific (`c` shows none), not general.
+**Where the queue stands with Kevin away (2026-08-17 ~15:00):** the items that need no input
+are done; the three that remain (T2.1, T2.2c, the watchdog enable) each need his eyes or his
+call — see the checklist at the end of this block. The watchdog
 *enable* is a separate decision on the T1.6 numbers. **A consolidated "Kevin's hands-on
 checklist" is at the end of this block.**
 
@@ -1144,7 +1166,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable. **Measure-only
   stage landed 2026-08-17 (section 0, with the numbers and what they imply for the enable).**
 - T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain). **Landed
-  2026-08-17 (section 0).**
+  2026-08-17 (section 0); T1.7b (no argument wait for complete-line input) landed the same day.**
 - T1.8 C2-0 CH446Q hot path + ISR into RAM (`__not_in_flash_func`).
 - T1.9 C2c I2C0: one clock owner at 1 MHz (Kevin's call — approved; hardware-verify INA
   reads + wavegen + register readout). **Landed 2026-08-17 (section 0).**
