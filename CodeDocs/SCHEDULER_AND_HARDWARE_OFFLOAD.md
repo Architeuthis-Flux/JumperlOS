@@ -20,11 +20,31 @@
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
-and **T1.10** (the commit after `574e749`, `DEV_MERGE_HANDOFF.md` row 36 — hash with the next
-commit). **The board is flashed with HEAD.** **Tier 1 is complete. Next: T2.2** (core-1
-mailbox, `REQ_SEND_PATHS` first — see "Then the queue" and section D); the watchdog *enable*
-is a separate decision on the T1.6 numbers (design sketched there), not part of the queue as
-approved.
+`dff24b3` (T1.10, row 36), and **T2.2a — the tap→crossbar→LEDs latency probe** (the commit
+after `dff24b3`, `DEV_MERGE_HANDOFF.md` row 37 — hash with the next commit). **The board is
+flashed with HEAD.** **Tier 1 is complete. Next: T2.2b** (the core-1 mailbox with
+`REQ_SEND_PATHS` only, `waitCore2()` on `doneGen` in place — section D's migration step 2; the
+probe below is its gate: same-or-better); the watchdog *enable* is a separate decision on the
+T1.6 numbers (design sketched there), not part of the queue as approved.
+
+**T2.2a — what was built (section F's "tap→crossbar latency probe", instrumentation only).**
+`src/XbarLatency.h/.cpp`: five stamps — `tap` (probeMode accepts a tap and commits it, right
+before `addBridgeToState`/`removeBridgeFromState`; needs a real tap, so **n = 0 until Kevin
+taps**), `req` (core 0 writes `sendAllPathsCore2` — the three sites in `Commands.cpp`:
+`refreshConnections` ±1, the `3` bypass, `refreshLocalConnections` ±1), `pickup` (top of
+`sendPaths()`, whichever core), `sendDone` (end of `sendPaths()`), `show` (the first
+`leds.show()` after a send) — and last/max/n per segment: tap→req, req→pickup, pickup→send,
+send→show, req→show. A request landing while one is outstanding keeps the first stamp;
+`X` prints it, `X!` resets it (with the kick-gap maxima). RAM-resident stamps for the
+`sendPaths()` path (T1.8).
+
+**T2.2a — the before numbers (flag handshake, 40 REPL `connect`/`disconnect` ops, two runs;
+`xbar_lat.py`):** req→pickup **~100–200 µs typical, max 304 µs / 2 197 µs** (a pass where core
+1 was mid-frame); pickup→send **~40–50 µs** (incremental sends), max ~240 µs; send→show
+**~7.1 ms**, max ~10 ms (the LED render + show — the dominant term); req→show **~7.3 ms**, max
+10.4 / 12.4 ms. So the handshake itself is already ~0.1–0.3 ms; the mailbox's win is
+correctness (no lost `-1`, no overwritten request, `doneGen` instead of a 25 ms proceed-anyway)
+and the LED path is where the time goes. HIL 7/7; `test_infra_paths` 24/24 with the probe in.
 
 **T1.10 — what was built.** LED-dump mode (`R!`, or `serial_1/2.function = leds/oled_leds`)
 no longer writes USB CDC from core 1: the `dumpLEDs()` block in `loop1()` is gone; core 1
@@ -412,9 +432,9 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ ~~T1.10~~ (landed — see the top
-of this block; Tier 1 done) → **T2.2** → T2.3 → T2.1. (The watchdog *enable* is its own
-decision, on the T1.6 numbers.)
+**Then the queue:** ~~T1.4~~ ~~T1.5~~ ~~T1.7~~ ~~T1.6 (measure-only)~~ ~~T1.10~~ ~~T2.2a (probe)~~ (landed
+— see the top of this block; Tier 1 done) → **T2.2b** (mailbox) → T2.3 → T2.1. (The watchdog
+*enable* is its own decision, on the T1.6 numbers.)
 
 **Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
 with the four deviations and the ConfigSave/SlotManager correction recorded at the top of this block):**
@@ -530,7 +550,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 7 | T1.7 B6 `loop()` cleanup | **landed** (pending Kevin hands-on: help/`x?` feel, latency in the app) | builds ×3; help/`help <cat>`/`x?`/`m?`/`h`/`?`/`i?`/`A?`/`M?` right in both modes (scripted); `n` latency line mode CR/LF 146 → 46 ms p50, char mode unchanged; `X` PortHousekeeping row; HIL 7/7; `test_infra_paths` 24/24 |
 | 8 | T1.6 watchdog, measure-only | **landed** (measure-only; the enable is a separate decision) | builds ×3; `X` kick-gap lines; idle 42 ms = the ProbePads block; slot save 1.8 s / 1.1 s; wavegen 10 s = core-1 capture; compute-bound MicroPython 5.2 s; suite 11.5 s; HIL 7/7; `test_infra_paths` 24/24 |
 | 9 | T1.10 LED-dump off core 1 | **landed** | builds ×3; `R!` dumps at ~340 ms idle and through a modal MicroPython script; `serial_1.function = leds` → 60 KB/4 s on USBSer1, board alive; `X` LedDump row; HIL 7/7; `test_infra_paths` 24/24 |
-| 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | pending | — |
+| 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | **probe landed** (T2.2a); mailbox pending (T2.2b) | probe: builds ×3; before numbers req→pickup ~0.1–0.3 ms (max 2.2 ms), pickup→send ~50 µs, send→show ~7 ms (max 10), req→show ~7.3 ms; HIL 7/7; `test_infra_paths` 24/24 |
 | 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | pending | — |
 | 12 | T2.1 always-on ADC ring | pending | — |
 

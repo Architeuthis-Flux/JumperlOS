@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <cstdint>  // For uint16_t
+#include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
 #include "CH446Q.h"
 #include "Colors.h"       // For changeTerminalColor
 #include "JumperlessDefines.h"
@@ -156,6 +157,7 @@ void __not_in_flash_func(sendPaths)(int clean) {
   unsigned long core2_step = core2_start;
 
   core2busy = true;
+  xbarLatPickup();  // latency probe: the send starts (XbarLatency.h)
 
   // OPTIMIZATION: Only create chip-ordered index if invalid or doing clean refresh
   // For incremental updates (clean==0), we send paths in net order which is fine
@@ -195,6 +197,7 @@ void __not_in_flash_func(sendPaths)(int clean) {
   core2busy = false;
   sendAllPathsCore2 = 0;
   __dmb();  // Memory barrier so Core 0 sees the update
+  xbarLatSendDone();  // latency probe: crossbar matches the netlist (XbarLatency.h)
   
   #if PROFILE_CORE2_SENDPATHS
   unsigned long core2_total = micros() - core2_start;

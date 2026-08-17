@@ -83,6 +83,7 @@ KevinC@ppucc.io
 #include "Undo.h"               // Delta-based undo log (Phase 4.1)
 #include "SingleCharCommands.h" // Single-character command system
 #include "KickGap.h"            // watchdog measure-only stage: would-be kick stamps (T1.6)
+#include "XbarLatency.h"        // tap->crossbar->LEDs latency probe (T2.2 gate)
 #include "WaveGen.h"            // New async wavegen
 #include "externVars.h"
 
@@ -1843,6 +1844,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 }
                 lastForcedShow = millis( );
                 ledDumpFrameReady = true; // LED-dump mode: core 0 may dump this frame
+                xbarLatShow( );           // latency probe: first show after a send (XbarLatency.h)
 
                 t[ 13 ] = micros( );
 

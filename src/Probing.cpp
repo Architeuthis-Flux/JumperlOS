@@ -3,6 +3,7 @@
 #include "FileParsing.h"
 #include "InfraPaths.h"
 #include "JumperlOS.h"
+#include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MatrixState.h"
@@ -3127,6 +3128,7 @@ restartProbingNoPrint:
                         Serial.flush( );
                     }
 
+                    xbarLatTap( ); // latency probe: tap accepted, about to commit (XbarLatency.h)
                     if ( firstConnection == -3 ) {
                         // Add to RAM state - DON'T save yet, let auto-save handle it
                         addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
@@ -3231,6 +3233,7 @@ restartProbingNoPrint:
                     //  Serial.println();
                     // Remove from RAM state - let auto-save handle persistence
                     // This removes ALL connections containing nodesToConnect[0]
+                    xbarLatTap( ); // latency probe: tap accepted, about to commit (XbarLatency.h)
                     bool removed = removeBridgeFromState( nodesToConnect[ 0 ], -1, true );
 
                     // The number of removed connections is tracked in lastRemovedNodesIndex

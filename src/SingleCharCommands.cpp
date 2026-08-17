@@ -19,6 +19,7 @@
 #include "Jerial.h" // TermControl is now part of Jerial
 #include "JumperlOS.h"
 #include "KickGap.h"   // watchdog measure-only stage: X prints the kick gaps, X! resets them
+#include "XbarLatency.h" // tap->crossbar->LEDs latency probe: X prints it, X! resets it
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MCP4728.h"
@@ -2764,7 +2765,8 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
         String arg = getCommandArgs( line, 20 );
         if ( arg.length( ) > 0 && arg[ 0 ] == '!' ) {
             kickGapReset( );
-            target->println( "kick-gap maxima reset" );
+            xbarLatReset( );
+            target->println( "kick-gap maxima and crossbar-latency stats reset" );
             return CMD_DONT_SHOW_MENU;
         }
     }
@@ -2953,6 +2955,9 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // where a watchdog kick would go, per core. X! resets the maxima.
     target->println( "\r" );
     kickGapPrint( target );
+    // Tap -> request -> send -> LEDs latency probe (T2.2 / T2.3 gate).
+    target->println( "\r" );
+    xbarLatPrint( target );
     target->println( "\r" );
     target->flush( );
 

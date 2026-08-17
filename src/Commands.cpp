@@ -1,4 +1,5 @@
 #include "Commands.h"
+#include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
 #include "AsyncPassthrough.h"
 #include <hardware/sync.h>  // For __dmb() memory barrier
 #include "CH446Q.h"
@@ -189,6 +190,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
     sendAllPathsCore2 = 1;   // 1 means send paths without cleaning
   }
   __dmb();  // Ensure Core 2 sees the signal
+  xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
 
   // CRITICAL: Wait for core 2 to actually process the sendAllPathsCore2 signal
   // IMPORTANT: Must call tud_task() during wait to prevent USB disconnect!
@@ -364,6 +366,7 @@ unsigned long start2 = millis();
   // Result: ~13ms saved per refresh by eliminating synchronous wait
   sendAllPathsCore2 = 3;  // 3 = bypass flag for immediate parallel execution
   __dmb();  // Memory barrier so Core 2 sees the update
+  xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
   
   // NOTE: We do NOT wait for Core 2 to finish here (unlike old synchronous approach)
   // The next refresh will check core2busy flag before starting, ensuring proper sequencing
@@ -446,12 +449,14 @@ void refreshBlind(
   // }
   if (clean == 1) {
     sendAllPathsCore2 = -1;
+    xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
     if (rp2040.cpuid() == 1) {
       sendPaths(sendAllPathsCore2);
      // sendAllPathsCore2 = 0;
     } 
     } else {
       sendAllPathsCore2 = 1;
+      xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
       if (rp2040.cpuid() == 1) {
         sendPaths(sendAllPathsCore2);
         //sendAllPathsCore2 = 0;
