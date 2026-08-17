@@ -16,8 +16,10 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16 implementation session)
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
-(T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below), T1.8
-(see the row-3 hash in `DEV_MERGE_HANDOFF.md`). **The board is flashed with the T1.8 build** = HEAD.
+(T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
+`f3e4f6f` (T1.8). **The board is flashed with `f3e4f6f`** = HEAD; the working tree is clean.
+**T1.9 is next and its "before" measurement is already taken (below); no T1.9 code has been
+written yet.**
 
 **T1.8 landed** after the interrupted gate was understood: the 3/24 `test_infra_paths` failures
 reproduced with the client detached and on the pre-T1.1 code too — they were **board state, not
@@ -29,14 +31,44 @@ section 3:** `test_infra_paths` assumes DAC0 is inside the window; a stray `dac_
 test, a REPL session) leaves it non-viable and the test fails 3/24 with `(none)` — check `i@`
 shows `probe_power -> DAC0` before blaming the code.
 
-**Then the queue, in order (all designs are in this doc):** T1.9 (I2C0 one clock owner —
-see the corrected finding below; three edits: `MCP4728::begin()` drops `setClock(1700000)`,
-the OLED-on-I2C0 `Adafruit_SSD1306` instance gets `clkAfter = 1000000` (`oled.cpp:111-112`,
-keep `clkDuring` 400 kHz), and `oled::connect()` passes the bus rate instead of 400000 to
-`initI2C()` when `connection_type == 2` (`oled.cpp:4260`); verify with the REPL register
-readout = 1 MHz after boot with the OLED connected, `i@`, `probe_current_zero` across ≥10
-reboots, the WaveGen actual-frequency stat before/after) → T1.4 (B3, with the period
-choices refined below) → T1.5 → T1.7 → T1.6 → T1.10 → T2.2 → T2.3 → T2.1.
+**T1.9 — the I2C0 clock story got worse while measuring the "before" number, and the
+design changes accordingly.** The bus clock is not just "three owners", it is **dynamic**:
+`jl_wavegen_start()` (`JumperlessMicroPythonAPI.cpp:273`) calls `wavegen.begin()` on **every**
+start → `WaveGen::begin()` → `_dac.begin()` (`WaveGen.cpp:83`) → `MCP4728::begin()` →
+`_wire->setClock(1700000)` (`MCP4728.cpp:164`). So the bus flips to **1.7 MHz whenever the
+wave generator is started** and drops back to **400 kHz on the next OLED frame** (SSD1306
+`clkAfter`), and sits at 1.7 MHz between them; the INA219s and the probe feed DAC run at
+whichever value the last of those two left. Measured on this boot: register readout after a
+wavegen start = `FS_HCNT 36 / FS_LCNT 52` @ 150 MHz → **1.70 MHz** (the earlier 400 kHz
+readout was taken hours after boot with no wavegen since). **Before number:** wavegen 2 kHz
+sine on DAC1 for 3.0 s → **91 055 MCP4728 writes = 30 352 writes/s** at 1.7 MHz (the
+`mcp4728 writes` B counter in `i@`, script in `$CLAUDE_JOB_DIR/tmp/wg_rate.py`: read `i@`,
+`wavegen_set_output(1); wavegen_set_wave(0); wavegen_set_freq(2000); wavegen_start(1);
+sleep 3; wavegen_stop()`, read `i@` again). Expect ~18 k writes/s at 1 MHz after T1.9 (the
+rate WaveGen's `B_PER_SAM 4.67` model was calibrated for — that constant fits ~1 MHz, not
+1.7 MHz or 400 kHz), and note for Kevin that the max wave frequency he sees today at 1.7 MHz
+will drop ~40 % — that is the honest cost of running the INA219s at the clock the code
+argues for; if he would rather keep 1.7 MHz for streaming, the alternative is "1 MHz owner +
+WaveGen may raise the clock only while `isRunning()` and must restore it on stop", which is a
+fourth edit in `WaveGen::start/stop`, not in `MCP4728::begin()`.
+
+**T1.9 edits (still three, now with the fourth caller understood):** (1) `MCP4728::begin()`
+drops `setClock(1700000)` — this also fixes the every-wavegen-start flip; (2) the OLED-on-I2C0
+`Adafruit_SSD1306` instance keeps `clkDuring` 400 kHz and gets `clkAfter = 1000000`
+(`oled.cpp:109-112`; introduce one shared constant for the I2C0 bus rate next to `initDAC()`'s
+`Wire.setClock(1000000)` in `Peripherals.cpp:520` and use it in both places); (3)
+`oled::connect()` passes that constant instead of `400000` to `initI2C()` when
+`connection_type == 2` (`oled.cpp:4260`) — the OLED's own address pings (`checkConnection`
+`oled.cpp:706-709`, `show()`'s post-write ping `:2296`, the boot auto-detect `:4337`) then run
+at the bus rate, which is fine: the boot auto-detect already ACKs at 1.7 MHz today. **Verify:**
+register readout = 1 MHz right after boot with the OLED connected **and** again right after a
+`wavegen_start(1)`/`wavegen_stop()` (the flip must be gone); the writes/s number above → ~18 k;
+`i@` and the `[switch]` classification stable; `probe_current_zero` in `~` across ≥10 reboots
+(`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
+history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
+
+**Then the queue:** T1.4 (B3, with the period choices refined below) → T1.5 → T1.7 → T1.6 →
+T1.10 → T2.2 → T2.3 → T2.1.
 
 **Design refinements found while reading for T1.4 (use these, not the first-pass numbers):**
 - `ProbeSwitch` gets **`periodUs() = 10 000`, not 500 000**: `checkSwitchPosition()` has
@@ -124,7 +156,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | **landed** | builds ×3; HIL 5/6 ×5 (one standalone + a 4-run soak, ~9 min, with a second process holding port 7 open the whole time: 0 errors, 4 CDC ports enumerated after every run, uptime continuous — no port drops); `X` census unchanged (6/6 slots, FlashPark timeouts 0). Zero raw `tud_task()` calls left in `src/` (59 sites: 23 → `TinyUSB_Device_Task()` at pump-only waits, 36 → `yield()` where the site wanted output pushed or was a `Serial.write(marker); tud_task();` debug pair). `TinyUSBService` is CRITICAL now (every pass, and inside `serviceCritical()`'s modal set — the B4 delta arriving early). |
 | 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
 | 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **landed** | builds ×3; HIL 5/6; `test_infra_paths` 24/24; `X`: `irq 16` handler `0x20000835` (was `0x10055931` in flash); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise |
-| 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | pending | — |
+| 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | **in progress — "before" measured, no code yet** | before: 30 352 MCP4728 writes/s on DAC1 (2 kHz sine, 3 s) at 1.70 MHz (register readout after `wavegen_start`); the bus is dynamic — 1.7 MHz after any wavegen start, 400 kHz after any OLED frame |
 | 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
 | 6 | T1.5 B4 `serviceInner()` | pending | — |
 | 7 | T1.7 B6 `loop()` cleanup | pending | — |
@@ -153,6 +185,8 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
   sets and WaveGen's rate math assumes (`WaveGen.cpp:372,412,432,637`, `B_PER_SAM 4.67`
   "empirically calibrated" — consistent with ~1 MHz, not 400 kHz or 1.7 MHz; the stream is
   free-running, so its output frequency scales with the real bus clock).
+  **Update (T1.9 measurement):** the clock is also *dynamic* — every `wavegen_start()` re-runs
+  `MCP4728::begin()` and flips the bus back to 1.7 MHz until the next OLED frame (see CONTINUE HERE).
   **T1.9 therefore becomes "give I2C0 one clock owner"**: `MCP4728::begin()` stops overriding
   the clock; the OLED-on-I2C0 instance keeps its own transfers at 400 kHz (`clkDuring`, the
   panel's rating) but hands the bus back at 1 MHz (`clkAfter`), and `connect()`'s probe passes
