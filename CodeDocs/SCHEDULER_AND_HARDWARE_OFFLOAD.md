@@ -21,13 +21,49 @@
 `2761825` (the switch classifier inside probe mode, row 31), `e3d4d36` (T1.4, row 32),
 `545b7e6` (T1.5, row 33), `b8d00d9` (T1.7, row 34), `574e749` (T1.6 measure-only, row 35),
 `dff24b3` (T1.10, row 36), `de297c5` (T2.2a, the latency probe, row 37), `3f02a14` (T2.2b, the
-mailbox, row 38), and **T2.3 — the DMA-fed CH446Q list send** (the commit after `3f02a14`,
-`DEV_MERGE_HANDOFF.md` row 39 — hash with the next commit). **The board is flashed with HEAD.**
-**Next: T2.1** (the always-on ADC ring — section C1; the largest and the one whose gate has
-the most of Kevin in it: taps under both feeds and both positions, the USB mic; read the C1
-row and the "T2.1" line in the Verification section before starting), then the second mailbox
-step `REQ_SHOW_LEDS` (T2.2c). The watchdog *enable* is a separate decision on the T1.6 numbers.
-**A consolidated "Kevin's hands-on checklist" is at the end of this block.**
+mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), and this docs commit
+(row 40 — the T2.1 analysis below; hash with the next commit). **The board is flashed with
+`9db4675`.** **Next: T2.1 — but read the analysis first; it wants Kevin's hands in the loop,
+so it was deliberately NOT started autonomously.** Then T2.2c (`REQ_SHOW_LEDS`). The watchdog
+*enable* is a separate decision on the T1.6 numbers. **A consolidated "Kevin's hands-on
+checklist" is at the end of this block.**
+
+**T2.1 (the always-on ADC ring) — why it was not started here, and what it actually is.**
+The hoped-for staging ("promote the audio engine to always-on with the full channel mask,
+add `readAdcRing()` next to the untouched `readAdc()`, move no reader yet") does not exist:
+the ADC is either free-running round-robin into the DMA half-buffers (what `usbAudioAdcStart()`
+sets up: `START_MANY`, `adc_set_round_robin`, results into `adc_hw->fifo`) or manual
+`START_ONCE` (what every `readAdc()`/`readAdcHeld()` does) — the two cannot share the
+peripheral, and the code already says so (`Peripherals.cpp` `readAdc()`: "USB audio streaming
+reconfigures the ADC … which makes everything below structurally invalid … bail out BEFORE the
+lock"). So an always-on engine means **every existing reader is served from the engine's
+snapshot from boot on** — which is exactly the path that exists today only while the mic is
+open: `readAdc()` → `usbAudioSnapshotRaw()` = the last 1 ms burst's per-channel mean, and
+channels 5/7 (pad sense, tip) handed to the row decoder as a sentinel (`readAdcVoltage`
+serves their cached value; "the row decoder still gets its sentinel"), with
+`usb_audio_probe_activity` pausing the capture every 300 ms so the probe can read directly.
+That is a known-degraded probe. So T2.1 IS the probe-reader rewrite: the per-channel ring
+with the "samples newer than t0" API (`readAdcSince(ch, t0, n)`) for the timed reads (the
+phantom check, the blink and droop switch detectors, `readProbeRaw`'s 8 × 16-sample bursts),
+`Probing::service`'s 100 Hz read and `checkPads()`'s 12 × 8 × 16 reads becoming memory reads,
+`adc_get` from MicroPython, NetVoltageScan's core-1 reads, and USB audio as one more
+consumer of the same engine — all in one step, because there is no half-way state that
+keeps the pads decoding. Things to settle before writing it: the per-channel rate under an
+8-channel mask (500 ksps ÷ 8 = 62.5 ksps → a 128-sample decode window is ~2 ms of history
+either way, the doc's C1 row already says so — the win is core 0 not blocked, not a shorter
+window); the resync-on-overrun path (`usbAudioDmaIrq` flags, core 0's pump restarts) must
+re-label all 8 channels, not just L/R; `readingADC`/`adcTryAcquire()` users (the droop
+estimate, the blink detector — they hold the tip dark for ~20 µs and read ADC7 before/after,
+which needs "the samples between t0 and t1", not a mean); and the switch classifier's
+`readAdc(5, 4)` touch veto. Payoff (measured need, T1.4): ProbePads 36.8 ms per poll at
+20 Hz = 65–70 % of core 0 → ~10 µs memory reads. **Gate has Kevin in it:** taps decode
+identically under both feeds and both switch positions, the reading display, the USB mic
+still records, plus the automatable part (ring stats in `X`: overruns 0, oldest-sample age
+< 1 ms; the T1.4 table's ProbePads share drops as predicted; HIL; `test_infra_paths`;
+`test_net_currents`). Recommendation: do it as a session with Kevin at the board — the first
+build will be judged by feel within a minute of tapping, and the cheap alternative for the
+core-0 load alone (a one-read touch pre-check in `checkPads()`, "T1.11 candidate" in the
+checklist) is a 20-line change he can take today if he only wants the CPU back.
 
 **T2.3 — what was built (section C2a).** In `CH446Q.cpp`: on core 1 (V5) a list send —
 `sendAllPaths()` from `sendPaths()` — no longer pushes one word per crosspoint into the PIO TX
