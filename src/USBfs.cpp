@@ -474,10 +474,7 @@ void validateAllSlots(bool verbose) {
         while (core2busy) {
             __dmb();
             if (micros() - _t > 25000) { break; }  // timeout-and-proceed; don't falsify the other core's flag
-            #ifdef USE_TINYUSB
-            extern void tud_task(void);
-            tud_task();
-            #endif
+            TinyUSB_Device_Task(); // mutex-guarded USB pump
         }
     }
     core1busy = true;
@@ -561,10 +558,7 @@ void manualRefreshFromUSB() {
         while (core2busy) {
             __dmb();
             if (micros() - _t > 25000) { break; }  // timeout-and-proceed; don't falsify the other core's flag
-            #ifdef USE_TINYUSB
-            extern void tud_task(void);
-            tud_task();
-            #endif
+            TinyUSB_Device_Task(); // mutex-guarded USB pump
         }
     }
     core1busy = true;

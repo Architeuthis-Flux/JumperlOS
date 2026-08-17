@@ -73,11 +73,8 @@ unsigned long waitCore2() {
     }
     
     // CRITICAL: Service USB during wait to prevent disconnect
-    #ifdef USE_TINYUSB
-    extern void tud_task(void);
-    tud_task();
-    #endif
-    
+    TinyUSB_Device_Task(); // mutex-guarded pump (the USB IRQ pumps too - never raw tud_task())
+
     // Small yield to prevent tight loop
     tight_loop_contents();
   }
@@ -210,10 +207,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
     __dmb();  // Memory barrier to see Core 2's update
     delayMicroseconds(100);
     // CRITICAL: Service USB during wait to prevent disconnect
-    #ifdef USE_TINYUSB
-    extern void tud_task(void);
-    tud_task();
-    #endif
+    TinyUSB_Device_Task(); // mutex-guarded pump
   }
   t[ti++] = millis(); // t[6] = after sendAllPathsCore2 wait
 
@@ -312,7 +306,7 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
     }
     // Service USB periodically during the wait to prevent port disconnect
     if ((micros() - core2_wait_start) % 5000 < 10) {
-      tud_task();
+      TinyUSB_Device_Task(); // mutex-guarded pump
     }
   }
   

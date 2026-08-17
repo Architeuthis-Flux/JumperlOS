@@ -143,10 +143,7 @@ extern "C" void machine_pin_irq_deinit( void );
 // Include JumperlOS for service management
 #include "JumperlOS.h"
 
-// TinyUSB for flushing USB buffers
-#ifdef USE_TINYUSB
-extern "C" void tud_task( void );
-#endif
+// USB is pumped through yield()/TinyUSB_Device_Task() (mutex-guarded), never raw tud_task().
 
 /**
  * @brief Run essential services during MicroPython execution
@@ -1501,7 +1498,7 @@ extern "C" void jl_soft_reboot( void ) {
     }
     // Service USB to ensure buffers are fully drained
     for ( int i = 0; i < 10; i++ ) {
-        tud_task( );
+        yield( ); // mutex-guarded pump + CDC flush
         delay( 1 );
     }
 #endif
@@ -1581,7 +1578,7 @@ extern "C" void jl_soft_reboot( void ) {
 #ifdef USE_TINYUSB
     // Final USB service to ensure clean state
     for ( int i = 0; i < 5; i++ ) {
-        tud_task( );
+        yield( ); // mutex-guarded pump + CDC flush
         delay( 1 );
     }
 #endif

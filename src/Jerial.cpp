@@ -1008,7 +1008,7 @@ void JerialClass::flush() {
     // any pending data without blocking. The USB protocol guarantees
     // eventual delivery without requiring blocking waits.
     //#ifdef USE_TINYUSB
-    extern void tud_task(void);
+    // (raw tud_task() is never called from here; the mutex-guarded pump is yield())
     // Service USB multiple times to give it a chance to transmit
     // for (int i = 0; i < 3; i++) {
     //     tud_task();

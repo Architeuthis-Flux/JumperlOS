@@ -764,9 +764,7 @@ void FileManager::refreshListing( ) {
             break;
         }
         // Service USB periodically during long directory reads to prevent disconnect
-        #ifdef USE_TINYUSB
-        if ( ( fileCount & 0x03 ) == 0 ) tud_task( );
-        #endif
+        if ( ( fileCount & 0x03 ) == 0 ) TinyUSB_Device_Task( ); // mutex-guarded pump
 
         String fileName = dir.fileName( );
 
@@ -803,9 +801,7 @@ void FileManager::refreshListing( ) {
 
     for ( int i = startSort; i < fileCount - 1; i++ ) {
         // Service USB during sort to prevent disconnect on large directories
-        #ifdef USE_TINYUSB
-        if ( ( i & 0x03 ) == 0 ) tud_task( );
-        #endif
+        if ( ( i & 0x03 ) == 0 ) TinyUSB_Device_Task( ); // mutex-guarded pump
 
         for ( int j = i + 1; j < fileCount; j++ ) {
             bool shouldSwap = false;
@@ -1594,9 +1590,7 @@ void FileManager::run( ) {
                 unsigned long rootReleaseWait = millis( );
                 while ( isEncoderButtonPhysicallyPressed( ) &&
                         millis( ) - rootReleaseWait < 3000 ) {
-                    #ifdef USE_TINYUSB
-                    tud_task( );
-                    #endif
+                    TinyUSB_Device_Task( ); // mutex-guarded pump
                     delayMicroseconds( 500 );
                 }
                 encoderButtonState = IDLE;
@@ -1620,9 +1614,7 @@ void FileManager::run( ) {
             unsigned long releaseWaitStart = millis( );
             while ( isEncoderButtonPhysicallyPressed( ) &&
                     millis( ) - releaseWaitStart < 3000 ) {
-                #ifdef USE_TINYUSB
-                tud_task( );
-                #endif
+                TinyUSB_Device_Task( ); // mutex-guarded pump
                 delayMicroseconds( 500 );
             }
             encoderButtonState = IDLE;
@@ -1648,9 +1640,7 @@ void FileManager::run( ) {
         // for its whole session, and a navigation burst (each key = OLED I2C +
         // a multi-KB ANSI redraw + a directory walk) can starve TinyUSB long
         // enough that the host gives up and drops the CDC port entirely.
-        #ifdef USE_TINYUSB
-        tud_task( );
-        #endif
+        yield( ); // mutex-guarded pump + CDC flush
 
         // Check if input is blocked (except Ctrl+Q and ESC)
         char input = 0;

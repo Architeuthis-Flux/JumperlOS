@@ -129,10 +129,7 @@ int openFileThreadSafe(int openTypeEnum, int slot, int flashOrLocal) {
       // ponytail: timeout-and-proceed only; core2busy belongs to core 2,
       // force-clearing it here lied to every other waiter
       if (micros() - _t > 25000) break;
-      #ifdef USE_TINYUSB
-      extern void tud_task(void);
-      tud_task();
-      #endif
+      TinyUSB_Device_Task(); // mutex-guarded pump
     }
   }
   core1request = 0;
@@ -3042,10 +3039,7 @@ int printChangedNetColorFile(int slot, int flashOrLocal) {
         __dmb();
         // ponytail: timeout-and-proceed only; never falsify core 2's flag
         if (micros() - _t > 25000) break;
-        #ifdef USE_TINYUSB
-        extern void tud_task(void);
-        tud_task();
-        #endif
+        TinyUSB_Device_Task(); // mutex-guarded pump
       }
     }
     core1request = 0;

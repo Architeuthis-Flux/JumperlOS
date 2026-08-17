@@ -21,7 +21,7 @@ KevinC@ppucc.io
 #include <Arduino.h>
 
 #ifdef USE_TINYUSB
-#include "tusb.h" // For tud_task() function
+#include "tusb.h" // TinyUSB (the pump is TinyUSB_Device_Task()/yield(), never raw tud_task())
 #include <Adafruit_TinyUSB.h>
 #endif
 
@@ -865,7 +865,7 @@ menu:
 dontshowmenu:
 #if DEBUG_MAIN_LOOP_CHECKPOINTS
     Serial.write( 'H' ); // Reached dontshowmenu
-    tud_task( );
+    yield( );
 #endif
 
     // Config saving is now handled by ConfigSaveService which monitors configChanged flag
@@ -875,12 +875,12 @@ dontshowmenu:
 
 #if DEBUG_MAIN_LOOP_CHECKPOINTS
     Serial.write( 'I' ); // About to enter busy loop
-    tud_task( );
+    yield( );
 #endif
 
 #if debug_busy_timers == 1
     Serial.println( "Starting main loop: " + String( millis( ) ) + " ms" );
-    tud_task( );
+    yield( );
 #endif
     busyPrintTime = millis( );
 
@@ -921,7 +921,7 @@ dontshowmenu:
 
         if ( printLoop ) {
             Serial.write( 'L' );
-            tud_task( );
+            yield( );
         } // Loop start
 #endif
 
@@ -933,14 +933,14 @@ dontshowmenu:
         // serviceAll() and the marker below
         if ( printHeartbeat ) {
             Serial.write( '>' ); // After serviceAll marker
-            tud_task( );
+            yield( );
             lastHeartbeatPrint = heartbeatCounter; // Update here so we get consistent '<{...}>'
         }
 
 #if DEBUG_MAIN_LOOP_CHECKPOINTS
         if ( printLoop ) {
             Serial.write( 'S' );
-            tud_task( );
+            yield( );
         } // After serviceAll
 
         // DEBUG: Check Core 2 state
@@ -957,14 +957,14 @@ dontshowmenu:
             Serial.write( ',' );
             Serial.print( showLEDsCore2 );
             Serial.write( ']' );
-            tud_task( );
+            yield( );
         }
 #endif
 
 #if DEBUG_MAIN_LOOP_CHECKPOINTS
         if ( printLoop ) {
             Serial.write( '1' );
-            tud_task( );
+            yield( );
         } // Checkpoint 1
 #endif
 
@@ -1035,7 +1035,7 @@ dontshowmenu:
             Serial.print( millis( ) );
             Serial.println( " ms" );
             Serial.println( "\n\r" );
-            tud_task( ); // Non-blocking USB service instead of flush
+            yield( ); // non-blocking USB pump + CDC flush
         }
 #endif
         // Service Jerial to process line buffering and poll Port 4 (USBSer3) TUI commands
@@ -1090,7 +1090,7 @@ dontshowmenu:
                         input = cmdPtr[ 0 ];
 
                         // Service USB to prevent port disconnect during command execution
-                        tud_task( );
+                        TinyUSB_Device_Task( ); // mutex-guarded pump
 
                         // Execute the command
                         inMainMenu = true;

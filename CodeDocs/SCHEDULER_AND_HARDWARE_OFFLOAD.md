@@ -44,7 +44,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | Step | Item | Status | Verified how |
 |---|---|---|---|
 | 0 | this doc + `DEV_MERGE_HANDOFF.md` rows | landed | docs only |
-| 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | pending | — |
+| 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | **landed** | builds ×3; HIL 5/6 ×5 (one standalone + a 4-run soak, ~9 min, with a second process holding port 7 open the whole time: 0 errors, 4 CDC ports enumerated after every run, uptime continuous — no port drops); `X` census unchanged (6/6 slots, FlashPark timeouts 0). Zero raw `tud_task()` calls left in `src/` (59 sites: 23 → `TinyUSB_Device_Task()` at pump-only waits, 36 → `yield()` where the site wanted output pushed or was a `Serial.write(marker); tud_task();` debug pair). `TinyUSBService` is CRITICAL now (every pass, and inside `serviceCritical()`'s modal set — the B4 delta arriving early). |
 | 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | pending | — |
 | 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | pending | — |
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | pending | — |

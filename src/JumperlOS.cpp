@@ -190,7 +190,7 @@ void jOSmanager::serviceAll() {
     // DEBUG: Mark start of serviceAll
     if (printServiceDebug) {
         Serial.write('{');
-        tud_task();
+        yield();
     }
     
     // Debug: Print service execution order every N loops
@@ -269,7 +269,7 @@ void jOSmanager::serviceAll() {
         if (printServiceDebug) {
             Serial.write('[');
             Serial.print(i);
-            tud_task();
+            yield();
         }
         
         // Execute the service with timing
@@ -281,7 +281,7 @@ void jOSmanager::serviceAll() {
         // DEBUG: Print completion marker
         if (printServiceDebug) {
             Serial.write(']');
-            tud_task();
+            yield();
         }
         
         // CRITICAL: Report ANY service taking > 100ms (causes command delays!)
@@ -324,7 +324,7 @@ void jOSmanager::serviceAll() {
     // DEBUG: Mark end of serviceAll
     if (printServiceDebug) {
         Serial.write('}');
-        tud_task();
+        yield();
     }
     //debugWaitLoopTiming = false;
 }
@@ -384,10 +384,10 @@ void jOSmanager::serviceCritical() {
  * and visualization working during Python script execution.
  */
 void jOSmanager::servicePython() {
-    // Keep USB alive during MicroPython execution
-#ifdef USE_TINYUSB
-    tud_task();
-#endif
+    // Keep USB alive during MicroPython execution (mutex-guarded pump: the
+    // Adafruit port also runs tud_task() from its USB IRQ under __usb_mutex,
+    // so a raw tud_task() here could re-enter the stack)
+    TinyUSB_Device_Task();
     
     // Run peripherals service for current sense measurements
     // This updates currentSenseState.filteredCurrent_mA which drives marching ants
@@ -712,13 +712,17 @@ TinyUSBService& TinyUSBService::getInstance() {
 
 /**
  * @brief Service method for TinyUSB task
- * HIGH priority - USB communication is time-sensitive
+ * CRITICAL priority - runs every pass and inside every modal loop. The pump is
+ * TinyUSB_Device_Task(): the Adafruit port already runs tud_task() from its
+ * USB soft-IRQ under __usb_mutex, so this is the mutex-guarded (try-enter)
+ * thread-context entry - never a raw tud_task(). yield() would also flush
+ * every CDC port; the CDC writers flush themselves, so the plain pump is enough here.
  */
 ServiceStatus TinyUSBService::service() {
     lastStatus = ServiceStatus::IDLE;
     
 #ifdef USE_TINYUSB
-    tud_task();
+    TinyUSB_Device_Task();
     lastStatus = ServiceStatus::BUSY;
 #endif
     

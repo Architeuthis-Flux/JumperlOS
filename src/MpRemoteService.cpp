@@ -6,9 +6,7 @@
 #include <cstring>
 #include "Probing.h"
 #include "Commands.h"
-#ifdef USE_TINYUSB
-#include "tusb.h" // For tud_task() function
-#endif
+// USB is pumped through yield() (mutex-guarded), never raw tud_task().
 
 extern "C" {
 #include "py/gc.h"
@@ -257,9 +255,7 @@ ServiceStatus MpRemoteService::service( ) {
                 USBSer2.write('\x04');
                 USBSer2.write('>');
                 USBSer2.flush();
-                #ifdef USE_TINYUSB
-                tud_task();
-                #endif
+                yield(); // mutex-guarded pump + CDC flush
             }
 
             // Restore USBSer2 stream state and stop processing this batch
@@ -276,9 +272,7 @@ ServiceStatus MpRemoteService::service( ) {
     // NO flush — bytes can sit in the CDC TX buffer indefinitely without this.
     if (processed_count > 0) {
         USBSer2.flush();
-        #ifdef USE_TINYUSB
-        tud_task();  // Ensure USB transfer actually happens
-        #endif
+        yield();  // mutex-guarded pump + CDC flush: ensure the transfer actually happens
     }
 
     // CRITICAL: Handle soft reset requests from the native REPL

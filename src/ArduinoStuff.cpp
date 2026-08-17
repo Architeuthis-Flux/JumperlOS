@@ -30,7 +30,7 @@
 #include "hardware/structs/io_bank0.h"
 #include "hardware/structs/xip.h"
 
-extern void tud_task(void);  // TinyUSB task processing
+// USB is pumped through TinyUSB_Device_Task() (mutex-guarded), never raw tud_task().
 
 // #include "SerialWrapper.h"
 
@@ -556,11 +556,8 @@ void connectArduino( int flashOrLocal, int refreshConnections ) {
         AsyncPassthrough::task();
         #endif
         
-        // Also service USB directly
-        #ifdef USE_TINYUSB
-        extern void tud_task(void);
-        tud_task();
-        #endif
+        // Also service USB directly (mutex-guarded pump)
+        TinyUSB_Device_Task();
         
         // Timeout check to prevent infinite loop
         if (millis() - connectTimeout > CONNECT_TIMEOUT_MS) {

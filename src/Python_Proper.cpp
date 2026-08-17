@@ -219,9 +219,7 @@ extern "C" void mp_hal_delay_ms(mp_uint_t ms) {
     
     // CRITICAL: Service USB EVERY iteration to ensure Ctrl+C bytes reach the CDC buffer
     // Without this, USB characters get stuck in hardware buffers and interrupts don't work
-    #ifdef USE_TINYUSB
-    tud_task();
-    #endif
+    TinyUSB_Device_Task(); // mutex-guarded pump (never raw tud_task(): the USB IRQ pumps too)
     
     // Check for interrupts at least every 1ms (but don't throttle too aggressively)
     if (current != last_interrupt_check) {
@@ -295,9 +293,7 @@ extern "C" int arduino_serial_read(Stream *stream) {
 // tud_task() itself is available in C++ but not directly linkable from
 // the micropython library's C compilation units.
 extern "C" void service_usb_task(void) {
-  #ifdef USE_TINYUSB
-  tud_task();
-  #endif
+  TinyUSB_Device_Task(); // mutex-guarded pump
 }
 
 // USB-CDC back-pressure guard. Adafruit_USBD_CDC::write() spins forever
@@ -319,9 +315,7 @@ bool jl_cdc_wait_writable(Stream *stream, size_t need, unsigned long timeoutMs) 
   }
   unsigned long start = millis();
   while (millis() - start < timeoutMs) {
-    #ifdef USE_TINYUSB
-    tud_task(); // give the host a chance to drain the TX FIFO
-    #endif
+    yield(); // pump USB + flush CDC: give the host a chance to drain the TX FIFO
     if ((size_t)stream->availableForWrite() >= need) {
       return true;
     }
@@ -503,7 +497,7 @@ extern "C" void mp_hal_stdout_tx_strn_cooked(const char *str, size_t len) {
       // Without this, Serial.write() can block if CDC TX buffer is full,
       // and USB never gets serviced, causing a permanent freeze
       if (i % 50 == 0) {
-        tud_task();  // Service USB to drain CDC TX buffer
+        yield();  // pump USB + flush CDC to drain the TX buffer
         mp_hal_check_interrupt();
       }
 
@@ -640,9 +634,7 @@ extern "C" void mp_hal_check_interrupt(void) {
   // CRITICAL: Service USB FIRST, BEFORE any throttling checks
   // This ensures Ctrl+C bytes move from USB hardware → CDC buffer even when throttled
   // Without this, interrupts during time.sleep() won't work!
-  #ifdef USE_TINYUSB
-  tud_task(); // MUST be called every time, regardless of throttling
-  #endif
+  TinyUSB_Device_Task(); // MUST be called every time, regardless of throttling
   
   // PROACTIVE MEMORY MANAGEMENT: Check for low memory and trigger GC if needed
   // This prevents MemoryError during long-running scripts by freeing memory before it's critically low
@@ -1200,9 +1192,7 @@ void enterMicroPythonREPLWithFile(Stream *stream, const String& filepath) {
         USBSer2.write('\x04');
         USBSer2.write('>');
         USBSer2.flush();
-        #ifdef USE_TINYUSB
-        tud_task();
-        #endif
+        yield();
       }
       
       // Restore stream state for next REPL iteration
@@ -1798,7 +1788,7 @@ void processMicroPythonInput(Stream *stream) {
                 // Clear stale interrupt/exception state after script execution
                 mp_interrupt_requested = false;
                 MP_STATE_MAIN_THREAD(mp_pending_exception) = MP_OBJ_NULL;
-                tud_task();
+                yield(); // pump USB + flush the script's output
                 // Force GC after script to close file handles and free memory
                 // Use safe version with Core 2 synchronization
                 gc_collect_safe();
@@ -2170,7 +2160,7 @@ void processMicroPythonInput(Stream *stream) {
               // Clear stale interrupt/exception state after script execution
               mp_interrupt_requested = false;
               MP_STATE_MAIN_THREAD(mp_pending_exception) = MP_OBJ_NULL;
-              tud_task();
+              yield(); // pump USB + flush the script's output
               // Force GC after script to close file handles and free memory
               // Use safe version with Core 2 synchronization
               gc_collect_safe();
@@ -2349,7 +2339,7 @@ void processMicroPythonInput(Stream *stream) {
               
               // Service USB to ensure any traceback output is fully transmitted
               // before proceeding with gc_collect and prompt drawing
-              tud_task();
+              yield();
               
               // Restore the original character
               input_buffer[clean_end] = saved_char;
@@ -2493,7 +2483,7 @@ void processMicroPythonInput(Stream *stream) {
               // Clear stale interrupt/exception state after script execution
               mp_interrupt_requested = false;
               MP_STATE_MAIN_THREAD(mp_pending_exception) = MP_OBJ_NULL;
-              tud_task();
+              yield(); // pump USB + flush the script's output
               // Force GC after script to close file handles and free memory
               // Use safe version with Core 2 synchronization
               gc_collect_safe();
@@ -4854,7 +4844,7 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
 }
   
   // Service USB before execution to prevent port disconnect during long commands
-  tud_task();
+  TinyUSB_Device_Task();
   
   // Clear result buffer
   if (result_buffer && buffer_size > 0) {
@@ -4867,8 +4857,8 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
   // mp_embed_exec_str has nlr_push/nlr_pop to catch Python exceptions
   mp_embed_exec_str(parsed_command.c_str());
 
-  // Service USB after execution
-  tud_task();
+  // Service USB after execution (and flush the output)
+  yield();
   
   // CRITICAL: Force garbage collection after each command to prevent heap exhaustion
   // Without this, repeated commands can fragment/exhaust the MicroPython heap

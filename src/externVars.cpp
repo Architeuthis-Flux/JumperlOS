@@ -11,7 +11,7 @@
 
 // TinyUSB task function (C linkage)
 #ifdef USE_TINYUSB
-extern "C" void tud_task(void);
+// (raw tud_task() is no longer called from here - TinyUSB_Device_Task() is the mutex-guarded pump)
 #endif
 
 // Single point of definition (ODR).
@@ -210,10 +210,7 @@ bool pauseCore2ForFlash(uint32_t timeout_ms) {
     // is what actually makes XIP-disable safe.
     uint32_t wait_start = millis();
     while (core2busy && (millis() - wait_start < timeout_ms)) {
-        #ifdef USE_TINYUSB
-        tud_task();
-        #endif
-        
+        TinyUSB_Device_Task(); // mutex-guarded USB pump (never raw tud_task())
         delayMicroseconds(100);
     }
     

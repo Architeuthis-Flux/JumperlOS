@@ -371,8 +371,10 @@ private:
 };
 
 /**
- * @brief TinyUSB task service - handles USB communication
- * HIGH priority - USB communication is time-sensitive
+ * @brief TinyUSB task service - pumps the USB device stack from the loop
+ * CRITICAL priority - every pass, and inside the modal loops' inner set (it
+ * used to be NORMAL = every 3rd pass, which is why every hot wait in the tree
+ * grew its own raw tud_task()). Mutex-guarded via TinyUSB_Device_Task().
  */
 class TinyUSBService : public Service {
 public:
@@ -382,7 +384,7 @@ public:
     
     ServiceStatus service() override;
     const char* getName() const override { return "TinyUSB"; }
-    ServicePriority getPriority() const override { return ServicePriority::NORMAL; }
+    ServicePriority getPriority() const override { return ServicePriority::CRITICAL; }
     
 private:
     TinyUSBService() = default;

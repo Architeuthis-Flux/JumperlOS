@@ -1991,7 +1991,7 @@ CommandResult cmd_pythonCommand( char c, const String& line ) {
                             }
                             if ( hasPrintable ) {
                                 executeSinglePythonCommand( singleLine.c_str( ), nullptr, 0 );
-                                tud_task( ); // Service USB between commands
+                                yield( ); // pump USB + flush CDC between commands
                             }
                         }
                     }
@@ -2006,7 +2006,7 @@ CommandResult cmd_pythonCommand( char c, const String& line ) {
         Jerial.println( "Usage: > <python_command>" );
     }
     Jerial.flush( );
-    tud_task( ); // Service USB before return
+    yield( ); // pump USB + flush CDC before return
     return CMD_DONT_SHOW_MENU;
 }
 

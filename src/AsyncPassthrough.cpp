@@ -1503,7 +1503,7 @@ static inline void bridge_uart_to_usb( uint8_t itf ) {
         }
         
         unsigned long tudStart = micros();
-        tud_task(); // service USB to reduce latency under load
+        TinyUSB_Device_Task(); // mutex-guarded pump: service USB to reduce latency under load
         unsigned long tudTime = micros() - tudStart;
         if (tudTime > 50000) {
             Serial.printf("⏱️  tud_task (in bridge) took %lu ms\n", tudTime / 1000);
@@ -1587,7 +1587,7 @@ static void uart_rx_clean_resync( uint32_t max_wait_us ) {
         } else if ( time_us_32() - last_change > IDLE_US ) {
             break;  // line has been idle long enough
         }
-        tud_task();  // keep USB alive during the (boot-time) wait
+        TinyUSB_Device_Task();  // keep USB alive during the (boot-time) wait (mutex-guarded pump)
     }
 
     // 2. Re-align the receiver during the idle. Abort the DMA first so we can
@@ -1814,11 +1814,11 @@ void task( ) {
     // mid-flash.
     t0 = micros();
     
-    if (printCheckpoints) { Serial.write('1'); tud_task(); }
+    if (printCheckpoints) { Serial.write('1'); yield(); }
     
     checkDTRState( USBSer1 );
     
-    if (printCheckpoints) { Serial.write('2'); tud_task(); }
+    if (printCheckpoints) { Serial.write('2'); yield(); }
     t1 = micros();
     #if DEBUG_INJECTED_COMMANDS
     if ((t1 - t0) > 50000) {  // > 50ms
@@ -1982,7 +1982,7 @@ void task( ) {
         }
     }
     
-    if (printCheckpoints) { Serial.write('3'); tud_task(); }
+    if (printCheckpoints) { Serial.write('3'); yield(); }
 
     // Handle deferred UART receiver resync (requested by ISR via flag).
     // This runs in main context where busy_wait_us(100) is harmless,
@@ -1995,11 +1995,11 @@ void task( ) {
     // If suspended by MicroPython, avoid touching UART hardware (and don't
     // fire the cap-emulation reset - MP owns the UART, no flash is happening).
     if ( s_uart_suspended_by_mpy ) {
-        tud_task();
+        TinyUSB_Device_Task(); // mutex-guarded pump
         return;
     }
     
-    if (printCheckpoints) { Serial.write('4'); tud_task(); }
+    if (printCheckpoints) { Serial.write('4'); yield(); }
     
     // Apply pending line coding from host, and keep the UART baud/format in sync
     // with the host's CDC line coding (handles the "monitor already open at a
@@ -2012,7 +2012,7 @@ void task( ) {
         syncUartToHostLineCoding();
     }
 
-    if (printCheckpoints) { Serial.write('5'); tud_task(); }
+    if (printCheckpoints) { Serial.write('5'); yield(); }
     
     // USB -> UART when either pending flag set or data available
     t0 = micros();
@@ -2033,7 +2033,7 @@ void task( ) {
         }
     }
     
-    if (printCheckpoints) { Serial.write('6'); tud_task(); }
+    if (printCheckpoints) { Serial.write('6'); yield(); }
     t1 = micros();
     #if DEBUG_INJECTED_COMMANDS
     if ((t1 - t0) > 50000) {
@@ -2060,7 +2060,7 @@ last_uart_usb = millis();
     }
     t1 = micros();
     
-    if (printCheckpoints) { Serial.write('7'); tud_task(); }  // After UART->USB bridge
+    if (printCheckpoints) { Serial.write('7'); yield(); }  // After UART->USB bridge
     
     #if DEBUG_INJECTED_COMMANDS
     if ((t1 - t0) > 50000) {
@@ -2079,8 +2079,10 @@ last_uart_usb = millis();
     #endif
 
     // Service USB stack regardless to minimize latency and prevent CDC TX stalling
+    // (mutex-guarded: the Adafruit port also pumps tud_task() from its USB IRQ, so a
+    // raw call here could re-enter the stack. yield() also flushes every CDC port.)
     t0 = micros();
-    tud_task();
+    yield();
     t1 = micros();
     #if DEBUG_INJECTED_COMMANDS
     if ((t1 - t0) > 50000) {
