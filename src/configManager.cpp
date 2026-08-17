@@ -4059,8 +4059,14 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_power_dac") == 0) jumperlessConfig.dacs.probe_power_dac = parseInt(value);
         else if (strcmp(key, "auto_connect_probe") == 0) {
             jumperlessConfig.dacs.auto_connect_probe = parseInt(value);
+            // Symmetric with jl_probe_autoconnect(): turning it back on must
+            // re-enable the feed too - it used to leave s_probePowerOn false, so
+            // `[dacs] auto_connect_probe = 1` after a 0 left the probe unpowered
+            // until reboot ("probe_power off -> (none)" in i@; seen 2026-08-17).
             if (jumperlessConfig.dacs.auto_connect_probe <= 0) {
                 routableBufferPower(0, 0, 1);
+            } else {
+                routableBufferPower(1, 0, 1);
             }
         }
         else if (strcmp(key, "probe_power_source") == 0) {

@@ -24,8 +24,9 @@
 mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a4806` (docs, row
 40), `b03d25b` (the in-session switch classifier decides on agreement, row 41), `bd1e7bc`
 (the tip-sense veto for the legacy classifier, row 42 — "Side quest 2, follow-up 2" below),
-`4dd3eee` (T1.7b, row 43), and this docs commit (row 44 — hash with the next commit). **The
-board is flashed with `4dd3eee`.** **Next: T2.1 — but read the analysis first; it wants Kevin's
+`4dd3eee` (T1.7b, row 43), `ba64238` (docs, row 44), and **the probe-zero fix** (the commit after
+`ba64238`, row 45 — hash with the next commit; "Side quest 2, follow-up 3" below). **The board
+is flashed with HEAD.** **Next: T2.1 — but read the analysis first; it wants Kevin's
 hands in the loop, so it was deliberately NOT started autonomously.** T2.2c (`REQ_SHOW_LEDS`)
 likewise waits for eyes: the census is ~200 `showLEDsCore2` sites across 15 files (Menus 49,
 Probing 47, Apps 17, main 16, LEDs 12, Highlighting 9, SelfTest 8, RotaryEncoder 8, …), not the
@@ -448,8 +449,34 @@ the firmware reader tolerates it (the user's Enter flushes the tail and terminat
 app's line mode sends each line with **no terminator**, so pastes cannot work there by
 construction — interactive mode is the paste path.
 
+**Side quest 2, follow-up 3 (while Kevin was away, ~15:00–15:40): the root cause of the bad
+zero, measured and fixed (row 45).** `X` now prints `probe zero: Z mA (samples n: min..max,
+led-off ack N ms, xbar idle yes/NO, at T s, runs R) live L` — what `checkProbeCurrentZero()`
+actually saw. Over **17 reboots**: the LED-off request is acked in 0–1 ms and the DAC0
+disconnect had landed (mailbox idle) before every sampling window — the procedure runs as
+designed — yet the eight samples spread **0.79..2.38 mA on most boots**: the floor is a rock-
+steady 0.79 mA (INA1 with DAC0 open reads exactly that; measured with the feed genuinely
+parked: min/median 0.79/0.79, and it still spikes to 1.89 with nothing connected — the blips
+are not LED current) and 1–7 of the 8 samples land at 1.3–2.4. Every contamination is
+**upward**; a median only holds while fewer than half the samples are hit, and the boot that
+gave 2.4 had more (one boot in these 17 had seven of eight elevated). Fix: the zero is now the
+**2nd-lowest of the 8 samples** (the lowest if fewer than 4): 12 boots → 0.79 / 0.82 / 0.79 /
+0.79 / 0.79 / 1.04 / 0.82 / 0.79 / 0.79 (+ 0.82 / 0.89 / 0.98 / 0.82 / 1.28 / 0.95 with an
+interim 3rd-lowest pick), vs 0.9–1.3 with the median on the same board the same hour and 2.4
+on Kevin's bad boot. Corrected select-idle is then ~1.8–2.5 mA (> 1.2, SELECT, with margin)
+and MEASURE ~0.0. **Also found and fixed on the way:** `` `[dacs] auto_connect_probe = 1 ``
+after a `0` did not re-enable the probe feed (`s_probePowerOn` stayed false; `i@` said
+`probe_power off -> (none)` until reboot or `probe_autoconnect(1)`) — the config applier now
+calls `routableBufferPower(1, 0, 1)` symmetrically with the Python API (I hit this while
+parking the feed to measure the floor; the feed was put back with `probe_autoconnect(1)`, `i@`
+`probe_power on -> DAC0`). Verified: `[switch]` at idle SELECT 1.77–1.86 mA corrected; HIL 6/7
+(the known phantom check); `test_infra_paths` 24/24. Open item 2 of the probe handoff (the
+zero's spread) is thereby mostly answered: the spread was the median catching INA1's upward
+blips, not the LED-off race the comment feared — the blips' *source* (a ~2 mA transient on
+DAC0's output with the crossbar open, ~1 sample in 10–30) is still unexplained.
+
 **Side quest 2, follow-up 2 (Kevin, ~14:15: "now I'm getting erroneous flipping sometimes
-with the switch in select"): the commit after `b03d25b` (row 42) — the legacy classifier
+with the switch in select"): the commit after `b03d25b` (row 42, `bd1e7bc`) — the legacy classifier
 may no longer flip AGAINST detector A.** The log on his board at idle: 72 checks in 40 s, 15
 position changes, `A:L` on every line, corrected current oscillating 0.06–0.15 mA (B:M) ↔
 1.4–1.7 mA (B:S) — legacy deciding (`shadow:` label, so *not* the in-session path). Raw INA1

@@ -46,6 +46,21 @@ extern volatile bool g_probeDoubleTapBail;
 //                     elapsed microseconds for the most recent read on each
 //                     path. Useful for confirming PIO is the fast one.
 // ----------------------------------------------------------------------------
+// Diagnostics for the last probe_current_zero calibration (X prints them):
+// the zero swings boot to boot (open item 2 of PROBE_REWORK_HANDOFF.md, and
+// the 2.4 mA boot of 2026-08-17 that made the legacy classifier oscillate),
+// so record what the calibration actually saw. Defined in Probing.cpp.
+struct ProbeZeroDiag {
+    float zero_mA;               // what was stored
+    float sampleMin_mA, sampleMax_mA;
+    int goodSamples;
+    uint32_t ledOffAckMs;        // ms until core 1 consumed the LED-off request (100 = timed out)
+    bool xbarIdleBeforeSampling; // the DAC0 disconnect had landed (mailbox idle) before sampling
+    uint32_t atMs;               // millis() when it ran
+    uint32_t runs;               // calibrations since boot
+};
+extern ProbeZeroDiag probeZeroDiag;
+
 extern volatile int      probe_button_trace;
 extern volatile uint32_t probeButtonPIOReadCount;
 extern volatile uint32_t probeLedShowCount;     // WS2811 frames sent to the probe LED

@@ -2939,6 +2939,15 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                         en ? "DMA (core 1)" : "CPU", (unsigned long)sends, (unsigned long)words,
                         (unsigned long)maxWords, (unsigned long)stalls, ch446q_timeout_count );
     }
+    // probe_current_zero calibration diagnostics (see Probing.cpp ProbeZeroDiag).
+    {
+        target->printf( "probe zero: %.2f mA (samples %d: %.2f..%.2f, led-off ack %lu ms, xbar idle %s, at %lu s, runs %lu)  live %.2f mA\n\r",
+                        (double)probeZeroDiag.zero_mA, probeZeroDiag.goodSamples,
+                        (double)probeZeroDiag.sampleMin_mA, (double)probeZeroDiag.sampleMax_mA,
+                        (unsigned long)probeZeroDiag.ledOffAckMs, probeZeroDiag.xbarIdleBeforeSampling ? "yes" : "NO",
+                        (unsigned long)( probeZeroDiag.atMs / 1000 ), (unsigned long)probeZeroDiag.runs,
+                        (double)jumperlessConfig.calibration.probe_current_zero );
+    }
     // Probe LED / button line: frames vs colour requests (shows >> requests
     // is the shared-GPIO9 constant re-send), button samples decoded.
     extern volatile uint32_t ledFrameAbortsPause; // main.cpp

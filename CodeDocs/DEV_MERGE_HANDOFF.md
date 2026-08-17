@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–44, plus the paste fix in row 30 and
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–45, plus the paste fix in row 30 and
 the switch-classifier-in-probe-mode note in row 31): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
@@ -153,7 +153,9 @@ it wasn't this session.
 | 42 | `bd1e7bc` | **Legacy switch classifier: tip-sense veto** (Kevin: "erroneous flipping sometimes with the switch in select"). His board at idle: 15 flips in 40 s, `A:L` on every line, corrected current 0.1 ↔ 1.6 mA — `probe_current_zero` on that boot was ≈ 2.4 mA (raw INA1 a flat 2.5; three reboots later 0.4–1.05) = open item 2 of the probe handoff blinding B. The legacy rule still decides on its own but a flip A contradicts is held (SELECT→MEASURE vetoed while A:L, MEASURE→SELECT while A:H, boot verdicts likewise; A abstains while a button is held) | builds ×3; reproduced with `` `[calibration] probe_current_zero = 2.4 ``: 22 vetoes, **0 changes**, SELECT held over 12 s (was oscillating); zero restored to 1.05; HIL 6/7 (known phantom check); `test_infra_paths` 24/24. **Kevin:** flip at idle + mid-session again |
 
 | 43 | `4dd3eee` | **T1.7b: no argument wait for complete-line commands.** `getCommandArgs()` returned after its 20–100 ms stream timeout for every bare command in line mode (the app's mode), the relayed path and the port-7 backchannel (which waited on port 1's stream); `g_commandInputIsLine` (set by `loop()` / CommandBuffer / Ser3Backchannel, cleared only on the char-mode read path) skips the wait. All 23 callers audited: same-line suffixes only, no prompt-then-read | builds ×3; help/mode matrix unchanged in both modes; `c` line mode 4 ms p50 (was ≥ 100 ms by construction); char mode 2 ms; port-7 `X` fine; HIL 6/7 (known phantom check); `test_infra_paths` 24/24 |
-| 44 | _next commit after `4dd3eee`_ | Docs: rows 42–43 hashes, T1.7b block, why T2.2c also waits for Kevin's eyes (~200 `showLEDsCore2` sites, all LED behaviour) | docs only |
+| 44 | `ba64238` | Docs: rows 42–43 hashes, T1.7b block, why T2.2c also waits for Kevin's eyes (~200 `showLEDsCore2` sites, all LED behaviour) | docs only |
+
+| 45 | _next commit after `ba64238`_ | **probe_current_zero: 2nd-lowest sample instead of the median** (+ `X` prints the calibration's diagnostics: zero, sample spread, LED-off ack, xbar idle, run count). 17 reboots showed the LED-off request acked in 0–1 ms and the DAC0 disconnect landed before sampling every time — but the 8 samples spread 0.79..2.38 mA on most boots (floor 0.79 = INA1 with DAC0 open; 1–7 of 8 samples land at 1.3–2.4 — upward blips that occur even with nothing connected). A median catches them; the boot that gave Kevin's 2.4 mA zero had ≥ 4. Also: `` `[dacs] auto_connect_probe = 1 `` after a 0 now re-enables the feed (the applier only handled the off side) | builds ×3; 9 reboots with the 2nd-lowest pick: 0.79–1.04 mA (median gave 0.9–1.3 the same hour, 2.4 on the bad boot); `[switch]` idle SELECT 1.8 mA corrected; HIL 6/7 (known phantom check); `test_infra_paths` 24/24 |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

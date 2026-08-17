@@ -4,6 +4,7 @@
 #include "InfraPaths.h"
 #include "JumperlOS.h"
 #include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
+#include "CoreMailbox.h"  // core1req::allIdle() - probe zero calibration diag
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MatrixState.h"
@@ -5707,6 +5708,10 @@ float Probing::probeCurrentMedian( int n ) {
 #endif
 }
 
+// Diagnostics for the last probe_current_zero calibration (X prints them) -
+// struct in Probing.h.
+ProbeZeroDiag probeZeroDiag = { };
+
 float Probing::checkProbeCurrentZero( void ) {
 #if defined(OG_JUMPERLESS)
     // Only calibrate INA0 offset on OG, as INA1 doesn't exist.
@@ -5736,6 +5741,7 @@ float Probing::checkProbeCurrentZero( void ) {
     while ( showProbeLEDs != 0 && ( millis( ) - ledOffWaitStart < 100 ) ) {
         delayMicroseconds( 100 );
     }
+    probeZeroDiag.ledOffAckMs = (uint32_t)( millis( ) - ledOffWaitStart );
     delay( LED_SETTLE_TIME_MS + 5 );
 
     // Temporarily disconnect DAC0 from whatever it is connected to so
@@ -5767,6 +5773,7 @@ float Probing::checkProbeCurrentZero( void ) {
     // routed reads load current instead of the true offset.
     waitCore2( );
     delayMicroseconds( 10000 );
+    probeZeroDiag.xbarIdleBeforeSampling = core1req::allIdle( );
 
     extern float medianInPlace( float* vals, int n ); // Apps.cpp
     const int div = 8; // several samples; a single reading is too noisy for a stored offset
@@ -5797,8 +5804,25 @@ float Probing::checkProbeCurrentZero( void ) {
         }
     }
 
+    probeZeroDiag.goodSamples = goodSamples;
+    probeZeroDiag.sampleMin_mA = probeZeroDiag.sampleMax_mA = ( goodSamples > 0 ) ? zeroSamples[ 0 ] : 0.0f;
+    for ( int i = 1; i < goodSamples; i++ ) {
+        if ( zeroSamples[ i ] < probeZeroDiag.sampleMin_mA ) probeZeroDiag.sampleMin_mA = zeroSamples[ i ];
+        if ( zeroSamples[ i ] > probeZeroDiag.sampleMax_mA ) probeZeroDiag.sampleMax_mA = zeroSamples[ i ];
+    }
     if ( goodSamples > 0 ) {
-        current = medianInPlace( zeroSamples, goodSamples );
+        // Lower-quartile sample, not the median (2026-08-17). Every
+        // contamination of this measurement is UPWARD - a still-settling LED
+        // relatch, a crosspoint apply, the sporadic ~2 mA blips INA1 shows even
+        // with DAC0 open (X's "probe zero" line prints the sample spread: the
+        // floor is a stable ~0.8 mA, 1-3 of 8 samples land at 1.7-2.4) - and
+        // nothing ever reads LOW. A median only holds while fewer than half
+        // the samples are hit; the boot that produced a 2.4 mA zero (and an
+        // idle classifier oscillating SELECT/MEASURE) had more. The 2nd-lowest
+        // of 8 tolerates one odd low sample and any number of high
+        // ones up to six (one boot in twelve had six of eight elevated).
+        medianInPlace( zeroSamples, goodSamples ); // std::sort in place - we want the order, not the median
+        current = zeroSamples[ goodSamples >= 4 ? 1 : 0 ]; // 2nd lowest (the lowest if fewer than 4 samples)
         jumperlessConfig.calibration.probe_current_zero = current;
     } else {
         // Every read failed - bus problem, not a measurement. Keep the
@@ -5842,6 +5866,10 @@ float Probing::checkProbeCurrentZero( void ) {
     if ( wasProbePowerOn ) {
         infraNudge( );
     }
+
+    probeZeroDiag.zero_mA = current;
+    probeZeroDiag.atMs = millis( );
+    probeZeroDiag.runs++;
 
     showProbeLEDs = 4;
     return current;
