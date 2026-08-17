@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16, rows 24–26): see
+**Scheduler / hardware offload (2026-08-16, rows 24–27): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
 approved item as it lands (one commit each). One finding was corrected on the way in:
@@ -102,6 +102,7 @@ it wasn't this session.
 | 24 | (docs) | **`SCHEDULER_AND_HARDWARE_OFFLOAD.md` rewritten as the reviewed proposals + decisions** — Kevin's approved scope (Tier 1 incl. T1.9, T2.1–T2.3; T2.4 next session; the rest design-only), the commit-gate disposition for the autonomous pass, and the corrected I2C0 finding (400 kHz measured, three clock owners) | register readout over the REPL (`IC_FS_SCL_HCNT/LCNT` 150/225 @150 MHz); baseline `X` + `run_all` 5/6 captured into the doc's section F |
 | 25 | `a3e58f4` | **No raw `tud_task()` anywhere in `src/`** (59 sites → `TinyUSB_Device_Task()` / `yield()`, the Adafruit port's mutex-guarded entry points; the port also pumps from its USB soft-IRQ, so a raw call could re-enter the stack); `TinyUSBService` is CRITICAL (every pass, and in the modal loops' set) instead of NORMAL (every 3rd pass) | builds ×3; HIL 5/6 ×5 incl. a 4-run soak with port 7 held open by a second process (0 errors, no port drops, uptime continuous); `X` census unchanged |
 | 26 | `3fc5c57` | Priority/comment truth (`main.cpp` registration comments, `JumperlOS.cpp` stale ID map, Highlighting 40 ms, MpRemote 8192, ProbeSwitch NORMAL); the five verified no-op services are no longer registered (TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush behind `#if USE_FILE_CACHE`); `core1request` (written, never read) deleted; `inClickMenu` is `volatile` like every other cross-core mode flag | builds ×3; HIL 5/6; `X` census unchanged |
+| 27 | `b0fd157` | **Vocabulary rename, nothing behavioural**: the "injected command / injection buffer" family is now "relayed command / relay buffer" (`RelayedCommandService`, `RelayBufferStream`, `Jerial.relayInput()`, `hasRelayedCommand`, `relay_buffer`, `DEBUG_RELAYED_COMMANDS`, `withANSI`), and comment words that read wrong out of context were reworded (steal→take over, poison→corrupt, kill→stop/break, sniff→watch, forged→simulated, attack→rise, hostile→untrusted). Datasheet excerpts left as quoted. No Python-facing API or command changed | builds ×3 |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

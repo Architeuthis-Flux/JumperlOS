@@ -16,7 +16,7 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16 implementation session)
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
-(T1.2 + T1.3). **The board is flashed with the T1.8 build** (working tree = HEAD + the two
+(T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below). **The board is flashed with the T1.8 build** (working tree = HEAD + the two
 T1.8 files below), so what is running is one step ahead of HEAD.
 
 **Uncommitted, deliberately (T1.8 — CH446Q hot path into RAM):** `src/CH446Q.cpp` and
