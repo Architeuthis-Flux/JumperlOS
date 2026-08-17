@@ -217,6 +217,11 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "ProbeSwitch"; }
     ServicePriority getPriority() const override { return ServicePriority::NORMAL; }
+    // 10 ms, NOT interval_ms: checkSwitchPosition() has early returns before
+    // its 500 ms gate (checkingButton, LED settle) that expect to retry on the
+    // next pass, and infraServiceTick() runs on every call with no gate of
+    // its own (its comment says "~500 ms"; the calls were every 3rd pass).
+    uint32_t periodUs() const override { return 10000; }
     unsigned long interval_ms = 500; // switchPositionCheckInterval;
     
 private:
@@ -240,7 +245,9 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "ProbePads"; }
     ServicePriority getPriority() const override { return ServicePriority::LOW; }
-    
+    // Encodes service()'s own 50 ms (20 Hz) gate, which stays in place.
+    uint32_t periodUs() const override { return 50000; }
+
 private:
     ProbePads() = default;
     ~ProbePads() = default;

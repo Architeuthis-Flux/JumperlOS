@@ -29,7 +29,11 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "Peripherals"; }
     ServicePriority getPriority() const override { return ServicePriority::CRITICAL; }
-    
+    // The current-sense poll re-asks the INA at most every 10 ms (its own
+    // lastAttemptMs gate - kept, servicePython() calls service() directly)
+    // and showMeasurements() prints every 150 ms; 10 ms encodes the faster.
+    uint32_t periodUs() const override { return 10000; }
+
     // Member variables (previously globals)
     unsigned long gpioToggleFrequency = 25;
     int showReadings = 0;

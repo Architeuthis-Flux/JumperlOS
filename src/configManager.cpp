@@ -54,9 +54,11 @@ ConfigSaveService& ConfigSaveService::getInstance() {
     return *instance;
 }
 
-// Request async config save (non-blocking)
+// Request async config save (non-blocking). The service has a 100 ms period;
+// requestRun() makes an explicit request land on the very next pass anyway.
 void requestConfigSave() {
     configSavePending = true;
+    ConfigSaveService::getInstance().requestRun();
 }
 
 

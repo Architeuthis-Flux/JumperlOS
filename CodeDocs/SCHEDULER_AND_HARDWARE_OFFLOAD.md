@@ -13,16 +13,89 @@
 
 ## 0. Decisions and status
 
-### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 2)
+### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
-`f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30), and
-the switch-classifier-in-probe-mode note (the commit after `f5a6cd0`, row 31 — hash with the
-next commit). **The board is flashed with HEAD.** T1.9's gate ran in two halves: everything not needing port 1 while Kevin's
-`jumperless` client held `JLV5port1` (it reconnected through the flash and 21 reboots), and
-the port-1 half — clean HIL 5/6, `test_infra_paths` 24/24, `i@` — the moment Kevin closed the
-app. **Next: T1.4** (B3 — see "Then the queue" and the design refinements below).
+`f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
+`2761825` (the switch classifier inside probe mode, row 31), and **T1.4** (the commit after
+`2761825`, `DEV_MERGE_HANDOFF.md` row 32 — hash with the next commit). **The board is flashed
+with HEAD.** **Next: T1.5** (B4 `serviceInner()` — see "Then the queue"; T1.4's stats table
+is the instrument for it: the modal-loop calls already show up in `runs`).
+
+**T1.4 (B3) — what was built.** `Service` (base, `JumperlOS.h`) grew `virtual uint32_t
+periodUs() const { return 0; }`, `requestRun()`, and the scheduler-owned fields `nextDueUs`,
+`pending`, `runs`, `lastUs`, `maxUs`, `overruns`, `totalUs`. `jOSmanager::serviceAll()` lost
+the per-band loop divisors (1/1/3/20 — never a cadence) and runs a service iff
+`isDue()` (pending latch, or period 0, or `(int32_t)(now - nextDueUs) >= 0` on
+`time_us_32()` — C12) through one `runService()` helper that `serviceCritical()` and the
+`forceServiceBy*` paths share, so the `X` table counts the modal loops' calls too. Periods
+(each still has its own internal gate — T1.4 deletes nothing): ProbeSwitch 10 000, OLED 20 000,
+LiveXbar 100 000 (+ `requestUpdate()` → `requestRun()`, so a crossbar change draws on the next
+pass), Peripherals 10 000, ProbePads 50 000, OledGui 15 000, SlotManager ("States") 50 000,
+ConfigSave 100 000 (+ `requestConfigSave()` → `requestRun()`); everything else 0. C6:
+`probe_button_pio_irq_handler` calls `ProbeButton::requestRun()` + `Probing::requestRun()` on
+a sample-state change (a no-op while both are period 0 — the hook is wired). `X` prints
+`scheduler: N passes, M services` and a row per service: name / prio / period_us / runs /
+last_us / max_us / avg_us / overruns / share (share = total time in the service ÷ uptime).
+Four deliberate deviations from B3's sketch, all recorded here: (1) `nextDueUs` is stamped
+from the run **start**, not the end — a period equal to a service's own `millis()` gate then
+never aliases against it (the next attempt is ≥ period after this attempt's start, so a gate
+of the same length always passes; end-stamping would stretch ProbePads' 50 ms to ~87 ms);
+(2) the pending latch is cleared **only when read set** (the sketch's unconditional clear had
+a lost-request window); (3) the due gate applies inside `serviceCritical()` too (identical
+behaviour — only Peripherals has a period there, and it self-gates); (4) `nextDueUs` is
+initialised to `time_us_32()` at registration (a service registered >35 min after boot would
+otherwise wait for the wraparound). Correction to the refinements list below: "exact
+encodings (verified)" was loose for **ConfigSave and SlotManager** — neither has a 100 ms /
+50 ms gate; both are event/idle-gated (2 s input debounce; `systemIdleForFlush` ≥ 750 ms
+quiet), so those two periods are new, consequence-free upper bounds. Blocking is checked
+before the pending capture, so a `requestRun()` against a service skipped by a BLOCKING menu
+survives the skip.
+
+**T1.4 — verified:** builds ×3; `X` (port 7) after boot and after the HIL run: every one of
+the 16 registered services `runs > 0` with the expected period; period-0 services' `runs` ==
+passes (+ the `serviceCritical()` calls from modal loops — visible as TinyUSB/ProbeButton/
+MpRemote 417 342 vs 417 301 passes after `run_all.py`); `d`→`w` (wait-loop timing debug) on
+for 12 s: **0 SLOW SERVICE lines**, 232 × `serviceAll() took ~41.9 ms` (that flood is
+pre-existing — it is the ProbePads block below, one line per pad poll — and it stops the
+moment the flag goes off); 20 connect/disconnects with port 1 watched: no `⏱️ refresh:` line
+(none > 100 ms); **HIL 7/7** (`test_net_currents`' phantom-current check passed on this
+board today — twice, on the row-31 build and on this one; nothing in either touches it, so
+treat it as board state that may come back); `test_infra_paths` 24/24. **Pending Kevin
+hands-on: probe feel and menu feel unchanged** (the design intent is behaviour-identical;
+the tactile check is his by the disposition rule).
+
+**T1.4 — the number it was built to produce (finding 1, now measured, and it is worse than
+the estimate):** `ProbePads` = `checkPads()` = 12 × `readProbeRaw()` = 12 × 8 × `readAdc(5,16)`
+≈ **36.8 ms per call at 20 Hz → 64–70 % of core 0**, plus `Probing::service` (100 Hz
+`justReadProbe`) avg ~200 µs → ~16 %; together **~85 % of core 0's loop time is pad polling
+while nothing is touched** (the doc's estimate was "~⅓": ~12 ms @ 20 Hz + 1.2 ms @ 100 Hz).
+Consequences the table makes visible: the loop makes only ~900–1 300 passes/s (each pass
+containing ProbePads is ~40 ms), so every "period 0" service is serviced ~1 000×/s with 37 ms
+gaps, and the 10 ms services effectively run at ~24 Hz (Peripherals 1 417 runs in 60 s), not
+100 Hz — the current-sense poll included. Nothing here is new behaviour (T1.4 is
+behaviour-preserving; the same block existed at "every 20th pass"), it is just measured now.
+Two ways out, Kevin's call: **T2.1** (the always-on ADC ring — the poll becomes a memory read)
+is the approved one; a much smaller **T1.11 candidate** would be a touch pre-check in
+`checkPads()` — one `readAdc(5,16)` (~150 µs) and return unless it is above the floor, the
+12-read average only when something is there — which drops the idle share from ~65 % to
+<1 % at the cost of a slightly different first-detection filter (the next 50 ms poll catches
+a light touch the pre-read missed). Not done: it changes pad-detection behaviour and Kevin
+owns that.
+
+**Other numbers from the first table (for the baseline):** MpRemote `max_us` 11.7 s after the
+HIL run — that is a MicroPython script executing inside `MpRemoteService::service()` (the
+modal REPL path, `servicePython()` keeps USB/current-sense alive inside it), expected; States
+max 1.59 s / 37 overruns and ConfigSave max 85 ms are the slot/config file writes during
+the suite; Probing max 5.6 ms; ProbeSwitch max 5.2 ms (a classifier pass with the INA read
+and the pad-sense veto); everything else sub-ms.
+
+**T1.4 files:** `src/JumperlOS.h/.cpp` (base class, `isDue()`/`runService()`, `serviceAll()`
+rewrite, `serviceCritical()`, force paths, the three JumperlOS.h services' periods),
+`src/Peripherals.h`, `src/Probing.h` (ProbeSwitch/ProbePads periods), `src/Probing.cpp` (C6
+in the IRQ handler), `src/routing/States.h`, `src/configManager.h/.cpp`,
+`src/SingleCharCommands.cpp` (the `X` table), the rebuilt `firmware.uf2`.
 
 **Side quest landed on the way (Kevin's report, 2026-08-17): pasting a state back (`S` YAML /
 `L` JSON) works again.** Not a scheduler regression: both readers stopped at the *first* empty
@@ -175,10 +248,11 @@ register readout = 1 MHz right after boot with the OLED connected **and** again 
 (`machine.reset()` from the REPL, then `~` on port 1) — compare its spread with the 0.5–2.3 mA
 history; `X` still says OLED Connected. Then build ×3, HIL 5/6, `test_infra_paths` 24/24, commit.
 
-**Then the queue:** T1.4 (B3, with the period choices refined below) → T1.5 → T1.7 → T1.6 →
+**Then the queue:** ~~T1.4~~ (landed — see the top of this block) → **T1.5** → T1.7 → T1.6 →
 T1.10 → T2.2 → T2.3 → T2.1.
 
-**Design refinements found while reading for T1.4 (use these, not the first-pass numbers):**
+**Design refinements found while reading for T1.4 (all executed as written in the T1.4 commit,
+with the four deviations and the ConfigSave/SlotManager correction recorded at the top of this block):**
 - `ProbeSwitch` gets **`periodUs() = 10 000`, not 500 000**: `checkSwitchPosition()` has
   early returns *before* its 500 ms gate (`checkingButton`, LED-settle) that expect to retry
   on the next pass, and it runs `infraServiceTick()` on every call (whose comment says
@@ -281,7 +355,7 @@ on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
 | 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | **landed** | builds ×3; HIL 5/6; `X` census unchanged (6/6 slots, FlashPark timeouts 0, heap free 46 KB). Registered services now: TinyUSB, MpRemote, Peripherals, ProbeButton (CRITICAL); AsyncPassthrough, Menus, SlotManager, Probing, Highlighting, MeasureMode (HIGH); ProbeSwitch, OledGui (NORMAL); ProbePads, OLED, LiveXbar, ConfigSave (LOW). Not registered: TermSerial, RelayedCmd, SingleCharCommands, USBPeriodic, FileCacheFlush (`#if USE_FILE_CACHE`). |
 | 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | **landed** | builds ×3; HIL 5/6; `test_infra_paths` 24/24; `X`: `irq 16` handler `0x20000835` (was `0x10055931` in flash); `nm`: `isrFromPio` 0x20000834, `sendXYrawUnchecked` 0x2000087c, `sendPath` 0x20000bc4, `setCSex` 0x20003a90 (V5), OG likewise |
 | 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | **landed** | builds ×3; I2C0 register readout 60/90 = 1.00 MHz on 11/11 boots, unchanged before/during/after `wavegen_start`/`stop` and after forced OLED frames (the flip is gone); DAC1 30 352 → ~20 k writes/s (2 kHz sine, ~3.1 s; −33 %, the honest cost); 80 000 INA0/INA1 register reads at sustained 1 MHz, 0 failures, 1–2 LSB spread; 10 reboots: INA1 8-sample median 1.465 mA every boot, OLED Connected, DAC found; `probe_current_zero` on 10 further boots 1.01–1.51 mA (mean 1.28, history 0.5–2.3); HIL 5/6; `test_infra_paths` 24/24; `i@` `probe_power on -> DAC0` |
-| 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
+| 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | **landed** (pending Kevin hands-on: probe/menu feel) | builds ×3; `X` table: all 16 services runs>0 with the expected periods, modal-loop calls counted; wait-loop debug 12 s: 0 SLOW SERVICE; no `refresh:` line over 20 routing ops; HIL 7/7; `test_infra_paths` 24/24. First measured numbers: ProbePads 36.8 ms/call @ 20 Hz = 64–70 % of core 0 (est. was ~12 ms) |
 | 6 | T1.5 B4 `serviceInner()` | pending | — |
 | 7 | T1.7 B6 `loop()` cleanup | pending | — |
 | 8 | T1.6 watchdog, measure-only | pending | — |
@@ -380,14 +454,16 @@ in each service's header, not the registration comment.
 ```bash
 pio run -e jumperless_v5 -e jumperless_og -e jumperless_v5_debug   # ALL THREE, every step
 pio run -e jumperless_v5 -t upload                                  # flash the attached board
-python3 test/hil/run_all.py                                         # expect 6/7 (see below; 5/6 before the paste fix)
+python3 test/hil/run_all.py                                         # expect 6/7 or 7/7 (see below)
 python3 test/hil/test_infra_paths.py                                # 24/24 for routing/config work
 python3 test/hil/test_config.py                                     # 30/30
 ```
 
-`run_all.py` is **expected to report 6/7** (5/6 before `test_paste_state.py` joined it on 2026-08-17): `test_net_currents` ("zero-load TOP_RAIL net
-shows < 1 mA phantom current") is pre-existing and out of scope (identical on the `5.7.2.0`
-checkpoint and on `main`). Anything else failing is a real regression. `test_encoder_ui`
+`run_all.py` is **expected to report 6/7 or 7/7** (5/6 before `test_paste_state.py` joined it on 2026-08-17): the one
+tolerated failure is `test_net_currents` ("zero-load TOP_RAIL net shows < 1 mA phantom current"),
+pre-existing and out of scope (identical on the `5.7.2.0` checkpoint and on `main`) — it
+**passed on three consecutive runs on 2026-08-17** (rows 31–32 builds) without any change that
+touches it, so it is board state that may come and go. Anything else failing is a real regression. `test_encoder_ui`
 auto-skips (reports PASS) without an OpenOCD session on :4444.
 
 **Config keys** over port 1 in **bracket** form — `` `[dacs] probe_power_source = 1 `` — or
@@ -423,6 +499,10 @@ soaking), `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`/`PERFORMANCE_ROUND3.md`,
 1. **~⅓ of idle core 0 is spent blocked in probe-pad ADC reads** (estimated from the code's
    own sample counts × the 8 µs/sample `readAdcHeld` cost: `Probing::service` ~1.2 ms @ 100 Hz
    + `ProbePads::service` ~12 ms @ 20 Hz). The B3 stats table measures it before C1 acts on it.
+   **Measured 2026-08-17 (T1.4's `X` table): it is ~85 %, not ⅓** — `ProbePads` 36.8 ms per
+   call at 20 Hz (64–70 % of core 0) + `Probing::service` ~16 %; the loop makes ~900–1 300
+   passes/s and the 10 ms services effectively run at ~24 Hz. See CONTINUE HERE for the
+   T2.1-vs-touch-pre-check choice.
 2. **I2C0 does not run at the 1 MHz the code argues for** — see the corrected finding in
    section 0: 400 kHz on a rev-7 board with the OLED on I2C0, 1.7 MHz otherwise; three
    different owners of the clock (`MCP4728::begin()`, `initDAC()`, the SSD1306 driver).
@@ -648,7 +728,8 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T1.2 B1 comment/priority truth fixes + B2 drop the no-op services.
 - T1.3 D `core1request` delete; `inClickMenu` volatile.
 - T1.4 B3 scheduler time + stats (`periodUs`, `requestRun`, `X` table) — the largest Tier-1
-  item, ~150 lines; behaviour-preserving if periods only encode existing gates.
+  item, ~150 lines; behaviour-preserving if periods only encode existing gates. **Landed
+  2026-08-17 (section 0).**
 - T1.5 B4 `serviceInner()` replacing `serviceCritical()` in the modal loops.
 - T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable.
 - T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain).

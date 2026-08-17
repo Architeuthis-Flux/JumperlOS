@@ -3,6 +3,7 @@
 #define JUMPERLOS_H
 
 #include <Arduino.h>
+#include "hardware/sync.h" // __dmb() for Service::requestRun()
 #include "Jerial.h"
 
 // Forward declarations
@@ -138,14 +139,44 @@ public:
      * @brief Check if this service is currently active/busy
      */
     virtual bool isActive() const {
-        return lastStatus == ServiceStatus::BUSY || 
+        return lastStatus == ServiceStatus::BUSY ||
                lastStatus == ServiceStatus::BLOCKING;
     }
-    
+
     /**
      * @brief Get the last status returned by service()
      */
     ServiceStatus getLastStatus() const { return lastStatus; }
+
+    // ---- scheduling (jOSmanager reads these; see JumperlOS.cpp serviceAll) ----
+
+    /**
+     * @brief How often this service wants to run, in microseconds.
+     * 0 (the default) = every scheduler pass, exactly as before periods
+     * existed. A non-zero period only ever ENCODES a cadence the service
+     * already applies internally (its own millis() gate stays in place), so
+     * the walk skips it cheaply between runs; it is not a new rate limit.
+     * requestRun() overrides the period for one pass.
+     */
+    virtual uint32_t periodUs() const { return 0; }
+
+    /**
+     * @brief Ask the scheduler to run this service on its very next pass,
+     * whatever its period. Safe from an IRQ or the other core: one aligned
+     * byte store, and the scheduler only clears the flag when it has read it
+     * set - a request landing between its read and the run is covered by
+     * that run, one landing during the run re-pends for the next pass.
+     */
+    void requestRun() { __dmb(); pending = true; }
+
+    // Managed by jOSmanager - read-only for everyone else (the X table).
+    uint32_t nextDueUs = 0;          // time_us_32() at which the period next elapses
+    volatile bool pending = false;   // requestRun() latch
+    uint32_t runs = 0;               // service() calls (scheduler + modal set + force*)
+    uint32_t lastUs = 0;             // duration of the last call
+    uint32_t maxUs = 0;              // longest call since boot
+    uint32_t overruns = 0;           // calls that took longer than periodUs() (period > 0 only)
+    uint64_t totalUs = 0;            // sum of all call durations (avg = totalUs / runs)
 
 protected:
     ServiceStatus lastStatus = ServiceStatus::IDLE;
@@ -183,19 +214,43 @@ public:
     
     /**
      * @brief Execute all registered services in priority order
-     * 
-     * If a service returns BLOCKING, only CRITICAL priority services
-     * will continue to run until the blocking service returns to non-blocking state
+     *
+     * A service runs on a pass when it is due (its periodUs() has elapsed
+     * since its last run start, or its period is 0), or when someone called
+     * requestRun() on it since its last run. If a service returns BLOCKING,
+     * only CRITICAL priority services (and the blocking one) run until it
+     * returns to non-blocking state; a requestRun() on a skipped service
+     * survives the skip.
      */
     void serviceAll();
-    
+
     /**
      * @brief Execute ONLY CRITICAL priority services
-     * 
+     *
      * This is for use within blocking operations (like probeMode) that need
-     * to keep critical services like button checking running in their inner loops
+     * to keep critical services like button checking running in their inner
+     * loops. Same due-or-pending gate and stats as serviceAll().
      */
     void serviceCritical();
+
+    /**
+     * @brief Number of registered services (for the X table)
+     */
+    uint8_t getServiceCount() const { return serviceCount; }
+
+    /**
+     * @brief Registered service by index (nullptr if out of range) - for the
+     * X table; the array is priority-sorted, registration order within a
+     * priority.
+     */
+    Service* getServiceAt(uint8_t index) const {
+        return (index < serviceCount) ? services[index].service : nullptr;
+    }
+
+    /**
+     * @brief Passes serviceAll() has made since boot (the X table).
+     */
+    unsigned long getLoopCount() const { return loopCounter; }
     
     /**
      * @brief Execute services needed during MicroPython REPL execution
@@ -267,29 +322,33 @@ private:
     uint8_t serviceCount;
     uint8_t coreId;
     Service* blockingService;
-    
-    // Priority-based scheduling - run lower priority services less frequently
+
+    // serviceAll() passes since boot (diagnostics; the old per-band loop
+    // divisors that hung off it are gone - periods replaced them).
     unsigned long loopCounter;
-    uint8_t criticalDivisor;  // How often to run CRITICAL (typically 1 = every loop)
-    uint8_t highDivisor;      // How often to run HIGH (e.g., 2 = every 2nd loop)
-    uint8_t normalDivisor;    // How often to run NORMAL (e.g., 10 = every 10th loop)
-    uint8_t lowDivisor;       // How often to run LOW (e.g., 50 = every 50th loop)
-    
+
     // Core 1 singleton instance
     static jOSmanager* core1Instance;
-    
+
     // Sort services by priority (simple bubble sort - small array)
     void sortServicesByPriority();
-    
+
     /**
-     * @brief Set execution divisors for priority-based scheduling
-     * @param critical Run CRITICAL services every N loops (default: 1)
-     * @param high Run HIGH services every N loops (default: 1)
-     * @param normal Run NORMAL services every N loops (default: 5)
-     * @param low Run LOW services every N loops (default: 20)
+     * @brief The due-or-pending gate. Captures (and, only if set, clears)
+     * the service's requestRun() latch, then answers "run it this pass?".
+     * @param now time_us_32() taken by the caller
      */
-    void setExecutionDivisors(uint8_t critical = 1, uint8_t high = 1, 
-                               uint8_t normal = 5, uint8_t low = 20);
+    static bool isDue(Service* svc, uint32_t now);
+
+    /**
+     * @brief Run one service and account for it: nextDueUs (stamped from the
+     * run START, so a period that equals a service's own millis() gate never
+     * aliases against it), runs / lastUs / maxUs / totalUs / overruns.
+     * Shared by serviceAll(), serviceCritical() and the force* paths so the
+     * X table sees every call, including the modal loops'.
+     * @return the status service() returned
+     */
+    ServiceStatus runService(Service* svc, uint32_t now);
 };
 
 /**
@@ -429,7 +488,11 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "OLED"; }
     ServicePriority getPriority() const override { return ServicePriority::LOW; }
-    
+    // oledPeriodic(): connection pings are self-gated >= 750 ms, but the
+    // post-hold and post-wavegen flushes have no gate of their own and would
+    // wait a whole period - so 20 ms, not the ping interval.
+    uint32_t periodUs() const override { return 20000; }
+
     void setOledDisplay(class oled* display) { oledDisplay = display; }
     
 private:
@@ -456,6 +519,9 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "OledGui"; }
     ServicePriority getPriority() const override { return ServicePriority::NORMAL; }
+    // OledGui::renderNow()'s own minInterval for a foreground screen is 15 ms
+    // (160 ms for the idle stats page); this encodes the faster one.
+    uint32_t periodUs() const override { return 15000; }
 
 private:
     OledGuiService() = default;
@@ -477,9 +543,13 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "LiveXbar"; }
     ServicePriority getPriority() const override { return ServicePriority::LOW; }
-    
-    // Request an update (called from sendAllPaths, etc.)
-    void requestUpdate() { updatePending = true; extraUpdateNeeded = true; }
+    // The periodic refresh is 60 s / 400 ms (probe); 100 ms bounds how late
+    // that fires. A crossbar change does not wait for it: requestUpdate()
+    // also requestRun()s, so it is drawn on the next pass.
+    uint32_t periodUs() const override { return 100000; }
+
+    // Request an update (called from sendAllPaths - on core 1 - etc.)
+    void requestUpdate() { updatePending = true; extraUpdateNeeded = true; requestRun(); }
     
     // Check if colors are assigned for all active nets
     bool colorsReady() const;

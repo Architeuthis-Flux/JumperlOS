@@ -650,6 +650,17 @@ static void __not_in_flash_func( probe_button_pio_irq_handler )( void ) {
         else if ( s1 == 0 && s2 == 0 ) newState = ( probeRev >= 4 ) ? 1 : 2;
         else                            newState = 0;
 
+        // A press/release edge is acted on by ProbeButton::service() (the
+        // deferred undo/redo drain) and Probing::service() (button actions,
+        // probeMode entry): ask the scheduler to run both on its very next
+        // pass. Both are period 0 today, so this is a no-op until either
+        // gets a period - it is the C6 hook, wired now so it cannot be
+        // forgotten then. Cheap: two flag stores.
+        if ( newState != probeBtnLatestState ) {
+            self.requestRun( );
+            probing.requestRun( );
+        }
+
         // Update raw-state cache + diagnostics for legacy readers.
         probeBtnLatestState        = newState;
         probeButtonPIOReadCount++;

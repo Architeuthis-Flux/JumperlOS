@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "JumperlOS.h"
+#include "hardware/timer.h"  // time_us_32() - the scheduler's clock
 #include "Adafruit_USBD_CDC.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
@@ -51,15 +52,11 @@ ConfigSaveService& configSaveService = ConfigSaveService::getInstance();
 /**
  * @brief Construct a jOSmanager for a specific core
  */
-jOSmanager::jOSmanager(uint8_t coreId) 
+jOSmanager::jOSmanager(uint8_t coreId)
     : serviceCount(0)
     , coreId(coreId)
     , blockingService(nullptr)
     , loopCounter(0)
-    , criticalDivisor(1)
-    , highDivisor(1)
-    , normalDivisor(3)
-    , lowDivisor(20)
 {
     // Initialize service array
     for (uint8_t i = 0; i < MAX_SERVICES; i++) {
@@ -105,10 +102,15 @@ bool jOSmanager::registerService(Service* service) {
     services[serviceCount].service = service;
     services[serviceCount].active = true;
     serviceCount++;
-    
+
+    // First run is due now, not "when time_us_32() catches up with 0" - a
+    // service registered late (>35 min after boot) would otherwise wait for
+    // the wraparound compare to come round.
+    service->nextDueUs = time_us_32();
+
     // Re-sort by priority
     sortServicesByPriority();
-    
+
     return true;
 }
 
@@ -142,17 +144,71 @@ bool jOSmanager::unregisterService(Service* service) {
 }
 
 /**
+ * @brief The due-or-pending gate (see JumperlOS.h Service::periodUs()).
+ *
+ * The requestRun() latch is captured first and cleared ONLY when it was
+ * read set: a request that lands between the read and the run is covered by
+ * the run that follows, one that lands during the run re-pends for the next
+ * pass, and a request against a service that is not run (blocked, or read
+ * before it was set) is never erased. Period 0 = every pass, no timestamp
+ * work at all. Wraparound-safe compare on time_us_32() (C12).
+ */
+bool jOSmanager::isDue(Service* svc, uint32_t now) {
+    bool p = false;
+    if (svc->pending) {
+        svc->pending = false;
+        __dmb();
+        p = true;
+    }
+    if (p) {
+        return true;
+    }
+    uint32_t period = svc->periodUs();
+    if (period == 0) {
+        return true;
+    }
+    return (int32_t)(now - svc->nextDueUs) >= 0;
+}
+
+/**
+ * @brief Run one service and account for it.
+ *
+ * nextDueUs is stamped from the run START ("from now", not from the previous
+ * due time - no catch-up bursts after a stall). Start rather than end so a
+ * period that equals a service's own millis() gate never aliases against
+ * it: the next attempt is >= period after this attempt's start, so a gate
+ * of the same length always passes; stamping from the end would stretch
+ * every cadence by the service's own run time (ProbePads: 50 -> ~62 ms).
+ */
+ServiceStatus jOSmanager::runService(Service* svc, uint32_t now) {
+    uint32_t period = svc->periodUs();
+    if (period != 0) {
+        svc->nextDueUs = now + period;
+    }
+    ServiceStatus status = svc->service();
+    uint32_t took = time_us_32() - now;
+    svc->runs++;
+    svc->lastUs = took;
+    if (took > svc->maxUs) {
+        svc->maxUs = took;
+    }
+    svc->totalUs += took;
+    if (period != 0 && took > period) {
+        svc->overruns++;
+    }
+    return status;
+}
+
+/**
  * @brief Execute all registered services in priority order
- * 
- * Priority-based scheduling:
- * - CRITICAL services run every loop (divisor = 1 typically)
- * - HIGH services run every N loops (configurable, default = 1)
- * - NORMAL services run every M loops (configurable, default = 5)
- * - LOW services run every K loops (configurable, default = 20)
- * 
- * This ensures critical services (button input, menus) are ultra-responsive
- * while less time-sensitive services don't block the main loop.
- * 
+ *
+ * Priority orders the walk (CRITICAL first). Whether a service runs on a
+ * given pass is the due-or-pending gate: its periodUs() has elapsed since
+ * its last run started, or its period is 0 (every pass), or someone called
+ * requestRun() on it. There are no per-band loop divisors any more (they
+ * were never a cadence: a "pass" is 20 us inside a modal loop and multi-ms
+ * when a service does I2C).
+ *
  * The registration list (and the priority each service really has) lives in
  * main.cpp's setup(); getPriority() in each service's header is authoritative.
  * Indices are assigned at registration and re-sorted by priority, so there is
@@ -160,7 +216,6 @@ bool jOSmanager::unregisterService(Service* service) {
  */
 void jOSmanager::serviceAll() {
     loopCounter++;
-    //debugWaitLoopTiming = true;
 
     // Deferred startup complete: wait 4s after init before enabling UART/async
     // passthrough so incoming Arduino data doesn't crash the system during boot
@@ -175,127 +230,40 @@ void jOSmanager::serviceAll() {
     }
     #endif
 
-    // DEBUG: Track current service for crash debugging
-    static const char* currentServiceName = nullptr;
-    static uint8_t currentServiceIndex = 255;
-    
-    // DEBUG: Print service index every 5000 calls to track where freeze happens
-    static uint32_t serviceAllCounter = 0;
-    serviceAllCounter++;
-    bool printServiceDebug = false; //(serviceAllCounter % 5000 == 0);
-    
-    // DEBUG: Mark start of serviceAll
-    if (printServiceDebug) {
-        Serial.write('{');
-        yield();
-    }
-    
-    // Debug: Print service execution order every N loops
-    static unsigned long lastDebugLoop = 0;
-    bool printServiceOrder = 0;//debugWaitLoopTiming && (loopCounter % 100 == 0);
-    
-    if (printServiceOrder && loopCounter != lastDebugLoop) {
-        lastDebugLoop = loopCounter;
-        Serial.printf("\n=== Service Execution Order (Loop #%lu) ===\n", loopCounter);
-    }
-    
-    unsigned long loopStart = micros( );
+    uint32_t loopStart = time_us_32();
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
-            if (printServiceOrder) {
-                Serial.printf("  [%d] (inactive)\n", i);
-            }
             continue;
         }
-        
+
         Service* svc = services[i].service;
         if (svc == nullptr) {
-            if (printServiceOrder) {
-                Serial.printf("  [%d] (null service)\n", i);
-            }
             continue;
         }
-        
-        // If we're blocked, only allow CRITICAL priority services to run
-        if (blockingService != nullptr && 
-            blockingService != svc && 
+
+        // If we're blocked, only allow CRITICAL priority services to run.
+        // Checked BEFORE the pending capture so a requestRun() against a
+        // blocked service survives the skip and fires once unblocked.
+        if (blockingService != nullptr &&
+            blockingService != svc &&
             svc->getPriority() != ServicePriority::CRITICAL) {
-            if (printServiceOrder) {
-                Serial.printf("  [%d] %s - SKIPPED (blocked by %s)\n", i, svc->getName(), 
-                             blockingService->getName());
-            }
             continue;
         }
-        
-        // Priority-based scheduling - skip services based on their priority and divisor
-        ServicePriority priority = svc->getPriority();
-        bool shouldRun = false;
-        const char* priorityName = "UNKNOWN";
-        
-        switch (priority) {
-            case ServicePriority::CRITICAL:
-                shouldRun = (loopCounter % criticalDivisor == 0);
-                priorityName = "CRITICAL";
-                break;
-            case ServicePriority::HIGH:
-                shouldRun = (loopCounter % highDivisor == 0);
-                priorityName = "HIGH";
-                break;
-            case ServicePriority::NORMAL:
-                shouldRun = (loopCounter % normalDivisor == 0);
-                priorityName = "NORMAL";
-                break;
-            case ServicePriority::LOW:
-                shouldRun = (loopCounter % lowDivisor == 0);
-                priorityName = "LOW";
-                break;
+
+        uint32_t now = time_us_32();
+        if (!isDue(svc, now)) {
+            continue;
         }
-        
-        if (!shouldRun) {
-            if (printServiceOrder) {
-                Serial.printf("  [%d] %s (%s) - SKIPPED (scheduled)\n", i, svc->getName(), priorityName);
-            }
-            continue;  // Skip this service this iteration
-        }
-        
-        if (printServiceOrder) {
-            Serial.printf("  [%d] %s (%s) - RUNNING...\n", i, svc->getName(), priorityName);
-        }
-        
-        // DEBUG: Print which service is about to run
-        if (printServiceDebug) {
-            Serial.write('[');
-            Serial.print(i);
-            yield();
-        }
-        
-        // Execute the service with timing
-        unsigned long svcStart = micros();
-        ServiceStatus status = svc->service();
-        unsigned long svcEnd = micros();
-        unsigned long svcTime = svcEnd - svcStart;
-        
-        // DEBUG: Print completion marker
-        if (printServiceDebug) {
-            Serial.write(']');
-            yield();
-        }
-        
+
+        ServiceStatus status = runService(svc, now);
+        uint32_t svcTime = svc->lastUs;
+
         // CRITICAL: Report ANY service taking > 100ms (causes command delays!)
         if (debugWaitLoopTiming && svcTime > 100000) {  // > 100ms
-            Serial.printf("⏱️  SLOW SERVICE: %s took %lu ms\n", svc->getName(), svcTime / 1000);
+            Serial.printf("⏱️  SLOW SERVICE: %s took %lu ms\n", svc->getName(), (unsigned long)(svcTime / 1000));
             Serial.flush();
         }
-        
-        if (debugWaitLoopTiming) {
-            if (printServiceOrder) {
-                Serial.printf("       └─> completed in %lu us (status=%d)\n", svcTime, (int)status);
-            } else if (debugWaitLoopTiming && svcTime > 100000) {
-                // Debug: Report if any service takes more than 1ms (even when not printing full order)
-                Serial.printf("DEBUG:   Service #%d (%s) took %lu us\n", i, svc->getName(), svcTime);
-            }
-        }
-        
+
         // Update blocking state
         if (status == ServiceStatus::BLOCKING) {
             if (blockingService != svc) {
@@ -313,48 +281,50 @@ void jOSmanager::serviceAll() {
             }
         }
     }
-    if (debugWaitLoopTiming && ( micros() - loopStart ) > 20000 ) {
-        Serial.printf("DEBUG:   serviceAll() took %lu us (%.2f ms)\n", micros() - loopStart, (micros() - loopStart) / 1000.0);
-        Serial.flush();
+    if (debugWaitLoopTiming) {
+        uint32_t passUs = time_us_32() - loopStart;
+        if (passUs > 20000) {
+            Serial.printf("DEBUG:   serviceAll() took %lu us (%.2f ms)\n", (unsigned long)passUs, passUs / 1000.0);
+            Serial.flush();
+        }
     }
-    
-    // DEBUG: Mark end of serviceAll
-    if (printServiceDebug) {
-        Serial.write('}');
-        yield();
-    }
-    //debugWaitLoopTiming = false;
 }
 
 /**
  * @brief Execute ONLY CRITICAL priority services
- * 
+ *
  * This is used within blocking operations (like probeMode) to keep
  * critical services like button checking alive in their inner loops.
- * 
+ *
  * Also keeps current sense measurements updating so marching ants
- * visualization stays current during probe mode.
+ * visualization stays current during probe mode. Same due-or-pending gate
+ * and stats as serviceAll() (the X table counts these calls too); the
+ * blocking latch is ignored - we are inside the blocking context already.
  */
 void jOSmanager::serviceCritical() {
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
             continue;
         }
-        
+
         Service* svc = services[i].service;
         if (svc == nullptr) {
             continue;
         }
-        
+
         // Only execute CRITICAL priority services
         if (svc->getPriority() != ServicePriority::CRITICAL) {
             continue;
         }
-        
-        // Execute the service (ignore status - we're in a blocking context already)
-        svc->service();
+
+        uint32_t now = time_us_32();
+        if (!isDue(svc, now)) {
+            continue;
+        }
+        // (status ignored - we're in a blocking context already)
+        runService(svc, now);
     }
-    
+
     // (Peripherals is a CRITICAL service, so the loop above already ran its
     // current-sense poll; the explicit second pollCurrentSense() that used
     // to sit here made every serviceCritical() poll twice.)
@@ -417,11 +387,11 @@ bool jOSmanager::forceServiceByName(const char* name) {
         
         // Check if name matches
         if (strcmp(svc->getName(), name) == 0) {
-            svc->service();
+            runService(svc, time_us_32());  // forced: no due gate, but counted
             return true;
         }
     }
-    
+
     return false;  // Service not found
 }
 
@@ -447,8 +417,8 @@ bool jOSmanager::forceServiceByIndex(uint8_t index) {
     if (svc == nullptr) {
         return false;
     }
-    
-    svc->service();
+
+    runService(svc, time_us_32());  // forced: no due gate, but counted
     return true;
 }
 
@@ -512,32 +482,6 @@ void jOSmanager::sortServicesByPriority() {
             }
         }
     }
-}
-
-/**
- * @brief Set execution divisors for priority-based scheduling
- * 
- * Controls how frequently services at each priority level run.
- * 
- * Example: setExecutionDivisors(1, 2, 10, 50) means:
- * - CRITICAL services run every loop
- * - HIGH services run every 2nd loop
- * - NORMAL services run every 10th loop  
- * - LOW services run every 50th loop
- * 
- * This allows fine-tuning of responsiveness vs. throughput tradeoffs.
- * 
- * @param critical How often to run CRITICAL services (default: 1 = every loop)
- * @param high How often to run HIGH services (default: 1 = every loop)
- * @param normal How often to run NORMAL services (default: 5 = every 5th loop)
- * @param low How often to run LOW services (default: 20 = every 20th loop)
- */
-void jOSmanager::setExecutionDivisors(uint8_t critical, uint8_t high, 
-                                       uint8_t normal, uint8_t low) {
-    criticalDivisor = critical > 0 ? critical : 1;  // Ensure at least 1
-    highDivisor = high > 0 ? high : 1;
-    normalDivisor = normal > 0 ? normal : 1;
-    lowDivisor = low > 0 ? low : 1;
 }
 
 // ============================================================================

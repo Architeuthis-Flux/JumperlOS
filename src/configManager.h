@@ -62,7 +62,12 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "ConfigSave"; }
     ServicePriority getPriority() const override { return ServicePriority::LOW; }
-    
+    // Not an existing gate: implicit (configChanged) saves are debounced 2 s
+    // after the last input inside service(); 100 ms bounds how late that
+    // check runs. An explicit requestConfigSave() also requestRun()s, so it
+    // is picked up on the next pass exactly as before.
+    uint32_t periodUs() const override { return 100000; }
+
 private:
     ConfigSaveService() = default;
     ~ConfigSaveService() = default;

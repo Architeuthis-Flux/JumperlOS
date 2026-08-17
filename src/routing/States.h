@@ -404,7 +404,12 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "States"; }
     ServicePriority getPriority() const override { return ServicePriority::HIGH; }
-    
+    // Not an existing gate: the auto-save is idle-gated (systemIdleForFlush,
+    // >= 750 ms quiet) and the editor/preview transitions are edge checks, so
+    // 50 ms is a new, consequence-free upper bound on how often the dirty /
+    // editor / preview state is looked at.
+    uint32_t periodUs() const override { return 50000; }
+
     // Active state access
     JumperlessState& getActiveState();
     const JumperlessState& getActiveState() const;
