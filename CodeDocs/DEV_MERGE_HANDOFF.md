@@ -51,8 +51,14 @@ feed, switch sensing and their calibration were reworked end to end. The agreeme
 classifier is built, logging and hardware-checked in both positions but **decides nothing
 until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
-signal the legacy current thresholds ride on. The scheduler / hardware-offload
-recommendations doc is the piece still unwritten.
+signal the legacy current thresholds ride on.
+
+**Scheduler / hardware offload (2026-08-16, rows 24+): see
+`SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
+mode; its section 0 records what was approved, what was declined, and the status of each
+approved item as it lands (one commit each). One finding was corrected on the way in:
+**I2C0 runs at 400 kHz on this board, not 1.7 MHz** — the OLED on I2C0 (rev 7) owns the
+clock after `oled.init()`; T1.9 gives the bus one owner at 1 MHz.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -87,6 +93,8 @@ it wasn't this session.
 | 20 | `13e2313` | **Two switch detectors** (tip-side digital sense; per-feed INA ceiling / feed-side blink) + agreement classifier behind `debug.probe_switch_agree` (shadow by default); droop V0 off the hot path; `resetConfigToDefaults` copies the calibration + hardware **structs** | builds ×3; both detectors correct in both positions under both feeds, every observed flip agreed with legacy; agree mode classified from boot and survived the dark-LED trick; `test_config` **30/30** (sentinel survives `` `reset ``) |
 | 21 | `b9bfac2` | Probe LED frame/request/button counters in `X`; event-driven show when the LED has its own pin; **INA poll drops the `pauseCore2` toggle** (I2C0 is core-0-only) + ≥10 ms attempt gate + no double poll; `probeRowMap` bounds | builds ×3; HIL 5/6; measured ~2,560 frames/s vs ~7 requests/30 s, ~2,600 button samples/s, 0 pause-aborts idle |
 | 22 | `1036b18` | Switch Calib app measures **both feeds and both detectors**, refuses to save on a contradicting tip sense, unforces on every exit; self test's `probe_cable` infers position from the **tip sense** (fixed a live FAIL on a good cable), `tip_voltage` gates `probe_droop_v0` on an unloaded tip | builds ×3; full `self_test` **OVERALL PASS** (`probe_cable PASS sw:meas(tip)`, `tip_voltage PASS droopR:183 sw:meas`) |
+| 23 | `a6ad4ba` | **A measure calibration per feed, converged against each other**; SELECT pins DAC0 so its switch current is measurable; the app's position comes from the tip sense (`PROBE_REWORK_HANDOFF.md` row 5) | **Kevin on hardware**: SELECT engages on a flip, convergence lands after a SELECT round-trip, taps decode under both feeds (feeds settled 74 counts apart); builds ×3; `run_all` 5/6; `test_infra_paths` 24/24; `test_config` 30/30 |
+| 24 | (docs) | **`SCHEDULER_AND_HARDWARE_OFFLOAD.md` rewritten as the reviewed proposals + decisions** — Kevin's approved scope (Tier 1 incl. T1.9, T2.1–T2.3; T2.4 next session; the rest design-only), the commit-gate disposition for the autonomous pass, and the corrected I2C0 finding (400 kHz measured, three clock owners) | register readout over the REPL (`IC_FS_SCL_HCNT/LCNT` 150/225 @150 MHz); baseline `X` + `run_all` 5/6 captured into the doc's section F |
 
 "HIL 5/6" everywhere means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

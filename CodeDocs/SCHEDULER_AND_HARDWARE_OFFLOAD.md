@@ -1,17 +1,90 @@
-# Scheduler & hardware offload — recommendations, then changes
+# Scheduler & hardware offload — proposals, decisions, and what was built
 
-> **STATUS: NOT WRITTEN YET.** Everything below is the *brief* — the original ask, the
-> orientation a fresh session needs, the facts already verified on hardware, and the agreed
-> section outline. Nothing below the outline is a recommendation yet.
+> **STATUS (2026-08-16):** the sweep is done and the proposals below were reviewed by Kevin
+> in plan mode. Section 0 records what he approved, what was declined and why, and how each
+> approved item was verified as it landed. Everything from "Executive summary" down is the
+> proposal body as reviewed, corrected where the implementation pass found a claim wrong.
 >
-> **This is a propose-then-implement job, not a document-only one.** Write the
-> recommendations into this file first, so the reasoning is on the table and reviewable.
-> Kevin then reviews them **in plan mode** and approves what to build — and the approved
-> items get implemented. Do not stop at the document; do not start editing before the
-> proposals exist and are approved.
->
-> This file is written to be read with **no prior context**. It should contain everything
-> needed to start; if something is missing, that is a bug in this file.
+> This file is written to be read with **no prior context**. Sections 1–3 are the
+> orientation a fresh session needs; if something is missing there, that is a bug in this
+> file.
+
+---
+
+## 0. Decisions and status
+
+### What was approved (Kevin, 2026-08-16, plan mode)
+
+- **All of Tier 1** (T1.1–T1.10), **including T1.9** (I2C0 clock, hardware-verified before
+  commit).
+- **T2.1** (always-on ADC ring), **T2.2** (core-1 mailbox: `REQ_SEND_PATHS` then
+  `REQ_SHOW_LEDS`), **T2.3** (CH446Q DMA→FIFO).
+- **T2.4** (the GPIO 9 PIO program, C5) is the **next session's opener** — design stays in C5.
+- **Tier 3 and the rest of Tier 2 (T2.5, T2.6) are design-only this pass** — recorded in E
+  as "proposed, not built".
+
+### How the approved items were executed
+
+One commit per item, in the order below, each after `pio run -e jumperless_v5 -e
+jumperless_og -e jumperless_v5_debug`, flash, `python3 test/hil/run_all.py` (5/6, only
+`test_net_currents` failing — pre-existing), plus the item's own checks. Never pushed. A
+`DEV_MERGE_HANDOFF.md` row per landed commit.
+
+**Commit-gate disposition (read this before judging the commits).** The plan said anything
+Kevin can see or feel waits for his hardware confirmation *before* the commit. This pass ran
+autonomously with Kevin away, so it was executed in two lanes: the items whose gates are
+fully automatable (T1.1, T1.2/1.3, T1.8, T1.9, T1.6, T1.7, T1.10, T2.2, T2.3) were committed
+after their gates; the items with a tactile component (T1.4 probe/menu feel, T1.5 probe mode
++ click menu + Arduino passthrough, T2.1 taps under both feeds) were run through every
+automatable check and then **committed with "pending Kevin hands-on" in the commit message**
+rather than left as an unbisectable uncommitted blob. Each is one commit and individually
+`git revert`-able; nothing was pushed. This matches Kevin's own answer to the same question
+on 2026-08-15 ("commit after your verification, leave me a hands-on checklist").
+
+| Step | Item | Status | Verified how |
+|---|---|---|---|
+| 0 | this doc + `DEV_MERGE_HANDOFF.md` rows | landed | docs only |
+| 1 | T1.1 raw `tud_task()` → mutex-guarded entry points; `TinyUSBService` every pass | pending | — |
+| 2 | T1.2 + T1.3 priority/comment truth, drop the no-op services, `core1request` gone, `inClickMenu` volatile | pending | — |
+| 3 | T1.8 CH446Q per-crosspoint path + ISR into RAM | pending | — |
+| 4 | T1.9 I2C0: one clock owner at 1 MHz (**see the corrected finding below**) | pending | — |
+| 5 | T1.4 B3 scheduler periods + `requestRun()` + stats table (+C6, C12) | pending | — |
+| 6 | T1.5 B4 `serviceInner()` | pending | — |
+| 7 | T1.7 B6 `loop()` cleanup | pending | — |
+| 8 | T1.6 watchdog, measure-only | pending | — |
+| 9 | T1.10 LED-dump off core 1 | pending | — |
+| 10 | T2.2 mailbox `REQ_SEND_PATHS`, then `REQ_SHOW_LEDS`; latency probe | pending | — |
+| 11 | T2.3 CH446Q DMA→FIFO + ISR chip list | pending | — |
+| 12 | T2.1 always-on ADC ring | pending | — |
+
+(The table is updated in place as items land; "pending" rows are the queue.)
+
+### Findings corrected during the implementation pass
+
+- **Finding 2 ("I2C0 runs at 1.7 MHz") is wrong on Kevin's board — it runs at 400 kHz.**
+  Measured live over the REPL before any change: `I2C0.IC_FS_SCL_HCNT = 150`,
+  `IC_FS_SCL_LCNT = 225` at `clk_sys` 150 MHz → 150e6/375 = **400 kHz**. Cause: on a rev-7
+  board the OLED is on I2C0 (`top_oled.connection_type == 2`, `X` shows "Type: I2C0
+  (internal)"), and `oled::init()` → `oled::connect()` (`oled.cpp:544, 4260`) calls
+  `initI2C(4, 5, 400000)` (`Peripherals.cpp:591`, re-`begin()`s Wire at 400 kHz), after which
+  every SSD1306 transaction sets the clock to `kOledI2CClockHz` = 400 kHz **before and after**
+  (`oled.cpp:68, 111-112`; the driver's `TRANSACTION_START/END` = `wire->setClock(wireClk)` /
+  `setClock(restoreClk)`). So the timeline is: 1.7 MHz from `mcp.begin()` in `setup()`
+  (`MCP4728.cpp:164`) until `oled.init()` in `loop()`'s `firstLoop == 2`, then **400 kHz for
+  the rest of the session** for the DAC, both INA219s and WaveGen. On a board with no OLED on
+  I2C0 the original finding stands (1.7 MHz throughout). Neither is the 1 MHz `initDAC()`
+  sets and WaveGen's rate math assumes (`WaveGen.cpp:372,412,432,637`, `B_PER_SAM 4.67`
+  "empirically calibrated" — consistent with ~1 MHz, not 400 kHz or 1.7 MHz; the stream is
+  free-running, so its output frequency scales with the real bus clock).
+  **T1.9 therefore becomes "give I2C0 one clock owner"**: `MCP4728::begin()` stops overriding
+  the clock; the OLED-on-I2C0 instance keeps its own transfers at 400 kHz (`clkDuring`, the
+  panel's rating) but hands the bus back at 1 MHz (`clkAfter`), and `connect()`'s probe passes
+  the bus rate for the shared bus. Verification adds a register readout (must read 1 MHz
+  after boot with the OLED connected) and the WaveGen actual-frequency stat before/after.
+- **The `tud_task()` count is 59 textual call sites, 51 compiled in this build** (8 are behind
+  compile-time-0 debug macros in `main.cpp`: `DEBUG_MAIN_LOOP_CHECKPOINTS`,
+  `debug_busy_timers`). The proposal said 54. T1.1 converts all of them, the compiled-out
+  ones too (they are one `#define` away from live).
 
 ---
 
@@ -27,34 +100,13 @@ The task was given as three parts (2026-08-16, branch `dev`):
 > *recommendations* for using RP2350 peripherals to make the concurrent work smooth.**
 > Priority now = probing/calibration; the sweep is a doc.
 
-**(1) and (2) are done, committed and hardware-verified.** See `PROBE_REWORK_HANDOFF.md`.
-**(3) is this file, and it is the only part left.**
+(1) and (2) are done, committed and hardware-verified — `PROBE_REWORK_HANDOFF.md`. (3) is
+this file. Kevin's instruction for the sweep: *"I do want changes after proposing them, I'll
+be doing it in plan mode."* — so: proposals first (this file), Kevin picks in plan mode,
+the approved items are implemented (section 0).
 
-### How this part runs
-
-The ask says "delivering *recommendations*", and that is the **first** step, not the whole
-job. Kevin's instruction for this session (2026-08-16): *"I do want changes after proposing
-them, I'll be doing it in plan mode."* So:
-
-1. **Do the sweep and write the recommendations into this file** — every registered
-   `service()` and core 1's loop, each proposal naming the peripheral, the SDK calls, the
-   gain, the risk and the effort, with `file:line` throughout.
-2. **Kevin reviews in plan mode** and approves which items to build. The tiered roadmap
-   (section E) exists to make that triage easy — keep the tiers honest about size and risk,
-   because he is choosing from them.
-3. **Implement what he approves.** Normal rules from there: build all three environments
-   after every step, run the HIL suite, and verify on the attached board.
-
-So the document is the deliverable of step 1 and the map for step 3 — it should be written
-to be *acted on*, and it stays in the tree afterwards as the record of why each change was
-made (and why the rejected ones were not).
-
-Standing constraints from Kevin that apply throughout:
-
-- **Commit only when verified** — not mid-investigation. Ideally confirmed by him on
-  hardware for anything he can see or feel; his own hardware verification is the gate for
-  interactive behaviour.
-- **Never push.** Commit locally; pushing is his call.
+Standing constraints from Kevin: **commit only when verified** (ideally by him on hardware
+for anything he can see or feel); **never push**.
 
 ---
 
@@ -62,252 +114,557 @@ Standing constraints from Kevin that apply throughout:
 
 **JumperlOS** — firmware for the **Jumperless V5**, a breadboard whose rows are wired
 together by a 12-chip **CH446Q analog crossbar** instead of jumper wires. An RP2350B
-(dual-core Cortex-M33, arduino-pico core) drives the crossbar, a 4-channel DAC, several
-ADCs/INA219 current sensors, addressable LEDs under every row, an OLED, and a **probe** —
-a handheld tip the user taps rows with, whose DPDT switch has a SELECT and a MEASURE
-position.
+(dual-core Cortex-M33, arduino-pico core 5.6.0 / pico-sdk 2.2.1) drives the crossbar, a
+4-channel MCP4728 DAC, ADCs and two INA219 current sensors, addressable LEDs under every row,
+an OLED, and a **probe** — a handheld tip the user taps rows with, whose DPDT switch has a
+SELECT and a MEASURE position.
 
-The board is **attached over USB** while working on this. It enumerates several CDC ports:
+The board is **attached over USB** while working on this. CDC ports: `…JLV5port1` = main
+terminal (single-char commands, the `` ` `` config interface); `…JLV5port5` = MicroPython raw
+REPL (the HIL suite drives this); `…JLV5port7` = USBSer3 machine backchannel.
 
-| Port | Use |
-|---|---|
-| `…JLV5port1` | main terminal — single-char commands, the `` ` `` config interface |
-| `…JLV5port5` | MicroPython raw REPL (the HIL suite drives this) |
-| `…JLV5port7` | USBSer3 machine backchannel (`:` verbs, JSON/YAML) |
+**Cores.** Core 0 — `setup()`/`loop()` (`main.cpp:210`/`:718`): the service scheduler
+(`jOS`), USB, the terminal, MicroPython, the probe button IRQ. Core 1 — `setup1()`/`loop1()`
+→ `core2stuff()` (`main.cpp:609`/`:1399`/`:1540`): the LEDs, the CH446Q crossbar sends, the
+probe LED, WaveGen's DAC streaming, the encoder poll, the net-voltage scan.
 
-### Cores, roughly
-
-- **Core 0** — `setup()` / `loop()` (`main.cpp:210` / `:718`). Runs the **service
-  scheduler** (`jOS`), USB, the terminal, MicroPython, the probe button IRQ.
-- **Core 1** — `setup1()` / `loop1()` → `core2stuff()` (`main.cpp:609` / `:1399` / `:1540`).
-  Owns the **LEDs** and the **CH446Q** crossbar sends, plus the probe LED and the wave
-  generator's DAC streaming.
-
-Cross-core coordination today is a set of **shared volatile flags** (`sendAllPathsCore2`,
-`showLEDsCore2`, `showProbeLEDs`, `pauseCore2`, `core1busy`/`core2busy`, …) plus a
-`core_sync` mutex and a 25 ms `waitCore2()` guess. Replacing that is section D.
-
-### The scheduler you are reviewing
-
-`src/JumperlOS.h` / `src/JumperlOS.cpp`. Services are objects with a `service()` method and
-a `getPriority()` (`ServicePriority`, `JumperlOS.h:102`) returning CRITICAL / HIGH / NORMAL
-/ LOW, returning a `ServiceStatus` (`JumperlOS.h:91`: IDLE / BUSY / BLOCKING).
-
-- `jOSmanager::serviceAll()` — `JumperlOS.cpp:164`, the main-loop dispatcher.
-- `jOSmanager::serviceCritical()` — `JumperlOS.cpp:341`, the reduced set that blocking
-  modal loops (notably `probeMode()`) call to stay alive.
-- Registration list — `main.cpp:495–538`, one `jOS.registerService(...)` per service with a
-  trailing comment naming its priority. **Several of those comments are wrong**; the
-  authoritative answer is `getPriority()` in each service's header.
-
-**Sweep every `service()`** means: for each registered service, what it does, how often it
-actually runs, what it blocks on, and what RP2350 peripheral could do that job instead.
+**The scheduler.** `src/JumperlOS.h`/`.cpp`. Services are objects with `service()` and
+`getPriority()` (CRITICAL/HIGH/NORMAL/LOW, `JumperlOS.h:102`) returning IDLE/BUSY/BLOCKING
+(`:91`). `jOSmanager::serviceAll()` (`JumperlOS.cpp:164`) is the main-loop dispatcher;
+`serviceCritical()` (`:341`) the reduced set that modal loops (`probeMode()`, click menus)
+pump. Registration list: `main.cpp:495–542`. The authoritative priority is `getPriority()`
+in each service's header, not the registration comment.
 
 ---
 
 ## 3. How to work on this repo
 
 ```bash
-# build ALL THREE environments after every step - og and debug catch different things
-pio run -e jumperless_v5 -e jumperless_og -e jumperless_v5_debug
-
-pio run -e jumperless_v5 -t upload        # flash the attached board
-
-python3 test/hil/run_all.py               # hardware-in-the-loop suite; expect 5/6
+pio run -e jumperless_v5 -e jumperless_og -e jumperless_v5_debug   # ALL THREE, every step
+pio run -e jumperless_v5 -t upload                                  # flash the attached board
+python3 test/hil/run_all.py                                         # expect 5/6 (see below)
+python3 test/hil/test_infra_paths.py                                # 24/24 for routing/config work
+python3 test/hil/test_config.py                                     # 30/30
 ```
 
-**`run_all.py` is expected to report 5/6.** The one failure — `test_net_currents`, "zero-load
-TOP_RAIL net shows < 1 mA phantom current" — is **pre-existing and out of scope**; it fails
-identically on the `5.7.2.0` checkpoint commit. Anything *else* failing is a real regression.
+`run_all.py` is **expected to report 5/6**: `test_net_currents` ("zero-load TOP_RAIL net
+shows < 1 mA phantom current") is pre-existing and out of scope (identical on the `5.7.2.0`
+checkpoint and on `main`). Anything else failing is a real regression. `test_encoder_ui`
+auto-skips (reports PASS) without an OpenOCD session on :4444.
 
-Individual suites worth running: `test/hil/test_infra_paths.py` (24 checks),
-`test/hil/test_config.py` (30 checks).
+**Config keys** over port 1 in **bracket** form — `` `[dacs] probe_power_source = 1 `` — or
+dot form `config.section.key = value`. Bare `` `dacs.probe_power_source = 1 `` is not parsed.
 
-**Config keys** are set over port 1 in **bracket** form:
+**Gotcha:** a stale process holding port 1 gives "device reports readiness to read but
+returned no data". Not a board fault. In `run_all.py` it also appears when a previous file's
+deferred config save is still in its flash window as the next file opens the port — suspect
+that first if a suite failure doesn't reproduce standalone. Only one process on a port at a
+time (don't drive port 1/5 while `run_all.py` runs).
 
+Useful readouts: `X` on port 1 (resource census: PIO map, shared-IRQ slots, FlashPark, MCP
+write/skip counters, probe LED frames / button samples / frame aborts); `i@` (INA/probe
+line); the REPL for register peeks (`uctypes.struct(addr, {'v': uctypes.UINT32|0}).v` —
+`machine.mem32` is not built into this MicroPython).
+
+Docs worth reading first: `PROBE_REWORK_HANDOFF.md` (parts 1–2), `PROBE_INFRAPATHS_HANDOFF.md`,
+`DEV_MERGE_HANDOFF.md` (commit history + "how to work on this board": flashing, SWD recovery,
+soaking), `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`/`PERFORMANCE_ROUND3.md`,
+`differencesRP2040RP2350B.md`, `dma_sectopn_rp2350b.md`.
+
+---
+
+## Findings the brief did not have (the sweep's own results)
+
+1. **~⅓ of idle core 0 is spent blocked in probe-pad ADC reads** (estimated from the code's
+   own sample counts × the 8 µs/sample `readAdcHeld` cost: `Probing::service` ~1.2 ms @ 100 Hz
+   + `ProbePads::service` ~12 ms @ 20 Hz). The B3 stats table measures it before C1 acts on it.
+2. **I2C0 does not run at the 1 MHz the code argues for** — see the corrected finding in
+   section 0: 400 kHz on a rev-7 board with the OLED on I2C0, 1.7 MHz otherwise; three
+   different owners of the clock (`MCP4728::begin()`, `initDAC()`, the SSD1306 driver).
+3. **The CH446Q per-crosspoint path and its ISR execute from flash** despite the
+   `__not_in_flash_func` banner on `sendPaths` (`X` shows the `irq 16` handler at
+   `0x10055951`) — and `src/ch446.pio` is stale vs the compiled header.
+4. **TinyUSB is NORMAL** (pumped from the loop every 3rd pass), and **ProbeButton is CRITICAL /
+   Probing HIGH** — the brief had both wrong; the modal loops starve AsyncPassthrough (HIGH).
+5. **Every command char in `loop()` waits up to 100 ms with nothing serviced** for a possible
+   `?` (`main.cpp:1188,1216`).
+6. **LED-dump mode writes USB CDC from core 1** (`main.cpp:1510` → `dumpLEDs()`), the documented
+   wedge family; latent because the mode is off by default.
+7. `core1request` is written and never read; `inClickMenu` is the one cross-core flag that is
+   not `volatile`; `LED_SHOW_MIN_TIME` is 14 µs, not ms; the LED DMA double buffer has no
+   completion IRQ; `usbPeriodic()`, `FileCacheFlushService` (this build), TermSerial, InjectedCmd
+   and SingleCharCommands are no-op services; `Probing::measureMode()` has zero callers.
+8. USBAudio's ring **cannot** serve the probe channels as designed (ADC5/7 return 0) — the
+   ring promotion needs a "samples newer than t0" read for the probe's timed reads (C1).
+
+## Executive summary
+
+1. **The scheduler has no notion of time.** `serviceAll()` (`JumperlOS.cpp:164`) runs each
+   band on a loop divisor (1/1/3/20) with no periods, deadlines or overrun accounting; every
+   service that needs a cadence re-implements it with `millis()`. Loop-pass time varies from
+   ~20 µs (inside `probeMode()`'s `serviceCritical()`) to multi-ms (a service doing I2C), so
+   "every 3rd pass" means anything from 60 µs to 10 ms. → Section B: due-or-pending gate,
+   `periodUs()`, ISR-safe `requestRun()`, per-service µs stats in `X`.
+2. **`probeMode()` is a nested blocking loop** that keeps only the CRITICAL set alive
+   ({TermSerial, InjectedCmd, MpRemote, Peripherals, ProbeButton} — TermSerial and
+   InjectedCmd are no-ops). → Section B: `serviceInner()` first, the state machine last (Tier 3).
+3. **TinyUSB is already IRQ-pumped** by the Adafruit port under `__usb_mutex`
+   (`Adafruit_TinyUSB_rp2040.cpp:81-117`); the **raw `tud_task()` calls in `src/`** bypass
+   that mutex (re-entrancy: the pump IRQ can land mid-`tud_task()`), and the `TinyUSBService`
+   that is supposed to pump from the loop is NORMAL priority (every 3rd pass, `JumperlOS.h:385`)
+   — every hot wait spins with its own raw call instead. Fix is mechanical:
+   `TinyUSB_Device_Task()` / `yield()`; nothing on core 1, ever (`main.cpp:1494-1504`).
+4. **The ADC ring already exists** in USBAudio (`USBAudio.cpp:366-431`) and `readAdc()`
+   already snapshots it while streaming (`Peripherals.cpp:2687-2690`). Promoting it to
+   always-on turns `readAdc()` into a lock-free memory read (no 100 ms lock spin, no
+   USB-audio/probe hand-off) and takes the pad poll's 1–3 ms of core-0 CPU to ~10 µs. Honest
+   caveat: it does not shorten the pad decode's *sample window* (that is the median/variance
+   filter's choice), and per-channel sample rate = 500 ksps ÷ channels in the mask.
+5. **INA poll no longer toggles `pauseCore2`** (done, `PROBE_REWORK_HANDOFF.md`); the
+   remaining `led-frame aborts(pause)` come from flash writes.
+6. **CH446Q single-SM offload is impossible on RP2350B**: data/clk on GPIO 14/15
+   (`CH446Q.cpp:89-96`), chip-selects on 28..39 (`:110-113`), and a PIO block's GPIOBASE is
+   0 or 16. The current program already flow-controls on a CPU ISR per crosspoint
+   (`ch446.pio.h` `irq nowait 1` / `wait 0 irq 1 rel`, `CH446Q.cpp:55,1042-1060`), so **step 1** is
+   DMA→TX FIFO + an ISR chip-select list (non-blocking `sendPaths`, no per-crosspoint spin),
+   **step 2** a second SM in PIO1/PIO2 (GPIOBASE 16) strobing CS with `irq set 0 next` /
+   `wait 1 irq 0 prev`. Payoff is core-1 availability and a hardware-owned send that either
+   core can kick, not raw crosspoint speed — tap→crossbar latency today is dominated by the
+   `waitCore2()` / `sendAllPathsCore2` handshake (`Commands.cpp:57-88, 194-235`).
+7. **Cross-core coordination is ~10 volatile ints with magic values** plus a 25 ms guess. →
+   Section D: one typed request mailbox (bits + payload + generation counter), and written ownership
+   rules (I2C0 = core 0, WaveGen the exception; ADC = the ring; USB = core 0; flash =
+   FlashPark; CH446Q SM = core 1 (until step 2); button PIO IRQ = core 0).
+8. **WaveGen ≥ 1 kHz captures core 1 indefinitely** (`WaveGen.cpp:283-289`,
+   `WAVEGEN_NONBLOCKING_THRESHOLD_HZ 1000`): no LED frames and no crossbar sends while it
+   streams (`refreshConnections` leaves the send pending — the crossbar diverges from the
+   netlist until streaming stops). → Tier 3: I2C0 DMA + pacing timer.
+
+## A. What RTOSes do vs jOS
+
+| Need | FreeRTOS | Zephyr | pico-sdk primitive actually linked here | jOS today | Verdict |
+|---|---|---|---|---|---|
+| Time-driven wake | `vTaskDelayUntil`, software timers | k_timer / k_work_delayable | `alarm_pool` (default: TIMER0 alarm 3, core 0; `alarm_pool_create_on_timer(timer1,…)` for a core-1 pool), `time_us_32()` deadlines | none — per-band loop divisor 1/1/3/20 (`JumperlOS.cpp:59-62`); every service self-gates with `millis()` | add `periodUs()`/`nextDueUs` to the base class; keep alarms out of the main path (no I2C/flash/Serial in callbacks) |
+| ISR→task notify | `xTaskNotifyFromISR` | k_sem / k_work_submit | a `volatile bool pending` + `__dmb` (single-writer), `sem_t`, or a `queue_t` | the button PIO IRQ sets `g_pendingUndo/…` flags read by `service()` (`Probing.cpp:607-612`) | formalise as `Service::requestRun()` |
+| Software timers | `xTimerCreate` | k_timer | `add_repeating_timer_us` (already used for slow PWM `Peripherals.cpp:2854`) | ad-hoc `millis()` gates | fine as is; alarms only for hard cadences |
+| Cross-core message | queues + SMP | k_msgq / IPM | `queue_t` (spinlock-guarded, `queue_try_add/remove` linked), SIO FIFO (arduino-pico owns it), **doorbells** (8; FlashPark uses one) | ~10 volatile ints with magic values (`sendAllPathsCore2 = ±1/3`, `showLEDsCore2 = -N/2/3/≥10`) + `waitCore2()` 25 ms spin | replace with one mailbox of typed requests + a generation counter (section D) |
+| Mutual exclusion | mutex / critical section | k_mutex / k_spinlock | `mutex_t` (`core_sync_mutex`, `fs_mutex` — `externVars.cpp:56`), `critical_section_t`, `spin_lock_claim_unused` (32) | `core_sync` mutex + `core1busy/core2busy` flags + `pauseCore2` | keep `core_sync`; retire the flags as the mailbox lands |
+| Poll many | `select`-style event groups | k_poll | none — cooperative loop | `serviceAll()` walks 20 services every pass | due-or-pending gate makes the walk cheap |
+| Watchdog | `xTaskCheckIn` patterns | k_wdt / task watchdog | `watchdog_enable/_update`, `watchdog_hw->scratch[0..7]` (CrashLog already reads scratch — `crashlogLatchAtBoot`) | none | Tier 1: measure first, then enable with a long timeout, kick from `loop()` and `loop1()`, stamp scratch with the last service index |
+| SMP / core affinity | SMP kernel | SMP | `multicore_*`, per-core NVIC enables, `PICO_VTABLE_PER_CORE=0` | hand-placed: core 0 = USB/I2C0/scheduler, core 1 = LEDs/CH446Q | write the ownership rules down (section D) |
+
+**Do not** (all verified in this tree): call `tud_task()` from an IRQ or from core 1 (the SWD-confirmed wedge in `main.cpp:1494-1504`); add shared IRQ handlers (6/6 used); do I2C, flash, or Serial from alarm/DMA/PIO callbacks; vendor `async_context` (not linked; borrow its `at_time`/`when_pending` shape); steal the ADC lock on timeout (`Peripherals.cpp:2669-2673`).
+
+## B. jOS upgrade
+
+### B1. Truth table of priorities today, and the comment fixes (Tier 1, trivial)
+Fix the five wrong registration comments in `main.cpp:502,503,506,515,519`, the stale
+service-ID map in `JumperlOS.cpp:156-163`, `Highlighting.cpp:123` ("20ms" → 40),
+`MpRemoteService.cpp:166` ("1024" → 8192), and `Probing.h:205-209` (ProbeSwitch "LOW").
+Nothing behavioural.
+
+### B2. Drop the no-op services (Tier 1, small)
+Unregister TermSerial, InjectedCmd, SingleCharCommands, USBPeriodic (its `usbPeriodic()` is a
+debug print), FileCacheFlush (compiled-out body). Keep the classes for now (delete in a later
+pass) — the win is a shorter walk on every pass and an honest `X` table. Risk: nil (verified
+no-ops). Note `TermSerialService::setTermControl` wiring goes with it.
+
+### B3. Give the scheduler time (Tier 1 → honest size: medium-small)
+Add to `Service` (base, `JumperlOS.h:117`), all defaulted so no header changes are forced:
+```cpp
+virtual uint32_t periodUs() const { return 0; }     // 0 = every pass (today)
+void requestRun() { pending = true; }               // ISR/other-core safe: single word
+// managed by jOS:
+uint32_t nextDueUs = 0; volatile bool pending = false;
+uint32_t runs = 0, lastUs = 0, maxUs = 0, overruns = 0; uint64_t totalUs = 0;
 ```
-`[dacs] probe_power_source = 1
-```
+`serviceAll()`: `now = time_us_32()`; per service **capture-and-clear first** — `bool p =
+pending; pending = false;` — then run iff `p || periodUs()==0 || (int32_t)(now - nextDueUs)
+>= 0` (a `requestRun()` landing from an IRQ *during* the call re-pends for the next pass
+instead of being erased by a clear-after-run); after it runs `nextDueUs = now + periodUs()`
+(from *now* — no catch-up bursts), stats; `overruns++` when `lastUs > periodUs()`.
+The band divisors go (they were never a cadence). Then set `periodUs()` where a real cadence
+already exists inside the service — Peripherals 10 000, ProbeSwitch 500 000 (but keep
+`infraServiceTick()` on a 10 000 tick — it runs every pass today; give it its own tiny
+service), ProbePads 50 000, Highlighting 40 000 (its `encoderNetHighlight()` needs every pass →
+split or period 1 000), OledGui 15 000, OLED 250 000, LiveXbar 100 000, ConfigSave 100 000,
+SlotManager 50 000, MpRemote/AsyncPassthrough/Menus/ProbeButton/Probing 0. `X` (or a new `x`
+sub-view) prints name / prio / period / runs / last / max / avg µs / overruns.
+Risk: low if periods only *encode* gates the services already apply internally (behaviour
+identical); moderate for the ones that don't (Menus, Highlighting) — leave those at 0.
+Effort: ~150 lines in JumperlOS + one line per header.
 
-or dot form `config.section.key = value`. A bare `` `dacs.probe_power_source = 1 `` is **not**
-parsed ("No ] found and not dot notation format") — this cost a debugging round.
+### B4. BLOCKING → an explicit modal set (Tier 1, small)
+BLOCKING is live for Menus (`Menus.cpp:68,75`), Highlighting (`:81`, the encoder voltage
+adjuster) and Probing (`:1249`, pad menu open) — the latch is what stops `Menus::clickMenu()`
+running while the adjuster owns the wheel, so its *semantics* stay. What changes: the set that
+keeps running while a modal owner holds the loop is named — `jOS.serviceInner()` = exactly
+{ProbeButton, MpRemote, AsyncPassthrough, TinyUSB (mutex-guarded), Peripherals}, run once —
+and `probeMode()`, `getMenuSelection()`, the pad-menu `choose*` loops and `servicePython()`
+call *that*; `serviceAll()` uses the same set while a service is BLOCKING; `serviceCritical()`
+becomes an alias, then goes. Behavioural delta (Kevin-visible, intended): AsyncPassthrough and
+the USB pump join the inner set — today both are starved inside probe mode / click menus (a
+modal loop pumps USB only through the raw `tud_task()` in `waitCore2()`, and the Arduino UART
+bridge stops while the probe is in use).
 
-**Gotcha:** a stale process holding port 1 produces "device reports readiness to read but
-returned no data". Not a board fault. It also appears in `run_all.py` when a previous file's
-deferred config save is still in its flash window as the next file opens the port — if a
-suite run fails in a way a standalone re-run doesn't reproduce, suspect that first.
+### B5. `probeMode` → state machine (Tier 3, large — milestones; **not built this pass**)
+1. **Extract `probeTick()`** = one pass of the `while` body (`Probing.cpp:2423-3320`) with
+   the loop-carried locals (`row[]`, `node1or2`, `nodesToConnect[]`, `probeTimeout`,
+   `pendingInProbeButton`, `doubleSelectCountdown`, `firstEntry`, `bannerEmitted`, …) moved
+   into a `ProbeSession` struct; the `goto restartProbing(NoPrint)` labels become
+   `S_ARM`/`S_REARM` states; exits become `S_EXIT` with the tail (`:3322-3470`) as `probeExit()`.
+2. **Replace the delays with deadlines**: `delay(40/40/60)` at `:3009-3018` → a `S_FLASH`
+   sub-state with `nextAtUs`; the `readProbe()` 8 ms inner loop → `readProbe` returns
+   "not yet" and the tick comes back; the 20 µs `delayMicroseconds` goes.
+3. **Move it into `Probing::service()`**: `probeMode()` becomes `session.begin(); while
+   (!session.done) { probeTick(); jOS.serviceInner(); }` first (behaviour-preserving), then
+   the loop is deleted and `service()` calls `probeTick()` when a session is live.
+4. **Delete the `serviceCritical()` calls** — the scheduler is running.
+The pad menus (`chooseDAC` … `voltageSelect`) are their own modal loops and stay for a
+later pass. Gate: Kevin's hands on every step (tap, connect, clear, double-tap undo, menu
+exit); the HIL suite covers the routing side only.
 
-**Docs worth reading before starting:**
+### B6. `loop()` cleanup (Tier 1, small)
+- The 10 ms `secondSerialHandler()` / `replyWithSerialInfo()` / `serviceNetVoltageScanDebug()`
+  block (`main.cpp:979-996`) → a `periodUs()=10000` service.
+- The two 100 ms help-wait spins (`main.cpp:1188, 1216`): every command char waits up to
+  **100 ms with nothing serviced** for a possible `?`. Make it a peek on the already-received
+  line (line-buffered input has the `?` in the line) and, in char mode, an armed deadline
+  checked from the loop — needs Kevin's UX check that `h?` / `x?` still work.
+- The `delayMicroseconds(1000)` drain (`:1249-1253`) → `Jerial.service()` handles it.
 
-| File | Why |
-|---|---|
-| `PROBE_REWORK_HANDOFF.md` | what changed in parts (1) and (2); several changes are seams this work would build on |
-| `PROBE_INFRAPATHS_HANDOFF.md` | the probe/InfraPaths subsystem reference |
-| `DEV_MERGE_HANDOFF.md` | the branch's whole commit history + "how to work on this board" (flashing, SWD recovery, soaking) |
-| `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`, `PERFORMANCE_ROUND3.md` | prior optimisation passes; §2d of ROUND2 is marked stale |
-| `differencesRP2040RP2350B.md`, `dma_sectopn_rp2350b.md` | RP2350B specifics |
+## C. Per-service hardware-offload table ("gain" says measured vs estimated)
 
----
+| # | Now | Peripheral / design | SDK calls | Gain | Risk | Effort |
+|---|---|---|---|---|---|---|
+| C1 | `readAdc()` = lock spin (≤100 ms) + START_ONCE per sample (~8 µs); pad polling blocks core 0 ~1.2 ms @100 Hz + ~12 ms @20 Hz (est. from `readProbeRaw` × `readAdcHeld` costs — **measure first with the B3 stats**); USB audio takes the ADC over and hands it back (`usbAudioOwnsAdc`, `usb_audio_probe_activity`) | **Always-on ADC ring**: promote `usbAudioAdcStart()`'s engine (`USBAudio.cpp:366-431`) to boot-time, mask = every channel anyone reads (probe 5/7, supply 6, routable 0–3, audio L/R), two chained DMA channels into a ring, exclusive `DMA_IRQ_1` (already claimed for it). `readAdc(ch,n)` = mean of the last *n* ring samples for `ch` (age-checked); `readAdcSince(ch, t0, n)` for the timed reads (phantom check, blink, tip sense: "wait until n samples newer than t0"); USB audio = one consumer; `routingGeneration` stamped per ring block so consumers can drop pre-route samples | `adc_set_round_robin`, `adc_fifo_setup(true,true,1,…)`, `adc_set_clkdiv`, `dma_channel_configure(... &adc_hw->fifo ...)`, `channel_config_set_ring`, `channel_config_set_chain_to`, `dma_channel_set_irq1_enabled` | core-0 CPU: the pad polls' ~1–3 ms blocks → ~10 µs memory reads (**estimated**); the ADC lock and its 100 ms spin disappear; no more audio↔probe hand-off. **Not** a latency win for the pad decode itself: per-channel rate = 500 ksps ÷ mask size (8 ch → 62.5 ksps → 16 µs/sample vs 8 µs today), so a 128-sample decode window is ~2 ms of history either way — the win is that core 0 isn't blocked while it accrues | medium: every reader moves; the probe's timed reads need the `since` API; ADC FIFO overrun rotates the channel interleave (USBAudio already detects+resyncs `:347-353`); MicroPython `adc_get` and NetVoltageScan (core 1) read via the same API | medium (~2 days): engine promotion + `readAdc` rewrite + audio as consumer + tests |
+| C2-0 | `sendPath`/`sendXYraw*`/`isrFromPio` execute from flash (`CH446Q.cpp:962,992,1063,55`) | mark them `__not_in_flash_func` like `sendPaths` already is | — | no XIP-miss jitter on the per-crosspoint path and inside the ISR; removes one class of "core 1 stalls during a flash write" (**estimated**) | nil (RAM cost ~1–2 KB) | trivial — **Tier 1** |
+| C2a | CH446Q: `pio_sm_put` + spin on the ISR per crosspoint (`CH446Q.cpp:1042-1048`), ISR strobes CS 28..39 (`:55`), core 1 blocked for the whole `sendPaths` (~1.1 ms typical, ROUND3) | **DMA→TX FIFO + ISR chip list**: `sendPaths` builds `words[]` (address bytes) and `cs[]` (chip per word), starts one DMA channel (DREQ = PIO TX) and returns; `isrFromPio` strobes `cs[idx++]`; the existing `irq nowait 1` / `wait 0 irq 1 rel` handshake in `ch446.pio.h` throttles the DMA for free; completion = `idx == n` → `sendGen++`. Core 1 keeps rendering; **either core can kick it** once the ISR is moved to core 0's NVIC (or stays on core 1 — decide by where `sendPaths`' bookkeeping runs) | `dma_claim_unused_channel(false)`, `channel_config_set_dreq(pio_get_dreq(pio,sm,true))`, `dma_channel_configure`, `dma_channel_set_read_addr/trans_count`; ISR stays a shared PIO0_IRQ_1 handler (slot already held) | non-blocking `sendPaths`; core 1 gains ~1 ms per rebuild; sets up C2b (**estimated**) | medium: the RESET pulse + `clearChipXYSuspect` + chip-K safety stay CPU-side before the DMA; the PIO timeout recovery (`:1050-1060`) moves into the ISR/deadline; two producers (sendPaths + NetVoltageScan taps `NetVoltageScan.cpp:154`) need the request mailbox (D) | medium (~1 day) |
+| C2c | I2C0's clock has three owners (`MCP4728::begin()` 1.7 MHz `MCP4728.cpp:164`; `initDAC()` 1 MHz `Peripherals.cpp:512-520`; the SSD1306 driver on `connection_type 2` 400 kHz sticky, `oled.cpp:68,111`) — live value 400 kHz on Kevin's board (measured), 1.7 MHz without an OLED on I2C0; WaveGen's math assumes 1 MHz | one owner: `initDAC()`'s 1 MHz; MCP4728 stops overriding; the OLED-on-I2C0 instance transfers at 400 kHz and restores 1 MHz (`clkAfter`) | `Wire.setClock`; SSD1306 ctor `clkDuring/clkAfter` | INA219/DAC/WaveGen run at the clock the code reasons about; WaveGen output frequency lands where its table math says | low, but **hardware-verify**: register readout, INA read reliability, `probe_current_zero` across boots, WaveGen actual frequency, OLED still connected | trivial — **Tier 1**, Kevin's call (approved) |
+| C2b | as above | **Second SM strobes CS**: a 12-pin `out pins` program on PIO1/PIO2 (GPIOBASE 16 → pins 28..39 = 12..23), synchronised with the shifter via `irq set 0 next` / `wait 1 irq 0 prev` (RP2350 cross-block IRQ), CS words DMA'd from a second array; no per-crosspoint ISR at all | `pio_set_gpio_base(pio1,16)`, `pio_claim_unused_sm`, second DMA channel, `pio_encode_*` | crosspoint send fully hardware-owned; frees the PIO0_IRQ_1 chain slot; the ~30 µs/crosspoint (est.) becomes ~2 µs | medium-high: needs a PIO block with GPIOBASE 16 free of other claims (check the census: LEDs/probe/encoder SMs pick blocks by pin), two-DMA sequencing, and the OG (RP2040) keeps the old path | large (2–3 days incl. scope verification) — **Tier 3, not built** |
+| C3 | INA poll toggled `pauseCore2` (20 Hz LED-frame aborts) | INA219 continuous mode + read-latest, no pause | — | **DONE** (`PROBE_REWORK_HANDOFF.md`) | — | — |
+| C4 | MCP4728 re-sent identical words | per-channel shadow, dedupe | — | **DONE**; LDAC batching for the 4-channel setters is a small follow-up (one LDAC pulse per group instead of per write) | low | small |
+| C5 | Probe LED + button share one SM, program-swapped from core 1 every pass (~2,560 frames/s); colour requests via `showProbeLEDs` magic values; `checkingButton`/`showingProbeLEDs` cross-core gate | **One PIO program owning GPIO 9**: `pull noblock` (X→OSR when the FIFO is empty, i.e. the last colour repeats) → `mov x, osr` → 24-bit WS2811 frame from OSR (Y as bit counter) → the 2-pulse sample sequence immediately after the frame (the pulse rides behind the frame and is forwarded, never latched) → `push`/`irq` → ≥300 µs low gap (Y loop) → repeat. Colour change = `pio_sm_put(colour)` from any core (one 32-bit FIFO write); button samples keep arriving on core 0's IRQ. `probeLEDhandler` and the swap disappear | `pio_add_program`, `pio_sm_config` with `sideset`/`set`/`in` on the same pin, `pio_sm_put`; JeoPixel no longer owns the SM (`probeLEDs` becomes a thin `put`) | zero cross-core traffic for the probe LED; a constant, jitter-free refresh; no short-frame corruption possible; ~2,600 button samples/s preserved (**estimated**; the frame+pulse spacing must be checked on a scope — Kevin's "acceptable if periodic refresh in the tens of ms" note) | medium: PIO register budget is tight (X=colour, Y=counter, ISR=samples/counter seed, OSR=shift), so the ~1 ms sampler delay needs the ISR-seeded counter trick; the CPU fallback path and `probe_led_on_button_pin=0` (separate pin) must keep working; the OG has no probe pads | medium (~1–2 days incl. scope time) — **next session's opener (T2.4)** |
+| C6 | Button PIO IRQ posts flags read by `service()` | `requestRun()` on ProbeButton/Probing from the IRQ so the press is acted on the very next pass | B3 | sub-ms press→action instead of "next scheduled pass" | nil | trivial once B3 lands |
+| C7 | Encoder polled on core 1 (`rotaryEncoderStuff`, 2 kHz), events via shared vars | `queue_t` of encoder events (core 1 → core 0) — see D | `queue_init`, `queue_try_add/remove` | clean ownership; no lost clicks when core 0 is slow | low | small — **proposed, not built** (Tier 2, not approved this pass) |
+| C8 | LED frame tick = `micros()` poll in `core2stuff` (8 ms) | (considered) core-1 `alarm_pool` on TIMER1 setting a flag | `alarm_pool_create_on_timer(timer1_hw,…)`, `alarm_pool_add_repeating_timer_us` | none worth having — the poll is a compare on a core that spins anyway; **not recommended** | — | — |
+| C9 | raw `tud_task()` (59 textual sites, 51 compiled) | `TinyUSB_Device_Task()` / `yield()` (mutex-guarded); `TinyUSBService` period 0. Note the semantic change: `TinyUSB_Device_Task()` is *try-enter* — under contention it silently skips the pump (irrelevant in a spin loop, harmless one-shot: the IRQ pump covers it) | — | closes the pump-IRQ re-entrancy window; USB pumped every pass, not every 3rd | low (mechanical), but audit each site for the "flush" intent (`yield()` also flushes CDC) | small (1 h) |
+| C10 | OLED frame = 512–1024 B blocking Wire write on core 0, OledGui up to 66 Hz. **On Kevin's rev-7 board the OLED is on I2C0** (`connection_type 2`) at 400 kHz — 12–25 ms per frame, sharing the bus with the INA219s and the DAC | I2C TX via DMA: build the frame's command stream once, `dma_channel_configure(→ &i2cN_hw->data_cmd)` with `DREQ_I2CN_TX`, poll/IRQ completion; `Adafruit_SSD1306::display()` replaced by an async `displayDMA()` for the SSD1306 path | `channel_config_set_dreq(DREQ_I2C0/1_TX)`, i2c `data_cmd` STOP/RESTART bits per word | core-0 blocking per frame 12–25 ms → ~20 µs (**estimated**); a live GUI screen stops eating the loop | medium: I2C error handling (NACK/timeout) mid-DMA; on I2C0 (rev 7) the DMA'd frame needs the I2C0 arbiter (see WaveGen) — the shared-bus gate at `oled.cpp:2245` is a `wavegen.isRunning()` check today | medium (~1 day) — **proposed, not built** (Tier 2, not approved this pass) |
+| C11 | no watchdog | `watchdog_enable(≤8 s)`; kick from `loop()`, `loop1()`, `serviceInner()`, `servicePython()`; stamp a scratch word with the last service index / core-1 state so a WDT reset leaves a trail — on RP2350 `watchdog_hw->scratch[3]` is free (`CrashLog.cpp:29-32` uses POWMAN 0–7 + watchdog 0–2), on the OG/RP2040 CrashLog owns watchdog 2–3 (`:37-45`) so gate the stamp V5-only or pick per platform; **first ship measure-only** (max gap between kicks in `X`) | `watchdog_enable`, `watchdog_update`, `watchdog_caused_reboot`, `watchdog_hw->scratch` | a wedged board reboots instead of sitting dead; post-mortem of what it was doing | medium: legitimate long blockers (self-test, calibration, file ops, MicroPython) must kick or the timeout must exceed them — the measure-only stage finds them | small + a soak |
+| C12 | `millis()` gates everywhere | `time_us_32()` deadlines with wraparound-safe compares (B3) | — | µs resolution, no 1 ms quantisation | nil | with B3 |
+| C13 | flags + `waitCore2()` | core-1 request mailbox + generation counter (D) | spinlock-guarded bitmask | replaces ~10 flags and the 25 ms guess | medium | see D |
+| C14 | WaveGen ≥1 kHz owns core 1 by synchronous per-sample I2C writes | I2C0 TX DMA from a pre-built command image, paced by a DMA timer (`dma_timer_claim`, `DREQ_DMA_TIMERn`) or by bus rate; core 1 free; needs an I2C0 arbiter (INA/DAC setters/OLED-on-I2C0 wait or fail fast while streaming — they already skip on `isRunning()`) | `dma_timer_claim`, `dma_timer_set_fraction`, `channel_config_set_dreq(dma_get_timer_dreq)`, `i2c0_hw->data_cmd` | LED frames and crossbar sends work while a waveform streams (today the crossbar diverges from the netlist until streaming stops, `Commands.cpp:208-230`) | high: MCP4728 command framing per sample, mid-stream STOP/RESTART, arbitration with core-0 I2C0 users, waveform pacing accuracy | large (3+ days) — **Tier 3, not built** |
+| C15 | `readAdcVoltage(6,4)` supply sense on core 1 every 1 s | a ring consumer (C1) | — | one less lock holder | nil | with C1 |
+| C16 | `pauseCore2` (soft LED-frame hint; hard park is FlashPark) | delete once C13 + the flash-write frame abort are expressed as a request ("HOLD_FRAMES until gen") | — | one less global; frame aborts become explicit | medium (nested pause semantics in `pauseCore2ForFlash`) | Tier 3 — **not built** |
 
-## 4. Verified facts to build on
+## D. Cross-core protocol cleanup
 
-Measured or read out of the tree during the probe session — not assumptions. Where a number
-disagrees with the original plan, the number here is the one that was checked.
+| Flag | Written by → read by | Hazard | Replacement |
+|---|---|---|---|
+| `sendAllPathsCore2` (1/-1/3/n) | core 0 sets (`Commands.cpp:195-197,376`), core 1 clears (`CH446Q.cpp:188`, `main.cpp:1406,1569,1842`) | a second request overwrites the first (a `-1` clean lost under a `1`); pending forever while WaveGen streams; `waitCore2()`/`refreshConnections` spin 25 ms / 1 s | `REQ_SEND_PATHS` (+ `CLEAN` bit) in the mailbox; completion = `doneGen` |
+| `showLEDsCore2` (-n/1/2/3/≥10) | core 0 (Highlighting ×9, probeMode ×9, Menus, MeasureMode, AsyncPassthrough `:2021-2058`, refresh); core 1 too (`main.cpp:1611`); cleared by CAS on core 1 (`:1813`) | value collisions (a `1` overwritten by a `2` drops the net show; `-1` vs `≥10` encodings); "clear before" and "blocking" are bits hiding in an int | `REQ_SHOW_LEDS` with a flags word {NETS, TEXT, STAGED, CLEAR_FIRST, BLOCKING} OR-merged, latest wins |
+| `showProbeLEDs` (1/2/3/4/11…) | core 0 (probeMode ×7, ProbeSwitch ×3, `handleProbeButtonActions`) → core 1 `probeLEDhandler` | request overwrite (a flash `11` then `1`) hidden by the constant re-send | `REQ_PROBE_LED(colour)` → with C5, a bare `pio_sm_put` |
+| `showingProbeLEDs` | core 1 → core 0 (`ProbeButton` CPU path spin, `PausePollingFromCore0`) | 20 ms/600 µs waits | gone with C5 |
+| `checkingButton` | core 0 → core 1 (`probeLEDhandler` ≤100 ms spin `Probing.cpp:7199-7207`, `main.cpp:1878`) | the shared line's mutex, by spin | gone with C5 (CPU fallback keeps a local flag) |
+| `pauseCore2` | core 0 (`refreshConnections :146-185`, `pauseCore2ForFlash`) → core 1 (`loop1 :1401`, `core2stuff :1598,1690,1752`) | nested save/restore; a core-0 fault while paused = core 1 dead; soft only since FlashPark | `REQ_HOLD_FRAMES(untilGen)`; the routing critical section becomes "core 1 renders from a snapshot" or simply keeps `core_sync` |
+| `core1busy` | core 0 (`refreshConnections :148,186`) **and core 1** (`main.cpp:1513-1520` dumpLED) → core 1 swirl gate, `systemIdleForFlush`, SlotManager, OledGui | two writers, ambiguous meaning | split: `routingInProgress` (core 0 only) |
+| `core2busy` | core 1 around sendPaths/render/show → `waitCore2`, `refreshLocalConnections` (200 ms), `pauseCore2ForFlash`, `safeFileWriteAllRaw` (200 ms), OledGui | polled with timeouts that "proceed anyway" | `doneGen` + a `core1State` enum for the readers that only want "idle?" |
+| `core1request` | written (`Commands.cpp:61,86`, `FileParsing.cpp:124,138,3038,3051`), **read by nobody** | dead | delete |
+| `probeActive`, `loadingFile`, `inClickMenu`, `inPadMenu`, `hideNets` | core-0 mode flags read by core 1's render | fine as mode flags (single writer) | keep; make `inClickMenu` `volatile` (it is `int&` via `Menus`) |
+| `dumpLED` (LED-dump mode, `serial_x.function` 5/6) | core 0 config → **core 1 calls `dumpLEDs()` (`main.cpp:1510-1525`) which writes `USBSer1/2`** (`Graphics.cpp:4455-4483`) | USB CDC I/O from core 1 — the exact wedge family documented at `main.cpp:1494-1504`; latent because the mode is off by default | `REQ_DUMP_LEDS`: core 1 snapshots the frame, core 0 prints it |
 
-- **The scheduler has no notion of time.** `jOSmanager`'s only pacing is a per-band loop
-  divisor — `criticalDivisor 1, highDivisor 1, normalDivisor 3, lowDivisor 20`
-  (`JumperlOS.cpp:59-62`). No periods, no deadlines, no overrun accounting.
-- **Service priorities today** (grep `getPriority` across `src/*.h`): CRITICAL =
-  MpRemote, Peripherals, Probing, TermSerial, InjectedCmd; HIGH = Highlighting, Menus,
-  MeasureMode, TinyUSB, ProbeButton→`Probing.h:267`; NORMAL = SingleCharCommands,
-  ProbeSwitch (`Probing.h:217`), usbPeriodic, oledGui; LOW = configSave, FileCache,
-  ProbePads (`Probing.h:240`), oled, liveCrossbar. Note `main.cpp`'s registration comments
-  contradict the actual priorities in several places (`peripherals` was commented NORMAL
-  while `Peripherals.h:31` says CRITICAL — fixed this session; others remain).
-- **`tud_task()` is called raw from 54 places in `src/`** — Python_Proper 13,
-  AsyncPassthrough 12, JumperlOS 6, USBfs 4, Commands 4, USBAudio 3, MpRemoteService 3,
-  Jerial 3, rest scattered. The Adafruit port already pumps TinyUSB from its IRQ under
-  `__usb_mutex`, so these bypass the mutex — re-entrancy hazard. Fix is mechanical:
-  `TinyUSB_Device_Task()` / `yield()`. (The plan said 73; the verified count today is 54.)
-- **The ADC free-run + FIFO + DMA ring already exists**, in USBAudio:
-  `adc_set_round_robin(g_rrMask)` + `dma_channel_configure(..., &adc_hw->fifo, ...)`
-  (`USBAudio.cpp:395-423`), and `readAdc()` already snapshots it when streaming
-  (`usbAudioSnapshotRaw`, `USBAudio.cpp:814`). Promoting it to always-on is a *reuse*
-  recommendation, not new work: `readAdc` becomes a ring read, the pad-ladder burst goes
-  from 1–3 ms to ~10 µs, and the ADC lock disappears. This session already split
-  `readAdc()` into the lock + `readAdcHeld()` and added `adcTryAcquire()/adcRelease()`,
-  which is the seam that work would use.
-- **CH446Q single-SM offload is impossible on RP2350B.** Data/clock are GPIO **14/15**
-  (`CH446Q.cpp:89-96`), the 12 chip-selects are GPIO **28..39** (`CH446Q.cpp:110-113`), and
-  a PIO block's GPIOBASE is 0 or 16 — one SM cannot reach both halves. So the design is
-  either two SMs in different blocks handshaking (`irq set 0 next` / `wait 1 irq 0 prev`)
-  or a DMA→FIFO half-offload. Note the honest payoff: latency is dominated by the
-  `waitCore2()` / `core_sync` handshake, so the win is stability, not speed.
-- **`pauseCore2`'s cost is now measurable** — `X` prints `led-frame aborts(pause)`, and the
-  INA poll's 20 Hz contribution is already gone. The remaining sources are flash writes.
-- **Cross-core protocol** — the flags to tabulate (flag → hazard → replacement):
-  `sendAllPathsCore2`, `showLEDsCore2`, `showProbeLEDs`, `showingProbeLEDs`,
-  `checkingButton`, `pauseCore2`, `core1busy`/`core2busy`, and the 25 ms `waitCore2()`
-  guess. Replacement shape: a core-1 request `queue_t` (`{SEND_PATHS, SHOW_LEDS,
-  PROBE_LED, DUMP_LEDS}`) + a generation counter. Ownership rules to state: I2C0 = core 0
-  (WaveGen the sanctioned exception, guarded by `isRunning()`) — **this session made that
-  rule real**; ADC = the ring engine; USB = core 0; flash = FlashPark; PIO0 CH446Q SM =
-  core 1; button PIO IRQ = core 0.
-- **Don't-do list for the doc:** no `tud_task` from an IRQ or core 1; count shared-IRQ
-  slots before adding one (the pool is **6/6 used** today — `X` prints the census, and
-  `IrqSlots.cpp` declines rather than panicking); no I2C/flash/Serial from alarm callbacks;
-  don't vendor `async_context_poll` (not linked in this arduino-pico — borrow its
-  `at_time` / `when_pending` shape instead).
+**Mailbox shape** (prefer over a FIFO — every request type coalesces): `volatile uint32_t
+pendingBits` + per-type payload words + `reqGen`/`doneGen`, updated under a SIO spinlock
+(`spin_lock_claim_unused`) or `critical_section_t` — **not** bare `__atomic_fetch_or`: whether
+RP2350's exclusive monitor is cross-core is a datasheet check we have not done (the existing
+`readingADC` `__atomic_test_and_set` lock at `Peripherals.cpp:2694` relies on it — verify
+before building more on it). Core 1 pops at the top of `core2stuff()`; core 0 waits on
+`(int32_t)(doneGen - myGen) >= 0` with the same 25 ms bound it has today. No IRQ needed
+(core 1 spins anyway); if one is ever wanted, the SIO_IRQ_BELL slot is taken — extend
+`flashParkIrq` into a bell dispatcher.
 
----
+**Ownership rules to write down**: I2C0 = core 0 (WaveGen the sanctioned exception, gated by
+`isRunning()`); **I2C0's clock = `initDAC()`, 1 MHz, and nobody else's** (T1.9); ADC = the
+ring engine (C1) — until then, the `readingADC` lock with no stealing; USB = core 0 only
+(`tud_task`, CDC I/O); flash = FlashPark (`__wrap_flash_range_*`) with `fs_mutex`
+core-0-in-practice; PIO0 CH446Q SM = core 1 (C2a may move the ISR to core 0); button PIO IRQ =
+core 0; the LED strip SM/DMA = core 1; I2C1 (OLED on connection types 0/1/3) = core 0.
 
+**Migration order**: (1) `core1request` delete + `inClickMenu volatile` (trivial); (2) mailbox
+with `REQ_SEND_PATHS` only, `waitCore2()` re-implemented on `doneGen` **in place** — its ~40
+call sites (`grep -rn "waitCore2("` across Commands, Apps, SelfTest, States, FakeGpio, Menus,
+Probing …) stay untouched (behaviour-identical, measurable by the tap→crossbar probe in F);
+(3) `REQ_SHOW_LEDS`; (4) `REQ_PROBE_LED` or C5; (5) `pauseCore2` last.
 
+## E. Roadmap (sized honestly; status per section 0)
 
----
+**Tier 1 — small, low risk (each ≤ ½ day, one commit each) — all approved**
+- T1.1 C9 raw `tud_task()` → `TinyUSB_Device_Task()`/`yield()`; `TinyUSBService` period 0.
+- T1.2 B1 comment/priority truth fixes + B2 drop the no-op services.
+- T1.3 D `core1request` delete; `inClickMenu` volatile.
+- T1.4 B3 scheduler time + stats (`periodUs`, `requestRun`, `X` table) — the largest Tier-1
+  item, ~150 lines; behaviour-preserving if periods only encode existing gates.
+- T1.5 B4 `serviceInner()` replacing `serviceCritical()` in the modal loops.
+- T1.6 C11 watchdog, measure-only stage first (max kick gap in `X`), then enable.
+- T1.7 B6 `loop()` cleanup (10 ms block → service; help-wait spins; the drain).
+- T1.8 C2-0 CH446Q hot path + ISR into RAM (`__not_in_flash_func`).
+- T1.9 C2c I2C0: one clock owner at 1 MHz (Kevin's call — approved; hardware-verify INA
+  reads + wavegen + register readout).
+- T1.10 D `REQ_DUMP_LEDS`-lite: stop core 1 writing USB CDC in LED-dump mode (`main.cpp:1510`) —
+  move `dumpLEDs()` to core 0's 10 ms service behind a core-1 snapshot flag.
+- (done) C3 INA no-pause, C4 MCP dedupe, I2C0 rule.
 
-## 5. The agreed section outline
+**Tier 2 — medium (1–2 days each)**
+- T2.1 C1 always-on ADC ring (`readAdc` = ring read; audio = consumer) — **approved**.
+- T2.2 D2/D3 core-1 mailbox: `REQ_SEND_PATHS` first, then `REQ_SHOW_LEDS` — **approved**.
+- T2.3 C2a CH446Q DMA→FIFO + ISR chip list (non-blocking `sendPaths`) — **approved**.
+- T2.4 C5 the combined GPIO 9 PIO program (needs scope time with Kevin) — **next session's opener**.
+- T2.5 C7 encoder event queue — **proposed, not built** (not approved this pass; small, low risk, no measured symptom driving it).
+- T2.6 C10 OLED I2C DMA frame — **proposed, not built** (not approved this pass; on rev 7 it needs the I2C0 arbiter first).
+- (not recommended) C8 LED tick alarm.
 
-Trim or reorder as the evidence warrants, but this is the shape that was agreed with Kevin.
+**Tier 3 — large (3+ days, or needs a design round) — design-only this pass**
+- T3.1 B5 `probeMode` state machine (4 milestones).
+- T3.2 C2b second-SM CH446Q strobe (PIO block/GPIOBASE allocation first).
+- T3.3 C14 WaveGen via I2C0 DMA + pacing timer (+ I2C0 arbiter).
+- T3.4 C16 delete `pauseCore2`.
 
-**Executive summary** — the scheduler has no notion of time (per-band divisor 1/1/3/20,
-`JumperlOS.cpp:59-62`); `probeMode()` is a nested blocking loop; TinyUSB is already
-IRQ-pumped by the Adafruit port under `__usb_mutex`, so the raw `tud_task()` calls in
-`src/` bypass it (re-entrancy hazard; fix = `TinyUSB_Device_Task()` / `yield()`); the ADC
-free-run + FIFO + DMA ring already exists in USBAudio and `readAdc` already snapshots it
-when streaming — promote it; the INA poll's `pauseCore2` toggle was 20 Hz of LED-frame
-aborts (**fixed this session**); single-SM CH446Q strobe offload is impossible on RP2350B
-(PIO GPIOBASE 0|16 per block; data/clk 14/15 vs CS 28..39) → a two-block `irq next/prev`
-design or a DMA→FIFO half-offload.
+## F. How to measure
+Existing hooks: `X` (`cmd_resourceStatus`, `SingleCharCommands.cpp:2670`: PIO map, IRQ slots,
+FlashPark, MCP counters, probe LED frames/button samples/frame aborts), `debugWaitLoopTiming`
+(slow-service prints, `JumperlOS.cpp:288-321`), `debugWaitLoopTimingCore2` (LED show timing
+summary `main.cpp:1918-1959`), `PROFILE_*` in Commands/CH446Q, `refresh:` timing line
+(`Commands.cpp:244-246`), the HIL suite (`run_all.py` 5/6), the SWD scripts.
+Additions per recommendation: B3's per-service µs table (**do this first — the CPU-share
+numbers above are estimates**); an I2C0 transaction counter (Wire wrapper) for C10/C14; ADC
+ring stats (overruns, resyncs, oldest-sample age) for C1; a frame-abort histogram by cause
+(pause / mutex-timeout / checkingButton) for D; a **tap→crossbar latency probe**:
+timestamp at `readProbe` accept, at `sendAllPathsCore2` set, at `sendPaths` end, at LED show —
+printed on `X`, gate for D2 and C2a; watchdog max-gap for C11.
 
-**A. What RTOSes do vs jOS** — a table with rows for time-driven wake / ISR→task notify /
-software timers / cross-core messaging / mutual exclusion / poll-many / watchdog / SMP,
-and columns for FreeRTOS, Zephyr, **the pico-sdk primitive actually available**
-(`alarm_pool`, `queue_t`, doorbells, `critical_section_t`, `hardware_claim`,
-`watchdog_hw->scratch`), jOS today, and a verdict. Then a "what NOT to do" list: no
-`tud_task` from an IRQ or core 1; count shared-IRQ slots first (the pool is **6/6 used**,
-`IrqSlots.cpp` declines rather than panicking); no I2C / flash / Serial from alarm
-callbacks; don't vendor `async_context_poll` (not linked in this arduino-pico — borrow its
-`at_time` / `when_pending` shape).
+Baseline captured before any change (2026-08-16, firmware `a6ad4ba`, uptime 12036 s): `X` →
+shared-IRQ slots 6/6 (irq 16 handler `0x10055951` — flash), FlashPark timeouts 0, `mcp4728
+writes 14/2/6/2 skips 45/21/21/21`, probe led frames 29 112 026 (requests 2362), button
+samples 30 127 251, led-frame aborts(pause) 47; heap free 46 KB of 221 KB; I2C0 at 400 kHz
+(register readout); `run_all.py` 5/6 in 2 m 09 s.
 
-**B. jOS upgrade** — the corrected priority table + fixing `main.cpp`'s contradicting
-registration comments; an API of `periodUs()` / `nextDueUs` / `pending` + an ISR-safe
-`requestRun()`, plus per-service last/max/avg µs and overrun counts in `X`; `serviceAll`
-runs due-or-pending only, with no catch-up bursts; BLOCKING becomes an explicit modal set;
-`serviceInner()` = {ProbeButton, MpRemote, AsyncPassthrough, TinyUSB (mutex-guarded),
-Peripherals} exactly once; drop the no-op services (TermSerial, InjectedCmd,
-SingleCharCommands, OLED-null, FileCache); and `probeMode` → a state machine
-(OFF→ENTER→ARMED→TAP_SEEN→NODE1→ACTION→FEEDBACK→…→EXIT) with milestones: extract
-`probeTick()`, replace the `delay()`s with deadlines, move it into `service()`, delete the
-`serviceCritical()` calls. Plus `loop()` cleanup (the 10 ms block → a service, the help
-waits, the serial drain).
+## Verification (per step, and per item)
 
-**C. Per-service hardware-offload table** — columns: now → peripheral → SDK calls → gain →
-risk → effort. Rows: the always-on ADC ring engine (`readAdc` = a ring read; the pad-ladder
-burst 1–3 ms → ~10 µs; the ADC lock disappears; USB audio becomes one consumer; freshness
-generations after route changes); CH446Q step 1 = DMA→PIO FIFO + an IRQ STB queue
-(non-blocking `sendPaths`), step 2 = a second SM at GPIOBASE 16 with `irq set 0 next` /
-`wait 1 irq 0 prev` (payoff is stability — latency is dominated by the `waitCore2` /
-`core_sync` handshake); INA continuous + read-latest with no `pauseCore2` (**done**);
-MCP4728 dedupe (**done**) + LDAC batching; the probe LED on core 0 and its prerequisite
-**one PIO program owning GPIO 9** (button sample + WS2811 frame from a `pull noblock` /
-X-held colour word) — zero cross-core, constant refresh, no short-frame corruption; button
-IRQ → `requestRun()`; encoder events via `queue_t`; the LED frame tick via a core-1 alarm
-pool flag; the USB entry points; OLED (Wire1 for most types) chunked / DMA; watchdog +
-scratch post-mortem; `time_us_32` deadlines; and a core-1 request queue
-`{SEND_PATHS, SHOW_LEDS, PROBE_LED, DUMP_LEDS}` + a generation counter replacing
-`sendAllPathsCore2` / `showLEDsCore2` / `showProbeLEDs` and the 25 ms `waitCore2` guess.
+- Every step: build all three envs; flash `jumperless_v5`; `python3 test/hil/run_all.py` = 5/6
+  with only `test_net_currents` failing; `test/hil/test_infra_paths.py` 24/24 and
+  `test/hil/test_config.py` 30/30 for anything touching routing or config; `X` after boot for
+  the resource census (PIO map, IRQ slots 6/6, FlashPark active, MCP counters, probe-LED
+  frame/abort counters unchanged unless the step targets them).
+- T1.1 (`tud_task`): a 10-min soak with the `jumperless` client attached + `run_all.py` in a
+  loop; no port drops. T1.2/T1.3: build + `X`. T1.4 (B3): the new `X` service table shows
+  every service with runs>0 and the expected period; the `refresh:` timing line and the
+  probe feel (Kevin) unchanged; `debugWaitLoopTiming` shows no new SLOW SERVICE lines. T1.5
+  (B4): probe mode + click menu + REPL still respond; Arduino passthrough now works while
+  probing (Kevin, if an Arduino is on the header). T1.6 (watchdog): measure-only first — `X`
+  prints max kick gap over a session including self-test/calibration/file ops; enable only if
+  the max is comfortably under the timeout. T1.7: `h?`, `x?`, `help` still work; command
+  latency visibly better (Kevin). T1.8: build + `X` (irq 16 handler address in RAM) +
+  connect/disconnect soak. T1.9: I2C0 register readout = 1 MHz after boot with the OLED
+  connected; INA reads (`i@`, `[switch]` line) stable; `probe_current_zero` across boots;
+  WaveGen actual-frequency stat before/after; OLED still Connected. T1.10: enable LED-dump
+  mode on port 2, watch for the wedge not happening.
+- T2.1 (ADC ring): ring stats in `X` (overruns 0, oldest-sample age < 1 ms); probe taps decode
+  identically under both feeds and both positions (Kevin); USB mic still records; the pad
+  polls' CPU share in the B3 table drops as predicted (measured, not estimated).
+- T2.2 (mailbox): tap→crossbar latency probe (F) before/after — same or better; no "Core 2 has
+  not processed sendAllPathsCore2" warnings in a 200-connect soak; wavegen streaming still
+  leaves the send pending and it lands when streaming stops.
+- T2.3 (CH446Q DMA): `test_infra_paths` + `self_test` crossbar phase pass; `ch446q_timeout_count`
+  stays 0 across a 500-rebuild soak; NetVoltageScan taps still serialised.
+- T2.4 (GPIO 9 program): scope on GPIO 9 — frame, pulse, gap; button double-tap/hold/undo all
+  work (Kevin); `X` frames/s and button samples/s in the expected range; no colour drift over
+  10 min idle.
 
-**D. Cross-core protocol cleanup** — a flag → hazard → replacement table, the ownership
-rules (I2C0 core 0 with a WaveGen token; ADC = the ring engine; USB core 0; flash =
-FlashPark; PIO0 CH446Q SM core 1; button PIO IRQ core 0), and a migration order.
+## Verified while sweeping (facts, with where they came from)
 
-**E. Roadmap in three tiers** — Tier 1 (small, low risk): raw `tud_task` → guarded entry
-points; priority/comment fixes + dropping dead services; the INA no-pause + I2C0 rule
-(**done**); `inClickMenu` volatile; scheduler deadlines + stats; watchdog; the help-wait
-and drain spins. Tier 2 (medium): the ADC ring; the LED tick alarm; the CH446Q
-half-offload; a core-1 `queue_t` (SEND_PATHS first); the encoder queue; the combined GPIO 9
-PIO program; OLED. Tier 3 (large): the `probeMode` state machine; full CH446Q PIO offload;
-WaveGen via I2C DMA + a pacing timer; deleting `pauseCore2`.
-
-**F. How to measure** — the hooks that already exist (`X`, `debugWaitLoopTiming`,
-`PROFILE_*`, the HIL suite, the SWD scripts) plus the additions each recommendation needs
-(a per-service µs table, an I2C0 transaction counter, ADC ring stats, a frame-abort
-histogram — `X` already has the `pauseCore2` half of this — and a tap→crossbar latency
-probe).
-
----
-
----
-
-## 6. Also on this pass
-
-- Add a `DEV_MERGE_HANDOFF.md` row per landed commit (rows 18–22 are already in).
-- `PERFORMANCE_OPTIMIZATIONS_ROUND2` §2d "Only Check routableBufferPower for Power Nets" is
-  **already marked stale** — no action needed unless the sweep finds more like it.
-- The electrical-model memory note is already written (`memory/probe-electrical-model.md`).
-
----
-
-## 7. What "done" looks like
-
-**Step 1 — the proposals** (this file, rewritten):
-
-- Every claim carries a `file:line`.
-- Every recommendation names the **peripheral**, the **SDK calls**, the **gain**, the
-  **risk**, and the **effort**, and is honest about payoff (the CH446Q entry, for instance,
-  should say the win is stability rather than latency, because latency is dominated by the
-  `waitCore2()` / `core_sync` handshake).
-- Anything bounded or sampled says so out loud rather than reading as full coverage.
-- The roadmap is tiered and the tiers are honest about size and risk — Kevin is picking
-  from them in plan mode, so a mis-sized Tier 1 wastes his afternoon, not just yours.
-- A recommendation that turns out to be wrong on inspection is **said so and dropped**, with
-  the reason kept. Several plan-stage assumptions in this very brief did not survive
-  contact (see the `tud_task` count, and the ratiometric-decode finding in
-  `PROBE_REWORK_HANDOFF.md`) — that is the normal outcome, not a failure.
-
-**Step 2 — the approved changes**, once he has picked them in plan mode:
-
-- All three environments build after every step; HIL suite at 5/6 (no *new* failures).
-- Verified on the attached board, and for anything with a visible or tactile effect,
-  confirmed by Kevin before it is committed.
-- This file updated to record what was built and what was consciously not.
+- arduino-pico core 1.50600.0 (5.6.0), pico-sdk **2.2.1**. USB stack = Adafruit TinyUSB port:
+  `TinyUSB_Port_InitDevice()` claims a spare user IRQ (`user_irq_claim_unused`) and registers
+  a *shared* handler on `USBCTRL_IRQ` that sets it pending; the user-IRQ handler runs
+  `tud_task()` under `mutex_try_enter(&__usb_mutex)` (`Adafruit_TinyUSB_rp2040.cpp:79-117`).
+  `TinyUSB_Device_Task()` (`:138`) is the same mutex-guarded entry (try-enter: skips if held);
+  `yield()` = `TinyUSB_Device_Task()` + `TinyUSB_Device_FlushCDC()` (`cores/rp2040/delay.cpp:50-54`;
+  FlushCDC = `tud_cdc_n_write_flush` on every CDC instance, non-blocking). `delay()` =
+  `sleep_ms` — it does **not** pump USB. `Adafruit_USBD_CDC` `available()`/`write()`/`operator
+  bool` call `yield()` internally when they would otherwise spin (`Adafruit_USBD_CDC.cpp:183,198,253`).
+  USB is initialised from `main()` on core 0, so the pump IRQ is a core-0 IRQ.
+- Linked in `lib/rp2350/libpico.a`: `queue_*` (with spinlock), `alarm_pool_create_on_timer`
+  / `_add_repeating_timer_us` / `_get_default`, `multicore_doorbell_claim(_unused)`,
+  `multicore_lockout_*`, `critical_section_init`, `hardware_alarm_claim_unused`,
+  `user_irq_claim_unused`, `watchdog_enable/_update`, `spin_lock_claim_unused`, `sem_*`,
+  `recursive_mutex_*`. **Not** linked: `async_context_*` (confirmed).
+- RP2350 resource counts (`hardware/platform_defs.h`): 16 DMA channels, 4 DMA IRQs, 3 PIO
+  blocks (12 SMs), 2 timers × 4 alarms, 8 doorbells, 6 user IRQs, 32 spinlocks. Default alarm
+  pool = TIMER0 alarm 3, core 0, 16 timers. `clk_sys` = 150 MHz (`machine.freq()`).
+- Shared-IRQ chain: 6/6 used (`include/FlashPark.h:43-45`): USBCTRL_IRQ ×2, SIO_IRQ_BELL ×2
+  (arduino-pico's park + FlashPark), PIO0_IRQ_1 (CH446Q), IO_IRQ_BANK0 (MicroPython). Any new
+  interrupt must be an **exclusive** handler on an unshared line (a free DMA_IRQ_n, PIO1/PIO2
+  IRQs, a TIMER1 alarm, a user IRQ). A second doorbell cannot get its own handler — extend
+  `flashParkIrq` into a dispatcher, or don't use an IRQ (poll from the loop).
+- FlashPark (`src/FlashPark.cpp`) already uses a doorbell + `__wrap_flash_range_erase/program`
+  to park the other core; `pauseCore2ForFlash()` (`externVars.cpp:188`) is now only the "soft"
+  LED-stutter hint, spinning on `core2busy` with raw `tud_task()`.
+- Cross-core waits today: `waitCore2()` (`Commands.cpp:57`) spins ≤25 ms on `core2busy ||
+  sendAllPathsCore2` with raw `tud_task()`; `refreshConnections()` (`Commands.cpp:114`) sets
+  `pauseCore2` around routing, then `sendAllPathsCore2 = ±1` and spins ≤1 s (`:208-217`), then
+  `showLEDsCore2` + `waitCore2()` (`:232-235`). `refreshLocalConnections()` spins ≤200 ms on
+  `core2busy` (`:300-309`).
+- CH446Q send path (`src/CH446Q.cpp`): PIO0 SM (claimed at **file scope** `:38`, before
+  `setup()`), data 14 / clk 15 (`:89-96`), clkdiv 1, 8-bit words; the compiled program
+  (`ch446.pio.h` — **`src/ch446.pio` is stale**: it says IRQ 0 / `PIO0_IRQ_0`, the header and
+  `CH446Q.cpp:98` use `irq nowait 1` / `wait 0 irq 1 rel` / `PIO0_IRQ_1`) shifts the word then
+  stalls until the CPU ISR `isrFromPio` (`:55`, shared PIO0_IRQ_1, NVIC enabled on core 1)
+  pulses CS 28..39 with `gpio_put` (`setCSex`, `Peripherals.cpp:1635-1647`) and clears the flag;
+  `sendXYrawUnchecked` (`:992`) does `pio_sm_put` then spins on `chipSelect != -1` per crosspoint
+  (`:1044-1048`, 100 ms timeout → `markChipXYSuspect` + SM restart `:1050-1060`). So the SM
+  already flow-controls on the ISR — a DMA→FIFO feed would be paced by the CS strobe for free.
+  **The hot path is not RAM-resident**: `sendPaths`/`sendAllPaths` are `__not_in_flash_func`
+  but `sendPath` (`:962`), `sendXYrawUnchecked` (`:992`), `sendXYraw` (`:1063`), `setCSex` and
+  `isrFromPio` (`:55`, `X`: handler `0x10055951`) run from flash. NetVoltageScan (core 1) is a
+  **second producer** of crosspoint sends (`senseNodeVoltage`, `NetVoltageScan.cpp:154`, one
+  tap per pass, ≥5 ms apart).
+- **I2C0 clock** — see section 0 (corrected). `initDAC()` sets `Wire.setClock(1000000)` with a
+  comment explaining 1 MHz was chosen because 1.7 MHz "produced intermittent silently-failed
+  [INA219] reads" (`Peripherals.cpp:512-520`), then `mcp.begin()` (`:529`) calls
+  `_wire->setClock(1700000)` (`MCP4728.cpp:164`); `MCP4728.cpp:298`'s `setClock(_clock_hz)` is
+  only on the soft-I2C set-address path, not per write. On a rev-7 board `oled::init()` then
+  drops the bus to 400 kHz for good (`oled.cpp:544→4260`, `initI2C(4,5,400000)`; SSD1306
+  `clkDuring = clkAfter = 400000`, `oled.cpp:68,111`). WaveGen's rate math assumes 1 MHz
+  (`WaveGen.cpp:372,412,432,637`) and its stream is free-running (`:289-322`), so the output
+  frequency scales with the real bus clock. INA1 is read on this bus (`probe_current_zero`,
+  handoff open item 2).
+- LED strip: `LED_SHOW_MIN_TIME 14` is compared against `micros()` (`main.cpp:1794`) — a
+  14 **µs** floor, i.e. no throttle; pacing comes from `isDMABusy()` frame-dropping in
+  `ledClass::show()` (`LEDs.cpp:171-184`). The DMA double buffer has **no completion IRQ**: a
+  frame queued while DMA is busy is sent by the *next* `show()` that finds it idle
+  (`Jeopixel_RP2.cpp:112-200`), not on completion as `DMA_LED_DOUBLE_BUFFER_SOLUTION.md` reads.
+- Resource budget today: DMA channels — JeoPixel ×3, AsyncPassthrough ×2 (**panic-on-fail**
+  `AsyncPassthrough.cpp:555,578`), USBAudio ×2 (+ MicroPython `rp2.DMA`/SPI on demand) = 7 of
+  16; DMA IRQs — `DMA_IRQ_0` MicroPython, `DMA_IRQ_1` USBAudio (exclusive), 2 and 3 free; PIO —
+  CH446Q (pio0), JeoPixel ×3 (dynamic, by pin), encoder (first-fit), probe button (shares
+  probeLEDs' SM), MicroPython `rp2.PIO` on demand (`X` today: PIO0 SM0, PIO1 SM0, PIO2 SM0-2
+  claimed); timers — one `add_repeating_timer_ms` (slow PWM `Peripherals.cpp:2854`), no alarm
+  pools of our own; no `queue_t`, no `critical_section_t`, no spinlocks (except the OG atomic
+  shim); mutexes = `core_sync_mutex`, `fs_mutex`, `g_arenaMutex`, `__usb_mutex`; atomic-flag
+  locks = `readingADC`, `readingGPIO`, `svcBusy`, the `infraAcquireAdc` pool.
+- `core_sync_*` grant unconditionally before `core_sync_init()` (`externVars.cpp:75-95`);
+  `core2stuff()` takes it with `timeout_ms(0)` (`main.cpp:1585`) or `(1)` for the bypass.
+- Priorities actually in the tree (grep `getPriority`): CRITICAL = TermSerial `JumperlOS.h:318`,
+  InjectedCmd `:345`, MpRemote `MpRemoteService.h:50`, Peripherals `Peripherals.h:31`,
+  **ProbeButton `Probing.h:80`**; HIGH = AsyncPassthrough `JumperlOS.h:365`, Highlighting
+  `Highlighting.h:29`, Menus `Menus.h:35`, MeasureMode `MeasureMode.h:61`, **Probing
+  `Probing.h:269`**, SlotManager `routing/States.h:406`; NORMAL = **TinyUSB `JumperlOS.h:385`**,
+  USBPeriodic `:405`, OledGui `:452`, ProbeSwitch `Probing.h:219`, SingleCharCommands
+  `SingleCharCommands.h:127`; LOW = OLED `JumperlOS.h:425`, LiveXbar `:473`, ConfigSave
+  `configManager.h:64`, FileCache `FileCache.h:163`, ProbePads `Probing.h:242`.
+  Two brief-stage claims did not survive: TinyUSB is NORMAL not HIGH (the service pumps USB only
+  every 3rd loop), and it is ProbeButton that is CRITICAL / Probing that is HIGH (the brief had
+  them swapped) — so `serviceCritical()` inside probeMode runs {TermSerial, InjectedCmd, MpRemote,
+  Peripherals, ProbeButton} and does not re-enter Probing. Registration comments wrong in
+  `main.cpp`: `:502` asyncPassthrough "CRITICAL" (HIGH), `:503` menus "CRITICAL" (HIGH), `:506`
+  tinyUSB "HIGH" (NORMAL), `:515` probeButton "HIGH" (CRITICAL), `:519` probeSwitch "LOW" (NORMAL).
+- LED strip: `JeoPixel` (lib/Jadafruit_NeoPixel) claims a WS2812 SM via
+  `pio_claim_free_sm_and_add_program_for_gpio_range` + one DMA channel; `show()` is **async
+  DMA** (returns at transfer start; 300 LEDs × 3 B × 10 µs = 9 ms on the wire; `endTime`
+  projected to the last bit) (`Jeopixel_RP2.cpp:6-70`, `JeoPixel.cpp:239-317`).
+  `showBlocking()` bypasses DMA. So core 1's CPU is free during the frame; the "LED frame"
+  cost on core 1 is the *render* (showNets etc.), not the transmit.
+- Probe button + probe LED share one PIO SM (`Probing.cpp:470-830`): a hand-encoded 15-word
+  polling program (~1 ms cadence, pushes 2-bit samples + `irq set 0`) and JeoPixel's WS2812
+  program live in the same SM; core 1's `probeLEDhandler` swaps programs with
+  `pio_sm_exec(jmp)` around every frame (`probeButtonPausePolling/ResumePolling` `:671-716`);
+  the PIO IRQ is exclusive and **core-0 owned** (`:816-820`), draining the RX FIFO and running
+  `processSample()` in the handler. `probeButtonPausePollingFromCore0()` (`:738`) uses
+  `checkingButton` + `showingProbeLEDs` as the cross-core gate. The sample pulses (~875 ns
+  HIGH) are valid WS2812 bits; a frame *followed immediately* by the pulse is harmless (the
+  LED forwards bit 25 to DOUT and latches the 24 it kept), a pulse followed by a >280 µs gap
+  with no frame shifts the colour — which is why the frame is re-sent every pass.
+- `readAdc()` (`Peripherals.cpp:2661`): spins up to **100 ms** on the `readingADC` atomic
+  flag; `readAdcHeld()` (`:2724`) = per sample START_ONCE + READY wait (~2 µs) +
+  `delayMicroseconds(6)` ≈ 8 µs/sample. `readProbeRaw()` (`Probing.cpp:6614`) = 8 (up to 16)
+  bursts × `readAdc(5, 16|24)` + variance gate + median ≈ 1–3 ms of core-0 CPU per pad poll;
+  the pad ladder is a steady DC divider (no per-read drive), except the phantom check
+  (`:6578-6586`, feed off 60 µs → `readAdc(5,8)`) and the tip-sense/blink detectors, which
+  are timed reads. USBAudio's ring (`USBAudio.cpp:366-431`): round-robin over
+  audio L/R + `JL_AUDIO_HOUSEKEEP_MASK 0xFF`, two chained DMA channels writing 1 ms halves
+  into a ring, exclusive `DMA_IRQ_1`, `usbAudioSnapshotRaw()` (`:814`) serves means for
+  every channel except ADC5/ADC7 (returned as 0 by design — "drive→settle→sample").
+- **Per-service census (core 0)** — what one call costs, from the sweep (agent-located, spot-verified):
+  - `Probing::service` (HIGH, `Probing.cpp:1243`): 10 ms gate (`:1257`) → `justReadProbe()` →
+    `readProbeRaw()` = 8–16 × `readAdc(5,16|24)` ≈ **1.0–1.6 ms of blocking ADC per call, 100×/s**
+    (~10–16 % of core 0 while idle); then `handleProbeButtonActions()` which **enters `probeMode()`
+    synchronously** (`:1094,1136,1150`). Returns BLOCKING while a pad menu is open (`:1249`).
+  - `ProbePads::service` (LOW, `:1202`): 50 ms gate (`:1207`) → `checkPads()` (`:6362`) = **12 ×
+    `readProbeRaw(0,1)`** = 12 × 8 × 16 conversions ≈ **12 ms of blocking ADC per tick, 20×/s**
+    (~25 % of core 0 while idle; escalates to 16 bursts). Together with Probing::service, roughly
+    **a third of idle core 0 is spent blocked in pad ADC reads.** (Verified `:1202-1216`, `:6362-6370`.)
+  - `ProbeButton::service` (CRITICAL, `:121`): PIO mode (default) → returns immediately after
+    draining deferred undo/redo (`:188-191`); real work is in the PIO IRQ. CPU fallback: 4 ms gate,
+    ≤600 µs spin on `showingProbeLEDs`/`canShow()` (`:860-866`), 8-µs settle delays.
+  - `ProbeSwitch::service` (NORMAL, `:1174`): no gate of its own; `checkSwitchPosition()` runs
+    `infraServiceTick()` every pass (`:5193`) then 500 ms-gated (`:5226`) INA1 I2C read (up to 3
+    tries + 200 µs) or ADC7 droop reads; detector A ~6 µs; detector B `adcTryAcquire`+2×`readAdcHeld(7,2)`.
+  - `Peripherals::service` (CRITICAL, `Peripherals.cpp:74`): `pollCurrentSenseMeasurement()` — 50 ms
+    poll (`:50`), ≥10 ms attempt gate (`:121-125`), INA0 on I2C0, skipped while `wavegen.isRunning()`
+    (`:187`); `showMeasurements()` only if `showReadings>=1` (default 0). Also runs from
+    `serviceCritical()` and `servicePython()`.
+  - `MeasureMode::service` (HIGH, `MeasureMode.cpp:59`): 300 ms switch debounce, 15 ms INA guard,
+    `readAdcVoltage(ch,16)` per update; `startMeasurement()` → `addEphemeralConnection(...)` →
+    `refreshLocalConnections()` + `waitCore2()` (`States.cpp:806-816`).
+  - `Highlighting::service` (HIGH, `Highlighting.cpp:65`): `encoderNetHighlight()` every pass; 40 ms
+    gate (`:123`, comment says 20) → `checkForReadingChanges()` with `readAdcVoltage(ch,64)` (~0.5 ms);
+    returns BLOCKING when it consumed an encoder press (`:81`); writes `showLEDsCore2` at 9 sites.
+  - `Menus::service` (HIGH, `Menus.cpp:63`): no gate; `clickMenu()` every pass; returns BLOCKING while
+    `inClickMenu` (`:67-69,74-76`); `getMenuSelection()` is a **modal loop** pumping only
+    `serviceCritical()` (`:993-995`).
+  - `SlotManager::service` (HIGH, `States.cpp:3668`): idle-gated autosave (`systemIdleForFlush(750)`),
+    → `safeFileWriteAllRaw()` (`FilesystemStuff.cpp:4010`): `pauseCore2ForFlash(100)` + a 200 ms
+    `core2busy` busy-wait + `fs_mutex` + FatFS write. `USE_FILE_CACHE` = 0 in this build.
+  - `MpRemoteService::service` (CRITICAL, `MpRemoteService.cpp:99`): no time gate; drains ≤8192 chars;
+    runs raw-REPL Python **synchronously**; `tud_task()` after each batch (`:277-281`).
+  - `AsyncPassthroughService` (HIGH, `JumperlOS.cpp:686` → `AsyncPassthrough::task()` `:1771`): no
+    gate; UART↔CDC bridging + DMA TX; **unconditional raw `tud_task()` every pass** (`:2083`).
+  - `TinyUSBService` (NORMAL, `JumperlOS.cpp:717`): raw `tud_task()` every 3rd pass.
+  - No-ops: `SingleCharCommands::service` (`SingleCharCommands.cpp:94-98`), `TermSerial`
+    (`JumperlOS.cpp:598-603`, body commented out), `InjectedCmd` (`:637-651`, disabled),
+    `FileCacheFlushService` (compiled body `FileCache.cpp:1610-1612` because `USE_FILE_CACHE`=0),
+    `usbPeriodic()` (`USBfs.cpp:43-58`, debug print only, still reports BUSY). (`OLEDService` is
+    NOT dead: `oled::init()` registers itself at `oled.cpp:664`, so once the OLED is initialised
+    `oledPeriodic()` (`oled.cpp:3181`) runs every 20th pass — connection ping every 750 ms/2 s/4 s,
+    and `Wire1.end(); delay(50)` … `delay(150)` on a reconnect (`:3350-3375`).)
+  - `OledGuiService` (NORMAL): inert until a screen is active; then `oled.show()` = a 512–1024 B
+    SSD1306 frame at 400 kHz ≈ **12–25 ms of blocking I2C on core 0 per frame** (I2C0 on rev 7,
+    I2C1 otherwise), capped at 15 ms (foreground) / 160 ms (idle screen) intervals
+    (`OledGui.cpp:673`), skipped when nothing changed; gated on `probeActive`,
+    `core1busy/core2busy`, `refreshInProgress`.
+  - `ConfigSaveService` (LOW, `configManager.cpp:63`): deferred (`probeActive`, 2 s after user input),
+    then `saveConfig()` → same `safeFileWriteAllRaw` path.
+  - `LiveCrossbarService` (LOW): 60 s / 400 ms (probe) refresh, `updateLiveCrossbarDisplay()`.
+- **`probeMode()` anatomy** (`Probing.cpp:2199-3471`, agent-located, key lines spot-checked): one
+  `while (Serial.available()==0 && millis()-probeTimeout < 80000)` loop (`:2423`); per pass:
+  `delayMicroseconds(20)` (`:2429`), `jOS.serviceCritical()` (`:2432`), `checkSwitchPositionFast()`
+  (250 ms), `liveCrossbarService.service()` (`:2521`), encoder nav, `readProbe()` (`:2590`) whose
+  inner `while (probeRead <= 0)` (`:7016`) re-runs `readProbeRaw()` + `probeButton.service()` up to
+  8 ms; `delay(40)/delay(40)/delay(60)` on the node-1 latch flash (`:3009-3018` — 140 ms of
+  hard delay per first node in connect mode); the commit path `addBridgeToState()` /
+  `removeBridgeFromState()` (`:3114,3124,3216`) → `refreshLocalConnections(1,1,0)` →
+  `sendAllPathsCore2 = 3` + `showLEDsCore2`. Nested modal loops in the pad menus (`chooseDAC`
+  `:4094`, `chooseIsense` `:4245`, `chooseADC` `:4387`, `chooseGPIOinputOutput` `:4511`,
+  `chooseGPIO` `:4709`, `voltageSelect` `:4939,5054`), each pumping `serviceCritical()`. Entry
+  from `Probing::service()` → `handleProbeButtonActions()` (`:1094,1136,1150`) and from the click
+  menu (`Menus.cpp:4550`). Exits: serial key / 80 s / double-tap bail / encoder held / mode-button
+  with nothing latched (`:2934`) / `firstConnection` -2/-3. `probeMode` never touches
+  `sendAllPathsCore2` or `checkingButton`; it writes `probeActive`, `showProbeLEDs` (7 sites),
+  `showLEDsCore2` (9 sites), `inPadMenu` (exit). No flash, no `saveConfig`; OLED
+  `clearPrintShow` at 8 sites; INA219 only via `Peripherals::service` in `serviceCritical()`.
+  `Probing::measureMode()` has zero call sites; MeasureMode is a separate HIGH service.
+- Raw `tud_task()` in `src/`: 59 textual call sites (51 compiled): Python_Proper 12,
+  AsyncPassthrough 11, main 10 (8 compiled-out), JumperlOS 6, FilesystemStuff 5, Commands 3,
+  USBfs 2, SingleCharCommands 2, JumperlessMicroPythonAPI 2, FileParsing 2, MpRemoteService 2,
+  ArduinoStuff 1, externVars 1. Other `serviceCritical()` pumpers besides probeMode/menus:
+  `BitmapEditor.cpp:1167`, `GraphicOverlays.cpp:632`, `ImagesApp.cpp:341`,
+  `Peripherals.cpp:3339`, `Python_Proper.cpp:256` (`mp_hal_delay_ms`).
