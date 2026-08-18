@@ -15,12 +15,14 @@
 
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
-**START HERE — state at a glance (2026-08-17 night, written so a fresh chat can act on it):**
-- **HEAD = the T3.2 commit after `6ee9abf` (row 51) — the CH446Q chip-select strobe state machine
-  on PIO2; the board is flashed with it.** The tree is clean; nothing has ever been pushed (tag
-  `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–51 have every commit with how it was
-  verified (one commit per item, hash of each filled in by the next commit — row 51's hash goes
-  in with the next). Kevin's evening asks, in order: "tag this as a release where we are now" →
+**START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
+- **HEAD = the T3.3 commit after `7b5c412` (row 52) — WaveGen streams over I2C0 DMA with a pacing
+  timer, plus the I2C0 arbiter; the board is flashed with it.** The tree is clean; nothing has
+  ever been pushed (tag `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–52 have every commit
+  with how it was verified (one commit per item, hash of each filled in by the next commit — row
+  52's hash goes in with the next). **Next in the queue: T3.4 (delete `pauseCore2`) — then T3.1
+  (the `probeMode` state machine) needs a design round with Kevin — ask before starting it.**
+  Kevin's evening asks, in order: "tag this as a release where we are now" →
   `6ee9abf` = **release `5.7.3.0`** (`VERSION` 5.7.2.0 → 5.7.3.0, annotated tag on it — the next
   hand-bumped *third* component after his `5.7.2.0` checkpoint; the fourth is CI's auto-bump on
   `main`, the second is the public named line — 5.8 is his call; retagging is `git tag -d` +
@@ -29,8 +31,31 @@
   `main` makes CI release `5.7.3.1`; to have CI publish exactly `5.7.3.0`, push the branch without
   the tag and let the workflow tag it); then **"start with the second SM CH446Q strobe (put it on
   PIO2), then continue with the rest"** → T3.2 is built and verified (block below); "the rest" =
-  the remaining Tier 3 in list order — **T3.3 (WaveGen via I2C0 DMA) is next, then T3.4 (delete
-  `pauseCore2`); T3.1 (the `probeMode` state machine) needs a design round with Kevin — ask.**
+  the remaining Tier 3 in list order — **T3.3 (WaveGen via I2C0 DMA) is built and verified too
+  (block below); T3.4 (delete `pauseCore2`) is next; T3.1 (the `probeMode` state machine) needs a
+  design round with Kevin — ask.**
+- **T3.3 in one paragraph:** the wave is a hardware stream — an image of the exact IC_DATA_CMD
+  entries per sample, channel A (image → I2C0 TX FIFO, 3 entries per trigger), channel B2 (an
+  address ring, one word per sample, hardware ring wrap → A's READ_ADDR_TRIG), channel B1 (a
+  divider of D dummy transfers per pass, paced by a DMA timer at clk_sys·X/Y, chained to B2 and
+  back). Frequency = clk_sys·X/(Y·D·N), **exact** (N a power of two the bus can carry; the API's
+  whole 0.0001–10 000 Hz range is covered by D). Started / stopped / re-planned synchronously on
+  core 0 (every caller is core 0); core 1's `service()` is a monitor. **The I2C0 arbiter:** the two
+  SDK symbols every Wire master transaction goes through (`i2c_write_blocking_until`,
+  `i2c_read_blocking_until`) are linker-wrapped (`src/I2C0Arbiter.cpp`, flags on one line in
+  `platformio.ini`) — a foreign transaction on I2C0 during a stream pauses the wave at a sample
+  boundary (~50 µs) and resumes it after; a repeated-START pair keeps the pause across both
+  halves. The internal pollers keep skipping on `isRunning()` (a bus gate that costs the wave
+  nothing); the API's `dac_set()`/`ina_get_current()` during a stream now return the real thing.
+  `X` → `wavegen: DMA STREAMING f req … -> … Hz (N, tick = clk*X/Y/D; bus cap …) laps … tx aborts …
+  bus yields …` is the health line. Payoff measured: **req→pickup during a 2 kHz stream 349 µs
+  max (was 7 684 589 µs — the whole stream); core 1's max kick gap during a 10 s 2 kHz stream
+  0.53 ms (was 10 007 ms)**; a 500-op routing soak with the stream, the LED strips and the CH446Q
+  strobe all on DMA at once: 0 stalls, 0 timeouts, 0 WARNINGs. Trade stated: N is a power of two,
+  so an unlucky frequency gets up to 2× fewer samples per cycle than the old arbitrary-N table
+  — in exchange for the frequency being right (5.0011 Hz measured for 5.0, edges 50.0 ms apart at
+  20 Hz through a flash write). Untested by nature: the TX_ABRT (NAK) path — the DAC is on-board.
+  I2C0 stays at 1 MHz — checklist 7b remains Kevin's call.
 - **T3.2 in one paragraph:** PIO2 is GPIOBASE 16 and its SM0 strobes the twelve chip selects
   (GPIO 28..39) itself, handshaking with the PIO0 shifter through the RP2350's cross-block IRQ
   flags (PIO0's `prev` wraps to PIO2). One 32-bit word carries the address byte (top) *and* the
@@ -46,7 +71,8 @@
   500-op soak with 0 stalls / 0 timeouts / mailbox idle, list IRQs == list sends at every read,
   ~860 k singles with 0 timeouts, and an A/B against `6ee9abf` on the same board state (latency
   probe, speed test, kick gaps under `run_all` — all the same; see the T3.2 block for numbers).
-- Before this: `6ee9abf` = release 5.7.3.0 (row 50); `7e6f069` = the speed-test commit (row 49).
+- Before this: `7b5c412` = T3.2 (row 51); `6ee9abf` = release 5.7.3.0 (row 50); `7e6f069` = the
+  speed-test commit (row 49).
 - **Kevin's "the crossbar speed test went from 300 kHz to 10 kHz" (17:00) — answered:** it did
   not, and not today: the diagnostics-menu speed test called the *checked* `sendXYraw()`, which
   since the RouteSafety work (rows 16–20, mid-August) runs the per-crosspoint short-check on
@@ -94,8 +120,9 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 "Side quest 2, follow-up 3" below), `e1fc7f8` (T1.6b, the VM-hook and WaveGen kick sites,
 row 46), `3406b1a` (docs), `e148384` (the in-session probe LED fix, row 47 — "Side quest 2, follow-up 4"
 below), `eafb218` (docs, row 48), `7e6f069` (the speed test's two labelled passes, row 49), and
-`6ee9abf` (**release 5.7.3.0**, row 50; annotated tag `5.7.3.0` on it), and the **T3.2 commit**
-(row 51 — hash with the next commit). **The board is flashed with the T3.2 build.**
+`6ee9abf` (**release 5.7.3.0**, row 50; annotated tag `5.7.3.0` on it), `7b5c412` (T3.2, the PIO2
+chip-select strobe, row 51), and the **T3.3 commit** (row 52 — hash with the next commit). **The
+board is flashed with the T3.3 build.**
 
 **Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
 probing state — if I flip the switch inside the probing loop, it lights up measure, even though
@@ -186,6 +213,93 @@ still records, plus the automatable part (ring stats in `X`: overruns 0, oldest-
 build will be judged by feel within a minute of tapping, and the cheap alternative for the
 core-0 load alone (a one-read touch pre-check in `checkPads()`, "T1.11 candidate" in the
 checklist) is a 20-line change he can take today if he only wants the CPU back.
+
+**T3.3 — what was built (section C14; "then continue with the rest").** `src/WaveGen.cpp/.h`
+rewritten around a hardware stream; the legacy per-sample core-1 loop stays as the fallback (and
+is what the OG runs — no OG board to verify, T2.3's precedent). **The stream:** an IMAGE (uint16
+entries, heap, ≤ 1024 samples × 3) holds, per sample, exactly the three IC_DATA_CMD entries the
+old `MCP4728::setChannelValue()` put on the wire — `[0x40 | ch<<1] [D11..D8] [D7..D0 | STOP]`,
+START/STOP generated by the block, so every sample is its own short transaction as before; an
+ADDRESS RING (`static alignas(4096) uint32_t[1024]` — B2 reads it with a hardware ring wrap of
+4N bytes, which is why N is a power of two: 4N can be, the image's 6N cannot; the heap cannot
+promise the alignment) holds each sample's entry address; **channel A** image → TX FIFO, DREQ =
+the FIFO (TDLR 8), count 3, read address supplied per burst; **channel B2** ring → A's
+`al3_read_addr_trig`, one write = one sample, chained to B1; **channel B1** the pacing DIVIDER:
+D dummy RAM transfers per pass, DREQ = a DMA pacing timer (clk_sys·X/Y), chained to B2 — one
+sample every D ticks, forever, until the timer is written 0. Planner: N = the largest power of
+two with f·N ≤ 85 % of the bus capacity (computed from I2C0's own SCL counts, 40 bit-times per
+sample: 23 734 sps at the 1 MHz T1.9 set), then D ≥ 1 so the timer runs above ~3 kHz (its floor is
+clk/65535 = 2.29 kHz) and the best X/Y ≤ 65535 by continued fractions; f_actual = clk·X/(Y·D·N)
+and `getAchievableFrequency()` / `setFrequencyAdjusted()` return it (the old `B_PER_SAM 4.67`
+model is fallback-only now). Control is **synchronous on the caller's core, and every caller is
+core 0** — swept: the MicroPython glue (the VM runs on core 0; `modules/jumperless/modjumperless.c`
+→ `jl_wavegen_*`), nothing else calls start/stop/setters; the ownership rule becomes "I2C0 = core
+0, WaveGen's stream is DMA started/stopped from core 0" (was "core 0, WaveGen the core-1
+exception"). Setters while running re-plan and restart **with `isRunning()` held true** (the bus
+gates never see a gap). `begin()` (the API calls it on every `wavegen_start`) drains a live
+stream first, since `MCP4728::begin()` probes the chip. **Stop:** EN + CHAIN_TO cleared on B1/B2,
+ONE `CHAN_ABORT` for both, then the timer to 0 (the datasheet's 12.6.8.3 / RP2350-E5 sequence,
+every wait bounded — the SDK's `dma_channel_abort()` spins unbounded on BUSY, and a channel
+parked on a just-stopped pacing timer is exactly where that hung the board once during
+bring-up: BOOTSEL + reflash, then this), A left to finish its in-flight 3-entry burst (so the
+FIFO always ends on a STOP entry), wait TFE + !MST_ACTIVITY, DMA_CR off, the MCP4728 shadow
+invalidated for the channel; a wedged A (bus stuck mid-burst, never seen) is aborted and its
+sample's remaining entries pushed by hand, then the block's own ABORT. **Monitor (core 1,
+`service()`):** ring laps (`_successful_writes` += N per lap), a wedge latch (no ring progress for
+> max(200 ms, 4 sample periods) → timer to 0, `X` says WEDGED, `stop()` recovers), TX_ABRT counted
+and cleared so a NAK heals. **The I2C0 arbiter (`src/I2C0Arbiter.cpp`):** `--wrap` on
+`i2c_write_blocking_until` / `i2c_read_blocking_until` — arduino-pico's TwoWire issues every
+master write/read through those two, so every driver on the bus is covered (the INA219s — a
+registry library, not ours to edit —, the MCP4728, the SSD1306, MicroPython's `machine.I2C`)
+without touching any of them: `WaveGen::busPause()` (timer to 0, one microsecond for a granted
+credit to fire, wait A idle + FIFO empty + bus idle, double-checked; under a claimed SIO
+spinlock) before, `busResume()` (TAR back to the DAC if Wire moved it, DMA_CR on, timer back)
+after; a transaction that ends **without** a STOP (`nostop`: `endTransmission(false)` before a
+`requestFrom`) keeps the pause held until its partner ends with one, else the DAC's bytes would be
+appended to the foreign device's open transfer; the monitor releases a pause held > 100 ms; a
+failed transaction always releases. Not covered: TwoWire's zero-length probe bit-bangs the pins
+(begin()/isConnected()/scanners — WaveGen::begin() drains first). The bus gates on
+`isRunning()` (INA poll, OLED, net-voltage scan, probing's INA1 reads) STAY — they cost the wave
+nothing; comment at the INA poll says which kind it is. **The refresh wait in `Commands.cpp`**
+(`!wavegen.isRunning()` in the send-request wait) keyed on core-1 availability, so it now keys on
+`wavegen.isCoreLoopStreaming()` (legacy loop only) — the crossbar no longer diverges from the
+netlist while a wave plays. Sustained overrun (tick > bus capacity → FIFO backs up → A stalls
+mid-burst → B2's next trigger lands on a busy A) is the one structural weakness, named in the
+banner; the 85 % cap makes it unreachable at any legal setting, the monitor is the backstop.
+`X` prints the whole plan and health (`wavegen: DMA STREAMING f req -> f act (N, tick = clk*X/Y/D;
+bus cap) laps, tx aborts, starts/stops/restarts, stop wait max, wedge recoveries, abort
+timeouts, bus yields (max us, forced resumes)`; `LEGACY … (reason)` on the fallback). RAM: heap
+−4 KB net (table 8 → 2 KB, the 4 KB `_i2c_buffer` gone, image +6 KB), +4 KB static (the ring).
+DMA census now ~12/16 (LED strips 3, CH446Q 2, WaveGen 3, USB audio 2 lazy, AsyncPassthrough 2).
+
+**T3.3 — verified:** builds ×3; `X` `wavegen: DMA` with the plan (100 Hz → N 128, tick 12 800 Hz =
+clk·4/46875; 5 Hz → N 1024, tick 5 120 = clk·8/46875/5; 2 kHz → N 8, tick 16 000 = clk·1/9375);
+**frequency:** ring-lap rate over timestamped 15 s windows 4.982 / 99.963 / 999.663 laps/s for
+5 / 100 / 1000 Hz (the deficits are laps the core-1 monitor missed under LED frames, not the
+wave), ADC0 through the crossbar (DAC1 → row 5 → ADC0, 3 Vpp about 1.65 V: 0.15–3.17 V measured)
+5.0011 Hz for 5.0, and at 20 Hz the rising edges 0.0 / 40.4 / 90.5 / 140.6 / 190.7 / 240.6 / 290.5
+/ 499.2 ms — 50.0 ms apart **through a 200 ms core-0 flash-write stall** (the sampler missed
+edges, the wave did not); start/stop cycles at 5 / 100 / 1000 Hz: stop wait ≤ 57 µs, 0 abort
+timeouts, 0 wedge recoveries; **the payoff:** during a 2 kHz stream `connect(DAC0, ISENSE_PLUS);
+connect(ISENSE_MINUS, 5); connect(GND, 5)` closes physically — INA0 loop 4.76 mA → open 0.55 →
+loop 4.79 (identical to the no-stream values; those INA reads and the `dac_set(DAC0, 0.8)` before
+them went through the arbiter: `bus yields 6, max 48 µs`, 0 forced resumes — before the arbiter
+the same reads returned 16 / 201 / 118 mA garbage), latency probe req→pickup **max 349 µs (n 8)
+during the stream** (the doc's pre-T3.3 number for the same case: 7 684 589 µs), mailbox idle
+25/25; **kick gaps during a pure 10 s 2 kHz stream: core 1 max 0.53 ms, core 0 16 ms** (was core 1
+10 007 ms — the T1.6 finding 8 number); **the three DMA consumers together** (2 kHz stream +
+`soak500` = 500 routing ops + 20 × (10 connects + clear) + LED frames): 21.6 s (21.7–22.7 without
+the stream), 1 530 CH446Q list sends = 1 530 strobe IRQs, 0 stalls, 0 timeouts, 0 WARNINGs,
+RouteSafety self-check PASS / audit suspect=0, mailbox idle 118/118 + 2015/2015, stream 0 tx
+aborts, req→pickup max 3.1 ms; `run_all.py` ×3 = 6/7 (the tolerated phantom-current check
+only; one 4/7 right after a flash was the post-flash REPL transient seen before — the same
+suite passed 6/7 three times running after it); board end state: `i@` probe_power on → DAC0,
+DAC0 back at 3.33 V. Untested: the TX_ABRT path (needs the DAC to NAK) and the legacy fallback
+(would need a DMA claim to fail).
+
+**T3.3 files:** `src/WaveGen.cpp/.h` (rewritten), `src/I2C0Arbiter.cpp` (new), `platformio.ini`
+(the two wraps + define, one line), `src/Commands.cpp` (the refresh wait), `src/Peripherals.cpp`
+(comment), `src/SingleCharCommands.cpp` (`X`), the rebuilt `firmware.uf2`.
 
 **T3.2 — what was built (section C2b; Kevin, 2026-08-17 evening: "start with the second SM
 CH446Q strobe, put it on PIO2").** `src/ch446_pio2cs.pio` (+ the pioasm-generated `.pio.h`,
@@ -926,11 +1040,29 @@ port 7) is the instrument for most of them.
    run the things the measure-only stage could not — a self-test, a calibration, a long probe
    session, a click menu held open, an app — then `X` for the max kick gaps; then pick the
    timeout (8 s has ×4 margin over everything measured) and whether long file ops should kick.
+   **Update (T3.3):** the wavegen gap is gone — a 10 s 2 kHz stream now leaves core 1's max gap at
+   0.53 ms (was 10 007 ms) because the stream is DMA; `KICK_WAVEGEN` is fallback-only. What
+   remains large is the flash-write family (`run_all` shows ~2.3 s core-0 / ~1.2–1.7 s core-1
+   gaps, A/B'd identical on the release build) — the enable's real ceiling.
 7. **The two calls the doc leaves to you:** (a) ProbePads is ~65–70 % of core 0 idle
    (36.8 ms per poll at 20 Hz — T1.4's first number): T2.1 (ADC ring, approved) or the small
    "touch pre-check in `checkPads()`" (T1.11 candidate, changes first-detection slightly);
    (b) the wavegen max frequency is −33 % since T1.9 (1 MHz bus); the "WaveGen raises the
    clock only while `isRunning()`" alternative is a 2-line follow-up if you want the speed back.
+   **Update (T3.3):** the DMA framing removed the CPU's per-sample overhead, so the bus carries
+   ~23.7 k samples/s at 1 MHz (the CPU loop managed ~18–20 k) — the API's 10 kHz ceiling is
+   reachable at N = 2; still your call on the clock, and the planner reads the real SCL counts,
+   so a clock change needs no code.
+9. **T3.3, the wavegen over DMA (the commit after `7b5c412`)** — on a scope: `wavegen_start(1)`
+   at a few frequencies (5, 100, 1000, 10 000 Hz), sine/tri/saw/square, amplitude/offset — the
+   frequency is now exact (the timer's), the shape has N = a power of two samples per cycle (up
+   to 2× fewer than before at an unlucky frequency: 2.6 kHz gets 8, not 7 — the trade for exact
+   frequency; say if that is the wrong trade), and `X` → `wavegen:` shows the plan. Then the two
+   things that used to be impossible: route (`connect`) and watch the LEDs **while** it plays
+   (crossbar follows, LEDs animate), and `dac_set()` / `ina_get_current()` from the REPL during a
+   stream (correct values; a ~50 µs dip in the wave per call — `bus yields` counts them). The
+   probe feed and DAC0 are untouched (DAC1 default). `git revert` of that one commit brings the
+   core-1 loop back.
 8. **T3.2, the chip-select strobe SM (the commit after `6ee9abf`)** — nothing should feel
    different: route, tap, clear, turn the encoder (it moved to PIO1 SM1), press the probe
    button (its SM moved to PIO0 — `X` must say `button: PIO`, and its double-tap / hold feel is
@@ -1315,7 +1447,7 @@ exit); the HIL suite covers the routing side only.
 | C11 | no watchdog | `watchdog_enable(≤8 s)`; kick from `loop()`, `loop1()`, `serviceInner()`, `servicePython()`; stamp a scratch word with the last service index / core-1 state so a WDT reset leaves a trail — on RP2350 `watchdog_hw->scratch[3]` is free (`CrashLog.cpp:29-32` uses POWMAN 0–7 + watchdog 0–2), on the OG/RP2040 CrashLog owns watchdog 2–3 (`:37-45`) so gate the stamp V5-only or pick per platform; **first ship measure-only** (max gap between kicks in `X`) | `watchdog_enable`, `watchdog_update`, `watchdog_caused_reboot`, `watchdog_hw->scratch` | a wedged board reboots instead of sitting dead; post-mortem of what it was doing | medium: legitimate long blockers (self-test, calibration, file ops, MicroPython) must kick or the timeout must exceed them — the measure-only stage finds them | small + a soak |
 | C12 | `millis()` gates everywhere | `time_us_32()` deadlines with wraparound-safe compares (B3) | — | µs resolution, no 1 ms quantisation | nil | with B3 |
 | C13 | flags + `waitCore2()` | core-1 request mailbox + generation counter (D) | spinlock-guarded bitmask | replaces ~10 flags and the 25 ms guess | medium | see D |
-| C14 | WaveGen ≥1 kHz owns core 1 by synchronous per-sample I2C writes | I2C0 TX DMA from a pre-built command image, paced by a DMA timer (`dma_timer_claim`, `DREQ_DMA_TIMERn`) or by bus rate; core 1 free; needs an I2C0 arbiter (INA/DAC setters/OLED-on-I2C0 wait or fail fast while streaming — they already skip on `isRunning()`) | `dma_timer_claim`, `dma_timer_set_fraction`, `channel_config_set_dreq(dma_get_timer_dreq)`, `i2c0_hw->data_cmd` | LED frames and crossbar sends work while a waveform streams (today the crossbar diverges from the netlist until streaming stops, `Commands.cpp:208-230`) | high: MCP4728 command framing per sample, mid-stream STOP/RESTART, arbitration with core-0 I2C0 users, waveform pacing accuracy | large (3+ days) — **Tier 3, not built** |
+| C14 | WaveGen ≥1 kHz owns core 1 by synchronous per-sample I2C writes | I2C0 TX DMA from a pre-built command image, paced by a DMA timer (`dma_timer_claim`, `DREQ_DMA_TIMERn`) or by bus rate; core 1 free; needs an I2C0 arbiter (INA/DAC setters/OLED-on-I2C0 wait or fail fast while streaming — they already skip on `isRunning()`) | `dma_timer_claim`, `dma_timer_set_fraction`, `channel_config_set_dreq(dma_get_timer_dreq)`, `i2c0_hw->data_cmd` | LED frames and crossbar sends work while a waveform streams (today the crossbar diverges from the netlist until streaming stops, `Commands.cpp:208-230`) | high: MCP4728 command framing per sample, mid-stream STOP/RESTART, arbitration with core-0 I2C0 users, waveform pacing accuracy | large (3+ days) — **Tier 3; built 2026-08-18 as T3.3 (section 0): image + address ring + divider on a pacing timer, exact frequency, the arbiter is a linker wrap on the two SDK I2C entry points** |
 | C15 | `readAdcVoltage(6,4)` supply sense on core 1 every 1 s | a ring consumer (C1) | — | one less lock holder | nil | with C1 |
 | C16 | `pauseCore2` (soft LED-frame hint; hard park is FlashPark) | delete once C13 + the flash-write frame abort are expressed as a request ("HOLD_FRAMES until gen") | — | one less global; frame aborts become explicit | medium (nested pause semantics in `pauseCore2ForFlash`) | Tier 3 — **not built** |
 
@@ -1345,8 +1477,8 @@ before building more on it). Core 1 pops at the top of `core2stuff()`; core 0 wa
 (core 1 spins anyway); if one is ever wanted, the SIO_IRQ_BELL slot is taken — extend
 `flashParkIrq` into a bell dispatcher.
 
-**Ownership rules to write down**: I2C0 = core 0 (WaveGen the sanctioned exception, gated by
-`isRunning()`); **I2C0's clock = `initDAC()`, 1 MHz, and nobody else's** (T1.9); ADC = the
+**Ownership rules to write down**: I2C0 = core 0 (WaveGen's stream is DMA, started/stopped/re-planned
+from core 0 since T3.3; other users skip on `isRunning()` or go through the arbiter); **I2C0's clock = `initDAC()`, 1 MHz, and nobody else's** (T1.9); ADC = the
 ring engine (C1) — until then, the `readingADC` lock with no stealing; USB = core 0 only
 (`tud_task`, CDC I/O); flash = FlashPark (`__wrap_flash_range_*`) with `fs_mutex`
 core-0-in-practice; PIO0 CH446Q SM = core 1 (C2a may move the ISR to core 0); button PIO IRQ =
@@ -1396,7 +1528,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 **Tier 3 — large (3+ days, or needs a design round) — design-only this pass**
 - T3.1 B5 `probeMode` state machine (4 milestones).
 - T3.2 C2b second-SM CH446Q strobe (PIO block/GPIOBASE allocation first). **Built 2026-08-17 (section 0, Kevin's call: PIO2).**
-- T3.3 C14 WaveGen via I2C0 DMA + pacing timer (+ I2C0 arbiter).
+- T3.3 C14 WaveGen via I2C0 DMA + pacing timer (+ I2C0 arbiter). **Built 2026-08-18 (section 0).**
 - T3.4 C16 delete `pauseCore2`.
 
 ## F. How to measure

@@ -38,6 +38,7 @@
 #include "IrqSlots.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "WaveGen.h"    // X: the wavegen stream line (T3.3)
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "States.h"
@@ -2971,6 +2972,32 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
             target->printf( "cs strobe: FALLBACK to the legacy ISR strobe - %s  |  probe LED SM: PIO%d  button: %s\n\r",
                             whyStr[ why ], probePio,
                             btn == 1 ? "PIO" : ( btn == 2 ? "CPU (no PIO room!)" : "not tried" ) );
+        }
+    }
+    // T3.3: the wavegen stream - DMA (image + address ring + pacing timer,
+    // core 1 free) or the legacy core-1 loop; plan and health.
+    {
+        extern WaveGen wavegen;
+        WaveGenDmaStatus w;
+        wavegen.getDmaStatus( &w );
+        static const char* const wgWhy[] = { "ok", "Wire is not I2C0", "no DMA channels", "no DMA timer", "no memory", "not built (OG)" };
+        int why = ( w.fallbackReason <= 5 ) ? w.fallbackReason : 0;
+        if ( w.dmaAvailable ) {
+            target->printf( "wavegen: DMA%s%s  f req %.4f Hz -> %.4f Hz (N %lu, tick %.1f Hz = clk*%u/%u/%lu; bus cap %.0f sps)  laps %lu  tx aborts %lu  starts %lu stops %lu restarts %lu  stop wait max %lu us  wedge recoveries %lu  abort timeouts %lu  bus yields %lu (max %lu us, forced resumes %lu)\n\r",
+                            w.streaming ? " STREAMING" : " idle", w.wedged ? " WEDGED" : "",
+                            (double)wavegen.getFrequency( ), (double)w.actualHz, (unsigned long)w.tableSize,
+                            (double)w.tickHz, (unsigned)w.timerX, (unsigned)w.timerY, (unsigned long)w.divider,
+                            (double)w.capacityHz, (unsigned long)w.laps, (unsigned long)w.txAborts,
+                            (unsigned long)w.starts, (unsigned long)w.stops, (unsigned long)w.restarts,
+                            (unsigned long)w.stopWaitMaxUs, (unsigned long)w.wedgeRecoveries, (unsigned long)w.abortTimeouts,
+                            (unsigned long)w.busYields, (unsigned long)w.busYieldMaxUs, (unsigned long)w.busForcedResumes );
+        } else if ( why == 0 ) {
+            target->println( "wavegen: not initialised yet (begin() runs on the first wavegen_start; the DMA claim happens then)" );
+        } else {
+            target->printf( "wavegen: LEGACY core-1 loop (%s)%s  f req %.4f Hz  writes ok %lu failed %lu\n\r",
+                            wgWhy[ why ], wavegen.isRunning( ) ? " running" : "",
+                            (double)wavegen.getFrequency( ), (unsigned long)wavegen.getSuccessfulWrites( ),
+                            (unsigned long)wavegen.getFailedWrites( ) );
         }
     }
     // probe_current_zero calibration diagnostics (see Probing.cpp ProbeZeroDiag).

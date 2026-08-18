@@ -174,9 +174,9 @@ static bool pollCurrentSenseMeasurement() {
     //     }
     // }
 
-    // While the function generator runs, core1 sits inside wavegen.service()'s
-    // blocking streaming loop writing DAC samples on this same Wire bus.
-    // TwoWire has no cross-core lock; skip the poll entirely.
+    // BUS gate: while the function generator runs, its stream owns I2C0
+    // (T3.3: a DMA stream started from core 0; before that, core 1's
+    // blocking loop) - the INA219s share that bus. Skip the poll entirely.
     //
     // (2026-08-16) No pauseCore2 toggle around the read any more. I2C0 is
     // core-0-only - the INA219s, the MCP4728 (Peripherals' mcp) and the

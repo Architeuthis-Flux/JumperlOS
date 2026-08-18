@@ -199,13 +199,16 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
 
   // CRITICAL: Wait for core 2 to actually process the send request
   // IMPORTANT: Must call tud_task() during wait to prevent USB disconnect!
-  // While wavegen streams, core 2 sits in wavegen.service()'s blocking loop
-  // and can't process the request at all - don't burn the full second on every
-  // refresh; leave it pending and it sends the moment streaming stops.
+  // Only the LEGACY wavegen path captures core 2 (its blocking per-sample
+  // loop): there, don't burn the full second on every refresh - leave the
+  // send pending and it goes out the moment streaming stops. On the DMA
+  // path (T3.3) a stream leaves core 2 free and the send goes through like
+  // any other - the crossbar no longer diverges from the netlist while a
+  // waveform plays.
   extern WaveGen wavegen;
   unsigned long pathsTimeout = millis();
   while (!core1req::isDone(core1req::REQ_SEND, sendGen) &&
-         (millis() - pathsTimeout < 1000) && !wavegen.isRunning()) {
+         (millis() - pathsTimeout < 1000) && !wavegen.isCoreLoopStreaming()) {
     delayMicroseconds(100);
     // CRITICAL: Service USB during wait to prevent disconnect
     TinyUSB_Device_Task(); // mutex-guarded pump
