@@ -9,7 +9,7 @@
  */
 
 #include "RouteSafety.h"
-#include "../CoreMailbox.h" // core1req::allIdle() (T2.2b)
+#include "CoreMailbox.h" // core1req::allIdle() (T2.2b) - src/coredination is on the include path
 #include "CH446Q.h" // sendXYrawUnchecked
 
 #ifndef OG_JUMPERLESS

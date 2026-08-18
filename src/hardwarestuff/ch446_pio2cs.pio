@@ -30,7 +30,7 @@
 ; magnitude at clkdiv 1 (150 MHz sys clock).
 ;
 ; Assemble with the pioasm shipped in the PlatformIO toolchain:
-;   ~/.platformio/packages/tool-pioasm-rp2040-earlephilhower/pioasm src/ch446_pio2cs.pio src/ch446_pio2cs.pio.h
+;   ~/.platformio/packages/tool-pioasm-rp2040-earlephilhower/pioasm src/hardwarestuff/ch446_pio2cs.pio src/hardwarestuff/ch446_pio2cs.pio.h
 ; (the OG's RP2040 keeps the legacy program in ch446.pio.h - no PIO2, no
 ; cross-block IRQs there.)
 

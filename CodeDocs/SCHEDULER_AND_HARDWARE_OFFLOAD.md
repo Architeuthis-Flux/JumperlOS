@@ -27,6 +27,21 @@
   goes in with the next). **Kevin is reachable now (Cursor notifications) — ask instead of
   stopping.** Next up per Kevin: his `src/` folder reorganisation (feature folders; the include
   path gets them automatically) — then T2.2c `REQ_SHOW_LEDS` → T3.4.
+- **`src/` was reorganised into feature folders on 2026-08-18 (row 58, Kevin's move):** the main
+  files stay at the top level (`main.cpp`, `Probing.cpp`, `CH446Q.cpp`, `Peripherals.cpp`, `LEDs.cpp`,
+  `JumperlOS.cpp`, `Commands.cpp`, `SingleCharCommands.cpp`, `configManager.cpp`, `oled.cpp`, `Menus.cpp`,
+  `Apps.cpp`, `RotaryEncoder.cpp`, `Graphics.cpp`, `Jerial.cpp`, `JumperlessMicroPythonAPI.cpp` and their
+  headers), everything else lives in `coredination/` (CoreMailbox, externVars, I2C0Arbiter,
+  IrqSlots), `eyecandy/` (LED/OLED/menu graphics, ReadingDisplay), `hardwarestuff/` (AdcRing,
+  WaveGen, MCP4728, the `.pio` files), `remembering/` (filesystem, FlashPark, config persistence,
+  Undo, editors), `routing/` (RouteSafety, MatrixState, NetManager, InfraPaths, States, JsonState),
+  `selfreflection/` (Debugs, SelfTest, KickGap, XbarLatency, CrashLog, HelpDocs), `sensing/`
+  (MeasureMode, NetVoltageScan, FakeGpio, TDM), `snakes/` (MicroPython glue), `tubes/` (USB, serial,
+  passthrough, USBAudio), `unused/`. **`scripts/src_subdirs_include.py` (pre-build) puts every folder
+  under `src/` on the include path**, so `#include "AdcRing.h"` works from anywhere — no folder
+  names in includes, no `-I` lines to maintain. File paths quoted in the older T-blocks above are
+  pre-move; the name is what matters. Also: the platform regenerates `*.pio.h` next to any `*.pio`
+  it finds under `src/` (row 56) — the `.pio` files are the source of truth wherever they live.
 - **Two things learned while tagging (row 56):** the raspberrypi platform regenerates any
   `src/**/*.pio.h` whose `.pio` is newer (mtime) — the `.pio` files are the source of truth now,
   never hand-edit a `.pio.h`; and **heap headroom is the constraint on this board**: 5.7.3.0 had
