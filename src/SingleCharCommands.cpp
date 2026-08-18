@@ -2842,15 +2842,19 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     int connType = jumperlessConfig.top_oled.connection_type;
     const char* connName = (connType >= 0 && connType <= 3) ? connTypes[connType] : "Unknown";
     
-    target->printf( "│ Status: %-23s  │ PIO0: SM0:%s SM1:%s SM2:%s SM3:%s     │\n\r",
+    // "@0" / "@16" = the block's GPIOBASE (RP2350B: which 32 of the 48 pins
+    // it can reach; PIO2 is @16 for the crossbar chip-select strobe, T3.2).
+    target->printf( "│ Status: %-23s  │ PIO0@%-2u: SM0:%s SM1:%s SM2:%s SM3:%s  │\n\r",
                    oled.isConnected( ) ? "Connected" : "Not connected",
+                   (unsigned)pio_get_gpio_base( pio0 ),
                    pio_sm_is_claimed( pio0, 0 ) ? "●" : "○",
                    pio_sm_is_claimed( pio0, 1 ) ? "●" : "○",
                    pio_sm_is_claimed( pio0, 2 ) ? "●" : "○",
                    pio_sm_is_claimed( pio0, 3 ) ? "●" : "○" );
     
-    target->printf( "│ Type: %-25s  │ PIO1: SM0:%s SM1:%s SM2:%s SM3:%s     │\n\r",
+    target->printf( "│ Type: %-25s  │ PIO1@%-2u: SM0:%s SM1:%s SM2:%s SM3:%s  │\n\r",
                    connName,
+                   (unsigned)pio_get_gpio_base( pio1 ),
                    pio_sm_is_claimed( pio1, 0 ) ? "●" : "○",
                    pio_sm_is_claimed( pio1, 1 ) ? "●" : "○",
                    pio_sm_is_claimed( pio1, 2 ) ? "●" : "○",
@@ -2858,9 +2862,10 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     
     // PIO2 only exists on RP2350; RP2040 (OG) has just pio0/pio1.
 #if defined(PICO_RP2350)
-    target->printf( "│ SDA: GPIO %2d  SCL: GPIO %2d       │ PIO2: SM0:%s SM1:%s SM2:%s SM3:%s     │\n\r",
+    target->printf( "│ SDA: GPIO %2d  SCL: GPIO %2d       │ PIO2@%-2u: SM0:%s SM1:%s SM2:%s SM3:%s  │\n\r",
                    jumperlessConfig.top_oled.sda_pin,
                    jumperlessConfig.top_oled.scl_pin,
+                   (unsigned)pio_get_gpio_base( pio2 ),
                    pio_sm_is_claimed( pio2, 0 ) ? "●" : "○",
                    pio_sm_is_claimed( pio2, 1 ) ? "●" : "○",
                    pio_sm_is_claimed( pio2, 2 ) ? "●" : "○",
@@ -2938,6 +2943,35 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
         target->printf( "ch446q list send: %s  dma sends %lu  words %lu (max %lu per send)  dma stalls %lu  pio timeouts %d\n\r",
                         en ? "DMA (core 1)" : "CPU", (unsigned long)sends, (unsigned long)words,
                         (unsigned long)maxWords, (unsigned long)stalls, ch446q_timeout_count );
+    }
+    // T3.2: the chip-select strobe SM on PIO2 (base 16) - one completion IRQ
+    // per list, no ISR per crosspoint. "fallback" = the legacy ISR strobe is
+    // in use; the reason says why. Then where the probe LED/button SM landed
+    // (the layout needs it on PIO0 - see LEDs.cpp) and whether its button
+    // program fit.
+    {
+        int csSm = -1, why = 0;
+        uint32_t listIrqs = 0, singles = 0, singleTo = 0;
+        ch446qCsStrobeInfo( &csSm, &why, &listIrqs, &singles, &singleTo );
+        static const char* const whyStr[] = { "active", "PIO2 already had a program (base stuck at 0)",
+                                              "no PIO2 instruction room", "no free PIO2 SM",
+                                              "no DMA channel", "SM config refused", "not built (OG)" };
+        if ( why < 0 || why > 6 ) why = 0;
+        int probePio = ( probeLEDs.getPIO( ) != nullptr ) ? (int)pio_get_index( probeLEDs.getPIO( ) ) : -1;
+        int btn = probeButtonPioState( );
+#if defined(PICO_RP2350)
+        if ( csSm >= 0 ) {
+            target->printf( "cs strobe: PIO2 SM%d (base %u), one IRQ per list: %lu  singles %lu (timeouts %lu)  |  probe LED SM: PIO%d  button: %s\n\r",
+                            csSm, (unsigned)pio_get_gpio_base( pio2 ), (unsigned long)listIrqs, (unsigned long)singles,
+                            (unsigned long)singleTo, probePio,
+                            btn == 1 ? "PIO" : ( btn == 2 ? "CPU (no PIO room!)" : "not tried" ) );
+        } else
+#endif
+        {
+            target->printf( "cs strobe: FALLBACK to the legacy ISR strobe - %s  |  probe LED SM: PIO%d  button: %s\n\r",
+                            whyStr[ why ], probePio,
+                            btn == 1 ? "PIO" : ( btn == 2 ? "CPU (no PIO room!)" : "not tried" ) );
+        }
     }
     // probe_current_zero calibration diagnostics (see Probing.cpp ProbeZeroDiag).
     {

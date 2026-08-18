@@ -65,6 +65,14 @@ void sendPaths(int clean = 0, int reqSlot = -1, uint32_t reqGen = 0);
 void ch446qDmaService(void);
 bool ch446qSendInFlight(void);
 void ch446qDmaStats(uint32_t* sends, uint32_t* words, uint32_t* stalls, uint32_t* maxWords, bool* enabled);
+// T3.2: the chip-select strobe SM on PIO2 (V5). sm = the PIO2 state machine
+// (-1: not active - the legacy ISR strobe is in use); fallbackReason: 0 =
+// strobe active, 1 = PIO2 already had a program (base could not be set to
+// 16), 2 = no instruction room, 3 = no free SM, 4 = no DMA channel, 5 = the
+// SM config was refused, 6 = not built for this board (OG). listIrqs = one
+// completion interrupt per list send; singles = single-crosspoint sends
+// through the strobe SM (+ how many timed out).
+void ch446qCsStrobeInfo(int* sm, int* fallbackReason, uint32_t* listIrqs, uint32_t* singles, uint32_t* singleTimeouts);
 void initCH446Q(void);
 // timeoutUs bounds the PIO-handshake wait before silent recovery. Default is
 // 100ms (the historical wait was 1s; a sick handshake still recovers, just

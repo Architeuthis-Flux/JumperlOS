@@ -63,6 +63,8 @@ extern ProbeZeroDiag probeZeroDiag;
 
 extern volatile int      probe_button_trace;
 extern volatile uint32_t probeButtonPIOReadCount;
+// 0 = PIO button reader not tried yet, 1 = in use, 2 = unavailable (CPU polling).
+int probeButtonPioState( void );
 extern volatile uint32_t probeLedShowCount;     // WS2811 frames sent to the probe LED
 extern volatile uint32_t probeLedRequestCount;  // colour-change requests consumed
 extern volatile uint32_t probeButtonCPUReadCount;

@@ -2140,6 +2140,11 @@ bool btnPioInit( BtnPio& bp, uint pin, uint32_t timeout, uint32_t prechargeCycle
     const int numPio = (int)( sizeof( insts ) / sizeof( insts[0] ) );
     for ( int i = 0; i < numPio && !bp.ok; i++ ) {
         PIO pio = insts[ i ];
+        // RP2350B: the block's GPIOBASE (0 or 16) must reach `pin`.
+        {
+            uint base = pio_get_gpio_base( pio );
+            if ( pin < base || pin >= base + 32u ) continue;
+        }
         if ( !pio_can_add_program( pio, &btnTimerProgram ) ) continue;
         int sm = pio_claim_unused_sm( pio, false );
         if ( sm < 0 ) continue;

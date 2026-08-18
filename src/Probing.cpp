@@ -554,6 +554,9 @@ static const pio_program_t probe_button_pio_program = {
 // PIOProbeState is declared up at the top of the file so service() can
 // see PIOProbeState::READY directly.
 volatile PIOProbeState g_pioProbeState   = PIOProbeState::UNTRIED;
+// For X: 0 = not tried yet, 1 = the PIO button reader is in use, 2 = it could
+// not be set up (no instruction room on the probe LED's block) - CPU polling.
+int probeButtonPioState( void ) { return (int)g_pioProbeState; }
 PIO                    g_pioProbePIO     = nullptr;
 uint                   g_pioProbeSM      = 0;
 uint                   g_pioProbeBtnPC   = 0;  // start of button polling program

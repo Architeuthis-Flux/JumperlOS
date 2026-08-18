@@ -42,7 +42,7 @@ uint sm = pio_claim_unused_sm(pio, true);
 
 uint offset = 0;
 
-volatile int chipSelect = 0;
+volatile int chipSelect = -1;  // -1 = no single-crosspoint send in flight (the token; see sendXYrawUnchecked)
 volatile uint32_t irq_flags = 0;
 
 // struct justXY {
@@ -104,11 +104,65 @@ static bool chipHadConnections[12] = {false};
 #define CH446Q_DMA_SEND 0
 #endif
 
+// ---------------------------------------------------------------------------
+// T3.2 (C2b): the chip-select strobe done by a SECOND state machine, in PIO2.
+//
+// The shifter (PIO0 SM, DAT/CK on GPIO 14/15, GPIOBASE 0) cannot reach the
+// twelve chip selects on GPIO 28..39 (they need GPIOBASE 16), so until now a
+// CPU ISR strobed the select after every word - one interrupt per crosspoint,
+// on core 1, and the SM stalled until it ran. Now (V5 only - the OG's RP2040
+// has no PIO2 and no cross-block IRQs): PIO2 is set to GPIOBASE 16 first thing
+// on core 1 (before the LED strips claim their SMs, so nobody has loaded a
+// program there yet), and one SM there runs ch446_cs_strobe (ch446_pio2cs.pio):
+// it pulls a word, waits for the shifter's "word shifted" flag, pulses the
+// selected chip's STB for ~160 ns, and hands the shifter its "done" flag - the
+// two blocks are neighbours through the RP2350's PREV/NEXT IRQ wrap (PIO0's
+// prev is PIO2). No CPU in the loop, no ISR per crosspoint.
+//
+// ONE word describes a crosspoint for BOTH machines: bits 31..24 the CH446Q
+// address byte (the shifter shifts left with an 8-bit autopull threshold, so
+// it consumes the top byte and discards the rest), bits 11..0 the one-hot
+// chip-select mask (bit c = chip c = GPIO 28+c; the strobe SM shifts right and
+// consumes 13 bits), bit 12 = LAST. A list send runs TWO DMA channels over
+// the SAME dmaWords[] array (one into each TX FIFO), so the two streams can
+// never disagree in length or order; a single send puts the same word into
+// both FIFOs and polls PIO2 flag 0 (which the strobe SM raises after a LAST
+// word) - no ISR at all for singles. A list's last word carries LAST, so the
+// strobe SM raises flag 0 exactly once per list; that flag is routed to
+// PIO2_IRQ_1 (an EXCLUSIVE handler on core 1 - the shared chain is 6/6 full,
+// and in strobe mode the legacy PIO0_IRQ_1 handler is not registered, which
+// gives that chain slot back) only between kick and completion, and the ISR
+// completes the mailbox request. Everything else - collection, arbitration
+// (spinlock OS1, chipSelect as the single-send token), the stall watchdog,
+// suspect marking on abort - is the T2.3 machinery with the ISR taken out.
+//
+// Fallback: if PIO2 cannot be re-based (someone loaded a program first), has
+// no room, no free SM, or no DMA channel is left, the legacy path (this
+// file's isrFromPio + the SIO chip selects) is used exactly as before, and X
+// says so ("cs strobe: fallback").
+//
+// PIO layout this relies on (see LEDs.cpp / RotaryEncoder.cpp): PIO0 = this
+// shifter + the probe LED/button SM (steered there: its button program needs
+// 15 instructions and only PIO0 has the room), PIO1 = the top LED strip + the
+// encoder (24 instructions at origin 0), PIO2 (base 16) = this strobe + the
+// breadboard LED strip.
+// ---------------------------------------------------------------------------
+#if !defined(OG_JUMPERLESS) && defined(PICO_RP2350)
+#define CH446Q_PIO2_CS 1
+#include "ch446_pio2cs.pio.h"
+#else
+#define CH446Q_PIO2_CS 0
+#endif
+
+#define CH446Q_CS_LAST     (1u << 12)         // word bit 12: last word of a list send
+#define CH446Q_CS_FIRST_GPIO 28
+#define CH446Q_CS_PIN_MASK (0xFFFull << CH446Q_CS_FIRST_GPIO)
+
 #define CH446Q_DMA_MAX_WORDS 2048   // 128 paths x 4 hops + every possible disconnect, with room
-static uint32_t dmaWords[CH446Q_DMA_MAX_WORDS];  // PIO TX words (address byte << 24)
-static uint8_t  dmaCs[CH446Q_DMA_MAX_WORDS];     // chip per word (the ISR's strobe list)
+static uint32_t dmaWords[CH446Q_DMA_MAX_WORDS];  // PIO TX words (address byte << 24 | cs mask | LAST)
+static uint8_t  dmaCs[CH446Q_DMA_MAX_WORDS];     // chip per word (the legacy ISR's strobe list)
 static volatile uint32_t dmaCount = 0;   // words in the send in flight
-static volatile uint32_t dmaIdx = 0;     // words strobed by the ISR so far
+static volatile uint32_t dmaIdx = 0;     // words strobed by the legacy ISR so far
 static volatile bool dmaActive = false;  // a DMA send is in flight (ISR strobes dmaCs[])
 static volatile bool dmaCollect = false; // sendXYrawUnchecked() appends instead of sending
 static int dmaChan = -1;                 // -1: no channel (CPU path)
@@ -118,6 +172,24 @@ static uint32_t ch446q_dma_sends = 0;    // stats for X
 static uint32_t ch446q_dma_words = 0;
 static uint32_t ch446q_dma_stalls = 0;
 static uint32_t ch446q_dma_maxWords = 0;
+
+#if CH446Q_PIO2_CS
+static PIO      csPio = pio2;
+static int      csSm = -1;              // -1: strobe SM not available -> legacy ISR path
+static uint     csOffset = 0;
+static int      dmaChanCs = -1;         // second DMA channel: dmaWords[] -> PIO2 TX FIFO
+static uint8_t  csFallbackReason = 0;   // 0 = strobe active; see ch446qCsStrobeInfo()
+static uint32_t cs_list_irqs = 0;       // completion IRQs (one per list send)
+static uint32_t cs_single_sends = 0;    // single-crosspoint sends through the strobe SM
+static uint32_t cs_single_timeouts = 0; // ... that timed out (recovery ran)
+static inline bool csStrobeActive(void) { return csSm >= 0; }
+#endif
+
+// The chip-select bits of a word (bit c = chip c). Out-of-range chips strobe
+// nothing - the legacy setCSex() ignored them the same way.
+static inline uint32_t ch446qCsBits(int chip) {
+  return (chip >= 0 && chip < 12) ? (1u << chip) : 0u;
+}
 
 // The send-arbitration lock: a CPU single-crosspoint send (chipSelect != -1)
 // and a DMA send (dmaActive) must never overlap - see the banner. Fixed SIO
@@ -159,9 +231,10 @@ void __not_in_flash_func(isrFromPio)(void) {
     }
     dmaIdx = i + 1;
     // Let the SM pull the next word (it is parked at "wait 0 irq 1 rel").
+    // Flag 1 ONLY: the probe LED/button SM lives on PIO0 too (T3.2 layout)
+    // and its samples arrive on flag 0 - the old blanket clear of every PIO0
+    // flag would eat them.
     pio_interrupt_clear(pio, 1);
-    irq_flags = pio0_hw->irq;
-    hw_clear_bits(&pio0_hw->irq, irq_flags);
     if (dmaIdx >= dmaCount) {
       dmaActive = false;
       __dmb();
@@ -182,14 +255,51 @@ void __not_in_flash_func(isrFromPio)(void) {
 
   // Clear the state machine interrupt (not PIO0_IRQ_0)
   // The PIO program uses "irq 1" and "wait 0 irq 1 rel", so we need to clear interrupt 1 for this state machine
-  pio_interrupt_clear(pio, 1);  // Clear interrupt 1 (absolute)
-  
-  // Also clear the PIO IRQ register for good measure
-  irq_flags = pio0_hw->irq;
-  hw_clear_bits(&pio0_hw->irq, irq_flags);
-  
-
+  pio_interrupt_clear(pio, 1);  // Clear interrupt 1 (absolute) - and only that one (see above)
   }
+
+#if CH446Q_PIO2_CS
+// The strobe path's one interrupt: PIO2 flag 0, raised by the strobe SM after
+// a LAST word. Enabled as an IRQ source only between a list kick and here (a
+// single send polls the same flag with the source disabled). Exclusive
+// handler on PIO2_IRQ_1, core 1's NVIC (registered from initCH446Q on core 1).
+static void __not_in_flash_func(ch446qCsStrobeIsr)(void) {
+  if (!pio_interrupt_get(csPio, 0)) return;
+  pio_interrupt_clear(csPio, 0);
+  pio_set_irq1_source_enabled(csPio, pis_interrupt0, false);
+  cs_list_irqs++;
+  if (dmaActive) {
+    dmaActive = false;
+    __dmb();
+    ch446qSendComplete();
+  }
+}
+
+// Put both machines back at their entry points with empty FIFOs, no handshake
+// flag pending, every chip select LOW and the shifter's bit counters reset
+// (a restart mid-word would otherwise carry a partial X into the next word).
+// Used by the single-send timeout and the DMA abort.
+static void __not_in_flash_func(ch446qStrobeReset)(void) {
+  pio_sm_set_enabled(pio, sm, false);
+  pio_sm_set_enabled(csPio, csSm, false);
+  pio_sm_clear_fifos(pio, sm);
+  pio_sm_clear_fifos(csPio, csSm);
+  pio_sm_restart(pio, sm);
+  pio_sm_restart(csPio, csSm);
+  pio_set_irq1_source_enabled(csPio, pis_interrupt0, false);
+  pio_interrupt_clear(pio, 5);
+  pio_interrupt_clear(pio, 1);
+  pio_interrupt_clear(csPio, 4);
+  pio_interrupt_clear(csPio, 0);
+  pio_sm_set_pins_with_mask64(csPio, csSm, 0, CH446Q_CS_PIN_MASK);
+  pio_sm_exec(pio, sm, pio_encode_set(pio_x, 8 - 2));
+  pio_sm_exec(pio, sm, pio_encode_set(pio_y, 8 - 2));
+  pio_sm_exec(pio, sm, pio_encode_jmp(offset + spi_ch446_pio2cs_offset_entry_point));
+  pio_sm_exec(csPio, csSm, pio_encode_jmp(csOffset + ch446_cs_strobe_offset_entry_point));
+  pio_sm_set_enabled(csPio, csSm, true);
+  pio_sm_set_enabled(pio, sm, true);
+}
+#endif
 
 // Kick the collected words. Called at the end of a collecting sendAllPaths()
 // (dmaCollect already false). Waits for any CPU single-crosspoint send to
@@ -227,6 +337,32 @@ static void __not_in_flash_func(ch446qDmaKick)(void) {
   ch446q_dma_sends++;
   ch446q_dma_words += n;
   if (n > ch446q_dma_maxWords) ch446q_dma_maxWords = n;
+#if CH446Q_PIO2_CS
+  if (csStrobeActive()) {
+    // Strobe path (T3.2): mark the last word, arm the one completion IRQ,
+    // and start both channels over the same array - the strobe SM's channel
+    // first so a chip select is always waiting when the shifter finishes a
+    // word (either order works; this one keeps the shifter from stalling on
+    // the first handshake).
+    dmaWords[n - 1] |= CH446Q_CS_LAST;
+    pio_interrupt_clear(csPio, 0);
+    pio_set_irq1_source_enabled(csPio, pis_interrupt0, true);
+    dma_channel_config cc = dma_channel_get_default_config(dmaChanCs);
+    channel_config_set_transfer_data_size(&cc, DMA_SIZE_32);
+    channel_config_set_read_increment(&cc, true);
+    channel_config_set_write_increment(&cc, false);
+    channel_config_set_dreq(&cc, pio_get_dreq(csPio, (uint)csSm, true));
+    dma_channel_config c = dma_channel_get_default_config(dmaChan);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_dreq(&c, pio_get_dreq(pio, sm, true));
+    __dmb();
+    dma_channel_configure(dmaChanCs, &cc, &csPio->txf[csSm], dmaWords, n, true);
+    dma_channel_configure(dmaChan, &c, &pio->txf[sm], dmaWords, n, true);
+    return;
+  }
+#endif
   dma_channel_config c = dma_channel_get_default_config(dmaChan);
   channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
   channel_config_set_read_increment(&c, true);
@@ -239,6 +375,37 @@ static void __not_in_flash_func(ch446qDmaKick)(void) {
 // Recovery for a wedged DMA send: abort the transfer, mark what did not go out
 // suspect, restart the SM, complete the request so nobody waits on it forever.
 static void __not_in_flash_func(ch446qDmaAbort)(void) {
+#if CH446Q_PIO2_CS
+  if (csStrobeActive()) {
+    // How far did it get? The strobe channel's remaining count says how many
+    // words were pushed; up to 8 of those may still sit in its (joined) FIFO
+    // plus one in the OSR, so everything from pushed - 9 on is "maybe not
+    // strobed" and its chip is marked suspect. Then both channels stop, both
+    // machines restart, and the request is completed so nobody waits on it.
+    uint32_t n = dmaCount;
+    uint32_t remaining = dma_channel_hw_addr(dmaChanCs)->transfer_count & 0x0FFFFFFFu;  // [31:28] = MODE on RP2350
+    uint32_t pushed = (remaining <= n) ? (n - remaining) : 0;
+    uint32_t from = (pushed > 9) ? (pushed - 9) : 0;
+    dma_channel_abort(dmaChanCs);
+    dma_channel_abort(dmaChan);
+    uint32_t save = spin_lock_blocking(sendLock());
+    dmaActive = false;
+    spin_unlock(sendLock(), save);
+    ch446q_timeout_count++;
+    ch446q_dma_stalls++;
+    bool marked[12] = {false};
+    for (uint32_t i = from; i < n && i < CH446Q_DMA_MAX_WORDS; i++) {
+      uint32_t bits = dmaWords[i] & 0xFFFu;
+      if (bits == 0) continue;
+      int cs = __builtin_ctz(bits);
+      if (cs >= 0 && cs < 12 && !marked[cs]) { marked[cs] = true; markChipXYSuspect(cs); }
+    }
+    ch446qStrobeReset();
+    chipSelect = -1;
+    ch446qSendComplete();
+    return;
+  }
+#endif
   uint32_t idx = dmaIdx;
   dma_channel_abort(dmaChan);
   uint32_t save = spin_lock_blocking(sendLock());
@@ -255,19 +422,27 @@ static void __not_in_flash_func(ch446qDmaAbort)(void) {
   pio_sm_clear_fifos(pio, sm);
   pio_sm_restart(pio, sm);
   pio_sm_exec(pio, sm, pio_encode_jmp(offset + spi_ch446_multi_cs_offset_entry_point));
-  pio_interrupt_clear(pio, 1);
-  irq_flags = pio0_hw->irq;
-  hw_clear_bits(&pio0_hw->irq, irq_flags);
+  pio_interrupt_clear(pio, 1);  // flag 1 only (the button SM's flag 0 lives on PIO0 too)
   pio_sm_set_enabled(pio, sm, true);
   chipSelect = -1;
   ch446qSendComplete();
 }
 
 // Stall watchdog for the DMA path. Called every core2stuff() pass on core 1.
-// Progress = the ISR advancing dmaIdx; "stall time" accumulates in bounded
-// per-pass increments (<= 5 ms each), so a FlashPark park or a pauseCore2
-// stretch - during which the ISR cannot run and neither can this - adds at
-// most one increment when we come back, and never trips the recovery.
+// Progress = the ISR advancing dmaIdx (legacy path) or the strobe channel's
+// remaining transfer count falling (strobe path - once it reaches 0 the only
+// progress left is the completion IRQ, which lands within microseconds unless
+// something is wedged); "stall time" accumulates in bounded per-pass
+// increments (<= 5 ms each), so a FlashPark park or a pauseCore2 stretch -
+// during which the ISR cannot run and neither can this - adds at most one
+// increment when we come back, and never trips the recovery.
+static inline uint32_t ch446qDmaProgress(void) {
+#if CH446Q_PIO2_CS
+  if (csStrobeActive()) return dmaCount - (dma_channel_hw_addr(dmaChanCs)->transfer_count & 0x0FFFFFFFu);  // [31:28] = MODE on RP2350
+#endif
+  return dmaIdx;
+}
+
 void __not_in_flash_func(ch446qDmaService)(void) {
   static uint32_t lastSeenIdx = 0;
   static uint32_t lastPassUs = 0;
@@ -275,11 +450,11 @@ void __not_in_flash_func(ch446qDmaService)(void) {
   if (!dmaActive) {
     stallUs = 0;
     lastPassUs = time_us_32();
-    lastSeenIdx = dmaIdx;
+    lastSeenIdx = ch446qDmaProgress();
     return;
   }
   uint32_t now = time_us_32();
-  uint32_t idx = dmaIdx;
+  uint32_t idx = ch446qDmaProgress();
   if (idx != lastSeenIdx) {
     lastSeenIdx = idx;
     stallUs = 0;
@@ -304,6 +479,100 @@ bool chipOrderValid = false;
 // Timeout counter for PIO debugging
 int ch446q_timeout_count = 0;
 
+#if CH446Q_PIO2_CS
+// The strobe path's shifter init: the body of pio_spi_ch446_multi_cs_init
+// (ch446.pio.h) for the spi_ch446_pio2cs program - same pins, shift, clock and
+// X/Y preload, minus the flag-1 -> PIO0_IRQ_1 routing (this program never
+// raises flag 1; its handshake is flags 4/5 with PIO2, never routed anywhere).
+static void ch446qShifterInitPio2cs(uint prog_offs, uint n_bits, uint pin_sck, uint pin_mosi) {
+  pio_sm_config c = spi_ch446_pio2cs_program_get_default_config(prog_offs);
+  sm_config_set_out_pins(&c, pin_mosi, 1);
+  sm_config_set_set_pins(&c, pin_sck, 1);
+  sm_config_set_sideset_pins(&c, pin_sck);
+  sm_config_set_out_shift(&c, false, true, n_bits);
+  sm_config_set_clkdiv(&c, 1.0f);
+  pio_sm_set_consecutive_pindirs(pio, sm, pin_mosi, 2, true);
+  gpio_set_drive_strength(pin_sck, GPIO_DRIVE_STRENGTH_12MA);
+  gpio_set_drive_strength(pin_mosi, GPIO_DRIVE_STRENGTH_12MA);
+  gpio_set_slew_rate(pin_sck, GPIO_SLEW_RATE_FAST);
+  gpio_set_slew_rate(pin_mosi, GPIO_SLEW_RATE_FAST);
+  pio_gpio_init(pio, pin_mosi);
+  pio_gpio_init(pio, pin_sck);
+  pio_interrupt_clear(pio, 5);
+  pio_interrupt_clear(pio, 1);
+  pio_sm_init(pio, sm, prog_offs + spi_ch446_pio2cs_offset_entry_point, &c);
+  pio_sm_exec(pio, sm, pio_encode_set(pio_x, n_bits - 2));
+  pio_sm_exec(pio, sm, pio_encode_set(pio_y, n_bits - 2));
+  pio_sm_set_enabled(pio, sm, true);
+}
+
+// Claim PIO2 (GPIOBASE 16) for the chip-select strobe SM. Returns false with
+// csFallbackReason set if any step is refused; nothing is left half-claimed.
+// Runs on core 1 in initCH446Q() - before the LED strips claim their SMs
+// (initLEDs comes after this in setupCore2stuff), so PIO2 has no program yet
+// and its base can still be changed. No USB I/O here (core 1); X reports.
+static bool ch446qCsStrobeInit(void) {
+  csFallbackReason = 0;
+  if (pio_set_gpio_base(csPio, 16) != PICO_OK) { csFallbackReason = 1; return false; }
+  if (!pio_can_add_program(csPio, &ch446_cs_strobe_program)) { csFallbackReason = 2; return false; }
+  int s = pio_claim_unused_sm(csPio, false);
+  if (s < 0) { csFallbackReason = 3; return false; }
+  int chan = dma_claim_unused_channel(false);
+  if (chan < 0) { pio_sm_unclaim(csPio, (uint)s); csFallbackReason = 4; return false; }
+  csOffset = pio_add_program(csPio, &ch446_cs_strobe_program);
+  pio_sm_config c = ch446_cs_strobe_program_get_default_config(csOffset);
+  sm_config_set_out_pins(&c, CH446Q_CS_FIRST_GPIO, 12);
+  sm_config_set_out_shift(&c, true /* right: bits 11..0 first */, false /* no autopull */, 32);
+  sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);   // 8 deep; the RX FIFO is never used
+  sm_config_set_clkdiv(&c, 1.0f);
+  // Every chip select LOW, output, 12 mA (what pinMode(OUTPUT_12MA) gave the
+  // SIO path), then handed to PIO2 - the level is set before the mux flips.
+  pio_sm_set_pins_with_mask64(csPio, (uint)s, 0, CH446Q_CS_PIN_MASK);
+  pio_sm_set_consecutive_pindirs(csPio, (uint)s, CH446Q_CS_FIRST_GPIO, 12, true);
+  for (int i = 0; i < 12; i++) {
+    gpio_set_drive_strength(CH446Q_CS_FIRST_GPIO + i, GPIO_DRIVE_STRENGTH_12MA);
+    pio_gpio_init(csPio, CH446Q_CS_FIRST_GPIO + i);
+  }
+  pio_interrupt_clear(csPio, 0);
+  pio_interrupt_clear(csPio, 4);
+  if (pio_sm_init(csPio, (uint)s, csOffset + ch446_cs_strobe_offset_entry_point, &c) != PICO_OK) {
+    // The pin range does not fit the block's base - cannot happen with base
+    // 16 and pins 28..39, but never run with a half-configured SM.
+    pio_remove_program(csPio, &ch446_cs_strobe_program, csOffset);
+    pio_sm_unclaim(csPio, (uint)s);
+    dma_channel_unclaim((uint)chan);
+    csFallbackReason = 5;
+    return false;
+  }
+  pio_sm_set_enabled(csPio, (uint)s, true);
+  // The one interrupt: PIO2 flag 0 -> IRQ1 line, exclusive handler (no
+  // shared-chain slot), core 1's NVIC. Source enabled per list send.
+  pio_set_irq1_source_enabled(csPio, pis_interrupt0, false);
+  irq_set_exclusive_handler(PIO2_IRQ_1, ch446qCsStrobeIsr);
+  irq_set_enabled(PIO2_IRQ_1, true);
+  dmaChanCs = chan;
+  csSm = s;
+  return true;
+}
+
+// For X: mode and counters of the strobe path.
+void ch446qCsStrobeInfo(int* smOut, int* fallbackReason, uint32_t* listIrqs, uint32_t* singles, uint32_t* singleTimeouts) {
+  if (smOut) *smOut = csSm;
+  if (fallbackReason) *fallbackReason = csFallbackReason;
+  if (listIrqs) *listIrqs = cs_list_irqs;
+  if (singles) *singles = cs_single_sends;
+  if (singleTimeouts) *singleTimeouts = cs_single_timeouts;
+}
+#else
+void ch446qCsStrobeInfo(int* smOut, int* fallbackReason, uint32_t* listIrqs, uint32_t* singles, uint32_t* singleTimeouts) {
+  if (smOut) *smOut = -1;
+  if (fallbackReason) *fallbackReason = 6;  // not built for this board
+  if (listIrqs) *listIrqs = 0;
+  if (singles) *singles = 0;
+  if (singleTimeouts) *singleTimeouts = 0;
+}
+#endif
+
 void initCH446Q(void) {
 
   uint dat = 14;
@@ -315,22 +584,38 @@ void initCH446Q(void) {
   pio_gpio_init(pio, dat);  // Initialize GPIO 14 for PIO0
   pio_gpio_init(pio, clk);  // Initialize GPIO 15 for PIO0
 
-  irq_add_shared_handler(PIO0_IRQ_1, isrFromPio,
-                         PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
-  irq_set_enabled(PIO0_IRQ_1, true);
+#if CH446Q_PIO2_CS
+  // T3.2: the strobe SM on PIO2 first (its base must be set while PIO2 is
+  // still empty). With it, the shifter runs the pio2cs program and no
+  // PIO0_IRQ_1 handler is registered at all (a shared-chain slot freed);
+  // without it, everything below is the legacy path.
+  if (ch446qCsStrobeInit()) {
+    offset = pio_add_program(pio, &spi_ch446_pio2cs_program);
+    ch446qShifterInitPio2cs(offset, 8, clk, dat);
+  } else
+#endif
+  {
+    irq_add_shared_handler(PIO0_IRQ_1, isrFromPio,
+                           PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+    irq_set_enabled(PIO0_IRQ_1, true);
 
-   offset = pio_add_program(pio, &spi_ch446_multi_cs_program);
-  // uint offsetCS = pio_add_program(pio, &spi_ch446_cs_handler_program);
+    offset = pio_add_program(pio, &spi_ch446_multi_cs_program);
+    // uint offsetCS = pio_add_program(pio, &spi_ch446_cs_handler_program);
 
-  // Serial.print("offset: ");
-  // Serial.println(offset);
+    // Serial.print("offset: ");
+    // Serial.println(offset);
 
-  pio_spi_ch446_multi_cs_init(pio, sm, offset, 8, 1, 0, 1, clk, dat);
+    pio_spi_ch446_multi_cs_init(pio, sm, offset, 8, 1, 0, 1, clk, dat);
 #if !defined(OG_JUMPERLESS)
-  for (int i = 0; i < 12; i++) {
-    pinMode(28 + i, OUTPUT_12MA);
-    // digitalWrite(28+i, LOW);
+    for (int i = 0; i < 12; i++) {
+      pinMode(28 + i, OUTPUT_12MA);
+      // digitalWrite(28+i, LOW);
     }
+#endif
+  }
+#if !defined(OG_JUMPERLESS)
+  // (V5 chip selects: PIO2's in strobe mode, SIO outputs on the legacy path -
+  // both set up above.)
     #else
     // OG: crosspoint chip-selects are split across two GPIO banks - chips A-H on
     // GPIO 6-13 and chips I-L on GPIO 20-23 (matching CS_A..CS_L in the OG
@@ -1236,8 +1521,9 @@ void __not_in_flash_func(sendPath)(int i, int setOrClear, int newOrLast) {
 
     for (int chip = 0; chip < 4; chip++) {
       if (globalState.connections.paths[i].chip[chip] != -1) {
-        chipSelect = globalState.connections.paths[i].chip[chip];
-
+        // (chipSelect is claimed inside sendXYrawUnchecked - it is the
+        // single-send token there; setting it here would hold the token
+        // through a whole collected list and stall the kick.)
         chipToConnect = globalState.connections.paths[i].chip[chip];
 
         if (globalState.connections.paths[i].y[chip] == -1 || globalState.connections.paths[i].x[chip] == -1) {
@@ -1257,7 +1543,11 @@ void __not_in_flash_func(sendPath)(int i, int setOrClear, int newOrLast) {
 
 void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrClear, unsigned long timeoutUs) {
   uint32_t chAddress = 0;
+#if !CH446Q_DMA_SEND
+  // OG: the ISR strobes chipSelect. (V5 claims it under the arbitration lock
+  // below - it is the single-send token there, and must not be clobbered here.)
   chipSelect = chip;
+#endif
 
   if (chip >= 0 && chip < 12 && x >= 0 && x < 16 && y >= 0 && y < 8) {
     if (setOrClear == 1) {
@@ -1304,6 +1594,10 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
   }
 
   chAddress = chAddress << 24;
+  // The word both machines read on the strobe path (T3.2): address byte on
+  // top, chip-select bits below. The legacy shifter discards the low bits.
+  const uint32_t word = chAddress | ch446qCsBits(chip);
+  (void)word;  // (the OG's legacy path below sends chAddress alone)
 
 #if CH446Q_DMA_SEND
   if (dmaCollect && ((sio_hw->cpuid & 1) == 1)) {
@@ -1311,7 +1605,8 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
     // a core-0 caller landing here mid-collect takes the CPU path below and
     // waits for the DMA like everyone else): queue the word and its chip. A full
     // buffer flushes what is there and waits for it, so the wire order is
-    // preserved.
+    // preserved. (chipSelect is not ours to touch here - it is the single-send
+    // token, possibly held by a core-0 caller.)
     if (dmaCount >= CH446Q_DMA_MAX_WORDS) {
       dmaCollect = false;
       ch446qDmaKick();
@@ -1321,33 +1616,68 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
       dmaCount = 0;
       dmaCollect = true;
     }
-    dmaWords[dmaCount] = chAddress;
+    dmaWords[dmaCount] = word;
     dmaCs[dmaCount] = (uint8_t)chip;
     dmaCount = dmaCount + 1;
-    chipSelect = -1;
     return;
   }
   // A single-crosspoint CPU send while a DMA send is in flight would put a
   // foreign word into the FIFO and shift every later chip select by one -
   // wait it out (bounded by the same timeout as the handshake below), then
-  // claim the wire under the arbitration lock.
+  // claim the wire under the arbitration lock. chipSelect == -1 is the token:
+  // one single at a time across both cores (a core-0 refreshPaths and a
+  // core-1 tap used to interleave freely - the strobe path carries the chip
+  // in-band so the wire was never wrong, but two pollers on one done flag
+  // would be), and it is released by the ISR / the poll below, never here.
   {
     unsigned long t0 = micros();
     for (;;) {
       uint32_t save = spin_lock_blocking(sendLock());
-      if (!dmaActive) {
+      if (!dmaActive && chipSelect == -1) {
         chipSelect = chip;
         spin_unlock(sendLock(), save);
         break;
       }
       spin_unlock(sendLock(), save);
       if (micros() - t0 > timeoutUs) {
-        // The stall watchdog will clear a wedged DMA; do not queue behind it.
-        chipSelect = -1;
+        // The stall watchdog will clear a wedged DMA, the holder's own
+        // timeout a wedged single; do not queue behind either.
         return;
       }
       tight_loop_contents();
     }
+  }
+#endif
+
+#if CH446Q_PIO2_CS
+  if (csStrobeActive()) {
+    // Strobe path: the same word into both TX FIFOs (LAST set, so the strobe
+    // SM raises flag 0 when this one crosspoint has been strobed), then poll
+    // that flag - no ISR involved, ~1 us. A timeout means a wedged machine:
+    // count it, mark the chip suspect, put both machines back at their entry
+    // points (the same recovery the legacy path did with the SM restart).
+    cs_single_sends++;
+    pio_interrupt_clear(csPio, 0);
+    pio_sm_put(csPio, (uint)csSm, word | CH446Q_CS_LAST);
+    pio_sm_put(pio, sm, word);
+    // ~0.6 us on the wire (86 PIO cycles at 150 MHz) - no encoderServiceYield()
+    // in this loop: that yield was for the legacy ~30 us ISR handshake wait,
+    // and it costs more than this whole wait.
+    uint32_t wait_start = time_us_32();
+    while (!pio_interrupt_get(csPio, 0)) {
+      tight_loop_contents();
+      if (time_us_32() - wait_start > timeoutUs) {
+        ch446q_timeout_count++;
+        cs_single_timeouts++;
+        markChipXYSuspect(chip);
+        // No Serial/USB I/O here (core 1 callers).
+        ch446qStrobeReset();
+        break;
+      }
+    }
+    pio_interrupt_clear(csPio, 0);
+    chipSelect = -1;
+    return;
   }
 #endif
 

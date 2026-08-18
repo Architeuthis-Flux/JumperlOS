@@ -604,6 +604,16 @@ void initLEDs(void) {
   if (jumperlessConfig.hardware.probe_led_on_button_pin) {
     probeLEDs.setPin(BUTTON_PIN);
   }
+  // PIO layout (T3.2, CH446Q.cpp): PIO2 is GPIOBASE 16 for the crossbar
+  // chip-select strobe (+ the breadboard strip, GPIO 17), PIO1 gets the top
+  // strip and the encoder (24 instructions at origin 0), and this SM - which
+  // also hosts the 15-instruction probe BUTTON program (Probing.cpp) - only
+  // fits next to the CH446Q shifter on PIO0 (10 + 4 + 15 = 29 of 32). Left to
+  // the SDK's first-fit search it lands on PIO1 next to the top strip, the
+  // encoder then fills PIO1, and the button program falls back to CPU
+  // polling. So ask for PIO0; if that is refused the search runs as before
+  // and X ("cs strobe" line) shows where it went.
+  probeLEDs.setPreferredPIO(pio0);
   probeLEDs.begin();
   probeLEDs.setPixelColor(0, 0x000000);
   probeLEDs.show();

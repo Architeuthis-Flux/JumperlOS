@@ -338,6 +338,15 @@ public:
   PIO  getPIO(void)            const { return pio;                 }
   int  getStateMachine(void)   const { return (pio_sm == (uint)-1) ? -1 : (int)pio_sm; }
   uint getProgramOffset(void)  const { return pio_program_offset;  }
+  /*!
+    @brief   Ask begin() to claim its state machine on this PIO block if it
+             can (a free SM, room for the WS2812 program, and - RP2350B - a
+             GPIOBASE that reaches the pin); otherwise the normal search runs.
+             For callers that also load OTHER programs onto this SM's block
+             (the probe button reader) and need to land where they fit.
+             Call before begin().
+  */
+  void setPreferredPIO(PIO p)         { preferred_pio = p; }
 #endif
   /*!
     @brief   An 8-bit integer sine wave function, not directly compatible
@@ -424,6 +433,7 @@ private:
   void   rp2040releasePIO(void);
   void   rp2040Show(uint8_t *pixels, uint32_t numBytes);
   PIO    pio = NULL;
+  PIO    preferred_pio = NULL;    // setPreferredPIO(): try this block first
   uint   pio_sm = -1;
   uint   pio_program_offset = 0;
   int    dma_channel = -1;        // DMA channel for non-blocking LED updates

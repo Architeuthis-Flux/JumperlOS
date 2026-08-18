@@ -7,7 +7,26 @@ bool JeoPixel::rp2040claimPIO(void) {
   // Find a PIO with enough available space in its instruction memory
   pio = NULL;
 
-  if (! pio_claim_free_sm_and_add_program_for_gpio_range(&ws2812_program, 
+  // A preferred block first (setPreferredPIO): only if it has a free SM, room
+  // for the program and - RP2350B, where a block reaches 32 of the 48 pins -
+  // a GPIOBASE that covers this pin. Otherwise the SDK's search below.
+  bool claimed = false;
+  if (preferred_pio != NULL) {
+    uint base = pio_get_gpio_base(preferred_pio);
+    bool reaches = ((uint)pin >= base) && ((uint)pin < base + 32u);
+    if (reaches && pio_can_add_program(preferred_pio, &ws2812_program)) {
+      int s = pio_claim_unused_sm(preferred_pio, false);
+      if (s >= 0) {
+        pio = preferred_pio;
+        pio_sm = (uint)s;
+        pio_program_offset = pio_add_program(pio, &ws2812_program);
+        claimed = true;
+      }
+    }
+  }
+
+  if (!claimed &&
+      ! pio_claim_free_sm_and_add_program_for_gpio_range(&ws2812_program, 
                                                          &pio, &pio_sm, &pio_program_offset, 
                                                          pin, 1, true)) {
     pio = NULL;

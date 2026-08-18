@@ -1,0 +1,78 @@
+; SPDX-License-Identifier: MIT
+;
+; CH446Q crosspoint send with the chip-select strobe done by a SECOND state
+; machine in PIO2 (T3.2 / C2b in CodeDocs/SCHEDULER_AND_HARDWARE_OFFLOAD.md).
+;
+; Why two blocks: the shifter drives DAT/CK on GPIO 14/15 (GPIOBASE 0) and the
+; twelve chip selects sit on GPIO 28..39 (GPIOBASE 16) - one PIO block cannot
+; reach both, and PIO0's "prev" wraps to PIO2 (datasheet 11.4.11: PREV from
+; PIO0 references the highest-numbered PIO), so PIO0 <-> PIO2 are neighbours
+; for the cross-block IRQ handshake.
+;
+; One 32-bit word describes one crosspoint for BOTH machines:
+;   bits 31..24  the CH446Q address byte  (Y2 Y1 Y0 X3 X2 X1 X0 DATA), MSB first
+;   bits 11..0   the chip-select mask     (bit c = chip c = GPIO 28+c), one-hot
+;   bit 12       LAST: this is the last word of a list send -> raise PIO2 flag 0
+;                (routed to a system IRQ; one IRQ per list, none per crosspoint)
+; The shifter shifts LEFT with an 8-bit autopull threshold, so it consumes the
+; top byte and discards the rest; the strobe SM shifts RIGHT and consumes the
+; low 13 bits. Two DMA channels read the SAME array (or the CPU puts the same
+; word into both TX FIFOs), so the two streams can never disagree in length or
+; order.
+;
+; Handshake per word (PIO IRQ flags 4/5 are internal-only here - never routed):
+;   shifter: ... last bit on DAT, CK high ->  irq prev set 4   (PIO2.flag4 = "strobe now")
+;                                             wait 1 irq 5     (until PIO2 says done; auto-clears)
+;   strobe:  pull; wait 1 irq 4 (auto-clears); STB high [~160 ns]; STB low;
+;            irq next set 5 (PIO0.flag5 = "done"); LAST? -> irq set 0.
+; CH446Q limits (datasheet): TSTB >= 10 ns, DAT setup/hold to STB falling
+; 8/6 ns, CK rising to STB rising >= 10 ns - all satisfied by an order of
+; magnitude at clkdiv 1 (150 MHz sys clock).
+;
+; Assemble with the pioasm shipped in the PlatformIO toolchain:
+;   ~/.platformio/packages/tool-pioasm-rp2040-earlephilhower/pioasm src/ch446_pio2cs.pio src/ch446_pio2cs.pio.h
+; (the OG's RP2040 keeps the legacy program in ch446.pio.h - no PIO2, no
+; cross-block IRQs there.)
+
+.pio_version 1
+
+; ---------------------------------------------------------------------------
+; The shifter: identical to spi_ch446_multi_cs (ch446.pio.h) except that the
+; per-crosspoint "irq nowait 1 / wait 0 irq 1 rel" CPU handshake is replaced
+; by the PIO2 handshake. Side-set = CK; out pin = DAT. X,Y = n_bits - 2.
+; ---------------------------------------------------------------------------
+.program spi_ch446_pio2cs
+.side_set 1
+
+.wrap_target
+bitloop:
+    out pins, 1        side 0 [2]     ; DAT = next address bit, CK low
+    nop                side 1 [2]     ; CK high: CH446Q shifts the bit in
+    jmp x-- bitloop    side 1
+    out pins, 1        side 1         ; the 8th bit = switch DATA, held on DAT for the strobe
+    mov x, y           side 1
+    irq prev set 4     side 1         ; PIO2.flag4: "word shifted, strobe it"
+    wait 1 irq 5       side 1         ; PIO2 sets PIO0.flag5 when the STB pulse is over
+    jmp !osre bitloop  side 0
+public entry_point:
+    pull ifempty       side 0 [1]
+    nop                side 0 [1]
+.wrap
+
+; ---------------------------------------------------------------------------
+; The strobe: PIO2 (GPIOBASE 16), out pins = GPIO 28..39 (chips A..L).
+; Shift RIGHT, no autopull: `out pins, 12` takes bits 11..0, `out x, 1` bit 12.
+; ---------------------------------------------------------------------------
+.program ch446_cs_strobe
+
+.wrap_target
+public entry_point:
+    pull block                        ; the word (DMA or CPU); blocks until one is there
+    wait 1 irq 4                      ; the shifter's "strobe now" (auto-clears flag 4)
+    out pins, 12       [23]           ; STB high on the selected chip, ~24 cycles (~160 ns)
+    mov pins, null                    ; STB low on all twelve
+    irq next set 5                    ; PIO0.flag5: "done" - the shifter may move on
+    out x, 1                          ; LAST bit
+    jmp !x entry_point                ; not the last word: next
+    irq set 0                         ; last word of a list (or a single send): flag 0 -> CPU
+.wrap

@@ -15,20 +15,38 @@
 
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
-**START HERE — state at a glance (2026-08-17 evening, written so a fresh chat can act on it):**
-- **HEAD = the release commit after `7e6f069` (row 50), tagged `5.7.3.0` (annotated, local —
-  nothing has ever been pushed, tag included); the board is flashed with it** and reports
-  `Jumperless firmware version: 5.7.3.0` on `?`. The tree is clean. `DEV_MERGE_HANDOFF.md` rows
-  29–50 have every commit with how it was verified (one commit per item, hash of each filled in
-  by the next commit — row 50's hash goes in with the next). Kevin's ask was "let's tag this as a
-  release where we are now": `VERSION` went 5.7.2.0 → 5.7.3.0 — the next hand-bumped *third*
-  component after his `5.7.2.0` checkpoint (the fourth is CI's auto-bump on `main`, the second is
-  the public named line — 5.8 is his call; retagging is a `git tag -d` + `VERSION` edit while
-  nothing is pushed). **CI note:** `release.yml` runs on push to `main` and
-  `bump_version_if_needed.py` bumps past any *existing* tag — so if the `5.7.3.0` tag is pushed to
-  origin before `main` is, CI releases `5.7.3.1`; to have CI publish exactly `5.7.3.0`, push the
-  branch without the tag and let the workflow tag it.
-- Before this: `7e6f069` was the speed-test commit (row 49).
+**START HERE — state at a glance (2026-08-17 night, written so a fresh chat can act on it):**
+- **HEAD = the T3.2 commit after `6ee9abf` (row 51) — the CH446Q chip-select strobe state machine
+  on PIO2; the board is flashed with it.** The tree is clean; nothing has ever been pushed (tag
+  `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–51 have every commit with how it was
+  verified (one commit per item, hash of each filled in by the next commit — row 51's hash goes
+  in with the next). Kevin's evening asks, in order: "tag this as a release where we are now" →
+  `6ee9abf` = **release `5.7.3.0`** (`VERSION` 5.7.2.0 → 5.7.3.0, annotated tag on it — the next
+  hand-bumped *third* component after his `5.7.2.0` checkpoint; the fourth is CI's auto-bump on
+  `main`, the second is the public named line — 5.8 is his call; retagging is `git tag -d` +
+  `VERSION` edit while nothing is pushed. **CI note:** `release.yml` runs on push to `main` and
+  `bump_version_if_needed.py` bumps past any *existing* tag — pushing the `5.7.3.0` tag before
+  `main` makes CI release `5.7.3.1`; to have CI publish exactly `5.7.3.0`, push the branch without
+  the tag and let the workflow tag it); then **"start with the second SM CH446Q strobe (put it on
+  PIO2), then continue with the rest"** → T3.2 is built and verified (block below); "the rest" =
+  the remaining Tier 3 in list order — **T3.3 (WaveGen via I2C0 DMA) is next, then T3.4 (delete
+  `pauseCore2`); T3.1 (the `probeMode` state machine) needs a design round with Kevin — ask.**
+- **T3.2 in one paragraph:** PIO2 is GPIOBASE 16 and its SM0 strobes the twelve chip selects
+  (GPIO 28..39) itself, handshaking with the PIO0 shifter through the RP2350's cross-block IRQ
+  flags (PIO0's `prev` wraps to PIO2). One 32-bit word carries the address byte (top) *and* the
+  chip-select mask + LAST bit (bottom); a list send is two DMA channels over the same array; a
+  single send is two FIFO puts and a flag poll; **one** completion IRQ per list (PIO2_IRQ_1,
+  exclusive — the shared-IRQ chain went 6/6 → 5/6 because the per-crosspoint PIO0_IRQ_1 handler
+  is no longer registered). PIO layout now: PIO0 = shifter + probe LED/button SM (steered there,
+  `probeLEDs.setPreferredPIO(pio0)`), PIO1 = top LED strip + encoder, PIO2@16 = strobe + breadboard
+  strip. `X` → `cs strobe: PIO2 SM0 (base 16), one IRQ per list: N  singles M (timeouts 0) | probe
+  LED SM: PIO0  button: PIO` is the health line; "FALLBACK" there means the legacy ISR path is in
+  use and says why. Verified: builds ×3, `run_all.py` ×3 = 6/7 (the tolerated phantom-current
+  check only), the crossbar self-test app `rows:60/60 gpio:8/8 rails:2/2 OVERALL: PASS`, the
+  500-op soak with 0 stalls / 0 timeouts / mailbox idle, list IRQs == list sends at every read,
+  ~860 k singles with 0 timeouts, and an A/B against `6ee9abf` on the same board state (latency
+  probe, speed test, kick gaps under `run_all` — all the same; see the T3.2 block for numbers).
+- Before this: `6ee9abf` = release 5.7.3.0 (row 50); `7e6f069` = the speed-test commit (row 49).
 - **Kevin's "the crossbar speed test went from 300 kHz to 10 kHz" (17:00) — answered:** it did
   not, and not today: the diagnostics-menu speed test called the *checked* `sendXYraw()`, which
   since the RouteSafety work (rows 16–20, mid-August) runs the per-crosspoint short-check on
@@ -76,8 +94,8 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 "Side quest 2, follow-up 3" below), `e1fc7f8` (T1.6b, the VM-hook and WaveGen kick sites,
 row 46), `3406b1a` (docs), `e148384` (the in-session probe LED fix, row 47 — "Side quest 2, follow-up 4"
 below), `eafb218` (docs, row 48), `7e6f069` (the speed test's two labelled passes, row 49), and
-the **`5.7.3.0` release commit** (row 50 — hash with the next commit; annotated tag `5.7.3.0` on
-it). **The board is flashed with the release build (`5.7.3.0`).**
+`6ee9abf` (**release 5.7.3.0**, row 50; annotated tag `5.7.3.0` on it), and the **T3.2 commit**
+(row 51 — hash with the next commit). **The board is flashed with the T3.2 build.**
 
 **Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
 probing state — if I flip the switch inside the probing loop, it lights up measure, even though
@@ -168,6 +186,71 @@ still records, plus the automatable part (ring stats in `X`: overruns 0, oldest-
 build will be judged by feel within a minute of tapping, and the cheap alternative for the
 core-0 load alone (a one-read touch pre-check in `checkPads()`, "T1.11 candidate" in the
 checklist) is a 20-line change he can take today if he only wants the CPU back.
+
+**T3.2 — what was built (section C2b; Kevin, 2026-08-17 evening: "start with the second SM
+CH446Q strobe, put it on PIO2").** `src/ch446_pio2cs.pio` (+ the pioasm-generated `.pio.h`,
+checked in; assemble with the toolchain's `tool-pioasm-rp2040-earlephilhower/pioasm`) holds two
+programs: `spi_ch446_pio2cs` — the shifter, byte-identical to the legacy program except that
+the per-crosspoint `irq nowait 1` / `wait 0 irq 1 rel` CPU handshake became `irq prev set 4` /
+`wait 1 irq 5` — and `ch446_cs_strobe` (8 instructions): `pull; wait 1 irq 4; out pins,12 [23];
+mov pins,null; irq next set 5; out x,1; jmp !x 0; irq set 0`. Why PIO2 and not "any base-16
+block": the datasheet's PREV/NEXT modes wrap — PIO0's *prev* is PIO2 and PIO2's *next* is PIO0
+(11.4.11), so PIO0 (DAT/CK on 14/15, base 0) and PIO2 (chip selects on 28..39, base 16) are
+neighbours for the cross-block IRQ flags; flags 4/5 are the handshake and are never routed to
+an NVIC line, flag 0 is the once-per-list completion. **One word for both machines** (the
+strongest decision in it): bits 31..24 = the CH446Q address byte (the shifter shifts left with
+an 8-bit autopull threshold and discards the rest), bits 11..0 = the one-hot chip-select mask,
+bit 12 = LAST; the two DMA channels of a list send read the *same* `dmaWords[]` (no second
+array, no way for the two streams to disagree in length or order); a single send puts the same
+word into both TX FIFOs and polls PIO2 flag 0 (~0.6 µs on the wire: 86 PIO cycles at 150 MHz,
+STB high 24 cycles ≈ 160 ns against the CH446Q's 10 ns minimum, DAT setup/hold and CK→STB all
+an order of magnitude inside spec) — **no ISR at all for singles, one exclusive-handler IRQ
+(PIO2_IRQ_1, core 1) per list**, whose ISR completes the mailbox request. In strobe mode the
+legacy PIO0_IRQ_1 shared handler is not registered (`shared-IRQ handler slots: 5/6`, was 6/6 —
+the slot the C2b row promised); the legacy path stays intact behind `csSm < 0` (and the OG),
+with its blanket "clear every PIO0 flag" narrowed to flag 1 because the probe button's flag 0
+now lives on PIO0 too. `chipSelect == -1` is now a real single-send token (claimed under the
+OS1 spinlock only when no DMA is active *and* no other single is in flight — a core-0
+`refreshPaths` and a core-1 tap used to interleave), initialised to −1 (it was 0, which made
+the first list kick of a boot wait out its 100 ms "take the wire" timeout), and `sendPath()` no
+longer clobbers it. Abort/stall: progress = the strobe channel's remaining transfer count
+(TRANS_COUNT[31:28] is MODE on RP2350 — masked), abort stops both channels, marks the chips of
+the last ≤ 9 pushed words + everything unsent suspect, resets both machines (FIFOs, flags 4/5/1
+on PIO0 and 0/4 on PIO2, every chip select LOW, the shifter's X/Y re-preloaded — a restart mid-word
+used to carry a partial X into the next word), and completes the request. **PIO layout** (the
+"allocation first" the Tier 3 line asked for): PIO2 must be re-based to 16 while empty, so
+`initCH446Q()` (first thing on core 1) claims it before the LED strips do; the probe LED/button
+SM then only fits on PIO0 (its button program is 15 instructions and PIO1 has to hold the
+encoder's 24 at origin 0), so `LEDs.cpp` asks for it (`JeoPixel::setPreferredPIO`, a 10-line
+addition to Kevin's `lib/Jadafruit_NeoPixel`) and the encoder / debug-button block searches skip
+a base-16 block; result: PIO0@0 = shifter + probe LED/button, PIO1@0 = top strip + encoder,
+PIO2@16 = strobe + breadboard strip, `X`'s PIO map now prints each block's base. Every fallback
+is loud on `X`: `cs strobe: FALLBACK … <reason>` and `probe LED SM: PIOn  button: PIO|CPU`.
+
+**T3.2 — verified:** builds ×3; `X` census exactly as designed (above), `button: PIO`, `shared-IRQ
+5/6`, chip selects show `PIO2` in the GPIO table; `run_all.py` ×3 = 6/7 (the tolerated
+phantom-current check only; the real current loop reads 4.76 mA → crosspoints physically
+close, and a connect/clear/connect/disconnect INA0 sequence toggles 4.76 → 0.58 → 4.76 → 0.52 mA);
+**crossbar self-test app `rows:60/60 gpio:8/8 rails:2/2 OVERALL: PASS`**; the 500-op soak: 662 list
+sends = 662 completion IRQs, 13 811 words, **0 stalls, 0 timeouts, 0 WARNINGs**, mailbox idle,
+RouteSafety self-check PASS / audit `suspect=0x000`; after everything ~1 100 lists (all with a
+matching IRQ), **~860 000 singles, 0 timeouts**. **A/B against `6ee9abf` on the same board state:**
+latency probe pickup→send 61 / 217 µs (strobe) vs 57 / 236 µs (release) — the same, because the
+list path is bookkeeping-bound (`findDifferentPaths` / `createChipOrderedIndex`), not wire-bound;
+speed test raw 3.5 µs per on/off cycle (283 kHz) vs 3.9 (256 kHz) — ~0.6 µs of that is the wire,
+the rest is `sendXYrawUnchecked`'s own bookkeeping; kick gaps under one `run_all` core 0 max
+2.34 s / core 1 1.29 s (strobe) vs 2.30 / 1.19 s (release) — **pre-existing, not T3.2's; note for
+the watchdog decision that a `run_all` produces ~2.3 s core-0 `loop0 -> loop0` gaps (8 s still
+has ×3.5)**. Honest note on the payoff, as with T2.3: the numbers a user can see do not move; what
+moved is that core 1 takes one interrupt per list instead of one per crosspoint (~860 k fewer
+in the session above), a list send finishes without any core-1 service at all (a FlashPark park
+no longer stalls a send mid-way), and the shared-IRQ chain has a free slot again. Hands-on:
+"routing, the encoder, the probe button and the LEDs feel the same" — checklist item 8.
+
+**T3.2 files:** `src/ch446_pio2cs.pio` (+ `.pio.h`), `src/CH446Q.cpp/.h`, `src/LEDs.cpp`,
+`lib/Jadafruit_NeoPixel/JeoPixel.h` + `Jeopixel_RP2.cpp`, `src/RotaryEncoder.cpp`, `src/Debugs.cpp`,
+`src/Probing.cpp/.h` (`probeButtonPioState()` for `X`), `src/SingleCharCommands.cpp` (`X`), the
+rebuilt `firmware.uf2`.
 
 **T2.3 — what was built (section C2a).** In `CH446Q.cpp`: on core 1 (V5) a list send —
 `sendAllPaths()` from `sendPaths()` — no longer pushes one word per crosspoint into the PIO TX
@@ -848,6 +931,12 @@ port 7) is the instrument for most of them.
    "touch pre-check in `checkPads()`" (T1.11 candidate, changes first-detection slightly);
    (b) the wavegen max frequency is −33 % since T1.9 (1 MHz bus); the "WaveGen raises the
    clock only while `isRunning()`" alternative is a 2-line follow-up if you want the speed back.
+8. **T3.2, the chip-select strobe SM (the commit after `6ee9abf`)** — nothing should feel
+   different: route, tap, clear, turn the encoder (it moved to PIO1 SM1), press the probe
+   button (its SM moved to PIO0 — `X` must say `button: PIO`, and its double-tap / hold feel is
+   the tell), watch all three LED strips. `X` → the `cs strobe:` line must not say FALLBACK and
+   `(timeouts 0)`; the `PIO0@0 / PIO1@0 / PIO2@16` map is the layout it relies on. If anything
+   feels off, `git revert` that one commit brings back the ISR strobe unchanged.
 
 ### What this project is, and is not (read before judging any of the vocabulary here)
 
@@ -1214,7 +1303,7 @@ exit); the HIL suite covers the routing side only.
 | C2-0 | `sendPath`/`sendXYraw*`/`isrFromPio` execute from flash (`CH446Q.cpp:962,992,1063,55`) | mark them `__not_in_flash_func` like `sendPaths` already is | — | no XIP-miss jitter on the per-crosspoint path and inside the ISR; removes one class of "core 1 stalls during a flash write" (**estimated**) | nil (RAM cost ~1–2 KB) | trivial — **Tier 1** |
 | C2a | CH446Q: `pio_sm_put` + spin on the ISR per crosspoint (`CH446Q.cpp:1042-1048`), ISR strobes CS 28..39 (`:55`), core 1 blocked for the whole `sendPaths` (~1.1 ms typical, ROUND3) | **DMA→TX FIFO + ISR chip list**: `sendPaths` builds `words[]` (address bytes) and `cs[]` (chip per word), starts one DMA channel (DREQ = PIO TX) and returns; `isrFromPio` strobes `cs[idx++]`; the existing `irq nowait 1` / `wait 0 irq 1 rel` handshake in `ch446.pio.h` throttles the DMA for free; completion = `idx == n` → `sendGen++`. Core 1 keeps rendering; **either core can kick it** once the ISR is moved to core 0's NVIC (or stays on core 1 — decide by where `sendPaths`' bookkeeping runs) | `dma_claim_unused_channel(false)`, `channel_config_set_dreq(pio_get_dreq(pio,sm,true))`, `dma_channel_configure`, `dma_channel_set_read_addr/trans_count`; ISR stays a shared PIO0_IRQ_1 handler (slot already held) | non-blocking `sendPaths`; core 1 gains ~1 ms per rebuild; sets up C2b (**estimated**) | medium: the RESET pulse + `clearChipXYSuspect` + chip-K safety stay CPU-side before the DMA; the PIO timeout recovery (`:1050-1060`) moves into the ISR/deadline; two producers (sendPaths + NetVoltageScan taps `NetVoltageScan.cpp:154`) need the request mailbox (D) | medium (~1 day) |
 | C2c | I2C0's clock has three owners (`MCP4728::begin()` 1.7 MHz `MCP4728.cpp:164`; `initDAC()` 1 MHz `Peripherals.cpp:512-520`; the SSD1306 driver on `connection_type 2` 400 kHz sticky, `oled.cpp:68,111`) — live value 400 kHz on Kevin's board (measured), 1.7 MHz without an OLED on I2C0; WaveGen's math assumes 1 MHz | one owner: `initDAC()`'s 1 MHz; MCP4728 stops overriding; the OLED-on-I2C0 instance transfers at 400 kHz and restores 1 MHz (`clkAfter`) | `Wire.setClock`; SSD1306 ctor `clkDuring/clkAfter` | INA219/DAC/WaveGen run at the clock the code reasons about; WaveGen output frequency lands where its table math says | low, but **hardware-verify**: register readout, INA read reliability, `probe_current_zero` across boots, WaveGen actual frequency, OLED still connected | trivial — **Tier 1**, Kevin's call (approved) |
-| C2b | as above | **Second SM strobes CS**: a 12-pin `out pins` program on PIO1/PIO2 (GPIOBASE 16 → pins 28..39 = 12..23), synchronised with the shifter via `irq set 0 next` / `wait 1 irq 0 prev` (RP2350 cross-block IRQ), CS words DMA'd from a second array; no per-crosspoint ISR at all | `pio_set_gpio_base(pio1,16)`, `pio_claim_unused_sm`, second DMA channel, `pio_encode_*` | crosspoint send fully hardware-owned; frees the PIO0_IRQ_1 chain slot; the ~30 µs/crosspoint (est.) becomes ~2 µs | medium-high: needs a PIO block with GPIOBASE 16 free of other claims (check the census: LEDs/probe/encoder SMs pick blocks by pin), two-DMA sequencing, and the OG (RP2040) keeps the old path | large (2–3 days incl. scope verification) — **Tier 3, not built** |
+| C2b | as above | **Second SM strobes CS**: a 12-pin `out pins` program on PIO1/PIO2 (GPIOBASE 16 → pins 28..39 = 12..23), synchronised with the shifter via `irq set 0 next` / `wait 1 irq 0 prev` (RP2350 cross-block IRQ), CS words DMA'd from a second array; no per-crosspoint ISR at all | `pio_set_gpio_base(pio1,16)`, `pio_claim_unused_sm`, second DMA channel, `pio_encode_*` | crosspoint send fully hardware-owned; frees the PIO0_IRQ_1 chain slot; the ~30 µs/crosspoint (est.) becomes ~2 µs | medium-high: needs a PIO block with GPIOBASE 16 free of other claims (check the census: LEDs/probe/encoder SMs pick blocks by pin), two-DMA sequencing, and the OG (RP2040) keeps the old path | large (2–3 days incl. scope verification) — **Tier 3; built 2026-08-17 as T3.2 (section 0): PIO2@16, one word for both machines, one IRQ per list, singles ~0.6 µs on the wire** |
 | C3 | INA poll toggled `pauseCore2` (20 Hz LED-frame aborts) | INA219 continuous mode + read-latest, no pause | — | **DONE** (`PROBE_REWORK_HANDOFF.md`) | — | — |
 | C4 | MCP4728 re-sent identical words | per-channel shadow, dedupe | — | **DONE**; LDAC batching for the 4-channel setters is a small follow-up (one LDAC pulse per group instead of per write) | low | small |
 | C5 | Probe LED + button share one SM, program-swapped from core 1 every pass (~2,560 frames/s); colour requests via `showProbeLEDs` magic values; `checkingButton`/`showingProbeLEDs` cross-core gate | **One PIO program owning GPIO 9**: `pull noblock` (X→OSR when the FIFO is empty, i.e. the last colour repeats) → `mov x, osr` → 24-bit WS2811 frame from OSR (Y as bit counter) → the 2-pulse sample sequence immediately after the frame (the pulse rides behind the frame and is forwarded, never latched) → `push`/`irq` → ≥300 µs low gap (Y loop) → repeat. Colour change = `pio_sm_put(colour)` from any core (one 32-bit FIFO write); button samples keep arriving on core 0's IRQ. `probeLEDhandler` and the swap disappear | `pio_add_program`, `pio_sm_config` with `sideset`/`set`/`in` on the same pin, `pio_sm_put`; JeoPixel no longer owns the SM (`probeLEDs` becomes a thin `put`) | zero cross-core traffic for the probe LED; a constant, jitter-free refresh; no short-frame corruption possible; ~2,600 button samples/s preserved (**estimated**; the frame+pulse spacing must be checked on a scope — Kevin's "acceptable if periodic refresh in the tens of ms" note) | medium: PIO register budget is tight (X=colour, Y=counter, ISR=samples/counter seed, OSR=shift), so the ~1 ms sampler delay needs the ISR-seeded counter trick; the CPU fallback path and `probe_led_on_button_pin=0` (separate pin) must keep working; the OG has no probe pads | medium (~1–2 days incl. scope time) — **next session's opener (T2.4)** |
@@ -1306,7 +1395,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 
 **Tier 3 — large (3+ days, or needs a design round) — design-only this pass**
 - T3.1 B5 `probeMode` state machine (4 milestones).
-- T3.2 C2b second-SM CH446Q strobe (PIO block/GPIOBASE allocation first).
+- T3.2 C2b second-SM CH446Q strobe (PIO block/GPIOBASE allocation first). **Built 2026-08-17 (section 0, Kevin's call: PIO2).**
 - T3.3 C14 WaveGen via I2C0 DMA + pacing timer (+ I2C0 arbiter).
 - T3.4 C16 delete `pauseCore2`.
 

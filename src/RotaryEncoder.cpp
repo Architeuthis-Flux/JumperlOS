@@ -68,6 +68,14 @@ void initRotaryEncoder( void ) {
         PIO test_pio = pio_instances[ i ];
         // Serial.printf("◆ Trying PIO%d for rotary encoder...\n", pio_get_index(test_pio));
 
+        // RP2350B: a block reaches 32 of the 48 pins (GPIOBASE 0 or 16). The
+        // encoder reads PIN_AB / PIN_AB+1 (12/13) - a base-16 block (PIO2 is,
+        // for the crossbar chip-select strobe, T3.2) cannot see them and the
+        // claim would "succeed" into a dead SM. Skip it.
+        if ( pio_get_gpio_base( test_pio ) != 0 ) {
+            continue;
+        }
+
         // Try to claim a state machine
         int test_sm = pio_claim_unused_sm( test_pio, false );
         if ( test_sm < 0 ) {
