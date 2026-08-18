@@ -16,12 +16,27 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **HEAD = the T3.3 commit after `7b5c412` (row 52) — WaveGen streams over I2C0 DMA with a pacing
-  timer, plus the I2C0 arbiter; the board is flashed with it.** The tree is clean; nothing has
-  ever been pushed (tag `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–52 have every commit
-  with how it was verified (one commit per item, hash of each filled in by the next commit — row
-  52's hash goes in with the next). **Next in the queue: T3.4 (delete `pauseCore2`) — then T3.1
-  (the `probeMode` state machine) needs a design round with Kevin — ask before starting it.**
+- **HEAD = the T3.3 follow-up commit after `42bf038` (row 53 — the four API INA reads no longer
+  pause core 2; `42bf038` = T3.3 itself, row 52); the board is flashed with HEAD.** The tree is
+  clean; nothing has ever been pushed (tag `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–53
+  have every commit with how it was verified (one commit per item, hash of each filled in by the
+  next commit — row 53's hash goes in with the next). **Where the autonomous run stopped, and
+  why:** the doc's own migration order (section D) puts `pauseCore2` (T3.4 / C16) LAST — after
+  `REQ_SHOW_LEDS` (T2.2c, ~200 `showLEDsCore2` sites, Kevin's decision) and the probe-LED request
+  / C5 (T2.4, needs scope time with Kevin); `pauseCore2` is the soft LED-frame hint at ~230 sites
+  (`pauseCore2ForFlash` around every flash write, `refreshConnections`' routing critical section,
+  apps, debug) whose meaning is tied to those LED-show flags — deleting it first would be doing
+  the doc's step (5) before its (3) and (4). So T3.4 proper waits for Kevin; the one piece that
+  did not depend on them (the API INA reads' pause, obsolete since I2C0 is core-0-only and the
+  arbiter covers the wavegen) landed as row 53. **T3.1 needs a design round with him.** Nothing
+  input-free is left in the approved queue.
+- **A flake to know about (not new, not T3.x):** `test_paste_state.py`'s "S/L prompts for the
+  paste" checks give the firmware 1.0 s to print the paste prompt after `nodes_clear()`; when the
+  deferred file-cache flush (a flash write, core 0 stalled ~1.3–2.3 s — the `loop0 -> loop0` gaps
+  in `X`) lands in that window the check fails while the paste itself still applies. Seen 1–2 of
+  3 runs on `7b5c412` (pre-T3.3) and on HEAD, 4 of 5 pass with 5 s between runs, and it passed
+  3/3 inside `run_all` earlier the same day — timing, not a regression. Kevin's call whether the
+  test's window grows or the flush should not land there.
   Kevin's evening asks, in order: "tag this as a release where we are now" →
   `6ee9abf` = **release `5.7.3.0`** (`VERSION` 5.7.2.0 → 5.7.3.0, annotated tag on it — the next
   hand-bumped *third* component after his `5.7.2.0` checkpoint; the fourth is CI's auto-bump on
@@ -71,8 +86,8 @@
   500-op soak with 0 stalls / 0 timeouts / mailbox idle, list IRQs == list sends at every read,
   ~860 k singles with 0 timeouts, and an A/B against `6ee9abf` on the same board state (latency
   probe, speed test, kick gaps under `run_all` — all the same; see the T3.2 block for numbers).
-- Before this: `7b5c412` = T3.2 (row 51); `6ee9abf` = release 5.7.3.0 (row 50); `7e6f069` = the
-  speed-test commit (row 49).
+- Before this: `42bf038` = T3.3 (row 52); `7b5c412` = T3.2 (row 51); `6ee9abf` = release 5.7.3.0
+  (row 50); `7e6f069` = the speed-test commit (row 49).
 - **Kevin's "the crossbar speed test went from 300 kHz to 10 kHz" (17:00) — answered:** it did
   not, and not today: the diagnostics-menu speed test called the *checked* `sendXYraw()`, which
   since the RouteSafety work (rows 16–20, mid-August) runs the per-crosspoint short-check on
@@ -121,8 +136,8 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 row 46), `3406b1a` (docs), `e148384` (the in-session probe LED fix, row 47 — "Side quest 2, follow-up 4"
 below), `eafb218` (docs, row 48), `7e6f069` (the speed test's two labelled passes, row 49), and
 `6ee9abf` (**release 5.7.3.0**, row 50; annotated tag `5.7.3.0` on it), `7b5c412` (T3.2, the PIO2
-chip-select strobe, row 51), and the **T3.3 commit** (row 52 — hash with the next commit). **The
-board is flashed with the T3.3 build.**
+chip-select strobe, row 51), `42bf038` (T3.3, the DMA wavegen + the I2C0 arbiter, row 52), and the
+**T3.3 follow-up commit** (row 53 — hash with the next commit). **The board is flashed with HEAD.**
 
 **Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
 probing state — if I flip the switch inside the probing loop, it lights up measure, even though

@@ -472,15 +472,14 @@ void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *lef
 #endif
 
 // INA Functions
-// NOTE: INA219 uses I2C which may conflict with Core 2 operations (OLED, etc.)
-// We temporarily pause Core 2 during I2C operations to prevent bus conflicts
-// and potential crashes from concurrent I2C access.
+// (These used to pause core 2 around every read "to prevent Core 2 I2C
+// conflicts": 50 us + an aborted LED frame per call. I2C0 has no core-1
+// user - the INA219s, the MCP4728 and the OLED are all core 0, and the
+// wavegen's DMA stream is handled by the I2C0 arbiter (T3.3), which pauses
+// the wave at a sample boundary around this very read. So no pause: C3's
+// "INA poll no longer toggles pauseCore2", now for the API too.)
 
 float jl_ina_get_current( int sensor ) {
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;       // Prevent Core 2 I2C conflicts
-    delayMicroseconds( 50 ); // Allow Core 2 to finish any in-progress I2C
-
     float result = 0.0f;
     if ( sensor == 0 ) {
         result = INA0.getCurrent( );
@@ -492,15 +491,10 @@ float jl_ina_get_current( int sensor ) {
 #endif
     }
 
-    pauseCore2 = was_paused;
     return result;
 }
 
 float jl_ina_get_voltage( int sensor ) {
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
-    delayMicroseconds( 50 );
-
     float result = 0.0f;
     if ( sensor == 0 ) {
         result = INA0.getBusVoltage( );
@@ -512,15 +506,10 @@ float jl_ina_get_voltage( int sensor ) {
 #endif
     }
 
-    pauseCore2 = was_paused;
     return result;
 }
 
 float jl_ina_get_bus_voltage( int sensor ) {
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
-    delayMicroseconds( 50 );
-
     float result = 0.0f;
     if ( sensor == 0 ) {
         result = INA0.getBusVoltage( );
@@ -532,15 +521,10 @@ float jl_ina_get_bus_voltage( int sensor ) {
 #endif
     }
 
-    pauseCore2 = was_paused;
     return result;
 }
 
 float jl_ina_get_power( int sensor ) {
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
-    delayMicroseconds( 50 );
-
     float result = 0.0f;
     if ( sensor == 0 ) {
         result = INA0.getPower( );
@@ -552,7 +536,6 @@ float jl_ina_get_power( int sensor ) {
 #endif
     }
 
-    pauseCore2 = was_paused;
     return result;
 }
 
