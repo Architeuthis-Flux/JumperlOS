@@ -74,9 +74,9 @@
 #include "hardware/sync.h"
 
 // The address ring: B2 reads it with a hardware ring wrap of 4N bytes, so it
-// must sit at an address aligned to its own size; 4 KB alignment covers
-// every N <= 1024. Static (BSS) - the heap cannot promise alignment.
-static uint32_t __attribute__((aligned(4096))) s_addrRing[1024];
+// must sit at an address aligned to its own size; 2 KB alignment covers
+// every N <= 512. Static (BSS) - the heap cannot promise alignment.
+static uint32_t __attribute__((aligned(2048))) s_addrRing[512];
 
 // Pacing-timer floor: clk_sys / 65535 = 2289 Hz at 150 MHz; plan ticks
 // comfortably above it and let the divider do the rest.

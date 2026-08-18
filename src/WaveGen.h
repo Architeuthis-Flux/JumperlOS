@@ -160,7 +160,7 @@ private:
     uint32_t _sample_count;
 
     // Waveform data (dynamically allocated to save RAM)
-    static const size_t MAX_WAVEFORM_TABLE_SIZE = 1024;  // DMA path: N is a power of two <= this
+    static const size_t MAX_WAVEFORM_TABLE_SIZE = 512;   // DMA path: N is a power of two <= this (512 points per cycle is plenty for a 12-bit DAC over I2C; 1024 cost 4 KB more SRAM)
     volatile uint16_t* _waveform_table;  // MAX_WAVEFORM_TABLE_SIZE codes
     volatile size_t _table_size;        // Current table size (dynamic)
     volatile size_t _table_index;

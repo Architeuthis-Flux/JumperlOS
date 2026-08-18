@@ -16,13 +16,25 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **HEAD = the T2.1 commit after `15db8c0` (row 55) — the always-on ADC ring; the board is flashed
-  with it and Kevin felt the pads on it ("same or better — commit it").** `15db8c0` = docs (row 54),
+- **HEAD = release `5.7.3.1` (row 57; annotated tag `5.7.3.1`, local) on top of the row-56 fix commit
+  (`ch446.pio` is the source of truth again + an SRAM diet after a heap-abort find — read row 56, it
+  matters); `557203e` = T2.1, the always-on ADC ring (row 55) — the board is flashed with the
+  release build and Kevin felt the pads on T2.1 ("same or better — commit it").** `15db8c0` = docs (row 54),
   `060d52e` = the T3.3 follow-up (row 53), `42bf038` = T3.3 (row 52), `7b5c412` = T3.2 (row 51),
   `6ee9abf` = release 5.7.3.0 (row 50). The tree is clean; nothing has ever been pushed (tag
-  `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–55 have every commit with how it was
-  verified (one commit per item, hash of each filled in by the next commit — row 55's hash goes
-  in with the next). **Kevin is reachable now (Cursor notifications) — ask instead of stopping.**
+  `5.7.3.0`/`5.7.3.1` included). `DEV_MERGE_HANDOFF.md` rows 29–57 have every commit with how it
+  was verified (one commit per item, hash of each filled in by the next commit — row 57's hash
+  goes in with the next). **Kevin is reachable now (Cursor notifications) — ask instead of
+  stopping.** Next up per Kevin: his `src/` folder reorganisation (feature folders; the include
+  path gets them automatically) — then T2.2c `REQ_SHOW_LEDS` → T3.4.
+- **Two things learned while tagging (row 56):** the raspberrypi platform regenerates any
+  `src/**/*.pio.h` whose `.pio` is newer (mtime) — the `.pio` files are the source of truth now,
+  never hand-edit a `.pio.h`; and **heap headroom is the constraint on this board**: 5.7.3.0 had
+  37.5 KB free, T2.1 took it to 25 KB and the deferred config save then aborted the board on a
+  plain `new` about every second `test_config` run (crashlog: HardFault, PC `__breakpoint`, LR
+  `abort`; the ELF's only `abort()` callers are `operator new`, `__throw_bad_alloc`, `__assert_func`).
+  Back at 33–34 KB after the diet, 8/8 clean. Anything that adds static SRAM from here needs to
+  pay for it; the 8 MB PSRAM is 0 % used and the config path's allocation is Kevin's to move.
 - **T2.1 in one paragraph:** `src/AdcRing.cpp` owns the ADC: free-running round-robin over all
   eight inputs at 48 kHz per channel (384 ksps) into an 8 KB SRAM ring by ONE DMA channel in
   RP2350 TRIGGER_SELF mode (1 ms blocks, hardware write-ring wrap, a block IRQ on DMA_IRQ_1 on

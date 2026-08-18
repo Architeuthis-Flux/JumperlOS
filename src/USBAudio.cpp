@@ -118,7 +118,7 @@ static int32_t g_hpX1[2], g_hpY1[2];
 // straight from a DMA IRQ took the whole board off the bus once (the FIFO
 // mutex - the same cross-core deadlock custom_tusb_config.h documents for
 // CDC), hence the indirection. Power-of-two so the wrap is a mask.
-#define JL_AUDIO_RING_SAMPLES 2048u   // ~21 ms of stereo headroom at 48 k (64 ms at the 16 k default)
+#define JL_AUDIO_RING_SAMPLES 1024u   // ~10 ms of stereo headroom at 48 k, 32 ms at the 16 k default (SRAM is the constraint - audio is niche)
 #define JL_AUDIO_RING_MASK    (JL_AUDIO_RING_SAMPLES - 1u)
 static int16_t g_ring[JL_AUDIO_RING_SAMPLES];
 static volatile uint32_t g_ringHead = 0;   // producer index

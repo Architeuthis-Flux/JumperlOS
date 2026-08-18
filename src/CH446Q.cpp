@@ -158,7 +158,7 @@ static bool chipHadConnections[12] = {false};
 #define CH446Q_CS_FIRST_GPIO 28
 #define CH446Q_CS_PIN_MASK (0xFFFull << CH446Q_CS_FIRST_GPIO)
 
-#define CH446Q_DMA_MAX_WORDS 2048   // 128 paths x 4 hops + every possible disconnect, with room
+#define CH446Q_DMA_MAX_WORDS 1024   // 128 paths x 4 hops = 512 + the chip-K safety clears; max seen 73 per send. (Was 2048: 5 KB of SRAM given back for the heap, 2026-08-18 - a full collect flushes and continues anyway.)
 static uint32_t dmaWords[CH446Q_DMA_MAX_WORDS];  // PIO TX words (address byte << 24 | cs mask | LAST)
 static uint8_t  dmaCs[CH446Q_DMA_MAX_WORDS];     // chip per word (the legacy ISR's strobe list)
 static volatile uint32_t dmaCount = 0;   // words in the send in flight

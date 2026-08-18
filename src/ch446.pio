@@ -1,100 +1,68 @@
-;I'm just compiling this with the online pioasm compiler and then pasting the compiled code into spi.pio.h
-
-;https://wokwi.com/tools/pioasm
-
-;this is basically spi but it sets a system IRQ on the last bit to allow the chip select pulse to happen
-
-;Eric, remember to set the MYNAMEISERIC define to 1 if you're using the board I sent you, otherwise set it to 0
-
+; SPDX-License-Identifier: MIT
+;
+; CH446Q crosspoint shifter with the chip-select strobe done by a CPU ISR - the
+; LEGACY program: the OG's path, and V5's fallback when the PIO2 strobe SM
+; (ch446_pio2cs.pio, T3.2) cannot be set up.
+;
+; THIS FILE IS THE SOURCE OF TRUTH FOR ch446.pio.h. The PlatformIO raspberrypi
+; platform re-runs pioasm on every *.pio under src/ whose mtime is newer than
+; its .pio.h (builder/frameworks/_build_pioasm.py) - so a checkout, stash or
+; touch that makes this file newer REGENERATES the header. For a long time the
+; header was hand-edited (flag 1, the IRQ1 line, drive strength) while this
+; source still said flag 0, and one such regeneration (2026-08-18) silently
+; put a shifter that waits on flag 0 in front of an ISR that clears flag 1.
+; Keep the two in sync by editing THIS file and regenerating:
+;   ~/.platformio/packages/tool-pioasm-rp2040-earlephilhower/pioasm src/ch446.pio src/ch446.pio.h
+;
+; It is SPI-like: 8 bits out MSB first (7 address bits, then the switch data
+; bit held on DAT), then it raises PIO IRQ flag 1 (-> PIO0_IRQ_1 -> isrFromPio
+; in CH446Q.cpp, which pulses the chip's STB and clears the flag) and waits for
+; the flag to clear before the next word.
 
 .program spi_ch446_multi_cs
 .side_set 1
 
 .wrap_target
 bitloop:
-
     out pins, 1        side 0x0 [2]
-    
     nop                side 0x1 [2]
-
     jmp x-- bitloop    side 0x1
-
-
     out pins, 1        side 0x1
-
     mov x, y           side 0x1
-
-    irq  0             side 0x1
-    
-    wait 0 irq 0 rel   side 0x1
-    
+    irq nowait 1       side 0x1     ; flag 1 -> the CPU ISR strobes the chip select
+    wait 0 irq 1 rel   side 0x1     ; ... and clears the flag when the pulse is done
     jmp !osre bitloop  side 0x0
-
 public entry_point:                 ; Must set X,Y to n-2 before starting!
-
-
     pull ifempty       side 0x0 [1] ; Block with CSn high (minimum 2 cycles)
-    
-    nop                side 0x0 [1]; CSn front porch
-
-
+    nop                side 0x0 [1] ; CSn front porch
 .wrap
 
 % c-sdk {
-
-//#define MYNAMEISERIC 0 //on the board I sent to eric, the data and clock lines are bodged to GPIO 18 and 19. To allow for using hardware SPI
-
+// The shifter init used by CH446Q.cpp's legacy path (the pio2cs shifter has
+// its own init in CH446Q.cpp). Side-set = CK, out pin = DAT; flag 1 routed to
+// PIO0_IRQ_1, which initCH446Q() enables on the core that registers isrFromPio.
 #include "hardware/gpio.h"
-
 static inline void pio_spi_ch446_multi_cs_init(PIO pio, uint sm, uint prog_offs, uint n_bits, float clkdiv, bool cpha, bool cpol,
-        uint pin_sck, uint pin_mosi) {
-    
+                                               uint pin_sck, uint pin_mosi) {
+    (void)cpha; (void)cpol;
     pio_sm_config c = spi_ch446_multi_cs_program_get_default_config(prog_offs);
-    
     sm_config_set_out_pins(&c, pin_mosi, 1);
-
-    sm_config_set_set_pins(&c, pin_mosi, 1);
-
+    sm_config_set_set_pins(&c, pin_sck, 1);
     sm_config_set_sideset_pins(&c, pin_sck);
-
     sm_config_set_out_shift(&c, false, true, n_bits);
-   
     sm_config_set_clkdiv(&c, clkdiv);
-   
-    
-
-pio_sm_set_consecutive_pindirs	(pio, sm, pin_mosi, 2, true);
-
-
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_mosi, 2, true);
+    gpio_set_drive_strength(pin_sck, GPIO_DRIVE_STRENGTH_12MA);
+    gpio_set_drive_strength(pin_mosi, GPIO_DRIVE_STRENGTH_12MA);
+    gpio_set_slew_rate(pin_sck, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(pin_mosi, GPIO_SLEW_RATE_FAST);
     pio_gpio_init(pio, pin_mosi);
- 
     pio_gpio_init(pio, pin_sck);
-    //pio_set_irqn_source_enabled	(pio,0,pis_sm0_tx_fifo_not_full,true);
-
-           // The reason for doing interrupt0 + sm:
-        // IRQ sources are enabled per irq flag. Since the irq flag being set depends on the state
-        // machine because of the "0 rel", we want to make sure we're enabling the correct interrupt
-        // source for the state machine the program is loaded into. 
-
-        pio_set_irq0_source_enabled(pio, (pio_interrupt_source)(pis_interrupt0 + sm), true);
-
-        // Make sure the interrupt starts cleared. It should already be cleared, so this should
-        // basically be a no-op. I call it defensive programming.
-
-        pio_interrupt_clear(pio, sm);
-
-        // Build the configuration for the state machine
-
-    
-
- 
- 
-
-
-//pio_set_irq0_source_enabled(pio, pis_interrupt0, true);
-
-irq_set_enabled(PIO0_IRQ_0, true);
-
+    // The IRQ source is per flag; "1 rel" on state machine 0 is flag 1, and
+    // isrFromPio clears flag 1 - so this must be interrupt1 + sm.
+    pio_set_irq1_source_enabled(pio, (pio_interrupt_source)(pis_interrupt1 + sm), true);
+    pio_interrupt_clear(pio, sm);
+    irq_set_enabled(PIO0_IRQ_1, true);
     uint entry_point = prog_offs;
     pio_sm_init(pio, sm, entry_point, &c);
     pio_sm_exec(pio, sm, pio_encode_set(pio_x, n_bits - 2));
@@ -102,114 +70,3 @@ irq_set_enabled(PIO0_IRQ_0, true);
     pio_sm_set_enabled(pio, sm, true);
 }
 %}
-/*
-//this doesnt work, so instead Im using the PIO IRQ to set the CS pin
-.program spi_ch446_cs_handler
-
-;.word 0b00000000000000001
-.wrap_target
-
-
-setI:
-    set pins, 1
-    nop [3]
-    set pins, 0
-    jmp bitloop2
-setJ:
-    set pins, 2
-    nop [3]
-    set pins, 0
-    jmp bitloop2
-setK:
-    set pins, 4
-    nop [3]
-    set pins, 0
-    jmp bitloop2
-setL:
-    set pins, 8
-    nop [3]
-    set pins, 0
-    jmp bitloop2
-
-public entry_point: 
-bitloop2:
- 
-
-    wait 1 irq 2 
-    pull ifempty
-    irq clear 2
-    out pins, 8
-    
-    set pins, 31 
-    nop [3]
-    set pins, 0
-    
-    
-    
-    
-    jmp bitloop2  
-
-
-   
-
-.wrap
-
-% c-sdk {
-#include "hardware/gpio.h"
-static inline void pio_spi_ch446_cs_handler_init(PIO pio, uint smCS, uint prog_offs, float clkdiv, uint y, uint x, uint pin_cs_I, uint pin_cs_A) {
-    
-    pio_sm_config c = spi_ch446_cs_handler_program_get_default_config(prog_offs);
-    
-    sm_config_set_set_pins(&c, pin_cs_I, 4);
-
-    sm_config_set_out_pins(&c, pin_cs_A, 8);
-
-   
-    sm_config_set_out_shift(&c, false, true, x);
-   
-    sm_config_set_clkdiv(&c, clkdiv);
-   
-    
-
-    pio_sm_set_pindirs_with_mask (pio, smCS, 1, 0b000000000111100000111111111100000);
-;pio_sm_set_consecutive_pindirs	(pio, smCS, pin_cs_I, 4, true);
-
-
-gpio_set_outover(pin_cs_A, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+1, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+2, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+3, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+4, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+5, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+6, GPIO_OVERRIDE_INVERT);
-gpio_set_outover(pin_cs_A+7, GPIO_OVERRIDE_INVERT);
-
-    pio_gpio_init(pio, pin_cs_A);
-    pio_gpio_init(pio, pin_cs_A + 1);
-    pio_gpio_init(pio, pin_cs_A + 2);
-    pio_gpio_init(pio, pin_cs_A + 3);
-    pio_gpio_init(pio, pin_cs_A + 4);
-    pio_gpio_init(pio, pin_cs_A + 5);
-    pio_gpio_init(pio, pin_cs_A + 6);
-    pio_gpio_init(pio, pin_cs_A + 7);
-
-    
- 
-    
-    pio_gpio_init(pio, pin_cs_I);
-    pio_gpio_init(pio, pin_cs_I + 1);
-    pio_gpio_init(pio, pin_cs_I + 2);
-    pio_gpio_init(pio, pin_cs_I + 3);
-
-pio_set_irq0_source_enabled(pio, pis_interrupt2, true);
-
-
-
-    uint entry_point = prog_offs;
-    pio_sm_init(pio, smCS, entry_point, &c);
-    pio_sm_exec(pio, smCS, pio_encode_set(pio_x, x));
-    pio_sm_exec(pio, smCS, pio_encode_set(pio_y, y));
-    pio_sm_set_enabled(pio, smCS, true);
-}
-%}
-*/
