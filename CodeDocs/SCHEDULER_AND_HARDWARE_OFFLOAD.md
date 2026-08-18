@@ -25,9 +25,23 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 40), `b03d25b` (the in-session switch classifier decides on agreement, row 41), `bd1e7bc`
 (the tip-sense veto for the legacy classifier, row 42 — "Side quest 2, follow-up 2" below),
 `4dd3eee` (T1.7b, row 43), `ba64238` (docs, row 44), `c785d0d` (the probe-zero fix, row 45 —
-"Side quest 2, follow-up 3" below), and **T1.6b — the VM-hook and WaveGen kick sites,
-measure-only** (the commit after `c785d0d`, row 46 — hash with the next commit). **The board is
-flashed with HEAD.**
+"Side quest 2, follow-up 3" below), `e1fc7f8` (T1.6b, the VM-hook and WaveGen kick sites,
+row 46), `3406b1a` (docs), and **the in-session probe LED fix** (the commit after `3406b1a`,
+row 47 — hash with the next commit; "Side quest 2, follow-up 4" below). **The board is flashed
+with HEAD.**
+
+**Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
+probing state — if I flip the switch inside the probing loop, it lights up measure, even though
+it should continue to say connect (or remove)").** The classifier lit the new position's idle
+pattern (`showProbeLEDs = 3` / `4`) on every detected flip — right at idle, wrong inside a
+session where the LED is the session's (connect / remove / net colour). Now that write is
+idle-only (`!inSession`), and the agree-mode A-only tracker (`checkSwitchPositionFast`, session
+only) no longer writes the LED either; the flip still re-scales the pads, and `probeMode()`'s
+exit lights the correct idle pattern for the (now correct) position. Verified: idle unchanged
+(`A:H B:M → MEASURE` — the switch was in MEASURE at that moment); no in-session LED write left
+in the classifier (the two remaining ones are the legacy dark-LED re-sends, which the session
+never reaches, and the agreement heal, already `!inSession`); `test_infra_paths` 24/24. **Kevin:**
+flip mid-session — the LED must stay connect/remove and the pads must re-scale.
 
 **T1.6b — the two kick sites the enable needs, measured.** `KICK_VM` in
 `mp_hal_check_interrupt()` (the `MICROPY_VM_HOOK_LOOP`, after its 1 ms throttle) and
@@ -748,7 +762,7 @@ T1.8 commit).
 Each item is committed and individually `git revert`-able; nothing is pushed. `X` on port 1 (or
 port 7) is the instrument for most of them.
 
-1. **The switch classifier (rows 31, 41, 42, 45 — `2761825`, `b03d25b`, `bd1e7bc`, `c785d0d`)**
+1. **The switch classifier (rows 31, 41, 42, 45, 47 — `2761825`, `b03d25b`, `bd1e7bc`, `c785d0d`, the LED fix)**
    — three things to check with `` `[debug] probe_switch_stats = 1 `` on: (a) at idle in SELECT
    it must never flip on its own now (your afternoon oscillation was a 2.4 mA
    `probe_current_zero`; `X` → `probe zero:` shows the zero and the sample spread on every boot,
@@ -757,7 +771,9 @@ port 7) is the instrument for most of them.
    is still seen within a check both ways; (c) mid-session a SELECT→MEASURE flip re-scales the
    pads within ~1 s (both detectors agree in MEASURE), a MEASURE→SELECT flip may wait for the
    session to end if the LED pattern is dim (that is the agreement rule's cost — the
-   `agree*:` label in the stats lines means the session rule is deciding).
+   `agree*:` label in the stats lines means the session rule is deciding); (d) through all of
+   that the probe LED keeps showing connect / remove — the classifier no longer lights the
+   idle pattern inside a session (row 47).
 2. **Probe feel and menu feel (T1.4 `e3d4d36`, T1.5 `545b7e6`)** — tap, connect, clear,
    double-tap undo, the click menu, the pad menus, the REPL: nothing should feel different.
    New since T1.5: with an Arduino on the header, **the UART passthrough keeps working while

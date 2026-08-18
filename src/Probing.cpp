@@ -5554,10 +5554,17 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
         }
     }
 
-    if ( switchPosition == 0 && changed == true ) {
-        showProbeLEDs = 3; // measure
-    } else if ( switchPosition == 1 && changed == true ) {
-        showProbeLEDs = 4; // select idle
+    // A flip lights the new position's IDLE pattern - at idle only. Inside a
+    // probe session the LED is the session's (connect / remove / net colour)
+    // and must keep saying so; the position change re-scales the pads, the
+    // exit path lights the right idle pattern when the session ends (Kevin,
+    // 2026-08-17: "the state of the LEDs must always match the probing state").
+    if ( !inSession ) {
+        if ( switchPosition == 0 && changed == true ) {
+            showProbeLEDs = 3; // measure
+        } else if ( switchPosition == 1 && changed == true ) {
+            showProbeLEDs = 4; // select idle
+        }
     }
 
     if ( jumperlessConfig.debug.probe_switch_stats ) {
@@ -6213,7 +6220,7 @@ int probeSwitchFeedBlinkNow( int* pct ) { return probeSwitchFeedBlink( pct ); }
 // classifier never runs while a probe session is open (up to 80 s): flip
 // the switch mid-session and nothing notices until it exits. Detector A
 // alone (~6us, no ADC, no I2C) every 250 ms; two agreeing reads flip the
-// position and its LED pattern. Only under debug.probe_switch_agree - A is
+// position (the LED stays the session's). Only under debug.probe_switch_agree - A is
 // unverified in SELECT until the hands-on matrix passes, so it must not
 // steer sessions while the legacy classifier is in charge.
 // ---------------------------------------------------------------------------
@@ -6243,7 +6250,8 @@ void Probing::checkSwitchPositionFast( void ) {
         switchPosition = a;
         s_pending = -1;
         s_pendingCount = 0;
-        showProbeLEDs = ( a == 0 ) ? 3 : 4;
+        // (no LED write: this runs inside a probe session, whose LED - connect /
+        // remove / net colour - must keep matching the probing state)
         if ( jumperlessConfig.debug.probe_switch_stats ) {
             Serial.printf( "[switch] fast A -> %s  (CHANGED, inside probeMode)\n\r",
                            a == 0 ? "MEASURE" : "SELECT" );
