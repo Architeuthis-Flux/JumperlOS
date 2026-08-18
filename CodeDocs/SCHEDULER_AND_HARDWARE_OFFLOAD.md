@@ -15,6 +15,31 @@
 
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
+**START HERE — state at a glance (2026-08-17 evening, written so a fresh chat can act on it):**
+- **HEAD = `e148384` + this docs commit; the board is flashed with `e148384`**; the tree is clean;
+  nothing has ever been pushed. `DEV_MERGE_HANDOFF.md` rows 29–48 have every commit with how it
+  was verified (one commit per item, hash of each filled in by the next commit — row 48 = this
+  docs commit, its hash goes in with the next).
+- **Done today:** all of Tier 1 (T1.1–T1.10 + T1.7b + T1.6b measure-only), T2.2 step 2 (the
+  `REQ_SEND_PATHS` mailbox) with its latency probe (T2.2a), T2.3 (the DMA-fed CH446Q list send),
+  the paste fix, and the probe-switch work Kevin drove during the day (rows 31, 41, 42, 45, 47).
+- **What needs Kevin next, in this order:** (1) the switch classifier — checklist item 1 below,
+  four sub-checks, all four commits are individually revertable; (2) the rest of the checklist;
+  (3) his three decisions: **T2.1** (ADC ring — read "T2.1 … why it was not started here" below:
+  it is the probe-reader rewrite, no dark stage; a session with him at the board), **T2.2c**
+  (`REQ_SHOW_LEDS` — ~200 sites, all LED behaviour; same), **the watchdog enable** (T1.6/T1.6b
+  numbers say 8 s with kicks at {loop0, inner, loop1, vm, wavegen} has ×4 margin; his call on the
+  timeout and the hands-on blockers).
+- **Nothing input-free is left in the approved queue.** If a new chat starts with Kevin present,
+  begin with checklist item 1 and whatever he reports; if he is away, there is nothing to run
+  autonomously beyond keeping the doc honest.
+- **Working rules that bit this session** are further down in this block (one process per CDC
+  port; `B1` before `run_all.py`; `run_all.py` is 6/7 or 7/7 — the phantom-current check comes
+  and goes; `test_infra_paths` needs DAC0 in the feed window; the tests can leave the probe feed
+  or DAC0 in odd states — `i@` must show `probe_power on -> DAC0` before blaming code; the
+  `X` command is the instrument for everything: scheduler table, kick gaps, crossbar latency,
+  mailbox, DMA send, probe zero).
+
 **Landed on `dev` (never pushed):** `fb8e45d` (this doc), `a3e58f4` (T1.1), `3fc5c57`
 (T1.2 + T1.3), `0b5f6f7` (docs), `b0fd157` (the vocabulary rename — see the note below),
 `f3e4f6f` (T1.8), `95fb058` (docs), `9bca7b5` (T1.9), `f5a6cd0` (the paste fix, row 30),
@@ -26,9 +51,9 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 (the tip-sense veto for the legacy classifier, row 42 — "Side quest 2, follow-up 2" below),
 `4dd3eee` (T1.7b, row 43), `ba64238` (docs, row 44), `c785d0d` (the probe-zero fix, row 45 —
 "Side quest 2, follow-up 3" below), `e1fc7f8` (T1.6b, the VM-hook and WaveGen kick sites,
-row 46), `3406b1a` (docs), and **the in-session probe LED fix** (the commit after `3406b1a`,
-row 47 — hash with the next commit; "Side quest 2, follow-up 4" below). **The board is flashed
-with HEAD.**
+row 46), `3406b1a` (docs), `e148384` (the in-session probe LED fix, row 47 — "Side quest 2, follow-up 4"
+below), and this docs commit (row 48 — hash with the next commit). **The board is flashed with
+`e148384`.**
 
 **Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
 probing state — if I flip the switch inside the probing loop, it lights up measure, even though

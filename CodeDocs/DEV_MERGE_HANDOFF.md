@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–47, plus the paste fix in row 30 and
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–48, plus the paste fix in row 30 and
 the switch-classifier-in-probe-mode note in row 31): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
@@ -82,9 +82,14 @@ can be lost any more, and the probe reads the same; **T2.3 (row 39) made the cro
 send DMA-fed and ISR-completed** — core 1 is no longer blocked for a rebuild, the crossbar
 self-test passes, 0 stalls in a 500-rebuild soak. **Stopped before T2.1 (row 40 explains why:
 the ADC ring cannot be staged dark — it is the probe-reader rewrite, and its gate is Kevin's
-hands).** The doc's "▶ CONTINUE HERE" block has the T2.1 analysis, the queue after it
-(T2.1 → `REQ_SHOW_LEDS`), the design refinements found on the way, and **a consolidated
-hands-on checklist for Kevin**.
+hands).** The afternoon (rows 41–47) was the probe switch: the in-session classifier decides
+on agreement, the idle classifier cannot flip against the tip sense, `probe_current_zero` is
+the 2nd-lowest sample (the 2.4 mA boot that oscillated is explained), the probe LED keeps the
+session's pattern through a flip; plus T1.7b (no argument wait in line mode) and T1.6b (VM /
+WaveGen kick sites: nothing in the suite leaves a gap above 1.8 s). The doc's "▶ CONTINUE
+HERE" block starts with a **state-at-a-glance** for the next chat, then the T2.1 analysis, the
+queue (T2.1 / T2.2c / the watchdog enable — all three need Kevin), and **the consolidated
+hands-on checklist**.
 
 **Two things remain, both need Kevin's hands** (open item 1 below): the sensory
 checks (listen, probe-while-recording, OLED layouts, Windows boot-restore),
@@ -159,7 +164,9 @@ it wasn't this session.
 
 | 46 | `e1fc7f8` | **T1.6b: the VM-hook (`mp_hal_check_interrupt`, 1 ms throttle) and WaveGen stream-loop kick sites, measure-only** (`KICK_VM`, `KICK_WAVEGEN`; still no `watchdog_enable()`) | builds ×3; compute-bound MicroPython 5 s: core 0 max gap **5.2 s → 173 ms**; wavegen 10 s: core 1 **10.0 s → 3.9 ms**; whole `run_all.py`: core 0 1.82 s (slot save), core 1 1.16 s (down from 11.5 / 9.4 s) — an 8 s watchdog would have ×4 margin over everything measured; HIL 6/7 (known phantom check); `test_infra_paths` 24/24 |
 
-| 47 | _next commit after `3406b1a`_ | **In-session probe LED stays the session's** (Kevin: "if I flip the switch inside the probing loop it lights up measure; it should continue to say connect/remove"): the classifier's `showProbeLEDs = 3/4` on a detected flip is idle-only now; the agree-mode A-only tracker no longer writes the LED either; the flip still re-scales the pads; `probeMode()`'s exit lights the right idle pattern | builds ×3; idle unchanged; `test_infra_paths` 24/24. **Kevin:** flip mid-session |
+| 47 | `e148384` | **In-session probe LED stays the session's** (Kevin: "if I flip the switch inside the probing loop it lights up measure; it should continue to say connect/remove"): the classifier's `showProbeLEDs = 3/4` on a detected flip is idle-only now; the agree-mode A-only tracker no longer writes the LED either; the flip still re-scales the pads; `probeMode()`'s exit lights the right idle pattern | builds ×3; idle unchanged; `test_infra_paths` 24/24. **Kevin:** flip mid-session |
+
+| 48 | _next commit after `e148384`_ | Docs: the "START HERE" state-at-a-glance at the top of the doc's CONTINUE HERE block (what landed, what needs Kevin and in what order, nothing input-free left in the approved queue), row 47's hash | docs only |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
