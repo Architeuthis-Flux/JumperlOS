@@ -23,11 +23,18 @@
   SRAM diet fix (row 56 — read it, it matters), `557203e` = T2.1, the always-on ADC ring (row 55).
   `15db8c0` = docs (row 54),
   `060d52e` = the T3.3 follow-up (row 53), `42bf038` = T3.3 (row 52), `7b5c412` = T3.2 (row 51),
-  `6ee9abf` = release 5.7.3.0 (row 50). The tree is clean; nothing has ever been pushed (tag
-  `5.7.3.0`/`5.7.3.1` included). `DEV_MERGE_HANDOFF.md` rows 29–57 have every commit with how it
-  was verified (one commit per item, hash of each filled in by the next commit — row 57's hash
-  goes in with the next). **Kevin is reachable now (Cursor notifications) — ask instead of
-  stopping.** Next up per the doc's section-D order: **T3.4 (delete `pauseCore2`)** — its
+  `6ee9abf` = release 5.7.3.0 (row 50). The tree is clean. `DEV_MERGE_HANDOFF.md` rows 29–59 have
+  every commit with how it was verified (one commit per item, hash of each filled in by the next
+  commit — row 59's hash goes in with the next). **Kevin is reachable now (Cursor notifications) —
+  ask instead of stopping.**
+- **Remote state (corrected 2026-08-18 — earlier START HERE said "nothing pushed", no longer
+  true): Kevin has been pushing `dev` as the session went. `origin/dev` = `e795630` (the reorg,
+  row 58); the `5.7.3.0` tag is on `origin` (→ `6ee9abf`). ONLY the T2.2c commit `1c7249f` (row 59)
+  and the `5.7.3.1` tag are local. `origin/main` is still `e45af3b` (the branch content lives on
+  `origin/dev`, not main).** So: `git push origin dev` sends T2.2c; the `5.7.3.1` tag is Kevin's to
+  push or let CI mint (pushing the tag before `main` makes CI publish `5.7.3.2`, per `release.yml`).
+  The old "never push" rule from earlier in this run no longer applies to `dev` — Kevin is driving
+  the pushes; do not push on his behalf without asking. Next up per the doc's section-D order: **T3.4 (delete `pauseCore2`)** — its
   blocker (T2.2c) is now done; then T3.1 (the `probeMode` state machine) needs a design round
   with Kevin.
 - **T2.2c in one paragraph (row 59):** the packed magic-int `showLEDsCore2` (0/±1/2/3/+10, ~270
