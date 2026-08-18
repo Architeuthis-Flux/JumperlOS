@@ -1676,35 +1676,51 @@ void action_memoryMap() {
     Serial.flush();
 }
 
+// Two passes (2026-08-17): the RAW hardware path (sendXYrawUnchecked - PIO
+// word + core-1 ISR chip-select strobe, ~2 us per crosspoint, ~230 kHz of
+// on/off cycles) and the CHECKED path every closing crosspoint on chip K pays
+// through sendXYraw() (RouteSafety's short-check, ~45 us on top). The test
+// used to run only the checked path and call it "raw" - the ~300 kHz Kevin
+// remembered was from before the short-check existed; 10.6 kHz since, on
+// every build back to the 5.7.2.0 checkpoint. Neither pass touches the
+// DMA-fed list send (that is sendPaths, not single crosspoints).
+static void speedTestPass(const char* label, bool checked) {
+    unsigned long cycles = 100000;
+    unsigned long start = micros();
+    if (checked) {
+        sendXYraw(10, 0, 4, 1);
+        for (unsigned long i = 0; i < cycles; i++) {
+            sendXYraw(10, 0, 0, 1);
+            sendXYraw(10, 0, 0, 0);
+        }
+    } else {
+        sendXYrawUnchecked(10, 0, 4, 1);
+        for (unsigned long i = 0; i < cycles; i++) {
+            sendXYrawUnchecked(10, 0, 0, 1);
+            sendXYrawUnchecked(10, 0, 0, 0);
+        }
+    }
+    unsigned long end = micros();
+    Serial.print(label);
+    Serial.print(": ");
+    Serial.print(cycles);
+    Serial.print(" on/off cycles in ");
+    Serial.print(end - start);
+    Serial.print(" us = ");
+    Serial.print((float)(end - start) / (float)cycles, 1);
+    Serial.print(" us per cycle, ");
+    Serial.print(((float)cycles / (float)(end - start)) * 1000);
+    Serial.println(" kHz");
+    Serial.flush();
+}
+
 void action_speedTest() {
-    Serial.println("\n\rRaw Crossbar Speed Test...\n\r");
+    Serial.println("\n\rCrossbar Speed Test (chip K x0 y0 on/off, single crosspoints, core 1 paused)...\n\r");
     
     pauseCore2 = true;
     delay(100);
-    unsigned long cycles = 100000;
-    unsigned long start = micros();
-    
-    sendXYraw(10, 0, 4, 1);
-    for (unsigned long i = 0; i < cycles; i++) {
-        sendXYraw(10, 0, 0, 1);
-        sendXYraw(10, 0, 0, 0);
-    }
-    unsigned long end = micros();
-    
-    Serial.print("Time for ");
-    Serial.print(cycles);
-    Serial.print(" on/off cycles: ");
-    Serial.print(end - start);
-    Serial.println(" microseconds");
-    
-    Serial.print("Time per cycle: ");
-    Serial.print((end - start) / cycles);
-    Serial.println(" microseconds");
-    
-    Serial.print("Frequency: ");
-    Serial.print(((float)cycles / (float)(end - start)) * 1000);
-    Serial.println(" kHz");
-    
+    speedTestPass("raw      (sendXYrawUnchecked)", false);
+    speedTestPass("checked  (sendXYraw + short-check)", true);
     pauseCore2 = false;
     Serial.flush();
 }

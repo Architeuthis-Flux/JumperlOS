@@ -53,7 +53,7 @@ until a hands-on touch matrix promotes it** (`debug.probe_switch_agree`), and
 `probe_current_zero` was found to swing wider (0.5 → 2.3 mA across boots) than the ~1.4 mA
 signal the legacy current thresholds ride on.
 
-**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–48, plus the paste fix in row 30 and
+**Scheduler / hardware offload (2026-08-16/17, rows 24–29 and 32–49, plus the paste fix in row 30 and
 the switch-classifier-in-probe-mode note in row 31): see
 `SCHEDULER_AND_HARDWARE_OFFLOAD.md`** — the sweep's proposals were reviewed by Kevin in plan
 mode; its section 0 records what was approved, what was declined, and the status of each
@@ -166,7 +166,9 @@ it wasn't this session.
 
 | 47 | `e148384` | **In-session probe LED stays the session's** (Kevin: "if I flip the switch inside the probing loop it lights up measure; it should continue to say connect/remove"): the classifier's `showProbeLEDs = 3/4` on a detected flip is idle-only now; the agree-mode A-only tracker no longer writes the LED either; the flip still re-scales the pads; `probeMode()`'s exit lights the right idle pattern | builds ×3; idle unchanged; `test_infra_paths` 24/24. **Kevin:** flip mid-session |
 
-| 48 | _next commit after `e148384`_ | Docs: the "START HERE" state-at-a-glance at the top of the doc's CONTINUE HERE block (what landed, what needs Kevin and in what order, nothing input-free left in the approved queue), row 47's hash | docs only |
+| 48 | `eafb218` | Docs: the "START HERE" state-at-a-glance at the top of the doc's CONTINUE HERE block (what landed, what needs Kevin and in what order, nothing input-free left in the approved queue), row 47's hash | docs only |
+
+| 49 | _next commit after `eafb218`_ | **Diagnostics speed test: two labelled passes** — raw (`sendXYrawUnchecked`) and checked (`sendXYraw` + RouteSafety short-check). Kevin's "300 kHz → 10 kHz": the test only ran the checked path and called it raw; bisected via BOOTSEL/picotool to the 5.7.2.0 checkpoint — 93–96 µs per cycle on every build since the short-check landed; raw path 3.9 µs per cycle (256 kHz) | builds ×3; on HEAD: raw 256 kHz, checked 10.8 kHz; check toggled back on |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against

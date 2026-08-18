@@ -16,10 +16,24 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-17 evening, written so a fresh chat can act on it):**
-- **HEAD = `e148384` + this docs commit; the board is flashed with `e148384`**; the tree is clean;
-  nothing has ever been pushed. `DEV_MERGE_HANDOFF.md` rows 29–48 have every commit with how it
-  was verified (one commit per item, hash of each filled in by the next commit — row 48 = this
-  docs commit, its hash goes in with the next).
+- **HEAD = the speed-test commit after `eafb218` (row 49); the board is flashed with it**; the
+  tree is clean; nothing has ever been pushed. `DEV_MERGE_HANDOFF.md` rows 29–49 have every
+  commit with how it was verified (one commit per item, hash of each filled in by the next
+  commit — row 49's hash goes in with the next).
+- **Kevin's "the crossbar speed test went from 300 kHz to 10 kHz" (17:00) — answered:** it did
+  not, and not today: the diagnostics-menu speed test called the *checked* `sendXYraw()`, which
+  since the RouteSafety work (rows 16–20, mid-August) runs the per-crosspoint short-check on
+  every closing crosspoint of chip K — ~45 µs each — and it read 93–96 µs per on/off cycle
+  (10.4–10.8 kHz) on **every** build bisected back to the 5.7.2.0 checkpoint (`7ffdb03`,
+  `fb8e45d`, `95fb058`, `3f02a14`, HEAD — all re-flashed via BOOTSEL/picotool). With the check
+  off (`i#`) or through `sendXYrawUnchecked()` the raw path is **3.9 µs per cycle = 256 kHz**
+  (~2 µs per crosspoint: PIO word + core-1 ISR strobe). The test now runs both passes and labels
+  them ("raw (sendXYrawUnchecked)" / "checked (sendXYraw + short-check)"). Neither pass touches
+  the DMA-fed list send (that is `sendPaths()`, not single crosspoints) — the T2.3 win is core-1
+  availability during a rebuild, not per-crosspoint speed (its probe: pickup→send ~50 µs for an
+  incremental send, same as before). The ~45 µs short-check per checked closing crosspoint is
+  RouteSafety's design (Kevin's) — worth knowing where `sendXYraw()` (checked) sits on a hot path,
+  if anywhere.
 - **Done today:** all of Tier 1 (T1.1–T1.10 + T1.7b + T1.6b measure-only), T2.2 step 2 (the
   `REQ_SEND_PATHS` mailbox) with its latency probe (T2.2a), T2.3 (the DMA-fed CH446Q list send),
   the paste fix, and the probe-switch work Kevin drove during the day (rows 31, 41, 42, 45, 47).
