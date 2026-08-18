@@ -797,7 +797,7 @@ void probeCalibApp( void ) {
     b.printRawRow( 0b00000100, 56, 0x000510, 0x000000 );
 
     b.print( "Tap", 0x000510, 0x000000, 0, 1, 3 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
     delay( 200 );
     // b.clear( );
     bool touched = false;
@@ -1133,7 +1133,7 @@ void probeCalibApp( void ) {
                     setLogoOverride( LOGO_BOTTOM, modeLogoColor );
                     break;
                 }
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             }
 
             if ( nodeSelected != nodeSelectedWithOldMapping && measureOrSelect == 1 ) {
@@ -1179,7 +1179,7 @@ void probeCalibApp( void ) {
 
                 //  //   setLogoOverride( GPIO_0, 0xa0a0f0 );
 
-                //     showLEDsCore2 = 2;
+                //     requestLedShow( 2 );
                 //     break;
                 // case 1:
                 //     if (countup == 0) {
@@ -1187,7 +1187,7 @@ void probeCalibApp( void ) {
                 //     }
                 //    // setLogoOverride( GPIO_1, 0xa0a0f0 );
 
-                //     showLEDsCore2 = 2;
+                //     requestLedShow( 2 );
                 //     break;
                 // case 2:
                 //     if (countup == 0) {
@@ -1196,7 +1196,7 @@ void probeCalibApp( void ) {
 
                 //    // setLogoOverride( DAC_0, 0xa0a0f0 );
 
-                //     showLEDsCore2 = 2;
+                //     requestLedShow( 2 );
                 //     break;
                 // case 3:
                 //     if (countup == 0) {
@@ -1204,7 +1204,7 @@ void probeCalibApp( void ) {
                 //     }
                 //     //setLogoOverride( DAC_1, 0xa0a0f0 );
 
-                //     showLEDsCore2 = 2;
+                //     requestLedShow( 2 );
                 //     break;
                 // case 4:
                 //     if (countup == 0) {
@@ -1212,12 +1212,12 @@ void probeCalibApp( void ) {
                 //     }
                 //     //setLogoOverride( ADC_0, 0xa0a0f0 );
 
-                //     showLEDsCore2 = 2;
+                //     requestLedShow( 2 );
                 //     break;
                 // case 5:
                 //     //setLogoOverride( ADC_1, 0xa0a0f0 );
 
-                //     showLEDsCore2 = 2;
+                //     requestLedShow( 2 );
                 //     break;
                 case 0 ... 6:
                     clearColorOverrides( true, true, true );
@@ -1291,7 +1291,7 @@ void customApp( void ) {
     b.clear( );
     delay( 1000 );
     b.print( "This isa demo", (uint32_t)0x002008 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
     delay( 2000 );
     b.clear( );
     b.print( "It will show", (uint32_t)0x002008 );
@@ -1418,7 +1418,7 @@ void customApp( void ) {
         return;
     }
 
-    showLEDsCore2 = -3;
+    requestLedShow( -3 );
     b.clear( );
     clearLEDsExceptRails( );
 
@@ -1436,7 +1436,7 @@ void customApp( void ) {
                              (uint32_t)rgbTextColor.g << 8 |
                              (uint32_t)rgbTextColor.b;
         b.print( "Fuck    you!", (uint32_t)textColor );
-        showLEDsCore2 = -3;
+        requestLedShow( -3 );
         delayMicroseconds( 200 );
     }
 
@@ -1451,9 +1451,9 @@ void customApp( void ) {
 
     b.clear( );
     b.print( " Tap    Rows!", (uint32_t)0x00140a );
-    showLEDsCore2 = -3;
+    requestLedShow( -3 );
     delay( 100 );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 
     int probeRow = -1;
     int lastProbedRow = 0;
@@ -1498,7 +1498,7 @@ void customApp( void ) {
         removeBridgeFromState( 1, i - 1 );
         addBridgeToState( 1, i );
         refreshLocalConnections( -1, 0 );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
         waitCore2( );
     }
 
@@ -1514,7 +1514,7 @@ void customApp( void ) {
         removeBridgeFromState( 31, i - 1 );
         addBridgeToState( 31, i );
         refreshConnections( -1, 0 );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
         if ( digitalRead( BUTTON_ENC ) == 0 || Serial.available( ) > 0 ) {
             leaveApp( );
             return;
@@ -1694,7 +1694,7 @@ void bounceStartup( void ) {
             break;
     }
     pauseCore2 = 0;
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     waitCore2( );
 }
 
@@ -1751,7 +1751,7 @@ void scanBoard( void ) {
                 break;
             }
 
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
             delay( 3 );
             lastRow = i;
         }
@@ -1834,17 +1834,17 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
     Serial.println( "\n\nI2C Scan Results:" );
     if ( nDevices == 0 ) {
         Serial.println( "No I2C devices found" );
-        showLEDsCore2 = -3;
+        requestLedShow( -3 );
         b.clear( );
         b.print( "No I2C  Found", (uint32_t)0x070003 );
         delayWithButton( 2000 );
         b.clear( );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
     } else {
         Serial.printf( "Found %d I2C device(s)\n", nDevices );
-        showLEDsCore2 = -3;
+        requestLedShow( -3 );
         b.clear( );
-        showLEDsCore2 = -3;
+        requestLedShow( -3 );
         if ( addressesFoundCount == 1 ) {
             b.print( "Found", (uint32_t)0x000b01, (uint32_t)0x000000, 0, 0, 3 );
             b.print( addressToHexString( addressesFound[ 0 ] ), (uint32_t)0x000a05, (uint32_t)0x000000, 1, 1 );
@@ -1853,7 +1853,7 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
             b.print( addressToHexString( addressesFound[ 1 ] ), (uint32_t)0x000808, (uint32_t)0x000000, 1, 1 );
         }
         delayWithButton( 2000 );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
     }
 
     if ( leaveConnections == 0 && sdaRow != -1 && sclRow != -1 ) {
@@ -2460,7 +2460,7 @@ void calibrateDacs( ) {
 
     b.clear( );
     b.print( "Test?", 0x0a0a00, 0x000000, 1, -1, -1 );
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
     int yesNo;
     if ( firstStart == 1 ) {
         yesNo = 1; // yesNoMenu(800);

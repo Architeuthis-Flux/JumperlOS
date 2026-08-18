@@ -477,8 +477,8 @@ static void exitMenuModeForAction( void ) {
 // (node picker, value editors) call this in their wait loops instead.
 static void menuShowKeepalive( unsigned long& lastRequestMs,
                                unsigned long cadenceMs = 50 ) {
-    if ( showLEDsCore2 == 0 && millis( ) - lastRequestMs >= cadenceMs ) {
-        showLEDsCore2 = 2;
+    if ( ledShowIdle( ) && millis( ) - lastRequestMs >= cadenceMs ) {   // T2.2c
+        requestLedShow( 2 );
         lastRequestMs = millis( );
     }
 }
@@ -558,7 +558,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
             // before drawing wires) or the menu text stays on the
             // breadboard underneath the redrawn nets.
             b.clear( );
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             inClickMenu = 0;
             logoRing.enabled = false;
             clearColorOverrides( false, true, false ); // restore depth pads
@@ -568,7 +568,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
             return -2;
         }
 
-        // showLEDsCore2 = 1;
+        // requestLedShow( 1 );
 
         // Serial.print("returnedMenuPosition: ");
         //  Serial.println(returnedMenuPosition);
@@ -611,7 +611,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // before showNets() - a plain positive show draws the wires on top
         // of whatever menu text is still in the buffer.
         b.clear( );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
 
         // Leave the terminal in a known state when the wheel session ends:
         // clear whatever the menu / launched app left on screen and reprint
@@ -924,7 +924,7 @@ static void renderMenuLine( int menuPosition, int menuLevel,
     if ( oledText != nullptr ) {
         oled.clearPrintShow( oledText, 2, true, true, true, -1, -1 );
     }
-    showLEDsCore2 = ledShowMode;
+    requestLedShow( ledShowMode );
 }
 
 // (The Menu FX debug TUI drives the real click menu directly — see
@@ -974,7 +974,7 @@ int getMenuSelection( void ) {
 
     clearAction( );
 
-    // showLEDsCore2 = 2;
+    // requestLedShow( 2 );
     // clearLEDsExceptRails( );
     // Don't set showLEDsCore2 here - buffer not populated with menu text yet
     // It will be set after buffer is updated in the menu loop (firstTime == 1 case)
@@ -1013,7 +1013,7 @@ int getMenuSelection( void ) {
         // animates its V (white -> black -> active color) press indicator,
         // including the per-step replays during hold-to-back.
         if ( encoderButtonState == PRESSED || logoRing.holdStepLengthMs > 0 ) {
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
         }
 
         if ( Serial.getWriteError( ) ) {
@@ -1098,7 +1098,7 @@ int getMenuSelection( void ) {
                 // Serial.flush();
                 delayMicroseconds( 15000 );
                 firstTime = 0;
-                // showLEDsCore2 = 2;
+                // requestLedShow( 2 );
             }
             // currentAction.Category
             resetPosition = true;
@@ -1617,7 +1617,7 @@ int getMenuSelection( void ) {
                 }
             }
 
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
             lastMenuLevel = menuLevel;
             // previousMenuSelection[menuLevel] = menuPosition;
 
@@ -1992,7 +1992,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                 mgr.exitPreview( false, errorMsg ); // Cancel preview
             }
 
-            showLEDsCore2 = 1;
+            requestLedShow( 1 );
             return -1;
         }
         if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) || ProbeButton::getInstance( ).getButtonPress( ) == 2 ) {
@@ -2444,7 +2444,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
             // NET colors on the breadboard, but core2stuff() skips showNets() whenever
             // rails==2 — so =2 would defeat SlotManager::isPreviewMode() and leave the
             // breadboard showing menu text instead of the slot. Use =1 there so nets render.
-            showLEDsCore2 = ( menuType == 3 ) ? 1 : 2;
+            requestLedShow( ( menuType == 3 ) ? 1 : 2 );
             changed = 0;
         }
 
@@ -2485,7 +2485,7 @@ int yesNoMenu( unsigned long timeout ) {
     b.print( "No", noColorBright, 0x0, 5, 1, -1 );
     menuTransitionArm( );
     delay( 100 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     while ( optionSelected == -1 ) {
         jOS.serviceInner( );
@@ -2557,7 +2557,7 @@ int yesNoMenu( unsigned long timeout ) {
             }
             menuTransitionArm( );
 
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
 
             changed = 0;
         }
@@ -2573,7 +2573,7 @@ int selectNodeAction( int whichSelection ) {
     menuTransitionCancel( );
 
     b.clear( );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 
     int nodeSelected = -1;
     int currentlySelecting = whichSelection;
@@ -2640,7 +2640,7 @@ int selectNodeAction( int whichSelection ) {
             b.clear( );
             // Flush the cleared buffer back to nets, otherwise the node-selection
             // overlay lingers on the breadboard after cancelling.
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             rotaryDivider = lastDivider;
             return -1;
         }
@@ -2745,7 +2745,7 @@ int selectNodeAction( int whichSelection ) {
 
             b.clear( );
             showNets( );
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
 
             if ( inNanoHeader == 1 ) {
                 for ( int a = 0; a < 8; a++ ) {
@@ -2798,7 +2798,7 @@ int selectNodeAction( int whichSelection ) {
                                    nodeSelectionColors[ currentlySelecting ] );
                 }
             }
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
             lastShowRequestMs = millis( );
         }
 
@@ -2945,7 +2945,7 @@ float getActionFloat( int menuPosition, int rail ) {
         // Check for cancellation (long press) - check FIRST on every iteration
         if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
             encoderButtonState = IDLE;
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             // Long-press is a "leave the rails wherever the slider was last"
             // exit. The hardware/state still got mutated during the drag,
             // so we still need to record one undo step.
@@ -2980,7 +2980,7 @@ float getActionFloat( int menuPosition, int rail ) {
         // Check for serial cancellation
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             railRecordUndo();
             return roundedCurrentChoice;
         }
@@ -3081,7 +3081,7 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 }
             }
 
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
 
             // Reset encoder-based tracking since we're using probe now
             lastEncoderPosition = encoderPosition;
@@ -3256,7 +3256,7 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
             // Update LED display
             b.clear( 1 );
             b.print( floatString, numberColor, 0xffffff, 0, 1, 1 );
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
 
             // Update serial
             Serial.print( "\r                        \r" );
@@ -3300,7 +3300,7 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 }
             }
 
-            // showLEDsCore2 = 2;
+            // requestLedShow( 2 );
             delayMicroseconds(8000);
             firstTime = 0;
         }
@@ -3388,7 +3388,7 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
     Serial.print( "\r                        \r" );
     Serial.print( intString );
     oled.clearPrintShow( intString, 2, true, true, true );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     unsigned long lastShowRequestMs = millis( );
 
@@ -3486,7 +3486,7 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
                 // Display on OLED
                 oled.clearPrintShow( intString, 2, true, true, true );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             }
         }
     }
@@ -3650,7 +3650,7 @@ String getActionString( int maxLength ) {
     oled.clearPrintShow( oledDisplay, 2, true, true, true );
     Serial.print( "\r                          \r" );
     Serial.println( "Type directly or use encoder. ESC to cancel, Ctrl+Enter to finish." );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     unsigned long lastShowRequestMs = millis( );
 
@@ -3705,7 +3705,7 @@ String getActionString( int maxLength ) {
                     Serial.print( "                        \r" );
 
                     displayStringOnBreadboard( inputString, cursorPos, 0, highlightColor, cursorColor );
-                    showLEDsCore2 = 2;
+                    requestLedShow( 2 );
                 }
                 continue;
             }
@@ -3766,7 +3766,7 @@ String getActionString( int maxLength ) {
                 Serial.print( "                        \r" );
 
                 displayStringOnBreadboard( inputString, cursorPos, 0, highlightColor, cursorColor );
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             }
             continue;
         }
@@ -3817,7 +3817,7 @@ String getActionString( int maxLength ) {
         //         Serial.print(inputString);
         //         Serial.print("                        \r");
         //         displayStringOnBreadboard(inputString, cursorPos, 0, highlightColor, cursorColor);
-        //         showLEDsCore2 = 2;
+        //         requestLedShow( 2 );
         //     }
         //     continue;
         // }
@@ -3912,7 +3912,7 @@ String getActionString( int maxLength ) {
             Serial.print( " " );
             Serial.print( "                        \r" );
 
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
             firstUpdate = false;
             lastEncoderPosition = currentEncoderPosition;
         }
@@ -4038,7 +4038,7 @@ int doMenuAction( int menuPosition, int selection ) {
 
     // printActionStruct( );
     // clearLEDsExceptRails( );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 
     actionCategories currentCategory = getActionCategory( );
 
@@ -4209,7 +4209,7 @@ int doMenuAction( int menuPosition, int selection ) {
     } else if ( currentCategory == RAILSACTION ) { //! Rails
 
         //  Serial.print( "Rails Action\n\r" );
-        showLEDsCore2 = 1;
+        requestLedShow( 1 );
         waitCore2( );
 
         switch ( currentAction.from[ 0 ] ) {
@@ -4240,7 +4240,7 @@ int doMenuAction( int menuPosition, int selection ) {
             break;
         }
         }
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
 
         // State is marked dirty by setRailVoltage() - will auto-save before next reload
         // No need for configChanged - voltages are in state, not config
@@ -4472,7 +4472,7 @@ int doMenuAction( int menuPosition, int selection ) {
         exitMenuModeForAction( );
 
         runApp( -1, (char*)menuLines[ appNameIdx ].c_str( ) );
-        // showLEDsCore2 = -1;
+        // requestLedShow( -1 );
         refreshConnections( -1, 0 );
 
         return 10;
@@ -4552,7 +4552,7 @@ int doMenuAction( int menuPosition, int selection ) {
         // Refresh display after exiting probe mode (negative = clear the
         // probe-mode leftovers out of the buffer before drawing wires)
         b.clear( );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
         oled.showJogo32h( );
 
     } else if ( currentCategory == ROUTINGACTION ) { //! Routing Options
@@ -4641,7 +4641,7 @@ int doMenuAction( int menuPosition, int selection ) {
 
             saveLEDbrightness( 0 );
             showNets( );
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
         } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf(
                         "DEFCON" ) != -1 ) {
 
@@ -4831,7 +4831,7 @@ int doMenuAction( int menuPosition, int selection ) {
         } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf( "Connect" ) != -1 ) {
             if ( oled.checkConnection( ) == 0 ) {
                 jumperlessConfig.top_oled.enabled = 1;
-                showLEDsCore2 = 1;
+                requestLedShow( 1 );
                 oled.init( );
                 oled.clearPrintShow( "OLED Connected", 2, true, true, true );
                 delay( 300 );
@@ -5030,7 +5030,7 @@ char LEDbrightnessMenu( void ) {
                 // Serial.print("\n\r");
                 Serial.flush( );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             } else if ( input2 == '-' ) {
                 LEDbrightness -= 1;
 
@@ -5044,7 +5044,7 @@ char LEDbrightnessMenu( void ) {
                 // Serial.print("\n\r");
                 Serial.flush( );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             } else if ( input2 == 'x' || input2 == ' ' || input2 == 'm' ) {
                 input = ' ';
             } else {
@@ -5054,7 +5054,7 @@ char LEDbrightnessMenu( void ) {
             // for (int i = 8; i <= numberOfNets; i++) {
             //   lightUpNet(i, -1, 1, LEDbrightness, 0);
             // }
-            showLEDsCore2 = 1;
+            requestLedShow( 1 );
 
             if ( Serial.available( ) == 0 ) {
                 Serial.print( "\r                            \r" );
@@ -5091,7 +5091,7 @@ char LEDbrightnessMenu( void ) {
                 // Serial.print("\n\r");
                 Serial.flush( );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             } else if ( input2 == '-' || input2 == '_' ) {
 
                 LEDbrightnessRail -= 1;
@@ -5106,7 +5106,7 @@ char LEDbrightnessMenu( void ) {
                 // Serial.print("\n\r");
                 Serial.flush( );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             } else if ( input2 == 'x' || input2 == ' ' || input2 == 'm' ) {
                 input = ' ';
                 saveLEDbrightness( 0 );
@@ -5145,7 +5145,7 @@ char LEDbrightnessMenu( void ) {
         b.print( "s", menuColors[ 2 ], 0xffffff, 3, 1, 2 );
         b.print( "s", menuColors[ 0 ], 0xffffff, 4, 1, 2 );
 
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         while ( input == 'h' ) {
 
             while ( Serial.available( ) == 0 )
@@ -5171,7 +5171,7 @@ char LEDbrightnessMenu( void ) {
                 b.print( "s", menuColors[ 2 ], 0xffffff, 3, 1, 2 );
                 b.print( "s", menuColors[ 0 ], 0xffffff, 4, 1, 2 );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             } else if ( input2 == '-' ) {
 
                 menuBrightnessSetting -= 5;
@@ -5191,7 +5191,7 @@ char LEDbrightnessMenu( void ) {
                 b.print( "s", menuColors[ 2 ], 0xffffff, 3, 1, 2 );
                 b.print( "s", menuColors[ 0 ], 0xffffff, 4, 1, 2 );
 
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             } else if ( input2 == 'x' ) {
                 input = ' ';
             } else {
@@ -5225,7 +5225,7 @@ char LEDbrightnessMenu( void ) {
                     LEDbrightnessSpecial = 200;
                 }
 
-                // showLEDsCore2 = 2;
+                // requestLedShow( 2 );
             } else if ( input2 == '-' ) {
 
                 LEDbrightnessSpecial -= 1;
@@ -5234,7 +5234,7 @@ char LEDbrightnessMenu( void ) {
                     LEDbrightnessSpecial = 1;
                 }
 
-                // showLEDsCore2 = 2;
+                // requestLedShow( 2 );
             } else if ( input2 == 'x' || input2 == ' ' || input2 == 'm' ) {
                 input = ' ';
                 saveLEDbrightness( 0 );
@@ -5245,7 +5245,7 @@ char LEDbrightnessMenu( void ) {
             for ( int i = 0; i < 8; i++ ) {
                 lightUpNet( i, -1, 1, LEDbrightnessSpecial, 0 );
             }
-            showLEDsCore2 = 1;
+            requestLedShow( 1 );
             if ( Serial.available( ) == 0 ) {
 
                 Serial.print( "Special brightness:  " );
@@ -5287,7 +5287,7 @@ char LEDbrightnessMenu( void ) {
                     LEDbrightnessSpecial = 200;
                 }
 
-                showLEDsCore2 = 1;
+                requestLedShow( 1 );
             } else if ( input2 == '-' ) {
 
                 LEDbrightness -= 1;
@@ -5304,7 +5304,7 @@ char LEDbrightnessMenu( void ) {
                     LEDbrightnessSpecial = 1;
                 }
 
-                showLEDsCore2 = 1;
+                requestLedShow( 1 );
             } else if ( input2 == 'x' || input2 == ' ' || input2 == 'm' ||
                         input2 == 'l' ) {
                 input = ' ';
@@ -5321,7 +5321,7 @@ char LEDbrightnessMenu( void ) {
             for ( int i = 0; i < 6; i++ ) {
                 lightUpNet( i, -1, 1, LEDbrightnessSpecial, 0 );
             }
-            showLEDsCore2 = 1;
+            requestLedShow( 1 );
 
             if ( Serial.available( ) == 0 ) {
 
@@ -5354,7 +5354,7 @@ char LEDbrightnessMenu( void ) {
             //  delay(100);
 
             // clearLEDsExceptRails();
-            // showLEDsCore2 = 1;
+            // requestLedShow( 1 );
 
             // delay(2000);
             // rainbowBounce(3);
@@ -5362,7 +5362,7 @@ char LEDbrightnessMenu( void ) {
         pauseCore2 = 0;
         // showNets();
         // lightUpRail(-1, -1, 1);
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
 
         input = '!'; // this tells the main fuction to reset the leds
     } else if ( input == 'c' ) {
@@ -5373,10 +5373,10 @@ char LEDbrightnessMenu( void ) {
             randomColors( );
             leds.show( );
             delayMicroseconds( random( 500, 80000 ) );
-            showLEDsCore2 = -3;
+            requestLedShow( -3 );
         }
         pauseCore2 = 0;
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
         // delay(100);
         input = '!';
     } else if ( input == 'p' ) {
@@ -5411,12 +5411,12 @@ char LEDbrightnessMenu( void ) {
         showLoss( );
         while ( Serial.available( ) == 0 ) {
         }
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
         return ' ';
     } else {
         saveLEDbrightness( 0 );
         // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-        showLEDsCore2 = 1; // Trigger LED update on core 2
+        requestLedShow( 1 ); // Trigger LED update on core 2
 
         return input;
     }
@@ -5425,7 +5425,7 @@ char LEDbrightnessMenu( void ) {
 
 void showLoss( void ) {
     b.clear( );
-    showLEDsCore2 = -3;
+    requestLedShow( -3 );
     uint32_t guyColor = 0x0a0a1a;
     uint32_t hairColor = 0x1a0902;
     uint32_t nurseColor = 0x1a0207;

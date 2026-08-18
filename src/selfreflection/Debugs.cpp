@@ -3162,7 +3162,7 @@ void action_menuTransitionTuner( void ) {
         delay( 2 );
     }
 
-    showLEDsCore2 = 1; // back to nets
+    requestLedShow( 1 ); // back to nets
     Serial.print( "\033[0m" );
     Serial.println( "\r\nMenu FX tuner exited." );
     Serial.flush( );

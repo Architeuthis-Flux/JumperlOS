@@ -16,17 +16,56 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **HEAD = release `5.7.3.1` (row 57; annotated tag `5.7.3.1`, local) on top of the row-56 fix commit
-  (`ch446.pio` is the source of truth again + an SRAM diet after a heap-abort find — read row 56, it
-  matters); `557203e` = T2.1, the always-on ADC ring (row 55) — the board is flashed with the
-  release build and Kevin felt the pads on T2.1 ("same or better — commit it").** `15db8c0` = docs (row 54),
+- **HEAD = the T2.2c commit after `e795630` (row 59) — `showLEDsCore2` is gone, the LED-show
+  request is `core1req::REQ_SHOW_LEDS`; the board is flashed with it and Kevin confirmed the LED
+  behaviour on hardware ("that all seems to work fine").** `e795630` = the `src/` reorg (row 58),
+  `331dd6b` = release `5.7.3.1` (row 57; annotated tag, local), `8428397` = the `ch446.pio`-truth +
+  SRAM diet fix (row 56 — read it, it matters), `557203e` = T2.1, the always-on ADC ring (row 55).
+  `15db8c0` = docs (row 54),
   `060d52e` = the T3.3 follow-up (row 53), `42bf038` = T3.3 (row 52), `7b5c412` = T3.2 (row 51),
   `6ee9abf` = release 5.7.3.0 (row 50). The tree is clean; nothing has ever been pushed (tag
   `5.7.3.0`/`5.7.3.1` included). `DEV_MERGE_HANDOFF.md` rows 29–57 have every commit with how it
   was verified (one commit per item, hash of each filled in by the next commit — row 57's hash
   goes in with the next). **Kevin is reachable now (Cursor notifications) — ask instead of
-  stopping.** Next up per Kevin: his `src/` folder reorganisation (feature folders; the include
-  path gets them automatically) — then T2.2c `REQ_SHOW_LEDS` → T3.4.
+  stopping.** Next up per the doc's section-D order: **T3.4 (delete `pauseCore2`)** — its
+  blocker (T2.2c) is now done; then T3.1 (the `probeMode` state machine) needs a design round
+  with Kevin.
+- **T2.2c in one paragraph (row 59):** the packed magic-int `showLEDsCore2` (0/±1/2/3/+10, ~270
+  writers) became `core1req::REQ_SHOW_LEDS` — the typed request the old FOLLOW-UP note asked for,
+  with the vocabulary kept: `requestLedShow(1/2/3/-1/12/0)` is the one writer, `ledShowIdle()` /
+  `ledGraphicsOwned()` the readers. Mode bits LED_NETS/MENU/GFX, flags LED_CLEAR/LED_BLOCKING;
+  NETS and GFX are full renders that replace, a MENU flush replaces another MENU but **cannot
+  downgrade a pending NETS/GFX** (the keep-rule is inside `postMode()` under the slot spinlock so
+  core 0's NETS and core 1's own menu-transition mode-2 post can't race). Core 1 takes the request
+  in `core2stuff()` and completes its generation after the show; staged-graphics ownership (the old
+  sticky 3) is a state bit. `X` gained a `leds bits …` mailbox column, a `led frames shown / idle
+  renders` line, and a `led takes` ring log (the last 32 requests core 1 took — the instrument
+  that found the exit bug below).
+- **Three lessons this migration produced (all in-code and here):** (1) **a posted LED show is not
+  "core 2 busy"** — `waitCore2()` waits on the SEND slots only; a first cut that also waited on the
+  LED slot put ~25 ms in front of every `refreshConnections()` (a probe session/menu keeps a show
+  posted almost continuously) and Kevin felt the switch classifier go sluggish within a minute.
+  (2) **the mode-merge rank rule** above — its first cut let a MENU flush downgrade a pending
+  NETS+CLEAR: a menu/probe **exit** posts `requestLedShow(-1)` (clear the board, draw nets) and the
+  press/hold animation posts `requestLedShow(2)` (menu flush) a microsecond later; the flush
+  replaced NETS→MENU while keeping the CLEAR flag, so core 1 cleared the board and flushed an empty
+  buffer — the board stayed **blank until the button released**, and the current ants (they draw
+  inside `showNets()`) froze. The take-log showed the exit's `b09` (nets+clear) being overwritten;
+  the keep-rule fixes it (the exit's nets+clear now survives to a rails-1 render). (3) **the SWD
+  encoder harness is the repro path** for any LED-ordering report: `~/.cursor/skills/jumperless-swd-input`
+  (regen the ADDR table per build from the ELF with `nm`; forge a click by writing
+  `encoderButtonState=RELEASED` with a fresh `buttonEventTimestamp` in one TCL line; a physical
+  hold via GPIO 11 `mww 0xD0000020/0038/0040`), read the `led takes` log in `X`.
+- **Verified (T2.2c):** builds ×3; **Kevin on hardware:** menu exit (hold-to-back and click-out),
+  probe exit, the current ants after each — "all seems to work fine"; `run_all.py` 7/7 twice on the
+  pre-hardening build and 6/7 (the tolerated phantom check) on the flashed build; the SWD take-log
+  shows the exit's nets+clear surviving on the hardened (atomic-`postMode`) build; idle nets renders
+  20.4/s (each ticks the ants); mailbox `leds req N done N` always equal at rest. **A separate,
+  PRE-EXISTING finding (checklist item 1):** the single probe LED (GPIO9, shared with the button
+  sampler) shows a faint measure-green (`0x003600`, case 3) flicker in connect mode — A/B'd on
+  `557203e` (pre-T2.2c) by re-flashing and it is there too, so it is the switch classifier's, not
+  T2.2c's; T2.2c changed no `showProbeLEDs` write. (The commit build differs from the one Kevin
+  eyeballed only by shrinking the take-log 64→32 and moving the keep-rule into `postMode`.)
 - **`src/` was reorganised into feature folders on 2026-08-18 (row 58, Kevin's move):** the main
   files stay at the top level (`main.cpp`, `Probing.cpp`, `CH446Q.cpp`, `Peripherals.cpp`, `LEDs.cpp`,
   `JumperlOS.cpp`, `Commands.cpp`, `SingleCharCommands.cpp`, `configManager.cpp`, `oled.cpp`, `Menus.cpp`,
@@ -1180,6 +1219,13 @@ port 7) is the instrument for most of them.
    0.53 ms (was 10 007 ms) because the stream is DMA; `KICK_WAVEGEN` is fallback-only. What
    remains large is the flash-write family (`run_all` shows ~2.3 s core-0 / ~1.2–1.7 s core-1
    gaps, A/B'd identical on the release build) — the enable's real ceiling.
+13. **T2.2c, the LED-show mailbox (the commit after `e795630`) — you confirmed menu/probe/ants;**
+   the one thing left to eyeball is a graphics app that OWNS the strip (bitmap editor, images, the
+   crossbar self-test app): open it, leave it, and check the breadboard hands back to the nets
+   cleanly (the old sticky-3 ownership is now a state bit; `X`'s mailbox line shows `(gfx owns)`
+   while it holds). Also on the list, PRE-EXISTING (not T2.2c, A/B'd on `557203e`): the probe LED's
+   faint measure-green flicker in connect mode — the switch classifier's (item 1), the GPIO9-shared
+   re-send cadence or a one-frame `showProbeLEDs=3`, not the LED mailbox.
 11. **T2.1, the ADC ring (the commit after `15db8c0`) — you already felt it ("same or better");** the
    remaining checks are the ones the ring changes the *timing* of: the switch classifier's blink
    detector (the tip is dark ~85 µs per check now, was ~40) and the dark pad read (~230 µs, was
@@ -1593,7 +1639,7 @@ exit); the HIL suite covers the routing side only.
 | C10 | OLED frame = 512–1024 B blocking Wire write on core 0, OledGui up to 66 Hz. **On Kevin's rev-7 board the OLED is on I2C0** (`connection_type 2`) at 400 kHz — 12–25 ms per frame, sharing the bus with the INA219s and the DAC | I2C TX via DMA: build the frame's command stream once, `dma_channel_configure(→ &i2cN_hw->data_cmd)` with `DREQ_I2CN_TX`, poll/IRQ completion; `Adafruit_SSD1306::display()` replaced by an async `displayDMA()` for the SSD1306 path | `channel_config_set_dreq(DREQ_I2C0/1_TX)`, i2c `data_cmd` STOP/RESTART bits per word | core-0 blocking per frame 12–25 ms → ~20 µs (**estimated**); a live GUI screen stops eating the loop | medium: I2C error handling (NACK/timeout) mid-DMA; on I2C0 (rev 7) the DMA'd frame needs the I2C0 arbiter (see WaveGen) — the shared-bus gate at `oled.cpp:2245` is a `wavegen.isRunning()` check today | medium (~1 day) — **proposed, not built** (Tier 2, not approved this pass) |
 | C11 | no watchdog | `watchdog_enable(≤8 s)`; kick from `loop()`, `loop1()`, `serviceInner()`, `servicePython()`; stamp a scratch word with the last service index / core-1 state so a WDT reset leaves a trail — on RP2350 `watchdog_hw->scratch[3]` is free (`CrashLog.cpp:29-32` uses POWMAN 0–7 + watchdog 0–2), on the OG/RP2040 CrashLog owns watchdog 2–3 (`:37-45`) so gate the stamp V5-only or pick per platform; **first ship measure-only** (max gap between kicks in `X`) | `watchdog_enable`, `watchdog_update`, `watchdog_caused_reboot`, `watchdog_hw->scratch` | a wedged board reboots instead of sitting dead; post-mortem of what it was doing | medium: legitimate long blockers (self-test, calibration, file ops, MicroPython) must kick or the timeout must exceed them — the measure-only stage finds them | small + a soak |
 | C12 | `millis()` gates everywhere | `time_us_32()` deadlines with wraparound-safe compares (B3) | — | µs resolution, no 1 ms quantisation | nil | with B3 |
-| C13 | flags + `waitCore2()` | core-1 request mailbox + generation counter (D) | spinlock-guarded bitmask | replaces ~10 flags and the 25 ms guess | medium | see D |
+| C13 | flags + `waitCore2()` | core-1 request mailbox + generation counter (D) | spinlock-guarded bitmask | replaces ~10 flags and the 25 ms guess | medium | **REQ_SEND (T2.2b) + REQ_SHOW_LEDS (T2.2c) done; pauseCore2 is T3.4** |
 | C14 | WaveGen ≥1 kHz owns core 1 by synchronous per-sample I2C writes | I2C0 TX DMA from a pre-built command image, paced by a DMA timer (`dma_timer_claim`, `DREQ_DMA_TIMERn`) or by bus rate; core 1 free; needs an I2C0 arbiter (INA/DAC setters/OLED-on-I2C0 wait or fail fast while streaming — they already skip on `isRunning()`) | `dma_timer_claim`, `dma_timer_set_fraction`, `channel_config_set_dreq(dma_get_timer_dreq)`, `i2c0_hw->data_cmd` | LED frames and crossbar sends work while a waveform streams (today the crossbar diverges from the netlist until streaming stops, `Commands.cpp:208-230`) | high: MCP4728 command framing per sample, mid-stream STOP/RESTART, arbitration with core-0 I2C0 users, waveform pacing accuracy | large (3+ days) — **Tier 3; built 2026-08-18 as T3.3 (section 0): image + address ring + divider on a pacing timer, exact frequency, the arbiter is a linker wrap on the two SDK I2C entry points** |
 | C15 | `readAdcVoltage(6,4)` supply sense on core 1 every 1 s | a ring consumer (C1) | — | one less lock holder | nil | with C1 |
 | C16 | `pauseCore2` (soft LED-frame hint; hard park is FlashPark) | delete once C13 + the flash-write frame abort are expressed as a request ("HOLD_FRAMES until gen") | — | one less global; frame aborts become explicit | medium (nested pause semantics in `pauseCore2ForFlash`) | Tier 3 — **not built** |
@@ -1635,7 +1681,7 @@ core 0; the LED strip SM/DMA = core 1; I2C1 (OLED on connection types 0/1/3) = c
 with `REQ_SEND_PATHS` only, `waitCore2()` re-implemented on `doneGen` **in place** — its ~40
 call sites (`grep -rn "waitCore2("` across Commands, Apps, SelfTest, States, FakeGpio, Menus,
 Probing …) stay untouched (behaviour-identical, measurable by the tap→crossbar probe in F);
-(3) `REQ_SHOW_LEDS`; (4) `REQ_PROBE_LED` or C5; (5) `pauseCore2` last.
+(3) `REQ_SHOW_LEDS` (**done, T2.2c**); (4) `REQ_PROBE_LED` or C5; (5) `pauseCore2` last (T3.4 - its blocker is now clear).
 
 ## E. Roadmap (sized honestly; status per section 0)
 
@@ -1663,8 +1709,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 **Tier 2 — medium (1–2 days each)**
 - T2.1 C1 always-on ADC ring (`readAdc` = ring read; audio = consumer) — **approved**. **Built 2026-08-18 (section 0).**
 - T2.2 D2/D3 core-1 mailbox: `REQ_SEND_PATHS` first, then `REQ_SHOW_LEDS` — **approved**.
-  **`REQ_SEND_PATHS` landed 2026-08-17 (section 0, with the latency probe); `REQ_SHOW_LEDS`
-  is its own later commit.**
+  **`REQ_SEND_PATHS` landed 2026-08-17 (T2.2b); `REQ_SHOW_LEDS` landed 2026-08-18 (T2.2c, row 59).**
 - T2.3 C2a CH446Q DMA→FIFO + ISR chip list (non-blocking `sendPaths`) — **approved**.
   **Landed 2026-08-17 (section 0).**
 - T2.4 C5 the combined GPIO 9 PIO program (needs scope time with Kevin) — **next session's opener**.

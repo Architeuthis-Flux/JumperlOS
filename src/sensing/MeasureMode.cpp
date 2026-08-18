@@ -26,9 +26,6 @@
 extern JumperlessState globalState;
 extern class oled oled;
 extern volatile unsigned long lastProbeCurrentCheckTime;
-extern volatile int showLEDsCore2;
-
-// ============================================================================
 // Singleton Implementation
 // ============================================================================
 
@@ -326,7 +323,7 @@ void MeasureMode::stopMeasurement() {
 #endif
         }
     }
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
 }
 
 // ============================================================================

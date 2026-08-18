@@ -24,9 +24,6 @@
 
 // External references
 extern class oled oled;
-extern volatile int showLEDsCore2;
-
-// eKilo editor integration
 #include "EkiloEditor.h"
 
 // Bitmap editor integration
@@ -34,6 +31,7 @@ extern volatile int showLEDsCore2;
 
 // States integration for slot file preview
 #include "States.h"
+#include "Commands.h"   // requestLedShow() (T2.2c)
 
 // Global flag to signal return to main menu after editing
 static bool returnToMainMenu = false;
@@ -466,7 +464,7 @@ void FileManager::updateOLEDStatus( ) {
         b.clear( );
         b.print( topLine.c_str( ), 0x001008, 0xFFFFFF, 0, 0, 1 );   // top row
         b.print( bottomLine.c_str( ), 0x100810, 0xFFFFFF, 0, 1, 1 ); // bottom row
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         // Fall through to still update the OLED normally
     }
 
@@ -2706,7 +2704,7 @@ String pickPythonScriptFromClickMenu( ) {
     // run loop no longer clears inClickMenu mid-session - it's owned here.)
     inClickMenu = false;
     b.clear( );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 
     return selectedPath;
 }

@@ -50,7 +50,8 @@ namespace core1req {
 enum Slot : uint8_t {
     REQ_SEND = 0,
     REQ_BYPASS = 1,
-    SLOT_COUNT = 2
+    REQ_SHOW_LEDS = 2,   // T2.2c: the LED-show request (was the showLEDsCore2 int, see LEDs.h requestLedShow)
+    SLOT_COUNT = 3
 };
 
 // REQ_SEND bits
@@ -59,10 +60,38 @@ enum : uint32_t {
     SEND_CLEAN = 1u << 1, // reset the crossbar first; sticky until served
 };
 
+// REQ_SHOW_LEDS bits. The MODE is one of NETS / MENU / GFX; the flags COALESCE
+// like SEND_CLEAN (a clear-first or a blocking request is never downgraded).
+// Mode merge (in requestLedShow, not here): NETS and GFX are FULL renders and
+// replace whatever is pending; a MENU flush replaces another MENU but does NOT
+// downgrade a pending NETS/GFX (else a menu/probe exit's nets-and-clear is lost
+// to the press-animation's flush landing a microsecond later - blank board).
+enum : uint32_t {
+    LED_NETS     = 1u << 0,  // was 1: full render (nets, animations, overlays) + show
+    LED_MENU     = 1u << 1,  // was 2: menu text flush / plain show (immediate, no scheduler tick)
+    LED_GFX      = 1u << 2,  // was 3: staged graphics own the strip (immediate; ownership sticks - LEDs.h ledGraphicsOwned())
+    LED_MODE_MASK = LED_NETS | LED_MENU | LED_GFX,
+    LED_CLEAR    = 1u << 3,  // was a negative value: clearLEDsExceptRails() before the render
+    LED_BLOCKING = 1u << 4,  // was +10: leds.showBBBlocking() - an atomic frame
+};
+
 // Core 0 (or 1): OR `bits` into the slot, bump its request generation.
 // Returns the generation to wait for with isDone(). Cheap; never blocks
 // beyond the other core's few-instruction critical section.
 uint32_t post( Slot s, uint32_t bits );
+
+// Like post(), but the bits under `replaceMask` are REPLACED by `modeBits`
+// (the rest OR-ed): for slots whose request has a mode that must not
+// coalesce with an older one (REQ_SHOW_LEDS). modeBits == 0 with no other
+// bits = cancel the pending mode; if nothing is left pending the slot is
+// marked done so no waiter hangs on it.
+//
+// keepIfPresentMask: if any of these bits is ALREADY pending, `modeBits` is
+// dropped (only `orBits` is applied). This is the atomic form of "a MENU
+// flush must not downgrade a pending NETS/GFX render" - done here under the
+// slot spinlock so core 0's post and core 1's own mode-2 post (the menu
+// transition pacer) can't race a snapshot-then-post check. 0 = no such rule.
+uint32_t postMode( Slot s, uint32_t replaceMask, uint32_t modeBits, uint32_t orBits, uint32_t keepIfPresentMask );
 
 // Any bit pending in the slot? (does not clear anything)
 bool pending( Slot s );
@@ -83,7 +112,10 @@ bool isDone( Slot s, uint32_t gen );
 // Nothing pending and nothing in flight in this slot.
 bool idle( Slot s );
 
-// Nothing pending or in flight in any slot (what waitCore2() waits for).
+// Nothing pending or in flight in the two SEND slots (the crossbar is
+// quiet: RouteSafety, the net-voltage scan, the LED branch's "a pending
+// path send goes first" all mean this). The LED slot is deliberately NOT
+// in it - a show is always pending somewhere; waitCore2() adds it itself.
 bool allIdle( void );
 
 // Diagnostics (X): bits pending, request gen, done gen.

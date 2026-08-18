@@ -2175,7 +2175,7 @@ void __not_in_flash_func(showLEDmeasurements)( void ) {
             adcReadingColors[ i ] = color;
             
             // drawWires(showADCreadings[0]);
-            // showLEDsCore2 = 2;
+            // requestLedShow( 2 );
         }
     }
     
@@ -3323,7 +3323,7 @@ void VoltageAdjuster::updateDisplay(float value, uint32_t color, const VoltageAd
     snprintf(valueText, sizeof(valueText), "%0.1f V", value);
     ReadingDisplay::show(config.label, -1, valueText);
 
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 }
 
 bool VoltageAdjuster::isInLiveRange(float value, const VoltageAdjustConfig& config) {
@@ -3366,7 +3366,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
     
     // CRITICAL: Use blocking LED update for atomic display (flag + 10 = blocking)
     // This prevents flickering from partial updates (clear + text)
-    showLEDsCore2 = 12;  // 12 = blocking mode (menu display)
+    requestLedShow( 12 );  // 12 = blocking mode (menu display)
     
     // If we have a callback and we're in live range, call it immediately
     if (config.callback && isInLiveRange(currentValue, config)) {
@@ -3404,7 +3404,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
             
             // CRITICAL: Use blocking LED update for atomic display (flag + 10 = blocking)
             // Prevents flickering from showing partial text/graphics
-            showLEDsCore2 = 12;  // 12 = blocking mode (menu display)
+            requestLedShow( 12 );  // 12 = blocking mode (menu display)
             
             // Call callback for preview
             if (config.callback) {
@@ -3430,7 +3430,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
             
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             b.clear();
             Menus::getInstance().inClickMenu = 0;
             return AdjustResult::CANCELLED;
@@ -3439,7 +3439,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
         // Check for confirmation (short press)
         if ((encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED) || probeButton.getButtonState() == 2) {
             encoderButtonState = IDLE;
-            //showLEDsCore2 = -1;
+            //requestLedShow( -1 );
             // Final update with callback if not already in live range
             // if (config.callback && !isInLiveRange(currentValue, config)) {
             //     config.callback(currentValue, false, config.context);
@@ -3449,7 +3449,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
             config.initialValue = currentValue; // Update config with new value
             Menus::getInstance().inClickMenu = 0;
             b.clear();
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             
             return AdjustResult::CONFIRMED;
         }
@@ -3465,7 +3465,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
             
 
             b.clear();
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             return AdjustResult::CANCELLED;
         }
         
@@ -3591,7 +3591,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
             
             // CRITICAL: Use blocking LED update for atomic display (flag + 10 = blocking)
             // Prevents flickering from showing partial voltage bar/text
-            showLEDsCore2 = 12;  // 12 = blocking mode (menu display)
+            requestLedShow( 12 );  // 12 = blocking mode (menu display)
             
             // ALWAYS call callback for preview (both live and non-live)
             // Pass ROUNDED value to hardware/state

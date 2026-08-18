@@ -141,6 +141,13 @@ unsigned long dumpLEDTimer = 0;
 unsigned long dumpLEDrate = 250;
 // LED-dump mode (T1.10): core 1 only raises this after a frame is shown; the
 // terminal dump itself - USB CDC writes - runs on core 0 (PortHousekeeping).
+volatile uint32_t ledFramesShown = 0;      // T2.2c diag: leds.show() from the LED branch
+volatile uint32_t ledIdleFramesShown = 0;  // ... of which swirl-only (no request) renders
+// T2.2c diag: the last 16 LED requests core 1 took - what was taken, what it
+// did (X prints them). bits: taken bits; rails; menu = inClickMenu|inPadMenu<<1;
+// shown = leds.show() ran; t = ms.
+volatile LedTakeLog ledTakeLog[ 32 ];
+volatile uint8_t ledTakeLogIdx = 0;
 volatile bool ledDumpFrameReady = false;
 
 #include "FirmwareVersion.generated.h"
@@ -998,7 +1005,6 @@ dontshowmenu:
         // DEBUG: Check Core 2 state
         if ( printLoop ) {
             extern volatile bool core2busy;
-            extern volatile int showLEDsCore2;
             uint32_t sendBits = 0;
             core1req::snapshot( core1req::REQ_SEND, &sendBits, nullptr, nullptr );
             Serial.write( 'C' );
@@ -1008,7 +1014,7 @@ dontshowmenu:
             Serial.write( ',' );
             Serial.print( (int)sendBits );
             Serial.write( ',' );
-            Serial.print( showLEDsCore2 );
+            Serial.print( (int)ledShowPendingBits( ) );
             Serial.write( ']' );
             yield( );
         }
@@ -1605,7 +1611,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 #if DEBUG_DISABLE_CORE2_PROCESSING
     // Skip all Core 2 processing for crash debugging
     // If crash stops when this is enabled, the bug is in Core 2 code
-    showLEDsCore2 = 0;
+    requestLedShow( 0 );
     return;
 #endif
 
@@ -1670,44 +1676,51 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 
     // Pace menu frame transitions: when the engine says the next blend frame
     // is due, request a menu flush. This MUST live up here, checked every
-    // iteration — the LED branch below only executes when showLEDsCore2 is
-    // already set or a logo swirl ticked, so a re-trigger placed inside it
+    // iteration — the LED branch below only executes when a show is
+    // already requested or a logo swirl ticked, so a re-trigger placed inside it
     // got paced by the 51ms swirl timer instead of MT_FRAME_MS (visibly
     // choppy transitions).
-    if ( inClickMenu == 1 && showLEDsCore2 == 0 && menuTransitionFrameDue( ) ) {
-        showLEDsCore2 = 2;
+    if ( inClickMenu == 1 && ledShowIdle( ) && menuTransitionFrameDue( ) ) {
+        requestLedShow( 2 );
     }
 
-    // Check for negative values (clear before show)
-    // Also preserve blocking mode flag (>= 10) through the abs() operation
+    // T2.2c: the LED-show request lives in the mailbox (REQ_SHOW_LEDS). PEEK
+    // it here (a peek is not a take): the mode decides whether this pass runs
+    // now (menu flush / staged graphics: immediately, no scheduler tick) or on
+    // the tick (nets); the flags carry clear-first and blocking exactly as the
+    // old int's sign and +10 did. Staged graphics' "3 keeps control of the
+    // LEDs" is the ledGraphicsOwned() state: while it holds and nothing new is
+    // requested, this branch does nothing and the logo does not swirl - what
+    // the sticky 3 did.
+    uint32_t ledBits = 0;
+    core1req::snapshot( core1req::REQ_SHOW_LEDS, &ledBits, nullptr, nullptr );
+    const bool ledPending  = ( ledBits & core1req::LED_MODE_MASK ) != 0;
+    const bool ledImmediate = ( ledBits & ( core1req::LED_MENU | core1req::LED_GFX ) ) != 0;
     bool useBlockingMode = false;
-    if ( showLEDsCore2 < 0 ) {
-        showLEDsCore2 = abs( showLEDsCore2 );
-        // Serial.println("clearBeforeSend = 1");
-        clearBeforeSend = 1;
-    }
-
-    // Check for blocking mode flag (values >= 10)
-    if ( showLEDsCore2 >= 10 ) {
-        useBlockingMode = true;
-        showLEDsCore2 -= 10; // Normalize to regular value (10->0, 11->1, 12->2, etc)
-    }
 
     // Run the LED block immediately (don't wait for the 8ms scheduler tick) for the
     // interactive modes 2 (menu text flush) and 3 (staged graphics). Modes 4/5/6
     // were never written by any code and have been removed.
-    if ( micros( ) - schedulerTimer > schedulerUpdateTime || showLEDsCore2 == 3 || showLEDsCore2 == 2 ) {
+    if ( micros( ) - schedulerTimer > schedulerUpdateTime || ledImmediate ) {
 
-        // (a pending path send goes first: the LED branch waits for the mailbox
-        // to be idle, exactly as it waited for sendAllPathsCore2 == 0)
-        if ( ( ( ( showLEDsCore2 >= 1 && loadingFile == 0 ) || showLEDsCore2 == 3 ||
-                 ( swirled == 1 ) && core1req::allIdle( ) ) ) &&
+        // (a pending path send goes first: the LED branch waits for the SEND
+        // slots to be idle, exactly as it waited for sendAllPathsCore2 == 0)
+        if ( ( ( ledPending && ( loadingFile == 0 || ( ledBits & core1req::LED_GFX ) ) ) ||
+               ( swirled == 1 && !ledGraphicsOwned( ) ) ) &&
              core1req::allIdle( ) ) {
 
-            // Capture the current value to process, but don't clear it yet
-            // This prevents race conditions where menu code sets it again during processing
-            int rails =
-                showLEDsCore2; // 3 doesn't show nets and keeps control of the LEDs
+            // Take the request now (its bits are cleared; anything posted while
+            // we render stays pending for the next pass - the old
+            // compare-and-swap clear, done by the mailbox). No request = a
+            // swirl-only pass, which renders exactly as the old rails == 0 did.
+            uint32_t ledGen = 0;
+            uint32_t taken = ledPending ? core1req::take( core1req::REQ_SHOW_LEDS, &ledGen ) : 0;
+            int rails = 0;   // 3 doesn't show nets and keeps control of the LEDs
+            if ( taken & core1req::LED_GFX )       rails = 3;
+            else if ( taken & core1req::LED_MENU ) rails = 2;
+            else if ( taken & core1req::LED_NETS ) rails = 1;
+            if ( taken & core1req::LED_CLEAR )    clearBeforeSend = 1;
+            if ( taken & core1req::LED_BLOCKING ) useBlockingMode = true;
 
             if ( rails != 3 ) {
                 core2busy = true;
@@ -1867,6 +1880,8 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     }
                 }
                 lastForcedShow = millis( );
+                ledFramesShown++;         // X: strip frames shown by this branch (idle renders + requests)
+                if ( rails == 0 ) ledIdleFramesShown++;
                 ledDumpFrameReady = true; // LED-dump mode: core 0 may dump this frame
                 xbarLatShow( );           // latency probe: first show after a send (XbarLatency.h)
 
@@ -1877,17 +1892,23 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 core2busy = false;
             }
 
-            // Only clear showLEDsCore2 if it hasn't been set again during processing
-            // This prevents race conditions where menu rapidly sets it multiple times
-            if ( rails != 3 && swirled == 0 ) {
-                // Compare-and-swap: only clear if value hasn't changed since we captured it
-                if ( showLEDsCore2 == rails ) {
-                    showLEDsCore2 = 0;
+            // The request we took is done (a show posted while we rendered is
+            // still pending in the slot and runs next pass). A staged-graphics
+            // request is done too - its ownership persists as state, not as a
+            // pending request.
+            if ( taken ) {
+                core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                uint8_t menuBits = (uint8_t)( ( inClickMenu ? 1 : 0 ) | ( inPadMenu ? 2 : 0 ) );
+                uint8_t prev = (uint8_t)( ( ledTakeLogIdx + 31 ) & 31 );
+                if ( ledTakeLog[ prev ].t != 0 && ledTakeLog[ prev ].bits == (uint8_t)taken && ledTakeLog[ prev ].rails == (uint8_t)rails &&
+                     ledTakeLog[ prev ].menu == menuBits && ledTakeLog[ prev ].shown == ( needsLedShow ? 1 : 0 ) ) {
+                    ledTakeLog[ prev ].repeats++;
+                } else {
+                    uint8_t k = ledTakeLogIdx;
+                    ledTakeLog[ k ].t = millis( ); ledTakeLog[ k ].bits = (uint8_t)taken; ledTakeLog[ k ].rails = (uint8_t)rails;
+                    ledTakeLog[ k ].menu = menuBits; ledTakeLog[ k ].shown = needsLedShow ? 1 : 0; ledTakeLog[ k ].repeats = 0;
+                    ledTakeLogIdx = (uint8_t)( ( k + 1 ) & 31 );
                 }
-                // If showLEDsCore2 != rails, it means it was set again during our processing
-                // Leave it alone so it gets processed on the next iteration
-
-                // delayMicroseconds(3200);
             }
 
             // (Menu transition frames are re-triggered by the paced check at
@@ -1912,7 +1933,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             }
             t[ 19 ] = micros( );
         } else if ( millis( ) - lastSwirlTime > 51 && loadingFile == 0 &&
-                    showLEDsCore2 == 0 && core1busy == false ) {
+                    ledShowIdle( ) && core1busy == false ) {
 
             lastSwirlTime = millis( );
 
@@ -1926,7 +1947,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 countsss++;
             }
 
-            if ( showLEDsCore2 == 0 && !wavegen.isRunning( ) ) {
+            if ( ledShowIdle( ) && !wavegen.isRunning( ) ) {
                 swirled = 1; // only swirl when wavegen not streaming
             }
 

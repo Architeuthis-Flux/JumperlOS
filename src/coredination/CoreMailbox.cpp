@@ -30,6 +30,30 @@ uint32_t post( Slot s, uint32_t bits ) {
     return gen;
 }
 
+uint32_t postMode( Slot s, uint32_t replaceMask, uint32_t modeBits, uint32_t orBits, uint32_t keepIfPresentMask ) {
+    SlotState& st = s_slot[ s ];
+    uint32_t save = spin_lock_blocking( lock( ) );
+    // Keep a stronger pending mode: if any keepIfPresentMask bit is already
+    // set, this post only coalesces its flags (orBits), it does not replace
+    // the mode. (A MENU flush cannot downgrade a pending NETS/GFX render.)
+    if ( keepIfPresentMask && ( st.bits & keepIfPresentMask ) ) {
+        st.bits |= orBits;
+    } else {
+        st.bits = ( st.bits & ~replaceMask ) | modeBits | orBits;
+    }
+    uint32_t gen;
+    if ( st.bits == 0 ) {
+        // a cancel that left nothing pending: nothing for core 1 to do, so
+        // whatever was requested is "done" from a waiter's point of view
+        gen = st.reqGen;
+        if ( (int32_t)( gen - st.doneGen ) > 0 ) st.doneGen = gen;
+    } else {
+        gen = ++st.reqGen;
+    }
+    spin_unlock( lock( ), save );
+    return gen;
+}
+
 bool pending( Slot s ) {
     __dmb( );
     return s_slot[ s ].bits != 0;
@@ -69,7 +93,7 @@ bool idle( Slot s ) {
 }
 
 bool allIdle( void ) {
-    return idle( REQ_SEND ) && idle( REQ_BYPASS );
+    return idle( REQ_SEND ) && idle( REQ_BYPASS );   // the SEND slots only - see the header
 }
 
 void snapshot( Slot s, uint32_t* bits, uint32_t* reqGen, uint32_t* doneGen ) {

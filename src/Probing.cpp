@@ -1388,15 +1388,13 @@ static int nodeToLogoPadConfig( int node, int fallbackConfig ) {
 ///   3. Wait for completion: waitForBlockingDisplay()
 ///   4. Enter blocking loop (menu now guaranteed visible)
 static bool waitForBlockingDisplay( uint32_t timeoutMs = 100 ) {
-    extern volatile int showLEDsCore2;
-
     uint32_t waitStart = millis( );
-    while ( showLEDsCore2 != 0 && ( millis( ) - waitStart ) < timeoutMs ) {
+    while ( !ledShowIdle( ) && ( millis( ) - waitStart ) < timeoutMs ) {   // T2.2c: the LED slot idle = shown
         tight_loop_contents( ); // Yield to Core 2, hint to CPU we're spinning
     }
 
     // Return true if Core 2 finished, false if timeout
-    return ( showLEDsCore2 == 0 );
+    return ledShowIdle( );
 }
 
 // ============================================================================
@@ -1685,7 +1683,7 @@ void Probing::handleEncoderCursorNavigation(
                 Highlighting::getInstance( ).clearHighlighting( );
                 clearLEDsExceptRails( );
                 b.clear( );
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
                 clearColorOverrides( 1, 1, 0 );
 
                 // Clear inPadMenu when leaving special function zones
@@ -1942,7 +1940,7 @@ void Probing::handleEncoderCursorNavigation(
 
             // 8. NOW update LEDs atomically - unpause and trigger update
             // pauseCore2 = 0;    // Unpause Core 2
-            // showLEDsCore2 = 2; // Trigger single atomic update
+            // requestLedShow( 2 ); // Trigger single atomic update
 
             // ========== END ATOMIC UPDATE ==========
 
@@ -1960,7 +1958,7 @@ void Probing::handleEncoderCursorNavigation(
                 }
             }
 
-            // showLEDsCore2 = 2;
+            // requestLedShow( 2 );
         }
 
         lastEncoderPosition = currentEncoderPosition;
@@ -1991,7 +1989,7 @@ void Probing::handleEncoderCursorNavigation(
         lastCursorZone = -1;
         globalEncoderCursorNode = -1; // Clear global
         globalEncoderCursorInHeader = 0;
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
     }
     rotaryEncoderButtonStuff();
 
@@ -2011,7 +2009,7 @@ void Probing::handleEncoderCursorNavigation(
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE; // Set to IDLE to prevent menu trigger on release
                                            // Trigger cursor redraw on next iteration
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
         }
     }
 
@@ -2086,7 +2084,7 @@ void Probing::handleEncoderCursorNavigation(
             setLogoOverride( DAC_0, -2 );
             setLogoOverride( DAC_1, -2 );
             // clearLEDsExceptRails( );
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
             return; // Early return for DAC adjustment
         } else if ( cursorZone == ZONE_ADC ) {
             const int adcMap[ 6 ] = { ADC0, ADC1, ADC2, ADC3, ADC4, ADC7 };
@@ -2147,7 +2145,7 @@ void Probing::handleEncoderCursorNavigation(
             probeButton.clearButtonState( );
             blockProbeButton = 100;
             blockProbeButtonTimer = millis( );
-            showLEDsCore2 = -1;
+            requestLedShow( -1 );
         }
 
         // If we selected from special function zone, reset to row 15 breadboard for next selection
@@ -2169,7 +2167,7 @@ void Probing::handleEncoderCursorNavigation(
         // Clear breadboard display and continue to normal probe processing
         // clearLEDsExceptRails( );
 
-        //showLEDsCore2 = -1;
+        //requestLedShow( -1 );
 
         // Continue to normal probe processing below
     } else {
@@ -2207,7 +2205,7 @@ void Probing::handleEncoderCursorNavigation(
         // Clear inPadMenu flag
         inPadMenu = 0;
 
-        showLEDsCore2 = -2; // Update LEDs to show cleared state
+        requestLedShow( -2 ); // Update LEDs to show cleared state
     }
 
     // ======= END ENCODER SELECTION =======
@@ -2384,7 +2382,7 @@ restartProbingNoPrint:
 
     connectOrClearProbe = setOrClear;
 
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
     unsigned long doubleSelectTimeout = millis( );
     int doubleSelectCountdown = 0;
 
@@ -2685,7 +2683,7 @@ restartProbingNoPrint:
                 // numberOfLocalChanges = 0;
                 }
             }
-            // showLEDsCore2 = -1;
+            // requestLedShow( -1 );
 
         } else {
             if ( millis( ) - fadeTimer > 12 ) {
@@ -2713,7 +2711,7 @@ restartProbingNoPrint:
                     int fadeOffset = map( i, 0, deleteMissesIndex, 0, 12 ) + fadeFloor;
                     if ( fadeOffset > 12 ) {
                         fadeOffset = 12;
-                        // showLEDsCore2 = -1;
+                        // requestLedShow( -1 );
                     }
                     // clearLEDsExceptMiddle(deleteMisses[i], -1);
 
@@ -2724,14 +2722,14 @@ restartProbingNoPrint:
                     // b.printRawRow(0b00001010, deleteMisses[i] - 1, deleteFadeSides[fadeOffset], 0xfffffe);
                     b.printRawRow( 0b00000100, deleteMisses[ i ] - 1, deleteFade[ fadeOffset ],
                                    0xfffffe );
-                   // showLEDsCore2 = 2;
+                   // requestLedShow( 2 );
                 }
 
                 if ( deleteMissesIndex == 0 && fadeClear == 0 ) {
                     fadeClear = 1;
                     // Serial.println( "fadeClear = 1" );
                     // Serial.flush( );
-                    // showLEDsCore2 = -1;
+                    // requestLedShow( -1 );
                     if ( numberOfLocalChanges > 0 ) {
                         // saveLocalNodeFile( netSlot );
                         // Serial.print("\n\r");
@@ -2799,7 +2797,7 @@ restartProbingNoPrint:
             // Serial.println("probingTimer = " + String(probingTimer));
             // Serial.println("probeButtonTimer = " + String(probeButtonTimer));
             // Serial.println("probeHighlight = " + String(probeHighlight));
-            // Serial.println("showLEDsCore2 = " + String(showLEDsCore2));
+            // (a debug print of the old LED flag lived here)
             // Serial.println("connectedRowsIndex = " + String(connectedRowsIndex));
             // Serial.println("--------------------------------\n\r1\n\r2\n\r3\n\r4\n\r5\n\r");
             // Serial.flush( );
@@ -2817,7 +2815,7 @@ restartProbingNoPrint:
                     blockProbeButton = 8000;
                     blockProbeButtonTimer = millis( );
                     probeHighlight = -1;
-                    showLEDsCore2 = -1;
+                    requestLedShow( -1 );
                     // connectionsThisSession = 0;
                     Serial.print( "\x1b[2K\r" ); // Clear the line and return cursor to start
 
@@ -2841,7 +2839,7 @@ restartProbingNoPrint:
                     //           lastProbedRows[0] = -1;
                     // lastProbedRows[1] = -1;
                     // clearLEDsExceptRails();
-                    showLEDsCore2 = 1;
+                    requestLedShow( 1 );
                     node1or2 = 0;
 
                     // Serial.println("-18 connectionsThisSession = " + String(connectionsThisSession) + "\n\n\n\n\n\r");
@@ -2878,7 +2876,7 @@ restartProbingNoPrint:
 
                         probeHighlight = -1;
                         // clearLEDsExceptRails();
-                        showLEDsCore2 = -2;
+                        requestLedShow( -2 );
                         // waitCore2();
 
                         // Serial.println("-16 setOrClear == 1\n\r");
@@ -2906,7 +2904,7 @@ restartProbingNoPrint:
                     blockProbeButtonTimer = millis( );
                     probeButtonTimer = millis( );
                     // showNets();
-                    // showLEDsCore2 = 1;
+                    // requestLedShow( 1 );
                     sfProbeMenu = 0;
                     connectedRowsIndex = 0;
                     connectedRows[ 0 ] = -1;
@@ -2927,7 +2925,7 @@ restartProbingNoPrint:
                         //   Serial.print("    ");
                         //  Serial.println(map(i, 0,deleteMissesIndex, 0, 19));
                     }
-                    // showLEDsCore2 = 1;
+                    // requestLedShow( 1 );
                     if ( connectionsThisSession == 0 && bannerEmitted ) {
                         Serial.print( "\x1b[3A\x1b[0J" ); // rewind 3 banner lines
                         Serial.flush( );
@@ -2957,7 +2955,7 @@ restartProbingNoPrint:
             nodesToConnect[ 0 ] = -1;
             nodesToConnect[ 1 ] = -1;
             probeHighlight = -1;
-            // showLEDsCore2 = -1;
+            // requestLedShow( -1 );
             break;
         } else {
             // probingTimer = millis();
@@ -3027,28 +3025,28 @@ restartProbingNoPrint:
                     // probeConnectHighlight = nodesToConnect[node1or2];
                     //  Serial.print("probeConnectHighlight = ");
                     //  Serial.println(probeConnectHighlight);
-                    // showLEDsCore2 = 2;
+                    // requestLedShow( 2 );
                         showProbeLEDs = 11;
                     // // b.clear();
                     b.printRawRow( 0b0010001, nodesToConnect[ node1or2 ] - 1, 0x000121e,
                                    0xfffffe );
-                    showLEDsCore2 = 2;
+                    requestLedShow( 2 );
                     delay( 40 );
                     b.printRawRow( 0b00001010, nodesToConnect[ node1or2 ] - 1, 0x0f0498,
                                    0xfffffe );
-                    showLEDsCore2 = 2;
+                    requestLedShow( 2 );
                     delay( 40 );
 
                     b.printRawRow( 0b00000100, nodesToConnect[ node1or2 ] - 1, 0x4000e8,
                                    0xfffffe );
-                    showLEDsCore2 = 2;
+                    requestLedShow( 2 );
                      delay( 60 );
-                     showLEDsCore2 = 2;
+                     requestLedShow( 2 );
                 }
 
                 node1or2++;
                 probingTimer = millis( );
-                //showLEDsCore2 = 1;
+                //requestLedShow( 1 );
                 doubleSelectTimeout = millis( );
                 doubleSelectCountdown = 200;
                 // delay(500);
@@ -3142,7 +3140,7 @@ restartProbingNoPrint:
                         addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
                         numberOfLocalChanges++;
                         // refreshConnections(1, 1, 0);
-                        // showLEDsCore2 = -1;
+                        // requestLedShow( -1 );
                         connectionsThisSession++;
                         break;
 
@@ -3300,7 +3298,7 @@ restartProbingNoPrint:
 
                 if ( firstConnection == -3 ) {
                     //
-                    // showLEDsCore2 = 1;
+                    // requestLedShow( 1 );
                     // firstConnection = -1;
 
                     break;
@@ -3370,7 +3368,7 @@ restartProbingNoPrint:
     // ~750ms after the user actually stops touching things. The PSRAM
     // cache is the durability layer until then; the only loss window
     // is a cold-yank in that ~750ms post-input quiet period.)
-    // showLEDsCore2 = 1;
+    // requestLedShow( 1 );
     //  Serial.print("millis() - timer[0] = ");
     //  Serial.println(millis() - timer[0]);
     //  Serial.print("millis() - timer[1] = ");
@@ -3392,7 +3390,7 @@ restartProbingNoPrint:
 
     Serial.flush( );
 
-    // showLEDsCore2 = -1;
+    // requestLedShow( -1 );
     // refreshLocalConnections(-1);
     // delay(10);
     // Only trigger a save on exit if state is actually dirty (has unsaved changes)
@@ -3407,14 +3405,14 @@ restartProbingNoPrint:
     //refreshConnections( 1, 1, 0 );
     row[ 0 ] = -1;
     row[ 1 ] = -2;
-    // showLEDsCore2 = -1;
+    // requestLedShow( -1 );
     // sprintf(oledBuffer, "        ");
     // drawchar();
 
     // rotaryEncoderMode = wasRotaryMode;
     // routableBufferPower(0);
     // delay(10);
-    // showLEDsCore2 = -1;
+    // requestLedShow( -1 );
     oled.showJogo32h( );
 
     // Restore rotary divider
@@ -3446,7 +3444,7 @@ restartProbingNoPrint:
     firstProbeEntry = true;
 
     // Force LED update to clear cursor
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     // Wait for button to be released before exiting
     // This prevents the press that triggered probeMode from being detected again
@@ -3633,7 +3631,7 @@ int Probing::selectSFprobeMenu( int function ) {
 
             // CRITICAL: Signal Core 2 to display menu with blocking PIO transfer
             // Prevents deadlock where async DMA drops frame and menu isn't visible
-            showLEDsCore2 = 2; // 12 = blocking mode, value 2 (normal display)
+            requestLedShow( 2 ); // 12 = blocking mode, value 2 (normal display)
             // waitForBlockingDisplay();  // Wait for Core 2 to finish displaying
 
             function = resolveLogoPadAssignment( jumperlessConfig.logo_pads.top_guy, RP_UART_TX );
@@ -3666,7 +3664,7 @@ int Probing::selectSFprobeMenu( int function ) {
 
             // CRITICAL: Signal Core 2 to display menu with blocking PIO transfer
             // Prevents deadlock where async DMA drops frame and menu isn't visible
-            showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display)
+            requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display)
             waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
             function = resolveLogoPadAssignment( jumperlessConfig.logo_pads.bottom_guy, RP_UART_RX );
@@ -3684,7 +3682,7 @@ int Probing::selectSFprobeMenu( int function ) {
         }
         }
 
-        // showLEDsCore2 = 2;
+        // requestLedShow( 2 );
         // delayWithButton( 900 );
 
         // b.clear();
@@ -3693,7 +3691,7 @@ int Probing::selectSFprobeMenu( int function ) {
         // lastReadRaw = 0;
         // b.print("Attach", sfOptionColors[0], 0xFFFFFF, 0, 0, -1);
         // b.print("to Pad", sfOptionColors[2], 0xFFFFFF, 0, 1, -1);
-        // showLEDsCore2 = 2;
+        // requestLedShow( 2 );
 
         // delayWithButton(800);
 
@@ -3720,7 +3718,7 @@ int Probing::selectSFprobeMenu( int function ) {
 
         // Serial.print("function!!!!!: ");
         // printNodeOrName(function, 1);
-        showLEDsCore2 = 1;
+        requestLedShow( 1 );
         lightUpRail( );
         // delay( 200 );
         inPadMenu = 0;
@@ -3750,7 +3748,7 @@ int Probing::selectSFprobeMenu( int function ) {
         connectedRowsIndex = 1;
         // lightUpRail( );
         // delay(500);
-        // showLEDsCore2 = -1;
+        // requestLedShow( -1 );
         // delayWithButton(900);
         sfProbeMenu = 0;
         inPadMenu = 0;
@@ -3777,7 +3775,7 @@ int Probing::selectSFprobeMenu( int function ) {
     connectedRowsIndex = 1;
     // lightUpRail( );
     // delay(500);
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     // delayWithButton(900);
     sfProbeMenu = 0;
     inPadMenu = 0;
@@ -3800,7 +3798,7 @@ int Probing::attachPadsToSettings( int pad ) {
     inPadMenu = 1;
     b.clear( );
     clearLEDsExceptRails( );
-    // showLEDsCore2 = 2;
+    // requestLedShow( 2 );
     //   lastReadRaw = 0;
     b.print( "DAC", sfOptionColors[ 0 ], 0xFFFFFF, 0, 0, -1 );
     b.print( "ADC", sfOptionColors[ 1 ], 0xFFFFFF, 4, 0, 0 );
@@ -3808,7 +3806,7 @@ int Probing::attachPadsToSettings( int pad ) {
 
     // CRITICAL: Signal Core 2 to display menu with blocking PIO transfer BEFORE blocking loop
     // Prevents deadlock where async DMA drops frame and user can't see menu options
-    showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display)
+    requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display)
     waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
     int selected = -1;
@@ -3827,7 +3825,7 @@ int Probing::attachPadsToSettings( int pad ) {
                 // b.clear();
                 settingOption = dacChosen - DAC0;
                 clearLEDsExceptRails( );
-                // showLEDsCore2 = 1;
+                // requestLedShow( 1 );
 
                 break;
             }
@@ -3842,7 +3840,7 @@ int Probing::attachPadsToSettings( int pad ) {
                 // b.clear();
                 clearLEDsExceptRails( );
                 delayWithButton( 400 );
-                // showLEDsCore2 = 1;
+                // requestLedShow( 1 );
 
                 break;
             }
@@ -3851,12 +3849,12 @@ int Probing::attachPadsToSettings( int pad ) {
                 functionSetting = 2;
                 // b.clear();
                 clearLEDsExceptRails( );
-                // showLEDsCore2 = 2;
+                // requestLedShow( 2 );
 
                 gpioChosen = chooseGPIO( 1 );
                 // b.clear();
                 clearLEDsExceptRails( );
-                // showLEDsCore2 = 2;
+                // requestLedShow( 2 );
                 // if (gpioChosen >= 122 && gpioChosen <= 125) {
                 //   gpioChosen = gpioChosen - 122 + 5;
                 //   } else if (gpioChosen >= 135 && gpioChosen <= 138) {
@@ -3872,7 +3870,7 @@ int Probing::attachPadsToSettings( int pad ) {
                 // Serial.println( gpioState[ gpioChosen - 1 ] );
                 if ( gpioState[ gpioChosen - 1 ] != 0 ) {
                     clearLEDsExceptRails( );
-                    // showLEDsCore2 = 2;
+                    // requestLedShow( 2 );
                     Serial.print( "Set GP" );
                     Serial.print( gpioChosen );
                     Serial.println( " to Output" );
@@ -3890,7 +3888,7 @@ int Probing::attachPadsToSettings( int pad ) {
                     b.printRawRow( 0b00010101, 33, 0x200010, 0xffffff );
                     b.printRawRow( 0b00001110, 34, 0x200010, 0xffffff );
                     b.printRawRow( 0b00000100, 35, 0x200010, 0xffffff );
-                    // showLEDsCore2 = 2;
+                    // requestLedShow( 2 );
                     delayWithButton( 400 );
 
                 } else {
@@ -3903,14 +3901,14 @@ int Probing::attachPadsToSettings( int pad ) {
                 setGPIO( );
                 clearLEDsExceptRails( );
 
-                // showLEDsCore2 = 2;
+                // requestLedShow( 2 );
                 b.print( "Tap to", sfOptionColors[ ( gpioChosen + 1 ) % 7 ], 0xFFFFFF, 0, 0,
                          1 );
                 b.print( "toggle", sfOptionColors[ ( gpioChosen + 2 ) % 7 ], 0xFFFFFF, 0, 1,
                          1 );
                 delayWithButton( 500 );
                 clearLEDsExceptRails( );
-                // showLEDsCore2 = 1;
+                // requestLedShow( 1 );
                 // inPadMenu = 0;
 
                 break;
@@ -3999,7 +3997,7 @@ int Probing::attachPadsToSettings( int pad ) {
     saveLogoBindings( );
     delay( 3 );
     inPadMenu = 0;
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
     return function;
 }
 
@@ -4097,7 +4095,7 @@ int Probing::chooseDAC( int justPickOne ) {
 
         blockProbeButton = 2000;
         blockProbeButtonTimer = millis( );
-        showLEDsCore2 = -1;
+        requestLedShow( -1 );
         probeButton.clearButtonState( );
         delay( 100 );
 
@@ -4112,7 +4110,7 @@ int Probing::chooseDAC( int justPickOne ) {
         // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
         // Without this, async DMA may drop the frame and menu won't display,
         // causing a deadlock where code waits for input on invisible menu
-        showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display) - NO CLEAR
+        requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display) - NO CLEAR
         waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
         // Serial.println("waitForBlockingDisplay");
@@ -4171,7 +4169,7 @@ int Probing::chooseDAC( int justPickOne ) {
                     probeButton.clearButtonState( );
                     blockProbeButton = 2000;
                     blockProbeButtonTimer = millis( );
-                    showLEDsCore2 = -1;
+                    requestLedShow( -1 );
 
                     delay( 100 );
                     break;
@@ -4208,7 +4206,7 @@ int Probing::chooseDAC( int justPickOne ) {
                     probeButton.clearButtonState( );
                     blockProbeButton = 2000;
                     blockProbeButtonTimer = millis( );
-                    showLEDsCore2 = -1;
+                    requestLedShow( -1 );
 
                     delay( 100 );
                     break;
@@ -4233,7 +4231,7 @@ int Probing::chooseIsense( void ) {
     // Clear LEDs before showing menu
     clearLEDsExceptRails( );
     b.clear( );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     // Track encoder position for selection with accumulator
     long lastEncPos = encoderPosition;
@@ -4267,7 +4265,7 @@ int Probing::chooseIsense( void ) {
     // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
     // Without this, async DMA may drop the frame and menu won't display,
     // causing a deadlock where code waits for input on invisible menu
-    showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display)
+    requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display)
     waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
     int selected = -1;
@@ -4309,7 +4307,7 @@ int Probing::chooseIsense( void ) {
             b.print( "Current", sfOptionColors[ 6 ], 0xFFFFFF, 0, 0, 1 );
             b.print( "I+", plusColor, 0xFFFFFF, 1, 1, -2 );
             b.print( "I-", minusColor, 0xFFFFFF, 4, 1, 2 );
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
 
             lastSelectedOption = selectedOption;
         }
@@ -4373,7 +4371,7 @@ int Probing::chooseIsense( void ) {
 
     clearLEDsExceptRails( );
     b.clear( );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 
     // Clear inPadMenu flag
     inPadMenu = 0;
@@ -4402,7 +4400,7 @@ int Probing::chooseADC( void ) {
     // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
     // Without this, async DMA may drop the frame and menu won't display,
     // causing a deadlock where code waits for input on invisible menu
-    showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display)
+    requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display)
     waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
     // Serial.print("inPadMenu: ");
@@ -4489,7 +4487,7 @@ int Probing::chooseADC( void ) {
 
     clearLEDsExceptRails( );
     // showNets();
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
     return function;
 }
 
@@ -4503,7 +4501,7 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
     // Clear LEDs before showing menu
     clearLEDsExceptRails( );
     b.clear( );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     // Show initial display
     char gpioNumStr[ 3 ];
@@ -4534,7 +4532,7 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
     // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
     // Without this, async DMA may drop the frame and menu won't display,
     // causing a deadlock where code waits for input on invisible menu
-    showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display)
+    requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display)
     waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
     while ( settingOption == -1 && ProbeButton::getInstance( ).getButtonState( ) == 0 ) {
@@ -4569,7 +4567,7 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
             b.print( "Input", inputColor, 0xFFFFFF, 1, 0, 3 );
             b.print( gpioNumStr, sfOptionColors[ gpioChosen - 1 ], 0xFFFFFF, 0, 0, -2 );
             b.print( "Output", outputColor, 0xFFFFFF, 0, 1, 3 );
-            showLEDsCore2 = 2;
+            requestLedShow( 2 );
 
             lastSelectedOption = selectedOption;
         }
@@ -4636,7 +4634,7 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
 
     clearLEDsExceptRails( );
     b.clear( );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 
     // Clear inPadMenu flag
     inPadMenu = 0;
@@ -4713,7 +4711,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
     // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
     // Without this, async DMA may drop the frame and menu won't display,
     // causing a deadlock where code waits for input on invisible menu
-    showLEDsCore2 = 12;        // 12 = blocking mode, value 2 (normal display)
+    requestLedShow( 12 );        // 12 = blocking mode, value 2 (normal display)
     waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
     int selected = -1;
@@ -4931,7 +4929,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
     ProbeButton::getInstance( ).clearButtonState( );
     blockProbeButton = 500;
     blockProbeButtonTimer = millis( );
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     // updateGPIOConfigFromState();
 
     return function;
@@ -5019,7 +5017,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
 
                 snprintf( voltageString, 7, "%0.1f v", voltageProbe );
                 b.print( voltageString, color, 0xFFFFFF, 0, 1, 3 );
-                showLEDsCore2 = -2;
+                requestLedShow( -2 );
                 delay( 10 );
             }
             // Check button state to exit voltage selection (state-based, doesn't consume event)
@@ -5033,7 +5031,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
                 specialNetColors[ 4 ].b = rg.b;
                 b.clear( );
                 // clearLEDsExceptRails();
-                // showLEDsCore2 = 1;
+                // requestLedShow( 1 );
                 if ( vSelected != 10 ) {
                     vSelected = 1;
                 } else {
@@ -5048,7 +5046,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
                 probeButton.clearButtonState( );
 
                 return voltageProbe;
-                showLEDsCore2 = -1;
+                requestLedShow( -1 );
                 break;
             }
         }
@@ -5134,7 +5132,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
 
                 snprintf( voltageString, 7, "%0.1f v", voltageProbe );
                 b.print( voltageString, color, 0xFFFFFF, 0, 1, 3 );
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
                 Serial.print( "\r                                           \r" );
                 Serial.print( "DAC " );
                 Serial.print( fiveOrEight ? "1:  " : "0:  " );
@@ -5154,7 +5152,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
                 specialNetColors[ 4 ].b = rg.b;
                 b.clear( );
                 // clearLEDsExceptRails();
-                // showLEDsCore2 = 1;
+                // requestLedShow( 1 );
                 if ( vSelected != 10 ) {
                     vSelected = 1;
                 } else {
@@ -5163,7 +5161,7 @@ float Probing::voltageSelect( int fiveOrEight ) {
                     // delay(500);
                 }
                 vSelected = 1;
-                showLEDsCore2 = -1;
+                requestLedShow( -1 );
                 probeButton.clearButtonState( );
                 blockProbeButton = 2000;
                 blockProbeButtonTimer = millis( );
@@ -6613,7 +6611,7 @@ void Probing::checkPads( void ) {
             clearHighlighting( );
             checkChangedNetColors( -1 );
             // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-            showLEDsCore2 = -1; // Trigger LED update on core 2
+            requestLedShow( -1 ); // Trigger LED update on core 2
             // saveChangedNetColorsToFile( netSlot, 0 ); // DEPRECATED: Colors now saved via YAML state
 
         } else {
@@ -6636,7 +6634,7 @@ void Probing::checkPads( void ) {
             clearHighlighting( );
             checkChangedNetColors( -1 );
             // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-            showLEDsCore2 = -1; // Trigger LED update on core 2
+            requestLedShow( -1 ); // Trigger LED update on core 2
             // saveChangedNetColorsToFile( netSlot, 0 ); // DEPRECATED: Colors now saved via YAML state
 
         } else {
@@ -7604,7 +7602,7 @@ int Probing::selectFromLastFound( void ) {
             Serial.print( "  " );
         }
         // leds.show();
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         blinkTimer = millis( );
         //  }
         delay( 30 );
@@ -7626,7 +7624,7 @@ int Probing::selectFromLastFound( void ) {
             //         leds.setPixelColor(nodesToPixelMap[connectedRows[i]], 0, 0, 0);
             //     }
             // }
-            // showLEDsCore2 = 1;
+            // requestLedShow( 1 );
             // selected = lastFound[node1or2][selected];
             //  clearLastFound();
 
@@ -7649,7 +7647,7 @@ int Probing::selectFromLastFound( void ) {
         //  }
         //}
 
-        // showLEDsCore2 = 1;
+        // requestLedShow( 1 );
     }
     selected2 = connectedRows[ selected ];
 
@@ -7671,7 +7669,7 @@ int Probing::selectFromLastFound( void ) {
     }
 
     // leds.setPixelColor(nodesToPixelMap[selected2], rainbowList[0][0],
-    // rainbowList[0][1], rainbowList[0][2]); leds.show(); showLEDsCore2 = 1;
+    // rainbowList[0][1], rainbowList[0][2]); leds.show(); requestLedShow( 1 );
     probeButtonTimer = millis( );
     // connectedRowsIndex = 0;
     // justSelectedConnectedNodes = 1;
@@ -7874,7 +7872,7 @@ int Probing::readFloatingOrState( int pin, int rowBeingScanned ) { // this is th
     }
 
     // Serial.print("\n");
-    // showLEDsCore2 = 1;
+    // requestLedShow( 1 );
     // leds.show();
     // delayMicroseconds(100);
 

@@ -747,12 +747,12 @@ CommandResult cmd_showSwitchPosition( char c, const String& line ) {
     for (int j = 0; j < 10; j++) {
     for (int i = 0; i < 10; i++) {
         showSwitchPosition(i, " ", 0x000000, 0x000000);
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         delay(100);
     }
     for (int i = 9; i >= 0; i--) {
         showSwitchPosition(i, "Fuck", 0x000000, 0x000000);
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         delay(100);
     }
 }
@@ -1027,8 +1027,7 @@ CommandResult cmd_cycleSlots( char c, const String& line ) {
 CommandResult cmd_loadSlot( char c, const String& line ) {
     extern volatile int rotaryEncoderMode;
     inputNodeFileList( rotaryEncoderMode );
-    extern volatile int showLEDsCore2;
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     return CMD_LOAD_FILE;
 }
 
@@ -3080,10 +3079,23 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
         uint32_t b0, r0, d0, b1, r1, d1;
         core1req::snapshot( core1req::REQ_SEND, &b0, &r0, &d0 );
         core1req::snapshot( core1req::REQ_BYPASS, &b1, &r1, &d1 );
-        target->printf( "core1 mailbox: send bits 0x%lx req %lu done %lu   bypass bits 0x%lx req %lu done %lu   %s\n\r",
+        uint32_t b2 = 0, r2 = 0, d2 = 0;
+        core1req::snapshot( core1req::REQ_SHOW_LEDS, &b2, &r2, &d2 );
+        target->printf( "core1 mailbox: send bits 0x%lx req %lu done %lu   bypass bits 0x%lx req %lu done %lu   leds bits 0x%lx req %lu done %lu%s   %s\n\r",
                         (unsigned long)b0, (unsigned long)r0, (unsigned long)d0,
                         (unsigned long)b1, (unsigned long)r1, (unsigned long)d1,
-                        core1req::allIdle( ) ? "(idle)" : "(busy)" );
+                        (unsigned long)b2, (unsigned long)r2, (unsigned long)d2, ledGraphicsOwned( ) ? " (gfx owns)" : "",
+                        core1req::allIdle( ) ? "(sends idle)" : "(send busy)" );
+        extern volatile uint32_t ledFramesShown, ledIdleFramesShown;
+        target->printf( "led frames shown %lu (idle renders %lu)  uptime %lus\n\r",
+                        (unsigned long)ledFramesShown, (unsigned long)ledIdleFramesShown, (unsigned long)( millis( ) / 1000 ) );
+        target->print( "led takes (oldest..newest): " );
+        for ( int i = 0; i < 32; i++ ) {
+            int k = ( ledTakeLogIdx + i ) & 31;
+            if ( ledTakeLog[ k ].t == 0 ) continue;
+            target->printf( "[%lu b%02x r%d m%d s%d x%u] ", (unsigned long)ledTakeLog[ k ].t, ledTakeLog[ k ].bits, ledTakeLog[ k ].rails, ledTakeLog[ k ].menu, ledTakeLog[ k ].shown, (unsigned)ledTakeLog[ k ].repeats + 1u );
+        }
+        target->println( "\r" );
     }
     target->println( "\r" );
     target->flush( );
@@ -3785,10 +3797,8 @@ CommandResult cmd_printTextFromMenu( char c, const String& line ) {
     printTextFromMenu( );
 
     clearLEDs( );
-    extern volatile int showLEDsCore2;
-    // defconDisplay is defined in Menus.h as int&
     extern int& defconDisplay;
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
     defconDisplay = -1;
 
     return CMD_SHOW_MENU;

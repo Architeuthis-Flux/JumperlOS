@@ -444,7 +444,7 @@ static void rotaryEncoderButtonStuffLocked( void ) {
         doubleClickTimer = millis( );
         buttonDebounceTimer2 = micros( );
 
-        showLEDsCore2 = 1;
+        requestLedShow( 1 );
         encoderWasPressed = encoderIsPressed;
     }
 
@@ -634,7 +634,7 @@ void holdAnimationStuff( void ) {
         }
         pressAnimUpdateTimer = millis( );
         buttonPressAnimActive = true; // set AFTER colors are ready
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
     }
     unsigned long elapsed = millis( ) - buttonHoldStart;
 
@@ -646,7 +646,7 @@ void holdAnimationStuff( void ) {
         //     if ( millis( ) - buttonHoldStart >= flashCountdown && millis( ) - buttonHoldStart <= flashCountdown + flashDuration ) {
         //         // setLogoOverride( LOGO_TOP, flashColors[ i ] );
         //         // setLogoOverride( LOGO_BOTTOM, flashColors[ i ] );
-        //         // showLEDsCore2 = 2;
+        //         // requestLedShow( 2 );
         //         inFlashRange = i;
         //         break;
         //     }
@@ -688,7 +688,7 @@ void holdAnimationStuff( void ) {
                 // Center LEDs stay white
                 // pressAnimLogoColors[ 6 ] = PRESS_WHITE;
                 pressAnimLogoColors[ 7 ] = PRESS_WHITE;
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
             }
         }
     }
@@ -697,7 +697,7 @@ void holdAnimationStuff( void ) {
     if ( pressAnimActive && encoderButtonState == DOUBLECLICKED ) {
         pressAnimActive = false;
         buttonPressAnimActive = false;
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
     }
 
     // ── Start animation on entering HELD ──
@@ -759,7 +759,7 @@ void holdAnimationStuff( void ) {
                 setLogoOverride( holdLogos[ pairIdx ], color );
                 // setLogoOverride(holdLogoPairs[pairIdx][0], color);
                 // setLogoOverride(holdLogoPairs[pairIdx][1], color);
-                showLEDsCore2 = 2;
+                requestLedShow( 2 );
 
                 holdAnimStep++;
                 // After first 3 logo pairs (one full sweep of 6 steps) are lit, fire MEDIUM_HELD and flash
@@ -795,7 +795,7 @@ void holdAnimationStuff( void ) {
         }
         pressAnimLogoColors[ 7 ] = PRESS_WHITE;
 
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         holdAnimLongHeldFlashed = true;
         if ( rebootFlag == -1 ) {
             rebootFlag = 1;
@@ -809,7 +809,7 @@ void holdAnimationStuff( void ) {
             setLogoOverride( holdLogoPairs[ p ][ 0 ], -3 );
             setLogoOverride( holdLogoPairs[ p ][ 1 ], -3 );
         }
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         holdAnimActive = false;
         holdAnimLongHeldFlashed = false;
         holdAnimStep = 0;
@@ -835,7 +835,7 @@ void holdAnimationStuff( void ) {
         if ( millis( ) - flashStartTime >= flashDuration ) {
             triggerFlash = -1;
         }
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
     }
 }
 

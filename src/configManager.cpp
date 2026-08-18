@@ -3576,7 +3576,7 @@ bool dacChange = false;
                 Serial.println("Config updated");
                 readSettingsFromConfig();
                 setRailsAndDACs(0);
-                showLEDsCore2 = -1;
+                requestLedShow( -1 );
                 
                 // Clear any leftover characters from Jerial buffer
                 while (Jerial.available() > 0) {
@@ -3848,7 +3848,7 @@ bool dacChange = false;
 //    Serial.println(globalState.power.dac0);
 //    Serial.println(globalState.power.dac1);
     setRailsAndDACs(0);
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
 }
 
 int parseTrueFalse(const char* value) {

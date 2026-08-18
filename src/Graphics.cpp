@@ -915,7 +915,7 @@ void drawWires(int net) {
           filledPaths[i][1] = last;
           filledPaths[i][2] = fillSequence[fillIndex];
 
-          // showLEDsCore2 = 1;
+          // requestLedShow( 1 );
         } else {
           for (int j = 0; j < 5; j++) {
 
@@ -3227,7 +3227,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
   // b.printRawRow(0b00001000, row, frameColors[3], 0xfffffe);
   // b.printRawRow(0b00010000, row, frameColors[4], 0xfffffe);
 
-  // showLEDsCore2 = 2;
+  // requestLedShow( 2 );
   showSkippedNodes();
 }
 
@@ -4036,7 +4036,7 @@ void printTextFromMenu(int print) {
         }
         // delay(100);
         // leds.show();
-        // showLEDsCore2 =2;
+        // requestLedShow( 2 );
       }
     }
   }
@@ -4084,7 +4084,7 @@ void showArray(uint8_t *array, int size) {
       leds.setPixelColor(array[screenMap[i]], array[i]);
     }
   }
-  showLEDsCore2 = -3;
+  requestLedShow( -3 );
 }
 
 int getCursorPositionX() {
@@ -4670,7 +4670,7 @@ int attractMode(void) {
     // Jerial.print("netSlot = ");
     // Jerial.println(netSlot);
     slotChanged = 1;
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     encoderDirectionState = NONE;
     return 1;
     // goto menu;
@@ -4685,7 +4685,7 @@ int attractMode(void) {
     // Jerial.print("netSlot = ");
     // Jerial.println(netSlot);
     slotChanged = 1;
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     encoderDirectionState = NONE;
     return 1;
     // goto menu;
@@ -5333,7 +5333,7 @@ unsigned long lastLEDsShowTime = 0;
 
 unsigned long ledsShowTime = 0;
 void drawAnimatedImage(int imageIndex, int speed) {
-  showLEDsCore2 = -3;
+  requestLedShow( -3 );
   leds.clear();
   lastLEDsShowTime = micros();
   //leds.show();
@@ -5343,7 +5343,7 @@ void drawAnimatedImage(int imageIndex, int speed) {
     brightnessSet = -100;
     for (int i = startupFrameLEN - 1; i >= 0; i--) {
       drawImage(i);
-      // showLEDsCore2 = 3;
+      // requestLedShow( 3 );
       cycleCount++;
       
       lastLEDsShowTime = micros();
@@ -5386,7 +5386,7 @@ void drawAnimatedImage(int imageIndex, int speed) {
   }
   // lightUpRail();
   /// leds.clear();
-  showLEDsCore2 = -1;
+  requestLedShow( -1 );
 }
 
 void drawImage(int imageIndex) {

@@ -2,10 +2,32 @@
 #define COMMANDS_H
 
 #include <Arduino.h>    
-// Core 2 path sending signal
-// Values: 0 = idle/done, 1 = send paths, -1 = send paths with clean, 3 = immediate bypass (skip scheduler)
-// sendAllPathsCore2 is gone (T2.2b): see CoreMailbox.h (core1req::REQ_SEND / REQ_BYPASS)
-extern volatile int showLEDsCore2;
+// (sendAllPathsCore2 is gone (T2.2b): see CoreMailbox.h - core1req::REQ_SEND / REQ_BYPASS.
+//  showLEDsCore2 is gone (T2.2c): the LED-show request is core1req::REQ_SHOW_LEDS.)
+//
+// requestLedShow(): ask core 1 to refresh the LEDs. The argument keeps the
+// vocabulary every caller already spoke, so the ~270 sites read exactly as
+// before:  1 = show the netlist (showNets + measurements + animations +
+// overlays), 2 = menu / text-buffer flush (immediate), 3 = staged graphics
+// keep the strip (immediate; ownership sticks until another mode is
+// requested - ledGraphicsOwned()), negative = clear the breadboard first, +10 =
+// blocking show (an atomic frame; e.g. 12), 0 = cancel a pending request.
+// A later mode replaces an earlier pending one (last write wins, as the int
+// did); clear-first and blocking coalesce. Returns the request generation
+// (core1req::isDone(REQ_SHOW_LEDS, gen) - or just waitCore2()).
+uint32_t requestLedShow( int legacyValue );
+// True when no LED show is pending or in flight and staged graphics do not
+// own the strip - what "showLEDsCore2 == 0" used to say.
+bool ledShowIdle( void );
+// True while staged graphics (mode 3) own the strip.
+bool ledGraphicsOwned( void );
+// For X: the pending bits of the LED slot.
+uint32_t ledShowPendingBits( void );
+// For X: the last 16 LED requests core 1 took (main.cpp fills, X prints).
+struct LedTakeLog { uint32_t t; uint8_t bits, rails, menu, shown; uint16_t repeats; };   // consecutive identical takes collapse into one entry (+repeats)
+extern volatile LedTakeLog ledTakeLog[ 32 ];
+extern volatile uint8_t ledTakeLogIdx;
+
 extern volatile int showProbeLEDs;
 
 

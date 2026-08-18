@@ -86,7 +86,7 @@ void GraphicOverlay::clear() {
     height = 0;
     memset(colors, 0, sizeof(colors));
     enabled = false;
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
 }
 
 // ============================================================================
@@ -250,7 +250,7 @@ bool GraphicOverlayState::shiftOverlay(const char* name, int deltaRow, int delta
     while (newCol > 30) newCol -= 30;
     
     // Trigger LED refresh to clear old position
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
     
     overlays[idx].startRow = newRow;
     overlays[idx].startCol = newCol;
@@ -274,7 +274,7 @@ bool GraphicOverlayState::placeOverlay(const char* name, int newRow, int newCol)
 
     
     // Trigger LED refresh to clear old position
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
     
     overlays[idx].startRow = newRow;
     overlays[idx].startCol = newCol;

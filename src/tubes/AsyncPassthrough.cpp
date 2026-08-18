@@ -2019,7 +2019,7 @@ void task( ) {
     if ( s_usb_rx_pending || ( tud_inited( ) && tud_cdc_n_available( ASYNC_PASSTHROUGH_CDC_ITF ) ) ) {
         if (gpioReadingColors[8] != 0x1b0700) {
          gpioReadingColors[8] = 0x1b0700;
-         showLEDsCore2 = 2;
+         requestLedShow( 2 );
         }
          last_usb_uart = millis();
         bridge_usb_to_uart( ASYNC_PASSTHROUGH_CDC_ITF );
@@ -2029,7 +2029,7 @@ void task( ) {
         // No USB->UART activity for a while - reset color
         if (gpioReadingColors[8] != 0x001b07) {
         gpioReadingColors[8] = 0x001b07;
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         }
     }
     
@@ -2047,7 +2047,7 @@ void task( ) {
             if (gpioReadingColors[9] != 0x1b0700) {
          gpioReadingColors[9] = 0x1b0700;
          
-         showLEDsCore2 = 2;
+         requestLedShow( 2 );
             }
 last_uart_usb = millis();
     bridge_uart_to_usb( ASYNC_PASSTHROUGH_CDC_ITF );
@@ -2055,7 +2055,7 @@ last_uart_usb = millis();
         // No UART->USB activity for a while - reset color
         if (gpioReadingColors[9] != 0x001b07) {
         gpioReadingColors[9] = 0x001b07;
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
         }
     }
     t1 = micros();

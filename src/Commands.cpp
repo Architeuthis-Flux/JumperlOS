@@ -50,7 +50,64 @@
 // and funnel all writers through one Core-2 compose function with a single show()
 // call site, retiring the negative/+10 encoding. See also the encoder-source and
 // dirty-flag follow-up notes in RotaryEncoder.cpp / LEDs.cpp.
-volatile int showLEDsCore2 = 0; // this signals the core 2 to show the LEDs
+// T2.2c: the packed int above is now core1req::REQ_SHOW_LEDS (CoreMailbox.h) -
+// exactly the typed request the FOLLOW-UP note asked for, and it landed with
+// the vocabulary intact: requestLedShow(1/2/3/-1/12/...) is the one writer.
+// The mode REPLACES a pending one (postMode: last write wins, as the int did),
+// the clear-first / blocking flags coalesce, core 1 takes the request in
+// core2stuff() and completes its generation after the show, and staged
+// graphics' "3 keeps control" is a state bit here (ledGraphicsOwned()) since
+// a taken request cannot stick.
+#include "CoreMailbox.h"
+static volatile bool s_ledGfxOwned = false;
+
+uint32_t requestLedShow( int legacyValue ) {
+  uint32_t flags = 0;
+  int v = legacyValue;
+  if ( v < 0 ) { flags |= core1req::LED_CLEAR; v = -v; }
+  if ( v >= 10 ) { flags |= core1req::LED_BLOCKING; v -= 10; }
+  uint32_t mode = 0;
+  switch ( v ) {
+    case 1: mode = core1req::LED_NETS; break;
+    case 2: mode = core1req::LED_MENU; break;
+    case 3: mode = core1req::LED_GFX; break;
+    default: mode = 0; break;   // 0: cancel whatever mode is pending
+  }
+  // Note: a mode-2 request drops s_ledGfxOwned even when the keep-rule above
+  // preserves the pending GFX bits - the two agree on the end state (the
+  // graphics no longer own the strip once someone asks for a flush/render),
+  // this is just where that ownership flag turns off. (T3.4 walks this code.)
+  s_ledGfxOwned = ( mode == core1req::LED_GFX );
+  __dmb( );
+  if ( mode == 0 && flags == 0 ) {
+    return core1req::postMode( core1req::REQ_SHOW_LEDS, core1req::LED_MODE_MASK | core1req::LED_CLEAR | core1req::LED_BLOCKING, 0, 0, 0 );
+  }
+  // A menu FLUSH (mode 2) must NOT downgrade a full render (nets/graphics)
+  // that is already pending - it only coalesces its flags. Without this the
+  // netlist-and-clear a menu/probe exit posts (requestLedShow(-1)) is replaced
+  // by the press/hold animation's mode-2 flush that lands a microsecond later:
+  // core 1 then clears the board and flushes an empty buffer, leaving the
+  // breadboard (and the current ants, which draw inside showNets) blank until
+  // the next full render. NETS and GFX always replace (a fresh full render
+  // supersedes a stale flush; graphics take the strip). The keep-rule is
+  // applied INSIDE postMode under the slot lock - core 1's own mode-2 post
+  // (the menu-transition pacer in core2stuff) races core 0's NETS otherwise.
+  uint32_t keep = ( mode == core1req::LED_MENU ) ? ( core1req::LED_NETS | core1req::LED_GFX ) : 0u;
+  return core1req::postMode( core1req::REQ_SHOW_LEDS, core1req::LED_MODE_MASK, mode, flags, keep );
+}
+
+bool ledShowIdle( void ) {
+  return core1req::idle( core1req::REQ_SHOW_LEDS ) && !s_ledGfxOwned;
+}
+
+bool ledGraphicsOwned( void ) { return s_ledGfxOwned; }
+
+uint32_t ledShowPendingBits( void ) {
+  uint32_t bits = 0;
+  core1req::snapshot( core1req::REQ_SHOW_LEDS, &bits, nullptr, nullptr );
+  return bits;
+}
+
 volatile int showProbeLEDs =
     0; // this signals the core 2 to show the probe LEDs
 
@@ -63,6 +120,12 @@ unsigned long waitCore2() {
   // or in flight (the mailbox's done generation has caught up with the
   // request generation in every slot - CoreMailbox.h). Same 25 ms
   // timeout-and-proceed as always; nothing is force-cleared.
+  // (T2.2c: this deliberately does NOT wait on the LED slot - a probe session
+  // or a menu keeps a show posted almost continuously, and waiting for it here
+  // put ~25 ms in front of every refreshConnections(); Kevin felt the switch
+  // classifier go sluggish within a minute of the first build that did. A show
+  // is async, as the old int was; a caller that needs "shown" waits on the
+  // generation requestLedShow() returns, or on ledShowIdle().)
   while (core2busy || !core1req::allIdle()) {
     __dmb();  // Memory barrier to ensure we see latest values from Core 2
     
@@ -228,7 +291,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   }
 
   if (ledShowOption != 0) {
-    showLEDsCore2 = ledShowOption;
+    requestLedShow( ledShowOption );
     waitCore2();  // Wait for core 2 to finish rendering (which calls assignNetColors)
   }
   t[ti++] = millis(); // t[7] = after showLEDs wait
@@ -380,7 +443,7 @@ unsigned long start2 = millis();
 
   // LED display can happen in parallel too
   if (ledShowOption != 0) {
-    showLEDsCore2 = ledShowOption;
+    requestLedShow( ledShowOption );
     // Don't wait - let LEDs update asynchronously
   }
   

@@ -766,7 +766,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
     // createSlots(netSlot, 1);
   //!dont show nets
     hideNets = 1;
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
     resetEncoderPosition = 1;
 
     // Store original range for restoring when zooming out
@@ -1051,7 +1051,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
           //   }
 
           redraw = true;
-          // showLEDsCore2 = 2;
+          // requestLedShow( 2 );
           // waitCore2();
           probeButtonWasPressed = probeButtonIsPressed;
           buttonWasPressed = buttonIsPressed;
@@ -1111,7 +1111,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
 
                       if (millis() - buttonPressStartTime > holdConfirmTime) {
                         hideNets = 0;
-                        showLEDsCore2 = -1;
+                        requestLedShow( -1 );
                         clearColorOverrides(true, true, true);
                         blockProbeButton = 5000;
                         blockProbeButtonTimer = millis();
@@ -1380,7 +1380,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
 
       } while (Serial.available() == 0);
 
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     hideNets = 0;
     clearColorOverrides();
 
@@ -1731,7 +1731,7 @@ void previewSlotColors(int slot, bool showVoltages) {
   }
   
   // Trigger LED update - core2stuff will call showNets() and leds.show()
-  showLEDsCore2 = 1;
+  requestLedShow( 1 );
   
   // NOTE: We stay in preview mode! Call exitPreview() to commit or cancel
 }
@@ -1777,7 +1777,7 @@ void cancelPreview() {
     bridgesToPaths();
     clearLEDsExceptRails();
     // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-    showLEDsCore2 = -1;
+    requestLedShow( -1 );
     Serial.println("✓ Cancelled preview, returned to slot " + String(originalSlot));
   } else {
     Serial.println("Error cancelling preview: " + errorMsg);
@@ -1976,7 +1976,7 @@ void assignNetColors(int preview) {
 */
 // leds.setPixelColor(110, rawOtherColors[2]);
 // logoFlash = 2;
-// showLEDsCore2 = 1;
+// requestLedShow( 1 );
 //  if (debugLEDs) {
 // Serial.print("\n\rcolorDistance: ");
 // Serial.print(colorDistance);
@@ -2686,7 +2686,7 @@ void lightUpNet(int netNumber, int node, int onOff, int brightness2,
        brightness2: "); Serial.println(brightness2);*/
     }
   // showRowAnimation(-1, GND);
-  //  showLEDsCore2 = 1;
+  //  requestLedShow( 1 );
   showSkippedNodes();
   }
 unsigned long lastSkippedNodesTime = 0;
@@ -3207,7 +3207,7 @@ bool photos = false; //this lets me adjust the brightness for better photos
 void lightUpNode(int node, uint32_t color) {
 
   leds.setPixelColor(nodesToPixelMap[node], color);
-  showLEDsCore2 = 1;
+  requestLedShow( 1 );
   }
 uint32_t dimLogoColor(uint32_t color, int brightness) {
   // return color;
@@ -4254,7 +4254,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
     leds.setPixelColor(railsToPixelMap[1][24], 0x2f0000);
     }
   // leds.show();
-  // showLEDsCore2 = 1;
+  // requestLedShow( 1 );
   // delay(3);
   }
 //int displayMode = jumperlessConfig.display.lines_wires; // 0 = lines 1= wires
@@ -4309,7 +4309,7 @@ void __not_in_flash_func(showNets)(void) {
     //               if (debugNTCC > 0) {
     //   Serial.println(debugNTCC);
     // }
-    // showLEDsCore2 = 1;
+    // requestLedShow( 1 );
     //     if (rp2040.cpuid() == 0) {
     //   core1busy = false;
     //  } else {
@@ -4574,7 +4574,7 @@ void randomColors(void) {
 
     leds.setPixelColor(i, color); //  Set pixel's color (in RAM)
     // lightUpRail(-1, -1, 1, LEDbrightnessRail);
-    showLEDsCore2 = 3; //  Update strip to match
+    requestLedShow( 3 ); //  Update strip to match
     //  Pause for a moment
     }
   // delay(500);
@@ -4611,7 +4611,7 @@ void rainbowy(int saturation, int brightness, int wait) {
 
     offset += 1;
     // offset = offset % 80;
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
     delayMicroseconds((wait * 1000)); //*((j/20.0)));
     }
   }
@@ -4672,7 +4672,7 @@ void startupColors(void) {
     offset += 1;
     // offset = offset % 80;
     // lightUpRail(1);
-    // showLEDsCore2 = 1;
+    // requestLedShow( 1 );
     leds.show();
     if (done == 0) {
       delayMicroseconds((14000)); //*((j/20.0)));
@@ -4683,7 +4683,7 @@ void startupColors(void) {
     }
   // clearLEDs();
   //  lightUpRail();
-  //   showLEDsCore2 = 1;
+  //   requestLedShow( 1 );
   }
 
 // Fixed capacity sized to its initializer (was LED_COUNT+200 = 500 on V5). Kept
@@ -4829,11 +4829,11 @@ void startupColorsV5(void) {
       }
     // leds.setPixelColor(399, 0x151515);
 
-    showLEDsCore2 = 3;
+    requestLedShow( 3 );
     delayMicroseconds((12));
     }
   // lightUpRail();
-  showLEDsCore2 = 1;
+  requestLedShow( 1 );
   // delay(1000);
   }
 void rainbowBounce(int wait, int logo) {
@@ -4872,7 +4872,7 @@ void rainbowBounce(int wait, int logo) {
         }
       }
 
-    showLEDsCore2 = 3;
+    requestLedShow( 3 );
     delayMicroseconds((wait * 1000) * ((j / 20.0)));
     }
   for (long j = 140; j >= 0; j -= 1) {
@@ -4907,7 +4907,7 @@ void rainbowBounce(int wait, int logo) {
       // leds.setPixelColor(i, rgbPacked);
       }
 
-    showLEDsCore2 = 3;
+    requestLedShow( 3 );
     delayMicroseconds((wait * 1000) * ((j / 20.0)));
     }
   }
@@ -4942,7 +4942,7 @@ void clearLEDs(void) {
 
     leds.setPixelColor(i, 0); //  Set pixel's color (in RAM)
     //  Update strip to match
-    // showLEDsCore2 = 1;
+    // requestLedShow( 1 );
     }
   // lightUpRail();
   //  for (int i = 80; i <= 109; i++)
@@ -4955,7 +4955,7 @@ void clearLEDs(void) {
   //      //  Update strip to match
   //  }
 
-  // showLEDsCore2 = 1;
+  // requestLedShow( 1 );
   }
 
 

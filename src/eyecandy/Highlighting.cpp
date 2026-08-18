@@ -266,7 +266,7 @@ void Highlighting::clearHighlighting( int updateLEDs) {
     // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
     // Use negative value to force clearBeforeSend, ensuring old highlights are fully cleared
     if (updateLEDs != 0) {
-    showLEDsCore2 = updateLEDs;  // Trigger full clear + LED update on core 2
+    requestLedShow( updateLEDs );  // Trigger full clear + LED update on core 2
     }
 }
 
@@ -422,7 +422,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             // b.printRawRow(0b00000100, returnNode, 0x0f0f00, 0x000000);
 
             lastNodeHighlighted = returnNode;
-            // showLEDsCore2 = 2;
+            // requestLedShow( 2 );
         }
         // rotaryDivider = lastDivider;
         return returnNode;
@@ -528,7 +528,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     // Serial.print("returnNode: ");
                     // Serial.println(returnNode);
                     // Serial.flush();
-                    showLEDsCore2 = -1;
+                    requestLedShow( -1 );
                     highlightNets( 0, highlightedNet, print );
                     returnNode = scrolledRow;
                     break;
@@ -574,7 +574,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     brightenedNet = connectedNet;
                     brightenedNode = scrolledRow;
                     brightenedAmount = 80; // Set brightness for highlighting
-                    showLEDsCore2 = -1;
+                    requestLedShow( -1 );
                     highlightNets( 0, highlightedNet, print );
                     returnNode = scrolledRow;
                     break;
@@ -618,7 +618,7 @@ int Highlighting::brightenNet( int node, int addBrightness ) {
         brightenedNet = 0;
         brightenedRail = -1;
         // Use negative value to force clearBeforeSend, ensuring old highlights are fully cleared
-        showLEDsCore2 = -1;  // Trigger full clear + LED update
+        requestLedShow( -1 );  // Trigger full clear + LED update
         return -1;
     }
     addBrightness = 0;
@@ -636,7 +636,7 @@ int Highlighting::brightenNet( int node, int addBrightness ) {
             //         brightenedNode = node;  // Set for persistence check
             //         highlightedNet = netToHighlight;
             //         highlightedRow = node;
-            //         showLEDsCore2 = 1;  // Trigger LED update to show marching ants
+            //         requestLedShow( 1 );  // Trigger LED update to show marching ants
             //         return netToHighlight;
             //     }
             // }
@@ -664,7 +664,7 @@ int Highlighting::brightenNet( int node, int addBrightness ) {
             // Serial.println(brightenedNet);
             brightenedOriginalColor = netColors[ brightenedNet ];
             // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-            showLEDsCore2 = 1;  // Trigger LED update on core 2
+            requestLedShow( 1 );  // Trigger LED update on core 2
             return brightenedNet;
         }
     }
@@ -745,7 +745,7 @@ int Highlighting::warnNet( int node ) {
 
             warningOriginalColor = netColors[ warningNet ];
             // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-            showLEDsCore2 = 1;  // Trigger LED update on core 2
+            requestLedShow( 1 );  // Trigger LED update on core 2
             warningTimer = millis( );
             return warningNet;
         }
@@ -791,7 +791,7 @@ void Highlighting::warnNetTimeout( int clearAll ) {
         warningTimer = 0;
 
         // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
-        showLEDsCore2 = 1;  // Trigger LED update on core 2
+        requestLedShow( 1 );  // Trigger LED update on core 2
     } else {
         lastWarningTimer = millis( ) - lastWarningTimer;
         // Serial.print("lastWarningTimer = ");
@@ -1421,7 +1421,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             Serial.flush( );
         }
     }
-    // showLEDsCore2 = 1;
+    // requestLedShow( 1 );
 
     // Serial.println("netHighlighted: ");
     // Serial.println(netHighlighted);
@@ -2016,7 +2016,7 @@ void Highlighting::adjustRailVoltage(int rail) {
         highlightNets(0, highlightedNet, 1);
     }
     
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
 }
 
 /**
@@ -2083,7 +2083,7 @@ void Highlighting::adjustDACVoltage(int dac) {
         highlightNets(0, highlightedNet, 1);
     }
     
-    showLEDsCore2 = 1;
+    requestLedShow( 1 );
 }
 
 // ============================================================================

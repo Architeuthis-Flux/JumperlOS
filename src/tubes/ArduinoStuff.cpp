@@ -670,7 +670,7 @@ void SetArduinoResetLine( bool state, int topBottomBoth ) {
             rstColors[ 0 ] = 0x002a10;
         }
 
-        showLEDsCore2 = 2;
+        requestLedShow( 2 );
 
         delayMicroseconds( 1000 );
 
@@ -688,7 +688,7 @@ void SetArduinoResetLine( bool state, int topBottomBoth ) {
         }
         // headerColors[0] = 0x2000b9;
         // headerColors[1] = 0x0020f9;
-        // showLEDsCore2 = 2;
+        // requestLedShow( 2 );
     }
 }
 
@@ -706,7 +706,7 @@ void ESPReset( ) {
     pinMode( ARDUINO_RESET_0_PIN, OUTPUT_12MA );
     digitalWrite( ARDUINO_RESET_0_PIN, LOW );     // RST low
     rstColors[ 1 ] = 0x002a10;
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
     delay( 50 );   // Hold RST low ~50 ms
     pinMode( ARDUINO_RESET_0_PIN, INPUT );        // Release RST; B1 stays low → download mode
     // RESET_1 (B1) left LOW until flash is done (released in flashArduino cleanup)
@@ -736,7 +736,7 @@ void applyPsramModeChange( int psramEnabled ) {
     }
 
     applyHeaderColorsForPsram();
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 }
 
 void setBaudRate( int baudRate ) {}

@@ -160,7 +160,7 @@ static void oledStatus( const char* line ) {
 // Live LED progress: fill one breadboard row (1-60) with a status color.
 static void paintRowColor( int row, uint32_t color ) {
     b.printRawRow( 0b00011111, row - 1, color, 0xfffffe );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 }
 
 static void paintRowStatus( int row, bool ok ) {
@@ -223,7 +223,7 @@ static void paintSelfTestOverlay( const SelfTestReport& r ) {
     }
 
     graphicOverlayState.addOverlay( SELFTEST_OVERLAY_NAME, 1, 1, 30, 10, colors );
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
 }
 
 static String selfTestToJson( const SelfTestReport& r ) {
@@ -395,7 +395,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] probe cable..." );
     b.clear( );
     b.print( "Probe", (uint32_t)0x000a12 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     // The firmware's WS2812-data/button pin follows probeLEDs; the other pin
     // of the shared TRRS ring is the parked spare (GPIO2 when
@@ -599,7 +599,7 @@ static void runCrossbarTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] crossbar routing..." );
     b.clear( );
     b.print( "Xbar", (uint32_t)0x120400 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     // Phase 2 drives ALL eight routable GPIOs as outputs. A GPIO buffer-power
     // claim would be fought mid-test (and the claim's HIGH drive would
@@ -753,7 +753,7 @@ static void runTipVoltageTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] probe tip voltage..." );
     b.clear( );
     b.print( "Tip V", (uint32_t)0x0a0a00 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     // In SELECT position the probe LED is powered FROM the buffer output this
     // test measures: any lit color is a steady load that drags the node down
@@ -1061,7 +1061,7 @@ static void runPsramTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] psram..." );
     b.clear( );
     b.print( "PSRAM", (uint32_t)0x001008 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     size_t sz = rp2040.getPSRAMSize( );
     if ( sz == 0 ) {
@@ -1095,7 +1095,7 @@ static void runPeripheralsTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] peripherals..." );
     b.clear( );
     b.print( "Chips", (uint32_t)0x0c0010 );
-    showLEDsCore2 = 2;
+    requestLedShow( 2 );
 
     bool ina0 = i2cAck( 0x40 );
     Serial.printf( "  INA219 #0 (0x40): %s\n\r", ina0 ? "ack" : "NO ACK" );
@@ -1351,7 +1351,7 @@ void selfTestWaitForInput( const char* nextWhat ) {
 
 void selfTestClearOverlay( void ) {
     graphicOverlayState.removeOverlay( SELFTEST_OVERLAY_NAME );
-    showLEDsCore2 = -2;
+    requestLedShow( -2 );
 }
 
 void selfTestWaitForInputThenReset( void ) {
