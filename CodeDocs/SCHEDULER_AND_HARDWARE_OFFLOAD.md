@@ -16,10 +16,19 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-17 evening, written so a fresh chat can act on it):**
-- **HEAD = the speed-test commit after `eafb218` (row 49); the board is flashed with it**; the
-  tree is clean; nothing has ever been pushed. `DEV_MERGE_HANDOFF.md` rows 29–49 have every
-  commit with how it was verified (one commit per item, hash of each filled in by the next
-  commit — row 49's hash goes in with the next).
+- **HEAD = the release commit after `7e6f069` (row 50), tagged `5.7.3.0` (annotated, local —
+  nothing has ever been pushed, tag included); the board is flashed with it** and reports
+  `Jumperless firmware version: 5.7.3.0` on `?`. The tree is clean. `DEV_MERGE_HANDOFF.md` rows
+  29–50 have every commit with how it was verified (one commit per item, hash of each filled in
+  by the next commit — row 50's hash goes in with the next). Kevin's ask was "let's tag this as a
+  release where we are now": `VERSION` went 5.7.2.0 → 5.7.3.0 — the next hand-bumped *third*
+  component after his `5.7.2.0` checkpoint (the fourth is CI's auto-bump on `main`, the second is
+  the public named line — 5.8 is his call; retagging is a `git tag -d` + `VERSION` edit while
+  nothing is pushed). **CI note:** `release.yml` runs on push to `main` and
+  `bump_version_if_needed.py` bumps past any *existing* tag — so if the `5.7.3.0` tag is pushed to
+  origin before `main` is, CI releases `5.7.3.1`; to have CI publish exactly `5.7.3.0`, push the
+  branch without the tag and let the workflow tag it.
+- Before this: `7e6f069` was the speed-test commit (row 49).
 - **Kevin's "the crossbar speed test went from 300 kHz to 10 kHz" (17:00) — answered:** it did
   not, and not today: the diagnostics-menu speed test called the *checked* `sendXYraw()`, which
   since the RouteSafety work (rows 16–20, mid-August) runs the per-crosspoint short-check on
@@ -66,8 +75,9 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 `4dd3eee` (T1.7b, row 43), `ba64238` (docs, row 44), `c785d0d` (the probe-zero fix, row 45 —
 "Side quest 2, follow-up 3" below), `e1fc7f8` (T1.6b, the VM-hook and WaveGen kick sites,
 row 46), `3406b1a` (docs), `e148384` (the in-session probe LED fix, row 47 — "Side quest 2, follow-up 4"
-below), and this docs commit (row 48 — hash with the next commit). **The board is flashed with
-`e148384`.**
+below), `eafb218` (docs, row 48), `7e6f069` (the speed test's two labelled passes, row 49), and
+the **`5.7.3.0` release commit** (row 50 — hash with the next commit; annotated tag `5.7.3.0` on
+it). **The board is flashed with the release build (`5.7.3.0`).**
 
 **Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
 probing state — if I flip the switch inside the probing loop, it lights up measure, even though
