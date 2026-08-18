@@ -62,6 +62,7 @@ extern WaveGen wavegen; // defined in main.cpp
 #include "externVars.h"
 #include "oled.h"
 #include "USBAudio.h" // usb_audio_probe_activity()
+#include "AdcRing.h"  // T2.1: the pad decode reads the ring's history
 
 // Button timing constants
 #define BUTTON_SETTLE_US 8
@@ -6495,6 +6496,16 @@ void Probing::checkPads( void ) {
     int probeReadings[ 12 ] = { 0 };
 
     for ( int i = 0; i < 12; i++ ) {
+        // T2.1: each of the 12 decodes reads the ring's newest history, so
+        // between them wait for 16 fresh sweeps (~0.33 ms) - otherwise the 12
+        // would all see the same samples. 12 x 0.33 ms = ~4 ms per poll (was
+        // ~37 ms of conversions), and the waits are on the wall clock, not
+        // the converter. Bounded; a stalled engine falls through.
+        if ( adcRingActive( ) && i > 0 ) {
+            uint32_t s0 = adcRingSweeps( );
+            uint32_t t0 = micros( );
+            while ( (int32_t)( adcRingSweeps( ) - ( s0 + 16 ) ) < 0 && ( micros( ) - t0 ) < 1000 ) { tight_loop_contents( ); }
+        }
         probeReadings[ i ] = readProbeRaw( 0, 1 );
     }
 
@@ -6765,7 +6776,33 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // Serial.print("CheckingPads: ");
     // Serial.println(checkingPads);
     
-    if ( connectOrClearProbe == 1 ) {
+    if ( adcRingActive( ) ) {
+        // T2.1: the same decode - N bursts of B samples each, variance across
+        // bursts, median of bursts - taken from the ring's HISTORY in one
+        // memory read: burst i is the i-th window of B sweeps ending at the
+        // newest one, oldest first, so the variance gate still measures slew
+        // across the read (2.7 ms of history for 8 x 16 at 48 kHz, vs ~1.2 ms
+        // of live conversions before). The weak-signal escalation to 16
+        // bursts re-reads with more history. Core 0 spends microseconds here
+        // instead of the ~1.2-2 ms the conversions took.
+        int burstSamples = 16;
+        if ( connectOrClearProbe != 1 && checkingPads != 1 ) {
+            burstSamples = ( switchPosition == 0 ) ? 24 : 16;   // measure position: deeper bursts (see below)
+        }
+        for ( int pass = 0; pass < 2; pass++ ) {
+            uint32_t end = adcRingSweeps( );
+            for ( int i = 0; i < numberOfReads; i++ ) {
+                // window i (oldest first) ends at end - (numberOfReads-1-i)*B
+                uint32_t wEnd = end - (uint32_t)( ( numberOfReads - 1 - i ) * burstSamples );
+                measurements[ i ] = adcRingMeanWindow( 5, wEnd, burstSamples );
+                if ( measurements[ i ] < 300 && measurements[ i ] > ( mapMin + 10 ) && i < 4 ) {
+                    lowReads++;
+                }
+            }
+            if ( lowReads > 2 && numberOfReads == 8 ) { numberOfReads = 16; lowReads = 0; continue; }
+            break;
+        }
+    } else if ( connectOrClearProbe == 1 ) {
 
         for ( int i = 0; i < numberOfReads; i++ ) {
             measurements[ i ] = readAdc( 5, 16 );

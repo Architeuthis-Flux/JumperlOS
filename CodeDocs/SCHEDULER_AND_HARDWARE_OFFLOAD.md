@@ -16,12 +16,31 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **HEAD = the docs commit after `060d52e` (row 54); `060d52e` = the T3.3 follow-up (row 53 — the
-  four API INA reads no longer pause core 2); `42bf038` = T3.3 itself (row 52); the board is
-  flashed with `060d52e` (HEAD is docs-only on top of it).** The tree is clean; nothing has ever
-  been pushed (tag `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–54 have every commit with
-  how it was verified (one commit per item, hash of each filled in by the next commit — row 54's
-  hash goes in with the next). **Where the autonomous run stopped, and
+- **HEAD = the T2.1 commit after `15db8c0` (row 55) — the always-on ADC ring; the board is flashed
+  with it and Kevin felt the pads on it ("same or better — commit it").** `15db8c0` = docs (row 54),
+  `060d52e` = the T3.3 follow-up (row 53), `42bf038` = T3.3 (row 52), `7b5c412` = T3.2 (row 51),
+  `6ee9abf` = release 5.7.3.0 (row 50). The tree is clean; nothing has ever been pushed (tag
+  `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–55 have every commit with how it was
+  verified (one commit per item, hash of each filled in by the next commit — row 55's hash goes
+  in with the next). **Kevin is reachable now (Cursor notifications) — ask instead of stopping.**
+- **T2.1 in one paragraph:** `src/AdcRing.cpp` owns the ADC: free-running round-robin over all
+  eight inputs at 48 kHz per channel (384 ksps) into an 8 KB SRAM ring by ONE DMA channel in
+  RP2350 TRIGGER_SELF mode (1 ms blocks, hardware write-ring wrap, a block IRQ on DMA_IRQ_1 on
+  core 0) — memory-safe with no core in the loop. Halfword i = channel (i & 7) of sweep (i >> 3).
+  `readAdc()`/`readAdcHeld()` keep their "fresh burst starting now" meaning by waiting for n new
+  sweeps (`adcRingMeanAfter`, ~21 µs each), so every drive-then-read site (probe blink, dark pad
+  read, NetVoltageScan taps) is right unaudited; the hot paths read history: `readProbeRaw()`
+  = the same decode (N bursts × B samples, variance across bursts, median) over the newest
+  N×B sweeps as ordered windows in one memory read, `checkPads()`' 12 decodes each wait ≥ 16
+  fresh sweeps, the OLED cache = 16-sample means every ms. USB audio is a consumer of the same
+  sweeps (`usbAudioOnRingBlock` from the block IRQ, decimating: rates must divide 48 k — Kevin:
+  audio is niche, the pads take precedence). `adcTryAcquire()` = true and the `readingADC` lock is
+  moot while the ring is live; the legacy START_ONCE path stays behind `adcRingActive()` and the
+  D-menu "ADC Ring A/B" flips them live. Measured: **ProbePads 36.8 ms → 4.6–5.7 ms per poll,
+  core-0 loop 1.3 k → 3.6 k passes/s**, ring vs legacy `adc_get()` on all 8 channels identical
+  within noise, HIL **7/7** (the phantom check passed too), `test_infra_paths` 24/24, 500-op soak
+  clean, 7.5 M ring reads with 0 overruns / 0 resyncs / 0 stalls, ADC ring 8 KB + audio ring
+  4 KB static (RAM 58.7 → 60.4 %). **Where the autonomous run stopped, and
   why:** the doc's own migration order (section D) puts `pauseCore2` (T3.4 / C16) LAST — after
   `REQ_SHOW_LEDS` (T2.2c, ~200 `showLEDsCore2` sites, Kevin's decision) and the probe-LED request
   / C5 (T2.4, needs scope time with Kevin); `pauseCore2` is the soft LED-frame hint at ~230 sites
@@ -141,8 +160,9 @@ mailbox, row 38), `9db4675` (T2.3, the DMA-fed CH446Q list send, row 39), `38a48
 row 46), `3406b1a` (docs), `e148384` (the in-session probe LED fix, row 47 — "Side quest 2, follow-up 4"
 below), `eafb218` (docs, row 48), `7e6f069` (the speed test's two labelled passes, row 49), and
 `6ee9abf` (**release 5.7.3.0**, row 50; annotated tag `5.7.3.0` on it), `7b5c412` (T3.2, the PIO2
-chip-select strobe, row 51), `42bf038` (T3.3, the DMA wavegen + the I2C0 arbiter, row 52), and the
-**T3.3 follow-up commit** (row 53 — hash with the next commit). **The board is flashed with HEAD.**
+chip-select strobe, row 51), `42bf038` (T3.3, the DMA wavegen + the I2C0 arbiter, row 52),
+`060d52e` (the T3.3 follow-up, row 53), `15db8c0` (docs, row 54), and the **T2.1 commit** (the
+always-on ADC ring, row 55 — hash with the next commit). **The board is flashed with HEAD.**
 
 **Side quest 2, follow-up 4 (Kevin, ~16:20: "we need the state of the LEDs to always match the
 probing state — if I flip the switch inside the probing loop, it lights up measure, even though
@@ -197,7 +217,9 @@ call — see the checklist at the end of this block. The watchdog
 *enable* is a separate decision on the T1.6 numbers. **A consolidated "Kevin's hands-on
 checklist" is at the end of this block.**
 
-**T2.1 (the always-on ADC ring) — why it was not started here, and what it actually is.**
+**T2.1 (the always-on ADC ring) — why it was not started in the autonomous run, and what it
+actually is. (Built 2026-08-18 with Kevin at the board — see the T2.1 block above; this analysis
+is what it was built from.)**
 The hoped-for staging ("promote the audio engine to always-on with the full channel mask,
 add `readAdcRing()` next to the untouched `readAdc()`, move no reader yet") does not exist:
 the ADC is either free-running round-robin into the DMA half-buffers (what `usbAudioAdcStart()`
@@ -233,6 +255,73 @@ still records, plus the automatable part (ring stats in `X`: overruns 0, oldest-
 build will be judged by feel within a minute of tapping, and the cheap alternative for the
 core-0 load alone (a one-read touch pre-check in `checkPads()`, "T1.11 candidate" in the
 checklist) is a 20-line change he can take today if he only wants the CPU back.
+
+**T2.1 — what was built (section C1; Kevin picked it from the queue, 2026-08-18, "session with
+you").** `src/AdcRing.h/.cpp` (new) is the ADC's owner on V5: `adcRingStart()` at the end of
+`setup()` puts the converter in free-running round-robin over all eight inputs at 384 ksps
+(clkdiv 124: 48 kHz per channel — the datasheet: "Switching AINSEL requires no settling time",
+1 pF sample cap, > 100 kΩ effective at 500 kS/s), FIFO + DREQ, and one DMA channel writing
+16-bit samples into `static alignas(8192) uint16_t s_ring[4096]` with a hardware write-ring wrap
+over the whole buffer, in **TRIGGER_SELF** mode with a 384-halfword (1 ms) count — the RP2350
+datasheet's own "streaming through SRAM ring buffers with periodic interrupts" case
+(12.6.2.2.1): the channel re-triggers itself, resumes at its current write address, raises the
+completion IRQ every block. So no core is ever in the data path (a park costs a late block count,
+never a wild pointer — the exact failure USB audio's old two-half ping-pong had, `USB_AUDIO_
+HANDOFF.md`). Sweep phase: the DMA starts at `ring[0]` with AINSEL 0, so halfword i is channel
+i & 7 of sweep i >> 3 for as long as no conversion is lost; an ADC FIFO overrun (never seen: 0
+in 7.5 M reads) sets `needResync` in the IRQ and `adcRingService()` (from core 1's lazy-cache
+pass) restarts the engine cleanly (generation++). The sample counter `s_total` (halfwords) is
+brought up to the live DMA write pointer under a claimed SIO spinlock by every reader and the
+IRQ (`syncTotal`); it loses whole laps only if nobody calls it for > 10.7 ms (both cores parked
+for a flash write) — readers only use differences of a few hundred sweeps and the ring content
+stays consistent with the position, so nothing mis-reads; only an `adcRingMeanAfter` wait that
+straddles such a stall can time out (bounded, counted as a stall, returns the newest n).
+**Readers:** `adcRingSweeps()`, `adcRingMeanNewest(ch, n)` (memory read, torn-read check +
+retry), `adcRingMeanWindow(ch, endSweep, n)`, `adcRingMeanAfter(ch, after, n, timeoutUs)` (the
+fresh burst: sweeps after+1..after+n — waits ~(n+1)·21 µs). `Peripherals.cpp`: `readAdc()` /
+`readAdcHeld()` → `adcRingMeanAfter(ch, adcRingSweeps(), n)` when the ring is live — the SAME
+meaning every caller had ("a fresh burst starting now"), which is what makes the drive-then-read
+sites (`probeSwitchFeedBlink`'s 2+2 tip samples around a 20 µs dark, the 60 µs dark pad read,
+NetVoltageScan's settle-then-read taps, SelfTest/calibration set-then-read) correct without a
+per-site audit; `adcTryAcquire()` = true and `adcRelease()` a no-op on the ring (nothing to own);
+`updateLazyAdcReadings()` (core 1) fills the whole OLED cache from 16-sample means every 1 ms
+and runs the resync service. **The hot paths** (`Probing.cpp`): `readProbeRaw()` keeps its
+decode — N bursts (8, escalating to 16 on weak signal) of B samples (16; 24 in measure
+position), max adjacent-burst variance ≤ 6 as the slew gate, median of bursts — but takes the
+bursts as ordered WINDOWS of the newest N×B sweeps in one memory read (2.7 ms of history for
+8×16 vs ~1.2 ms of live conversions before: the slew gate still sees slew, over a slightly
+longer window); `checkPads()`' 12 decodes each wait ≥ 16 fresh sweeps between them (bounded
+1 ms) so they see progressively fresher data — 12 × 0.33 ms ≈ 4 ms per poll on the wall clock,
+microseconds of CPU. `NetVoltageScan.cpp`: `readScanAdcVoltage()` reads fresh sweeps, no lock
+on the ring. **USB audio (`USBAudio.cpp`) is a consumer:** the ring's block IRQ calls
+`usbAudioOnRingBlock(total)`; audio walks the sweeps it has not seen, one frame per `48000/rate`
+sweeps (mean of them), converts + DC-blocks + pushes PCM into its SPSC ring (now 2048 samples);
+if it falls more than the ADC ring behind (a park) it skips ahead and counts it. Gone: ADC/DMA
+ownership, the `readingADC` claim, the probe-activity pause and its 300 ms hysteresis, the
+sentinel channels, `usbAudioSnapshotRaw`/`RefreshLazy` (stubs return false), `usbAudioInit`'s DMA
+claims and DMA_IRQ_1 handler; `usb_audio_yield_adc()` returns true. Rates must divide 48 k
+(48/24/16/12/9.6/8 k; the 16 k default is fine) — per Kevin, audio is niche and the pads take
+precedence: no engine decision was made for audio's sake. **A/B:** the D menu's "ADC Ring A/B"
+stops/starts the engine live (`adcRingStop()` restores `initADC()`'s START_ONCE state), and X
+prints `adc ring: ACTIVE 48 kHz x 8 ch, DMA ch, gen, sweeps, block irqs, overruns/resyncs, reads,
+waits max/stalls` or `LEGACY (why)`. The OG keeps the START_ONCE path (not built there). RAM:
++8 KB (the ring) +4 KB (the audio ring, was 2) −2 KB (the old halves) static → 60.4 %.
+
+**T2.1 — verified:** builds ×3; `X`: ACTIVE, DMA ch 5, sweeps 48.5 k/s, block IRQs 1 kHz, **0
+overruns, 0 resyncs, 0 stalls after 7.5 M reads**, waits max 528 µs; **A/B on the same board via
+the D-menu toggle: `adc_get()` on all 8 channels ring vs legacy identical within noise** (ch 5
+0.08–0.10, ch 6 8.56–8.58, ch 7 3.25–3.27 V, three rounds each), gen 1 → 2 → 3 across the flips;
+**scheduler table: ProbePads avg 4.6–5.7 ms (was 36.8 ms), share 4.6–8.9 % (was 65–70 %), core-0
+loop 3.6 k passes/s (was 0.9–1.3 k)**; `run_all.py` **7/7** (the phantom-current check passed as
+well — the scan's taps read fresh sweeps now), `test_infra_paths` 24/24, the 500-op routing soak
+21.5 s / 0 WARNINGs / RouteSafety PASS / audit ok; kick gaps unchanged (the flash-write family
+only); board end state `i@` on → DAC0. **Kevin's hands-on (2026-08-18):** taps in SELECT and
+MEASURE, connect/clear/remove, the pad menus, dragging highlight, the reading display — "**same or
+better — commit it**". Not exercised: the resync path (needs an overrun), the OG.
+
+**T2.1 files:** `src/AdcRing.h/.cpp` (new), `src/Peripherals.cpp`, `src/Probing.cpp`,
+`src/NetVoltageScan.cpp`, `src/USBAudio.cpp`, `src/main.cpp`, `src/Debugs.cpp` (the A/B item),
+`src/SingleCharCommands.cpp` (`X`), the rebuilt `firmware.uf2`.
 
 **T3.3 — what was built (section C14; "then continue with the rest").** `src/WaveGen.cpp/.h`
 rewritten around a hardware stream; the legacy per-sample core-1 loop stays as the fallback (and
@@ -1064,6 +1153,12 @@ port 7) is the instrument for most of them.
    0.53 ms (was 10 007 ms) because the stream is DMA; `KICK_WAVEGEN` is fallback-only. What
    remains large is the flash-write family (`run_all` shows ~2.3 s core-0 / ~1.2–1.7 s core-1
    gaps, A/B'd identical on the release build) — the enable's real ceiling.
+11. **T2.1, the ADC ring (the commit after `15db8c0`) — you already felt it ("same or better");** the
+   remaining checks are the ones the ring changes the *timing* of: the switch classifier's blink
+   detector (the tip is dark ~85 µs per check now, was ~40) and the dark pad read (~230 µs, was
+   ~140) — item 1 covers the classifier; a probe session with the mic open (audio at 16 k decimates
+   the same sweeps the pads read); and `X` → `adc ring:` must never show overruns/resyncs. The D
+   menu's "ADC Ring A/B" is your instant comparison if anything ever feels off.
 7. **The two calls the doc leaves to you:** (a) ProbePads is ~65–70 % of core 0 idle
    (36.8 ms per poll at 20 Hz — T1.4's first number): T2.1 (ADC ring, approved) or the small
    "touch pre-check in `checkPads()`" (T1.11 candidate, changes first-detection slightly);
@@ -1539,7 +1634,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - (done) C3 INA no-pause, C4 MCP dedupe, I2C0 rule.
 
 **Tier 2 — medium (1–2 days each)**
-- T2.1 C1 always-on ADC ring (`readAdc` = ring read; audio = consumer) — **approved**.
+- T2.1 C1 always-on ADC ring (`readAdc` = ring read; audio = consumer) — **approved**. **Built 2026-08-18 (section 0).**
 - T2.2 D2/D3 core-1 mailbox: `REQ_SEND_PATHS` first, then `REQ_SHOW_LEDS` — **approved**.
   **`REQ_SEND_PATHS` landed 2026-08-17 (section 0, with the latency probe); `REQ_SHOW_LEDS`
   is its own later commit.**

@@ -39,6 +39,7 @@
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "WaveGen.h"    // X: the wavegen stream line (T3.3)
+#include "AdcRing.h"    // X: the ADC ring line (T2.1)
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "States.h"
@@ -2972,6 +2973,23 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
             target->printf( "cs strobe: FALLBACK to the legacy ISR strobe - %s  |  probe LED SM: PIO%d  button: %s\n\r",
                             whyStr[ why ], probePio,
                             btn == 1 ? "PIO" : ( btn == 2 ? "CPU (no PIO room!)" : "not tried" ) );
+        }
+    }
+    // T2.1: the always-on ADC ring - engine state, sweep count, IRQ blocks,
+    // overruns/resyncs, reader stats. "LEGACY" = the START_ONCE burst path
+    // (the D-menu A/B toggle, or the engine declined at boot - reason shown).
+    {
+        AdcRingStats rs; adcRingGetStats( &rs );
+        if ( rs.active ) {
+            target->printf( "adc ring: ACTIVE  48 kHz x 8 ch, DMA ch %lu, gen %lu, sweeps %lu, block irqs %lu, overruns %lu resyncs %lu, reads %lu, waits max %lu us stalls %lu\n\r",
+                            (unsigned long)rs.dmaA, (unsigned long)rs.generation, (unsigned long)rs.sweeps,
+                            (unsigned long)rs.blockIrqs, (unsigned long)rs.overruns, (unsigned long)rs.resyncs,
+                            (unsigned long)rs.reads, (unsigned long)rs.maxWaitUs, (unsigned long)rs.stalls );
+        } else {
+            static const char* const why[] = { "toggled off (D menu)", "no DMA channel", "DMA_IRQ_1 taken", "no spinlock", "not built (OG)" };
+            int r = ( rs.failReason >= 0 && rs.failReason <= 4 ) ? rs.failReason : 0;
+            target->printf( "adc ring: LEGACY START_ONCE path (%s)  gen %lu  reads so far %lu\n\r",
+                            why[ r ], (unsigned long)rs.generation, (unsigned long)rs.reads );
         }
     }
     // T3.3: the wavegen stream - DMA (image + address ring + pacing timer,

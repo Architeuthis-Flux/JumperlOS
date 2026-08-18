@@ -86,6 +86,7 @@ KevinC@ppucc.io
 #include "XbarLatency.h"        // tap->crossbar->LEDs latency probe (T2.2 gate)
 #include "CoreMailbox.h"        // core 0 -> core 1 request mailbox (T2.2b)
 #include "WaveGen.h"            // New async wavegen
+#include "AdcRing.h"            // the always-on ADC ring (T2.1)
 #include "externVars.h"
 
 bread b;
@@ -566,6 +567,12 @@ void setup( ) {
     // This resets terminal state in case LED dump or crossbar display was active before reboot
     clearNonScrollingRegion( );
 
+    // T2.1: the always-on ADC ring - from here every readAdc() on either core
+    // is a memory read / a short wait on the ring, and the pad poll no longer
+    // owns core 0 (AdcRing.h). Started here, on core 0, after initADC() and
+    // the config (its DMA_IRQ_1 handler runs on this core). If it declines,
+    // the START_ONCE path stays and X says why.
+    adcRingStart( );
 #if USB_AUDIO_ENABLE
     // Last thing in setup(), once USB and the config are both up: if the saved
     // config wants the USB mic, re-enumerate so the host actually sees it. USB

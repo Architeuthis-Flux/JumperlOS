@@ -2,20 +2,13 @@
 //
 // Three pieces: the descriptor toggle (usb_descriptors.cpp picks the variant on
 // g_usb_audio_enabled), the class control plane (the tud_audio_* callbacks at
-// the bottom), and the ADC->DMA->ring->TinyUSB capture pump in the middle.
-//
-// THE ONE RULE FOR THE CAPTURE PATH: the DMA must stay memory-safe with NO help
-// from a CPU. Core 1 owns the completion IRQ, and core 1 is parked with
-// interrupts masked (rp2040.idleOtherCore(), inside the doorbell IRQ) for every
-// flash erase/program - tens of ms per sector. On RP2350 a chain-triggered
-// channel reloads TRANS_COUNT but keeps its current WRITE_ADDR, so two channels
-// chained to each other keep ping-ponging without the IRQ, and if that IRQ was
-// the only thing resetting the write pointer they walk it straight out of the
-// buffer. That is exactly what happened: SWD caught the pointers 443 KB past
-// g_half[], through .bss and into core 0's stack, one jfs write after streaming
-// started (see CodeDocs/USB_AUDIO_HANDOFF.md). The fix is hardware: each half is
-// a power-of-two, aligned region and the channel's write address is ring-wrapped
-// to it, so a late IRQ costs a glitch, never memory.
+// the bottom), and the capture pump in the middle - which, since T2.1, is a
+// CONSUMER of the always-on ADC ring (src/AdcRing.cpp): the ring engine owns
+// the ADC and the DMA (memory-safe by hardware ring wrap, no core in the loop),
+// and this file only converts sweeps into PCM. The history of why the DMA must
+// never depend on a CPU (SWD caught the old ping-pong pointers 443 KB past
+// their buffer after a flash-write park) is in CodeDocs/USB_AUDIO_HANDOFF.md;
+// the ring engine keeps that rule.
 
 #include "USBAudio.h"
 
@@ -35,6 +28,7 @@
 #include "config.h"
 #include "configManager.h"
 #include "externVars.h"   // pauseCore2
+#include "AdcRing.h"      // the always-on ADC ring (T2.1): audio is one of its consumers
 
 // The big global USB mutex from the core's TinyUSB port. tud_task() is pumped
 // from the USB soft-IRQ as well as from thread context, so cycling the bus
@@ -81,63 +75,27 @@ static uint32_t g_rateHz = JL_AUDIO_DEFAULT_RATE;
 // the pump at the next stop. 0 = nothing pending. See usb_audio_set_rate().
 static volatile uint32_t g_pendingRateHz = 0;
 
-// Sweep EVERY ADC channel, not just the two being streamed. The audio pair is
-// whatever the user picked; the rest ride along and are demuxed straight into
-// adcReadings[], which is what the OLED, probe sensing, supply sense and
-// adc_get() all read. Covering all 8 removes an entire bug class - otherwise
-// any channel outside the sweep silently reads 0 for the whole recording, and
-// which channels those are would shift with the user's choice of audio pair.
-//
-// Cost is only ADC bandwidth: 8 channels at the default 16 kHz is 128 ksps
-// against the converter's ~500 ksps ceiling, i.e. ~7.8 us per conversion, which
-// is comfortably above its settling requirement. Note that at the maximum
-// 48 kHz the sweep hits 384 ksps and per-channel settling gets tight, so the
-// non-audio readings are less accurate there - another reason 16 kHz is the
-// default.
-#define JL_AUDIO_HOUSEKEEP_MASK 0xFFu
+// (The round-robin mask, per-ms burst sizing and the ADC clock divider all
+// moved to src/AdcRing.cpp with T2.1: the ring engine sweeps every channel at
+// 48 kHz whether or not audio is streaming; audio decimates to its rate.)
 
-static uint8_t  g_rrMask   = 0;    // every channel in the round-robin
-static uint8_t  g_nChan    = 0;    // popcount(g_rrMask)
-static uint8_t  g_slotOf[8];       // ADC channel -> position within one sweep
-static uint16_t g_perMs    = 0;    // conversions per millisecond (all channels)
-static uint16_t g_framesMs = 0;    // stereo audio frames per millisecond
+// T2.1: the ADC is the always-on ring's (src/AdcRing.cpp) - free-running
+// round-robin over all eight inputs at 48 kHz per channel into an 8 KB SRAM
+// ring by DMA, one block IRQ per millisecond. Audio is one CONSUMER of those
+// sweeps: the ring's block IRQ (core 0) calls usbAudioOnRingBlock() with the
+// halfword total, and this side walks the sweeps it has not seen yet, takes
+// its two channels (mean over `g_decim` sweeps per frame - the stream rate
+// must divide 48 000: 48/24/16/12/9.6/8 k), converts, DC-blocks and pushes
+// PCM into the SPSC ring below. No ADC or DMA ownership, no probe pause, no
+// sentinel channels, no resync dance: the probe and every other reader read
+// the same ring at the same time. (Kevin, 2026-08-18: audio is a niche
+// feature; the pads take precedence - if this ever fights the probe, it is
+// audio that gives.)
+static volatile uint32_t g_ringTail16 = 0;   // halfword total consumed so far (sweep-aligned)
+static uint32_t g_decim = 3;                 // sweeps per frame = 48000 / rate
 
-// One USB full-speed frame is 1 ms = 48 stereo frames = 96 conversions.
-// Sizing the DMA half-buffers to exactly that keeps the capture cadence and the
-// isochronous cadence in lockstep, so each IRQ produces exactly one packet.
-// Worst case: 48 kHz x 8 channels = 384 conversions per millisecond.
-#define JL_AUDIO_MAX_PER_MS     384
-#define JL_AUDIO_FRAMES_PER_MS  48
-#define JL_AUDIO_SAMPLES_PER_MS (JL_AUDIO_FRAMES_PER_MS * 2)
-
-// clk_adc is the SDK default 48 MHz and the ADC period is (1 + DIV.INT) clocks,
-// so 499 - not 500 - gives exactly 96.000 ksps round-robin = 48.000 kHz per
-// channel. 500 would give 48e6/501 = 95808 sps, a -0.2% error that shows up as
-// an audible artefact every few seconds.
-#define JL_AUDIO_ADC_CLKDIV     499.0f
-
-// Capture buffers. Must be plain SRAM (never PSRAM) and the conversion path
-// must stay out of flash: the ISO endpoint is single-buffered on this DCD, so
-// there is a hard 1 ms refill deadline and any XIP stall drops a frame.
-//
-// Each half is a 1 KB region, 1 KB-ALIGNED, and the DMA channel filling it has
-// its write address RING-WRAPPED to that region (channel_config_set_ring). This
-// is what makes a late or missing completion IRQ harmless: the chain keeps the
-// channels ping-ponging, but every write lands inside its own half. Without the
-// wrap the pointer marched through all of SRAM the first time core 1 was parked
-// for a flash write (see the file header).
-#define JL_AUDIO_HALF_BYTES     1024u
-#define JL_AUDIO_HALF_RING_BITS 10u
-static_assert((1u << JL_AUDIO_HALF_RING_BITS) == JL_AUDIO_HALF_BYTES, "ring bits vs half size");
-static_assert(JL_AUDIO_MAX_PER_MS * 2u <= JL_AUDIO_HALF_BYTES, "one burst must fit in a half");
-static uint16_t __attribute__((aligned(JL_AUDIO_HALF_BYTES))) g_half[2][JL_AUDIO_HALF_BYTES / 2u];
-static int  g_dmaCh[2] = { -1, -1 };
-
-// Channels 5 and 7 are the probe's pad-sense and tip inputs. Streaming them is
-// self-defeating: ADC5 crossing the pad threshold stamps probe activity, which
-// pauses the very capture that is reading it, every 300 ms forever. They are
-// also the two channels served as a sentinel rather than a mean, so the audio
-// would be silence anyway.
+// Channels 5 and 7 are the probe's pad-sense and tip inputs; keep them out of
+// the audio pair (a finger on the pads is not a signal to record).
 static inline bool usbAudioChannelStreamable(int ch) {
     return ch >= 0 && ch <= 7 && ch != 5 && ch != 7;
 }
@@ -155,55 +113,30 @@ static float   g_fullScaleVolts = 8.0f;
 static int32_t g_hpX1[2], g_hpY1[2];
 
 // Lock-free SPSC ring carrying converted PCM from the capture side to the USB
-// side. This exists because the two live on DIFFERENT CORES and must never
-// share a lock: the DMA completion IRQ runs on core1, while TinyUSB's software
-// FIFO is owned by core0's USB IRQ. Calling tud_audio_write() straight from the
-// DMA IRQ took the whole board off the bus - core1 blocked on the FIFO mutex
-// while core0 held it, the same cross-core deadlock custom_tusb_config.h
-// documents for CDC. Producer: usbAudioDmaIrq (core1). Consumer:
-// tud_audio_tx_done_isr (core0, USB context). Power-of-two so the wrap is a mask.
-#define JL_AUDIO_RING_SAMPLES 1024u   // ~5.3 ms of stereo headroom
+// side: producer = the ring's block IRQ (core 0), consumer =
+// tud_audio_tx_done_isr (core 0, USB context). Calling tud_audio_write()
+// straight from a DMA IRQ took the whole board off the bus once (the FIFO
+// mutex - the same cross-core deadlock custom_tusb_config.h documents for
+// CDC), hence the indirection. Power-of-two so the wrap is a mask.
+#define JL_AUDIO_RING_SAMPLES 2048u   // ~21 ms of stereo headroom at 48 k (64 ms at the 16 k default)
 #define JL_AUDIO_RING_MASK    (JL_AUDIO_RING_SAMPLES - 1u)
 static int16_t g_ring[JL_AUDIO_RING_SAMPLES];
-static volatile uint32_t g_ringHead = 0;   // producer index, core1 only
-static volatile uint32_t g_ringTail = 0;   // consumer index, core0 only
+static volatile uint32_t g_ringHead = 0;   // producer index
+static volatile uint32_t g_ringTail = 0;   // consumer index
 
-// Rolling mean of the last completed half, so adc_get() keeps returning real
-// data for the two streamed channels instead of the 0 that every other channel
-// gets while the ADC is ours.
+// Rolling means of the two streamed channels (status / legacy readers).
 static volatile int32_t g_lastMean[2] = { 0, 0 };
-// Per-channel means for the housekeeping channels, in raw ADC counts.
-static volatile int32_t g_hkMean[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 // Runtime health counters surfaced through usb_audio_status(). These are the
 // things that tell you whether a recording is clean without listening to it.
 static volatile uint32_t g_statFramesSent  = 0;   // stereo frames handed to TinyUSB
 static volatile uint32_t g_statFifoFull    = 0;   // ring full: host stalled
-static volatile uint32_t g_statAdcOver     = 0;   // ADC FIFO overran (forces a resync)
-static volatile uint32_t g_statLateIrq     = 0;   // completion IRQ arrived after the sibling chained back
-static volatile uint32_t g_statResyncs     = 0;   // capture restarts (overrun / late IRQ / reconfigure)
-static volatile uint32_t g_statProbePauses = 0;   // times capture yielded to the probe
-static volatile uint32_t g_statClaimFail   = 0;   // start declined: readingADC held by someone else
-static volatile bool     g_needResync      = false;
-
-// Probe arbitration. The probe drives a crosspoint, waits 5-60 us and reads -
-// a protocol two orders of magnitude faster than our 1 ms capture average, so
-// serving it from the sweep returns values that lag across many probe states
-// and make readings jump. It needs the real converter. Rather than making the
-// two mutually exclusive, capture yields while the probe is IN USE and resumes
-// once it has been quiet for PROBE_HOLD. The host hears a gap while probing.
-//
-// "In use" is an explicit signal - usb_audio_probe_activity(), stamped by the
-// probe/measure code when it has actually decoded a touch - NOT "any read of
-// the probe ADC channels". The idle loop polls the pad-sense channel at 100 Hz
-// whether or not anything is touching it, so inferring from reads paused
-// capture forever and stop/started the DMA every 300 ms.
-#define JL_AUDIO_PROBE_HOLD_US 300000u
-static volatile uint32_t g_probeReqUs    = 0;    // 0 = no recent activity
-static volatile bool     g_pausedForProbe = false;
-
-static volatile uint8_t  g_initFail    = 9;   // 0 ok, 1 no DMA channels, 2 DMA_IRQ_1 taken, 9 not tried
-static bool              g_dmaInitDone = false;
+static volatile uint32_t g_statAdcOver     = 0;   // (ring engine's overruns, mirrored)
+static volatile uint32_t g_statLateIrq     = 0;   // producer fell more than the ADC ring behind: skipped ahead
+static volatile uint32_t g_statResyncs     = 0;   // stream (re)starts
+static volatile uint32_t g_statProbePauses = 0;   // (none since T2.1)
+static volatile uint32_t g_statClaimFail   = 0;   // start declined: the ring engine is not running
+static volatile uint8_t  g_initFail        = 0;   // 0 ok (the ring engine reports its own)
 
 extern "C" bool usb_audio_device_enabled(void) { return g_usb_audio_enabled; }
 extern "C" bool usb_audio_is_streaming(void)   { return g_streaming; }
@@ -248,273 +181,105 @@ static inline int16_t __not_in_flash_func(usbAudioDcBlock)(int16_t s, int slot) 
     return (int16_t) o;
 }
 
-// no-tree-loop-distribute-patterns: keep GCC from turning the small zeroing
-// loop below into a memset() call - memset lives in flash, and this handler
-// must stay RAM-only.
-static void __attribute__((optimize("no-tree-loop-distribute-patterns")))
-__not_in_flash_func(usbAudioDmaIrq)(void) {
-    for (int k = 0; k < 2; k++) {
-        const int ch = g_dmaCh[k];
-        if (ch < 0 || !(dma_hw->ints1 & (1u << ch))) continue;
-        dma_hw->ints1 = (1u << ch);   // write-1-clear
-
-        // If this channel is ALREADY running again, its sibling completed and
-        // chained back before we got here: this IRQ is late (core 1 was parked
-        // for a flash write, or something masked interrupts for >1 ms). The
-        // ring wrap kept every write inside g_half[k], so memory is fine, but
-        // the buffer holds a torn mix of two bursts and the ADC round-robin
-        // phase relative to the buffer start is no longer known. Publish
-        // nothing and ask the pump for a clean restart.
-        if (dma_hw->ch[ch].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) {
-            g_statLateIrq++;
-            g_needResync = true;
+// The ring's block IRQ (core 0, once per ms) hands us the halfword total.
+// Walk complete sweeps from our tail, one frame per g_decim sweeps. Bounded
+// per call; if we fell more than the ADC ring holds behind (a flash write
+// parked the IRQ), skip to the newest whole ring rather than read overwritten
+// history as audio.
+extern "C" void __not_in_flash_func(usbAudioOnRingBlock)(uint32_t total) {
+    if (!g_streaming) return;
+    const volatile uint16_t *ring = adcRingData();
+    uint32_t tail = g_ringTail16;
+    uint32_t behind = total - tail;
+    if (behind > (ADC_RING_HALFWORDS - 512u)) {
+        // too far behind: restart just behind the head, on a sweep boundary
+        tail = (total - 512u) & ~7u;
+        g_statLateIrq++;
+    }
+    const uint32_t frameHw = 8u * g_decim;             // halfwords per output frame
+    int16_t out[2 * 64];
+    int nOut = 0;
+    int32_t sumL = 0, sumR = 0; int nSum = 0;
+    // at most ~4 ms of frames per call, so a catch-up cannot hog the IRQ
+    int budget = 4 * 48;
+    while ((total - tail) >= frameHw && budget-- > 0) {
+        uint32_t l = 0, r = 0;
+        for (uint32_t k = 0; k < g_decim; k++) {
+            uint32_t base = (tail + 8u * k) & (ADC_RING_HALFWORDS - 1u);
+            l += ring[(base + g_chL) & (ADC_RING_HALFWORDS - 1u)] & 0x0FFFu;
+            r += ring[(base + g_chR) & (ADC_RING_HALFWORDS - 1u)] & 0x0FFFu;
         }
-        // While a resync is pending the channel<->slot mapping of the buffer is
-        // unknown, so neither the audio nor the housekeeping means may be
-        // taken from it - a rotated interleave would hand readAdc() another
-        // channel's voltage. Just keep the DMA armed and wait for the pump.
-        if (g_needResync) {
-            dma_channel_set_write_addr(ch, g_half[k], false);
-            dma_channel_set_trans_count(ch, g_perMs, false);
-            continue;
-        }
-
-        const uint16_t *src = g_half[k];
-        const int frames = g_framesMs;
-        const int nch    = g_nChan;
-        int16_t out[JL_AUDIO_SAMPLES_PER_MS];
-        int32_t sum0 = 0, sum1 = 0;
-
-        // One "sweep" is one pass over every channel in the round-robin mask,
-        // in ascending channel order. Audio takes its two slots; the rest are
-        // averaged into adcReadings[] so the OLED and probe stay live.
-        int32_t hkSum[8];
-        for (int c = 0; c < 8; c++) hkSum[c] = 0;
-        const int sl = g_slotOf[g_chL], sr = g_slotOf[g_chR];
-
-        for (int f = 0; f < frames; f++) {
-            const uint16_t *sweep = &src[f * nch];
-            const uint16_t l = sweep[sl] & 0x0FFF;
-            const uint16_t r = sweep[sr] & 0x0FFF;
-            sum0 += l;
-            sum1 += r;
-
-            int16_t a = usbAudioConvert(l, 0);
-            int16_t b = usbAudioConvert(r, 1);
-            if (g_dcBlock) { a = usbAudioDcBlock(a, 0); b = usbAudioDcBlock(b, 1); }
-            out[2 * f]     = a;
-            out[2 * f + 1] = b;
-
-            for (int c = 0; c < 8; c++) {
-                if (JL_AUDIO_HOUSEKEEP_MASK & (1u << c)) hkSum[c] += sweep[g_slotOf[c]] & 0x0FFF;
-            }
-        }
-
-        g_lastMean[0] = sum0 / frames;
-        g_lastMean[1] = sum1 / frames;
-        for (int c = 0; c < 8; c++) {
-            if (JL_AUDIO_HOUSEKEEP_MASK & (1u << c)) g_hkMean[c] = hkSum[c] / frames;
-        }
-
-        // Publish into the ring; the USB side drains it. NOTHING TinyUSB
-        // here - see the ring's comment for why. Once a resync is pending the
-        // interleave may be rotated, so hold the audio until the restart.
-        if (g_streaming && !g_needResync) {
-            const uint32_t head = g_ringHead;
-            const uint32_t tail = g_ringTail;
-            const uint32_t n = (uint32_t)(frames * 2);
-            const uint32_t free_n = JL_AUDIO_RING_SAMPLES - 1u - ((head - tail) & JL_AUDIO_RING_MASK);
+        l /= g_decim; r /= g_decim;
+        sumL += (int32_t)l; sumR += (int32_t)r; nSum++;
+        int16_t a = usbAudioConvert((uint16_t)l, 0);
+        int16_t b = usbAudioConvert((uint16_t)r, 1);
+        if (g_dcBlock) { a = usbAudioDcBlock(a, 0); b = usbAudioDcBlock(b, 1); }
+        out[2 * nOut] = a; out[2 * nOut + 1] = b; nOut++;
+        tail += frameHw;
+        if (nOut == 64) {
+            const uint32_t head = g_ringHead, t = g_ringTail;
+            const uint32_t n = (uint32_t)(nOut * 2);
+            const uint32_t free_n = JL_AUDIO_RING_SAMPLES - 1u - ((head - t) & JL_AUDIO_RING_MASK);
             if (free_n >= n) {
-                for (uint32_t i = 0; i < n; i++) {
-                    g_ring[(head + i) & JL_AUDIO_RING_MASK] = out[i];
-                }
+                for (uint32_t i = 0; i < n; i++) g_ring[(head + i) & JL_AUDIO_RING_MASK] = out[i];
                 __sync_synchronize();
                 g_ringHead = (head + n) & JL_AUDIO_RING_MASK;
             } else {
                 g_statFifoFull++;
             }
+            nOut = 0;
         }
-
-        // Re-arm this half for the sibling's chain-back. On RP2350 the chain
-        // trigger reloads TRANS_COUNT by itself but resumes at the CURRENT
-        // write address, so this reset is what keeps each burst starting at
-        // the top of its half; if we are ever too late, the ring wrap above is
-        // what keeps the pointer inside it.
-        dma_channel_set_write_addr(ch, g_half[k], false);
-        dma_channel_set_trans_count(ch, g_perMs, false);
     }
-
-    // An ADC FIFO overrun permanently rotates the L/R interleave - one lost
-    // conversion and every later sample lands in the wrong channel. Flag it for
-    // core 0 to resync; never restart the ADC from inside the IRQ.
-    if (adc_hw->fcs & ADC_FCS_OVER_BITS) {
-        adc_hw->fcs |= ADC_FCS_OVER_BITS;   // W1C
-        g_statAdcOver++;
-        g_needResync = true;
+    if (nOut > 0) {
+        const uint32_t head = g_ringHead, t = g_ringTail;
+        const uint32_t n = (uint32_t)(nOut * 2);
+        const uint32_t free_n = JL_AUDIO_RING_SAMPLES - 1u - ((head - t) & JL_AUDIO_RING_MASK);
+        if (free_n >= n) {
+            for (uint32_t i = 0; i < n; i++) g_ring[(head + i) & JL_AUDIO_RING_MASK] = out[i];
+            __sync_synchronize();
+            g_ringHead = (head + n) & JL_AUDIO_RING_MASK;
+        } else {
+            g_statFifoFull++;
+        }
     }
+    if (nSum > 0) { g_lastMean[0] = sumL / nSum; g_lastMean[1] = sumR / nSum; }
+    g_ringTail16 = tail;
 }
 
 //--------------------------------------------------------------------+
 // ADC + DMA lifecycle
 //--------------------------------------------------------------------+
 
-static bool usbAudioAdcStart(void) {
-    // Acquire lazily here rather than trusting a caller to have done it.
-    // usb_audio_apply_config() restores a saved-enabled mic at BOOT without
-    // going through usb_audio_set_device_enabled(), so this used to run with
-    // g_dmaCh[] still -1 and hand dma_channel_configure() an invalid channel,
-    // which takes the board off the USB bus at every power-on. Idempotent.
-    if (!usbAudioInit()) return false;
-
-    // Round-robin over the two audio channels PLUS the housekeeping channels,
-    // so the OLED cache, supply sense and probe tip keep getting real readings
-    // instead of going blind for the whole recording.
-    g_rrMask = (uint8_t)((1u << g_chL) | (1u << g_chR) | JL_AUDIO_HOUSEKEEP_MASK);
-    g_nChan  = (uint8_t) __builtin_popcount(g_rrMask);
-
-    // Round-robin always advances low channel index -> high, so a channel's
-    // slot within one sweep is just how many masked channels precede it. This
-    // replaces the old two-channel swapLR special case.
-    uint8_t slot = 0;
-    for (int c = 0; c < 8; c++) {
-        g_slotOf[c] = slot;
-        if (g_rrMask & (1u << c)) slot++;
-    }
-
-    g_framesMs = (uint16_t)(g_rateHz / 1000u);          // audio frames per ms
-    g_perMs    = (uint16_t)(g_framesMs * g_nChan);      // conversions per ms
-    if (g_perMs == 0 || g_perMs > JL_AUDIO_MAX_PER_MS) return false;
-
+// Stream start: no ADC or DMA to set up any more - only our own state. The
+// ring engine must be running (it is, from setup(); the D-menu A/B toggle can
+// stop it, in which case audio declines and counts it).
+static bool usbAudioStreamStart(void) {
+    if (!adcRingActive()) { g_statClaimFail++; return false; }
+    if (g_rateHz < 8000u || g_rateHz > 48000u || (ADC_RING_SWEEP_HZ % g_rateHz) != 0) return false;
+    g_decim = ADC_RING_SWEEP_HZ / g_rateHz;
     usbAudioCacheCal(g_chL, 0);
     usbAudioCacheCal(g_chR, 1);
     g_hpX1[0] = g_hpY1[0] = g_hpX1[1] = g_hpY1[1] = 0;
     g_ringHead = g_ringTail = 0;
-
-    const uint8_t first = (uint8_t) __builtin_ctz(g_rrMask);
-
-    adc_run(false);
-    adc_fifo_drain();
-    // clk_adc is 48 MHz and the ADC period is (1 + DIV.INT) clocks, so the
-    // divider is 48e6 / (rate * channels) - 1.
-    adc_set_clkdiv((float)(48000000.0f / (float)(g_rateHz * g_nChan)) - 1.0f);
-    adc_select_input(first);
-    adc_set_round_robin(g_rrMask);
-    adc_hw->fcs = ADC_FCS_EN_BITS | ADC_FCS_DREQ_EN_BITS
-                | (1u << ADC_FCS_THRESH_LSB)
-                | ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS;   // W1C the sticky flags
-
-    for (int k = 0; k < 2; k++) {
-        dma_channel_config c = dma_channel_get_default_config(g_dmaCh[k]);
-        channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
-        channel_config_set_read_increment(&c, false);
-        channel_config_set_write_increment(&c, true);
-        channel_config_set_dreq(&c, DREQ_ADC);
-        channel_config_set_chain_to(&c, g_dmaCh[1 - k]);
-        // THE memory-safety line: wrap the write address inside this half.
-        channel_config_set_ring(&c, true, JL_AUDIO_HALF_RING_BITS);
-        dma_channel_configure(g_dmaCh[k], &c, g_half[k], &adc_hw->fifo,
-                              g_perMs, false);
-    }
-    // Drop any completion left over from the previous stop (aborting a channel
-    // completes it) so the handler doesn't fire on a stale half, then enable.
-    dma_hw->ints1 = (1u << g_dmaCh[0]) | (1u << g_dmaCh[1]);
-    irq_clear(DMA_IRQ_1);
-    for (int k = 0; k < 2; k++) dma_channel_set_irq1_enabled(g_dmaCh[k], true);
-    irq_set_enabled(DMA_IRQ_1, true);
-
-    // NO tud_audio_write() prefill here. It is a TinyUSB FIFO write, and taking
-    // that FIFO's mutex from core1 while core0's USB soft-IRQ may hold it is
-    // exactly the deadlock family already documented for CDC in
-    // custom_tusb_config.h. The flow controller settles within a few frames on
-    // its own; a prefill is an optimisation, not a requirement.
-    dma_channel_start(g_dmaCh[0]);
-    adc_hw->cs = ADC_CS_EN_BITS
-               | ((uint32_t) first    << ADC_CS_AINSEL_LSB)
-               | ((uint32_t) g_rrMask << ADC_CS_RROBIN_LSB)
-               | ADC_CS_START_MANY_BITS;
+    g_ringTail16 = adcRingSweeps() << 3;   // start from now
+    __sync_synchronize();
+    g_streaming = true;
+    g_statResyncs++;
     return true;
 }
 
-// Claim DMA channels and install the completion handler ONCE, at boot, from
-// core 0. Doing it inside the start path meant dma_claim_unused_channel(true)
-// (panic-on-exhaustion) and irq_add_shared_handler (panics if installed twice)
-// were reachable from core1 mid-session - a panic there stops core1 silently
-// while core0 keeps answering, which is exactly how this first presented.
-extern "C" bool usbAudioInit(void) {
-    if (g_dmaInitDone) return g_dmaCh[0] >= 0;
-    g_dmaInitDone = true;
+// Nothing to claim any more: kept for the callers (usb_audio_set_device_enabled).
+extern "C" bool usbAudioInit(void) { return true; }
 
-    // NOTHING here may panic. The panic-on-failure forms of these APIs took the
-    // whole board off the USB bus twice during bring-up (a panic just halts the
-    // calling core - the symptom is the device silently vanishing, with no log
-    // because the console went with it). A feature that cannot get its
-    // resources must decline, not brick the board.
-    //
-    // DMA_IRQ_1, not 0: MicroPython's rp2.DMA owns IRQ 0 and masks it while
-    // reconfiguring channels, which would swallow ours. Take IRQ 1 exclusively
-    // - the shared-handler API was what took the board off the USB bus during
-    // bring-up. irq_set_exclusive_handler() hard_asserts if anyone else already
-    // owns the line, so look first with the non-panicking getters and decline.
-    const irq_handler_t cur = irq_get_exclusive_handler(DMA_IRQ_1);
-    if ((cur != NULL && cur != usbAudioDmaIrq) || irq_has_shared_handler(DMA_IRQ_1)) {
-        g_initFail = 2;   // DMA_IRQ_1 belongs to someone else
-        return false;
-    }
-
-    const int a = dma_claim_unused_channel(false);
-    const int b = dma_claim_unused_channel(false);
-    if (a < 0 || b < 0) {
-        if (a >= 0) dma_channel_unclaim(a);
-        if (b >= 0) dma_channel_unclaim(b);
-        g_initFail = 1;   // no free DMA channels
-        return false;
-    }
-    g_dmaCh[0] = a;
-    g_dmaCh[1] = b;
-
-    if (cur != usbAudioDmaIrq) irq_set_exclusive_handler(DMA_IRQ_1, usbAudioDmaIrq);
-    g_initFail = 0;
-    return true;
-}
-
-static void usbAudioAdcStop(void) {
-    adc_run(false);
-    adc_hw->cs &= ~ADC_CS_START_MANY_BITS;
-    // RP2350-E5 (hardware/dma.h, dma_channel_abort): clear the ENABLE bit of
-    // the aborted channel AND anything chained to it BEFORE the abort, or the
-    // abort's completion can re-trigger the sibling and leave a channel
-    // running behind our back. Both channels chain to each other, so disable
-    // both first, then abort both, then drop the completions the aborts raise.
-    for (int k = 0; k < 2; k++) {
-        if (g_dmaCh[k] < 0) continue;
-        dma_channel_set_irq1_enabled(g_dmaCh[k], false);
-        hw_clear_bits(&dma_hw->ch[g_dmaCh[k]].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
-    }
-    for (int k = 0; k < 2; k++) {
-        if (g_dmaCh[k] < 0) continue;
-        dma_channel_abort(g_dmaCh[k]);
-    }
-    for (int k = 0; k < 2; k++) {
-        if (g_dmaCh[k] < 0) continue;
-        dma_hw->ints1 = (1u << g_dmaCh[k]);   // W1C
-    }
-    irq_set_enabled(DMA_IRQ_1, false);
-    irq_clear(DMA_IRQ_1);
-    adc_fifo_drain();
-    adc_set_round_robin(0);
-    // Put the peripheral back exactly the way Peripherals.cpp's initADC() left
-    // it, or every subsequent readAdc() gets garbage.
-    initADC();
-    // DMA channels stay claimed for the life of the process; nothing to unclaim.
-}
-
-// Hand the ADC back to the rest of the board. Only ever called from the pump
-// (core 1) so there is exactly one releaser of the readingADC lock.
-static void usbAudioReleaseAdc(void) {
+static void usbAudioStreamStop(void) {
     g_streaming = false;
-    usbAudioAdcStop();
-    // Capture is down: this is the one safe moment to adopt a rate the host was
-    // not consulted about (see usb_audio_set_rate()).
+    __sync_synchronize();
+}
+
+// (was: hand the ADC back to the rest of the board) - the stream just stops;
+// a pending rate change is adopted here, the one safe moment.
+static void usbAudioReleaseAdc(void) {
+    usbAudioStreamStop();
     if (g_pendingRateHz != 0) {
         g_rateHz = g_pendingRateHz;
         g_pendingRateHz = 0;
@@ -522,8 +287,8 @@ static void usbAudioReleaseAdc(void) {
     }
     __sync_synchronize();
     usbAudioOwnsAdc = false;
-    __atomic_clear(&readingADC, __ATOMIC_RELEASE);
 }
+
 
 //--------------------------------------------------------------------+
 // Persistence
@@ -671,33 +436,11 @@ extern "C" bool usb_audio_set_device_enabled(bool on) {
 // ADC ownership
 //--------------------------------------------------------------------+
 
+// Nothing to yield since T2.1: the ring is everyone's. Kept for the callers
+// (self test, DAC calibration, config saves) that bracket their reads with it.
 extern "C" bool usb_audio_yield_adc(const char *why) {
-    (void) why;   // no Serial from here: this can run on core 1 (see below)
-    if (!g_streaming && !usbAudioOwnsAdc) return true;
-    g_stopRequested = true;
-
-    // Only the core-1 pump may execute the stop, so there is exactly one
-    // releaser of readingADC: two cores both observing g_stopRequested and both
-    // clearing the lock would hand the ADC to two owners at once. If we ARE
-    // core 1 run the pump right here - the
-    // regular pump call is downstream in this same loop1 pass and cannot help
-    // us. Otherwise wait for it, bounded so a wedged core 1 cannot hang core 0.
-    //
-    // RETURNS whether the ADC is actually free now. It can legitimately fail:
-    // the pump only runs from core2stuff(), which loop1() skips entirely while
-    // pauseCore2 is set. A caller that
-    // ignores this and reads anyway gets the audio sweep means - and a hard 0
-    // on the probe channels - which is how DAC calibration could solve for, and
-    // then PERSIST, constants derived from sentinel values.
-    if (get_core_num() == 1) {
-        serviceUSBAudio();
-        return !usbAudioOwnsAdc;
-    }
-    const uint32_t t0 = micros();
-    while (usbAudioOwnsAdc && (micros() - t0) < 250000u) {
-        tight_loop_contents();
-    }
-    return !usbAudioOwnsAdc;
+    (void) why;
+    return true;
 }
 
 extern "C" void usb_audio_resume_adc(void) {
@@ -705,13 +448,11 @@ extern "C" void usb_audio_resume_adc(void) {
 }
 
 extern "C" void usb_audio_probe_activity(void) {
-    g_probeReqUs = micros() | 1u;   // never the 0 sentinel
+    // Nothing to do since T2.1: the probe and the stream read the same ring.
 }
 
 extern "C" void serviceUSBAudio(void) {
-    // Single-entry, even though the only regular caller is core1's loop1().
-    // Anything that reconfigures the ADC/DMA from another core while this is
-    // mid-teardown would corrupt both. Cheap: uncontended in the normal path.
+    // Single-entry, cheap: uncontended in the normal path.
     static volatile bool svcBusy = false;
     if (__atomic_test_and_set(&svcBusy, __ATOMIC_ACQUIRE)) return;
     struct SvcGuard {
@@ -719,82 +460,22 @@ extern "C" void serviceUSBAudio(void) {
         ~SvcGuard() { __atomic_clear(f, __ATOMIC_RELEASE); }
     } guard{ &svcBusy };
 
-    // STOP FIRST, before any quiesce gate. This is the ONLY releaser of
-    // readingADC/usbAudioOwnsAdc, and a stop is precisely what a pauseCore2
-    // window wants - gating it behind pauseCore2 meant usb_audio_yield_adc()
-    // could return with the ADC still held, and its callers (self test, DAC
-    // calibration) then proceeded as if they had the
-    // real converter while every read was served from the audio sweep.
     if (g_stopRequested) {
         g_stopRequested = false;
-        if (g_streaming || usbAudioOwnsAdc) usbAudioReleaseAdc();
+        if (g_streaming) usbAudioReleaseAdc();
     }
-
-    // Core 0 wants core 1 quiesced (flash write, refresh). Same gate as our
-    // neighbours updateLazyAdcReadings()/serviceNetVoltageScan(): STARTING or
-    // restarting the ADC/DMA inside that window is the wrong moment. Releasing
-    // it, handled above, never is.
-    if (pauseCore2) return;
-
     if (g_startRequested) {
         g_startRequested = false;
-        if (!g_streaming && g_usb_audio_enabled && !g_pausedForProbe) {
-            // Claim the ADC for the whole stream. Bounded, because the caller
-            // here is the main loop: if something else legitimately owns the
-            // ADC we decline this start rather than stalling the board, and
-            // the host simply hears silence. No Serial here - core 1.
-            uint32_t t0 = micros();
-            bool got = true;
-            while (__atomic_test_and_set(&readingADC, __ATOMIC_ACQUIRE)) {
-                if (micros() - t0 > 50000) { got = false; break; }
-                tight_loop_contents();
-            }
-            if (!got) {
-                g_statClaimFail++;
-            } else {
-                usbAudioOwnsAdc = true;
-                __sync_synchronize();
-                if (usbAudioAdcStart()) {
-                    g_streaming = true;
-                } else {
-                    // Could not get DMA/IRQ - give the ADC straight back
-                    // rather than holding it hostage for a stream that will
-                    // never run.
-                    usbAudioReleaseAdc();
-                }
+        if (!g_streaming && g_usb_audio_enabled) {
+            if (!usbAudioStreamStart()) {
+                // the ring engine is off (A/B toggle) or the rate does not
+                // divide 48 k: the host hears silence, the counter says why
             }
         }
     }
-
-    // Probe arbitration: give the ADC up while the probe is in use, take it
-    // back once the probe has gone quiet. Deliberately hysteretic - probe
-    // bursts are many reads over tens of ms and we must not thrash the DMA.
-    if (g_probeReqUs != 0) {
-        const uint32_t sinceProbe = micros() - g_probeReqUs;
-        if (sinceProbe < JL_AUDIO_PROBE_HOLD_US) {
-            if (g_streaming) {
-                usbAudioReleaseAdc();
-                g_pausedForProbe = true;
-                g_statProbePauses++;
-            }
-        } else {
-            g_probeReqUs = 0;
-            if (g_pausedForProbe) {
-                g_pausedForProbe = false;
-                usb_audio_resume_adc();   // only if the host still has the mic open
-            }
-        }
-    }
-
-    // An ADC FIFO overrun (or a late completion IRQ) leaves the channel
-    // interleave in an unknown phase, so the only safe fix is a full restart -
-    // done here, never in the IRQ.
-    if (g_needResync && g_streaming) {
-        g_needResync = false;
-        g_statResyncs++;
-        usbAudioAdcStop();
-        if (!usbAudioAdcStart()) usbAudioReleaseAdc();
-    }
+    // The ring engine's overruns, mirrored into the audio status.
+    AdcRingStats rs; adcRingGetStats(&rs);
+    g_statAdcOver = rs.overruns;
 }
 
 //--------------------------------------------------------------------+
@@ -811,80 +492,23 @@ extern "C" void serviceUSBAudio(void) {
 // they read as "nothing" here, and a pad that actually has the tip on it
 // (sweep mean over the pad threshold) hands the converter to the probe within
 // one core-1 pass; the probe's next poll, 10 ms later, gets the real ADC.
+// Legacy readers (readAdc()'s sentinel path, the lazy cache) - never taken
+// since T2.1: usbAudioOwnsAdc stays false, the ring serves everyone.
 extern "C" bool usbAudioSnapshotRaw(int channel, int *raw) {
-    if (!usbAudioOwnsAdc || raw == NULL || channel < 0 || channel > 7) return false;
-
-    if (channel == 5) {
-        if (g_hkMean[5] >= jumperlessConfig.calibration.minimum_probe_reading) {
-            usb_audio_probe_activity();
-        }
-        *raw = 0;
-        return true;
-    }
-    if (channel == 7) { *raw = 0; return true; }
-
-    if (channel == (int) g_chL) { *raw = (int) g_lastMean[0]; return true; }
-    if (channel == (int) g_chR) { *raw = (int) g_lastMean[1]; return true; }
-    // Housekeeping channels ride the same sweep, so supply sense and the
-    // routable ADCs still read real values while the host records.
-    if (g_rrMask & (1u << channel)) { *raw = (int) g_hkMean[channel]; return true; }
+    (void) channel; (void) raw;
     return false;
 }
-
-// Refresh only the streamed entries of the adcReadings[] cache. Everything else
-// keeps its last good value rather than being overwritten with the 0 that a
-// short-circuited readAdc() now returns.
 extern "C" bool usbAudioRefreshLazy(float *readings) {
-    if (!usbAudioOwnsAdc || readings == NULL) return false;
-    // Every channel in the sweep refreshes, so the OLED voltage cache stays
-    // live for the whole recording rather than freezing at whatever it held
-    // when streaming began.
-    for (int ch = 0; ch < 8; ch++) {
-        if (!(g_rrMask & (1u << ch))) continue;
-        int32_t raw;
-        if (ch == (int) g_chL)      raw = g_lastMean[0];
-        else if (ch == (int) g_chR) raw = g_lastMean[1];
-        else                        raw = g_hkMean[ch];
-        float v = (float) raw * (adcSpread[ch] / 4095.0f);
-        if (ch != 4 && ch != 5) v -= adcZero[ch];
-        readings[ch] = v;
-    }
-    return true;
-}
-
-// Drain the ring into TinyUSB's software FIFO. Runs in USB IRQ context on
-// core 0 (audiod_xfer_cb -> here), which is the only safe place to touch that
-// FIFO, and is called once per completed isochronous transfer - i.e. ~1 kHz
-// while the host is recording.
-extern "C" bool __not_in_flash_func(tud_audio_tx_done_isr)(uint8_t rhport, uint16_t n_bytes_sent,
-                                                           uint8_t func_id, uint8_t ep_in,
-                                                           uint8_t cur_alt_setting) {
-    (void) rhport; (void) n_bytes_sent; (void) func_id; (void) ep_in; (void) cur_alt_setting;
-
-    const uint32_t head = g_ringHead;
-    uint32_t tail = g_ringTail;
-    uint32_t avail = (head - tail) & JL_AUDIO_RING_MASK;
-    if (avail > (uint32_t) JL_AUDIO_SAMPLES_PER_MS) avail = JL_AUDIO_SAMPLES_PER_MS;
-    if (avail == 0) return true;   // nothing captured yet; driver sends silence
-
-    int16_t buf[JL_AUDIO_SAMPLES_PER_MS];
-    for (uint32_t n = 0; n < avail; n++) {
-        buf[n] = g_ring[(tail + n) & JL_AUDIO_RING_MASK];
-    }
-    __sync_synchronize();
-    g_ringTail = (tail + avail) & JL_AUDIO_RING_MASK;
-
-    tud_audio_write(buf, (uint16_t)(avail * sizeof(int16_t)));
-    g_statFramesSent += avail / 2u;
-    return true;
+    (void) readings;
+    return false;
 }
 
 //--------------------------------------------------------------------+
 // Configuration
 //--------------------------------------------------------------------+
 
-// NOTE: these reconfigure via g_needResync rather than calling
-// usbAudioAdcStop()/Start() inline. They are invoked from MicroPython or the
+// NOTE: these re-latch the stream in place (stop/start of our own state - no
+// ADC or DMA involved since T2.1). They are invoked from MicroPython or the
 // console on core 0, while core1 owns the DMA IRQ and the service pump -
 // tearing the DMA down from a second core would let the IRQ fire into a
 // half-configured channel. Setting the flag lets core1 do the restart in the
@@ -894,7 +518,7 @@ extern "C" bool usb_audio_set_channels(int left, int right) {
         left == right) return false;
     g_chL = (uint8_t) left;
     g_chR = (uint8_t) right;
-    if (g_streaming) g_needResync = true;
+    if (g_streaming) { usbAudioStreamStop(); usbAudioStreamStart(); }   // re-latch the pair and its calibration
     usb_audio_sync_config();
     return true;
 }

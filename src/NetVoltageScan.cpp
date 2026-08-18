@@ -36,6 +36,7 @@
 #include "States.h"
 #include "externVars.h" // pauseCore2 / core2busy / lastUserInputMs
 #include "USBAudio.h"   // usbAudioOwnsAdc
+#include "AdcRing.h"    // T2.1: taps read fresh sweeps off the ring
 #include "WaveGen.h"
 #include "config.h"
 #include "hardware/adc.h"
@@ -112,6 +113,15 @@ static uint32_t tapOk = 0;
 // timeout so a collision costs one discarded sample, not a core.
 
 static bool readScanAdcVoltage(int channel, int samples, float* volts) {
+    if (adcRingActive()) {
+        // T2.1: n fresh sweeps after this instant (the tap has settled by
+        // now), off the ring - no converter, no lock; ~21 us per sample.
+        int raw = adcRingMeanAfter(channel, adcRingSweeps(), samples, (uint32_t)samples * 25u + 400u);
+        float reading = ((float)raw) * (adcSpread[channel] / 4095.0f);
+        if (channel != 4 && channel != 5) reading -= adcZero[channel];
+        *volts = reading;
+        return true;
+    }
     adc_select_input(channel);
     uint32_t sum = 0;
     int good = 0;
@@ -158,8 +168,9 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
     // NEVER take the lock over on timeout: that's how the ADC state machine gets corrupted
     // and hangs a core. Core 0's probe poller reads almost back-to-back; a
     // ~2ms window catches the gap between its reads.
+    const bool ringLive = adcRingActive();   // T2.1: no converter to own - skip the lock
     unsigned long waitStart = micros();
-    while (__atomic_test_and_set(&readingADC, __ATOMIC_ACQUIRE)) {
+    while (!ringLive && __atomic_test_and_set(&readingADC, __ATOMIC_ACQUIRE)) {
         if (micros() - waitStart > 2000) {
             tapFailAdcBusy++;
             return false;
@@ -178,7 +189,7 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
     // ~1ms reads + 4x1ms disconnect ~= 11ms hard worst case.
     int rc = fastConnectPath(node, adcNode, &handle, 500);
     if (rc != 0) {
-        __atomic_clear(&readingADC, __ATOMIC_RELEASE);
+        if (!ringLive) __atomic_clear(&readingADC, __ATOMIC_RELEASE);
         tapFailNoRoute++;
         return false;
     }
@@ -191,7 +202,7 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
         ok = readScanAdcVoltage(adc, 4, &late);
     }
     fastDisconnectPath(&handle);
-    __atomic_clear(&readingADC, __ATOMIC_RELEASE);
+    if (!ringLive) __atomic_clear(&readingADC, __ATOMIC_RELEASE);
     if (!ok) {
         tapFailAdcBusy++;
         return false;

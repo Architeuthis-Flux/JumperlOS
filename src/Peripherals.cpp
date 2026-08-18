@@ -37,6 +37,7 @@
 
 #include "MCP4728.h"  // New library
 #include "WaveGen.h"  // wavegen.isRunning() - shared I2C0 bus arbitration
+#include "AdcRing.h"  // the always-on ADC ring (T2.1): readAdc() reads it when active
 extern WaveGen wavegen; // defined in main.cpp
 
 // ============================================================================
@@ -2208,11 +2209,31 @@ void __not_in_flash_func(updateLazyAdcReadings)( void ) {
     // audio stream owns and the whole cache would decay to 0. The two streamed
     // channels refresh for free from the DMA half-buffer mean; every other
     // entry keeps its last good value instead of being zeroed.
+    // (Legacy path only: with the ring engine live usbAudioOwnsAdc is never set.)
     if ( usbAudioOwnsAdc ) {
         usbAudioRefreshLazy( adcReadings );
         return;
     }
 #endif
+
+    if ( adcRingActive( ) ) {
+        // T2.1: the whole cache is a memory read off the ring - every channel
+        // every pass, from the mean of its newest LAZY_ADC_SAMPLES samples; no
+        // converter time, no core2busy hold. The resync service rides here
+        // (an ADC FIFO overrun asks for a clean restart).
+        adcRingService( );
+        static unsigned long lastRingUs = 0;
+        unsigned long nowUs = micros( );
+        if ( (unsigned long)( nowUs - lastRingUs ) < 1000u ) return;   // 1 kHz is plenty for a display cache
+        lastRingUs = nowUs;
+        for ( int ch = 0; ch < 8; ch++ ) {
+            int raw = adcRingMeanNewest( ch, 16 );   // 16 x 21 us: a steadier display than the 4 the burst could afford
+            float v = ( raw ) * ( adcSpread[ ch ] / 4095 );
+            if ( ch != 4 && ch != 5 ) v -= adcZero[ ch ];
+            adcReadings[ ch ] = v;
+        }
+        return;
+    }
 
     unsigned long nowUs = micros();
     static unsigned long lastFastUs = 0;
@@ -2665,6 +2686,15 @@ float __not_in_flash_func(readAdcVoltage)( int channel, int samples ) {
 }
 
 int __not_in_flash_func(readAdc)( int channel, int samples ) {
+    // T2.1: with the ring engine live, a read is "n fresh sweeps starting
+    // now" off the ring - the same meaning as the START_ONCE burst below (a
+    // drive-then-read caller gets samples taken after its drive), no lock, no
+    // converter access from any core, ~21 us per sample instead of ~9.
+    if ( adcRingActive( ) ) {
+        if ( channel < 0 || channel > 7 ) return 0;
+        if ( samples < 1 ) samples = 1;
+        return adcRingMeanAfter( channel, adcRingSweeps( ), samples, (uint32_t)samples * 25u + 400u );
+    }
     // Claim the single ADC peripheral for this core. CRITICAL: the acquire must
     // be ATOMIC - a plain "while(flag) flag=true" is a check-then-set race that
     // lets both cores pass simultaneously, then both drive the ADC mux/state
@@ -2715,6 +2745,7 @@ int __not_in_flash_func(readAdc)( int channel, int samples ) {
 // 100ms wait there would be 100ms of dark tip). Returns false when the ADC
 // is busy or USB audio owns it; on true the caller MUST call adcRelease().
 bool adcTryAcquire( void ) {
+    if ( adcRingActive( ) ) return true;   // T2.1: nothing to hold - the ring is everyone's
 #if USB_AUDIO_ENABLE
     if ( usbAudioOwnsAdc ) return false;
 #endif
@@ -2722,12 +2753,18 @@ bool adcTryAcquire( void ) {
 }
 
 void adcRelease( void ) {
+    if ( adcRingActive( ) ) return;
     __atomic_clear( &readingADC, __ATOMIC_RELEASE );
 }
 
 // The conversion loop with the lock ALREADY HELD by the caller (readAdc()
 // wraps it; adcTryAcquire()/adcRelease() callers use it directly).
 int __not_in_flash_func(readAdcHeld)( int channel, int samples ) {
+    if ( adcRingActive( ) ) {              // T2.1: same fresh-burst meaning, off the ring
+        if ( channel < 0 || channel > 7 ) return 0;
+        if ( samples < 1 ) samples = 1;
+        return adcRingMeanAfter( channel, adcRingSweeps( ), samples, (uint32_t)samples * 25u + 400u );
+    }
     unsigned long adcReadingAverage = 0;
     // if (channel == 0) { // I have no fucking idea why this works //future me:
     // the op amps were untamed

@@ -32,6 +32,7 @@
 #include <Wire.h>
 #include "oled.h"
 #include "CH446Q.h"
+#include "AdcRing.h"   // T2.1: the ADC ring A/B toggle
 #include "NetsToChipConnections.h"
 #include "States.h"          // globalState — the single largest static buffer (memory map)
 #include "GraphicOverlays.h" // graphicOverlayState — large overlay state buffer (memory map)
@@ -422,6 +423,7 @@ void action_memoryUsage();
 void action_memoryMap();
 void action_i2cScan();
 void action_speedTest();
+void action_adcRingToggle();
 void action_colorSpectrum();
 void action_encoderButtonAnalyzer(); // implemented at the bottom of this file
 void action_menuTransitionTuner();   // implemented at the bottom of this file
@@ -439,6 +441,7 @@ const StatusMenuItem statusMenuItems[] = {
     { "Memory Map",         "Granular RAM/PSRAM/flash block map",     action_memoryMap },
     { "I2C Scan",           "Scan I2C bus for devices",               action_i2cScan },
     { "Speed Test",         "Raw crossbar switch speed test",         action_speedTest },
+    { "ADC Ring A/B",       "Toggle the always-on ADC ring / START_ONCE",  action_adcRingToggle },
     { "Color Spectrum",     "Display terminal color palette",         action_colorSpectrum },
     { "Encoder Btn",        "Analog click-wheel button press test",   action_encoderButtonAnalyzer },
     { "Menu FX",            "Tune menu frame transitions",            action_menuTransitionTuner },
@@ -1685,7 +1688,7 @@ void action_memoryMap() {
 // every build back to the 5.7.2.0 checkpoint. Neither pass touches the
 // DMA-fed list send (that is sendPaths, not single crosspoints).
 static void speedTestPass(const char* label, bool checked) {
-    unsigned long cycles = 100000;
+    unsigned long cycles = 1000;
     unsigned long start = micros();
     if (checked) {
         sendXYraw(10, 0, 4, 1);
@@ -1723,6 +1726,24 @@ void action_speedTest() {
     speedTestPass("checked  (sendXYraw + short-check)", true);
     pauseCore2 = false;
     Serial.flush();
+}
+
+// T2.1: flip the ADC between the always-on ring engine (AdcRing.cpp) and the
+// legacy START_ONCE burst path, live, so the pad decode / tip reads / OLED
+// cache can be A/B'd on the same board within seconds. X shows the state.
+void action_adcRingToggle() {
+    AdcRingStats rs; adcRingGetStats( &rs );
+    if ( rs.active ) {
+        adcRingStop( );
+        Serial.println( "\n\rADC ring engine STOPPED - readAdc() is the START_ONCE burst path again (legacy).\n\r" );
+    } else {
+        bool ok = adcRingStart( );
+        adcRingGetStats( &rs );
+        Serial.printf( "\n\rADC ring engine %s (%s)\n\r", ok ? "STARTED - readAdc() reads the ring" : "did NOT start",
+                       ok ? "48 kHz per channel, all 8, DMA_IRQ_1"
+                          : ( rs.failReason == 1 ? "no DMA channel" : rs.failReason == 2 ? "DMA_IRQ_1 taken" : rs.failReason == 3 ? "no spinlock" : "not built (OG)" ) );
+    }
+    Serial.flush( );
 }
 
 void action_colorSpectrum() {
