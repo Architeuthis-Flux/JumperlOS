@@ -16,11 +16,12 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **HEAD = the T3.3 follow-up commit after `42bf038` (row 53 — the four API INA reads no longer
-  pause core 2; `42bf038` = T3.3 itself, row 52); the board is flashed with HEAD.** The tree is
-  clean; nothing has ever been pushed (tag `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–53
-  have every commit with how it was verified (one commit per item, hash of each filled in by the
-  next commit — row 53's hash goes in with the next). **Where the autonomous run stopped, and
+- **HEAD = the docs commit after `060d52e` (row 54); `060d52e` = the T3.3 follow-up (row 53 — the
+  four API INA reads no longer pause core 2); `42bf038` = T3.3 itself (row 52); the board is
+  flashed with `060d52e` (HEAD is docs-only on top of it).** The tree is clean; nothing has ever
+  been pushed (tag `5.7.3.0` included). `DEV_MERGE_HANDOFF.md` rows 29–54 have every commit with
+  how it was verified (one commit per item, hash of each filled in by the next commit — row 54's
+  hash goes in with the next). **Where the autonomous run stopped, and
   why:** the doc's own migration order (section D) puts `pauseCore2` (T3.4 / C16) LAST — after
   `REQ_SHOW_LEDS` (T2.2c, ~200 `showLEDsCore2` sites, Kevin's decision) and the probe-LED request
   / C5 (T2.4, needs scope time with Kevin); `pauseCore2` is the soft LED-frame hint at ~230 sites
@@ -36,7 +37,11 @@
   in `X`) lands in that window the check fails while the paste itself still applies. Seen 1–2 of
   3 runs on `7b5c412` (pre-T3.3) and on HEAD, 4 of 5 pass with 5 s between runs, and it passed
   3/3 inside `run_all` earlier the same day — timing, not a regression. Kevin's call whether the
-  test's window grows or the flush should not land there.
+  test's window grows or the flush should not land there. Two facts from chasing it: the S/L
+  paste wait BLOCKS `loop0` (by design — it reads the paste in a loop on core 0), so while a
+  paste prompt is open the main terminal AND the REPL are unresponsive; and a `core 0: max
+  32 089 ms` in `X` before the last `X!` was the measurement harness abandoning a paste prompt
+  for 30 s, not firmware (maxima reset afterwards).
   Kevin's evening asks, in order: "tag this as a release where we are now" →
   `6ee9abf` = **release `5.7.3.0`** (`VERSION` 5.7.2.0 → 5.7.3.0, annotated tag on it — the next
   hand-bumped *third* component after his `5.7.2.0` checkpoint; the fourth is CI's auto-bump on
@@ -1078,6 +1083,11 @@ port 7) is the instrument for most of them.
    stream (correct values; a ~50 µs dip in the wave per call — `bus yields` counts them). The
    probe feed and DAC0 are untouched (DAC1 default). `git revert` of that one commit brings the
    core-1 loop back.
+10. **T3.3 follow-up (the commit after `42bf038`)** — `ina_get_current()` in a Python polling loop
+   no longer stutters the LEDs: `X` → `led-frame aborts(pause)` should stay flat while the loop
+   runs (it climbed once per read before). And **the paste flake** (START HERE): if
+   `test_paste_state` fails on "S/L prompts for the paste" for you too, the paste still applied
+   — decide whether the test's 1.0 s window grows or the deferred flush must not land there.
 8. **T3.2, the chip-select strobe SM (the commit after `6ee9abf`)** — nothing should feel
    different: route, tap, clear, turn the encoder (it moved to PIO1 SM1), press the probe
    button (its SM moved to PIO0 — `X` must say `button: PIO`, and its double-tap / hold feel is
