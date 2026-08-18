@@ -64,6 +64,50 @@ static bool g_reportedThisBoot = false;
 static CrashRecord g_bootRecord;
 static bool        g_bootRecordValid = false;
 
+#ifdef PICO_RP2350
+// STKOF postmortem (diagnostic). When the recorded fault is a core-0 stack
+// overflow (CFSR bit 20, UFSR.STKOF), the stacked frame was VETOED - the M33
+// pins SP at MSPLIM and suppresses the writes - so the recorded PC/LR/xPSR are
+// residue, not the faulting context. The real evidence is the dead stack
+// itself: SRAM survives the watchdog reboot, and crashlogLatchAtBoot() runs
+// early enough in setup() that the DEEP frames (low addresses, just above the
+// pinned SP) have not been reused yet. Capture them here, print them with the
+// report. Raw words catch EXC_RETURN magics (nested-IRQ pileup) and
+// RAM-resident code; the filtered list catches flash-text return addresses.
+// Repeated identical values are the fingerprint of runaway recursion - do NOT
+// dedupe.
+#define STKOF_RAW_WORDS 96u
+#define STKOF_MAX_CAND  128u
+static uint32_t g_stkofRaw[ STKOF_RAW_WORDS ];
+static uint32_t g_stkofRawBase  = 0;
+static uint32_t g_stkofRawCount = 0;
+static uint32_t g_stkofCandOff[ STKOF_MAX_CAND ];
+static uint32_t g_stkofCandVal[ STKOF_MAX_CAND ];
+static uint32_t g_stkofCandCount = 0;
+
+static void crashlogCaptureStkofStack( void ) {
+    const CrashRecord& r = g_bootRecord;
+    if ( r.core != 0 || !( r.cfsr & ( 1u << 20 ) ) ) return;
+    if ( r.sp < 0x20080000u || r.sp >= 0x20082000u ) return;
+    uint32_t msp;
+    __asm volatile( "mrs %0, msp" : "=r"( msp ) );
+    const uint32_t* lo = (const uint32_t*) ( r.sp & ~3u );
+    const uint32_t* hi = (const uint32_t*) ( ( msp - 256u ) & ~3u );
+    if ( hi > (const uint32_t*) 0x20082000u ) hi = (const uint32_t*) 0x20082000u;
+    g_stkofRawBase = (uint32_t) lo;
+    for ( const uint32_t* p = lo; p < hi && g_stkofRawCount < STKOF_RAW_WORDS; p++ )
+        g_stkofRaw[ g_stkofRawCount++ ] = *p;
+    for ( const uint32_t* p = lo; p < hi && g_stkofCandCount < STKOF_MAX_CAND; p++ ) {
+        uint32_t w = *p;
+        if ( ( w & 1u ) && w >= 0x10000100u && w < 0x10400000u ) {
+            g_stkofCandOff[ g_stkofCandCount ] = (uint32_t) p - (uint32_t) lo;
+            g_stkofCandVal[ g_stkofCandCount ] = w;
+            g_stkofCandCount++;
+        }
+    }
+}
+#endif
+
 extern "C" {
 
 // The C half of the handler. `frame` is the exception stack frame the core
@@ -186,6 +230,9 @@ void crashlogLatchAtBoot( void ) {
     if ( !crashlogPending( ) ) { g_bootRecordValid = false; return; }
     if ( !crashlogLast( &g_bootRecord ) ) return;
     g_bootRecordValid = true;
+#ifdef PICO_RP2350
+    crashlogCaptureStkofStack( );
+#endif
     // Consume it now, while we still know it belongs to THIS firmware.
     // VALID stays set so the record remains readable; only PENDING is cleared,
     // along with the consecutive-fault counter (reaching this point means the
@@ -220,4 +267,25 @@ void crashlogReportOnce( Stream& out ) {
                 (unsigned long) r.bfar, (unsigned long) r.mmfar );
 #endif
     out.println( "[crashlog]   Symbolize with: arm-none-eabi-addr2line -C -f -e .pio/build/jumperless_v5/firmware.elf <PC> <LR>" );
+#ifdef PICO_RP2350
+    if ( g_stkofRawCount ) {
+        out.printf( "[crashlog]   STKOF: recorded frame was vetoed (PC/LR above are residue). Dead-stack capture from 0x%08lX, bottom-up:\n\r",
+                    (unsigned long) g_stkofRawBase );
+        for ( uint32_t i = 0; i < g_stkofRawCount; i += 8 ) {
+            out.printf( "[crashlog]   raw +0x%03lX:", (unsigned long) ( i * 4u ) );
+            for ( uint32_t j = i; j < i + 8 && j < g_stkofRawCount; j++ )
+                out.printf( " %08lX", (unsigned long) g_stkofRaw[ j ] );
+            out.print( "\n\r" );
+        }
+        out.printf( "[crashlog]   flash-text candidates (%lu, deepest first, repeats = recursion):\n\r",
+                    (unsigned long) g_stkofCandCount );
+        for ( uint32_t i = 0; i < g_stkofCandCount; i += 6 ) {
+            out.print( "[crashlog]  " );
+            for ( uint32_t j = i; j < i + 6 && j < g_stkofCandCount; j++ )
+                out.printf( " +%03lX:%08lX", (unsigned long) g_stkofCandOff[ j ],
+                            (unsigned long) g_stkofCandVal[ j ] );
+            out.print( "\n\r" );
+        }
+    }
+#endif
 }

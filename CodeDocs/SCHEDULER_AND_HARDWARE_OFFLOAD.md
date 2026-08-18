@@ -16,6 +16,20 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
+- **NEWEST (2026-08-18, row 61): the no-PSRAM V5 hard boot loop is fixed.** Kevin flashed a
+  no-PSRAM board and it HardFaulted at uptime 28.5 s every boot, forever. Root cause (SWD-proven,
+  the full story is row 61): the MicroPython 96 KB GC-heap malloc fails on the no-PSRAM SRAM heap,
+  `MpRemoteService` ignored the failed init and ran the raw REPL on a heapless VM, and
+  `nlr_jump_fail`'s mp_deinit/mp_init recovery re-raised — 28 nested rounds → core-0 STKOF.
+  Fixes: the service honors init failure (port-1 message, REPL disabled), `mpAllocHeap()` steps
+  96→64→…→16 KB keeping a 24 KB C-heap reserve (the config-save abort floor), and `nlr_jump_fail`
+  has a reentry guard in BOTH port copies of `micropython_embed.c` (both compile — patch both,
+  keep them identical). **Tooling that found it and stays: CrashLog's STKOF postmortem** — on a
+  core-0 STKOF record the boot walks the dead stack above the pinned SP and the crashlog report
+  prints raw words + flash-text LR candidates (repeats = recursion). Remember: an STKOF record's
+  PC/LR/xPSR are RESIDUE (the exception frame is vetoed, SP pinned at MSPLIM = `0x200800A0`), so
+  never chase them — read the walk. Verified on the no-PSRAM board: 0 disconnects in 100 s
+  (was 28.5 s to death), MP got a 64 KB heap, 41 KB C heap free.
 - **HEAD = the T2.2c commit after `e795630` (row 59) — `showLEDsCore2` is gone, the LED-show
   request is `core1req::REQ_SHOW_LEDS`; the board is flashed with it and Kevin confirmed the LED
   behaviour on hardware ("that all seems to work fine").** `e795630` = the `src/` reorg (row 58),

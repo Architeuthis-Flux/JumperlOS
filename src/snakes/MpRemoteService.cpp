@@ -132,8 +132,27 @@ ServiceStatus MpRemoteService::service( ) {
         if ( m_debug ) {
             Serial.println( "[MpRemote] Initializing event REPL" );
         }
-        // Ensure MicroPython is initialized
-        ensureMicroPythonInitialized( );
+        // Ensure MicroPython is initialized - and HONOR the result. This return
+        // value was ignored until 2026-08-18: on a no-PSRAM board whose SRAM
+        // heap couldn't fit the MicroPython GC heap, initMicroPythonProper()
+        // failed, pyexec_event_repl_init() below ran on a VM with NO heap,
+        // every allocation raised MemoryError through the emergency exception
+        // buffer with no nlr catcher on this path, and nlr_jump_fail's
+        // reinit-retry recursed until core 0 died by stack overflow (STKOF)
+        // 28.5 s after boot - a hard boot loop. SWD-verified: 28 nested
+        // mp_init->raise->nlr_jump_fail rounds on the dead stack, mp_heap NULL.
+        // Everything below this block (RX processing, the Ctrl-D soft-reboot
+        // pyexec_event_repl_init) is unreachable until this passes, so this is
+        // the single choke point for "MicroPython actually has a VM".
+        if ( !ensureMicroPythonInitialized( ) ) {
+            static bool s_unavailableWarned = false;
+            if ( !s_unavailableWarned ) {
+                s_unavailableWarned = true;
+                Serial.println( "[MpRemote] MicroPython unavailable (GC heap allocation failed) - raw REPL on USBSer2 disabled" );
+            }
+            s_in_service = false;
+            return ServiceStatus::IDLE;
+        }
 
         // CRITICAL: Redirect MicroPython I/O to USBSer2 AND set correct interrupt (Ctrl+C)
         // This MUST happen before initializing REPL so banner goes to correct stream

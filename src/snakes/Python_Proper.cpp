@@ -744,6 +744,51 @@ static void runBootPyIfPresent(void) {
   );
 }
 
+// Allocate the MicroPython GC heap, stepping down rung by rung until one fits
+// while leaving a reserve of C heap for the rest of the firmware. Why: the
+// heap is malloc'd from the shared C heap, and on a no-PSRAM board the SRAM
+// heap can no longer fit the configured 96 KB - the malloc failed, callers
+// ignored it, MicroPython ran with NO GC heap, and the board died in an
+// nlr_jump_fail stack-overflow boot loop (SWD-verified 2026-08-18: mp_heap
+// NULL, 28 nested mp_init->MemoryError->nlr_jump_fail rounds, STKOF at
+// t+28.5 s, forever). The getFreeHeap() precheck alone is not enough (free
+// total != largest contiguous block), so every rung attempts the real malloc
+// and falls through on NULL. The reserve floor is calibrated, not a guess: at
+// ~25 KB free the config-save path aborts the board on a plain `new`
+// (measured during T2.1), so never leave less than 24 KB behind.
+static bool mpAllocHeap(void) {
+  if (mp_heap) return true;
+  const size_t configured = jumperlessConfig.hardware.psram_installed
+      ? MICROPY_HEAP_SIZE_PSRAM : MICROPY_HEAP_SIZE;
+  const size_t MP_HEAP_C_RESERVE = 24 * 1024;
+  const size_t rungs[] = {configured, 64 * 1024, 48 * 1024,
+                          32 * 1024,  24 * 1024, 16 * 1024};
+  for (size_t i = 0; i < sizeof(rungs) / sizeof(rungs[0]); i++) {
+    size_t sz = rungs[i];
+    if (sz > configured) continue;  // never grow past the configured size
+    size_t freeHeap = rp2040.getFreeHeap();
+    if (sz + MP_HEAP_C_RESERVE > freeHeap) continue;
+    unsigned char *p = (unsigned char *)malloc(sz);
+    if (!p) continue;  // fragmentation - try the next rung down
+    mp_heap = p;
+    mp_heap_size = sz;
+    if (sz < configured) {
+      // Port 1, deliberately: a port-3-only message is invisible in the
+      // normal terminal, which is why the original failure took SWD to find.
+      Serial.printf("[MP] GC heap: %d KB (configured %d KB doesn't fit; %d KB C heap left)\r\n",
+          (int)(sz / 1024), (int)(configured / 1024),
+          (int)(rp2040.getFreeHeap() / 1024));
+    }
+    return true;
+  }
+  Serial.printf("[MP] FATAL: no room for a MicroPython GC heap (16 KB rung + 24 KB reserve, %d KB free) - MicroPython disabled\r\n",
+      (int)(rp2040.getFreeHeap() / 1024));
+  if (global_mp_stream && global_mp_stream != (Stream *)&Serial) {
+    global_mp_stream->println("[MP] FATAL: failed to allocate MicroPython heap - MicroPython disabled");
+  }
+  return false;
+}
+
 bool initMicroPythonProper(Stream *stream, bool preserve_interrupt_char) {
   // global_mp_stream = stream;
  
@@ -758,16 +803,12 @@ bool initMicroPythonProper(Stream *stream, bool preserve_interrupt_char) {
   char stack_dummy;
   char *stack_top = &stack_dummy;
 
-  // Allocate heap if needed (first boot or after PSRAM config change freed it)
-  if (!mp_heap) {
-    mp_heap_size = jumperlessConfig.hardware.psram_installed
-        ? MICROPY_HEAP_SIZE_PSRAM : MICROPY_HEAP_SIZE;
-    mp_heap = (unsigned char *)malloc(mp_heap_size);
-    if (!mp_heap) {
-      global_mp_stream->printf("[MP] FATAL: failed to malloc %d KB heap\n",
-          (int)(mp_heap_size / 1024));
-      return false;
-    }
+  // Allocate heap if needed (first boot or after PSRAM config change freed it).
+  // Steps down to a smaller heap when the configured size doesn't fit
+  // (no-PSRAM boards); returns false - and MicroPython stays disabled - when
+  // even the smallest rung won't fit. See mpAllocHeap above.
+  if (!mpAllocHeap()) {
+    return false;
   }
 
   changeTerminalColor(replColors[11], true, global_mp_stream);
@@ -4440,16 +4481,11 @@ bool initMicroPythonQuiet(bool preserve_interrupt_char) {
   char stack_dummy;
   char *stack_top = &stack_dummy;
 
-  // Allocate heap if needed
-  if (!mp_heap) {
-    mp_heap_size = jumperlessConfig.hardware.psram_installed
-        ? MICROPY_HEAP_SIZE_PSRAM : MICROPY_HEAP_SIZE;
-    mp_heap = (unsigned char *)malloc(mp_heap_size);
-    if (!mp_heap) {
-      global_mp_stream = original_stream;
-      global_mp_stream_ptr = (void *)original_stream;
-      return false;
-    }
+  // Allocate heap if needed (stepping ladder - see mpAllocHeap)
+  if (!mpAllocHeap()) {
+    global_mp_stream = original_stream;
+    global_mp_stream_ptr = (void *)original_stream;
+    return false;
   }
 
   // Initialize MicroPython silently

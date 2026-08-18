@@ -344,8 +344,25 @@ void gc_collect(void) {
     gc_collect_end();
 }
 
-// Non-local return (exception handling) failure function  
+// Non-local return (exception handling) failure function
 void nlr_jump_fail(void *val) {
+    // REENTRY GUARD. The recovery attempt below (mp_deinit()/mp_init()) can
+    // itself raise - e.g. when the GC heap was never allocated, EVERY
+    // allocation raises MemoryError through the emergency exception buffer -
+    // and that lands right back here. Without this guard each round nested
+    // another ~0x100 bytes of stack every ~2 s (the two delay(1000)s), and
+    // core 0 died by STKOF stack overflow 28.5 s after boot: a hard boot
+    // loop, SWD-verified on a no-PSRAM V5 (2026-08-18, 28 nested rounds on
+    // the dead stack). On reentry: no second recovery, no more printing
+    // through MicroPython paths - just park this (unrecoverable) call chain.
+    // The flag is set at ENTRY, before the recovery calls, on purpose.
+    static volatile bool nlr_fail_active = false;
+    if (nlr_fail_active) {
+        mp_hal_stdout_tx_strn_cooked("\r\nFATAL: nlr_jump_fail re-entered (recovery raised) - MicroPython parked\r\n", 74);
+        for (;;) { delay(1000); }
+    }
+    nlr_fail_active = true;
+
     // CRITICAL: Disable ALL interrupt mechanisms FIRST to prevent re-entrant crashes.
     // Without this, mp_hal_stdout_tx_strn_cooked -> mp_hal_check_interrupt could
     // re-trigger the same exception path that got us here.
