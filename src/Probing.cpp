@@ -2289,6 +2289,19 @@ struct Probing::ProbeSession {
     int savedRotaryDivider = 0;
     unsigned long probeModeStartTime = 0;
     unsigned long lastLoopTime = 0;
+
+    // --- M2: the node-latch flash as a deadline sub-state (was three
+    // delay()s totalling 140 ms). While flashPhase != 0 the tick keeps the
+    // inner set serviced and advances the flash frames by deadline, taking
+    // no new input (the old delays froze input exactly the same way). The
+    // rest of the latch pass (node1or2++, a node-2 commit) runs when the
+    // flash STARTS (eager - the old code ran it after the delays); the
+    // gesture-timing stamps (probingTimer, doubleSelectTimeout) are
+    // RE-stamped at flash completion so the double-select window matches
+    // the old post-delay stamps. ---
+    int flashPhase = 0;              // 0 idle; 1..3 = frame N painted, dwelling
+    unsigned long flashNextAtUs = 0; // when the current dwell ends
+    int flashRow = -1;               // 0-based row being flashed (node1or2 moves on eagerly)
 };
 
 // The old emitBanner lambda. Deferral contract unchanged: nothing prints
@@ -2523,6 +2536,40 @@ void Probing::probeTick( ProbeSession& s ) {
     }
 
     // ---- PROBE_RUN: one pass of the old main probing loop ----
+
+    // M2: latch-flash sub-state. Runs BEFORE the loop-condition check, as
+    // the old mid-pass delays did (serial arriving mid-flash exited on the
+    // pass after the flash, not during it).
+    if ( s.flashPhase != 0 ) {
+        jOS.serviceInner( ); // the inner set stays alive through the flash - the milestone's point
+        if ( (long)( micros( ) - s.flashNextAtUs ) < 0 ) {
+            return; // dwell not over
+        }
+        if ( s.flashPhase == 1 ) {
+            b.printRawRow( 0b00001010, s.flashRow, 0x0f0498, 0xfffffe );
+            requestLedShow( 2 );
+            s.flashPhase = 2;
+            s.flashNextAtUs = micros( ) + 40000;
+            return;
+        }
+        if ( s.flashPhase == 2 ) {
+            b.printRawRow( 0b00000100, s.flashRow, 0x4000e8, 0xfffffe );
+            requestLedShow( 2 );
+            s.flashPhase = 3;
+            s.flashNextAtUs = micros( ) + 60000;
+            return;
+        }
+        // phase 3 dwell over - the flash is done. Final show, then re-stamp
+        // the gesture windows: the old code set these AFTER its 140 ms of
+        // delays, so the double-select countdown must start counting from
+        // here, not from frame 1.
+        requestLedShow( 2 );
+        s.flashPhase = 0;
+        probingTimer = millis( );
+        s.doubleSelectTimeout = millis( );
+        return;
+    }
+
     // (was: while ( Serial.available( ) == 0 && ( millis( ) - probeTimeout ) < 80000 ))
     if ( !( Serial.available( ) == 0 && ( millis( ) - probeTimeout ) < 80000 ) ) {
         s.done = true;
@@ -2534,7 +2581,8 @@ void Probing::probeTick( ProbeSession& s ) {
         // Serial.flush();
         // s.lastLoopTime = millis();
 
-        delayMicroseconds( 20 ); // Reduced from 500 for faster encoder response
+        // (M2: the delayMicroseconds(20) throttle is gone - each pass is
+        // already paced by readProbeRaw's ~1 ms of ADC work.)
 
         // Keep the inner set (ProbeButton, the USB pump, mpremote, the
         // current-sense poll, the Arduino UART bridge) running during blocking probeMode
@@ -2779,7 +2827,12 @@ void Probing::probeTick( ProbeSession& s ) {
             // requestLedShow( -1 );
 
         } else {
-            if ( millis( ) - s.fadeTimer > 12 ) {
+            // Kevin's M2 feedback: 12 ms per step was never the real pace -
+            // pre-M2 the slow passes (8-20 ms each) throttled this to one
+            // step per pass, and M2's fast ticks exposed the raw 12 ms
+            // cadence as "fading too fast". 30 ms per step ~= 400 ms for a
+            // full fade, close to the old effective feel with headroom.
+            if ( millis( ) - s.fadeTimer > 30 ) {
                 s.fadeTimer = millis( );
 
                 if ( fadeIndex < 12 ) {
@@ -2815,7 +2868,13 @@ void Probing::probeTick( ProbeSession& s ) {
                     // b.printRawRow(0b00001010, s.deleteMisses[i] - 1, deleteFadeSides[fadeOffset], 0xfffffe);
                     b.printRawRow( 0b00000100, s.deleteMisses[ i ] - 1, deleteFade[ fadeOffset ],
                                    0xfffffe );
-                   // requestLedShow( 2 );
+                }
+                // Kevin's M2 feedback: the fade painted rows but never
+                // requested a show itself, so it was only visible while
+                // pad-touch traffic happened to request LED shows - lift the
+                // probe and the fade froze invisibly. Push each step.
+                if ( s.deleteMissesIndex > 0 ) {
+                    requestLedShow( 2 );
                 }
 
                 if ( s.deleteMissesIndex == 0 && s.fadeClear == 0 ) {
@@ -3124,17 +3183,14 @@ void Probing::probeTick( ProbeSession& s ) {
                     b.printRawRow( 0b0010001, nodesToConnect[ node1or2 ] - 1, 0x000121e,
                                    0xfffffe );
                     requestLedShow( 2 );
-                    delay( 40 );
-                    b.printRawRow( 0b00001010, nodesToConnect[ node1or2 ] - 1, 0x0f0498,
-                                   0xfffffe );
-                    requestLedShow( 2 );
-                    delay( 40 );
-
-                    b.printRawRow( 0b00000100, nodesToConnect[ node1or2 ] - 1, 0x4000e8,
-                                   0xfffffe );
-                    requestLedShow( 2 );
-                     delay( 60 );
-                     requestLedShow( 2 );
+                    // M2: frames 2 and 3 (and the 40/40/60 ms dwells) run as
+                    // the flash sub-state at the top of the tick - input
+                    // stays frozen until the last dwell ends, but the inner
+                    // set keeps servicing. flashRow is captured because
+                    // node1or2 advances eagerly below.
+                    s.flashRow = nodesToConnect[ node1or2 ] - 1;
+                    s.flashPhase = 1;
+                    s.flashNextAtUs = micros( ) + 40000;
                 }
 
                 node1or2++;
@@ -7283,7 +7339,14 @@ int Probing::readProbe( ) {
     // delay(100);
     // Serial.println(probeRead);
     // Serial.println(debugLEDs);
-    while ( probeRead <= 0 ) {
+    // M2: this was `while ( probeRead <= 0 )` - up to 8 ms (the
+    // lastProbeTime gate below) of back-to-back readProbeRaw() bursts with
+    // probeButton.service() calls wedged in, a blocking blackout for
+    // everything not hand-called inside it. Now it is ONE attempt per call:
+    // "nothing yet" returns -1 and the probe tick simply calls again next
+    // pass, so the event checks below run at the same effective cadence
+    // while the tick keeps coming back.
+    {
         /// delay(50);
         // return -1;
         // Serial.println(debugLEDs);
@@ -7338,11 +7401,10 @@ int Probing::readProbe( ) {
             lastReadRaw = 0;
         }
 
-        if ( millis( ) - lastProbeTime > 8 ) {
+        if ( probeRead <= 0 ) {
             lastProbeTime = millis( );
-            // // Serial.println("probe timeout");
-            // Serial.println("probe timeout");
-            // Serial.flush();
+            // (was: the 8 ms lastProbeTime retry gate - M2 returns "not
+            // yet" immediately; the tick calls again next pass)
             return -1;
         }
     }
