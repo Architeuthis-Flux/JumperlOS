@@ -5,15 +5,15 @@ Sessions of 2026-08-15 through 08-19. Branch **`dev`** is a fast-forward of
 
 **Push state, re-verified against `origin` on 2026-08-19** (the old note here was
 stale): `origin/dev` = **`d66112a`** = row 65 = the `5.7.4.0` release, and that
-tag *is* on `origin`. Local `dev` is **9 commits ahead** — the 8 firmware
-commits of rows 66–73 (`dc11153` … `41bde8b`) plus the docs commit that added
-this paragraph. `origin/main` is still `e45af3b`. The tags **`5.7.3.1`
+tag *is* on `origin`. Local `dev` is **11 commits ahead** — the 9 firmware
+commits of rows 66–74 (`dc11153` … `ac24c8a`) plus two docs commits.
+`origin/main` is still `e45af3b`. The tags **`5.7.3.1`
 and `5.7.3.2` exist only locally**. Kevin drives every push, and **tags go by
 name** (`git push origin 5.7.3.1`), never `--tags`.
 
 `firmware.uf2` in `.pio/build/jumperless_v5/` is the build that is *flashed*,
-which is normally HEAD — **right now it is one step ahead of HEAD**: it carries
-the uncommitted double-tap fix (see "In flight", below).
+and it is HEAD's own build again (row 74 committed the double-tap + ghost-press
+fix together with its uf2).
 
 Read this first; the two feature handoffs (`USB_AUDIO_HANDOFF.md`,
 `reading-display-handoff.md`) have the deep detail per feature.
@@ -204,6 +204,7 @@ it wasn't this session.
 | 71 | `51dd9ac` | **The missed-click investigation: firmware exonerated, the harness was the bug** — encoder_ui's click-open went 4/10 on the C5 build (9/10 legacy), which looked like a C5 regression. Diag counters (kept: `encoderClickAutoClears` in RotaryEncoder.cpp, put-path counters in Probing.cpp) showed missed clicks never even registered as events. A/B with clean symbol tables: the real bug is `jl_input.py`'s click write ORDER - it wrote lastButtonEncoderState=PRESSED while encoderButtonState was still IDLE (unfrozen slot), so core 1's 2 kHz poller could overwrite PRESSED with IDLE mid-injection; the firmware's own synthesizeEncoderClick comment prescribes the safe order (RELEASED first - the holding guard freezes the slot - THEN PRESSED). C5's ~4x faster core-1 loop made the poller punctual enough to hit the race ~60% of the time. jl_input.py fixed (RELEASED-then-PRESSED): **10/10 clicks on BOTH modes**. Physical clicks were never affected (the physical path lives inside the poller, no split write). Bonus lesson re-learned the hard way: a mid-investigation flash WITHOUT refreshing jl_input's ADDR table produced a fake 0/10 that nearly sent the whole hunt sideways | 10-click A/B matrix: legacy+stale-table 0/10 (invalid), legacy+fresh 9/10, merged+fresh 4/10, legacy+fixed-order 10/10, merged+fixed-order 10/10; builds ×3; final run_all on the shipping merged build: 6/7, encoder_ui PASS, net_currents = the standing tolerated phantom |
 | 72 | `4b4cff1` | **Tooling + data housekeeping (overnight)** - (1) `test/hil/swd/refresh_jl_input_addrs.sh`: the per-build jl_input ADDR-table regenerator moves from ephemeral job tmp into the repo, with a README section on WHY (a stale table = injected input silently vanishing = a fake firmware regression, twice on 2026-08-18); (2) C11 watchdog row gains tonight's measured kick gaps (core 0 max 1.60 s flash-write class, core 1 max 0.81 s FlashPark class, across a full HIL run) + the real blocker for enabling: the S/L paste prompt and pad menus block loop0 user-paced, so kicks inside the modal waits come first - the enable decision is teed up for Kevin with data | docs/tooling only; the referenced numbers are from the live board's X on the shipping build |
 | 73 | `41bde8b` | **C5 v2: the merged program's frame cadence was flattening ALL probe-LED brightness - fixed by pacing the loop at legacy's proven rate** (Kevin's report: hold-bright/clear-ramp missing on merged, fine on legacy A/B). Root cause found by INA1, not eyes: v1 re-latched the LED every 165 us - FASTER than the WS2811's ~400 us internal PWM cycle - so every PWM period restarted before completing and brightness rendered wrong and flat (measured: max-white 6.77 mA == dim idle 6.74 mA; truncation also INFLATED dim colours and broke the switch classifier's current signature, whose low-current branch then stomped requests with idle re-sends). v2: same pulse-carrier design, latch gap stretched to ~520 us (loop ~1.8 kHz ~= legacy's 2.4 kHz shows) - the colour parks in OSR so X serves as the outer delay counter, and the SM wrap replaces the final jmp (22 instructions, exactly the PIO0 contiguous ceiling). After: idle 3.72 / hold-bright 5.83 / max-white 7.75 mA - a true brightness staircase. Also this session: the probe "LED" anatomy recorded (ONE WS2811, its three colour channels drive three separate physical LEDs, 0x[remove][measure][connect], arranged connect furthest / measure closest -> case 11's 0x0f0fc6 IS "active bright + neighbours dim"); the hold-bright state belongs ONLY to the first-row-tapped-waiting-for-second state; and the live A/B flip merged->legacy wedged core 1 once in canShow()'s UNBOUNDED wait (task #28 - pre-existing landmine, recovered by reflash) | builds ×3; SWD: 22-instr program fits + active at boot, idle decode 0, sample rate 1740/s == design; INA1 staircase above = the money gate; run_all 6/7 (standing net_currents); **Kevin's eyes: "yep, that looks good"** |
+| 74 | `ac24c8a` | **Task #29 closed: double-tap rev 3 + the ghost-press fix.** Rev 3 knobs: confirm gate 5→28 samples / 25→60 ms (tolerant accumulation ≈16 ms of contact at the merged 1.74 kHz; ≈3 ms let a release scratch through — phantoms survived two rounds), `kWindowMs` 350→420 (Kevin's tune, committed as found). His retest then surfaced the remainder: **1-in-5 probe-mode entries self-exited ~0.5 s in**. Trace: `0 -> 2` press edges 200 ms apart with **no release between** — `handleProbeButtonActions()` refuses to consume while `blockProbeButton` runs, so a click held past 200 ms is consumed at block expiry MID-HOLD; `probeSessionBegin()`'s `clearButtonState()` zeroed the state (and set `releaseConfirmed`!), the next sample re-latched the held button as a fresh double-tap-eligible press, and its deferred consumption exited the session. Fix at the ProbeButton level so every clear site is covered (incl. JumperlOS.cpp's context-pop clear, whose comment fears exactly this ghost): `clearButtonState()` while physically held arms `suppressPressUntilRelease` — state tracking/trace stay honest, press REGISTRATION is swallowed until a debounce-confirmed release. The trace tooling for this class of report: `probe_button_trace = 1` over SWD + a port-1 capture; transitions print with ms timestamps, and a `0 -> N` edge with no `N -> 0` before it = someone cleared state mid-hold | pre-fix trace: ghosts registering at the 200 ms signature + `[UNDO]`/`[REDO]` on real doubles; post-fix trace: two re-latches swallowed, no self-exit; **Kevin's hands: "all good now"** (long-click entries, doubles, sloppy singles); HIL 6/7 (standing net_currents phantom); builds ×3 |
 
 "HIL 5/6" everywhere (6/7 from row 30 on, when `test_paste_state.py` joined the suite) means: the one failure is `test_net_currents` "zero-load
 TOP_RAIL net shows < 1 mA phantom current", which was **A/B-verified against
@@ -260,74 +261,22 @@ future feature that asks gets the same treatment.
 
 ---
 
-## In flight — flashed on the board, NOT committed (2026-08-19)
+## In flight — nothing (2026-08-19, end of session)
 
-The working tree is dirty on purpose. Kevin's standing rule is **commit only
-once the fix is confirmed working**, ideally by his hands on the hardware, and
-this one has not had that pass yet.
-
-| Path | What it is | Status |
-|---|---|---|
-| `src/Probing.cpp`, `src/Probing.h` | the phantom-double-tap fix (task #29) | **awaiting Kevin's verdict** |
-| `.pio/build/jumperless_v5/firmware.uf2` | the build of exactly those two files | goes in with them, same commit |
-
-### What the fix does
-
-Kevin's report: *"I am getting phantom double clicks (undo) when I only click
-once occasionally, make sure the double click time gets cleared."*
-
-The mechanism: the ≥30 ms release debounce confirmed a release, and then **one
-bounce sample** re-registered as a whole second press, which paired with the
-first click's still-live timestamp inside the 350 ms double-tap window — one
-physical click, one undo fired.
-
-Two changes, both in `ProbeButton::processSample()`:
-
-1. **The double-click history is clearable** (Kevin's literal ask). The per-button
-   click timestamps moved from function-`static` to file scope
-   (`s_connectClicks` / `s_disconnectClicks`) so the new
-   `ProbeButton::clearDoubleTapState()` can zero them along with any pending
-   candidate; `clearButtonState()` now calls it first. A stale first-tap stamp
-   can no longer survive a state clear and pair with a later single click.
-2. **The second tap has to prove itself.** It no longer fires undo/redo on
-   sight: it arms a *candidate* (`s_dblCandidateBtn`, deadline `now +
-   kDblConfirmWindowMs`) and must accumulate `kDblConfirmSamples` same-button
-   **pressed** samples before the pending-undo/redo flags get set. The deferral
-   to main-loop context via `g_pendingUndo`/`g_pendingRedo` is unchanged — only
-   *when* those flags get set moved.
-
-Revision 1 of (2) cancelled the candidate on **any** released sample, which sits
-right inside the second press's own contact bounce — Kevin: *"the double tap is
-too strict and it's missing double clicks."* Revision 2 (what is on the board)
-**tolerates interleaved released samples**; only the *opposite* button or the
-deadline expiring cancels. Deadline compares are wrap-safe:
-`(int32_t)((uint32_t)now - deadline) > 0`.
-
-### Three knobs, three different jobs
-
-Kevin is tuning this by feel, so turn the right one:
+The working tree is clean. The double-tap fix that sat here became **row 74**
+(`ac24c8a`) after Kevin's hands passed it both ways — and on the way it grew
+the ghost-press fix (the row-74 entry has the full story). The knob table that
+lived here, updated to what shipped, in case tuning resumes:
 
 | Constant | Where | Value | What it controls | Turn it when |
 |---|---|---|---|---|
-| `ProbingDoubleTap::kWindowMs` | `Probing.h` | 350 ms | how far apart the two **taps** may be and still count as a double | doubles are missed because the two taps are *slow* |
-| `kDblConfirmWindowMs` | `Probing.cpp` | **25 ms** (was 15) | how long the second tap has to prove itself | doubles are missed on scratchy/bouncy presses |
-| `kDblConfirmSamples` | `Probing.cpp` | 5 | how many same-button pressed samples count as proof | raise if phantoms return; lower if real doubles are rejected |
+| `ProbingDoubleTap::kWindowMs` | `Probing.h` | 420 ms | how far apart the two **taps** may be and still count as a double | doubles are missed because the two taps are *slow* |
+| `kDblConfirmWindowMs` | `Probing.cpp` | 60 ms | how long the second tap has to prove itself | keep it ≳2× the sample budget below or the window becomes the binding constraint |
+| `kDblConfirmSamples` | `Probing.cpp` | 28 | pressed samples (released tolerated) that count as proof (~16 ms at the merged 1.74 kHz) | raise if phantoms return; lower if real doubles are rejected |
 
-### Board + verification state
-
-Flashed with this build; `test/hil/swd/refresh_jl_input_addrs.sh` run for it;
-OpenOCD up. The HIL suite last ran **6/7** on the immediately preceding build
-(identical except the 15→25 ms constant) — the failure is the standing,
-tolerated `net_currents` phantom.
-
-**The verdict this is waiting on** (Kevin's hands, both directions):
-
-1. Real double-taps — undo/redo should fire reliably again.
-2. Sloppy single clicks — should never phantom an undo.
-
-**On pass:** commit `src/Probing.cpp` + `src/Probing.h` + the uf2 as **row 74**
-(its own hash stays `_______` until the commit after it fills it in).
-**On fail:** the knob table above says which constant to turn.
+The repro/diagnosis tooling if button reports return: `probe_button_trace = 1`
+(over SWD or the debug menu) + a raw port-1 capture. A `0 -> N` press edge with
+no `N -> 0` before it means someone cleared state mid-hold.
 
 ---
 
@@ -337,8 +286,8 @@ tolerated `net_currents` phantom.
 
 | # | State | What | Where the detail is |
 |---|---|---|---|
-| **29** | in progress | phantom double-click undos from single probe-button clicks | "In flight", above — needs Kevin's verdict, then a commit |
-| **30** | not started | **clear PIO0 for user programs** | `SCHEDULER_AND_HARDWARE_OFFLOAD.md` § "PIO block budget" — plan written, **awaiting Kevin's confirmation** that PIO0-can't-reach-empty is acceptable |
+| **29** | **done** (row 74, `ac24c8a`) | phantom double-click undos + the 1-in-5 enters-then-exits ghost press | row 74; knob table + trace tooling under "In flight" above |
+| **30** | **approved, C7 started** (2026-08-19: Kevin signed off on PIO0-can't-reach-empty — shifter stays, 10 instr / 1 SM floor) | **clear PIO0 for user programs** | `SCHEDULER_AND_HARDWARE_OFFLOAD.md` § "PIO block budget"; order of work: C7 first, then re-home merged probe → PIO1, main strip → PIO2 |
 | **31** | not started | rail-adjust shortcut: highlight a rail, click the wheel to change its voltage (gate on an OLED being installed) | `CodeDocs/TODO81926.md` (Kevin's note) — needs an interaction-design round first |
 | **28** | not started, low | a live "Probe LED A/B" flip from merged→legacy wedged core 1 in `canShow()`'s **unbounded** wait | row 73; the fix is to bound that wait / reset `endTime` in `setProbeLedMerged()`. Pre-existing landmine, only reachable from the debug menu |
 
@@ -462,13 +411,14 @@ once to the first terminal that gets the menu, with the `addr2line` command.
 
 ## Suggested order for the next session
 
-1. **Kevin's double-tap verdict** (the two-way test under "In flight"). On pass,
-   commit it as row 74 — that is the one piece of work sitting unfinished.
-2. **Task #30, clearing PIO0** — but read
-   `SCHEDULER_AND_HARDWARE_OFFLOAD.md` § "PIO block budget" and get Kevin's
-   confirmation first: the honest answer is PIO0 keeps a 10-instruction
-   shifter forever, and C7 (the encoder rewrite) is a hard prerequisite for the
-   rest. Do not start moving programs before he has agreed to that shape.
+1. ~~Kevin's double-tap verdict~~ — **done**, committed as row 74 (`ac24c8a`).
+2. **Task #30, clearing PIO0** — **Kevin approved the plan 2026-08-19**
+   (PIO0 keeps the 10-instruction shifter, C7 first). C7 (encoder quadrature →
+   tiny PIO sampler + CPU decode + a core1→core0 event queue) is in progress;
+   a full impact map of everything C7 touches was compiled 2026-08-19 (the
+   `.origin 0` computed-jump constraint, the 2 kHz poll sites, every consumer
+   of the encoder globals, the six SWD-injected symbol names that must not be
+   renamed).
 3. **Task #31, the rail-adjust shortcut** — an interaction-design round with
    Kevin, then build.
 4. The older queue, in whatever order Kevin wants it: the **T3.1 milestone-4**
