@@ -15,7 +15,7 @@ class EncoderAccelerator;
 // Probing::probeMode (which bails out so the second tap doesn't repaint
 // the OLED with "connect"/"clear" on top of the undo toast).
 namespace ProbingDoubleTap {
-    constexpr uint32_t kWindowMs = 350;
+    constexpr uint32_t kWindowMs = 420;
 }
 
 // Set by ProbeButton::service the moment a double-tap fires undoUndo /
@@ -126,7 +126,24 @@ public:
     unsigned long getConnectHoldDuration() const { return connectHoldTime; }
     unsigned long getRemoveHoldDuration() const { return removeHoldTime; }
 
+    // Zero the double-tap press history + any pending second-tap
+    // confirmation (defined in Probing.cpp - the state lives at file scope
+    // there). Kevin's rule: the double-click time gets CLEARED at every
+    // explicit state clear, so a stale first-tap timestamp can never pair
+    // a later single click into a phantom undo.
+    void clearDoubleTapState(void);
+
     void clearButtonState() {
+        clearDoubleTapState();
+        // If the physical button is still held when the clear lands, the
+        // very next sample re-latches the held button as a fresh 0->N press
+        // edge - a ghost second click from the SAME physical hold. (Seen
+        // live: probe-mode entry consumes the press at block expiry, i.e.
+        // 200ms into any click held longer than that; the entry clear then
+        // ghost-registered the still-held button and the deferred press
+        // exited the session ~0.5s later.) Swallow press registration until
+        // a debounce-confirmed release - this hold has been consumed.
+        if (currentButtonState > 0) suppressPressUntilRelease = true;
         currentButtonState = 0;
         buttonPress = 0;
         buttonChanged = false;
@@ -136,8 +153,9 @@ public:
         removeHoldTime = 0;
         pressStartTime = 0;
         // Treat an explicit clear as a confirmed release so the next genuine
-        // press registers cleanly (the block, intentionally, still stands).
-        releaseConfirmed = true;
+        // press registers cleanly (the block, intentionally, still stands) -
+        // except while the same physical hold is still on the button.
+        releaseConfirmed = !suppressPressUntilRelease;
         // isBlocked and blockStartTime are NOT cleared - block must stay active!
     }
 
@@ -160,8 +178,8 @@ public:
     // release "confirmed" so the NEXT press is allowed to register and feed
     // the double-tap history. This rejects the brief mid-press float glitches
     // that otherwise turn one physical press into two presses (and a stray
-    // undo). 50ms is well under any human inter-tap gap, so genuine fast
-    // double-taps (kWindowMs = 350ms) still register.
+    // undo). 30ms is well under any human inter-tap gap, so genuine fast
+    // double-taps (ProbingDoubleTap::kWindowMs apart) still register.
     unsigned long releaseDebounceMs = 30;
     unsigned long connectHoldThresholdMs = 800;        // Threshold to set connectHeld
     unsigned long removeHoldThresholdMs = 1000;        // Threshold to set removeHeld
@@ -198,6 +216,13 @@ private:
     // can't be (mis)counted as a fresh press. Starts true so the first
     // press after boot registers.
     bool releaseConfirmed = true;
+    // Set by clearButtonState() when the clear lands while the button is
+    // physically held: the next samples re-latch the held button as a fresh
+    // press edge, and without this flag that ghost would REGISTER as a new
+    // click (the entry clear also marks releaseConfirmed, making the ghost
+    // double-tap-eligible). Cleared where releaseConfirmed is set - a
+    // debounce-confirmed release ends the consumed hold.
+    bool suppressPressUntilRelease = false;
 };
 
 enum probePressType {

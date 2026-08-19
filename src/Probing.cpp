@@ -232,6 +232,40 @@ ServiceStatus ProbeButton::service( ) {
 // IRQ-SAFE: only updates ProbeButton fields and the pending-undo/redo
 // flags. Does NOT call undoUndo/undoRedo/undoToast/Serial.printf.
 // =====================================================================
+// Double-tap press history (per button) + the confirm-the-second-tap state.
+// File scope so clearButtonState()/clearDoubleTapState() can reach them.
+// Kevin's phantom-double report (2026-08-19): a single scratchy click could
+// fire an undo - a >=30ms quiet gap confirmed the release, then ONE bounce
+// sample re-registered as a full second press and paired with the first.
+// The fix: the second tap of a double must accumulate kDblConfirmSamples
+// pressed samples (~16ms of contact) before the undo fires; a blip cancels
+// AND clears the double-click history ("make sure the double click time
+// gets cleared").
+static uint32_t s_connectClicks[ 2 ]    = { 0, 0 };
+static uint32_t s_disconnectClicks[ 2 ] = { 0, 0 };
+static volatile uint8_t s_dblCandidateBtn      = 0;  // 0 = none; 1/2 = awaiting confirmation
+static uint8_t          s_dblConfirmCount      = 0;
+static uint32_t         s_dblCandidateDeadline = 0;
+// A real second tap accumulates pressed samples fast; a bounce blip is 1-2
+// samples total. Count SAME-BUTTON pressed samples inside a short window,
+// TOLERATING interleaved released samples - Kevin's second round of feedback:
+// cancelling on any single released sample sat right in the press's own
+// contact-bounce zone and rejected genuine doubles.
+static const uint8_t    kDblConfirmSamples  = 28;  // pressed samples needed... (~16ms at the merged
+                                                   // program's 1.74kHz; 5 = ~3ms still let a release
+                                                   // scratch through - phantoms survived round 2)
+static const uint32_t   kDblConfirmWindowMs = 60;  // ...within this window, released samples tolerated
+                                                   // (25 would make the window the binding constraint
+                                                   // at the higher sample count)
+
+void ProbeButton::clearDoubleTapState( void ) {
+    s_connectClicks[ 0 ] = s_connectClicks[ 1 ] = 0;
+    s_disconnectClicks[ 0 ] = s_disconnectClicks[ 1 ] = 0;
+    s_dblCandidateBtn = 0;
+    s_dblConfirmCount = 0;
+    s_dblCandidateDeadline = 0;
+}
+
 void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
     int newState = (int)newStateRaw;
     unsigned long now = millis( );
@@ -240,6 +274,16 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
     // BUTTON RELEASED - Clear state with debounce protection
     // ========================================================================
     if ( newState == 0 ) {
+        // A released sample does NOT cancel a pending double-tap candidate -
+        // presses bounce in their first milliseconds and a real second tap
+        // often reads released for a sample or two. Only the WINDOW expiring
+        // without enough pressed samples cancels (this branch returns early,
+        // so the deadline must be checked here too).
+        if ( s_dblCandidateBtn != 0 && (int32_t)( (uint32_t)now - s_dblCandidateDeadline ) > 0 ) {
+            s_dblCandidateBtn = 0;
+            s_dblConfirmCount = 0;
+            s_dblCandidateDeadline = 0;
+        }
         // Track the *first* release sample so the bounce filter measures
         // sustained-released time, not time-since-press. The old code
         // gated block-clear on (now - blockStartTime), where blockStartTime
@@ -287,6 +331,9 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
         // pressed branch, so a noisy release can never wedge it permanently.
         if ( releaseStartTime > 0 && ( now - releaseStartTime ) >= releaseDebounceMs ) {
             releaseConfirmed = true;
+            // A confirmed release ends the hold a clearButtonState() call
+            // swallowed - presses may register again.
+            suppressPressUntilRelease = false;
             if ( isBlocked ) {
                 isBlocked = false;
                 blockStartTime = 0;
@@ -344,7 +391,10 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
         // Register a press event when:
         // 1. Transitioning from RELEASED (0) to any PRESSED (1 or 2)
         // 2. Switching between different button types (1↔2)
-        if ( stateChanged && newState > 0 &&
+        // ...unless suppressPressUntilRelease: then this edge is the SAME
+        // physical hold an explicit clearButtonState() already consumed
+        // (state tracking above stays honest; only the event is swallowed).
+        if ( !suppressPressUntilRelease && stateChanged && newState > 0 &&
              ( lastButtonState == 0 || ( lastButtonState > 0 && lastButtonState != newState ) ) ) {
 
             // -- Fast double-click undo/redo detection --------------------
@@ -381,11 +431,9 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             // Click 2's buttonPress is suppressed (dbl branch) so the second
             // tap doesn't trigger any in-probe action (mode switch, clear
             // nodesToConnect) - it's exclusively a double-tap gesture.
-            static uint32_t connectClicks[ 2 ] = { 0, 0 };
-            static uint32_t disconnectClicks[ 2 ] = { 0, 0 };
             constexpr uint32_t DOUBLE_WINDOW_MS = ProbingDoubleTap::kWindowMs;
-            uint32_t* hist      = ( newState == 2 ) ? connectClicks    : disconnectClicks;
-            uint32_t* otherHist = ( newState == 2 ) ? disconnectClicks : connectClicks;
+            uint32_t* hist      = ( newState == 2 ) ? s_connectClicks    : s_disconnectClicks;
+            uint32_t* otherHist = ( newState == 2 ) ? s_disconnectClicks : s_connectClicks;
             otherHist[ 0 ] = otherHist[ 1 ] = 0;
 
             bool dbl = false;
@@ -401,28 +449,20 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             }
 
             if ( dbl ) {
-                // Defer the heavy work (undoUndo/undoRedo + undoToast)
-                // to main-loop context via the pending-* flags. Capture
-                // the label NOW so it reflects the state at click time.
-                if ( newState == 2 ) {
-                    if ( undoCanRedo( ) ) {
-                        g_pendingRedoLabel = undoPeekRedoLabel( );
-                        g_pendingRedoSplit = undoLabelSplitAt( +1 );
-                        g_pendingRedo = true;
-                    }
-                } else if ( newState == 1 ) {
-                    if ( undoCanUndo( ) ) {
-                        g_pendingUndoLabel = undoPeekUndoLabel( );
-                        g_pendingUndoSplit = undoLabelSplitAt( 0 );
-                        g_pendingUndo = true;
-                    }
-                }
-                // Swallow click 2: don't propagate as a press event. The
-                // first click already entered/triggered probeMode; we
-                // don't want the second tap to also count as a press.
+                // A double-tap CANDIDATE. Don't fire yet: require the second
+                // press to accumulate kDblConfirmSamples pressed samples
+                // (~16ms of contact) first - a brief re-contact after a
+                // confirmed release used to fire a phantom undo from one
+                // click. The confirm/cancel logic runs in the per-sample
+                // block below.
+                s_dblCandidateBtn = (uint8_t)newState;
+                s_dblConfirmCount = 0; // the block below counts this sample too
+                s_dblCandidateDeadline = now + kDblConfirmWindowMs;
+                // Swallow click 2: don't propagate as a press event (real
+                // doubles never propagated; a cancelled blip shouldn't
+                // propagate either - it's a bounce, not a press).
                 buttonPress = 0;
-                // Reset history to prevent a third click within the
-                // window from triggering a stale match.
+                // Reset history so a third click can't pair with a stale entry.
                 hist[ 0 ] = hist[ 1 ] = 0;
             } else {
                 // Single press - propagate to consumers. The press will sit
@@ -442,6 +482,53 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             blockProbeButtonTimer = now;
 
             lastStatus = ServiceStatus::BUSY;
+        }
+    }
+
+    // ========================================================================
+    // DOUBLE-TAP CONFIRMATION - the second tap must be held for a few
+    // consecutive same-button samples before the undo/redo fires; a blip
+    // (release or button-flip before confirmation) cancels and the history
+    // stays cleared, so the blip can't pair into a later false double.
+    // ========================================================================
+    if ( s_dblCandidateBtn != 0 ) {
+        if ( (int32_t)( (uint32_t)now - s_dblCandidateDeadline ) > 0 ) {
+            // Window closed without enough pressed samples - a blip, not a
+            // tap. History stayed cleared when the candidate armed.
+            s_dblCandidateBtn = 0;
+            s_dblConfirmCount = 0;
+            s_dblCandidateDeadline = 0;
+        } else if ( newState == (int)s_dblCandidateBtn ) {
+            if ( ++s_dblConfirmCount >= kDblConfirmSamples ) {
+                int btn = (int)s_dblCandidateBtn;
+                s_dblCandidateBtn = 0;
+                s_dblConfirmCount = 0;
+                s_dblCandidateDeadline = 0;
+                // Defer the heavy work (undoUndo/undoRedo + undoToast)
+                // to main-loop context via the pending-* flags. Capture
+                // the label NOW so it reflects the state at click time.
+                if ( btn == 2 ) {
+                    if ( undoCanRedo( ) ) {
+                        g_pendingRedoLabel = undoPeekRedoLabel( );
+                        g_pendingRedoSplit = undoLabelSplitAt( +1 );
+                        g_pendingRedo = true;
+                    }
+                } else {
+                    if ( undoCanUndo( ) ) {
+                        g_pendingUndoLabel = undoPeekUndoLabel( );
+                        g_pendingUndoSplit = undoLabelSplitAt( 0 );
+                        g_pendingUndo = true;
+                    }
+                }
+            }
+        } else {
+            // The OPPOSITE button pressed mid-window - a genuine button
+            // switch, not our second tap. Cancel; history is already clear.
+            // (Released samples never reach here - the release branch
+            // returns early and only the deadline cancels there.)
+            s_dblCandidateBtn = 0;
+            s_dblConfirmCount = 0;
+            s_dblCandidateDeadline = 0;
         }
     }
 
