@@ -3033,6 +3033,17 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                     (unsigned long)probeLedShowCount, (unsigned long)probeLedRequestCount,
                     (unsigned long)probeButtonPIOReadCount, (unsigned long)ledFrameAbortsPause,
                     (unsigned long)( millis( ) / 1000 ) );
+    // T3.1 M3: what the pump steals between probe ticks (last session).
+    // The milestone-4 decision (full scheduler vs session-lite between
+    // ticks) gets made from this number - watch max during real probing.
+    {
+        extern volatile uint32_t probeTickGapMaxUs, probeTickGapAvgUs, probeTickCount;
+        if ( probeTickCount > 0 ) {
+            target->printf( "probe tick gap (last session): max %lu us  avg %lu us  over %lu ticks\n\r",
+                            (unsigned long)probeTickGapMaxUs, (unsigned long)probeTickGapAvgUs,
+                            (unsigned long)probeTickCount );
+        }
+    }
 
     // Scheduler table: one row per registered service, in the order the
     // walk visits them (priority, then registration). period 0 = every pass.

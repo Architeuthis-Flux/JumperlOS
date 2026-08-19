@@ -2541,7 +2541,8 @@ void Probing::probeTick( ProbeSession& s ) {
     // the old mid-pass delays did (serial arriving mid-flash exited on the
     // pass after the flash, not during it).
     if ( s.flashPhase != 0 ) {
-        jOS.serviceInner( ); // the inner set stays alive through the flash - the milestone's point
+        // (M3: the wrapper pumps serviceInner between ticks now, so the
+        // inner set stays alive through the flash without a call here.)
         if ( (long)( micros( ) - s.flashNextAtUs ) < 0 ) {
             return; // dwell not over
         }
@@ -2582,12 +2583,12 @@ void Probing::probeTick( ProbeSession& s ) {
         // s.lastLoopTime = millis();
 
         // (M2: the delayMicroseconds(20) throttle is gone - each pass is
-        // already paced by readProbeRaw's ~1 ms of ADC work.)
+        // already paced by readProbeRaw's ~1 ms of ADC work. M3: the
+        // serviceInner pump that lived here moved to the probeMode() wrapper
+        // loop - one pump per tick, same relative order, and exactly what
+        // Probing::service() will do when the loop moves there.)
 
-        // Keep the inner set (ProbeButton, the USB pump, mpremote, the
-        // current-sense poll, the Arduino UART bridge) running during blocking probeMode
-        jOS.serviceInner( );
-        // ...and the switch position (ProbeSwitch is NORMAL, so it is not in
+        // The switch position must still be tracked (ProbeSwitch is NORMAL, so it is not in
         // that set). The pad frame follows switchPosition, so a flip during
         // a session must be seen here, not when the session ends: the same
         // classifier the service runs, on its own 500 ms gate (its early-outs
@@ -3650,12 +3651,38 @@ int Probing::probeExitTail( ProbeSession& s ) {
     return 1;
 }
 
+// M3 tick-gap instrumentation (Kevin's "measure first" call): how much time
+// the pump steals between two probe ticks. This is THE number the
+// milestone-4 decision (full scheduler vs a session-lite mask between ticks)
+// gets made from. Last completed session's stats; X prints them.
+volatile uint32_t probeTickGapMaxUs = 0;
+volatile uint32_t probeTickGapAvgUs = 0;
+volatile uint32_t probeTickCount = 0;
+
 int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu ) {
     ProbeSession s;
     probeSessionBegin( s, setOrClear, firstConnection, fromClickMenu );
+    // M3 (first half, behaviour-preserving): the pump lives in the wrapper
+    // now - one serviceInner between ticks, exactly the shape
+    // Probing::service() takes over in a later pass. The gap measured is
+    // (start of tick N+1) - (end of tick N) = the pump + loop overhead.
+    uint32_t lastTickEndUs = micros( );
+    uint32_t gapMax = 0;
+    uint64_t gapTotal = 0;
+    uint32_t ticks = 0;
     while ( !s.done ) {
+        uint32_t nowUs = micros( );
+        uint32_t gap = nowUs - lastTickEndUs;
+        if ( gap > gapMax ) gapMax = gap;
+        gapTotal += gap;
+        ticks++;
         probeTick( s );
+        lastTickEndUs = micros( );
+        jOS.serviceInner( );
     }
+    probeTickGapMaxUs = gapMax;
+    probeTickGapAvgUs = ticks ? (uint32_t)( gapTotal / ticks ) : 0;
+    probeTickCount = ticks;
     return probeExitTail( s );
 }
 
