@@ -15,8 +15,38 @@
 
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
-**START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **NEWEST (2026-08-18 evening, rows 66-71): T3.1 is DONE through M3, and C5/T2.4 (the probe
+**START HERE — state at a glance (2026-08-19, written so a fresh chat can act on it):**
+- **NEWEST (2026-08-19): one fix is on the board and uncommitted, and one plan is
+  waiting on Kevin.** Read `DEV_MERGE_HANDOFF.md` § "In flight" first — it has the
+  detail — but in short:
+  - **The phantom double-tap fix (task #29) is flashed, NOT committed.** Kevin
+    reported single probe-button clicks occasionally firing an undo: one bounce
+    sample after a confirmed release re-registered as a whole second press and
+    paired with the first click's still-live timestamp. Fix = the click history
+    became clearable (`ProbeButton::clearDoubleTapState()`, called from
+    `clearButtonState()` — Kevin's literal ask, "make sure the double click time
+    gets cleared") **and** the second tap must now hold for `kDblConfirmSamples`
+    (5) same-button pressed samples inside `kDblConfirmWindowMs` (25 ms, widened
+    from 15 at Kevin's ask) before undo/redo fires. Released samples do **not**
+    cancel — v1 did that and rejected real doubles, because a fresh press bounces.
+    It is waiting on Kevin's two-way verdict (real doubles fire / sloppy singles
+    don't phantom); on pass it commits as row 74.
+  - **Task #30, "clear PIO0", has a written plan and needs Kevin's sign-off** —
+    see § "PIO block budget" below. Headline: **PIO0 cannot reach empty.** The
+    CH446Q shifter's pins are base-0-only *and* the T3.2 cross-block IRQ pins it
+    to PIO0 specifically, so the floor is 10 instructions + 1 SM. Everything else
+    can move, but only if **C7** (the encoder rewrite) happens first — the
+    24-instruction quadrature program is what makes the room impossible.
+  - Rows 72–73 landed and are committed: the SWD tooling/data housekeeping
+    (`4b4cff1`) and **C5 v2** (`41bde8b`) — the merged probe-LED program's 165 µs
+    re-latch was truncating the WS2811's ~400 µs internal PWM and flattening
+    *every* brightness (found with INA1, not eyes: max-white current == idle
+    current). Paced to a ~520 µs latch gap it is a real staircase again
+    (3.72 / 5.83 / 7.75 mA) and Kevin's eyes agreed. Also recorded there: the
+    probe "LED" is **one WS2811 whose three colour channels drive three separate
+    physical LEDs**, `0x[remove][measure][connect]`, arranged connect furthest
+    from the user / measure closest.
+- **2026-08-18 evening, rows 66-71: T3.1 is DONE through M3, and C5/T2.4 (the probe
   LED) is DONE.** The evening's arc, one line each:
   - **T3.1 M1 (row 66, `dc11153`)**: probeMode() = ProbeSession + probeTick() state machine,
     byte-identical body (normalized-diff proven), hardware A/B vs 5.7.4.0 identical.
@@ -1247,6 +1277,104 @@ placeholder in the item's own commit and put the real hash in with the *next* co
 `--amend` changes the hash — row 26 says `73aee5c` and should say `3fc5c57`; fix it in the
 T1.8 commit).
 
+### PIO block budget — the plan to clear PIO0 (task #30, **awaiting Kevin's confirmation**)
+
+**Kevin's ask (2026-08-18):** *"let's clear PIO 0 … We should move whatever we can to 1 and 2
+to free up PIO0 as much as possible, if one needs to be used, make it the fewest
+instructions."* The goal is PIO0 left free for **user** programs (MicroPython / app code),
+not firmware.
+
+**A premise corrected, with the receipt.** The working assumption was that a PIO block's pin
+window is an arbitrary 16-pin span placed anywhere. It is not. In the SDK
+(`hardware_pio/pio.c`, `pio_set_gpio_base_unsafe()`):
+
+- the base may be **0 or 16, nothing else** (`gpio_base != 0 && gpio_base != 16` →
+  `PICO_ERROR_BAD_ALIGNMENT`);
+- the window is **32 pins wide** (base … base+31), not 16 — so a base-16 block reaches
+  GPIO 16–47, and a base-0 block reaches 0–31;
+- the base is **per block, not per state machine**;
+- and it can only be set while the block has **zero instruction space used**
+  (`used_mask` non-zero → `PICO_ERROR_INVALID_STATE`). That is why
+  `ch446qCsStrobeInit()` runs before anything else in `initCH446Q()`, and it constrains
+  the *order* of any rearrangement.
+
+**What each program needs** (read off the shipping build):
+
+| Program | Pins | Reachable from | Instructions |
+|---|---|---|---|
+| CH446Q shifter (`spi_ch446_pio2cs`) | 14 data, 15 clk | base 0 only | 10 |
+| CH446Q CS strobe (`ch446_cs_strobe`, T3.2) | 28–39 | base 16 only | 8 |
+| probe merged LED+button (C5 v2) | 9 (shared TRRS line; 2 in the separate-pin config) | base 0 only | 22 |
+| encoder quadrature | 12, 13 | base 0 only | **24** |
+| main LED strip (ws2812) | 17 | base 0 **or** 16 | 4 |
+| top LED strip (ws2812) | 3 | base 0 only | 4 |
+
+**Where they are today.** Nothing is hard-assigned: `JeoPixel::rp2040claimPIO()` takes a
+`setPreferredPIO()` hint then falls back to the SDK's search, and the encoder walks
+`pio0, pio1, pio2` skipping any block whose base isn't 0. The emergent layout (consistent
+with the live `PIO Status` panel — PIO0/1/2 each showing SM0+SM1 claimed, and with the fact
+that C5 v2's 22 instructions only fit PIO0 by removing both legacy programs):
+
+| Block | Base | Contents | Used |
+|---|---|---|---|
+| PIO0 | 0 | shifter (10) + merged probe (22) | **32 / 32 — full** |
+| PIO1 | 0 | encoder quadrature (24) + top strip (4) | 28 / 32 |
+| PIO2 | 16 | CS strobe (8) + main strip (4) | 12 / 32 |
+
+**The arithmetic that decides everything.** Base-0-only demand is 10 + 22 + 24 + 4 = **60
+instructions** against the two base-0-capable blocks' 64. That "fits" only in the useless
+sense: PIO0 would still be carrying ~28 of it. Replace the encoder's 24-instruction
+quadrature program with **C7** (a ~4-instruction PIO edge sampler plus CPU-side decode) and
+the demand drops to 40 — which packs into one block plus a 10-instruction remainder.
+**C7 is therefore a hard prerequisite of task #30, not an optional companion.**
+
+**A constraint found while writing this up — do not skip it.** The T3.2 crossbar pair is
+welded to *adjacent blocks* by the RP2350's cross-block IRQ instructions. In
+`src/hardwarestuff/ch446_pio2cs.pio.h` the shifter does `irq prev nowait 4` and
+`wait 1 irq, 5`, and the strobe does `wait 1 irq, 4` and `irq next nowait 5`. The
+relationship is cyclic, and the shipping pair proves the wrap: shifter on **PIO0**
+(`CH446Q.cpp:39`), strobe on **PIO2** (`:177`), so **PIO0's `prev` is PIO2**. Moving the
+shifter to PIO1 silently breaks that handshake unless the strobe moves to PIO0 with it —
+which puts PIO0 at base 16 and defeats the whole exercise. **The shifter is pinned to PIO0.**
+
+**Proposed layout** (PIO0 at its floor):
+
+| Block | Base | Contents | Left for users |
+|---|---|---|---|
+| **PIO0** | 0 | CH446Q shifter only (10) | **3 SMs, 22 instructions** |
+| **PIO1** | 0 | merged probe (22) + C7 encoder sampler (~4) + top strip (4) = 30 | 1 SM, 2 instructions |
+| **PIO2** | 16 | CS strobe (8) + main strip (4) = 12 | 2 SMs, 20 instructions |
+
+**This is the part Kevin has to sign off on: PIO0 cannot reach empty.** Its pins are on the
+board, its shifter needs base 0, and the cross-block IRQ pins that shifter to PIO0
+specifically. Ten instructions and one state machine is the floor — which is also Kevin's
+own tie-breaker ("if one needs to be used, make it the fewest instructions"), since every
+other candidate for PIO0 is either larger or pushes something bigger back onto it.
+
+**The one alternative considered and rejected:** strobe → PIO1 (base 16), shifter → PIO2
+(base 0, sharing with the merged probe: 10 + 22 = exactly 32), leaving PIO0 holding only the
+encoder sampler + top strip (8 instructions, 2 SMs). It buys 2 more free instructions on
+PIO0, costs one free SM, and requires flipping the base on two blocks and re-homing the probe
+program. Not worth it.
+
+**Order of work, once approved:**
+
+1. **C7 first** — encoder quadrature → tiny PIO sampler + CPU decode. It is the only thing
+   that frees the room, and it is independently reviewable against the physical encoder
+   (Kevin's hands: detents, direction, no missed clicks, the click-menu at speed).
+2. Give PIO1 its programs **before** anything else is added to it (base must be set on an
+   empty block): merged probe, then the C7 sampler, then the top strip.
+3. Move the main strip to PIO2.
+4. Leave the shifter alone.
+5. Verify: probe LED + button (the C5 gates), both LED strips, the encoder, and a crossbar
+   send — plus the HIL suite.
+
+**Tooling gap worth closing on the way:** the `PIO Status` debug panel prints only
+CLAIMED/FREE per SM. It cannot tell you who owns a machine, how much instruction memory a
+block has used, or what its GPIOBASE is — exactly the three things this task needs to verify.
+Extending it (owner label, `used` instruction count, base) is a small, self-contained
+improvement that makes #30 checkable instead of inferred.
+
 ### Kevin's hands-on checklist (everything the 2026-08-17 commits left for your hands, in one place)
 
 Each item is committed and individually `git revert`-able; nothing is pushed. `X` on port 1 (or
@@ -1702,7 +1830,7 @@ exit); the HIL suite covers the routing side only.
 | C4 | MCP4728 re-sent identical words | per-channel shadow, dedupe | — | **DONE**; LDAC batching for the 4-channel setters is a small follow-up (one LDAC pulse per group instead of per write) | low | small |
 | C5 | Probe LED + button share one SM, program-swapped from core 1 every pass (~2,560 frames/s); colour requests via `showProbeLEDs` magic values; `checkingButton`/`showingProbeLEDs` cross-core gate | **One PIO program owning GPIO 9**: `pull noblock` (X→OSR when the FIFO is empty, i.e. the last colour repeats) → `mov x, osr` → 24-bit WS2811 frame from OSR (Y as bit counter) → the 2-pulse sample sequence immediately after the frame (the pulse rides behind the frame and is forwarded, never latched) → `push`/`irq` → ≥300 µs low gap (Y loop) → repeat. Colour change = `pio_sm_put(colour)` from any core (one 32-bit FIFO write); button samples keep arriving on core 0's IRQ. `probeLEDhandler` and the swap disappear | `pio_add_program`, `pio_sm_config` with `sideset`/`set`/`in` on the same pin, `pio_sm_put`; JeoPixel no longer owns the SM (`probeLEDs` becomes a thin `put`) | zero cross-core traffic for the probe LED; a constant, jitter-free refresh; no short-frame corruption possible; ~2,600 button samples/s preserved (**estimated**; the frame+pulse spacing must be checked on a scope — Kevin's "acceptable if periodic refresh in the tens of ms" note) | medium: PIO register budget is tight (X=colour, Y=counter, ISR=samples/counter seed, OSR=shift), so the ~1 ms sampler delay needs the ISR-seeded counter trick; the CPU fallback path and `probe_led_on_button_pin=0` (separate pin) must keep working; the OG has no probe pads | medium — **DONE 2026-08-18 as C5/task #26 (row 70): merged program, pulses ride the frame tail; Kevin: "the flicker's better"** |
 | C6 | Button PIO IRQ posts flags read by `service()` | `requestRun()` on ProbeButton/Probing from the IRQ so the press is acted on the very next pass | B3 | sub-ms press→action instead of "next scheduled pass" | nil | trivial once B3 lands |
-| C7 | Encoder polled on core 1 (`rotaryEncoderStuff`, 2 kHz), events via shared vars | `queue_t` of encoder events (core 1 → core 0) — see D | `queue_init`, `queue_try_add/remove` | clean ownership; no lost clicks when core 0 is slow | low | small — **proposed, not built** (Tier 2, not approved this pass) |
+| C7 | Encoder polled on core 1 (`rotaryEncoderStuff`, 2 kHz), events via shared vars | `queue_t` of encoder events (core 1 → core 0) — see D | `queue_init`, `queue_try_add/remove` | clean ownership; no lost clicks when core 0 is slow | low | small — **proposed, not built** (Tier 2, not approved this pass). **Now also a hard prerequisite of task #30 (clearing PIO0)**: quadrature costs 24 of a block's 32 instructions and its pins (12/13) are base-0-only, so nothing else can be rearranged until it shrinks — see § "PIO block budget" |
 | C8 | LED frame tick = `micros()` poll in `core2stuff` (8 ms) | (considered) core-1 `alarm_pool` on TIMER1 setting a flag | `alarm_pool_create_on_timer(timer1_hw,…)`, `alarm_pool_add_repeating_timer_us` | none worth having — the poll is a compare on a core that spins anyway; **not recommended** | — | — |
 | C9 | raw `tud_task()` (59 textual sites, 51 compiled) | `TinyUSB_Device_Task()` / `yield()` (mutex-guarded); `TinyUSBService` period 0. Note the semantic change: `TinyUSB_Device_Task()` is *try-enter* — under contention it silently skips the pump (irrelevant in a spin loop, harmless one-shot: the IRQ pump covers it) | — | closes the pump-IRQ re-entrancy window; USB pumped every pass, not every 3rd | low (mechanical), but audit each site for the "flush" intent (`yield()` also flushes CDC) | small (1 h) |
 | C10 | OLED frame = 512–1024 B blocking Wire write on core 0, OledGui up to 66 Hz. **On Kevin's rev-7 board the OLED is on I2C0** (`connection_type 2`) at 400 kHz — 12–25 ms per frame, sharing the bus with the INA219s and the DAC | I2C TX via DMA: build the frame's command stream once, `dma_channel_configure(→ &i2cN_hw->data_cmd)` with `DREQ_I2CN_TX`, poll/IRQ completion; `Adafruit_SSD1306::display()` replaced by an async `displayDMA()` for the SSD1306 path | `channel_config_set_dreq(DREQ_I2C0/1_TX)`, i2c `data_cmd` STOP/RESTART bits per word | core-0 blocking per frame 12–25 ms → ~20 µs (**estimated**); a live GUI screen stops eating the loop | medium: I2C error handling (NACK/timeout) mid-DMA; on I2C0 (rev 7) the DMA'd frame needs the I2C0 arbiter (see WaveGen) — the shared-bus gate at `oled.cpp:2245` is a `wavegen.isRunning()` check today | medium (~1 day) — **proposed, not built** (Tier 2, not approved this pass) |
