@@ -258,7 +258,31 @@ static const uint32_t   kDblConfirmWindowMs = 60;  // ...within this window, rel
                                                    // (25 would make the window the binding constraint
                                                    // at the higher sample count)
 
+// Double-tap failure-mode counters (X prints them, X! resets them). Kevin's
+// "the double tap is inconsistent" report: a would-be double can die at any
+// of the sequential gates - each counter names one thief, so a trace session
+// of mixed hits/misses says WHICH gate is eating the misses instead of
+// inviting another knob guess. IRQ context increments only.
+volatile uint32_t dblCandArmed = 0;      // second-tap edges that armed a candidate
+volatile uint32_t dblCandConfirmed = 0;  // candidates that fired undo/redo
+volatile uint32_t dblCandExpired = 0;    // candidates dead at the deadline (tap 2 too light/short for the confirm gate)
+volatile uint32_t dblCandOppCancel = 0;  // candidates cancelled by the opposite button mid-confirm
+volatile uint32_t dblEdgeNoRelease = 0;  // press edges with NO confirmed release since the last press - cannot pair, history dropped
+volatile uint32_t dblHistoryWipes = 0;   // clearDoubleTapState() calls that destroyed a LIVE first-tap stamp
+volatile uint32_t dblEdgeSuppressed = 0; // press edges swallowed by suppressPressUntilRelease (a consumed hold re-latching)
+
+void probeDblStatsReset( void ) {
+    dblCandArmed = dblCandConfirmed = dblCandExpired = 0;
+    dblCandOppCancel = dblEdgeNoRelease = dblHistoryWipes = dblEdgeSuppressed = 0;
+}
+
 void ProbeButton::clearDoubleTapState( void ) {
+    if ( s_connectClicks[ 1 ] != 0 || s_disconnectClicks[ 1 ] != 0 ) {
+        // A first tap was waiting for its pair when this clear landed - if
+        // this counts up during a session of missed doubles, some consumer
+        // path is wiping the history between the user's two taps.
+        dblHistoryWipes++;
+    }
     s_connectClicks[ 0 ] = s_connectClicks[ 1 ] = 0;
     s_disconnectClicks[ 0 ] = s_disconnectClicks[ 1 ] = 0;
     s_dblCandidateBtn = 0;
@@ -283,6 +307,7 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             s_dblCandidateBtn = 0;
             s_dblConfirmCount = 0;
             s_dblCandidateDeadline = 0;
+            dblCandExpired++;
         }
         // Track the *first* release sample so the bounce filter measures
         // sustained-released time, not time-since-press. The old code
@@ -394,6 +419,10 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
         // ...unless suppressPressUntilRelease: then this edge is the SAME
         // physical hold an explicit clearButtonState() already consumed
         // (state tracking above stays honest; only the event is swallowed).
+        if ( suppressPressUntilRelease && stateChanged && newState > 0 &&
+             ( lastButtonState == 0 || ( lastButtonState > 0 && lastButtonState != newState ) ) ) {
+            dblEdgeSuppressed++; // diagnostic only - the swallowed consumed-hold edge
+        }
         if ( !suppressPressUntilRelease && stateChanged && newState > 0 &&
              ( lastButtonState == 0 || ( lastButtonState > 0 && lastButtonState != newState ) ) ) {
 
@@ -446,6 +475,7 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
                 // glitch/bounce, not a genuine second tap. Drop the history
                 // so it can't later pair with a real press into a false double.
                 hist[ 0 ] = hist[ 1 ] = 0;
+                dblEdgeNoRelease++;
             }
 
             if ( dbl ) {
@@ -458,6 +488,7 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
                 s_dblCandidateBtn = (uint8_t)newState;
                 s_dblConfirmCount = 0; // the block below counts this sample too
                 s_dblCandidateDeadline = now + kDblConfirmWindowMs;
+                dblCandArmed++;
                 // Swallow click 2: don't propagate as a press event (real
                 // doubles never propagated; a cancelled blip shouldn't
                 // propagate either - it's a bounce, not a press).
@@ -498,12 +529,14 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             s_dblCandidateBtn = 0;
             s_dblConfirmCount = 0;
             s_dblCandidateDeadline = 0;
+            dblCandExpired++;
         } else if ( newState == (int)s_dblCandidateBtn ) {
             if ( ++s_dblConfirmCount >= kDblConfirmSamples ) {
                 int btn = (int)s_dblCandidateBtn;
                 s_dblCandidateBtn = 0;
                 s_dblConfirmCount = 0;
                 s_dblCandidateDeadline = 0;
+                dblCandConfirmed++;
                 // Defer the heavy work (undoUndo/undoRedo + undoToast)
                 // to main-loop context via the pending-* flags. Capture
                 // the label NOW so it reflects the state at click time.
@@ -529,6 +562,7 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             s_dblCandidateBtn = 0;
             s_dblConfirmCount = 0;
             s_dblCandidateDeadline = 0;
+            dblCandOppCancel++;
         }
     }
 
@@ -2694,10 +2728,15 @@ void Probing::probeSessionBegin( ProbeSession& s, int setOrClear, int firstConne
 
     // clearColorOverrides(1, 1, 0);
 
-    // Block button and clear any pre-existing state to prevent double-detection
+    // Block button and clear any pre-existing state to prevent double-detection.
+    // KEEP the double-tap history: at idle the entry press IS tap 1 of a
+    // possible double-tap-undo, and the entry-window bail below only works if
+    // tap 2 can still pair with it (see clearButtonStateKeepDoubleTap's
+    // banner - the full clear here made any double slower than ~200ms
+    // press-to-press miss silently).
     blockProbeButton = 3000;
     blockProbeButtonTimer = millis( );
-    probeButton.clearButtonState( ); // Clear the button state that triggered entry
+    probeButton.clearButtonStateKeepDoubleTap( ); // Clear the button state that triggered entry
 
     // Enable text layer for special nodes display (UART, Current, etc.)
 

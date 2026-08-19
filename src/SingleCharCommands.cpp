@@ -2784,7 +2784,11 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
             kickGapReset( );
             xbarLatReset( );
             encoderDriftReset( );
-            target->println( "kick-gap maxima, crossbar-latency and encoder-drift stats reset" );
+            {
+                extern void probeDblStatsReset( void );
+                probeDblStatsReset( );
+            }
+            target->println( "kick-gap maxima, crossbar-latency, encoder-drift and double-tap stats reset" );
             return CMD_DONT_SHOW_MENU;
         }
     }
@@ -3060,6 +3064,20 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     // one is live. Judge accumulated drift over a session of real spinning
     // (transient +/-1s are bounce/E9 aliasing, not drift). X! resets.
     printEncoderC7Line( *target );
+    // Probe double-tap failure modes (X! resets): armed/confirmed says how
+    // many second taps reached the confirm gate and survived it; expired =
+    // the confirm gate ate one; noRelease = the two taps had no 30ms clean
+    // release between them (cannot pair, history dropped); historyWipes = a
+    // consumer cleared state while a first tap was waiting for its pair.
+    {
+        extern volatile uint32_t dblCandArmed, dblCandConfirmed, dblCandExpired,
+            dblCandOppCancel, dblEdgeNoRelease, dblHistoryWipes, dblEdgeSuppressed;
+        target->printf( "probe double-tap: armed %lu confirmed %lu expired %lu oppCancel %lu | edges: noRelease %lu suppressed %lu | historyWipes %lu\n\r",
+                        (unsigned long)dblCandArmed, (unsigned long)dblCandConfirmed,
+                        (unsigned long)dblCandExpired, (unsigned long)dblCandOppCancel,
+                        (unsigned long)dblEdgeNoRelease, (unsigned long)dblEdgeSuppressed,
+                        (unsigned long)dblHistoryWipes );
+    }
 
     // Scheduler table: one row per registered service, in the order the
     // walk visits them (priority, then registration). period 0 = every pass.

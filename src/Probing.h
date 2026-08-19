@@ -133,8 +133,18 @@ public:
     // a later single click into a phantom undo.
     void clearDoubleTapState(void);
 
-    void clearButtonState() {
-        clearDoubleTapState();
+    // Clear the press/event state but PRESERVE the double-tap pairing
+    // history. This is the probe-mode ENTRY clear: at idle, tap 1 both
+    // enters probe mode (consumed at block expiry, +200ms) and may be the
+    // first tap of a double-tap-undo whose window is 420ms - probeMode's
+    // banner deferral + entry-window bail are BUILT on tap 2 pairing with
+    // tap 1 across the entry boundary. A full clearButtonState() here wiped
+    // the stamp, so any double slower than ~200ms press-to-press silently
+    // missed (measured: fired gaps <=193ms, missed 220-396ms - Kevin's
+    // "inconsistent"). Stale-stamp phantoms are guarded separately now: the
+    // 420ms window, the kDblConfirmSamples gate and the consumed-hold
+    // suppression each stand on their own.
+    void clearButtonStateKeepDoubleTap() {
         // If the physical button is still held when the clear lands, the
         // very next sample re-latches the held button as a fresh 0->N press
         // edge - a ghost second click from the SAME physical hold. (Seen
@@ -157,6 +167,11 @@ public:
         // except while the same physical hold is still on the button.
         releaseConfirmed = !suppressPressUntilRelease;
         // isBlocked and blockStartTime are NOT cleared - block must stay active!
+    }
+
+    void clearButtonState() {
+        clearDoubleTapState();
+        clearButtonStateKeepDoubleTap();
     }
 
     // Adjustable timing parameters (milliseconds)
