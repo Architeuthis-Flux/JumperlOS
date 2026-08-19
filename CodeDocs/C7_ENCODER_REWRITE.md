@@ -1,5 +1,15 @@
 # C7 — the encoder rewrite (task #30's hard prerequisite)
 
+**Status 2026-08-19: stage 1 (the verification rig) is committed and verified
+on hardware — `b0ee09e`, handoff row 75.** Kevin's spin matrix: ~1460 raw
+counts, accumulated drift −2, max transient 4, nearOverruns 0, "feels right".
+The CPU count is live by default (`encoderUseCpuDecode`, debug menu
+"Encoder A/B" flips it). Found on the way: the 1-instruction sampler FIT ON
+PIO0 — the budget table below says 32/32, so its arithmetic is off by ≥1 word;
+measure real occupancy (extend the PIO Status panel first, § step 3) before
+the re-home. **Next: the removal commit** (legacy quadrature program + the
+drift rig out, CPU count becomes the only source), then the re-home.
+
 2026-08-19. Kevin approved task #30 (clear PIO0 for user programs) including its
 honest bottom line: **PIO0 cannot reach empty** — the CH446Q shifter is pinned
 there (base-0 pins 14/15 + the cross-block IRQ handshake with the PIO2 strobe),
