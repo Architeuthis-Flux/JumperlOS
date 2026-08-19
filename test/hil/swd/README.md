@@ -30,3 +30,11 @@ the build actually flashed.
 
 Known nit: the `switchPosition` symbol is a C++ reference, so sampling its
 address yields a pointer, not the value - ignore that field.
+
+## jl_input.py ADDR refresh
+
+`jl_input.py` (the encoder-injection skill, `~/.cursor/skills/jumperless-swd-input/`)
+carries a hardcoded per-build ADDR table. **Run `./refresh_jl_input_addrs.sh` after
+every build you flash** - a stale table makes injected input silently vanish, which
+looks exactly like a firmware regression (it produced two false alarms on 2026-08-18:
+a fake encoder_ui failure and a fake 0/10 click test mid-investigation).
