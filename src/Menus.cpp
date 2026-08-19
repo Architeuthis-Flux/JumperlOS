@@ -1040,7 +1040,13 @@ int getMenuSelection( void ) {
         }
         delayMicroseconds( 400 );
 
-        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || ProbeButton::getInstance( ).getButtonPress( ) == 2 ) { //! click
+        // One probe-button read per pass: getButtonPress() CONSUMES the press
+        // whatever its value, so checking "== 2" here used to EAT a remove
+        // press before the back-step handler below could see it - the remove
+        // button never took you back in the menus (Kevin, 2026-08-18). Read
+        // once, dispatch on the local.
+        int probePress = ProbeButton::getInstance( ).getButtonPress( );
+        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || probePress == 2 ) { //! click
 
             lastMenuLevel = menuLevel;
             noInputTimer = millis( );
@@ -1649,7 +1655,7 @@ int getMenuSelection( void ) {
             }
         }
 
-        if ( holdBackStep || ProbeButton::getInstance( ).getButtonPress( ) == 1 ) {
+        if ( holdBackStep || probePress == 1 ) {
             noInputTimer = millis( );
             lastMenuLevel = menuLevel;
             // Serial.println("Held");
@@ -2636,7 +2642,8 @@ int selectNodeAction( int whichSelection ) {
         // rotaryEncoderStuff( );
         jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
-        if ( encoderButtonState == HELD || Serial.available( ) > 0 || ProbeButton::getInstance( ).getButtonPress( ) == 1 ) {
+        int probePress = ProbeButton::getInstance( ).getButtonPress( ); // one read per pass (see getMenuSelection)
+        if ( encoderButtonState == HELD || Serial.available( ) > 0 || probePress == 1 ) {
             b.clear( );
             // Flush the cleared buffer back to nets, otherwise the node-selection
             // overlay lingers on the breadboard after cancelling.
@@ -2803,7 +2810,7 @@ int selectNodeAction( int whichSelection ) {
         }
 
         // Check for confirmation (short press)
-        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || ProbeButton::getInstance( ).getButtonPress( ) == 2 ) {
+        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || probePress == 2 ) {
             encoderButtonState = IDLE;
             nodeSelected = highlightedNode;
 
@@ -3399,7 +3406,8 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
         menuShowKeepalive( lastShowRequestMs );
 
         // Check for cancellation (long press)
-        if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonPress( ) == 1 ) {
+        int probePress = ProbeButton::getInstance( ).getButtonPress( ); // one read per pass (see getMenuSelection)
+        if ( encoderButtonState == HELD || probePress == 1 ) {
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             b.clear( );
@@ -3408,7 +3416,7 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
         }
 
         // Check for confirmation (short press)
-        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || ProbeButton::getInstance( ).getButtonPress( ) == 2 ) {
+        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || probePress == 2 ) {
             encoderButtonState = IDLE;
             rotaryDivider = lastDivider;
             b.clear( );
@@ -3772,7 +3780,8 @@ String getActionString( int maxLength ) {
         }
 
         // Check for finish (long press)
-        if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonPress( ) == 1 ) {
+        int probePress = ProbeButton::getInstance( ).getButtonPress( ); // one read per pass (see getMenuSelection)
+        if ( encoderButtonState == HELD || probePress == 1 ) {
             // Finish and return current string
             inputString[ cursorPos ] = '\0';
             rotaryDivider = lastDivider;
@@ -3824,7 +3833,7 @@ String getActionString( int maxLength ) {
         // rotaryEncoderStuff();
 
         // Check for character confirmation (short press)
-        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || ProbeButton::getInstance( ).getButtonPress( ) == 2 ) {
+        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || probePress == 2 ) {
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
 
@@ -5732,14 +5741,15 @@ void runHistoryScrubMenu( void ) {
         // scrub session - re-extend the window each loop.
         undoFlashLogo( 250 );
 
+        int probePress = ProbeButton::getInstance( ).getButtonPress( ); // one read per pass (see getMenuSelection)
         if ( encoderButtonState == HELD
-             || ProbeButton::getInstance( ).getButtonPress( ) == disconnectPress ) {
+             || probePress == disconnectPress ) {
             undoScrubTo( entryPos );
             break;
         }
 
         if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED )
-             || ProbeButton::getInstance( ).getButtonPress( ) == connectPress ) {
+             || probePress == connectPress ) {
             encoderButtonState = IDLE;
             break;
         }
