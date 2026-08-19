@@ -3895,7 +3895,6 @@ void bread::clear(int topBottom) {
 }
 
 void scrollFont() {
-  // pauseCore2 = 1;
   //  scroll font
   //  uint8_t font[] = // 'JumperlessFontmap', 500x5px
   //  {0x1f, 0x11, 0x1f, 0x00, 0x12, 0x1f, 0x10, 0x00, 0x1d, 0x15, 0x17, 0x00,
@@ -4544,7 +4543,7 @@ void dumpLEDs(int posX, int posY, int pixelsOrRows, int header, int rgbOrRaw,
   #define FG(c)  do { if ((c) != curFg) { stream->printf("\033[38;5;%dm",(c)); curFg=(c); } } while(0)
   #define BG(c)  do { if ((c) != curBg) { stream->printf("\033[48;5;%dm",(c)); curBg=(c); } } while(0)
   #define RST()  do { stream->print("\033[0m"); curFg=-1; curBg=-1; } while(0)
-  #define BAIL() (pauseCore2 || (millis() - t0 > 600))
+  #define BAIL() (core1FramesHeld() || (millis() - t0 > 600))
 
   bool scrl = mainSerial && ledDumpEnabled &&
               (stream == &Jerial || stream == &Serial);
@@ -4644,7 +4643,7 @@ void dumpLEDs(int posX, int posY, int pixelsOrRows, int header, int rgbOrRaw,
 done:
   if (scrl) {
     stream->print("\0338");
-    if (!pauseCore2) stream->flush();
+    if (!core1FramesHeld()) stream->flush();
   }
   safeFlush(stream, 10);
   dumpingToSerial = false;

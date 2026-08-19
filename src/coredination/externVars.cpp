@@ -18,7 +18,27 @@
 volatile bool core1busy = false;
 volatile bool core2busy = false;
 
-volatile bool pauseCore2 = false;
+// Core-1 frame hold depth, one word per core (T3.4 / C16 - replaces the old
+// `volatile bool pauseCore2`). Each core only writes its own word; readers sum.
+// See externVars.h for the full contract.
+volatile uint32_t core1FrameHoldDepth[ 2 ] = { 0, 0 };
+
+void holdCore1Frames( void ) {
+    uint32_t core = sio_hw->cpuid & 1;
+    core1FrameHoldDepth[ core ] = core1FrameHoldDepth[ core ] + 1;
+    __dmb( ); // make the hold visible to the other core before the caller proceeds
+}
+
+void releaseCore1Frames( void ) {
+    uint32_t core = sio_hw->cpuid & 1;
+    uint32_t d = core1FrameHoldDepth[ core ];
+    if ( d > 0 ) {
+        core1FrameHoldDepth[ core ] = d - 1;
+    }
+    // else: stray release - saturate at 0 rather than underflow (an underflow
+    // would park core 1 forever). Balanced callers never hit this branch.
+    __dmb( );
+}
 
 // Filesystem activity indicator - set during flash/filesystem operations
 // Used by LEDs.cpp to show colored logo during saves
@@ -186,18 +206,16 @@ bool fs_mutex_held_by_this_core(void) {
 // =============================================================================
 
 bool pauseCore2ForFlash(uint32_t timeout_ms) {
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
-    __dmb();  // Memory barrier to ensure Core2 sees the pause
+    bool had_outer_hold = core1FramesHeld();
+    holdCore1Frames();
 
     // Deadlock guard: if this is called from Core 1 itself, we must NOT wait on
     // core2busy - Core 1 IS the core we'd be waiting to go idle, so the loop
     // would spin forever. Flash ops are expected on Core 0; on Core 1 we just
-    // set the flag (harmless) and return. The nested-pause case is handled by
-    // the was_paused save/restore idiom (an inner pause sees pauseCore2 already
-    // true, so its matching unpause leaves it paused for the outer caller).
+    // take the hold (harmless - core 1 doesn't reach loop1()'s spin until this
+    // caller returns, by which point it has released) and return.
     if ((sio_hw->cpuid & 1) == 1) {
-        return was_paused;
+        return had_outer_hold;
     }
 
     // Wait for Core2 to actually pause (check core2busy)
@@ -206,20 +224,20 @@ bool pauseCore2ForFlash(uint32_t timeout_ms) {
     // is SAFE because the actual flash op (EEPROM.commit() / SPIFTL) calls
     // rp2040.idleOtherCore() internally, which is the HARD guarantee that Core 1
     // is parked (it pushes GOTOSLEEP over the SIO FIFO and spins until Core 1
-    // acks). This pause flag is the soft, LED-stutter-reducing hint; idleOtherCore
+    // acks). This frame hold is the soft, LED-stutter-reducing hint; idleOtherCore
     // is what actually makes XIP-disable safe.
     uint32_t wait_start = millis();
     while (core2busy && (millis() - wait_start < timeout_ms)) {
         TinyUSB_Device_Task(); // mutex-guarded USB pump (never raw tud_task())
         delayMicroseconds(100);
     }
-    
-    return was_paused;
+
+    return had_outer_hold;
 }
 
 void unpauseCore2ForFlash(bool was_paused) {
-    pauseCore2 = was_paused;
-    __dmb();  // Memory barrier to ensure Core2 sees the unpause
+    (void)was_paused; // vestigial since T3.4 - the hold depth counts nesting
+    releaseCore1Frames();
 }
 
 // =============================================================================

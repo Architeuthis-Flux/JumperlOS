@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Peripherals.h"
+#include "externVars.h" // core-1 frame hold (core1FramesHeld)
 #include <Arduino.h>
 #include "CH446Q.h"
 #include "FileParsing.h"
@@ -179,11 +180,11 @@ static bool pollCurrentSenseMeasurement() {
     // (T3.3: a DMA stream started from core 0; before that, core 1's
     // blocking loop) - the INA219s share that bus. Skip the poll entirely.
     //
-    // (2026-08-16) No pauseCore2 toggle around the read any more. I2C0 is
+    // (2026-08-16) No core-1 pause toggle around the read any more. I2C0 is
     // core-0-only - the INA219s, the MCP4728 (Peripherals' mcp) and the
     // internal-I2C0 OLED are all driven from core 0; core 1's only Wire
     // user is WaveGen, and it is excluded above by isRunning(). The old
-    // "pauseCore2 = true; delay 50 us; read; restore" made core 1 abort
+    // "pause core 1; delay 50 us; read; restore" made core 1 abort
     // whatever LED frame it was in 20 times a second for nothing.
     if ( wavegen.isRunning( ) ) {
         return false;
@@ -2188,7 +2189,7 @@ void __not_in_flash_func(showLEDmeasurements)( void ) {
 // blocking hardware read. Cycles one channel per tick to stay light: channels
 // 0-4 on the fast interval, 5-7 on the slow one. Self-throttled, so it's safe
 // to call every core1 loop iteration. Marked __not_in_flash_func + gated on
-// pauseCore2/core2busy to match the rest of the core1 hardware paths so it
+// the frame hold/core2busy to match the rest of the core1 hardware paths so it
 // can't run during a flash write.
 void __not_in_flash_func(updateLazyAdcReadings)( void ) {
 #if defined(OG_JUMPERLESS)
@@ -2199,9 +2200,8 @@ void __not_in_flash_func(updateLazyAdcReadings)( void ) {
     return;
 #endif
 #if LAZY_ADC_READINGS
-    extern volatile bool pauseCore2;
     extern volatile bool core2busy;
-    if ( pauseCore2 ) return;   // core0 wants core1 quiesced (e.g. flash write)
+    if ( core1FramesHeld( ) ) return; // core0 wants core1 quiesced (e.g. flash write)
 
 #if USB_AUDIO_ENABLE
     // This is the single most important audio guard. It runs on core1 every

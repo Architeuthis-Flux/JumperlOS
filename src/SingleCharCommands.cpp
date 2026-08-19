@@ -3086,6 +3086,11 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                         (unsigned long)b1, (unsigned long)r1, (unsigned long)d1,
                         (unsigned long)b2, (unsigned long)r2, (unsigned long)d2, ledGraphicsOwned( ) ? " (gfx owns)" : "",
                         core1req::allIdle( ) ? "(sends idle)" : "(send busy)" );
+        // Core-1 frame hold depth per core (T3.4). Nonzero at idle = a leaked
+        // hold (core 1 parked); this line is the leak detector.
+        target->printf( "frame hold: core0 %lu  core1 %lu%s\n\r",
+                        (unsigned long)core1FrameHoldDepth[ 0 ], (unsigned long)core1FrameHoldDepth[ 1 ],
+                        core1FramesHeld( ) ? "  (CORE 1 PARKED)" : "" );
         extern volatile uint32_t ledFramesShown, ledIdleFramesShown;
         target->printf( "led frames shown %lu (idle renders %lu)  uptime %lus\n\r",
                         (unsigned long)ledFramesShown, (unsigned long)ledIdleFramesShown, (unsigned long)( millis( ) / 1000 ) );
@@ -3501,11 +3506,10 @@ CommandResult cmd_showBoardLEDs( char c, const String& line ) {
 }
 
 CommandResult cmd_startupAnimation( char c, const String& line ) {
-    // pauseCore2 is defined in externVars.h as volatile bool
-    pauseCore2 = 1;
+    holdCore1Frames( ); // park core 1 while we own the LED strip
     delay( 1 );
     drawAnimatedImage( 0 );
-    pauseCore2 = 0;
+    releaseCore1Frames( );
     return CMD_DONT_SHOW_MENU;
 }
 
@@ -3719,8 +3723,7 @@ CommandResult cmd_rawSpeedTest( char c, const String& line ) {
     Jerial.println( "Raw speed test..." );
     Jerial.println( "Read frequency on row 29\n\n\r" );
 
-    // pauseCore2 is defined in externVars.h as volatile bool
-    pauseCore2 = true;
+    holdCore1Frames( ); // park core 1 while we own the crossbar
     unsigned long cycles = 1000000;
     unsigned long start = micros( );
     sendXYraw( 10, 0, 4, 1 );
@@ -3741,7 +3744,7 @@ CommandResult cmd_rawSpeedTest( char c, const String& line ) {
     Jerial.print( ( (float)cycles / (float)( end - start ) ) * 1000 );
     Jerial.println( " kHz\n\r" );
     Jerial.flush( );
-    pauseCore2 = false;
+    releaseCore1Frames( );
 
     return CMD_SHOW_MENU;
 }

@@ -204,7 +204,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   // while we're about to modify it in getNodesToConnect()
   waitCore2();
   t[ti++] = millis(); // t[0] = after waitCore2
-  pauseCore2 = true;
+  holdCore1Frames( ); // core-1 frame hold (T3.4) - core 1 stops rendering while we rebuild
   unsigned long start = millis();
   core1busy = true;
   // Converge system-owned connections (probe power, lock bridges) BEFORE
@@ -243,7 +243,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   // updateAllFakeGPIOAfterConnectionChange();
 
   
-  pauseCore2 = false;
+  releaseCore1Frames( );
   core1busy = false;
 
   // Signal Core 2 to send paths (Core 2 handles this in loop1 -> core2stuff)
@@ -377,7 +377,7 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
     }
   }
   
-  //pauseCore2 = true;
+  //holdCore1Frames( );
 unsigned long start2 = millis();
   clearAllNTCC();
   core1busy = true;
@@ -429,7 +429,7 @@ unsigned long start2 = millis();
 
 
   core1busy = false;
-  //pauseCore2 = false;
+  //releaseCore1Frames( );
 
   // OPTIMIZATION: Use Core 2 bypass for parallel execution (like fastRefresh)
   // This allows Core 0 to return immediately while Core 2 sends paths asynchronously

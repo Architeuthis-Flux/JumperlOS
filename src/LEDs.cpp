@@ -3887,7 +3887,7 @@ void __not_in_flash_func(lightUpHeader)(void) {
 {
   unsigned long _t = micros();
   while (logoLedAccess == true) {
-    if (pauseCore2 || (micros() - _t > 5000)) return;
+    if (core1FramesHeld() || (micros() - _t > 5000)) return;
   }
 }
 logoLedAccess = true;

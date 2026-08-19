@@ -10,6 +10,7 @@
 
 #include "FakeGpio.h"
 #include "CoreMailbox.h" // core1req (path-send requests to core 1; T2.2b)
+#include "externVars.h" // core-1 frame hold (core1FramesHeld)
 #include "TimeDomainMultiplexer.h"
 #include "JumperlessDefines.h"
 #include "States.h"
@@ -561,8 +562,7 @@ int fakeGpioWrite(int node, int state) {
 
     updateFakeGpioOutputDisplay(slot);
 
-    extern volatile bool pauseCore2;
-    if (!pauseCore2) {
+    if (!core1FramesHeld()) {
         core1req::post(core1req::REQ_BYPASS, 1u);  // send now, no clean (mailbox, T2.2b)
         waitCore2();
     }

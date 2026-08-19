@@ -112,7 +112,7 @@
  * :bench). gpio:s uses a precise RAM-resident buffered path (__not_in_flash_func
  * + gpio_get_all() at busy-waited micros() spacing, dumped as caps{...}); every
  * other verb uses a best-effort streamed path. Capture stops on any inbound
- * byte, on :stop, on a flash op (pauseCore2), or a 60s safety cap.
+ * byte, on :stop, on a flash op (core-1 frame hold), or a 60s safety cap.
  *
  * :bench times each read-only verb compute-only by routing its output to a
  * NullStream byte counter (so the measurement excludes USB/CDC cost) and seeds

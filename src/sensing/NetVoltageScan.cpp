@@ -34,7 +34,7 @@
 #include "InfraPaths.h"
 #include "RouteSafety.h"
 #include "States.h"
-#include "externVars.h" // pauseCore2 / core2busy / lastUserInputMs
+#include "externVars.h" // core-1 frame hold / core2busy / lastUserInputMs
 #include "USBAudio.h"   // usbAudioOwnsAdc
 #include "AdcRing.h"    // T2.1: taps read fresh sweeps off the ring
 #include "WaveGen.h"
@@ -539,14 +539,14 @@ void serviceNetVoltageScan(void) {
 
     // We run OUTSIDE the core_sync/core2busy LED window now (see the call
     // site after core_sync_release() in main.cpp), so gate ourselves:
-    //   - pauseCore2: core 0 wants core 1 quiesced (flash write / XIP erase)
+    //   - the core-1 frame hold: core 0 wants core 1 quiesced (flash write / XIP erase)
     //   - a path send pending / in flight (core1req mailbox): a crossbar
     //     refresh is pending, so the connections we'd read are mid-change
     //   - core1busy / refreshInProgress: core 0 is mid-rebuild of the
     //     netlist/chipStates we read and whose xStatus lanes we claim. The
     //     100ms input preempt below misses MicroPython/app/script-driven
     //     refreshes, so check the flags directly.
-    if (pauseCore2) return;
+    if (core1FramesHeld()) return;
     if (!core1req::allIdle()) return;
     if (core1busy || refreshInProgress) return;
 #if USB_AUDIO_ENABLE

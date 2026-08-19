@@ -1,6 +1,7 @@
 
 
 #include "Debugs.h"
+#include "externVars.h"      // core-1 frame hold (holdCore1Frames / releaseCore1Frames)
 #include "PersistentStuff.h"
 
 // Encoder-button analog press test (diagnostics menu entry; implementation lives
@@ -765,7 +766,6 @@ bool statusDiagnosticsMenu() {
 // External function declarations - these are now included via headers
 // (sendXYraw comes from CH446Q.h - a local re-declaration would miss its
 // default timeout argument and make every call ambiguous)
-extern volatile bool pauseCore2;
 
 void action_resourceStatus() {
   cmd_resourceStatus( 'j', "" );
@@ -1491,14 +1491,12 @@ void action_memoryMap() {
 
         // Walk newlib's heap block-by-block for a true per-allocation map.
         // Pause core 1 so the chunk chain can't shift mid-walk.
-        extern volatile bool pauseCore2;
-        bool wasPaused = pauseCore2;
-        pauseCore2 = true;
+        holdCore1Frames( ); // park core 1 so the heap chunk chain can't shift mid-walk
         delay(2);
         uintptr_t topEnd = 0;
         BlockRunCtx ctx{ segs, n, kMaxSegs, base, -1, 0 };
         size_t blocks = sram_heap_walk(blockRunCb, &ctx, &topEnd);
-        pauseCore2 = wasPaused;
+        releaseCore1Frames( );
         n = ctx.n;
 
         uint64_t heapUsed, heapFree;
@@ -1720,11 +1718,11 @@ static void speedTestPass(const char* label, bool checked) {
 void action_speedTest() {
     Serial.println("\n\rCrossbar Speed Test (chip K x0 y0 on/off, single crosspoints, core 1 paused)...\n\r");
     
-    pauseCore2 = true;
+    holdCore1Frames( ); // park core 1 while we own the crossbar
     delay(100);
     speedTestPass("raw      (sendXYrawUnchecked)", false);
     speedTestPass("checked  (sendXYraw + short-check)", true);
-    pauseCore2 = false;
+    releaseCore1Frames( );
     Serial.flush();
 }
 

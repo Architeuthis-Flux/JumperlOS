@@ -88,7 +88,6 @@ extern volatile uint8_t LEDbrightnessRail;
 extern volatile uint8_t LEDbrightness;
 extern volatile uint8_t LEDbrightnessSpecial;
 
-//extern volatile uint8_t pauseCore2;
   extern JeoPixel bbleds;
 extern JeoPixel probeLEDs;
 extern uint8_t probeLEDstateMachine;

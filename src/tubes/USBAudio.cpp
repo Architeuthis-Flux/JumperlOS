@@ -27,7 +27,7 @@
 #include "Peripherals.h"
 #include "config.h"
 #include "configManager.h"
-#include "externVars.h"   // pauseCore2
+#include "externVars.h"   // core-1 frame hold
 #include "AdcRing.h"      // the always-on ADC ring (T2.1): audio is one of its consumers
 
 // The big global USB mutex from the core's TinyUSB port. tud_task() is pumped

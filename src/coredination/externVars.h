@@ -7,7 +7,32 @@
 extern volatile bool core1busy;
 extern volatile bool core2busy;
 
-extern volatile bool pauseCore2;
+// =============================================================================
+// CORE-1 FRAME HOLD (T3.4 / C16 - replaces the old `volatile bool pauseCore2`)
+// =============================================================================
+// "Please stop rendering": while the hold depth is nonzero, core 1 parks in
+// loop1()'s spin (still serving REQ_BYPASS) and core2stuff() aborts its LED
+// frame at the next checkpoint. This is the SOFT hint that keeps core 1 off
+// the LED strip / crossbar / XIP-resident render code around flash writes and
+// exclusive LED work; the HARD guarantee for flash safety is still
+// rp2040.idleOtherCore() inside the flash op itself (FlashPark).
+//
+// Why a per-core depth instead of the old bool: every hold/release pair lives
+// on one core's own call stack, so each core only ever writes its own word -
+// no cross-core atomics needed (the RP2350 exclusive-monitor question stays
+// moot). Nesting is counted exactly, which retires the fragile
+// `was_paused` save/restore idiom the bool required. Saturates at 0 on a
+// stray release. NOT IRQ-safe by design: no holder runs in interrupt context.
+extern volatile uint32_t core1FrameHoldDepth[ 2 ];
+
+// The reader - loop1() spins on this, so it must stay a bare inline load.
+static inline bool core1FramesHeld( void ) {
+    return ( core1FrameHoldDepth[ 0 ] | core1FrameHoldDepth[ 1 ] ) != 0;
+}
+
+// Scoped hold/release. Call in pairs on the same core (any core). Nests.
+void holdCore1Frames( void );
+void releaseCore1Frames( void );
 
 // Filesystem activity indicator - set during flash/filesystem operations
 // Used by LEDs.cpp to show colored logo during saves
@@ -114,15 +139,20 @@ bool fs_mutex_acquire_timeout_ms(uint32_t timeout_ms);
 // Flash writes disable XIP cache, so Core2 must not execute code from flash.
 
 /**
- * Pause Core2 for flash operations and wait for it to actually stop
- * @param timeout_ms Maximum time to wait for Core2 to pause (default 100ms)
- * @return true if Core2 was previously paused (restore with unpauseCore2ForFlash)
+ * Take a core-1 frame hold for a flash operation and wait for core 1 to
+ * actually go quiet (core2busy clear). Since T3.4 this is a thin envelope over
+ * holdCore1Frames() - the hold depth counts nesting exactly, so the returned
+ * bool is vestigial (kept so ~50 call sites' `was_paused` idiom compiles
+ * unchanged; it reports whether an outer hold already existed).
+ * @param timeout_ms Maximum time to wait for core 1 to go quiet (default 100ms)
+ * @return true if a hold was already active before this call (informational)
  */
 bool pauseCore2ForFlash(uint32_t timeout_ms = 100);
 
 /**
- * Unpause Core2 after flash operations
- * @param was_paused Value returned by pauseCore2ForFlash (to restore previous state)
+ * Release the frame hold taken by pauseCore2ForFlash.
+ * @param was_paused Ignored since T3.4 (nesting is depth-counted now);
+ *                   kept so existing call sites compile unchanged.
  */
 void unpauseCore2ForFlash(bool was_paused);
 

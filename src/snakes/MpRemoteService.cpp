@@ -387,7 +387,7 @@ void MpRemoteService::onScriptExecutionComplete() {
     readGPIOInterval = lastReadGPIOIntervalinMpRemoteService;
 
     // Restores happen FIRST so the handback below sees the final switchPosition.
-    // (This also clears pauseCore2, which used to be set here directly.)
+    // (This also releases the core-1 frame hold, which used to be set here directly.)
     //
     // Full display teardown ONLY when the script moved the switch itself - i.e.
     // the way a script latches measure mode. This runs after every raw-REPL

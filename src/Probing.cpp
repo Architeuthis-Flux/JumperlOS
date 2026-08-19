@@ -1673,7 +1673,6 @@ void Probing::handleEncoderCursorNavigation(
             }
 
             // ========== ATOMIC LED UPDATE - PAUSE CORE2 WHILE MAKING CHANGES ==========
-            // pauseCore2 = 1; // Pause Core 2 LED updates
 
             // 1. Clear previous highlighting if zone or subIndex changed
             bool zoneChanged = ( lastCursorZone != cursorZone );
@@ -1939,7 +1938,6 @@ void Probing::handleEncoderCursorNavigation(
             persistentSubIndex = subIndex;
 
             // 8. NOW update LEDs atomically - unpause and trigger update
-            // pauseCore2 = 0;    // Unpause Core 2
             // requestLedShow( 2 ); // Trigger single atomic update
 
             // ========== END ATOMIC UPDATE ==========

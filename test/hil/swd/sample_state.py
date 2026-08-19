@@ -18,14 +18,16 @@ import time
 VAR_SIZES = {
     "core1busy":              1,
     "core2busy":              1,
-    "pauseCore2":             1,
+    # T3.4: pauseCore2 (bool) became core1FrameHoldDepth[2] - one uint32 hold
+    # depth per core. Size 8 = read both words; nonzero = core 1 parked.
+    "core1FrameHoldDepth":    8,
     "readingADC":             1,
     "refreshInProgress":      1,
     "refreshLocalInProgress": 1,
     "filesystemActive":       1,
     "usbMountedByHost":       1,
-    "sendAllPathsCore2":      4,
-    "showLEDsCore2":          4,
+    # (sendAllPathsCore2 / showLEDsCore2 were deleted by T2.2b/c - the requests
+    # live in the core1req mailbox now; use the X panel's "core1 mailbox" line.)
     "chipSelect":             4,
     "ch446q_timeout_count":   4,
     "sendxy_blocked_count":   4,
@@ -118,7 +120,19 @@ def sample_vars(o):
         sys.exit("FAIL: no symbol addresses (no firmware.elf) - cannot sample over SWD.")
     vals = {}
     for name, (addr, size) in VARS.items():
-        vals[name] = o.read_mem(addr, size)
+        if size == 8:
+            # Two consecutive uint32 words (core1FrameHoldDepth[2]): report 0
+            # when both are zero, else "core0+core1" so a leak names its core.
+            v0 = o.read_mem(addr, 4)
+            v1 = o.read_mem(addr + 4, 4)
+            if v0 is None or v1 is None:
+                vals[name] = None
+            elif v0 == 0 and v1 == 0:
+                vals[name] = 0
+            else:
+                vals[name] = f"{v0}+{v1}"
+        else:
+            vals[name] = o.read_mem(addr, size)
     return vals
 
 

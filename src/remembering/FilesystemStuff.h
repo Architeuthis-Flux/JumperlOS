@@ -338,7 +338,7 @@ int safeFileWrite(File& file, const uint8_t* data, size_t len);
  * Core 1 freezes once (continuous) instead of N times (with flicker).
  *
  * Caller MUST currently hold:
- *   - pauseCore2ForFlash (i.e. the global `pauseCore2` flag is true)
+ *   - pauseCore2ForFlash (i.e. a core-1 frame hold is up)
  *   - the fs_mutex (acquired via safeFileOpen)
  *   - AsyncPassthrough UART RX IRQ already suspended
  *

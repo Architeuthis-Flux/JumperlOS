@@ -16,7 +16,23 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **NEWEST (2026-08-18, row 61): the no-PSRAM V5 hard boot loop is fixed.** Kevin flashed a
+- **NEWEST (2026-08-18, row 64): T3.4 (C16) is DONE — `pauseCore2` is deleted.** The volatile
+  bool became `core1FrameHoldDepth[2]` (`externVars.h`): a per-core nesting hold depth — each
+  core writes only its own word (no cross-core atomics), readers use the inline
+  `core1FramesHeld()`, release saturates at 0. `pauseCore2ForFlash`/`unpauseCore2ForFlash` keep
+  their names and signatures (~50 envelopes untouched; the bool they thread through is
+  vestigial) but count nesting exactly — the `was_paused` save/restore idiom is gone. The ~14
+  raw scopes use `holdCore1Frames()`/`releaseCore1Frames()`; Python owns a single idempotent
+  hold slot (`pythonFrameHoldSet` — `jl.pause_core2` maps onto it, session teardown releases
+  only its own slot instead of stomping every holder like the old `pauseCore2 = false`
+  recovery did). `X` prints `frame hold: core0 N  core1 N` — nonzero at idle = a leaked hold.
+  Two tooling notes: the SWD scripts (`sample_state.py`/`tap_session.py`/`stress_flash.py`)
+  now resolve `core1FrameHoldDepth` from the ELF (tap_session no longer carries a hardcoded
+  table), and **`test_encoder_ui` only actually runs when OpenOCD is up — with it up, a stale
+  `jl_input.py` ADDR table looks like a firmware regression** (that exact false alarm happened
+  this session; refresh the table per its header after every flashed build). Release `5.7.3.2`
+  (row 62) went out just before this; Kevin still pushes `dev` + the `5.7.3.2` tag by name.
+- **2026-08-18, row 61: the no-PSRAM V5 hard boot loop is fixed.** Kevin flashed a
   no-PSRAM board and it HardFaulted at uptime 28.5 s every boot, forever. Root cause (SWD-proven,
   the full story is row 61): the MicroPython 96 KB GC-heap malloc fails on the no-PSRAM SRAM heap,
   `MpRemoteService` ignored the failed init and ran the raw REPL on a heapless VM, and
@@ -48,8 +64,8 @@
   `origin/dev`, not main).** So: `git push origin dev` sends T2.2c; the `5.7.3.1` tag is Kevin's to
   push or let CI mint (pushing the tag before `main` makes CI publish `5.7.3.2`, per `release.yml`).
   The old "never push" rule from earlier in this run no longer applies to `dev` — Kevin is driving
-  the pushes; do not push on his behalf without asking. Next up per the doc's section-D order: **T3.4 (delete `pauseCore2`)** — its
-  blocker (T2.2c) is now done; then T3.1 (the `probeMode` state machine) needs a design round
+  the pushes; do not push on his behalf without asking. T3.4 (delete `pauseCore2`) is DONE
+  (row 64, top bullet); next up: T3.1 (the `probeMode` state machine) needs a design round
   with Kevin.
 - **T2.2c in one paragraph (row 59):** the packed magic-int `showLEDsCore2` (0/±1/2/3/+10, ~270
   writers) became `core1req::REQ_SHOW_LEDS` — the typed request the old FOLLOW-UP note asked for,
@@ -158,8 +174,8 @@
   the tag and let the workflow tag it); then **"start with the second SM CH446Q strobe (put it on
   PIO2), then continue with the rest"** → T3.2 is built and verified (block below); "the rest" =
   the remaining Tier 3 in list order — **T3.3 (WaveGen via I2C0 DMA) is built and verified too
-  (block below); T3.4 (delete `pauseCore2`) is next; T3.1 (the `probeMode` state machine) needs a
-  design round with Kevin — ask.**
+  (block below); T3.4 (delete `pauseCore2`) is DONE (row 64); T3.1 (the `probeMode` state
+  machine) needs a design round with Kevin — ask.**
 - **T3.3 in one paragraph:** the wave is a hardware stream — an image of the exact IC_DATA_CMD
   entries per sample, channel A (image → I2C0 TX FIFO, 3 entries per trigger), channel B2 (an
   address ring, one word per sample, hardware ring wrap → A's READ_ADDR_TRIG), channel B1 (a
@@ -585,7 +601,7 @@ fixed spinlock (OS1) before it puts, the DMA kick waits for an in-flight CPU sen
 loads, apps) keep the CPU path byte-for-byte; the OG keeps the CPU path (stated decision: no
 OG board attached; C2b sets the precedent). Stall watchdog `ch446qDmaService()` (every
 core2stuff pass): 200 ms of core-1 time without a PIO IRQ — accumulated in ≤ 5 ms per-pass
-increments, so a FlashPark park or `pauseCore2` stretch adds one increment, never a false
+increments, so a FlashPark park or a frame-hold stretch adds one increment, never a false
 trip — aborts the DMA, marks the unsent chips suspect, counts a timeout, restarts the SM at
 its entry point, and **completes the request anyway** (no waiter can hang). `X` prints
 `ch446q list send: DMA (core 1) dma sends N words M (max K per send) dma stalls S pio
@@ -626,7 +642,7 @@ locked regions are a few loads/stores; the core-1 side is RAM-resident next to `
 "leave it pending while wavegen streams" rule, same WARNING text minus the flag name);
 `refreshLocalConnections`, `fastRefresh` and FakeGpio's three sites post `BYPASS`; the LED
 brightness menu's re-send posts `SEND`; `refreshBlind` (no callers) posts+takes in step;
-core 1 takes `BYPASS` in `loop1()`'s `pauseCore2` spin and at the top of `core2stuff()` (still
+core 1 takes `BYPASS` in `loop1()`'s frame-hold spin and at the top of `core2stuff()` (still
 under the 1 ms `core_sync` try — the request stays posted if the try fails), and takes `SEND`
 in `core2stuff()`'s main branch (`sendPaths(clean = CLEAN bit)`), completing after each;
 `sendPaths()` **no longer zeroes anything at its end** (that zeroing erased a request that
@@ -702,7 +718,7 @@ rebuilt `firmware.uf2`.
 **T1.6 (C11) measure-only stage — what was built.** `src/KickGap.h/.cpp`: `kickGapStamp(core,
 site)` at the three places a watchdog kick would go — the top of `loop()`'s busy-loop pass
 (`KICK_LOOP0`), `jOS.serviceInner()` (`KICK_INNER`, the modal loops), the top of `loop1()`
-before its `pauseCore2` wait (`KICK_LOOP1`) — records per core the longest gap between two
+before its frame-hold wait (`KICK_LOOP1`) — records per core the longest gap between two
 consecutive stamps, which two sites bracketed it and when; `X` prints it ("watchdog
 (measure-only, nothing enabled): …", plus the currently open gap), **`X!` resets the maxima**
 (port 1 — on port 7 a raw `X!` is `X` then `!`, the arg never reaches the command). **No
@@ -1556,7 +1572,7 @@ soaking), `PERFORMANCE_OPTIMIZATIONS_ROUND2.md`/`PERFORMANCE_ROUND3.md`,
 | ISR→task notify | `xTaskNotifyFromISR` | k_sem / k_work_submit | a `volatile bool pending` + `__dmb` (single-writer), `sem_t`, or a `queue_t` | the button PIO IRQ sets `g_pendingUndo/…` flags read by `service()` (`Probing.cpp:607-612`) | formalise as `Service::requestRun()` |
 | Software timers | `xTimerCreate` | k_timer | `add_repeating_timer_us` (already used for slow PWM `Peripherals.cpp:2854`) | ad-hoc `millis()` gates | fine as is; alarms only for hard cadences |
 | Cross-core message | queues + SMP | k_msgq / IPM | `queue_t` (spinlock-guarded, `queue_try_add/remove` linked), SIO FIFO (arduino-pico owns it), **doorbells** (8; FlashPark uses one) | ~10 volatile ints with magic values (`sendAllPathsCore2 = ±1/3`, `showLEDsCore2 = -N/2/3/≥10`) + `waitCore2()` 25 ms spin | replace with one mailbox of typed requests + a generation counter (section D) |
-| Mutual exclusion | mutex / critical section | k_mutex / k_spinlock | `mutex_t` (`core_sync_mutex`, `fs_mutex` — `externVars.cpp:56`), `critical_section_t`, `spin_lock_claim_unused` (32) | `core_sync` mutex + `core1busy/core2busy` flags + `pauseCore2` | keep `core_sync`; retire the flags as the mailbox lands |
+| Mutual exclusion | mutex / critical section | k_mutex / k_spinlock | `mutex_t` (`core_sync_mutex`, `fs_mutex` — `externVars.cpp:56`), `critical_section_t`, `spin_lock_claim_unused` (32) | `core_sync` mutex + `core1busy/core2busy` flags + the core-1 frame hold (T3.4; was `pauseCore2`) | keep `core_sync`; retire the flags as the mailbox lands |
 | Poll many | `select`-style event groups | k_poll | none — cooperative loop | `serviceAll()` walks 20 services every pass | due-or-pending gate makes the walk cheap |
 | Watchdog | `xTaskCheckIn` patterns | k_wdt / task watchdog | `watchdog_enable/_update`, `watchdog_hw->scratch[0..7]` (CrashLog already reads scratch — `crashlogLatchAtBoot`) | none | Tier 1: measure first, then enable with a long timeout, kick from `loop()` and `loop1()`, stamp scratch with the last service index |
 | SMP / core affinity | SMP kernel | SMP | `multicore_*`, per-core NVIC enables, `PICO_VTABLE_PER_CORE=0` | hand-placed: core 0 = USB/I2C0/scheduler, core 1 = LEDs/CH446Q | write the ownership rules down (section D) |
@@ -1660,10 +1676,10 @@ exit); the HIL suite covers the routing side only.
 | C10 | OLED frame = 512–1024 B blocking Wire write on core 0, OledGui up to 66 Hz. **On Kevin's rev-7 board the OLED is on I2C0** (`connection_type 2`) at 400 kHz — 12–25 ms per frame, sharing the bus with the INA219s and the DAC | I2C TX via DMA: build the frame's command stream once, `dma_channel_configure(→ &i2cN_hw->data_cmd)` with `DREQ_I2CN_TX`, poll/IRQ completion; `Adafruit_SSD1306::display()` replaced by an async `displayDMA()` for the SSD1306 path | `channel_config_set_dreq(DREQ_I2C0/1_TX)`, i2c `data_cmd` STOP/RESTART bits per word | core-0 blocking per frame 12–25 ms → ~20 µs (**estimated**); a live GUI screen stops eating the loop | medium: I2C error handling (NACK/timeout) mid-DMA; on I2C0 (rev 7) the DMA'd frame needs the I2C0 arbiter (see WaveGen) — the shared-bus gate at `oled.cpp:2245` is a `wavegen.isRunning()` check today | medium (~1 day) — **proposed, not built** (Tier 2, not approved this pass) |
 | C11 | no watchdog | `watchdog_enable(≤8 s)`; kick from `loop()`, `loop1()`, `serviceInner()`, `servicePython()`; stamp a scratch word with the last service index / core-1 state so a WDT reset leaves a trail — on RP2350 `watchdog_hw->scratch[3]` is free (`CrashLog.cpp:29-32` uses POWMAN 0–7 + watchdog 0–2), on the OG/RP2040 CrashLog owns watchdog 2–3 (`:37-45`) so gate the stamp V5-only or pick per platform; **first ship measure-only** (max gap between kicks in `X`) | `watchdog_enable`, `watchdog_update`, `watchdog_caused_reboot`, `watchdog_hw->scratch` | a wedged board reboots instead of sitting dead; post-mortem of what it was doing | medium: legitimate long blockers (self-test, calibration, file ops, MicroPython) must kick or the timeout must exceed them — the measure-only stage finds them | small + a soak |
 | C12 | `millis()` gates everywhere | `time_us_32()` deadlines with wraparound-safe compares (B3) | — | µs resolution, no 1 ms quantisation | nil | with B3 |
-| C13 | flags + `waitCore2()` | core-1 request mailbox + generation counter (D) | spinlock-guarded bitmask | replaces ~10 flags and the 25 ms guess | medium | **REQ_SEND (T2.2b) + REQ_SHOW_LEDS (T2.2c) done; pauseCore2 is T3.4** |
+| C13 | flags + `waitCore2()` | core-1 request mailbox + generation counter (D) | spinlock-guarded bitmask | replaces ~10 flags and the 25 ms guess | medium | **REQ_SEND (T2.2b) + REQ_SHOW_LEDS (T2.2c) + the frame hold (T3.4) done - C13 complete** |
 | C14 | WaveGen ≥1 kHz owns core 1 by synchronous per-sample I2C writes | I2C0 TX DMA from a pre-built command image, paced by a DMA timer (`dma_timer_claim`, `DREQ_DMA_TIMERn`) or by bus rate; core 1 free; needs an I2C0 arbiter (INA/DAC setters/OLED-on-I2C0 wait or fail fast while streaming — they already skip on `isRunning()`) | `dma_timer_claim`, `dma_timer_set_fraction`, `channel_config_set_dreq(dma_get_timer_dreq)`, `i2c0_hw->data_cmd` | LED frames and crossbar sends work while a waveform streams (today the crossbar diverges from the netlist until streaming stops, `Commands.cpp:208-230`) | high: MCP4728 command framing per sample, mid-stream STOP/RESTART, arbitration with core-0 I2C0 users, waveform pacing accuracy | large (3+ days) — **Tier 3; built 2026-08-18 as T3.3 (section 0): image + address ring + divider on a pacing timer, exact frequency, the arbiter is a linker wrap on the two SDK I2C entry points** |
 | C15 | `readAdcVoltage(6,4)` supply sense on core 1 every 1 s | a ring consumer (C1) | — | one less lock holder | nil | with C1 |
-| C16 | `pauseCore2` (soft LED-frame hint; hard park is FlashPark) | delete once C13 + the flash-write frame abort are expressed as a request ("HOLD_FRAMES until gen") | — | one less global; frame aborts become explicit | medium (nested pause semantics in `pauseCore2ForFlash`) | Tier 3 — **not built** |
+| C16 | `pauseCore2` (soft LED-frame hint; hard park is FlashPark) | delete once C13 + the flash-write frame abort are expressed as a request ("HOLD_FRAMES until gen") | — | one less global; frame aborts become explicit | medium (nested pause semantics in `pauseCore2ForFlash`) | **DONE 2026-08-18 as T3.4 (row 64)** - `core1FrameHoldDepth[2]` per-core nesting depth, not the sketched until-gen request (the call sites are scoped envelopes, not coalescing requests) |
 
 ## D. Cross-core protocol cleanup
 
@@ -1674,7 +1690,7 @@ exit); the HIL suite covers the routing side only.
 | `showProbeLEDs` (1/2/3/4/11…) | core 0 (probeMode ×7, ProbeSwitch ×3, `handleProbeButtonActions`) → core 1 `probeLEDhandler` | request overwrite (a flash `11` then `1`) hidden by the constant re-send | `REQ_PROBE_LED(colour)` → with C5, a bare `pio_sm_put` |
 | `showingProbeLEDs` | core 1 → core 0 (`ProbeButton` CPU path spin, `PausePollingFromCore0`) | 20 ms/600 µs waits | gone with C5 |
 | `checkingButton` | core 0 → core 1 (`probeLEDhandler` ≤100 ms spin `Probing.cpp:7199-7207`, `main.cpp:1878`) | the shared line's mutex, by spin | gone with C5 (CPU fallback keeps a local flag) |
-| `pauseCore2` | core 0 (`refreshConnections :146-185`, `pauseCore2ForFlash`) → core 1 (`loop1 :1401`, `core2stuff :1598,1690,1752`) | nested save/restore; a core-0 fault while paused = core 1 dead; soft only since FlashPark | `REQ_HOLD_FRAMES(untilGen)`; the routing critical section becomes "core 1 renders from a snapshot" or simply keeps `core_sync` |
+| `pauseCore2` | **REPLACED (T3.4)** by `core1FrameHoldDepth[2]` - per-core nesting depth, single-writer words, inline `core1FramesHeld()` readers, saturating release; envelopes (`pauseCore2ForFlash`) keep their names; Python holds one idempotent slot | the "nested save/restore" and "recovery stomps every holder" hazards are gone | done |
 | `core1busy` | core 0 (`refreshConnections :148,186`) **and core 1** (`main.cpp:1513-1520` dumpLED) → core 1 swirl gate, `systemIdleForFlush`, SlotManager, OledGui | two writers, ambiguous meaning | split: `routingInProgress` (core 0 only) |
 | `core2busy` | core 1 around sendPaths/render/show → `waitCore2`, `refreshLocalConnections` (200 ms), `pauseCore2ForFlash`, `safeFileWriteAllRaw` (200 ms), OledGui | polled with timeouts that "proceed anyway" | `doneGen` + a `core1State` enum for the readers that only want "idle?" |
 | `core1request` | written (`Commands.cpp:61,86`, `FileParsing.cpp:124,138,3038,3051`), **read by nobody** | dead | delete |
@@ -1702,7 +1718,7 @@ core 0; the LED strip SM/DMA = core 1; I2C1 (OLED on connection types 0/1/3) = c
 with `REQ_SEND_PATHS` only, `waitCore2()` re-implemented on `doneGen` **in place** — its ~40
 call sites (`grep -rn "waitCore2("` across Commands, Apps, SelfTest, States, FakeGpio, Menus,
 Probing …) stay untouched (behaviour-identical, measurable by the tap→crossbar probe in F);
-(3) `REQ_SHOW_LEDS` (**done, T2.2c**); (4) `REQ_PROBE_LED` or C5; (5) `pauseCore2` last (T3.4 - its blocker is now clear).
+(3) `REQ_SHOW_LEDS` (**done, T2.2c**); (4) `REQ_PROBE_LED` or C5; (5) `pauseCore2` last (**done, T3.4** - `core1FrameHoldDepth[2]`, a per-core nesting hold; (4) was skipped as orthogonal, C5 remains).
 
 ## E. Roadmap (sized honestly; status per section 0)
 
@@ -1742,7 +1758,7 @@ Probing …) stay untouched (behaviour-identical, measurable by the tap→crossb
 - T3.1 B5 `probeMode` state machine (4 milestones).
 - T3.2 C2b second-SM CH446Q strobe (PIO block/GPIOBASE allocation first). **Built 2026-08-17 (section 0, Kevin's call: PIO2).**
 - T3.3 C14 WaveGen via I2C0 DMA + pacing timer (+ I2C0 arbiter). **Built 2026-08-18 (section 0).**
-- T3.4 C16 delete `pauseCore2`.
+- T3.4 C16 delete `pauseCore2` - **DONE 2026-08-18** (row 64: per-core hold depth, envelopes keep their names, Python single-slot).
 
 ## F. How to measure
 Existing hooks: `X` (`cmd_resourceStatus`, `SingleCharCommands.cpp:2670`: PIO map, IRQ slots,
@@ -1821,12 +1837,13 @@ samples 30 127 251, led-frame aborts(pause) 47; heap free 46 KB of 221 KB; I2C0 
   IRQs, a TIMER1 alarm, a user IRQ). A second doorbell cannot get its own handler — extend
   `flashParkIrq` into a dispatcher, or don't use an IRQ (poll from the loop).
 - FlashPark (`src/FlashPark.cpp`) already uses a doorbell + `__wrap_flash_range_erase/program`
-  to park the other core; `pauseCore2ForFlash()` (`externVars.cpp:188`) is now only the "soft"
-  LED-stutter hint, spinning on `core2busy` with raw `tud_task()`.
-- Cross-core waits today: `waitCore2()` (`Commands.cpp:57`) spins ≤25 ms on `core2busy ||
-  sendAllPathsCore2` with raw `tud_task()`; `refreshConnections()` (`Commands.cpp:114`) sets
-  `pauseCore2` around routing, then `sendAllPathsCore2 = ±1` and spins ≤1 s (`:208-217`), then
-  `showLEDsCore2` + `waitCore2()` (`:232-235`). `refreshLocalConnections()` spins ≤200 ms on
+  to park the other core; `pauseCore2ForFlash()` (`externVars.cpp`) is only the "soft"
+  LED-stutter hint, waiting on `core2busy` — since T3.4 it is a thin envelope over the
+  frame-hold depth (`holdCore1Frames`/`releaseCore1Frames`).
+- Cross-core waits (survey updated for T2.2b/c + T3.4): `waitCore2()` (`Commands.cpp:57`)
+  spins ≤25 ms on the SEND slots; `refreshConnections()` (`Commands.cpp:114`) takes the
+  frame hold around routing, posts `REQ_SEND` and spins ≤1 s on its generation, then
+  requests the LED show + `waitCore2()`. `refreshLocalConnections()` spins ≤200 ms on
   `core2busy` (`:300-309`).
 - CH446Q send path (`src/CH446Q.cpp`): PIO0 SM (claimed at **file scope** `:38`, before
   `setup()`), data 14 / clk 15 (`:89-96`), clkdiv 1, 8-bit words; the compiled program

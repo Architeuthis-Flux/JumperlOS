@@ -433,7 +433,7 @@ static void __not_in_flash_func(ch446qDmaAbort)(void) {
 // remaining transfer count falling (strobe path - once it reaches 0 the only
 // progress left is the completion IRQ, which lands within microseconds unless
 // something is wedged); "stall time" accumulates in bounded per-pass
-// increments (<= 5 ms each), so a FlashPark park or a pauseCore2 stretch -
+// increments (<= 5 ms each), so a FlashPark park or a frame-hold stretch -
 // during which the ISR cannot run and neither can this - adds at most one
 // increment when we come back, and never trips the recovery.
 static inline uint32_t ch446qDmaProgress(void) {

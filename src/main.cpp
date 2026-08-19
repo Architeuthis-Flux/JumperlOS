@@ -111,8 +111,7 @@ void printDirectoryContents( const char* dirname, int level );
 
 void core2stuff( void );
 
-// volatile uint8_t pauseCore2 = 0;
-// Core-1 LED-frame aborts caused by pauseCore2 (X prints it). Was ~20 Hz
+// Core-1 LED-frame aborts caused by the core-1 frame hold (X prints it). Was ~20 Hz
 // from the current-sense poll's pause toggle until 2026-08-16.
 volatile uint32_t ledFrameAbortsPause = 0;
 
@@ -1472,11 +1471,11 @@ float supplySense = 9.10F;
 
 void loop1( ) {
     // Would-be watchdog kick, core 1 (measure-only stage - see KickGap.h).
-    // Stamped BEFORE the pause wait so a long pauseCore2 / FlashPark park /
+    // Stamped BEFORE the pause wait so a long frame hold / FlashPark park /
     // WaveGen capture shows up as a gap.
     kickGapStamp( 1, KICK_LOOP1 );
 
-    while ( pauseCore2 == true ) {
+    while ( core1FramesHeld( ) ) {
         // Check for an immediate bypass request even while paused (not while a
         // DMA-fed send is still strobing - its ISR completes that one first)
         if ( core1req::pending( core1req::REQ_BYPASS ) && !ch446qSendInFlight( ) ) {
@@ -1516,7 +1515,7 @@ void loop1( ) {
     // 3) Medium-low: rotary encoder
     // 4) Low: logo swirls/animations
 
-    if ( pauseCore2 )
+    if ( core1FramesHeld( ) )
         return; // Exit early to allow flash operations
 
 #if POWER_SUPPLY_SENSE_ENABLED == 1
@@ -1552,7 +1551,7 @@ void loop1( ) {
     if ( doomOn == 1 ) {
         playDoom( );
         doomOn = 0;
-    } else if ( pauseCore2 == 0 ) {
+    } else if ( !core1FramesHeld( ) ) {
         // Always call core2stuff() for logo swirls and animations
         t[ 4 ] = micros( );
         core2stuff( );
@@ -1568,8 +1567,8 @@ void loop1( ) {
     // They were causing refreshLocalConnections() to be called from Core 2
     // when handling Arduino flashing (DTR pulse detection)
 
-    // Check pauseCore2 before serial operations
-    if ( pauseCore2 )
+    // Check the frame hold before serial operations
+    if ( core1FramesHeld( ) )
         return;
 
     // replyWithSerialInfo() was MOVED to Core 0's loop() (next to
@@ -1665,10 +1664,10 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // From here on, we hold the mutex and can safely access shared resources
     // Make sure to release it before returning!
 
-    // CRITICAL FIX: Check pauseCore2 immediately after acquiring mutex
-    // If Core1 set pauseCore2=true while we were waiting for mutex, we need to
+    // CRITICAL FIX: Check the frame hold immediately after acquiring mutex
+    // If Core 0 took a frame hold while we were waiting for the mutex, we need to
     // release and return immediately to avoid flash XIP crashes during file writes
-    if ( pauseCore2 ) {
+    if ( core1FramesHeld( ) ) {
         ledFrameAbortsPause++;
         core_sync_release( );
         return;
@@ -1768,8 +1767,8 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                         clearBeforeSend = 0;
                     }
 
-                    // Check pauseCore2 before long-running showNets() to allow quick exit for flash ops
-                    if ( pauseCore2 ) {
+                    // Check the frame hold before long-running showNets() to allow quick exit for flash ops
+                    if ( core1FramesHeld( ) ) {
                         ledFrameAbortsPause++;
                         core2busy = false;
                         core_sync_release( );
@@ -1822,7 +1821,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 // the buffer first; it returns false while Core 0 is mid-repaint
                 // so we never show a half-drawn menu frame.
                 //
-                // CRITICAL: re-check pauseCore2 and raise core2busy around the
+                // CRITICAL: re-check the frame hold and raise core2busy around the
                 // render. menuTransitionRender() is flash-resident code, and
                 // pauseCore2ForFlash() waits on core2busy before letting a
                 // flash op proceed — without this bracket it saw Core 2 as
@@ -1831,7 +1830,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 // FM runs with inClickMenu==1, so this branch stays hot
                 // during its flash writes; serial entry has inClickMenu==0
                 // and never hit it).
-                if ( pauseCore2 ) {
+                if ( core1FramesHeld( ) ) {
                     ledFrameAbortsPause++;
                     core_sync_release( );
                     return;
@@ -1858,8 +1857,8 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             if ( needsLedShow ) {
                 core2busy = true;
 
-                // Check pauseCore2 before long-running leds.show() to allow quick exit for flash ops
-                // if ( pauseCore2 ) {
+                // Check the frame hold before long-running leds.show() to allow quick exit for flash ops
+                // if ( core1FramesHeld( ) ) {
                 //     core2busy = false;
                 //     core_sync_release( );
                 //     return;
@@ -1978,7 +1977,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     core_sync_release( );
 
     // Keep the full adcReadings[] cache fresh in the background (for the OLED
-    // GUI / cached {adc:N} tokens). Self-throttled and gated on pauseCore2.
+    // GUI / cached {adc:N} tokens). Self-throttled and gated on the core-1 frame hold.
     // Done AFTER releasing core_sync so a background ADC read (which uses its
     // own atomic ADC lock) can never extend the core_sync hold and stall core0.
     // Compiled out when LAZY_ADC_READINGS == 0.
@@ -2001,7 +2000,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
     // never extend the LED-frame core_sync/core2busy hold that Core 0's
     // waitCore2() blocks on - stacking it inside the frame was the "clickwheel
     // super laggy" regression. Still core 1 only (taps stay serialized with
-    // sendPaths); internally gated on pauseCore2/sendAllPathsCore2, preempted
+    // sendPaths); internally gated on the frame hold/sendAllPathsCore2, preempted
     // by recent user input, and raises core2busy around its hardware work.
     serviceNetVoltageScan( );
 

@@ -216,6 +216,11 @@ bool isJumperlessFunction(const char* function_name);
 void startMicroPythonREPL(void);
 void stopMicroPythonREPL(void);
 bool isMicroPythonREPLActive(void);
+
+// Python's single core-1 frame-hold slot (T3.4): set(true)/set(false) are
+// idempotent; session teardown releases it without touching other holds.
+void pythonFrameHoldSet(bool hold);
+bool pythonFrameHoldActive(void);
 void processMicroPythonInput(Stream *stream = global_mp_stream);
 
 // REPL helper functions

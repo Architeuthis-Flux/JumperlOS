@@ -78,7 +78,7 @@ ServiceStatus ConfigSaveService::service() {
     // never run during active probing, and debounce on recent input. The
     // probe droop tracker marks the config dirty DURING probing (every tap
     // re-anchors V0), and saving right then stalls the whole probe pipeline
-    // mid-tap: pauseCore2 held up to ~700ms per save with storms of several
+    // mid-tap: the core-1 pause held up to ~700ms per save with storms of several
     // full config.txt writes per second (hardware-confirmed over SWD) - the
     // user sees missed pads, a dimmed probe LED, and taps registering rows
     // late. The flag stays set, so the value persists in ONE save right

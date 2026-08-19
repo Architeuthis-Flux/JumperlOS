@@ -49,8 +49,8 @@ else:
     print("(--no-swd: running without SWD sampling)", flush=True)
 
 prev = None
-stuck_candidates = ("core1busy", "core2busy", "pauseCore2", "refreshInProgress",
-                    "refreshLocalInProgress", "sendAllPathsCore2")
+stuck_candidates = ("core1busy", "core2busy", "core1FrameHoldDepth",
+                    "refreshInProgress", "refreshLocalInProgress")
 
 
 def usb_ports():

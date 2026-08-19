@@ -19,7 +19,7 @@
 #include "JumperlOS.h"
 #include "MpRemoteService.h"
 #include "SharedBuffer.h"  // For zero-copy transfer from Ekilo editor
-#include "externVars.h"  // For pauseCore2 synchronization
+#include "externVars.h"  // core-1 frame hold (holdCore1Frames / releaseCore1Frames)
 #include "micropythonExamples.h"  // For embedded Python scripts including ViperIDE reinit
 #include "RotaryEncoder.h"  // For clickwheel interrupt during script execution
 #include "Highlighting.h"   // For handing the display back at script exit
@@ -192,19 +192,42 @@ size_t jl_get_psram_mp_size(void) {
  * operations (like file flush/close). Core 2 must be paused during this
  * to prevent concurrent filesystem access which can cause crashes.
  * 
- * Memory barriers (__dmb) ensure pauseCore2 changes are visible to Core 2
- * before proceeding with garbage collection.
+ * The frame hold's memory barriers ensure Core 2 sees it before the
+ * collection proceeds.
  */
 static inline void gc_collect_safe(void) {
-    // Pause Core 2 before GC to prevent concurrent filesystem access
+    // Hold core-1 frames before GC to prevent concurrent filesystem access
     bool was_paused = pauseCore2ForFlash(100);
-    
+
     // Run garbage collection (this may call finalisers that access files)
     gc_collect();
-    
-    // Restore previous pauseCore2 state
+
     unpauseCore2ForFlash(was_paused);
 }
+
+// -----------------------------------------------------------------------------
+// Python's core-1 frame hold slot (T3.4). jl_pause_core2() gives scripts an
+// ABSOLUTE pause/unpause switch, which cannot map 1:1 onto the nesting
+// hold/release pair - a script calling pause(True) twice then False once would
+// leave core 1 parked forever. So Python owns exactly ONE hold: set(true)
+// takes it if not already held, set(false) releases it if held, both
+// idempotent. Session teardown (REPL exit, deinit, script end) releases the
+// slot without ever touching holds other subsystems own - the old
+// `pauseCore2 = false` recovery could stomp a concurrent ForFlash envelope.
+// -----------------------------------------------------------------------------
+static volatile bool s_pyFrameHold = false;
+
+void pythonFrameHoldSet(bool hold) {
+    if (hold && !s_pyFrameHold) {
+        s_pyFrameHold = true;
+        holdCore1Frames();
+    } else if (!hold && s_pyFrameHold) {
+        s_pyFrameHold = false;
+        releaseCore1Frames();
+    }
+}
+
+bool pythonFrameHoldActive(void) { return s_pyFrameHold; }
 
 // Arduino timing functions for MicroPython
 extern "C" void mp_hal_delay_ms(mp_uint_t ms) { 
@@ -909,7 +932,11 @@ void deinitMicroPythonProper(void) {
     jumperless_globals_loaded = false;  // Reset globals flag
     mp_interrupt_requested = false;  // Clear any pending interrupt
 
-    pauseCore2 = false;
+    pythonFrameHoldSet(false);  // release the script's frame hold, if any
+    if (core1FramesHeld()) {
+      // Not ours to clear - flag it rather than stomp another owner's hold.
+      Serial.println("[MP] note: core-1 frame hold still nonzero after deinit (X panel shows depth)");
+    }
   }
 }
 
@@ -975,7 +1002,10 @@ void stopMicroPythonREPL(void) {
     
     mp_repl_active = false;
     mp_interrupt_requested = false; // Clear any pending interrupt
-    pauseCore2 = false;
+    pythonFrameHoldSet(false);  // release the script's frame hold, if any
+    if (core1FramesHeld()) {
+      Serial.println("[MP] note: core-1 frame hold still nonzero after REPL exit (X panel shows depth)");
+    }
   }
 }
 
@@ -1248,7 +1278,7 @@ void enterMicroPythonREPLWithFile(Stream *stream, const String& filepath) {
     delayMicroseconds(1); // Small delay to prevent overwhelming
   }
 
-  pauseCore2 = false;
+  pythonFrameHoldSet(false);  // release the script's frame hold, if any
 
   // Cleanup with colors
   changeTerminalColor(replColors[0], true, repl_stream);
@@ -4938,7 +4968,7 @@ if (jumperlessConfig.display.terminal_line_buffering == 0) {
  * this stops the zombie repainters, it does not blank the screen.
  *
  * fullHandback=false does only the script-simulated input state (encoder,
- * pauseCore2) and leaves the display alone - see the comment in the body.
+ * the script frame hold) and leaves the display alone - see the comment in the body.
  */
 void onPythonSessionEnd( bool fullHandback ) {
     // The display teardown is NOT unconditional. The raw REPL calls this after
@@ -4971,7 +5001,7 @@ void onPythonSessionEnd( bool fullHandback ) {
     lastButtonEncoderState = IDLE;
     encoderOverride = 0;
 
-    pauseCore2 = 0;
+    pythonFrameHoldSet(false);  // release the script's frame hold, if any
 }
 
 /**
@@ -5312,7 +5342,6 @@ void closeAllOpenFiles(void) {
   delay(10);
   yield();
   
-  // Restore previous pauseCore2 state
   unpauseCore2ForFlash(was_paused);
 }
 

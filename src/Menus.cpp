@@ -5345,7 +5345,7 @@ char LEDbrightnessMenu( void ) {
     } else if ( input == 'b' ) {
         Serial.print( "\n\rPress any key to exit\n\n\r" );
         leds.clear( );
-        pauseCore2 = 1;
+        holdCore1Frames( ); // park core 1 while we own the LED strip
         while ( Serial.available( ) == 0 ) {
             // startupColorsV5();
             drawAnimatedImage( 0 );
@@ -5359,7 +5359,7 @@ char LEDbrightnessMenu( void ) {
             // delay(2000);
             // rainbowBounce(3);
         }
-        pauseCore2 = 0;
+        releaseCore1Frames( );
         // showNets();
         // lightUpRail(-1, -1, 1);
         requestLedShow( -1 );
@@ -5367,7 +5367,7 @@ char LEDbrightnessMenu( void ) {
         input = '!'; // this tells the main fuction to reset the leds
     } else if ( input == 'c' ) {
         Serial.print( "\n\rPress any key to exit\n\n\r" );
-        pauseCore2 = 1;
+        holdCore1Frames( ); // park core 1 while we own the LED strip
         while ( Serial.available( ) == 0 ) {
 
             randomColors( );
@@ -5375,7 +5375,7 @@ char LEDbrightnessMenu( void ) {
             delayMicroseconds( random( 500, 80000 ) );
             requestLedShow( -3 );
         }
-        pauseCore2 = 0;
+        releaseCore1Frames( );
         requestLedShow( -1 );
         // delay(100);
         input = '!';

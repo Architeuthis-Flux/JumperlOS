@@ -780,7 +780,7 @@ bool planFastPath(int nodeA, int nodeB, pathStruct* out) {
 int fastConnectPath(int nodeA, int nodeB, FastPathHandle* out,
                     unsigned long hopTimeoutUs) {
     if (!out || !wireTableReady) return -1;
-    if (pauseCore2 || !core1req::allIdle()) return -2;  // a path send pending / in flight
+    if (core1FramesHeld() || !core1req::allIdle()) return -2;  // a path send pending / in flight
 
     out->active = false;
     pathStruct route;

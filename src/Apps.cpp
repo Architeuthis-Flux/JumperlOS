@@ -1680,7 +1680,7 @@ void xlsxGui( void ) {
 void bounceStartup( void ) {
     Serial.print( "\n\rPress any key to exit\n\n\r" );
     leds.clear( );
-    pauseCore2 = 1;
+    holdCore1Frames( ); // park core 1 while we own the LED strip
 
     int bounceDelay = 300;
     resetEncoderPosition = true;
@@ -1693,7 +1693,7 @@ void bounceStartup( void ) {
         if ( digitalRead( BUTTON_ENC ) == 0 || Serial.available( ) > 0 )
             break;
     }
-    pauseCore2 = 0;
+    releaseCore1Frames( );
     requestLedShow( -1 );
     waitCore2( );
 }
@@ -1890,7 +1890,7 @@ void calibrateDacs( ) {
     //
     // If the stream will NOT let go, bail before touching a single DAC. The
     // pump that releases the ADC only runs from core2stuff(), which loop1()
-    // skips while pauseCore2 is set, so
+    // skips while a core-1 frame hold is set, so
     // this is reachable - and calibrating anyway would solve every constant
     // from sweep means (a hard 0 on the probe channels) and then PERSIST them.
     UsbAudioAdcYield audioYield( "DAC calibration" );

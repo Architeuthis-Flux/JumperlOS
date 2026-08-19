@@ -387,7 +387,7 @@ static bool ensureParentDirsHeld(const char* path) {
 }
 
 // Helper: write `totalSize` bytes from `src` to `path`. Caller MUST
-// already hold fs_mutex and pauseCore2 - hence "Held". Uses FatFS
+// already hold fs_mutex and the core-1 frame hold - hence "Held". Uses FatFS
 // directly to avoid re-acquiring the mutex.
 //
 // PERFORMANCE: prefers "r+" mode (open existing for read/write) over
@@ -1429,7 +1429,7 @@ ServiceStatus FileCacheFlushService::service() {
     }
 
     // Lone pending EEPROM commit (no file/mirror/metadata work). Commit it in
-    // its own safe envelope (pauseCore2 + fs_mutex) so identity / calibration /
+    // its own safe envelope (frame hold + fs_mutex) so identity / calibration /
     // debug-flag persistence isn't starved when nothing else is dirty.
     if (!anyDirty && !anyMirrorStale && !spiftlDebt && eepromDebt) {
         FCDBG("flushService lone EEPROM commit");

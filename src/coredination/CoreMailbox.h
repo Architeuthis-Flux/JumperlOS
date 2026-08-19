@@ -16,13 +16,13 @@
 // lands while one is in flight stays set and is served on the next pass.
 //
 // Two slots, because the "3" bypass has different service points (it is also
-// served inside loop1()'s pauseCore2 spin and at the top of core2stuff() with
+// served inside loop1()'s frame-hold spin and at the top of core2stuff() with
 // a 1 ms core_sync try) and never has a waiter, while a SEND is what
 // refreshConnections() and waitCore2() wait on:
 //   REQ_SEND    bits SEND_PATHS (+ SEND_CLEAN): send the paths, cleaning first
 //               if the clean bit is set. Served in core2stuff()'s main branch.
 //   REQ_BYPASS  the old "3": send without cleaning, right now, even while
-//               pauseCore2 is held. Served in loop1()'s pause spin and at the
+//               a core-1 frame hold is up. Served in loop1()'s pause spin and at the
 //               top of core2stuff().
 //
 // All updates are made under a FIXED SIO hardware spinlock (PICO_SPINLOCK_ID_

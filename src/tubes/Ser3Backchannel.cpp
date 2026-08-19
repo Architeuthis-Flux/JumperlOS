@@ -935,7 +935,6 @@ static bool usbSer3_captureGpioBuffered(uint32_t intervalUs, long count, const S
 // Best-effort streamed capture: re-run the verb each slot, busy-wait to the
 // next due time. Bails on flash ops or any inbound byte (host stop).
 static void usbSer3_captureStreamed(uint32_t intervalUs, long count, const String& verb) {
-    extern volatile bool pauseCore2;
     USBSer3.printf("cap{verb:%s,mode:streamed,eff_us:%lu,count:%ld}\r\n",
                    verb.c_str(), (unsigned long)intervalUs, count);
     uint32_t start = micros();
@@ -945,7 +944,7 @@ static void usbSer3_captureStreamed(uint32_t intervalUs, long count, const Strin
         usbSer3_dispatchVerb(&USBSer3, verb);
         i++;
         if (USBSer3.available() > 0) break;   // host sent a byte -> stop
-        if (pauseCore2) break;                  // flash op -> bail
+        if (core1FramesHeld()) break;         // flash op -> bail
         if (continuous && (micros() - start) > 60000000UL) break;  // safety cap
         uint32_t nextDue = start + (uint32_t)i * intervalUs;
         if ((int32_t)(micros() - nextDue) >= 0) {

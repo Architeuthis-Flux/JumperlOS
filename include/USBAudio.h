@@ -83,7 +83,7 @@ extern volatile bool usbAudioOwnsAdc;
 // bounded, for core 1 to carry it out). No Serial output - may run on core 1.
 //
 // RETURNS true if the ADC is free when it returns. It can fail: the pump runs
-// only from core2stuff(), which loop1() skips while pauseCore2 is set.
+// only from core2stuff(), which loop1() skips while a core-1 frame hold is set.
 // ANYTHING that calibrates or measures must
 // check this - reading anyway yields sweep means and a hard 0 on the probe
 // channels, which silently corrupts whatever is solved from them.

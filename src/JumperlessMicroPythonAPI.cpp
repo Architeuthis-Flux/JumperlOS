@@ -191,7 +191,9 @@ int jl_wavegen_is_running( void );
 void jl_wavegen_get_sweep( float* start_hz, float* end_hz, float* seconds );
 
 void jl_pause_core2( bool pause ) {
-    pauseCore2 = pause;
+    // Scripts get an ABSOLUTE pause/unpause switch mapped onto exactly one
+    // core-1 frame hold (idempotent both ways) - see pythonFrameHoldSet().
+    pythonFrameHoldSet( pause );
 }
 
 void jl_change_terminal_color( int color, bool flush ) {
@@ -477,7 +479,7 @@ void jl_usb_audio_status( int *enabled, int *streaming, int *host_open, int *lef
 // user - the INA219s, the MCP4728 and the OLED are all core 0, and the
 // wavegen's DMA stream is handled by the I2C0 arbiter (T3.3), which pauses
 // the wave at a sample boundary around this very read. So no pause: C3's
-// "INA poll no longer toggles pauseCore2", now for the API too.)
+// "INA poll no longer toggles the core-1 pause", now for the API too.)
 
 float jl_ina_get_current( int sensor ) {
     float result = 0.0f;
@@ -1382,10 +1384,9 @@ int jl_nodes_fast_disconnect( int node1, int node2 ) {
 }
 
 int jl_nodes_clear( void ) {
-    // Pause Core 2 BEFORE modifying state to prevent race conditions
+    // Hold core-1 frames BEFORE modifying state to prevent race conditions
     // Core 2 handles LEDs and may be reading state while we modify it
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
+    holdCore1Frames( );
     delayMicroseconds( 50 ); // Allow Core 2 to finish any in-progress operations
 
     // Clear the entire state (safe now that Core 2 is paused)
@@ -1393,9 +1394,9 @@ int jl_nodes_clear( void ) {
     // Save the cleared state
     // saveStateToSlot();
 
-    // Unpause Core 2 BEFORE refreshConnections since it internally calls waitCore2
-    // and needs Core 2 to be running to process sendAllPathsCore2/showLEDsCore2
-    pauseCore2 = was_paused;
+    // Release BEFORE refreshConnections since it internally calls waitCore2
+    // and needs Core 2 to be running to process its requests
+    releaseCore1Frames( );
 
     refreshConnections( -1, 1, 0 );
     // waitCore2 is called internally by refreshConnections
@@ -1412,16 +1413,15 @@ int jl_nodes_is_connected( int node1, int node2 ) {
 int jl_nodes_save( int slot ) {
     int target_slot = ( slot == -1 ) ? netSlot : slot; // Use current slot if -1
 
-    // Pause Core 2 while saving to prevent race conditions
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
+    // Hold core-1 frames while saving to prevent race conditions
+    holdCore1Frames( );
     delayMicroseconds( 50 );
 
     // Save globalState to YAML
     saveStateToSlot( target_slot );
 
-    // Unpause Core 2 BEFORE refreshConnections since it internally calls waitCore2
-    pauseCore2 = was_paused;
+    // Release BEFORE refreshConnections since it internally calls waitCore2
+    releaseCore1Frames( );
 
     // Refresh connections to make sure everything is in sync
     refreshConnections( );
@@ -1579,9 +1579,8 @@ void jl_exit_micropython_restore_entry_state( void ) {
     // Release all GPIO pins claimed by MicroPython
     jl_gpio_release_all_pins( );
 
-    // Pause Core 2 during state modifications to prevent race conditions
-    bool was_paused = pauseCore2;
-    pauseCore2 = true;
+    // Hold core-1 frames during state modifications to prevent race conditions
+    holdCore1Frames( );
     delayMicroseconds( 50 );
 
     if ( connectionContext == PYTHON_CONTEXT_ISOLATED ) {
@@ -1605,8 +1604,8 @@ void jl_exit_micropython_restore_entry_state( void ) {
         clearStateBackup( );
     }
 
-    // Unpause Core 2 BEFORE refreshConnections since it internally calls waitCore2
-    pauseCore2 = was_paused;
+    // Release BEFORE refreshConnections since it internally calls waitCore2
+    releaseCore1Frames( );
 
     // Refresh connections to match the current state
     refreshConnections( -1, 1, 0 );
@@ -1704,16 +1703,15 @@ int jl_switch_slot( int slot ) {
 
     // Save current slot if different
     if ( netSlot != slot ) {
-        // Pause Core 2 briefly while changing slot number
-        bool was_paused = pauseCore2;
-        pauseCore2 = true;
+        // Hold core-1 frames briefly while changing slot number
+        holdCore1Frames( );
         delayMicroseconds( 50 );
 
         int old_slot = netSlot;
         netSlot = slot;
 
-        // Unpause Core 2 BEFORE refreshConnections since it internally calls waitCore2
-        pauseCore2 = was_paused;
+        // Release BEFORE refreshConnections since it internally calls waitCore2
+        releaseCore1Frames( );
 
         // Refresh connections for the new slot
         refreshConnections( -1 );
@@ -3169,12 +3167,15 @@ int jl_set_state(const char* jsonState, int clearFirst, int fromWokwi) {
             return -1;
         }
 
-        // Apply hardware routing
-        // Unpause Core 2 BEFORE refreshConnections since it internally waits
-        bool was_paused = pauseCore2;
-        pauseCore2 = false;
+        // Apply hardware routing. If a script is holding core-1 frames
+        // (jl_pause_core2(True)), suspend ITS hold around the refresh -
+        // refreshConnections waits on core 1 completing requests, which a held
+        // core 1 never would. Holds other subsystems own are left alone (the
+        // old bool stomped every holder here).
+        bool had_script_hold = pythonFrameHoldActive();
+        if (had_script_hold) pythonFrameHoldSet(false);
         refreshConnections(-1, 1, 1);
-        pauseCore2 = was_paused;
+        if (had_script_hold) pythonFrameHoldSet(true);
 
         return 0;
     }
