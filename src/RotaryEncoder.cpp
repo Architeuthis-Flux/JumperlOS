@@ -14,6 +14,8 @@
 #include "pico/mutex.h"
 #include "pico/stdlib.h"
 #include "quadrature.pio.h"
+#include "encoder_sampler.pio.h" // C7: the 1-instruction sampler (verification rig below)
+#include "hardware/dma.h"
 
 #include "Commands.h"
 #include "Graphics.h"
@@ -44,6 +46,184 @@ volatile int slotPreview = 0;
 
 // volatile enum { IDLE, UP, DOWN } encoderDirectionState;
 // volatile enum { IDLE, PRESSED, HELD, RELEASED } encoderButtonState;
+
+// ============================================================================
+// C7 (task #30 prerequisite): the CPU-decoded quadrature count.
+//
+// A 1-instruction PIO sampler (encoder_sampler.pio) samples the AB pins at
+// ENC_SAMPLE_HZ, autopushing 16 two-bit samples per FIFO word; a TRIGGER_SELF
+// DMA channel streams the words into a 2 KB SRAM ring (no IRQ - the reader
+// derives progress from the channel's live write pointer, the AdcRing
+// precedent); the drain walks every sample through the same transition table
+// the legacy 24-instruction program encodes as its computed-jump LUT.
+//
+// VERIFICATION RIG: both programs run in parallel on the same pins and X
+// prints the drift between the two counts - the legacy program samples at
+// ~15 MHz and cannot miss an edge, so any real subsampling loss shows up as
+// a number instead of a feeling. (test_encoder_ui injects downstream of this
+// and cannot validate the count source; Kevin's flick test + the drift line
+// is the gate.) encoderUseCpuDecode picks which count feeds the session
+// (debug menu "Encoder A/B", or over SWD); the counts share the legacy epoch
+// so a live flip doesn't jump the position. Expect bounded +/-1 jitter in
+// the drift line, not zero: the E9 pad-IE mitigation blanks a pin for a
+// sample every ~5 ms and contact bounce aliases at 4 kHz - both cancel, and
+// the detent hysteresis (rotaryDivider/2 backlash margin) absorbs them.
+// ============================================================================
+#if !defined(OG_JUMPERLESS)
+#define ENC_C7_BUILD 1
+#else
+#define ENC_C7_BUILD 0 // OG: no encoder in loop1's path + no RP2350 TRIGGER_SELF DMA mode
+#endif
+
+volatile int encoderUseCpuDecode = 1; // 1 = CPU decode feeds the count, 0 = legacy PIO counter (drift measured either way)
+
+#if ENC_C7_BUILD
+static const float ENC_SAMPLE_HZ = 4000.0f; // Nyquist-safe past any human flick (8 counts/detent, ~80 detents/s hard flick = ~640 edges/s)
+#define ENC_RING_WORDS 512u
+#define ENC_RING_BITS  11u // log2(ring BYTES) for the DMA write wrap
+static_assert( ( 1u << ENC_RING_BITS ) == ENC_RING_WORDS * 4u, "ring bits vs ring size" );
+// 2 KB static, aligned to its own size for the DMA write ring: 512 words =
+// 8192 samples = ~2.0 s at 4 kHz - outlasts the longest measured core-1 park
+// (1.1 s, the slot save) so a flash-stalled reader loses nothing.
+static uint32_t __attribute__( ( aligned( 2048 ) ) ) s_encRing[ ENC_RING_WORDS ];
+static PIO  pioSamp = nullptr;
+static int  smSamp = -1;
+static uint offsetSamp = 0;
+static int  dmaSamp = -1;
+static uint32_t s_encRdIdx = 0;        // ring words consumed
+static uint8_t  s_encPrev = 0;         // last decoded 2-bit AB state
+static long     s_cpuQuadCount = 0;    // the CPU twin of the legacy program's Y register
+static uint32_t s_encNearOverruns = 0; // drain found the ring nearly full
+// Drift bookkeeping (X prints it, X! resets it): both counts are sampled in
+// the same drain and compared as deltas from a shared baseline - the epochs
+// differ and bounce/E9 aliasing gives transient +/-1s, so judge accumulated
+// drift over a session, not instantaneous equality.
+static long s_driftBase = 0;
+static bool s_driftBaselined = false;
+static long s_driftMaxAbs = 0;
+
+// The legacy program's transition table (quadrature.pio's computed-jump LUT,
+// same signs: from state 00, reading 01 decrements and reading 10 increments).
+// index = (prev << 2) | curr; an impossible two-step transition counts 0.
+static const int8_t s_quadLUT[ 16 ] = { 0, -1, +1, 0,
+                                        +1, 0, 0, -1,
+                                        -1, 0, 0, +1,
+                                        0, +1, -1, 0 };
+
+static void encSamplerDrain( void ) {
+    // Live write position, in ring words. Words strictly behind it are fully
+    // written (the writer advances ~250 words/s; it cannot lap a running
+    // drain). Lap ambiguity accepted: pending==0 cannot distinguish "nothing
+    // new" from "exactly N laps" - a reader stalled past the ring's ~2 s
+    // silently loses whole rings of counts, the same consequence as any
+    // overrun, and the ring is sized so the longest measured stall stays
+    // well inside it.
+    uint32_t widx = ( ( dma_hw->ch[ dmaSamp ].write_addr - (uint32_t)(uintptr_t)s_encRing ) / 4u ) & ( ENC_RING_WORDS - 1u );
+    uint32_t pending = ( widx - s_encRdIdx ) & ( ENC_RING_WORDS - 1u );
+    if ( pending > ENC_RING_WORDS - 8u ) s_encNearOverruns++;
+    while ( pending-- > 0 ) {
+        uint32_t w = s_encRing[ s_encRdIdx ];
+        s_encRdIdx = ( s_encRdIdx + 1u ) & ( ENC_RING_WORDS - 1u );
+        // shift-left ISR: oldest sample in bits 31:30, newest in bits 1:0
+        for ( int i = 15; i >= 0; i-- ) {
+            uint8_t cur = (uint8_t)( ( w >> ( i * 2 ) ) & 3u );
+            s_cpuQuadCount += s_quadLUT[ ( s_encPrev << 2 ) | cur ];
+            s_encPrev = cur;
+        }
+    }
+}
+
+static void encSamplerUninit( void ) {
+    if ( dmaSamp >= 0 ) {
+        // the datasheet's abort sequence (T3.3's lesson: EN + chain off first,
+        // then one abort, bounded poll)
+        hw_write_masked( &dma_hw->ch[ dmaSamp ].al1_ctrl,
+                         ( (uint)dmaSamp << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB ) | ( 0u << DMA_CH0_CTRL_TRIG_EN_LSB ),
+                         DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS | DMA_CH0_CTRL_TRIG_EN_BITS );
+        dma_hw->abort = 1u << dmaSamp;
+        uint32_t t0 = time_us_32( );
+        while ( ( dma_hw->abort & ( 1u << dmaSamp ) ) && ( time_us_32( ) - t0 ) < 2000 ) { tight_loop_contents( ); }
+        dma_channel_unclaim( (uint)dmaSamp );
+        dmaSamp = -1;
+    }
+    if ( pioSamp != nullptr && smSamp >= 0 ) {
+        pio_sm_set_enabled( pioSamp, smSamp, false );
+        pio_remove_program( pioSamp, &encoder_sampler_program, offsetSamp );
+        pio_sm_unclaim( pioSamp, smSamp );
+        pioSamp = nullptr;
+        smSamp = -1;
+        offsetSamp = 0;
+    }
+}
+
+static void encSamplerInit( void ) {
+    // Same block rules as the legacy claim: base-0 only (pins 12/13). The
+    // program is 1 instruction and relocatable, so anywhere with a free word
+    // and a free SM works.
+    PIO cand[] = { pio0, pio1, pio2 };
+    for ( int i = 0; i < 3 && pioSamp == nullptr; i++ ) {
+        PIO p = cand[ i ];
+        if ( pio_get_gpio_base( p ) != 0 ) continue;
+        int sm = pio_claim_unused_sm( p, false );
+        if ( sm < 0 ) continue;
+        if ( !pio_can_add_program( p, &encoder_sampler_program ) ) {
+            pio_sm_unclaim( p, sm );
+            continue;
+        }
+        pioSamp = p;
+        smSamp = sm;
+        offsetSamp = pio_add_program( p, &encoder_sampler_program );
+    }
+    if ( pioSamp == nullptr ) return; // legacy counter stays in charge
+    int ch = dma_claim_unused_channel( false );
+    if ( ch < 0 ) {
+        // No second live data path: a claim failure joins the existing
+        // silently-uninitialized contract and the legacy counter feeds
+        // everything regardless of encoderUseCpuDecode.
+        encSamplerUninit( );
+        return;
+    }
+    dmaSamp = ch;
+
+    s_encPrev = (uint8_t)( ( gpio_get( QUADRATURE_B_PIN ) ? 2u : 0u ) | ( gpio_get( QUADRATURE_A_PIN ) ? 1u : 0u ) );
+    s_encRdIdx = 0;
+    s_cpuQuadCount = 0;
+    s_driftBaselined = false;
+    s_driftMaxAbs = 0;
+
+    encoder_sampler_program_init( pioSamp, smSamp, offsetSamp, PIN_AB, ENC_SAMPLE_HZ );
+
+    dma_channel_config c = dma_channel_get_default_config( (uint)ch );
+    channel_config_set_transfer_data_size( &c, DMA_SIZE_32 );
+    channel_config_set_read_increment( &c, false );
+    channel_config_set_write_increment( &c, true );
+    channel_config_set_dreq( &c, pio_get_dreq( pioSamp, smSamp, false ) );
+    channel_config_set_ring( &c, true, ENC_RING_BITS );
+    dma_channel_configure( (uint)ch, &c, s_encRing, &pioSamp->rxf[ smSamp ], ENC_RING_WORDS, false );
+    // TRIGGER_SELF (RP2350): the channel re-arms itself at the end of every
+    // pass - no IRQ, no CPU in the data path; the ring wrap keeps the writes
+    // inside s_encRing.
+    dma_hw->ch[ ch ].transfer_count = ( DMA_CH0_TRANS_COUNT_MODE_VALUE_TRIGGER_SELF << DMA_CH0_TRANS_COUNT_MODE_LSB ) | ENC_RING_WORDS;
+    __dmb( );
+    dma_channel_start( (uint)ch );
+}
+#endif // ENC_C7_BUILD
+
+bool encSamplerActive( void ) {
+#if ENC_C7_BUILD
+    return dmaSamp >= 0;
+#else
+    return false;
+#endif
+}
+
+void encoderDriftReset( void ) {
+#if ENC_C7_BUILD
+    s_driftBaselined = false;
+    s_driftMaxAbs = 0;
+    s_encNearOverruns = 0;
+#endif
+}
 
 void initRotaryEncoder( void ) {
     #if !defined(OG_JUMPERLESS)
@@ -118,9 +298,18 @@ void initRotaryEncoder( void ) {
     // Initialize the quadrature encoder
     quadrature_encoder_program_init( pioEnc, smEnc, PIN_AB, 0 );
     // Serial.println("◆ Rotary encoder initialized successfully");
+
+#if ENC_C7_BUILD
+    // C7 verification rig: the sampler runs alongside the legacy program on
+    // the same pins. A claim failure leaves the legacy counter in charge.
+    encSamplerInit( );
+#endif
 }
 
 void unInitRotaryEncoder( void ) {
+#if ENC_C7_BUILD
+    encSamplerUninit( );
+#endif
     if ( pioEnc && smEnc != (uint)-1 ) {
         // Serial.printf("◆ Cleaning up rotary encoder resources: PIO%d SM%d\n",
         //               pio_get_index(pioEnc), smEnc);
@@ -197,11 +386,49 @@ bool isRotaryEncoderInitialized( void ) {
 // queued word is at most microseconds stale - fresh enough for a clickwheel.
 static long s_lastQuadCount = 0;
 static long quadratureCountBounded( void ) {
+    // The legacy counter is always drained - it is the drift reference for
+    // the C7 verification rig above (and the live count when the A/B flag
+    // points at legacy, or when the sampler failed to claim its resources).
     uint n = pio_sm_get_rx_fifo_level( pioEnc, smEnc );
     while ( n-- > 0 ) {
         s_lastQuadCount = (long)(int32_t)pio_sm_get( pioEnc, smEnc );
     }
+#if ENC_C7_BUILD
+    if ( dmaSamp >= 0 ) {
+        encSamplerDrain( );
+        if ( !s_driftBaselined ) {
+            s_driftBase = s_cpuQuadCount - s_lastQuadCount;
+            s_driftBaselined = true;
+        }
+        long drift = ( s_cpuQuadCount - s_lastQuadCount ) - s_driftBase;
+        long a = drift < 0 ? -drift : drift;
+        if ( a > s_driftMaxAbs ) s_driftMaxAbs = a;
+        if ( encoderUseCpuDecode ) {
+            // Shared epoch: returning cpu - base keeps a live A/B flip (or an
+            // X! re-baseline) from jumping the position by more than the
+            // accumulated drift itself.
+            return s_cpuQuadCount - s_driftBase;
+        }
+    }
+#endif
     return s_lastQuadCount;
+}
+
+void printEncoderC7Line( Stream& target ) {
+#if ENC_C7_BUILD
+    if ( dmaSamp >= 0 ) {
+        long hw = s_lastQuadCount;
+        long cpu = s_cpuQuadCount - s_driftBase;
+        target.printf( "encoder count: src=%s  hw=%ld cpu=%ld drift=%ld (max %ld)  sampler PIO%d SM%d dma ch%d @%dHz  nearOverruns=%lu\n\r",
+                       encoderUseCpuDecode ? "CPU" : "legacy", hw, cpu, cpu - hw, s_driftMaxAbs,
+                       pio_get_index( pioSamp ), smSamp, dmaSamp, (int)ENC_SAMPLE_HZ,
+                       (unsigned long)s_encNearOverruns );
+        return;
+    }
+    target.println( "encoder count: legacy PIO only (C7 sampler not running)" );
+#else
+    (void)target;
+#endif
 }
 
 // Read the raw quadrature count straight from the PIO state machine. Safe to

@@ -1,0 +1,48 @@
+;
+; C7 (task #30 prerequisite): the 1-instruction quadrature sampler.
+;
+; Samples the two encoder pins forever at the clkdiv-set rate; autopush at
+; 32 bits packs 16 two-bit AB samples per FIFO word (shift-left: the oldest
+; sample lands in bits 31:30, the newest in 1:0). A TRIGGER_SELF DMA channel
+; drains the RX FIFO into an SRAM ring and the CPU walks every sample through
+; the same transition table the legacy 24-instruction program encoded as its
+; computed-jump LUT (RotaryEncoder.cpp, s_quadLUT).
+;
+; Fully relocatable: no .origin, no jumps - loads at any offset on any
+; base-0 block. This is the program that lets task #30 clear PIO0.
+;
+
+.program encoder_sampler
+
+.wrap_target
+    in pins, 2
+.wrap
+
+% c-sdk {
+
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+static inline void encoder_sampler_program_init(PIO pio, uint sm, uint offset, uint pin, float sample_hz) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 2, false);
+    // The pins keep their existing config (pulled-up GPIO inputs; the E9
+    // pad-IE mitigation twiddles them every 5 ms) - a PIO 'in' needs no
+    // funcsel, so no pio_gpio_init here. The pulls are (re)asserted so this
+    // init stays self-sufficient for the day the legacy program - whose init
+    // owned them - is removed.
+    gpio_pull_up(pin);
+    gpio_pull_up(pin + 1);
+
+    pio_sm_config c = encoder_sampler_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);
+    // shift left (oldest sample at the MSB end), autopush every 32 bits
+    sm_config_set_in_shift(&c, false, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    // one instruction per loop: the clock divider IS the sample rate
+    sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / sample_hz);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+%}

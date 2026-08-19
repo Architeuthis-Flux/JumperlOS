@@ -93,6 +93,15 @@ void synthesizeEncoderClick(void);
 bool isRotaryEncoderInitialized(void);
 void printRotaryEncoderStatus(void);
 
+// C7 verification rig (task #30): the CPU-decoded quadrature count runs in
+// parallel with the legacy PIO counter; this flag picks which one feeds the
+// session (debug menu "Encoder A/B", or poke it over SWD). X prints the
+// drift between the two counts; X! resets the drift stats.
+extern volatile int encoderUseCpuDecode;
+bool encSamplerActive(void);
+void encoderDriftReset(void);
+void printEncoderC7Line(Stream& target);
+
 /**
  * @brief Read the raw quadrature count directly from the PIO.
  *

@@ -2783,7 +2783,8 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
         if ( arg.length( ) > 0 && arg[ 0 ] == '!' ) {
             kickGapReset( );
             xbarLatReset( );
-            target->println( "kick-gap maxima and crossbar-latency stats reset" );
+            encoderDriftReset( );
+            target->println( "kick-gap maxima, crossbar-latency and encoder-drift stats reset" );
             return CMD_DONT_SHOW_MENU;
         }
     }
@@ -3055,6 +3056,10 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                             (unsigned long)probeTickCount );
         }
     }
+    // C7 verification rig: legacy PIO count vs CPU-decoded count, and which
+    // one is live. Judge accumulated drift over a session of real spinning
+    // (transient +/-1s are bounce/E9 aliasing, not drift). X! resets.
+    printEncoderC7Line( *target );
 
     // Scheduler table: one row per registered service, in the order the
     // walk visits them (priority, then registration). period 0 = every pass.

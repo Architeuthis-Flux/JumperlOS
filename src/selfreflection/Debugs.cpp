@@ -426,6 +426,7 @@ void action_i2cScan();
 void action_speedTest();
 void action_adcRingToggle();
 void action_probeLedMergedToggle();
+void action_encoderDecodeToggle();
 void action_colorSpectrum();
 void action_encoderButtonAnalyzer(); // implemented at the bottom of this file
 void action_menuTransitionTuner();   // implemented at the bottom of this file
@@ -445,6 +446,7 @@ const StatusMenuItem statusMenuItems[] = {
     { "Speed Test",         "Raw crossbar switch speed test",         action_speedTest },
     { "ADC Ring A/B",       "Toggle the always-on ADC ring / START_ONCE",  action_adcRingToggle },
     { "Probe LED A/B",      "Toggle merged LED+button PIO / legacy swap",  action_probeLedMergedToggle },
+    { "Encoder A/B",        "Toggle CPU-decoded / legacy quadrature count", action_encoderDecodeToggle },
     { "Color Spectrum",     "Display terminal color palette",         action_colorSpectrum },
     { "Encoder Btn",        "Analog click-wheel button press test",   action_encoderButtonAnalyzer },
     { "Menu FX",            "Tune menu frame transitions",            action_menuTransitionTuner },
@@ -1762,6 +1764,24 @@ void action_probeLedMergedToggle() {
                    g_probeMergedActive ? "MERGED program (flicker fix): pulses ride each frame's tail"
                                        : "LEGACY swap path: separate programs + masking re-sends",
                    ok ? "" : "  (switch FAILED - see message above)" );
+    Serial.flush( );
+}
+
+void action_encoderDecodeToggle() {
+    // C7 verification rig (task #30): flip which quadrature count feeds the
+    // session - the CPU-decoded 1-instruction sampler (the shape that clears
+    // PIO0) or the legacy 24-instruction PIO counter. Both run in parallel on
+    // the same pins either way; X prints the drift between them, X! resets it.
+    extern volatile int encoderUseCpuDecode;
+    extern bool encSamplerActive( void );
+    if ( !encSamplerActive( ) ) {
+        Serial.println( "\n\rC7 sampler not running (claim failed at boot) - legacy count is in charge" );
+        Serial.flush( );
+        return;
+    }
+    encoderUseCpuDecode = !encoderUseCpuDecode;
+    Serial.printf( "\n\rencoder count source: %s (X prints hw/cpu drift)\n\r",
+                   encoderUseCpuDecode ? "CPU-decoded sampler (C7)" : "LEGACY PIO counter" );
     Serial.flush( );
 }
 
