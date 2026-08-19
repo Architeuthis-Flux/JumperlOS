@@ -280,6 +280,12 @@ volatile bool encoderDirectionConsumed = true;
 static unsigned long buttonEventTimestamp = 0;
 const unsigned long BUTTON_EVENT_MIN_DURATION_US = 10000; // 10ms minimum hold time - ensures Core 1 catches events even when busy
 
+// Diag (task #27, the missed-click question): how many RELEASED/DOUBLECLICKED
+// events expired UNCONSUMED (auto-clear fired) vs how many the consuming code
+// acknowledged. If clicks are being missed, autoClears advancing while the
+// user clicks is the tell that core 0 isn't polling inside the 10ms window.
+volatile uint32_t encoderClickAutoClears = 0;
+
 // ── Hold animation state ──
 // Managed by holdAnimationStuff(); drives the white→red LED sweep and
 // transitions encoderButtonState from HELD → LONG_HELD when the animation ends.
@@ -424,6 +430,7 @@ static void rotaryEncoderButtonStuffLocked( void ) {
             // Check if enough time has passed since the event was set
             if ( micros( ) - buttonEventTimestamp >= BUTTON_EVENT_MIN_DURATION_US ) {
                 // Time expired - now safe to auto-clear if still not consumed
+                encoderClickAutoClears++; // diag: an event nobody consumed (task #27)
                 lastButtonEncoderState = encoderButtonState; // Update before clearing
                 encoderButtonState = IDLE;
             }

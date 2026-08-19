@@ -16,7 +16,39 @@
 ### ▶ CONTINUE HERE (state at the end of the 2026-08-16/17 implementation session, part 3)
 
 **START HERE — state at a glance (2026-08-18, written so a fresh chat can act on it):**
-- **NEWEST (2026-08-18, row 64): T3.4 (C16) is DONE — `pauseCore2` is deleted.** The volatile
+- **NEWEST (2026-08-18 evening, rows 66-71): T3.1 is DONE through M3, and C5/T2.4 (the probe
+  LED) is DONE.** The evening's arc, one line each:
+  - **T3.1 M1 (row 66, `dc11153`)**: probeMode() = ProbeSession + probeTick() state machine,
+    byte-identical body (normalized-diff proven), hardware A/B vs 5.7.4.0 identical.
+  - **T3.1 M2 (row 67, `046c943`)**: the three probe delays became deadlines (latch flash =
+    tick sub-state, readProbe = one attempt per call, 20 µs throttle gone) + Kevin's fade
+    feedback (30 ms/step, fade now requests its own LED shows).
+  - **T3.1 M3 (row 68, `1beec52`)**: the pump moved to the wrapper + tick-gap instrumentation.
+    **Real data from Kevin's probing: max 648 µs / avg 146 µs over 201 ticks** — the inner set
+    is cheap; that is the baseline for the milestone-4 decision (full scheduler vs
+    session-lite), which is a LATER pass per Kevin's scope call, as is moving the loop into
+    Probing::service().
+  - **Menu remove-button back (row 69, `a29074f`)**: getButtonPress() consumes whatever the
+    press is, so paired checks in one loop starve each other — every modal menu loop now reads
+    the button ONCE per pass. Kevin's hands confirmed.
+  - **C5 / probe-LED flicker (row 70, `3de3822`)**: ONE merged PIO program owns the shared
+    line — sample pulses ride each colour frame's tail (forwarded out DOUT, physically unable
+    to latch), pulse shapes VERBATIM from the proven sampler (the two failed fixes changed the
+    pulses; this changes only WHEN). Live A/B in the debug menu ("Probe LED A/B").
+    **Kevin's eyes: "the flicker's better."** Merged is the boot default on shared-pin
+    hardware. PIO0 lessons: side-set eats the delay field ([15] max — a [31] encoding drives
+    the line high through your "quiet" gap), and merged mode must remove BOTH legacy programs
+    and own the SM wrap registers.
+  - **The missed-click hunt (row 71)**: encoder_ui's injected clicks went 4/10 on the C5 build —
+    NOT firmware: `jl_input.py` wrote PRESSED into an unfrozen slot (backwards vs the order
+    synthesizeEncoderClick documents), and C5's faster core-1 loop made the poller punctual
+    enough to hit the race. Fixed order = 10/10 on BOTH builds. Physical clicks were never
+    affected. (Also: refresh jl_input's ADDR table after EVERY build — a stale table looks
+    exactly like a firmware regression, twice today.)
+  Next up (Kevin's call): the T3.1 milestone-4 decision now has its data; the watchdog enable
+  decision (C11 measure stage long done); or new Tier-2 approvals (C7 encoder queue, C10 OLED
+  DMA). The probeMode pad menus are still modal by design.
+- **2026-08-18, row 64: T3.4 (C16) is DONE — `pauseCore2` is deleted.** The volatile
   bool became `core1FrameHoldDepth[2]` (`externVars.h`): a per-core nesting hold depth — each
   core writes only its own word (no cross-core atomics), readers use the inline
   `core1FramesHeld()`, release saturates at 0. `pauseCore2ForFlash`/`unpauseCore2ForFlash` keep
@@ -1668,7 +1700,7 @@ exit); the HIL suite covers the routing side only.
 | C2b | as above | **Second SM strobes CS**: a 12-pin `out pins` program on PIO1/PIO2 (GPIOBASE 16 → pins 28..39 = 12..23), synchronised with the shifter via `irq set 0 next` / `wait 1 irq 0 prev` (RP2350 cross-block IRQ), CS words DMA'd from a second array; no per-crosspoint ISR at all | `pio_set_gpio_base(pio1,16)`, `pio_claim_unused_sm`, second DMA channel, `pio_encode_*` | crosspoint send fully hardware-owned; frees the PIO0_IRQ_1 chain slot; the ~30 µs/crosspoint (est.) becomes ~2 µs | medium-high: needs a PIO block with GPIOBASE 16 free of other claims (check the census: LEDs/probe/encoder SMs pick blocks by pin), two-DMA sequencing, and the OG (RP2040) keeps the old path | large (2–3 days incl. scope verification) — **Tier 3; built 2026-08-17 as T3.2 (section 0): PIO2@16, one word for both machines, one IRQ per list, singles ~0.6 µs on the wire** |
 | C3 | INA poll toggled `pauseCore2` (20 Hz LED-frame aborts) | INA219 continuous mode + read-latest, no pause | — | **DONE** (`PROBE_REWORK_HANDOFF.md`) | — | — |
 | C4 | MCP4728 re-sent identical words | per-channel shadow, dedupe | — | **DONE**; LDAC batching for the 4-channel setters is a small follow-up (one LDAC pulse per group instead of per write) | low | small |
-| C5 | Probe LED + button share one SM, program-swapped from core 1 every pass (~2,560 frames/s); colour requests via `showProbeLEDs` magic values; `checkingButton`/`showingProbeLEDs` cross-core gate | **One PIO program owning GPIO 9**: `pull noblock` (X→OSR when the FIFO is empty, i.e. the last colour repeats) → `mov x, osr` → 24-bit WS2811 frame from OSR (Y as bit counter) → the 2-pulse sample sequence immediately after the frame (the pulse rides behind the frame and is forwarded, never latched) → `push`/`irq` → ≥300 µs low gap (Y loop) → repeat. Colour change = `pio_sm_put(colour)` from any core (one 32-bit FIFO write); button samples keep arriving on core 0's IRQ. `probeLEDhandler` and the swap disappear | `pio_add_program`, `pio_sm_config` with `sideset`/`set`/`in` on the same pin, `pio_sm_put`; JeoPixel no longer owns the SM (`probeLEDs` becomes a thin `put`) | zero cross-core traffic for the probe LED; a constant, jitter-free refresh; no short-frame corruption possible; ~2,600 button samples/s preserved (**estimated**; the frame+pulse spacing must be checked on a scope — Kevin's "acceptable if periodic refresh in the tens of ms" note) | medium: PIO register budget is tight (X=colour, Y=counter, ISR=samples/counter seed, OSR=shift), so the ~1 ms sampler delay needs the ISR-seeded counter trick; the CPU fallback path and `probe_led_on_button_pin=0` (separate pin) must keep working; the OG has no probe pads | medium (~1–2 days incl. scope time) — **next session's opener (T2.4)** |
+| C5 | Probe LED + button share one SM, program-swapped from core 1 every pass (~2,560 frames/s); colour requests via `showProbeLEDs` magic values; `checkingButton`/`showingProbeLEDs` cross-core gate | **One PIO program owning GPIO 9**: `pull noblock` (X→OSR when the FIFO is empty, i.e. the last colour repeats) → `mov x, osr` → 24-bit WS2811 frame from OSR (Y as bit counter) → the 2-pulse sample sequence immediately after the frame (the pulse rides behind the frame and is forwarded, never latched) → `push`/`irq` → ≥300 µs low gap (Y loop) → repeat. Colour change = `pio_sm_put(colour)` from any core (one 32-bit FIFO write); button samples keep arriving on core 0's IRQ. `probeLEDhandler` and the swap disappear | `pio_add_program`, `pio_sm_config` with `sideset`/`set`/`in` on the same pin, `pio_sm_put`; JeoPixel no longer owns the SM (`probeLEDs` becomes a thin `put`) | zero cross-core traffic for the probe LED; a constant, jitter-free refresh; no short-frame corruption possible; ~2,600 button samples/s preserved (**estimated**; the frame+pulse spacing must be checked on a scope — Kevin's "acceptable if periodic refresh in the tens of ms" note) | medium: PIO register budget is tight (X=colour, Y=counter, ISR=samples/counter seed, OSR=shift), so the ~1 ms sampler delay needs the ISR-seeded counter trick; the CPU fallback path and `probe_led_on_button_pin=0` (separate pin) must keep working; the OG has no probe pads | medium — **DONE 2026-08-18 as C5/task #26 (row 70): merged program, pulses ride the frame tail; Kevin: "the flicker's better"** |
 | C6 | Button PIO IRQ posts flags read by `service()` | `requestRun()` on ProbeButton/Probing from the IRQ so the press is acted on the very next pass | B3 | sub-ms press→action instead of "next scheduled pass" | nil | trivial once B3 lands |
 | C7 | Encoder polled on core 1 (`rotaryEncoderStuff`, 2 kHz), events via shared vars | `queue_t` of encoder events (core 1 → core 0) — see D | `queue_init`, `queue_try_add/remove` | clean ownership; no lost clicks when core 0 is slow | low | small — **proposed, not built** (Tier 2, not approved this pass) |
 | C8 | LED frame tick = `micros()` poll in `core2stuff` (8 ms) | (considered) core-1 `alarm_pool` on TIMER1 setting a flag | `alarm_pool_create_on_timer(timer1_hw,…)`, `alarm_pool_add_repeating_timer_us` | none worth having — the poll is a compare on a core that spins anyway; **not recommended** | — | — |
