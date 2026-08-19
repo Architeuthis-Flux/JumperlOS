@@ -3060,9 +3060,7 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                             (unsigned long)probeTickCount );
         }
     }
-    // C7 verification rig: legacy PIO count vs CPU-decoded count, and which
-    // one is live. Judge accumulated drift over a session of real spinning
-    // (transient +/-1s are bounce/E9 aliasing, not drift). X! resets.
+    // C7: the quadrature count + sampler/DMA status. X! resets nearOverruns.
     printEncoderC7Line( *target );
     // Probe double-tap failure modes (X! resets): armed/confirmed says how
     // many second taps reached the confirm gate and survived it; expired =

@@ -13,8 +13,7 @@
 #include "hardware/structs/sio.h" // sio_hw->cpuid for single-owner core check
 #include "pico/mutex.h"
 #include "pico/stdlib.h"
-#include "quadrature.pio.h"
-#include "encoder_sampler.pio.h" // C7: the 1-instruction sampler (verification rig below)
+#include "encoder_sampler.pio.h" // the 1-instruction quadrature sampler (C7)
 #include "hardware/dma.h"
 
 #include "Commands.h"
@@ -48,34 +47,29 @@ volatile int slotPreview = 0;
 // volatile enum { IDLE, PRESSED, HELD, RELEASED } encoderButtonState;
 
 // ============================================================================
-// C7 (task #30 prerequisite): the CPU-decoded quadrature count.
+// C7 (task #30): the quadrature counter.
 //
-// A 1-instruction PIO sampler (encoder_sampler.pio) samples the AB pins at
+// A 1-instruction PIO sampler (encoder_sampler.pio - relocatable, this is
+// what lets task #30 clear PIO0; the stock 24-instruction .origin-0 program
+// it replaced is in git history at b0ee09e^) samples the AB pins at
 // ENC_SAMPLE_HZ, autopushing 16 two-bit samples per FIFO word; a TRIGGER_SELF
 // DMA channel streams the words into a 2 KB SRAM ring (no IRQ - the reader
 // derives progress from the channel's live write pointer, the AdcRing
-// precedent); the drain walks every sample through the same transition table
-// the legacy 24-instruction program encodes as its computed-jump LUT.
+// precedent); the drain walks every sample through the quadrature transition
+// table into the count.
 //
-// VERIFICATION RIG: both programs run in parallel on the same pins and X
-// prints the drift between the two counts - the legacy program samples at
-// ~15 MHz and cannot miss an edge, so any real subsampling loss shows up as
-// a number instead of a feeling. (test_encoder_ui injects downstream of this
-// and cannot validate the count source; Kevin's flick test + the drift line
-// is the gate.) encoderUseCpuDecode picks which count feeds the session
-// (debug menu "Encoder A/B", or over SWD); the counts share the legacy epoch
-// so a live flip doesn't jump the position. Expect bounded +/-1 jitter in
-// the drift line, not zero: the E9 pad-IE mitigation blanks a pin for a
-// sample every ~5 ms and contact bounce aliases at 4 kHz - both cancel, and
-// the detent hysteresis (rotaryDivider/2 backlash margin) absorbs them.
+// Verified against the legacy hardware counter running in parallel (row 75):
+// Kevin's full spin matrix accumulated drift -2 over ~1460 counts, max
+// transient 4 - bounce/E9-mitigation aliasing at the 4 kHz subsample rate,
+// which cancels and sits under the detent hysteresis (rotaryDivider = 8,
+// backlash margin rotaryDivider/2). test_encoder_ui injects downstream of
+// this decode - hardware verification is hands + the (removed) drift rig.
 // ============================================================================
 #if !defined(OG_JUMPERLESS)
 #define ENC_C7_BUILD 1
 #else
 #define ENC_C7_BUILD 0 // OG: no encoder in loop1's path + no RP2350 TRIGGER_SELF DMA mode
 #endif
-
-volatile int encoderUseCpuDecode = 1; // 1 = CPU decode feeds the count, 0 = legacy PIO counter (drift measured either way)
 
 #if ENC_C7_BUILD
 static const float ENC_SAMPLE_HZ = 4000.0f; // Nyquist-safe past any human flick (8 counts/detent, ~80 detents/s hard flick = ~640 edges/s)
@@ -86,23 +80,13 @@ static_assert( ( 1u << ENC_RING_BITS ) == ENC_RING_WORDS * 4u, "ring bits vs rin
 // 8192 samples = ~2.0 s at 4 kHz - outlasts the longest measured core-1 park
 // (1.1 s, the slot save) so a flash-stalled reader loses nothing.
 static uint32_t __attribute__( ( aligned( 2048 ) ) ) s_encRing[ ENC_RING_WORDS ];
-static PIO  pioSamp = nullptr;
-static int  smSamp = -1;
-static uint offsetSamp = 0;
-static int  dmaSamp = -1;
+static int  dmaSamp = -1;              // the ring-feed DMA channel (pioEnc/smEnc/offsetEnc hold the sampler)
 static uint32_t s_encRdIdx = 0;        // ring words consumed
 static uint8_t  s_encPrev = 0;         // last decoded 2-bit AB state
-static long     s_cpuQuadCount = 0;    // the CPU twin of the legacy program's Y register
+static long     s_cpuQuadCount = 0;    // the quadrature count (was the legacy program's Y register)
 static uint32_t s_encNearOverruns = 0; // drain found the ring nearly full
-// Drift bookkeeping (X prints it, X! resets it): both counts are sampled in
-// the same drain and compared as deltas from a shared baseline - the epochs
-// differ and bounce/E9 aliasing gives transient +/-1s, so judge accumulated
-// drift over a session, not instantaneous equality.
-static long s_driftBase = 0;
-static bool s_driftBaselined = false;
-static long s_driftMaxAbs = 0;
 
-// The legacy program's transition table (quadrature.pio's computed-jump LUT,
+// The quadrature transition table (the legacy program's computed-jump LUT,
 // same signs: from state 00, reading 01 decrements and reading 10 increments).
 // index = (prev << 2) | curr; an impossible two-step transition counts 0.
 static const int8_t s_quadLUT[ 16 ] = { 0, -1, +1, 0,
@@ -111,6 +95,7 @@ static const int8_t s_quadLUT[ 16 ] = { 0, -1, +1, 0,
                                         0, +1, -1, 0 };
 
 static void encSamplerDrain( void ) {
+    if ( dmaSamp < 0 ) return; // callers guard on isRotaryEncoderInitialized, but stay safe
     // Live write position, in ring words. Words strictly behind it are fully
     // written (the writer advances ~250 words/s; it cannot lap a running
     // drain). Lap ambiguity accepted: pending==0 cannot distinguish "nothing
@@ -146,22 +131,23 @@ static void encSamplerUninit( void ) {
         dma_channel_unclaim( (uint)dmaSamp );
         dmaSamp = -1;
     }
-    if ( pioSamp != nullptr && smSamp >= 0 ) {
-        pio_sm_set_enabled( pioSamp, smSamp, false );
-        pio_remove_program( pioSamp, &encoder_sampler_program, offsetSamp );
-        pio_sm_unclaim( pioSamp, smSamp );
-        pioSamp = nullptr;
-        smSamp = -1;
-        offsetSamp = 0;
+    if ( pioEnc != nullptr && smEnc >= 0 ) {
+        pio_sm_set_enabled( pioEnc, smEnc, false );
+        pio_remove_program( pioEnc, &encoder_sampler_program, offsetEnc );
+        pio_sm_unclaim( pioEnc, smEnc );
+        pioEnc = nullptr;
+        smEnc = -1;
+        offsetEnc = 0;
     }
 }
 
 static void encSamplerInit( void ) {
-    // Same block rules as the legacy claim: base-0 only (pins 12/13). The
-    // program is 1 instruction and relocatable, so anywhere with a free word
-    // and a free SM works.
+    // Block rules: base-0 only (the pins are 12/13). The program is 1
+    // instruction and relocatable, so anywhere with a free word and a free
+    // SM works. (For the #30 re-home it should prefer PIO1 - claim order
+    // note in C7_ENCODER_REWRITE.md.)
     PIO cand[] = { pio0, pio1, pio2 };
-    for ( int i = 0; i < 3 && pioSamp == nullptr; i++ ) {
+    for ( int i = 0; i < 3 && pioEnc == nullptr; i++ ) {
         PIO p = cand[ i ];
         if ( pio_get_gpio_base( p ) != 0 ) continue;
         int sm = pio_claim_unused_sm( p, false );
@@ -170,16 +156,16 @@ static void encSamplerInit( void ) {
             pio_sm_unclaim( p, sm );
             continue;
         }
-        pioSamp = p;
-        smSamp = sm;
-        offsetSamp = pio_add_program( p, &encoder_sampler_program );
+        pioEnc = p;
+        smEnc = sm;
+        offsetEnc = pio_add_program( p, &encoder_sampler_program );
     }
-    if ( pioSamp == nullptr ) return; // legacy counter stays in charge
+    if ( pioEnc == nullptr ) return; // no room: encoder silently uninitialized (existing contract)
     int ch = dma_claim_unused_channel( false );
     if ( ch < 0 ) {
-        // No second live data path: a claim failure joins the existing
-        // silently-uninitialized contract and the legacy counter feeds
-        // everything regardless of encoderUseCpuDecode.
+        // No FIFO-drain fallback: a claim failure joins the existing
+        // silently-uninitialized contract (isRotaryEncoderInitialized()
+        // false, every caller already guards on it).
         encSamplerUninit( );
         return;
     }
@@ -188,18 +174,16 @@ static void encSamplerInit( void ) {
     s_encPrev = (uint8_t)( ( gpio_get( QUADRATURE_B_PIN ) ? 2u : 0u ) | ( gpio_get( QUADRATURE_A_PIN ) ? 1u : 0u ) );
     s_encRdIdx = 0;
     s_cpuQuadCount = 0;
-    s_driftBaselined = false;
-    s_driftMaxAbs = 0;
 
-    encoder_sampler_program_init( pioSamp, smSamp, offsetSamp, PIN_AB, ENC_SAMPLE_HZ );
+    encoder_sampler_program_init( pioEnc, smEnc, offsetEnc, PIN_AB, ENC_SAMPLE_HZ );
 
     dma_channel_config c = dma_channel_get_default_config( (uint)ch );
     channel_config_set_transfer_data_size( &c, DMA_SIZE_32 );
     channel_config_set_read_increment( &c, false );
     channel_config_set_write_increment( &c, true );
-    channel_config_set_dreq( &c, pio_get_dreq( pioSamp, smSamp, false ) );
+    channel_config_set_dreq( &c, pio_get_dreq( pioEnc, smEnc, false ) );
     channel_config_set_ring( &c, true, ENC_RING_BITS );
-    dma_channel_configure( (uint)ch, &c, s_encRing, &pioSamp->rxf[ smSamp ], ENC_RING_WORDS, false );
+    dma_channel_configure( (uint)ch, &c, s_encRing, &pioEnc->rxf[ smEnc ], ENC_RING_WORDS, false );
     // TRIGGER_SELF (RP2350): the channel re-arms itself at the end of every
     // pass - no IRQ, no CPU in the data path; the ring wrap keeps the writes
     // inside s_encRing.
@@ -209,18 +193,8 @@ static void encSamplerInit( void ) {
 }
 #endif // ENC_C7_BUILD
 
-bool encSamplerActive( void ) {
-#if ENC_C7_BUILD
-    return dmaSamp >= 0;
-#else
-    return false;
-#endif
-}
-
 void encoderDriftReset( void ) {
 #if ENC_C7_BUILD
-    s_driftBaselined = false;
-    s_driftMaxAbs = 0;
     s_encNearOverruns = 0;
 #endif
 }
@@ -232,76 +206,10 @@ void initRotaryEncoder( void ) {
     pinMode( QUADRATURE_B_PIN, INPUT_PULLUP );
     #endif
 
-    // CRITICAL: Dynamically claim an unused PIO to avoid conflicts
-    // Serial.println("◆ Initializing rotary encoder with dynamic PIO allocation...");
-
-    // Try PIO instances in order. RP2350 has three PIO blocks; RP2040 has two.
-#if defined(PICO_RP2350)
-    PIO pio_instances[] = { pio0, pio1, pio2 };
-#else
-    PIO pio_instances[] = { pio0, pio1 };
-#endif
-    const int numPioInst = (int)( sizeof( pio_instances ) / sizeof( pio_instances[0] ) );
-    bool pio_allocated = false;
-
-    for ( int i = 0; i < numPioInst && !pio_allocated; i++ ) {
-        PIO test_pio = pio_instances[ i ];
-        // Serial.printf("◆ Trying PIO%d for rotary encoder...\n", pio_get_index(test_pio));
-
-        // RP2350B: a block reaches 32 of the 48 pins (GPIOBASE 0 or 16). The
-        // encoder reads PIN_AB / PIN_AB+1 (12/13) - a base-16 block (PIO2 is,
-        // for the crossbar chip-select strobe, T3.2) cannot see them and the
-        // claim would "succeed" into a dead SM. Skip it.
-        if ( pio_get_gpio_base( test_pio ) != 0 ) {
-            continue;
-        }
-
-        // Try to claim a state machine
-        int test_sm = pio_claim_unused_sm( test_pio, false );
-        if ( test_sm < 0 ) {
-            //  Serial.printf("◆ PIO%d: No available state machines\n", pio_get_index(test_pio));
-            continue;
-        }
-
-        // Check if we can add the program
-        if ( !pio_can_add_program( test_pio, &quadrature_encoder_program ) ) {
-            // Serial.printf("◆ PIO%d: Cannot add quadrature encoder program\n", pio_get_index(test_pio));
-            pio_sm_unclaim( test_pio, test_sm );
-            continue;
-        }
-
-        // Add the program
-        uint test_offset = pio_add_program( test_pio, &quadrature_encoder_program );
-        if ( test_offset < 0 ) {
-            // Serial.printf("◆ PIO%d: Failed to add quadrature encoder program\n", pio_get_index(test_pio));
-            pio_sm_unclaim( test_pio, test_sm );
-            continue;
-        }
-
-        // Success! Assign the resources
-        pioEnc = test_pio;
-        smEnc = test_sm;
-        offsetEnc = test_offset;
-
-        // Serial.printf("◆ SUCCESS: Rotary encoder allocated PIO%d SM%d offset=%d\n",
-        //             pio_get_index(pioEnc), smEnc, offsetEnc);
-
-        pio_allocated = true;
-    }
-
-    if ( !pio_allocated ) {
-        // Serial.println("◆ ERROR: Failed to allocate PIO resources for rotary encoder");
-        // Serial.println("◆ Rotary encoder will not function");
-        return;
-    }
-
-    // Initialize the quadrature encoder
-    quadrature_encoder_program_init( pioEnc, smEnc, PIN_AB, 0 );
-    // Serial.println("◆ Rotary encoder initialized successfully");
-
 #if ENC_C7_BUILD
-    // C7 verification rig: the sampler runs alongside the legacy program on
-    // the same pins. A claim failure leaves the legacy counter in charge.
+    // Claim a block/SM/word for the sampler + a DMA channel for its ring;
+    // any claim failure leaves the encoder silently uninitialized, exactly
+    // as the old dynamic-claim contract did.
     encSamplerInit( );
 #endif
 }
@@ -310,21 +218,6 @@ void unInitRotaryEncoder( void ) {
 #if ENC_C7_BUILD
     encSamplerUninit( );
 #endif
-    if ( pioEnc && smEnc != (uint)-1 ) {
-        // Serial.printf("◆ Cleaning up rotary encoder resources: PIO%d SM%d\n",
-        //               pio_get_index(pioEnc), smEnc);
-
-        // Remove the program and unclaim the state machine
-        pio_remove_program( pioEnc, &quadrature_encoder_program, offsetEnc );
-        pio_sm_unclaim( pioEnc, smEnc );
-
-        // Reset the variables
-        pioEnc = nullptr;
-        smEnc = -1;
-        offsetEnc = 0;
-
-        // Serial.println("◆ Rotary encoder resources cleaned up");
-    }
 }
 
 // const char rotaryEncoderHelp[] =
@@ -371,69 +264,42 @@ void unInitRotaryEncoder( void ) {
 
 // Function to check if rotary encoder is properly initialized
 bool isRotaryEncoderInitialized( void ) {
-    return ( pioEnc != nullptr && smEnc != (uint)-1 );
+    return ( pioEnc != nullptr && smEnc >= 0 );
 }
 
-// Bounded quadrature count read. The generated helper
-// quadrature_encoder_get_count() reads fifo_level + 1 words, and that +1 is
-// an UNBOUNDED pio_sm_get_blocking() waiting on a fresh push.
-// encoderServiceYield() made this poll reachable from inside NetVoltageScan
-// sense taps (readingADC held, crosspoints closed, core2busy raised) and
-// from sendXYraw's PIO handshake wait - a quadrature SM that ever stops
-// pushing would wedge core 1 with all of that claimed. Drain only what's
-// already queued and keep the last value across a momentarily-empty FIFO:
-// the program pushes continuously (~4 SM cycles/sample), so the newest
-// queued word is at most microseconds stale - fresh enough for a clickwheel.
-static long s_lastQuadCount = 0;
+// Bounded quadrature count read: drain whatever the ring holds and return
+// the count. Never blocks - encoderServiceYield() makes this reachable from
+// inside NetVoltageScan sense taps and sendXYraw's PIO handshake wait, so a
+// wedged wait here would take core 1 down with everything claimed. The DMA
+// feeds the ring with no CPU in the path, so the newest samples are at most
+// one word (16 samples, ~4 ms at 4 kHz) behind - fresh enough for a
+// clickwheel, and the detent hysteresis absorbs the boundary.
 static long quadratureCountBounded( void ) {
-    // The legacy counter is always drained - it is the drift reference for
-    // the C7 verification rig above (and the live count when the A/B flag
-    // points at legacy, or when the sampler failed to claim its resources).
-    uint n = pio_sm_get_rx_fifo_level( pioEnc, smEnc );
-    while ( n-- > 0 ) {
-        s_lastQuadCount = (long)(int32_t)pio_sm_get( pioEnc, smEnc );
-    }
 #if ENC_C7_BUILD
-    if ( dmaSamp >= 0 ) {
-        encSamplerDrain( );
-        if ( !s_driftBaselined ) {
-            s_driftBase = s_cpuQuadCount - s_lastQuadCount;
-            s_driftBaselined = true;
-        }
-        long drift = ( s_cpuQuadCount - s_lastQuadCount ) - s_driftBase;
-        long a = drift < 0 ? -drift : drift;
-        if ( a > s_driftMaxAbs ) s_driftMaxAbs = a;
-        if ( encoderUseCpuDecode ) {
-            // Shared epoch: returning cpu - base keeps a live A/B flip (or an
-            // X! re-baseline) from jumping the position by more than the
-            // accumulated drift itself.
-            return s_cpuQuadCount - s_driftBase;
-        }
-    }
+    encSamplerDrain( );
+    return s_cpuQuadCount;
+#else
+    return 0;
 #endif
-    return s_lastQuadCount;
 }
 
 void printEncoderC7Line( Stream& target ) {
 #if ENC_C7_BUILD
     if ( dmaSamp >= 0 ) {
-        long hw = s_lastQuadCount;
-        long cpu = s_cpuQuadCount - s_driftBase;
-        target.printf( "encoder count: src=%s  hw=%ld cpu=%ld drift=%ld (max %ld)  sampler PIO%d SM%d dma ch%d @%dHz  nearOverruns=%lu\n\r",
-                       encoderUseCpuDecode ? "CPU" : "legacy", hw, cpu, cpu - hw, s_driftMaxAbs,
-                       pio_get_index( pioSamp ), smSamp, dmaSamp, (int)ENC_SAMPLE_HZ,
-                       (unsigned long)s_encNearOverruns );
+        target.printf( "encoder count: %ld  sampler PIO%d SM%d dma ch%d @%dHz  nearOverruns=%lu\n\r",
+                       s_cpuQuadCount, pio_get_index( pioEnc ), smEnc, dmaSamp,
+                       (int)ENC_SAMPLE_HZ, (unsigned long)s_encNearOverruns );
         return;
     }
-    target.println( "encoder count: legacy PIO only (C7 sampler not running)" );
+    target.println( "encoder count: sampler not running (claim failed - encoder disabled)" );
 #else
     (void)target;
 #endif
 }
 
-// Read the raw quadrature count straight from the PIO state machine. Safe to
-// call from Core 1 only while Core 2's rotaryEncoderStuff() is suspended via
-// encoderOverride (otherwise both cores drain the same RX FIFO and race).
+// Read the raw quadrature count. Safe to call from Core 1 only while Core
+// 2's rotaryEncoderStuff() is suspended via encoderOverride (otherwise both
+// cores advance the same ring read index and race).
 long getEncoderRawCount( void ) {
     if ( !isRotaryEncoderInitialized( ) ) {
         return 0;
@@ -696,16 +562,6 @@ static void rotaryEncoderButtonStuffLocked( void ) {
 
     if ( encoderIsPressed == 1 && encoderWasPressed == 0 ) {
         buttonHoldStart = millis( );
-        // NOTE: do NOT pio_sm_restart() here (removed). The quadrature
-        // program keeps its previous-pin-state in the OSR; restart clears
-        // the OSR, so if the pins aren't at 00 the program sees a phantom
-        // transition and adds a spurious +/-1 count. Restarting on every
-        // click (plus every divider change) made the raw count drift by
-        // THOUSANDS over a session - caught via the [enc] reversal
-        // diagnostics. The SM is initialized once and never restarted.
-        // encoderRaw = quadrature_encoder_get_count(pioEnc, smEnc);
-        // lastPositionEncoder = encoderRaw;
-
         // Click/rotation interlock: mark the press moment so rotaryEncoderStuff can
         // suppress the click jiggle (see CLICK_SUPPRESS_AFTER_US / confirm-gate notes).
         lastEncoderClickUs = micros( );
@@ -1207,25 +1063,6 @@ static void rotaryEncoderStuffLocked( void ) {
     // Drive the hold animation + LONG_HELD transition
     holdAnimationStuff( );
 
-    // if (resetPosition == true) {
-    //  // quadrature_encoder_program_init(pioEnc, smEnc, PIN_AB, 0);
-    //   //pio_sm_restart(pioEnc, smEnc);
-    //   //pio_sm_clear_fifos(pioEnc, smEnc);
-    //   //pio_sm_drain_tx_fifo(pioEnc, smEnc);
-
-    //   positionOffset = quadrature_encoder_get_count(pioEnc, smEnc);
-    //   positionOffset = positionOffset / rotaryDivider;
-    //   Serial.print("\n\n\rencoderRaw: ");
-    //   Serial.println(encoderRaw);
-    //   Serial.print("positionOffset: ");
-    //   Serial.println(positionOffset);
-
-    //   // encoderRaw -= positionOffset;
-    //   // encoderRaw = encoderRaw / rotaryDivider;
-    //   //lastPositionEncoder = positionOffset/rotaryDivider;
-    //   resetPosition = false;
-    // }
-
     long rawCount = quadratureCountBounded( );
 
     encoderPosition = rawCount - encoderPositionOffset;
@@ -1236,13 +1073,8 @@ static void rotaryEncoderStuffLocked( void ) {
     }
 
     if ( lastRotaryDivider != rotaryDivider ) {
-        // NOTE: no pio_sm_restart() here (removed) - the divider is purely
-        // software bookkeeping (raw counts per logical step); the PIO just
-        // counts and must never be restarted. Restart clears the program's
-        // previous-pin-state (OSR), adding a phantom +/-1 whenever the
-        // pins aren't at 00 - and since menus/probe/highlighting all set
-        // different dividers, the constant restarts drifted the raw count
-        // by thousands per session ("hops backwards while scrolling").
+        // The divider is purely software bookkeeping (raw counts per logical
+        // step); the count source never resets for it.
         lastRotaryDivider = rotaryDivider;
         // Changing the divider only changes sensitivity; reseed the hysteresis
         // baseline to the current raw count so the logical position doesn't jump.
