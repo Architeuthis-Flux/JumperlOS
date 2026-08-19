@@ -587,13 +587,16 @@ static const pio_program_t probe_button_pio_program = {
 static const uint16_t probe_merged_pio_instructions[] = {
     0x8080u, //  0: pull   noblock     side 0     ; FIFO -> OSR, or X (last colour)
     0xa027u, //  1: mov    x, osr      side 0     ; X = colour for future repeats
-    // bit loop - 10 cycles per bit like the stock ws2812 (T1=2 T2=5 T3=3),
-    // with the !osre exit folded into the tail delays:
+    // bit loop - 10 cycles per bit, '0' and '1' HIGH times cycle-identical to
+    // the stock ws2812 program ('0' high 2 cy = 250ns, '1' high 7 cy = 875ns).
+    // The '1' path carries its own !osre check in the high tail; a frame
+    // ending on a '1' falls through instrs 5-6 (a few extra low cycles before
+    // the samples - still deep inside the pre-latch window, harmless).
     0x6241u, //  2: out    y, 1        side 0 [2] ; 3 cy low
     0x1165u, //  3: jmp    !y, 5       side 1 [1] ; 2 cy high
-    0x1306u, //  4: jmp    6           side 1 [3] ; '1': +4 cy high (total 6 = 750ns)
-    0xa342u, //  5: nop                side 0 [3] ; '0': 4 cy low  (high stays 2 = 250ns)
-    0x00e2u, //  6: jmp    !osre, 2    side 0     ; 1 cy low tail; 24 bits -> fall through
+    0x14e2u, //  4: jmp    !osre, 2    side 1 [4] ; '1': +5 cy high (total 7 = 875ns, stock)
+    0xa342u, //  5: nop                side 0 [3] ; '0': 4 cy low
+    0x00e2u, //  6: jmp    !osre, 2    side 0     ; '0' tail: 1 cy low ('0' = 10 cy total)
     // sample sequence - VERBATIM widths from probe_button_pio_instructions:
     0xe381u, //  7: set    pindirs, 1  side 0 [3] ; OE=1, drive line LOW ~500ns
     0xe180u, //  8: set    pindirs, 0  side 0 [1] ; OE=0 (HiZ), settle
@@ -605,17 +608,25 @@ static const uint16_t probe_merged_pio_instructions[] = {
     0xe081u, // 13: set    pindirs, 1  side 0     ; restore OE=1, line driven LOW
     0x8000u, // 14: push   noblock     side 0     ; 2-bit result (bits 31:30, shift-right ISR)
     0xc000u, // 15: irq    set 0       side 0     ; same handler as the legacy sampler
-    // latch gap: 32 iters x 32 cy = 1024 cy = 128us of driven-low quiet at
-    // 8 MHz (WS2812B latch spec is >=50us). NOTE: with a side-set bit
-    // configured the delay field is only 4 BITS - [15] is the max; a [31]
-    // encoding would overflow into the side bit and drive the line HIGH
-    // through the "quiet" gap (bug caught by the sample-rate gate). PIO0 is
-    // crowded (CH446Q shifter + fragmentation), so every instruction counts -
-    // the cadence/latch knob is duplicating this 3-instruction block.
-    0xe05fu, // 16: set    y, 31       side 0
-    0xaf42u, // 17: nop                side 0 [15]
-    0x0f91u, // 18: jmp    y--, 17     side 0 [15]
-    0x0000u, // 19: jmp    0           side 0     ; next frame + sample pass
+    // latch gap ~520us of driven-low quiet. WHY this long: the WS2811's
+    // internal PWM runs ~2.5 kHz (400us/cycle); re-latching faster than a
+    // full cycle truncates every PWM period and FLATTENS brightness -
+    // measured on INA1: at a 128us gap (6 kHz loop), max-white drew the
+    // same 6.7 mA as the dim idle colour. Legacy's ~2.5 kHz show rate is
+    // the proven cadence; this matches it (loop ~560us = 1.8 kHz, still
+    // ~7x the button-sampling floor). Budget notes: with a side-set bit the
+    // delay field is 4 BITS ([15] max - [31] overflows into the side bit
+    // and DRIVES THE LINE HIGH through the "quiet" gap); the colour parks
+    // in OSR so X can serve as the outer delay counter; the SM wrap
+    // replaces the final jmp (wrap_top = the jmp y-- below, which only
+    // falls through when the whole gap is done).
+    0xa0e1u, // 16: mov    osr, x      side 0     ; park the colour (OSR is spent)
+    0xe027u, // 17: set    x, 7        side 0     ; 8 outer iterations
+    0xe05fu, // 18: set    y, 31       side 0     ; inner: 32 x 16 cy = 64us
+    0x0f93u, // 19: jmp    y--, 19     side 0 [15]
+    0x0052u, // 20: jmp    x--, 18     side 0     ; ~8 x 65us = ~520us total
+    0xa027u, // 21: mov    x, osr      side 0     ; restore the colour cache
+             //     (SM wrap: 21 -> 0 = next frame + sample pass)
 };
 static const pio_program_t probe_merged_pio_program = {
     .instructions = probe_merged_pio_instructions,
@@ -1029,7 +1040,7 @@ bool setProbeLedMerged( bool wantMerged ) {
         // If the merged program's range passed through that wrap_top with a
         // fall-through instruction, execution would teleport mid-program.
         // Park the wrap on the merged program's final jmp (which always
-        // jumps, so the wrap can never fire).
+        // instruction falls through into the wrap to start the next pass).
         {
             uint top = g_pioProbeMergedPC + probe_merged_pio_program.length - 1;
             hw_write_masked( &pio->sm[ sm ].execctrl,
