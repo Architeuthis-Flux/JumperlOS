@@ -145,6 +145,21 @@ ServiceStatus ProbeButton::service( ) {
         s_lastPIOFlag = currentFlag;
     }
 
+    // C5 (task #26): apply the merged LED+button program once the PIO path
+    // is live. Lives HERE (service runs every pass) because nothing calls
+    // checkProbeButtonHardware() after the PIO path is READY. No-op after
+    // the switch succeeds; only meaningful when the LED shares the pin.
+    {
+        extern volatile bool g_probeMergedActive;
+        extern volatile bool g_probeMergedWanted;
+        extern bool setProbeLedMerged( bool );
+        if ( g_pioProbeState == PIOProbeState::READY &&
+             g_probeMergedWanted && !g_probeMergedActive &&
+             jumperlessConfig.hardware.probe_led_on_button_pin ) {
+            setProbeLedMerged( true );
+        }
+    }
+
     // -------------------------------------------------------------------
     // 1. Drain deferred undo/redo work posted by the PIO IRQ handler.
     //    The handler can't safely run these itself - they touch global
@@ -547,6 +562,67 @@ static const pio_program_t probe_button_pio_program = {
     .origin       = -1,
 };
 
+// ============================================================================
+// MERGED probe LED + button program (C5 / task #26 - the dim-flicker fix).
+//
+// Kevin's diagnosis (2026-08-18): the flicker is the pullup/pulldown twiddling
+// for the two button-read samples being seen by the LED as WS2811 data. The
+// two prior fixes (fast-clock sampler; resume-entry latch guard) changed what
+// the pulses LOOK like and both made it worse on real hardware. This fix
+// changes only WHEN they happen: one program owns the line, and the sample
+// pulses ride IMMEDIATELY behind each 24-bit colour frame - the LED's shift
+// register is already full, so the extra pulses shift out DOUT (unconnected
+// on the single-pixel probe) and can never join a frame that latches. The
+// pulse widths/drive pattern are VERBATIM the proven sampler's (same SM
+// divider, same encodings) - only the phase moved.
+//
+// Loop: pull colour (X repeats the last one when the FIFO is empty) ->
+// 24-bit WS2811 frame (10 cycles/bit at the ws2812 divider, '0' high 250ns /
+// '1' high 750ns) -> the 2-sample sequence -> push+IRQ (same handler) ->
+// ~384us driven-low latch gap -> wrap. ~2.4 kHz frame+sample rate (vs the
+// old ~1 kHz sampler + ~2.5 kHz masking re-sends, so LESS line activity).
+// Colour change = one pio_sm_put() (probeLEDhandler's decode feeds it);
+// probeButtonPausePolling/showBlocking are not used in this mode.
+// ============================================================================
+static const uint16_t probe_merged_pio_instructions[] = {
+    0x8080u, //  0: pull   noblock     side 0     ; FIFO -> OSR, or X (last colour)
+    0xa027u, //  1: mov    x, osr      side 0     ; X = colour for future repeats
+    // bit loop - 10 cycles per bit like the stock ws2812 (T1=2 T2=5 T3=3),
+    // with the !osre exit folded into the tail delays:
+    0x6241u, //  2: out    y, 1        side 0 [2] ; 3 cy low
+    0x1165u, //  3: jmp    !y, 5       side 1 [1] ; 2 cy high
+    0x1306u, //  4: jmp    6           side 1 [3] ; '1': +4 cy high (total 6 = 750ns)
+    0xa342u, //  5: nop                side 0 [3] ; '0': 4 cy low  (high stays 2 = 250ns)
+    0x00e2u, //  6: jmp    !osre, 2    side 0     ; 1 cy low tail; 24 bits -> fall through
+    // sample sequence - VERBATIM widths from probe_button_pio_instructions:
+    0xe381u, //  7: set    pindirs, 1  side 0 [3] ; OE=1, drive line LOW ~500ns
+    0xe180u, //  8: set    pindirs, 0  side 0 [1] ; OE=0 (HiZ), settle
+    0x4001u, //  9: in     pins, 1     side 0     ; sample 1 (post drive-low)
+    0xf381u, // 10: set    pindirs, 1  side 1 [3] ; OE=1, drive line HIGH ~500ns
+             //     ^ rides the frame's tail: forwarded out DOUT, never latched
+    0xf180u, // 11: set    pindirs, 0  side 1 [1] ; OE=0 (HiZ), settle
+    0x5001u, // 12: in     pins, 1     side 1     ; sample 2 (post drive-high)
+    0xe081u, // 13: set    pindirs, 1  side 0     ; restore OE=1, line driven LOW
+    0x8000u, // 14: push   noblock     side 0     ; 2-bit result (bits 31:30, shift-right ISR)
+    0xc000u, // 15: irq    set 0       side 0     ; same handler as the legacy sampler
+    // latch gap: 32 iters x 32 cy = 1024 cy = 128us of driven-low quiet at
+    // 8 MHz (WS2812B latch spec is >=50us). NOTE: with a side-set bit
+    // configured the delay field is only 4 BITS - [15] is the max; a [31]
+    // encoding would overflow into the side bit and drive the line HIGH
+    // through the "quiet" gap (bug caught by the sample-rate gate). PIO0 is
+    // crowded (CH446Q shifter + fragmentation), so every instruction counts -
+    // the cadence/latch knob is duplicating this 3-instruction block.
+    0xe05fu, // 16: set    y, 31       side 0
+    0xaf42u, // 17: nop                side 0 [15]
+    0x0f91u, // 18: jmp    y--, 17     side 0 [15]
+    0x0000u, // 19: jmp    0           side 0     ; next frame + sample pass
+};
+static const pio_program_t probe_merged_pio_program = {
+    .instructions = probe_merged_pio_instructions,
+    .length       = sizeof( probe_merged_pio_instructions ) / sizeof( probe_merged_pio_instructions[ 0 ] ),
+    .origin       = -1,
+};
+
 // Cached lazy-init state for the PIO probe button reader. We can't init
 // at static-init time because probeLEDs.begin() runs later in setup() and
 // has to claim its PIO/SM first. Instead we init on the first call that
@@ -709,6 +785,15 @@ void probeButtonPausePolling( void ) {
     pio_sm_clear_fifos( pio, sm );
     pio_sm_restart( pio, sm );
 
+    // Merged mode (C5): there is no WS2812 program to jump to - the pause
+    // semantics are simply "no pulses on the line": leave the SM disabled.
+    // ResumePolling restarts the merged program. Callers' contract (the
+    // line is quiet for their sampling window) holds either way.
+    extern volatile bool g_probeMergedActive;
+    if ( g_probeMergedActive ) {
+        return;
+    }
+
     // Jump to WS2812 wrap_target. SM will stall on autopull (TX FIFO
     // empty) until showBlocking() starts loading data.
     pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeLedPC ) );
@@ -723,10 +808,18 @@ void probeButtonResumePolling( void ) {
 
     // See probeButtonPausePolling: the IRQ stays owned by core0 only; we do
     // NOT re-enable it here (the original cross-core enable was the bug).
+    extern volatile bool g_probeMergedActive;
+    extern uint g_pioProbeMergedPC;
     pio_sm_set_enabled( pio, sm, false );
     pio_sm_clear_fifos( pio, sm );
     pio_sm_restart( pio, sm );
-    pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeBtnPC ) );
+    if ( g_probeMergedActive ) {
+        // Merged mode: restart the merged program. X still holds the last
+        // colour, so the first pull-noblock repeats it - no reseed needed.
+        pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeMergedPC ) );
+    } else {
+        pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeBtnPC ) );
+    }
     pio_sm_set_enabled( pio, sm, true );
 
     pio_interrupt_clear( pio, 0 );
@@ -845,6 +938,161 @@ static bool initProbeButtonPIO( void ) {
     return true;
 }
 
+// ============================================================================
+// Merged-mode state + init + live A/B toggle (C5 / task #26).
+// ============================================================================
+volatile bool     g_probeMergedActive = false; // the merged program owns the SM right now
+volatile bool     g_probeMergedWanted = true;  // runtime A/B (debug menu); default = the fix
+uint              g_pioProbeMergedPC  = 0;
+volatile uint32_t probeLedPutCount    = 0;     // merged-mode colour puts (X prints it)
+static uint32_t   s_lastMergedPut     = 0xFFFFFFFFu;
+
+// Pack the probe LED's buffer (wire-order bytes; GRB) into the word the
+// merged program's shift-left/threshold-24 OSR expects: byte 0 at the top.
+static uint32_t probeMergedPackColour( void ) {
+    uint8_t* p = probeLEDs.getPixels( );
+    if ( p == nullptr ) return 0;
+    return ( (uint32_t)p[ 0 ] << 24 ) | ( (uint32_t)p[ 1 ] << 16 ) | ( (uint32_t)p[ 2 ] << 8 );
+}
+
+// Push the current buffer colour to the running merged program, deduped -
+// the program repeats the last colour from X for free, so identical values
+// never need a put (the TX FIFO is 4 deep; a put storm would overflow it).
+volatile uint32_t probeLedPutCallCount  = 0; // merged-put attempts (diag)
+volatile uint32_t probeLedPutDedupCount = 0; // bails: colour unchanged (diag)
+volatile uint32_t probeLedPutLastPacked = 0; // last packed wire word (diag)
+void probeMergedPutColourIfChanged( void ) {
+    if ( !g_probeMergedActive || g_pioProbePIO == nullptr ) return;
+    probeLedPutCallCount++;
+    uint32_t w = probeMergedPackColour( );
+    probeLedPutLastPacked = w;
+    if ( w == s_lastMergedPut ) { probeLedPutDedupCount++; return; }
+    if ( pio_sm_is_tx_fifo_full( g_pioProbePIO, g_pioProbeSM ) ) return; // next change lands it
+    pio_sm_put( g_pioProbePIO, g_pioProbeSM, w );
+    s_lastMergedPut = w;
+    probeLedPutCount++;
+}
+
+// Switch the shared SM between the legacy pair (button poller + WS2812 swap)
+// and the merged program. Core-0 only. Uses the proven FromCore0 gate to
+// park core 1's probeLEDhandler first. The two button programs never coexist
+// in instruction memory (they wouldn't fit next to ws2812).
+bool setProbeLedMerged( bool wantMerged ) {
+    if ( g_pioProbeState != PIOProbeState::READY ) {
+        g_probeMergedWanted = wantMerged; // honored when the lazy init runs
+        return false;
+    }
+    if ( wantMerged == g_probeMergedActive ) return true;
+
+    PIO  pio = g_pioProbePIO;
+    uint sm  = g_pioProbeSM;
+    int  pin = probeLEDs.getPin( );
+
+    checkingButton = 1; // park core 1's probeLEDhandler (its own gate)
+    delay( 1 );
+    unsigned long start = millis( );
+    while ( showingProbeLEDs != 0 && millis( ) - start < 20 ) {
+        delayMicroseconds( 50 );
+    }
+
+    pio_sm_set_enabled( pio, sm, false );
+    while ( !pio_sm_is_rx_fifo_empty( pio, sm ) ) (void)pio_sm_get( pio, sm );
+    pio_sm_clear_fifos( pio, sm );
+
+    if ( wantMerged ) {
+        // The probe LED shares PIO0 with the CH446Q shifter, so instruction
+        // memory is tight AND fragmented. Merged mode needs NEITHER legacy
+        // program, so remove both (the button poller and the probe LED's own
+        // ws2812 copy) to open one contiguous run. Flip-back re-adds them.
+        pio_remove_program( pio, &probe_button_pio_program, g_pioProbeBtnPC );
+        extern const pio_program_t* probeLedWs2812Program( void );
+        pio_remove_program( pio, probeLedWs2812Program( ), g_pioProbeLedPC );
+        if ( !pio_can_add_program( pio, &probe_merged_pio_program ) ) {
+            // No room even so - put both legacy programs back, stay on swap.
+            g_pioProbeLedPC = pio_add_program( pio, probeLedWs2812Program( ) );
+            g_pioProbeBtnPC = pio_add_program( pio, &probe_button_pio_program );
+            hw_write_masked( &pio->sm[ sm ].execctrl,
+                             ( ( g_pioProbeLedPC + 3 ) << PIO_SM0_EXECCTRL_WRAP_TOP_LSB )
+                           | ( g_pioProbeLedPC << PIO_SM0_EXECCTRL_WRAP_BOTTOM_LSB ),
+                             PIO_SM0_EXECCTRL_WRAP_TOP_BITS | PIO_SM0_EXECCTRL_WRAP_BOTTOM_BITS );
+            pio_sm_restart( pio, sm );
+            pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeBtnPC ) );
+            pio_sm_set_enabled( pio, sm, true );
+            checkingButton = 0;
+            g_probeMergedWanted = false; // stop the service()'s auto-apply from retrying every pass
+            Serial.println( "probe LED merged: no PIO instruction room - staying on the swap path" );
+            return false;
+        }
+        g_pioProbeMergedPC = pio_add_program( pio, &probe_merged_pio_program );
+
+        // The SM's wrap registers still frame the (removed) ws2812 program.
+        // If the merged program's range passed through that wrap_top with a
+        // fall-through instruction, execution would teleport mid-program.
+        // Park the wrap on the merged program's final jmp (which always
+        // jumps, so the wrap can never fire).
+        {
+            uint top = g_pioProbeMergedPC + probe_merged_pio_program.length - 1;
+            hw_write_masked( &pio->sm[ sm ].execctrl,
+                             ( top << PIO_SM0_EXECCTRL_WRAP_TOP_LSB )
+                           | ( g_pioProbeMergedPC << PIO_SM0_EXECCTRL_WRAP_BOTTOM_LSB ),
+                             PIO_SM0_EXECCTRL_WRAP_TOP_BITS | PIO_SM0_EXECCTRL_WRAP_BOTTOM_BITS );
+        }
+
+        // OSR: shift LEFT (ws2812 already does), NO autopull, threshold 24
+        // (!osre after the 24th bit). ISR: shift RIGHT (the 2-bit decode
+        // reads bits 31:30), no autopush. Both set explicitly.
+        uint32_t shiftctrl = pio->sm[ sm ].shiftctrl;
+        shiftctrl &= ~( PIO_SM0_SHIFTCTRL_AUTOPULL_BITS
+                      | PIO_SM0_SHIFTCTRL_AUTOPUSH_BITS
+                      | PIO_SM0_SHIFTCTRL_OUT_SHIFTDIR_BITS
+                      | PIO_SM0_SHIFTCTRL_PULL_THRESH_BITS );
+        shiftctrl |= PIO_SM0_SHIFTCTRL_IN_SHIFTDIR_BITS; // right
+        shiftctrl |= ( 24u << PIO_SM0_SHIFTCTRL_PULL_THRESH_LSB );
+        pio->sm[ sm ].shiftctrl = shiftctrl;
+
+        // Seed: put the current colour so the first pull has real data (a
+        // pull-noblock on an empty FIFO copies scratch X, which is garbage
+        // until the first real frame).
+        s_lastMergedPut = probeMergedPackColour( );
+        pio_sm_put( pio, sm, s_lastMergedPut );
+
+        pio_sm_restart( pio, sm );
+        pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeMergedPC ) );
+        pio_sm_set_enabled( pio, sm, true );
+        g_probeMergedActive = true;
+    } else {
+        pio_remove_program( pio, &probe_merged_pio_program, g_pioProbeMergedPC );
+        extern const pio_program_t* probeLedWs2812Program( void );
+        g_pioProbeLedPC = pio_add_program( pio, probeLedWs2812Program( ) );
+        g_pioProbeBtnPC = pio_add_program( pio, &probe_button_pio_program );
+
+        // Restore the legacy shift config: autopull ON at the byte threshold
+        // the ws2812 stream uses (showBlocking pushes byte-at-top words).
+        uint32_t shiftctrl = pio->sm[ sm ].shiftctrl;
+        shiftctrl &= ~PIO_SM0_SHIFTCTRL_PULL_THRESH_BITS;
+        shiftctrl |= ( 8u << PIO_SM0_SHIFTCTRL_PULL_THRESH_LSB )
+                   | PIO_SM0_SHIFTCTRL_AUTOPULL_BITS;
+        pio->sm[ sm ].shiftctrl = shiftctrl;
+
+        // Wrap back around the (re-added, possibly relocated) ws2812 program
+        // so showBlocking's stream loops it exactly as begin() configured.
+        hw_write_masked( &pio->sm[ sm ].execctrl,
+                         ( ( g_pioProbeLedPC + 3 ) << PIO_SM0_EXECCTRL_WRAP_TOP_LSB )
+                       | ( g_pioProbeLedPC << PIO_SM0_EXECCTRL_WRAP_BOTTOM_LSB ),
+                         PIO_SM0_EXECCTRL_WRAP_TOP_BITS | PIO_SM0_EXECCTRL_WRAP_BOTTOM_BITS );
+
+        pio_sm_restart( pio, sm );
+        pio_sm_exec( pio, sm, pio_encode_jmp( g_pioProbeBtnPC ) );
+        pio_sm_set_enabled( pio, sm, true );
+        g_probeMergedActive = false;
+    }
+
+    (void)pin;
+    pio_interrupt_clear( pio, 0 );
+    checkingButton = 0;
+    return true;
+}
+
 /**
  * @brief Direct hardware button check - fast and non-blocking
  *
@@ -897,6 +1145,15 @@ int ProbeButton::checkProbeButtonHardware( void ) {
     // memory etc.) we permanently fall through to the CPU path.
     // ============================================================
     if ( jumperlessConfig.hardware.use_pio_probe_button && initProbeButtonPIO( ) ) {
+        // C5 (task #26): once the legacy PIO path is up, apply the merged
+        // program if it's wanted (default). Runs once; setProbeLedMerged is
+        // a no-op when the mode already matches. Only meaningful when the
+        // LED shares the button pin - a separate-pin LED keeps the swap path.
+        if ( g_probeMergedWanted && !g_probeMergedActive &&
+             jumperlessConfig.hardware.probe_led_on_button_pin ) {
+            extern bool setProbeLedMerged( bool );
+            setProbeLedMerged( true );
+        }
         return (int)probeBtnLatestState;
     }
 
@@ -7715,12 +7972,23 @@ void Probing::probeLEDhandler( void ) {
     //   - Any leftover CPU-path readers see the flag and back off.
     extern void probeButtonPausePolling( void );
     extern void probeButtonResumePolling( void );
-    showingProbeLEDs = 1;
-    probeButtonPausePolling( );
-    probeLEDs.showBlocking( );
-    probeButtonResumePolling( );
-    showingProbeLEDs = 0;
-    probeLedShowCount++;
+    extern volatile bool g_probeMergedActive;
+    extern void probeMergedPutColourIfChanged( void );
+    if ( g_probeMergedActive ) {
+        // C5 (task #26): the merged program streams the colour itself - a
+        // colour CHANGE is one deduped FIFO put; identical colours cost
+        // nothing (the program repeats from scratch X). No pause, no
+        // showBlocking, no swap - and no need for masking re-sends, because
+        // the sample pulses can no longer latch into a frame.
+        probeMergedPutColourIfChanged( );
+    } else {
+        showingProbeLEDs = 1;
+        probeButtonPausePolling( );
+        probeLEDs.showBlocking( );
+        probeButtonResumePolling( );
+        showingProbeLEDs = 0;
+        probeLedShowCount++;
+    }
 
     // Track when LED MODE was changed so we can wait for current to stabilize
     // Don't update for every fade step - that would block current reading continuously

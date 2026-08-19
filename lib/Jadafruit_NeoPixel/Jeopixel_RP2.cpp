@@ -307,3 +307,9 @@ void __not_in_flash_func(JeoPixel::rp2040Show)(uint8_t *pixels, uint32_t numByte
     pio_sm_put_blocking(pio, pio_sm, ((uint32_t)*pixels++)<< 24);
 }
 #endif
+
+// C5 (Jumperless task #26): the probe-LED merged program needs to remove and
+// re-add this TU's ws2812 program copy around mode flips. Only .length and
+// the instructions matter to pio_remove_program/pio_add_program, so exposing
+// this TU's static instance is sufficient.
+const pio_program_t* probeLedWs2812Program(void) { return &ws2812_program; }

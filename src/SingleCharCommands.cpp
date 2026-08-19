@@ -3033,6 +3033,17 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                     (unsigned long)probeLedShowCount, (unsigned long)probeLedRequestCount,
                     (unsigned long)probeButtonPIOReadCount, (unsigned long)ledFrameAbortsPause,
                     (unsigned long)( millis( ) / 1000 ) );
+    // C5 (task #26): merged LED+button program state. In merged mode the PIO
+    // streams frames itself (~2.4 kHz - button samples run ~2.4x the legacy
+    // rate, that is expected, not an anomaly) and "puts" counts deduped
+    // colour CHANGES, not frames.
+    {
+        extern volatile bool g_probeMergedActive;
+        extern volatile uint32_t probeLedPutCount;
+        target->printf( "probe led mode: %s  colour puts %lu\n\r",
+                        g_probeMergedActive ? "MERGED (pulses ride the frame tail)" : "legacy swap",
+                        (unsigned long)probeLedPutCount );
+    }
     // T3.1 M3: what the pump steals between probe ticks (last session).
     // The milestone-4 decision (full scheduler vs session-lite between
     // ticks) gets made from this number - watch max during real probing.

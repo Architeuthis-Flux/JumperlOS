@@ -425,6 +425,7 @@ void action_memoryMap();
 void action_i2cScan();
 void action_speedTest();
 void action_adcRingToggle();
+void action_probeLedMergedToggle();
 void action_colorSpectrum();
 void action_encoderButtonAnalyzer(); // implemented at the bottom of this file
 void action_menuTransitionTuner();   // implemented at the bottom of this file
@@ -443,6 +444,7 @@ const StatusMenuItem statusMenuItems[] = {
     { "I2C Scan",           "Scan I2C bus for devices",               action_i2cScan },
     { "Speed Test",         "Raw crossbar switch speed test",         action_speedTest },
     { "ADC Ring A/B",       "Toggle the always-on ADC ring / START_ONCE",  action_adcRingToggle },
+    { "Probe LED A/B",      "Toggle merged LED+button PIO / legacy swap",  action_probeLedMergedToggle },
     { "Color Spectrum",     "Display terminal color palette",         action_colorSpectrum },
     { "Encoder Btn",        "Analog click-wheel button press test",   action_encoderButtonAnalyzer },
     { "Menu FX",            "Tune menu frame transitions",            action_menuTransitionTuner },
@@ -1741,6 +1743,25 @@ void action_adcRingToggle() {
                        ok ? "48 kHz per channel, all 8, DMA_IRQ_1"
                           : ( rs.failReason == 1 ? "no DMA channel" : rs.failReason == 2 ? "DMA_IRQ_1 taken" : rs.failReason == 3 ? "no spinlock" : "not built (OG)" ) );
     }
+    Serial.flush( );
+}
+
+void action_probeLedMergedToggle() {
+    // C5 (task #26): live A/B between the merged LED+button PIO program (the
+    // dim-flicker fix - sample pulses ride each colour frame's tail) and the
+    // legacy swap path (separate programs, masking re-sends). Two earlier
+    // flicker fixes looked right and were worse on hardware - flip this while
+    // watching the probe LED, with and without a button held.
+    extern volatile bool g_probeMergedActive;
+    extern volatile bool g_probeMergedWanted;
+    extern bool setProbeLedMerged( bool );
+    bool want = !g_probeMergedActive;
+    g_probeMergedWanted = want;
+    bool ok = setProbeLedMerged( want );
+    Serial.printf( "\n\rprobe LED %s%s\n\r",
+                   g_probeMergedActive ? "MERGED program (flicker fix): pulses ride each frame's tail"
+                                       : "LEGACY swap path: separate programs + masking re-sends",
+                   ok ? "" : "  (switch FAILED - see message above)" );
     Serial.flush( );
 }
 
