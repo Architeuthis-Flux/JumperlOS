@@ -13,6 +13,7 @@
 #include "hardware/structs/sio.h" // sio_hw->cpuid for single-owner core check
 #include "pico/mutex.h"
 #include "pico/stdlib.h"
+#include "config.h"              // jumperlessConfig.hardware.encoder_pio (sampler block preference)
 #include "encoder_sampler.pio.h" // the 1-instruction quadrature sampler (C7)
 #include "hardware/dma.h"
 
@@ -142,13 +143,30 @@ static void encSamplerUninit( void ) {
 }
 
 static void encSamplerInit( void ) {
-    // Block rules: base-0 only (the pins are 12/13). The program is 1
-    // instruction and relocatable, so anywhere with a free word and a free
-    // SM works. (For the #30 re-home it should prefer PIO1 - claim order
-    // note in C7_ENCODER_REWRITE.md.)
-    PIO cand[] = { pio0, pio1, pio2 };
-    for ( int i = 0; i < 3 && pioEnc == nullptr; i++ ) {
+    // Block rules: base-0 only (the pins are 12/13) - a base-16 block is
+    // skipped below. The program is 1 instruction and relocatable, so
+    // anywhere with a free word and a free SM works; the ORDER is the
+    // policy: task #30 keeps PIO0 as clear as possible for user programs,
+    // so auto prefers PIO1 and leaves PIO0 as the last resort.
+    // `[hardware] encoder_pio = 0/1/2` tries that block first instead
+    // (applied at boot - core 1 waits on configLoaded before this runs).
+    PIO cand[ 4 ];
+    int nCand = 0;
+    {
+        PIO all[] = { pio0, pio1, pio2 };
+        int pref = jumperlessConfig.hardware.encoder_pio;
+        if ( pref >= 0 && pref <= 2 ) cand[ nCand++ ] = all[ pref ];
+    }
+    cand[ nCand++ ] = pio1;
+    cand[ nCand++ ] = pio2;
+    cand[ nCand++ ] = pio0;
+    for ( int i = 0; i < nCand && pioEnc == nullptr; i++ ) {
         PIO p = cand[ i ];
+        bool alreadyTried = false;
+        for ( int j = 0; j < i; j++ ) {
+            if ( cand[ j ] == p ) alreadyTried = true;
+        }
+        if ( alreadyTried ) continue;
         if ( pio_get_gpio_base( p ) != 0 ) continue;
         int sm = pio_claim_unused_sm( p, false );
         if ( sm < 0 ) continue;
