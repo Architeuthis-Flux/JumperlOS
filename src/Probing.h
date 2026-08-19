@@ -359,6 +359,18 @@ public:
     // false (probe-button entry), a short wheel click with no encoder
     // cursor showing exits probing and opens the click menu.
     int probeMode(int setOrClear = 1, int firstConnection = -1, bool fromClickMenu = false);
+
+    // T3.1 M1 (B5): probeMode() runs as a tick-based state machine. One
+    // ProbeSession (defined in Probing.cpp) holds a session's loop-carried
+    // state; probeTick() is exactly one pass of the old while body;
+    // probeExitTail() is the old post-loop cleanup. probeMode() is now a
+    // thin wrapper: begin -> tick until done -> exit tail. The pump
+    // (serviceInner) still lives inside the PROBE_RUN tick - M3 moves it out.
+    struct ProbeSession;
+    void probeSessionBegin(ProbeSession& s, int setOrClear, int firstConnection, bool fromClickMenu);
+    void probeTick(ProbeSession& s);
+    int probeExitTail(ProbeSession& s);
+    void probeEmitBanner(ProbeSession& s);
     float measureMode(int updateSpeed = 150);
     void checkPads(void);
     int delayWithButton(int delayTime = 1000);

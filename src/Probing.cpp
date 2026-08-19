@@ -2209,7 +2209,112 @@ void Probing::handleEncoderCursorNavigation(
     // ======= END ENCODER SELECTION =======
 }
 
-int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu ) {
+// ============================================================================
+// T3.1 M1 (B5 milestone 1): probeMode() as a tick-based state machine.
+//
+// One ProbeSession = one probe-mode session's loop-carried state, stack-
+// allocated in probeMode() (stack, not a member: the exit tail's
+// exitToClickMenu path runs clickMenu(), which can re-enter probeMode() -
+// nesting must be trivially safe). probeTick() is EXACTLY one pass of the
+// old while body; the old restartProbing / restartProbingNoPrint labels are
+// the PROBE_ARM / PROBE_REARM states; every old `break` sets s.done (the
+// exit tail runs after the wrapper loop), every `continue` is a bare return
+// (the next PROBE_RUN tick re-checks the loop condition first, same as the
+// original), and the two goto labels are state transitions. The pump
+// (delayMicroseconds(20) + jOS.serviceInner()) stays INSIDE the PROBE_RUN
+// tick so M1 is behaviour-preserving to the instruction; M3 moves it out.
+// ============================================================================
+
+// Navigation zones + the cursor position that persists between probe
+// sessions (moved out of probeMode()'s body; the statics keep their
+// once-only init semantics at file scope).
+enum CursorZone { ZONE_BREADBOARD = 0,
+                  ZONE_NANO = 1,
+                  ZONE_RAILS = 2,
+                  ZONE_DAC = 3,
+                  ZONE_ADC = 4,
+                  ZONE_GPIO = 5,
+                  ZONE_UART = 6,
+                  ZONE_CURRENT = 7 };
+static int persistentEncoderCursorNode = -1;
+static int persistentCursorZone = ZONE_BREADBOARD;
+static int persistentSubIndex = 0;  // For multi-item zones (DAC 0/1, ADC 0-4, etc.)
+static bool firstProbeEntry = true; // Track first entry to reset position
+
+struct Probing::ProbeSession {
+    enum State { PROBE_ARM, PROBE_REARM, PROBE_RUN };
+    State state = PROBE_ARM;
+    bool done = false; // the old loop exit (break / while-condition false)
+
+    // Parameters (setOrClear and firstConnection MUTATE during the session -
+    // mode toggles rewrite setOrClear, the firstConnection -2/-3 protocol
+    // rewrites firstConnection).
+    int setOrClear = 1;
+    int firstConnection = -1;
+    bool fromClickMenu = false;
+
+    // --- session-scoped (initialized once in probeSessionBegin) ---
+    int deleteMisses[ 20 ];
+    int deleteMissesIndex = 0;
+    int connectionsThisSession = 0;
+    bool bannerEmitted = false;
+    bool firstEntry = true;
+    bool exitToClickMenu = false;
+    unsigned long outerProbeEntryTime = 0;
+    int pendingInProbeButton = 0; // 0, -16, or -18
+    unsigned long pendingInProbeButtonTime = 0;
+    bool wasHeld = false;
+
+    // --- rearm-scoped (re-initialized on every PROBE_REARM, exactly like
+    // the old declarations after the restartProbingNoPrint label) ---
+    int numberOfLocalChanges = 0;
+    int row[ 16 ] = { };
+    unsigned long doubleSelectTimeout = 0;
+    int doubleSelectCountdown = 0;
+    int lastProbedRows[ 4 ] = { };
+    unsigned long fadeTimer = 0;
+    int fadeClear = -1;
+    EncoderAccelerator encoderAccel;
+    long lastEncoderPosition = 0;
+    float encoderAccumulator = 0.0f;
+    int encoderCursorNode = 14;
+    int cursorZone = ZONE_BREADBOARD;
+    int subIndex = 0;
+    int lastEncoderCursorNode = -1;
+    int lastCursorZone = -1;
+    int lastSubIndex = -1;
+    unsigned long lastEncoderMovement = 0;
+    unsigned long encoderHideTimeout = 5000;
+    bool encoderCursorVisible = false;
+    int savedRotaryDivider = 0;
+    unsigned long probeModeStartTime = 0;
+    unsigned long lastLoopTime = 0;
+};
+
+// The old emitBanner lambda. Deferral contract unchanged: nothing prints
+// until the double-tap entry window has passed (or a toggle goto commits
+// the session).
+void Probing::probeEmitBanner( ProbeSession& s ) {
+    if ( s.bannerEmitted ) return;
+    s.bannerEmitted = true;
+    if ( s.setOrClear == 1 ) {
+        changeTerminalColor( 45 );
+        Serial.println( "\n\r\t connect nodes\n\r" );
+        Serial.flush( );
+        changeTerminalColor( -1 );
+    } else {
+        changeTerminalColor( 202 );
+        Serial.println( "\n\r\t clear nodes\n\r" );
+        Serial.flush( );
+        changeTerminalColor( -1 );
+    }
+}
+
+void Probing::probeSessionBegin( ProbeSession& s, int setOrClear, int firstConnection, bool fromClickMenu ) {
+    s.setOrClear = setOrClear;
+    s.firstConnection = firstConnection;
+    s.fromClickMenu = fromClickMenu;
+
 
     // Clear any stale double-tap bail flag from a previous session.
     // The flag is set inside the loop by service() when undo/redo fires
@@ -2228,17 +2333,13 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
 
     // Enable text layer for special nodes display (UART, Current, etc.)
 
-    /* clang-format off */
 
-    int deleteMisses[ 20 ] = {
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    };
+    for ( int i = 0; i < 20; i++ ) { s.deleteMisses[ i ] = -1; } // (was: int deleteMisses[20] = {-1,...})
 
-    /* clang-format on */
 
-    int deleteMissesIndex = 0;
+    s.deleteMissesIndex = 0;
 
-    int connectionsThisSession = 0; // Track total connections made this probe mode session
+    s.connectionsThisSession = 0; // Track total connections made this probe mode session
 
     routableBufferPower( 1, 1 );
 
@@ -2257,13 +2358,13 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     // passed without a bail (or until any user activity proves we're
     // staying). Toggle gotos (goto restartProbing inside the loop)
     // emit immediately - by then the user has committed to the session.
-    bool bannerEmitted = false;
-    bool firstEntry = true;
+    s.bannerEmitted = false;
+    s.firstEntry = true;
     // Set when a short wheel click (no encoder cursor showing, probe-button
     // entry) exits probing - the tail of this function then reopens the
     // click menu with that same click. Declared before the restartProbing
     // labels so a mode-toggle goto can't reset it.
-    bool exitToClickMenu = false;
+    s.exitToClickMenu = false;
     // Outer-session entry timestamp. Set ONCE here (before the
     // restartProbing labels) so a goto-restart from a mode switch
     // inside the loop doesn't reset it. Used by the bail check below
@@ -2271,25 +2372,25 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     // means they didn't mean to" from "user has been in probeMode for
     // a while and the double-tap is a real undo gesture."
     //
-    // (probeModeStartTime, declared near the loop start, DOES reset
+    // (s.probeModeStartTime, declared near the loop start, DOES reset
     // on goto-restart - that's the right behaviour for the encoder
     // cursor logic that uses it, but NOT for the bail check.)
-    const unsigned long outerProbeEntryTime = millis( );
+    s.outerProbeEntryTime = millis( );
 
     // In-probe deferred-press state. When readProbe() returns a button
     // code (-16 / -18), we DON'T process it immediately - we stash the
     // press here and wait kWindowMs for a possible second tap. If a
     // double-tap fires during the wait, service() drains the deferred
     // undo/redo and our bail handler (top of loop) clears
-    // pendingInProbeButton - so click 1's mode switch / clear-in-
+    // s.pendingInProbeButton - so click 1's mode switch / clear-in-
     // -progress effect never commits. If no second tap arrives, we
-    // re-queue the press into row[0] at the top of the loop and
+    // re-queue the press into s.row[0] at the top of the loop and
     // the existing button handler processes it normally.
     //
     // Declared up here (before the restartProbing labels) so a goto-
     // restart from a mode switch can't reset it.
-    int           pendingInProbeButton     = 0;     // 0, -16, or -18
-    unsigned long pendingInProbeButtonTime = 0;
+    s.pendingInProbeButton = 0;     // 0, -16, or -18
+    s.pendingInProbeButtonTime = 0;
     // Tracks the oled hold state across loop iterations so we can detect
     // the held -> not-held transition (the moment an undo toast just
     // finished) and force the probeMode banner back onto the panel. Must
@@ -2302,142 +2403,136 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     // inside probeMode because OLEDService is a low-priority service
     // that probeMode's tight loop doesn't run, so oledPeriodic() can't
     // do this work for us during a probeMode session.
-    bool wasHeld = oled.oledIsHeld( );
-    auto emitBanner = [&]() {
-        if ( bannerEmitted ) return;
-        bannerEmitted = true;
-        if ( setOrClear == 1 ) {
-            changeTerminalColor( 45 );
-            Serial.println( "\n\r\t connect nodes\n\r" );
-            Serial.flush( );
-            changeTerminalColor( -1 );
-        } else {
-            changeTerminalColor( 202 );
-            Serial.println( "\n\r\t clear nodes\n\r" );
-            Serial.flush( );
-            changeTerminalColor( -1 );
+    s.wasHeld = oled.oledIsHeld( );
+    // (the emitBanner lambda is now Probing::probeEmitBanner() - T3.1 M1)
+}
+
+void Probing::probeTick( ProbeSession& s ) {
+
+    if ( s.state == ProbeSession::PROBE_ARM ) {
+        // (was: restartProbing label)
+
+        probeActive = 1;
+        // A NetVoltageScan sense tap checks probeActive before starting but can
+        // be mid-flight right now (it raises core2busy for the tap's ~1ms).
+        // Wait it out so probe raw crosspoint sends never overlap a tap's PIO
+        // handshake from the other core.
+        waitCore2( );
+        brightenNet( -1 );
+
+        if ( switchPosition == 0 && globalState.hasConnection( probePowerDAC == 0 ? DAC0 : DAC1, ROUTABLE_BUFFER_IN ) ) {
+           // changeTerminalColor( 197 );
+           // Serial.println( "  Switch is in Measure mode!\n\r  Set switch to Select mode for best results\n\r" );
+           // Serial.flush( );
         }
-    };
 
-restartProbing:
+        // LED color hint is non-terminal state so it's safe to set immediately.
+        rawOtherColors[ 1 ] = ( s.setOrClear == 1 ) ? 0x4500e8 : 0x6644A8;
 
-    probeActive = 1;
-    // A NetVoltageScan sense tap checks probeActive before starting but can
-    // be mid-flight right now (it raises core2busy for the tap's ~1ms).
-    // Wait it out so probe raw crosspoint sends never overlap a tap's PIO
-    // handshake from the other core.
-    waitCore2( );
-    brightenNet( -1 );
+        // First-entry banner is deferred until the main loop confirms the
+        // double-tap window passed without bailing. Toggle gotos (which set
+        // s.firstEntry=false before goto) emit immediately.
+        if ( !s.firstEntry ) {
+            probeEmitBanner( s );
+        }
 
-    if ( switchPosition == 0 && globalState.hasConnection( probePowerDAC == 0 ? DAC0 : DAC1, ROUTABLE_BUFFER_IN ) ) {
-       // changeTerminalColor( 197 );
-       // Serial.println( "  Switch is in Measure mode!\n\r  Set switch to Select mode for best results\n\r" );
-       // Serial.flush( );
+        // restartProbing always fell through into restartProbingNoPrint
+        s.state = ProbeSession::PROBE_REARM;
     }
 
-    // LED color hint is non-terminal state so it's safe to set immediately.
-    rawOtherColors[ 1 ] = ( setOrClear == 1 ) ? 0x4500e8 : 0x6644A8;
+    if ( s.state == ProbeSession::PROBE_REARM ) {
+        // (was: restartProbingNoPrint label)
 
-    // First-entry banner is deferred until the main loop confirms the
-    // double-tap window passed without bailing. Toggle gotos (which set
-    // firstEntry=false before goto) emit immediately.
-    if ( !firstEntry ) {
-        emitBanner( );
+        if ( s.setOrClear == 1 && s.firstConnection == -1 ) {
+            oled.clearPrintShow( "connect", 2, true, true, true );
+        } else if ( s.setOrClear == 0 && s.firstConnection == -1 ) {
+            oled.clearPrintShow( "clear", 2, true, true, true );
+        }
+
+        clearColorOverrides( 1, 1, 0 );
+
+        probeHighlight = -1;
+
+        s.numberOfLocalChanges = 0;
+
+        connectOrClearProbe = s.setOrClear;
+
+        for ( int i = 0; i < 16; i++ ) { s.row[ i ] = 0; } // (was: int row[16] = {0,...})
+
+        s.row[ 1 ] = -2;
+        s.row[ 0 ] = -2;
+
+        probeTimeout = millis( );
+
+        if ( s.setOrClear == 0 ) {
+            probeButtonTimer = millis( );
+        }
+
+        if ( s.setOrClear == 1 ) {
+            showProbeLEDs = 1;
+        } else {
+            showProbeLEDs = 2;
+        }
+
+        connectOrClearProbe = s.setOrClear;
+
+        requestLedShow( 1 );
+        s.doubleSelectTimeout = millis( );
+        s.doubleSelectCountdown = 0;
+
+        s.lastProbedRows[ 0 ] = s.lastProbedRows[ 1 ] = s.lastProbedRows[ 2 ] = s.lastProbedRows[ 3 ] = 0;
+        s.fadeTimer = millis( );
+        s.fadeClear = -1;
+
+        // Encoder support for node selection with special function zones
+        s.encoderAccel = EncoderAccelerator::Slow( ); // Use slow preset for precise node selection
+        s.lastEncoderPosition = encoderPosition;
+        s.encoderAccumulator = 0.0f; // Fractional position accumulator
+
+        // Navigation zones: 0=Breadboard, 1=NanoHeader, 2=Rails, 3=DAC, 4=ADC, 5=GPIO, 6=UART
+        // (CursorZone enum moved to file scope - T3.1 M1)
+
+        // (persistent cursor statics moved to file scope - T3.1 M1)
+
+        // Initialize cursor position on first entry or use persistent position
+        s.encoderCursorNode = firstProbeEntry ? 14 : persistentEncoderCursorNode; // Start at s.row 15 (0-indexed = 14)
+        s.cursorZone = firstProbeEntry ? ZONE_BREADBOARD : persistentCursorZone;
+        s.subIndex = firstProbeEntry ? 0 : persistentSubIndex; // Index within special function zone
+        firstProbeEntry = false;                                 // After first use, persist position
+
+        s.lastEncoderCursorNode = -1; // Track last position to clear it
+        s.lastCursorZone = -1;
+        s.lastSubIndex = -1;
+        s.lastEncoderMovement = millis( ); // Time of last encoder movement
+        s.encoderHideTimeout = 5000;       // Hide cursor after 2 seconds of no movement
+        s.encoderCursorVisible = false;             // Whether cursor is currently shown
+
+        // Set rotary divider for good responsiveness during probing
+        s.savedRotaryDivider = rotaryDivider;
+        rotaryDivider = 3;
+
+        blockProbeButton = 1000;
+        blockProbeButtonTimer = millis( );
+
+        s.probeModeStartTime = millis( );
+        s.lastLoopTime = millis( );
+
+        //! this is the main loop for probing
+        s.state = ProbeSession::PROBE_RUN;
+        return; // the loop condition is checked at the top of the next tick, as the old while did
     }
 
-restartProbingNoPrint:
-
-    if ( setOrClear == 1 && firstConnection == -1 ) {
-        oled.clearPrintShow( "connect", 2, true, true, true );
-    } else if ( setOrClear == 0 && firstConnection == -1 ) {
-        oled.clearPrintShow( "clear", 2, true, true, true );
+    // ---- PROBE_RUN: one pass of the old main probing loop ----
+    // (was: while ( Serial.available( ) == 0 && ( millis( ) - probeTimeout ) < 80000 ))
+    if ( !( Serial.available( ) == 0 && ( millis( ) - probeTimeout ) < 80000 ) ) {
+        s.done = true;
+        return;
     }
 
-    clearColorOverrides( 1, 1, 0 );
 
-    probeHighlight = -1;
-
-    int numberOfLocalChanges = 0;
-
-    connectOrClearProbe = setOrClear;
-
-    int row[ 16 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-    row[ 1 ] = -2;
-    row[ 0 ] = -2;
-
-    probeTimeout = millis( );
-
-    if ( setOrClear == 0 ) {
-        probeButtonTimer = millis( );
-    }
-
-    if ( setOrClear == 1 ) {
-        showProbeLEDs = 1;
-    } else {
-        showProbeLEDs = 2;
-    }
-
-    connectOrClearProbe = setOrClear;
-
-    requestLedShow( 1 );
-    unsigned long doubleSelectTimeout = millis( );
-    int doubleSelectCountdown = 0;
-
-    int lastProbedRows[ 4 ] = { 0, 0, 0, 0 };
-    unsigned long fadeTimer = millis( );
-    int fadeClear = -1;
-
-    // Encoder support for node selection with special function zones
-    EncoderAccelerator encoderAccel = EncoderAccelerator::Slow( ); // Use slow preset for precise node selection
-    long lastEncoderPosition = encoderPosition;
-    float encoderAccumulator = 0.0f; // Fractional position accumulator
-
-    // Navigation zones: 0=Breadboard, 1=NanoHeader, 2=Rails, 3=DAC, 4=ADC, 5=GPIO, 6=UART
-    enum CursorZone { ZONE_BREADBOARD = 0,
-                      ZONE_NANO = 1,
-                      ZONE_RAILS = 2,
-                      ZONE_DAC = 3,
-                      ZONE_ADC = 4,
-                      ZONE_GPIO = 5,
-                      ZONE_UART = 6,
-                      ZONE_CURRENT = 7 };
-
-    // Static variable to persist cursor position between selections within same probe mode session
-    static int persistentEncoderCursorNode = -1;
-    static int persistentCursorZone = ZONE_BREADBOARD;
-    static int persistentSubIndex = 0;  // For multi-item zones (DAC 0/1, ADC 0-4, etc.)
-    static bool firstProbeEntry = true; // Track first entry to reset position
-
-    // Initialize cursor position on first entry or use persistent position
-    int encoderCursorNode = firstProbeEntry ? 14 : persistentEncoderCursorNode; // Start at row 15 (0-indexed = 14)
-    int cursorZone = firstProbeEntry ? ZONE_BREADBOARD : persistentCursorZone;
-    int subIndex = firstProbeEntry ? 0 : persistentSubIndex; // Index within special function zone
-    firstProbeEntry = false;                                 // After first use, persist position
-
-    int lastEncoderCursorNode = -1; // Track last position to clear it
-    int lastCursorZone = -1;
-    int lastSubIndex = -1;
-    unsigned long lastEncoderMovement = millis( ); // Time of last encoder movement
-    unsigned long encoderHideTimeout = 5000;       // Hide cursor after 2 seconds of no movement
-    bool encoderCursorVisible = false;             // Whether cursor is currently shown
-
-    // Set rotary divider for good responsiveness during probing
-    int savedRotaryDivider = rotaryDivider;
-    rotaryDivider = 3;
-
-    blockProbeButton = 1000;
-    blockProbeButtonTimer = millis( );
-
-    unsigned long probeModeStartTime = millis( );
-    unsigned long lastLoopTime = millis( );
-
-    //! this is the main loop for probing
-    while ( Serial.available( ) == 0 && ( millis( ) - probeTimeout ) < 80000 ) {
-
-        // Serial.println("Full loop took " + String(millis() - lastLoopTime) + "ms");
+        // Serial.println("Full loop took " + String(millis() - s.lastLoopTime) + "ms");
         // Serial.flush();
-        // lastLoopTime = millis();
+        // s.lastLoopTime = millis();
 
         delayMicroseconds( 20 ); // Reduced from 500 for faster encoder response
 
@@ -2452,7 +2547,7 @@ restartProbingNoPrint:
         // the infra tick (a nudge is a crossbar rebuild; not mid-session) -
         // and, in a session, deciding only on AGREEMENT of both detectors
         // (see classifySwitchPosition: the session's LED patterns fool the
-        // current detector, a needle on a hot row fools the tip sense).
+        // current detector, a needle on a hot s.row fools the tip sense).
         classifySwitchPosition( true );
         // Detector-A-only tracking at 250 ms, agree mode only (see definition).
         checkSwitchPositionFast( );
@@ -2464,17 +2559,17 @@ restartProbingNoPrint:
         // repaint the canonical probeMode banner. We don't paint in the
         // held->held or not-held->not-held cases - only the transition
         // edge - so this is at most one clearPrintShow per toast and
-        // doesn't fight with normal probeMode rendering. firstConnection
+        // doesn't fight with normal probeMode rendering. s.firstConnection
         // gating mirrors the entry-banner block above for consistency.
         bool isHeld = oled.oledIsHeld( );
-        if ( wasHeld && !isHeld && firstConnection == -1 ) {
-            if ( setOrClear == 1 ) {
+        if ( s.wasHeld && !isHeld && s.firstConnection == -1 ) {
+            if ( s.setOrClear == 1 ) {
                 oled.clearPrintShow( "connect", 2, true, true, true );
             } else {
                 oled.clearPrintShow( "clear", 2, true, true, true );
             }
         }
-        wasHeld = isHeld;
+        s.wasHeld = isHeld;
 
         // ============================================================
         // Double-tap fast-return / stay-alive cutoff.
@@ -2482,7 +2577,7 @@ restartProbingNoPrint:
         // service() (called from serviceInner above) sets
         // g_probeDoubleTapBail when it actually fires an undo/redo from
         // a double-tap. We branch on how far into the OUTER probeMode
-        // session we are (outerProbeEntryTime, set once before the
+        // session we are (s.outerProbeEntryTime, set once before the
         // restartProbing labels):
         //
         //   - Inside the entry window (< kWindowMs since outer entry):
@@ -2499,8 +2594,8 @@ restartProbingNoPrint:
         //     and keep running - the undo fired via service()'s drain
         //     one line up.
         //
-        // CRITICAL: uses outerProbeEntryTime, NOT probeModeStartTime.
-        // probeModeStartTime gets reset on goto restartProbing (mode
+        // CRITICAL: uses s.outerProbeEntryTime, NOT s.probeModeStartTime.
+        // s.probeModeStartTime gets reset on goto restartProbing (mode
         // switch inside probeMode), which would make the bail fire on
         // every "mode switch + undo" sequence and incorrectly exit
         // probeMode even when the user has been in it for ages.
@@ -2514,11 +2609,11 @@ restartProbingNoPrint:
             // click 1's switch-to-clear, then commit it AFTER the bail
             // returned us to the loop top - leaving the user in clear
             // mode despite their double-tap.
-            pendingInProbeButton = 0;
-            if ( ( millis( ) - outerProbeEntryTime ) < ProbingDoubleTap::kWindowMs ) {
+            s.pendingInProbeButton = 0;
+            if ( ( millis( ) - s.outerProbeEntryTime ) < ProbingDoubleTap::kWindowMs ) {
                 blockProbeButton = ProbingDoubleTap::kWindowMs;
                 blockProbeButtonTimer = millis( );
-                break;
+                s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
             }
             // else: past the entry window - stay in probeMode, undo
             // already fired via service()'s drain, just continue.
@@ -2526,18 +2621,18 @@ restartProbingNoPrint:
 
         // pendingCommitting is set further down (after readProbe) when
         // the deferred-press window elapses and we re-queue the press
-        // back into row[0]. Declared here so its scope covers the rest
+        // back into s.row[0]. Declared here so its scope covers the rest
         // of this iteration including the press handler.
         bool pendingCommitting = false;
 
         // First-entry banner: emit once the double-tap entry window has
         // passed without a fast-return. After that point we know this
         // is a real probe-mode session, not the first half of a
-        // double-tap. Toggle-gotos (which set firstEntry=false before
+        // double-tap. Toggle-gotos (which set s.firstEntry=false before
         // jumping) emit immediately at the goto target.
-        if ( firstEntry && !bannerEmitted &&
-             ( millis( ) - outerProbeEntryTime ) >= ProbingDoubleTap::kWindowMs ) {
-            emitBanner( );
+        if ( s.firstEntry && !s.bannerEmitted &&
+             ( millis( ) - s.outerProbeEntryTime ) >= ProbingDoubleTap::kWindowMs ) {
+            probeEmitBanner( s );
         }
 
         // Service live crossbar display during probe mode for real-time updates
@@ -2549,30 +2644,30 @@ restartProbingNoPrint:
 
         // ======= ENCODER-BASED NODE SELECTION WITH SPECIAL FUNCTION ZONES =======
         handleEncoderCursorNavigation(
-            setOrClear,
+            s.setOrClear,
             node1or2,
             nodesToConnect,
             connectOrClearProbe,
-            probeModeStartTime,
-            lastEncoderPosition,
-            encoderAccumulator,
-            encoderCursorNode,
-            cursorZone,
-            subIndex,
-            lastEncoderCursorNode,
-            lastCursorZone,
-            lastSubIndex,
-            lastEncoderMovement,
-            encoderCursorVisible,
+            s.probeModeStartTime,
+            s.lastEncoderPosition,
+            s.encoderAccumulator,
+            s.encoderCursorNode,
+            s.cursorZone,
+            s.subIndex,
+            s.lastEncoderCursorNode,
+            s.lastCursorZone,
+            s.lastSubIndex,
+            s.lastEncoderMovement,
+            s.encoderCursorVisible,
             persistentEncoderCursorNode,
             persistentCursorZone,
             persistentSubIndex,
-            row,
+            s.row,
             connectedRows,
             connectedRowsIndex,
-            encoderAccel,
-            encoderHideTimeout,
-            !fromClickMenu );
+            s.encoderAccel,
+            s.encoderHideTimeout,
+            !s.fromClickMenu );
 
         // Check for encoder button HELD to exit probe mode. The function
         // above already did the visual cleanup (it leaves HELD set on
@@ -2581,7 +2676,7 @@ restartProbingNoPrint:
         if ( encoderButtonState == HELD ) {
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
-            break;
+            s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
         }
 
         // Short wheel click with no encoder cursor showing, in a session
@@ -2590,87 +2685,87 @@ restartProbingNoPrint:
         // A click while the cursor IS visible still selects the
         // highlighted node (handled inside the encoder function, which
         // consumes the event - seeing RELEASED here means no cursor).
-        if ( !fromClickMenu && !encoderCursorVisible &&
+        if ( !s.fromClickMenu && !s.encoderCursorVisible &&
              encoderButtonState == RELEASED ) {
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
-            exitToClickMenu = true;
-            break;
+            s.exitToClickMenu = true;
+            s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
         }
         // ======= END ENCODER SELECTION =======
 
-        if ( firstConnection > 0 ) {
-            row[ 0 ] = firstConnection;
-            connectedRows[ 0 ] = row[ 0 ];
+        if ( s.firstConnection > 0 ) {
+            s.row[ 0 ] = s.firstConnection;
+            connectedRows[ 0 ] = s.row[ 0 ];
             connectedRowsIndex = 1;
-            if ( setOrClear == 0 ) {
-                firstConnection = -2;
+            if ( s.setOrClear == 0 ) {
+                s.firstConnection = -2;
             } else {
-                firstConnection = -3;
+                s.firstConnection = -3;
             }
 
-        } else if ( row[ 0 ] == -1 ) { // Only read physical probe if encoder didn't select
-            row[ 0 ] = readProbe( );
+        } else if ( s.row[ 0 ] == -1 ) { // Only read physical probe if encoder didn't select
+            s.row[ 0 ] = readProbe( );
         }
 
 
 
         // Handle encoder returns from readProbe() - these are handled by cursor logic above
-        if ( row[ 0 ] == -19 || row[ 0 ] == -17 || row[ 0 ] == -10 ) {
+        if ( s.row[ 0 ] == -19 || s.row[ 0 ] == -17 || s.row[ 0 ] == -10 ) {
             // Encoder movement/button - already handled by cursor logic
             // Clear encoder state so readProbe() can read physical probe next time
             encoderDirectionState = NONE;
-            // Reset row[0] and continue loop
-            row[ 0 ] = -1;
-            continue;
+            // Reset s.row[0] and continue loop
+            s.row[ 0 ] = -1;
+            return; // (was: continue - the next PROBE_RUN tick re-checks the loop condition first)
         }
 
         // Resolve a deferred in-probe button press whose double-tap
         // window has elapsed without a cancel. Done here (AFTER
         // handleEncoderCursorNavigation + readProbe) because the
-        // encoder function unconditionally writes row[0] = -1 when no
+        // encoder function unconditionally writes s.row[0] = -1 when no
         // selection is active - the earlier re-queue got clobbered. We
         // only re-queue when no fresher input (encoder selection,
         // probe-needle touch, or new button press from readProbe)
-        // already claimed row[0] this iteration.
-        if ( row[ 0 ] == -1 &&
-             pendingInProbeButton != 0 &&
-             ( millis( ) - pendingInProbeButtonTime ) >= ProbingDoubleTap::kWindowMs ) {
-            row[ 0 ] = pendingInProbeButton;
-            pendingInProbeButton = 0;
+        // already claimed s.row[0] this iteration.
+        if ( s.row[ 0 ] == -1 &&
+             s.pendingInProbeButton != 0 &&
+             ( millis( ) - s.pendingInProbeButtonTime ) >= ProbingDoubleTap::kWindowMs ) {
+            s.row[ 0 ] = s.pendingInProbeButton;
+            s.pendingInProbeButton = 0;
             pendingCommitting = true;
         }
 
-        if ( row[ 0 ] == -1 ) {
+        if ( s.row[ 0 ] == -1 ) {
             // tuiGlue.loop();
         } else {
             idleTime = millis( );
         }
-        // Serial.println(row[0]);
+        // Serial.println(s.row[0]);
         //! save local node file if idle for 3 seconds`
         if ( millis( ) - idleTime > idleSaveTime ) { // save local node file if idle for 3 seconds
             idleTime = millis( );
             // Only call service() if state is actually dirty to avoid unnecessary work
             // The service() will auto-save if dirty for >1 second
-            if ( globalState.isDirty( ) && numberOfLocalChanges > 0 ) {
+            if ( globalState.isDirty( ) && s.numberOfLocalChanges > 0 ) {
                 SlotManager::getInstance( ).service();
-                // Only reset numberOfLocalChanges if state was actually saved (no longer dirty)
+                // Only reset s.numberOfLocalChanges if state was actually saved (no longer dirty)
                 if ( !globalState.isDirty( ) ) {
-                    numberOfLocalChanges = 0;
+                    s.numberOfLocalChanges = 0;
                 }
             }
         }
         // probeButtonToggle = checkProbeButton();
-        // if (isConnectable(row[0]) == false && row[0] != -1) {
-        //   row[0] = -1;
+        // if (isConnectable(s.row[0]) == false && s.row[0] != -1) {
+        //   s.row[0] = -1;
         // //  continue;
         // }
 
-        if ( setOrClear == 1 ) { //! remove fade animation
-            deleteMissesIndex = 0;
-            if ( millis( ) - fadeTimer > 500 ) {
-                fadeTimer = millis( );
-                if ( numberOfLocalChanges > 0 ) {
+        if ( s.setOrClear == 1 ) { //! remove fade animation
+            s.deleteMissesIndex = 0;
+            if ( millis( ) - s.fadeTimer > 500 ) {
+                s.fadeTimer = millis( );
+                if ( s.numberOfLocalChanges > 0 ) {
 
                     // saveStateToSlot( netSlot );
                     // saveLocalNodeFile( netSlot );
@@ -2678,14 +2773,14 @@ restartProbingNoPrint:
                     // Serial.print("saving local node file\n\r");
 
                 // refreshConnections();
-                // numberOfLocalChanges = 0;
+                // s.numberOfLocalChanges = 0;
                 }
             }
             // requestLedShow( -1 );
 
         } else {
-            if ( millis( ) - fadeTimer > 12 ) {
-                fadeTimer = millis( );
+            if ( millis( ) - s.fadeTimer > 12 ) {
+                s.fadeTimer = millis( );
 
                 if ( fadeIndex < 12 ) {
                     fadeIndex++;
@@ -2694,9 +2789,9 @@ restartProbingNoPrint:
                         showProbeLEDs = 2;
                     }
                 } else {
-                    deleteMissesIndex = 0;
+                    s.deleteMissesIndex = 0;
                     for ( int i = 0; i < 20; i++ ) {
-                        deleteMisses[ i ] = -1;
+                        s.deleteMisses[ i ] = -1;
                     }
                 }
 
@@ -2705,42 +2800,42 @@ restartProbingNoPrint:
                     fadeFloor = 0;
                 }
 
-                for ( int i = deleteMissesIndex - 1; i >= 0; i-- ) {
-                    int fadeOffset = map( i, 0, deleteMissesIndex, 0, 12 ) + fadeFloor;
+                for ( int i = s.deleteMissesIndex - 1; i >= 0; i-- ) {
+                    int fadeOffset = map( i, 0, s.deleteMissesIndex, 0, 12 ) + fadeFloor;
                     if ( fadeOffset > 12 ) {
                         fadeOffset = 12;
                         // requestLedShow( -1 );
                     }
-                    // clearLEDsExceptMiddle(deleteMisses[i], -1);
+                    // clearLEDsExceptMiddle(s.deleteMisses[i], -1);
 
                     //  Serial.println(fadeOffset);
                     //  Serial.flush();
                     //  Serial.println("fadeOffset = " + String(fadeOffset));
                     //  Serial.flush();
-                    // b.printRawRow(0b00001010, deleteMisses[i] - 1, deleteFadeSides[fadeOffset], 0xfffffe);
-                    b.printRawRow( 0b00000100, deleteMisses[ i ] - 1, deleteFade[ fadeOffset ],
+                    // b.printRawRow(0b00001010, s.deleteMisses[i] - 1, deleteFadeSides[fadeOffset], 0xfffffe);
+                    b.printRawRow( 0b00000100, s.deleteMisses[ i ] - 1, deleteFade[ fadeOffset ],
                                    0xfffffe );
                    // requestLedShow( 2 );
                 }
 
-                if ( deleteMissesIndex == 0 && fadeClear == 0 ) {
-                    fadeClear = 1;
-                    // Serial.println( "fadeClear = 1" );
+                if ( s.deleteMissesIndex == 0 && s.fadeClear == 0 ) {
+                    s.fadeClear = 1;
+                    // Serial.println( "s.fadeClear = 1" );
                     // Serial.flush( );
                     // requestLedShow( -1 );
-                    if ( numberOfLocalChanges > 0 ) {
+                    if ( s.numberOfLocalChanges > 0 ) {
                         // saveLocalNodeFile( netSlot );
                         // Serial.print("\n\r");
                         // Serial.print("saving local node file\n\r");
                         // saveStateToSlot( netSlot );
                         // refreshConnections();
-                        // numberOfLocalChanges = 0;
+                        // s.numberOfLocalChanges = 0;
                     }
                 }
             }
         }
 
-        if ( ( row[ 0 ] == -18 || row[ 0 ] == -16 ) ) { // ! Button press detected
+        if ( ( s.row[ 0 ] == -18 || s.row[ 0 ] == -16 ) ) { // ! Button press detected
                                                         // (millis() - probingTimer > 500)) { //&&
 
             // Defer fresh in-probe presses by kWindowMs so a double-tap
@@ -2749,7 +2844,7 @@ restartProbingNoPrint:
             // undo" processes click 1 immediately (switches to clear),
             // then click 2 fires undo - leaving the user in clear mode
             // despite their double-tap intent. With deferral, click 1
-            // sits in pendingInProbeButton; if click 2 arrives within
+            // sits in s.pendingInProbeButton; if click 2 arrives within
             // the window, service() fires undo, the bail handler at
             // the top of the loop clears the pending press, and the
             // mode switch never commits.
@@ -2766,18 +2861,18 @@ restartProbingNoPrint:
             // pending immediately and defer the new press so both
             // mode switches happen sequentially.
             if ( !pendingCommitting ) {
-                if ( pendingInProbeButton != 0 && pendingInProbeButton != row[ 0 ] ) {
-                    int newPress = row[ 0 ];
-                    row[ 0 ] = pendingInProbeButton;       // process old pending in this iter
-                    pendingInProbeButton     = newPress;   // defer the new press
-                    pendingInProbeButtonTime = millis( );
+                if ( s.pendingInProbeButton != 0 && s.pendingInProbeButton != s.row[ 0 ] ) {
+                    int newPress = s.row[ 0 ];
+                    s.row[ 0 ] = s.pendingInProbeButton;       // process old pending in this iter
+                    s.pendingInProbeButton     = newPress;   // defer the new press
+                    s.pendingInProbeButtonTime = millis( );
                     pendingCommitting = true;              // (informational - already past the early-out)
-                    // fall through to handler with row[0] = old pending
+                    // fall through to handler with s.row[0] = old pending
                 } else {
-                    pendingInProbeButton     = row[ 0 ];
-                    pendingInProbeButtonTime = millis( );
-                    row[ 0 ] = -1;
-                    continue;
+                    s.pendingInProbeButton     = s.row[ 0 ];
+                    s.pendingInProbeButtonTime = millis( );
+                    s.row[ 0 ] = -1;
+                    return; // (was: continue - the next PROBE_RUN tick re-checks the loop condition first)
                 }
             }
 
@@ -2788,10 +2883,10 @@ restartProbingNoPrint:
             // -1. The undo/redo fires via the deferred flags drained
             // from serviceInner() and probeMode stays alive.
 
-            // Serial.println("row[0] = " + String(row[0]));
-            // Serial.println("setOrClear = " + String(setOrClear));
+            // Serial.println("s.row[0] = " + String(s.row[0]));
+            // Serial.println("s.setOrClear = " + String(s.setOrClear));
             // Serial.println("node1or2 = " + String(node1or2));
-            // Serial.println("connectionsThisSession = " + String(connectionsThisSession));
+            // Serial.println("s.connectionsThisSession = " + String(s.connectionsThisSession));
             // Serial.println("probingTimer = " + String(probingTimer));
             // Serial.println("probeButtonTimer = " + String(probeButtonTimer));
             // Serial.println("probeHighlight = " + String(probeHighlight));
@@ -2801,11 +2896,11 @@ restartProbingNoPrint:
             // Serial.flush( );
             // blockProbeButton = 8000;
             // blockProbeButtonTimer = millis( );
-            if ( row[ 0 ] == -18 ) { // clear button
+            if ( s.row[ 0 ] == -18 ) { // clear button
                 // Serial.println("-18 clear button\n\r");
 
-                if ( setOrClear == 0 ) { // already in clear mode
-                    // Serial.println("-18 setOrClear == 0\n\r");
+                if ( s.setOrClear == 0 ) { // already in clear mode
+                    // Serial.println("-18 s.setOrClear == 0\n\r");
                     nodesToConnect[ 0 ] = -1;
                     nodesToConnect[ 1 ] = -1;
                     node1or2 = 0;
@@ -2814,15 +2909,15 @@ restartProbingNoPrint:
                     blockProbeButtonTimer = millis( );
                     probeHighlight = -1;
                     requestLedShow( -1 );
-                    // connectionsThisSession = 0;
+                    // s.connectionsThisSession = 0;
                     Serial.print( "\x1b[2K\r" ); // Clear the line and return cursor to start
 
                     Serial.flush( );
-                    // Serial.println("setOrClear == 0");
+                    // Serial.println("s.setOrClear == 0");
                 } else { // switch to clear mode
 
-                    // Serial.println("-18 setOrClear == 1\n\r");
-                    setOrClear = 0;
+                    // Serial.println("-18 s.setOrClear == 1\n\r");
+                    s.setOrClear = 0;
                     probingTimer = millis( );
                     blockProbeButton = 8000;
                     blockProbeButtonTimer = millis( );
@@ -2834,32 +2929,32 @@ restartProbingNoPrint:
                     connectedRows[ 1 ] = -1;
                     nodesToConnect[ 0 ] = -1;
                     nodesToConnect[ 1 ] = -1;
-                    //           lastProbedRows[0] = -1;
-                    // lastProbedRows[1] = -1;
+                    //           s.lastProbedRows[0] = -1;
+                    // s.lastProbedRows[1] = -1;
                     // clearLEDsExceptRails();
                     requestLedShow( 1 );
                     node1or2 = 0;
 
-                    // Serial.println("-18 connectionsThisSession = " + String(connectionsThisSession) + "\n\n\n\n\n\r");
-                    if ( connectionsThisSession == 0 && bannerEmitted ) {
+                    // Serial.println("-18 s.connectionsThisSession = " + String(s.connectionsThisSession) + "\n\n\n\n\n\r");
+                    if ( s.connectionsThisSession == 0 && s.bannerEmitted ) {
                         // Only rewind if the banner was actually printed -
                         // \x1b[3A jumps the cursor up 3 rows to overwrite
                         // the deferred banner, which would otherwise eat
                         // 3 lines of unrelated output above us.
                         Serial.print( "\x1b[3A\x1b[0J" );
                         Serial.flush( );
-                        connectionsThisSession = 0;
+                        s.connectionsThisSession = 0;
                     }
 
                     // showProbeLEDs = 1;
-                    firstEntry = false;
-                    bannerEmitted = false;  // re-print banner for the new mode
-                    goto restartProbing;
+                    s.firstEntry = false;
+                    s.bannerEmitted = false;  // re-print banner for the new mode
+                    s.state = ProbeSession::PROBE_ARM; return; // (was: goto restartProbing)
                 }
                 // break;
-            } else if ( row[ 0 ] == -16 ) { // connect button
+            } else if ( s.row[ 0 ] == -16 ) { // connect button
 
-                if ( setOrClear == 1 ) { // already in connect mode
+                if ( s.setOrClear == 1 ) { // already in connect mode
                     // showProbeLEDs = 2;
                     //  delay(100);
                     if ( node1or2 == 1 ) {
@@ -2877,24 +2972,24 @@ restartProbingNoPrint:
                         requestLedShow( -2 );
                         // waitCore2();
 
-                        // Serial.println("-16 setOrClear == 1\n\r");
-                        // if ( connectionsThisSession == 0 ) {
+                        // Serial.println("-16 s.setOrClear == 1\n\r");
+                        // if ( s.connectionsThisSession == 0 ) {
                         Serial.print( "\x1b[2K\r" ); // Clear the line and return cursor to start
 
                         Serial.flush( );
-                        // connectionsThisSession = 0;
+                        // s.connectionsThisSession = 0;
                         // }
-                        goto restartProbingNoPrint;
+                        s.state = ProbeSession::PROBE_REARM; return; // (was: goto restartProbingNoPrint)
 
                     } else {
 
-                        // Serial.println("-16 setOrClear == 0 && node1or2 == 0\n\r");
-                        //  Serial.println("setOrClear == 1 && node1or2 ==
+                        // Serial.println("-16 s.setOrClear == 0 && node1or2 == 0\n\r");
+                        //  Serial.println("s.setOrClear == 1 && node1or2 ==
                         //  0");
                     }
                 } else { // switch to connect mode
-                    // Serial.println("-16 setOrClear == 0\n\r");
-                    setOrClear = 1;
+                    // Serial.println("-16 s.setOrClear == 0\n\r");
+                    s.setOrClear = 1;
                     // showProbeLEDs = 2;
 
                     probingTimer = millis( );
@@ -2911,20 +3006,20 @@ restartProbingNoPrint:
                     nodesToConnect[ 1 ] = -1;
                     node1or2 = 0;
                     // clearLEDsExceptRails();
-                    //  lastProbedRows[0] = -1;
-                    //  lastProbedRows[1] = -1;
+                    //  s.lastProbedRows[0] = -1;
+                    //  s.lastProbedRows[1] = -1;
 
-                    for ( int i = deleteMissesIndex - 1; i >= 0; i-- ) {
+                    for ( int i = s.deleteMissesIndex - 1; i >= 0; i-- ) {
 
-                        // b.printRawRow( 0b00000100, deleteMisses[ i ] - 1, 0, 0xfffffe );
+                        // b.printRawRow( 0b00000100, s.deleteMisses[ i ] - 1, 0, 0xfffffe );
                         //   Serial.print(i);
                         //   Serial.print("   ");
-                        //   Serial.print(deleteMisses[i]);
+                        //   Serial.print(s.deleteMisses[i]);
                         //   Serial.print("    ");
-                        //  Serial.println(map(i, 0,deleteMissesIndex, 0, 19));
+                        //  Serial.println(map(i, 0,s.deleteMissesIndex, 0, 19));
                     }
                     // requestLedShow( 1 );
-                    if ( connectionsThisSession == 0 && bannerEmitted ) {
+                    if ( s.connectionsThisSession == 0 && s.bannerEmitted ) {
                         Serial.print( "\x1b[3A\x1b[0J" ); // rewind 3 banner lines
                         Serial.flush( );
 
@@ -2932,19 +3027,19 @@ restartProbingNoPrint:
                         Serial.print( "\x1b[2K\r" ); // Clear the line and return cursor to start
                         Serial.flush( );
                     }
-                    connectionsThisSession = 0;
+                    s.connectionsThisSession = 0;
 
-                    // Serial.println("setOrClear == 1");
+                    // Serial.println("s.setOrClear == 1");
 
-                    firstEntry = false;
-                    bannerEmitted = false;  // re-print banner for the new mode
-                    goto restartProbing;
+                    s.firstEntry = false;
+                    s.bannerEmitted = false;  // re-print banner for the new mode
+                    s.state = ProbeSession::PROBE_ARM; return; // (was: goto restartProbing)
                 }
                 // break;
             }
 
             // Serial.print("\n\rCommitting paths!\n\r");
-            row[ 1 ] = -2;
+            s.row[ 1 ] = -2;
             probingTimer = millis( );
 
             connectedRowsIndex = 0;
@@ -2954,20 +3049,20 @@ restartProbingNoPrint:
             nodesToConnect[ 1 ] = -1;
             probeHighlight = -1;
             // requestLedShow( -1 );
-            break;
+            s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
         } else {
             // probingTimer = millis();
         }
 
-        if ( isConnectable( row[ 0 ] ) == false && row[ 0 ] != -1 ) {
-            row[ 0 ] = -1;
+        if ( isConnectable( s.row[ 0 ] ) == false && s.row[ 0 ] != -1 ) {
+            s.row[ 0 ] = -1;
         }
 
-        if ( row[ 0 ] != -1 && row[ 0 ] != row[ 1 ] ) { // && row[0] != lastProbedRows[0] &&
-            // row[0] != lastProbedRows[1]) {
+        if ( s.row[ 0 ] != -1 && s.row[ 0 ] != s.row[ 1 ] ) { // && s.row[0] != s.lastProbedRows[0] &&
+            // s.row[0] != s.lastProbedRows[1]) {
 
-            lastProbedRows[ 1 ] = lastProbedRows[ 0 ];
-            lastProbedRows[ 0 ] = row[ 0 ];
+            s.lastProbedRows[ 1 ] = s.lastProbedRows[ 0 ];
+            s.lastProbedRows[ 0 ] = s.row[ 0 ];
             if ( connectedRowsIndex == 1 ) {
                 nodesToConnect[ node1or2 ] = connectedRows[ 0 ];
 
@@ -2998,14 +3093,14 @@ restartProbingNoPrint:
                     Serial.print( " " );
                 }
                 Serial.print( node1Name );
-                if ( setOrClear == 1 ) {
+                if ( s.setOrClear == 1 ) {
                     Serial.print( "  -  " );
                 }
                 // numChars = Serial.print(node2Name);
                 Serial.flush( );
 
                 probeHighlight = nodesToConnect[ node1or2 ];
-                if ( setOrClear == 1 ) {
+                if ( s.setOrClear == 1 ) {
                     // probeConnectHighlight = nodesToConnect[node1or2];
                     brightenNet( probeHighlight, 5 );
                     oled.clearPrintShow( bothNames, 2, true, true, true );
@@ -3018,7 +3113,7 @@ restartProbingNoPrint:
                 // showProbeLEDs = 1;
 
                 if ( nodesToConnect[ node1or2 ] > 0 &&
-                     nodesToConnect[ node1or2 ] <= NANO_RESET_1 && setOrClear == 1 ) {
+                     nodesToConnect[ node1or2 ] <= NANO_RESET_1 && s.setOrClear == 1 ) {
 
                     // probeConnectHighlight = nodesToConnect[node1or2];
                     //  Serial.print("probeConnectHighlight = ");
@@ -3045,14 +3140,14 @@ restartProbingNoPrint:
                 node1or2++;
                 probingTimer = millis( );
                 //requestLedShow( 1 );
-                doubleSelectTimeout = millis( );
-                doubleSelectCountdown = 200;
+                s.doubleSelectTimeout = millis( );
+                s.doubleSelectCountdown = 200;
                 // delay(500);
 
                 // delay(3);
             }
 
-            if ( node1or2 >= 2 || ( setOrClear == 0 && node1or2 >= 1 ) ) {
+            if ( node1or2 >= 2 || ( s.setOrClear == 0 && node1or2 >= 1 ) ) {
 
                 probeHighlight = -1;
                 // Serial.print("connectedRowsIndex: ");
@@ -3064,7 +3159,7 @@ restartProbingNoPrint:
 
                 // Serial.print("fuck");
 
-                if ( setOrClear == 1 && ( nodesToConnect[ 0 ] != nodesToConnect[ 1 ] ) &&
+                if ( s.setOrClear == 1 && ( nodesToConnect[ 0 ] != nodesToConnect[ 1 ] ) &&
                      nodesToConnect[ 0 ] > 0 && nodesToConnect[ 1 ] > 0 ) {
                     // b.printRawRow( 0b00011111, nodesToConnect[ 0 ] - 1, 0x0, 0x00000000 );
                     // b.printRawRow( 0b00011111, nodesToConnect[ 1 ] - 1, 0x0, 0x00000000 );
@@ -3093,7 +3188,7 @@ restartProbingNoPrint:
                         node1or2 = 0;
                         nodesToConnect[ 0 ] = -1;
                         nodesToConnect[ 1 ] = -1;
-                        continue;
+                        return; // (was: continue - the next PROBE_RUN tick re-checks the loop condition first)
                     }
 
                     int numChars = strlen( node1Name );
@@ -3133,22 +3228,22 @@ restartProbingNoPrint:
                     }
 
                     xbarLatTap( ); // latency probe: tap accepted, about to commit (XbarLatency.h)
-                    if ( firstConnection == -3 ) {
+                    if ( s.firstConnection == -3 ) {
                         // Add to RAM state - DON'T save yet, let auto-save handle it
                         addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
-                        numberOfLocalChanges++;
+                        s.numberOfLocalChanges++;
                         // refreshConnections(1, 1, 0);
                         // requestLedShow( -1 );
-                        connectionsThisSession++;
-                        break;
+                        s.connectionsThisSession++;
+                        s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
 
                     } else {
 
                         // Add to RAM state (local changes accumulated in RAM)
                         addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
                         showProbeLEDs = 1;
-                        numberOfLocalChanges++;
-                        connectionsThisSession++;
+                        s.numberOfLocalChanges++;
+                        s.connectionsThisSession++;
                     }
                     brightenNet( -1 );
 
@@ -3159,32 +3254,32 @@ restartProbingNoPrint:
                     // oled.print(node2Name);
                     // oled.print(" connected");
                     // oled.show();
-                    // Serial.println(numberOfLocalChanges);
+                    // Serial.println(s.numberOfLocalChanges);
 
                     // NOTE: refreshLocalConnections() is already called inside addBridgeToState()
                     // No need to call it again here - that was causing double refresh delay!
-                    fadeTimer = millis( );
-                    // if (numberOfLocalChanges > 5) {
+                    s.fadeTimer = millis( );
+                    // if (s.numberOfLocalChanges > 5) {
                     //   saveLocalNodeFile(netSlot);
                     //   // refreshConnections();
-                    //   numberOfLocalChanges = 0;
+                    //   s.numberOfLocalChanges = 0;
 
                     // } // else {
                     //  saveLocalNodeFile(netSlot);
 
                     //}
 
-                    row[ 1 ] = -1;
+                    s.row[ 1 ] = -1;
 
-                    // doubleSelectTimeout = millis();
+                    // s.doubleSelectTimeout = millis();
                     for ( int i = 0; i < 12; i++ ) {
-                        deleteMisses[ i ] = -1;
+                        s.deleteMisses[ i ] = -1;
                     }
 
-                    doubleSelectTimeout = millis( );
-                    doubleSelectCountdown = 400;
+                    s.doubleSelectTimeout = millis( );
+                    s.doubleSelectCountdown = 400;
 
-                } else if ( setOrClear == 0 ) {
+                } else if ( s.setOrClear == 0 ) {
 
                     char node1Name[ 12 ];
 
@@ -3204,34 +3299,34 @@ restartProbingNoPrint:
                     // numChars = Serial.print(node2Name);
 
                     for ( int i = 12; i > 0; i-- ) {
-                        deleteMisses[ i ] = deleteMisses[ i - 1 ];
+                        s.deleteMisses[ i ] = s.deleteMisses[ i - 1 ];
                         // Serial.print(i);
                         // Serial.print("   ");
-                        // Serial.println(deleteMisses[i]);
+                        // Serial.println(s.deleteMisses[i]);
                     }
                     // Serial.print("\n\r");
-                    deleteMisses[ 0 ] = nodesToConnect[ 0 ];
+                    s.deleteMisses[ 0 ] = nodesToConnect[ 0 ];
 
-                    // deleteMisses[deleteMissesIndex] = nodesToConnect[0];
-                    if ( deleteMissesIndex < 12 ) {
-                        deleteMissesIndex++;
+                    // s.deleteMisses[s.deleteMissesIndex] = nodesToConnect[0];
+                    if ( s.deleteMissesIndex < 12 ) {
+                        s.deleteMissesIndex++;
                     }
                     fadeIndex = -3;
 
                     //  Serial.println("\n\r");
-                    //  Serial.print("deleteMissesIndex: ");
-                    //   Serial.print(deleteMissesIndex);
+                    //  Serial.print("s.deleteMissesIndex: ");
+                    //   Serial.print(s.deleteMissesIndex);
                     //   Serial.print("\n\r");
-                    for ( int i = deleteMissesIndex - 1; i >= 0; i-- ) {
+                    for ( int i = s.deleteMissesIndex - 1; i >= 0; i-- ) {
 
-                        b.printRawRow( 0b00000100, deleteMisses[ i ] - 1,
-                                       deleteFade[ map( i, 0, deleteMissesIndex, 0, 12 ) ],
+                        b.printRawRow( 0b00000100, s.deleteMisses[ i ] - 1,
+                                       deleteFade[ map( i, 0, s.deleteMissesIndex, 0, 12 ) ],
                                        0xfffffe );
                         //   Serial.print(i);
                         //   Serial.print("   ");
-                        //   Serial.print(deleteMisses[i]);
+                        //   Serial.print(s.deleteMisses[i]);
                         //   Serial.print("    ");
-                        //  Serial.println(map(i, 0,deleteMissesIndex, 0, 19));
+                        //  Serial.println(map(i, 0,s.deleteMissesIndex, 0, 19));
                     }
                     clearHighlighting( 0 );
                     //  Serial.println();
@@ -3243,19 +3338,19 @@ restartProbingNoPrint:
                     // The number of removed connections is tracked in lastRemovedNodesIndex
                     int rowsRemoved = removed ? lastRemovedNodesIndex : 0;
                     if ( removed ) {
-                        numberOfLocalChanges += rowsRemoved;
+                        s.numberOfLocalChanges += rowsRemoved;
                     }
                     // if ( rowsRemoved > 0 ) {
 
-                    // Serial.print("connectionsThisSession: ");
-                    // Serial.print(connectionsThisSession);
+                    // Serial.print("s.connectionsThisSession: ");
+                    // Serial.print(s.connectionsThisSession);
                     // Serial.flush( );
                     // }
 
                     // waitCore2();
                     if ( rowsRemoved > 0 ) {
-                        connectionsThisSession++;
-                        // connectionsThisSession++;
+                        s.connectionsThisSession++;
+                        // s.connectionsThisSession++;
                         removeFade = 10;
 
                         // goto restartProbing;
@@ -3286,64 +3381,67 @@ restartProbingNoPrint:
 
                         oled.clearPrintShow( node1Name, 2, true, true, true );
 
-                        fadeClear = 0;
-                        fadeTimer = 0;
+                        s.fadeClear = 0;
+                        s.fadeTimer = 0;
                     } else {
                         // oled.clear( );
                         oled.clearPrintShow( node1Name, 2, true, true, true );
                     }
                 }
 
-                if ( firstConnection == -3 ) {
+                if ( s.firstConnection == -3 ) {
                     //
                     // requestLedShow( 1 );
-                    // firstConnection = -1;
+                    // s.firstConnection = -1;
 
-                    break;
+                    s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
                 }
 
                 node1or2 = 0;
                 nodesToConnect[ 0 ] = -1;
                 nodesToConnect[ 1 ] = -1;
-                // row[1] = -2;
-                doubleSelectTimeout = millis( );
+                // s.row[1] = -2;
+                s.doubleSelectTimeout = millis( );
             }
 
-            row[ 1 ] = row[ 0 ];
+            s.row[ 1 ] = s.row[ 0 ];
         }
         // Serial.print("\n\r");
         // Serial.print(" ");
-        // Serial.println(row[0]);
+        // Serial.println(s.row[0]);
 
-        if ( millis( ) - doubleSelectTimeout > 700 ) {
-            // Serial.println("doubleSelectCountdown");
-            row[ 1 ] = -2;
+        if ( millis( ) - s.doubleSelectTimeout > 700 ) {
+            // Serial.println("s.doubleSelectCountdown");
+            s.row[ 1 ] = -2;
             lastReadRaw = 0;
-            lastProbedRows[ 0 ] = 0;
-            lastProbedRows[ 1 ] = 0;
-            doubleSelectTimeout = millis( );
-            doubleSelectCountdown = 700;
+            s.lastProbedRows[ 0 ] = 0;
+            s.lastProbedRows[ 1 ] = 0;
+            s.doubleSelectTimeout = millis( );
+            s.doubleSelectCountdown = 700;
         }
 
-        // Serial.println(doubleSelectCountdown);
+        // Serial.println(s.doubleSelectCountdown);
 
-        if ( doubleSelectCountdown <= 0 ) {
+        if ( s.doubleSelectCountdown <= 0 ) {
 
-            doubleSelectCountdown = 0;
+            s.doubleSelectCountdown = 0;
         } else {
-            doubleSelectCountdown =
-                doubleSelectCountdown - ( millis( ) - doubleSelectTimeout );
+            s.doubleSelectCountdown =
+                s.doubleSelectCountdown - ( millis( ) - s.doubleSelectTimeout );
 
-            doubleSelectTimeout = millis( );
+            s.doubleSelectTimeout = millis( );
         }
 
         probeTimeout = millis( );
 
-        if ( firstConnection == -2 ) {
-            firstConnection = -1;
-            break;
+        if ( s.firstConnection == -2 ) {
+            s.firstConnection = -1;
+            s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
         }
-    } //! end main probing loop
+    //! (was: end main probing loop)
+}
+
+int Probing::probeExitTail( ProbeSession& s ) {
 
 
     // Serial.println("fuck you");
@@ -3351,7 +3449,7 @@ restartProbingNoPrint:
     node1or2 = 0;
     nodesToConnect[ 0 ] = -1;
     nodesToConnect[ 1 ] = -1;
-    // row[1] = -2;
+    // s.row[1] = -2;
     connectedRowsIndex = 0;
     connectedRows[ 0 ] = -1;
     probeActive = false;
@@ -3376,14 +3474,14 @@ restartProbingNoPrint:
     //  Serial.print("millis() - timer[3] = ");
     //  Serial.println(millis() - timer[3]);
 
-    if ( connectionsThisSession == 0 && bannerEmitted ) {
+    if ( s.connectionsThisSession == 0 && s.bannerEmitted ) {
         // Only rewind 3 lines if the banner was actually printed - if we
         // bailed out on a double-tap before the banner fired, those
         // lines belong to whatever was on screen before probeMode and
         // must NOT be erased.
         Serial.print( "\x1b[3A\x1b[0J" );
         Serial.flush( );
-        connectionsThisSession = 0;
+        s.connectionsThisSession = 0;
     }
 
     Serial.flush( );
@@ -3398,11 +3496,11 @@ restartProbingNoPrint:
         // The scheduler will save within 1 second after exiting probing
     }
     // Reset local change counter regardless - we've either saved or will auto-save
-    numberOfLocalChanges = 0;
+    s.numberOfLocalChanges = 0;
     // delay(10);
     //refreshConnections( 1, 1, 0 );
-    row[ 0 ] = -1;
-    row[ 1 ] = -2;
+    s.row[ 0 ] = -1;
+    s.row[ 1 ] = -2;
     // requestLedShow( -1 );
     // sprintf(oledBuffer, "        ");
     // drawchar();
@@ -3414,16 +3512,16 @@ restartProbingNoPrint:
     oled.showJogo32h( );
 
     // Restore rotary divider
-    rotaryDivider = savedRotaryDivider;
+    rotaryDivider = s.savedRotaryDivider;
 
     // Clear any visible cursor LED before exiting based on zone
-    if ( cursorZone == ZONE_BREADBOARD && encoderCursorNode >= 0 ) {
-        b.printRawRow( 0b00000100, encoderCursorNode, 0x000000, 0x000000 );
-    } else if ( cursorZone == ZONE_NANO && encoderCursorNode >= 0 ) {
-        int pixel = getNanoHeaderPixel( encoderCursorNode );
+    if ( s.cursorZone == ZONE_BREADBOARD && s.encoderCursorNode >= 0 ) {
+        b.printRawRow( 0b00000100, s.encoderCursorNode, 0x000000, 0x000000 );
+    } else if ( s.cursorZone == ZONE_NANO && s.encoderCursorNode >= 0 ) {
+        int pixel = getNanoHeaderPixel( s.encoderCursorNode );
         if ( pixel >= 0 )
             leds.setPixelColor( pixel, 0x000000 );
-    } else if ( cursorZone >= ZONE_RAILS ) {
+    } else if ( s.cursorZone >= ZONE_RAILS ) {
         clearLEDsExceptRails( );
     }
 
@@ -3438,7 +3536,7 @@ restartProbingNoPrint:
     // Clear inPadMenu flag
     inPadMenu = 0;
 
-    // Reset first entry flag so next entrance starts at row 15 in breadboard
+    // Reset first entry flag so next entrance starts at s.row 15 in breadboard
     firstProbeEntry = true;
 
     // Force LED update to clear cursor
@@ -3479,7 +3577,7 @@ restartProbingNoPrint:
 // Serial.println(lastProbeLEDs);
 // Serial.flush();
 
-    if ( exitToClickMenu ) {
+    if ( s.exitToClickMenu ) {
         // The wheel click that ended probing now opens the click menu.
         // Done here, AFTER the full exit cleanup, so the menu starts from
         // the same state a normal idle-click entry would. The real click
@@ -3492,7 +3590,17 @@ restartProbingNoPrint:
         Menus::getInstance( ).clickMenu( );
     }
 
+
     return 1;
+}
+
+int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu ) {
+    ProbeSession s;
+    probeSessionBegin( s, setOrClear, firstConnection, fromClickMenu );
+    while ( !s.done ) {
+        probeTick( s );
+    }
+    return probeExitTail( s );
 }
 
 float Probing::measureMode( int updateSpeed ) {
