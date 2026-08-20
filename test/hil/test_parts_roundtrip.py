@@ -59,6 +59,23 @@ parts:
     pins:
       A: {offset: 0, connect: 37}
       B: {offset: 1, connect: 45}
+  - name: "U2"
+    type: ic
+    footprint: dip28
+    row: 3
+    placed: true
+    pins:
+      P1: {pin: 1, connect: 17}
+      P28: {pin: 28, connect: 18}
+  - name: "C1"
+    type: capacitor
+    value: "100n"
+    footprint: sip2
+    row: 50
+    placed: false
+    pins:
+      A: {offset: 0, connect: 52}
+      B: {offset: 1}
 
 config:
   fakeGpio:
@@ -72,15 +89,20 @@ power:
 """
 
 # Expansion geometry (dip8 at row 5: pins 1-4 -> 5,6,7,8; pins 5-8 ->
-# 38,37,36,35; sip2 at row 20 with offsets 0/1 -> 20,21):
-#   U1 GND   pin 1 -> node 5  -> GND
-#   U1 TRIG  pin 2 -> node 6  -> 37
-#   U1 RESET pin 4 -> node 8  -> TOP_RAIL
-#   U1 VCC   pin 8 -> node 35 -> TOP_RAIL
-#   R1 A     off 0 -> node 20 -> 37
-#   R1 B     off 1 -> node 21 -> 45
+# 38,37,36,35; sip2 at row 20 with offsets 0/1 -> 20,21; dip28 at row 3:
+# pin 1 -> 3, pin 28 -> 3+30+(28-28) = 33 - the physical pin count 28
+# exceeds MAX_PART_PINS on purpose: only LISTED pins are storage-bounded):
+#   U1 GND   pin 1  -> node 5  -> GND
+#   U1 TRIG  pin 2  -> node 6  -> 37
+#   U1 RESET pin 4  -> node 8  -> TOP_RAIL
+#   U1 VCC   pin 8  -> node 35 -> TOP_RAIL
+#   R1 A     off 0  -> node 20 -> 37
+#   R1 B     off 1  -> node 21 -> 45
+#   U2 P1    pin 1  -> node 3  -> 17
+#   U2 P28   pin 28 -> node 33 -> 18
+# C1 has placed: false - it must NOT expand (no 50 -> 52 bridge).
 EXPECTED_PAIRS = [(5, "GND"), (6, 37), (8, "TOP_RAIL"), (35, "TOP_RAIL"),
-                  (20, 37), (21, 45), (55, 42)]
+                  (20, 37), (21, 45), (3, 17), (33, 18), (55, 42)]
 
 
 def read_device_file(path):
@@ -135,6 +157,7 @@ for i, (a, b) in enumerate(pairs):
     print("conn%d=" % i, 1 if is_connected(a, b) else 0)
 print("bogus=", 1 if is_connected(12, 48) else 0)
 print("nopin=", 1 if is_connected(7, 36) else 0)
+print("unplaced=", 1 if is_connected(50, 52) else 0)
 """)
 vals = parse_kv(out)
 for i, (a, b) in enumerate(EXPECTED_PAIRS):
@@ -142,6 +165,8 @@ for i, (a, b) in enumerate(EXPECTED_PAIRS):
 check(vals.get("bogus") == 0,
       "futuresection: content was contained (12-48 did NOT become a bridge)")
 check(vals.get("nopin") == 0, "pins without connect: made no bridge (7-36 absent)")
+check(vals.get("unplaced") == 0,
+      "placed: false part C1 was NOT expanded (50-52 absent)")
 
 # --- 3. Net names ----------------------------------------------------------
 out = jl_exec("""
@@ -187,7 +212,13 @@ for needle in ('- name: "U1"', "type: ic", 'value: "NE555"', "footprint: dip8",
                '- name: "R1"', "type: resistor", 'value: "10k"',
                "footprint: sip2", "row: 20",
                "A: {offset: 0, connect: 37, class: signal}",
-               "B: {offset: 1, connect: 45, class: signal}"):
+               "B: {offset: 1, connect: 45, class: signal}",
+               '- name: "U2"', "footprint: dip28",
+               "P1: {pin: 1, connect: 17, class: signal}",
+               "P28: {pin: 28, connect: 18, class: signal}",
+               '- name: "C1"', "placed: false",
+               "A: {offset: 0, connect: 52, class: signal}",
+               "B: {offset: 1, class: signal}"):
     check(needle in rewritten, f"rewrite kept: {needle}")
 check(re.search(r'guideProgress: \{source: "/projects/test/wiring.yaml", step: 2\}',
                 rewritten) is not None, "guideProgress scalar survived the rewrite")
@@ -221,10 +252,39 @@ check(vals.get("conn_trig") == 1, "second load of the rewritten file: 6-37 bridg
 check(vals.get("conn_r1b") == 1, "second load of the rewritten file: 21-45 bridge intact")
 check("U1_TRIG" in str(vals.get("names", "")), "second load: U1_TRIG re-asserted")
 
-# --- 6. Restore the bench --------------------------------------------------
-port1_command(f"<{orig_slot}", 4.0)
-time.sleep(1.5)
+# --- 6. numParts == 0 emits NO parts: section ------------------------------
+# Write a plain (no-parts) slot, load it, force a rewrite, and assert the
+# serializer omits parts: and guideProgress: entirely for an empty table.
+NO_PARTS_YAML = """version: 2
+sourceOfTruth: bridges
 
+bridges:
+  - {n1: 55, n2: 42, dup: 2}
+
+power:
+  topRail: 0.00
+  bottomRail: 0.00
+  dac0: 3.33
+  dac1: 0.00
+"""
+port1_command(f"<{bounce}", 4.0)   # move off slot 3 before touching its file
+time.sleep(1.5)
+out = jl_exec(f"print('wrote2=', 1 if fs_write({SLOT_PATH!r}, {NO_PARTS_YAML!r}) else 0)")
+check(parse_kv(out).get("wrote2") == 1, "wrote no-parts slot YAML")
+port1_command("<3", 4.0)
+time.sleep(2.0)
+out = jl_exec("print('saved2=', nodes_save(3))")
+check(parse_kv(out).get("saved2") == 3, "nodes_save(3) rewrote the no-parts slot")
+time.sleep(1.0)
+_, noparts = read_device_file(SLOT_PATH)
+check("parts:" not in noparts, "numParts==0: rewrite emits NO parts: section")
+check("guideProgress:" not in noparts, "empty guideSource: rewrite emits NO guideProgress:")
+check("- {n1: 55, n2: 42" in noparts, "no-parts slot still round-trips its bridge")
+
+# --- 7. Restore the bench --------------------------------------------------
+# Restore the FILE first, switch slots second: if orig_slot happened to be 3,
+# switching first would make slot 3 active again and the idle auto-save could
+# clobber the restored content (the same hazard handled before phase 1).
 if slot3_existed:
     out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)")
     check(parse_kv(out).get("restored") == 1, "restored slot3.yaml prior content")
@@ -235,6 +295,9 @@ if fs_exists({SLOT_PATH!r}):
 print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
 """)
     check(parse_kv(out).get("removed") == 1, "removed the test's slot3.yaml (did not exist before)")
+
+port1_command(f"<{orig_slot}", 4.0)
+time.sleep(1.5)
 
 if snapshot is not None:
     check(board_state_restore(snapshot), "board state restored to pre-test snapshot")

@@ -1238,8 +1238,9 @@ bool JumperlessState::toYAML(String& output, int showANSI) const {
     output = "";
     
     // Pre-allocate buffer to avoid repeated reallocations during concatenation
-    // Estimate: ~50 bytes per bridge + ~500 bytes overhead = ~3KB typical
-    output.reserve(connections.numBridges * 50 + 500);
+    // Estimate: ~50 bytes per bridge + ~450 per part (header lines + pins)
+    // + ~500 bytes overhead = ~3KB typical
+    output.reserve(connections.numBridges * 50 + parts.numParts * 450 + 500);
     
     // Header
     output += "version: " + String(version) + "\n";
@@ -2992,6 +2993,10 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
         if (activeState.parts.numParts > 0) {
             String partsErr;
             expandPartsToBridges(activeState, partsErr);
+            if (partsErr.length() > 0 && jumperlessConfig.debug.show_node_errors) {
+                Serial.print("parts expansion warnings: ");
+                Serial.println(partsErr);
+            }
         }
 
         // Populate FakeGPIO slot structs BEFORE routing so the router can expand
@@ -3060,6 +3065,10 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     if (activeState.parts.numParts > 0) {
         String partsErr;
         expandPartsToBridges(activeState, partsErr);
+        if (partsErr.length() > 0 && jumperlessConfig.debug.show_node_errors) {
+            Serial.print("parts expansion warnings: ");
+            Serial.println(partsErr);
+        }
     }
     initializeFakeGpioFromLoadedState();
     extern void refreshConnections(int ledShowOption, int fillUnused, int clean);

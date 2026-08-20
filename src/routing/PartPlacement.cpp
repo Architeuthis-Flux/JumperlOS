@@ -414,9 +414,14 @@ static void partInit(PartDefinition& p) {
 static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool& bad, String& err) {
     if (!open) return;
     open = false;
+    // pinCount is the footprint's PHYSICAL pin count - bound it by the board
+    // geometry (60 rows), NOT by MAX_PART_PINS, which only caps how many pins
+    // are LISTED (numPins, enforced in parsePinEntry). Bounding it by storage
+    // silently dropped a well-formed dip28/dip40 - and the next auto-save
+    // then erased it from the user's slot file.
     bool valid = !bad &&
                  p.name[0] != '\0' &&
-                 p.pinCount >= 1 && p.pinCount <= MAX_PART_PINS &&
+                 p.pinCount >= 1 && p.pinCount <= 60 &&
                  p.baseRow >= 1 && p.baseRow <= 60 &&
                  (p.footprint == 0 || (p.pinCount % 2) == 0);
     if (!valid) {
@@ -477,14 +482,23 @@ static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, b
         }
         inPins = false;
     } else if (key == "row") {
-        p.baseRow = (int16_t)rest.toInt();
+        // through parseScalar like every other scalar: a quoted `row: "5"`
+        // must not toInt() to 0 and get the whole part dropped
+        p.baseRow = (int16_t)parseScalar(rest).toInt();
         inPins = false;
     } else if (key == "placed") {
         bool ok;
-        p.placed = parseBoolean(parseScalar(rest), ok);
+        bool v = parseBoolean(parseScalar(rest), ok);
+        if (ok) {
+            p.placed = v;
+        } else {
+            // keep the default (false) but WARN - a silent false would
+            // persist through the next auto-save
+            err += "part " + String(p.name) + ": unparseable placed '" + rest + "' (kept false); ";
+        }
         inPins = false;
     } else if (key == "verify") {
-        p.defaultVerify = (uint8_t)rest.toInt();
+        p.defaultVerify = (uint8_t)parseScalar(rest).toInt();
         inPins = false;
     } else if (key == "color") {
         String v = parseScalar(rest);
