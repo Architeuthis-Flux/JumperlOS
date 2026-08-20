@@ -146,10 +146,10 @@ static void encSamplerUninit( void ) {
 
 static void encSamplerInit( void ) {
     // Block rules: base-0 only (the pins are 12/13) - a base-16 block is
-    // skipped below. The program is 1 instruction and relocatable, so
-    // anywhere with a free word and a free SM works; the ORDER is the
-    // policy: task #30 keeps PIO0 as clear as possible for user programs,
-    // so auto prefers PIO1 and leaves PIO0 as the last resort.
+    // skipped below (that's PIO0 in the task #30 layout). The program is 1
+    // instruction and relocatable, so anywhere with a free word and a free
+    // SM works; the ORDER is the policy: auto prefers PIO2 (its home in the
+    // #30 layout, next to the top strip), then PIO1, PIO0 last.
     // `[hardware] encoder_pio = 0/1/2` tries that block first instead
     // (applied at boot - core 1 waits on configLoaded before this runs).
     PIO cand[ 4 ];
@@ -159,8 +159,8 @@ static void encSamplerInit( void ) {
         int pref = jumperlessConfig.hardware.encoder_pio;
         if ( pref >= 0 && pref <= 2 ) cand[ nCand++ ] = all[ pref ];
     }
-    cand[ nCand++ ] = pio1;
     cand[ nCand++ ] = pio2;
+    cand[ nCand++ ] = pio1;
     cand[ nCand++ ] = pio0;
     for ( int i = 0; i < nCand && pioEnc == nullptr; i++ ) {
         PIO p = cand[ i ];

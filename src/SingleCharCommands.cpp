@@ -2967,8 +2967,9 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
         int btn = probeButtonPioState( );
 #if defined(PICO_RP2350)
         if ( csSm >= 0 ) {
-            target->printf( "cs strobe: PIO2 SM%d (base %u), one IRQ per list: %lu  singles %lu (timeouts %lu)  |  probe LED SM: PIO%d  button: %s\n\r",
-                            csSm, (unsigned)pio_get_gpio_base( pio2 ), (unsigned long)listIrqs, (unsigned long)singles,
+            int csBlk = ch446qCsStrobeBlock( );
+            target->printf( "cs strobe: PIO%d SM%d (base %u), one IRQ per list: %lu  singles %lu (timeouts %lu)  |  probe LED SM: PIO%d  button: %s\n\r",
+                            csBlk, csSm, (unsigned)pio_get_gpio_base( PIO_INSTANCE( csBlk ) ), (unsigned long)listIrqs, (unsigned long)singles,
                             (unsigned long)singleTo, probePio,
                             btn == 1 ? "PIO" : ( btn == 2 ? "CPU (no PIO room!)" : "not tried" ) );
         } else

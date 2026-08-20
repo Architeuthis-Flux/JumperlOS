@@ -15,7 +15,13 @@ bool JeoPixel::rp2040claimPIO(void) {
     uint base = pio_get_gpio_base(preferred_pio);
     bool reaches = ((uint)pin >= base) && ((uint)pin < base + 32u);
     if (reaches && pio_can_add_program(preferred_pio, &ws2812_program)) {
-      int s = pio_claim_unused_sm(preferred_pio, false);
+      int s = -1;
+      if (preferred_sm >= 0 && preferred_sm <= 3 && !pio_sm_is_claimed(preferred_pio, (uint)preferred_sm)) {
+        pio_sm_claim(preferred_pio, (uint)preferred_sm);
+        s = preferred_sm;
+      } else {
+        s = pio_claim_unused_sm(preferred_pio, false);
+      }
       if (s >= 0) {
         pio = preferred_pio;
         pio_sm = (uint)s;

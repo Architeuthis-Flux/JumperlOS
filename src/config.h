@@ -64,11 +64,11 @@ struct config {
         // = 0) frames are event-driven regardless of this value.
         int probe_led_refresh_us = 0;
         // Which PIO block the encoder's quadrature sampler (1 instruction +
-        // 1 SM) tries FIRST. -1 = auto: PIO1, then PIO0 last - task #30
-        // keeps PIO0 as clear as possible for user programs. 0/1/2 = try
-        // that block first, falling through to the auto order when it can't
-        // reach GPIO 12/13 (base 16) or has no room. Applied at boot (core 1
-        // waits on configLoaded before the claim).
+        // 1 SM) tries FIRST. -1 = auto: PIO2 (its home in the task #30
+        // layout), then PIO1, PIO0 last - PIO0 stays for user programs.
+        // 0/1/2 = try that block first, falling through to the auto order
+        // when it can't reach GPIO 12/13 (base 16) or has no room. Applied
+        // at boot (core 1 waits on configLoaded before the claim).
         int encoder_pio = -1;
     } hardware;
 

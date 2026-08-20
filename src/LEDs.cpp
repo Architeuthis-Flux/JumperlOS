@@ -115,6 +115,17 @@ void ledClass::begin(void) {
 
   bbleds.setPioOwnerName("bb-strip");
   topleds.setPioOwnerName("top-strip");
+#if !defined(OG_JUMPERLESS) && defined(PICO_RP2350)
+  // Task #30 layout (the registry in X prints the live truth): the bb strip
+  // joins the cs strobe on PIO0@16 (pin 17 is inside the base-16 window) on
+  // a HIGH SM - SM0/SM1 stay free for user StateMachine(0)/(1); the top
+  // strip (pin 3, base-0 only) goes to PIO2 with the encoder sampler. The
+  // probe LED pair claims PIO1 next to the shifter (initLEDs, which runs
+  // its claim BEFORE these strips could poach PIO1's exact 32/32 fit).
+  bbleds.setPreferredPIO(pio0);
+  bbleds.setPreferredSM(2);
+  topleds.setPreferredPIO(pio2);
+#endif
 
 #if defined(OG_JUMPERLESS)
   // OG: one physical chain on GPIO 25. We size the buffer to LED_COUNT + LED_COUNT_TOP (445 pixels)
@@ -570,6 +581,32 @@ int pass = 0;
 void initLEDs(void) {
   applyHeaderColorsForPsram();
 
+#if !defined(OG_JUMPERLESS)
+  // OG has no dedicated probe LED (V5-only). Skipping avoids claiming
+  // a PIO SM that the OG's oversubscribed PIO blocks can't spare.
+  //
+  // GPIO2 (PROBE_LED_PIN) and GPIO9 (BUTTON_PIN) land on the same TRRS plug
+  // ring, and the GPIO2-side jack contact is the common flaky one - so by
+  // default the WS2812 data (and the shared-SM button sampling, which follows
+  // probeLEDs.getPin()) lives on GPIO9 and GPIO2 becomes the parked spare.
+  // configLoaded is guaranteed by setupCore2stuff() before we get here.
+  if (jumperlessConfig.hardware.probe_led_on_button_pin) {
+    probeLEDs.setPin(BUTTON_PIN);
+  }
+  // Task #30 layout: the probe LED/button SM lives on PIO1 next to the
+  // CH446Q shifter - the merged program flip later needs 22 contiguous
+  // words there (10 + 22 = exactly 32), which is why this claim runs
+  // BEFORE the strips' begin() below: a strip fallback poaching even one
+  // PIO1 word would silently drop the probe LED back to the legacy swap
+  // path (the C5 flicker). X's registry + "probe led mode:" line show it
+  // if that ever happens.
+  probeLEDs.setPioOwnerName("probe-led");
+  probeLEDs.setPreferredPIO(pio1);
+  probeLEDs.begin();
+  probeLEDs.setPixelColor(0, 0x000000);
+  probeLEDs.show();
+#endif
+
   leds.begin(); // INITIALIZE NeoPixel strip object (REQUIRED)
   // delay(1);
   leds.show();
@@ -592,34 +629,8 @@ void initLEDs(void) {
   // }
 
 
-#if !defined(OG_JUMPERLESS)
-  // OG has no dedicated probe LED (V5-only). Skipping avoids claiming
-  // a PIO SM that the OG's oversubscribed PIO blocks can't spare.
-  //
-  // GPIO2 (PROBE_LED_PIN) and GPIO9 (BUTTON_PIN) land on the same TRRS plug
-  // ring, and the GPIO2-side jack contact is the common flaky one - so by
-  // default the WS2812 data (and the shared-SM button sampling, which follows
-  // probeLEDs.getPin()) lives on GPIO9 and GPIO2 becomes the parked spare.
-  // configLoaded is guaranteed by setupCore2stuff() before we get here.
-  if (jumperlessConfig.hardware.probe_led_on_button_pin) {
-    probeLEDs.setPin(BUTTON_PIN);
-  }
-  // PIO layout (T3.2, CH446Q.cpp): PIO2 is GPIOBASE 16 for the crossbar
-  // chip-select strobe (+ the breadboard strip, GPIO 17), PIO1 gets the top
-  // strip and the encoder (24 instructions at origin 0), and this SM - which
-  // also hosts the 15-instruction probe BUTTON program (Probing.cpp) - only
-  // fits next to the CH446Q shifter on PIO0 (10 + 4 + 15 = 29 of 32). Left to
-  // the SDK's first-fit search it lands on PIO1 next to the top strip, the
-  // encoder then fills PIO1, and the button program falls back to CPU
-  // polling. So ask for PIO0; if that is refused the search runs as before
-  // and X ("cs strobe" line) shows where it went.
-  probeLEDs.setPioOwnerName("probe-led");
-  probeLEDs.setPreferredPIO(pio0);
-  probeLEDs.begin();
-  probeLEDs.setPixelColor(0, 0x000000);
-  probeLEDs.show();
-#endif
-
+  // (The probe LED init moved to the TOP of this function - its PIO1 claim
+  // must land before the strips'. See the comment there.)
 
   // Serial.println("\n\rprobeLEDs.begin()\n\r");
 

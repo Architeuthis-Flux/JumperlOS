@@ -73,6 +73,7 @@ void ch446qDmaStats(uint32_t* sends, uint32_t* words, uint32_t* stalls, uint32_t
 // completion interrupt per list send; singles = single-crosspoint sends
 // through the strobe SM (+ how many timed out).
 void ch446qCsStrobeInfo(int* sm, int* fallbackReason, uint32_t* listIrqs, uint32_t* singles, uint32_t* singleTimeouts);
+int ch446qCsStrobeBlock(void); // which block the strobe runs on (-1 = fallback/not built)
 void initCH446Q(void);
 // timeoutUs bounds the PIO-handshake wait before silent recovery. Default is
 // 100ms (the historical wait was 1s; a sick handshake still recovers, just

@@ -37,7 +37,18 @@
 
 // int chipToPinArray[12] = {CS_A, CS_B, CS_C, CS_D, CS_E, CS_F, CS_G, CS_H,
 // CS_I, CS_J, CS_K, CS_L};
+#if !defined(OG_JUMPERLESS) && defined(PICO_RP2350)
+// V5 re-home (task #30): the shifter lives on PIO1 so PIO0 carries only the
+// base-16 group (cs strobe + bb strip, high SMs) and keeps SM0/SM1 + 20
+// instruction words free for user programs - MicroPython StateMachine(0..3)
+// maps to PIO0, and its window at base 16 (GPIO 16..47) covers the routable
+// GPIOs (20..27). The strobe must sit on the shifter's PREV block (the
+// cross-block irq 4/5 handshake in ch446_pio2cs.pio): shifter PIO1 ->
+// strobe PIO0.
+PIO pio = pio1;
+#else
 PIO pio = pio0;
+#endif
 
 uint sm = pio_claim_unused_sm(pio, true);
 
@@ -127,26 +138,28 @@ static bool chipHadConnections[12] = {false};
 // consumes 13 bits), bit 12 = LAST. A list send runs TWO DMA channels over
 // the SAME dmaWords[] array (one into each TX FIFO), so the two streams can
 // never disagree in length or order; a single send puts the same word into
-// both FIFOs and polls PIO2 flag 0 (which the strobe SM raises after a LAST
-// word) - no ISR at all for singles. A list's last word carries LAST, so the
-// strobe SM raises flag 0 exactly once per list; that flag is routed to
-// PIO2_IRQ_1 (an EXCLUSIVE handler on core 1 - the shared chain is 6/6 full,
-// and in strobe mode the legacy PIO0_IRQ_1 handler is not registered, which
-// gives that chain slot back) only between kick and completion, and the ISR
-// completes the mailbox request. Everything else - collection, arbitration
-// (spinlock OS1, chipSelect as the single-send token), the stall watchdog,
-// suspect marking on abort - is the T2.3 machinery with the ISR taken out.
+// both FIFOs and polls the strobe block's flag 0 (which the strobe SM raises
+// after a LAST word) - no ISR at all for singles. A list's last word carries
+// LAST, so the strobe SM raises flag 0 exactly once per list; that flag is
+// routed to the strobe block's IRQ-1 line (an EXCLUSIVE handler on core 1 -
+// the shared chain is 6/6 full, and in strobe mode no shared PIO-IRQ handler
+// is registered, which gives that chain slot back) only between kick and
+// completion, and the ISR completes the mailbox request. Everything else -
+// collection, arbitration (spinlock OS1, chipSelect as the single-send
+// token), the stall watchdog, suspect marking on abort - is the T2.3
+// machinery with the ISR taken out.
 //
-// Fallback: if PIO2 cannot be re-based (someone loaded a program first), has
-// no room, no free SM, or no DMA channel is left, the legacy path (this
-// file's isrFromPio + the SIO chip selects) is used exactly as before, and X
-// says so ("cs strobe: fallback").
+// Fallback: if the strobe block's base isn't 16, it has no room, no free SM,
+// or no DMA channel is left, the legacy path (this file's isrFromPio + the
+// SIO chip selects) is used exactly as before, and X says so
+// ("cs strobe: fallback").
 //
-// PIO layout this relies on (see LEDs.cpp / RotaryEncoder.cpp): PIO0 = this
-// shifter + the probe LED/button SM (steered there: its button program needs
-// 15 instructions and only PIO0 has the room), PIO1 = the top LED strip + the
-// encoder (24 instructions at origin 0), PIO2 (base 16) = this strobe + the
-// breadboard LED strip.
+// PIO layout (task #30, re-homed; X's registry prints the live truth):
+// PIO0@16 = this strobe + the bb strip on the HIGH SMs - SM0/SM1 and ~20
+// instruction words stay free for user programs (MicroPython
+// StateMachine(0..3) = PIO0; base 16 reaches the routable GPIOs 20..27);
+// PIO1@0 = the shifter + the probe LED/button SM (merged: 10 + 22 = 32);
+// PIO2@0 = the top strip + the encoder sampler.
 // ---------------------------------------------------------------------------
 #if !defined(OG_JUMPERLESS) && defined(PICO_RP2350)
 #define CH446Q_PIO2_CS 1
@@ -175,7 +188,7 @@ static uint32_t ch446q_dma_stalls = 0;
 static uint32_t ch446q_dma_maxWords = 0;
 
 #if CH446Q_PIO2_CS
-static PIO      csPio = pio2;
+static PIO      csPio = pio0;           // the shifter's prev block (weld note at the PIO pio definition)
 static int      csSm = -1;              // -1: strobe SM not available -> legacy ISR path
 static uint     csOffset = 0;
 static int      dmaChanCs = -1;         // second DMA channel: dmaWords[] -> PIO2 TX FIFO
@@ -507,16 +520,36 @@ static void ch446qShifterInitPio2cs(uint prog_offs, uint n_bits, uint pin_sck, u
   pio_sm_set_enabled(pio, sm, true);
 }
 
-// Claim PIO2 (GPIOBASE 16) for the chip-select strobe SM. Returns false with
-// csFallbackReason set if any step is refused; nothing is left half-claimed.
-// Runs on core 1 in initCH446Q() - before the LED strips claim their SMs
-// (initLEDs comes after this in setupCore2stuff), so PIO2 has no program yet
-// and its base can still be changed. No USB I/O here (core 1); X reports.
+// The whole-board PIO base map (task #30). A base can only change while a
+// block has zero instruction memory used, and every firmware program load
+// runs later in setupCore2stuff's single core-1 sequence - so this runs
+// FIRST, from initCH446Q. PIO0 goes to base 16: its window (GPIO 16..47)
+// covers the routable GPIOs (20..27) users actually reach through the
+// fabric, and the MicroPython rp2 port (rp2_pio_jl.c) validates pins against
+// the live base with a clean error for anything below 16. PIO1 and PIO2
+// keep the reset default 0 (the pre-re-home code set PIO2 to 16 for the
+// strobe; the strobe now rides PIO0's 16).
+static void pioBasesInit(void) {
+  pio_set_gpio_base(pio0, 16);
+}
+
+// Claim PIO0 (GPIOBASE 16, set by pioBasesInit) for the chip-select strobe
+// SM. Returns false with csFallbackReason set if any step is refused;
+// nothing is left half-claimed. Runs on core 1 in initCH446Q() - before the
+// LED strips claim their SMs (initLEDs comes after this in setupCore2stuff).
+// No USB I/O here (core 1); X reports. The SM is SM3 by preference: PIO0's
+// SM0/SM1 are what MicroPython StateMachine(0)/(1) examples construct.
 static bool ch446qCsStrobeInit(void) {
   csFallbackReason = 0;
-  if (pio_set_gpio_base(csPio, 16) != PICO_OK) { csFallbackReason = 1; return false; }
+  if (pio_get_gpio_base(csPio) != 16) { csFallbackReason = 1; return false; }
   if (!pio_can_add_program(csPio, &ch446_cs_strobe_program)) { csFallbackReason = 2; return false; }
-  int s = pio_claim_unused_sm(csPio, false);
+  int s = -1;
+  if (!pio_sm_is_claimed(csPio, 3)) {
+    pio_sm_claim(csPio, 3);
+    s = 3;
+  } else {
+    s = pio_claim_unused_sm(csPio, false);
+  }
   if (s < 0) { csFallbackReason = 3; return false; }
   int chan = dma_claim_unused_channel(false);
   if (chan < 0) { pio_sm_unclaim(csPio, (uint)s); csFallbackReason = 4; return false; }
@@ -551,8 +584,8 @@ static bool ch446qCsStrobeInit(void) {
   // The one interrupt: PIO2 flag 0 -> IRQ1 line, exclusive handler (no
   // shared-chain slot), core 1's NVIC. Source enabled per list send.
   pio_set_irq1_source_enabled(csPio, pis_interrupt0, false);
-  irq_set_exclusive_handler(PIO2_IRQ_1, ch446qCsStrobeIsr);
-  irq_set_enabled(PIO2_IRQ_1, true);
+  irq_set_exclusive_handler(pio_get_irq_num(csPio, 1), ch446qCsStrobeIsr);
+  irq_set_enabled(pio_get_irq_num(csPio, 1), true);
   dmaChanCs = chan;
   csSm = s;
   return true;
@@ -566,6 +599,10 @@ void ch446qCsStrobeInfo(int* smOut, int* fallbackReason, uint32_t* listIrqs, uin
   if (singles) *singles = cs_single_sends;
   if (singleTimeouts) *singleTimeouts = cs_single_timeouts;
 }
+// For X: which block the strobe actually runs on (-1 = fallback/not built).
+int ch446qCsStrobeBlock(void) {
+  return (csSm >= 0) ? (int)pio_get_index(csPio) : -1;
+}
 #else
 void ch446qCsStrobeInfo(int* smOut, int* fallbackReason, uint32_t* listIrqs, uint32_t* singles, uint32_t* singleTimeouts) {
   if (smOut) *smOut = -1;
@@ -574,9 +611,15 @@ void ch446qCsStrobeInfo(int* smOut, int* fallbackReason, uint32_t* listIrqs, uin
   if (singles) *singles = 0;
   if (singleTimeouts) *singleTimeouts = 0;
 }
+int ch446qCsStrobeBlock(void) { return -1; }
 #endif
 
 void initCH446Q(void) {
+
+#if CH446Q_PIO2_CS
+  // Bases first - before ANY program lands on any block (see pioBasesInit).
+  pioBasesInit();
+#endif
 
   uint dat = 14;
   uint clk = 15;
@@ -588,10 +631,10 @@ void initCH446Q(void) {
   pio_gpio_init(pio, clk);  // Initialize GPIO 15 for PIO0
 
 #if CH446Q_PIO2_CS
-  // T3.2: the strobe SM on PIO2 first (its base must be set while PIO2 is
-  // still empty). With it, the shifter runs the pio2cs program and no
-  // PIO0_IRQ_1 handler is registered at all (a shared-chain slot freed);
-  // without it, everything below is the legacy path.
+  // T3.2 (re-homed for task #30): the strobe SM on PIO0@16 first. With it,
+  // the shifter (PIO1) runs the pio2cs program and no shared PIO-IRQ handler
+  // is registered at all (a shared-chain slot freed); without it, everything
+  // below is the legacy path on the shifter's own block.
   if (ch446qCsStrobeInit()) {
     offset = pio_add_program(pio, &spi_ch446_pio2cs_program);
     pioRegistryLog(pio, (int)sm, offset, spi_ch446_pio2cs_program.length, "ch446-shift");
@@ -599,9 +642,9 @@ void initCH446Q(void) {
   } else
 #endif
   {
-    irq_add_shared_handler(PIO0_IRQ_1, isrFromPio,
+    irq_add_shared_handler(pio_get_irq_num(pio, 1), isrFromPio,
                            PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
-    irq_set_enabled(PIO0_IRQ_1, true);
+    irq_set_enabled(pio_get_irq_num(pio, 1), true);
 
     offset = pio_add_program(pio, &spi_ch446_multi_cs_program);
     pioRegistryLog(pio, (int)sm, offset, spi_ch446_multi_cs_program.length, "ch446-legacy");
