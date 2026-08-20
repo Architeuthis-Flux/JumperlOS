@@ -5,9 +5,9 @@ This script automatically converts Python example files into C string literals f
 ## 🎯 Purpose
 
 The `generate_micropython_examples.py` script:
-1. Scans `pythonStuff/ex/` for Python example files
+1. Scans `scripts/ex/` for Python example files
 2. Converts each `.py` file to a C raw string literal
-3. Generates `src/micropythonExamples.h` with all examples embedded
+3. Generates `src/snakes/micropythonExamples.h` with all examples embedded
 4. Includes the `jumperless_module.py` wrapper and `jumperless.pyi` stub
 
 This allows MicroPython examples to be:
@@ -28,7 +28,7 @@ python3 scripts/generate_micropython_examples.py
 
 ```bash
 # 1. Edit Python examples
-vim pythonStuff/ex/my_example.py
+vim scripts/ex/my_example.py
 
 # 2. Regenerate header
 python3 scripts/generate_micropython_examples.py
@@ -41,10 +41,10 @@ pio run -t upload
 
 | Path | Description |
 |------|-------------|
-| `pythonStuff/ex/*.py` | Source Python examples |
+| `scripts/ex/*.py` | Source Python examples |
 | `pythonStuff/jumperless_module.py` | Main module wrapper |
 | `pythonStuff/jumperless.pyi` | Type stub for IDEs |
-| `src/micropythonExamples.h` | Generated C header (output) |
+| `src/snakes/micropythonExamples.h` | Generated C header (output) |
 | `scripts/generate_micropython_examples.py` | This generator script |
 
 ## ⚙️ Configuration
@@ -137,7 +137,7 @@ py_files = sorted([f for f in source_dir.glob('*.py')
                   if f.name not in exclude_files])
 ```
 
-Scans `pythonStuff/ex/` for all `.py` files except those in `exclude_files`.
+Scans `scripts/ex/` for all `.py` files except those in `exclude_files`.
 
 ### 2. C String Conversion
 
@@ -209,7 +209,7 @@ python3 scripts/generate_micropython_examples.py
 **Problem:** Generated header not being compiled
 
 **Solution:**
-1. Check that `src/micropythonExamples.h` was updated
+1. Check that `src/snakes/micropythonExamples.h` was updated
 2. Verify the header is included in the build
 3. Clean and rebuild: `pio run -t clean && pio run`
 
@@ -283,8 +283,8 @@ Found type stub at /path/to/jumperless.pyi
 
 ## 🔗 Related Files
 
-- `pythonStuff/ex/README.md` - Documentation for example files
-- `src/micropythonExamples.h` - Generated output (do not edit manually!)
+- `scripts/ex/README.md` - Documentation for example files
+- `src/snakes/micropythonExamples.h` - Generated output (do not edit manually!)
 - `platformio.ini` - Build configuration
 
 ## 📚 References
