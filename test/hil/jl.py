@@ -126,6 +126,70 @@ def port1_path():
     sys.exit("FAIL: main terminal (JLV5port1) not found. Is the board connected?")
 
 
+def port1_paste(cmd, payload, settle=3.5):
+    """Send `cmd` on port 1, wait for its paste prompt, paste `payload` in one
+    write, return (prompt, output). The S/L paste mechanics test_paste_state
+    verifies - factored here so run_all's state restore can reuse them."""
+    import serial  # pyserial
+
+    _ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+    def _collect(ser, secs):
+        deadline = time.time() + secs
+        buf = b""
+        while time.time() < deadline:
+            chunk = ser.read(4096)
+            if chunk:
+                buf += chunk
+        return _ansi.sub("", buf.decode(errors="replace"))
+
+    with serial.Serial(port1_path(), 115200, timeout=0.05) as ser:
+        ser.write(b"\r\n")
+        ser.flush()
+        _collect(ser, 1.5)  # connection-init banner
+        ser.reset_input_buffer()
+        ser.write(cmd.encode() + b"\r\n")
+        ser.flush()
+        prompt = _collect(ser, 1.0)
+        ser.write(payload)
+        ser.flush()
+        out = _collect(ser, settle)
+    return prompt, out
+
+
+def board_state_capture():
+    """Snapshot the board's full state (bridges + power) as a pastable YAML,
+    or None if the board didn't produce one. Forces line mode first (the
+    suite's standing assumption)."""
+    port1_command("B1", 1.5)
+    y = port1_command("Y", 3.0)
+    # An empty board prints "nets:" with no "bridges:" section - still a
+    # valid, pastable snapshot (restoring "no user nets" is exactly right).
+    if "version:" not in y or "power:" not in y:
+        return None
+    yaml = y[y.index("version:"):]
+    return "\n".join(l.rstrip("\r") for l in yaml.split("\n")).rstrip() + "\n\n"
+
+
+def board_state_restore(yaml):
+    """Paste a board_state_capture() snapshot back. Returns True when the
+    board confirmed it. The suite's cleanup (nodes_clear + zeroed rails) used
+    to simply STAY on the board - twice now that read as a firmware bug on
+    the bench ('rails aren't setting', 'current sensing isn't working')."""
+    prompt, out = port1_paste("S", yaml.encode())
+    ok = "State applied successfully" in out
+    # Applying a pasted power section claims DAC0 as a user write, which
+    # relocates the probe buffer feed; a DAC0 write inside the feed window
+    # (2.80-3.90 V) hands it back. Re-issue the captured dac0 so the feed
+    # returns whenever the bench value allows it.
+    m = re.search(r"dac0:\s*(-?[0-9.]+)", yaml)
+    if ok and m:
+        v = float(m.group(1))
+        if 2.80 <= v <= 3.90:
+            jl_exec(f"dac_set(0, {v}, True)", timeout=15)
+    return ok
+
+
 def port1_command(cmd, collect_seconds=2.5):
     """Send a single-char command line on port 1, return de-ANSI'd output."""
     import serial  # pyserial

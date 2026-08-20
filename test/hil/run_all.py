@@ -12,6 +12,9 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import jl  # board_state_capture/restore - leave the bench as we found it
+
 TESTS = [
     "test_micropython_fs.py",  # cheapest liveness check first
     "test_routing.py",
@@ -25,6 +28,14 @@ TESTS = [
 here = os.path.dirname(os.path.abspath(__file__))
 selector = sys.argv[1] if len(sys.argv) > 1 else ""
 
+# Snapshot the bench BEFORE the suite touches anything: the tests' standard
+# cleanup (nodes_clear + zeroed rails/DACs) used to simply stay on the board,
+# and twice now that read as a firmware bug ("rails aren't setting",
+# "current sensing isn't working" - both were this).
+snapshot = jl.board_state_capture()
+if snapshot is None:
+    print("WARNING: could not snapshot the board state - it will NOT be restored after the suite")
+
 results = {}
 for name in TESTS:
     if selector and selector not in name:
@@ -32,6 +43,13 @@ for name in TESTS:
     print(f"\n=== {name} " + "=" * max(0, 60 - len(name)))
     proc = subprocess.run([sys.executable, os.path.join(here, name)], cwd=here)
     results[name] = proc.returncode
+
+if snapshot is not None:
+    if jl.board_state_restore(snapshot):
+        print("\nboard state restored to the pre-suite snapshot")
+    else:
+        print("\nWARNING: board state restore FAILED - the bench nets/rails are "
+              "whatever the last test left; reload your slot or reboot")
 
 print("\n" + "=" * 66)
 fails = 0
