@@ -197,6 +197,15 @@ switch_slot = _native.switch_slot
 CURRENT_SLOT = _native.CURRENT_SLOT
 
 # ============================================================================
+# Projects and Parts (guided placement)
+# ============================================================================
+load_project = _native.load_project
+place_part = _native.place_part
+remove_part = _native.remove_part
+list_parts = _native.list_parts
+guide_progress = _native.guide_progress
+
+# ============================================================================
 # Context Control
 # ============================================================================
 context_toggle = _native.context_toggle
@@ -922,6 +931,9 @@ __all__ = [
     
     # Slot Management
     'switch_slot', 'CURRENT_SLOT',
+
+    # Projects and Parts (guided placement)
+    'load_project', 'place_part', 'remove_part', 'list_parts', 'guide_progress',
     
     # Context Control
     'context_toggle', 'context_get',

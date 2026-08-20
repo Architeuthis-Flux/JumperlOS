@@ -65,8 +65,9 @@ int PartDefinition::nodeForPin(int k) const {
 }
 
 // `offset` wins when >= 0 (same-side offset from baseRow); otherwise the
-// footprint math on the 1-based physical pin number.
-static int partPinNode(const PartDefinition& p, const PartPin& pin) {
+// footprint math on the 1-based physical pin number. Exported (PartPlacement.h)
+// so list_parts() reports the same node the expansion actually bridges.
+int partPinNode(const PartDefinition& p, const PartPin& pin) {
     if (pin.offset >= 0) {
         int node = p.baseRow + pin.offset;
         if (node < 1 || node > 60) return -1;
@@ -229,7 +230,7 @@ int removePartPlacement(JumperlessState& st, int partIdx, String& err) {
 // Serializer
 // ---------------------------------------------------------------------------
 
-static const char* pinClassName(uint8_t pinClass) {
+const char* partPinClassName(uint8_t pinClass) {
     switch (pinClass) {
         case 1: return "power";
         case 2: return "gnd";
@@ -287,7 +288,7 @@ void serializeParts(const JumperlessState& st, String& out) {
                     first = false;
                 }
                 if (!first) out += ", ";
-                out += "class: " + String(pinClassName(pin.pinClass));
+                out += "class: " + String(partPinClassName(pin.pinClass));
                 out += "}\n";
             }
         }
@@ -402,6 +403,25 @@ static void parseInlinePins(PartDefinition& p, const String& rest, String& err) 
         parsePinEntry(p, pinName, rest.substring(braceStart, braceEnd + 1), err);
         i = braceEnd + 1;
     }
+}
+
+// Pins map handed in from MicroPython (place_part's `pins_json`):
+//   {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
+// Quotes are stripped (both kinds - a bare Python dict repr uses ') and the
+// rest goes through the SAME inline-flow-map parser the YAML
+// `pins: {A: {...}}` form uses, so the two entry points can never grow
+// different grammars. Returns the number of pins appended to p.
+int parsePartPinsSpec(PartDefinition& p, const char* spec, String& err) {
+    if (spec == nullptr) return 0;
+    String flow;
+    flow.reserve(strlen(spec));
+    for (const char* c = spec; *c != '\0'; c++) {
+        if (*c == '"' || *c == '\'') continue;
+        flow += *c;
+    }
+    int before = p.numPins;
+    parseInlinePins(p, flow, err);
+    return p.numPins - before;
 }
 
 static void partInit(PartDefinition& p) {

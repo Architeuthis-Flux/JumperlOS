@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Parts layer roundtrip (file-driven - the place_part Python bindings land
-in a later task): write a slot YAML with a parts: section, load it through
-the REAL slot-load path (`<3` on port 1 -> SlotManager::loadSlot), assert the
-expansion bridges and {NAME}_{PIN} net names, then trigger a wholesale toYAML
-rewrite (nodes_save) and assert the parts: section SURVIVED it - the
-auto-save regression that motivated the serializer. Unknown-key tolerance
-(frobnicate: 7 inside a part) and unknown-section containment
+"""Parts layer roundtrip, file-driven AND through the Python bindings.
+
+File-driven (phases 1-6): write a slot YAML with a parts: section, load it
+through the REAL slot-load path (`<3` on port 1 -> SlotManager::loadSlot),
+assert the expansion bridges and {NAME}_{PIN} net names, then trigger a
+wholesale toYAML rewrite (nodes_save) and assert the parts: section SURVIVED
+it - the auto-save regression that motivated the serializer. Unknown-key
+tolerance (frobnicate: 7 inside a part) and unknown-section containment
 (futuresection: before bridges:) ride along in the same file.
+
+API (phases 7-8, task 4's bindings): place_part / list_parts / remove_part /
+guide_progress against an empty parts table, then load_project() of a project
+pushed to /projects/tmptest/wiring.yaml - including the slot-clobber
+regression (the active slot number and /slots/slot0.yaml must be untouched by
+a project load, because a project wiring.yaml is deliberately NOT named
+slot*.yaml).
 
 Bench convention: snapshot board state + slot3.yaml + active slot up front,
 restore all three at the end."""
@@ -180,6 +188,10 @@ for i in range(1, 59):
 for k in sorted(found):
     print(k, "=", found[k])
 """)
+gp = jl_exec("print('gp=', guide_progress())")
+check(parse_kv(gp).get("gp") == 2,
+      "guide_progress() == 2 (the guideProgress: scalar this slot carries)")
+
 check("U1_TRIG" in out, "net name U1_TRIG asserted from the parts table")
 check("R1_B" in out, "net name R1_B asserted (offset pins)")
 trig_nodes = ""
@@ -281,7 +293,264 @@ check("parts:" not in noparts, "numParts==0: rewrite emits NO parts: section")
 check("guideProgress:" not in noparts, "empty guideSource: rewrite emits NO guideProgress:")
 check("- {n1: 55, n2: 42" in noparts, "no-parts slot still round-trips its bridge")
 
-# --- 7. Restore the bench --------------------------------------------------
+# --- 7. The Python bindings: place_part / list_parts / remove_part ---------
+# Slot 3 is active and its parts table is empty (phase 6 loaded the no-parts
+# YAML), so every part seen from here on came from the API. Geometry:
+#   U9 sip2 @ row 5 (footprint inferred): A pin 1 -> node 5, B pin 2 -> node 6
+#   U8 dip8 @ row 14 (explicit):          VCC pin 8 -> 14+30+(8-8) = node 44
+out = jl_exec("""
+print("gp_none=", guide_progress())
+print("rc=", place_part("U9", 5, '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'))
+print("rc_dip=", place_part("U8", 14, '{"VCC": {"pin": 8, "connect": "TOP_RAIL"}}', "dip8", "ic", "TEST"))
+print("rc_dup=", place_part("U9", 20, '{"A": {"pin": 1, "connect": 30}}'))
+print("rc_odd=", place_part("BAD1", 20, '{"A": {"pin": 1, "connect": 30}}', "dip7"))
+print("rc_row=", place_part("BAD2", 99, '{"A": {"pin": 1, "connect": 30}}'))
+print("rc_nopins=", place_part("BAD3", 20, '{}'))
+""", timeout=40)
+vals = parse_kv(out)
+check(vals.get("gp_none") == -1, "guide_progress() == -1 when no guide source is loaded")
+check(vals.get("rc") == 0, "place_part('U9', 5, pins_json) returned 0")
+check(vals.get("rc_dip") == 0, "place_part with an explicit dip8 + type + value returned 0")
+check(vals.get("rc_dup") == -1, "place_part on an existing name is refused (-1)")
+# The three refusals below are commitPart()'s predicate: an entry that passed
+# here but failed the parser would be auto-saved and then silently DROPPED on
+# the next load (the erasure bug of commit 352bb23).
+check(vals.get("rc_odd") == -1, "place_part with an odd DIP pin count is refused (-1)")
+check(vals.get("rc_row") == -1, "place_part with row 99 is refused (-1)")
+check(vals.get("rc_nopins") == -1, "place_part with no parseable pins is refused (-1)")
+
+out = jl_exec("""
+print("u9a=", 1 if is_connected(5, "GND") else 0)
+print("u9b=", 1 if is_connected(6, 7) else 0)
+print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
+print("bad=", 1 if is_connected(20, 30) else 0)
+for i in range(1, 59):
+    nodes = get_net_nodes(i)
+    if nodes:
+        print("NET|%d|%s|%s" % (i, str(get_net_name(i)), str(nodes)))
+""")
+vals = parse_kv(out)
+check(vals.get("u9a") == 1, "place_part expanded U9 pin A: bridge 5 <-> GND")
+check(vals.get("u9b") == 1, "place_part expanded U9 pin B: bridge 6 <-> 7")
+check(vals.get("u8vcc") == 1, "place_part expanded U8 pin VCC (dip8 pin 8 -> node 44) to TOP_RAIL")
+check(vals.get("bad") == 0, "no bridge from any refused place_part call (20-30 absent)")
+
+nets = {}
+for line in out.splitlines():
+    m = re.match(r"\s*NET\|(\d+)\|(.*)\|(.*?)\s*$", line)
+    if m:
+        nets[int(m.group(1))] = (m.group(2).strip(), m.group(3).strip())
+net7 = None
+gndnet = None
+for num, (name, nodes) in nets.items():
+    toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
+    if "7" in toks:
+        net7 = (num, name)
+    if "5" in toks and name == "GND":
+        gndnet = num
+check(net7 is not None and net7[1] == "U9_B",
+      f"the net holding node 7 is named U9_B (got {net7})")
+check(gndnet is not None,
+      "U9 pin A landed on GND and the special net kept its name (never renamed by parts)")
+
+out = jl_exec("""
+parts = list_parts()
+print("n=", len(parts))
+by = {}
+for p in parts:
+    by[p['name']] = p
+u9 = by['U9']
+print("u9row=", u9['row'])
+print("u9fp=", u9['footprint'])
+print("u9placed=", 1 if u9['placed'] else 0)
+print("u9npins=", len(u9['pins']))
+print("u9bnode=", u9['pins']['B']['node'])
+print("u9bconn=", u9['pins']['B']['connect'])
+print("u9aclass=", u9['pins']['A']['class'])
+u8 = by['U8']
+print("u8fp=", u8['footprint'])
+print("u8type=", u8['type'])
+print("u8val=", u8['value'])
+print("u8vnode=", u8['pins']['VCC']['node'])
+""")
+vals = parse_kv(out)
+check(vals.get("n") == 2, "list_parts() returned both parts")
+check(vals.get("u9row") == 5, "list_parts: U9 row is 5")
+check(vals.get("u9fp") == "sip2", "list_parts: U9 footprint inferred as sip2")
+check(vals.get("u9placed") == 1, "list_parts: U9 placed is True")
+check(vals.get("u9npins") == 2, "list_parts: U9 pins dict has both legs")
+check(vals.get("u9bnode") == 6, "list_parts: U9 pin B resolves to node 6")
+check(vals.get("u9bconn") == 7, "list_parts: U9 pin B connects to 7")
+check(vals.get("u9aclass") == "signal", "list_parts: U9 pin A class defaults to signal")
+check(vals.get("u8fp") == "dip8", "list_parts: U8 footprint is dip8")
+check(vals.get("u8type") == "ic", "list_parts: U8 type is ic")
+check(vals.get("u8val") == "TEST", "list_parts: U8 value is TEST")
+check(vals.get("u8vnode") == 44, "list_parts: U8 pin VCC resolves to node 44")
+
+# The silent-vanish check: a part BUILT by place_part must survive the
+# serializer AND re-parse on the next load (place_part enforces the same
+# predicate commitPart does, so nothing it accepts can be dropped).
+out = jl_exec("print('saved=', nodes_save(3))")
+check(parse_kv(out).get("saved") == 3, "nodes_save(3) wrote the API-placed parts")
+time.sleep(1.0)
+_, api_yaml = read_device_file(SLOT_PATH)
+for needle in ('- name: "U9"', "footprint: sip2", "row: 5", "placed: true",
+               "A: {pin: 1, connect: GND, class: signal}",
+               "B: {pin: 2, connect: 7, class: signal}",
+               '- name: "U8"', "footprint: dip8", 'value: "TEST"', "type: ic",
+               "VCC: {pin: 8, connect: TOP_RAIL, class: signal}"):
+    check(needle in api_yaml, f"place_part serialized: {needle}")
+
+port1_command(f"<{bounce}", 4.0)
+time.sleep(1.5)
+port1_command("<3", 4.0)
+time.sleep(2.0)
+out = jl_exec("""
+print("n=", len(list_parts()))
+print("u9b=", 1 if is_connected(6, 7) else 0)
+print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
+""")
+vals = parse_kv(out)
+check(vals.get("n") == 2, "reload: both API-placed parts re-parsed (none silently dropped)")
+check(vals.get("u9b") == 1, "reload: U9 pin B bridge 6-7 re-expanded")
+check(vals.get("u8vcc") == 1, "reload: U8 pin VCC bridge 44-TOP_RAIL re-expanded")
+
+out = jl_exec("""
+print("rm=", remove_part("U9"))
+print("rm2=", remove_part("U8"))
+print("rm_missing=", remove_part("U9"))
+print("n=", len(list_parts()))
+print("u9a=", 1 if is_connected(5, "GND") else 0)
+print("u9b=", 1 if is_connected(6, 7) else 0)
+print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
+names = []
+for i in range(1, 59):
+    nm = get_net_name(i)
+    if nm and str(nm).startswith("U9_"):
+        names.append(str(nm))
+print("leftover=", ",".join(names) if names else "none")
+""", timeout=40)
+vals = parse_kv(out)
+check(vals.get("rm") == 0, "remove_part('U9') returned 0")
+check(vals.get("rm2") == 0, "remove_part('U8') returned 0")
+check(vals.get("rm_missing") == -1, "remove_part on an unknown name returns -1")
+check(vals.get("n") == 0, "remove_part dropped the entries (list_parts() empty)")
+check(vals.get("u9a") == 0, "remove_part pulled the 5 <-> GND bridge")
+check(vals.get("u9b") == 0, "remove_part pulled the 6 <-> 7 bridge")
+check(vals.get("u8vcc") == 0, "remove_part pulled the 44 <-> TOP_RAIL bridge")
+check(vals.get("leftover") == "none", "remove_part cleared the {NAME}_{PIN} net names too")
+
+# --- 8. load_project() + the slot-clobber regression -----------------------
+# A project wiring.yaml is deliberately NOT named slot*.yaml, so
+# extractSlotNumberFromPath() returns -1 and loadSlotFromPath leaves slot
+# tracking alone. Assert that: the active slot number and /slots/slot0.yaml
+# must both come through a project load untouched.
+TMP_PROJ = "/projects/tmptest"
+TMP_WIRING = TMP_PROJ + "/wiring.yaml"
+TMP_YAML = """version: 2
+sourceOfTruth: bridges
+guideProgress: {source: "/projects/tmptest/wiring.yaml", step: 4}
+
+meta:
+  name: tmptest
+
+bridges:
+  - {n1: 23, n2: 24}
+
+parts:
+  - name: "Q1"
+    type: bjt
+    footprint: sip3
+    row: 28
+    placed: true
+    pins:
+      B: {offset: 0, connect: 23}
+      C: {offset: 1}
+      E: {offset: 2, connect: 26}
+
+power:
+  topRail: 0.00
+  bottomRail: 0.00
+  dac0: 3.33
+  dac1: 0.00
+"""
+
+slot0_existed, slot0_before = read_device_file("/slots/slot0.yaml")
+print(f"  info: slot0.yaml existed before load_project: {slot0_existed}")
+
+out = jl_exec(f"""
+for d in ("/projects", {TMP_PROJ!r}):
+    if not fs_exists(d):
+        try:
+            jfs.mkdir(d)
+        except Exception as e:
+            print("mkdirerr=", e)
+print("projdir=", 1 if fs_exists({TMP_PROJ!r}) else 0)
+print("wrote=", 1 if fs_write({TMP_WIRING!r}, {TMP_YAML!r}) else 0)
+""", timeout=30)
+vals = parse_kv(out)
+check(vals.get("projdir") == 1, f"created {TMP_PROJ} on the board")
+check(vals.get("wrote") == 1, f"pushed {TMP_WIRING}")
+
+out = jl_exec("""
+print("loaded=", 1 if load_project("tmptest") else 0)
+""", timeout=30)
+check(parse_kv(out).get("loaded") == 1,
+      "load_project('tmptest') resolved /projects/tmptest/wiring.yaml and loaded it")
+time.sleep(1.5)
+
+out = jl_exec("""
+print("b=", 1 if is_connected(23, 24) else 0)
+print("q1b=", 1 if is_connected(28, 23) else 0)
+print("q1e=", 1 if is_connected(30, 26) else 0)
+print("gp=", guide_progress())
+print("nparts=", len(list_parts()))
+print("stale=", 1 if is_connected(55, 42) else 0)
+""")
+vals = parse_kv(out)
+check(vals.get("b") == 1, "load_project applied the project's bridges (23-24)")
+check(vals.get("q1b") == 1, "load_project re-expanded the placed part (Q1 B: node 28 -> 23)")
+check(vals.get("q1e") == 1, "load_project re-expanded the placed part (Q1 E: node 30 -> 26)")
+check(vals.get("gp") == 4, "guide_progress() == 4 from the project's guideProgress scalar")
+check(vals.get("nparts") == 1, "list_parts() sees the project's part")
+check(vals.get("stale") == 0,
+      "load_project replaced the previous state (slot 3's 55-42 bridge is gone)")
+
+q = port1_command("Q", 1.5)
+m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+check(m is not None and int(m.group(1)) == 3,
+      f"slot-clobber regression: the active slot is still 3 after load_project ({q.strip()[:60]!r})")
+time.sleep(2.0)  # give the idle auto-save a chance to misbehave
+slot0_after_exists, slot0_after = read_device_file("/slots/slot0.yaml")
+check(slot0_after_exists == slot0_existed and slot0_after == slot0_before,
+      "slot-clobber regression: /slots/slot0.yaml is byte-identical after load_project")
+
+out = jl_exec(f"""
+print("literal=", 1 if load_project({TMP_WIRING!r}) else 0)
+print("missing=", 1 if load_project("nosuchproject") else 0)
+""", timeout=30)
+vals = parse_kv(out)
+check(vals.get("literal") == 1, "load_project() takes a literal path when the arg contains '/'")
+check(vals.get("missing") == 0, "load_project() of a missing project returns False")
+
+out = jl_exec(f"""
+for p in ({TMP_WIRING!r},):
+    if fs_exists(p):
+        jfs.remove(p)
+try:
+    jfs.rmdir({TMP_PROJ!r})
+except Exception as e:
+    print("rmdirerr=", e)
+print("gone=", 0 if fs_exists({TMP_PROJ!r}) else 1)
+""", timeout=25)
+check(parse_kv(out).get("gone") == 1, f"removed {TMP_PROJ} (the 555 project stays, tmptest does not)")
+
+# Leave slot 3 before the restore: the state is dirty from the project load
+# and the idle auto-save of the ACTIVE slot would clobber the fs_write below.
+port1_command(f"<{bounce}", 4.0)
+time.sleep(1.5)
+
+# --- 9. Restore the bench --------------------------------------------------
 # Restore the FILE first, switch slots second: if orig_slot happened to be 3,
 # switching first would make slot 3 active again and the idle auto-save could
 # clobber the restored content (the same hazard handled before phase 1).

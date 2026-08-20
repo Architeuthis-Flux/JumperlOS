@@ -31,6 +31,7 @@
 #include "FilesystemStuff.h" // For safe file operations
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
+#include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
 #include "WaveGen.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
 
@@ -1720,6 +1721,282 @@ int jl_switch_slot( int slot ) {
     }
 
     return slot; // Already in this slot
+}
+
+// =============================================================================
+// Projects + parts layer (guided placement)
+// =============================================================================
+// Backing C functions for load_project() / place_part() / remove_part() /
+// list_parts() / guide_progress(). The parts primitives themselves live in
+// routing/PartPlacement.cpp - everything here is a thin wrapper so the pins
+// grammar, the DIP/SIP geometry and the {NAME}_{PIN} naming have exactly one
+// implementation (design: CodeDocs/DESIGN_GUIDED_PLACEMENT.md 8,
+// CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md 1).
+
+// Load any slot YAML by path - a project wiring.yaml IS a slot YAML. This is
+// the FileManager call path (FilesystemStuff.cpp:1290), NOT jl_switch_slot's:
+//  - no holdCore1Frames dance: that exists only to flip netSlot, and
+//    loadSlotFromPath deliberately leaves slot tracking alone for a
+//    non-slot*.yaml name (States.cpp:3078, the slot-clobber guard).
+//  - no refreshConnections() here: loadSlotFromPath already re-expands placed
+//    parts, calls refreshConnections(-1, 1, 1) and applies state to hardware
+//    (States.cpp:3062-3076). A second refresh would just re-route the same
+//    state.
+// Returns 0 on success, -1 on failure (the reason is printed to the stream).
+int jl_load_slot_path( const char* path ) {
+    if ( path == nullptr || path[ 0 ] == '\0' ) {
+        Serial.println( "load_project: empty path" );
+        return -1;
+    }
+
+    String err;
+    if ( !SlotManager::getInstance( ).loadSlotFromPath( String( path ), err ) ) {
+        Serial.print( "load_project failed: " );
+        Serial.println( err );
+        return -1;
+    }
+
+    return 0;
+}
+
+// Scratch part assembled by jl_place_part. static, not a stack local: a
+// PartDefinition is ~500 B and the OG's stacks are tiny - the same argument
+// deserializeParts makes for its static `cur` (PartPlacement.cpp). The REPL
+// is single-threaded, so there is no second builder.
+static PartDefinition placeScratch;
+
+// place_part(name, row, pins_json[, footprint][, type][, value])
+// pins_json: {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
+//   pin:     1-based PHYSICAL pin placed by the footprint math
+//   offset:  same-side offset from row (wins over pin: when >= 0)
+//   connect: row 1-60 or any node name parseNodeName() resolves (GND, TOP_RAIL...)
+//   class:   signal|power|gnd|nc
+// footprint "" (default) infers sipN from the highest pin/offset listed, so a
+// 2-leg part just works; pass "dip8" for real DIP geometry.
+// Returns 0 on success, -1 on failure (reason printed).
+int jl_place_part( const char* name, int row, const char* pins_json,
+                   const char* footprint, const char* type, const char* value ) {
+    if ( name == nullptr || name[ 0 ] == '\0' || strlen( name ) > 15 ) {
+        Serial.println( "place_part: name must be 1-15 characters" );
+        return -1;
+    }
+    if ( globalState.parts.findByName( name ) >= 0 ) {
+        Serial.print( "place_part: a part named " );
+        Serial.print( name );
+        Serial.println( " already exists (remove_part it first)" );
+        return -1;
+    }
+    if ( globalState.parts.numParts >= MAX_PARTS ) {
+        Serial.print( "place_part: parts table full (max " );
+        Serial.print( MAX_PARTS );
+        Serial.println( ")" );
+        return -1;
+    }
+
+    PartDefinition& p = placeScratch;
+    memset( &p, 0, sizeof( p ) );
+    strncpy( p.name, name, sizeof( p.name ) - 1 );
+    if ( type != nullptr ) strncpy( p.typeStr, type, sizeof( p.typeStr ) - 1 );
+    if ( value != nullptr ) strncpy( p.value, value, sizeof( p.value ) - 1 );
+    p.baseRow = (int16_t)row;
+
+    // Footprint: explicit dipN/sipN, else inferred below from the pins.
+    bool inferFootprint = ( footprint == nullptr || footprint[ 0 ] == '\0' );
+    if ( !inferFootprint ) {
+        String fp = String( footprint );
+        fp.toLowerCase( );
+        if ( fp.startsWith( "dip" ) ) {
+            p.footprint = 1;
+            p.pinCount = (uint8_t)fp.substring( 3 ).toInt( );
+        } else if ( fp.startsWith( "sip" ) ) {
+            p.footprint = 0;
+            p.pinCount = (uint8_t)fp.substring( 3 ).toInt( );
+        } else {
+            Serial.print( "place_part: unknown footprint " );
+            Serial.println( footprint );
+            return -1;
+        }
+    }
+
+    String err;
+    int added = parsePartPinsSpec( p, pins_json, err );
+    if ( err.length( ) > 0 ) {
+        Serial.print( "place_part: " );
+        Serial.println( err );
+    }
+    if ( added <= 0 ) {
+        Serial.println( "place_part: no usable pins parsed" );
+        return -1;
+    }
+
+    if ( inferFootprint ) {
+        // A strip of legs: the highest 1-based pin (or offset+1) listed.
+        int high = 1;
+        for ( int j = 0; j < p.numPins; j++ ) {
+            if ( p.pins[ j ].pinNumber > high ) high = p.pins[ j ].pinNumber;
+            if ( p.pins[ j ].offset + 1 > high ) high = p.pins[ j ].offset + 1;
+        }
+        p.footprint = 0;
+        p.pinCount = (uint8_t)high;
+    }
+
+    // The SAME predicate commitPart() applies on parse (PartPlacement.cpp).
+    // An entry that passes here but would fail there gets auto-saved into the
+    // slot YAML and then silently DROPPED on the next load - the erasure bug
+    // commit 352bb23 fixed. Keep the two in step.
+    if ( p.pinCount < 1 || p.pinCount > 60 ) {
+        Serial.println( "place_part: footprint pin count must be 1-60" );
+        return -1;
+    }
+    if ( p.footprint == 1 && ( p.pinCount % 2 ) != 0 ) {
+        Serial.println( "place_part: a DIP needs an even pin count" );
+        return -1;
+    }
+    if ( p.baseRow < 1 || p.baseRow > 60 ) {
+        Serial.println( "place_part: row must be 1-60" );
+        return -1;
+    }
+
+    // Hold core-1 frames while the state changes, release BEFORE the refresh
+    // (refreshConnections calls waitCore2 internally) - the jl_nodes_clear
+    // pattern.
+    holdCore1Frames( );
+    delayMicroseconds( 50 );
+
+    globalState.parts.parts[ globalState.parts.numParts++ ] = p;
+    int idx = globalState.parts.numParts - 1;
+    String applyErr;
+    int bridges = applyPartPlacement( globalState, idx, applyErr );
+
+    releaseCore1Frames( );
+
+    if ( applyErr.length( ) > 0 ) {
+        Serial.print( "place_part warnings: " );
+        Serial.println( applyErr );
+    }
+    if ( bridges < 0 ) {
+        return -1;
+    }
+
+    // The refresh re-asserts {NAME}_{PIN} net names for us
+    // (partsReassertNetNames runs inside every rebuild).
+    refreshConnections( -1, 1, 0 );
+    return 0;
+}
+
+// remove_part(name): pull the expansion bridges, drop the {NAME}_{PIN} net
+// names the part owned, and remove the entry from the table.
+// Returns 0 on success, -1 when there is no such part.
+int jl_remove_part( const char* name ) {
+    if ( name == nullptr || name[ 0 ] == '\0' ) {
+        Serial.println( "remove_part: empty name" );
+        return -1;
+    }
+    int idx = globalState.parts.findByName( name );
+    if ( idx < 0 ) {
+        Serial.print( "remove_part: no part named " );
+        Serial.println( name );
+        return -1;
+    }
+
+    // Capture the auto names BEFORE the entry disappears: removePartPlacement
+    // only pulls bridges, and nothing else drops a net name that
+    // partsReassertNetNames asserted (part names are unique, so no surviving
+    // part can own these).
+    static char autoNames[ MAX_PART_PINS ][ 32 ];
+    int numAuto = 0;
+    {
+        const PartDefinition& p = globalState.parts.parts[ idx ];
+        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+            makePinNetName( p, p.pins[ j ], autoNames[ numAuto++ ] );
+        }
+    }
+
+    holdCore1Frames( );
+    delayMicroseconds( 50 );
+
+    String err;
+    removePartPlacement( globalState, idx, err );
+    // Drop the entry itself (placed=false alone would leave it in the YAML).
+    for ( int i = idx; i < globalState.parts.numParts - 1; i++ ) {
+        globalState.parts.parts[ i ] = globalState.parts.parts[ i + 1 ];
+    }
+    globalState.parts.numParts--;
+    globalState.markDirty( );
+
+    releaseCore1Frames( );
+
+    if ( err.length( ) > 0 ) {
+        Serial.print( "remove_part warnings: " );
+        Serial.println( err );
+    }
+
+    refreshConnections( -1, 1, 0 );
+
+    // Now that the nets are rebuilt, clear any surviving auto names.
+    bool cleared = false;
+    for ( int a = 0; a < numAuto; a++ ) {
+        for ( int n = 1; n < MAX_NETS; n++ ) {
+            const char* nm = globalState.display.getNetName( n );
+            if ( nm != nullptr && strcmp( nm, autoNames[ a ] ) == 0 ) {
+                globalState.display.removeNetName( n );
+                cleared = true;
+            }
+        }
+    }
+    if ( cleared ) {
+        globalState.markDirty( );
+    }
+
+    return 0;
+}
+
+int jl_get_num_parts( void ) {
+    return globalState.parts.numParts;
+}
+
+// One part as a delimited record for the MicroPython dict builder - the same
+// static-buffer shape jl_get_path_info() uses (no JSON library on board):
+//   name|type|value|row|footprint|placed|PIN,node,connect,class;PIN,node,...
+// footprint is the "dip8"/"sip2" spelling serializeParts emits, node is the
+// resolved board node (-1 when the leg would leave the board) and connect is
+// -1 when the leg only occupies a hole. Empty string for a bad index.
+const char* jl_get_part_info( int idx ) {
+#if defined( OG_JUMPERLESS )
+    static char partBuffer[ 640 ]; // RP2040: scarce SRAM, MAX_PART_PINS is 16
+#else
+    static char partBuffer[ 1024 ];
+#endif
+    partBuffer[ 0 ] = '\0';
+
+    if ( idx < 0 || idx >= globalState.parts.numParts ) {
+        return partBuffer;
+    }
+
+    const PartDefinition& p = globalState.parts.parts[ idx ];
+    int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|",
+                        p.name, p.typeStr, p.value, (int)p.baseRow,
+                        p.footprint == 1 ? "dip" : "sip", (unsigned)p.pinCount,
+                        p.placed ? 1 : 0 );
+
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        if ( pos < 0 || pos > (int)sizeof( partBuffer ) - 48 ) break;
+        const PartPin& pin = p.pins[ j ];
+        pos += snprintf( partBuffer + pos, sizeof( partBuffer ) - pos, "%s%s,%d,%d,%s",
+                         ( j == 0 ) ? "" : ";", pin.name, partPinNode( p, pin ),
+                         (int)pin.connect, partPinClassName( pin.pinClass ) );
+    }
+
+    return partBuffer;
+}
+
+// guide_progress(): the guideProgress step of the loaded state, or -1 when no
+// guide source is set. A project stopped at step 0 legitimately returns 0.
+int jl_guide_progress( void ) {
+    if ( globalState.parts.guideSource[ 0 ] == '\0' ) {
+        return -1;
+    }
+    return (int)globalState.parts.guideStep;
 }
 
 // OLED Functions

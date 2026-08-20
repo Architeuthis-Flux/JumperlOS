@@ -110,6 +110,17 @@ void jl_init_micropython_local_copy( void );
 void jl_send_raw( int chip, int x, int y, int setOrClear );
 void jl_send_raw_str( const char* chip_str, int x, int y, int setOrClear );
 int jl_switch_slot( int slot );
+
+// Projects + parts layer (guided placement). A project wiring.yaml IS a slot
+// YAML, so load_project() rides the same loader the Files browser uses.
+int jl_load_slot_path( const char* path );
+int jl_place_part( const char* name, int row, const char* pins_json,
+                   const char* footprint, const char* type, const char* value );
+int jl_remove_part( const char* name );
+int jl_get_num_parts( void );
+const char* jl_get_part_info( int idx );
+int jl_guide_progress( void );
+
 void jl_restore_micropython_entry_state( void );
 int jl_has_unsaved_changes( void );
 const char* jl_get_state( void );
@@ -2598,6 +2609,130 @@ static mp_obj_t jl_switch_slot_func( mp_obj_t slot_obj ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_switch_slot_obj, jl_switch_slot_func );
 
+// ---------------------------------------------------------------------------
+// Projects + parts (guided placement)
+// ---------------------------------------------------------------------------
+
+// load_project("555") -> /projects/555/wiring.yaml
+// load_project("/projects/555/wiring.yaml") -> that literal path
+// Anything containing '/' is taken verbatim. Returns True on success.
+static mp_obj_t jl_load_project_func( mp_obj_t name_obj ) {
+    const char* arg = mp_obj_str_get_str( name_obj );
+    char path[ 128 ];
+
+    if ( strchr( arg, '/' ) != NULL ) {
+        snprintf( path, sizeof( path ), "%s", arg );
+    } else {
+        snprintf( path, sizeof( path ), "/projects/%s/wiring.yaml", arg );
+    }
+
+    return mp_obj_new_bool( jl_load_slot_path( path ) == 0 );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_load_project_obj, jl_load_project_func );
+
+// place_part(name, row, pins_json [, footprint] [, type] [, value]) -> 0 / -1
+// pins_json: {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
+static mp_obj_t jl_place_part_func( size_t n_args, const mp_obj_t* args ) {
+    const char* name = mp_obj_str_get_str( args[ 0 ] );
+    int row = mp_obj_get_int( args[ 1 ] );
+    const char* pins = mp_obj_str_get_str( args[ 2 ] );
+    const char* footprint = ( n_args > 3 ) ? mp_obj_str_get_str( args[ 3 ] ) : "";
+    const char* type = ( n_args > 4 ) ? mp_obj_str_get_str( args[ 4 ] ) : "";
+    const char* value = ( n_args > 5 ) ? mp_obj_str_get_str( args[ 5 ] ) : "";
+
+    return mp_obj_new_int( jl_place_part( name, row, pins, footprint, type, value ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_place_part_obj, 3, 6, jl_place_part_func );
+
+// remove_part(name) -> 0 / -1
+static mp_obj_t jl_remove_part_func( mp_obj_t name_obj ) {
+    return mp_obj_new_int( jl_remove_part( mp_obj_str_get_str( name_obj ) ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_remove_part_obj, jl_remove_part_func );
+
+// Field of a '|'/','-delimited record: returns the start, sets *len and
+// advances *cursor past the delimiter (same hand-rolled split style
+// get_path_info uses - there is no JSON/CSV library on board).
+static const char* jl_rec_field( const char** cursor, char delim, size_t* len ) {
+    const char* start = *cursor;
+    const char* end = start;
+    while ( *end != '\0' && *end != delim ) end++;
+    *len = (size_t)( end - start );
+    *cursor = ( *end == '\0' ) ? end : end + 1;
+    return start;
+}
+
+// list_parts() -> list of dicts:
+//   {name, type, value, row, footprint, placed, pins: {PIN: {node, connect, class}}}
+static mp_obj_t jl_list_parts_func( void ) {
+    mp_obj_t list = mp_obj_new_list( 0, NULL );
+    int numParts = jl_get_num_parts( );
+
+    for ( int i = 0; i < numParts; i++ ) {
+        const char* rec = jl_get_part_info( i );
+        if ( rec == NULL || rec[ 0 ] == '\0' ) continue;
+
+        // name|type|value|row|footprint|placed|PIN,node,connect,class;...
+        const char* cur = rec;
+        size_t len;
+        const char* name = jl_rec_field( &cur, '|', &len );
+        size_t name_len = len;
+        const char* type = jl_rec_field( &cur, '|', &len );
+        size_t type_len = len;
+        const char* value = jl_rec_field( &cur, '|', &len );
+        size_t value_len = len;
+        const char* row = jl_rec_field( &cur, '|', &len );
+        const char* footprint = jl_rec_field( &cur, '|', &len );
+        size_t fp_len = len;
+        const char* placed = jl_rec_field( &cur, '|', &len );
+
+        mp_obj_t dict = mp_obj_new_dict( 7 );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_name ),
+                           mp_obj_new_str( name, name_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_type ),
+                           mp_obj_new_str( type, type_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_value ),
+                           mp_obj_new_str( value, value_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_row ),
+                           mp_obj_new_int( atoi( row ) ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_footprint ),
+                           mp_obj_new_str( footprint, fp_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_placed ),
+                           mp_obj_new_bool( atoi( placed ) != 0 ) );
+
+        mp_obj_t pins = mp_obj_new_dict( 0 );
+        while ( *cur != '\0' ) {
+            const char* pin_name = jl_rec_field( &cur, ',', &len );
+            size_t pin_name_len = len;
+            const char* node = jl_rec_field( &cur, ',', &len );
+            const char* connect = jl_rec_field( &cur, ',', &len );
+            const char* pin_class = jl_rec_field( &cur, ';', &len );
+            size_t class_len = len;
+
+            mp_obj_t pin_dict = mp_obj_new_dict( 3 );
+            mp_obj_dict_store( pin_dict, MP_OBJ_NEW_QSTR( MP_QSTR_node ),
+                               mp_obj_new_int( atoi( node ) ) );
+            mp_obj_dict_store( pin_dict, MP_OBJ_NEW_QSTR( MP_QSTR_connect ),
+                               mp_obj_new_int( atoi( connect ) ) );
+            mp_obj_dict_store( pin_dict, MP_OBJ_NEW_QSTR( MP_QSTR_class ),
+                               mp_obj_new_str( pin_class, class_len ) );
+            mp_obj_dict_store( pins, mp_obj_new_str( pin_name, pin_name_len ), pin_dict );
+        }
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_pins ), pins );
+
+        mp_obj_list_append( list, dict );
+    }
+
+    return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_list_parts_obj, jl_list_parts_func );
+
+// guide_progress() -> guided-placement step, or -1 when no guide is loaded
+static mp_obj_t jl_guide_progress_func( void ) {
+    return mp_obj_new_int( jl_guide_progress( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_guide_progress_obj, jl_guide_progress_func );
+
 static mp_obj_t jl_nodes_discard_func( void ) {
     jl_restore_micropython_entry_state( );
     return mp_const_none;
@@ -4638,6 +4773,16 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "   nodes_has_changes()              - Check for unsaved changes\n" );
         mp_printf( &mp_plat_print, "   switch_slot(slot)                - Switch to different slot (0-7)\n" );
         mp_printf( &mp_plat_print, "   CURRENT_SLOT                     - Get current slot number\n\n" );
+        mp_printf( &mp_plat_print, "  Projects and parts (guided placement):\n" );
+        mp_printf( &mp_plat_print, "   load_project(\"555\")              - Load /projects/555/wiring.yaml (a '/' = literal path)\n" );
+        mp_printf( &mp_plat_print, "   place_part(name, row, pins_json) - Place a part, expand its pins to bridges (0 = ok)\n" );
+        mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value)\n" );
+        mp_printf( &mp_plat_print, "        pins_json: {\"A\": {\"pin\": 1, \"connect\": \"GND\"}, \"B\": {\"pin\": 2, \"connect\": 7}}\n" );
+        mp_printf( &mp_plat_print, "        pin/offset place the leg, connect is a row or node name, class: signal|power|gnd|nc\n" );
+        mp_printf( &mp_plat_print, "        footprint \"dip8\"/\"sip2\" (default: a SIP strip sized from the pins listed)\n" );
+        mp_printf( &mp_plat_print, "   remove_part(name)                - Remove a part: bridges, net names and entry (0 = ok)\n" );
+        mp_printf( &mp_plat_print, "   list_parts()                     - Parts as dicts (name/type/value/row/footprint/placed/pins)\n" );
+        mp_printf( &mp_plat_print, "   guide_progress()                 - Guided-placement step, -1 when no guide is loaded\n\n" );
         mp_printf( &mp_plat_print, "  Context (controls persistence):\n" );
         mp_printf( &mp_plat_print, "   context_toggle()                 - Toggle global/python mode\n" );
         mp_printf( &mp_plat_print, "   context_get()                    - Get current mode name\n\n" );
@@ -6523,6 +6668,14 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_nodes_discard ), MP_ROM_PTR( &jl_nodes_discard_obj ) },
     { MP_ROM_QSTR( MP_QSTR_nodes_has_changes ), MP_ROM_PTR( &jl_nodes_has_changes_obj ) },
     { MP_ROM_QSTR( MP_QSTR_switch_slot ), MP_ROM_PTR( &jl_switch_slot_obj ) },
+
+    // Projects + parts (guided placement)
+    { MP_ROM_QSTR( MP_QSTR_load_project ), MP_ROM_PTR( &jl_load_project_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_place_part ), MP_ROM_PTR( &jl_place_part_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_remove_part ), MP_ROM_PTR( &jl_remove_part_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_list_parts ), MP_ROM_PTR( &jl_list_parts_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_guide_progress ), MP_ROM_PTR( &jl_guide_progress_obj ) },
+
     { MP_ROM_QSTR( MP_QSTR_get_state ), MP_ROM_PTR( &jl_get_state_obj ) },
     { MP_ROM_QSTR( MP_QSTR_set_state ), MP_ROM_PTR( &jl_set_state_obj ) },
     { MP_ROM_QSTR( MP_QSTR_nodes_clear ), MP_ROM_PTR( &jl_nodes_clear_obj ) },

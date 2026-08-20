@@ -723,6 +723,92 @@ CURRENT_SLOT: int
 """Current active slot number"""
 
 # ============================================================================
+# Projects and Parts (guided placement)
+# ============================================================================
+
+def load_project(name_or_path: str) -> bool:
+    """Load a project's wiring into the live state
+
+    A project wiring.yaml IS a slot YAML, so this takes the same loader the
+    Files browser uses: bridges, nets, power and any `parts:` section are
+    applied and routed immediately.
+
+    Args:
+        name_or_path: "555" -> /projects/555/wiring.yaml.
+                      Anything containing '/' is used as a literal path.
+
+    Returns:
+        True if the file loaded, False otherwise (the reason is printed)
+
+    Example:
+        load_project("555")
+        load_project("/slots/slot3.yaml")
+    """
+    ...
+
+def place_part(name: str, row: int, pins_json: str, footprint: str = "",
+               type: str = "", value: str = "") -> int:
+    """Place a part and expand its pins into bridges
+
+    Args:
+        name: Part name, 1-15 characters, unique (remove_part first to replace)
+        row: Breadboard row of pin 1 (1-60)
+        pins_json: Pins map, e.g.
+            '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'
+            pin:     1-based physical pin, placed by the footprint geometry
+            offset:  same-side offset from row (wins over pin: when >= 0)
+            connect: row 1-60 or a node name (GND, TOP_RAIL, DAC0, ...);
+                     omit it to let the leg occupy the hole with no bridge
+            class:   "signal" (default), "power", "gnd" or "nc"
+        footprint: "dip8" / "sip2" - default "" infers a SIP strip sized from
+                   the highest pin/offset listed
+        type: Optional part type (resistor|capacitor|diode|led|bjt|fet|ic)
+        value: Optional value string ("10k", "NE555")
+
+    Returns:
+        0 on success, -1 on failure (the reason is printed)
+
+    Example:
+        place_part("U9", 5, '{"A": {"pin": 1, "connect": "GND"}, '
+                            '"B": {"pin": 2, "connect": 7}}')
+        place_part("U1", 5, '{"GND": {"pin": 1, "connect": "GND"}}',
+                   "dip8", "ic", "NE555")
+    """
+    ...
+
+def remove_part(name: str) -> int:
+    """Remove a part: its expansion bridges, its {NAME}_{PIN} net names and its entry
+
+    Returns:
+        0 on success, -1 when there is no part with that name
+    """
+    ...
+
+def list_parts() -> List[Dict]:
+    """List the parts in the loaded state
+
+    Returns:
+        A list of dicts:
+        {'name', 'type', 'value', 'row', 'footprint', 'placed',
+         'pins': {PIN: {'node', 'connect', 'class'}}}
+        'node' is the resolved breadboard node for the leg (-1 if off-board),
+        'connect' is the node it bridges to (-1 for none).
+
+    Example:
+        for p in list_parts():
+            print(p['name'], p['footprint'], 'placed' if p['placed'] else 'pending')
+    """
+    ...
+
+def guide_progress() -> int:
+    """Guided-placement progress of the loaded state
+
+    Returns:
+        The saved guide step, or -1 when no guide source is loaded
+    """
+    ...
+
+# ============================================================================
 # Context Control
 # ============================================================================
 

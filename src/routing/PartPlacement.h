@@ -25,4 +25,10 @@ int  removePartPlacement(JumperlessState& st, int partIdx, String& err);   // ba
 void partsReassertNetNames(JumperlessState& st);                           // after net rebuilds (names survive merges)
 void makePinNetName(const PartDefinition& p, const PartPin& pin, char out[32]); // {NAME}_{PIN}, [A-Z0-9_], <=31 chars
 
+// Shared with the MicroPython bindings (place_part / list_parts) so the pins
+// grammar and the geometry rules have exactly ONE implementation.
+int  partPinNode(const PartDefinition& p, const PartPin& pin);   // resolved node (offset wins), -1 off-board
+const char* partPinClassName(uint8_t pinClass);                  // "signal"|"power"|"gnd"|"nc"
+int  parsePartPinsSpec(PartDefinition& p, const char* spec, String& err); // JSON/flow pins map -> p.pins[]
+
 #endif // PART_PLACEMENT_H
