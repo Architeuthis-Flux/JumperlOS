@@ -1,0 +1,72 @@
+version: 2
+sourceOfTruth: bridges
+meta:
+  project: 555
+  title: "555 LED Flasher"
+  variant: default
+  summary: "NE555 astable blinking an LED at ~1.4 Hz"
+  script: main.py
+  needs: ["NE555 (DIP-8)", "10k", "47k", "10uF cap", "LED", "330"]
+parts:
+  - name: "U1"
+    type: ic
+    value: "NE555"
+    footprint: dip8
+    row: 5
+    pins:
+      GND:   {pin: 1, connect: GND,      class: gnd}
+      TRIG:  {pin: 2, connect: 37,       class: signal}
+      OUT:   {pin: 3,                    class: signal}
+      RESET: {pin: 4, connect: TOP_RAIL, class: power}
+      CTRL:  {pin: 5,                    class: nc}
+      THR:   {pin: 6,                    class: signal}
+      DIS:   {pin: 7,                    class: signal}
+      VCC:   {pin: 8, connect: TOP_RAIL, class: power}
+  - name: "R1"
+    type: resistor
+    value: "10k"
+    footprint: sip2
+    row: 12
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 36}}
+  - name: "R2"
+    type: resistor
+    value: "47k"
+    footprint: sip2
+    row: 15
+    pins: {A: {pin: 1, connect: 36}, B: {pin: 2, connect: 37}}
+  - name: "C1"
+    type: capacitor
+    value: "10uF"
+    footprint: sip2
+    row: 18
+    pins: {PLUS: {pin: 1, connect: 37}, MINUS: {pin: 2, connect: GND}}
+  - name: "LED1"
+    type: led
+    footprint: sip2
+    row: 22
+    pins: {A: {pin: 1}, K: {pin: 2, connect: GND}}
+  - name: "R3"
+    type: resistor
+    value: "330"
+    footprint: sip2
+    row: 25
+    pins: {A: {pin: 1, connect: 7}, B: {pin: 2, connect: 22}}
+guide:
+  title: "555 LED Flasher"
+  steps:
+    - {do: note, text: "A 555 blinker. Wheel: turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 5."}
+    - {do: place, part: R1, check: continuity, min: 0.1, max: 0.8, text: "10k resistor: rows 12 and 13."}
+    - {do: place, part: R2, check: continuity, min: 0.04, max: 0.3, text: "47k resistor: rows 15 and 16."}
+    - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19."}
+    - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23."}
+    - {do: place, part: R3, check: continuity, min: 5.0, max: 15.0, text: "330 resistor: rows 25 and 26."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
+    - {do: verify, target: 7, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
+bridges:
+  - {n1: ADC0, n2: 7}
+  - {n1: ADC1, n2: 37}
+nets:
+  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [37], user: true}
+power:
+  topRail: 5.0

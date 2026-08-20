@@ -1274,7 +1274,18 @@ void FileManager::selectCurrentFile( ) {
             pendingScriptPath = fullPath;
             shouldExitForScript = true;
             return;  // run() loop will detect this and exit
-        } else if ( lower.endsWith( ".yaml" ) && lower.startsWith( "slot" ) ) {
+        } else if ( lower.endsWith( ".yaml" ) &&
+                    ( lower.startsWith( "slot" ) || fullPath.startsWith( "/projects/" ) ) ) {
+            // Project wiring files (/projects/<dir>/wiring*.yaml) take the same
+            // slot-load path as slot*.yaml - a project wiring file IS a slot
+            // YAML (v2 plus the contained meta:/parts:/guide: sections). They
+            // are deliberately NOT named slot*.yaml: extractSlotNumberFromPath()
+            // (States.cpp:2873) matches any basename starting "slot" and ending
+            // ".yaml", so "slot_555.yaml" would toInt() to 0 and repoint
+            // activeSlotNumber/netSlot at slot 0 - the idle auto-save would then
+            // write the project over the user's /slots/slot0.yaml. With
+            // "wiring.yaml" it returns -1 (:2877) and loadSlotFromPath leaves
+            // slot tracking alone (:3080, guarded on `slotNum >= 0`).
             String err;
             if ( SlotManager::getInstance( ).loadSlotFromPath( fullPath, err ) ) {
                 outputToArea( "Loaded slot: " + file->name, FileColors::STATUS );
