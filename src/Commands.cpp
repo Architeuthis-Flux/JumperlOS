@@ -16,6 +16,7 @@
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
 #include "PersistentStuff.h"
+#include "PartPlacement.h"
 #include "Probing.h"
 #include "RotaryEncoder.h"
 #include "RouteSafety.h"
@@ -227,7 +228,10 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   // Reconcile DisplayState custom names/colors after nets are rebuilt
   // Uses firstNode to find where nets moved to
   globalState.display.reconcileAfterRebuild();
-  
+  // The parts table is the source of truth for {NAME}_{PIN} net names - net
+  // merges lose firstNode-keyed names, so re-assert from parts every rebuild.
+  partsReassertNetNames(globalState);
+
   rebuildChangedNetColorsFromBridges();  // Recompute net colors from bridges after net regeneration
   t[ti++] = millis(); // t[3] = after rebuildChangedNetColorsFromBridges
 
@@ -396,7 +400,10 @@ unsigned long start2 = millis();
   
   // Reconcile DisplayState custom names/colors after nets are rebuilt
   globalState.display.reconcileAfterRebuild();
-  
+  // Re-assert {NAME}_{PIN} net names from the parts table (merges lose
+  // firstNode-keyed names; the parts table is the source of truth).
+  partsReassertNetNames(globalState);
+
   rebuildChangedNetColorsFromBridges();  // Recompute net colors from bridges after net regeneration
 #if DEBUG_REFRESH
   Serial.print("rebuildChangedNetColorsFromBridges = ");
