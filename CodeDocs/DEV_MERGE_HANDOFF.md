@@ -296,6 +296,7 @@ no `N -> 0` before it means someone cleared state mid-hold.
 | **30** | **done** (rows 77–81, shipped in 5.7.4.1) | **clear PIO0 for user programs** — better than the approved floor: Kevin's base-16 call gives users PIO0 SM0/SM1 + 20 words, verified with a live REPL `StateMachine(0)` | row 81; `C7_ENCODER_REWRITE.md` status block has the superseded-plan note; the SCHEDULER doc's "PIO0 cannot reach empty" is obsolete |
 | **31** | not started | rail-adjust shortcut: highlight a rail, click the wheel to change its voltage (gate on an OLED being installed) | `CodeDocs/TODO81926.md` (Kevin's note) — needs an interaction-design round first |
 | **28** | not started, low | a live "Probe LED A/B" flip from merged→legacy wedged core 1 in `canShow()`'s **unbounded** wait | row 73; the fix is to bound that wait / reset `endTime` in `setProbeLedMerged()`. Pre-existing landmine, only reachable from the debug menu |
+| **32** | not started | **nvscan per-path current estimates ~60% off vs INA0** (+ one negative-wrong path) — regressed somewhere in rows 34–79; ruled out: re-home, board state, the INA itself | the detailed bullet under "Pre-existing, noticed, not acted on" below; bisect starting at T2.1 (`557203e`) |
 
 Two things that are nobody's task yet but will bite:
 
@@ -359,6 +360,22 @@ Two things that are nobody's task yet but will bite:
 ### 2. Pre-existing, noticed, not acted on
 
 - `test_net_currents` phantom-current failure (A/B'd on `main`, identical).
+- **The scan-vs-INA current disagreement (task #32, found 2026-08-19).** The
+  suite's file-level "FAIL test_net_currents" hid a SECOND failing check for
+  days: `[nvscan]`'s per-path current estimates disagree with INA0 by ~60%
+  (scan max 6.7 mA vs INA0 4.24 mA on the standard DAC0→ISENSE→row-5→GND
+  loop; one path also reads negative-wrong: `path 1 net 2 20->101 -5.33 mA`).
+  Ruled out on 2026-08-19: NOT the PIO re-home (identical on `cc6bdd4` and
+  `4867fe5`), NOT board state (identical after a clean reboot), NOT the INA
+  (its reading and `currentSenseState` are correct — 18.7 mA measured right
+  on the same loop). The estimates come from `NetVoltageScan`'s per-path
+  math (ADC-ring voltage drops across known path resistances,
+  `src/sensing/NetVoltageScan.cpp`); the last check-level 8/8 on record is
+  row 33's build (2026-08-17, `545b7e6`), so it regressed somewhere in rows
+  34–79 — T2.1's ADC-ring tap rewrite and the path-resistance table are the
+  first suspects to bisect. **Lesson encoded**: "the standing net_currents
+  phantom" was doing a lot of work — run the file standalone for check-level
+  truth before tolerating a suite FAIL.
 - `machine.UART` in `lib/micropython/port/machine_uart_jl.c`: `deinit()`'s
   `if (!was_enabled)` guard reads inverted relative to `init()`'s, so a live
   `uart.deinit()` never runs `uart_deinit()`/`irq_remove_handler` and leaves
