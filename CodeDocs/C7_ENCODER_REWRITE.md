@@ -1,14 +1,22 @@
 # C7 — the encoder rewrite (task #30's hard prerequisite)
 
-**Status 2026-08-19: stage 1 (the verification rig) is committed and verified
-on hardware — `b0ee09e`, handoff row 75.** Kevin's spin matrix: ~1460 raw
-counts, accumulated drift −2, max transient 4, nearOverruns 0, "feels right".
-The CPU count is live by default (`encoderUseCpuDecode`, debug menu
-"Encoder A/B" flips it). Found on the way: the 1-instruction sampler FIT ON
-PIO0 — the budget table below says 32/32, so its arithmetic is off by ≥1 word;
-measure real occupancy (extend the PIO Status panel first, § step 3) before
-the re-home. **Next: the removal commit** (legacy quadrature program + the
-drift rig out, CPU count becomes the only source), then the re-home.
+**Status 2026-08-19, end of session: C7 AND task #30 are DONE** — stage 1
+rig `b0ee09e` (row 75), removal `87e30ef` (row 77), placement + config key
+`6711653` (row 78), the placement registry `cc6bdd4` (row 79), and the
+re-home `4867fe5` (row 81), shipped as **5.7.4.1**.
+
+**The plan below is superseded in one important way**: this doc's premise
+(inherited from the SCHEDULER doc) was that PIO0 cannot reach empty. Kevin's
+call — "make PIO0's gpio base 16, users will use routable gpio" — dissolved
+it: the routable GPIOs are RP2350 pins 20–27, all inside a base-16 window,
+so BOTH other blocks can be base 0 and every base-0 firmware program fits
+across them. Final layout: **PIO0@16 = cs-strobe + bb-strip on SM3/SM2
+(SM0/SM1 + 20 words free for `StateMachine(0..3)` users)**, PIO1@0 =
+shifter + merged probe (exactly 32/32), PIO2@0 = top-strip + sampler.
+The "free word on a full PIO0" anomaly: the merged probe program applies
+late, so the sampler's early pio0-first claim cost it the 22-word
+contiguous fit — the registry (row 79) is the instrument that catches that
+class from now on.
 
 2026-08-19. Kevin approved task #30 (clear PIO0 for user programs) including its
 honest bottom line: **PIO0 cannot reach empty** — the CH446Q shifter is pinned
