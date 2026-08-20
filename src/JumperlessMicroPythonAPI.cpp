@@ -1765,6 +1765,32 @@ int jl_load_slot_path( const char* path ) {
 // is single-threaded, so there is no second builder.
 static PartDefinition placeScratch;
 
+// Charset guard for every user string that reaches serializeParts RAW.
+// Strings that arrive through the YAML path are pre-filtered by the line
+// scanner; API strings are not, and the serializer emits them verbatim:
+//   `- name: "<raw>"` / `value: "<raw>"` -> an embedded '"' truncates the
+//      field at the next load (parseScalar takes the quote pair)
+//   `type: <raw>` / `<PINNAME>: {...}`   -> emitted unquoted, and an embedded
+//      '\n' writes an UN-INDENTED line into the parts: section, where
+//      deserializeParts hits `if (!indented) break;` and silently DROPS every
+//      part after it. Same data-erasure class the States.h header calls
+//      load-bearing.
+// REJECT rather than sanitize: makePinNetName may quietly transform (net
+// names are cosmetic), but a part the caller asked for must not come back as
+// a different part.
+static bool partStringSafe( const char* s, const char* what ) {
+    for ( const char* c = s; c != nullptr && *c != '\0'; c++ ) {
+        unsigned char ch = (unsigned char)*c;
+        if ( ch < 0x20 || ch > 0x7E || ch == '"' ) {
+            Serial.print( "place_part: " );
+            Serial.print( what );
+            Serial.println( " may only contain printable ASCII (no '\"', no control characters)" );
+            return false;
+        }
+    }
+    return true;
+}
+
 // place_part(name, row, pins_json[, footprint][, type][, value])
 // pins_json: {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
 //   pin:     1-based PHYSICAL pin placed by the footprint math
@@ -1780,6 +1806,10 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         Serial.println( "place_part: name must be 1-15 characters" );
         return -1;
     }
+    // Guard BEFORE anything is appended: these three are serialized raw.
+    if ( !partStringSafe( name, "name" ) ) return -1;
+    if ( !partStringSafe( type, "type" ) ) return -1;
+    if ( !partStringSafe( value, "value" ) ) return -1;
     if ( globalState.parts.findByName( name ) >= 0 ) {
         Serial.print( "place_part: a part named " );
         Serial.print( name );
@@ -1829,6 +1859,18 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         return -1;
     }
 
+    // Pin names are emitted UNQUOTED as `      <NAME>: {...}`. A ':' is
+    // already impossible (parseInlinePins cuts the name at the first colon),
+    // but a control character or a leading '#' still corrupts the section on
+    // reload - '#' makes the whole line a comment and the pin vanishes.
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        if ( !partStringSafe( p.pins[ j ].name, "pin name" ) ) return -1;
+        if ( p.pins[ j ].name[ 0 ] == '#' ) {
+            Serial.println( "place_part: a pin name may not start with '#'" );
+            return -1;
+        }
+    }
+
     if ( inferFootprint ) {
         // A strip of legs: the highest 1-based pin (or offset+1) listed.
         int high = 1;
@@ -1867,6 +1909,14 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     int idx = globalState.parts.numParts - 1;
     String applyErr;
     int bridges = applyPartPlacement( globalState, idx, applyErr );
+    if ( bridges < 0 ) {
+        // Unwind the append: a failed placement must never leave a half-placed
+        // entry in the table (the next auto-save would persist it).
+        // Unreachable today - applyPartPlacement only returns -1 for a bad
+        // index, and idx is valid by construction - but it stays safe if
+        // applyPartPlacement grows failure modes.
+        globalState.parts.numParts--;
+    }
 
     releaseCore1Frames( );
 
@@ -1874,14 +1924,13 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         Serial.print( "place_part warnings: " );
         Serial.println( applyErr );
     }
-    if ( bridges < 0 ) {
-        return -1;
-    }
 
-    // The refresh re-asserts {NAME}_{PIN} net names for us
-    // (partsReassertNetNames runs inside every rebuild).
+    // Refresh either way: the failure path unwound the table above, and a
+    // rebuild resyncs the fabric with whatever did land. The refresh also
+    // re-asserts {NAME}_{PIN} net names for us (partsReassertNetNames runs
+    // inside every rebuild).
     refreshConnections( -1, 1, 0 );
-    return 0;
+    return ( bridges < 0 ) ? -1 : 0;
 }
 
 // remove_part(name): pull the expansion bridges, drop the {NAME}_{PIN} net

@@ -306,6 +306,10 @@ print("rc_dup=", place_part("U9", 20, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_odd=", place_part("BAD1", 20, '{"A": {"pin": 1, "connect": 30}}', "dip7"))
 print("rc_row=", place_part("BAD2", 99, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_nopins=", place_part("BAD3", 20, '{}'))
+print("rc_quote=", place_part('U"X', 30, '{"A": {"pin": 1, "connect": 31}}'))
+print("rc_nl=", place_part("U\\nX", 30, '{"A": {"pin": 1, "connect": 31}}'))
+print("rc_pinnl=", place_part("UNL", 30, '{"A\\nB": {"pin": 1, "connect": 31}}'))
+print("rc_val=", place_part("UVAL", 30, '{"A": {"pin": 1, "connect": 31}}', "sip2", "ic", 'bad\\nvalue'))
 """, timeout=40)
 vals = parse_kv(out)
 check(vals.get("gp_none") == -1, "guide_progress() == -1 when no guide source is loaded")
@@ -318,12 +322,21 @@ check(vals.get("rc_dup") == -1, "place_part on an existing name is refused (-1)"
 check(vals.get("rc_odd") == -1, "place_part with an odd DIP pin count is refused (-1)")
 check(vals.get("rc_row") == -1, "place_part with row 99 is refused (-1)")
 check(vals.get("rc_nopins") == -1, "place_part with no parseable pins is refused (-1)")
+# Charset guard: serializeParts emits name/value quoted and type/pin names
+# bare, so a '"' truncates the field at reload and a newline writes an
+# UN-INDENTED line into parts: - where deserializeParts breaks out and drops
+# every part after it. All four must be refused, not sanitized.
+check(vals.get("rc_quote") == -1, "place_part with a '\"' in the name is refused (-1)")
+check(vals.get("rc_nl") == -1, "place_part with a newline in the name is refused (-1)")
+check(vals.get("rc_pinnl") == -1, "place_part with a newline in a PIN name is refused (-1)")
+check(vals.get("rc_val") == -1, "place_part with a newline in the value is refused (-1)")
 
 out = jl_exec("""
 print("u9a=", 1 if is_connected(5, "GND") else 0)
 print("u9b=", 1 if is_connected(6, 7) else 0)
 print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
 print("bad=", 1 if is_connected(20, 30) else 0)
+print("badchar=", 1 if is_connected(30, 31) else 0)
 for i in range(1, 59):
     nodes = get_net_nodes(i)
     if nodes:
@@ -334,6 +347,8 @@ check(vals.get("u9a") == 1, "place_part expanded U9 pin A: bridge 5 <-> GND")
 check(vals.get("u9b") == 1, "place_part expanded U9 pin B: bridge 6 <-> 7")
 check(vals.get("u8vcc") == 1, "place_part expanded U8 pin VCC (dip8 pin 8 -> node 44) to TOP_RAIL")
 check(vals.get("bad") == 0, "no bridge from any refused place_part call (20-30 absent)")
+check(vals.get("badchar") == 0,
+      "no bridge from any charset-refused place_part call (30-31 absent)")
 
 nets = {}
 for line in out.splitlines():
@@ -374,7 +389,8 @@ print("u8val=", u8['value'])
 print("u8vnode=", u8['pins']['VCC']['node'])
 """)
 vals = parse_kv(out)
-check(vals.get("n") == 2, "list_parts() returned both parts")
+check(vals.get("n") == 2,
+      "list_parts() returned both parts and nothing from the 7 refused calls")
 check(vals.get("u9row") == 5, "list_parts: U9 row is 5")
 check(vals.get("u9fp") == "sip2", "list_parts: U9 footprint inferred as sip2")
 check(vals.get("u9placed") == 1, "list_parts: U9 placed is True")
