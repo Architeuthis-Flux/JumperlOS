@@ -14,6 +14,7 @@
 #include "pico/mutex.h"
 #include "pico/stdlib.h"
 #include "config.h"              // jumperlessConfig.hardware.encoder_pio (sampler block preference)
+#include "PioRegistry.h"         // sampler placement lands in X's PIO panel
 #include "encoder_sampler.pio.h" // the 1-instruction quadrature sampler (C7)
 #include "hardware/dma.h"
 
@@ -134,6 +135,7 @@ static void encSamplerUninit( void ) {
     }
     if ( pioEnc != nullptr && smEnc >= 0 ) {
         pio_sm_set_enabled( pioEnc, smEnc, false );
+        pioRegistryUnlog( pioEnc, offsetEnc, "enc-sampler" );
         pio_remove_program( pioEnc, &encoder_sampler_program, offsetEnc );
         pio_sm_unclaim( pioEnc, smEnc );
         pioEnc = nullptr;
@@ -177,6 +179,7 @@ static void encSamplerInit( void ) {
         pioEnc = p;
         smEnc = sm;
         offsetEnc = pio_add_program( p, &encoder_sampler_program );
+        pioRegistryLog( p, sm, offsetEnc, encoder_sampler_program.length, "enc-sampler" );
     }
     if ( pioEnc == nullptr ) return; // no room: encoder silently uninitialized (existing contract)
     int ch = dma_claim_unused_channel( false );

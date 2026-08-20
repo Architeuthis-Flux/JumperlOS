@@ -45,6 +45,14 @@ bool JeoPixel::rp2040claimPIO(void) {
     ws2812_program_init(pio, pio_sm, pio_program_offset, pin, 400000, 8);
   }
 
+  // Log the placement in the app's PIO registry (defined in src/; always
+  // linked with this lib in this project).
+  {
+    extern void pioRegistryLog(PIO pio, int sm, uint offset, uint length, const char* name);
+    pioRegistryLog(pio, (int)pio_sm, pio_program_offset, ws2812_program.length,
+                   pio_owner_name ? pio_owner_name : "ws2812");
+  }
+
   // OPTIMIZATION: Try to claim a DMA channel for non-blocking LED updates
   dma_channel = dma_claim_unused_channel(false); // false = don't panic if unavailable
   use_dma = (dma_channel >= 0);

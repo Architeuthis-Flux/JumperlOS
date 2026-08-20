@@ -7,6 +7,7 @@
 // Encoder-button analog press test (diagnostics menu entry; implementation lives
 // at the bottom of this file). Needs the encoder accessor + raw PIO/GPIO access.
 #include "JumperlessDefines.h"
+#include "PioRegistry.h" // btn-analyzer program placement lands in X's PIO panel
 #include "RotaryEncoder.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
@@ -2191,6 +2192,7 @@ bool btnPioInit( BtnPio& bp, uint pin, uint32_t timeout, uint32_t prechargeCycle
         bp.pio = pio;
         bp.sm = sm;
         bp.offset = pio_add_program( pio, &btnTimerProgram );
+        pioRegistryLog( pio, sm, bp.offset, btnTimerProgram.length, "btn-analyzer" );
         bp.ok = true;
     }
     if ( !bp.ok ) return false;
@@ -2215,6 +2217,7 @@ bool btnPioInit( BtnPio& bp, uint pin, uint32_t timeout, uint32_t prechargeCycle
 void btnPioDeinit( BtnPio& bp, uint pin ) {
     if ( !bp.ok ) return;
     pio_sm_set_enabled( bp.pio, bp.sm, false );
+    pioRegistryUnlog( bp.pio, bp.offset, "btn-analyzer" );
     pio_remove_program( bp.pio, &btnTimerProgram, bp.offset );
     pio_sm_unclaim( bp.pio, bp.sm );
     // Hand the pad back to plain SIO input for the normal C sampler + Core 2.

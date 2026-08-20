@@ -3062,6 +3062,13 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     }
     // C7: the quadrature count + sampler/DMA status. X! resets nearOverruns.
     printEncoderC7Line( *target );
+    // Task #30's instrument: where every registered firmware PIO program
+    // actually sits (block@base, used words, offsets, SM) - measured, not
+    // inferred from the docs' arithmetic.
+    {
+        extern void pioRegistryPrint( Stream& target );
+        pioRegistryPrint( *target );
+    }
     // Probe double-tap failure modes (X! resets): armed/confirmed says how
     // many second taps reached the confirm gate and survived it; expired =
     // the confirm gate ate one; noRelease = the two taps had no 30ms clean

@@ -4,6 +4,7 @@
 #include "XbarLatency.h" // tap->crossbar->LEDs latency probe (T2.2 gate)
 #include "CoreMailbox.h"  // core1req::complete() at the end of a list send (T2.2b/T2.3)
 #include "hardware/dma.h" // the DMA-fed list send (T2.3)
+#include "PioRegistry.h"  // program placements land in X's PIO panel
 #include "CH446Q.h"
 #include "Colors.h"       // For changeTerminalColor
 #include "JumperlessDefines.h"
@@ -520,6 +521,7 @@ static bool ch446qCsStrobeInit(void) {
   int chan = dma_claim_unused_channel(false);
   if (chan < 0) { pio_sm_unclaim(csPio, (uint)s); csFallbackReason = 4; return false; }
   csOffset = pio_add_program(csPio, &ch446_cs_strobe_program);
+  pioRegistryLog(csPio, s, csOffset, ch446_cs_strobe_program.length, "cs-strobe");
   pio_sm_config c = ch446_cs_strobe_program_get_default_config(csOffset);
   sm_config_set_out_pins(&c, CH446Q_CS_FIRST_GPIO, 12);
   sm_config_set_out_shift(&c, true /* right: bits 11..0 first */, false /* no autopull */, 32);
@@ -538,6 +540,7 @@ static bool ch446qCsStrobeInit(void) {
   if (pio_sm_init(csPio, (uint)s, csOffset + ch446_cs_strobe_offset_entry_point, &c) != PICO_OK) {
     // The pin range does not fit the block's base - cannot happen with base
     // 16 and pins 28..39, but never run with a half-configured SM.
+    pioRegistryUnlog(csPio, csOffset, "cs-strobe");
     pio_remove_program(csPio, &ch446_cs_strobe_program, csOffset);
     pio_sm_unclaim(csPio, (uint)s);
     dma_channel_unclaim((uint)chan);
@@ -591,6 +594,7 @@ void initCH446Q(void) {
   // without it, everything below is the legacy path.
   if (ch446qCsStrobeInit()) {
     offset = pio_add_program(pio, &spi_ch446_pio2cs_program);
+    pioRegistryLog(pio, (int)sm, offset, spi_ch446_pio2cs_program.length, "ch446-shift");
     ch446qShifterInitPio2cs(offset, 8, clk, dat);
   } else
 #endif
@@ -600,6 +604,7 @@ void initCH446Q(void) {
     irq_set_enabled(PIO0_IRQ_1, true);
 
     offset = pio_add_program(pio, &spi_ch446_multi_cs_program);
+    pioRegistryLog(pio, (int)sm, offset, spi_ch446_multi_cs_program.length, "ch446-legacy");
     // uint offsetCS = pio_add_program(pio, &spi_ch446_cs_handler_program);
 
     // Serial.print("offset: ");

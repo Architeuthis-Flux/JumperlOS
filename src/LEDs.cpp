@@ -113,8 +113,8 @@ void ledClass::end(void) {
 
 void ledClass::begin(void) {
 
-
- 
+  bbleds.setPioOwnerName("bb-strip");
+  topleds.setPioOwnerName("top-strip");
 
 #if defined(OG_JUMPERLESS)
   // OG: one physical chain on GPIO 25. We size the buffer to LED_COUNT + LED_COUNT_TOP (445 pixels)
@@ -613,6 +613,7 @@ void initLEDs(void) {
   // encoder then fills PIO1, and the button program falls back to CPU
   // polling. So ask for PIO0; if that is refused the search runs as before
   // and X ("cs strobe" line) shows where it went.
+  probeLEDs.setPioOwnerName("probe-led");
   probeLEDs.setPreferredPIO(pio0);
   probeLEDs.begin();
   probeLEDs.setPixelColor(0, 0x000000);

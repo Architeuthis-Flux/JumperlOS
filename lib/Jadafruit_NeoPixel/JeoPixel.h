@@ -347,6 +347,8 @@ public:
              Call before begin().
   */
   void setPreferredPIO(PIO p)         { preferred_pio = p; }
+  // Name shown by the app's PIO placement registry (string literal only).
+  void setPioOwnerName(const char* n) { pio_owner_name = n; }
 #endif
   /*!
     @brief   An 8-bit integer sine wave function, not directly compatible
@@ -434,6 +436,7 @@ private:
   void   rp2040Show(uint8_t *pixels, uint32_t numBytes);
   PIO    pio = NULL;
   PIO    preferred_pio = NULL;    // setPreferredPIO(): try this block first
+  const char* pio_owner_name = NULL; // setPioOwnerName(): registry label
   uint   pio_sm = -1;
   uint   pio_program_offset = 0;
   int    dma_channel = -1;        // DMA channel for non-blocking LED updates

@@ -1,5 +1,6 @@
 #include "Probing.h"
 #include "CH446Q.h"
+#include "PioRegistry.h" // probe LED/button program placements land in X's PIO panel
 #include "FileParsing.h"
 #include "InfraPaths.h"
 #include "JumperlOS.h"
@@ -1020,6 +1021,7 @@ static bool initProbeButtonPIO( void ) {
     g_pioProbeSM    = (uint)sm;
     g_pioProbeLedPC = probeLEDs.getProgramOffset( );
     g_pioProbeBtnPC = pio_add_program( pio, &probe_button_pio_program );
+    pioRegistryLog( pio, sm, g_pioProbeBtnPC, probe_button_pio_program.length, "probe-btn" );
 
     // The probe LED SM was init'd with FIFO_JOIN_TX (giving it an 8-deep
     // TX FIFO with no RX FIFO). The button program needs to PUSH to the
@@ -1136,13 +1138,17 @@ bool setProbeLedMerged( bool wantMerged ) {
         // memory is tight AND fragmented. Merged mode needs NEITHER legacy
         // program, so remove both (the button poller and the probe LED's own
         // ws2812 copy) to open one contiguous run. Flip-back re-adds them.
+        pioRegistryUnlog( pio, g_pioProbeBtnPC, "probe-btn" );
         pio_remove_program( pio, &probe_button_pio_program, g_pioProbeBtnPC );
         extern const pio_program_t* probeLedWs2812Program( void );
+        pioRegistryUnlog( pio, g_pioProbeLedPC, "probe-led" );
         pio_remove_program( pio, probeLedWs2812Program( ), g_pioProbeLedPC );
         if ( !pio_can_add_program( pio, &probe_merged_pio_program ) ) {
             // No room even so - put both legacy programs back, stay on swap.
             g_pioProbeLedPC = pio_add_program( pio, probeLedWs2812Program( ) );
             g_pioProbeBtnPC = pio_add_program( pio, &probe_button_pio_program );
+            pioRegistryLog( pio, (int)sm, g_pioProbeLedPC, probeLedWs2812Program( )->length, "probe-led" );
+            pioRegistryLog( pio, (int)sm, g_pioProbeBtnPC, probe_button_pio_program.length, "probe-btn" );
             hw_write_masked( &pio->sm[ sm ].execctrl,
                              ( ( g_pioProbeLedPC + 3 ) << PIO_SM0_EXECCTRL_WRAP_TOP_LSB )
                            | ( g_pioProbeLedPC << PIO_SM0_EXECCTRL_WRAP_BOTTOM_LSB ),
@@ -1156,6 +1162,7 @@ bool setProbeLedMerged( bool wantMerged ) {
             return false;
         }
         g_pioProbeMergedPC = pio_add_program( pio, &probe_merged_pio_program );
+        pioRegistryLog( pio, (int)sm, g_pioProbeMergedPC, probe_merged_pio_program.length, "probe-merged" );
 
         // The SM's wrap registers still frame the (removed) ws2812 program.
         // If the merged program's range passed through that wrap_top with a
@@ -1193,10 +1200,13 @@ bool setProbeLedMerged( bool wantMerged ) {
         pio_sm_set_enabled( pio, sm, true );
         g_probeMergedActive = true;
     } else {
+        pioRegistryUnlog( pio, g_pioProbeMergedPC, "probe-merged" );
         pio_remove_program( pio, &probe_merged_pio_program, g_pioProbeMergedPC );
         extern const pio_program_t* probeLedWs2812Program( void );
         g_pioProbeLedPC = pio_add_program( pio, probeLedWs2812Program( ) );
         g_pioProbeBtnPC = pio_add_program( pio, &probe_button_pio_program );
+        pioRegistryLog( pio, (int)sm, g_pioProbeLedPC, probeLedWs2812Program( )->length, "probe-led" );
+        pioRegistryLog( pio, (int)sm, g_pioProbeBtnPC, probe_button_pio_program.length, "probe-btn" );
 
         // Restore the legacy shift config: autopull ON at the byte threshold
         // the ws2812 stream uses (showBlocking pushes byte-at-top words).
@@ -2172,13 +2182,13 @@ void Probing::handleEncoderCursorNavigation(
                 if ( subIndex == 0 ) {
                     setLogoOverride( DAC_0, -2 );
 
-                    b.print( "0", cursorColors[ 1 ][ setOrClear ][ 0 ], 0xFFFFFF, 0, 1, 3 );
-                    b.print( "1", cursorColors[ 0 ][ setOrClear ][ 4 ], 0xFFFFFF, 5, 1, 0 );
+                    b.print( "0", cursorColors[ 0 ][ setOrClear ][ 0], 0xFFFFFF, 0, 1, 3 );
+                    b.print( "1", cursorColors[ 1 ][ setOrClear ][ 4], 0xFFFFFF, 5, 1, 0 );
                 } else {
 
                     setLogoOverride( DAC_1, -2 );
-                    b.print( "0", cursorColors[ 0 ][ setOrClear ][ 0 ], 0xFFFFFF, 0, 1, 3 );
-                    b.print( "1", cursorColors[ 1 ][ setOrClear ][ 4 ], 0xFFFFFF, 5, 1, 0 );
+                    b.print( "0", cursorColors[ 1 ][ setOrClear ][ 0 ], 0xFFFFFF, 0, 1, 3 );
+                    b.print( "1", cursorColors[ 0 ][ setOrClear ][ 4 ], 0xFFFFFF, 5, 1, 0 );
                 }
             } else if ( cursorZone == ZONE_ADC ) {
                 // Display ADC 0-4, 7 (ADC 5,6 don't exist)

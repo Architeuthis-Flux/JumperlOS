@@ -2653,6 +2653,13 @@ void printPIOStateMachines( ) {
             }
         }
     }
+
+    // The placement registry: who owns which instruction words on each
+    // block, and each block's GPIO base (task #30's instrument).
+    {
+        extern void pioRegistryPrint( Stream& target );
+        pioRegistryPrint( Serial );
+    }
 }
 
 float __not_in_flash_func(readAdcVoltage)( int channel, int samples ) {
