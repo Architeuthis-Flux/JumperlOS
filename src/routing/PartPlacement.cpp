@@ -301,9 +301,21 @@ void serializeParts(const JumperlessState& st, String& out) {
 
 // Extract "key: value" from a flow-map body ("{pin: 1, connect: GND}").
 // Returns trimmed value up to the next ',' or '}', or "" when absent.
+// The key must start a field (preceded by '{', ',' or whitespace) so that
+// "pin:" can never match inside an unknown key like "spin:".
 static String extractFlowField(const String& body, const char* key) {
-    int idx = body.indexOf(key);
-    if (idx < 0) return String("");
+    int idx = -1;
+    int from = 0;
+    while (true) {
+        int cand = body.indexOf(key, from);
+        if (cand < 0) return String("");
+        char before = (cand == 0) ? '{' : body.charAt(cand - 1);
+        if (before == '{' || before == ',' || before == ' ' || before == '\t') {
+            idx = cand;
+            break;
+        }
+        from = cand + 1;
+    }
     int start = idx + strlen(key);
     int commaIdx = body.indexOf(',', start);
     int braceIdx = body.indexOf('}', start);
