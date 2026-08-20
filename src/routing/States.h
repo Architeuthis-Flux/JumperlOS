@@ -56,6 +56,15 @@ config:
 #define STATE_HISTORY_SIZE 0
 #endif
 
+// Parts layer capacity (guided placement / projects branch)
+#if defined(OG_JUMPERLESS)
+  #define MAX_PARTS 6
+  #define MAX_PART_PINS 16
+#else
+  #define MAX_PARTS 16
+  #define MAX_PART_PINS 24
+#endif
+
 // Forward declarations
 class JumperlessState;
 class SlotManager;
@@ -234,10 +243,103 @@ struct ConfigState {
     void setDefaults();
 };
 
+// ============================================================================
+// Parts layer (guided placement / projects branch)
+// ============================================================================
+// Slot-YAML `parts:` section (design: CodeDocs/DESIGN_GUIDED_PLACEMENT.md
+// §1-§2/§6; serializer/parser live in routing/PartPlacement.cpp):
+//
+//   parts:
+//     - name: "U1"          # required
+//       type: ic            # optional: resistor|capacitor|diode|led|bjt|fet|ic
+//       value: "NE555"      # optional
+//       part_id: ""         # optional part-ID hook (future /partdb reference)
+//       footprint: dip8     # dipN | sipN (N = PHYSICAL pin count)
+//       row: 5              # breadboard row of pin 1 (1-60)
+//       placed: false       # runtime flag; always serialized
+//       pins:
+//         GND:  {pin: 1, connect: GND, class: gnd}
+//         TRIG: {pin: 2, connect: 37, class: signal}
+//         A:    {offset: 0, connect: 45}
+//
+// PIN FORMS PARSED: both the nested block form above (one `NAME: {...}` per
+// line under `pins:`) and the inline one-line form
+// `pins: {A: {pin: 1, connect: 7}, B: {pin: 2}}`. Part entries themselves
+// parse in block form only (`- name: ...`). `pin:` is the 1-based physical
+// pin number placed by the DIP/SIP footprint math; `offset:` places the pin
+// at baseRow+offset on the same side and WINS over `pin:` when >= 0.
+// `connect:` is node-only - a row number 1-60 or any node name resolvable by
+// parseNodeName(), the exact helper `bridges:` parsing uses. `class:` is
+// signal|power|gnd|nc (default signal). Unknown keys inside a part entry are
+// skipped without error; malformed part entries are skipped with a warning,
+// like bridges. Pin and part names must not be reserved section keywords
+// ("overlays" especially - the overlays pass strstr-scans the whole file).
+//
+// guideProgress round-trips as ONE top-level flow-map line - the only shape
+// parsed and the only shape emitted (keep serializer and parser matched):
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3}
+// Emitted only while guideSource is non-empty. `meta:` and `guide:` sections
+// are swallowed on parse and NOT round-tripped - the launcher and the guide
+// runtime re-read the project file themselves.
+//
+// fromYAML INDENT-HARDENING: top-level section headers are recognized on
+// UN-indented lines only (the serializer never indents them), so a nested
+// key like `config:` inside a contained section can't hijack the section
+// state. Exception: `fakeGpio:` is also recognized while inside `config:` -
+// the serializer nests it there ("  fakeGpio:"). An unrecognized un-indented
+// `something:` header opens an ignored/contained section instead of
+// corrupting the one before it.
+//
+// ROUND-TRIP IS LOAD-BEARING: toYAML is a wholesale rewrite; any section the
+// serializer doesn't emit is silently destroyed by the SlotManager idle
+// auto-save. serializeParts() must re-emit every field deserializeParts()
+// accepts.
+
+struct PartPin {
+    char    name[12];
+    int8_t  pinNumber;   // 1-based physical pin; -1 = positioned by offset
+    int8_t  offset;      // same-side offset from baseRow; -1 = use pinNumber + footprint
+    int16_t connect;     // target node; -1 = none (leg occupies the hole, no bridge)
+    uint8_t pinClass;    // 0=signal 1=power 2=gnd 3=nc
+};
+
+struct PartDefinition {
+    char     name[16];
+    char     typeStr[12];      // part-ID hook: resistor|capacitor|diode|led|bjt|fet|ic
+    char     partId[16];       // part-ID hook: future /partdb reference
+    int16_t  baseRow;          // breadboard row of pin 1 (1-60)
+    uint8_t  footprint;        // 0=SIP 1=DIP
+    uint8_t  pinCount;         // PHYSICAL pin count from the footprint (dip8 -> 8)
+    uint8_t  numPins;          // entries used in pins[] (only listed pins are stored;
+                               // pinCount is the footprint's N for the geometry math)
+    uint8_t  defaultVerify;    // GuideCheck (raw uint8 until the guide runtime lands)
+    uint32_t outlineColor;     // 0 = per-class defaults
+    char     value[12];        // "10k" etc.
+    bool     placed;           // runtime: expansion applied (guide progress)
+    PartPin  pins[MAX_PART_PINS];
+    // DIP/SIP geometry for 1-based PHYSICAL pin k: SIP -> baseRow+(k-1);
+    // DIP -> k<=N/2: baseRow+(k-1), k>N/2: baseRow+30+(N-k); a baseRow on
+    // the bottom half (>30) mirrors the +30 to -30. Returns -1 when the pin
+    // would leave the board. Per-pin `offset` overrides are applied by
+    // PartPlacement.cpp (offset wins when >= 0).
+    int nodeForPin(int k) const;
+};
+
+struct PartsState {                 // member of JumperlessState
+    PartDefinition parts[MAX_PARTS];
+    int8_t numParts;
+    // guideProgress scalars (round-tripped in slot YAML; step TEXT is always
+    // re-read from guideSource by the guide runtime, never stored here)
+    char    guideSource[96];
+    int16_t guideStep;
+    void clear();
+    int findByName(const char* n) const;   // -1 when absent
+};
+
 /**
  * @brief Complete Jumperless state for a single slot
  * This is the main state container that gets saved/loaded
- * 
+ *
  * WARNING: This class contains MASSIVE arrays (tens of KB) and must NEVER be copied!
  * Always use references (&) or pointers (*) when passing this object around.
  * Copy constructor and copy assignment operator are deleted to enforce this.
@@ -248,6 +350,7 @@ public:
     PowerState power;
     DisplayState display;
     ConfigState config;
+    PartsState parts;      // guided-placement parts table (+ guideProgress scalars)
     
     // Metadata
     int version;  // State format version for future compatibility

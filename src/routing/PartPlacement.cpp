@@ -1,0 +1,565 @@
+// SPDX-License-Identifier: MIT
+// Parts layer: serializer/parser for the slot-YAML `parts:` section plus
+// placement expansion and {NAME}_{PIN} net naming. Format and parsing rules
+// are documented in States.h; design in CodeDocs/DESIGN_GUIDED_PLACEMENT.md.
+//
+// ROUND-TRIP IS LOAD-BEARING: toYAML is a wholesale rewrite - the SlotManager
+// idle auto-save destroys any section the serializer doesn't emit. Every
+// field deserializeParts() accepts MUST be re-emitted by serializeParts().
+
+#include "PartPlacement.h"
+#include "States.h"
+#include "NetManager.h"   // findNodeInNet
+#include "config.h"       // jumperlessConfig (warning gating)
+
+// States.cpp's node-name resolution - the exact helper `bridges:` uses.
+extern int parseNodeName(const String& nodeName);
+extern String nodeValueToString(int nodeValue);
+extern bool parseBoolean(const String& val, bool& success);
+
+// ---------------------------------------------------------------------------
+// PartsState / PartDefinition members
+// ---------------------------------------------------------------------------
+
+void PartsState::clear() {
+    memset(this, 0, sizeof(*this));
+    // All-zero is the valid empty state: numParts = 0 means nothing reads
+    // pins[] until deserializeParts fills entries with proper -1 sentinels.
+}
+
+int PartsState::findByName(const char* n) const {
+    if (n == nullptr || n[0] == '\0') return -1;
+    for (int i = 0; i < numParts && i < MAX_PARTS; i++) {
+        if (strcmp(parts[i].name, n) == 0) return i;
+    }
+    return -1;
+}
+
+int PartDefinition::nodeForPin(int k) const {
+    if (k < 1 || k > pinCount) return -1;
+    if (baseRow < 1 || baseRow > 60) return -1;
+    bool top = (baseRow <= 30);
+    int node;
+    if (footprint == 0) {
+        // SIP: legs march along one side
+        node = baseRow + (k - 1);
+    } else {
+        // DIP: U-shaped numbering; node n+30 is the same column across the
+        // ravine (verified geometry, WokwiParser). baseRow > 30 mirrors.
+        int half = pinCount / 2;
+        if (k <= half) {
+            node = baseRow + (k - 1);
+        } else {
+            node = top ? (baseRow + 30 + (pinCount - k))
+                       : (baseRow - 30 + (pinCount - k));
+            // far side must land on the OTHER half
+            if (top  && (node < 31 || node > 60)) return -1;
+            if (!top && (node < 1  || node > 30)) return -1;
+            return node;
+        }
+    }
+    // near-side pins stay on baseRow's half
+    if (top  && (node < 1  || node > 30)) return -1;
+    if (!top && (node < 31 || node > 60)) return -1;
+    return node;
+}
+
+// `offset` wins when >= 0 (same-side offset from baseRow); otherwise the
+// footprint math on the 1-based physical pin number.
+static int partPinNode(const PartDefinition& p, const PartPin& pin) {
+    if (pin.offset >= 0) {
+        int node = p.baseRow + pin.offset;
+        if (node < 1 || node > 60) return -1;
+        if ((p.baseRow <= 30) != (node <= 30)) return -1;  // must not cross the ravine
+        return node;
+    }
+    return p.nodeForPin(pin.pinNumber);
+}
+
+// ---------------------------------------------------------------------------
+// Naming
+// ---------------------------------------------------------------------------
+
+void makePinNetName(const PartDefinition& p, const PartPin& pin, char out[32]) {
+    // {NAME}_{PIN} uppercased, sanitized to [A-Z0-9_], <= 31 chars
+    // (NetNameEntry::name[32]).
+    char raw[32];
+    snprintf(raw, sizeof(raw), "%s_%s", p.name, pin.name);
+    int w = 0;
+    for (int r = 0; raw[r] != '\0' && w < 31; r++) {
+        char c = raw[r];
+        if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) c = '_';
+        out[w++] = c;
+    }
+    out[w] = '\0';
+}
+
+// Is `name` one of the auto names this state's parts table would generate?
+// (Custom names carry no origin flag, so "came from parts" is decided by
+// pattern-matching against the parts table - an explicit nets:-section name
+// that happens to differ from every auto name outranks auto naming.)
+static bool isPartsAutoName(const JumperlessState& st, const char* name) {
+    char buf[32];
+    for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = st.parts.parts[i];
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            makePinNetName(p, p.pins[j], buf);
+            if (strcmp(buf, name) == 0) return true;
+        }
+    }
+    return false;
+}
+
+void partsReassertNetNames(JumperlessState& st) {
+    if (st.parts.numParts <= 0) return;
+    // Lowest part index wins per net, per pass.
+    bool claimed[MAX_NETS] = { false };
+    for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = st.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            const PartPin& pin = p.pins[j];
+            int node = partPinNode(p, pin);
+            if (node < 0) continue;
+            int netNum = findNodeInNet(node);
+            if (netNum <= 0 || netNum >= MAX_NETS) continue;
+            // findNodeInNet's gpio/adc fallbacks return NODE values, not net
+            // numbers - only accept a real net at that index.
+            if (st.connections.nets[netNum].number != netNum) continue;
+            // Never rename GND / rails / DACs - their names are authoritative.
+            if (st.connections.nets[netNum].specialFunction > 0) continue;
+            if (claimed[netNum]) continue;
+            char autoName[32];
+            makePinNetName(p, pin, autoName);
+            const char* existing = st.display.getNetName(netNum);
+            if (existing != nullptr && existing[0] != '\0' &&
+                strcmp(existing, autoName) != 0 && !isPartsAutoName(st, existing)) {
+                // An explicit nets:-section custom name outranks auto names.
+                claimed[netNum] = true;
+                continue;
+            }
+            st.display.setNetName(netNum, autoName);  // also refreshes firstNode
+            claimed[netNum] = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Expansion (bridges)
+// ---------------------------------------------------------------------------
+
+static int expandOnePart(JumperlessState& st, const PartDefinition& p, String& err) {
+    int added = 0;
+    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+        const PartPin& pin = p.pins[j];
+        if (pin.connect < 0) continue;   // leg occupies the hole, no bridge
+        int node = partPinNode(p, pin);
+        if (node < 0) {
+            err += "part " + String(p.name) + " pin " + String(pin.name) + ": off-board; ";
+            continue;
+        }
+        if (node == pin.connect) continue;
+        // Idempotency lives HERE: bare addConnection on an existing bridge
+        // bumps its duplicate count (and re-dirties the state), so skip
+        // exact duplicates up front via hasConnection.
+        if (st.hasConnection(node, pin.connect)) continue;
+        String aerr;
+        if (st.addConnection(node, pin.connect, aerr)) {
+            added++;
+        } else {
+            err += "part " + String(p.name) + " pin " + String(pin.name) + ": " + aerr + "; ";
+        }
+    }
+    return added;
+}
+
+int expandPartsToBridges(JumperlessState& st, String& err) {
+    int added = 0;
+    for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = st.parts.parts[i];
+        if (!p.placed) continue;
+        added += expandOnePart(st, p, err);
+    }
+    return added;
+}
+
+int applyPartPlacement(JumperlessState& st, int partIdx, String& err) {
+    if (partIdx < 0 || partIdx >= st.parts.numParts) {
+        err = "bad part index " + String(partIdx);
+        return -1;
+    }
+    PartDefinition& p = st.parts.parts[partIdx];
+    int added = expandOnePart(st, p, err);
+    if (!p.placed) {
+        p.placed = true;      // serialized field - dirty even when 0 bridges
+        st.markDirty();
+    }
+    return added;
+}
+
+int removePartPlacement(JumperlessState& st, int partIdx, String& err) {
+    if (partIdx < 0 || partIdx >= st.parts.numParts) {
+        err = "bad part index " + String(partIdx);
+        return -1;
+    }
+    PartDefinition& p = st.parts.parts[partIdx];
+    int removed = 0;
+    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+        const PartPin& pin = p.pins[j];
+        if (pin.connect < 0) continue;
+        int node = partPinNode(p, pin);
+        if (node < 0) continue;
+        if (!st.hasConnection(node, pin.connect)) continue;
+        String rerr;
+        if (st.removeConnection(node, pin.connect, rerr)) {
+            removed++;
+        } else {
+            err += "part " + String(p.name) + " pin " + String(pin.name) + ": " + rerr + "; ";
+        }
+    }
+    if (p.placed) {
+        p.placed = false;
+        st.markDirty();
+    }
+    return removed;
+}
+
+// ---------------------------------------------------------------------------
+// Serializer
+// ---------------------------------------------------------------------------
+
+static const char* pinClassName(uint8_t pinClass) {
+    switch (pinClass) {
+        case 1: return "power";
+        case 2: return "gnd";
+        case 3: return "nc";
+        default: return "signal";
+    }
+}
+
+static uint8_t pinClassFromString(const String& s) {
+    if (s == "power") return 1;
+    if (s == "gnd") return 2;
+    if (s == "nc") return 3;
+    return 0;  // signal (also the tolerant default for unknown classes)
+}
+
+void serializeParts(const JumperlessState& st, String& out) {
+    const PartsState& ps = st.parts;
+    if (ps.numParts <= 0) {
+        return;  // omit the section entirely when empty (existing files unchanged)
+    }
+    out += "parts:\n";
+    for (int i = 0; i < ps.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = ps.parts[i];
+        out += "  - name: \"" + String(p.name) + "\"\n";
+        if (p.typeStr[0] != '\0') out += "    type: " + String(p.typeStr) + "\n";
+        if (p.value[0] != '\0')   out += "    value: \"" + String(p.value) + "\"\n";
+        if (p.partId[0] != '\0')  out += "    part_id: \"" + String(p.partId) + "\"\n";
+        out += "    footprint: " + String(p.footprint == 1 ? "dip" : "sip") + String(p.pinCount) + "\n";
+        out += "    row: " + String(p.baseRow) + "\n";
+        out += "    placed: " + String(p.placed ? "true" : "false") + "\n";
+        if (p.defaultVerify != 0) out += "    verify: " + String(p.defaultVerify) + "\n";
+        if (p.outlineColor != 0) {
+            char hexBuf[12];
+            snprintf(hexBuf, sizeof(hexBuf), "0x%06lX", (unsigned long)(p.outlineColor & 0xFFFFFFul));
+            out += "    color: " + String(hexBuf) + "\n";
+        }
+        if (p.numPins > 0) {
+            out += "    pins:\n";
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                const PartPin& pin = p.pins[j];
+                out += "      " + String(pin.name) + ": {";
+                bool first = true;
+                if (pin.pinNumber >= 0) {
+                    out += "pin: " + String(pin.pinNumber);
+                    first = false;
+                }
+                if (pin.offset >= 0) {
+                    if (!first) out += ", ";
+                    out += "offset: " + String(pin.offset);
+                    first = false;
+                }
+                if (pin.connect >= 0) {
+                    if (!first) out += ", ";
+                    out += "connect: " + nodeValueToString(pin.connect);
+                    first = false;
+                }
+                if (!first) out += ", ";
+                out += "class: " + String(pinClassName(pin.pinClass));
+                out += "}\n";
+            }
+        }
+    }
+    out += "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+
+// Extract "key: value" from a flow-map body ("{pin: 1, connect: GND}").
+// Returns trimmed value up to the next ',' or '}', or "" when absent.
+static String extractFlowField(const String& body, const char* key) {
+    int idx = body.indexOf(key);
+    if (idx < 0) return String("");
+    int start = idx + strlen(key);
+    int commaIdx = body.indexOf(',', start);
+    int braceIdx = body.indexOf('}', start);
+    int endIdx = body.length();
+    if (commaIdx >= 0 && (braceIdx < 0 || commaIdx < braceIdx)) endIdx = commaIdx;
+    else if (braceIdx >= 0) endIdx = braceIdx;
+    String val = body.substring(start, endIdx);
+    val.trim();
+    return val;
+}
+
+// Parse a quoted-or-bare scalar value.
+static String parseScalar(const String& rest) {
+    String v = rest;
+    v.trim();
+    if (v.length() >= 2 && v.charAt(0) == '"') {
+        int endQuote = v.indexOf('"', 1);
+        if (endQuote > 0) return v.substring(1, endQuote);
+    }
+    return v;
+}
+
+// One pin from its name + flow-map body. Malformed pins are skipped (warn).
+static void parsePinEntry(PartDefinition& p, const String& pinName, const String& body, String& err) {
+    if (p.numPins >= MAX_PART_PINS) {
+        err += "part " + String(p.name) + ": too many pins; ";
+        return;
+    }
+    PartPin pin;
+    memset(&pin, 0, sizeof(pin));
+    pin.pinNumber = -1;
+    pin.offset = -1;
+    pin.connect = -1;
+    pin.pinClass = 0;
+
+    String nm = pinName;
+    nm.trim();
+    if (nm.length() == 0 || nm.length() > 11) {
+        err += "part " + String(p.name) + ": bad pin name '" + nm + "'; ";
+        return;
+    }
+    strncpy(pin.name, nm.c_str(), sizeof(pin.name) - 1);
+
+    String v = extractFlowField(body, "pin:");
+    if (v.length() > 0) pin.pinNumber = (int8_t)v.toInt();
+    v = extractFlowField(body, "offset:");
+    if (v.length() > 0) pin.offset = (int8_t)v.toInt();
+    v = extractFlowField(body, "connect:");
+    if (v.length() > 0) {
+        int node = parseNodeName(v);   // same resolution bridges: uses
+        if (node >= 0) {
+            pin.connect = (int16_t)node;
+        } else {
+            err += "part " + String(p.name) + " pin " + nm + ": unknown node '" + v + "'; ";
+        }
+    }
+    v = extractFlowField(body, "class:");
+    if (v.length() > 0) pin.pinClass = pinClassFromString(v);
+
+    if (pin.pinNumber < 0 && pin.offset < 0) {
+        err += "part " + String(p.name) + " pin " + nm + ": needs pin: or offset:; ";
+        return;
+    }
+    p.pins[p.numPins++] = pin;
+}
+
+// Inline pins map: pins: {A: {pin: 1, connect: 7}, B: {pin: 2}}
+static void parseInlinePins(PartDefinition& p, const String& rest, String& err) {
+    int outer = rest.indexOf('{');
+    if (outer < 0) return;
+    int i = outer + 1;
+    int len = rest.length();
+    while (i < len) {
+        // skip separators
+        while (i < len && (rest.charAt(i) == ' ' || rest.charAt(i) == ',' || rest.charAt(i) == '\t')) i++;
+        if (i >= len || rest.charAt(i) == '}') break;
+        int colon = rest.indexOf(':', i);
+        if (colon < 0) break;
+        String pinName = rest.substring(i, colon);
+        int braceStart = rest.indexOf('{', colon);
+        if (braceStart < 0) break;
+        int braceEnd = rest.indexOf('}', braceStart);
+        if (braceEnd < 0) braceEnd = len - 1;
+        parsePinEntry(p, pinName, rest.substring(braceStart, braceEnd + 1), err);
+        i = braceEnd + 1;
+    }
+}
+
+static void partInit(PartDefinition& p) {
+    memset(&p, 0, sizeof(p));
+    p.baseRow = -1;
+}
+
+// Commit the in-progress part. Malformed entries are skipped with a warning,
+// like bridges.
+static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool& bad, String& err) {
+    if (!open) return;
+    open = false;
+    bool valid = !bad &&
+                 p.name[0] != '\0' &&
+                 p.pinCount >= 1 && p.pinCount <= MAX_PART_PINS &&
+                 p.baseRow >= 1 && p.baseRow <= 60 &&
+                 (p.footprint == 0 || (p.pinCount % 2) == 0);
+    if (!valid) {
+        err += "skipped malformed part entry '" + String(p.name) + "'; ";
+        if (jumperlessConfig.debug.show_node_errors) {
+            Serial.print("Skipping malformed parts: entry ");
+            Serial.println(p.name[0] ? p.name : "(unnamed)");
+        }
+        bad = false;
+        return;
+    }
+    if (st.parts.numParts >= MAX_PARTS) {
+        err += "too many parts (max " + String(MAX_PARTS) + "); ";
+        return;
+    }
+    st.parts.parts[st.parts.numParts++] = p;
+}
+
+// Field line inside a part entry (already trimmed, "- " prefix stripped).
+// Unknown keys are skipped without error (part-ID branch hook).
+static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, bool& bad, String& err) {
+    int colon = line.indexOf(':');
+    if (colon < 0) return;   // not a key: line - ignore
+    String key = line.substring(0, colon);
+    key.trim();
+    String rest = line.substring(colon + 1);
+    rest.trim();
+
+    if (key == "name") {
+        String v = parseScalar(rest);
+        if (v.length() == 0 || v.length() > 15) { bad = true; return; }
+        strncpy(p.name, v.c_str(), sizeof(p.name) - 1);
+        inPins = false;
+    } else if (key == "type") {
+        String v = parseScalar(rest);
+        strncpy(p.typeStr, v.c_str(), sizeof(p.typeStr) - 1);
+        inPins = false;
+    } else if (key == "value") {
+        String v = parseScalar(rest);
+        strncpy(p.value, v.c_str(), sizeof(p.value) - 1);
+        inPins = false;
+    } else if (key == "part_id") {
+        String v = parseScalar(rest);
+        strncpy(p.partId, v.c_str(), sizeof(p.partId) - 1);
+        inPins = false;
+    } else if (key == "footprint") {
+        String v = parseScalar(rest);
+        v.toLowerCase();
+        if (v.startsWith("dip")) {
+            p.footprint = 1;
+            p.pinCount = (uint8_t)v.substring(3).toInt();
+        } else if (v.startsWith("sip")) {
+            p.footprint = 0;
+            p.pinCount = (uint8_t)v.substring(3).toInt();
+        } else {
+            bad = true;
+            err += "unknown footprint '" + v + "'; ";
+        }
+        inPins = false;
+    } else if (key == "row") {
+        p.baseRow = (int16_t)rest.toInt();
+        inPins = false;
+    } else if (key == "placed") {
+        bool ok;
+        p.placed = parseBoolean(parseScalar(rest), ok);
+        inPins = false;
+    } else if (key == "verify") {
+        p.defaultVerify = (uint8_t)rest.toInt();
+        inPins = false;
+    } else if (key == "color") {
+        String v = parseScalar(rest);
+        if (v.startsWith("0x") || v.startsWith("0X")) {
+            p.outlineColor = strtoul(v.c_str() + 2, nullptr, 16);
+        } else {
+            p.outlineColor = strtoul(v.c_str(), nullptr, 10);
+        }
+        inPins = false;
+    } else if (key == "pins") {
+        if (rest.indexOf('{') >= 0) {
+            parseInlinePins(p, rest, err);   // inline one-line form
+            inPins = false;
+        } else {
+            inPins = true;                   // nested block form follows
+        }
+    } else if (inPins && rest.startsWith("{")) {
+        parsePinEntry(p, key, rest, err);    // nested pin line: NAME: {...}
+    }
+    // else: unknown key (e.g. frobnicate: 7) - skipped without error
+}
+
+bool deserializeParts(JumperlessState& st, const char* yaml, String& err) {
+    st.parts.numParts = 0;   // clear() already ran in fromYAML; be safe
+    if (yaml == nullptr) return true;
+
+    const char* pos = yaml;
+    bool inSection = false;
+    bool inPins = false;
+    bool curOpen = false;
+    bool curBad = false;
+    // ~500 B scratch part; static so OG's small stacks never see it (parsing
+    // is single-threaded through fromYAML).
+    static PartDefinition cur;
+
+    while (*pos) {
+        const char* lineEnd = strchr(pos, '\n');
+        size_t rawLen = lineEnd ? (size_t)(lineEnd - pos) : strlen(pos);
+        const char* nextPos = lineEnd ? lineEnd + 1 : pos + rawLen;
+
+        // Indentation captured BEFORE trimming - the section header only
+        // counts on an un-indented line, and any un-indented line ends it.
+        bool indented = (rawLen > 0 && (pos[0] == ' ' || pos[0] == '\t'));
+
+        String line;
+        line.reserve(rawLen);
+        for (size_t i = 0; i < rawLen; i++) {
+            char c = pos[i];
+            if (c == '\r') continue;
+            line += c;
+        }
+        line.trim();
+
+        if (!inSection) {
+            // Same recognition rule as fromYAML's main loop: un-indented
+            // line starting with "parts:".
+            if (!indented && line.startsWith("parts:")) inSection = true;
+            pos = nextPos;
+            continue;
+        }
+
+        if (line.length() == 0 || line.startsWith("#")) {
+            pos = nextPos;
+            continue;
+        }
+        if (!indented) {
+            break;   // next top-level section - parts: is over
+        }
+        if (line.startsWith("- ")) {
+            commitPart(st, cur, curOpen, curBad, err);
+            partInit(cur);
+            curOpen = true;
+            curBad = false;
+            inPins = false;
+            line = line.substring(2);
+            line.trim();
+            if (line.length() == 0) {
+                pos = nextPos;
+                continue;
+            }
+            // fall through: "- name: ..." carries the first field
+        }
+        if (curOpen) {
+            parsePartLine(cur, line, inPins, curBad, err);
+        }
+        pos = nextPos;
+    }
+    commitPart(st, cur, curOpen, curBad, err);
+    return true;
+}

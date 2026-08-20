@@ -11,6 +11,7 @@
 #include "config.h"
 #include "FakeGpio.h"
 #include "GraphicOverlays.h"
+#include "PartPlacement.h"  // parts: section serializer/parser + expansion
 #include <string.h>
 #include <vector>
 #include <FatFS.h>
@@ -556,6 +557,7 @@ void JumperlessState::clear() {
     power.setDefaults();
     display.clear();
     config.setDefaults();
+    parts.clear();             // parts table + guideProgress scalars
     clearAllCustomNetNames();  // Reset all custom net names to defaults
     dirty = false;
     lastModifiedTime = 0;
@@ -1241,23 +1243,39 @@ bool JumperlessState::toYAML(String& output, int showANSI) const {
     
     // Header
     output += "version: " + String(version) + "\n";
-    output += "sourceOfTruth: " + String(config.sourceOfTruth == BRIDGES_PRIMARY ? "bridges" : "nets") + "\n\n";
-    
+    output += "sourceOfTruth: " + String(config.sourceOfTruth == BRIDGES_PRIMARY ? "bridges" : "nets") + "\n";
+
+    // guideProgress scalar - ONE flow-map line, the only shape the parser
+    // accepts (see the parts format comment in States.h). Emitted only while
+    // a guide is bound to this slot.
+    if (parts.guideSource[0] != '\0') {
+        output += "guideProgress: {source: \"" + String(parts.guideSource) +
+                  "\", step: " + String(parts.guideStep) + "}\n";
+    }
+    output += "\n";
+
     // Bridges section
     serializeBridges(output);
-    
+
     // Nets section (optional, for colors/names)
     serializeNets(output);
-    
+
     // Power section
     serializePower(output);
-    
+
     // Config section
     serializeConfig(output);
-    
+
+    // Parts section - MUST stay before overlays: deserializeOverlaysFromYAML
+    // strstr-scans forward from "overlays:" with no section-end bound, so any
+    // parts entries emitted after it would be eaten as garbage overlays. Also
+    // load-bearing for persistence: toYAML is a wholesale rewrite - a section
+    // not emitted here is destroyed by the SlotManager idle auto-save.
+    serializeParts(*this, output);
+
     // Graphic overlays section
     serializeOverlaysToYAML(output, showANSI);
-    
+
     return true;
 }
 
@@ -1289,44 +1307,89 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         if (lineEnd == -1) lineEnd = input.length();
         
         String line = input.substring(lineStart, lineEnd);
+        // INDENT-HARDENING (see the parts format comment in States.h):
+        // capture whether the raw line was indented BEFORE trimming. Top-
+        // level section headers are only recognized on un-indented lines -
+        // the serializer never indents them - so a nested key like `config:`
+        // inside a contained section can't hijack the section state. The one
+        // exception is `fakeGpio:`, which the serializer nests under config.
+        bool indented = (line.length() > 0 &&
+                         (line.charAt(0) == ' ' || line.charAt(0) == '\t'));
         line.trim();
-        
+
         // Skip empty lines and comments
         if (line.length() == 0 || line.startsWith("#")) {
             lineStart = lineEnd + 1;
             continue;
         }
-        
+
         // Check for section headers
-        if (line.startsWith("version:")) {
+        if (!indented && line.startsWith("version:")) {
             int colonIdx = line.indexOf(':');
             String val = line.substring(colonIdx + 1);
             val.trim();
             version = val.toInt();
         }
-        else if (line.startsWith("sourceOfTruth:")) {
+        else if (!indented && line.startsWith("sourceOfTruth:")) {
             int colonIdx = line.indexOf(':');
             String val = line.substring(colonIdx + 1);
             val.trim();
             config.sourceOfTruth = (val == "nets") ? NETS_PRIMARY : BRIDGES_PRIMARY;
         }
-        else if (line.startsWith("bridges:")) {
+        else if (!indented && line.startsWith("guideProgress:")) {
+            // ONE shape only (matched with toYAML - see States.h):
+            //   guideProgress: {source: "/projects/555/wiring.yaml", step: 3}
+            int q1 = line.indexOf('"');
+            int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
+            if (q1 >= 0 && q2 > q1) {
+                String src = line.substring(q1 + 1, q2);
+                strncpy(parts.guideSource, src.c_str(), sizeof(parts.guideSource) - 1);
+                parts.guideSource[sizeof(parts.guideSource) - 1] = '\0';
+            }
+            int stepIdx = line.indexOf("step:", (q2 > 0) ? q2 : 0);
+            if (stepIdx >= 0) {
+                int endIdx = line.indexOf('}', stepIdx);
+                if (endIdx == -1) endIdx = line.length();
+                String val = line.substring(stepIdx + 5, endIdx);
+                val.trim();
+                parts.guideStep = (int16_t)val.toInt();
+            }
+        }
+        else if (!indented && line.startsWith("bridges:")) {
             currentSection = "bridges";
         }
-        else if (line.startsWith("nets:")) {
+        else if (!indented && line.startsWith("nets:")) {
             currentSection = "nets";
         }
-        else if (line.startsWith("power:")) {
+        else if (!indented && line.startsWith("power:")) {
             currentSection = "power";
         }
-        else if (line.startsWith("config:")) {
+        else if (!indented && line.startsWith("config:")) {
             currentSection = "config";
         }
-        else if (line.startsWith("fakeGpio:")) {
+        else if ((!indented || currentSection == "config") && line.startsWith("fakeGpio:")) {
+            // The serializer nests fakeGpio under config ("  fakeGpio:") -
+            // recognize it there too, or every existing fakeGpio entry would
+            // be silently dropped (and destroyed by the next auto-save).
             currentSection = "fakeGpio";
         }
-        else if (line.startsWith("overlays:")) {
+        else if (!indented && line.startsWith("overlays:")) {
             currentSection = "overlays";
+        }
+        else if (!indented && (line.startsWith("meta:") ||
+                               line.startsWith("parts:") ||
+                               line.startsWith("guide:"))) {
+            // Contained sections. parts: is parsed whole in a post-loop pass
+            // (deserializeParts, next to the overlays pass). meta:/guide: are
+            // swallowed entirely and NOT round-tripped - the launcher and the
+            // guide runtime re-read the project file themselves.
+            currentSection = "contained";
+        }
+        else if (!indented && line.endsWith(":") && line.indexOf(' ') == -1) {
+            // Unknown top-level section header - contain it so its indented
+            // content can't corrupt the section before it (future sections
+            // parse as ignored on older firmware).
+            currentSection = "ignored";
         }
         // Parse section content
         else if (line.startsWith("- {") || line.startsWith("-{")) {
@@ -1381,6 +1444,17 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         lineStart = lineEnd + 1;
     }
     
+    // Parse the parts: section whole in a single pass (multi-line list items
+    // need their own scanner - same pattern as the overlays pass below)
+    {
+        String partsError;
+        deserializeParts(*this, input.c_str(), partsError);
+        if (partsError.length() > 0 && jumperlessConfig.debug.show_node_errors) {
+            Serial.print("parts: parse warnings: ");
+            Serial.println(partsError);
+        }
+    }
+
     // Parse graphic overlays from the entire YAML content
     String overlayError;
     deserializeOverlaysFromYAML(input.c_str(), overlayError);
@@ -2910,7 +2984,16 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
         
         // Serial.println("  ✓ Loaded " + String(activeState.connections.numBridges) + " connections");
         // Serial.flush();
-        
+
+        // Re-expand placed parts into bridges BEFORE routing (idempotent -
+        // exact duplicates are skipped, so a slot whose expansion bridges
+        // already live in bridges: loads clean). Net names re-assert inside
+        // refreshConnections' reconcile pass (partsReassertNetNames).
+        if (activeState.parts.numParts > 0) {
+            String partsErr;
+            expandPartsToBridges(activeState, partsErr);
+        }
+
         // Populate FakeGPIO slot structs BEFORE routing so the router can expand
         // FAKE_GP_OUT_x/FAKE_GP_IN_x virtual nodes to real voltage sources/ADCs.
         // Without this, the router sees inactive slots and can't find chip positions.
@@ -2971,6 +3054,12 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     if (!activeState.fromYAML(content, errorMsg)) {
         errorMsg = "Failed to parse YAML: " + errorMsg;
         return false;
+    }
+    // Re-expand placed parts into bridges before routing (idempotent - see
+    // the identical hook in loadSlot).
+    if (activeState.parts.numParts > 0) {
+        String partsErr;
+        expandPartsToBridges(activeState, partsErr);
     }
     initializeFakeGpioFromLoadedState();
     extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
