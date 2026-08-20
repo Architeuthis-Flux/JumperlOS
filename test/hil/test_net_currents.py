@@ -67,6 +67,13 @@ report = port1_command("i!", collect_seconds=3.0)
 zero_ok = True
 for ln in report.splitlines():
     if "[nvscan] path" in ln and "mA" in ln:
+        # Only the TOP_RAIL net's paths (node 101). The board's own infra
+        # shows up in the report too - the probe buffer feed (GPIO8 ->
+        # ROUTABLE_BUFFER_IN, nodes 138/139) legitimately carries ~1.4 mA
+        # at all times, and the scan reporting it is correct, not phantom.
+        pm = re.search(r"(\d+)(?:->|-)(\d+)\s+\d+xp", ln)
+        if not pm or "101" not in (pm.group(1), pm.group(2)):
+            continue
         m = re.search(r"([+-]?\d+\.\d+)\s*mA", ln)
         if m and abs(float(m.group(1))) > 1.0:
             zero_ok = False

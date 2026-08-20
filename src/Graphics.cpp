@@ -1945,6 +1945,11 @@ if (isBrightenedNode) {
 static constexpr float kNetAntsMinCurrent_mA = 0.25f;
 static constexpr uint8_t kNetAntsAlphaMin = 45;  // barely-there at threshold
 static constexpr float kNetAntsAlphaScale = 26.0f; // ~8mA saturates to 255
+// Consecutive scanner compute ticks (~20Hz) that must agree before a path's
+// ants turn on OR off. Counted on compute ticks, not LED frames: the render
+// loop sees each 50ms compute pass many times, so frame-counting would let
+// one noisy pass through. 3 ticks ~= 150ms - debounce, not sluggishness.
+static constexpr int kNetAntsVoteFrames = 3;
 
 #if !defined(OG_JUMPERLESS)
 
@@ -2045,6 +2050,15 @@ static void antPathPixel(const AntPathGeom &g, int pos, int *row, int *col) {
   *col = (r <= 30) ? v : 4 - v;
 }
 
+// Ant on/off flip tally - the sparkle users report IS this counter moving
+// on a path that carries no current. Incremented on core 2 whenever a
+// path's ants turn on or off; printed (and reset) with the 'i!' scan stats
+// on core 0, so each print reads as flips-since-last-print. Torn reads are
+// cosmetic, same contract as the rest of the stats print.
+static uint32_t antFlipCount[MAX_BRIDGES] = {0};
+static volatile uint32_t antFlipTotal = 0;
+static uint32_t antFlipResetMs = 0;
+
 #endif // !OG_JUMPERLESS
 
 void renderNetCurrentAnts() {
@@ -2085,6 +2099,15 @@ void renderNetCurrentAnts() {
   // crosses back and forth. Once animating, keep going until the current
   // drops well below the entry threshold.
   static bool wasAnimated[MAX_BRIDGES] = {false};
+  // On top of the hysteresis, an N-of-M vote: a state flip needs
+  // kNetAntsVoteFrames consecutive scanner compute ticks agreeing, so a
+  // single noisy sample can never blink the ants. Votes advance only when
+  // the scanner has actually recomputed since our last frame.
+  static int8_t antVote[MAX_BRIDGES] = {0};
+  static uint32_t lastVoteGeneration = 0;
+  uint32_t voteGeneration = netScanComputeGeneration();
+  bool voteTick = (voteGeneration != lastVoteGeneration);
+  lastVoteGeneration = voteGeneration;
 
   unsigned long nowMs = millis();
   float deltaSeconds =
@@ -2129,11 +2152,22 @@ void renderNetCurrentAnts() {
     float mag = fabsf(signedI);
     float enterThreshold =
         wasAnimated[i] ? kNetAntsMinCurrent_mA * 0.6f : kNetAntsMinCurrent_mA;
-    if (mag < enterThreshold) {
-      wasAnimated[i] = false;
+    bool wantOn = (mag >= enterThreshold);
+    if (voteTick) {
+      if (wantOn != wasAnimated[i]) {
+        if (++antVote[i] >= kNetAntsVoteFrames) {
+          wasAnimated[i] = wantOn;
+          antVote[i] = 0;
+          antFlipCount[i]++;
+          antFlipTotal = antFlipTotal + 1;
+        }
+      } else {
+        antVote[i] = 0; // agreement breaks the dissent streak
+      }
+    }
+    if (!wasAnimated[i]) {
       continue;
     }
-    wasAnimated[i] = true;
 
     // Advance this path's ant phase; speed follows current magnitude.
     float stepsPerSecond =
@@ -2353,6 +2387,29 @@ void printAntPathContinuity(Stream *out) {
     }
     out->println();
   }
+#endif // OG_JUMPERLESS
+}
+
+// The flip tally above, as flips-since-last-print (printing resets it), so
+// two 'i!' captures a minute apart read directly as flips/min. Zero on a
+// steady board; a moving total on a zero-current path is the sparkle.
+void printAntFlipStats(Stream *out) {
+#if defined(OG_JUMPERLESS)
+  out->println("[ants] net current ants are V5-only");
+#else
+  uint32_t now = millis();
+  float seconds = (antFlipResetMs == 0) ? 0.0f : (now - antFlipResetMs) / 1000.0f;
+  out->printf("[ants] flips:%lu in %.1fs", (unsigned long)antFlipTotal, seconds);
+  int pathLimit = (numberOfPaths < MAX_BRIDGES) ? numberOfPaths : MAX_BRIDGES;
+  for (int i = 0; i < pathLimit; i++) {
+    if (antFlipCount[i] != 0) {
+      out->printf("  path%d:%lu", i, (unsigned long)antFlipCount[i]);
+    }
+  }
+  out->println();
+  memset(antFlipCount, 0, sizeof(antFlipCount));
+  antFlipTotal = 0;
+  antFlipResetMs = now;
 #endif // OG_JUMPERLESS
 }
 

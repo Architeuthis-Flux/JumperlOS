@@ -647,6 +647,7 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "auto_connect_probe") == 0) jumperlessConfig.dacs.auto_connect_probe = parseInt(value);
             else if (strcmp(key, "probe_power_source") == 0) jumperlessConfig.dacs.probe_power_source = parseInt(value);
             else if (strcmp(key, "limit_max") == 0) jumperlessConfig.dacs.limit_max = parseFloat(value);
+            else if (strcmp(key, "rail_click_adjust") == 0) jumperlessConfig.dacs.rail_click_adjust = parseInt(value);
             else if (strcmp(key, "limit_min") == 0) jumperlessConfig.dacs.limit_min = parseFloat(value);
         } else if (strcmp(section, "debug") == 0) {
             if (strcmp(key, "file_parsing") == 0) jumperlessConfig.debug.file_parsing = parseBool(value);
@@ -665,6 +666,7 @@ void updateConfigFromFile(const char* filename) {
             else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
             else if (strcmp(key, "probe_switch_agree") == 0) jumperlessConfig.debug.probe_switch_agree = parseBool(value);
             else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
+            else if (strcmp(key, "net_scan_pair_taps") == 0) jumperlessConfig.debug.net_scan_pair_taps = parseInt(value);
         } else if (strcmp(section, "routing") == 0) {
             if (strcmp(key, "stack_paths") == 0) {
                 jumperlessConfig.routing.stack_paths = parseInt(value);
@@ -1026,6 +1028,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("probe_power_source = "); file.print(jumperlessConfig.dacs.probe_power_source == 1 ? 1 : 0); file.println(";");
     file.print("limit_max = "); file.print(jumperlessConfig.dacs.limit_max); file.println(";");
     file.print("limit_min = "); file.print(jumperlessConfig.dacs.limit_min); file.println(";");
+    file.print("rail_click_adjust = "); file.print(jumperlessConfig.dacs.rail_click_adjust); file.println(";");
     file.println();
 
     // Write debug flags section
@@ -1046,6 +1049,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("probe_switch_stats = "); file.print(jumperlessConfig.debug.probe_switch_stats ? 1:0); file.println(";");
     file.print("probe_switch_agree = "); file.print(jumperlessConfig.debug.probe_switch_agree ? 1:0); file.println(";");
     file.print("net_voltage_scan = "); file.print(jumperlessConfig.debug.net_voltage_scan ? 1:0); file.println(";");
+    file.print("net_scan_pair_taps = "); file.print(jumperlessConfig.debug.net_scan_pair_taps); file.println(";");
     file.println();
 
     // Write routing settings section
@@ -1259,6 +1263,7 @@ bool configHasChanges() {
     if (jumperlessConfig.dacs.auto_connect_probe != -1 && lastSavedConfig.dacs.auto_connect_probe == -1) return true;
     if (jumperlessConfig.dacs.probe_power_source != lastSavedConfig.dacs.probe_power_source) return true;
     if (jumperlessConfig.dacs.limit_max != lastSavedConfig.dacs.limit_max) return true;
+    if (jumperlessConfig.dacs.rail_click_adjust != lastSavedConfig.dacs.rail_click_adjust) return true;
     if (jumperlessConfig.dacs.limit_min != lastSavedConfig.dacs.limit_min) return true;
     
     // Debug section
@@ -1278,6 +1283,7 @@ bool configHasChanges() {
     if (jumperlessConfig.debug.probe_switch_stats != lastSavedConfig.debug.probe_switch_stats) return true;
     if (jumperlessConfig.debug.probe_switch_agree != lastSavedConfig.debug.probe_switch_agree) return true;
     if (jumperlessConfig.debug.net_voltage_scan != lastSavedConfig.debug.net_voltage_scan) return true;
+    if (jumperlessConfig.debug.net_scan_pair_taps != lastSavedConfig.debug.net_scan_pair_taps) return true;
     
     // Routing section
     if (jumperlessConfig.routing.stack_paths != lastSavedConfig.routing.stack_paths) return true;
@@ -1760,6 +1766,9 @@ bool saveConfigIncremental(const char* filename) {
                 } else if (strcmp(key, "probe_power_source") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_power_source = %d;", jumperlessConfig.dacs.probe_power_source == 1 ? 1 : 0);
                     updated = true;
+                } else if (strcmp(key, "rail_click_adjust") == 0) {
+                    snprintf(newLine, sizeof(newLine), "rail_click_adjust = %d;", jumperlessConfig.dacs.rail_click_adjust);
+                    updated = true;
                 } else if (strcmp(key, "limit_max") == 0) {
                     snprintf(newLine, sizeof(newLine), "limit_max = %.2f;", jumperlessConfig.dacs.limit_max);
                     updated = true;
@@ -1808,6 +1817,9 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "probe_switch_agree") == 0) {
                     snprintf(newLine, sizeof(newLine), "probe_switch_agree = %d;", jumperlessConfig.debug.probe_switch_agree ? 1 : 0);
+                    updated = true;
+                } else if (strcmp(key, "net_scan_pair_taps") == 0) {
+                    snprintf(newLine, sizeof(newLine), "net_scan_pair_taps = %d;", jumperlessConfig.debug.net_scan_pair_taps);
                     updated = true;
                 } else if (strcmp(key, "net_voltage_scan") == 0) {
                     snprintf(newLine, sizeof(newLine), "net_voltage_scan = %d;", jumperlessConfig.debug.net_voltage_scan ? 1 : 0);
@@ -2797,6 +2809,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         if (pasteable == true) Serial.print("`[dacs] ");
         Serial.print("limit_max = "); Serial.print(jumperlessConfig.dacs.limit_max); Serial.println(";");
         if (pasteable == true) Serial.print("`[dacs] ");
+        Serial.print("rail_click_adjust = "); Serial.print(jumperlessConfig.dacs.rail_click_adjust); Serial.println(";");
+        if (pasteable == true) Serial.print("`[dacs] ");
         Serial.print("limit_min = "); Serial.print(jumperlessConfig.dacs.limit_min); Serial.println(";");
     }
     cycleTerminalColor();
@@ -2835,6 +2849,8 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("probe_switch_agree = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_switch_agree, boolTable)); Serial.println(";");
         if (pasteable == true) Serial.print("`[debug] ");
         Serial.print("net_voltage_scan = "); Serial.print(getStringFromTable(jumperlessConfig.debug.net_voltage_scan, boolTable)); Serial.println(";");
+        if (pasteable == true) Serial.print("`[debug] ");
+        Serial.print("net_scan_pair_taps = "); Serial.print(jumperlessConfig.debug.net_scan_pair_taps); Serial.println(";");
     }
     cycleTerminalColor();
     // Print routing settings section
@@ -3894,6 +3910,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "auto_connect_probe") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.auto_connect_probe);
         else if (strcmp(key, "probe_power_source") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.probe_power_source);
         else if (strcmp(key, "limit_max") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.dacs.limit_max);
+        else if (strcmp(key, "rail_click_adjust") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.rail_click_adjust);
         else if (strcmp(key, "limit_min") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.dacs.limit_min);
     }
     else if (strcmp(section, "debug") == 0) {
@@ -3913,6 +3930,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_switch_stats") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_stats);
         else if (strcmp(key, "probe_switch_agree") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_agree);
         else if (strcmp(key, "net_voltage_scan") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_voltage_scan);
+        else if (strcmp(key, "net_scan_pair_taps") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_scan_pair_taps);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_paths);
@@ -4098,6 +4116,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         }
         else if (strcmp(key, "limit_max") == 0) jumperlessConfig.dacs.limit_max = parseFloat(value);
         else if (strcmp(key, "limit_min") == 0) jumperlessConfig.dacs.limit_min = parseFloat(value);
+        else if (strcmp(key, "rail_click_adjust") == 0) jumperlessConfig.dacs.rail_click_adjust = parseInt(value);
     }
     else if (strcmp(section, "debug") == 0) {
         if (strcmp(key, "file_parsing") == 0) jumperlessConfig.debug.file_parsing = parseBool(value);
@@ -4123,6 +4142,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
         else if (strcmp(key, "probe_switch_agree") == 0) jumperlessConfig.debug.probe_switch_agree = parseBool(value);
         else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
+        else if (strcmp(key, "net_scan_pair_taps") == 0) jumperlessConfig.debug.net_scan_pair_taps = parseInt(value);
     }
     else if (strcmp(section, "routing") == 0) {
         if (strcmp(key, "stack_paths") == 0) jumperlessConfig.routing.stack_paths = parseInt(value);

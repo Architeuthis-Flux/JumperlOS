@@ -267,9 +267,104 @@ future feature that asks gets the same treatment.
 
 ---
 
-## In flight — nothing (2026-08-19, end of session)
+## In flight — tasks #31 + the current-sense hardening (2026-08-20, uncommitted)
 
-The working tree is clean. The double-tap fix that sat here became **row 74**
+The working tree holds BOTH TODO81926 items, implemented and HIL-verified but
+awaiting Kevin's hands before commit (the standing rule):
+
+**Part 1 — rail/DAC click-to-adjust (#31).** The dormant path is live again:
+`dacs.rail_click_adjust` (0 = off, 1 = only with an OLED, **default**, 2 =
+always; moved to `[dacs]` from `[display]` on Kevin's round-2 call) gates one
+predicate (`clickAdjustEnabled()`, Highlighting.cpp) used at
+all three touch points — `shouldPersistHighlight()` (rails + DAC nets persist,
+which also selects the long timeout the prompt needs), `wantsToHandleButtonPress()`
+(Menus defers the click), and a new `adjust?` prompt rendered by
+`ReadingDisplay::show()`'s new `hint` parameter (right-aligned 5pt tag on the
+bottom value row, which goes flush-left when the hint is present - centered it
+overlapped; both were Kevin's round-2 findings, along with the half-the-time
+click: rails were keyed on the volatile `brightenedNode`, now NET-based
+(highlightedNet 2/3) at all three touch points like the DACs always were).
+Downstream was already complete (`handleEncoderButtonPress` → `VoltageAdjuster`).
+**Needs Kevin**: probe-highlight a rail → prompt → click → adjust → confirm →
+survives reboot; ditto DACs; no-OLED board unchanged on flag=1; re-entrancy
+feel (the adjuster pumps `serviceInner` which re-runs `Highlighting::service`).
+
+**Part 2 — current-sense hardening (the "sparkling" report), staged 0–7, all
+landed.** Stage 0 metric: ant on/off flip counter, printed + reset by `i!`
+(`[ants] flips:N in Ss`). Stage 1: `adcRingMeanAfterStrict()` — taps now FAIL
+on a stale/torn/resynced ring window instead of eating history (`ringstale:`
+on the taps line). Stage 2: the TDM's 80 µs settle actually runs (committed
+commented-out in its first commit). Stage 3: `computePathCurrents` — no more
+pre-EMA deadband cliff; EMA seeded per routing epoch (no full-amplitude sample
+after pauses); deadband AFTER smoothing, per path (35 mV scaled by the folded
+conductance), with 1.25×/0.75× hysteresis → `pathShown_mA[]` is what ants,
+readouts and the `i!` path lines consume (raw EMA prints as `(ema …)`).
+Stage 4: ants flip only after 3 consecutive scanner compute ticks agree
+(counted on `netScanComputeGeneration()`, not LED frames). Stage 5: one
+~580 µs dwell sliced from ring history — early/late 8-sweep windows out of the
+same hold. Stage 6: in-use rails/DACs are TAPPED through the same sense path
+~1/s (`sources:` line shows `set…/meas…`); `fillKnownSources` prefers the
+measurement — this reverses `isKnownSourceNode`'s exclusion deliberately (a
+momentary high-Z tap, same as every user node). Stage 7: pairwise differential
+taps (`debug.net_scan_pair_taps`, default ON) — both path ends closed at once
+on two pool ADCs, both read from the SAME ring sweeps, channel assignment
+alternating per pass to average gain mismatch; `pair:` tap count and per-path
+`pair` markers in `i!`.
+
+**Bench numbers (this session's board).** Baseline (Stage 0 firmware):
+INA-agreement FAIL 6.71 vs 4.27 mA (that's task #32), zero-load FAIL — a
+**solid** −5.44 mA phantom on TOP_RAIL→20 (row 20 measured 4.78 V vs the
+5.00 V *setpoint*: a 220 mV systematic, exactly the plan's mechanism #1 —
+too big to sparkle, it was solid-on), flips 0/min. After: `sources:
+101=set5.00V/meas4.79V …`, taps `ok:10669 (pair:10459) noroute:0 ringstale:0`,
+the phantom path at `+0.00 mA (ema -0.26) pair`, flips 0, and **the
+INA-agreement check PASSES (4.4 vs 4.27 mA)** — the aligned pair taps +
+measured sources moved #32's symptom without the planned bisect (leave #32
+open until Kevin agrees the number holds).
+
+**Test change**: `test_net_currents.py`'s zero-load check now filters to the
+TOP_RAIL net's paths (node 101), per its own docstring — the report also
+contains the probe buffer feed (GPIO8→ROUTABLE_BUFFER_IN, nodes 138/139),
+which really does carry ~1.4 mA at all times; the scan reporting it is
+correct, and it was among the baseline offenders for the wrong reason.
+
+**Also measured autonomously**: the menu-exit ant-flash (mechanism #4) is now
+an instrumented PASS, not an eyeball item — SWD click → menu open over the
+no-load rail wire, 8 s hold (voltages age past the 5 s window), long-hold
+quit, 5 s rebuild: `[ants] flips:0`, zero path still `+0.00 mA`. `X` on this
+build: ring `overruns 0 resyncs 0 stalls 0` (max wait 422 µs over 7.9M
+reads), `frame hold: core0 0 core1 0`, ch446q `pio timeouts 0`. The first
+run_all's encoder_ui FAIL was the documented stale per-build `jl_input.py`
+ADDR table (rows 71–72); after `refresh_jl_input_addrs.sh`, run_all is
+**PASS 7/7 — the suite's first full pass on record** (every prior row says
+"6/7, standing tolerated phantom"; both the phantom and the harness flake
+are gone on this build).
+
+**Follow-on plans (2026-08-20, `DEV_PLANS_82026.md`)**: (1) Kevin's "do we
+need the OLED I2C speed switch?" — assessment: only until a panel proves out
+at 1 MHz (no panel has ever been driven at 1 MHz by this firmware; ping and
+clkDuring must move together or the detector lies again; nothing ACKs on the
+bench to verify today), plus a finding: `setClock`→`i2c_set_baudrate` is NOT
+arbiter-wrapped and the ping sites in Menus.cpp:4841 / Apps.cpp:1245 /
+init() are not wavegen-gated. (2) Crosspoint-R: `measure_crosspoint_r.py`
+(new HIL tool) measured the real per-crosspoint resistance against INA0
+across rows 34–60 + Nano D0–D9: **mean 41.8 Ω vs the 40 Ω model constant
+(σ 2.6, per-route structure down to ~36 Ω on some Nano routes)** — the
+scan's +3 % INA residual is the model constant, and a per-board ~42 Ω
+calibration (planned SelfTest phase) centers it. (3) Preloaded-projects
+outline + the five decisions it needs.
+
+**Needs Kevin (Part 2)**: clickwheel feel (Stages 2/5/7 lengthened dwells),
+the 5-minute no-flicker eyeball watch on a no-load rail wire, the ISENSE
+loop's steady march, and **Stage 2's own check, which has zero functional
+verification on record**: two FakeGpio inputs at 0 V / 3.3 V, confirm no
+cross-channel leakage (the reinstated 80 µs TDM settle is the one stage
+nothing else exercises). A/B knob if anything regresses:
+`` `[debug] net_scan_pair_taps = 0`` isolates Stage 7.
+
+---
+
+The double-tap fix that sat here became **row 74**
 (`ac24c8a`) after Kevin's hands passed it both ways — and on the way it grew
 the ghost-press fix (the row-74 entry has the full story). The knob table that
 lived here, updated to what shipped, in case tuning resumes:

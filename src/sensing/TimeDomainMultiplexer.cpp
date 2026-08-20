@@ -271,8 +271,11 @@ float TimeDomainMultiplexer::switchAndRead(int slot, int samples) {
 
     // Settling time for CH446Q analog switch after switching Y positions.
     // 30µs was too short and caused voltage readings from the previous channel
-    // to leak into the new one. 80µs provides reliable isolation.
-   // delayMicroseconds(80);
+    // to leak into the new one. 80µs provides reliable isolation. (This was
+    // committed already-commented-out and never actually ran; under the ADC
+    // ring, readActive()'s window starts at the call, so without this delay
+    // the first sweeps of every read landed pre-settle.)
+    delayMicroseconds(80);
 
     return readActive(samples);
 }

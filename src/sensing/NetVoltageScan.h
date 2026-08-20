@@ -59,6 +59,11 @@ float netCurrent_mA(int netIndex);
 bool pathCurrentKnown(int pathIndex);
 float pathCurrentSigned_mA(int pathIndex);
 
+// Bumps every computePathCurrents() pass (~20Hz). Consumers that vote over
+// "consecutive readings" (the ants' N-of-M debounce) count these, not their
+// own render frames - the LED loop sees each compute tick many times.
+uint32_t netScanComputeGeneration(void);
+
 // Call frequently from the core 2 loop. Self-throttled.
 void serviceNetVoltageScan(void);
 

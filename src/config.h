@@ -92,6 +92,11 @@ struct config {
         // Candidate indices for infraForceCandidate stay 0=DAC0 / 1=GPIO
         // regardless of this order.
         int probe_power_source = 0;
+        // Click the wheel while a rail/DAC is highlighted to adjust its
+        // voltage. 0 = off, 1 = only when an OLED is connected (default -
+        // the OLED shows the "adjust?" prompt that makes the click
+        // discoverable), 2 = always (LED-matrix adjuster UI only).
+        int rail_click_adjust = 1;
     } dacs;
 
     struct debug {
@@ -144,6 +149,12 @@ struct config {
         // Print net voltage scan stats once a second: every scanned node's
         // voltage and every routed path's estimated current.
         bool net_voltage_scan = false;
+        // Net scan pair taps (2026-08-20, experiment gate): tap BOTH ends
+        // of a routed path at once on two ADC channels and read them from
+        // the same ring sweeps, so each path's voltage delta is measured
+        // temporally aligned instead of up to a scan cycle apart.
+        // 1 = pair taps (default), 0 = sequential single-node taps (A/B).
+        int net_scan_pair_taps = 1;
     } debug;
 
     struct routing {

@@ -24,13 +24,17 @@ namespace ReadingDisplay {
  *                alongside a value - a name-only screen renders large and centered.
  * @param value   First reading ("3.30 V"), nullptr/"" to omit
  * @param value2  Second reading ("4.8 mA"), nullptr/"" to omit
+ * @param hint    Action prompt ("adjust?"), nullptr/"" to omit. Rendered as a
+ *                small right-aligned tag on the bottom value row (there is no
+ *                vertical room for a fourth row on the 32px panel), and part
+ *                of the dedupe key so gating changes repaint.
  *
  * Repeat calls with identical content are dropped, so callers that fire every
  * loop don't flicker the panel. Call resetLastShown() when something else has
  * painted over the display.
  */
 void show(const char* name, int rowNode, const char* value = nullptr,
-          const char* value2 = nullptr);
+          const char* value2 = nullptr, const char* hint = nullptr);
 
 /// Name-only screen (no measurement): renders as large as it fits.
 inline void showName(const char* name) { show(name, -1); }

@@ -921,12 +921,30 @@ static void uartRefreshLiveView( bool tx, bool rx, const char* txSnapshot,
     }
 }
 
+// Gate for the rail/DAC click-to-adjust shortcut (dacs.rail_click_adjust):
+// 0 = off, 1 = only with an OLED connected (the default - the OLED's
+// "adjust?" prompt is what makes the click discoverable), 2 = always.
+// All three touch points of the feature check this one predicate - the
+// persistent highlight, the button-press claim, and the prompt - so an
+// OLED-less board on the default setting behaves exactly as before.
+static bool clickAdjustEnabled( void ) {
+    int flag = jumperlessConfig.dacs.rail_click_adjust;
+    return flag == 2 || ( flag == 1 && oledConnected );
+}
+
+// The prompt for adjustable readings: shown only while a click would
+// actually enter the voltage adjuster.
+static const char* adjustHintText( void ) {
+    return clickAdjustEnabled( ) ? "adjust?" : nullptr;
+}
+
 // Highlight readings label themselves with the currently brightened node.
 // The rendering itself lives in ReadingDisplay so measure mode, the voltage
 // adjuster and the probe cursor draw the exact same way.
 static void showNetReading( const char* name, const char* value,
-                            const char* value2 = nullptr ) {
-    ReadingDisplay::show( name, brightenedNode, value, value2 );
+                            const char* value2 = nullptr,
+                            const char* hint = nullptr ) {
+    ReadingDisplay::show( name, brightenedNode, value, value2, hint );
 }
 
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
@@ -1002,7 +1020,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.topRail );
                     char curBuf[ 16 ];
-                    showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
+                    showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
             }
             brightenedRail = 0;
@@ -1014,7 +1032,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.bottomRail );
                     char curBuf[ 16 ];
-                    showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
+                    showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
             }
             brightenedRail = 2;
@@ -1028,7 +1046,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 0 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
+                    showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -1042,7 +1060,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 1 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ) );
+                    showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -1616,7 +1634,7 @@ int Highlighting::checkForReadingChanges( void ) {
             snprintf( name, sizeof( name ), "DAC %d", dacNum );
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentDacVoltage );
             char curBuf[ 16 ];
-            showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ) );
+            showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
 
             displayUpdated = true;
         }
@@ -1638,7 +1656,7 @@ int Highlighting::checkForReadingChanges( void ) {
 
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentRailVoltage );
             char curBuf[ 16 ];
-            showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ) );
+            showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
 
             displayUpdated = true;
         }
@@ -1835,16 +1853,21 @@ static void dacVoltageCallback(float value, bool isLive, void* context) {
  * @return true if node should persist, false otherwise
  */
 bool Highlighting::shouldPersistHighlight(int node) {
-    // Special nodes that persist
-    // if (node == TOP_RAIL || node == BOTTOM_RAIL) {
-    //     return true;
-    // }
-    
-    // // DAC nets (4 and 5)
-    // if (highlightedNet == 4 || highlightedNet == 5) {
-    //     return true;
-    // }
-    
+    // Rails and DACs persist while the click-to-adjust shortcut is armed:
+    // the long persistent timeout is what gives the user time to read the
+    // "adjust?" prompt and click. Gated so boards without the shortcut
+    // keep the short highlight timeout they always had.
+    // NET-based on purpose (2 = Top Rail, 3 = Bottom Rail, 4/5 = DACs -
+    // MatrixState's fixed special nets): brightenedNode is whatever node
+    // the probe last touched and clears to -1 on lift, so keying rails on
+    // node == TOP_RAIL made the click register only when the tap happened
+    // to land on the rail pad itself - Kevin's "works half the time".
+    if (clickAdjustEnabled()) {
+        if (highlightedNet >= 2 && highlightedNet <= 5) {
+            return true;
+        }
+    }
+
     // GPIO outputs persist
     if (highlightedNet > 0 && anyGpioOutputConnected(highlightedNet) != -1) {
         return true;
@@ -1884,9 +1907,12 @@ bool Highlighting::wantsToHandleButtonPress(void) {
         return false;
     }
     
-    // Rails and DACs are adjustable
-   // if (brightenedNode == TOP_RAIL || brightenedNode == BOTTOM_RAIL ||
-     if(   highlightedNet == 4 || highlightedNet == 5) {
+    // Rails and DACs are adjustable - by NET (see shouldPersistHighlight's
+    // note; GND is net 1 and never matches). shouldPersistHighlight() above
+    // already requires clickAdjustEnabled() for these, but the explicit
+    // gate keeps this readable on its own.
+    if (clickAdjustEnabled() &&
+        highlightedNet >= 2 && highlightedNet <= 5) {
         return true;
     }
     
@@ -1917,22 +1943,19 @@ int Highlighting::handleEncoderButtonPress(void) {
         return 0;
     }
     
-    // Handle rails
-    if (brightenedNode == GND) {
-        // GND is not adjustable
-        return 0;
-    }
-    
-    if (brightenedNode == TOP_RAIL) {
+    // Handle rails - by NET, matching wantsToHandleButtonPress (net 1 =
+    // GND is not adjustable and never claimed; brightenedNode is too
+    // volatile to key on - see shouldPersistHighlight's note).
+    if (highlightedNet == 2) {
         adjustRailVoltage(1);
         return 1;
     }
-    
-    if (brightenedNode == BOTTOM_RAIL) {
+
+    if (highlightedNet == 3) {
         adjustRailVoltage(2);
         return 1;
     }
-    
+
     // Handle DACs
     if (highlightedNet == 4) {
         adjustDACVoltage(0);

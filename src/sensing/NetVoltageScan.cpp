@@ -46,8 +46,10 @@ extern volatile bool refreshInProgress; // Commands.h
 extern volatile int probeActive;
 extern volatile int& inClickMenu; // Menus.h
 extern volatile int& inPadMenu;   // Probing.h
-// Defined in Graphics.cpp - ant geometry continuity check for the report
+// Defined in Graphics.cpp - ant geometry continuity check for the report,
+// and the ant on/off flip tally (prints flips-since-last-print, then resets)
 extern void printAntPathContinuity(Stream* out);
+extern void printAntFlipStats(Stream* out);
 
 // The encoder poll is single-owner on this core and internally throttled to
 // 2kHz, so calling it during our blocking waits is free and keeps the
@@ -63,8 +65,17 @@ static inline void waitServicingEncoder(unsigned long us) {
 float nodeVoltage[NODE_VOLTAGE_MAX];
 uint32_t nodeVoltageMs[NODE_VOLTAGE_MAX];
 NetCurrentInfo netCurrentInfo[NET_CURRENT_INFO_COUNT];
-static float pathCurrent_mA[MAX_BRIDGES];
+static float pathCurrent_mA[MAX_BRIDGES];   // smoothed estimate (the EMA)
 static bool pathCurrentValid[MAX_BRIDGES];
+// What consumers see: the smoothed estimate gated by a post-EMA per-path
+// deadband with hysteresis (0 while below the band). Separate from the EMA
+// so the deadband never corrupts the filter state it gates.
+static float pathShown_mA[MAX_BRIDGES];
+static bool pathShownOn[MAX_BRIDGES];   // hysteresis latch
+// EMA continuity: seeded once per routing epoch, NOT per freshness window.
+// Gating the EMA on last-pass validity made any >freshness pause (menus,
+// scan re-enable) inject one raw full-amplitude sample into the display.
+static bool pathEmaSeeded[MAX_BRIDGES];
 
 static const unsigned long kScanIntervalUs = 5000;    // min gap between taps
 // Sample validity window. Generous on purpose: probing/scrolling preempts
@@ -95,11 +106,54 @@ static bool gndInUse = false;
 // the debug print.
 static float nodeDrift[NODE_VOLTAGE_MAX];
 
+// Measured known sources. fillKnownSources() used to write rail/DAC
+// SETPOINTS into nodeVoltage[] while the other end of every path was
+// ADC-measured - the systematic offset between "5.00V commanded" and what
+// the sense path actually reads (rail droop, DAC/ADC calibration skew,
+// 220mV seen on a real board) turned directly into phantom mA on every
+// rail-fed path. Tapping each in-use source through the SAME sense path
+// ~1/s makes both endpoints share the channel's systematics, so a
+// zero-current path really reads dv~=0. Judgment call flagged in review:
+// this deliberately reverses isKnownSourceNode()'s rail/DAC exclusion and
+// taps them while in use - justified because a momentary high-Z tap is
+// exactly what the scanner already does to every user node. GND stays
+// untouched (it IS the zero reference; the auto-zero below handles it).
+static const int kSourceNodes[4] = {TOP_RAIL, BOTTOM_RAIL, DAC0, DAC1};
+static bool sourceInUse[4];
+static float sourceMeasured[4];
+static float sourceSetpointAtMeasure[4];
+static uint32_t sourceMeasuredMs[4] = {0, 0, 0, 0};
+// Attempt time, distinct from success time: a source whose tap keeps
+// failing (lanes busy) must back off, not hog every tap slot away from
+// the user-node round-robin.
+static uint32_t sourceAttemptMs[4] = {0, 0, 0, 0};
+// Measured values are trusted for a few refresh periods, then the setpoint
+// takes back over (a paused scan must not serve week-old rail readings).
+static const uint32_t kSourceMeasureFreshMs = 2500;
+static const uint32_t kSourceMeasureIntervalMs = 1000;
+
 // Tap failure tallies for the debug print (why nodes go stale)
 static uint32_t tapFailNoRoute = 0;
 static uint32_t tapFailAdcBusy = 0;
 static uint32_t tapFailDrift = 0;
+static uint32_t tapFailRingStale = 0; // ring couldn't serve a FRESH window
 static uint32_t tapOk = 0;
+static uint32_t tapPairOk = 0; // of tapOk, taps that read a path's both ends
+
+// Pairwise differential taps (debug.net_scan_pair_taps): a path's two ends
+// read from the SAME ring sweeps in one dwell. The aligned delta lands
+// here, per path; computePathCurrents prefers it over subtracting two
+// round-robin node samples taken up to a full scan cycle apart.
+// KNOWN LIMITATION: a differential read cancels common-mode/bias but turns
+// per-channel GAIN mismatch into an error proportional to V (1% @ 3V =
+// 30mV - the size of the problem being fixed). Mitigated by alternating
+// which node rides which channel each pass (pairSwapPhase), so the
+// mismatch averages out of the EMAs to first order; per-channel
+// adcSpread/adcZero calibration still applies underneath.
+static float pathPairDv[MAX_BRIDGES];
+static uint32_t pathPairDvMs[MAX_BRIDGES];
+static int pairPathIndex = 0;
+static bool pairSwapPhase = false;
 
 // ============================================================================
 // Hang-proof ADC read
@@ -116,7 +170,18 @@ static bool readScanAdcVoltage(int channel, int samples, float* volts) {
     if (adcRingActive()) {
         // T2.1: n fresh sweeps after this instant (the tap has settled by
         // now), off the ring - no converter, no lock; ~21 us per sample.
-        int raw = adcRingMeanAfter(channel, adcRingSweeps(), samples, (uint32_t)samples * 25u + 400u);
+        // Fresh-or-fail: on timeout/resync/stop the ring hands back
+        // best-available HISTORY, which describes whatever was on this
+        // channel before our tap - feeding that into nodeVoltage[] is how
+        // stale data becomes phantom current. Fail the tap instead; the
+        // node just stays stale one more scan cycle.
+        bool fresh = false;
+        int raw = adcRingMeanAfterStrict(channel, adcRingSweeps(), samples,
+                                         (uint32_t)samples * 25u + 400u, &fresh);
+        if (!fresh) {
+            tapFailRingStale++;
+            return false;
+        }
         float reading = ((float)raw) * (adcSpread[channel] / 4095.0f);
         if (channel != 4 && channel != 5) reading -= adcZero[channel];
         *volts = reading;
@@ -186,7 +251,8 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
     // stay well under waitCore2()'s 25ms, or refreshConnections() times out
     // and rebuilds chipStates while we're still mid-tap (torn route state,
     // possible short). Budget: 2ms lock spin + 4x500us connect + unwind +
-    // ~1ms reads + 4x1ms disconnect ~= 11ms hard worst case.
+    // ~0.6ms dwell (80us settle + 500us ring hold) + 4x1ms disconnect
+    // ~= 11ms hard worst case.
     int rc = fastConnectPath(node, adcNode, &handle, 500);
     if (rc != 0) {
         if (!ringLive) __atomic_clear(&readingADC, __ATOMIC_RELEASE);
@@ -196,15 +262,49 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
 
     waitServicingEncoder(80); // CH446Q settle (same value TDM landed on)
     float early = 0.0f, late = 0.0f;
-    bool ok = readScanAdcVoltage(adc, 4, &early);
-    if (ok) {
-        waitServicingEncoder(250); // give a floating net time to visibly decay
-        ok = readScanAdcVoltage(adc, 4, &late);
+    bool ok;
+    if (ringLive) {
+        // One dwell sliced from ring history: hold the tap ~500us while the
+        // ring records (a sweep lands every ~21us), then read an EARLY
+        // window (the 8 sweeps after settle) and a LATE window (the newest
+        // 8) out of the same hold. Twice the samples per window of the old
+        // read-wait-read at about the same tap length, and both windows are
+        // guaranteed inside the tap. The floating-drift check below compares
+        // the two ends of the dwell exactly as before.
+        uint32_t gen = adcRingGeneration();
+        uint32_t s0 = adcRingSweeps();
+        waitServicingEncoder(500);
+        uint32_t s1 = adcRingSweeps();
+        // >= 17 sweeps elapsed keeps early and late disjoint; a generation
+        // bump means a resync restarted the sweep phase mid-dwell.
+        ok = (adcRingActive() && adcRingGeneration() == gen && (s1 - s0) >= 17);
+        if (ok) {
+            // Early = sweeps s0+1..s0+8 (sweep s0 was mid-flight at capture,
+            // its sample can predate the settle end by one sweep period -
+            // same "+1" convention as adcRingMeanAfter). Late = newest 8.
+            int rawEarly = adcRingMeanWindow(adc, s0 + 9, 8);
+            int rawLate = adcRingMeanWindow(adc, s1, 8);
+            // Re-check: a resync while summing voids the channel mapping.
+            ok = (adcRingActive() && adcRingGeneration() == gen);
+            float scale = adcSpread[adc] / 4095.0f;
+            float zero = (adc != 4 && adc != 5) ? adcZero[adc] : 0.0f;
+            early = (float)rawEarly * scale - zero;
+            late = (float)rawLate * scale - zero;
+        }
+        if (!ok) tapFailRingStale++;
+    } else {
+        ok = readScanAdcVoltage(adc, 4, &early);
+        if (ok) {
+            waitServicingEncoder(250); // give a floating net time to visibly decay
+            ok = readScanAdcVoltage(adc, 4, &late);
+        }
     }
     fastDisconnectPath(&handle);
     if (!ringLive) __atomic_clear(&readingADC, __ATOMIC_RELEASE);
     if (!ok) {
-        tapFailAdcBusy++;
+        // Ring-path failures already counted themselves as ringstale; the
+        // legacy converter path failing (no good conversions) is adcbusy.
+        if (!ringLive) tapFailAdcBusy++;
         return false;
     }
     if (node >= 0 && node < NODE_VOLTAGE_MAX) {
@@ -216,6 +316,70 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
     }
     tapOk++;
     *volts = late;
+    return true;
+}
+
+// Pairwise differential tap: close node1->adcA AND node2->adcB, one settle,
+// then read both channels' early/late windows out of the same ring dwell.
+// Ring-only (the shared-sweep trick IS the point); callers fall back to
+// single taps when the ring is down. The two sequential fastConnectPaths
+// can't collide (lastChipXY is updated per route, laneOk demands
+// hardware-free lanes), and each route passes the same wouldShort
+// validation as any tap. Both readings keep the per-channel floating-drift
+// check - one floating end voids the whole tap.
+static bool pairSenseTap(int node1, int node2, int adcA, int adcB,
+                         float* v1, float* v2) {
+    FastPathHandle h1, h2;
+    if (fastConnectPath(node1, ADC0 + adcA, &h1, 500) != 0) {
+        tapFailNoRoute++;
+        return false;
+    }
+    if (fastConnectPath(node2, ADC0 + adcB, &h2, 500) != 0) {
+        fastDisconnectPath(&h1);
+        tapFailNoRoute++;
+        return false;
+    }
+    waitServicingEncoder(80); // CH446Q settle, both routes closed
+    uint32_t gen = adcRingGeneration();
+    uint32_t s0 = adcRingSweeps();
+    waitServicingEncoder(500);
+    uint32_t s1 = adcRingSweeps();
+    bool ok = (adcRingActive() && adcRingGeneration() == gen && (s1 - s0) >= 17);
+    float earlyA = 0, lateA = 0, earlyB = 0, lateB = 0;
+    if (ok) {
+        // Window arithmetic as in senseNodeVoltage: early = s0+1..s0+8,
+        // late = the newest 8 - both channels sliced from the SAME sweeps.
+        int rawEarlyA = adcRingMeanWindow(adcA, s0 + 9, 8);
+        int rawEarlyB = adcRingMeanWindow(adcB, s0 + 9, 8);
+        int rawLateA = adcRingMeanWindow(adcA, s1, 8);
+        int rawLateB = adcRingMeanWindow(adcB, s1, 8);
+        ok = (adcRingActive() && adcRingGeneration() == gen);
+        float scaleA = adcSpread[adcA] / 4095.0f;
+        float zeroA = (adcA != 4 && adcA != 5) ? adcZero[adcA] : 0.0f;
+        float scaleB = adcSpread[adcB] / 4095.0f;
+        float zeroB = (adcB != 4 && adcB != 5) ? adcZero[adcB] : 0.0f;
+        earlyA = (float)rawEarlyA * scaleA - zeroA;
+        lateA = (float)rawLateA * scaleA - zeroA;
+        earlyB = (float)rawEarlyB * scaleB - zeroB;
+        lateB = (float)rawLateB * scaleB - zeroB;
+    }
+    fastDisconnectPath(&h2);
+    fastDisconnectPath(&h1);
+    if (!ok) {
+        tapFailRingStale++;
+        return false;
+    }
+    if (node1 >= 0 && node1 < NODE_VOLTAGE_MAX) nodeDrift[node1] = lateA - earlyA;
+    if (node2 >= 0 && node2 < NODE_VOLTAGE_MAX) nodeDrift[node2] = lateB - earlyB;
+    if (fabsf(lateA - earlyA) > kFloatingDriftVolts ||
+        fabsf(lateB - earlyB) > kFloatingDriftVolts) {
+        tapFailDrift++;
+        return false;
+    }
+    tapOk++;
+    tapPairOk++;
+    *v1 = lateA;
+    *v2 = lateB;
     return true;
 }
 
@@ -233,6 +397,19 @@ static bool isScannable(int node) {
     if (isKnownSourceNode(node)) return false;
     if (node >= ADC0 && node <= ADC4) return false; // filled from adcReadings[]
     if (node == ADC7_PROBE) return false;           // hardwired to the buffer
+    return true;
+}
+
+// A path endpoint the pair tap may close a sense route onto: any scannable
+// user node, plus the rails/DACs (measured sources now - a momentary high-Z
+// tap, same as every user node gets). GND stays excluded - it is the zero
+// reference and gets no stubs while in use; ADC endpoints measure
+// themselves through adcReadings[].
+static bool pairTapEligible(int node) {
+    if (node <= 0 || node >= NODE_VOLTAGE_MAX) return false;
+    if (node == GND) return false;
+    if (node >= ADC0 && node <= ADC4) return false;
+    if (node == ADC7_PROBE) return false;
     return true;
 }
 
@@ -261,6 +438,7 @@ static void rebuildScanList() {
     scanNodeCount = 0;
     gndInUse = false;
     for (int i = 0; i < 5; i++) adcNodePresent[i] = false;
+    for (int i = 0; i < 4; i++) sourceInUse[i] = false;
 
     for (int i = 1; i < MAX_NETS; i++) {
         netStruct& net = globalState.connections.nets[i];
@@ -271,6 +449,9 @@ static void rebuildScanList() {
             if (node <= 0) break;
             if (node == GND) gndInUse = true;
             if (node >= ADC0 && node <= ADC4) adcNodePresent[node - ADC0] = true;
+            for (int k = 0; k < 4; k++) {
+                if (node == kSourceNodes[k]) sourceInUse[k] = true;
+            }
             if (!isScannable(node)) continue;
             bool dup = false;
             for (int k = 0; k < scanNodeCount; k++) {
@@ -287,18 +468,36 @@ static void rebuildScanList() {
     if (scanIndex >= scanNodeCount) scanIndex = 0;
 }
 
+// The commanded voltage for source k (kSourceNodes order). What
+// fillKnownSources() used exclusively before the sources were measured.
+static float sourceSetpoint(int k) {
+    switch (k) {
+    case 0: return globalState.power.topRail;
+    case 1: return globalState.power.bottomRail;
+    case 2: return globalState.power.dac0;
+    default: return globalState.power.dac1;
+    }
+}
+
 static void fillKnownSources() {
     uint32_t ms = millis();
     nodeVoltage[GND] = 0.0f;
     nodeVoltageMs[GND] = ms;
-    nodeVoltage[TOP_RAIL] = globalState.power.topRail;
-    nodeVoltageMs[TOP_RAIL] = ms;
-    nodeVoltage[BOTTOM_RAIL] = globalState.power.bottomRail;
-    nodeVoltageMs[BOTTOM_RAIL] = ms;
-    nodeVoltage[DAC0] = globalState.power.dac0;
-    nodeVoltageMs[DAC0] = ms;
-    nodeVoltage[DAC1] = globalState.power.dac1;
-    nodeVoltageMs[DAC1] = ms;
+    // Rails/DACs: prefer the fresh MEASURED value (tapped through the same
+    // sense path as every other node, so per-channel systematics cancel in
+    // the dv), falling back to the setpoint when the measurement is stale
+    // or the user has since changed the voltage.
+    for (int k = 0; k < 4; k++) {
+        float setpoint = sourceSetpoint(k);
+        float v = setpoint;
+        if (sourceMeasuredMs[k] != 0 &&
+            (ms - sourceMeasuredMs[k]) < kSourceMeasureFreshMs &&
+            fabsf(sourceSetpointAtMeasure[k] - setpoint) < 0.01f) {
+            v = sourceMeasured[k];
+        }
+        nodeVoltage[kSourceNodes[k]] = v;
+        nodeVoltageMs[kSourceNodes[k]] = ms;
+    }
     // ADCs the user bridged into nets already measure their node directly;
     // updateLazyAdcReadings() keeps adcReadings[] fresh on this core.
     for (int a = 0; a <= 4; a++) {
@@ -307,6 +506,37 @@ static void fillKnownSources() {
             nodeVoltageMs[ADC0 + a] = ms;
         }
     }
+}
+
+static inline bool voltageFresh(int node, uint32_t ms);
+
+// Route a fresh (already zero-corrected) tap value to wherever this node's
+// voltage lives: rails/DACs to the measured-source slot (fillKnownSources
+// rewrites their nodeVoltage[] from it every pass), everything else to the
+// per-node EMA. Smoothing matches on both branches: alpha 0.3 while the
+// previous value is fresh, seed otherwise.
+static void recordTapVoltage(int node, float volts) {
+    uint32_t ms = millis();
+    for (int k = 0; k < 4; k++) {
+        if (node != kSourceNodes[k]) continue;
+        if (sourceMeasuredMs[k] != 0 &&
+            (ms - sourceMeasuredMs[k]) < kSourceMeasureFreshMs &&
+            fabsf(sourceSetpointAtMeasure[k] - sourceSetpoint(k)) < 0.01f) {
+            volts = sourceMeasured[k] + 0.3f * (volts - sourceMeasured[k]);
+        }
+        sourceMeasured[k] = volts;
+        sourceSetpointAtMeasure[k] = sourceSetpoint(k);
+        sourceMeasuredMs[k] = ms;
+        sourceAttemptMs[k] = ms; // a pair tap counts as this source's refresh
+        return;
+    }
+    if (node <= 0 || node >= NODE_VOLTAGE_MAX) return;
+    if (voltageFresh(node, ms)) {
+        nodeVoltage[node] += 0.3f * (volts - nodeVoltage[node]);
+    } else {
+        nodeVoltage[node] = volts;
+    }
+    nodeVoltageMs[node] = ms;
 }
 
 // ============================================================================
@@ -325,7 +555,10 @@ static int pathCrosspoints(const pathStruct& p) {
     return count;
 }
 
+static volatile uint32_t computeGeneration = 0;
+
 static void computePathCurrents() {
+    computeGeneration = computeGeneration + 1;
     for (int i = 0; i < MAX_NETS; i++) netCurrentInfo[i].valid = false;
 
     int numPaths = livePathCount();
@@ -334,7 +567,6 @@ static void computePathCurrents() {
     uint32_t ms = millis();
 
     for (int i = 0; i < numPaths; i++) {
-        bool wasValid = pathCurrentValid[i];
         pathCurrentValid[i] = false;
         const pathStruct& p = globalState.connections.paths[i];
         if (p.skip || p.net <= 0 || p.net >= MAX_NETS) continue;
@@ -365,31 +597,48 @@ static void computePathCurrents() {
 
         float v1 = nodeVoltage[n1];
         float v2 = nodeVoltage[n2];
-        // Deadband: below the resolvable voltage delta the "current" is just
-        // measurement noise (a floating net parked at the ADC bias reads
-        // +/-20mV of jitter, which would fake fractional mA over a stacked
-        // low-resistance path). Report a solid 0 instead.
         float dv = v1 - v2;
-        if (fabsf(dv) < 0.035f) dv = 0.0f;
+        // Pair-tapped paths carry a better delta: both ends read from the
+        // same ring sweeps in one dwell, instead of two round-robin samples
+        // taken up to a full scan cycle apart on different channels.
+        if (pathPairDvMs[i] != 0 && (ms - pathPairDvMs[i]) < kVoltageFreshMs) {
+            dv = pathPairDv[i];
+        }
+        // Smooth the RAW current estimate - no deadband before the filter.
+        // The old pre-EMA hard deadband zeroed dv below 35mV, so a reading
+        // parked AT the cliff toggled the filter input between 0 and the
+        // full value on every pass and the EMA wandered through the ants'
+        // on/off band - the "sparkle". EMA alpha 0.25 at 20Hz converges in
+        // ~200ms - fast enough to track real changes, slow enough to iron
+        // out shot noise.
         float i_mA = dv * g * 1000.0f;
-        // Smooth across recomputes: near the dv deadband the raw value
-        // toggles between 0 and the real current on every pass (the node
-        // voltages refresh round-robin), which made the current ants and
-        // the highlight readout flicker. EMA alpha 0.25 at 20Hz converges
-        // in ~200ms - fast enough to track real changes, slow enough to
-        // iron out the toggle.
-        if (wasValid) {
+        if (pathEmaSeeded[i]) {
             i_mA = pathCurrent_mA[i] + 0.25f * (i_mA - pathCurrent_mA[i]);
         }
+        pathEmaSeeded[i] = true;
         pathCurrent_mA[i] = i_mA;
         pathCurrentValid[i] = true;
 
+        // Deadband AFTER smoothing, per path, with hysteresis. The noise
+        // floor is constant in VOLTS (ADC jitter + residual bias), so the
+        // current cutoff scales with the path's conductance - the same
+        // 35mV that used to gate dv, now applied to the smoothed current.
+        // Enter at 1.25x, drop at 0.75x: every borderline case latches
+        // solid-on or solid-off, never toggling.
+        float iDead_mA = 0.035f * g * 1000.0f;
+        if (pathShownOn[i]) {
+            if (fabsf(i_mA) < iDead_mA * 0.75f) pathShownOn[i] = false;
+        } else {
+            if (fabsf(i_mA) > iDead_mA * 1.25f) pathShownOn[i] = true;
+        }
+        pathShown_mA[i] = pathShownOn[i] ? i_mA : 0.0f;
+
         NetCurrentInfo& info = netCurrentInfo[p.net];
-        if (!info.valid || fabsf(i_mA) > info.current_mA) {
+        if (!info.valid || fabsf(pathShown_mA[i]) > info.current_mA) {
             info.valid = true;
-            info.current_mA = fabsf(i_mA);
+            info.current_mA = fabsf(pathShown_mA[i]);
             info.voltage = 0.5f * (v1 + v2);
-            if (v1 >= v2) {
+            if (dv >= 0) { // same delta the current came from (pair or nodes)
                 info.fromNode = n1;
                 info.toNode = n2;
             } else {
@@ -405,6 +654,7 @@ static void computePathCurrents() {
 // ============================================================================
 
 static int pickScanAdc();
+static bool anySourceInUse(void);
 
 // Print one node's current sense route (dry run of the same builder the
 // taps use, against live occupancy).
@@ -435,8 +685,22 @@ static void printScanStats(Stream* out) {
         }
     }
     out->println();
-    out->printf("[nvscan] taps ok:%lu noroute:%lu adcbusy:%lu drift:%lu\n",
-                tapOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift);
+    if (anySourceInUse()) {
+        out->print("[nvscan] sources:");
+        for (int k = 0; k < 4; k++) {
+            if (!sourceInUse[k]) continue;
+            out->printf(" %d=set%.2fV", kSourceNodes[k], sourceSetpoint(k));
+            if (sourceMeasuredMs[k] != 0 &&
+                millis() - sourceMeasuredMs[k] < kSourceMeasureFreshMs) {
+                out->printf("/meas%.2fV", sourceMeasured[k]);
+            } else {
+                out->print("/stale");
+            }
+        }
+        out->println();
+    }
+    out->printf("[nvscan] taps ok:%lu (pair:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu\n",
+                tapOk, tapPairOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift, tapFailRingStale);
     // Sense routes as the taps would compute them right now (peek only -
     // a debug print must not take pool ownership)
     uint8_t freeMask = infraFreeAdcMask(0x0F);
@@ -462,9 +726,16 @@ static void printScanStats(Stream* out) {
     for (int i = 0; i < numPaths; i++) {
         const pathStruct& p = globalState.connections.paths[i];
         if (pathCurrentValid[i]) {
-            out->printf("[nvscan] path %d net %d  %d->%d  %dxp dup%d  %+.2f mA\n",
+            // Shown (gated) value first - it is what the display and the HIL
+            // zero-load check consume; the raw EMA rides along unsuffixed so
+            // the mA regex can't match it. "pair" = the delta comes from a
+            // same-dwell differential tap of both ends.
+            bool pairFresh = pathPairDvMs[i] != 0 &&
+                             (millis() - pathPairDvMs[i]) < kVoltageFreshMs;
+            out->printf("[nvscan] path %d net %d  %d->%d  %dxp dup%d  %+.2f mA (ema %+.2f)%s\n",
                         i, p.net, p.node1, p.node2, pathCrosspoints(p),
-                        p.duplicate, pathCurrent_mA[i]);
+                        p.duplicate, pathShown_mA[i], pathCurrent_mA[i],
+                        pairFresh ? " pair" : "");
         } else if (p.net > 0 && !p.skip) {
             out->printf("[nvscan] path %d net %d  %d-%d  %dxp dup%d  (no data)\n",
                         i, p.net, p.node1, p.node2, pathCrosspoints(p),
@@ -474,6 +745,7 @@ static void printScanStats(Stream* out) {
     // Ant geometry self-check: every path's pixel sequence must be
     // physically continuous or the flow illusion is broken.
     printAntPathContinuity(out);
+    printAntFlipStats(out);
     out->flush();
 }
 
@@ -505,9 +777,13 @@ bool pathCurrentKnown(int pathIndex) {
     return pathCurrentValid[pathIndex];
 }
 
+uint32_t netScanComputeGeneration(void) {
+    return computeGeneration;
+}
+
 float pathCurrentSigned_mA(int pathIndex) {
     if (!pathCurrentKnown(pathIndex)) return 0.0f;
-    return pathCurrent_mA[pathIndex];
+    return pathShown_mA[pathIndex]; // deadband-gated: solid 0 below the band
 }
 
 static int pickScanAdc() {
@@ -518,13 +794,112 @@ static int pickScanAdc() {
     return infraAcquireAdc(INFRA_ADC_NVSCAN, 0x0F, true);
 }
 
+static bool anySourceInUse(void) {
+    return sourceInUse[0] || sourceInUse[1] || sourceInUse[2] || sourceInUse[3];
+}
+
+// The next in-use source due a measurement tap: least-recently measured of
+// those past the refresh interval. A setpoint change re-arms immediately -
+// the old measurement no longer describes the new command (fillKnownSources
+// already fell back to the setpoint the moment it moved).
+static int dueSourceIndex(void) {
+    int best = -1;
+    uint32_t ms = millis();
+    for (int k = 0; k < 4; k++) {
+        if (!sourceInUse[k]) continue;
+        if (sourceAttemptMs[k] != 0 &&
+            (ms - sourceAttemptMs[k]) < kSourceMeasureIntervalMs) {
+            continue; // attempted recently (success or not) - back off
+        }
+        bool setpointMoved =
+            sourceMeasuredMs[k] != 0 &&
+            fabsf(sourceSetpointAtMeasure[k] - sourceSetpoint(k)) >= 0.01f;
+        if (sourceMeasuredMs[k] != 0 && !setpointMoved &&
+            (ms - sourceMeasuredMs[k]) < kSourceMeasureIntervalMs) {
+            continue;
+        }
+        if (best < 0 ||
+            (int32_t)(sourceMeasuredMs[k] - sourceMeasuredMs[best]) < 0) {
+            best = k;
+        }
+    }
+    return best;
+}
+
+// One pair-tap slot: the next path with a tappable end gets its tap - both
+// ends at once on two channels when a second one is free, else the one
+// tappable end single-ended (so the slot still gathers something). Returns
+// false when no path qualifies and the caller should fall back to the
+// plain node round-robin. adcA is already acquired by the caller; the
+// second channel is freed with it by the caller's infraReleaseAdc (which
+// releases every channel this user owns). Pair taps still run serially,
+// one path per tap - a pair holds 2 of the 4 routable channels for its
+// ~1.2ms dwell, less than the full 0x0F mask a plain tap can acquire.
+static bool pairTapSlot(int adcA) {
+    int numPaths = livePathCount();
+    if (numPaths <= 0) return false;
+    for (int tries = 0; tries < numPaths; tries++) {
+        int i = pairPathIndex % numPaths;
+        pairPathIndex = (pairPathIndex + 1) % numPaths;
+        const pathStruct& p = globalState.connections.paths[i];
+        if (p.skip || p.net <= 0 || p.net >= MAX_NETS) continue;
+        if (p.pathType == VIRTUAL || p.duplicate != 0) continue;
+        bool e1 = pairTapEligible(p.node1);
+        bool e2 = pairTapEligible(p.node2);
+        if (!e1 && !e2) continue;
+        if (e1 && e2) {
+            int adcB = infraAcquireAdc(INFRA_ADC_NVSCAN,
+                                       (uint8_t)(0x0F & ~(1u << adcA)), true);
+            if (adcB >= 0) {
+                // Alternate which node rides which channel each pass so a
+                // per-channel gain mismatch averages out of the EMAs.
+                pairSwapPhase = !pairSwapPhase;
+                int a1 = pairSwapPhase ? adcB : adcA;
+                int a2 = pairSwapPhase ? adcA : adcB;
+                float v1, v2;
+                if (pairSenseTap(p.node1, p.node2, a1, a2, &v1, &v2)) {
+                    v1 -= scanZeroOffset[a1];
+                    v2 -= scanZeroOffset[a2];
+                    recordTapVoltage(p.node1, v1);
+                    recordTapVoltage(p.node2, v2);
+                    pathPairDv[i] = v1 - v2;
+                    pathPairDvMs[i] = millis();
+                    return true;
+                }
+                // Pair tap failed (route/drift/ring) - single-ended below,
+                // so a lane-contended path still gets its nodes refreshed.
+            }
+            // No second channel free right now - single-ended below.
+        }
+        int node;
+        if (e1 && e2) {
+            pairSwapPhase = !pairSwapPhase;
+            node = pairSwapPhase ? p.node1 : p.node2;
+        } else {
+            node = e1 ? p.node1 : p.node2;
+        }
+        float volts;
+        if (senseNodeVoltage(node, adcA, &volts)) {
+            recordTapVoltage(node, volts - scanZeroOffset[adcA]);
+        }
+        return true;
+    }
+    return false;
+}
+
 void serviceNetVoltageScan(void) {
     static bool wasEnabled = false;
     if (!jumperlessConfig.display.net_currents) {
         if (wasEnabled) {
             // Leave nothing stale behind for the display consumers.
             memset(nodeVoltageMs, 0, sizeof(nodeVoltageMs));
-            for (int i = 0; i < MAX_BRIDGES; i++) pathCurrentValid[i] = false;
+            for (int i = 0; i < MAX_BRIDGES; i++) {
+                pathCurrentValid[i] = false;
+                pathEmaSeeded[i] = false;
+                pathShownOn[i] = false;
+                pathShown_mA[i] = 0.0f;
+                pathPairDvMs[i] = 0;
+            }
             for (int i = 0; i < MAX_NETS; i++) netCurrentInfo[i].valid = false;
             wasEnabled = false;
         }
@@ -576,7 +951,13 @@ void serviceNetVoltageScan(void) {
         rebuildScanList();
         // Routing changed - old samples may describe merged/split nets.
         memset(nodeVoltageMs, 0, sizeof(nodeVoltageMs));
-        for (int i = 0; i < MAX_BRIDGES; i++) pathCurrentValid[i] = false;
+        for (int i = 0; i < MAX_BRIDGES; i++) {
+            pathCurrentValid[i] = false;
+            pathEmaSeeded[i] = false;
+            pathShownOn[i] = false;
+            pathShown_mA[i] = 0.0f;
+            pathPairDvMs[i] = 0;
+        }
         for (int i = 0; i < MAX_NETS; i++) netCurrentInfo[i].valid = false;
     }
 
@@ -593,12 +974,13 @@ void serviceNetVoltageScan(void) {
     // the tap window (same contract as updateLazyAdcReadings); the pure-CPU
     // bookkeeping needs no flag - idleOtherCore() is what actually parks this
     // core for flash safety.
-    if (scanNodeCount > 0 && probeActive == 0 && !wavegen.isRunning() &&
-        micros() - lastScanUs > kScanIntervalUs) {
+    if ((scanNodeCount > 0 || anySourceInUse()) && probeActive == 0 &&
+        !wavegen.isRunning() && micros() - lastScanUs > kScanIntervalUs) {
         core2busy = true;
         lastScanUs = micros();
         int adc = pickScanAdc();
         if (adc >= 0) {
+            int srcDue;
             // Refresh this channel's zero offset (a tap on GND) every second,
             // but NEVER touch GND while a user circuit is connected to it -
             // the last captured offset stays in use (it's a near-static ADC
@@ -609,7 +991,23 @@ void serviceNetVoltageScan(void) {
                     scanZeroOffset[adc] = zero;
                     scanZeroMs[adc] = millis();
                 }
-            } else {
+            } else if ((srcDue = dueSourceIndex()) >= 0) {
+                // A rail/DAC measurement tap - same sense path, same zero
+                // offset as the user nodes, so fillKnownSources' measured
+                // values cancel the channel's systematics in every dv.
+                // (Pair taps refresh most in-use sources on their own; this
+                // slot covers the ones they can't reach.)
+                sourceAttemptMs[srcDue] = millis();
+                float volts;
+                if (senseNodeVoltage(kSourceNodes[srcDue], adc, &volts)) {
+                    recordTapVoltage(kSourceNodes[srcDue], volts - scanZeroOffset[adc]);
+                }
+            } else if (jumperlessConfig.debug.net_scan_pair_taps != 0 &&
+                       adcRingActive() && pairTapSlot(adc)) {
+                // Pair-tap slot took the pass: one path's ends were tapped
+                // together (or its single tappable end, when a second
+                // channel/route wasn't available).
+            } else if (scanNodeCount > 0) {
                 int node = scanNodes[scanIndex];
                 // Advance round-robin unless the ADC was busy (retry then)
                 uint32_t busyBefore = tapFailAdcBusy;
@@ -619,15 +1017,9 @@ void serviceNetVoltageScan(void) {
                     scanIndex = (scanIndex + 1) % scanNodeCount;
                 }
                 if (ok) {
-                    volts -= scanZeroOffset[adc];
-                    // Smooth across scan cycles: shot-to-shot ADC noise is
-                    // +/-20mV, which is whole milliamps over a 30-ohm path.
-                    if (voltageFresh(node, millis())) {
-                        nodeVoltage[node] += 0.3f * (volts - nodeVoltage[node]);
-                    } else {
-                        nodeVoltage[node] = volts;
-                    }
-                    nodeVoltageMs[node] = millis();
+                    // Smoothing lives in recordTapVoltage: shot-to-shot ADC
+                    // noise is +/-20mV, whole milliamps over a 30-ohm path.
+                    recordTapVoltage(node, volts - scanZeroOffset[adc]);
                 }
             }
         }
@@ -671,6 +1063,7 @@ bool nodeVoltageValid(int) { return false; }
 float netCurrent_mA(int) { return 0.0f; }
 bool pathCurrentKnown(int) { return false; }
 float pathCurrentSigned_mA(int) { return 0.0f; }
+uint32_t netScanComputeGeneration(void) { return 0; }
 void serviceNetVoltageScan(void) {}
 void serviceNetVoltageScanDebug(void) {}
 void printNetVoltageScanStats(Stream* out) { out->println("net current scan: V5 only"); }
