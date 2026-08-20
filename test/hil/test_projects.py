@@ -18,9 +18,16 @@ Asserts:
     toYAML rewrite still carries all six parts with `placed: false`
   - meta:/guide: are swallowed on parse and deliberately NOT round-tripped
 
+Phase 6 (task 5) adds a second, minimal project at /projects/hiltest/ and
+covers the two contracts the encoder-driven launcher rests on - load_project()
+on a meta:-first wiring, and the `_jl_project` preamble prepended to the
+companion script. The launcher itself is NOT invoked from here; phase 6's
+comment says why, and the clickwheel flow is a bench checklist instead.
+
 Bench convention: snapshot board state + slot3.yaml + active slot up front,
-restore all three at the end. The /projects/555/ files are left in place on
-purpose - the clickwheel Files-browser check is a hands-on bench item.
+restore all three at the end. The /projects/555/ and /projects/hiltest/ files
+are left in place on purpose - the clickwheel Files-browser check is a
+hands-on bench item, and two projects make the picker's navigation testable.
 
 NOTE the loaded wiring sets topRail to 5.0 V for the duration of the test;
 the board_state snapshot restores the bench rail voltage afterwards.
@@ -214,7 +221,173 @@ check("meta:" not in rewritten and "guide:" not in rewritten,
 check("guideProgress:" not in rewritten,
       "no guideProgress: emitted (guideSource empty - the guide runtime sets it)")
 
-# --- 6. Restore the bench --------------------------------------------------
+# --- 6. Launcher slice: a second project + the two contracts it rests on ----
+# The launcher itself (src/ProjectsApp.cpp, task 5) is encoder-driven and is
+# deliberately NOT invoked from here:
+#   - its picker loop polls the encoder and jOS.serviceInner(), never
+#     mp_hal_check_interrupt(), so run_app("Projects") from this REPL would
+#     block the exec until somebody physically holds the clickwheel;
+#   - before running a companion script it calls
+#     setGlobalStreamWithInterrupt(&Serial), i.e. it moves the MicroPython
+#     stream to port 1 out from under a port-5 caller.
+# Nor can "did the app register?" be observed from here: jl_run_app()
+# (JumperlessMicroPythonAPI.cpp:2416) returns 1 unconditionally and runApp()
+# prints "App not found" to Serial (port 1), which this channel never sees.
+# So this phase covers the two things the launcher DEPENDS on, through the
+# same calls it makes, and the clickwheel flow itself stays a bench checklist
+# in the task-5 report:
+#   a) loadSlotFromPath() on a project wiring carrying meta: - via
+#      load_project(), the task-4 binding that wraps that exact call;
+#   b) the `_jl_project` preamble the launcher prepends to the script before
+#      executePythonFileContent() - rebuilt here in the same shape and exec'd
+#      on the device (mirroring the construction, not invoking the launcher).
+HIL_DIR = "/projects/hiltest"  # 7 chars, the dir-name convention
+HIL_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hiltest
+  title: "HIL Test Project"
+  variant: default
+  summary: "one bridge, one marker script"
+  script: main.py
+bridges:
+  - {n1: 20, n2: 21}
+"""
+HIL_MAIN = """# HIL marker script - see test/hil/test_projects.py phase 6.
+_jl_project = globals().get("_jl_project", {})
+print("hilmark=", 1)
+print("hildir=", _jl_project.get("dir", "none"))
+print("hilvariant=", _jl_project.get("variant", "none"))
+print("hilwiring=", _jl_project.get("wiring", "none"))
+"""
+
+out = jl_exec(f"""
+if not fs_exists({HIL_DIR!r}):
+    try:
+        jfs.mkdir({HIL_DIR!r})
+    except Exception as e:
+        print("mkdirerr=", e)
+print("hildirmade=", 1 if fs_exists({HIL_DIR!r}) else 0)
+print("w1=", 1 if fs_write({HIL_DIR + "/wiring.yaml"!r}, {HIL_WIRING!r}) else 0)
+print("w2=", 1 if fs_write({HIL_DIR + "/main.py"!r}, {HIL_MAIN!r}) else 0)
+""", timeout=30)
+vals = parse_kv(out)
+check(vals.get("hildirmade") == 1, f"created {HIL_DIR} on the board")
+check(vals.get("w1") == 1 and vals.get("w2") == 1,
+      f"pushed {HIL_DIR}/wiring.yaml + main.py (the launcher's listProjects target)")
+
+# (a) The launcher's load step: load_project() -> loadSlotFromPath(). A
+# wiring.yaml whose FIRST section is meta: is exactly the case the launcher
+# hands the slot parser, so this also proves meta: doesn't derail the parse.
+out = jl_exec("""
+print("loaded=", 1 if load_project("hiltest") else 0)
+print("br=", 1 if is_connected(20, 21) else 0)
+print("stale555=", 1 if is_connected("ADC1", 37) else 0)
+""", timeout=25)
+vals = parse_kv(out)
+check(vals.get("loaded") == 1, "load_project('hiltest') resolved the name to "
+                               f"{HIL_DIR}/wiring.yaml and loaded it")
+check(vals.get("br") == 1, "hiltest wiring's bridge 20-21 is live (meta: parsed past)")
+check(vals.get("stale555") == 0, "the previous wiring's bridges are gone (fresh state)")
+
+# (b) The companion-script contract: read main.py off the device, prepend the
+# launcher's `_jl_project = {...}` line, exec it. Same shape ProjectsApp.cpp
+# builds (dir / variant / wiring), same file the launcher would have run.
+preamble = ('_jl_project = {"dir": "hiltest", "variant": "default", '
+            f'"wiring": "{HIL_DIR}/wiring.yaml"}}\n')
+out = jl_exec(f"""
+src = fs_read({HIL_DIR + "/main.py"!r})
+exec({preamble!r} + src)
+""", timeout=25)
+vals = parse_kv(out)
+check(vals.get("hilmark") == 1, "the project's main.py ran and printed its marker")
+check(vals.get("hildir") == "hiltest",
+      f"_jl_project['dir'] reached the script (got {vals.get('hildir')!r})")
+check(vals.get("hilvariant") == "default",
+      f"_jl_project['variant'] reached the script (got {vals.get('hilvariant')!r})")
+check(vals.get("hilwiring") == f"{HIL_DIR}/wiring.yaml",
+      f"_jl_project['wiring'] reached the script (got {vals.get('hilwiring')!r})")
+
+# (c) The apps[] row itself. runApp() resolves by name and tells the caller
+# nothing (jl_run_app returns 1 unconditionally; "App not found" goes to port
+# 1), so the observable signal is TIME - and the only launcher path that ends
+# without an encoder is the empty-list exit, which holds its "No projects"
+# message for 1.5 s and returns. So: take every /projects/*/wiring.yaml away
+# (contents held here, written straight back), let the launcher take that
+# exit, and compare its duration against an unregistered app name.
+#
+# The "are there any projects left?" guard runs ON THE DEVICE, in the same
+# snippet as the run_app call: if a wiring.yaml were still there the launcher
+# would open its picker and block this exec until somebody physically holds
+# the clickwheel. If the deletes fail, the run_app simply doesn't happen.
+out = jl_exec("""
+dirs = []
+for d in jfs.listdir("/projects"):
+    d = d.rstrip("/")
+    if fs_exists("/projects/" + d + "/wiring.yaml"):
+        dirs.append(d)
+print("PROJDIRS|" + ",".join(dirs))
+""", timeout=25)
+m = re.search(r"PROJDIRS\|(.*)", out)
+device_projects = [d for d in (m.group(1).strip().split(",") if m else []) if d]
+print(f"  info: /projects dirs with a wiring.yaml: {device_projects}")
+
+# Gate: only run the probe when the board holds exactly the two projects this
+# test authored, whose contents are right here to write back. Any other
+# project (task 9 adds more) means content this test can't restore.
+known_wirings = {"555": WIRING, "hiltest": HIL_WIRING}
+if sorted(device_projects) == sorted(known_wirings):
+    out = jl_exec("""
+import time
+for d in jfs.listdir("/projects"):
+    d = d.rstrip("/")
+    p = "/projects/" + d + "/wiring.yaml"
+    if fs_exists(p):
+        jfs.remove(p)
+left = 0
+for d in jfs.listdir("/projects"):
+    d = d.rstrip("/")
+    if fs_exists("/projects/" + d + "/wiring.yaml"):
+        left += 1
+print("left=", left)
+if left == 0:
+    t0 = time.ticks_ms()
+    run_app("NoSuchAppXYZ")
+    t1 = time.ticks_ms()
+    run_app("Projects")
+    t2 = time.ticks_ms()
+    print("missing_ms=", time.ticks_diff(t1, t0))
+    print("projects_ms=", time.ticks_diff(t2, t1))
+""", timeout=40)
+    vals = parse_kv(out)
+    check(vals.get("left") == 0, "temporarily removed every /projects/*/wiring.yaml")
+    check(vals.get("missing_ms") is not None and vals.get("missing_ms") < 300,
+          f"an unregistered app name returns immediately ({vals.get('missing_ms')} ms)")
+    check(vals.get("projects_ms") is not None and vals.get("projects_ms") >= 1400,
+          "run_app('Projects') reached the registered launcher and took its "
+          f"empty-list exit ({vals.get('projects_ms')} ms, the 1.5 s message hold)")
+
+    # Put the wiring files straight back (from this file's own copies).
+    for d, content in known_wirings.items():
+        path = f"/projects/{d}/wiring.yaml"
+        out = jl_exec(f"print('restored=', 1 if fs_write({path!r}, {content!r}) else 0)",
+                      timeout=30)
+        check(parse_kv(out).get("restored") == 1, f"restored {path}")
+else:
+    print("  info: the board holds project dirs this test didn't author - "
+          "skipped the run_app('Projects') probe (it must never leave a "
+          "wiring.yaml behind for the picker to open on)")
+
+# Put the live state back in sync with slot 3's FILE before the restore below
+# rewrites it: load_project() deliberately leaves slot tracking alone
+# (States.cpp:3080, the slot-clobber guard), so slot 3 is still "active" while
+# holding hiltest's state - and a dirty active slot is what the idle auto-save
+# writes out. switch_slot re-reads the file. (Port 5 on purpose: one fewer
+# port-1 round trip when a terminal client is holding it.)
+out = jl_exec("print('back=', switch_slot(3))", timeout=25)
+time.sleep(1.5)
+
+# --- 7. Restore the bench --------------------------------------------------
 # Restore the FILE first, switch slots second (same hazard as phase 0).
 if slot3_existed:
     out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)",
@@ -235,5 +408,6 @@ time.sleep(1.5)
 if snapshot is not None:
     check(board_state_restore(snapshot), "board state restored to pre-test snapshot")
 
-print("  info: /projects/555/ left on the board for the clickwheel bench check")
+print("  info: /projects/555/ and /projects/hiltest/ left on the board - two "
+      "entries so the clickwheel bench check can exercise picker navigation")
 finish("test_projects")

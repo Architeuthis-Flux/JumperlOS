@@ -19,6 +19,7 @@
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "ProjectsApp.h"  // projectsAppLauncher - the "Projects" apps[] row
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
@@ -98,6 +99,7 @@ struct app apps[ NUM_APPS ] = {
     { "Xbar   Test", 22, 1, crossbarTestApp },
     { "Tip    Voltage", 23, 1, tipVoltageTestApp },
     { "PSRAM  Test", 24, 1, psramTestApp },
+    { "Projects", 25, 1, projectsAppLauncher },
     // others can remain uninitialized (works=0)
 };
 

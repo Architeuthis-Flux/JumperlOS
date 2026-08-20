@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: MIT
+#ifndef PROJECTS_APP_H
+#define PROJECTS_APP_H
+
+#include <Arduino.h>
+
+// Projects launcher (design: CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md §1
+// "Menu + launcher"). A project lives in /projects/<short_name>/ as
+// wiring.yaml (+ wiring.<variant>.yaml), main.py (+ main.<variant>.py) and an
+// optional README.md. A project wiring file IS a slot YAML plus the
+// launcher-only `meta:` block and the guided-placement `parts:`/`guide:`
+// sections (States.h's header comment documents what the slot parser does
+// with them: `meta:`/`guide:` are swallowed and never round-tripped, which is
+// why the launcher text-scans `meta:` itself).
+
+// Max projects the picker lists, and max variants per project. Both bound
+// stack/static arrays in the launcher - not a filesystem limit.
+#define PROJECTS_MAX 12
+#define PROJECT_VARIANTS_MAX 6
+
+// Root of the project tree on the filesystem.
+#define PROJECTS_DIR "/projects"
+
+struct ProjectMeta {
+    String dir;      // directory name, e.g. "555" (<=7 chars by convention)
+    String title;    // meta.title, or the dir name when there is no meta:
+    String summary;  // meta.summary ("" when absent)
+    String variant;  // meta.variant ("" when absent)
+    String script;   // meta.script ("" when absent -> main.py)
+};
+
+// Lightweight text scan of the `meta:` block only (title/summary/variant/
+// script; a quoted value takes the quote pair). Tolerant: a wiring file with
+// no meta: still returns true with title = dir name. Returns false only when
+// the file cannot be opened.
+bool readProjectMeta(const String& yamlPath, ProjectMeta& out);
+
+// Scan /projects/*/wiring.yaml. Returns how many entries were written to out[]
+// (alphabetical by dir name).
+int listProjects(ProjectMeta* out, int maxOut);
+
+// Guided-flow seam. v1 STUB: always returns false - task 6 (guide runtime)
+// implements it. Contract, binding for that task:
+//   - called BEFORE any temp-slot entry, only for wirings that carry an
+//     un-indented `parts:` or `guide:` line;
+//   - true  = the guided flow handled everything (picked the destination slot,
+//             ran the project, cleaned up) and the launcher returns at once;
+//   - false = the launcher proceeds with the non-guided temp-slot path.
+bool runGuidedProject(const String& dir, const String& wiringPath);
+
+// The app entry point (apps[] row "Projects" / menu line "-Project\31s").
+void projectsAppLauncher(void);
+
+#endif // PROJECTS_APP_H
