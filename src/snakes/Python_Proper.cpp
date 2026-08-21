@@ -719,7 +719,17 @@ extern "C" void mp_hal_check_interrupt(void) {
   // of clickWheelPythonInterrupt because a 3-second deliberate hold is unambiguous.
   if (encoderButtonState == MEDIUM_HELD &&
       millis() >= clickwheel_interrupt_ignore_until) {
-    mp_sched_keyboard_interrupt();
+    // Single-fire via the flag, NOT a direct sched call. Two independent
+    // consumers read mp_interrupt_requested: the top-of-function check above
+    // (~:645) schedules exactly once and clears the flag on the NEXT call to
+    // this function - that's the normal-script delivery path. But the C
+    // blocking loops (jl_probe_read_blocking / jl_probe_button_blocking in
+    // JumperlessMicroPythonAPI.cpp) poll this flag directly and clear it
+    // themselves when they see it true; they never check mp_pending_exception,
+    // so a direct mp_sched_keyboard_interrupt() call here would never reach a
+    // script blocked in wait_touch()/probe_read()/etc. Setting the flag alone
+    // reaches both consumers correctly; calling sched here (as before) does not.
+    mp_interrupt_requested = true;
     encoderButtonState = IDLE;  // Consume the button event
     if (global_mp_stream) {
       global_mp_stream->println("\r\nKeyboardInterrupt (clickwheel)");
