@@ -11,15 +11,27 @@
 //
 // Status-line grammar (one line per REST-state transition, machine-parseable):
 //   GUIDE step=<i>/<n> id=<type>_<part|node> state=<STATE>
-// with ` check=<name> val=<x>` appended at RESULT. Emitted states: INIT,
-// WAIT, PROBE_WAIT, RESULT, COMMIT, BACK, DONE, EXIT. The pass-through
-// states (ENTER, VERIFY) are internal and deliberately NOT emitted - the
-// machine never rests there, and a line for each would be the spam the
-// design's "one line per transition" rule exists to prevent.
+// with ` check=<name>` appended at VERIFY (emitted only when a REAL check
+// launches - the machine now rests there while the check polls) and
+// ` check=<name> val=<x> ok=<0|1>[ on_fail=<policy>]` at RESULT. Emitted
+// states: INIT, WAIT, PROBE_WAIT, VERIFY (real checks only), RESULT, COMMIT,
+// BACK, DONE, EXIT. ENTER stays internal (never a resting state).
 //
-// Electrical checks are task 7: check: fields parse into GuideStep.check but
-// STEP_VERIFY resolves everything to NONE (non-NONE prints "(check pending
-// firmware support)").
+// Electrical checks (task 7): STEP_VERIFY drives GuideChecks.cpp as a polled
+// sub-state (begin / poll / abort - the seam in GuidedFlow.h). Results feed
+// the on_fail policy at STEP_RESULT:
+//   pass                  -> commit (verify-only 'v' returns to the wait)
+//   measured FAIL + warn  -> note + back to the wait; the NEXT confirm
+//                            advances without re-running (a deliberate
+//                            "I saw the X" second press); 'v' re-runs
+//   FAIL + retry/block    -> back to the wait; confirm re-runs the check
+//                            (they differ in wording only - both skippable
+//                            via the explicit skip gesture, per §1.2)
+//   FAIL + skip           -> auto-skip the step
+//   SKIPPED/UNSUPPORTED   -> nothing was measured: warn-class prints the
+//                            note and proceeds with the confirm the user
+//                            already gave (no double-press for a check that
+//                            could not run); block still gates, skip skips
 
 #include "GuidedFlow.h"
 
@@ -67,6 +79,12 @@ struct GuideSession {
     unsigned long lastPulseMs;
     bool pulseOn;
     int  savedRotaryDivider;
+    // Check machinery (STEP_VERIFY drives GuideChecks.cpp)
+    bool checkRunning;                  // guideCheckBegin issued, polling
+    int  checkOutcome;                  // GUIDE_CHECK_* (valid at STEP_RESULT)
+    char checkVal[24];                  // machine token for the RESULT val=
+    bool checkWarned;                   // measured warn-fail on this step: the
+                                        // next confirm advances without re-run
 };
 
 // Single static instances - GuideScript is ~7.5 KB (V5) and the guide is a
@@ -442,8 +460,7 @@ static GuideCheck guideCheckFromString(const String& s) {
     return GuideCheck::NONE;
 }
 
-// Default check for an auto-synthesized place step, by part class. Stored
-// for task 7; ALL checks resolve to NONE in this task's STEP_VERIFY.
+// Default check for a place step that named none, by part class (§5.2).
 static GuideCheck guideDefaultCheckForPart(const PartDefinition& p) {
     if (p.defaultVerify != 0) return (GuideCheck)p.defaultVerify;
     String t = String(p.typeStr);
@@ -560,11 +577,17 @@ static void guideParseStepLine(const String& body, GuideScript& out, String& err
         err += "guide step " + String(out.numSteps + 1) + ": verify needs target: (skipped); ";
         return;
     }
-    // Default check for a place step that didn't name one (parsed enum kept
-    // for task 7 either way).
+    // Default check for a place step that didn't name one.
     if (st.type == GuideStepType::PLACE && st.check == GuideCheck::NONE &&
         guideFlowField(fields, "check:").length() == 0) {
         st.check = guideDefaultCheckForPart(globalState.parts.parts[st.partIdx]);
+    }
+    // power_on defaults to rail_sane (§5.2's matrix row) - an explicit
+    // `check: none` still opts out. Worst case is a warn-class note in a
+    // project with no class-tagged pins (the check passes as "norows").
+    if (st.type == GuideStepType::POWER_ON && st.check == GuideCheck::NONE &&
+        guideFlowField(fields, "check:").length() == 0) {
+        st.check = GuideCheck::RAIL_SANE;
     }
 
     out.steps[out.numSteps++] = st;
@@ -616,7 +639,7 @@ static void guideSynthesizeSteps(GuideScript& out) {
         st.timeoutMs = 1500;
         st.onFail = GuideOnFail::WARN;
         st.type = GuideStepType::POWER_ON;
-        st.check = GuideCheck::RAIL_SANE;   // stored for task 7
+        st.check = GuideCheck::RAIL_SANE;   // §5.2's power_on row
         snprintf(st.text, sizeof(st.text), "Confirm to power up");
         out.steps[out.numSteps++] = st;
     }
@@ -879,6 +902,18 @@ static void guidePersistProgress(GuideSession& s) {
     }
 }
 
+// Skip-with-flag (§3.3): shared by the wait states' skip key, a mid-check
+// skip (which aborts the check first at its call site), and on_fail: skip.
+static void guideDoSkip(GuideSession& s) {
+    s.skipped[s.stepIdx] = true;
+    s.committed[s.stepIdx] = false;
+    Serial.println("\r\n  (skipped)");
+    s.stepIdx++;
+    guidePersistProgress(s);
+    s.state = (s.stepIdx >= s.script->numSteps) ? GuideState::DONE
+                                                : GuideState::STEP_ENTER;
+}
+
 void guideTick(GuideSession& s) {
     GuideScript& sc = *s.script;
 
@@ -911,12 +946,21 @@ void guideTick(GuideSession& s) {
             for (int i = 0; i < s.stepIdx && i < sc.numSteps; i++) {
                 s.committed[i] = true;
                 if (sc.steps[i].type == GuideStepType::POWER_ON) {
-                    setTopRail(sc.topRail, 1, 0);
-                    setBotRail(sc.bottomRail, 1, 0);
-                    setDac0voltage(sc.dac0, 1, 0);
-                    setDac1voltage(sc.dac1, 1, 0);
-                    s.powerApplied = true;
-                    Serial.println("  (resume past power_on: rails re-applied)");
+                    // Mirror of the COMMIT path: only claim powerApplied when
+                    // the file actually has power to apply. (Was asymmetric -
+                    // an unconditional powerApplied=true here suppressed the
+                    // exit tail's "rails at 0V" note for a project with no
+                    // power: section, even though nothing was ever applied.)
+                    if (sc.hasPower) {
+                        setTopRail(sc.topRail, 1, 0);
+                        setBotRail(sc.bottomRail, 1, 0);
+                        setDac0voltage(sc.dac0, 1, 0);
+                        setDac1voltage(sc.dac1, 1, 0);
+                        s.powerApplied = true;
+                        Serial.println("  (resume past power_on: rails re-applied)");
+                    } else {
+                        Serial.println("  (resume past power_on: project has no power: section - rails stay at 0V)");
+                    }
                 }
             }
 
@@ -933,6 +977,7 @@ void guideTick(GuideSession& s) {
 
         case GuideState::STEP_ENTER: {
             const GuideStep& st = sc.steps[s.stepIdx];
+            s.checkWarned = false;   // a fresh step arrival re-arms its check
             guideShowPrompt(s);
             s.pulseOn = true;
             s.lastPulseMs = millis();
@@ -981,13 +1026,7 @@ void guideTick(GuideSession& s) {
                 case GuideKey::SKIP:
                     // Forward past current = skip-with-flag (§3.3). Progress
                     // moves and persists so resume lands after the skip.
-                    s.skipped[s.stepIdx] = true;
-                    s.committed[s.stepIdx] = false;
-                    Serial.println("\r\n  (skipped)");
-                    s.stepIdx++;
-                    guidePersistProgress(s);
-                    s.state = (s.stepIdx >= sc.numSteps) ? GuideState::DONE
-                                                         : GuideState::STEP_ENTER;
+                    guideDoSkip(s);
                     break;
                 case GuideKey::TAP: {
                     const GuideStep& st = sc.steps[s.stepIdx];
@@ -1010,29 +1049,133 @@ void guideTick(GuideSession& s) {
         }
 
         case GuideState::STEP_VERIFY: {
-            // Task 7 fills this in. Every check resolves to NONE here; the
-            // parsed enum is preserved for the day the checks land.
             const GuideStep& st = sc.steps[s.stepIdx];
-            if (st.check != GuideCheck::NONE) {
-                Serial.print("\r\n  (check ");
-                Serial.print(guideCheckName(st.check));
-                Serial.println(" pending firmware support)");
+            if (st.check == GuideCheck::NONE) {
+                s.checkOutcome = GUIDE_CHECK_PASS;
+                strncpy(s.checkVal, "pass", sizeof(s.checkVal));
+                s.state = GuideState::STEP_RESULT;
+                break;
             }
+            if (!s.checkRunning) {
+                if (s.checkWarned && !s.verifyOnly) {
+                    // Warn-armed manual advance: the user saw the X and
+                    // confirmed again - commit without re-running the check.
+                    Serial.println("\r\n  (advancing past the failed check)");
+                    s.state = GuideState::STEP_COMMIT;
+                    break;
+                }
+                // Status line BEFORE begin: the i2c check blocks inside its
+                // begin (documented reuse), and its own output must land
+                // after the line that says a check started.
+                char extra[24];
+                snprintf(extra, sizeof(extra), "check=%s", guideCheckName(st.check));
+                guideStatusLine(s, "VERIFY", extra);
+                GuideCheckRun run;
+                run.step = &st;
+                run.script = &sc;
+                run.powerApplied = s.powerApplied;
+                guideCheckBegin(run);
+                s.checkRunning = true;
+                break;
+            }
+            int r = guideCheckPoll(s.checkVal, sizeof(s.checkVal));
+            if (r == GUIDE_CHECK_RUNNING) {
+                // Mid-check the user keeps control: quit / skip / back all
+                // abort with guaranteed teardown; other inputs are ignored
+                // (a queued double-confirm must not act on the next step).
+                int tapRow = -1;
+                GuideKey k = guideReadInput(s, tapRow);
+                if (k == GuideKey::QUIT) {
+                    guideCheckAbort();
+                    s.checkRunning = false;
+                    s.exitRequested = true;
+                    s.state = GuideState::EXIT;
+                } else if (k == GuideKey::SKIP) {
+                    guideCheckAbort();
+                    s.checkRunning = false;
+                    guideDoSkip(s);
+                } else if (k == GuideKey::BACK) {
+                    guideCheckAbort();
+                    s.checkRunning = false;
+                    s.state = GuideState::STEP_BACK;
+                }
+                break;
+            }
+            s.checkRunning = false;
+            s.checkOutcome = r;
             s.state = GuideState::STEP_RESULT;
             break;
         }
 
         case GuideState::STEP_RESULT: {
             const GuideStep& st = sc.steps[s.stepIdx];
-            char extra[48];
-            snprintf(extra, sizeof(extra), "check=%s val=pass", guideCheckName(st.check));
+            bool pass = (s.checkOutcome == GUIDE_CHECK_PASS);
+            const char* onFailName =
+                (st.onFail == GuideOnFail::RETRY)  ? "retry"
+                : (st.onFail == GuideOnFail::SKIP) ? "skip"
+                : (st.onFail == GuideOnFail::BLOCK) ? "block" : "warn";
+            // 96: check=oscillates + a 23-char val + ok= + on_fail=retry is
+            // 63 chars - 64 would truncate the policy token at the edge.
+            char extra[96];
+            if (pass) {
+                snprintf(extra, sizeof(extra), "check=%s val=%s ok=1",
+                         guideCheckName(st.check), s.checkVal);
+            } else {
+                snprintf(extra, sizeof(extra), "check=%s val=%s ok=0 on_fail=%s",
+                         guideCheckName(st.check), s.checkVal, onFailName);
+            }
             guideStatusLine(s, "RESULT", extra);
+            const char* hint = guideCheckHint();
+            if (!pass && hint != nullptr && hint[0] != '\0') {
+                Serial.print("  ");
+                Serial.println(hint);
+                Serial.flush();
+                if (oled.isConnected()) {
+                    oled.showMultiLineSmallText(hint, true, true);
+                }
+            }
+
             if (s.verifyOnly) {
                 s.verifyOnly = false;
-                Serial.println("  verify ok (no commit)");
+                Serial.println(pass ? "  verify ok (no commit)"
+                                    : "  verify failed (no commit)");
+                if (pass) s.checkWarned = false;
                 s.state = s.waitReturn;
-            } else {
+                break;
+            }
+            if (pass) {
+                s.checkWarned = false;
                 s.state = GuideState::STEP_COMMIT;
+                break;
+            }
+
+            // Fail dispatch. "Measured" = the check ran and the physics said
+            // no; SKIPPED/UNSUPPORTED never measured anything - warn-class
+            // policy proceeds on those with the confirm the user already
+            // gave (no double-press for a check that could not run).
+            bool measured = (s.checkOutcome == GUIDE_CHECK_FAIL);
+            switch (st.onFail) {
+                case GuideOnFail::SKIP:
+                    guideDoSkip(s);
+                    break;
+                case GuideOnFail::RETRY:
+                    Serial.println("  ✗ check failed - fix it and confirm to re-run (s skips)");
+                    s.state = s.waitReturn;
+                    break;
+                case GuideOnFail::BLOCK:
+                    Serial.println("  ✗ check failed - step blocked: fix and confirm to re-run, s skips explicitly");
+                    s.state = s.waitReturn;
+                    break;
+                default: // WARN
+                    if (measured) {
+                        Serial.println("  ✗ check failed - n advances anyway, v re-runs");
+                        s.checkWarned = true;
+                        s.state = s.waitReturn;
+                    } else {
+                        Serial.println("  (check not run - continuing)");
+                        s.state = GuideState::STEP_COMMIT;
+                    }
+                    break;
             }
             break;
         }
@@ -1232,6 +1375,9 @@ static void guideSessionBegin(GuideSession& s, GuideScript* sc, int resumeStep) 
 }
 
 static void guideExitTail(GuideSession& s) {
+    // Belt and braces: no exit path leaves a check's stimulus or ephemeral
+    // routes behind (abort is idempotent - a no-op when nothing is running).
+    guideCheckAbort();
     guideClearOverlays();
     requestLedShow(1);
     rotaryDivider = s.savedRotaryDivider;
