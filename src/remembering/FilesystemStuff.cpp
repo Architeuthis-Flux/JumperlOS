@@ -3943,15 +3943,22 @@ void initializeProjects( bool forceInitialization ) {
 
     // Fast path: everything present and not forced -> silent return. Checked
     // on every boot and on every launcher entry, so it stays cheap.
+    //
+    // safeFileExists, NOT the raw FatFS.exists the examples provisioner uses
+    // here: that one only ever runs from boot/REPL-entry, but this also runs
+    // on the launcher entry path, where ProjectsApp is careful to take the
+    // fs_mutex for every other filesystem touch. An unsynchronised exists()
+    // racing Core 1 is exactly the class of bug the safe* wrappers exist for,
+    // and the rest of this function already uses them.
     if ( !forceInitialization ) {
         bool allFilesExist = true;
         for ( int i = 0; i < totalProjectFiles; i++ ) {
-            if ( !FatFS.exists( projectFiles[ i ].path ) ) {
+            if ( !safeFileExists( projectFiles[ i ].path ) ) {
                 allFilesExist = false;
                 break;
             }
         }
-        if ( allFilesExist && FatFS.exists( "/projects" ) ) {
+        if ( allFilesExist && safeFileExists( "/projects" ) ) {
             return;
         }
     }

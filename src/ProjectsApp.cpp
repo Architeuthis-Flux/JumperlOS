@@ -222,6 +222,13 @@ int listProjects(ProjectMeta* out, int maxOut) {
 
 // Every wiring*.yaml in a project directory, plain "wiring.yaml" first and the
 // rest alphabetical. Returns the count written to outNames[].
+//
+// EXCLUDES *_original* : initializeProjects(true) parks this build's default
+// beside a user-edited file as wiring_original.yaml / wiring_original1.yaml
+// (FilesystemStuff.cpp, the forced-refresh branch). Those match "wiring*.yaml"
+// but are backup copies, not variants - listing one would offer the user a
+// bogus picker entry that loads the firmware default OVER the edit they were
+// deliberately given a backup of.
 static int listVariantFiles(const String& projectPath, String* outNames, int maxOut) {
     if (outNames == nullptr || maxOut <= 0)
         return 0;
@@ -236,6 +243,8 @@ static int listVariantFiles(const String& projectPath, String* outNames, int max
         String lower = name;
         lower.toLowerCase();
         if (!lower.startsWith("wiring") || !lower.endsWith(".yaml"))
+            continue;
+        if (lower.indexOf("_original") >= 0)
             continue;
         outNames[found++] = name;
     }
