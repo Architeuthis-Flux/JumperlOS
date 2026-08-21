@@ -331,7 +331,7 @@ struct PartDefinition {
     char     typeStr[12];      // part-ID hook: resistor|capacitor|diode|led|bjt|fet|ic
     char     partId[16];       // part-ID hook: future /partdb reference
     int16_t  baseRow;          // breadboard row of pin 1 (1-60)
-    uint8_t  footprint;        // 0=SIP 1=DIP
+    uint8_t  footprint;        // 0=SIP 1=DIP 2=axial2
     uint8_t  pinCount;         // PHYSICAL pin count from the footprint (dip8 -> 8)
     uint8_t  numPins;          // entries used in pins[] (only listed pins are stored;
                                // pinCount is the footprint's N for the geometry math)

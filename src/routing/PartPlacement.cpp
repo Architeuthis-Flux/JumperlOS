@@ -474,25 +474,85 @@ static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool&
                  p.pinCount >= 1 && p.pinCount <= 60 &&
                  p.baseRow >= 1 && p.baseRow <= 60 &&
                  (p.footprint == 0 || (p.pinCount % 2) == 0);
-    // DIP pin 1 (row:) must anchor the bottom half - the old top-anchored
-    // mapping was the mirrored bug (wave 2, bench-found). nodeForPin() would
-    // already return -1 for every pin of a top-anchored DIP, but that only
-    // fails PLACEMENT (0 bridges, no error the user sees without debug
-    // logging); this rejects the entry itself, same as any other malformed
-    // part, so it can't round-trip through an idle auto-save.
-    if (valid && p.footprint == 1 && (p.baseRow < 31 || p.baseRow > 60)) {
-        valid = false;
-        err += "part " + String(p.name) +
-               ": dip pin 1 (row:) must be on the bottom half (31-60); ";
+    // Geometry rejections below are UNCONDITIONAL prints, matching the
+    // MAX_PARTS branch further down (and unlike it, these are the failure
+    // mode every pre-wave-2 user file hits): the only other surfacing point,
+    // States.cpp's "parts: parse warnings", sits behind
+    // debug.show_node_errors, so with that off a stale top-anchored DIP (or
+    // an off-board footprint span) was dropped with zero output, and the
+    // next idle auto-save erased it from the file for good.
+    const char* pname = p.name[0] ? p.name : "(unnamed)";
+    if (valid && p.footprint == 1) {
+        // DIP pin 1 (row:) must anchor the bottom half - the old top-anchored
+        // mapping was the mirrored bug (wave 2, bench-found). nodeForPin()
+        // would already return -1 for every pin of a top-anchored DIP, but
+        // that alone only fails PLACEMENT (0 bridges); rejecting the entry
+        // itself here keeps it from round-tripping through an idle auto-save.
+        if (p.baseRow < 31 || p.baseRow > 60) {
+            valid = false;
+            Serial.print("part '"); Serial.print(pname);
+            Serial.println("': dip pin 1 (row:) must be on the bottom half (31-60); dropped.");
+            err += "part " + String(p.name) +
+                   ": dip pin 1 (row:) must be on the bottom half (31-60); ";
+        } else {
+            // Column-fit: the U-shape's far side must land within the top
+            // half - (row-30) + N/2 - 1 <= 30 (binding geometry). Below this
+            // bound the near side overflows past row 60 at the SAME row the
+            // far side overflows past row 30 (both sides share one
+            // inequality), so a chip that doesn't fit would otherwise place
+            // SOME pins and silently drop the rest - a partial chip is never
+            // right, so the whole entry is rejected, not just the pins that
+            // don't fit.
+            int half = p.pinCount / 2;
+            if ((p.baseRow - 30) + (half - 1) > 30) {
+                valid = false;
+                Serial.print("part '"); Serial.print(pname);
+                Serial.print("': dip");
+                Serial.print(p.pinCount);
+                Serial.print(" at row ");
+                Serial.print(p.baseRow);
+                Serial.println(" does not fit the board (far-side columns run past row 30); dropped.");
+                err += "part " + String(p.name) + ": dip" + String(p.pinCount) +
+                       " at row " + String(p.baseRow) +
+                       " does not fit the board (far-side columns run past row 30); ";
+            }
+        }
+    } else if (valid && p.footprint == 0) {
+        // SIP: the whole run must stay on baseRow's half - nodeForPin()
+        // already refuses a leg that crosses the ravine, so an over-length
+        // SIP strip is the same partial-chip failure mode as an oversized
+        // DIP: some pins land, the rest silently don't.
+        bool top = (p.baseRow <= 30);
+        int lastNode = p.baseRow + (p.pinCount - 1);
+        if ((top && lastNode > 30) || (!top && lastNode > 60)) {
+            valid = false;
+            Serial.print("part '"); Serial.print(pname);
+            Serial.print("': sip");
+            Serial.print(p.pinCount);
+            Serial.print(" at row ");
+            Serial.print(p.baseRow);
+            Serial.println(top ? " does not fit the top half (runs past row 30); dropped."
+                                : " does not fit the bottom half (runs past row 60); dropped.");
+            err += "part " + String(p.name) + ": sip" + String(p.pinCount) +
+                   " at row " + String(p.baseRow) +
+                   (top ? " does not fit the top half (runs past row 30); "
+                        : " does not fit the bottom half (runs past row 60); ");
+        }
     }
     // axial2: a two-leg part straddling the ravine - pin 1 (row:) must be on
-    // the top half so pin 2 (row+30) lands on-board.
+    // the top half so pin 2 (row+30) lands on-board. No separate span check
+    // needed: the two legs are always exactly 30 apart, so row in 1-30
+    // already guarantees both resolve.
     if (valid && p.footprint == 2) {
         if (p.pinCount != 2) {
             valid = false;
+            Serial.print("part '"); Serial.print(pname);
+            Serial.println("': axial2 must have exactly 2 pins; dropped.");
             err += "part " + String(p.name) + ": axial2 must have exactly 2 pins; ";
         } else if (p.baseRow < 1 || p.baseRow > 30) {
             valid = false;
+            Serial.print("part '"); Serial.print(pname);
+            Serial.println("': axial2 pin 1 (row:) must be on the top half (1-30); dropped.");
             err += "part " + String(p.name) +
                    ": axial2 pin 1 (row:) must be on the top half (1-30); ";
         }

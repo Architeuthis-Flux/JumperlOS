@@ -1925,6 +1925,36 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         Serial.println( "place_part: dip pin 1 (row) must be on the bottom half (31-60)" );
         return -1;
     }
+    // Column-fit: same inequality commitPart() applies - (row-30) + N/2 - 1
+    // <= 30. Without it a chip that doesn't fit places SOME pins and silently
+    // drops the rest here (0 exit code, partial bridges) while commitPart()
+    // rejects the WHOLE entry on the next load - the exact accept-here-
+    // reject-there asymmetry the "keep the two in step" comments above exist
+    // to prevent.
+    if ( p.footprint == 1 && p.baseRow >= 31 && p.baseRow <= 60 ) {
+        int half = p.pinCount / 2;
+        if ( ( p.baseRow - 30 ) + ( half - 1 ) > 30 ) {
+            Serial.print( "place_part: dip" );
+            Serial.print( p.pinCount );
+            Serial.print( " at row " );
+            Serial.print( p.baseRow );
+            Serial.println( " does not fit the board (far-side columns run past row 30)" );
+            return -1;
+        }
+    }
+    if ( p.footprint == 0 ) {
+        bool top = ( p.baseRow <= 30 );
+        int lastNode = p.baseRow + ( p.pinCount - 1 );
+        if ( ( top && lastNode > 30 ) || ( !top && lastNode > 60 ) ) {
+            Serial.print( "place_part: sip" );
+            Serial.print( p.pinCount );
+            Serial.print( " at row " );
+            Serial.print( p.baseRow );
+            Serial.println( top ? " does not fit the top half (runs past row 30)"
+                                 : " does not fit the bottom half (runs past row 60)" );
+            return -1;
+        }
+    }
     if ( p.footprint == 2 ) {
         if ( p.pinCount != 2 ) {
             Serial.println( "place_part: axial2 must have exactly 2 pins" );
