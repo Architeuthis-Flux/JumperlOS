@@ -196,7 +196,12 @@ void readMenuFile( int flashOrLocal ) {
 
 int menuParsed = 0;
 
-int categoryRanges[ 10 ][ 2 ] = { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } };
+// Sized 16, not 10: the menu tree has 12 level-0 categories today (Rails,
+// Connect, Output, Show, Apps, Calibration, Files, Slots, History,
+// DisplayOptions, OLED, RoutingOptions) - count the categories, don't trust
+// the array. A 10-slot array let the fill loop below write categoryRanges[10]
+// and [11] out of bounds on every menu parse.
+int categoryRanges[ 16 ][ 2 ] = { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } };
 int categoryIndex = 0;
 
 void parseMenuFile( void ) {
@@ -353,6 +358,10 @@ void parseMenuFile( void ) {
     for ( int j = 0; j < menuLineIndex; j++ ) {
         // Serial.println(menuLevels[j]);
         if ( menuLevels[ j ] == 0 ) {
+            // Bounds guard: count the categories, don't trust the array size.
+            if ( categoryIndex >= 16 ) {
+                break;
+            }
             categoryRanges[ categoryIndex ][ 0 ] = j;
 
             if ( categoryIndex > 0 ) {
