@@ -37,30 +37,44 @@ int PartsState::findByName(const char* n) const {
 
 int PartDefinition::nodeForPin(int k) const {
     if (k < 1 || k > pinCount) return -1;
-    if (baseRow < 1 || baseRow > 60) return -1;
-    bool top = (baseRow <= 30);
-    int node;
-    if (footprint == 0) {
-        // SIP: legs march along one side
-        node = baseRow + (k - 1);
-    } else {
-        // DIP: U-shaped numbering; node n+30 is the same column across the
-        // ravine (verified geometry, WokwiParser). baseRow > 30 mirrors.
-        int half = pinCount / 2;
-        if (k <= half) {
-            node = baseRow + (k - 1);
-        } else {
-            node = top ? (baseRow + 30 + (pinCount - k))
-                       : (baseRow - 30 + (pinCount - k));
-            // far side must land on the OTHER half
-            if (top  && (node < 31 || node > 60)) return -1;
-            if (!top && (node < 1  || node > 30)) return -1;
-            return node;
-        }
+
+    if (footprint == 2) {
+        // axial2: a two-leg part straddling the ravine by default (Kevin's
+        // bench convention for resistors/diodes - wave 2). pin 1 = baseRow
+        // (top half, 1-30), pin 2 = baseRow+30 (same column, across the
+        // ravine). No near/far math: the two legs are always exactly 30
+        // apart.
+        if (baseRow < 1 || baseRow > 30) return -1;
+        return (k == 1) ? baseRow : (baseRow + 30);
     }
-    // near-side pins stay on baseRow's half
-    if (top  && (node < 1  || node > 30)) return -1;
-    if (!top && (node < 31 || node > 60)) return -1;
+
+    if (baseRow < 1 || baseRow > 60) return -1;
+
+    if (footprint == 0) {
+        // SIP: legs march along one side, either half.
+        int node = baseRow + (k - 1);
+        bool top = (baseRow <= 30);
+        if (top  && (node < 1  || node > 30)) return -1;
+        if (!top && (node < 31 || node > 60)) return -1;
+        return node;
+    }
+
+    // DIP: U-shaped numbering. Bench verdict (wave 2, photo-confirmed): real
+    // chips sit dot/notch at bottom-left, pin 1 on the BOTTOM half - a
+    // top-anchored baseRow (<=30) was the mirrored bug and is no longer a
+    // valid anchor at all (the old +30 top-anchored branch is gone, not just
+    // relabeled). node n-30 is the same column across the ravine.
+    if (baseRow <= 30) return -1;
+    int half = pinCount / 2;
+    if (k <= half) {
+        // near side: bottom half, left->right
+        int node = baseRow + (k - 1);
+        if (node < 31 || node > 60) return -1;
+        return node;
+    }
+    // far side: top half, right->left
+    int node = (baseRow - 30) + (pinCount - k);
+    if (node < 1 || node > 30) return -1;
     return node;
 }
 
@@ -258,7 +272,8 @@ void serializeParts(const JumperlessState& st, String& out) {
         if (p.typeStr[0] != '\0') out += "    type: " + String(p.typeStr) + "\n";
         if (p.value[0] != '\0')   out += "    value: \"" + String(p.value) + "\"\n";
         if (p.partId[0] != '\0')  out += "    part_id: \"" + String(p.partId) + "\"\n";
-        out += "    footprint: " + String(p.footprint == 1 ? "dip" : "sip") + String(p.pinCount) + "\n";
+        const char* fpName = (p.footprint == 1) ? "dip" : (p.footprint == 2) ? "axial" : "sip";
+        out += "    footprint: " + String(fpName) + String(p.pinCount) + "\n";
         out += "    row: " + String(p.baseRow) + "\n";
         out += "    placed: " + String(p.placed ? "true" : "false") + "\n";
         if (p.defaultVerify != 0) out += "    verify: " + String(p.defaultVerify) + "\n";
@@ -459,6 +474,29 @@ static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool&
                  p.pinCount >= 1 && p.pinCount <= 60 &&
                  p.baseRow >= 1 && p.baseRow <= 60 &&
                  (p.footprint == 0 || (p.pinCount % 2) == 0);
+    // DIP pin 1 (row:) must anchor the bottom half - the old top-anchored
+    // mapping was the mirrored bug (wave 2, bench-found). nodeForPin() would
+    // already return -1 for every pin of a top-anchored DIP, but that only
+    // fails PLACEMENT (0 bridges, no error the user sees without debug
+    // logging); this rejects the entry itself, same as any other malformed
+    // part, so it can't round-trip through an idle auto-save.
+    if (valid && p.footprint == 1 && (p.baseRow < 31 || p.baseRow > 60)) {
+        valid = false;
+        err += "part " + String(p.name) +
+               ": dip pin 1 (row:) must be on the bottom half (31-60); ";
+    }
+    // axial2: a two-leg part straddling the ravine - pin 1 (row:) must be on
+    // the top half so pin 2 (row+30) lands on-board.
+    if (valid && p.footprint == 2) {
+        if (p.pinCount != 2) {
+            valid = false;
+            err += "part " + String(p.name) + ": axial2 must have exactly 2 pins; ";
+        } else if (p.baseRow < 1 || p.baseRow > 30) {
+            valid = false;
+            err += "part " + String(p.name) +
+                   ": axial2 pin 1 (row:) must be on the top half (1-30); ";
+        }
+    }
     if (!valid) {
         err += "skipped malformed part entry '" + String(p.name) + "'; ";
         if (jumperlessConfig.debug.show_node_errors) {
@@ -524,6 +562,12 @@ static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, b
         } else if (v.startsWith("sip")) {
             p.footprint = 0;
             p.pinCount = (uint8_t)v.substring(3).toInt();
+        } else if (v.startsWith("axial")) {
+            // axial2 only (Kevin's binding geometry: a fixed 2-leg footprint
+            // straddling the ravine) - commitPart() rejects any other pin
+            // count with a clear message rather than silently truncating it.
+            p.footprint = 2;
+            p.pinCount = (uint8_t)v.substring(5).toInt();
         } else {
             bad = true;
             err += "unknown footprint '" + v + "'; ";

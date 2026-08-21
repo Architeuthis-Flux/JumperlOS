@@ -1798,7 +1798,9 @@ static bool partStringSafe( const char* s, const char* what ) {
 //   connect: row 1-60 or any node name parseNodeName() resolves (GND, TOP_RAIL...)
 //   class:   signal|power|gnd|nc
 // footprint "" (default) infers sipN from the highest pin/offset listed, so a
-// 2-leg part just works; pass "dip8" for real DIP geometry.
+// 2-leg part just works; pass "dip8" for real DIP geometry (row MUST be
+// 31-60, pin 1's bottom-half hole) or "axial2" to straddle the ravine
+// (row MUST be 1-30; pin 2 lands at row+30).
 // Returns 0 on success, -1 on failure (reason printed).
 int jl_place_part( const char* name, int row, const char* pins_json,
                    const char* footprint, const char* type, const char* value ) {
@@ -1841,6 +1843,11 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         } else if ( fp.startsWith( "sip" ) ) {
             p.footprint = 0;
             p.pinCount = (uint8_t)fp.substring( 3 ).toInt( );
+        } else if ( fp.startsWith( "axial" ) ) {
+            // axial2 only - the same matched copy of PartPlacement.cpp's
+            // parsePartLine footprint branch this whole function mirrors.
+            p.footprint = 2;
+            p.pinCount = (uint8_t)fp.substring( 5 ).toInt( );
         } else {
             Serial.print( "place_part: unknown footprint " );
             Serial.println( footprint );
@@ -1909,6 +1916,24 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     if ( p.baseRow < 1 || p.baseRow > 60 ) {
         Serial.println( "place_part: row must be 1-60" );
         return -1;
+    }
+    // The SAME predicate commitPart() applies on parse (PartPlacement.cpp),
+    // kept in step for the same reason as the pin-count check above: an entry
+    // that passes here but fails there gets auto-saved and then silently
+    // DROPPED on the next load.
+    if ( p.footprint == 1 && ( p.baseRow < 31 || p.baseRow > 60 ) ) {
+        Serial.println( "place_part: dip pin 1 (row) must be on the bottom half (31-60)" );
+        return -1;
+    }
+    if ( p.footprint == 2 ) {
+        if ( p.pinCount != 2 ) {
+            Serial.println( "place_part: axial2 must have exactly 2 pins" );
+            return -1;
+        }
+        if ( p.baseRow < 1 || p.baseRow > 30 ) {
+            Serial.println( "place_part: axial2 pin 1 (row) must be on the top half (1-30)" );
+            return -1;
+        }
     }
 
     // Hold core-1 frames while the state changes, release BEFORE the refresh
@@ -2019,7 +2044,7 @@ int jl_get_num_parts( void ) {
 // One part as a delimited record for the MicroPython dict builder - the same
 // static-buffer shape jl_get_path_info() uses (no JSON library on board):
 //   name|type|value|row|footprint|placed|PIN,node,connect,class;PIN,node,...
-// footprint is the "dip8"/"sip2" spelling serializeParts emits, node is the
+// footprint is the "dip8"/"sip2"/"axial2" spelling serializeParts emits, node is the
 // resolved board node (-1 when the leg would leave the board) and connect is
 // -1 when the leg only occupies a hole. Empty string for a bad index.
 // The record this builds is split by literal delimiters on the MicroPython
@@ -2068,7 +2093,7 @@ const char* jl_get_part_info( int idx ) {
                         partRecordSafe( p.typeStr, safeType, sizeof( safeType ) ),
                         partRecordSafe( p.value, safeValue, sizeof( safeValue ) ),
                         (int)p.baseRow,
-                        p.footprint == 1 ? "dip" : "sip", (unsigned)p.pinCount,
+                        p.footprint == 1 ? "dip" : ( p.footprint == 2 ? "axial" : "sip" ), (unsigned)p.pinCount,
                         p.placed ? 1 : 0 );
 
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {

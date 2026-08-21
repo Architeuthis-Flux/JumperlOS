@@ -752,7 +752,10 @@ def place_part(name: str, row: int, pins_json: str, footprint: str = "",
 
     Args:
         name: Part name, 1-15 characters, unique (remove_part first to replace)
-        row: Breadboard row of pin 1 (1-60)
+        row: Breadboard row of pin 1. Plain SIP is legal on either half
+             (1-60); a DIP's pin 1 (the dot/notch) MUST be on the bottom half
+             (31-60) - real chips sit that way; axial2's pin 1 MUST be on the
+             top half (1-30) so pin 2 (row+30) lands across the ravine.
         pins_json: Pins map, e.g.
             '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'
             pin:     1-based physical pin, placed by the footprint geometry
@@ -760,8 +763,11 @@ def place_part(name: str, row: int, pins_json: str, footprint: str = "",
             connect: row 1-60 or a node name (GND, TOP_RAIL, DAC0, ...);
                      omit it to let the leg occupy the hole with no bridge
             class:   "signal" (default), "power", "gnd" or "nc"
-        footprint: "dip8" / "sip2" - default "" infers a SIP strip sized from
-                   the highest pin/offset listed
+        footprint: "dip8" / "sip2" / "axial2" - default "" infers a SIP strip
+                   sized from the highest pin/offset listed. axial2 is always
+                   exactly 2 pins: pin 1 = row, pin 2 = row+30 (the default
+                   footprint for 2-leg parts like resistors/diodes, straddling
+                   the ravine; radial parts like caps/LEDs use sip2 instead).
         type: Optional part type (resistor|capacitor|diode|led|bjt|fet|ic)
         value: Optional value string ("10k", "NE555")
 
@@ -771,8 +777,10 @@ def place_part(name: str, row: int, pins_json: str, footprint: str = "",
     Example:
         place_part("U9", 5, '{"A": {"pin": 1, "connect": "GND"}, '
                             '"B": {"pin": 2, "connect": 7}}')
-        place_part("U1", 5, '{"GND": {"pin": 1, "connect": "GND"}}',
+        place_part("U1", 35, '{"GND": {"pin": 1, "connect": "GND"}}',
                    "dip8", "ic", "NE555")
+        place_part("R1", 10, '{"A": {"pin": 1, "connect": "TOP_RAIL"}, '
+                             '"B": {"pin": 2, "connect": 6}}', "axial2")
     """
     ...
 

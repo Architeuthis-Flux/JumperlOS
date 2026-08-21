@@ -254,12 +254,16 @@ struct ConfigState {
 //       type: ic            # optional: resistor|capacitor|diode|led|bjt|fet|ic
 //       value: "NE555"      # optional
 //       part_id: ""         # optional part-ID hook (future /partdb reference)
-//       footprint: dip8     # dipN | sipN (N = PHYSICAL pin count)
-//       row: 5              # breadboard row of pin 1 (1-60)
+//       footprint: dip8     # dipN | sipN | axial2 (N = PHYSICAL pin count;
+//                           # axial2 is always exactly 2 pins)
+//       row: 35             # breadboard row of pin 1 - DIP requires 31-60
+//                           # (bottom half only, pin 1's dot/notch), axial2
+//                           # requires 1-30 (top half; pin 2 = row+30), SIP
+//                           # is legal on either half
 //       placed: false       # runtime flag; always serialized
 //       pins:
 //         GND:  {pin: 1, connect: GND, class: gnd}
-//         TRIG: {pin: 2, connect: 37, class: signal}
+//         TRIG: {pin: 2, connect: 7, class: signal}
 //         A:    {offset: 0, connect: 45}
 //
 // PIN FORMS PARSED: both the nested block form above (one `NAME: {...}` per
@@ -336,11 +340,25 @@ struct PartDefinition {
     char     value[12];        // "10k" etc.
     bool     placed;           // runtime: expansion applied (guide progress)
     PartPin  pins[MAX_PART_PINS];
-    // DIP/SIP geometry for 1-based PHYSICAL pin k: SIP -> baseRow+(k-1);
-    // DIP -> k<=N/2: baseRow+(k-1), k>N/2: baseRow+30+(N-k); a baseRow on
-    // the bottom half (>30) mirrors the +30 to -30. Returns -1 when the pin
-    // would leave the board. Per-pin `offset` overrides are applied by
-    // PartPlacement.cpp (offset wins when >= 0).
+    // Geometry for 1-based PHYSICAL pin k, `row:` = pin 1's ACTUAL hole
+    // (bench verdict, wave 2 - photo-confirmed real chips sit dot/notch at
+    // bottom-left; this flipped the original top-anchored mapping, which was
+    // mirrored):
+    //   SIP  -> baseRow+(k-1), legal on either half.
+    //   DIP  -> baseRow MUST be on the bottom half (31-60) - a top-anchored
+    //           baseRow is no longer a valid DIP anchor at all (returns -1
+    //           for every pin, not just the far side). k<=N/2: baseRow+(k-1)
+    //           (bottom, left->right); k>N/2: (baseRow-30)+(N-k) (top,
+    //           right->left). Example: dip8 at row 35 -> pins 1-4 =
+    //           35,36,37,38; pins 5-8 = 8,7,6,5.
+    //   axial2 -> baseRow MUST be on the top half (1-30); pin 1 = baseRow,
+    //           pin 2 = baseRow+30 (same column, straddling the ravine -
+    //           the default footprint for 2-leg parts like resistors/diodes,
+    //           convention only, not enforced).
+    // Returns -1 when the pin would leave the board or the anchor is on the
+    // wrong half. Per-pin `offset` overrides are applied by PartPlacement.cpp
+    // (offset wins when >= 0). Full geometry + the wave-2 bench story:
+    // CodeDocs/DESIGN_GUIDED_PLACEMENT.md.
     int nodeForPin(int k) const;
 };
 
