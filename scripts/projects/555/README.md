@@ -24,8 +24,13 @@ R1 charges C1 through R1+R2 and discharges it through R2, so
 
     f = 1.44 / ((R1 + 2*R2) * C1) = 1.44 / (104k * 10uF) = ~1.4 Hz
 
-The LED blinks at that rate, slightly longer on than off (duty ~52%).
-`main.py` counts the edges on OUT and prints a line every 3 seconds:
+The LED blinks at that rate, slightly longer on than off: OUT is high for
+0.693*(R1+R2)*C1 = 0.395 s and low for 0.693*R2*C1 = 0.326 s, so the duty
+cycle is ~54.8%.
+
+`main.py` counts the edges on OUT and prints a line every 3 seconds
+(counting whole edges in a 3 s window means the printed frequency lands on
+a 1/3 Hz grid - ±0.33 Hz resolution):
 
     freq: 1.38 Hz   cap: 2.91 V
 

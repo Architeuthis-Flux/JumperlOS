@@ -58,8 +58,13 @@ R1 charges C1 through R1+R2 and discharges it through R2, so
 
     f = 1.44 / ((R1 + 2*R2) * C1) = 1.44 / (104k * 10uF) = ~1.4 Hz
 
-The LED blinks at that rate, slightly longer on than off (duty ~52%).
-`main.py` counts the edges on OUT and prints a line every 3 seconds:
+The LED blinks at that rate, slightly longer on than off: OUT is high for
+0.693*(R1+R2)*C1 = 0.395 s and low for 0.693*R2*C1 = 0.326 s, so the duty
+cycle is ~54.8%.
+
+`main.py` counts the edges on OUT and prints a line every 3 seconds
+(counting whole edges in a 3 s window means the printed frequency lands on
+a 1/3 Hz grid - ±0.33 Hz resolution):
 
     freq: 1.38 Hz   cap: 2.91 V
 
@@ -80,8 +85,8 @@ clickwheel to stop it.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[1] = { 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 1;
+const uint32_t PROJECT_555_README_MD_HASHES[2] = { 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 2;
 
 const char* PROJECT_555_MAIN_PY = R"("""555 LED Flasher - companion script for /projects/555/wiring.yaml
 
