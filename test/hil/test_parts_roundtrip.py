@@ -397,6 +397,7 @@ print("rc_row=", place_part("BAD2", 99, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_nopins=", place_part("BAD3", 20, '{}'))
 print("rc_diptop=", place_part("BAD4", 5, '{"A": {"pin": 1, "connect": 32}}', "dip8"))
 print("rc_axbot=", place_part("BAD5", 35, '{"A": {"pin": 1, "connect": 32}}', "axial2"))
+print("rc_dipfit=", place_part("BAD6", 58, '{"A": {"pin": 1, "connect": 50}, "D": {"pin": 4, "connect": 51}}', "dip8"))
 print("rc_quote=", place_part('U"X', 30, '{"A": {"pin": 1, "connect": 31}}'))
 print("rc_nl=", place_part("U\\nX", 30, '{"A": {"pin": 1, "connect": 31}}'))
 print("rc_pinnl=", place_part("UNL", 30, '{"A\\nB": {"pin": 1, "connect": 31}}'))
@@ -424,6 +425,12 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
           "place_part with a top-anchored dip8 (row 5) is refused (-1) - bottom half only")
     check(vals.get("rc_axbot") == -1,
           "place_part with a bottom-anchored axial2 (row 35) is refused (-1) - top half only")
+    # Column-fit needle: dip8 at row 58 doesn't fit (near side would overflow
+    # past row 60 at the same row the far side overflows past row 30 - pin 1
+    # (node 58) would have worked on its own, pin 4 (node 61) would not; the
+    # WHOLE part must be refused, not just the pins that don't fit.
+    check(vals.get("rc_dipfit") == -1,
+          "place_part with a dip8 at row 58 (does not fit the board) is refused (-1)")
     # Charset guard: serializeParts emits name/value quoted and type/pin names
     # bare, so a '"' truncates the field at reload and a newline writes an
     # UN-INDENTED line into parts: - where deserializeParts breaks out and drops
@@ -441,7 +448,8 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
           "place_part with a PIN name starting '- ' is refused (-1)")
     check(vals.get("rc_pinhash") == -1,
           "place_part with a PIN name starting '#' is refused (-1)")
-    # ...and nothing partial landed: only the three parts that were accepted.
+    # ...and nothing partial landed: only the three parts that were accepted -
+    # including BAD6, whose pin 1 (node 58) would have worked on its own.
     check(vals.get("names_after") == "AX1,U8,U9",
           f"every refused place_part left NO entry behind (table holds "
           f"{vals.get('names_after')!r}, expected 'AX1,U8,U9')")
@@ -454,6 +462,7 @@ print("ax1a=", 1 if is_connected(27, 40) else 0)
 print("ax1b=", 1 if is_connected(57, 41) else 0)
 print("bad=", 1 if is_connected(20, 30) else 0)
 print("diptopbad=", 1 if is_connected(5, 32) else 0)
+print("dipfitbad=", 1 if is_connected(58, 50) else 0)
 print("badchar=", 1 if is_connected(30, 31) else 0)
 for i in range(1, 59):
     nodes = get_net_nodes(i)
@@ -469,6 +478,9 @@ for i in range(1, 59):
     check(vals.get("bad") == 0, "no bridge from any refused place_part call (20-30 absent)")
     check(vals.get("diptopbad") == 0,
           "no bridge from the rejected top-anchored dip8 (5-32 absent)")
+    check(vals.get("dipfitbad") == 0,
+          "no PARTIAL placement from the rejected off-board dip8 (58-50 absent, "
+          "even though pin 1 alone would have fit)")
     check(vals.get("badchar") == 0,
           "no bridge from any charset-refused place_part call (30-31 absent)")
 
