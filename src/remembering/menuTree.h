@@ -96,7 +96,7 @@ String menuLines[150] = {
   "-JDI MIP\31display",
   "-DMX \31Serial",  
   "-OLED \31Images",
-  "-Project\31s",
+  "-Projects",
 
 
   //"-Show   Image",

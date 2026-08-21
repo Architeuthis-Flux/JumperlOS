@@ -129,6 +129,21 @@ int verifyPart(const PartDefinition& decl, PartResult* out);   // guided project
 MicroPython: `part_identify([rows]) -> dict`, `measure_res`, `measure_cap`,
 `measure_vf`, `iv_sweep(..., accurate=False) -> list`, `discharge(rows)`.
 
+**The v1 front door (Kevin, 2026-08-21, from the bench-notes session):** one
+call that does the whole job with everything defaulted —
+
+```python
+identify_part(leftmost_row=scan, pins=autodetect, types=all, timeout=1s)
+```
+
+Pass only what you know (here `leftmost_row`); the defaults cycle through the
+known tester types, autodetect which adjacent/straddled rows hold pins, figure
+the part out, and return a value. `identifyTwoLead`/`identifyThreeLead` above
+are the layers under this; `identify_part` is the shape users (and the guided
+flow's place-step display) actually call. The guided-placement checks will
+show whatever they already measure in the meantime — full identification
+lands here, in its own session.
+
 ## 5. Recipes (all: audit → powered-row refusal → discharge; positive-only through the
 shunt; DAC servo ramps ≤0.1 V/step with INA current-limit checks)
 
