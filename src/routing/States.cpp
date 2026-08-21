@@ -2810,7 +2810,8 @@ SlotManager::SlotManager()
     : activeState(globalState), activeSlotNumber(0), historySize(STATE_HISTORY_SIZE),
       historyHead(0), historyCount(0), historyPosition(0),
       previewModeActive(false), previewSlotNumber(-1), originalSlotNumber(-1),
-      temporarySlotActive(false), temporarySlotOriginal(-1) {
+      temporarySlotActive(false), temporarySlotOriginal(-1),
+      restoringContext(false) {
     // Always initialize to slot 0, sync with netSlot on first use.
     // This is the PRE-BOOT default only - seedBootContext() (main.cpp, called
     // once configLoaded is true) decides the real boot context.
@@ -3229,14 +3230,45 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
  * Now the context follows the file, and the auto-save writes back to the file
  * itself (saveActiveSlot -> saveStateToActivePath).
  *
- * ATOMIC ON FAILURE: every tracker is left untouched unless the open+read
- * succeeds. Open failure is the ONLY failure path - fromYAML never returns
- * false - so a false return means "the prior context is still fully active".
- * That is the contract the launcher's exit table is written against; keep the
- * read strictly BEFORE fromYAML (which clears state), because that ordering
- * IS the atomicity.
+ * ATOMIC ON FAILURE - the contract the launcher's exit table is written
+ * against. Tracking (activeSlotNumber / netSlot / activeSlotPath) is adopted
+ * ONLY on a successful open AND parse. There are TWO failure modes, not one:
+ *
+ *   - Open failure (missing file, open refused): nothing happened at all.
+ *     The read is kept strictly BEFORE fromYAML (which clear()s the state),
+ *     and that ordering IS the atomicity for this case.
+ *
+ *   - Parse/validate failure: fromYAML has ALREADY replaced globalState by
+ *     the time it returns false, so "leave the trackers alone" is NOT enough -
+ *     it would leave foreign remnants in RAM under the PRIOR context's number,
+ *     and the next dirty auto-save would write them into that numbered slot
+ *     with no -2 sentinel to trip the loud saveSlot guard. So the prior
+ *     context is RE-LOADED from its own file here, and a false return again
+ *     means "nothing happened".
+ *
+ *     (An earlier version of this contract claimed fromYAML never returns
+ *     false. It does: fromYAML ends in `return validate(errorMsg)`, and
+ *     PowerState::validate rejects any rail/DAC outside +/-8 V. Host-editing
+ *     a run file over MSC, or clicking a hand-written YAML in the Files
+ *     browser, reaches it.)
+ *
+ *   - EXCEPTION, double failure: if that restoring re-load ALSO fails (the
+ *     prior context's own file vanished or was corrupted since it was
+ *     loaded), the manager enters the NO-ACTIVE-CONTEXT state:
+ *     activeSlotNumber == netSlot == -1, empty path, cleared state. Nothing
+ *     can be auto-saved from there (saveActiveSlot returns "No active slot
+ *     to save"), which is the point - it is the only terminal state that
+ *     cannot write foreign content into anyone's file.
  */
 bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
+    // Captured BEFORE anything is touched, so the parse-failure path can put
+    // the prior context back. Same (number, path) pair pattern the preview,
+    // temp-slot, printSlotInfo and Wokwi dances use.
+    const int savedSlot = activeSlotNumber;
+    char savedPath[128];
+    strncpy(savedPath, activeSlotPath, sizeof(savedPath) - 1);
+    savedPath[sizeof(savedPath) - 1] = '\0';
+
     if (!safeFileExists(path.c_str())) {
         errorMsg = "File not found: " + path;
         return false;   // tracking untouched - prior context still active
@@ -3258,11 +3290,50 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     }
 
     if (!activeState.fromYAML(content, errorMsg)) {
-        // Unreachable in practice (fromYAML is tolerant and always returns
-        // true), but if it ever does fail the state is already clobbered -
-        // adopt anyway so the trackers describe what is actually in RAM
-        // rather than leaving a stale number pointed at a slot we'd overwrite.
         errorMsg = "Failed to parse YAML: " + errorMsg;
+        Serial.println("Load failed for " + path + ": " + errorMsg);
+
+        // globalState is ALREADY clobbered (fromYAML clear()s before parsing),
+        // so restoring the prior context means genuinely re-loading it. Reuse
+        // the public loaders rather than duplicating their tails (parts
+        // expansion, fakeGpio, refresh, power re-assert, updateLastActive) -
+        // `restoringContext` bounds the recursion to depth 1, so a restore
+        // whose own file is also bad cannot re-enter this logic.
+        bool restored = false;
+        if (!restoringContext) {
+            restoringContext = true;
+            String restoreErr;
+            if (savedSlot >= 0) {
+                restored = loadSlot(savedSlot, restoreErr);
+            } else if (savedSlot == SLOT_FILE_CONTEXT && savedPath[0] != '\0') {
+                restored = loadSlotFromPath(String(savedPath), restoreErr);
+            }
+            restoringContext = false;
+        }
+
+        if (!restored) {
+            // Double failure (or there was no prior context to restore).
+            // Terminal state: NO ACTIVE CONTEXT.
+            //
+            // netSlot is set to -1, NOT 0. deleteSlot's historical -1/0 split
+            // is exactly what must not be copied here: with netSlot == 0 and
+            // activeSlotNumber == -1 the next service() pass would
+            // syncFromGlobalNetSlot() to 0 and write this cleared/foreign
+            // state straight over /slots/slot0.yaml. Keeping the pair EQUAL at
+            // -1 means the sync is a no-op and saveActiveSlot refuses.
+            //
+            // updateLastActive() self-gates on -1, so last_active.txt still
+            // names the saved context; if that file really is gone, boot's
+            // existing fallback rewrites it.
+            activeState.clear();
+            activeSlotNumber = -1;
+            netSlot = -1;
+            activeSlotPath[0] = '\0';
+            Serial.println("Prior context could not be restored - no active "
+                           "context; nothing will be auto-saved until a slot "
+                           "or file is loaded.");
+            Serial.flush();
+        }
         return false;
     }
     // Re-expand placed parts into bridges before routing (idempotent - see
@@ -3299,7 +3370,9 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     // The WIRE value for "a file context" is -1, not -2: -1 already means
     // "no numbered slot" to every existing integer parser, and -2 is an
     // internal sentinel that never leaves the firmware.
-    if (activeSlotNumber == SLOT_FILE_CONTEXT) {
+    // Suppressed while restoring: a failed load of X must not announce a
+    // spurious context change for the prior context it just put back.
+    if (activeSlotNumber == SLOT_FILE_CONTEXT && !restoringContext) {
         Jerial.println("SLOT_CHANGED:-1");
         Jerial.print("ACTIVE_PATH:");
         Jerial.println(activeSlotPath);

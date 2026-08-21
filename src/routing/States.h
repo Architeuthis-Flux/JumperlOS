@@ -607,11 +607,20 @@ public:
      * and activeSlotPath becomes `path`.
      *
      * ATOMIC ON FAILURE (contract the launcher's exit table leans on):
-     * tracking (activeSlotNumber / netSlot / activeSlotPath) is adopted ONLY
-     * after a successful open+read. Open failure is the only load-failure path
-     * here - fromYAML never returns false - and on it this returns false with
-     * the PRIOR context fully active and every tracker untouched. Callers may
-     * therefore treat a false return as "nothing happened to the context".
+     * tracking is adopted ONLY on a successful open AND parse. Callers may
+     * treat a false return as "nothing happened to the context".
+     *
+     *   - Open failure: nothing happened; every tracker untouched.
+     *   - Parse/validate failure: fromYAML has already replaced globalState
+     *     by the time it returns false, so the prior context is RE-LOADED
+     *     from its own file. Trackers end where they started.
+     *     (fromYAML CAN return false: it ends in `return validate()`, and
+     *     PowerState::validate rejects any rail/DAC outside +/-8 V.)
+     *   - EXCEPTION, double failure: if that restoring re-load also fails
+     *     (the prior file vanished or was corrupted meanwhile), the manager
+     *     enters the NO-ACTIVE-CONTEXT state - activeSlotNumber == netSlot
+     *     == -1, empty path, cleared state - where nothing can be
+     *     auto-saved. See the full note on the definition.
      */
     bool loadSlotFromPath(const String& path, String& errorMsg);
     bool saveSlot(int slotNum, String& errorMsg, bool skipValidation = false);  // skipValidation for faster auto-saves
@@ -706,6 +715,13 @@ private:
     bool temporarySlotActive;
     int temporarySlotOriginal;   // Which slot to return to when exiting temp mode
     char temporarySlotOriginalPath[128];  // ...and its path (may be a run file)
+
+    // Depth-1 re-entrancy guard for loadSlotFromPath's parse-failure restore.
+    // The restore re-loads the PRIOR context through the public loaders (so it
+    // inherits parts expansion, fakeGpio, refresh and the power re-assert
+    // instead of duplicating them); this flag is what stops a restore whose
+    // own file is also bad from re-entering the restore logic forever.
+    bool restoringContext;
 
     // Internal: write the active state to activeSlotPath (saveActiveSlot's
     // SLOT_FILE_CONTEXT branch).
