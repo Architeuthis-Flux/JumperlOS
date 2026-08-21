@@ -190,6 +190,104 @@ def board_state_restore(yaml):
     return ok
 
 
+def active_context(collect_seconds=1.5):
+    """Query the active context with 'Q' and return (slot, path).
+
+    Since "slots become files", 'Q' prints TWO lines:
+
+        ACTIVE_SLOT:<n>      # 0-7 or 99 for a numbered slot, -1 for a file
+        ACTIVE_PATH:<path>   # ALWAYS - numbered slots print their canonical path
+
+    slot is an int (possibly -1) or None if the board didn't answer; path is a
+    str or None. Note the '-?': the old suite-wide r"ACTIVE_SLOT:(\\d+)" does
+    NOT match -1, so every suite aborted at its phase-0 snapshot whenever a
+    file context happened to be active. That is exactly the trap this helper
+    exists to close - use it instead of a local regex.
+    """
+    q = port1_command("Q", collect_seconds)
+    ms = re.search(r"ACTIVE_SLOT:(-?\d+)", q)
+    mp = re.search(r"ACTIVE_PATH:(\S+)", q)
+    return (int(ms.group(1)) if ms else None,
+            mp.group(1) if mp else None)
+
+
+def restore_context(slot, path):
+    """Return the board to a context captured with active_context().
+
+    Numbered slots go back through '<n'. A file context has no single-char
+    command, so it goes back through the MicroPython load_project() binding,
+    which is loadSlotFromPath - the same adopting call the Files browser uses.
+    """
+    if slot is not None and slot >= 0:
+        port1_command(f"<{slot}", 4.0)
+        return True
+    if path:
+        jl_exec(f"load_project({path!r})", timeout=20)
+        return True
+    return False
+
+
+def reboot_board():
+    """Reset the board via machine.reset() and wait for it to come back.
+
+    jl_exec() cannot be used directly: the REPL dies mid-exec (that IS the
+    reset), so jumperless.py returns non-zero and jl_exec would sys.exit. The
+    subprocess is therefore run here with its failure ignored, and readiness is
+    proven by port1_wait_ready() rather than assumed.
+
+    Returns True when the firmware answers again.
+    """
+    jl = find_jumperless_py()
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".py", delete=False, prefix="hil_reset_"
+    ) as f:
+        f.write("import machine\nmachine.reset()\n")
+        path = f.name
+    try:
+        subprocess.run(
+            [sys.executable, jl, "exec", "--file", path, "--timeout", "8"],
+            capture_output=True, text=True, timeout=30,
+            cwd=os.path.dirname(os.path.dirname(jl)),
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    time.sleep(2.0)   # let the USB node actually disappear before we poll
+    return port1_wait_ready(35.0)
+
+
+def port1_wait_ready(timeout=25.0):
+    """Wait for port 1 to come back after a reboot, then confirm the firmware
+    answers. The board re-enumerates USB on reset, so the device node itself
+    disappears and returns - this polls for the node, then for a 'Q' that
+    actually replies. Bounded; no silent sleeping."""
+    import serial  # pyserial
+
+    deadline = time.time() + timeout
+    # 1) wait for the node to exist again
+    while time.time() < deadline:
+        hits = [p for p in glob.glob("/dev/cu.*JLV5port1") if p.endswith("port1")]
+        if hits:
+            break
+        time.sleep(0.25)
+    else:
+        return False
+    # 2) wait for the firmware behind it to answer
+    while time.time() < deadline:
+        try:
+            slot, path = active_context(1.5)
+            if slot is not None:
+                return True
+        except (serial.SerialException, OSError, SystemExit):
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def port1_command(cmd, collect_seconds=2.5):
     """Send a single-char command line on port 1, return de-ANSI'd output."""
     import serial  # pyserial

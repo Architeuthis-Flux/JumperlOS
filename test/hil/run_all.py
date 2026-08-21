@@ -22,12 +22,19 @@ TESTS = [
     "test_config.py",
     "test_stress.py",
     "test_paste_state.py",     # Y->S / J->L paste round-trips on port 1
+    "test_slot_files.py",      # path-based active context: adopt, trap, boot
     "test_parts_roundtrip.py", # parts: section round-trip + the MP bindings
     "test_projects.py",        # /projects tree, provisioning, the launcher
     "test_guide_flow.py",      # guided placement: runtime + electrical checks
     "test_encoder_ui.py",      # last: drives the physical UI
 ]
 
+# test_slot_files.py runs BEFORE the three project/guide suites and REBOOTS
+# the board twice (boot-persistence assertions). It restores boot_mode/
+# boot_slot and the original context in its finally, so anything after it
+# starts from a normal bench - but it must not run between two suites that
+# share state, hence its position here rather than later in the list.
+#
 # ORDER MATTERS for the three project/guide suites: test_projects.py's
 # launcher phase asserts the picker lists exactly the two projects IT
 # authored, and test_guide_flow.py pushes a third (/projects/hilguide) that

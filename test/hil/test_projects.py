@@ -79,7 +79,8 @@ import time
 import serial  # pyserial
 
 from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
-                board_state_capture, board_state_restore)
+                board_state_capture, board_state_restore,
+                active_context, restore_context)
 
 SLOT_PATH = "/slots/slot3.yaml"
 PROJ_DIR = "/projects/555"
@@ -252,10 +253,15 @@ WIRING = local_file("wiring.yaml")
 snapshot = board_state_capture()
 check(snapshot is not None, "captured pre-test board state snapshot")
 
-q = port1_command("Q", 1.5)
-m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-check(m is not None, "queried active slot ('Q')")
-orig_slot = int(m.group(1)) if m else 0
+# Shared helper, not a local regex: 'Q' now answers ACTIVE_SLOT:-1 +
+# ACTIVE_PATH:<path> when a FILE context is active, and the old
+# r"ACTIVE_SLOT:(\d+)" did not match -1 - this phase aborted outright whenever
+# the bench happened to be sitting on a project run file.
+orig_slot, orig_path = active_context(1.5)
+check(orig_slot is not None, "queried active context ('Q')")
+check(orig_path is not None, "'Q' reports ACTIVE_PATH")
+if orig_slot is None:
+    orig_slot = 0
 
 slot3_existed, slot3_before = read_device_file(SLOT_PATH)
 print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
@@ -1050,7 +1056,8 @@ print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
         check(parse_kv(out).get("removed") == 1,
               "removed the test's slot3.yaml (did not exist before)")
 
-    port1_command(f"<{orig_slot}", 4.0)
+    # Path-aware: a file context has no "<n" to go back to.
+    restore_context(orig_slot, orig_path)
     time.sleep(1.5)
 
     if snapshot is not None:

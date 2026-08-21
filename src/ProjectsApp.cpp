@@ -700,7 +700,11 @@ static bool guidedFlowInner(const String& wiringPath, int destSlot) {
     // and this whole flow only pumps the CRITICAL inner set.
     // (loadSlotFromPath applies the file's power: momentarily before the 0V
     // force lands - noted in the report.)
+    // Capture the prior context as a (number, path) PAIR - prevSlot may be
+    // SLOT_FILE_CONTEXT now (a guided run launched while a project run file
+    // was active), and loadSlot(-2) cannot restore that.
     int prevSlot = mgr.getActiveSlot();
+    String prevPath = String(mgr.getActiveSlotPath());
     if (prevSlot != dest) {
         // Big-event flush of the OUTGOING slot before its state is replaced
         // - the loadSlot precedent (States.cpp:2918, review IMPORTANT 2):
@@ -714,8 +718,16 @@ static bool guidedFlowInner(const String& wiringPath, int destSlot) {
         notify("Load\nfailed", "\n\r  Failed to load " + wiringPath + ": " + err, 2000);
         Serial.println("\r\nGUIDE error load failed");
         String rerr;
-        if (!mgr.loadSlot(prevSlot, rerr)) {
-            Serial.println("  (could not restore slot " + String(prevSlot) +
+        bool restored;
+        if (prevSlot == SLOT_FILE_CONTEXT && prevPath.length() > 0) {
+            restored = mgr.loadSlotFromPath(prevPath, rerr);
+        } else {
+            restored = mgr.loadSlot(prevSlot, rerr);
+        }
+        if (!restored) {
+            Serial.println("  (could not restore " +
+                           (prevSlot == SLOT_FILE_CONTEXT ? prevPath
+                                                          : ("slot " + String(prevSlot))) +
                            ": " + rerr + ")");
         }
         return true;

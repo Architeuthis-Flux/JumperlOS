@@ -25,7 +25,8 @@ import re
 import time
 
 from jl import (jl_exec, parse_kv, port1_command, check, finish,
-                board_state_capture, board_state_restore)
+                board_state_capture, board_state_restore,
+                active_context, restore_context)
 
 SLOT_PATH = "/slots/slot3.yaml"
 
@@ -175,17 +176,23 @@ else:
 snapshot = board_state_capture()
 check(snapshot is not None, "captured pre-test board state snapshot")
 
-q = port1_command("Q", 1.5)
-m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-check(m is not None, "queried active slot ('Q')")
-orig_slot = int(m.group(1)) if m else 0
+# Shared helper, not a local regex: 'Q' now answers ACTIVE_SLOT:-1 +
+# ACTIVE_PATH:<path> when a FILE context is active, and the old
+# r"ACTIVE_SLOT:(\d+)" did not match -1 - this phase aborted outright whenever
+# the bench happened to be sitting on a project run file.
+orig_slot, orig_path = active_context(1.5)
+check(orig_slot is not None, "queried active context ('Q')")
+check(orig_path is not None, "'Q' reports ACTIVE_PATH")
+if orig_slot is None:
+    orig_slot = 0
 
 slot3_existed, slot3_before = read_device_file(SLOT_PATH)
 print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
 
 # The "somewhere that isn't slot 3" the phases below bounce through to force
 # a re-read. Computed here, with orig_slot, so the finally can use it too.
-bounce = orig_slot if orig_slot != 3 else 2
+bounce = orig_slot if (orig_slot is not None and 0 <= orig_slot < 8
+                       and orig_slot != 3) else 2
 
 # Everything that MUTATES the board lives inside this try; the tmptest
 # teardown + phase 9's restore are its finally. Without it an uncaught
@@ -657,6 +664,10 @@ power:
 """
 
     slot0_existed, slot0_before = read_device_file("/slots/slot0.yaml")
+    # Slot 3 is the context we are ON right now, so it is the slot the OLD
+    # bug would have written the project into. Snapshot it here (not phase 0 -
+    # earlier phases legitimately rewrote it) so the after-comparison is exact.
+    slot3_lp_existed, slot3_lp_before = read_device_file(SLOT_PATH)
     print(f"  info: slot0.yaml existed before load_project: {slot0_existed}")
 
     out = jl_exec(f"""
@@ -697,14 +708,31 @@ print("stale=", 1 if is_connected(55, 42) else 0)
     check(vals.get("stale") == 0,
           "load_project replaced the previous state (slot 3's 55-42 bridge is gone)")
 
-    q = port1_command("Q", 1.5)
-    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-    check(m is not None and int(m.group(1)) == 3,
-          f"slot-clobber regression: the active slot is still 3 after load_project ({q.strip()[:60]!r})")
+    # The slot-clobber regression, re-aimed at the new model. This used to
+    # assert "the active slot is STILL 3", because loadSlotFromPath left slot
+    # tracking alone for an unrecognized name - which meant the loaded project
+    # was live on the board while the auto-save still pointed at slot 3, and
+    # the project's content would be written into slot 3's file. The fix is
+    # ADOPTION: the context follows the file, so tracking must now report the
+    # PATH (ACTIVE_SLOT:-1 + ACTIVE_PATH:<the project file>), not slot 3.
+    #
+    # The part that has NOT changed - and is the whole point either way - is
+    # that no numbered slot file is touched.
+    slot_after_lp, path_after_lp = active_context(1.5)
+    check(slot_after_lp == -1,
+          f"load_project adopted the project file as a FILE context "
+          f"(ACTIVE_SLOT:{slot_after_lp}, expected -1)")
+    check(path_after_lp == TMP_WIRING,
+          f"ACTIVE_PATH is the project file itself (got {path_after_lp!r}, "
+          f"expected {TMP_WIRING!r})")
     time.sleep(2.0)  # give the idle auto-save a chance to misbehave
     slot0_after_exists, slot0_after = read_device_file("/slots/slot0.yaml")
     check(slot0_after_exists == slot0_existed and slot0_after == slot0_before,
           "slot-clobber regression: /slots/slot0.yaml is byte-identical after load_project")
+    slot3_lp_after_exists, slot3_lp_after = read_device_file(SLOT_PATH)
+    check(slot3_lp_after_exists == slot3_lp_existed and slot3_lp_after == slot3_lp_before,
+          "slot-clobber regression: slot3.yaml (the context we loaded FROM) is "
+          "byte-identical - the project's content did not land in it")
 
     out = jl_exec(f"""
 print("literal=", 1 if load_project({TMP_WIRING!r}) else 0)
@@ -720,6 +748,15 @@ finally:
     # written to be safe when the phase that created its subject never ran
     # (removing a project that was never written is a no-op that still
     # reports gone=1).
+    # ORDER MATTERS, and it changed with adoption. load_project now makes the
+    # project file the ACTIVE CONTEXT, so its dirty state auto-saves back to
+    # ITSELF. Deleting the file first and switching slots second would let the
+    # switch's dirty pre-save RE-CREATE the file we just deleted (or fail
+    # noisily against a removed directory). So: leave the file context first -
+    # which flushes it to its own file - and only then delete it.
+    port1_command(f"<{bounce}", 4.0)
+    time.sleep(1.5)
+
     out = jl_exec(f"""
 for p in ({TMP_WIRING!r},):
     if fs_exists(p):
@@ -731,11 +768,6 @@ except Exception as e:
 print("gone=", 0 if fs_exists({TMP_PROJ!r}) else 1)
 """, timeout=25)
     check(parse_kv(out).get("gone") == 1, f"removed {TMP_PROJ} (the 555 project stays, tmptest does not)")
-
-    # Leave slot 3 before the restore: the state is dirty from the project load
-    # and the idle auto-save of the ACTIVE slot would clobber the fs_write below.
-    port1_command(f"<{bounce}", 4.0)
-    time.sleep(1.5)
 
     # --- 9. Restore the bench --------------------------------------------------
     # Restore the FILE first, switch slots second: if orig_slot happened to be 3,
@@ -752,7 +784,8 @@ print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
 """)
         check(parse_kv(out).get("removed") == 1, "removed the test's slot3.yaml (did not exist before)")
 
-    port1_command(f"<{orig_slot}", 4.0)
+    # Path-aware: a file context has no "<n" to go back to.
+    restore_context(orig_slot, orig_path)
     time.sleep(1.5)
 
     if snapshot is not None:
