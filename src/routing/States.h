@@ -616,11 +616,15 @@ public:
      *     from its own file. Trackers end where they started.
      *     (fromYAML CAN return false: it ends in `return validate()`, and
      *     PowerState::validate rejects any rail/DAC outside +/-8 V.)
-     *   - EXCEPTION, double failure: if that restoring re-load also fails
-     *     (the prior file vanished or was corrupted meanwhile), the manager
-     *     enters the NO-ACTIVE-CONTEXT state - activeSlotNumber == netSlot
-     *     == -1, empty path, cleared state - where nothing can be
-     *     auto-saved. See the full note on the definition.
+     *   - EXCEPTION, double failure: if that restoring re-load also fails,
+     *     the manager enters the NO-ACTIVE-CONTEXT state - activeSlotNumber
+     *     == netSlot == -1, empty path, cleared state, board cleared to match
+     *     (nothing routed, nothing powered beyond defaults) - where nothing
+     *     can be auto-saved. For a FILE context this is DETERMINISTIC when
+     *     the caller passed the active path itself (USBfs's MSC-eject reload
+     *     does), because the restore re-reads the same bad file; numbered
+     *     contexts get loadSlot's /.bak mirror rescue, arbitrary paths do
+     *     not. See the full note on the definition.
      */
     bool loadSlotFromPath(const String& path, String& errorMsg);
     bool saveSlot(int slotNum, String& errorMsg, bool skipValidation = false);  // skipValidation for faster auto-saves

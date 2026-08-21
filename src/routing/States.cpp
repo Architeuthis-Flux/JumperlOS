@@ -3265,13 +3265,22 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
  *     a run file over MSC, or clicking a hand-written YAML in the Files
  *     browser, reaches it.)
  *
- *   - EXCEPTION, double failure: if that restoring re-load ALSO fails (the
- *     prior context's own file vanished or was corrupted since it was
- *     loaded), the manager enters the NO-ACTIVE-CONTEXT state:
- *     activeSlotNumber == netSlot == -1, empty path, cleared state. Nothing
- *     can be auto-saved from there (saveActiveSlot returns "No active slot
- *     to save"), which is the point - it is the only terminal state that
- *     cannot write foreign content into anyone's file.
+ *   - EXCEPTION, double failure: if that restoring re-load ALSO fails, the
+ *     manager enters the NO-ACTIVE-CONTEXT state: activeSlotNumber ==
+ *     netSlot == -1, empty path, cleared state, and the board cleared to
+ *     match (nothing routed, nothing powered beyond defaults). Nothing can be
+ *     auto-saved from there (saveActiveSlot returns "No active slot to
+ *     save"), which is the point - it is the only terminal state that cannot
+ *     write foreign content into anyone's file.
+ *
+ *     This is NOT limited to "the prior file vanished meanwhile". For a FILE
+ *     context it is DETERMINISTIC whenever the caller passed the active path
+ *     itself: USBfs's MSC-eject reload calls
+ *     loadSlotFromPath(getActiveSlotPath()), so savedPath == path and the
+ *     restore re-reads the same bad file. A host writing an invalid YAML over
+ *     the active run file therefore lands in the terminal state every time.
+ *     Numbered contexts are rescued by loadSlot's /.bak mirror; arbitrary
+ *     paths have no mirror. A reboot recovers via the boot slot-0 fallback.
  */
 bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     // Captured BEFORE anything is touched, so the parse-failure path can put
@@ -3328,12 +3337,28 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
             // Double failure (or there was no prior context to restore).
             // Terminal state: NO ACTIVE CONTEXT.
             //
+            // WHEN THIS HAPPENS. For a numbered prior context it is genuinely
+            // rare - loadSlot has a /.bak mirror rescue, and a missing slot
+            // file is a legitimate empty slot that restores fine. For a FILE
+            // prior context it is DETERMINISTIC in one important case: the
+            // USBfs eject reload calls loadSlotFromPath(getActiveSlotPath()),
+            // so savedPath == path and the restore re-reads the SAME bad file,
+            // guaranteeing the second failure. A host writing an invalid YAML
+            // over the active run file over MSC - an explicitly endorsed flow
+            // in this design - lands here every time. Arbitrary paths have no
+            // mirror to fall back to. Nothing is written and a reboot recovers
+            // through the boot slot-0 fallback, so this is a safe stop, not
+            // data loss - but it is a normal outcome, not an exotic one.
+            //
             // netSlot is set to -1, NOT 0. deleteSlot's historical -1/0 split
             // is exactly what must not be copied here: with netSlot == 0 and
             // activeSlotNumber == -1 the next service() pass would
             // syncFromGlobalNetSlot() to 0 and write this cleared/foreign
             // state straight over /slots/slot0.yaml. Keeping the pair EQUAL at
-            // -1 means the sync is a no-op and saveActiveSlot refuses.
+            // -1 means the sync is a no-op and saveActiveSlot refuses. -1 is
+            // also an already-live netSlot value here (attractMode's defcon
+            // position; main.cpp's loadfile: fails it through to
+            // clearActiveSlot), so this lands on handled ground.
             //
             // updateLastActive() self-gates on -1, so last_active.txt still
             // names the saved context; if that file really is gone, boot's
@@ -3342,9 +3367,25 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
             activeSlotNumber = -1;
             netSlot = -1;
             activeSlotPath[0] = '\0';
+
+            // THE INVARIANT: terminal state means NOTHING ROUTED and NOTHING
+            // POWERED BEYOND DEFAULTS. Clearing RAM alone would leave the
+            // crossbar still holding the vanished context's bridges and the
+            // rails still energized at its voltages while the state reads
+            // empty - the same RAM/hardware divergence that made the original
+            // parse-failure bug dangerous. The common parse-failure path gets
+            // this for free from the restoring loader; the terminal path has
+            // to do it itself. (clear() has just reset power to defaults:
+            // rails 0 V, DAC1 0 V, DAC0 at the probe feed voltage.)
+            extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
+            refreshConnections(-1, 1, 1);
+            if (!previewModeActive) {
+                applyStateToHardware();
+            }
+
             Serial.println("Prior context could not be restored - no active "
-                           "context; nothing will be auto-saved until a slot "
-                           "or file is loaded.");
+                           "context; board cleared and nothing will be "
+                           "auto-saved until a slot or file is loaded.");
             Serial.flush();
         }
         return false;
@@ -4501,7 +4542,9 @@ ServiceStatus SlotManager::service() {
             // that makes an arbitrary slot file persist its own edits instead
             // of writing them into whatever number happened to be tracked.
             // Skip validation on auto-save (state is validated when connections are added/removed)
+            static unsigned long lastAutoSaveFailPrint = 0;
             if (saveActiveSlot(errorMsg, true)) {
+                lastAutoSaveFailPrint = 0;   // next failure prints immediately
                 unsigned long saveTime = micros() - saveStart;
                 if (debugWaitLoopTiming) {
                 if (saveTime > 100000) {
@@ -4514,12 +4557,27 @@ ServiceStatus SlotManager::service() {
                     Serial.printf("DEBUG: Auto-save completed\n");
                 }
             } else {
-                // Don't clear dirty on failure - retry on next loop
-                Serial.print("✗ Auto-save failed (");
-                Serial.print(isPathContext() ? String(activeSlotPath)
-                                             : ("slot " + String(activeSlotNumber)));
-                Serial.print("): ");
-                Serial.println(errorMsg);
+                // Don't clear dirty on failure - retry on next loop.
+                //
+                // THROTTLED, for the same reason the template branch above is:
+                // the dirty flag deliberately survives a failure, so a context
+                // that cannot be saved re-attempts on every idle pass. The
+                // no-active-context terminal state is exactly that - once the
+                // user mutates, saveActiveSlot returns "No active slot to
+                // save" forever - and an unthrottled print would bury the
+                // console. The timestamp resets on any successful save, so a
+                // genuinely new failure still prints immediately.
+                if (millis() - lastAutoSaveFailPrint > 10000) {
+                    lastAutoSaveFailPrint = millis();
+                    Serial.print("✗ Auto-save failed (");
+                    Serial.print(activeSlotNumber < 0 && !isPathContext()
+                                     ? String("no active context")
+                                     : (isPathContext()
+                                            ? String(activeSlotPath)
+                                            : ("slot " + String(activeSlotNumber))));
+                    Serial.print("): ");
+                    Serial.println(errorMsg);
+                }
                 lastStatus = ServiceStatus::ERROR;
             }
     } else if (hasDirtyState && usbMountedByHost) {
