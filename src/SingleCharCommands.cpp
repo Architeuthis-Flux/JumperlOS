@@ -38,6 +38,7 @@
 #include "IrqSlots.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "ProjectsApp.h" // z: guided-project runner (headless/HIL entry)
 #include "WaveGen.h"    // X: the wavegen stream line (T3.3)
 #include "AdcRing.h"    // X: the ADC ring line (T2.1)
 #include "Python_Proper.h"
@@ -733,6 +734,17 @@ void SingleCharCommands::initializeCommands( ) {
     registerCommand( 'j', "Test overlay",
                      "Test overlay.",
                      cmd_testOverlay, MENU_DEBUG, CAT_ADVANCED, true, SER3_IRRELEVANT );
+
+    registerCommand( 'z', "run guided project (z <path> <slot>)",
+                     "Run the guided-placement flow for a project wiring, headless.\n"
+                     "Usage: z /projects/<dir>/wiring.yaml <slot 0-7>\n"
+                     "Builds DIRECTLY into the given destination slot (no temp slot),\n"
+                     "bypassing the encoder pickers - the HIL / scripted entry.\n"
+                     "A resume offer still appears when a slot holds progress for the\n"
+                     "same wiring (y = resume, n = restart, other byte = cancel).\n"
+                     "Guide keys on this stream: n/space=next  p=back  s=skip\n"
+                     "v=verify  q=quit  t <row>=probe-tap override.",
+                     cmd_guidedProject, MENU_DEBUG, CAT_APPS, true, SER3_INTERACTIVE );
 }
 
 
@@ -762,6 +774,38 @@ CommandResult cmd_showSwitchPosition( char c, const String& line ) {
 
 CommandResult cmd_testOverlay( char c, const String& line ) {
     graphicOverlayState.debugMenu();
+    return CMD_DONT_SHOW_MENU;
+}
+
+// z <path> <slot>: the guided-placement runner's headless entry. Both
+// arguments required - this command exists so the HIL (and any script) can
+// reach runGuidedProject's inner flow without the encoder pickers, and a
+// destination slot default would silently overwrite whatever it guessed.
+CommandResult cmd_guidedProject( char c, const String& line ) {
+    String args = ( line.length( ) > 1 ) ? line.substring( 1 ) : String( "" );
+    args.trim( );
+
+    int lastSpace = args.lastIndexOf( ' ' );
+    String path = ( lastSpace > 0 ) ? args.substring( 0, lastSpace ) : String( "" );
+    String slotStr = ( lastSpace > 0 ) ? args.substring( lastSpace + 1 ) : String( "" );
+    path.trim( );
+    slotStr.trim( );
+
+    bool slotOk = slotStr.length( ) > 0;
+    for ( unsigned int i = 0; i < slotStr.length( ); i++ ) {
+        if ( slotStr.charAt( i ) < '0' || slotStr.charAt( i ) > '9' ) slotOk = false;
+    }
+    int slot = slotOk ? slotStr.toInt( ) : -1;
+
+    if ( path.length( ) == 0 || !slotOk || slot < 0 || slot > 7 ) {
+        Jerial.println( "Usage: z /projects/<dir>/wiring.yaml <slot 0-7>" );
+        return CMD_DONT_SHOW_MENU;
+    }
+    if ( !safeFileExists( path.c_str( ) ) ) {
+        Jerial.println( "GUIDE error file not found: " + path );
+        return CMD_DONT_SHOW_MENU;
+    }
+    runGuidedProjectTo( path, slot );
     return CMD_DONT_SHOW_MENU;
 }
 

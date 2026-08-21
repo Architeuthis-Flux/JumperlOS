@@ -39,14 +39,25 @@ bool readProjectMeta(const String& yamlPath, ProjectMeta& out);
 // (alphabetical by dir name).
 int listProjects(ProjectMeta* out, int maxOut);
 
-// Guided-flow seam. v1 STUB: always returns false - task 6 (guide runtime)
-// implements it. Contract, binding for that task:
+// Guided-flow seam (task 6: src/guiding/GuidedFlow.cpp is the runtime).
+// Contract:
 //   - called BEFORE any temp-slot entry, only for wirings that carry an
 //     un-indented `parts:` or `guide:` line;
-//   - true  = the guided flow handled everything (picked the destination slot,
-//             ran the project, cleaned up) and the launcher returns at once;
-//   - false = the launcher proceeds with the non-guided temp-slot path.
+//   - true  = the guided flow handled everything (resume offer, destination
+//             slot, guideRun, cleanup - INCLUDING cancels at its own pickers:
+//             a user who cancelled a guided build did not ask for the
+//             non-guided path) and the launcher returns at once;
+//   - false = the launcher proceeds with the non-guided temp-slot path
+//             (currently never returned - kept for future gating).
+// The guided path never touches temporarySlotActive: it builds directly into
+// a destination slot (design §7).
 bool runGuidedProject(const String& dir, const String& wiringPath);
+
+// Headless/HIL entry (the 'z' single-char command): same flow with the
+// destination slot supplied up front, bypassing the encoder pickers. The
+// resume offer still appears and is serial-drivable (yesNoMenu takes y/n;
+// any other byte cancels).
+bool runGuidedProjectTo(const String& wiringPath, int destSlot);
 
 // The app entry point (apps[] row "Projects" / menu line "-Project\31s").
 void projectsAppLauncher(void);

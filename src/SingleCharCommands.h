@@ -334,6 +334,7 @@ CommandResult cmd_showBoardLEDs(char c, const String& line);
 CommandResult cmd_startupAnimation(char c, const String& line);
 CommandResult cmd_cycleSlots(char c, const String& line);
 CommandResult cmd_loadSlot(char c, const String& line);
+CommandResult cmd_guidedProject(char c, const String& line);  // z: guided runner (HIL entry)
 
 // Advanced/Test commands
 CommandResult cmd_testStates(char c, const String& line);

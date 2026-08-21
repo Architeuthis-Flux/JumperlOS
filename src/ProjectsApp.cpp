@@ -37,8 +37,10 @@
 #include "Commands.h"         // requestLedShow, refreshConnections
 #include "FilesystemStuff.h"  // safeFile*, FatFS Dir walk
 #include "Graphics.h"         // b.print (no-op on OG)
+#include "GuidedFlow.h"       // guideRun / guideForcePowerSafe (task 6)
 #include "JumperlOS.h"        // jOS.serviceInner()
 #include "Menus.h"            // inClickMenu, yesNoMenu
+#include "PartPlacement.h"    // removePartPlacement (guided restart path)
 #include "Python_Proper.h"    // executePythonFileContent, setGlobalStreamWithInterrupt
 #include "RotaryEncoder.h"    // encoder state machine
 #include "States.h"           // SlotManager
@@ -285,13 +287,17 @@ static bool wiringHasGuideSections(const String& wiringPath) {
     return found;
 }
 
+// Forward declarations for the guided flow (implemented below the picker
+// helpers they use).
+static bool guidedFlowInner(const String& wiringPath, int destSlot);
+
 bool runGuidedProject(const String& dir, const String& wiringPath) {
-    // v1 STUB. Task 6 (guide runtime) implements this; the contract it has to
-    // honor is in ProjectsApp.h. Returning false keeps the launcher on the
-    // non-guided temp-slot path, which is exactly the v1 behavior.
     (void)dir;
-    (void)wiringPath;
-    return false;
+    return guidedFlowInner(wiringPath, -1);   // -1 = interactive pickers
+}
+
+bool runGuidedProjectTo(const String& wiringPath, int destSlot) {
+    return guidedFlowInner(wiringPath, destSlot);
 }
 
 // ============================================================================
@@ -348,13 +354,15 @@ static void drawPickerItem(const char* header, const String& ledLabel,
 // machineTag is printed once on entry as `<TAG> n=<count>`: one grep-able line
 // per picker so a headless caller can see the picker open and how many entries
 // it holds (test_projects.py phase 6(d) drives the launcher on that line).
+// startIdx pre-selects an entry (the guided destination picker defaults to
+// the first empty slot); out of range falls back to 0.
 static int runPicker(const char* machineTag, const char* header,
                      const String* ledLabels, const String* titles,
-                     const String* summaries, int count) {
+                     const String* summaries, int count, int startIdx = 0) {
     if (count <= 0)
         return -1;
 
-    int idx = 0;
+    int idx = (startIdx >= 0 && startIdx < count) ? startIdx : 0;
     int result = -1;
     bool needsDraw = true;
     unsigned long lastShowRequest = 0;
@@ -483,6 +491,206 @@ static int pickDestinationSlot(void) {
         summaries[i] = used ? "overwrites saved slot" : "empty slot";
     }
     return runPicker("SLOTS", "Slot", ledLabels, titles, summaries, NUM_SLOTS);
+}
+
+// ============================================================================
+// Guided flow (task 6): destination slot + resume, then guideRun
+// ============================================================================
+// NO temp slots anywhere in this path - the guide builds DIRECTLY into a
+// destination slot (DESIGN_GUIDED_PLACEMENT.md §7, Kevin's decision), which
+// is why the seam is called before enterTemporarySlot in the launcher.
+// Every return from guidedFlowInner is `true`: once the wiring is known to
+// be guided, the guided flow owns the interaction - including cancels at its
+// own pickers (returning false there would drop the user into the non-guided
+// temp-slot path they never asked for).
+
+// Cheap text scan of /slots/slotN.yaml for a guideProgress line bound to
+// this wiring. toYAML emits it on line 3 (right after version/sourceOfTruth),
+// so a short bounded read is enough. Returns the slot, with the saved step in
+// stepOut; -1 when no slot resumes this project.
+static int findGuideProgressSlot(const String& wiringPath, int& stepOut) {
+    stepOut = 0;
+    String needle = "\"" + wiringPath + "\"";
+    for (int n = 0; n < NUM_SLOTS; n++) {
+        String path = "/slots/slot" + String(n) + ".yaml";
+        File f = safeFileOpen(path.c_str(), "r");
+        if (!f)
+            continue;
+        int lines = 0;
+        int found = -1;
+        while (f.available() && lines < 20) {
+            String line = f.readStringUntil('\n');
+            lines++;
+            if (line.length() == 0)
+                continue;
+            if (line.charAt(0) == ' ' || line.charAt(0) == '\t')
+                continue;   // guideProgress: is a top-level line
+            String t = line;
+            t.trim();
+            if (!t.startsWith("guideProgress:"))
+                continue;
+            if (t.indexOf(needle) < 0)
+                break;   // bound to a different project - this slot is out
+            int stepIdx = t.indexOf("step:");
+            if (stepIdx >= 0) {
+                int endIdx = t.indexOf('}', stepIdx);
+                if (endIdx < 0)
+                    endIdx = t.length();
+                String val = t.substring(stepIdx + 5, endIdx);
+                val.trim();
+                stepOut = val.toInt();
+            }
+            found = n;
+            break;
+        }
+        safeFileClose(f, false);
+        if (found >= 0)
+            return found;
+    }
+    return -1;
+}
+
+// Destination picker for the guided flow: slots 0-7 with occupied indicator,
+// default = first empty (modeled on the task-5 keep-prompt picker). -1 =
+// cancel (encoder hold or serial byte - the guide's own keys start AFTER
+// this picker returns, so a byte here is a cancel, not a guide key).
+static int pickGuideDestinationSlot(void) {
+    static String ledLabels[NUM_SLOTS];
+    static String titles[NUM_SLOTS];
+    static String summaries[NUM_SLOTS];
+
+    SlotManager& mgr = SlotManager::getInstance();
+    Serial.println("\n\r  Build this guided project into which slot?");
+    int firstEmpty = 0;
+    bool haveEmpty = false;
+    for (int i = 0; i < NUM_SLOTS; i++) {
+        bool used = mgr.slotExists(i);
+        if (!used && !haveEmpty) {
+            firstEmpty = i;
+            haveEmpty = true;
+        }
+        ledLabels[i] = String(i) + (used ? " used" : " free");
+        titles[i] = "Slot " + String(i);
+        summaries[i] = used ? "overwrites saved slot" : "empty slot";
+    }
+    return runPicker("GSLOTS", "Build in", ledLabels, titles, summaries,
+                     NUM_SLOTS, firstEmpty);
+}
+
+static bool guidedFlowInner(const String& wiringPath, int destSlot) {
+    SlotManager& mgr = SlotManager::getInstance();
+    String err;
+
+    // --- resume scan -------------------------------------------------------
+    int resumeStep = 0;
+    int resumeSlot = findGuideProgressSlot(wiringPath, resumeStep);
+    if (resumeSlot >= 0) {
+        // Machine-parseable line BEFORE the menu, so a headless driver can
+        // see the offer and answer it (yesNoMenu accepts serial y/n; any
+        // other byte cancels - the HIL's 'q' path).
+        Serial.print("\r\nGUIDE resume slot=");
+        Serial.print(resumeSlot);
+        Serial.print(" step=");
+        Serial.println(resumeStep);
+        Serial.flush();
+        notify("Resume?\nstep " + String(resumeStep + 1),
+               "\n\r  Guided build in progress (slot " + String(resumeSlot) +
+                   ", step " + String(resumeStep + 1) +
+                   "). y/click Yes = resume, n = restart, other = cancel",
+               0);
+        // The `z <path> <slot>` command line that can launch this flow ends
+        // in \r\n; the line reader consumes through the \r and the \n stays
+        // in the RAW Serial buffer. yesNoMenu treats any non-y/n byte as
+        // cancel, so that leftover terminator would cancel the resume offer
+        // before anyone saw it (bench-reproduced). Swallow line endings ONLY
+        // - a real y/n/other answer already in flight must survive.
+        delay(20);
+        while (Serial.available() > 0) {
+            int p = Serial.peek();
+            if (p == '\r' || p == '\n') {
+                Serial.read();
+                continue;
+            }
+            break;
+        }
+        int r = yesNoMenu(20000);   // 1 = resume, 0 = restart, -1 = cancel
+        b.clear();
+        requestLedShow(-1);
+        if (r == 1) {
+            if (!mgr.loadSlot(resumeSlot, err)) {
+                notify("Load\nfailed", "\n\r  Failed to load slot " +
+                                           String(resumeSlot) + ": " + err, 2000);
+                return true;
+            }
+            guideRun(wiringPath.c_str(), resumeStep);
+            return true;
+        }
+        if (r == -1) {
+            Serial.println("\r\nGUIDE cancelled");
+            Serial.println("  Cancelled.");
+            return true;
+        }
+        // r == 0: restart. Un-place everything, clear the binding, save the
+        // cleaned slot, then run the fresh path below. (The fresh path's
+        // loadSlotFromPath replaces the state wholesale anyway; this cleanup
+        // is what makes a cancel-at-the-destination-picker leave the old
+        // slot honest rather than half-built.)
+        if (mgr.loadSlot(resumeSlot, err)) {
+            JumperlessState& st = mgr.getActiveState();
+            String rerr;
+            for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
+                if (st.parts.parts[i].placed)
+                    removePartPlacement(st, i, rerr);
+            }
+            st.parts.guideSource[0] = '\0';
+            st.parts.guideStep = 0;
+            refreshConnections(-1);
+            mgr.saveSlot(resumeSlot, err, /*skipValidation=*/true);
+            Serial.println("\r\n  Restarted - previous progress cleared.");
+        } else {
+            Serial.println("\r\n  (could not load slot " + String(resumeSlot) +
+                           " to clear it: " + err + ")");
+        }
+    }
+
+    // --- destination slot --------------------------------------------------
+    int dest = destSlot;
+    if (dest < 0) {
+        dest = pickGuideDestinationSlot();
+        if (dest < 0) {
+            // Cancel at the destination picker: nothing was modified (or the
+            // restart cleanup above already saved a consistent slot). Still
+            // `true` - the guided flow owns this wiring, see the block
+            // comment above.
+            Serial.println("\r\nGUIDE cancelled");
+            Serial.println("  Cancelled.");
+            return true;
+        }
+    } else if (dest >= NUM_SLOTS) {
+        Serial.println("\r\nGUIDE error bad destination slot " + String(dest));
+        return true;
+    }
+
+    // --- fresh start into the destination slot -----------------------------
+    // Order per the task brief: setActiveSlot -> loadSlotFromPath -> force
+    // rails 0V -> saveSlot -> guideRun. (loadSlotFromPath applies the file's
+    // power: momentarily before the 0V force lands - noted in the report.)
+    mgr.setActiveSlot(dest);
+    if (!mgr.loadSlotFromPath(wiringPath, err)) {
+        // We already own the interaction; falling back to the non-guided
+        // path would just fail the same load again.
+        notify("Load\nfailed", "\n\r  Failed to load " + wiringPath + ": " + err, 2000);
+        Serial.println("\r\nGUIDE error load failed");
+        return true;
+    }
+    guideForcePowerSafe();
+    if (!mgr.saveSlot(dest, err, /*skipValidation=*/true)) {
+        Serial.println("\r\n  (initial save to slot " + String(dest) +
+                       " failed: " + err + " - continuing, commits will retry)");
+    }
+    Serial.println("\r\n  Building into slot " + String(dest) + ".");
+    guideRun(wiringPath.c_str(), -1);
+    return true;
 }
 
 // ============================================================================
