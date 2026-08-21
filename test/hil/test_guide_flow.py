@@ -37,7 +37,8 @@ Covers:
      a crowded 555-shaped fabric - asserts the per-node `noroute@22` split,
      the core-0 `TAP noroute ... bounceOk=0x00` diagnostic and the tap
      counters. See the long note at that phase: its verdict assertion is
-     EXPECTED TO FLIP if invest-vf-noroute.md §8 Option 1 ever lands.
+     EXPECTED TO FLIP if invest-vf-noroute.md §8 Option 1 ever lands, and the
+     flip is one line - `VFNR_EXPECT_REFUSAL = False`.
 
 Bench convention: snapshot board state + slot3.yaml + active slot up front,
 restore all three in a finally (a prior round's incident: an uncaught
@@ -770,28 +771,40 @@ print("NETNAME|" + name)
     # bounce tier finds no candidate chip at all - so the tap is genuinely
     # refused. bounceOk=0x00 in the diagnostic below IS that proof.
     #
-    # !!! THIS ASSERTION IS EXPECTED TO FLIP. !!!
+    # !!! THE VERDICT THIS PHASE ASSERTS IS EXPECTED TO FLIP. !!!
     # It encodes a real limitation, not a desired outcome. When the escalation
     # in invest-vf-noroute.md §8 Option 1 lands (the chain adds its sense legs
     # as ephemeral bridges so the FULL router plans stimulus + sense together,
     # instead of the tap builder's three tiers planning alone), this fixture
-    # should ROUTE and the two lines to expect become:
-    #     state=RESULT check=vf val=[23]\.\d+V ok=0 on_fail=warn
-    #     no current - LED missing or reversed (flip it?)
-    # Empty holes, so the taps read the full stimulus across the gap and the
-    # value lands outside the 1.4-2.6 band. That pair of lines is not a guess:
-    # it is what this same vf check prints TODAY on a bare fabric, measured at
-    # val=2.83V while validating the sequential-tap rewrite - i.e. the tap
-    # machinery is known-good, and only this fixture's crowded fabric refuses.
-    # When that day comes, flip the two assertions below; do NOT delete the
-    # phase.
+    # should ROUTE instead of refusing.
     #
-    # What is genuinely regression-protected here regardless of which way the
-    # verdict goes: the per-node `noroute@<row>` split (an undifferentiated
-    # `noroute` is what made three bench retries say nothing), the scan-core
-    # failure latch surviving cross-core to a correct core-0 print, and the
+    # THE FLIP IS ONE LINE: set VFNR_EXPECT_REFUSAL = False, just below.
+    # Everything branch-dependent hangs off that flag, so nothing else in this
+    # phase needs editing and no refusal-only assertion can be left behind to
+    # fail a genuinely-fixed run. Do NOT delete the phase.
+    #
+    # The routed-branch lines are not a guess: they are what this same vf check
+    # prints TODAY on a bare fabric, measured at val=2.83V while validating the
+    # sequential-tap rewrite. So the tap machinery is known-good; only this
+    # fixture's crowded fabric refuses it.
+    #
+    # Note what does NOT change across the flip: the check FAILS either way
+    # (ok=0, on_fail=warn), because rows 22/23 are empty holes - routed, the
+    # taps read the full stimulus across the gap, which lands outside the
+    # 1.4-2.6 band as "no current". So the whole warn-advance tail below is
+    # shared and stays put.
+    #
+    # Regression-protected on BOTH branches: the fixture builds the crowded
+    # fabric, the vf check reaches a terminal verdict, and the warn-advance
+    # tail works. Protected on the refusal branch specifically (i.e. today):
+    # the per-node `noroute@<row>` split - an undifferentiated `noroute` is
+    # what made three bench retries say nothing - plus the scan-core failure
+    # latch surviving cross-core into a correct core-0 print and the
     # unconditional tap-counter dump. The scan core must never Serial-print,
-    # so seeing these lines at all proves the latch/print seam works.
+    # so seeing those two lines at all is what proves the latch/print seam.
+    # When the flip happens, that seam loses its coverage here; it would then
+    # want a fixture that still starves a tap (a deliberately crowded chip).
+    VFNR_EXPECT_REFUSAL = True
     out = jl_exec(f"""
 for d in ("/projects", {VFNR_DIR!r}):
     if not fs_exists(d):
@@ -821,18 +834,30 @@ print("wrote=", 1 if fs_write({VFNR_PATH!r}, {VFNR_WIRING!r}) else 0)
         d.send(b"n")
         d.expect(r"GUIDE step=11/11 id=place_LEDX state=VERIFY check=vf",
                  "vf check launches on the crowded fabric")
-        # The §6 diagnostic, printed from core 0 once on the hard failure.
-        # rc=-3 is buildEphemeralRoute refusing; bounceOk=0x00 means the last
-        # tier had no candidate chip - route starvation, not a stale ring.
-        d.expect(r"TAP noroute node=2[23]->ADC\d rc=-3 Kfree=0x[0-9A-Fa-f]+ "
-                 r"Kxbusy=0x[0-9A-Fa-f]+ Dxbusy=0x[0-9A-Fa-f]+ bounceOk=0x[0-9A-Fa-f]+",
-                 "tap-failure diagnostic names the node, rc and the fabric masks")
-        d.expect(r"\[nvscan\] taps ok:\d+ .*noroute:\d+ .*ringstale:\d+",
-                 "tap counters print unconditionally on the hard failure")
-        d.expect(r"GUIDE step=11/11 id=place_LEDX state=RESULT check=vf "
-                 r"val=noroute@2[23] ok=0 on_fail=warn",
-                 "vf reports noroute PER NODE (see the flip note above)")
-        d.expect(r"no sense route to the rows", "the human refusal line prints")
+        if VFNR_EXPECT_REFUSAL:
+            # Refusal-only artifacts: neither of these prints on a successful
+            # tap, so they live entirely inside this branch.
+            # rc=-3 is buildEphemeralRoute refusing; bounceOk=0x00 means the
+            # last tier had no candidate chip - starvation, not a stale ring.
+            d.expect(r"TAP noroute node=2[23]->ADC\d rc=-3 Kfree=0x[0-9A-Fa-f]+ "
+                     r"Kxbusy=0x[0-9A-Fa-f]+ Dxbusy=0x[0-9A-Fa-f]+ "
+                     r"bounceOk=0x[0-9A-Fa-f]+",
+                     "tap-failure diagnostic names the node, rc and the masks")
+            d.expect(r"\[nvscan\] taps ok:\d+ .*noroute:\d+ .*ringstale:\d+",
+                     "tap counters print unconditionally on the hard failure")
+            d.expect(r"GUIDE step=11/11 id=place_LEDX state=RESULT check=vf "
+                     r"val=noroute@2[23] ok=0 on_fail=warn",
+                     "vf reports noroute PER NODE (see the flip note above)")
+            d.expect(r"no sense route to the rows", "the human refusal line prints")
+        else:
+            # Post-Option-1: the taps route. Still ok=0 - empty holes read the
+            # full stimulus across the gap, outside the 1.4-2.6 band.
+            d.expect(r"GUIDE step=11/11 id=place_LEDX state=RESULT check=vf "
+                     r"val=[23]\.\d+V ok=0 on_fail=warn",
+                     "vf routed and reported a measured voltage")
+            d.expect(r"no current - LED missing or reversed",
+                     "empty rows 22/23 report no current, not a refusal")
+        # Shared tail: warn-class failure either way.
         d.expect(r"check failed - n advances anyway", "warn offers the advance")
         d.send(b"n")
         d.expect(r"advancing past the failed check", "second n takes the advance")
