@@ -29,7 +29,8 @@ Covers:
      inner set), verify on the DAC1-routed row passes with the measured
      value; a band-miss fails on_fail: warn and 'n' advances past it;
      presence on a bare row (58 - ASSUMES nothing is plugged there) fails
-     with val=float@58
+     with val=(nocharge|decay)@58 - the charge-retention check's two
+     bare-row verdicts (drained before the tap / caught mid-drain)
  11. continuity refusal: a place step whose row is already routed reports
      `val=skip` + "check skipped (rows in use)" and warn-continues
 
@@ -643,9 +644,14 @@ print("NETNAME|" + name)
         # guide's INIT zeroed the state and the slot must keep that.
         out = jl_exec("dac_set(DAC1, 2.5)\nprint('dacset= 1')", timeout=25)
         check(parse_kv(out).get("dacset") == 1, "REPL drove DAC1 to 2.5V mid-guide")
-        # Let the background scan (if net_currents is on) converge its EMA on
-        # row 45 - the check may reuse <250ms-fresh scan data, and a
-        # half-converged EMA right after the DAC step would read low.
+        # Settle margin between the REPL's DAC write and the check. NOT about
+        # scan freshness any more: the voltage check ALWAYS takes a one-shot
+        # tap (GuideChecks.cpp deliberately dropped DESIGN §5.1's "<250 ms
+        # old nodeVoltage[] is good enough" clause - timestamp-fresh EMA data
+        # served 0.77 V for a row the DAC held at 2.5 V). What the pause still
+        # buys is the DAC output and its route reaching the row before
+        # anything measures it, plus the port-5 exec fully returning before
+        # port 1 sends the next key.
         time.sleep(2.0)
         d.send(b"n")
         d.expect(r"GUIDE step=2/4 id=verify_45 state=VERIFY check=voltage",

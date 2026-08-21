@@ -22,8 +22,18 @@ TESTS = [
     "test_config.py",
     "test_stress.py",
     "test_paste_state.py",     # Y->S / J->L paste round-trips on port 1
+    "test_parts_roundtrip.py", # parts: section round-trip + the MP bindings
+    "test_projects.py",        # /projects tree, provisioning, the launcher
+    "test_guide_flow.py",      # guided placement: runtime + electrical checks
     "test_encoder_ui.py",      # last: drives the physical UI
 ]
+
+# ORDER MATTERS for the three project/guide suites: test_projects.py's
+# launcher phase asserts the picker lists exactly the two projects IT
+# authored, and test_guide_flow.py pushes a third (/projects/hilguide) that
+# it removes in its own finally. Running guide_flow BEFORE projects is fine;
+# running it in the middle of projects is not - so they stay adjacent and in
+# this order. All three hold port 1 for their drives, like test_paste_state.
 
 here = os.path.dirname(os.path.abspath(__file__))
 selector = sys.argv[1] if len(sys.argv) > 1 else ""

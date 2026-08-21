@@ -56,7 +56,9 @@ default parked beside it as wiring_original.yaml) has no serial trigger and is
 NOT covered here - it stays a bench item.
 
 Bench convention: snapshot board state + slot3.yaml + active slot up front,
-restore all three at the end. The /projects/555/ and /projects/hiltest/ files
+restore all three in a finally (an uncaught exception must not strand the
+bench - the same lesson test_guide_flow.py's header records). The
+/projects/555/ and /projects/hiltest/ files
 are left in place on purpose - the clickwheel Files-browser check is a
 hands-on bench item, and two projects make the picker's navigation testable.
 
@@ -259,8 +261,16 @@ if orig_slot == 3:
     port1_command("<2", 4.0)
     time.sleep(1.5)
 
-# --- 1. Push the project tree to the board --------------------------------
-out = jl_exec(f"""
+# Everything that MUTATES the board lives inside this try; phase 7's restore
+# is its finally. Without it an uncaught exception anywhere below (a NameError
+# in a new phase is how this was learned) walks out with slot 3 overwritten,
+# the bench rails at the project's voltages and the active slot moved - a
+# stranded bench that reads as a firmware bug the next time anyone looks.
+# Same shape test_guide_flow.py uses. Phase 0 stays OUTSIDE: the finally
+# needs snapshot/orig_slot/slot3_before bound before it can restore anything.
+try:
+    # --- 1. Push the project tree to the board --------------------------------
+    out = jl_exec(f"""
 for d in ("/projects", {PROJ_DIR!r}):
     if not fs_exists(d):
         try:
@@ -269,33 +279,33 @@ for d in ("/projects", {PROJ_DIR!r}):
             print("mkdirerr=", e)
 print("projdir=", 1 if fs_exists({PROJ_DIR!r}) else 0)
 """, timeout=25)
-check(parse_kv(out).get("projdir") == 1, f"created {PROJ_DIR} on the board")
+    check(parse_kv(out).get("projdir") == 1, f"created {PROJ_DIR} on the board")
 
-for name in PROJECT_FILES:
-    content = local_file(name)
-    path = f"{PROJ_DIR}/{name}"
-    out = jl_exec(f"print('wrote=', 1 if fs_write({path!r}, {content!r}) else 0)",
+    for name in PROJECT_FILES:
+        content = local_file(name)
+        path = f"{PROJ_DIR}/{name}"
+        out = jl_exec(f"print('wrote=', 1 if fs_write({path!r}, {content!r}) else 0)",
+                      timeout=30)
+        check(parse_kv(out).get("wrote") == 1, f"pushed {path}")
+        exists, on_device = read_device_file(path)
+        # fs_read round-trips through print(), which appends a newline; compare
+        # on the stripped text so the trailing-newline difference isn't noise.
+        check(exists and on_device.strip() == content.strip(),
+              f"{path} content matches scripts/projects/555/{name}")
+
+    # --- 2. Load the wiring through the real slot-YAML parser ------------------
+    # Same content, same parser, same loadSlotFromPath-equivalent path that the
+    # relaxed FileManager guard now reaches for /projects/*.yaml.
+    out = jl_exec(f"print('wrote=', 1 if fs_write({SLOT_PATH!r}, {WIRING!r}) else 0)",
                   timeout=30)
-    check(parse_kv(out).get("wrote") == 1, f"pushed {path}")
-    exists, on_device = read_device_file(path)
-    # fs_read round-trips through print(), which appends a newline; compare
-    # on the stripped text so the trailing-newline difference isn't noise.
-    check(exists and on_device.strip() == content.strip(),
-          f"{path} content matches scripts/projects/555/{name}")
+    check(parse_kv(out).get("wrote") == 1, "copied wiring.yaml content to /slots/slot3.yaml")
 
-# --- 2. Load the wiring through the real slot-YAML parser ------------------
-# Same content, same parser, same loadSlotFromPath-equivalent path that the
-# relaxed FileManager guard now reaches for /projects/*.yaml.
-out = jl_exec(f"print('wrote=', 1 if fs_write({SLOT_PATH!r}, {WIRING!r}) else 0)",
-              timeout=30)
-check(parse_kv(out).get("wrote") == 1, "copied wiring.yaml content to /slots/slot3.yaml")
+    resp = port1_command("<3", 4.0)
+    check("SLOT_CHANGED:3" in resp, "'<3' loaded the 555 wiring (SLOT_CHANGED:3 seen)")
+    time.sleep(2.0)  # let the load + refresh + reconcile settle
 
-resp = port1_command("<3", 4.0)
-check("SLOT_CHANGED:3" in resp, "'<3' loaded the 555 wiring (SLOT_CHANGED:3 seen)")
-time.sleep(2.0)  # let the load + refresh + reconcile settle
-
-# --- 3. Bridges, rail, and the un-expanded parts ---------------------------
-out = jl_exec("""
+    # --- 3. Bridges, rail, and the un-expanded parts ---------------------------
+    out = jl_exec("""
 print("adc0=", 1 if is_connected("ADC0", 7) else 0)
 print("adc1=", 1 if is_connected("ADC1", 37) else 0)
 # parts are NOT placed (no `placed:` key -> default false), so none of the
@@ -307,110 +317,111 @@ print("r2b=", 1 if is_connected(16, 37) else 0)
 print("c1m=", 1 if is_connected(19, "GND") else 0)
 print("nbridges=", get_num_bridges())
 """)
-vals = parse_kv(out)
-check(vals.get("adc0") == 1, "bridge ADC0 <-> 7 exists after load")
-check(vals.get("adc1") == 1, "bridge ADC1 <-> 37 exists after load")
-check(vals.get("u1gnd") == 0, "part not expanded: U1 GND (row 5) has no GND bridge")
-check(vals.get("u1vcc") == 0, "part not expanded: U1 VCC (row 35) has no TOP_RAIL bridge")
-check(vals.get("r1a") == 0, "part not expanded: R1 A (row 12) has no TOP_RAIL bridge")
-check(vals.get("r2b") == 0, "part not expanded: R2 B (row 16) has no 37 bridge")
-check(vals.get("c1m") == 0, "part not expanded: C1 MINUS (row 19) has no GND bridge")
+    vals = parse_kv(out)
+    check(vals.get("adc0") == 1, "bridge ADC0 <-> 7 exists after load")
+    check(vals.get("adc1") == 1, "bridge ADC1 <-> 37 exists after load")
+    check(vals.get("u1gnd") == 0, "part not expanded: U1 GND (row 5) has no GND bridge")
+    check(vals.get("u1vcc") == 0, "part not expanded: U1 VCC (row 35) has no TOP_RAIL bridge")
+    check(vals.get("r1a") == 0, "part not expanded: R1 A (row 12) has no TOP_RAIL bridge")
+    check(vals.get("r2b") == 0, "part not expanded: R2 B (row 16) has no 37 bridge")
+    check(vals.get("c1m") == 0, "part not expanded: C1 MINUS (row 19) has no GND bridge")
 
-# --- 4. The custom nets: name --------------------------------------------
-# Net numbers are topology-dependent (1-5 are the pre-created special nets:
-# GND / Top Rail / Bottom Rail / DAC0 / DAC1), so DISCOVER the net holding
-# node 37 rather than hardcoding it - and print it, because wiring.yaml's
-# `nets:` entry has to name that number for deserializeNets to attach.
-out = jl_exec("""
+    # --- 4. The custom nets: name --------------------------------------------
+    # Net numbers are topology-dependent (1-5 are the pre-created special nets:
+    # GND / Top Rail / Bottom Rail / DAC0 / DAC1), so DISCOVER the net holding
+    # node 37 rather than hardcoding it - and print it, because wiring.yaml's
+    # `nets:` entry has to name that number for deserializeNets to attach.
+    out = jl_exec("""
 for i in range(1, 40):
     nodes = get_net_nodes(i)
     if not nodes:
         continue
     print("NET|%d|%s|%s" % (i, str(get_net_name(i)), str(nodes)))
 """)
-nets = {}
-for line in out.splitlines():
-    m = re.match(r"\s*NET\|(\d+)\|(.*)\|(.*?)\s*$", line)
-    if m:
-        nets[int(m.group(1))] = (m.group(2).strip(), m.group(3).strip())
-for num in sorted(nets):
-    print(f"  info: net {num}: {nets[num][0]!r} nodes {nets[num][1]}")
+    nets = {}
+    for line in out.splitlines():
+        m = re.match(r"\s*NET\|(\d+)\|(.*)\|(.*?)\s*$", line)
+        if m:
+            nets[int(m.group(1))] = (m.group(2).strip(), m.group(3).strip())
+    for num in sorted(nets):
+        print(f"  info: net {num}: {nets[num][0]!r} nodes {nets[num][1]}")
 
-net37 = None
-for num, (name, nodes) in nets.items():
-    toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
-    if "37" in toks:
-        net37 = (num, name)
-check(net37 is not None, "a net containing node 37 exists")
-if net37:
-    check(net37[1] == "TIMING",
-          f"net holding node 37 resolves to the nets: name TIMING (net {net37[0]}, "
-          f"name {net37[1]!r}; wiring.yaml declares num: 7)")
-# The pre-created special nets (1=GND 2=Top Rail 3=Bottom Rail 4=DAC0 5=DAC1)
-# must NOT have been renamed - naming net 1 is exactly the trap the reference
-# YAML's original `num: 1` fell into.
-for num, expected in ((1, "GND"), (2, "Top Rail")):
-    if num in nets:
-        check(nets[num][0] == expected,
-              f"special net {num} still named {expected!r} (got {nets[num][0]!r})")
+    net37 = None
+    for num, (name, nodes) in nets.items():
+        toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
+        if "37" in toks:
+            net37 = (num, name)
+    check(net37 is not None, "a net containing node 37 exists")
+    if net37:
+        check(net37[1] == "TIMING",
+              f"net holding node 37 resolves to the nets: name TIMING (net {net37[0]}, "
+              f"name {net37[1]!r}; wiring.yaml declares num: 7)")
+    # The pre-created special nets (1=GND 2=Top Rail 3=Bottom Rail 4=DAC0 5=DAC1)
+    # must NOT have been renamed - naming net 1 is exactly the trap the reference
+    # YAML's original `num: 1` fell into.
+    for num, expected in ((1, "GND"), (2, "Top Rail")):
+        if num in nets:
+            check(nets[num][0] == expected,
+                  f"special net {num} still named {expected!r} (got {nets[num][0]!r})")
 
-# --- 5. Parts survive a wholesale toYAML rewrite, still unplaced -----------
-out = jl_exec("print('saved=', nodes_save(3))")
-check(parse_kv(out).get("saved") == 3, "nodes_save(3) rewrote the slot via toYAML")
-time.sleep(1.0)
+    # --- 5. Parts survive a wholesale toYAML rewrite, still unplaced -----------
+    out = jl_exec("print('saved=', nodes_save(3))")
+    check(parse_kv(out).get("saved") == 3, "nodes_save(3) rewrote the slot via toYAML")
+    time.sleep(1.0)
 
-_, rewritten = read_device_file(SLOT_PATH)
-check("parts:" in rewritten, "parts: section survived the wholesale rewrite")
-names = re.findall(r'- name: "([A-Za-z0-9_]+)"', rewritten)
-check(names == ["U1", "R1", "R2", "C1", "LED1", "R3"],
-      f"all six parts round-tripped in order (got {names})")
-check(rewritten.count("placed: false") == 6 and "placed: true" not in rewritten,
-      "every part is still placed: false after the rewrite")
-for needle in ("footprint: dip8", "row: 5", 'value: "NE555"',
-               "GND: {pin: 1, connect: GND, class: gnd}",
-               "TRIG: {pin: 2, connect: 37, class: signal}",
-               "CTRL: {pin: 5, class: nc}",
-               "VCC: {pin: 8, connect: TOP_RAIL, class: power}",
-               "footprint: sip2", 'value: "10k"', 'value: "47k"',
-               'value: "10uF"', 'value: "330"', "type: led",
-               "A: {pin: 1, connect: TOP_RAIL, class: signal}",
-               "PLUS: {pin: 1, connect: 37, class: signal}",
-               "MINUS: {pin: 2, connect: GND, class: signal}",
-               "K: {pin: 2, connect: GND, class: signal}"):
-    check(needle in rewritten, f"rewrite kept: {needle}")
-# The inline one-line pins form (R1/R2/C1/LED1/R3 in wiring.yaml) parsed:
-check("B: {pin: 2, connect: 36, class: signal}" in rewritten,
-      "inline `pins: {A: {...}, B: {...}}` form parsed (R1 B -> node 36)")
-check('name: "TIMING"' in rewritten, "the TIMING net name survived the rewrite")
-check("topRail: 5.00" in rewritten, "power: topRail: 5.0 parsed and round-tripped")
-# Documented as-built contract: meta:/guide: are swallowed, never re-emitted.
-check("meta:" not in rewritten and "guide:" not in rewritten,
-      "meta:/guide: were contained on parse and NOT round-tripped (as designed)")
-check("guideProgress:" not in rewritten,
-      "no guideProgress: emitted (guideSource empty - the guide runtime sets it)")
+    _, rewritten = read_device_file(SLOT_PATH)
+    check("parts:" in rewritten, "parts: section survived the wholesale rewrite")
+    names = re.findall(r'- name: "([A-Za-z0-9_]+)"', rewritten)
+    check(names == ["U1", "R1", "R2", "C1", "LED1", "R3"],
+          f"all six parts round-tripped in order (got {names})")
+    check(rewritten.count("placed: false") == 6 and "placed: true" not in rewritten,
+          "every part is still placed: false after the rewrite")
+    for needle in ("footprint: dip8", "row: 5", 'value: "NE555"',
+                   "GND: {pin: 1, connect: GND, class: gnd}",
+                   "TRIG: {pin: 2, connect: 37, class: signal}",
+                   "CTRL: {pin: 5, class: nc}",
+                   "VCC: {pin: 8, connect: TOP_RAIL, class: power}",
+                   "footprint: sip2", 'value: "10k"', 'value: "47k"',
+                   'value: "10uF"', 'value: "330"', "type: led",
+                   "A: {pin: 1, connect: TOP_RAIL, class: signal}",
+                   "PLUS: {pin: 1, connect: 37, class: signal}",
+                   "MINUS: {pin: 2, connect: GND, class: signal}",
+                   "K: {pin: 2, connect: GND, class: signal}"):
+        check(needle in rewritten, f"rewrite kept: {needle}")
+    # The inline one-line pins form (R1/R2/C1/LED1/R3 in wiring.yaml) parsed:
+    check("B: {pin: 2, connect: 36, class: signal}" in rewritten,
+          "inline `pins: {A: {...}, B: {...}}` form parsed (R1 B -> node 36)")
+    check('name: "TIMING"' in rewritten, "the TIMING net name survived the rewrite")
+    check("topRail: 5.00" in rewritten, "power: topRail: 5.0 parsed and round-tripped")
+    # Documented as-built contract: meta:/guide: are swallowed, never re-emitted.
+    check("meta:" not in rewritten and "guide:" not in rewritten,
+          "meta:/guide: were contained on parse and NOT round-tripped (as designed)")
+    check("guideProgress:" not in rewritten,
+          "no guideProgress: emitted (guideSource empty - the guide runtime sets it)")
 
-# --- 6. Launcher slice: a second project + the two contracts it rests on ----
-# The launcher itself (src/ProjectsApp.cpp, task 5) is encoder-driven and is
-# deliberately NOT invoked from here:
-#   - its picker loop polls the encoder and jOS.serviceInner(), never
-#     mp_hal_check_interrupt(), so run_app("Projects") from this REPL would
-#     block the exec until somebody physically holds the clickwheel;
-#   - before running a companion script it calls
-#     setGlobalStreamWithInterrupt(&Serial), i.e. it moves the MicroPython
-#     stream to port 1 out from under a port-5 caller.
-# Nor can "did the app register?" be observed from here: jl_run_app()
-# (JumperlessMicroPythonAPI.cpp:2416) returns 1 unconditionally and runApp()
-# prints "App not found" to Serial (port 1), which this channel never sees.
-# So this phase covers the two things the launcher DEPENDS on, through the
-# same calls it makes, and the clickwheel flow itself stays a bench checklist
-# in the task-5 report:
-#   a) loadSlotFromPath() on a project wiring carrying meta: - via
-#      load_project(), the task-4 binding that wraps that exact call;
-#   b) the `_jl_project` preamble the launcher prepends to the script before
-#      executePythonFileContent() - rebuilt here in the same shape and exec'd
-#      on the device (mirroring the construction, not invoking the launcher).
-HIL_DIR = "/projects/hiltest"  # 7 chars, the dir-name convention
-HIL_WIRING = """version: 2
+    # --- 6. Launcher slice: a second project + the two contracts it rests on ----
+    # The launcher (src/ProjectsApp.cpp) is encoder-driven, so this phase opens
+    # with the two things it DEPENDS on, reached through the same calls it makes:
+    #   a) loadSlotFromPath() on a project wiring carrying meta: - via
+    #      load_project(), the task-4 binding that wraps that exact call;
+    #   b) the `_jl_project` preamble the launcher prepends to the script before
+    #      executePythonFileContent() - rebuilt here in the same shape and exec'd
+    #      on the device (mirroring the construction, not invoking the launcher).
+    #
+    # The launcher ITSELF is driven too - 6(c) and 6(d) below call
+    # run_app("Projects") for real, from two ports at once: port 5 runs the
+    # call in a worker thread while port 1 watches the picker and cancels it
+    # (run_projects_app(), top of this file). That two-port dance is what makes
+    # it reachable at all: the picker loop polls the encoder and
+    # jOS.serviceInner(), never mp_hal_check_interrupt(), so a single-port
+    # run_app() would block the exec until somebody physically held the
+    # clickwheel. What is still out of reach from here is RUNNING a project's
+    # script - before executing one the launcher calls
+    # setGlobalStreamWithInterrupt(&Serial), moving the MicroPython stream to
+    # port 1 out from under the port-5 caller. That, and the clickwheel
+    # navigation itself, stay bench-checklist items.
+    HIL_DIR = "/projects/hiltest"  # 7 chars, the dir-name convention
+    HIL_WIRING = """version: 2
 sourceOfTruth: bridges
 meta:
   project: hiltest
@@ -421,7 +432,7 @@ meta:
 bridges:
   - {n1: 20, n2: 21}
 """
-HIL_MAIN = """# HIL marker script - see test/hil/test_projects.py phase 6.
+    HIL_MAIN = """# HIL marker script - see test/hil/test_projects.py phase 6.
 _jl_project = globals().get("_jl_project", {})
 print("hilmark=", 1)
 print("hildir=", _jl_project.get("dir", "none"))
@@ -429,7 +440,7 @@ print("hilvariant=", _jl_project.get("variant", "none"))
 print("hilwiring=", _jl_project.get("wiring", "none"))
 """
 
-out = jl_exec(f"""
+    out = jl_exec(f"""
 if not fs_exists({HIL_DIR!r}):
     try:
         jfs.mkdir({HIL_DIR!r})
@@ -439,75 +450,75 @@ print("hildirmade=", 1 if fs_exists({HIL_DIR!r}) else 0)
 print("w1=", 1 if fs_write({HIL_DIR + "/wiring.yaml"!r}, {HIL_WIRING!r}) else 0)
 print("w2=", 1 if fs_write({HIL_DIR + "/main.py"!r}, {HIL_MAIN!r}) else 0)
 """, timeout=30)
-vals = parse_kv(out)
-check(vals.get("hildirmade") == 1, f"created {HIL_DIR} on the board")
-check(vals.get("w1") == 1 and vals.get("w2") == 1,
-      f"pushed {HIL_DIR}/wiring.yaml + main.py (the launcher's listProjects target)")
+    vals = parse_kv(out)
+    check(vals.get("hildirmade") == 1, f"created {HIL_DIR} on the board")
+    check(vals.get("w1") == 1 and vals.get("w2") == 1,
+          f"pushed {HIL_DIR}/wiring.yaml + main.py (the launcher's listProjects target)")
 
-# (a) The launcher's load step: load_project() -> loadSlotFromPath(). A
-# wiring.yaml whose FIRST section is meta: is exactly the case the launcher
-# hands the slot parser, so this also proves meta: doesn't derail the parse.
-out = jl_exec("""
+    # (a) The launcher's load step: load_project() -> loadSlotFromPath(). A
+    # wiring.yaml whose FIRST section is meta: is exactly the case the launcher
+    # hands the slot parser, so this also proves meta: doesn't derail the parse.
+    out = jl_exec("""
 print("loaded=", 1 if load_project("hiltest") else 0)
 print("br=", 1 if is_connected(20, 21) else 0)
 print("stale555=", 1 if is_connected("ADC1", 37) else 0)
 """, timeout=25)
-vals = parse_kv(out)
-check(vals.get("loaded") == 1, "load_project('hiltest') resolved the name to "
-                               f"{HIL_DIR}/wiring.yaml and loaded it")
-check(vals.get("br") == 1, "hiltest wiring's bridge 20-21 is live (meta: parsed past)")
-check(vals.get("stale555") == 0, "the previous wiring's bridges are gone (fresh state)")
+    vals = parse_kv(out)
+    check(vals.get("loaded") == 1, "load_project('hiltest') resolved the name to "
+                                   f"{HIL_DIR}/wiring.yaml and loaded it")
+    check(vals.get("br") == 1, "hiltest wiring's bridge 20-21 is live (meta: parsed past)")
+    check(vals.get("stale555") == 0, "the previous wiring's bridges are gone (fresh state)")
 
-# (b) The companion-script contract: read main.py off the device, prepend the
-# launcher's `_jl_project = {...}` line, exec it. Same shape ProjectsApp.cpp
-# builds (dir / variant / wiring), same file the launcher would have run.
-preamble = ('_jl_project = {"dir": "hiltest", "variant": "default", '
-            f'"wiring": "{HIL_DIR}/wiring.yaml"}}\n')
-out = jl_exec(f"""
+    # (b) The companion-script contract: read main.py off the device, prepend the
+    # launcher's `_jl_project = {...}` line, exec it. Same shape ProjectsApp.cpp
+    # builds (dir / variant / wiring), same file the launcher would have run.
+    preamble = ('_jl_project = {"dir": "hiltest", "variant": "default", '
+                f'"wiring": "{HIL_DIR}/wiring.yaml"}}\n')
+    out = jl_exec(f"""
 src = fs_read({HIL_DIR + "/main.py"!r})
 exec({preamble!r} + src)
 """, timeout=25)
-vals = parse_kv(out)
-check(vals.get("hilmark") == 1, "the project's main.py ran and printed its marker")
-check(vals.get("hildir") == "hiltest",
-      f"_jl_project['dir'] reached the script (got {vals.get('hildir')!r})")
-check(vals.get("hilvariant") == "default",
-      f"_jl_project['variant'] reached the script (got {vals.get('hilvariant')!r})")
-check(vals.get("hilwiring") == f"{HIL_DIR}/wiring.yaml",
-      f"_jl_project['wiring'] reached the script (got {vals.get('hilwiring')!r})")
+    vals = parse_kv(out)
+    check(vals.get("hilmark") == 1, "the project's main.py ran and printed its marker")
+    check(vals.get("hildir") == "hiltest",
+          f"_jl_project['dir'] reached the script (got {vals.get('hildir')!r})")
+    check(vals.get("hilvariant") == "default",
+          f"_jl_project['variant'] reached the script (got {vals.get('hilvariant')!r})")
+    check(vals.get("hilwiring") == f"{HIL_DIR}/wiring.yaml",
+          f"_jl_project['wiring'] reached the script (got {vals.get('hilwiring')!r})")
 
-# (c) PROVISIONING (task 8). projectFiles[] + initializeProjects() install the
-# built-in projects from firmware constants; the launcher calls the unforced
-# variant as a self-heal before it lists. There is no serial command that
-# reaches initializeProjects() and no reboot idiom anywhere in this suite, so
-# the launcher IS the trigger: delete files, run the app, watch them come back.
-#
-# What each assertion is for:
-#   - two of 555's three files are deleted, main.py is left alone: the restored
-#     pair proves "create missing", the untouched one proves the per-file
-#     existence check doesn't rewrite what's already right;
-#   - the restored bytes are hashed ON the device and compared to the hash
-#     compiled into src/snakes/projectFiles.h (which is itself cross-checked
-#     against a fresh hash of the repo source) - three-way, so a stale header
-#     or a mangled write both fail loudly;
-#   - /projects/hiltest is NOT in projectFiles[]. Its wiring.yaml is deleted
-#     too and must STAY deleted, and its directory + main.py must survive:
-#     provisioning creates missing files, it never enumerates /projects and
-#     never removes a directory it doesn't know about. That is the coexistence
-#     contract for hand-made projects on a user's board.
-for name, var in (("wiring.yaml", "PROJECT_555_WIRING_YAML"),
-                  ("main.py", "PROJECT_555_MAIN_PY"),
-                  ("README.md", "PROJECT_555_README_MD")):
-    hdr = embedded_hash(var)
-    src = "0x%08X" % fnv1a32(local_file(name).encode("utf-8"))
-    check(hdr == src,
-          f"{var}_HASHES[0] in projectFiles.h ({hdr}) == FNV of "
-          f"scripts/projects/555/{name} ({src}) - generated header is current")
+    # (c) PROVISIONING (task 8). projectFiles[] + initializeProjects() install the
+    # built-in projects from firmware constants; the launcher calls the unforced
+    # variant as a self-heal before it lists. There is no serial command that
+    # reaches initializeProjects() and no reboot idiom anywhere in this suite, so
+    # the launcher IS the trigger: delete files, run the app, watch them come back.
+    #
+    # What each assertion is for:
+    #   - two of 555's three files are deleted, main.py is left alone: the restored
+    #     pair proves "create missing", the untouched one proves the per-file
+    #     existence check doesn't rewrite what's already right;
+    #   - the restored bytes are hashed ON the device and compared to the hash
+    #     compiled into src/snakes/projectFiles.h (which is itself cross-checked
+    #     against a fresh hash of the repo source) - three-way, so a stale header
+    #     or a mangled write both fail loudly;
+    #   - /projects/hiltest is NOT in projectFiles[]. Its wiring.yaml is deleted
+    #     too and must STAY deleted, and its directory + main.py must survive:
+    #     provisioning creates missing files, it never enumerates /projects and
+    #     never removes a directory it doesn't know about. That is the coexistence
+    #     contract for hand-made projects on a user's board.
+    for name, var in (("wiring.yaml", "PROJECT_555_WIRING_YAML"),
+                      ("main.py", "PROJECT_555_MAIN_PY"),
+                      ("README.md", "PROJECT_555_README_MD")):
+        hdr = embedded_hash(var)
+        src = "0x%08X" % fnv1a32(local_file(name).encode("utf-8"))
+        check(hdr == src,
+              f"{var}_HASHES[0] in projectFiles.h ({hdr}) == FNV of "
+              f"scripts/projects/555/{name} ({src}) - generated header is current")
 
-pre_main_hash, pre_main_len = device_hash(f"{PROJ_DIR}/main.py")
-print(f"  info: {PROJ_DIR}/main.py before: {pre_main_hash} ({pre_main_len} bytes)")
+    pre_main_hash, pre_main_len = device_hash(f"{PROJ_DIR}/main.py")
+    print(f"  info: {PROJ_DIR}/main.py before: {pre_main_hash} ({pre_main_len} bytes)")
 
-out = jl_exec(f"""
+    out = jl_exec(f"""
 for p in ({PROJ_DIR + "/wiring.yaml"!r}, {PROJ_DIR + "/README.md"!r},
           {HIL_DIR + "/wiring.yaml"!r}):
     if fs_exists(p):
@@ -517,261 +528,318 @@ print("r555=", 1 if fs_exists({PROJ_DIR + "/README.md"!r}) else 0)
 print("m555=", 1 if fs_exists({PROJ_DIR + "/main.py"!r}) else 0)
 print("whil=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
 """, timeout=30)
-vals = parse_kv(out)
-check(vals.get("w555") == 0 and vals.get("r555") == 0 and vals.get("whil") == 0,
-      "deleted 555/wiring.yaml, 555/README.md and hiltest/wiring.yaml")
-check(vals.get("m555") == 1, "left 555/main.py in place (the skip-what-exists case)")
+    vals = parse_kv(out)
+    check(vals.get("w555") == 0 and vals.get("r555") == 0 and vals.get("whil") == 0,
+          "deleted 555/wiring.yaml, 555/README.md and hiltest/wiring.yaml")
+    check(vals.get("m555") == 1, "left 555/main.py in place (the skip-what-exists case)")
 
-# The trigger. With hiltest's wiring gone and 555's about to be restored, the
-# picker should open over exactly one project.
-buf, n_listed, sends, worker, launch = run_projects_app()
-check(worker is not None and not worker.is_alive(),
-      f"run_app('Projects') returned after the serial cancel ({sends} byte(s))")
-check(n_listed is not None and n_listed >= 1,
-      f"the launcher's self-heal ran and the picker listed a project "
-      f"(PROJECTS n={n_listed}) - initializeProjects() re-created what it needed")
-check("hiltest" not in buf,
-      "hiltest was NOT listed - the firmware did not re-create a project it "
-      "has no table entry for")
-if "err" in launch:
-    print(f"  info: launch worker error: {launch['err'][:400]}")
+    # The trigger. With hiltest's wiring gone and 555's about to be restored, the
+    # picker should open over exactly one project.
+    buf, n_listed, sends, worker, launch = run_projects_app()
+    check(worker is not None and not worker.is_alive(),
+          f"run_app('Projects') returned after the serial cancel ({sends} byte(s))")
+    check(n_listed is not None and n_listed >= 1,
+          f"the launcher's self-heal ran and the picker listed a project "
+          f"(PROJECTS n={n_listed}) - initializeProjects() re-created what it needed")
+    check("hiltest" not in buf,
+          "hiltest was NOT listed - the firmware did not re-create a project it "
+          "has no table entry for")
+    if "err" in launch:
+        print(f"  info: launch worker error: {launch['err'][:400]}")
 
-for name, var in (("wiring.yaml", "PROJECT_555_WIRING_YAML"),
-                  ("README.md", "PROJECT_555_README_MD")):
-    dh, dl = device_hash(f"{PROJ_DIR}/{name}")
-    want = embedded_hash(var)
-    check(dh == want,
-          f"provisioning re-created {PROJ_DIR}/{name} byte-exact "
-          f"(device FNV {dh}, firmware default {want}, {dl} bytes)")
+    for name, var in (("wiring.yaml", "PROJECT_555_WIRING_YAML"),
+                      ("README.md", "PROJECT_555_README_MD")):
+        dh, dl = device_hash(f"{PROJ_DIR}/{name}")
+        want = embedded_hash(var)
+        check(dh == want,
+              f"provisioning re-created {PROJ_DIR}/{name} byte-exact "
+              f"(device FNV {dh}, firmware default {want}, {dl} bytes)")
 
-post_main_hash, post_main_len = device_hash(f"{PROJ_DIR}/main.py")
-check(post_main_hash == pre_main_hash and post_main_len == pre_main_len,
-      f"555/main.py was left untouched by the unforced pass ({post_main_hash})")
+    post_main_hash, post_main_len = device_hash(f"{PROJ_DIR}/main.py")
+    check(post_main_hash == pre_main_hash and post_main_len == pre_main_len,
+          f"555/main.py was left untouched by the unforced pass ({post_main_hash})")
 
-# Coexistence: hiltest's dir and its other file survived; its wiring did not
-# come back (nothing in projectFiles[] points there).
-out = jl_exec(f"""
+    # Coexistence: hiltest's dir and its other file survived; its wiring did not
+    # come back (nothing in projectFiles[] points there).
+    out = jl_exec(f"""
 print("hdir=", 1 if fs_exists({HIL_DIR!r}) else 0)
 print("hmain=", 1 if fs_exists({HIL_DIR + "/main.py"!r}) else 0)
 print("hwiring=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
 """, timeout=25)
-vals = parse_kv(out)
-check(vals.get("hdir") == 1, f"{HIL_DIR} still exists - provisioning removed no "
-                             "directory it doesn't know about")
-check(vals.get("hmain") == 1, f"{HIL_DIR}/main.py survived provisioning untouched")
-check(vals.get("hwiring") == 0,
-      f"{HIL_DIR}/wiring.yaml was NOT re-created (not a projectFiles[] entry)")
+    vals = parse_kv(out)
+    check(vals.get("hdir") == 1, f"{HIL_DIR} still exists - provisioning removed no "
+                                 "directory it doesn't know about")
+    check(vals.get("hmain") == 1, f"{HIL_DIR}/main.py survived provisioning untouched")
+    check(vals.get("hwiring") == 0,
+          f"{HIL_DIR}/wiring.yaml was NOT re-created (not a projectFiles[] entry)")
 
-# The control that survives the contract change: an unregistered app name still
-# returns immediately, so "the launcher took time" means the row resolved.
-out = jl_exec("""
+    # The control that survives the contract change: an unregistered app name still
+    # returns immediately, so "the launcher took time" means the row resolved.
+    out = jl_exec("""
 import time
 t0 = time.ticks_ms()
 run_app("NoSuchAppXYZ")
 t1 = time.ticks_ms()
 print("missing_ms=", time.ticks_diff(t1, t0))
 """, timeout=25)
-check(parse_kv(out).get("missing_ms") is not None and
-      parse_kv(out).get("missing_ms") < 300,
-      f"an unregistered app name returns immediately ({parse_kv(out).get('missing_ms')} ms)")
+    check(parse_kv(out).get("missing_ms") is not None and
+          parse_kv(out).get("missing_ms") < 300,
+          f"an unregistered app name returns immediately ({parse_kv(out).get('missing_ms')} ms)")
 
-# Put hiltest's wiring back (this file's own copy) so 6(d) has two projects.
-out = jl_exec(f"print('restored=', 1 if fs_write({HIL_DIR + '/wiring.yaml'!r}, {HIL_WIRING!r}) else 0)",
-              timeout=30)
-check(parse_kv(out).get("restored") == 1, f"restored {HIL_DIR}/wiring.yaml")
+    # Put hiltest's wiring back (this file's own copy) so 6(d) has two projects.
+    out = jl_exec(f"print('restored=', 1 if fs_write({HIL_DIR + '/wiring.yaml'!r}, {HIL_WIRING!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("restored") == 1, f"restored {HIL_DIR}/wiring.yaml")
 
-# Put the live state back in sync with slot 3's FILE before the restore below
-# rewrites it: load_project() deliberately leaves slot tracking alone
-# (States.cpp:3080, the slot-clobber guard), so slot 3 is still "active" while
-# holding hiltest's state - and a dirty active slot is what the idle auto-save
-# writes out. switch_slot re-reads the file. (Port 5 on purpose: one fewer
-# port-1 round trip when a terminal client is holding it.)
-out = jl_exec("print('back=', switch_slot(3))", timeout=25)
-time.sleep(1.5)
+    # Put the live state back in sync with slot 3's FILE before the restore below
+    # rewrites it: load_project() deliberately leaves slot tracking alone
+    # (States.cpp:3080, the slot-clobber guard), so slot 3 is still "active" while
+    # holding hiltest's state - and a dirty active slot is what the idle auto-save
+    # writes out. switch_slot re-reads the file. (Port 5 on purpose: one fewer
+    # port-1 round trip when a terminal client is holding it.)
+    out = jl_exec("print('back=', switch_slot(3))", timeout=25)
+    time.sleep(1.5)
 
-# (d) The HAPPY path: the picker actually opens, over real listed content, and
-# comes back out without leaving the temp-slot latch set. 6(c) alone would
-# still pass if listProjects always returned 0 (a broken path join, an inverted
-# isDirectory test), so this drives the launcher WITH both projects present:
-#   - port 5 calls run_app("Projects") in a worker thread;
-#   - port 1 watches for the picker's `PROJECTS n=<count>` line - that count IS
-#     listProjects' result, so seeing n>=2 is the happy-path assertion;
-#   - port 1 then sends a byte, which the picker treats exactly like an encoder
-#     hold (Menus.cpp:1992/:2646's "encoder hold, serial byte, or probe button"
-#     convention), and the launcher takes its cancel-before-any-slot-call exit.
-# The cancel byte is '\r' (what port1_command primes connections with, so a
-# leftover copy is inert), re-sent every 0.5 s until the exec returns so a
-# dropped byte can't leave the board sitting in the picker. All of that lives
-# in run_projects_app() at the top of this file - 6(c) drives it too.
-q = port1_command("Q", 1.5)
-m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-slot_before_launch = int(m.group(1)) if m else -1
-check(slot_before_launch == 3, f"active slot before the launch probe is 3 (got {slot_before_launch})")
+    # (d) The HAPPY path: the picker actually opens, over real listed content, and
+    # comes back out without leaving the temp-slot latch set. 6(c) alone would
+    # still pass if listProjects always returned 0 (a broken path join, an inverted
+    # isDirectory test), so this drives the launcher WITH both projects present:
+    #   - port 5 calls run_app("Projects") in a worker thread;
+    #   - port 1 watches for the picker's `PROJECTS n=<count>` line - that count IS
+    #     listProjects' result, so seeing n>=2 is the happy-path assertion;
+    #   - port 1 then sends a byte, which the picker treats exactly like an encoder
+    #     hold (Menus.cpp:1992/:2646's "encoder hold, serial byte, or probe button"
+    #     convention), and the launcher takes its cancel-before-any-slot-call exit.
+    # The cancel byte is '\r' (what port1_command primes connections with, so a
+    # leftover copy is inert), re-sent every 0.5 s until the exec returns so a
+    # dropped byte can't leave the board sitting in the picker. All of that lives
+    # in run_projects_app() at the top of this file - 6(c) drives it too.
+    q = port1_command("Q", 1.5)
+    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+    slot_before_launch = int(m.group(1)) if m else -1
+    check(slot_before_launch == 3, f"active slot before the launch probe is 3 (got {slot_before_launch})")
 
-buf, n_listed, sends, worker, launch = run_projects_app()
+    buf, n_listed, sends, worker, launch = run_projects_app()
 
-check(n_listed is not None and n_listed >= 2,
-      f"the picker opened over listProjects' real output (PROJECTS n={n_listed}) "
-      "- listProjects found both projects")
-check("555" in buf and "hiltest" in buf,
-      "the launcher listed both project dirs on the terminal")
-check(worker is not None and not worker.is_alive(),
-      f"run_app('Projects') returned after the serial cancel "
-      f"({sends} cancel byte(s) sent)")
-check("Cancelled" in buf, "the launcher took its cancel exit")
-if "err" in launch:
-    print(f"  info: launch worker error: {launch['err'][:400]}")
-check(parse_kv(launch.get("out", "")).get("returned") == 1,
-      "the REPL exec that launched the app completed normally")
+    check(n_listed is not None and n_listed >= 2,
+          f"the picker opened over listProjects' real output (PROJECTS n={n_listed}) "
+          "- listProjects found both projects")
+    check("555" in buf and "hiltest" in buf,
+          "the launcher listed both project dirs on the terminal")
+    check(worker is not None and not worker.is_alive(),
+          f"run_app('Projects') returned after the serial cancel "
+          f"({sends} cancel byte(s) sent)")
+    check("Cancelled" in buf, "the launcher took its cancel exit")
+    if "err" in launch:
+        print(f"  info: launch worker error: {launch['err'][:400]}")
+    check(parse_kv(launch.get("out", "")).get("returned") == 1,
+          "the REPL exec that launched the app completed normally")
 
-# The latch witness. enterTemporarySlot(8) sets activeSlotNumber = 8 and only
-# exitTemporarySlot puts it back (States.cpp:3235/:3252), so a cancel that
-# wrongly entered - or entered and failed to unwind - shows up as ACTIVE_SLOT:8
-# here. And the follow-up slot write proves the slot machinery still works.
-q = port1_command("Q", 1.5)
-m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-slot_after = int(m.group(1)) if m else -1
-check(slot_after == 3,
-      f"cancelling the picker left no temp slot behind (ACTIVE_SLOT:{slot_after}, not 8)")
-out = jl_exec("print('saved=', nodes_save(3))", timeout=25)
-check(parse_kv(out).get("saved") == 3,
-      "a slot operation still succeeds after the cancelled launch")
+    # The latch witness. enterTemporarySlot(8) sets activeSlotNumber = 8 and only
+    # exitTemporarySlot puts it back (States.cpp:3235/:3252), so a cancel that
+    # wrongly entered - or entered and failed to unwind - shows up as ACTIVE_SLOT:8
+    # here. And the follow-up slot write proves the slot machinery still works.
+    q = port1_command("Q", 1.5)
+    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+    slot_after = int(m.group(1)) if m else -1
+    check(slot_after == 3,
+          f"cancelling the picker left no temp slot behind (ACTIVE_SLOT:{slot_after}, not 8)")
+    out = jl_exec("print('saved=', nodes_save(3))", timeout=25)
+    check(parse_kv(out).get("saved") == 3,
+          "a slot operation still succeeds after the cancelled launch")
 
-# --- 6(e). The task-9 starter projects -------------------------------------
-# i2cscrn / nand00 / eeprom are PROVISIONED projects, so unlike 555 above
-# nothing is pushed from the host here: the firmware's own projectFiles[]
-# put them on the board, and the first assertion in each block is that they
-# really did arrive byte-exact. Everything after that reads the DEVICE's
-# copy, which is the copy a user would run.
-#
-# Per project:
-#   (i)   repo FNV == projectFiles.h HASHES[0]  - the generated header is current
-#   (ii)  device FNV == HASHES[0]               - provisioning landed this build
-#   (iii) load_project() + list_parts()         - the wiring PARSES, and every
-#         leg resolves to the node the DIP/SIP math says it should. This is the
-#         assertion that catches a footprint or a row typo: list_parts()
-#         reports partPinNode()'s own answer, not the file's text.
-#   (iv)  the rails the wiring asks for actually land (3.3 V, measured)
-#   (v)   compile() of the companion script, ON the device, from the device's
-#         file. Never exec: all three scripts block on input().
-#   (vi)  the guide: section parses - `z` far enough to see `GUIDE step=1/<n>`,
-#         then quit. Nothing is placed, so no part bridges are created.
-#
-# The real parts (an SSD1306, a 74HC00, a 24Cxx) are NOT on this bench. What
-# the hardware does with them is a bench checklist in the task-9 report; what
-# is asserted here is everything that does not need them.
+    # --- 6(e). The task-9 starter projects -------------------------------------
+    # i2cscrn / nand00 / eeprom are PROVISIONED projects, so unlike 555 above
+    # nothing is pushed from the host here: the firmware's own projectFiles[]
+    # put them on the board, and the first assertion in each block is that they
+    # really did arrive byte-exact. Everything after that reads the DEVICE's
+    # copy, which is the copy a user would run.
+    #
+    # Per project:
+    #   (i)   repo FNV == projectFiles.h HASHES[0]  - the generated header is current
+    #   (ii)  device FNV == HASHES[0]               - provisioning landed this build
+    #   (iii) load_project() + list_parts()         - the wiring PARSES, and every
+    #         leg resolves to the node the DIP/SIP math says it should. This is the
+    #         assertion that catches a footprint or a row typo: list_parts()
+    #         reports partPinNode()'s own answer, not the file's text.
+    #   (iv)  the rails the wiring asks for actually land (3.3 V, measured)
+    #   (v)   compile() of the companion script, ON the device, from the device's
+    #         file. Never exec: all three scripts block on input().
+    #   (vi)  the guide: section parses - `z` far enough to see `GUIDE step=1/<n>`,
+    #         then quit. Nothing is placed, so no part bridges are created.
+    #
+    # The real parts (an SSD1306, a 74HC00, a 24Cxx) are NOT on this bench. What
+    # the hardware does with them is a bench checklist in the task-9 report; what
+    # is asserted here is everything that does not need them.
 
 
-class GuideDriver:
-    """One port-1 connection driving one guide session, with ORDERED
+    class GuideDriver:
+        """One port-1 connection driving one guide session, with ORDERED
     status-line assertions. A local copy of test_guide_flow.py's driver -
     jl.py is shared, this file is not, and duplicating the small serial
     helpers is already this suite's convention (read_device_file above)."""
 
-    def __init__(self):
-        self.ser = serial.Serial(port1_path(), 115200, timeout=0.05)
-        self.buf = ""
-        self.pos = 0
-        # Prime the connection: the firmware's connection-init eats the first
-        # byte(s) - the same idiom phase 6(d) uses.
-        self.ser.write(b"\r\n")
-        self.ser.flush()
-        quiet, overall = time.time(), time.time()
-        while time.time() - overall < 4.0:
-            if self.ser.read(4096):
-                quiet = time.time()
-            elif time.time() - quiet > 0.6:
-                break
-        self.ser.reset_input_buffer()
+        def __init__(self):
+            self.ser = serial.Serial(port1_path(), 115200, timeout=0.05)
+            self.buf = ""
+            self.pos = 0
+            # Prime the connection: the firmware's connection-init eats the first
+            # byte(s) - the same idiom phase 6(d) uses.
+            self.ser.write(b"\r\n")
+            self.ser.flush()
+            quiet, overall = time.time(), time.time()
+            while time.time() - overall < 4.0:
+                if self.ser.read(4096):
+                    quiet = time.time()
+                elif time.time() - quiet > 0.6:
+                    break
+            self.ser.reset_input_buffer()
 
-    def send(self, data):
-        self.ser.write(data)
-        self.ser.flush()
+        def send(self, data):
+            self.ser.write(data)
+            self.ser.flush()
 
-    def expect(self, pattern, what, timeout=25):
-        deadline = time.time() + timeout
-        rx = re.compile(pattern)
-        while time.time() < deadline:
-            chunk = self.ser.read(4096)
-            if chunk:
-                self.buf += _csi.sub("", chunk.decode(errors="replace"))
-            m = rx.search(self.buf, self.pos)
-            if m:
-                self.pos = m.end()
-                check(True, what)
-                return m
-        tail = self.buf[max(0, len(self.buf) - 600):]
-        check(False, f"{what} (timed out; tail: {tail!r})")
-        return None
+        def expect(self, pattern, what, timeout=25):
+            deadline = time.time() + timeout
+            rx = re.compile(pattern)
+            while time.time() < deadline:
+                chunk = self.ser.read(4096)
+                if chunk:
+                    self.buf += _csi.sub("", chunk.decode(errors="replace"))
+                m = rx.search(self.buf, self.pos)
+                if m:
+                    self.pos = m.end()
+                    check(True, what)
+                    return m
+            tail = self.buf[max(0, len(self.buf) - 600):]
+            check(False, f"{what} (timed out; tail: {tail!r})")
+            return None
 
-    def close(self):
+        def close(self):
+            try:
+                chunk = self.ser.read(4096)
+                if chunk:
+                    self.buf += _csi.sub("", chunk.decode(errors="replace"))
+            finally:
+                self.ser.close()
+
+
+    # (part name, footprint, base row, [(pin name, expected node, expected connect)])
+    # connect -1 = "the leg just occupies the hole". Node numbers are the ones
+    # JumperlessDefines.h assigns: GND 100, TOP_RAIL 101, RP_GPIO_1..3 131/132/133,
+    # RP_GPIO_7 137 (RP pin 26, SDA), RP_GPIO_8 138 (RP pin 27, SCL).
+    TASK9_PROJECTS = (
+        ("i2cscrn", 5, (
+            ("DISP", "sip4", 5, (("GND", 5, 100), ("VCC", 6, 101),
+                                 ("SCL", 7, 138), ("SDA", 8, 137))),
+        )),
+        ("nand00", 7, (
+            ("U1", "dip14", 5, (("A1", 5, 131), ("B1", 6, 132), ("Y1", 7, 133),
+                                ("A2", 8, 100), ("GND", 11, 100), ("Y3", 41, -1),
+                                ("B4", 36, 100), ("VCC", 35, 101))),
+            ("LED1", "sip2", 18, (("A", 18, -1), ("K", 19, 100))),
+            ("R1", "sip2", 15, (("A", 15, 7), ("B", 16, 18))),
+        )),
+        ("eeprom", 7, (
+            ("U1", "dip8", 5, (("A0", 5, 100), ("A2", 7, 100), ("GND", 8, 100),
+                               ("SDA", 38, 137), ("SCL", 37, 138),
+                               ("WP", 36, 101), ("VCC", 35, 101))),
+            ("R1", "sip2", 12, (("A", 12, 101), ("B", 13, 38))),
+            ("R2", "sip2", 15, (("A", 15, 101), ("B", 16, 37))),
+        )),
+    )
+
+    # Host-side grammar check, first and unconditionally: py_compile costs nothing
+    # and never depends on the board's heap, so a syntax error is caught here even
+    # on a run where the device-side compile below has to bow out for memory.
+    for _p in ("555",) + tuple(p[0] for p in TASK9_PROJECTS):
+        _path = os.path.join(REPO, "scripts", "projects", _p, "main.py")
         try:
-            chunk = self.ser.read(4096)
-            if chunk:
-                self.buf += _csi.sub("", chunk.decode(errors="replace"))
-        finally:
-            self.ser.close()
+            compile(open(_path).read(), _path, "exec")
+            check(True, f"scripts/projects/{_p}/main.py parses (host py_compile)")
+        except SyntaxError as e:
+            check(False, f"scripts/projects/{_p}/main.py: {e}")
 
+    # The "a fresh load leaves the breadboard unconnected" assertion below
+    # counts bridges touching rows 1-60. Infrastructure lives off-board on a
+    # DEFAULT config, but not on every config: with top_oled.lock_connection
+    # = 1 the oled_i2c infra path bridges sda_row<->gpio_sda and
+    # scl_row<->gpio_scl (InfraPaths.cpp), and those rows are config values.
+    # They default to NANO_D2/NANO_D3 = 72/73 (off the breadboard), but a
+    # bench running the OLED on breadboard holes puts them in 1-60, where
+    # they would false-fail a check that has nothing to do with the OLED.
+    # So read the live config once and exclude exactly those two rows.
+    # Streamed in 512-byte chunks and parsed on the DEVICE (test_config.py's
+    # jfs.read idiom): /config.txt is several KB and this must not depend on a
+    # contiguous MicroPython allocation deep into a long session. The last
+    # chunk gets a synthetic "\n" so a file with no trailing newline still
+    # flushes its final line through the same splitter.
+    _cfg = jl_exec("""
+f = jfs.open("/config.txt", "r")
+sec = ""
+buf = ""
+done = False
+while not done:
+    chunk = jfs.read(f, 512)
+    if not chunk:
+        buf += "\\n"
+        done = True
+    else:
+        buf += chunk
+    while "\\n" in buf:
+        ln, buf = buf.split("\\n", 1)
+        s = ln.strip()
+        if s.startswith("["):
+            sec = s
+        elif sec == "[top_oled]" and "=" in s:
+            k, v = s.split("=", 1)
+            k = k.strip()
+            if k in ("lock_connection", "sda_row", "scl_row"):
+                print("OLED|%s|%s" % (k, v.strip().rstrip(";").strip()))
+jfs.close(f)
+""", timeout=30)
+    _oled = {}
+    for _line in _cfg.splitlines():
+        _m = re.match(r"\s*OLED\|(\w+)\|(-?\d+)\s*$", _line)
+        if _m:
+            _oled[_m.group(1)] = int(_m.group(2))
+    if _oled.get("lock_connection") == 1:
+        INFRA_ROWS = tuple(sorted({r for r in (_oled.get("sda_row"), _oled.get("scl_row"))
+                                   if r is not None and 1 <= r <= 60}))
+    else:
+        INFRA_ROWS = ()
+    if INFRA_ROWS:
+        print(f"  info: top_oled.lock_connection=1 with breadboard rows "
+              f"{INFRA_ROWS} - excluding the oled_i2c infra bridges from the "
+              f"row-bridge count")
+    else:
+        print(f"  info: no OLED infra bridges expected on rows 1-60 "
+              f"(lock_connection={_oled.get('lock_connection')}, "
+              f"sda_row={_oled.get('sda_row')}, scl_row={_oled.get('scl_row')})")
 
-# (part name, footprint, base row, [(pin name, expected node, expected connect)])
-# connect -1 = "the leg just occupies the hole". Node numbers are the ones
-# JumperlessDefines.h assigns: GND 100, TOP_RAIL 101, RP_GPIO_1..3 131/132/133,
-# RP_GPIO_7 137 (RP pin 26, SDA), RP_GPIO_8 138 (RP pin 27, SCL).
-TASK9_PROJECTS = (
-    ("i2cscrn", 5, (
-        ("DISP", "sip4", 5, (("GND", 5, 100), ("VCC", 6, 101),
-                             ("SCL", 7, 138), ("SDA", 8, 137))),
-    )),
-    ("nand00", 7, (
-        ("U1", "dip14", 5, (("A1", 5, 131), ("B1", 6, 132), ("Y1", 7, 133),
-                            ("A2", 8, 100), ("GND", 11, 100), ("Y3", 41, -1),
-                            ("B4", 36, 100), ("VCC", 35, 101))),
-        ("LED1", "sip2", 18, (("A", 18, -1), ("K", 19, 100))),
-        ("R1", "sip2", 15, (("A", 15, 7), ("B", 16, 18))),
-    )),
-    ("eeprom", 7, (
-        ("U1", "dip8", 5, (("A0", 5, 100), ("A2", 7, 100), ("GND", 8, 100),
-                           ("SDA", 38, 137), ("SCL", 37, 138),
-                           ("WP", 36, 101), ("VCC", 35, 101))),
-        ("R1", "sip2", 12, (("A", 12, 101), ("B", 13, 38))),
-        ("R2", "sip2", 15, (("A", 15, 101), ("B", 16, 37))),
-    )),
-)
+    for proj, want_steps, want_parts in TASK9_PROJECTS:
+        print(f"  --- 6(e) {proj} ---")
+        pdir = f"/projects/{proj}"
+        src_dir = os.path.join(REPO, "scripts", "projects", proj)
 
-# Host-side grammar check, first and unconditionally: py_compile costs nothing
-# and never depends on the board's heap, so a syntax error is caught here even
-# on a run where the device-side compile below has to bow out for memory.
-for _p in ("555",) + tuple(p[0] for p in TASK9_PROJECTS):
-    _path = os.path.join(REPO, "scripts", "projects", _p, "main.py")
-    try:
-        compile(open(_path).read(), _path, "exec")
-        check(True, f"scripts/projects/{_p}/main.py parses (host py_compile)")
-    except SyntaxError as e:
-        check(False, f"scripts/projects/{_p}/main.py: {e}")
+        # (i) + (ii) the three-way provisioning check, exactly phase 6(c)'s shape.
+        for fname, var in ((f"{proj}/wiring.yaml", f"PROJECT_{proj.upper()}_WIRING_YAML"),
+                           (f"{proj}/main.py", f"PROJECT_{proj.upper()}_MAIN_PY"),
+                           (f"{proj}/README.md", f"PROJECT_{proj.upper()}_README_MD")):
+            base = fname.split("/")[1]
+            with open(os.path.join(src_dir, base), "r") as f:
+                repo_hash = "0x%08X" % fnv1a32(f.read().encode("utf-8"))
+            hdr = embedded_hash(var)
+            check(hdr == repo_hash,
+                  f"{var}_HASHES[0] ({hdr}) == FNV of scripts/projects/{fname} "
+                  f"({repo_hash}) - generated header is current")
+            dh, dl = device_hash(f"{pdir}/{base}")
+            check(dh == hdr,
+                  f"{pdir}/{base} on the board matches the firmware default "
+                  f"(device FNV {dh}, {dl} bytes) - provisioning installed it")
 
-for proj, want_steps, want_parts in TASK9_PROJECTS:
-    print(f"  --- 6(e) {proj} ---")
-    pdir = f"/projects/{proj}"
-    src_dir = os.path.join(REPO, "scripts", "projects", proj)
-
-    # (i) + (ii) the three-way provisioning check, exactly phase 6(c)'s shape.
-    for fname, var in ((f"{proj}/wiring.yaml", f"PROJECT_{proj.upper()}_WIRING_YAML"),
-                       (f"{proj}/main.py", f"PROJECT_{proj.upper()}_MAIN_PY"),
-                       (f"{proj}/README.md", f"PROJECT_{proj.upper()}_README_MD")):
-        base = fname.split("/")[1]
-        with open(os.path.join(src_dir, base), "r") as f:
-            repo_hash = "0x%08X" % fnv1a32(f.read().encode("utf-8"))
-        hdr = embedded_hash(var)
-        check(hdr == repo_hash,
-              f"{var}_HASHES[0] ({hdr}) == FNV of scripts/projects/{fname} "
-              f"({repo_hash}) - generated header is current")
-        dh, dl = device_hash(f"{pdir}/{base}")
-        check(dh == hdr,
-              f"{pdir}/{base} on the board matches the firmware default "
-              f"(device FNV {dh}, {dl} bytes) - provisioning installed it")
-
-    # (iii) the wiring parses, and every leg lands where the footprint math says
-    out = jl_exec(f"""
+        # (iii) the wiring parses, and every leg lands where the footprint math says
+        out = jl_exec(f"""
 print("loaded=", 1 if load_project({proj!r}) else 0)
 ps = list_parts()
 print("nparts=", len(ps))
@@ -784,103 +852,110 @@ for p in ps:
 n = get_num_bridges()
 print("nbridges=", n)
 rowb = 0
+infra_rows = {INFRA_ROWS!r}
 for i in range(n):
     b = get_bridge(i)
     if (1 <= b[0] <= 60) or (1 <= b[1] <= 60):
-        rowb += 1
         print("ROWBRIDGE|%s" % str(b))
+        if b[0] in infra_rows or b[1] in infra_rows:
+            continue
+        rowb += 1
 print("rowbridges=", rowb)
 """, timeout=40)
-    vals = parse_kv(out)
-    check(vals.get("loaded") == 1, f"load_project({proj!r}) loaded {pdir}/wiring.yaml")
-    check(vals.get("nparts") == len(want_parts),
-          f"{proj}: {vals.get('nparts')} parts parsed (expected {len(want_parts)})")
-    # All three carry their whole circuit in parts: and NO bridges: section, so
-    # a fresh load must leave the BREADBOARD entirely unconnected - every
-    # connection waits on a guide commit to set placed: true
-    # (expandPartsToBridges skips the rest). That is the whole reason the
-    # READMEs send people through the guided build instead of a bare
-    # Files-browser load, so it gets asserted as a count and not just as the
-    # per-leg spot checks below.
-    #
-    # Counted as "bridges touching a breadboard row (1-60)", NOT as
-    # get_num_bridges() == 0: the board carries a probe-power INFRASTRUCTURE
-    # feed, (139, 106) = ROUTABLE_BUFFER_IN <-> DAC0, which InfraPaths owns and
-    # which has nothing to do with any project. Asserting a bare zero here
-    # fails on a healthy board (bench-caught: got 1).
-    check(vals.get("rowbridges") == 0,
-          f"{proj}: a fresh load leaves the breadboard unconnected - 0 bridges "
-          f"touch rows 1-60 (total bridges {vals.get('nbridges')}, all infra)")
+        vals = parse_kv(out)
+        check(vals.get("loaded") == 1, f"load_project({proj!r}) loaded {pdir}/wiring.yaml")
+        check(vals.get("nparts") == len(want_parts),
+              f"{proj}: {vals.get('nparts')} parts parsed (expected {len(want_parts)})")
+        # Counted as "bridges touching a breadboard row (1-60)", NOT as
+        # get_num_bridges() == 0: the board carries INFRASTRUCTURE bridges that
+        # have nothing to do with any project - the probe-power feed
+        # (139, 106) = ROUTABLE_BUFFER_IN <-> DAC0 that InfraPaths owns is one,
+        # and asserting a bare zero fails on a healthy board (bench-caught:
+        # got 1). Most infra lives off the breadboard, but NOT all of it and
+        # NOT on every config: infra_rows (computed before this loop) carries
+        # the oled_i2c rows when top_oled.lock_connection puts the OLED on real
+        # breadboard holes, and those are excluded here. Anything else touching
+        # rows 1-60 is a real failure: these three projects carry their whole
+        # circuit in parts: with no bridges: section, so every connection must
+        # wait on a guide commit to set placed: true (expandPartsToBridges
+        # skips the rest). That is the whole reason the READMEs send people
+        # through the guided build instead of a bare Files-browser load, so it
+        # gets asserted as a count and not just as the per-leg spot checks
+        # below.
+        check(vals.get("rowbridges") == 0,
+              f"{proj}: a fresh load leaves the breadboard unconnected - 0 "
+              f"non-infra bridges touch rows 1-60 (total bridges "
+              f"{vals.get('nbridges')}; excluded infra rows {INFRA_ROWS})")
 
-    got_parts, got_pins = {}, {}
-    for line in out.splitlines():
-        m = re.match(r"\s*PART\|([^|]+)\|([^|]+)\|(\d+)\|(\d+)\s*$", line)
-        if m:
-            got_parts[m.group(1)] = (m.group(2), int(m.group(3)), int(m.group(4)))
-        m = re.match(r"\s*PIN\|([^|]+)\|([^|]+)\|(-?\d+)\|(-?\d+)\s*$", line)
-        if m:
-            got_pins[(m.group(1), m.group(2))] = (int(m.group(3)), int(m.group(4)))
+        got_parts, got_pins = {}, {}
+        for line in out.splitlines():
+            m = re.match(r"\s*PART\|([^|]+)\|([^|]+)\|(\d+)\|(\d+)\s*$", line)
+            if m:
+                got_parts[m.group(1)] = (m.group(2), int(m.group(3)), int(m.group(4)))
+            m = re.match(r"\s*PIN\|([^|]+)\|([^|]+)\|(-?\d+)\|(-?\d+)\s*$", line)
+            if m:
+                got_pins[(m.group(1), m.group(2))] = (int(m.group(3)), int(m.group(4)))
 
-    for pname, fp, row, pins in want_parts:
-        got = got_parts.get(pname)
-        check(got == (fp, row, 0),
-              f"{proj}.{pname}: footprint {fp} at row {row}, placed: false "
-              f"(got {got})")
-        for pin, node, conn in pins:
-            check(got_pins.get((pname, pin)) == (node, conn),
-                  f"{proj}.{pname}.{pin} -> node {node}, connect {conn} "
-                  f"(got {got_pins.get((pname, pin))})")
+        for pname, fp, row, pins in want_parts:
+            got = got_parts.get(pname)
+            check(got == (fp, row, 0),
+                  f"{proj}.{pname}: footprint {fp} at row {row}, placed: false "
+                  f"(got {got})")
+            for pin, node, conn in pins:
+                check(got_pins.get((pname, pin)) == (node, conn),
+                      f"{proj}.{pname}.{pin} -> node {node}, connect {conn} "
+                      f"(got {got_pins.get((pname, pin))})")
 
-    # Nothing is placed, so the expansion bridges must not exist yet. Pick the
-    # first pin of the first part that names a real target and prove its
-    # bridge is absent.
-    probe = next(((p[0], q[1], q[2]) for p in want_parts for q in p[3] if q[2] >= 0))
-    out = jl_exec(f"print('early=', 1 if is_connected({probe[1]}, {probe[2]}) else 0)")
-    check(parse_kv(out).get("early") == 0,
-          f"{proj}: part not expanded - no {probe[1]}<->{probe[2]} bridge "
-          f"before any place step")
+        # Nothing is placed, so the expansion bridges must not exist yet. Pick the
+        # first pin of the first part that names a real target and prove its
+        # bridge is absent.
+        probe = next(((p[0], q[1], q[2]) for p in want_parts for q in p[3] if q[2] >= 0))
+        out = jl_exec(f"print('early=', 1 if is_connected({probe[1]}, {probe[2]}) else 0)")
+        check(parse_kv(out).get("early") == 0,
+              f"{proj}: part not expanded - no {probe[1]}<->{probe[2]} bridge "
+              f"before any place step")
 
-    # (iv) the wiring's power: section parsed and round-trips. All three ask
-    # for 3.3 V, not the 555's 5 V, because their signal rows land on real
-    # RP2350 pins. Read back through toYAML the way phase 5 does, grepping on
-    # the device so the whole slot file never crosses the wire.
-    out = jl_exec("""
+        # (iv) the wiring's power: section parsed and round-trips. All three ask
+        # for 3.3 V, not the 555's 5 V, because their signal rows land on real
+        # RP2350 pins. Read back through toYAML the way phase 5 does, grepping on
+        # the device so the whole slot file never crosses the wire.
+        out = jl_exec("""
 print("saved=", nodes_save(3))
 for ln in fs_read("/slots/slot3.yaml").split("\\n"):
     s = ln.strip()
     if s.startswith("topRail:") or s.startswith("pulls:"):
         print("LINE|" + s)
 """, timeout=35)
-    check(parse_kv(out).get("saved") == 3, f"{proj}: nodes_save(3) rewrote the slot")
-    lines = [l.split("|", 1)[1].strip() for l in out.splitlines()
-             if l.strip().startswith("LINE|")]
-    check(any(l.startswith("topRail: 3.30") for l in lines),
-          f"{proj}: power: topRail: 3.3 parsed and round-tripped (got {lines})")
-    if proj in ("i2cscrn", "eeprom"):
-        # The I2C projects also carry `config: gpio: pulls:` with index 6/7 set
-        # to pull-up. Without it setGPIO() re-asserts the default PULLDOWN onto
-        # RP pins 26/27 on every refreshConnections() - a pulled-down I2C bus.
-        check(any(re.match(r"pulls:\s*\[0,0,0,0,0,0,1,1,0,0\]", l) for l in lines),
-              f"{proj}: gpio pulls index 6/7 = pull-up survived the round trip "
-              f"(got {lines})")
+        check(parse_kv(out).get("saved") == 3, f"{proj}: nodes_save(3) rewrote the slot")
+        lines = [l.split("|", 1)[1].strip() for l in out.splitlines()
+                 if l.strip().startswith("LINE|")]
+        check(any(l.startswith("topRail: 3.30") for l in lines),
+              f"{proj}: power: topRail: 3.3 parsed and round-tripped (got {lines})")
+        if proj in ("i2cscrn", "eeprom"):
+            # The I2C projects also carry `config: gpio: pulls:` with index 6/7 set
+            # to pull-up. Without it setGPIO() re-asserts the default PULLDOWN onto
+            # RP pins 26/27 on every refreshConnections() - a pulled-down I2C bus.
+            check(any(re.match(r"pulls:\s*\[0,0,0,0,0,0,1,1,0,0\]", l) for l in lines),
+                  f"{proj}: gpio pulls index 6/7 = pull-up survived the round trip "
+                  f"(got {lines})")
 
-    # (v) the companion script compiles ON the device, from the device's file.
-    # compile(), never exec(): every one of these scripts blocks on input().
-    #
-    # Read through jfs.open().read(size), NOT fs_read(): jl_fs_read_file()
-    # answers out of a static 4096-byte buffer (1024 on OG), so fs_read
-    # silently truncates anything larger and the compile then fails on a
-    # half statement. The File object's read() has no such cap.
-    #
-    # This does need one contiguous MicroPython string the size of the
-    # script, which is the one thing the REAL run path never needs -
-    # executePythonFileContent() hands mp_embed_exec_str() a C pointer and
-    # mp_lexer_new_from_str_len(..., free_len=0) lexes straight out of it.
-    # A fresh board has ~39 KB free and allocates 12 KB contiguously without
-    # complaint; deep into a long HIL session the same heap refuses 4 KB. So
-    # a MemoryError HERE is a statement about this suite's heap, not about
-    # the script, and is reported as exactly that instead of as a failure.
-    out = jl_exec(f"""
+        # (v) the companion script compiles ON the device, from the device's file.
+        # compile(), never exec(): every one of these scripts blocks on input().
+        #
+        # Read through jfs.open().read(size), NOT fs_read(): jl_fs_read_file()
+        # answers out of a static 4096-byte buffer (1024 on OG), so fs_read
+        # silently truncates anything larger and the compile then fails on a
+        # half statement. The File object's read() has no such cap.
+        #
+        # This does need one contiguous MicroPython string the size of the
+        # script, which is the one thing the REAL run path never needs -
+        # executePythonFileContent() hands mp_embed_exec_str() a C pointer and
+        # mp_lexer_new_from_str_len(..., free_len=0) lexes straight out of it.
+        # A fresh board has ~39 KB free and allocates 12 KB contiguously without
+        # complaint; deep into a long HIL session the same heap refuses 4 KB. So
+        # a MemoryError HERE is a statement about this suite's heap, not about
+        # the script, and is reported as exactly that instead of as a failure.
+        out = jl_exec(f"""
 import gc
 gc.collect()
 try:
@@ -895,78 +970,79 @@ except MemoryError as e:
 src = None
 gc.collect()
 """, timeout=45)
-    vals = parse_kv(out)
-    if vals.get("nomem") == 1:
-        print(f"  info: {pdir}/main.py device-compile skipped - this session's "
-              f"MicroPython heap is too fragmented to hold the source. The "
-              f"launcher's run path does not make this allocation; running the "
-              f"script from the picker is a bench item.")
-    else:
-        check(vals.get("compiled") == 1,
-              f"{pdir}/main.py compiles under this MicroPython "
-              f"({vals.get('srclen')} bytes read through jfs, uncapped)")
+        vals = parse_kv(out)
+        if vals.get("nomem") == 1:
+            print(f"  info: {pdir}/main.py device-compile skipped - this session's "
+                  f"MicroPython heap is too fragmented to hold the source. The "
+                  f"launcher's run path does not make this allocation; running the "
+                  f"script from the picker is a bench item.")
+        else:
+            check(vals.get("compiled") == 1,
+                  f"{pdir}/main.py compiles under this MicroPython "
+                  f"({vals.get('srclen')} bytes read through jfs, uncapped)")
 
-    # (vi) the guide: section parses. Drive `z` far enough to see the first
-    # step, then quit - no part is confirmed, so nothing is placed.
-    guide_live = False
-    d = GuideDriver()
-    try:
-        d.send(f"z {pdir}/wiring.yaml 3\r\n".encode())
-        guide_live = True
-        m = d.expect(r"GUIDE (?:resume slot=\d+ step=\d+|step=1/(?P<n>\d+) id=)",
-                     f"{proj}: guide: section parsed and the runtime started")
-        if m and m.group("n") is None:
-            # Stale progress for this same wiring: restart, then look again.
-            d.send(b"n")
-            m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
-                         f"{proj}: restarted at step 1")
-        if m:
-            n_steps = int(m.group("n"))
-            check(n_steps == want_steps,
-                  f"{proj}: guide has {n_steps} steps (expected {want_steps})")
-        d.expect(r"GUIDE step=1/\d+ id=\w+ state=WAIT",
-                 f"{proj}: step 1 is waiting for input")
-        d.send(b"q")
-        d.expect(r"GUIDE .* state=EXIT", f"{proj}: 'q' quit the guide at step 1")
+        # (vi) the guide: section parses. Drive `z` far enough to see the first
+        # step, then quit - no part is confirmed, so nothing is placed.
         guide_live = False
-    finally:
-        if guide_live:
+        d = GuideDriver()
+        try:
+            d.send(f"z {pdir}/wiring.yaml 3\r\n".encode())
+            guide_live = True
+            m = d.expect(r"GUIDE (?:resume slot=\d+ step=\d+|step=1/(?P<n>\d+) id=)",
+                         f"{proj}: guide: section parsed and the runtime started")
+            if m and m.group("n") is None:
+                # Stale progress for this same wiring: restart, then look again.
+                d.send(b"n")
+                m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
+                             f"{proj}: restarted at step 1")
+            if m:
+                n_steps = int(m.group("n"))
+                check(n_steps == want_steps,
+                      f"{proj}: guide has {n_steps} steps (expected {want_steps})")
+            d.expect(r"GUIDE step=1/\d+ id=\w+ state=WAIT",
+                     f"{proj}: step 1 is waiting for input")
             d.send(b"q")
-            time.sleep(0.5)
-        d.close()
+            d.expect(r"GUIDE .* state=EXIT", f"{proj}: 'q' quit the guide at step 1")
+            guide_live = False
+        finally:
+            if guide_live:
+                d.send(b"q")
+                time.sleep(0.5)
+            d.close()
 
-    out = jl_exec("""
+        out = jl_exec("""
 ps = list_parts()
 print("anyplaced=", 1 if any(p['placed'] for p in ps) else 0)
 print("progress=", guide_progress())
 """, timeout=30)
-    vals = parse_kv(out)
-    check(vals.get("anyplaced") == 0,
-          f"{proj}: quitting at step 1 placed nothing")
-    check(vals.get("progress") in (0, -1),
-          f"{proj}: no guide progress was committed (guide_progress()="
-          f"{vals.get('progress')})")
+        vals = parse_kv(out)
+        check(vals.get("anyplaced") == 0,
+              f"{proj}: quitting at step 1 placed nothing")
+        check(vals.get("progress") in (0, -1),
+              f"{proj}: no guide progress was committed (guide_progress()="
+              f"{vals.get('progress')})")
 
-# --- 7. Restore the bench --------------------------------------------------
-# Restore the FILE first, switch slots second (same hazard as phase 0).
-if slot3_existed:
-    out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)",
-                  timeout=30)
-    check(parse_kv(out).get("restored") == 1, "restored slot3.yaml prior content")
-else:
-    out = jl_exec(f"""
+finally:
+    # --- 7. Restore the bench --------------------------------------------------
+    # Restore the FILE first, switch slots second (same hazard as phase 0).
+    if slot3_existed:
+        out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)",
+                      timeout=30)
+        check(parse_kv(out).get("restored") == 1, "restored slot3.yaml prior content")
+    else:
+        out = jl_exec(f"""
 if fs_exists({SLOT_PATH!r}):
     jfs.remove({SLOT_PATH!r})
 print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
 """)
-    check(parse_kv(out).get("removed") == 1,
-          "removed the test's slot3.yaml (did not exist before)")
+        check(parse_kv(out).get("removed") == 1,
+              "removed the test's slot3.yaml (did not exist before)")
 
-port1_command(f"<{orig_slot}", 4.0)
-time.sleep(1.5)
+    port1_command(f"<{orig_slot}", 4.0)
+    time.sleep(1.5)
 
-if snapshot is not None:
-    check(board_state_restore(snapshot), "board state restored to pre-test snapshot")
+    if snapshot is not None:
+        check(board_state_restore(snapshot), "board state restored to pre-test snapshot")
 
 print("  info: /projects/555/ and /projects/hiltest/ left on the board - two "
       "entries so the clickwheel bench check can exercise picker navigation")
