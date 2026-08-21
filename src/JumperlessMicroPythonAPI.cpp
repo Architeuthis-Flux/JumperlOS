@@ -1735,6 +1735,35 @@ int jl_switch_slot( int slot ) {
     if ( netSlot != slot ) {
         int old_slot = netSlot;
 
+        SlotManager& mgr = SlotManager::getInstance( );
+
+        // FLUSH THE OUTGOING CONTEXT'S UNSAVED EDITS FIRST.
+        //
+        // This is a call-site responsibility, not something loadSlot does for
+        // us. loadSlot's internal fileCacheFlushNowAll("slot_switch") drains
+        // dirty CACHE ENTRIES and SPIFTL metadata (FileCache.cpp) - it never
+        // serializes a dirty in-RAM JumperlessState. The real dirty pre-save
+        // lives at each call site: `loadfile:` (main.cpp) and the FileManager
+        // click path (FilesystemStuff.cpp) both do it, and switch_slot goes
+        // through neither. Without this, switch_slot() from a file context
+        // with unsaved edits silently DISCARDS them - better than the pre-fix
+        // behavior (which wrote them into the destination slot) but still
+        // silent data loss, in a wave whose thesis is "the file IS the
+        // persistence".
+        //
+        // Kept at the call site rather than inside loadSlotFromPath/loadSlot
+        // on purpose: forcing a save inside the API is exactly what the boot
+        // firstLoop guard exists to prevent. A dirty TEMPLATE context hits the
+        // loud template refusal here and its edits are dropped - that is the
+        // guard working as designed, not a case to special-case.
+        if ( mgr.getActiveState( ).isDirty( ) ) {
+            String saveErr;
+            if ( !mgr.saveActiveSlot( saveErr ) ) {
+                Serial.print( "switch_slot: could not save the outgoing context: " );
+                Serial.println( saveErr );
+            }
+        }
+
         // ACTUALLY LOAD THE SLOT. This used to flip netSlot and call
         // refreshConnections() WITHOUT loading slot `slot`'s file - so the
         // outgoing context's bridges stayed in globalState under the new
@@ -1742,12 +1771,11 @@ int jl_switch_slot( int slot ) {
         // Harmless-looking before this wave (both were numbered slots and the
         // user "meant" the switch); a live clobber vector the moment a file
         // context can be the outgoing one, because the run file's content
-        // would land in /slots/slotN.yaml. loadSlot() flushes the outgoing
-        // context first (its :2921 big-event flush) and refreshes hardware
+        // would land in /slots/slotN.yaml. loadSlot() refreshes hardware
         // itself, so the old hold/refresh dance around a bare assignment is
         // gone with it.
         String err;
-        if ( !SlotManager::getInstance( ).loadSlot( slot, err ) ) {
+        if ( !mgr.loadSlot( slot, err ) ) {
             Serial.print( "switch_slot: failed to load slot " );
             Serial.print( slot );
             Serial.print( ": " );

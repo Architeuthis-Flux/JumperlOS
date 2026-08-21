@@ -278,9 +278,21 @@ print("b2=", 1 if is_connected(13, 14) else 0)
           "TRAP: the edit landed in slot_555.yaml itself")
 
     # --- 5. jl_switch_slot FROM a file context ----------------------------
-    # It used to flip netSlot and refresh WITHOUT loading, leaving the file's
-    # bridges live under slot n's number for the auto-save to write there.
+    # Two separate regressions here:
+    #   (a) it used to flip netSlot and refresh WITHOUT loading, leaving the
+    #       file's bridges live under slot n's number for the auto-save to
+    #       write there;
+    #   (b) it had no dirty pre-save, so the outgoing file context's unsaved
+    #       edits were silently DISCARDED (loadSlot's internal cache flush
+    #       drains cache entries, never a dirty in-RAM state).
+    #
+    # The fresh edit and the switch MUST be in ONE jl_exec snippet. Split
+    # across two calls, the multi-second REPL gap lets the idle auto-save
+    # write the edit on its own and the assertion below becomes vacuous -
+    # which is exactly how the previous version of this check passed while
+    # the bug was live.
     out = jl_exec("""
+connect(47, 48)
 print("prev=", switch_slot(2))
 """, timeout=30)
     time.sleep(1.5)
@@ -297,10 +309,15 @@ print("edit_live=", 1 if is_connected(43, 44) else 0)
           "switch_slot ACTUALLY LOADED slot 2 - the file context's bridges "
           "(21-22, 43-44) are gone, not carried over under slot 2's number")
 
-    # And the file context was flushed to its own path on the way out.
+    # The dirty pre-save witness: 47-48 was connected in the SAME snippet as
+    # the switch, with no idle window in between, so the only thing that can
+    # have put it in the file is switch_slot's own call-site save.
     trap_exists2, trap_after2 = read_device_file(TRAP_FILE)
-    check(trap_exists2 and trap_after2 is not None and "43" in trap_after2,
-          "switch_slot flushed the outgoing file context to its own file")
+    check(trap_exists2 and trap_after2 is not None and "47" in trap_after2,
+          "switch_slot saved the outgoing file context's UNSAVED edit (47-48) "
+          "to its own file before switching")
+    check(trap_after2 is not None and "43" in trap_after2,
+          "...and the previously-flushed edit (43-44) is still there")
 
     # --- 6. Temp slot 8 nesting from a file context ------------------------
     # enterTemporarySlot captures the ORIGINAL as a (number, path) pair, and
