@@ -1281,7 +1281,7 @@ void FileManager::selectCurrentFile( ) {
             // slot-load path as slot*.yaml - a project wiring file IS a slot
             // YAML (v2 plus the contained meta:/parts:/guide: sections). They
             // are deliberately NOT named slot*.yaml: extractSlotNumberFromPath()
-            // (States.cpp, ~:2873) matches any basename starting "slot" and
+            // (States.cpp, ~:2876) matches any basename starting "slot" and
             // ending ".yaml", so "slot_555.yaml" would toInt() to 0 and repoint
             // activeSlotNumber/netSlot at slot 0 - the idle auto-save would then
             // write the project over the user's /slots/slot0.yaml. With

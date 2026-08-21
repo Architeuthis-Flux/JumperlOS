@@ -265,8 +265,11 @@ static bool guideOverlayAddWarned = false;
 // LED overlay painting is V5-only: the OG has one LED per breadboard row and
 // no overlay fabric, so every call site below is already inside a
 // `#if defined(OG_JUMPERLESS) return;` early-out. Guarding the whole BLOCK
-// and not just the call sites is what keeps guideOverlayScratch - 300 x 4 B
-// = 1.2 KB - out of the OG's ~50 KB of total free SRAM.
+// and not just the call sites is SOURCE HYGIENE, not a RAM saving - the
+// linker's --gc-sections already dropped the unused 1.2 KB
+// guideOverlayScratch from the OG image (measured: .bss identical either
+// way, the symbol simply absent from the OG ELF). The point is that dead
+// code stops being compiled at all.
 #if !defined(OG_JUMPERLESS)
 
 // Dim class colors + pin-1 marker (DESIGN §4.1).

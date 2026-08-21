@@ -40,13 +40,22 @@ TMP_WIRING = TMP_PROJ + "/wiring.yaml"
 # pin numbers + connects incl. GND / TOP_RAIL / a row + an unknown key, a
 # sip2 with offsets, and the guideProgress scalar.
 #
-# C1's value is the string "overlays:" ON PURPOSE - it is the section-hijack
+# U1's value is the string "overlays:" ON PURPOSE - it is the section-hijack
 # needle. deserializeOverlaysFromYAML used to strstr() the WHOLE file for
-# "overlays:" and start parsing at the first hit, so this value (which sits
-# ABOVE the real section) took over the scan - and since the parts section
-# is full of `- name:` lines, the parts would have been read as overlays.
-# The scanner now matches only an UN-INDENTED `overlays:` line, so the real
-# RTTEST overlay below must survive intact.
+# "overlays:" and begin parsing at the first hit, then scan FORWARD for
+# `- name:` entries. The old scanner therefore reads this file as four
+# overlays - R1, U2, C1 and RTTEST - because the three parts BELOW U1 each
+# present a `- name:` line inside the hijacked region.
+#
+# It must be the FIRST part, not the last. On C1 the needle is INERT: the
+# forward scan starts below C1's own header, so the first `- name:` it finds
+# is the real RTTEST overlay and old and new scanners agree. Both scanners
+# were ported to Python and run against both placements to confirm that
+# (old: ['R1','U2','C1','RTTEST'] here vs ['RTTEST'] on C1). If this value
+# ever migrates to a later part, phase 2b stops testing anything.
+#
+# The scanner now anchors on an UN-INDENTED `overlays:` line and stops at the
+# next un-indented header, so only the real RTTEST overlay may load.
 SLOT_YAML = """version: 2
 sourceOfTruth: bridges
 guideProgress: {source: "/projects/test/wiring.yaml", step: 2}
@@ -61,7 +70,7 @@ bridges:
 parts:
   - name: "U1"
     type: ic
-    value: "NE555"
+    value: "overlays:"
     footprint: dip8
     row: 5
     placed: true
@@ -92,7 +101,7 @@ parts:
       P28: {pin: 28, connect: 18}
   - name: "C1"
     type: capacitor
-    value: "overlays:"
+    value: "100n"
     footprint: sip2
     row: 50
     placed: false
@@ -171,12 +180,6 @@ print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
 # a re-read. Computed here, with orig_slot, so the finally can use it too.
 bounce = orig_slot if orig_slot != 3 else 2
 
-# If slot 3 is somehow the active slot, move off it first - the idle
-# auto-save of the ACTIVE slot would clobber our fs_write.
-if orig_slot == 3:
-    port1_command("<2", 4.0)
-    time.sleep(1.5)
-
 # Everything that MUTATES the board lives inside this try; the tmptest
 # teardown + phase 9's restore are its finally. Without it an uncaught
 # exception anywhere below walks out with slot 3 overwritten, /projects/
@@ -184,7 +187,17 @@ if orig_slot == 3:
 # that reads as a firmware bug the next time anyone looks. Same shape
 # test_guide_flow.py and test_projects.py use. Phase 0 stays OUTSIDE: the
 # finally needs snapshot/orig_slot/slot3_before/bounce bound first.
+#
+# The slot-3 bounce below is the FIRST mutating action, so it belongs inside
+# the try, not above it - it moves the active slot, and a failure between it
+# and the first phase would otherwise leave the bench on someone else's slot.
 try:
+    # If slot 3 is somehow the active slot, move off it first - the idle
+    # auto-save of the ACTIVE slot would clobber our fs_write.
+    if orig_slot == 3:
+        port1_command("<2", 4.0)
+        time.sleep(1.5)
+
     # --- 1. Write the parts slot and load it through the real path ------------
     out = jl_exec(f"print('wrote=', 1 if fs_write({SLOT_PATH!r}, {SLOT_YAML!r}) else 0)")
     check(parse_kv(out).get("wrote") == 1, "wrote parts slot YAML to /slots/slot3.yaml")
@@ -216,10 +229,12 @@ print("unplaced=", 1 if is_connected(50, 52) else 0)
     # "overlays:" -------------------------------------------------------------
     # Section-hijack regression (see the SLOT_YAML note): a bare
     # strstr(file, "overlays:") started the overlay scan inside the PARTS
-    # section, where it would have read `- name: "U1"` etc. as overlay
-    # entries - wrong count, wrong names, and the real overlay lost. The
-    # scanner now anchors on an un-indented `overlays:` line, so exactly one
-    # overlay must be present and it must be RTTEST with its own geometry.
+    # section, at U1's value, and then scanned forward - so R1, U2 and C1
+    # were each read as an overlay entry and the table came back holding
+    # FOUR, three of them named after parts. The scanner now anchors on an
+    # un-indented `overlays:` line, so exactly one overlay may be present and
+    # it must be RTTEST. Both assertions below are load-bearing: the count
+    # catches the extra entries, the name regex catches WHICH ones.
     out = jl_exec("""
 print("ovcount=", overlay_count())
 print("<<<OV>>>")
@@ -274,7 +289,7 @@ for k in sorted(found):
 
     _, rewritten = read_device_file(SLOT_PATH)
     check("parts:" in rewritten, "parts: section SURVIVED the wholesale rewrite")
-    for needle in ('- name: "U1"', "type: ic", 'value: "NE555"', "footprint: dip8",
+    for needle in ('- name: "U1"', "type: ic", 'value: "overlays:"', "footprint: dip8",
                    "row: 5", "placed: true",
                    "GND: {pin: 1, connect: GND, class: gnd}",
                    "TRIG: {pin: 2, connect: 37, class: signal}",

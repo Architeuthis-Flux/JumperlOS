@@ -16,10 +16,15 @@ Asserts:
     toYAML rewrite still carries all six parts with `placed: false`
   - meta:/guide: are swallowed on parse and deliberately NOT round-tripped
 
-Phase 6 (task 5) adds a second, minimal project at /projects/hiltest/ and
-covers the two contracts the encoder-driven launcher rests on - load_project()
-on a meta:-first wiring, and the `_jl_project` preamble prepended to the
-companion script.
+Phase 6 (task 5) adds a second, minimal project at /projects/hiltest/. It
+opens with the two contracts the encoder-driven launcher rests on -
+load_project() on a meta:-first wiring, and the `_jl_project` preamble
+prepended to the companion script - and then drives the launcher ITSELF:
+6(c)/6(d) call run_app("Projects") for real from two ports at once (port 5
+runs it in a worker thread, port 1 watches the picker and cancels it). What
+stays out of reach from here is RUNNING a project's script, because the
+launcher moves the MicroPython stream to port 1 before it does. See the
+block at phase 6 for the full reasoning.
 
 Phase 6(c) (task 8) is the PROVISIONING phase: delete built-in project files
 off the board, drive initializeProjects() through the launcher's self-heal
@@ -255,12 +260,6 @@ orig_slot = int(m.group(1)) if m else 0
 slot3_existed, slot3_before = read_device_file(SLOT_PATH)
 print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
 
-# Move off slot 3 before touching its file - the idle auto-save of the
-# ACTIVE slot would clobber the fs_write.
-if orig_slot == 3:
-    port1_command("<2", 4.0)
-    time.sleep(1.5)
-
 # Everything that MUTATES the board lives inside this try; phase 7's restore
 # is its finally. Without it an uncaught exception anywhere below (a NameError
 # in a new phase is how this was learned) walks out with slot 3 overwritten,
@@ -268,7 +267,17 @@ if orig_slot == 3:
 # stranded bench that reads as a firmware bug the next time anyone looks.
 # Same shape test_guide_flow.py uses. Phase 0 stays OUTSIDE: the finally
 # needs snapshot/orig_slot/slot3_before bound before it can restore anything.
+#
+# The slot-3 bounce below is the FIRST mutating action, so it belongs inside
+# the try, not above it - it moves the active slot, and a failure between it
+# and the first phase would otherwise leave the bench on someone else's slot.
 try:
+    # Move off slot 3 before touching its file - the idle auto-save of the
+    # ACTIVE slot would clobber the fs_write.
+    if orig_slot == 3:
+        port1_command("<2", 4.0)
+        time.sleep(1.5)
+
     # --- 1. Push the project tree to the board --------------------------------
     out = jl_exec(f"""
 for d in ("/projects", {PROJ_DIR!r}):
