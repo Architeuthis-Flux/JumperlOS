@@ -839,39 +839,30 @@ static void finishRun(const RunContext& rc) {
 
 // The companion script, offered or run. `afterGuide` selects Kevin's OFFER
 // (exit H) over the unconditional run non-guided launches get.
+//
+// TWO machine lines on EVERY path, in this order, so the grammar is greppable
+// whether or not a script exists and whether or not it ran:
+//   SCRIPT offer=<resolved path>|none
+//   SCRIPT action=run|skip
 static void runOrOfferScript(const RunContext& rc, bool afterGuide) {
     String scriptPath = resolveScriptPath(rc);
 
-    if (rc.noScript) {
-        Serial.println("\r\nSCRIPT offer=" +
-                       (scriptPath.length() ? scriptPath : String("none")));
-        Serial.println("SCRIPT action=skip");
-        Serial.flush();
-        finishRun(rc);
-        return;
-    }
+    // Announce the resolution BEFORE any prompt: a headless driver watches for
+    // this line and then answers the offer that follows it.
+    Serial.println("\r\nSCRIPT offer=" +
+                   (scriptPath.length() ? scriptPath : String("none")));
+    Serial.flush();
 
-    if (scriptPath.length() == 0) {
-        // No script is a legitimate project shape (wiring only) - the circuit
-        // is live and the run file keeps it.
-        if (afterGuide) {
-            Serial.println("\r\nSCRIPT offer=none");
-            Serial.println("SCRIPT action=skip");
-        }
-        Serial.println("  (no companion script - wiring only)");
-        finishRun(rc);
-        return;
-    }
+    bool run = (scriptPath.length() > 0) && !rc.noScript;
 
-    bool run = true;
-    if (afterGuide && rc.interactive) {
+    if (run && afterGuide && rc.interactive) {
         // Kevin's binding addition: the companion script is OPTIONAL after a
         // guided build. Decline/timeout leaves the run file active and the
         // rails exactly where the guide left them (a completed 555 keeps
-        // blinking on hardware alone).
+        // blinking on hardware alone). Encoder/terminal-interactive only -
+        // headless guided-complete runs the script unless `noscript`, because
+        // headless has to be deterministic.
         waitForButtonRest(1500);
-        Serial.println("\r\nSCRIPT offer=" + scriptPath);
-        Serial.flush();
         notify("Run\nmain.py?",
                "\n\r  Build complete. Run " + baseNameOfPath(scriptPath) +
                    "? y/click = run, n/other/timeout(15s) = done",
@@ -881,11 +872,6 @@ static void runOrOfferScript(const RunContext& rc, bool afterGuide) {
         b.clear();
         requestLedShow(-1);
         run = (r == 1);
-    } else if (afterGuide) {
-        // Headless guided-complete: runs the script unless `noscript` said
-        // otherwise (handled above). No prompt - headless must be
-        // deterministic.
-        Serial.println("\r\nSCRIPT offer=" + scriptPath);
     }
 
     Serial.println(run ? "SCRIPT action=run" : "SCRIPT action=skip");
@@ -895,6 +881,10 @@ static void runOrOfferScript(const RunContext& rc, bool afterGuide) {
         runCompanionScript(rc, scriptPath);
         // The clickwheel hold that ended the script must not fall through.
         waitForButtonRest(2000);
+    } else if (scriptPath.length() == 0) {
+        // No script is a legitimate project shape (wiring only) - the circuit
+        // is live and the run file keeps it.
+        Serial.println("  (no companion script - wiring only)");
     }
     finishRun(rc);
 }
