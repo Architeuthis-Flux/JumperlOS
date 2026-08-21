@@ -82,9 +82,16 @@ of all offers the write test, which defaults to **no**.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > eeprom.
-- **Files browser:** open `/projects/eeprom/wiring.yaml` to load the
-  circuit, then run `/projects/eeprom/main.py`.
+- **Clickwheel:** Apps > Projects > eeprom, and walk the guided build. That is
+  what actually wires the board. Then run `main.py` when it offers.
+- **Headless:** `z /projects/eeprom/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/eeprom/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
+This project has no `bridges:` section at all - every connection lives in
+`parts:`, and `expandPartsToBridges()` skips any part still marked
+`placed: false`, which only a guide commit clears. Loaded that way the
+breadboard stays completely unconnected and `main.py` reports an empty bus.
 
 ## Troubleshooting
 

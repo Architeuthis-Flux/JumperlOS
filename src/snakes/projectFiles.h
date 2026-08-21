@@ -79,9 +79,16 @@ clickwheel to stop it.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > 555.
-- **Files browser:** open `/projects/555/wiring.yaml` to load the circuit,
-  then run `/projects/555/main.py`.
+- **Clickwheel:** Apps > Projects > 555, and walk the guided build - that is
+  what wires the parts up. Then run `main.py` when it offers.
+- **Headless:** `z /projects/555/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/555/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file and makes the two
+ADC tap connections from its `bridges:` section, but it does **not** wire the
+circuit. Parts are bridged only as the guided build confirms each one -
+`expandPartsToBridges()` skips any part still marked `placed: false`, and only
+a guide commit sets that flag. Loaded that way, the LED will not blink.
 
 ## Troubleshooting
 
@@ -91,8 +98,8 @@ clickwheel to stop it.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[2] = { 0x52517D68, 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 2;
+const uint32_t PROJECT_555_README_MD_HASHES[3] = { 0xE846A64A, 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 3;
 
 const char* PROJECT_555_MAIN_PY = R"("""555 LED Flasher - companion script for /projects/555/wiring.yaml
 
@@ -325,9 +332,16 @@ of all offers the write test, which defaults to **no**.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > eeprom.
-- **Files browser:** open `/projects/eeprom/wiring.yaml` to load the
-  circuit, then run `/projects/eeprom/main.py`.
+- **Clickwheel:** Apps > Projects > eeprom, and walk the guided build. That is
+  what actually wires the board. Then run `main.py` when it offers.
+- **Headless:** `z /projects/eeprom/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/eeprom/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
+This project has no `bridges:` section at all - every connection lives in
+`parts:`, and `expandPartsToBridges()` skips any part still marked
+`placed: false`, which only a guide commit clears. Loaded that way the
+breadboard stays completely unconnected and `main.py` reports an empty bus.
 
 ## Troubleshooting
 
@@ -348,8 +362,8 @@ of all offers the write test, which defaults to **no**.
   shares the i2c1 peripheral in every mode. Turn it off while you use this
   project.
 )";
-const uint32_t PROJECT_EEPROM_README_MD_HASHES[3] = { 0x965FF7AE, 0x35314190, 0xF2E7D49B };
-const int PROJECT_EEPROM_README_MD_HASH_COUNT = 3;
+const uint32_t PROJECT_EEPROM_README_MD_HASHES[4] = { 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
+const int PROJECT_EEPROM_README_MD_HASH_COUNT = 4;
 
 const char* PROJECT_EEPROM_MAIN_PY = R"===("""EEPROM Dumper - companion for /projects/eeprom/wiring.yaml.
 
@@ -394,6 +408,17 @@ def open_bus():
         return None
 
 
+def release_bus():
+    """Give the two pins back. Called on EVERY exit from main(), including
+    the one where open_bus() claimed them and then failed to build the I2C
+    object - that path used to return past the finally and leak the claim."""
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_release_pin(n)
+        except Exception:
+            pass
+
+
 def hexdump(data, base=0):
     for off in range(0, len(data), 16):
         c = data[off:off + 16]
@@ -426,6 +451,13 @@ def write_test(i2c, original):
     moved = False
     try:
         disconnect(WP_ROW, TOP_RAIL)
+        # Never add GND while the rail is still on that row: the two together
+        # are a short across the supply, through the crossbar. If the
+        # disconnect did not take, stop here - protected is the safe way out.
+        if is_connected(WP_ROW, TOP_RAIL):
+            print("WP row %d is still on the top rail - refusing to add GND "
+                  "(that would short the rail). Write test aborted." % WP_ROW)
+            return i2c
         connect(WP_ROW, GND)
         moved = True
         time.sleep(0.05)
@@ -459,9 +491,9 @@ def write_test(i2c, original):
 def main():
     print("EEPROM Dumper " + str(_jl_project.get("dir", "")))
     i2c = open_bus()
-    if i2c is None:
-        return
     try:
+        if i2c is None:
+            return                  # inside the try: the finally still runs
         found = i2c.scan()
         print("i2c devices: " + str([hex(a) for a in found]))
         if ADDR not in found:
@@ -502,18 +534,14 @@ def main():
     except Exception as e:
         print("failed: " + str(e))
     finally:
-        for n in (GPIO_7, GPIO_8):
-            try:
-                gpio_release_pin(n)
-            except Exception:
-                pass
+        release_bus()
         print("bye")
 
 
 main()
 )===";
-const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[2] = { 0x70FDD4AE, 0x9B89537B };
-const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 2;
+const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[3] = { 0x0D73F0A3, 0x70FDD4AE, 0x9B89537B };
+const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 3;
 
 const char* PROJECT_EEPROM_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -625,9 +653,16 @@ and COM pin configuration by itself.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > i2cscrn.
-- **Files browser:** open `/projects/i2cscrn/wiring.yaml` to load the
-  circuit, then run `/projects/i2cscrn/main.py`.
+- **Clickwheel:** Apps > Projects > i2cscrn, and walk the guided build. That is
+  what actually wires the board. Then run `main.py` when it offers.
+- **Headless:** `z /projects/i2cscrn/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/i2cscrn/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
+This project has no `bridges:` section at all - every connection lives in
+`parts:`, and `expandPartsToBridges()` skips any part still marked
+`placed: false`, which only a guide commit clears. Loaded that way the
+breadboard stays completely unconnected and `main.py` reports an empty bus.
 
 ## Troubleshooting
 
@@ -647,8 +682,8 @@ and COM pin configuration by itself.
 - **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
   Long crossbar paths plus breadboard capacitance slow the edges down.
 )";
-const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[2] = { 0x4A5A7256, 0xBFC48EF5 };
-const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 2;
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[3] = { 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 3;
 
 const char* PROJECT_I2CSCRN_MAIN_PY = R"("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml.
 
@@ -896,9 +931,16 @@ sets A high, B low, and reads the result back:
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > nand00.
-- **Files browser:** open `/projects/nand00/wiring.yaml` to load the
-  circuit, then run `/projects/nand00/main.py`.
+- **Clickwheel:** Apps > Projects > nand00, and walk the guided build. That is
+  what actually wires the board. Then run `main.py` when it offers.
+- **Headless:** `z /projects/nand00/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/nand00/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
+This project has no `bridges:` section at all - every connection lives in
+`parts:`, and `expandPartsToBridges()` skips any part still marked
+`placed: false`, which only a guide commit clears. Loaded that way the
+breadboard stays completely unconnected and `main.py` reports floating reads.
 
 ## Troubleshooting
 
@@ -907,15 +949,21 @@ sets A high, B low, and reads the result back:
   and that the top rail really is at 3.3 V.
 - **The LED never lights but the readback is right** - the LED is backwards.
   The long leg goes in row 18.
-- **The LED is on all four rows** - a 74HC**02** (NOR) or a 74HC**08** (AND)
-  will not behave like this; check the part number on the chip. A 74HC00
-  with input pin 1 or 2 not seated will also read high forever, because a
-  floating HC input tends to drift high.
+- **The LED is on for all four rows** - the output is stuck high. Most often
+  input pin 1 or 2 is not seated: a floating HC input drifts high, and two
+  high inputs are the only case NAND pulls low.
+- **The LED is on for exactly one row, `1 1`** - that is a 74HC**08** (AND).
+  AND is NAND's exact inverse, so it lights the one row NAND darkens. Check
+  the part number on the chip.
+- **A 74HC02 (NOR) is worse than wrong here.** Its pin 1 is an *output*
+  (1Y), not an input, and this wiring drives pin 1 from `RP_GPIO_1` - two
+  drivers fighting over one node. Pull it out rather than leaving it
+  powered, and use a 74HC00.
 - **The last two rows disagree** - one of the two input legs (rows 5, 6) is
   not making contact.
 )";
-const uint32_t PROJECT_NAND00_README_MD_HASHES[2] = { 0x6F684328, 0x66A8E629 };
-const int PROJECT_NAND00_README_MD_HASH_COUNT = 2;
+const uint32_t PROJECT_NAND00_README_MD_HASHES[3] = { 0x36273393, 0x6F684328, 0x66A8E629 };
+const int PROJECT_NAND00_README_MD_HASH_COUNT = 3;
 
 const char* PROJECT_NAND00_MAIN_PY = R"("""Logic Gates 101 - companion script for /projects/nand00/wiring.yaml
 

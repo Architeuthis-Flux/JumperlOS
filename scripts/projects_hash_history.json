@@ -1,5 +1,6 @@
 {
   "555/README.md": [
+    "0xE846A64A",
     "0x52517D68",
     "0x4E203A59"
   ],
@@ -10,11 +11,13 @@
     "0xC8CBC62E"
   ],
   "eeprom/README.md": [
+    "0xAF82DCE7",
     "0x965FF7AE",
     "0x35314190",
     "0xF2E7D49B"
   ],
   "eeprom/main.py": [
+    "0x0D73F0A3",
     "0x70FDD4AE",
     "0x9B89537B"
   ],
@@ -22,6 +25,7 @@
     "0x77CA786A"
   ],
   "i2cscrn/README.md": [
+    "0x9006DDCB",
     "0x4A5A7256",
     "0xBFC48EF5"
   ],
@@ -33,6 +37,7 @@
     "0xBEE331D0"
   ],
   "nand00/README.md": [
+    "0x36273393",
     "0x6F684328",
     "0x66A8E629"
   ],

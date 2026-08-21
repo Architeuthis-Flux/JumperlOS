@@ -49,9 +49,16 @@ and COM pin configuration by itself.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > i2cscrn.
-- **Files browser:** open `/projects/i2cscrn/wiring.yaml` to load the
-  circuit, then run `/projects/i2cscrn/main.py`.
+- **Clickwheel:** Apps > Projects > i2cscrn, and walk the guided build. That is
+  what actually wires the board. Then run `main.py` when it offers.
+- **Headless:** `z /projects/i2cscrn/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/i2cscrn/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
+This project has no `bridges:` section at all - every connection lives in
+`parts:`, and `expandPartsToBridges()` skips any part still marked
+`placed: false`, which only a guide commit clears. Loaded that way the
+breadboard stays completely unconnected and `main.py` reports an empty bus.
 
 ## Troubleshooting
 

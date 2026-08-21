@@ -781,12 +781,36 @@ for p in ps:
     for k in p['pins']:
         print("PIN|%s|%s|%d|%d" % (p['name'], k, p['pins'][k]['node'],
                                    p['pins'][k]['connect']))
-print("nbridges=", get_num_bridges())
+n = get_num_bridges()
+print("nbridges=", n)
+rowb = 0
+for i in range(n):
+    b = get_bridge(i)
+    if (1 <= b[0] <= 60) or (1 <= b[1] <= 60):
+        rowb += 1
+        print("ROWBRIDGE|%s" % str(b))
+print("rowbridges=", rowb)
 """, timeout=40)
     vals = parse_kv(out)
     check(vals.get("loaded") == 1, f"load_project({proj!r}) loaded {pdir}/wiring.yaml")
     check(vals.get("nparts") == len(want_parts),
           f"{proj}: {vals.get('nparts')} parts parsed (expected {len(want_parts)})")
+    # All three carry their whole circuit in parts: and NO bridges: section, so
+    # a fresh load must leave the BREADBOARD entirely unconnected - every
+    # connection waits on a guide commit to set placed: true
+    # (expandPartsToBridges skips the rest). That is the whole reason the
+    # READMEs send people through the guided build instead of a bare
+    # Files-browser load, so it gets asserted as a count and not just as the
+    # per-leg spot checks below.
+    #
+    # Counted as "bridges touching a breadboard row (1-60)", NOT as
+    # get_num_bridges() == 0: the board carries a probe-power INFRASTRUCTURE
+    # feed, (139, 106) = ROUTABLE_BUFFER_IN <-> DAC0, which InfraPaths owns and
+    # which has nothing to do with any project. Asserting a bare zero here
+    # fails on a healthy board (bench-caught: got 1).
+    check(vals.get("rowbridges") == 0,
+          f"{proj}: a fresh load leaves the breadboard unconnected - 0 bridges "
+          f"touch rows 1-60 (total bridges {vals.get('nbridges')}, all infra)")
 
     got_parts, got_pins = {}, {}
     for line in out.splitlines():

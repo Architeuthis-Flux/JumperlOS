@@ -39,9 +39,16 @@ clickwheel to stop it.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > 555.
-- **Files browser:** open `/projects/555/wiring.yaml` to load the circuit,
-  then run `/projects/555/main.py`.
+- **Clickwheel:** Apps > Projects > 555, and walk the guided build - that is
+  what wires the parts up. Then run `main.py` when it offers.
+- **Headless:** `z /projects/555/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/555/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file and makes the two
+ADC tap connections from its `bridges:` section, but it does **not** wire the
+circuit. Parts are bridged only as the guided build confirms each one -
+`expandPartsToBridges()` skips any part still marked `placed: false`, and only
+a guide commit sets that flag. Loaded that way, the LED will not blink.
 
 ## Troubleshooting
 

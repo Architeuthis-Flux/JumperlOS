@@ -41,6 +41,17 @@ def open_bus():
         return None
 
 
+def release_bus():
+    """Give the two pins back. Called on EVERY exit from main(), including
+    the one where open_bus() claimed them and then failed to build the I2C
+    object - that path used to return past the finally and leak the claim."""
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_release_pin(n)
+        except Exception:
+            pass
+
+
 def hexdump(data, base=0):
     for off in range(0, len(data), 16):
         c = data[off:off + 16]
@@ -73,6 +84,13 @@ def write_test(i2c, original):
     moved = False
     try:
         disconnect(WP_ROW, TOP_RAIL)
+        # Never add GND while the rail is still on that row: the two together
+        # are a short across the supply, through the crossbar. If the
+        # disconnect did not take, stop here - protected is the safe way out.
+        if is_connected(WP_ROW, TOP_RAIL):
+            print("WP row %d is still on the top rail - refusing to add GND "
+                  "(that would short the rail). Write test aborted." % WP_ROW)
+            return i2c
         connect(WP_ROW, GND)
         moved = True
         time.sleep(0.05)
@@ -106,9 +124,9 @@ def write_test(i2c, original):
 def main():
     print("EEPROM Dumper " + str(_jl_project.get("dir", "")))
     i2c = open_bus()
-    if i2c is None:
-        return
     try:
+        if i2c is None:
+            return                  # inside the try: the finally still runs
         found = i2c.scan()
         print("i2c devices: " + str([hex(a) for a in found]))
         if ADDR not in found:
@@ -149,11 +167,7 @@ def main():
     except Exception as e:
         print("failed: " + str(e))
     finally:
-        for n in (GPIO_7, GPIO_8):
-            try:
-                gpio_release_pin(n)
-            except Exception:
-                pass
+        release_bus()
         print("bye")
 
 

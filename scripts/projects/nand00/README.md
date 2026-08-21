@@ -61,9 +61,16 @@ sets A high, B low, and reads the result back:
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > nand00.
-- **Files browser:** open `/projects/nand00/wiring.yaml` to load the
-  circuit, then run `/projects/nand00/main.py`.
+- **Clickwheel:** Apps > Projects > nand00, and walk the guided build. That is
+  what actually wires the board. Then run `main.py` when it offers.
+- **Headless:** `z /projects/nand00/wiring.yaml <slot 0-7>` on the terminal
+  drives the same flow, then run `/projects/nand00/main.py`.
+
+Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
+This project has no `bridges:` section at all - every connection lives in
+`parts:`, and `expandPartsToBridges()` skips any part still marked
+`placed: false`, which only a guide commit clears. Loaded that way the
+breadboard stays completely unconnected and `main.py` reports floating reads.
 
 ## Troubleshooting
 
@@ -72,9 +79,15 @@ sets A high, B low, and reads the result back:
   and that the top rail really is at 3.3 V.
 - **The LED never lights but the readback is right** - the LED is backwards.
   The long leg goes in row 18.
-- **The LED is on all four rows** - a 74HC**02** (NOR) or a 74HC**08** (AND)
-  will not behave like this; check the part number on the chip. A 74HC00
-  with input pin 1 or 2 not seated will also read high forever, because a
-  floating HC input tends to drift high.
+- **The LED is on for all four rows** - the output is stuck high. Most often
+  input pin 1 or 2 is not seated: a floating HC input drifts high, and two
+  high inputs are the only case NAND pulls low.
+- **The LED is on for exactly one row, `1 1`** - that is a 74HC**08** (AND).
+  AND is NAND's exact inverse, so it lights the one row NAND darkens. Check
+  the part number on the chip.
+- **A 74HC02 (NOR) is worse than wrong here.** Its pin 1 is an *output*
+  (1Y), not an input, and this wiring drives pin 1 from `RP_GPIO_1` - two
+  drivers fighting over one node. Pull it out rather than leaving it
+  powered, and use a 74HC00.
 - **The last two rows disagree** - one of the two input legs (rows 5, 6) is
   not making contact.
