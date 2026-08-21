@@ -29,6 +29,11 @@ The 24Cxx pinout, and where each pin lands with pin 1 at row 5:
 
 A0-A2 all grounded puts the chip at **0x50**.
 
+> **Jumperless V5 only.** This project routes breadboard rows to
+> `RP_GPIO_7` and `RP_GPIO_8`, and those nodes exist only on the V5. The original
+> Jumperless has exactly three routable GPIO (`RP_GPIO_0` plus UART
+> TX/RX), so the wiring loads there but cannot be routed.
+
 ### Why the two resistors are not optional
 
 I2C is an open-drain bus: the chips only ever pull the lines *down*, so
@@ -60,15 +65,12 @@ re-load the wiring before trusting the chip again.
 
 ## What it does
 
-    EEPROM Dumper
+    EEPROM Dumper eeprom
     i2c devices: ['0x50']
-
     0000  FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF  |................|
     ...
     00F0  FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF  |................|
-
     256 bytes read.  (all 0xFF - an erased chip)
-
     dump more - total size in bytes (blank = no):
 
 16 bytes to a line with a printable-ASCII gutter, the same shape `hexdump -C`

@@ -36,6 +36,20 @@ the firmware has never heard of - is left completely alone.
   (it carries listProjects' actual count). The `run_app("NoSuchAppXYZ")`
   immediate-return control is kept.
 
+Phase 6(e) (task 9) covers the three starter projects that shipped after the
+555 - i2cscrn, nand00 and eeprom. They are PROVISIONED, so nothing is pushed
+from the host: the phase asserts they arrived byte-exact, then loads each
+wiring through load_project(), checks every part leg against the node
+list_parts() resolves from the DIP/SIP footprint math, round-trips the
+power:/config: sections, compiles the companion script on the device, and
+drives `z` far enough to prove the guide: section parses.
+
+  The real parts (an SSD1306, a 74HC00, a 24Cxx) are NOT on this bench, so
+  nothing here claims anything about what the circuits DO. That is a bench
+  checklist in the task-9 report. What is asserted is everything that does
+  not need the parts - which is the whole file format, both generators, the
+  provisioning table and the guide parse.
+
 Forced refresh (the firmware-update path, initializeProjects(true): untouched
 old defaults updated in place, a user-edited file left alone with this build's
 default parked beside it as wiring_original.yaml) has no serial trigger and is
@@ -100,20 +114,35 @@ def embedded_hash(var_name):
 
 def device_hash(path):
     """(hash_hex, length) of a device file, hashed ON the device so nothing
-    the serial transport does to the bytes can hide a mismatch."""
+    the serial transport does to the bytes can hide a mismatch.
+
+    Reads through jfs in 256-byte chunks rather than fs_read(). fs_read()
+    answers out of jl_fs_read_file()'s static 4096-byte buffer (1024 on OG)
+    and TRUNCATES anything longer - which would hash a prefix and call it a
+    match failure with no hint why. Chunking also keeps the peak allocation
+    tiny, so this works no matter how fragmented the heap has become.
+    """
     out = jl_exec(f"""
 p = {path!r}
 if fs_exists(p):
-    b = fs_read(p).encode('utf-8')
+    f = jfs.open(p, "r")
     h = 0x811C9DC5
-    for x in b:
-        h = ((h ^ x) * 0x01000193) & 0xFFFFFFFF
+    n = 0
+    while True:
+        c = f.read(256)
+        if not c:
+            break
+        b = c.encode('utf-8') if isinstance(c, str) else c
+        for x in b:
+            h = ((h ^ x) * 0x01000193) & 0xFFFFFFFF
+        n += len(b)
+    f.close()
     print("dhash=", "0x%08X" % h)
-    print("dlen=", len(b))
+    print("dlen=", n)
 else:
     print("dhash=", "MISSING")
     print("dlen=", -1)
-""", timeout=40)
+""", timeout=60)
     v = parse_kv(out)
     return v.get("dhash"), v.get("dlen")
 
@@ -607,6 +636,292 @@ check(slot_after == 3,
 out = jl_exec("print('saved=', nodes_save(3))", timeout=25)
 check(parse_kv(out).get("saved") == 3,
       "a slot operation still succeeds after the cancelled launch")
+
+# --- 6(e). The task-9 starter projects -------------------------------------
+# i2cscrn / nand00 / eeprom are PROVISIONED projects, so unlike 555 above
+# nothing is pushed from the host here: the firmware's own projectFiles[]
+# put them on the board, and the first assertion in each block is that they
+# really did arrive byte-exact. Everything after that reads the DEVICE's
+# copy, which is the copy a user would run.
+#
+# Per project:
+#   (i)   repo FNV == projectFiles.h HASHES[0]  - the generated header is current
+#   (ii)  device FNV == HASHES[0]               - provisioning landed this build
+#   (iii) load_project() + list_parts()         - the wiring PARSES, and every
+#         leg resolves to the node the DIP/SIP math says it should. This is the
+#         assertion that catches a footprint or a row typo: list_parts()
+#         reports partPinNode()'s own answer, not the file's text.
+#   (iv)  the rails the wiring asks for actually land (3.3 V, measured)
+#   (v)   compile() of the companion script, ON the device, from the device's
+#         file. Never exec: all three scripts block on input().
+#   (vi)  the guide: section parses - `z` far enough to see `GUIDE step=1/<n>`,
+#         then quit. Nothing is placed, so no part bridges are created.
+#
+# The real parts (an SSD1306, a 74HC00, a 24Cxx) are NOT on this bench. What
+# the hardware does with them is a bench checklist in the task-9 report; what
+# is asserted here is everything that does not need them.
+
+
+class GuideDriver:
+    """One port-1 connection driving one guide session, with ORDERED
+    status-line assertions. A local copy of test_guide_flow.py's driver -
+    jl.py is shared, this file is not, and duplicating the small serial
+    helpers is already this suite's convention (read_device_file above)."""
+
+    def __init__(self):
+        self.ser = serial.Serial(port1_path(), 115200, timeout=0.05)
+        self.buf = ""
+        self.pos = 0
+        # Prime the connection: the firmware's connection-init eats the first
+        # byte(s) - the same idiom phase 6(d) uses.
+        self.ser.write(b"\r\n")
+        self.ser.flush()
+        quiet, overall = time.time(), time.time()
+        while time.time() - overall < 4.0:
+            if self.ser.read(4096):
+                quiet = time.time()
+            elif time.time() - quiet > 0.6:
+                break
+        self.ser.reset_input_buffer()
+
+    def send(self, data):
+        self.ser.write(data)
+        self.ser.flush()
+
+    def expect(self, pattern, what, timeout=25):
+        deadline = time.time() + timeout
+        rx = re.compile(pattern)
+        while time.time() < deadline:
+            chunk = self.ser.read(4096)
+            if chunk:
+                self.buf += _csi.sub("", chunk.decode(errors="replace"))
+            m = rx.search(self.buf, self.pos)
+            if m:
+                self.pos = m.end()
+                check(True, what)
+                return m
+        tail = self.buf[max(0, len(self.buf) - 600):]
+        check(False, f"{what} (timed out; tail: {tail!r})")
+        return None
+
+    def close(self):
+        try:
+            chunk = self.ser.read(4096)
+            if chunk:
+                self.buf += _csi.sub("", chunk.decode(errors="replace"))
+        finally:
+            self.ser.close()
+
+
+# (part name, footprint, base row, [(pin name, expected node, expected connect)])
+# connect -1 = "the leg just occupies the hole". Node numbers are the ones
+# JumperlessDefines.h assigns: GND 100, TOP_RAIL 101, RP_GPIO_1..3 131/132/133,
+# RP_GPIO_7 137 (RP pin 26, SDA), RP_GPIO_8 138 (RP pin 27, SCL).
+TASK9_PROJECTS = (
+    ("i2cscrn", 5, (
+        ("DISP", "sip4", 5, (("GND", 5, 100), ("VCC", 6, 101),
+                             ("SCL", 7, 138), ("SDA", 8, 137))),
+    )),
+    ("nand00", 7, (
+        ("U1", "dip14", 5, (("A1", 5, 131), ("B1", 6, 132), ("Y1", 7, 133),
+                            ("A2", 8, 100), ("GND", 11, 100), ("Y3", 41, -1),
+                            ("B4", 36, 100), ("VCC", 35, 101))),
+        ("LED1", "sip2", 18, (("A", 18, -1), ("K", 19, 100))),
+        ("R1", "sip2", 15, (("A", 15, 7), ("B", 16, 18))),
+    )),
+    ("eeprom", 7, (
+        ("U1", "dip8", 5, (("A0", 5, 100), ("A2", 7, 100), ("GND", 8, 100),
+                           ("SDA", 38, 137), ("SCL", 37, 138),
+                           ("WP", 36, 101), ("VCC", 35, 101))),
+        ("R1", "sip2", 12, (("A", 12, 101), ("B", 13, 38))),
+        ("R2", "sip2", 15, (("A", 15, 101), ("B", 16, 37))),
+    )),
+)
+
+# Host-side grammar check, first and unconditionally: py_compile costs nothing
+# and never depends on the board's heap, so a syntax error is caught here even
+# on a run where the device-side compile below has to bow out for memory.
+for _p in ("555",) + tuple(p[0] for p in TASK9_PROJECTS):
+    _path = os.path.join(REPO, "scripts", "projects", _p, "main.py")
+    try:
+        compile(open(_path).read(), _path, "exec")
+        check(True, f"scripts/projects/{_p}/main.py parses (host py_compile)")
+    except SyntaxError as e:
+        check(False, f"scripts/projects/{_p}/main.py: {e}")
+
+for proj, want_steps, want_parts in TASK9_PROJECTS:
+    print(f"  --- 6(e) {proj} ---")
+    pdir = f"/projects/{proj}"
+    src_dir = os.path.join(REPO, "scripts", "projects", proj)
+
+    # (i) + (ii) the three-way provisioning check, exactly phase 6(c)'s shape.
+    for fname, var in ((f"{proj}/wiring.yaml", f"PROJECT_{proj.upper()}_WIRING_YAML"),
+                       (f"{proj}/main.py", f"PROJECT_{proj.upper()}_MAIN_PY"),
+                       (f"{proj}/README.md", f"PROJECT_{proj.upper()}_README_MD")):
+        base = fname.split("/")[1]
+        with open(os.path.join(src_dir, base), "r") as f:
+            repo_hash = "0x%08X" % fnv1a32(f.read().encode("utf-8"))
+        hdr = embedded_hash(var)
+        check(hdr == repo_hash,
+              f"{var}_HASHES[0] ({hdr}) == FNV of scripts/projects/{fname} "
+              f"({repo_hash}) - generated header is current")
+        dh, dl = device_hash(f"{pdir}/{base}")
+        check(dh == hdr,
+              f"{pdir}/{base} on the board matches the firmware default "
+              f"(device FNV {dh}, {dl} bytes) - provisioning installed it")
+
+    # (iii) the wiring parses, and every leg lands where the footprint math says
+    out = jl_exec(f"""
+print("loaded=", 1 if load_project({proj!r}) else 0)
+ps = list_parts()
+print("nparts=", len(ps))
+for p in ps:
+    print("PART|%s|%s|%d|%d" % (p['name'], p['footprint'], p['row'],
+                                1 if p['placed'] else 0))
+    for k in p['pins']:
+        print("PIN|%s|%s|%d|%d" % (p['name'], k, p['pins'][k]['node'],
+                                   p['pins'][k]['connect']))
+print("nbridges=", get_num_bridges())
+""", timeout=40)
+    vals = parse_kv(out)
+    check(vals.get("loaded") == 1, f"load_project({proj!r}) loaded {pdir}/wiring.yaml")
+    check(vals.get("nparts") == len(want_parts),
+          f"{proj}: {vals.get('nparts')} parts parsed (expected {len(want_parts)})")
+
+    got_parts, got_pins = {}, {}
+    for line in out.splitlines():
+        m = re.match(r"\s*PART\|([^|]+)\|([^|]+)\|(\d+)\|(\d+)\s*$", line)
+        if m:
+            got_parts[m.group(1)] = (m.group(2), int(m.group(3)), int(m.group(4)))
+        m = re.match(r"\s*PIN\|([^|]+)\|([^|]+)\|(-?\d+)\|(-?\d+)\s*$", line)
+        if m:
+            got_pins[(m.group(1), m.group(2))] = (int(m.group(3)), int(m.group(4)))
+
+    for pname, fp, row, pins in want_parts:
+        got = got_parts.get(pname)
+        check(got == (fp, row, 0),
+              f"{proj}.{pname}: footprint {fp} at row {row}, placed: false "
+              f"(got {got})")
+        for pin, node, conn in pins:
+            check(got_pins.get((pname, pin)) == (node, conn),
+                  f"{proj}.{pname}.{pin} -> node {node}, connect {conn} "
+                  f"(got {got_pins.get((pname, pin))})")
+
+    # Nothing is placed, so the expansion bridges must not exist yet. Pick the
+    # first pin of the first part that names a real target and prove its
+    # bridge is absent.
+    probe = next(((p[0], q[1], q[2]) for p in want_parts for q in p[3] if q[2] >= 0))
+    out = jl_exec(f"print('early=', 1 if is_connected({probe[1]}, {probe[2]}) else 0)")
+    check(parse_kv(out).get("early") == 0,
+          f"{proj}: part not expanded - no {probe[1]}<->{probe[2]} bridge "
+          f"before any place step")
+
+    # (iv) the wiring's power: section parsed and round-trips. All three ask
+    # for 3.3 V, not the 555's 5 V, because their signal rows land on real
+    # RP2350 pins. Read back through toYAML the way phase 5 does, grepping on
+    # the device so the whole slot file never crosses the wire.
+    out = jl_exec("""
+print("saved=", nodes_save(3))
+for ln in fs_read("/slots/slot3.yaml").split("\\n"):
+    s = ln.strip()
+    if s.startswith("topRail:") or s.startswith("pulls:"):
+        print("LINE|" + s)
+""", timeout=35)
+    check(parse_kv(out).get("saved") == 3, f"{proj}: nodes_save(3) rewrote the slot")
+    lines = [l.split("|", 1)[1].strip() for l in out.splitlines()
+             if l.strip().startswith("LINE|")]
+    check(any(l.startswith("topRail: 3.30") for l in lines),
+          f"{proj}: power: topRail: 3.3 parsed and round-tripped (got {lines})")
+    if proj in ("i2cscrn", "eeprom"):
+        # The I2C projects also carry `config: gpio: pulls:` with index 6/7 set
+        # to pull-up. Without it setGPIO() re-asserts the default PULLDOWN onto
+        # RP pins 26/27 on every refreshConnections() - a pulled-down I2C bus.
+        check(any(re.match(r"pulls:\s*\[0,0,0,0,0,0,1,1,0,0\]", l) for l in lines),
+              f"{proj}: gpio pulls index 6/7 = pull-up survived the round trip "
+              f"(got {lines})")
+
+    # (v) the companion script compiles ON the device, from the device's file.
+    # compile(), never exec(): every one of these scripts blocks on input().
+    #
+    # Read through jfs.open().read(size), NOT fs_read(): jl_fs_read_file()
+    # answers out of a static 4096-byte buffer (1024 on OG), so fs_read
+    # silently truncates anything larger and the compile then fails on a
+    # half statement. The File object's read() has no such cap.
+    #
+    # This does need one contiguous MicroPython string the size of the
+    # script, which is the one thing the REAL run path never needs -
+    # executePythonFileContent() hands mp_embed_exec_str() a C pointer and
+    # mp_lexer_new_from_str_len(..., free_len=0) lexes straight out of it.
+    # A fresh board has ~39 KB free and allocates 12 KB contiguously without
+    # complaint; deep into a long HIL session the same heap refuses 4 KB. So
+    # a MemoryError HERE is a statement about this suite's heap, not about
+    # the script, and is reported as exactly that instead of as a failure.
+    out = jl_exec(f"""
+import gc
+gc.collect()
+try:
+    f = jfs.open({pdir + "/main.py"!r}, "r")
+    src = f.read(f.size())
+    f.close()
+    print("srclen=", len(src))
+    compile(src, {proj + "/main.py"!r}, "exec")
+    print("compiled=", 1)
+except MemoryError as e:
+    print("nomem=", 1)
+src = None
+gc.collect()
+""", timeout=45)
+    vals = parse_kv(out)
+    if vals.get("nomem") == 1:
+        print(f"  info: {pdir}/main.py device-compile skipped - this session's "
+              f"MicroPython heap is too fragmented to hold the source. The "
+              f"launcher's run path does not make this allocation; running the "
+              f"script from the picker is a bench item.")
+    else:
+        check(vals.get("compiled") == 1,
+              f"{pdir}/main.py compiles under this MicroPython "
+              f"({vals.get('srclen')} bytes read through jfs, uncapped)")
+
+    # (vi) the guide: section parses. Drive `z` far enough to see the first
+    # step, then quit - no part is confirmed, so nothing is placed.
+    guide_live = False
+    d = GuideDriver()
+    try:
+        d.send(f"z {pdir}/wiring.yaml 3\r\n".encode())
+        guide_live = True
+        m = d.expect(r"GUIDE (?:resume slot=\d+ step=\d+|step=1/(?P<n>\d+) id=)",
+                     f"{proj}: guide: section parsed and the runtime started")
+        if m and m.group("n") is None:
+            # Stale progress for this same wiring: restart, then look again.
+            d.send(b"n")
+            m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
+                         f"{proj}: restarted at step 1")
+        if m:
+            n_steps = int(m.group("n"))
+            check(n_steps == want_steps,
+                  f"{proj}: guide has {n_steps} steps (expected {want_steps})")
+        d.expect(r"GUIDE step=1/\d+ id=\w+ state=WAIT",
+                 f"{proj}: step 1 is waiting for input")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", f"{proj}: 'q' quit the guide at step 1")
+        guide_live = False
+    finally:
+        if guide_live:
+            d.send(b"q")
+            time.sleep(0.5)
+        d.close()
+
+    out = jl_exec("""
+ps = list_parts()
+print("anyplaced=", 1 if any(p['placed'] for p in ps) else 0)
+print("progress=", guide_progress())
+""", timeout=30)
+    vals = parse_kv(out)
+    check(vals.get("anyplaced") == 0,
+          f"{proj}: quitting at step 1 placed nothing")
+    check(vals.get("progress") in (0, -1),
+          f"{proj}: no guide progress was committed (guide_progress()="
+          f"{vals.get('progress')})")
 
 # --- 7. Restore the bench --------------------------------------------------
 # Restore the FILE first, switch slots second (same hazard as phase 0).

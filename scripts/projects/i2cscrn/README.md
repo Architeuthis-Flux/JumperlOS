@@ -19,6 +19,11 @@ Top rail is set to 3.3 V. Rows 7 and 8 are routed to `RP_GPIO_8` (RP pin 27,
 SCL) and `RP_GPIO_7` (RP pin 26, SDA) - the same pair the built-in I2C
 scanner uses.
 
+> **Jumperless V5 only.** This project routes breadboard rows to
+> `RP_GPIO_7` and `RP_GPIO_8`, and those nodes exist only on the V5. The original
+> Jumperless has exactly three routable GPIO (`RP_GPIO_0` plus UART
+> TX/RX), so the wiring loads there but cannot be routed.
+
 ## What it does
 
 `main.py` opens `machine.I2C(1, scl=27, sda=26)`, scans the bus, and then

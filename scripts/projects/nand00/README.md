@@ -26,6 +26,11 @@ Pin map for gate 1:
 | 7 (GND) | 11 | GND |
 | 14 (VCC) | 35 | top rail |
 
+> **Jumperless V5 only.** This project routes breadboard rows to
+> `RP_GPIO_1`, `RP_GPIO_2` and `RP_GPIO_3`, and those nodes exist only on the V5. The original
+> Jumperless has exactly three routable GPIO (`RP_GPIO_0` plus UART
+> TX/RX), so the wiring loads there but cannot be routed.
+
 The other three gates are not used, so their inputs (pins 4, 5, 9, 10, 12,
 13) are tied to GND. That is not decoration: a floating CMOS input drifts
 around its switching threshold, oscillates, and makes the chip draw far more

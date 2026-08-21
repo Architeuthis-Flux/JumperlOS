@@ -10,24 +10,30 @@
     "0xC8CBC62E"
   ],
   "eeprom/README.md": [
+    "0x965FF7AE",
+    "0x35314190",
     "0xF2E7D49B"
   ],
   "eeprom/main.py": [
+    "0x70FDD4AE",
     "0x9B89537B"
   ],
   "eeprom/wiring.yaml": [
     "0x77CA786A"
   ],
   "i2cscrn/README.md": [
+    "0x4A5A7256",
     "0xBFC48EF5"
   ],
   "i2cscrn/main.py": [
+    "0xDC3D3F52",
     "0x79C8D0B3"
   ],
   "i2cscrn/wiring.yaml": [
     "0xBEE331D0"
   ],
   "nand00/README.md": [
+    "0x6F684328",
     "0x66A8E629"
   ],
   "nand00/main.py": [
