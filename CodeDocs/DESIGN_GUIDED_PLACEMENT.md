@@ -28,12 +28,22 @@ overlays already prove out). See the plan's Format spec for the final field set
 (`type:`/`value:`/`part_id:` hooks, `footprint:`, `pin:`/`offset:`, node-only
 `connect:`, `class:`).
 
-- **DIP mapping rule** (verified geometry: WokwiParser.cpp:120-190 — top rows = nodes
-  1-30, bottom = 31-60, node n+30 = same column below the ravine): for `dipN` with
-  pin 1 at `row` on the top half, pin k ≤ N/2 → `row + (k-1)`; pin k > N/2 →
-  `row + 30 + (N-k)`. DIP-8 at row 5 → pins 1-4 = nodes 5,6,7,8; pins 5-8 = nodes
-  38,37,36,35. `row > 30` mirrors. Nano-header nodes are legal `connect:` targets but
-  not legal `row` bases in v1.
+- **DIP mapping rule** (top rows = nodes 1-30, bottom = 31-60, node n±30 = same
+  column across the ravine): `row:` is pin 1's ACTUAL hole, and for `dipN` it MUST
+  be on the bottom half (31-60) — pin k ≤ N/2 → `row + (k-1)` (bottom, left→right);
+  pin k > N/2 → `(row - 30) + (N-k)` (top, right→left). DIP-8 at row 35 → pins 1-4 =
+  nodes 35,36,37,38; pins 5-8 = nodes 8,7,6,5. A top-anchored `row` (≤30) is no
+  longer a legal DIP anchor at all — it fails placement/validation instead of
+  silently mirroring. Nano-header nodes are legal `connect:` targets but not legal
+  `row` bases in v1.
+  > **Wave 2 correction (bench-found, photo committed —
+  > `CodeDocs/PROJECTS_BENCH_CHECKLIST.md`, `CodeDocs/IMG_20260814_064104.jpg`):**
+  > the mapping above is the FIXED version. The original v1 mapping anchored DIPs
+  > on the TOP half and mirrored `row+30` downward for the far side — that put
+  > pin 1 (the dot/notch) at the top-left, but real chips sit with pin 1 at the
+  > BOTTOM-left. Wave 2 also added `axial2` (pin 1 = `row` on the top half,
+  > pin 2 = `row+30`), the default footprint for 2-leg parts (resistors, diodes)
+  > straddling the ravine; radial parts (caps, LEDs) keep `sip2` in adjacent rows.
 - `connect:` absent → the leg occupies the hole but no bridge.
 - Expansion to bridges via `JumperlessState::addConnection` (idempotent —
   `hasConnection` States.h:273 skips exact duplicates).

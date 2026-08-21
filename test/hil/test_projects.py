@@ -8,11 +8,11 @@ copied into /slots/slot3.yaml and loaded with '<3'.
 
 Asserts:
   - the three project files land under /projects/555/ byte-identical
-  - the wiring loads: ADC0-7 and ADC1-37 bridges exist, topRail is 5 V
-  - the custom `nets:` name resolves - the net holding node 37 is "TIMING"
+  - the wiring loads: ADC0-37 and ADC1-7 bridges exist, topRail is 5 V
+  - the custom `nets:` name resolves - the net holding node 7 is "TIMING"
     (the net NUMBER is discovered, not hardcoded: it is topology-dependent)
   - parts are in the state but NOT expanded (no `placed:` in the file ->
-    default false): rows 5/35/12/16 have no part bridges, while a wholesale
+    default false): rows 35/5/10/13 have no part bridges, while a wholesale
     toYAML rewrite still carries all six parts with `placed: false`
   - meta:/guide: are swallowed on parse and deliberately NOT round-tripped
 
@@ -315,31 +315,33 @@ print("projdir=", 1 if fs_exists({PROJ_DIR!r}) else 0)
 
     # --- 3. Bridges, rail, and the un-expanded parts ---------------------------
     out = jl_exec("""
-print("adc0=", 1 if is_connected("ADC0", 7) else 0)
-print("adc1=", 1 if is_connected("ADC1", 37) else 0)
+print("adc0=", 1 if is_connected("ADC0", 37) else 0)
+print("adc1=", 1 if is_connected("ADC1", 7) else 0)
 # parts are NOT placed (no `placed:` key -> default false), so none of the
 # expansion bridges may exist:
-print("u1gnd=", 1 if is_connected(5, "GND") else 0)
-print("u1vcc=", 1 if is_connected(35, "TOP_RAIL") else 0)
-print("r1a=", 1 if is_connected(12, "TOP_RAIL") else 0)
-print("r2b=", 1 if is_connected(16, 37) else 0)
+print("u1gnd=", 1 if is_connected(35, "GND") else 0)
+print("u1vcc=", 1 if is_connected(5, "TOP_RAIL") else 0)
+print("r1a=", 1 if is_connected(10, "TOP_RAIL") else 0)
+print("r2b=", 1 if is_connected(43, 7) else 0)
 print("c1m=", 1 if is_connected(19, "GND") else 0)
 print("nbridges=", get_num_bridges())
 """)
     vals = parse_kv(out)
-    check(vals.get("adc0") == 1, "bridge ADC0 <-> 7 exists after load")
-    check(vals.get("adc1") == 1, "bridge ADC1 <-> 37 exists after load")
-    check(vals.get("u1gnd") == 0, "part not expanded: U1 GND (row 5) has no GND bridge")
-    check(vals.get("u1vcc") == 0, "part not expanded: U1 VCC (row 35) has no TOP_RAIL bridge")
-    check(vals.get("r1a") == 0, "part not expanded: R1 A (row 12) has no TOP_RAIL bridge")
-    check(vals.get("r2b") == 0, "part not expanded: R2 B (row 16) has no 37 bridge")
+    check(vals.get("adc0") == 1, "bridge ADC0 <-> 37 exists after load")
+    check(vals.get("adc1") == 1, "bridge ADC1 <-> 7 exists after load")
+    check(vals.get("u1gnd") == 0, "part not expanded: U1 GND (row 35) has no GND bridge")
+    check(vals.get("u1vcc") == 0, "part not expanded: U1 VCC (row 5) has no TOP_RAIL bridge")
+    check(vals.get("r1a") == 0, "part not expanded: R1 A (row 10, axial2) has no TOP_RAIL bridge")
+    check(vals.get("r2b") == 0, "part not expanded: R2 B (row 43, axial2 row 13 + 30) has no 7 bridge")
     check(vals.get("c1m") == 0, "part not expanded: C1 MINUS (row 19) has no GND bridge")
 
     # --- 4. The custom nets: name --------------------------------------------
     # Net numbers are topology-dependent (1-5 are the pre-created special nets:
     # GND / Top Rail / Bottom Rail / DAC0 / DAC1), so DISCOVER the net holding
-    # node 37 rather than hardcoding it - and print it, because wiring.yaml's
-    # `nets:` entry has to name that number for deserializeNets to attach.
+    # node 7 (the RC timing junction - THR/TRIG - now that wave 2 re-anchored
+    # U1 to the bottom half) rather than hardcoding it - and print it, because
+    # wiring.yaml's `nets:` entry has to name that number for deserializeNets
+    # to attach.
     out = jl_exec("""
 for i in range(1, 40):
     nodes = get_net_nodes(i)
@@ -355,16 +357,16 @@ for i in range(1, 40):
     for num in sorted(nets):
         print(f"  info: net {num}: {nets[num][0]!r} nodes {nets[num][1]}")
 
-    net37 = None
+    net7 = None
     for num, (name, nodes) in nets.items():
         toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
-        if "37" in toks:
-            net37 = (num, name)
-    check(net37 is not None, "a net containing node 37 exists")
-    if net37:
-        check(net37[1] == "TIMING",
-              f"net holding node 37 resolves to the nets: name TIMING (net {net37[0]}, "
-              f"name {net37[1]!r}; wiring.yaml declares num: 7)")
+        if "7" in toks:
+            net7 = (num, name)
+    check(net7 is not None, "a net containing node 7 exists")
+    if net7:
+        check(net7[1] == "TIMING",
+              f"net holding node 7 resolves to the nets: name TIMING (net {net7[0]}, "
+              f"name {net7[1]!r}; wiring.yaml declares num: 7)")
     # The pre-created special nets (1=GND 2=Top Rail 3=Bottom Rail 4=DAC0 5=DAC1)
     # must NOT have been renamed - naming net 1 is exactly the trap the reference
     # YAML's original `num: 1` fell into.
@@ -385,21 +387,22 @@ for i in range(1, 40):
           f"all six parts round-tripped in order (got {names})")
     check(rewritten.count("placed: false") == 6 and "placed: true" not in rewritten,
           "every part is still placed: false after the rewrite")
-    for needle in ("footprint: dip8", "row: 5", 'value: "NE555"',
+    for needle in ("footprint: dip8", "row: 35", 'value: "NE555"',
                    "GND: {pin: 1, connect: GND, class: gnd}",
-                   "TRIG: {pin: 2, connect: 37, class: signal}",
+                   "TRIG: {pin: 2, connect: 7, class: signal}",
                    "CTRL: {pin: 5, class: nc}",
                    "VCC: {pin: 8, connect: TOP_RAIL, class: power}",
-                   "footprint: sip2", 'value: "10k"', 'value: "47k"',
+                   "footprint: sip2", "footprint: axial2",
+                   'value: "10k"', 'value: "47k"',
                    'value: "10uF"', 'value: "330"', "type: led",
                    "A: {pin: 1, connect: TOP_RAIL, class: signal}",
-                   "PLUS: {pin: 1, connect: 37, class: signal}",
+                   "PLUS: {pin: 1, connect: 7, class: signal}",
                    "MINUS: {pin: 2, connect: GND, class: signal}",
                    "K: {pin: 2, connect: GND, class: signal}"):
         check(needle in rewritten, f"rewrite kept: {needle}")
     # The inline one-line pins form (R1/R2/C1/LED1/R3 in wiring.yaml) parsed:
-    check("B: {pin: 2, connect: 36, class: signal}" in rewritten,
-          "inline `pins: {A: {...}, B: {...}}` form parsed (R1 B -> node 36)")
+    check("B: {pin: 2, connect: 6, class: signal}" in rewritten,
+          "inline `pins: {A: {...}, B: {...}}` form parsed (R1 B -> DIS node 6)")
     check('name: "TIMING"' in rewritten, "the TIMING net name survived the rewrite")
     check("topRail: 5.00" in rewritten, "power: topRail: 5.0 parsed and round-tripped")
     # Documented as-built contract: meta:/guide: are swallowed, never re-emitted.
@@ -470,7 +473,7 @@ print("w2=", 1 if fs_write({HIL_DIR + "/main.py"!r}, {HIL_MAIN!r}) else 0)
     out = jl_exec("""
 print("loaded=", 1 if load_project("hiltest") else 0)
 print("br=", 1 if is_connected(20, 21) else 0)
-print("stale555=", 1 if is_connected("ADC1", 37) else 0)
+print("stale555=", 1 if is_connected("ADC1", 7) else 0)
 """, timeout=25)
     vals = parse_kv(out)
     check(vals.get("loaded") == 1, "load_project('hiltest') resolved the name to "
@@ -743,18 +746,18 @@ print("missing_ms=", time.ticks_diff(t1, t0))
                                  ("SCL", 7, 138), ("SDA", 8, 137))),
         )),
         ("nand00", 7, (
-            ("U1", "dip14", 5, (("A1", 5, 131), ("B1", 6, 132), ("Y1", 7, 133),
-                                ("A2", 8, 100), ("GND", 11, 100), ("Y3", 41, -1),
-                                ("B4", 36, 100), ("VCC", 35, 101))),
+            ("U1", "dip14", 35, (("A1", 35, 131), ("B1", 36, 132), ("Y1", 37, 133),
+                                 ("A2", 38, 100), ("GND", 41, 100), ("Y3", 11, -1),
+                                 ("B4", 6, 100), ("VCC", 5, 101))),
             ("LED1", "sip2", 18, (("A", 18, -1), ("K", 19, 100))),
-            ("R1", "sip2", 15, (("A", 15, 7), ("B", 16, 18))),
+            ("R1", "axial2", 15, (("A", 15, 37), ("B", 45, 18))),
         )),
         ("eeprom", 7, (
-            ("U1", "dip8", 5, (("A0", 5, 100), ("A2", 7, 100), ("GND", 8, 100),
-                               ("SDA", 38, 137), ("SCL", 37, 138),
-                               ("WP", 36, 101), ("VCC", 35, 101))),
-            ("R1", "sip2", 12, (("A", 12, 101), ("B", 13, 38))),
-            ("R2", "sip2", 15, (("A", 15, 101), ("B", 16, 37))),
+            ("U1", "dip8", 35, (("A0", 35, 100), ("A2", 37, 100), ("GND", 38, 100),
+                                ("SDA", 8, 137), ("SCL", 7, 138),
+                                ("WP", 6, 101), ("VCC", 5, 101))),
+            ("R1", "axial2", 12, (("A", 12, 101), ("B", 42, 8))),
+            ("R2", "axial2", 15, (("A", 15, 101), ("B", 45, 7))),
         )),
     )
 

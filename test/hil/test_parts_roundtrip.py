@@ -72,12 +72,12 @@ parts:
     type: ic
     value: "overlays:"
     footprint: dip8
-    row: 5
+    row: 35
     placed: true
     frobnicate: 7
     pins:
       GND: {pin: 1, connect: GND, class: gnd}
-      TRIG: {pin: 2, connect: 37, class: signal}
+      TRIG: {pin: 2, connect: 44, class: signal}
       OUT: {pin: 3, class: signal}
       RESET: {pin: 4, connect: TOP_RAIL, class: power}
       CTRL: {pin: 5, class: nc}
@@ -89,12 +89,12 @@ parts:
     row: 20
     placed: true
     pins:
-      A: {offset: 0, connect: 37}
+      A: {offset: 0, connect: 44}
       B: {offset: 1, connect: 45}
   - name: "U2"
     type: ic
     footprint: dip28
-    row: 3
+    row: 33
     placed: true
     pins:
       P1: {pin: 1, connect: 17}
@@ -129,21 +129,28 @@ overlays:
            [0x110000, 0x001100, 0x000011, 0x111111]
 """
 
-# Expansion geometry (dip8 at row 5: pins 1-4 -> 5,6,7,8; pins 5-8 ->
-# 38,37,36,35; sip2 at row 20 with offsets 0/1 -> 20,21; dip28 at row 3:
-# pin 1 -> 3, pin 28 -> 3+30+(28-28) = 33 - the physical pin count 28
-# exceeds MAX_PART_PINS on purpose: only LISTED pins are storage-bounded):
-#   U1 GND   pin 1  -> node 5  -> GND
-#   U1 TRIG  pin 2  -> node 6  -> 37
-#   U1 RESET pin 4  -> node 8  -> TOP_RAIL
-#   U1 VCC   pin 8  -> node 35 -> TOP_RAIL
-#   R1 A     off 0  -> node 20 -> 37
+# Expansion geometry (wave 2 binding geometry - DIP pin 1's row is the bottom
+# half, 31-60; dip8 at row 35: pins 1-4 -> 35,36,37,38 (bottom, left->right);
+# pins 5-8 -> 8,7,6,5 (top, right->left); sip2 at row 20 with offsets 0/1 ->
+# 20,21; dip28 at row 33: pin 1 -> 33, pin 28 -> (33-30)+(28-28) = 3 - the
+# physical pin count 28 exceeds MAX_PART_PINS on purpose: only LISTED pins
+# are storage-bounded):
+#   U1 GND   pin 1  -> node 35 -> GND
+#   U1 TRIG  pin 2  -> node 36 -> 44   (44 is a fresh row, NOT U1's own OUT
+#                                        hole (37) - TRIG's own leg AND R1's
+#                                        A leg both bridge to it, so they
+#                                        still land on the same net for the
+#                                        collision-rule check below without
+#                                        also shorting to OUT)
+#   U1 RESET pin 4  -> node 38 -> TOP_RAIL
+#   U1 VCC   pin 8  -> node 5  -> TOP_RAIL
+#   R1 A     off 0  -> node 20 -> 44
 #   R1 B     off 1  -> node 21 -> 45
-#   U2 P1    pin 1  -> node 3  -> 17
-#   U2 P28   pin 28 -> node 33 -> 18
+#   U2 P1    pin 1  -> node 33 -> 17
+#   U2 P28   pin 28 -> node 3  -> 18
 # C1 has placed: false - it must NOT expand (no 50 -> 52 bridge).
-EXPECTED_PAIRS = [(5, "GND"), (6, 37), (8, "TOP_RAIL"), (35, "TOP_RAIL"),
-                  (20, 37), (21, 45), (3, 17), (33, 18), (55, 42)]
+EXPECTED_PAIRS = [(35, "GND"), (36, 44), (38, "TOP_RAIL"), (5, "TOP_RAIL"),
+                  (20, 44), (21, 45), (33, 17), (3, 18), (55, 42)]
 
 
 def read_device_file(path):
@@ -213,7 +220,7 @@ pairs = {pairs_py}
 for i, (a, b) in enumerate(pairs):
     print("conn%d=" % i, 1 if is_connected(a, b) else 0)
 print("bogus=", 1 if is_connected(12, 48) else 0)
-print("nopin=", 1 if is_connected(7, 36) else 0)
+print("nopin=", 1 if is_connected(37, 7) else 0)
 print("unplaced=", 1 if is_connected(50, 52) else 0)
 """)
     vals = parse_kv(out)
@@ -221,7 +228,7 @@ print("unplaced=", 1 if is_connected(50, 52) else 0)
         check(vals.get(f"conn{i}") == 1, f"bridge {a} <-> {b} exists after load")
     check(vals.get("bogus") == 0,
           "futuresection: content was contained (12-48 did NOT become a bridge)")
-    check(vals.get("nopin") == 0, "pins without connect: made no bridge (7-36 absent)")
+    check(vals.get("nopin") == 0, "pins without connect: made no bridge (37-7 absent)")
     check(vals.get("unplaced") == 0,
           "placed: false part C1 was NOT expanded (50-52 absent)")
 
@@ -274,9 +281,9 @@ for k in sorted(found):
     for line in out.splitlines():
         if line.startswith("U1_TRIG"):
             trig_nodes = line
-    check(all(str(n) in re.findall(r"\d+", trig_nodes) for n in (6, 37, 20)),
-          f"U1_TRIG net contains nodes 6, 37, 20 ({trig_nodes.strip()})")
-    # Collision rule: R1 pin A shares the 6/37/20 net; lowest part index (U1) won.
+    check(all(str(n) in re.findall(r"\d+", trig_nodes) for n in (36, 44, 20)),
+          f"U1_TRIG net contains nodes 36, 44, 20 ({trig_nodes.strip()})")
+    # Collision rule: R1 pin A shares the 36/44/20 net; lowest part index (U1) won.
     check("R1_A" not in out, "collision rule: U1_TRIG outranks R1_A on the shared net")
     # GND / TOP_RAIL are special-function nets - never renamed by parts.
     check("U1_GND" not in out and "U1_RESET" not in out and "U1_VCC" not in out,
@@ -290,16 +297,16 @@ for k in sorted(found):
     _, rewritten = read_device_file(SLOT_PATH)
     check("parts:" in rewritten, "parts: section SURVIVED the wholesale rewrite")
     for needle in ('- name: "U1"', "type: ic", 'value: "overlays:"', "footprint: dip8",
-                   "row: 5", "placed: true",
+                   "row: 35", "placed: true",
                    "GND: {pin: 1, connect: GND, class: gnd}",
-                   "TRIG: {pin: 2, connect: 37, class: signal}",
+                   "TRIG: {pin: 2, connect: 44, class: signal}",
                    "OUT: {pin: 3, class: signal}",
                    "RESET: {pin: 4, connect: TOP_RAIL, class: power}",
                    "CTRL: {pin: 5, class: nc}",
                    "VCC: {pin: 8, connect: TOP_RAIL, class: power}",
                    '- name: "R1"', "type: resistor", 'value: "10k"',
                    "footprint: sip2", "row: 20",
-                   "A: {offset: 0, connect: 37, class: signal}",
+                   "A: {offset: 0, connect: 44, class: signal}",
                    "B: {offset: 1, connect: 45, class: signal}",
                    '- name: "U2"', "footprint: dip28",
                    "P1: {pin: 1, connect: 17, class: signal}",
@@ -329,7 +336,7 @@ for k in sorted(found):
     port1_command("<3", 4.0)
     time.sleep(2.0)
     out = jl_exec("""
-print("conn_trig=", 1 if is_connected(6, 37) else 0)
+print("conn_trig=", 1 if is_connected(36, 44) else 0)
 print("conn_r1b=", 1 if is_connected(21, 45) else 0)
 names = []
 for i in range(1, 59):
@@ -339,7 +346,7 @@ for i in range(1, 59):
 print("names=", ",".join(sorted(names)))
 """)
     vals = parse_kv(out)
-    check(vals.get("conn_trig") == 1, "second load of the rewritten file: 6-37 bridge intact")
+    check(vals.get("conn_trig") == 1, "second load of the rewritten file: 36-44 bridge intact")
     check(vals.get("conn_r1b") == 1, "second load of the rewritten file: 21-45 bridge intact")
     check("U1_TRIG" in str(vals.get("names", "")), "second load: U1_TRIG re-asserted")
 
@@ -374,17 +381,22 @@ power:
 
     # --- 7. The Python bindings: place_part / list_parts / remove_part ---------
     # Slot 3 is active and its parts table is empty (phase 6 loaded the no-parts
-    # YAML), so every part seen from here on came from the API. Geometry:
-    #   U9 sip2 @ row 5 (footprint inferred): A pin 1 -> node 5, B pin 2 -> node 6
-    #   U8 dip8 @ row 14 (explicit):          VCC pin 8 -> 14+30+(8-8) = node 44
+    # YAML), so every part seen from here on came from the API. Geometry (wave 2
+    # binding geometry - DIP row MUST be bottom-half, axial2 row MUST be top-half):
+    #   U9 sip2 @ row 5 (footprint inferred):  A pin 1 -> node 5, B pin 2 -> node 6
+    #   U8 dip8 @ row 44 (explicit):           VCC pin 8 -> (44-30)+(8-8) = node 14
+    #   AX1 axial2 @ row 27 (explicit):        A pin 1 -> node 27, B pin 2 -> node 57
     out = jl_exec("""
 print("gp_none=", guide_progress())
 print("rc=", place_part("U9", 5, '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'))
-print("rc_dip=", place_part("U8", 14, '{"VCC": {"pin": 8, "connect": "TOP_RAIL"}}', "dip8", "ic", "TEST"))
+print("rc_dip=", place_part("U8", 44, '{"VCC": {"pin": 8, "connect": "TOP_RAIL"}}', "dip8", "ic", "TEST"))
+print("rc_ax=", place_part("AX1", 27, '{"A": {"pin": 1, "connect": 40}, "B": {"pin": 2, "connect": 41}}', "axial2"))
 print("rc_dup=", place_part("U9", 20, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_odd=", place_part("BAD1", 20, '{"A": {"pin": 1, "connect": 30}}', "dip7"))
 print("rc_row=", place_part("BAD2", 99, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_nopins=", place_part("BAD3", 20, '{}'))
+print("rc_diptop=", place_part("BAD4", 5, '{"A": {"pin": 1, "connect": 32}}', "dip8"))
+print("rc_axbot=", place_part("BAD5", 35, '{"A": {"pin": 1, "connect": 32}}', "axial2"))
 print("rc_quote=", place_part('U"X', 30, '{"A": {"pin": 1, "connect": 31}}'))
 print("rc_nl=", place_part("U\\nX", 30, '{"A": {"pin": 1, "connect": 31}}'))
 print("rc_pinnl=", place_part("UNL", 30, '{"A\\nB": {"pin": 1, "connect": 31}}'))
@@ -396,14 +408,22 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
     vals = parse_kv(out)
     check(vals.get("gp_none") == -1, "guide_progress() == -1 when no guide source is loaded")
     check(vals.get("rc") == 0, "place_part('U9', 5, pins_json) returned 0")
-    check(vals.get("rc_dip") == 0, "place_part with an explicit dip8 + type + value returned 0")
+    check(vals.get("rc_dip") == 0, "place_part with an explicit dip8 (bottom-half row) + type + value returned 0")
+    check(vals.get("rc_ax") == 0, "place_part with an explicit axial2 (top-half row) returned 0")
     check(vals.get("rc_dup") == -1, "place_part on an existing name is refused (-1)")
-    # The three refusals below are commitPart()'s predicate: an entry that passed
+    # The refusals below are commitPart()'s predicate: an entry that passed
     # here but failed the parser would be auto-saved and then silently DROPPED on
     # the next load (the erasure bug of commit 352bb23).
     check(vals.get("rc_odd") == -1, "place_part with an odd DIP pin count is refused (-1)")
     check(vals.get("rc_row") == -1, "place_part with row 99 is refused (-1)")
     check(vals.get("rc_nopins") == -1, "place_part with no parseable pins is refused (-1)")
+    # The wave-2 rejection needles: a top-anchored DIP (the mirrored bug) and a
+    # bottom-anchored axial2 (pin 2 would fall off the board) must both fail
+    # cleanly - no entry, no crash - matching PartPlacement.cpp's new validation.
+    check(vals.get("rc_diptop") == -1,
+          "place_part with a top-anchored dip8 (row 5) is refused (-1) - bottom half only")
+    check(vals.get("rc_axbot") == -1,
+          "place_part with a bottom-anchored axial2 (row 35) is refused (-1) - top half only")
     # Charset guard: serializeParts emits name/value quoted and type/pin names
     # bare, so a '"' truncates the field at reload and a newline writes an
     # UN-INDENTED line into parts: - where deserializeParts breaks out and drops
@@ -421,16 +441,19 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
           "place_part with a PIN name starting '- ' is refused (-1)")
     check(vals.get("rc_pinhash") == -1,
           "place_part with a PIN name starting '#' is refused (-1)")
-    # ...and nothing partial landed: only the two parts that were accepted.
-    check(vals.get("names_after") == "U8,U9",
+    # ...and nothing partial landed: only the three parts that were accepted.
+    check(vals.get("names_after") == "AX1,U8,U9",
           f"every refused place_part left NO entry behind (table holds "
-          f"{vals.get('names_after')!r}, expected 'U8,U9')")
+          f"{vals.get('names_after')!r}, expected 'AX1,U8,U9')")
 
     out = jl_exec("""
 print("u9a=", 1 if is_connected(5, "GND") else 0)
 print("u9b=", 1 if is_connected(6, 7) else 0)
-print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
+print("u8vcc=", 1 if is_connected(14, "TOP_RAIL") else 0)
+print("ax1a=", 1 if is_connected(27, 40) else 0)
+print("ax1b=", 1 if is_connected(57, 41) else 0)
 print("bad=", 1 if is_connected(20, 30) else 0)
+print("diptopbad=", 1 if is_connected(5, 32) else 0)
 print("badchar=", 1 if is_connected(30, 31) else 0)
 for i in range(1, 59):
     nodes = get_net_nodes(i)
@@ -440,8 +463,12 @@ for i in range(1, 59):
     vals = parse_kv(out)
     check(vals.get("u9a") == 1, "place_part expanded U9 pin A: bridge 5 <-> GND")
     check(vals.get("u9b") == 1, "place_part expanded U9 pin B: bridge 6 <-> 7")
-    check(vals.get("u8vcc") == 1, "place_part expanded U8 pin VCC (dip8 pin 8 -> node 44) to TOP_RAIL")
+    check(vals.get("u8vcc") == 1, "place_part expanded U8 pin VCC (dip8 pin 8 -> node 14) to TOP_RAIL")
+    check(vals.get("ax1a") == 1, "place_part expanded AX1 pin A: bridge 27 (row) <-> 40")
+    check(vals.get("ax1b") == 1, "place_part expanded AX1 pin B: bridge 57 (row+30) <-> 41")
     check(vals.get("bad") == 0, "no bridge from any refused place_part call (20-30 absent)")
+    check(vals.get("diptopbad") == 0,
+          "no bridge from the rejected top-anchored dip8 (5-32 absent)")
     check(vals.get("badchar") == 0,
           "no bridge from any charset-refused place_part call (30-31 absent)")
 
@@ -452,16 +479,26 @@ for i in range(1, 59):
             nets[int(m.group(1))] = (m.group(2).strip(), m.group(3).strip())
     net7 = None
     gndnet = None
+    ax1a_net = None
+    ax1b_net = None
     for num, (name, nodes) in nets.items():
         toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
         if "7" in toks:
             net7 = (num, name)
         if "5" in toks and name == "GND":
             gndnet = num
+        if "27" in toks:
+            ax1a_net = (num, name)
+        if "57" in toks:
+            ax1b_net = (num, name)
     check(net7 is not None and net7[1] == "U9_B",
           f"the net holding node 7 is named U9_B (got {net7})")
     check(gndnet is not None,
           "U9 pin A landed on GND and the special net kept its name (never renamed by parts)")
+    check(ax1a_net is not None and ax1a_net[1] == "AX1_A",
+          f"the net holding node 27 (AX1 pin 1 = row) is named AX1_A (got {ax1a_net})")
+    check(ax1b_net is not None and ax1b_net[1] == "AX1_B",
+          f"the net holding node 57 (AX1 pin 2 = row+30) is named AX1_B (got {ax1b_net})")
 
     out = jl_exec("""
 parts = list_parts()
@@ -482,10 +519,15 @@ print("u8fp=", u8['footprint'])
 print("u8type=", u8['type'])
 print("u8val=", u8['value'])
 print("u8vnode=", u8['pins']['VCC']['node'])
+ax1 = by['AX1']
+print("ax1row=", ax1['row'])
+print("ax1fp=", ax1['footprint'])
+print("ax1anode=", ax1['pins']['A']['node'])
+print("ax1bnode=", ax1['pins']['B']['node'])
 """)
     vals = parse_kv(out)
-    check(vals.get("n") == 2,
-          "list_parts() returned both parts and nothing from the 7 refused calls")
+    check(vals.get("n") == 3,
+          "list_parts() returned all three placed parts and nothing from the refused calls")
     check(vals.get("u9row") == 5, "list_parts: U9 row is 5")
     check(vals.get("u9fp") == "sip2", "list_parts: U9 footprint inferred as sip2")
     check(vals.get("u9placed") == 1, "list_parts: U9 placed is True")
@@ -496,11 +538,16 @@ print("u8vnode=", u8['pins']['VCC']['node'])
     check(vals.get("u8fp") == "dip8", "list_parts: U8 footprint is dip8")
     check(vals.get("u8type") == "ic", "list_parts: U8 type is ic")
     check(vals.get("u8val") == "TEST", "list_parts: U8 value is TEST")
-    check(vals.get("u8vnode") == 44, "list_parts: U8 pin VCC resolves to node 44")
+    check(vals.get("u8vnode") == 14, "list_parts: U8 pin VCC resolves to node 14")
+    check(vals.get("ax1row") == 27, "list_parts: AX1 row is 27")
+    check(vals.get("ax1fp") == "axial2", "list_parts: AX1 footprint is axial2")
+    check(vals.get("ax1anode") == 27, "list_parts: AX1 pin A resolves to node 27 (row)")
+    check(vals.get("ax1bnode") == 57, "list_parts: AX1 pin B resolves to node 57 (row+30)")
 
     # The silent-vanish check: a part BUILT by place_part must survive the
     # serializer AND re-parse on the next load (place_part enforces the same
-    # predicate commitPart does, so nothing it accepts can be dropped).
+    # predicate commitPart does, so nothing it accepts can be dropped) - this is
+    # also the axial2 needle's "round-trip survives an auto-save rewrite" leg.
     out = jl_exec("print('saved=', nodes_save(3))")
     check(parse_kv(out).get("saved") == 3, "nodes_save(3) wrote the API-placed parts")
     time.sleep(1.0)
@@ -509,7 +556,10 @@ print("u8vnode=", u8['pins']['VCC']['node'])
                    "A: {pin: 1, connect: GND, class: signal}",
                    "B: {pin: 2, connect: 7, class: signal}",
                    '- name: "U8"', "footprint: dip8", 'value: "TEST"', "type: ic",
-                   "VCC: {pin: 8, connect: TOP_RAIL, class: signal}"):
+                   "VCC: {pin: 8, connect: TOP_RAIL, class: signal}",
+                   '- name: "AX1"', "footprint: axial2", "row: 27",
+                   "A: {pin: 1, connect: 40, class: signal}",
+                   "B: {pin: 2, connect: 41, class: signal}"):
         check(needle in api_yaml, f"place_part serialized: {needle}")
 
     port1_command(f"<{bounce}", 4.0)
@@ -519,36 +569,46 @@ print("u8vnode=", u8['pins']['VCC']['node'])
     out = jl_exec("""
 print("n=", len(list_parts()))
 print("u9b=", 1 if is_connected(6, 7) else 0)
-print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
+print("u8vcc=", 1 if is_connected(14, "TOP_RAIL") else 0)
+print("ax1a=", 1 if is_connected(27, 40) else 0)
+print("ax1b=", 1 if is_connected(57, 41) else 0)
 """)
     vals = parse_kv(out)
-    check(vals.get("n") == 2, "reload: both API-placed parts re-parsed (none silently dropped)")
+    check(vals.get("n") == 3, "reload: all three API-placed parts re-parsed (none silently dropped)")
     check(vals.get("u9b") == 1, "reload: U9 pin B bridge 6-7 re-expanded")
-    check(vals.get("u8vcc") == 1, "reload: U8 pin VCC bridge 44-TOP_RAIL re-expanded")
+    check(vals.get("u8vcc") == 1, "reload: U8 pin VCC bridge 14-TOP_RAIL re-expanded")
+    check(vals.get("ax1a") == 1, "reload: AX1 pin A bridge 27-40 re-expanded")
+    check(vals.get("ax1b") == 1, "reload: AX1 pin B bridge 57-41 re-expanded")
 
     out = jl_exec("""
 print("rm=", remove_part("U9"))
 print("rm2=", remove_part("U8"))
+print("rm3=", remove_part("AX1"))
 print("rm_missing=", remove_part("U9"))
 print("n=", len(list_parts()))
 print("u9a=", 1 if is_connected(5, "GND") else 0)
 print("u9b=", 1 if is_connected(6, 7) else 0)
-print("u8vcc=", 1 if is_connected(44, "TOP_RAIL") else 0)
+print("u8vcc=", 1 if is_connected(14, "TOP_RAIL") else 0)
+print("ax1a=", 1 if is_connected(27, 40) else 0)
+print("ax1b=", 1 if is_connected(57, 41) else 0)
 names = []
 for i in range(1, 59):
     nm = get_net_name(i)
-    if nm and str(nm).startswith("U9_"):
+    if nm and (str(nm).startswith("U9_") or str(nm).startswith("AX1_")):
         names.append(str(nm))
 print("leftover=", ",".join(names) if names else "none")
 """, timeout=40)
     vals = parse_kv(out)
     check(vals.get("rm") == 0, "remove_part('U9') returned 0")
     check(vals.get("rm2") == 0, "remove_part('U8') returned 0")
+    check(vals.get("rm3") == 0, "remove_part('AX1') returned 0")
     check(vals.get("rm_missing") == -1, "remove_part on an unknown name returns -1")
     check(vals.get("n") == 0, "remove_part dropped the entries (list_parts() empty)")
     check(vals.get("u9a") == 0, "remove_part pulled the 5 <-> GND bridge")
     check(vals.get("u9b") == 0, "remove_part pulled the 6 <-> 7 bridge")
-    check(vals.get("u8vcc") == 0, "remove_part pulled the 44 <-> TOP_RAIL bridge")
+    check(vals.get("u8vcc") == 0, "remove_part pulled the 14 <-> TOP_RAIL bridge")
+    check(vals.get("ax1a") == 0, "remove_part pulled the 27 <-> 40 bridge")
+    check(vals.get("ax1b") == 0, "remove_part pulled the 57 <-> 41 bridge")
     check(vals.get("leftover") == "none", "remove_part cleared the {NAME}_{PIN} net names too")
 
     # --- 8. load_project() + the slot-clobber regression -----------------------
