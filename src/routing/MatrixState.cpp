@@ -187,11 +187,19 @@ int rev4minusXmap[12][16] = {
 
   };
 
+// AUTHORITY: each chip's xMap above, not these strings. Chip D's x13/x15 were
+// stale ("DK"/"DH1") against xMap[13]=CHIP_G, xMap[15]=CHIP_K (:105), and
+// every other chip's pattern agrees the map is right (A: K@x9/L@x13,
+// B: K@x11/L@x15, C: L@x9/K@x13, D: L@x11/K@x15). The names are not
+// cosmetic: buildEphemeralRoute's tier-2 pairs lanes by strcmp of these
+// (RouteSafety.cpp), so "DK" != G's "DG1" silently discarded D's x13<->G x7
+// lane pair - halving chip D's G-lane options in exactly the starved fabric
+// that produced the vf noroute (invest-vf-noroute.md §7).
 const char* connectionNamesX[12][16] = {
   { "AI",  "AJ",  "AB0", "AB1", "AC0",  "AC1",  "AD0",  "AD1",  "AE0",  "AK",   "AF0",  "AF1",  "AG0",  "AL",   "AH0",  "AH1"  }, // A
   { "AB0", "AB1", "BI",  "BJ",  "BC0",  "BC1",  "BD0",  "BD1",  "BE0",  "BE1",  "BF0",  "BK",   "BG0",  "BG1",  "BH0",  "BL"   }, // B
   { "AC0", "AC1", "BC0", "BC1", "CI",   "CJ",   "CD0",  "CD1",  "CE0",  "CL",   "CF0",  "CF1",  "CG0",  "CK",   "CH0",  "CH1"  }, // C
-  { "AD0", "AD1", "BD0", "BD1", "CD0",  "CD1",  "DI",   "DJ",   "DE0",  "DE1",  "DF0",  "DL",   "DG0",  "DK",   "DH0",  "DH1"  }, // D
+  { "AD0", "AD1", "BD0", "BD1", "CD0",  "CD1",  "DI",   "DJ",   "DE0",  "DE1",  "DF0",  "DL",   "DG0",  "DG1",  "DH0",  "DK"   }, // D
   { "AE0", "EK",  "BE0", "BE1", "CE0",  "EL",   "DE0",  "DE1",  "EI",   "EJ",   "EF0",  "EF1",  "EG0",  "EG1",  "EH0",  "EH1"  }, // E
   { "AF0", "AF1", "BF0", "FK",  "CF0",  "CF1",  "DF0",  "FL",   "EF0",  "EF1",  "FI",   "FJ",   "FG0",  "FG1",  "FH0",  "FH1"  }, // F
   { "AG0", "GL",  "BG0", "BG1", "CG0",  "GK",   "DG0",  "DG1",  "EG0",  "EG1",  "FG0",  "FG1",  "GI",   "GJ",   "GH0",  "GH1"  }, // G
