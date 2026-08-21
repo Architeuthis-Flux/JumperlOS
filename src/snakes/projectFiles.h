@@ -18,12 +18,14 @@
 // Define which projects to include at compile time
 // Comment out any project you don't want provisioned
 #define INCLUDE_PROJECT_555
+#define INCLUDE_PROJECT_I2CSCRN
 
 // Convenience define to disable every project at once
 // #define DISABLE_ALL_PROJECTS
 
 #ifdef DISABLE_ALL_PROJECTS
 #undef INCLUDE_PROJECT_555
+#undef INCLUDE_PROJECT_I2CSCRN
 #endif
 
 //==============================================================================
@@ -233,6 +235,304 @@ const int PROJECT_555_WIRING_YAML_HASH_COUNT = 1;
 
 #endif // INCLUDE_PROJECT_555
 
+//---------- i2cscrn (scripts/projects/i2cscrn/) ----------
+#ifdef INCLUDE_PROJECT_I2CSCRN
+const char* PROJECT_I2CSCRN_README_MD = R"(# Type to Screen
+
+An SSD1306 OLED module pushed into the breadboard, wired to the Jumperless's
+I2C pins by the crossbar. You type a line in the terminal, it appears on the
+panel. No jumper wires - the Jumperless makes every connection.
+
+## Parts you need
+
+| Part | Package | Rows |
+|------|---------|------|
+| DISP | SSD1306 I2C module, 4-pin header | 5 - 8 |
+
+The four pins go, in order: **GND at row 5, VCC at row 6, SCL at row 7,
+SDA at row 8**. That is the pin order printed on nearly every cheap 0.96"
+and 0.91" module, but *check your silkscreen before powering up* - a few
+boards swap VCC and GND, and that is the one mistake that kills the panel.
+
+Top rail is set to 3.3 V. Rows 7 and 8 are routed to `RP_GPIO_8` (RP pin 27,
+SCL) and `RP_GPIO_7` (RP pin 26, SDA) - the same pair the built-in I2C
+scanner uses.
+
+## What it does
+
+`main.py` opens `machine.I2C(1, scl=27, sda=26)`, scans the bus, and then
+loops on `input()`. Each line you type is pushed onto a short history and
+redrawn on the panel:
+
+    Type to Screen
+    i2c devices: ['0x3c']
+    panel up: 128x32, 4 rows of 16 chars
+    Type a line and press enter. Empty line clears. 'q' quits.
+    > hello jumperless
+
+An empty line clears the screen, `q` quits, and Ctrl-C works too.
+
+The driver is deliberately tiny: MicroPython's `framebuf` module supplies
+the pixel buffer and the built-in 8x8 font, and the `Screen` class in
+`main.py` only adds the SSD1306 command set on top (init sequence, column
+and page window, the `0x40` data prefix).
+
+`HEIGHT = 32` at the top of `main.py` is the one thing to change for a
+128x64 panel - set it to 64 and the driver picks the right multiplex ratio
+and COM pin configuration by itself.
+
+## Running it
+
+- **Clickwheel:** Apps > Projects > i2cscrn.
+- **Files browser:** open `/projects/i2cscrn/wiring.yaml` to load the
+  circuit, then run `/projects/i2cscrn/main.py`.
+
+## Troubleshooting
+
+- **`i2c devices: []`** - nothing acked. Check that the module is really in
+  rows 5-8 with GND at 5, that the top rail is at 3.3 V, and that SCL/SDA
+  are not swapped (row 7 is SCL, row 8 is SDA).
+- **A device answers, but at some other address** - most 128x64 boards can
+  be strapped to 0x3D. Change `ADDR` at the top of `main.py`.
+- **Bare panel, no breakout board** - the 4-pin modules carry their own
+  pull-up resistors. A raw panel does not; add 4.7k from row 7 and from
+  row 8 up to the top rail (that is exactly what the `eeprom` project
+  does for its bare chip).
+- **The Jumperless's own top OLED behaves oddly while this runs** - in its
+  default `connection_type 0` it lives on GPIO 7/8, the very pins this
+  project uses, and it shares the i2c1 peripheral in every mode. Turn it
+  off (or move it to the hardwired pins) while you play with this project.
+- **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
+  Long crossbar paths plus breadboard capacitance slow the edges down.
+)";
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[1] = { 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 1;
+
+const char* PROJECT_I2CSCRN_MAIN_PY = R"("""Type to Screen - companion script for /projects/i2cscrn/wiring.yaml
+
+Drives an SSD1306 sitting on the breadboard. The wiring file routes the
+panel's SCL row to RP_GPIO_8 (RP pin 27) and its SDA row to RP_GPIO_7
+(RP pin 26) - the same pair the built-in I2C scanner uses - so MicroPython's
+machine.I2C(1) reaches it directly. Type a line, it lands on the screen.
+
+The panel driver here is deliberately small: framebuf does the pixels and
+the 8x8 font, and this file only speaks the SSD1306 command set on top.
+
+Runs standalone from the Files browser too - the launcher injects
+_jl_project, but nothing here depends on it.
+"""
+
+import time
+
+# The launcher injects this global; default so the script also runs standalone.
+_jl_project = globals().get("_jl_project", {})
+
+SDA_PIN = 26        # RP GPIO 26 = node RP_GPIO_7 - wiring.yaml routes row 8 here
+SCL_PIN = 27        # RP GPIO 27 = node RP_GPIO_8 - wiring.yaml routes row 7 here
+I2C_BUS = 1         # pins 26/27 belong to i2c1; machine.I2C(0, ...) rejects them
+I2C_HZ = 100000     # the scanner's rate - kind to breadboard capacitance
+ADDR = 0x3C         # 0x3D on a few 128x64 boards; check the module's silkscreen
+
+WIDTH = 128
+HEIGHT = 32         # <- set to 64 for a 128x64 panel
+
+
+class Screen:
+    """The smallest useful SSD1306: framebuf for the pixels, this class for
+    the command set (SSD1306 datasheet section 9 / 10)."""
+
+    def __init__(self, i2c, addr, width, height):
+        import framebuf
+        self.i2c = i2c
+        self.addr = addr
+        self.width = width
+        self.height = height
+        self.pages = height // 8
+        self.buf = bytearray(self.pages * width)
+        self.fb = framebuf.FrameBuffer(self.buf, width, height,
+                                       framebuf.MONO_VLSB)
+        # One pre-allocated transmit buffer: 0x40 ("data follows") + the frame.
+        self.tx = bytearray(1 + len(self.buf))
+        self.tx[0] = 0x40
+        self.rows = self.pages          # 8 px per text row
+        self.cols = width // 8          # 8 px per character
+        self._init_panel()
+
+    def cmd(self, c):
+        # 0x00 = "a command stream follows"
+        self.i2c.writeto(self.addr, bytes((0x00, c)))
+
+    def _init_panel(self):
+        com_pins = 0x02 if self.height == 32 else 0x12
+        for c in (0xAE,                       # display off
+                  0xD5, 0x80,                 # clock divide / osc freq
+                  0xA8, self.height - 1,      # multiplex ratio
+                  0xD3, 0x00,                 # display offset
+                  0x40,                       # start line 0
+                  0x8D, 0x14,                 # charge pump on
+                  0x20, 0x00,                 # horizontal addressing mode
+                  0xA1,                       # segment remap
+                  0xC8,                       # COM scan direction: flipped
+                  0xDA, com_pins,             # COM pin hardware config
+                  0x81, 0xCF,                 # contrast
+                  0xD9, 0xF1,                 # pre-charge period
+                  0xDB, 0x40,                 # VCOMH deselect level
+                  0xA4,                       # resume from RAM
+                  0xA6,                       # normal (not inverted)
+                  0xAF):                      # display on
+            self.cmd(c)
+
+    def show(self):
+        self.cmd(0x21); self.cmd(0); self.cmd(self.width - 1)      # column range
+        self.cmd(0x22); self.cmd(0); self.cmd(self.pages - 1)      # page range
+        self.tx[1:] = self.buf
+        self.i2c.writeto(self.addr, self.tx)
+
+    def lines(self, texts):
+        self.fb.fill(0)
+        y = 0
+        for t in texts:
+            self.fb.text(t[:self.cols], 0, y, 1)
+            y += 8
+        self.show()
+
+
+def open_bus():
+    """Returns an I2C object, or None with an explanation printed."""
+    try:
+        import machine
+    except Exception as e:
+        print("no machine module in this build: " + str(e))
+        return None
+    # Claim the two pins first. Without this, every refreshConnections()
+    # re-asserts the slot config's pull setting onto GPIO 26/27 and can pull
+    # the bus down under the I2C peripheral.
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_claim_pin(n)
+        except Exception:
+            pass
+    try:
+        return machine.I2C(I2C_BUS, scl=SCL_PIN, sda=SDA_PIN, freq=I2C_HZ)
+    except Exception as e:
+        print("could not open I2C on pins %d/%d: %s" % (SDA_PIN, SCL_PIN, str(e)))
+        return None
+
+
+def release_bus():
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_release_pin(n)
+        except Exception:
+            pass
+
+
+print("Type to Screen")
+if _jl_project:
+    print("project: " + str(_jl_project.get("dir", "i2cscrn")) +
+          "  variant: " + str(_jl_project.get("variant", "default")))
+
+i2c = open_bus()
+scr = None
+if i2c is not None:
+    found = i2c.scan()
+    print("i2c devices: " + str([hex(a) for a in found]))
+    if ADDR not in found:
+        print("no panel at " + hex(ADDR) + " - check power, SDA/SCL order, "
+              "and the module's address jumper")
+    else:
+        try:
+            scr = Screen(i2c, ADDR, WIDTH, HEIGHT)
+            scr.lines(["Type to Screen", "ready."])
+            print("panel up: %dx%d, %d rows of %d chars"
+                  % (WIDTH, HEIGHT, scr.rows, scr.cols))
+        except Exception as e:
+            print("panel init failed: " + str(e))
+            scr = None
+
+if scr is None:
+    print("running in terminal-only mode - fix the wiring and re-run.")
+
+print("Type a line and press enter. Empty line clears. 'q' quits.")
+
+history = []
+try:
+    while True:
+        try:
+            typed = input("> ")
+        except EOFError:
+            break
+        if typed == "q":
+            break
+        if typed == "":
+            history = []
+        else:
+            history.append(typed)
+            if scr is not None:
+                history = history[-scr.rows:]
+            else:
+                history = history[-4:]
+        if scr is not None:
+            try:
+                scr.lines(history)
+            except Exception as e:
+                print("write failed: " + str(e))
+        else:
+            print("screen: " + str(history))
+
+except KeyboardInterrupt:
+    pass
+
+if scr is not None:
+    try:
+        scr.lines([])
+    except Exception:
+        pass
+release_bus()
+print("bye")
+)";
+const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[1] = { 0x79C8D0B3 };
+const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 1;
+
+const char* PROJECT_I2CSCRN_WIRING_YAML = R"===(version: 2
+sourceOfTruth: bridges
+meta:
+  project: i2cscrn
+  title: "Type to Screen"
+  variant: default
+  summary: "An SSD1306 on the breadboard, echoing whatever you type"
+  script: main.py
+  needs: ["SSD1306 I2C module (4-pin: GND VCC SCL SDA)"]
+parts:
+  - name: "DISP"
+    type: ic
+    value: "SSD1306"
+    footprint: sip4
+    row: 5
+    pins:
+      GND: {pin: 1, connect: GND,       class: gnd}
+      VCC: {pin: 2, connect: TOP_RAIL,  class: power}
+      SCL: {pin: 3, connect: RP_GPIO_8, class: signal}
+      SDA: {pin: 4, connect: RP_GPIO_7, class: signal}
+guide:
+  title: "Type to Screen"
+  steps:
+    - {do: note, text: "An SSD1306 the Jumperless talks to. Turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: DISP, check: presence, on_fail: warn, text: "Header in rows 5-8: GND 5, VCC 6, SCL 7, SDA 8. Check the silkscreen order."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power the display (3.3V on the top rail)."}
+    - {do: verify, target: 8, n1: 8, n2: 7, check: i2c, text: "Scanning the bus - the panel should answer (0x3C on nearly every module)."}
+    - {do: note, text: "Wired. Run main.py and type a line - it lands on the screen."}
+power:
+  topRail: 3.3
+config:
+  gpio:
+    pulls: [0,0,0,0,0,0,1,1,0,0]
+)===";
+const uint32_t PROJECT_I2CSCRN_WIRING_YAML_HASHES[1] = { 0xBEE331D0 };
+const int PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT = 1;
+
+#endif // INCLUDE_PROJECT_I2CSCRN
+
 //==============================================================================
 // FilesystemStuff.cpp Integration Guide
 //==============================================================================
@@ -247,6 +547,11 @@ const int PROJECT_555_WIRING_YAML_HASH_COUNT = 1;
 //         { "/projects/555/README.md", PROJECT_555_README_MD, "555/README.md", PROJECT_555_README_MD_HASHES, PROJECT_555_README_MD_HASH_COUNT },
 //         { "/projects/555/main.py", PROJECT_555_MAIN_PY, "555/main.py", PROJECT_555_MAIN_PY_HASHES, PROJECT_555_MAIN_PY_HASH_COUNT },
 //         { "/projects/555/wiring.yaml", PROJECT_555_WIRING_YAML, "555/wiring.yaml", PROJECT_555_WIRING_YAML_HASHES, PROJECT_555_WIRING_YAML_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_PROJECT_I2CSCRN
+//         { "/projects/i2cscrn/README.md", PROJECT_I2CSCRN_README_MD, "i2cscrn/README.md", PROJECT_I2CSCRN_README_MD_HASHES, PROJECT_I2CSCRN_README_MD_HASH_COUNT },
+//         { "/projects/i2cscrn/main.py", PROJECT_I2CSCRN_MAIN_PY, "i2cscrn/main.py", PROJECT_I2CSCRN_MAIN_PY_HASHES, PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT },
+//         { "/projects/i2cscrn/wiring.yaml", PROJECT_I2CSCRN_WIRING_YAML, "i2cscrn/wiring.yaml", PROJECT_I2CSCRN_WIRING_YAML_HASHES, PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT },
 // #endif
 //
 
