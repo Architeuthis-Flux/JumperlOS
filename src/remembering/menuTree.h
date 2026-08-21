@@ -81,6 +81,15 @@ String menuLines[150] = {
  
  
 
+  // Top-level, childless: selecting it walks off the end of its (empty)
+  // submenu range into doMenuAction, the same way Files and History do, and
+  // getActionCategory()'s "Projects" branch sends it to APPSACTION ->
+  // runApp(-1, "Projects"). Placed at the head of the "things you run"
+  // cluster, after the wiring tools (Rails/Connect/Output/Show). 8 chars
+  // renders as 7 glyphs on the LED half-row ("Project"), the same truncation
+  // the launcher applies via ledFit - no \31 needed.
+  "Projects",
+
   "Apps",
   "-Bounce \31Startup",
   "-Snake",
@@ -96,7 +105,6 @@ String menuLines[150] = {
   "-JDI MIP\31display",
   "-DMX \31Serial",  
   "-OLED \31Images",
-  "-Projects",
 
 
   //"-Show   Image",

@@ -2472,13 +2472,16 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
     return optionSelected;
 }
 
-int yesNoMenu( unsigned long timeout ) {
+int yesNoMenu( unsigned long timeout, int startOption ) {
     inClickMenu = 1;
 
     rotaryDivider = 8; // one option step per physical detent (8 counts)
     // delayMicroseconds(3000);
     int optionSelected = -1;
-    int highlightedOption = 0;
+    // Which option a bare CLICK answers. 0 = No (the historical default and
+    // what every pre-existing caller passes); 1 = Yes, for prompts whose
+    // wording promises "click = yes".
+    int highlightedOption = ( startOption == 1 ) ? 1 : 0;
     int changed = 0;
     uint32_t selectColor = 0x1a001a;
     uint32_t yesColor = 0x001004;
@@ -2490,14 +2493,23 @@ int yesNoMenu( unsigned long timeout ) {
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
 
-    // Display initial state immediately before entering loop
+    // Display initial state immediately before entering loop. Mirrors the
+    // in-loop redraw below so startOption == 1 really SHOWS Yes selected -
+    // a hardcoded "No" here would make the prompt lie about what a click does.
     Serial.print( "\r                      \r" );
     menuTransitionBeginDraw( );
     b.clear( 1 );
-    Serial.print( "No" );
-    b.print( ">", noColorBright, 0x0, 4, 1, -1 );
-    b.print( "Yes", yesColor, 0x0, 1, 1, -2 );
-    b.print( "No", noColorBright, 0x0, 5, 1, -1 );
+    if ( highlightedOption == 1 ) {
+        Serial.print( "Yes" );
+        b.print( ">", yesColorBright, 0x0, 0, 1, -2 );
+        b.print( "Yes", yesColorBright, 0x0, 1, 1, -2 );
+        b.print( "No", noColor, 0x0, 5, 1, -1 );
+    } else {
+        Serial.print( "No" );
+        b.print( ">", noColorBright, 0x0, 4, 1, -1 );
+        b.print( "Yes", yesColor, 0x0, 1, 1, -2 );
+        b.print( "No", noColorBright, 0x0, 5, 1, -1 );
+    }
     menuTransitionArm( );
     delay( 100 );
     requestLedShow( 2 );
@@ -4026,6 +4038,20 @@ actionCategories getActionCategory( void ) {
     } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
                     "Python" ) != -1 ) {
         return APPSACTION;  // Python = same as Files (click-menu file browser)
+
+    } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
+                    "Projects" ) != -1 ) {
+        // Projects = the launcher app row, promoted to a childless TOP-LEVEL
+        // entry (menuTree.h). Selecting one walks off the end of its empty
+        // submenu range and lands in doMenuAction, exactly the way Files and
+        // History do. The APPSACTION arm's appNameIdx then falls back to
+        // previousMenuPositions[0] for single-level entries, so this yields
+        // runApp(-1, "Projects"), which name-matches the apps[] row
+        // { "Projects", 25, 1, projectsAppLauncher } - zero Apps.cpp changes.
+        //
+        // Order-safe: no earlier keyword above is a substring of "Projects"
+        // ("Probe" is not - Pro-b vs Pro-j).
+        return APPSACTION;
 
     } else {
         return NOCATEGORY;
