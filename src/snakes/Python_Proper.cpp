@@ -719,7 +719,6 @@ extern "C" void mp_hal_check_interrupt(void) {
   // of clickWheelPythonInterrupt because a 3-second deliberate hold is unambiguous.
   if (encoderButtonState == MEDIUM_HELD &&
       millis() >= clickwheel_interrupt_ignore_until) {
-    mp_interrupt_requested = true;
     mp_sched_keyboard_interrupt();
     encoderButtonState = IDLE;  // Consume the button event
     if (global_mp_stream) {
@@ -5033,6 +5032,12 @@ bool executePythonFileContent( const char* src ) {
 
     // Disable clickwheel interrupt now that script is done
     clickWheelPythonInterrupt = false;
+    // Belt-and-braces: clear any stale interrupt request flag here too. A
+    // caught KeyboardInterrupt never runs set_interrupt_char(-1) (see the
+    // stale-flag hazard documented at mp_hal_set_interrupt_char, ~:405-414),
+    // so without this a leftover request could fire during the gc.collect()
+    // below or after the NLR context is gone.
+    mp_interrupt_requested = false;
 
     // GC + close any leaked file handles
     mp_embed_exec_str( "import gc; gc.collect()" );
