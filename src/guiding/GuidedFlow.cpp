@@ -277,6 +277,24 @@ static void guidePaintNode(uint32_t* buf300, int node, uint32_t color) {
 // Scratch overlay buffer (300 x 4 B): static, single-threaded modal use.
 static uint32_t guideOverlayScratch[MAX_OVERLAY_PIXELS];
 
+// One warning per session when addOverlay refuses (-1: the destination
+// project already fills the 8 overlay slots) - without it the guide just
+// silently paints no LEDs and a bench user has no idea why. Reset by
+// guideSessionBegin. The TGT overlay rewrites at ~2 Hz, hence once, not
+// per-call.
+static bool guideOverlayAddWarned = false;
+
+#if !defined(OG_JUMPERLESS)   // call sites compile out on OG (no overlays)
+static void guideAddOverlayWarned(const char* name) {
+    if (graphicOverlayState.addOverlay(name, 1, 1, 30, 10, guideOverlayScratch) < 0 &&
+        !guideOverlayAddWarned) {
+        guideOverlayAddWarned = true;
+        Serial.println("\r\n  (guide LED overlays unavailable - this project's overlay"
+                       " slots are full; OLED/terminal guidance continues)");
+    }
+}
+#endif
+
 // _GUIDE_FP_: dim outlines of every PLACED part (rebuilt whole on commit /
 // back). Persistent for the whole guide; never serialized (reserved-name
 // exclusion in GraphicOverlays.cpp).
@@ -300,7 +318,7 @@ static void guideRenderFootprints(void) {
         }
     }
     if (any) {
-        graphicOverlayState.addOverlay(GUIDE_OVERLAY_FP, 1, 1, 30, 10, guideOverlayScratch);
+        guideAddOverlayWarned(GUIDE_OVERLAY_FP);
     } else {
         graphicOverlayState.removeOverlay(GUIDE_OVERLAY_FP);
     }
@@ -357,7 +375,7 @@ static void guideRenderTarget(const GuideSession& s, bool pulseOn) {
             break;
     }
     if (any) {
-        graphicOverlayState.addOverlay(GUIDE_OVERLAY_TGT, 1, 1, 30, 10, guideOverlayScratch);
+        guideAddOverlayWarned(GUIDE_OVERLAY_TGT);
     } else {
         graphicOverlayState.removeOverlay(GUIDE_OVERLAY_TGT);
     }
@@ -470,6 +488,10 @@ static void guideParseStepLine(const String& body, GuideScript& out, String& err
         if (q1 >= 0 && q2 > q1) {
             String txt = fields.substring(q1 + 1, q2);
             strncpy(st.text, txt.c_str(), sizeof(st.text) - 1);
+        } else {
+            // Warn, don't silently drop - the step still runs, promptless.
+            err += "guide step " + String(out.numSteps + 1) +
+                   ": unclosed text: quote (text dropped); ";
         }
         fields = fields.substring(0, textIdx);
     }
@@ -1190,6 +1212,7 @@ void guideTick(GuideSession& s) {
 
 static void guideSessionBegin(GuideSession& s, GuideScript* sc, int resumeStep) {
     memset(&s, 0, sizeof(s));
+    guideOverlayAddWarned = false;   // re-arm the once-per-session LED warning
     s.script = sc;
     s.state = GuideState::INIT;
     s.stepIdx = (resumeStep > 0) ? resumeStep : 0;

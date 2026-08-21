@@ -188,6 +188,30 @@ print("wrote=", 1 if fs_write({WIRING_PATH!r}, {WIRING!r}) else 0)
     check(vals.get("projdir") == 1, f"created {PROJ_DIR} on the board")
     check(vals.get("wrote") == 1, f"pushed {WIRING_PATH}")
 
+    # --- 1b. Load-failure witness (review IMPORTANT 1): a failed load must
+    # leave slot tracking where it was - a dangling activeSlotNumber would
+    # let the next auto-save write partial state into the destination slot.
+    # fromYAML is unconditionally tolerant (it never returns false), so the
+    # only headless trigger is an open failure: the project DIRECTORY passes
+    # the z command's safeFileExists guard but safeFileOpen(dir, "r") fails
+    # inside loadSlotFromPath (bench-verified). No guide session can start
+    # on this path, so no unwedge byte is armed.
+    q = port1_command("Q", 1.5)
+    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+    slot_before_bad = int(m.group(1)) if m else -1
+    d = GuideDriver()
+    try:
+        d.send(f"z {PROJ_DIR} {SLOT}\r\n".encode())
+        d.expect(r"GUIDE error load failed", "unopenable wiring path fails the load")
+    finally:
+        d.close()
+    q = port1_command("Q", 1.5)
+    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+    slot_after_bad = int(m.group(1)) if m else -2
+    check(slot_after_bad == slot_before_bad,
+          f"failed load left ACTIVE_SLOT unchanged "
+          f"({slot_before_bad} -> {slot_after_bad}, not {SLOT})")
+
     # --- 2. Fresh guided run: z -> n n n q ---------------------------------
     d = GuideDriver()
     try:

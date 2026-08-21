@@ -35,6 +35,7 @@
 #include "ProjectsApp.h"
 
 #include "Commands.h"         // requestLedShow, refreshConnections
+#include "FileCache.h"        // fileCacheFlushNowAll (guided slot switch)
 #include "FilesystemStuff.h"  // safeFile*, FatFS Dir walk
 #include "Graphics.h"         // b.print (no-op on OG)
 #include "GuidedFlow.h"       // guideRun / guideForcePowerSafe (task 6)
@@ -672,17 +673,36 @@ static bool guidedFlowInner(const String& wiringPath, int destSlot) {
     }
 
     // --- fresh start into the destination slot -----------------------------
-    // Order per the task brief: setActiveSlot -> loadSlotFromPath -> force
-    // rails 0V -> saveSlot -> guideRun. (loadSlotFromPath applies the file's
-    // power: momentarily before the 0V force lands - noted in the report.)
-    mgr.setActiveSlot(dest);
+    // loadSlotFromPath -> setActiveSlot(dest) -> force rails 0V -> saveSlot
+    // -> guideRun. The slot-tracking switch is DEFERRED until the load
+    // succeeds (task-6 review IMPORTANT 1): a failed fromYAML can leave
+    // globalState partially mutated, and pointing activeSlotNumber at dest
+    // first would let the next idle auto-save write that partial state into
+    // dest. No auto-save can fire in between - SlotManager is HIGH priority
+    // and this whole flow only pumps the CRITICAL inner set.
+    // (loadSlotFromPath applies the file's power: momentarily before the 0V
+    // force lands - noted in the report.)
+    int prevSlot = mgr.getActiveSlot();
+    if (prevSlot != dest) {
+        // Big-event flush of the OUTGOING slot before its state is replaced
+        // - the loadSlot precedent (States.cpp:2918, review IMPORTANT 2):
+        // switching away must not drop its pending writes.
+        fileCacheFlushNowAll("guided_slot_switch");
+    }
     if (!mgr.loadSlotFromPath(wiringPath, err)) {
         // We already own the interaction; falling back to the non-guided
-        // path would just fail the same load again.
+        // path would just fail the same load again. Reload the prior slot
+        // so live state and (unchanged) slot tracking agree again.
         notify("Load\nfailed", "\n\r  Failed to load " + wiringPath + ": " + err, 2000);
         Serial.println("\r\nGUIDE error load failed");
+        String rerr;
+        if (!mgr.loadSlot(prevSlot, rerr)) {
+            Serial.println("  (could not restore slot " + String(prevSlot) +
+                           ": " + rerr + ")");
+        }
         return true;
     }
+    mgr.setActiveSlot(dest);
     guideForcePowerSafe();
     if (!mgr.saveSlot(dest, err, /*skipValidation=*/true)) {
         Serial.println("\r\n  (initial save to slot " + String(dest) +
