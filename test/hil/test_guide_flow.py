@@ -2,25 +2,41 @@
 # SPDX-License-Identifier: MIT
 """Guided-placement runtime: the guide end to end, plus the task-7 checks.
 
-Drives the headless entry (`z <path> <slot>` on port 1, MENU_DEBUG) with a
-3-step project - note + place sip2 + connect - pushed to /projects/hilguide/,
-and asserts the machine-parseable `GUIDE step=<i>/<n> id=<id> state=<STATE>`
-lines in order while feeding the guide's serial keys (n n n q).
+Drives the headless entry (`z <project>[ new|load|run=<N>]` on port 1,
+MENU_DEBUG) with a 3-step project - note + place sip2 + connect - pushed to
+/projects/hilguide/, and asserts the machine-parseable
+`GUIDE step=<i>/<n> id=<id> state=<STATE>` lines in order while feeding the
+guide's serial keys (n n n q).
+
+WHAT CHANGED WITH RUN FILES (design-launcher §1, task 5). There is no
+destination slot any more: every launch opens or creates
+/projects/hilguide/hilguide_<N>.yaml and leaves it as the PERSISTENT active
+context, so this suite's workbench is no longer slot 3 - it is whatever run
+file the launch just announced on its `RUNFILE path=... action=new|load` line.
+Every phase therefore CAPTURES that path instead of hardcoding one, because
+the run counter is monotonic and depends on how many phases ran before it.
+Fresh phases say `new`; resume phases say `load` (or nothing) with the
+DIRECTORY name, since a wiring path combined with load is refused - the run
+file's own runSource decides the variant, so the argument would be a lie.
 
 Covers:
-  1. fresh run into slot 3: WAIT/COMMIT per step in order, DONE, EXIT
-  2. after the run (REPL): part bridge live, RG_A net name asserted,
-     connect bridge live, guideProgress + placed: true in slot3.yaml
-  3. relaunch -> resume offer (`GUIDE resume slot=3 step=3`) -> q = cancel,
-     state untouched
-  4. relaunch -> 'n' = restart -> progress cleared, fresh step 1, q ->
-     bridges gone, placed: false, no guideProgress in slot3.yaml
-  Task 7 (coverage debts + fixture-free checks):
-  6. y-resume accept: quit mid-guide, relaunch, 'y' resumes at the saved
-     step with the committed bridges intact (no power_on -> "rails at 0V")
+  1b. exit D: an unopenable source (the project DIRECTORY as the wiring path)
+      fails the copy and leaves the previous context untouched, number AND path
+  2. fresh run: WAIT/COMMIT per step in order, DONE, EXIT, then the script
+     offer resolving to `SCRIPT offer=none` (hilguide ships no main.py)
+  3. after the run (REPL): part bridge live, RG_A net name asserted, connect
+     bridge live, guideProgress + placed: true + runSource: in the RUN FILE
+  4. load-latest of a COMPLETED run does NOT relaunch the guide - the
+     completion clamp reports `GUIDE already complete (step 3/3)` and the
+     built state is untouched
+  5. start-new is the new restart, and it is NON-DESTRUCTIVE: run N+1 is a
+     fresh file and run N still exists on disk WITH its guideProgress
+  6. the guided-ness gate on a run with no progress (runSource names a guided
+     wiring -> fresh guide), then y-resume: quit mid-guide, `load`, resume at
+     the saved step with the committed bridges intact ("rails at 0V")
   7. one `p` un-commit: bridge + RG_A name removed, guideProgress decremented
   8. power fixture: power_on commit applies topRail 2.5V (default rail_sane
-     check passes as norows), y-resume past it RE-applies power and the exit
+     check passes as norows), resume past it RE-applies power and the exit
      tail stays silent about 0V
   9. no-power fixture: the powerApplied-asymmetry witness - resume past a
      power_on in a project with NO power: section keeps the "rails at 0V"
@@ -40,13 +56,17 @@ Covers:
      EXPECTED TO FLIP if invest-vf-noroute.md §8 Option 1 ever lands, and the
      flip is one line - `VFNR_EXPECT_REFUSAL = False`.
 
-Bench convention: snapshot board state + slot3.yaml + active slot up front,
-restore all three in a finally (a prior round's incident: an uncaught
-exception stranded slot 3 - the try/finally here is that lesson). BOTH
-/projects/hilguide/ and /projects/hilvfnr/ are REMOVED afterwards:
-test_projects.py's run_app('Projects') probe gates itself on the board
-holding exactly the two projects IT authored, and either leftover would
-silently skip that phase.
+Bench convention: snapshot board state + the active CONTEXT up front, restore
+both in a finally (a prior round's incident: an uncaught exception stranded
+slot 3 - the try/finally here is that lesson). The slot-3 fixture is gone with
+the destination slots; nothing in this file writes a numbered slot any more.
+TEARDOWN ORDER IS LOAD-BEARING: leave the run-file context FIRST, then delete
+the run files, or the switch's dirty pre-save re-creates what was just removed
+(test_parts_roundtrip learned that one). BOTH /projects/hilguide/ and
+/projects/hilvfnr/ are removed afterwards, run files included:
+test_projects.py's run_app('Projects') probe gates itself on the board holding
+exactly the two projects IT authored, and either leftover would silently skip
+that phase.
 
 Port discipline: the guide loop reads its keys straight off port 1, so this
 test holds ONE port-1 connection per drive and sends keys only after the
@@ -74,9 +94,8 @@ from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
                 active_context, restore_context)
 
-SLOT = 3
-SLOT_PATH = "/slots/slot3.yaml"
-PROJ_DIR = "/projects/hilguide"
+PROJ = "hilguide"
+PROJ_DIR = "/projects/" + PROJ
 WIRING_PATH = PROJ_DIR + "/wiring.yaml"
 
 # 3 steps: note + place (sip2 resistor at rows 45/46, pin A bridges to 50)
@@ -194,7 +213,8 @@ guide:
 # rebuilds the exact committed fabric of Kevin's bench session (10 connect
 # steps + two static ADC bridges applied at load) with rows 22/23 left clean,
 # then runs the identical vf check that failed there 3/3.
-VFNR_DIR = "/projects/hilvfnr"
+VFNR_PROJ = "hilvfnr"
+VFNR_DIR = "/projects/" + VFNR_PROJ
 VFNR_PATH = VFNR_DIR + "/wiring.yaml"
 VFNR_WIRING = """version: 2
 sourceOfTruth: bridges
@@ -281,6 +301,9 @@ class GuideDriver:
             self.buf += _csi.sub("", chunk.decode(errors="replace"))
 
     def expect(self, pattern, what, timeout=25):
+        """Returns the re.Match on success (truthy, so `if d.expect(...)`
+        still reads the same) and None on timeout - callers that need a
+        captured group take it off the return value."""
         deadline = time.time() + timeout
         rx = re.compile(pattern)
         while time.time() < deadline:
@@ -289,10 +312,17 @@ class GuideDriver:
             if m:
                 self.pos = m.end()
                 check(True, what)
-                return True
+                return m
         tail = self.buf[max(0, len(self.buf) - 600):]
         check(False, f"{what} (timed out; tail: {tail!r})")
-        return False
+        return None
+
+    def expect_runfile(self, action, what, timeout=25):
+        """Capture the run file the launch just opened. Never hardcode the
+        number: N is monotonic across the whole suite and depends on how many
+        phases ran before this one."""
+        m = self.expect(r"RUNFILE path=(\S+) action=" + action, what, timeout)
+        return m.group(1) if m else None
 
     def close(self):
         try:
@@ -315,15 +345,7 @@ check(orig_path is not None, "'Q' reports ACTIVE_PATH")
 if orig_slot is None:
     orig_slot = 0
 
-slot3_existed, slot3_before = read_device_file(SLOT_PATH)
-print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
-
-# Move off slot 3 before touching its file (idle auto-save of the ACTIVE slot
-# would clobber the fs_write / the guide's own saves are the only writes we
-# want attributed to it).
-if orig_slot == SLOT:
-    port1_command("<2", 4.0)
-    time.sleep(1.5)
+print(f"  info: entry context slot={orig_slot} path={orig_path!r}")
 
 # guide_live: True while a guide session may be blocking on port-1 keys -
 # the finally sends its 'q' ONLY then (a blind 'q' at the main menu would
@@ -346,37 +368,40 @@ print("wrote=", 1 if fs_write({WIRING_PATH!r}, {WIRING!r}) else 0)
     check(vals.get("projdir") == 1, f"created {PROJ_DIR} on the board")
     check(vals.get("wrote") == 1, f"pushed {WIRING_PATH}")
 
-    # --- 1b. Load-failure witness (review IMPORTANT 1): a failed load must
-    # leave slot tracking where it was - a dangling activeSlotNumber would
-    # let the next auto-save write partial state into the destination slot.
-    # fromYAML is unconditionally tolerant (it never returns false), so the
-    # only headless trigger is an open failure: the project DIRECTORY passes
-    # the z command's safeFileExists guard but safeFileOpen(dir, "r") fails
-    # inside loadSlotFromPath (bench-verified). No guide session can start
-    # on this path, so no unwedge byte is armed.
+    # --- 1b. EXIT D witness: the run-file COPY fails ------------------------
+    # RE-AIMED for run files. This used to prove loadSlotFromPath's
+    # atomic-on-open-failure contract by handing `z` the project DIRECTORY as a
+    # wiring path. Under the run-file model the copy runs FIRST, so the same
+    # input now exercises exit D instead: copyFileRaw cannot open the source,
+    # nothing is created (the destination is only opened after the source
+    # succeeds), the retry fails the same way, and the previous context is
+    # untouched - number AND path, which is why both are compared. No guide
+    # session can start on this path, so no unwedge byte is armed.
     slot_before_bad, path_before_bad = active_context(1.5)
     d = GuideDriver()
     try:
-        d.send(f"z {PROJ_DIR} {SLOT}\r\n".encode())
-        d.expect(r"GUIDE error load failed", "unopenable wiring path fails the load")
+        d.send(f"z {PROJ_DIR}\r\n".encode())
+        d.expect(r"PROJECT error cannot read " + re.escape(PROJ_DIR),
+                 "EXIT D: an unopenable wiring source fails the run-file copy")
     finally:
         d.close()
     slot_after_bad, path_after_bad = active_context(1.5)
-    # loadSlotFromPath's atomic-on-failure contract: on an open failure the
-    # PRIOR context stays fully active and every tracker is untouched - number
-    # AND path, which is why both are compared here.
     check(slot_after_bad == slot_before_bad,
-          f"failed load left ACTIVE_SLOT unchanged "
-          f"({slot_before_bad} -> {slot_after_bad}, not {SLOT})")
+          f"EXIT D left ACTIVE_SLOT unchanged "
+          f"({slot_before_bad} -> {slot_after_bad})")
     check(path_after_bad == path_before_bad,
-          f"failed load left ACTIVE_PATH unchanged "
+          f"EXIT D left ACTIVE_PATH unchanged "
           f"({path_before_bad!r} -> {path_after_bad!r})")
 
-    # --- 2. Fresh guided run: z -> n n n q ---------------------------------
+    # --- 2. Fresh guided run: z ... new -> n n n q -------------------------
     d = GuideDriver()
     try:
-        d.send(f"z {WIRING_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
         guide_live = True
+        run1 = d.expect_runfile("new", "start-new allocated a run file")
+        check(run1 is not None and re.match(
+                  r"^" + re.escape(PROJ_DIR) + r"/" + PROJ + r"_\d+\.yaml$", run1 or ""),
+              f"the run file is named <dir>_<N>.yaml (got {run1!r})")
         d.expect(r"GUIDE step=1/3 id=note_1 state=INIT", "INIT status line")
         d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "step 1 (note) WAIT")
         d.send(b"n")
@@ -395,11 +420,24 @@ print("wrote=", 1 if fs_write({WIRING_PATH!r}, {WIRING!r}) else 0)
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "EXIT on q at the DONE ack")
         guide_live = False
+        # EXIT H: a completed guide falls through to the script step. hilguide
+        # ships no main.py, so the offer resolves to `none` and is skipped -
+        # the same two machine lines a real offer prints, which is what makes
+        # the grammar greppable on every path.
+        d.expect(r"SCRIPT offer=none", "completed guide reaches the script step")
+        d.expect(r"SCRIPT action=skip", "no companion script -> action=skip")
+        d.expect(r"Run saved to " + PROJ + r"_\d+\.yaml \(now your active circuit\)",
+                 "the launcher's closing one-liner names the run file")
     finally:
         d.close()
     time.sleep(1.0)   # let the final save settle
 
-    # --- 3. State after the run (REPL + slot file) --------------------------
+    ctx_slot, ctx_path = active_context(1.5)
+    check(ctx_slot == -1 and ctx_path == run1,
+          f"the run file is the ACTIVE CONTEXT after the launcher returned "
+          f"(got {ctx_slot}, {ctx_path!r}, expected -1, {run1!r})")
+
+    # --- 3. State after the run (REPL + the RUN FILE) -----------------------
     out = jl_exec("""
 print("rg=", 1 if is_connected(45, 50) else 0)
 print("conn=", 1 if is_connected(52, 53) else 0)
@@ -429,47 +467,65 @@ print("NETNAME|" + name)
     check(net_name == "RG_A",
           f"net holding node 45 is named RG_A (got {net_name!r})")
 
-    _, slot_yaml = read_device_file(SLOT_PATH)
-    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 3}}' in slot_yaml,
-          "slot3.yaml round-trips guideProgress at step 3")
-    check("placed: true" in slot_yaml, "slot3.yaml has RG placed: true")
-    check("{n1: 45, n2: 50}" in slot_yaml.replace("  ", " ") or
-          re.search(r"n1:\s*45,\s*n2:\s*50", slot_yaml) is not None,
-          "slot3.yaml carries the 45-50 expansion bridge")
-    check(re.search(r"n1:\s*52,\s*n2:\s*53", slot_yaml) is not None,
-          "slot3.yaml carries the 52-53 connect bridge")
+    run1_exists, run1_yaml = read_device_file(run1)
+    check(run1_exists, f"the run file {run1} exists on the board")
+    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 3}}' in run1_yaml,
+          "the RUN FILE round-trips guideProgress at step 3, bound to the "
+          "CANONICAL wiring (never to itself)")
+    check(f'runSource: "{WIRING_PATH}"' in run1_yaml,
+          "the run file carries runSource: - the variant the path cannot encode")
+    check("placed: true" in run1_yaml, "the run file has RG placed: true")
+    check("{n1: 45, n2: 50}" in run1_yaml.replace("  ", " ") or
+          re.search(r"n1:\s*45,\s*n2:\s*50", run1_yaml) is not None,
+          "the run file carries the 45-50 expansion bridge")
+    check(re.search(r"n1:\s*52,\s*n2:\s*53", run1_yaml) is not None,
+          "the run file carries the 52-53 connect bridge")
+    # First-save normalization (design §1.2): the run file started as a
+    # verbatim wiring copy carrying meta:/guide:, and the first rewrite drops
+    # both (they are swallowed on parse and never re-emitted). That is exactly
+    # WHY the guide must be parsed from the canonical wiring, so it is asserted
+    # rather than assumed.
+    check("guide:" not in run1_yaml and "meta:" not in run1_yaml,
+          "the run file lost meta:/guide: on its first save (as designed)")
 
-    # --- 4. Relaunch -> resume offer -> q cancels ---------------------------
+    # --- 4. Load-latest of a COMPLETED run does not relaunch the guide ------
     d = GuideDriver()
     try:
-        d.send(f"z {WIRING_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {PROJ} load\r\n".encode())
         guide_live = True
-        d.expect(r"GUIDE resume slot=3 step=3", "resume offer announced")
-        d.expect(r"other = cancel", "resume prompt rendered")
-        time.sleep(0.5)          # yesNoMenu drains line endings, then polls
-        d.send(b"q")             # not y/n -> cancel
-        d.expect(r"GUIDE cancelled", "q at the resume offer cancels")
+        d.expect(r"RUNS n=\d+ latest=" + re.escape(run1), "RUNS names the latest run")
+        loaded = d.expect_runfile("load", "load-latest re-opened the run file")
+        check(loaded == run1, f"load-latest opened {run1} (got {loaded!r})")
+        d.expect(r"GUIDE resume file=" + re.escape(run1) + r" step=3",
+                 "resume line names the FILE and the step (never a slot)")
+        d.expect(r"GUIDE already complete \(step 3/3\)",
+                 "the completion clamp refuses to relaunch a finished build")
+        d.expect(r"SCRIPT offer=none", "a finished build falls through to the script step")
         guide_live = False
     finally:
         d.close()
+    time.sleep(1.0)
 
     out = jl_exec("print('rg=', 1 if is_connected(45, 50) else 0)", timeout=25)
     check(parse_kv(out).get("rg") == 1,
-          "cancel at the resume offer left the built state untouched")
+          "re-opening the completed run left the built state untouched")
 
-    # --- 5. Relaunch -> restart ('n') -> fresh step 1 -> q ------------------
+    # --- 5. Start-new IS the restart, and it is NON-DESTRUCTIVE -------------
+    # The old destructive restart (un-place loop + guideSource wipe + re-save)
+    # is deleted. Starting run N+1 leaves run N intact on disk, which is
+    # strictly better than what it replaces - assert exactly that.
     d = GuideDriver()
     try:
-        d.send(f"z {WIRING_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
         guide_live = True
-        d.expect(r"GUIDE resume slot=3 step=3", "resume offer on second relaunch")
-        d.expect(r"other = cancel", "resume prompt rendered again")
-        time.sleep(0.5)
-        d.send(b"n")             # yesNoMenu: No = restart
+        run2 = d.expect_runfile("new", "start-new allocated the NEXT run file")
+        check(run2 is not None and run2 != run1,
+              f"start-new is a different file from the previous run "
+              f"({run1!r} -> {run2!r})")
         d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT",
-                 "restart cleared progress and re-entered at step 1", timeout=40)
+                 "the new run enters at step 1 with no progress", timeout=40)
         d.send(b"q")
-        d.expect(r"GUIDE .* state=EXIT", "q quits the restarted guide at step 1")
+        d.expect(r"GUIDE .* state=EXIT", "q quits the new run at step 1")
         guide_live = False
     finally:
         d.close()
@@ -480,14 +536,19 @@ print("rg=", 1 if is_connected(45, 50) else 0)
 print("conn=", 1 if is_connected(52, 53) else 0)
 """, timeout=25)
     vals = parse_kv(out)
-    check(vals.get("rg") == 0, "restart removed the RG placement bridge 45-50")
-    check(vals.get("conn") == 0, "restart removed the connect bridge 52-53")
+    check(vals.get("rg") == 0, "the new run has no RG placement bridge 45-50")
+    check(vals.get("conn") == 0, "the new run has no connect bridge 52-53")
 
-    _, slot_yaml = read_device_file(SLOT_PATH)
-    check("guideProgress:" not in slot_yaml,
-          "restart + quit at step 1 leaves no guideProgress in slot3.yaml")
-    check("placed: true" not in slot_yaml,
-          "no part is placed: true after the restart")
+    prev_exists, prev_yaml = read_device_file(run1)
+    check(prev_exists, f"NON-DESTRUCTIVE RESTART: {run1} still exists on disk")
+    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 3}}' in prev_yaml,
+          "NON-DESTRUCTIVE RESTART: the previous run still holds its "
+          "guideProgress - starting a new run did not clear it")
+
+    _, run2_yaml = read_device_file(run2)
+    check("guideProgress:" not in run2_yaml,
+          "the new run has no guideProgress (quit at step 1, nothing committed)")
+    check("placed: true" not in run2_yaml, "no part is placed: true in the new run")
 
     # =====================================================================
     # Task 7 extensions. Coverage debts first (task 6 review), then the
@@ -495,13 +556,21 @@ print("conn=", 1 if is_connected(52, 53) else 0)
     # fixture-free electrical checks.
     # =====================================================================
 
-    # --- 6. y-resume accept: quit mid-guide, relaunch, 'y' resumes ----------
+    # --- 6. The guided-ness gate with no progress, then resume --------------
+    # Bare `z <dir>` = load latest, and the latest run (phase 5's) carries NO
+    # guideProgress. The run file lost its own guide: section on the first
+    # save, so the gate falls back to runSource - which names a wiring that IS
+    # guided - and starts the guide fresh on this run file. Without that arm a
+    # run quit before its first commit would be permanently non-guided and
+    # would run the companion script against a circuit nobody built.
     d = GuideDriver()
     try:
-        d.send(f"z {WIRING_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {PROJ}\r\n".encode())
         guide_live = True
-        # Phase 5 quit at step 1 with no commits -> no guideProgress -> no offer
-        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "fresh step 1 (no stale resume offer)")
+        loaded = d.expect_runfile("load", "bare `z <dir>` loads the latest run")
+        check(loaded == run2, f"bare z loaded the latest run {run2} (got {loaded!r})")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT",
+                 "no guideProgress + a guided runSource -> fresh guide at step 1")
         d.send(b"n")
         d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "step 2 WAIT")
         d.send(b"n")
@@ -515,14 +584,12 @@ print("conn=", 1 if is_connected(52, 53) else 0)
 
     d = GuideDriver()
     try:
-        d.send(f"z {WIRING_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {PROJ} load\r\n".encode())
         guide_live = True
-        d.expect(r"GUIDE resume slot=3 step=2", "resume offer at the saved step 2")
-        d.expect(r"other = cancel", "resume prompt rendered")
-        time.sleep(0.5)
-        d.send(b"y")
+        d.expect(r"GUIDE resume file=" + re.escape(run2) + r" step=2",
+                 "resume at the saved step 2, named by FILE")
         d.expect(r"GUIDE step=3/3 id=connect_52 state=INIT",
-                 "y-resume re-enters at step 3 (INIT)", timeout=40)
+                 "resume re-enters at step 3 (INIT)", timeout=40)
         d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "resumed step 3 WAIT")
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "quit the resumed session")
@@ -535,17 +602,15 @@ print("conn=", 1 if is_connected(52, 53) else 0)
 
     out = jl_exec("print('rg=', 1 if is_connected(45, 50) else 0)", timeout=25)
     check(parse_kv(out).get("rg") == 1,
-          "y-resume kept the committed place bridge 45-50")
+          "resume kept the committed place bridge 45-50")
 
     # --- 7. p un-commit: back out the place step, assert removal ------------
     d = GuideDriver()
     try:
-        d.send(f"z {WIRING_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {PROJ} load\r\n".encode())
         guide_live = True
-        d.expect(r"GUIDE resume slot=3 step=2", "resume offer again (step 2)")
-        d.expect(r"other = cancel", "prompt rendered")
-        time.sleep(0.5)
-        d.send(b"y")
+        d.expect(r"GUIDE resume file=" + re.escape(run2) + r" step=2",
+                 "resume again (step 2)")
         d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT",
                  "resumed at step 3 for the un-commit", timeout=40)
         d.send(b"p")
@@ -577,20 +642,21 @@ print("NETNAME|" + name)
     check(net_name != "RG_A",
           f"RG_A net name is gone after the un-commit (got {net_name!r})")
 
-    _, slot_yaml = read_device_file(SLOT_PATH)
-    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 1}}' in slot_yaml,
-          "guideProgress decremented to step 1 after p")
-    check("placed: true" not in slot_yaml, "RG placed: false after the un-commit")
+    _, run2_yaml = read_device_file(run2)
+    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 1}}' in run2_yaml,
+          "guideProgress decremented to step 1 after p (in the run file)")
+    check("placed: true" not in run2_yaml, "RG placed: false after the un-commit")
 
-    # --- 8. Power fixture: power_on commit + y-resume re-applies rails ------
+    # --- 8. Power fixture: power_on commit + resume re-applies rails --------
     out = jl_exec(f'print("wrote=", 1 if fs_write({POWER_PATH!r}, {POWER_WIRING!r}) else 0)',
                   timeout=30)
     check(parse_kv(out).get("wrote") == 1, "pushed the power fixture")
 
     d = GuideDriver()
     try:
-        d.send(f"z {POWER_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {POWER_PATH} new\r\n".encode())
         guide_live = True
+        run_pw = d.expect_runfile("new", "power fixture allocated its own run file")
         d.expect(r"GUIDE step=1/4 id=note_1 state=WAIT", "power fixture step 1")
         d.send(b"n")
         d.expect(r"GUIDE step=2/4 id=connect_52 state=WAIT", "step 2 WAIT")
@@ -610,17 +676,17 @@ print("NETNAME|" + name)
         d.close()
     time.sleep(1.0)
 
-    _, slot_yaml = read_device_file(SLOT_PATH)
-    check("topRail: 2.5" in slot_yaml, "slot3.yaml persisted topRail 2.5 after power_on")
+    _, pw_yaml = read_device_file(run_pw)
+    check("topRail: 2.5" in pw_yaml, "the run file persisted topRail 2.5 after power_on")
+    check(f'runSource: "{POWER_PATH}"' in pw_yaml,
+          "runSource names the power fixture, not the default wiring")
 
     d = GuideDriver()
     try:
-        d.send(f"z {POWER_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {PROJ} load\r\n".encode())
         guide_live = True
-        d.expect(r"GUIDE resume slot=3 step=3", "resume offer past the committed power_on")
-        d.expect(r"other = cancel", "prompt rendered")
-        time.sleep(0.5)
-        d.send(b"y")
+        d.expect(r"GUIDE resume file=" + re.escape(run_pw) + r" step=3",
+                 "resume past the committed power_on, from the power run file")
         d.expect(r"resume past power_on: rails re-applied",
                  "resume re-applies the file's power", timeout=40)
         d.expect(r"GUIDE step=4/4 id=note_4 state=WAIT", "resumed at step 4")
@@ -642,8 +708,9 @@ print("NETNAME|" + name)
 
     d = GuideDriver()
     try:
-        d.send(f"z {NOPOWER_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {NOPOWER_PATH} new\r\n".encode())
         guide_live = True
+        run_np = d.expect_runfile("new", "no-power fixture allocated its own run file")
         d.expect(r"GUIDE step=1/4 id=note_1 state=WAIT", "no-power fixture step 1")
         d.send(b"n")
         d.expect(r"GUIDE step=2/4 id=connect_52 state=WAIT", "step 2 WAIT")
@@ -664,12 +731,10 @@ print("NETNAME|" + name)
 
     d = GuideDriver()
     try:
-        d.send(f"z {NOPOWER_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {PROJ} load\r\n".encode())
         guide_live = True
-        d.expect(r"GUIDE resume slot=3 step=3", "resume offer past the no-power power_on")
-        d.expect(r"other = cancel", "prompt rendered")
-        time.sleep(0.5)
-        d.send(b"y")
+        d.expect(r"GUIDE resume file=" + re.escape(run_np) + r" step=3",
+                 "resume past the no-power power_on, from its own run file")
         d.expect(r"resume past power_on: project has no power: section",
                  "resume notes there is nothing to re-apply (asymmetry fix)", timeout=40)
         d.expect(r"GUIDE step=4/4 id=note_4 state=WAIT", "resumed at step 4")
@@ -691,7 +756,7 @@ print("NETNAME|" + name)
 
     d = GuideDriver()
     try:
-        d.send(f"z {CHECKS_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {CHECKS_PATH} new\r\n".encode())
         guide_live = True
         d.expect(r"GUIDE step=1/4 id=note_1 state=WAIT", "checks fixture step 1")
         d.send(b"n")
@@ -748,7 +813,7 @@ print("NETNAME|" + name)
 
     d = GuideDriver()
     try:
-        d.send(f"z {REFUSAL_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {REFUSAL_PATH} new\r\n".encode())
         guide_live = True
         d.expect(r"GUIDE step=1/1 id=place_RG state=WAIT", "refusal fixture step 1")
         d.send(b"n")
@@ -829,7 +894,7 @@ print("wrote=", 1 if fs_write({VFNR_PATH!r}, {VFNR_WIRING!r}) else 0)
 
     d = GuideDriver()
     try:
-        d.send(f"z {VFNR_PATH} {SLOT}\r\n".encode())
+        d.send(f"z {VFNR_PATH} new\r\n".encode())
         guide_live = True
         for i, sid in enumerate(VFNR_CONNECT_IDS, start=1):
             d.expect(rf"GUIDE step={i}/11 id={sid} state=WAIT",
@@ -897,43 +962,50 @@ finally:
         except Exception as e:  # pragma: no cover
             print(f"  info: unwedge attempt failed: {e!r}")
 
-    # Project tree OFF the board (test_projects' run_app probe gates on the
-    # board holding only ITS two projects).
+    # ORDER: leave the run-file context FIRST. Every launch above made a run
+    # file the ACTIVE context, so its dirty state auto-saves back to ITSELF -
+    # delete it while it is still active and the next switch's dirty pre-save
+    # simply re-creates it (or fails noisily against a removed directory).
+    # test_parts_roundtrip documents the same hazard.
+    restore_context(orig_slot, orig_path)
+    time.sleep(1.5)
+
+    # Project tree OFF the board, RUN FILES INCLUDED (test_projects' run_app
+    # probe gates on the board holding only ITS two projects, and rmdir refuses
+    # a directory that still holds a <dir>_<N>.yaml).
     out = jl_exec(f"""
 for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
           {REFUSAL_PATH!r}, {VFNR_PATH!r}):
     if fs_exists(p):
         jfs.remove(p)
+runs = 0
+for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
+    if not fs_exists(dd):
+        continue
+    try:
+        names = jfs.listdir(dd)
+    except Exception:
+        names = []
+    for nm in names:
+        if nm.endswith(".yaml"):
+            try:
+                jfs.remove(dd + "/" + nm)
+                runs += 1
+            except Exception as e:
+                print("rmerr=", e)
 for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
     try:
         jfs.rmdir(dd)
     except Exception:
         pass
+print("runsremoved=", runs)
 print("gone=", 0 if fs_exists({PROJ_DIR!r}) else 1)
 print("gonevfnr=", 0 if fs_exists({VFNR_DIR!r}) else 1)
-""", timeout=25)
+""", timeout=30)
     vals = parse_kv(out)
+    print(f"  info: removed {vals.get('runsremoved')} leftover run file(s)")
     check(vals.get("gone") == 1, f"removed {PROJ_DIR} from the board")
     check(vals.get("gonevfnr") == 1, f"removed {VFNR_DIR} from the board")
-
-    # slot3.yaml back to its pre-test content (file first, slot switch after -
-    # the same hazard ordering test_projects documents).
-    if slot3_existed:
-        out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)",
-                      timeout=30)
-        check(parse_kv(out).get("restored") == 1, "restored slot3.yaml prior content")
-    else:
-        out = jl_exec(f"""
-if fs_exists({SLOT_PATH!r}):
-    jfs.remove({SLOT_PATH!r})
-print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
-""", timeout=25)
-        check(parse_kv(out).get("removed") == 1,
-              "removed the test's slot3.yaml (did not exist before)")
-
-    # Path-aware: a file context has no "<n" to go back to.
-    restore_context(orig_slot, orig_path)
-    time.sleep(1.5)
 
     if snapshot is not None:
         check(board_state_restore(snapshot), "board state restored to pre-test snapshot")

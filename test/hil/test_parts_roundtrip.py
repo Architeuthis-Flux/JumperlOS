@@ -684,11 +684,20 @@ print("wrote=", 1 if fs_write({TMP_WIRING!r}, {TMP_YAML!r}) else 0)
     check(vals.get("projdir") == 1, f"created {TMP_PROJ} on the board")
     check(vals.get("wrote") == 1, f"pushed {TMP_WIRING}")
 
+    # CONTRACT CHANGE (task 5): load_project's NAME form now BEGINS A RUN.
+    # "load project tmptest" means "open its latest run file, or create
+    # tmptest_1.yaml from the wiring" - which is what stops a script from
+    # adopting a shipped template as its auto-saving context and rewriting it
+    # without guide:/meta: (task 4's bench-caught destruction path). The
+    # literal-path form below is deliberately still the raw adopting loader.
+    # Everything this phase actually tests - the parse, the re-expansion, the
+    # guideProgress scalar and the slot-clobber regression - is unchanged,
+    # because the run file is a verbatim copy of the wiring.
     out = jl_exec("""
 print("loaded=", 1 if load_project("tmptest") else 0)
 """, timeout=30)
     check(parse_kv(out).get("loaded") == 1,
-          "load_project('tmptest') resolved /projects/tmptest/wiring.yaml and loaded it")
+          "load_project('tmptest') began a run of /projects/tmptest/wiring.yaml")
     time.sleep(1.5)
 
     out = jl_exec("""
@@ -720,11 +729,16 @@ print("stale=", 1 if is_connected(55, 42) else 0)
     # that no numbered slot file is touched.
     slot_after_lp, path_after_lp = active_context(1.5)
     check(slot_after_lp == -1,
-          f"load_project adopted the project file as a FILE context "
+          f"load_project adopted a project file as a FILE context "
           f"(ACTIVE_SLOT:{slot_after_lp}, expected -1)")
-    check(path_after_lp == TMP_WIRING,
-          f"ACTIVE_PATH is the project file itself (got {path_after_lp!r}, "
-          f"expected {TMP_WIRING!r})")
+    # The context is the RUN FILE the name form allocated, not the wiring
+    # template it was copied from - the template stays read-only.
+    check(path_after_lp is not None and
+          re.match(r"^" + re.escape(TMP_PROJ) + r"/tmptest_\d+\.yaml$", path_after_lp),
+          f"ACTIVE_PATH is the run file the name form allocated (got "
+          f"{path_after_lp!r}, expected {TMP_PROJ}/tmptest_<N>.yaml)")
+    check(path_after_lp != TMP_WIRING,
+          "the shipped wiring template did NOT become the active context")
     time.sleep(2.0)  # give the idle auto-save a chance to misbehave
     slot0_after_exists, slot0_after = read_device_file("/slots/slot0.yaml")
     check(slot0_after_exists == slot0_existed and slot0_after == slot0_before,
@@ -757,10 +771,18 @@ finally:
     port1_command(f"<{bounce}", 4.0)
     time.sleep(1.5)
 
+    # Every .yaml, not just the wiring: load_project's name form allocated a
+    # tmptest_<N>.yaml run file, and rmdir refuses a directory that still holds
+    # one. (Run files are user data - the firmware never removes them, so the
+    # suite that minted this one takes it back off the bench.)
     out = jl_exec(f"""
-for p in ({TMP_WIRING!r},):
-    if fs_exists(p):
-        jfs.remove(p)
+if fs_exists({TMP_PROJ!r}):
+    for nm in jfs.listdir({TMP_PROJ!r}):
+        if nm.endswith(".yaml"):
+            try:
+                jfs.remove({TMP_PROJ!r} + "/" + nm)
+            except Exception as e:
+                print("rmerr=", e)
 try:
     jfs.rmdir({TMP_PROJ!r})
 except Exception as e:

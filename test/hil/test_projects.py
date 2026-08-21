@@ -21,10 +21,18 @@ opens with the two contracts the encoder-driven launcher rests on -
 load_project() on a meta:-first wiring, and the `_jl_project` preamble
 prepended to the companion script - and then drives the launcher ITSELF:
 6(c)/6(d) call run_app("Projects") for real from two ports at once (port 5
-runs it in a worker thread, port 1 watches the picker and cancels it). What
-stays out of reach from here is RUNNING a project's script, because the
-launcher moves the MicroPython stream to port 1 before it does. See the
-block at phase 6 for the full reasoning.
+runs it in a worker thread, port 1 watches the picker and cancels it).
+
+Phase 6(f) (wave 2) covers RUN FILES end to end, which is what replaced the
+temp-slot + keep-prompt flow. A launch now opens or creates
+/projects/<dir>/<dir>_<N>.yaml and leaves it as the persistent active context.
+Running a project's script IS reachable now - not through the encoder path
+(the launcher moves the MicroPython stream to port 1, out from under a port-5
+caller) but through the headless `z` command driven FROM port 1, which is
+where that stream lands anyway. 6(f) drives that: the exit table's rows A / D
+/ E / G, the monotonic no-reuse allocator, the runSource: stamp, the proof
+that run files are invisible to the template write-guard AND to provisioning,
+and the deterministic no-active-context terminal state.
 
 Phase 6(c) (task 8) is the PROVISIONING phase: delete built-in project files
 off the board, drive initializeProjects() through the launcher's self-heal
@@ -247,6 +255,34 @@ else:
     return True, (m.group(1) if m else "")
 
 
+def leave_context_to_slot3():
+    """Leave whatever run file is active and land on slot 3. ALWAYS do this
+    before deleting a run file: a run file that is still the ACTIVE CONTEXT
+    gets re-created by the next switch's dirty pre-save (test_parts_roundtrip
+    documents the same hazard)."""
+    jl_exec("print('back=', switch_slot(3))", timeout=25)
+    time.sleep(1.2)
+
+
+def purge_runs(pdir, prefix):
+    """Delete <prefix><digits>.yaml run files from a project directory.
+    Run files are user data the firmware never removes, so every phase that
+    mints one has to take it back off the bench itself."""
+    out = jl_exec(f"""
+n = 0
+if fs_exists({pdir!r}):
+    for nm in jfs.listdir({pdir!r}):
+        if nm.startswith({prefix!r}) and nm.endswith(".yaml"):
+            try:
+                jfs.remove({pdir!r} + "/" + nm)
+                n += 1
+            except Exception as e:
+                print("rmerr=", e)
+print("purged=", n)
+""", timeout=30)
+    return parse_kv(out).get("purged")
+
+
 WIRING = local_file("wiring.yaml")
 
 # --- 0. Snapshot the bench: board state, slot3.yaml, active slot ----------
@@ -456,6 +492,7 @@ print("hilmark=", 1)
 print("hildir=", _jl_project.get("dir", "none"))
 print("hilvariant=", _jl_project.get("variant", "none"))
 print("hilwiring=", _jl_project.get("wiring", "none"))
+print("hilrun=", _jl_project.get("run", "none"))
 """
 
     out = jl_exec(f"""
@@ -473,25 +510,42 @@ print("w2=", 1 if fs_write({HIL_DIR + "/main.py"!r}, {HIL_MAIN!r}) else 0)
     check(vals.get("w1") == 1 and vals.get("w2") == 1,
           f"pushed {HIL_DIR}/wiring.yaml + main.py (the launcher's listProjects target)")
 
-    # (a) The launcher's load step: load_project() -> loadSlotFromPath(). A
-    # wiring.yaml whose FIRST section is meta: is exactly the case the launcher
-    # hands the slot parser, so this also proves meta: doesn't derail the parse.
+    # (a) The launcher's load step, through the binding that now WRAPS it.
+    # load_project("<name>") no longer adopts the shipped template: under the
+    # run-file model "load project hiltest" means "open its latest run file, or
+    # create hiltest_1.yaml from the wiring" - which is exactly the destruction
+    # path task 4 caught (load_project("eeprom") adopting the template and the
+    # idle auto-save rewriting it without guide:/meta:). The LITERAL-path form
+    # is deliberately still raw, and test_slot_files phase 6b is what covers it.
+    #
+    # A wiring.yaml whose FIRST section is meta: is exactly the case the
+    # launcher hands the slot parser, so this also proves meta: doesn't derail
+    # the parse.
     out = jl_exec("""
 print("loaded=", 1 if load_project("hiltest") else 0)
 print("br=", 1 if is_connected(20, 21) else 0)
 print("stale555=", 1 if is_connected("ADC1", 7) else 0)
 """, timeout=25)
     vals = parse_kv(out)
-    check(vals.get("loaded") == 1, "load_project('hiltest') resolved the name to "
-                                   f"{HIL_DIR}/wiring.yaml and loaded it")
+    check(vals.get("loaded") == 1, "load_project('hiltest') began a run of the project")
     check(vals.get("br") == 1, "hiltest wiring's bridge 20-21 is live (meta: parsed past)")
     check(vals.get("stale555") == 0, "the previous wiring's bridges are gone (fresh state)")
 
+    lp_slot, lp_path = active_context(1.5)
+    check(lp_slot == -1 and lp_path is not None and
+          re.match(r"^" + re.escape(HIL_DIR) + r"/hiltest_\d+\.yaml$", lp_path or ""),
+          f"load_project('<name>') adopted a RUN FILE, not the template "
+          f"(got {lp_slot}, {lp_path!r})")
+    check(lp_path != f"{HIL_DIR}/wiring.yaml",
+          "the shipped template is NOT the active context after the name form")
+
     # (b) The companion-script contract: read main.py off the device, prepend the
     # launcher's `_jl_project = {...}` line, exec it. Same shape ProjectsApp.cpp
-    # builds (dir / variant / wiring), same file the launcher would have run.
+    # builds (dir / variant / wiring / run), same file the launcher would run.
+    # "wiring" keeps its canonical-wiring-path meaning (provenance); "run" is
+    # the state file the script's own mutations get saved into.
     preamble = ('_jl_project = {"dir": "hiltest", "variant": "default", '
-                f'"wiring": "{HIL_DIR}/wiring.yaml"}}\n')
+                f'"wiring": "{HIL_DIR}/wiring.yaml", "run": "{lp_path}"}}\n')
     out = jl_exec(f"""
 src = fs_read({HIL_DIR + "/main.py"!r})
 exec({preamble!r} + src)
@@ -504,6 +558,8 @@ exec({preamble!r} + src)
           f"_jl_project['variant'] reached the script (got {vals.get('hilvariant')!r})")
     check(vals.get("hilwiring") == f"{HIL_DIR}/wiring.yaml",
           f"_jl_project['wiring'] reached the script (got {vals.get('hilwiring')!r})")
+    check(vals.get("hilrun") == lp_path,
+          f"_jl_project['run'] reached the script (got {vals.get('hilrun')!r})")
 
     # (c) PROVISIONING (task 8). projectFiles[] + initializeProjects() install the
     # built-in projects from firmware constants; the launcher calls the unforced
@@ -535,6 +591,24 @@ exec({preamble!r} + src)
 
     pre_main_hash, pre_main_len = device_hash(f"{PROJ_DIR}/main.py")
     print(f"  info: {PROJ_DIR}/main.py before: {pre_main_hash} ({pre_main_len} bytes)")
+
+    # RUN FILES ARE INVISIBLE TO PROVISIONING (design-launcher §3). Park one
+    # inside /projects/555 across the provisioning pass below and prove it comes
+    # out byte-identical: initializeProjects() iterates the compiled
+    # projectFiles[] canonical paths only and never enumerates /projects, and
+    # the forced-refresh backup namer produces wiring_original*.yaml - a
+    # disjoint namespace from <dir>_<N>.yaml. This asserts it over the UNFORCED
+    # pass (the launcher's self-heal), which is the only one with a serial
+    # trigger; the forced refresh stays a bench item, as this file's header
+    # already says.
+    RUN_555 = f"{PROJ_DIR}/555_777.yaml"
+    RUN_555_BODY = ("version: 2\nsourceOfTruth: bridges\n"
+                    'runSource: "/projects/555/wiring.yaml"\n'
+                    "bridges:\n  - {n1: 31, n2: 32}\n")
+    out = jl_exec(f"print('wrote=', 1 if fs_write({RUN_555!r}, {RUN_555_BODY!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("wrote") == 1, f"parked a run file at {RUN_555}")
+    pre_run_hash, pre_run_len = device_hash(RUN_555)
 
     out = jl_exec(f"""
 for p in ({PROJ_DIR + "/wiring.yaml"!r}, {PROJ_DIR + "/README.md"!r},
@@ -577,6 +651,23 @@ print("whil=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
     check(post_main_hash == pre_main_hash and post_main_len == pre_main_len,
           f"555/main.py was left untouched by the unforced pass ({post_main_hash})")
 
+    post_run_hash, post_run_len = device_hash(RUN_555)
+    check(post_run_hash == pre_run_hash and post_run_len == pre_run_len,
+          f"the parked RUN FILE survived provisioning byte-identical "
+          f"({post_run_hash}, {post_run_len} bytes) - projectFiles[] cannot "
+          f"reach a <dir>_<N>.yaml")
+
+    # And it is not a variant either: listVariantFiles requires a `wiring`
+    # prefix, so 555 must still show exactly one wiring - proven through the
+    # picker, which is the code path that would double-list it.
+    out = jl_exec(f"""
+names = [n for n in jfs.listdir({PROJ_DIR!r}) if n.endswith(".yaml")]
+print("yamls=", len(names))
+print("YAMLS|" + ",".join(sorted(names)))
+""", timeout=25)
+    check("555_777.yaml" in out and "wiring.yaml" in out,
+          "the run file and the wiring coexist in /projects/555")
+
     # Coexistence: hiltest's dir and its other file survived; its wiring did not
     # come back (nothing in projectFiles[] points there).
     out = jl_exec(f"""
@@ -609,12 +700,11 @@ print("missing_ms=", time.ticks_diff(t1, t0))
                   timeout=30)
     check(parse_kv(out).get("restored") == 1, f"restored {HIL_DIR}/wiring.yaml")
 
-    # Put the live state back in sync with slot 3's FILE before the restore below
-    # rewrites it: load_project() deliberately leaves slot tracking alone
-    # (States.cpp:3080, the slot-clobber guard), so slot 3 is still "active" while
-    # holding hiltest's state - and a dirty active slot is what the idle auto-save
-    # writes out. switch_slot re-reads the file. (Port 5 on purpose: one fewer
-    # port-1 round trip when a terminal client is holding it.)
+    # Leave the run-file context and go back to slot 3 before phase 6(d), so
+    # the exit-A assertion below has a stable, nameable context to compare
+    # against. switch_slot flushes the outgoing context to its own file first
+    # (task 4's Q2 fix). Port 5 on purpose: one fewer port-1 round trip when a
+    # terminal client is holding it.
     out = jl_exec("print('back=', switch_slot(3))", timeout=25)
     time.sleep(1.5)
 
@@ -632,10 +722,9 @@ print("missing_ms=", time.ticks_diff(t1, t0))
     # leftover copy is inert), re-sent every 0.5 s until the exec returns so a
     # dropped byte can't leave the board sitting in the picker. All of that lives
     # in run_projects_app() at the top of this file - 6(c) drives it too.
-    q = port1_command("Q", 1.5)
-    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-    slot_before_launch = int(m.group(1)) if m else -1
-    check(slot_before_launch == 3, f"active slot before the launch probe is 3 (got {slot_before_launch})")
+    slot_before_launch, path_before_launch = active_context(1.5)
+    check(slot_before_launch == 3,
+          f"active slot before the launch probe is 3 (got {slot_before_launch})")
 
     buf, n_listed, sends, worker, launch = run_projects_app()
 
@@ -653,15 +742,18 @@ print("missing_ms=", time.ticks_diff(t1, t0))
     check(parse_kv(launch.get("out", "")).get("returned") == 1,
           "the REPL exec that launched the app completed normally")
 
-    # The latch witness. enterTemporarySlot(8) sets activeSlotNumber = 8 and only
-    # exitTemporarySlot puts it back (States.cpp:3235/:3252), so a cancel that
-    # wrongly entered - or entered and failed to unwind - shows up as ACTIVE_SLOT:8
-    # here. And the follow-up slot write proves the slot machinery still works.
-    q = port1_command("Q", 1.5)
-    m = re.search(r"ACTIVE_SLOT:(\d+)", q)
-    slot_after = int(m.group(1)) if m else -1
-    check(slot_after == 3,
-          f"cancelling the picker left no temp slot behind (ACTIVE_SLOT:{slot_after}, not 8)")
+    # EXIT A, the whole row: "cancel at the project picker -> previous context,
+    # untouched; on disk untouched; plain return". This used to be the TEMP-SLOT
+    # LATCH witness (assert ACTIVE_SLOT is 3 "and not 8"), because the launcher
+    # borrowed slot 8 and only exitTemporarySlot put tracking back. The launcher
+    # does not touch the temp slot at all any more, so the assertion is re-aimed
+    # at what exit A actually promises now: the CONTEXT is identical, number and
+    # path both. And the follow-up slot write proves the slot machinery still
+    # works afterwards.
+    slot_after, path_after = active_context(1.5)
+    check(slot_after == slot_before_launch and path_after == path_before_launch,
+          f"EXIT A: cancelling the picker left the context untouched "
+          f"({slot_before_launch}, {path_before_launch!r} -> {slot_after}, {path_after!r})")
     out = jl_exec("print('saved=', nodes_save(3))", timeout=25)
     check(parse_kv(out).get("saved") == 3,
           "a slot operation still succeeds after the cancelled launch")
@@ -856,9 +948,16 @@ jfs.close(f)
                   f"{pdir}/{base} on the board matches the firmware default "
                   f"(device FNV {dh}, {dl} bytes) - provisioning installed it")
 
-        # (iii) the wiring parses, and every leg lands where the footprint math says
+        # (iii) the wiring parses, and every leg lands where the footprint math
+        # says. LITERAL-path form on purpose: this phase is about the wiring
+        # FILE's contents, and the name form would begin a run (allocating
+        # <proj>_1.yaml and re-serializing it) before anything got read. The
+        # literal form is the raw adopting loader, so what is asserted below is
+        # the shipped template's own parse. Adopting a template is safe -
+        # SlotManager refuses to WRITE one (task 4) - and (iv) moves the context
+        # off it immediately.
         out = jl_exec(f"""
-print("loaded=", 1 if load_project({proj!r}) else 0)
+print("loaded=", 1 if load_project({pdir + "/wiring.yaml"!r}) else 0)
 ps = list_parts()
 print("nparts=", len(ps))
 for p in ps:
@@ -881,7 +980,7 @@ for i in range(n):
 print("rowbridges=", rowb)
 """, timeout=40)
         vals = parse_kv(out)
-        check(vals.get("loaded") == 1, f"load_project({proj!r}) loaded {pdir}/wiring.yaml")
+        check(vals.get("loaded") == 1, f"load_project() loaded {pdir}/wiring.yaml")
         check(vals.get("nparts") == len(want_parts),
               f"{proj}: {vals.get('nparts')} parts parsed (expected {len(want_parts)})")
         # Counted as "bridges touching a breadboard row (1-60)", NOT as
@@ -999,20 +1098,20 @@ gc.collect()
                   f"{pdir}/main.py compiles under this MicroPython "
                   f"({vals.get('srclen')} bytes read through jfs, uncapped)")
 
-        # (vi) the guide: section parses. Drive `z` far enough to see the first
-        # step, then quit - no part is confirmed, so nothing is placed.
+        # (vi) the guide: section parses. Drive `z ... new` far enough to see
+        # the first step, then quit - no part is confirmed, so nothing is
+        # placed. `new` (not a bare launch) so the phase is deterministic
+        # whatever run files a previous suite pass left behind; the run file it
+        # allocates is removed in teardown.
         guide_live = False
         d = GuideDriver()
         try:
-            d.send(f"z {pdir}/wiring.yaml 3\r\n".encode())
+            d.send(f"z {pdir}/wiring.yaml new\r\n".encode())
             guide_live = True
-            m = d.expect(r"GUIDE (?:resume slot=\d+ step=\d+|step=1/(?P<n>\d+) id=)",
+            d.expect(r"RUNFILE path=\S+ action=new",
+                     f"{proj}: the launch allocated a run file")
+            m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
                          f"{proj}: guide: section parsed and the runtime started")
-            if m and m.group("n") is None:
-                # Stale progress for this same wiring: restart, then look again.
-                d.send(b"n")
-                m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
-                             f"{proj}: restarted at step 1")
             if m:
                 n_steps = int(m.group("n"))
                 check(n_steps == want_steps,
@@ -1040,8 +1139,261 @@ print("progress=", guide_progress())
               f"{proj}: no guide progress was committed (guide_progress()="
               f"{vals.get('progress')})")
 
+    # --- 6(f). RUN FILES: the exit table, the allocator, the terminal state ---
+    # Everything the temp-slot keep-flow used to do is gone; this is what
+    # replaced it. Driven headless from PORT 1 on purpose: the launcher moves
+    # the MicroPython stream to port 1 before it execs a companion script, so
+    # port 1 is the only place a real script run is both drivable and readable.
+    print("  --- 6(f) run files ---")
+
+    leave_context_to_slot3()
+    purged = purge_runs(HIL_DIR, "hiltest_")
+    print(f"  info: purged {purged} pre-existing hiltest run file(s) for a "
+          f"deterministic allocator start")
+
+    # (i) EXIT G: the non-guided happy path, end to end. hiltest ships no
+    # guide:, so the launch runs its companion script UNCONDITIONALLY (that is
+    # the whole point of a non-guided project - no offer), then saves the run
+    # file and prints the one-liner.
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest new\r\n")
+        m = d.expect(r"RUNFILE path=(\S+) action=new", "z ... new allocated a run file")
+        run1 = m.group(1) if m else None
+        check(run1 == f"{HIL_DIR}/hiltest_1.yaml",
+              f"first run of a project with no runs is <dir>_1.yaml (got {run1!r})")
+        d.expect(r"SCRIPT offer=" + re.escape(f"{HIL_DIR}/main.py"),
+                 "the resolved companion script is announced")
+        d.expect(r"SCRIPT action=run",
+                 "a NON-guided launch runs its script unconditionally (no offer)")
+        d.expect(r"hilmark= 1", "the project's main.py really ran")
+        d.expect(r"hilrun= " + re.escape(run1 or "x"),
+                 '_jl_project["run"] names the run file the script lives in')
+        d.expect(r"--- script finished ---", "the script returned")
+        d.expect(r"Run saved to hiltest_1\.yaml \(now your active circuit\)",
+                 "EXIT G: the launcher saved the run and said so")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    ctx_slot, ctx_path = active_context(1.5)
+    check(ctx_slot == -1 and ctx_path == run1,
+          f"EXIT G: the run file is the ACTIVE CONTEXT afterwards "
+          f"(got {ctx_slot}, {ctx_path!r})")
+
+    exists, run1_yaml = read_device_file(run1)
+    check(exists, f"{run1} exists and reads back")
+    check(f'runSource: "{HIL_DIR}/wiring.yaml"' in run1_yaml,
+          "the run file carries runSource: - the variant provenance the path "
+          "cannot encode")
+    check(re.search(r"n1:\s*20,\s*n2:\s*21", run1_yaml) is not None,
+          "the run file carries the wiring's 20-21 bridge")
+    check("meta:" not in run1_yaml,
+          "the run file lost meta: on its first save (wholesale toYAML rewrite)")
+
+    # (ii) CORRECTION-5 NEEDLE: a run file is NOT a template. SlotManager
+    # refuses to write /projects/<dir>/wiring*.yaml, and <dir>_<N>.yaml
+    # deliberately does not match that predicate - VERIFIED here rather than
+    # assumed, because the whole run-file model rests on it. Dirty the state
+    # and prove the idle auto-save lands IN THE RUN FILE while the shipped
+    # template beside it is untouched.
+    tpl_hash_before, _ = device_hash(f"{HIL_DIR}/wiring.yaml")
+    jl_exec("connect(41, 42)", timeout=25)
+    time.sleep(4.5)   # well past the idle flush gate
+    _, run1_after = read_device_file(run1)
+    check(re.search(r"n1:\s*41,\s*n2:\s*42", run1_after) is not None,
+          "a run file IS writable: the auto-save landed the 41-42 edit in it "
+          "(the template write-guard does not match <dir>_<N>.yaml)")
+    tpl_hash_after, _ = device_hash(f"{HIL_DIR}/wiring.yaml")
+    check(tpl_hash_after == tpl_hash_before,
+          f"the shipped template beside it is byte-identical ({tpl_hash_after})")
+
+    # (iii) Relaunch offers the LATEST run, and `noscript` skips the script.
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest noscript\r\n")
+        d.expect(r"RUNS n=1 latest=" + re.escape(run1),
+                 "a relaunch reports the run count and the latest path")
+        m = d.expect(r"RUNFILE path=(\S+) action=load",
+                     "no mode arg = load latest when runs exist")
+        check(m is not None and m.group(1) == run1,
+              f"the relaunch opened {run1}")
+        d.expect(r"SCRIPT action=skip", "`noscript` skipped the companion script")
+        d.expect(r"Run saved to hiltest_1\.yaml", "the run was saved anyway")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # (iv) ALLOCATOR: monotonic, and gaps are NEVER reused. Two launches give
+    # _1 then _2; deleting _1 and launching again gives _3, not _1 - reusing a
+    # gap would resurrect a stale transcript's idea of which file is which.
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest new noscript\r\n")
+        m = d.expect(r"RUNFILE path=(\S+) action=new", "second launch allocated a run file")
+        run2 = m.group(1) if m else None
+        check(run2 == f"{HIL_DIR}/hiltest_2.yaml",
+              f"the allocator went _1 -> _2 (got {run2!r})")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    leave_context_to_slot3()
+    out = jl_exec(f"""
+if fs_exists({run1!r}):
+    jfs.remove({run1!r})
+print("gone=", 0 if fs_exists({run1!r}) else 1)
+""", timeout=25)
+    check(parse_kv(out).get("gone") == 1, f"deleted {run1} to open a gap at _1")
+
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest new noscript\r\n")
+        m = d.expect(r"RUNFILE path=(\S+) action=new", "third launch allocated a run file")
+        run3 = m.group(1) if m else None
+        check(run3 == f"{HIL_DIR}/hiltest_3.yaml",
+              f"NO REUSE: the gap left by _1 was skipped, next is _3 (got {run3!r})")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # (v) The `z` grammar. The old `z <path> <slot>` must break VISIBLY rather
+    # than silently writing a slot, and an all-digit PROJECT NAME must keep
+    # working - `z 555` is a project, not a destination slot.
+    ctx_before_bad = active_context(1.5)
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest 3\r\n")
+        d.expect(r"destination slots are gone",
+                 "the old `z <project> <slot>` grammar loud-fails with the usage line")
+    finally:
+        d.close()
+    check(active_context(1.5) == ctx_before_bad,
+          "the refused command changed nothing")
+
+    d = GuideDriver()
+    try:
+        # run=9999 cannot exist, so this errors WITHOUT starting 555's guide -
+        # what it proves is that "555" was parsed as the PROJECT (a token-wise
+        # parse), not swallowed as an old-grammar slot argument.
+        d.send(b"z 555 run=9999\r\n")
+        d.expect(r"PROJECT error no such run file: /projects/555/555_9999\.yaml",
+                 "an all-digit project name is a PROJECT, not a slot")
+    finally:
+        d.close()
+    check(active_context(1.5) == ctx_before_bad,
+          "the failed run=<N> changed nothing either")
+
+    # (vi) EXIT E, the NO-ACTIVE-CONTEXT terminal state. For a FILE context
+    # this is deterministic, not exotic (task 4 report, NEW-3): an invalid YAML
+    # written over the ACTIVE run file makes loadSlotFromPath's parse-failure
+    # RESTORE re-read the same bad file, and arbitrary paths have no /.bak
+    # mirror. The manager then stops at activeSlotNumber == -1 with an EMPTY
+    # path, a cleared state, and - the half that had zero coverage until now -
+    # the HARDWARE cleared to match: nothing routed, nothing powered.
+    #
+    # The write and the load must be ONE snippet: split across two jl_exec
+    # calls, the multi-second REPL gap lets the idle auto-save rewrite the run
+    # file with valid content and the needle goes vacuous.
+    #
+    # topRail 99 V is what fails: fromYAML ends in validate() and
+    # PowerState::validate rejects any rail/DAC outside +/-8 V.
+    BAD_RUN = ("version: 2\nsourceOfTruth: bridges\n"
+               "bridges:\n  - {n1: 51, n2: 52}\n"
+               "power:\n  topRail: 99.00\n  bottomRail: 0.00\n"
+               "  dac0: 0.00\n  dac1: 0.00\n")
+    ctx_slot, ctx_path = active_context(1.5)
+    check(ctx_slot == -1 and ctx_path == run3,
+          f"the bad-YAML target IS the active context (got {ctx_slot}, {ctx_path!r})")
+    out = jl_exec(f"""
+print("wrote=", 1 if fs_write({run3!r}, {BAD_RUN!r}) else 0)
+print("loaded=", 1 if load_project({run3!r}) else 0)
+""", timeout=30)
+    vals = parse_kv(out)
+    check(vals.get("wrote") == 1, "wrote an invalid YAML over the ACTIVE run file")
+    check(vals.get("loaded") == 0, "re-loading it fails (PowerState::validate rejects 99 V)")
+
+    q = port1_command("Q", 2.0)
+    check("ACTIVE_SLOT:-1" in q,
+          f"TERMINAL STATE: ACTIVE_SLOT is -1 (Q said {q.strip()[-80:]!r})")
+    # The discriminator is the EMPTY path: a normal FILE context also prints
+    # ACTIVE_SLOT:-1, so only "ACTIVE_PATH:" with nothing after it separates the
+    # terminal state from an ordinary run-file context.
+    check(re.search(r"ACTIVE_PATH:[ \t]*\r?\n", q) is not None,
+          "TERMINAL STATE: ACTIVE_PATH is EMPTY - not merely a file context")
+
+    out = jl_exec(f"""
+print("bad=", 1 if is_connected(51, 52) else 0)
+n = get_num_bridges()
+print("nbridges=", n)
+rowb = 0
+infra_rows = {INFRA_ROWS!r}
+for i in range(n):
+    b = get_bridge(i)
+    if (1 <= b[0] <= 60) or (1 <= b[1] <= 60):
+        if b[0] in infra_rows or b[1] in infra_rows:
+            continue
+        print("ROWBRIDGE|%s" % str(b))
+        rowb += 1
+print("rowbridges=", rowb)
+print("top=", dac_get(2))
+print("bot=", dac_get(3))
+""", timeout=30)
+    vals = parse_kv(out)
+    check(vals.get("bad") == 0,
+          "TERMINAL STATE: the failed file's own bridge was NOT applied")
+    check(vals.get("rowbridges") == 0,
+          f"TERMINAL STATE: NOTHING IS ROUTED - 0 non-infra bridges touch rows "
+          f"1-60 (total {vals.get('nbridges')}, excluded infra rows {INFRA_ROWS})")
+    # NOTHING POWERED BEYOND DEFAULTS: clear() resets the rails to 0 V (DAC0
+    # keeps the probe feed voltage by design, which is why only the two rails
+    # are asserted here).
+    check(vals.get("top") is not None and abs(float(vals.get("top"))) < 0.5 and
+          vals.get("bot") is not None and abs(float(vals.get("bot"))) < 0.5,
+          f"TERMINAL STATE: NOTHING IS POWERED - both rails at 0 V "
+          f"(top={vals.get('top')}, bottom={vals.get('bot')})")
+
+    # Recover explicitly - the terminal state is a safe STOP, and leaving the
+    # bench in it would strand every phase after this one.
+    #
+    # '<3' on port 1, NOT switch_slot(3): the MicroPython binding raises
+    # ValueError("Invalid slot number") whenever jl_switch_slot returns -1, and
+    # jl_switch_slot returns the PREVIOUS slot number on success - which is -1
+    # exactly here. The switch works; the binding just cannot tell "came from
+    # nowhere" from "bad argument". Recorded in the task-5 report as a
+    # pre-existing return-value ambiguity that the terminal state made
+    # reachable; it is task 4's surface, not the launcher's.
+    port1_command("<3", 4.0)
+    time.sleep(1.5)
+    rec_slot, rec_path = active_context(1.5)
+    check(rec_slot == 3,
+          f"recovered from the terminal state with a plain slot switch "
+          f"(got {rec_slot}, {rec_path!r})")
+
 finally:
     # --- 7. Restore the bench --------------------------------------------------
+    # RUN FILES FIRST, and only after leaving whichever one is active: a run
+    # file that is still the context is re-created by the next switch's dirty
+    # pre-save. Run files are user data the firmware never auto-deletes, so
+    # every one this suite minted has to come back off the bench here - the
+    # allocator is monotonic, and a board that accretes them across suite runs
+    # eventually earns the pile-up hint for no reason.
+    try:
+        leave_context_to_slot3()
+        total = 0
+        for _pdir, _prefix in ((PROJ_DIR, "555_"),
+                               ("/projects/hiltest", "hiltest_"),
+                               ("/projects/i2cscrn", "i2cscrn_"),
+                               ("/projects/nand00", "nand00_"),
+                               ("/projects/eeprom", "eeprom_")):
+            n = purge_runs(_pdir, _prefix)
+            total += int(n) if n is not None else 0
+        print(f"  info: removed {total} run file(s) minted by this suite")
+    except SystemExit:
+        raise
+    except Exception as e:  # pragma: no cover
+        print(f"  info: run-file cleanup failed: {e!r}")
+
     # Restore the FILE first, switch slots second (same hazard as phase 0).
     if slot3_existed:
         out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)",
