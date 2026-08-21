@@ -337,24 +337,31 @@ void __not_in_flash_func(renderGraphicOverlays)() {
 // YAML Serialization
 // ============================================================================
 
+// Session-only overlays are never persisted into a slot file: self-test
+// results must clear on reset, and the guided-placement runtime's `_GUIDE_`
+// footprint/target overlays are rebuilt from the parts table every session
+// (persisting them would also survive into slots the guide no longer owns).
+static bool overlayIsSessionOnly(const char* name) {
+    return strcmp(name, "_SELFTEST_") == 0 ||
+           strncmp(name, "_GUIDE_", 7) == 0;
+}
+
 void serializeOverlaysToYAML(String& output, int withANSI ) {
-    // Self-test results are session-only (must clear on reset) - never
-    // persist them into a slot file.
     int persistable = 0;
     for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
         const GraphicOverlay& overlay = graphicOverlayState.overlays[i];
-        if (overlay.enabled && strcmp(overlay.name, "_SELFTEST_") != 0) persistable++;
+        if (overlay.enabled && !overlayIsSessionOnly(overlay.name)) persistable++;
     }
     if (persistable == 0) {
         return;
     }
-    
+
     output += "\noverlays:\n";
-    
+
     for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
         const GraphicOverlay& overlay = graphicOverlayState.overlays[i];
         if (!overlay.enabled) continue;
-        if (strcmp(overlay.name, "_SELFTEST_") == 0) continue;
+        if (overlayIsSessionOnly(overlay.name)) continue;
 
         output += "  - name: \"";
         output += overlay.name;

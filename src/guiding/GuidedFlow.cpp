@@ -1,0 +1,1256 @@
+// SPDX-License-Identifier: MIT
+// Guided-placement runtime (task 6: manual advance). Design authority:
+// CodeDocs/DESIGN_GUIDED_PLACEMENT.md §2-§4, §6-§7; as-built parts contract
+// in src/routing/PartPlacement.h + the States.h header comment.
+//
+// Shape: probeMode's blocking-loop pattern - a GuideSession struct and a
+// guideTick() enum state machine, pumped by jOS.serviceInner() so only the
+// CRITICAL "inner set" services run (Highlighting / MeasureMode / SlotManager
+// are silenced for the guide's whole life - auto-save can't race a step, the
+// guide saves explicitly at each commit).
+//
+// Status-line grammar (one line per REST-state transition, machine-parseable):
+//   GUIDE step=<i>/<n> id=<type>_<part|node> state=<STATE>
+// with ` check=<name> val=<x>` appended at RESULT. Emitted states: INIT,
+// WAIT, PROBE_WAIT, RESULT, COMMIT, BACK, DONE, EXIT. The pass-through
+// states (ENTER, VERIFY) are internal and deliberately NOT emitted - the
+// machine never rests there, and a line for each would be the spam the
+// design's "one line per transition" rule exists to prevent.
+//
+// Electrical checks are task 7: check: fields parse into GuideStep.check but
+// STEP_VERIFY resolves everything to NONE (non-NONE prints "(check pending
+// firmware support)").
+
+#include "GuidedFlow.h"
+
+#include "Commands.h"          // requestLedShow, refreshConnections
+#include "FilesystemStuff.h"   // safeFileReadAll
+#include "Graphics.h"          // b (breadboard print), cycleTerminalColor
+#include "GraphicOverlays.h"   // graphicOverlayState
+#include "JumperlOS.h"         // jOS.serviceInner()
+#include "NetManager.h"        // printNodeOrName, findNodeInNet
+#include "PartPlacement.h"     // applyPartPlacement / removePartPlacement / partPinNode
+#include "Peripherals.h"       // setTopRail / setBotRail / setDac0voltage / setDac1voltage
+#include "Probing.h"           // justReadProbe, probeButton
+#include "ReadingDisplay.h"
+#include "RotaryEncoder.h"
+#include "States.h"            // globalState, SlotManager
+#include "config.h"            // jumperlessConfig.hardware.probe_revision
+#include "oled.h"
+
+// States.cpp's node-name resolution - the exact helper bridges: and parts:
+// parsing use, so guide steps speak the same node vocabulary.
+extern int parseNodeName(const String& nodeName);
+extern bool parseBoolean(const String& val, bool& success);
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+enum class GuideState : uint8_t {
+    INIT, STEP_ENTER, STEP_WAIT, STEP_PROBE_WAIT, STEP_VERIFY, STEP_RESULT,
+    STEP_COMMIT, STEP_BACK, DONE, EXIT
+};
+
+struct GuideSession {
+    GuideScript* script;
+    GuideState state;
+    int  stepIdx;                       // current step (0-based); == numSteps at DONE
+    bool done;                          // loop exit flag (set by EXIT)
+    bool exitRequested;                 // true = user quit; false = ran to DONE
+    bool verifyOnly;                    // 'v' pressed: run check, don't commit
+    GuideState waitReturn;              // where a verify-only RESULT returns to
+    bool committed[MAX_GUIDE_STEPS];
+    bool skipped[MAX_GUIDE_STEPS];
+    bool powerApplied;                  // a POWER_ON step has run (rails live)
+    bool summaryShown;                  // DONE printed its summary already
+    unsigned long lastPulseMs;
+    bool pulseOn;
+    int  savedRotaryDivider;
+};
+
+// Single static instances - GuideScript is ~7.5 KB (V5) and the guide is a
+// modal app on core 0, never re-entrant (same argument as the parser scratch
+// in PartPlacement.cpp).
+static GuideScript guideScript;
+static GuideSession guideSession;
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+static const char* guideCheckName(GuideCheck c) {
+    switch (c) {
+        case GuideCheck::PRESENCE:   return "presence";
+        case GuideCheck::CONTINUITY: return "continuity";
+        case GuideCheck::VF:         return "vf";
+        case GuideCheck::VOLTAGE:    return "voltage";
+        case GuideCheck::OSCILLATES: return "oscillates";
+        case GuideCheck::I2C_ACK:    return "i2c";
+        case GuideCheck::RAIL_SANE:  return "rail_sane";
+        default:                     return "none";
+    }
+}
+
+static const char* guideTypeName(GuideStepType t) {
+    switch (t) {
+        case GuideStepType::PLACE:      return "place";
+        case GuideStepType::CONNECT:    return "connect";
+        case GuideStepType::POWER_ON:   return "power_on";
+        case GuideStepType::VERIFY:     return "verify";
+        case GuideStepType::RUN_SCRIPT: return "run";
+        default:                        return "note";
+    }
+}
+
+// `GUIDE step=... id=...` id for a step: <type>_<part|node> (place_R1,
+// connect_12, verify_7, note_3); power_on and run stand alone.
+static void guideStepId(const GuideScript& sc, int idx, char* out, size_t outLen) {
+    if (idx < 0 || idx >= sc.numSteps) {
+        snprintf(out, outLen, "guide");
+        return;
+    }
+    const GuideStep& st = sc.steps[idx];
+    switch (st.type) {
+        case GuideStepType::PLACE:
+            if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
+                snprintf(out, outLen, "place_%s", globalState.parts.parts[st.partIdx].name);
+            } else {
+                snprintf(out, outLen, "place_%d", idx + 1);
+            }
+            break;
+        case GuideStepType::CONNECT:   snprintf(out, outLen, "connect_%d", st.n1); break;
+        case GuideStepType::VERIFY:    snprintf(out, outLen, "verify_%d", st.target); break;
+        case GuideStepType::POWER_ON:  snprintf(out, outLen, "power_on"); break;
+        case GuideStepType::RUN_SCRIPT: snprintf(out, outLen, "run_%d", idx + 1); break;
+        default:                       snprintf(out, outLen, "note_%d", idx + 1); break;
+    }
+}
+
+static void guideStatusLine(const GuideSession& s, const char* stateName,
+                            const char* extra = nullptr) {
+    char id[32];
+    int shown = s.stepIdx;
+    if (shown >= s.script->numSteps) shown = s.script->numSteps - 1;
+    guideStepId(*s.script, shown, id, sizeof(id));
+    Serial.print("\r\nGUIDE step=");
+    Serial.print((s.stepIdx < s.script->numSteps) ? (s.stepIdx + 1) : s.script->numSteps);
+    Serial.print("/");
+    Serial.print(s.script->numSteps);
+    Serial.print(" id=");
+    Serial.print(id);
+    Serial.print(" state=");
+    Serial.print(stateName);
+    if (extra != nullptr && extra[0] != '\0') {
+        Serial.print(" ");
+        Serial.print(extra);
+    }
+    Serial.println();
+    Serial.flush();
+}
+
+// Probe-button polarity: the probe_revision>3 swap lives only in the
+// MicroPython wrappers (jl_probe_button_*, JumperlessMicroPythonAPI.cpp);
+// raw probeButton.getButtonPress() is unswapped. Post-swap semantics here:
+// 0 = none, 1 = CONNECT/confirm, 2 = REMOVE/back.
+static int guideProbeButton(void) {
+    int bPress = probeButton.getButtonPress(true);
+    if (jumperlessConfig.hardware.probe_revision > 3) {
+        if (bPress == 1) bPress = 2;
+        else if (bPress == 2) bPress = 1;
+    }
+    return bPress;
+}
+
+void guideForcePowerSafe(void) {
+    // save=1 on purpose: the slot YAML must persist the SAFE state, so a
+    // half-built slot re-loaded outside the guide comes up unpowered instead
+    // of zapping an unfinished circuit with the project's rail voltage. The
+    // power_on step re-applies the file's values (GuideScript.topRail etc).
+    setTopRail(0.0f, 1, 0);
+    setBotRail(0.0f, 1, 0);
+    setDac0voltage(0.0f, 1, 0);
+    setDac1voltage(0.0f, 1, 0);
+}
+
+// Display name for the net holding `node` - the netDisplayName pattern
+// (Highlighting.cpp): custom name, then the net's own name, then "Net N".
+static const char* guideNetNameForNode(int node, char* buf, size_t bufLen) {
+    int netNum = findNodeInNet(node);
+    if (netNum <= 0 || netNum >= MAX_NETS) return "(no net)";
+    // findNodeInNet's gpio/adc fallbacks return NODE values - only accept a
+    // real net at that index (same guard as partsReassertNetNames).
+    if (globalState.connections.nets[netNum].number != netNum) return "(no net)";
+    const char* name = globalState.display.getNetName(netNum);
+    if (name != nullptr && name[0] != '\0') return name;
+    name = globalState.connections.nets[netNum].name;
+    if (name != nullptr && name[0] != '\0') return name;
+    snprintf(buf, bufLen, "Net %d", netNum);
+    return buf;
+}
+
+static void guideIdentifyRow(int row) {
+    char buf[16];
+    const char* name = guideNetNameForNode(row, buf, sizeof(buf));
+    Serial.print("\r\n  row ");
+    printNodeOrName(row, 0, -1, &Serial);
+    Serial.print(" -> ");
+    Serial.println(name);
+    Serial.flush();
+    ReadingDisplay::show(name, row);
+}
+
+// ---------------------------------------------------------------------------
+// Overlay rendering (V5 LED matrix; every painter below no-ops on OG)
+// ---------------------------------------------------------------------------
+//
+// OG fallback decision (DESIGN §4.2 offered two): on OG the guide paints NO
+// LEDs at all and relies on OLED + terminal; each COMMIT's refreshConnections
+// lights the newly committed bridges through the ordinary 1-LED-per-row net
+// render, which is §4.2's "bridges as colors" effect for finished steps
+// without pre-committing anything. Pre-committing the CURRENT step's bridges
+// for target lighting was the alternative; it buys one dim LED per target
+// row at the cost of un-commit bookkeeping on a board that can't show the
+// footprint anyway - the simpler path is the correct one here.
+
+// Overlay coordinate orientation - VERIFIED, three independent sources agree
+// (see task-6 report for the full chains):
+//  1. printChar's columnMask maps font bit b0 -> pixel offset 0, and glyphs
+//     render upright on the bench (FileManager menus, probeCalib labels), so
+//     pixel offset 0 = the physically UPPER hole of a row-column in BOTH
+//     halves; screenMap's overlay row 1 block is exactly the offset-0 pixels.
+//  2. The wire renderer's staple geometry ("position 0 = the outer tip",
+//     Graphics.cpp) mirrors bottom-half columns (4 - column), which is only
+//     consistent if pixel order runs the same physical direction in both
+//     halves.
+//  3. Kevin's published API docs (Jumperless-docs 09.5, Graphic Overlays):
+//     "Row 1-5: Top half (A-E) ... y=5 (Row 5/E)".
+// Net: overlay rows 1..10 run VISUAL TOP -> BOTTOM. Row 1 = top outer edge
+// (A), row 5 = ravine-adjacent top (E), row 6 = ravine-adjacent bottom (F),
+// row 10 = bottom outer edge (J). GraphicOverlays.h's old "(E, D, C, B, A)"
+// guess was the wrong lettering; fixed there alongside this task.
+// 0 = the verified order above; 1 flips within each half (fallback knob only,
+// nothing sets it).
+#define GUIDE_OVERLAY_ROW_ORDER 0
+
+static const char* GUIDE_OVERLAY_FP  = "_GUIDE_FP_";
+static const char* GUIDE_OVERLAY_TGT = "_GUIDE_TGT_";
+
+// Dim class colors + pin-1 marker (DESIGN §4.1).
+static const uint32_t GUIDE_COLOR_POWER  = 0x1A0000;
+static const uint32_t GUIDE_COLOR_GND    = 0x001A02;
+static const uint32_t GUIDE_COLOR_SIGNAL = 0x000818;
+static const uint32_t GUIDE_COLOR_NC     = 0x040404;
+static const uint32_t GUIDE_COLOR_PIN1   = 0x180800;
+
+static uint32_t guidePinClassColor(uint8_t pinClass) {
+    switch (pinClass) {
+        case 1: return GUIDE_COLOR_POWER;
+        case 2: return GUIDE_COLOR_GND;
+        case 3: return GUIDE_COLOR_NC;
+        default: return GUIDE_COLOR_SIGNAL;
+    }
+}
+
+// ~4x brightness for the pulsing target phase, per-channel clamped.
+static uint32_t guideBrighten(uint32_t c) {
+    uint32_t r = ((c >> 16) & 0xFF) * 4; if (r > 0xFF) r = 0xFF;
+    uint32_t g = ((c >> 8) & 0xFF) * 4;  if (g > 0xFF) g = 0xFF;
+    uint32_t bl = (c & 0xFF) * 4;        if (bl > 0xFF) bl = 0xFF;
+    return (r << 16) | (g << 8) | bl;
+}
+
+// Paint breadboard node n (1-60) into a full-board 10x30 overlay buffer:
+// col = ((n-1) % 30), all 5 sub-rows of its half (a row IS one net - the
+// whole 5-hole column lights). Nodes off the breadboard (rails, nano) have
+// no overlay cells and are skipped. Sub-row selective drawing would consult
+// GUIDE_OVERLAY_ROW_ORDER; whole-column fills are orientation-independent.
+static void guidePaintNode(uint32_t* buf300, int node, uint32_t color) {
+    if (node < 1 || node > 60) return;
+    int col = (node - 1) % 30;              // 0-based
+    int rowBase = (node <= 30) ? 0 : 5;     // 0-based overlay row of the half
+    for (int r = 0; r < 5; r++) {
+        buf300[(rowBase + r) * 30 + col] = color;
+    }
+}
+
+// Scratch overlay buffer (300 x 4 B): static, single-threaded modal use.
+static uint32_t guideOverlayScratch[MAX_OVERLAY_PIXELS];
+
+// _GUIDE_FP_: dim outlines of every PLACED part (rebuilt whole on commit /
+// back). Persistent for the whole guide; never serialized (reserved-name
+// exclusion in GraphicOverlays.cpp).
+static void guideRenderFootprints(void) {
+#if defined(OG_JUMPERLESS)
+    return;   // overlays no-op on OG (see the fallback note above)
+#else
+    memset(guideOverlayScratch, 0, sizeof(guideOverlayScratch));
+    bool any = false;
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            const PartPin& pin = p.pins[j];
+            int node = partPinNode(p, pin);
+            if (node < 0) continue;
+            uint32_t color = (pin.pinNumber == 1) ? GUIDE_COLOR_PIN1
+                                                  : guidePinClassColor(pin.pinClass);
+            guidePaintNode(guideOverlayScratch, node, color);
+            any = true;
+        }
+    }
+    if (any) {
+        graphicOverlayState.addOverlay(GUIDE_OVERLAY_FP, 1, 1, 30, 10, guideOverlayScratch);
+    } else {
+        graphicOverlayState.removeOverlay(GUIDE_OVERLAY_FP);
+    }
+#endif
+}
+
+// _GUIDE_TGT_: the current step's target holes. place = all pin rows (pin 1
+// in marker color), pulsing; connect = n1 static + n2 pulsing (§4.1); verify
+// = target pulsing. note/power_on/run have no target.
+static void guideRenderTarget(const GuideSession& s, bool pulseOn) {
+#if defined(OG_JUMPERLESS)
+    (void)s; (void)pulseOn;
+    return;
+#else
+    if (s.stepIdx < 0 || s.stepIdx >= s.script->numSteps) {
+        graphicOverlayState.removeOverlay(GUIDE_OVERLAY_TGT);
+        return;
+    }
+    const GuideStep& st = s.script->steps[s.stepIdx];
+    memset(guideOverlayScratch, 0, sizeof(guideOverlayScratch));
+    bool any = false;
+    switch (st.type) {
+        case GuideStepType::PLACE:
+            if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
+                const PartDefinition& p = globalState.parts.parts[st.partIdx];
+                for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                    const PartPin& pin = p.pins[j];
+                    int node = partPinNode(p, pin);
+                    if (node < 0) continue;
+                    uint32_t base = (pin.pinNumber == 1) ? GUIDE_COLOR_PIN1
+                                                         : guidePinClassColor(pin.pinClass);
+                    guidePaintNode(guideOverlayScratch, node,
+                                   pulseOn ? guideBrighten(base) : base);
+                    any = true;
+                }
+            }
+            break;
+        case GuideStepType::CONNECT: {
+            uint32_t c1 = guideBrighten(GUIDE_COLOR_SIGNAL);
+            guidePaintNode(guideOverlayScratch, st.n1, c1);
+            guidePaintNode(guideOverlayScratch, st.n2,
+                           pulseOn ? c1 : GUIDE_COLOR_SIGNAL);
+            any = (st.n1 >= 1 && st.n1 <= 60) || (st.n2 >= 1 && st.n2 <= 60);
+            break;
+        }
+        case GuideStepType::VERIFY: {
+            uint32_t c = GUIDE_COLOR_SIGNAL;
+            guidePaintNode(guideOverlayScratch, st.target,
+                           pulseOn ? guideBrighten(c) : c);
+            any = (st.target >= 1 && st.target <= 60);
+            break;
+        }
+        default:
+            break;
+    }
+    if (any) {
+        graphicOverlayState.addOverlay(GUIDE_OVERLAY_TGT, 1, 1, 30, 10, guideOverlayScratch);
+    } else {
+        graphicOverlayState.removeOverlay(GUIDE_OVERLAY_TGT);
+    }
+#endif
+}
+
+static void guideClearOverlays(void) {
+#if !defined(OG_JUMPERLESS)
+    graphicOverlayState.removeOverlay(GUIDE_OVERLAY_FP);
+    graphicOverlayState.removeOverlay(GUIDE_OVERLAY_TGT);
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+
+// Local copy of the parts parser's flow-map field extractor (PartPlacement.cpp
+// keeps its own static; the grammar is frozen by the States.h format doc, so
+// the duplication is two matched implementations of one documented rule).
+// The key must start a field (preceded by '{', ',' or whitespace).
+static String guideFlowField(const String& body, const char* key) {
+    int idx = -1;
+    int from = 0;
+    while (true) {
+        int cand = body.indexOf(key, from);
+        if (cand < 0) return String("");
+        char before = (cand == 0) ? '{' : body.charAt(cand - 1);
+        if (before == '{' || before == ',' || before == ' ' || before == '\t') {
+            idx = cand;
+            break;
+        }
+        from = cand + 1;
+    }
+    int start = idx + strlen(key);
+    int commaIdx = body.indexOf(',', start);
+    int braceIdx = body.indexOf('}', start);
+    int endIdx = body.length();
+    if (commaIdx >= 0 && (braceIdx < 0 || commaIdx < braceIdx)) endIdx = commaIdx;
+    else if (braceIdx >= 0) endIdx = braceIdx;
+    String val = body.substring(start, endIdx);
+    val.trim();
+    return val;
+}
+
+static String guideScalar(const String& rest) {
+    String v = rest;
+    v.trim();
+    if (v.length() >= 2 && v.charAt(0) == '"') {
+        int endQuote = v.indexOf('"', 1);
+        if (endQuote > 0) return v.substring(1, endQuote);
+    }
+    return v;
+}
+
+static GuideCheck guideCheckFromString(const String& s) {
+    if (s == "presence")   return GuideCheck::PRESENCE;
+    if (s == "continuity") return GuideCheck::CONTINUITY;
+    if (s == "vf")         return GuideCheck::VF;
+    if (s == "voltage")    return GuideCheck::VOLTAGE;
+    if (s == "oscillates") return GuideCheck::OSCILLATES;
+    if (s == "i2c")        return GuideCheck::I2C_ACK;
+    if (s == "rail_sane")  return GuideCheck::RAIL_SANE;
+    return GuideCheck::NONE;
+}
+
+// Default check for an auto-synthesized place step, by part class. Stored
+// for task 7; ALL checks resolve to NONE in this task's STEP_VERIFY.
+static GuideCheck guideDefaultCheckForPart(const PartDefinition& p) {
+    if (p.defaultVerify != 0) return (GuideCheck)p.defaultVerify;
+    String t = String(p.typeStr);
+    if (t == "resistor")               return GuideCheck::CONTINUITY;
+    if (t == "led" || t == "diode")    return GuideCheck::VF;
+    if (t == "capacitor" || t == "ic") return GuideCheck::PRESENCE;
+    return GuideCheck::NONE;
+}
+
+// One `- {do: ..., text: "..."}` flow-map step line (already trimmed to the
+// braces). Malformed steps are skipped with a warning, like bridges.
+static void guideParseStepLine(const String& body, GuideScript& out, String& err) {
+    if (out.numSteps >= MAX_GUIDE_STEPS) {
+        // Warned once by the caller (step cap); just drop.
+        return;
+    }
+    GuideStep st;
+    memset(&st, 0, sizeof(st));
+    st.partIdx = -1;
+    st.n1 = st.n2 = st.target = -1;
+    st.timeoutMs = 1500;
+    st.onFail = GuideOnFail::WARN;
+
+    // text: is parsed by quote-pair and must be the LAST field (§1.2) - split
+    // it off first so commas inside the prose can't derail field extraction.
+    String fields = body;
+    int textIdx = -1;
+    int from = 0;
+    while (true) {
+        int cand = fields.indexOf("text:", from);
+        if (cand < 0) break;
+        char before = (cand == 0) ? '{' : fields.charAt(cand - 1);
+        if (before == '{' || before == ',' || before == ' ' || before == '\t') {
+            textIdx = cand;
+            break;
+        }
+        from = cand + 1;
+    }
+    if (textIdx >= 0) {
+        int q1 = fields.indexOf('"', textIdx);
+        int q2 = (q1 >= 0) ? fields.indexOf('"', q1 + 1) : -1;
+        if (q1 >= 0 && q2 > q1) {
+            String txt = fields.substring(q1 + 1, q2);
+            strncpy(st.text, txt.c_str(), sizeof(st.text) - 1);
+        }
+        fields = fields.substring(0, textIdx);
+    }
+
+    String v = guideFlowField(fields, "do:");
+    if (v == "note")           st.type = GuideStepType::NOTE;
+    else if (v == "place")     st.type = GuideStepType::PLACE;
+    else if (v == "connect")   st.type = GuideStepType::CONNECT;
+    else if (v == "power_on")  st.type = GuideStepType::POWER_ON;
+    else if (v == "verify")    st.type = GuideStepType::VERIFY;
+    else if (v == "run")       st.type = GuideStepType::RUN_SCRIPT;
+    else {
+        err += "guide step " + String(out.numSteps + 1) + ": unknown do: '" + v + "' (skipped); ";
+        return;
+    }
+
+    v = guideFlowField(fields, "part:");
+    if (v.length() > 0) {
+        String name = guideScalar(v);
+        st.partIdx = (int8_t)globalState.parts.findByName(name.c_str());
+        if (st.partIdx < 0) {
+            err += "guide step " + String(out.numSteps + 1) + ": unknown part '" + name + "' (skipped); ";
+            return;
+        }
+    }
+    v = guideFlowField(fields, "n1:");
+    if (v.length() > 0) st.n1 = (int16_t)parseNodeName(v);
+    v = guideFlowField(fields, "n2:");
+    if (v.length() > 0) st.n2 = (int16_t)parseNodeName(v);
+    v = guideFlowField(fields, "target:");
+    if (v.length() > 0) st.target = (int16_t)parseNodeName(v);
+    v = guideFlowField(fields, "check:");
+    if (v.length() > 0) st.check = guideCheckFromString(v);
+    v = guideFlowField(fields, "min:");
+    if (v.length() > 0) st.min = v.toFloat();
+    v = guideFlowField(fields, "max:");
+    if (v.length() > 0) st.max = v.toFloat();
+    v = guideFlowField(fields, "on_fail:");
+    if (v == "retry")      st.onFail = GuideOnFail::RETRY;
+    else if (v == "skip")  st.onFail = GuideOnFail::SKIP;
+    else if (v == "block") st.onFail = GuideOnFail::BLOCK;
+    v = guideFlowField(fields, "timeout_ms:");
+    if (v.length() > 0) st.timeoutMs = (uint16_t)v.toInt();
+    v = guideFlowField(fields, "probe_confirm:");
+    if (v.length() > 0) {
+        bool ok;
+        bool bval = parseBoolean(v, ok);
+        if (ok) st.probeConfirm = bval;
+    }
+    v = guideFlowField(fields, "script:");
+    if (v.length() > 0) {
+        String sp = guideScalar(v);
+        strncpy(st.script, sp.c_str(), sizeof(st.script) - 1);
+    }
+
+    // Per-type requirements (skip-with-warning, never abort the parse).
+    if (st.type == GuideStepType::PLACE && st.partIdx < 0) {
+        err += "guide step " + String(out.numSteps + 1) + ": place needs part: (skipped); ";
+        return;
+    }
+    if (st.type == GuideStepType::CONNECT && (st.n1 < 0 || st.n2 < 0)) {
+        err += "guide step " + String(out.numSteps + 1) + ": connect needs n1:+n2: (skipped); ";
+        return;
+    }
+    if (st.type == GuideStepType::VERIFY && st.target < 0) {
+        err += "guide step " + String(out.numSteps + 1) + ": verify needs target: (skipped); ";
+        return;
+    }
+    // Default check for a place step that didn't name one (parsed enum kept
+    // for task 7 either way).
+    if (st.type == GuideStepType::PLACE && st.check == GuideCheck::NONE &&
+        guideFlowField(fields, "check:").length() == 0) {
+        st.check = guideDefaultCheckForPart(globalState.parts.parts[st.partIdx]);
+    }
+
+    out.steps[out.numSteps++] = st;
+}
+
+// Auto-synthesis (§1.3): one intro note, one place per part in file order,
+// one power_on when the file carries a power: section.
+static void guideSynthesizeSteps(GuideScript& out) {
+    out.autoFromParts = true;
+    out.numSteps = 0;
+
+    GuideStep st;
+    memset(&st, 0, sizeof(st));
+    st.partIdx = -1;
+    st.n1 = st.n2 = st.target = -1;
+    st.timeoutMs = 1500;
+    st.onFail = GuideOnFail::WARN;
+    st.type = GuideStepType::NOTE;
+    snprintf(st.text, sizeof(st.text), "%s: %d part%s to place. next=confirm",
+             out.title[0] ? out.title : "Guided build",
+             globalState.parts.numParts,
+             globalState.parts.numParts == 1 ? "" : "s");
+    out.steps[out.numSteps++] = st;
+
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS &&
+                    out.numSteps < MAX_GUIDE_STEPS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        memset(&st, 0, sizeof(st));
+        st.n1 = st.n2 = st.target = -1;
+        st.timeoutMs = 1500;
+        st.onFail = GuideOnFail::WARN;
+        st.type = GuideStepType::PLACE;
+        st.partIdx = (int8_t)i;
+        st.check = guideDefaultCheckForPart(p);
+        if (p.value[0] != '\0') {
+            snprintf(st.text, sizeof(st.text), "Place %s (%s), pin 1 at row %d",
+                     p.name, p.value, p.baseRow);
+        } else {
+            snprintf(st.text, sizeof(st.text), "Place %s, pin 1 at row %d",
+                     p.name, p.baseRow);
+        }
+        out.steps[out.numSteps++] = st;
+    }
+
+    if (out.hasPower && out.numSteps < MAX_GUIDE_STEPS) {
+        memset(&st, 0, sizeof(st));
+        st.partIdx = -1;
+        st.n1 = st.n2 = st.target = -1;
+        st.timeoutMs = 1500;
+        st.onFail = GuideOnFail::WARN;
+        st.type = GuideStepType::POWER_ON;
+        st.check = GuideCheck::RAIL_SANE;   // stored for task 7
+        snprintf(st.text, sizeof(st.text), "Confirm to power up");
+        out.steps[out.numSteps++] = st;
+    }
+}
+
+bool guideParse(const char* yamlPath, GuideScript& out, String& err) {
+    memset(&out, 0, sizeof(out));
+    strncpy(out.sourcePath, yamlPath, sizeof(out.sourcePath) - 1);
+
+    // STREAMED line-by-line (the readProjectMeta idiom): a whole-file malloc
+    // big enough for any project wiring (32 KB) does not reliably exist on
+    // the live heap - the first bench run died right here with a failed
+    // malloc. One String per line is all this parser ever holds.
+    File f = safeFileOpen(yamlPath, "r");
+    if (!f) {
+        err = "guideParse: cannot read " + String(yamlPath);
+        return false;
+    }
+
+    bool inGuide = false;
+    bool inSteps = false;
+    bool inPower = false;
+    bool autoFlag = false;
+    bool capWarned = false;
+    int  explicitSteps = 0;
+
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.replace("\r", "");
+
+        bool indented = (line.length() > 0 &&
+                         (line.charAt(0) == ' ' || line.charAt(0) == '\t'));
+        line.trim();
+
+        if (line.length() == 0 || line.startsWith("#")) continue;
+
+        if (!indented) {
+            // Top-level section routing (same indent-hardening rule as
+            // fromYAML: headers count on un-indented lines only).
+            inGuide = line.startsWith("guide:");
+            inPower = line.startsWith("power:");
+            inSteps = false;
+            continue;
+        }
+
+        if (inPower) {
+            int colon = line.indexOf(':');
+            if (colon > 0) {
+                String key = line.substring(0, colon);
+                key.trim();
+                String val = guideScalar(line.substring(colon + 1));
+                if (key == "topRail")         { out.topRail = val.toFloat();    out.hasPower = true; }
+                else if (key == "bottomRail") { out.bottomRail = val.toFloat(); out.hasPower = true; }
+                else if (key == "dac0")       { out.dac0 = val.toFloat();       out.hasPower = true; }
+                else if (key == "dac1")       { out.dac1 = val.toFloat();       out.hasPower = true; }
+            }
+            continue;
+        }
+
+        if (!inGuide) continue;
+
+        if (line.startsWith("- ")) {
+            if (!inSteps) continue;   // stray list item outside steps:
+            if (out.numSteps >= MAX_GUIDE_STEPS) {
+                if (!capWarned) {
+                    err += "guide: more than " + String(MAX_GUIDE_STEPS) +
+                           " steps - extras ignored; ";
+                    capWarned = true;
+                }
+                continue;
+            }
+            String body = line.substring(2);
+            body.trim();
+            guideParseStepLine(body, out, err);
+            explicitSteps++;
+            continue;
+        }
+
+        int colon = line.indexOf(':');
+        if (colon <= 0) continue;
+        String key = line.substring(0, colon);
+        key.trim();
+        String rest = line.substring(colon + 1);
+        rest.trim();
+        if (key == "title") {
+            String t = guideScalar(rest);
+            strncpy(out.title, t.c_str(), sizeof(out.title) - 1);
+            inSteps = false;
+        } else if (key == "auto") {
+            bool ok;
+            bool bval = parseBoolean(guideScalar(rest), ok);
+            if (ok) autoFlag = bval;
+            inSteps = false;
+        } else if (key == "steps") {
+            inSteps = true;
+        } else {
+            inSteps = false;   // unknown guide: scalar - ignore
+        }
+    }
+    safeFileClose(f, false);
+
+    // Synthesis rule: authored steps always win. `auto: true` alongside a
+    // steps: list is contradictory - warn, keep the authored steps.
+    if (out.numSteps == 0 && (autoFlag || globalState.parts.numParts > 0)) {
+        guideSynthesizeSteps(out);
+    } else if (autoFlag && explicitSteps > 0) {
+        err += "guide: both auto: true and steps: present - steps: wins; ";
+    }
+
+    if (out.title[0] == '\0') {
+        strncpy(out.title, "Guided build", sizeof(out.title) - 1);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+enum class GuideKey : uint8_t { NONE, CONFIRM, SKIP, BACK, VERIFY, QUIT, TAP };
+
+// One input event per tick. Serial keys (port 1): n/space=confirm-next,
+// p=back, s=skip, v=verify, q=quit, `t <row>`=probe-tap override. \r, \n and
+// unmapped bytes are explicitly ignored - the launch command line's
+// terminator and the port-priming newline land in this loop's lap, and a
+// stray byte must never advance a step (it cancels PICKERS by convention,
+// but the guide owns its keys - the picker handoff rule from the brief).
+static GuideKey guideReadInput(GuideSession& s, int& tapRow) {
+    tapRow = -1;
+    rotaryEncoderButtonStuff();
+
+    // Encoder: hold = quit, click (RELEASED off PRESSED - probeCalib's edge,
+    // Apps.cpp:858) = confirm, wheel = skip forward / back.
+    if (encoderButtonState == HELD) {
+        encoderButtonState = IDLE;
+        return GuideKey::QUIT;
+    }
+    if (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED) {
+        encoderButtonState = IDLE;
+        return GuideKey::CONFIRM;
+    }
+    if (encoderDirectionState == UP) {
+        encoderDirectionState = NONE;
+        return GuideKey::SKIP;
+    }
+    if (encoderDirectionState == DOWN) {
+        encoderDirectionState = NONE;
+        return GuideKey::BACK;
+    }
+
+    // Probe buttons (post-polarity-swap): CONNECT = confirm, REMOVE = back.
+    int pb = guideProbeButton();
+    if (pb == 1) return GuideKey::CONFIRM;
+    if (pb == 2) return GuideKey::BACK;
+
+    if (Serial.available() > 0) {
+        char c = Serial.read();
+        switch (c) {
+            case 'n': case ' ': return GuideKey::CONFIRM;
+            case 'p':           return GuideKey::BACK;
+            case 's':           return GuideKey::SKIP;
+            case 'v':           return GuideKey::VERIFY;
+            case 'q':           return GuideKey::QUIT;
+            case 't': {
+                // `t <row>`: digits until newline or 300 ms of silence.
+                String num;
+                unsigned long last = millis();
+                while (millis() - last < 300) {
+                    if (Serial.available() > 0) {
+                        char d = Serial.read();
+                        last = millis();
+                        if (d >= '0' && d <= '9') { num += d; continue; }
+                        if (d == ' ' && num.length() == 0) continue;
+                        break;   // newline / anything else ends the number
+                    }
+                    jOS.serviceInner();
+                    delayMicroseconds(200);
+                }
+                int row = num.toInt();
+                if (num.length() > 0 && row >= 1 && row <= 60) {
+                    tapRow = row;
+                    return GuideKey::TAP;
+                }
+                Serial.println("\r\n  t <row>: row must be 1-60");
+                return GuideKey::NONE;
+            }
+            default:
+                return GuideKey::NONE;   // \r \n and unmapped: ignored
+        }
+    }
+
+    // Probe tap (deduped): the same path `t <row>` feeds.
+    int probeRow = justReadProbe();
+    if (probeRow >= 1 && probeRow <= 60) {
+        tapRow = probeRow;
+        return GuideKey::TAP;
+    }
+
+    return GuideKey::NONE;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt rendering (OLED + terminal mirror)
+// ---------------------------------------------------------------------------
+
+// OLED hotplug poll (probeCalibApp's pattern): reconnect attempt at most
+// once a second; returns true when a fresh connection came up.
+static bool guideOledHotplugPoll(void) {
+    static unsigned long lastPoll = 0;
+    if (oled.isConnected() || millis() - lastPoll < 1000) return false;
+    lastPoll = millis();
+    if (!autoDetectAndConfigureOled()) return false;
+    oled.init();
+    return oled.isConnected();
+}
+
+static void guideShowPrompt(const GuideSession& s) {
+    const GuideStep& st = s.script->steps[s.stepIdx];
+
+    // Terminal mirror (the only feedback with no OLED).
+    cycleTerminalColor(false, 100.0, true, &Serial);
+    Serial.print("\r\n[");
+    Serial.print(s.stepIdx + 1);
+    Serial.print("/");
+    Serial.print(s.script->numSteps);
+    Serial.print("] ");
+    Serial.print(st.text[0] ? st.text : guideTypeName(st.type));
+    if (st.type == GuideStepType::CONNECT) {
+        Serial.print("  (");
+        printNodeOrName(st.n1, 0, -1, &Serial);
+        Serial.print(" -> ");
+        printNodeOrName(st.n2, 0, -1, &Serial);
+        Serial.print(")");
+        if (st.probeConfirm) Serial.print("  [tap a target row to confirm]");
+    }
+    Serial.println();
+    Serial.flush();
+
+    if (oled.isConnected()) {
+        char head[128];
+        snprintf(head, sizeof(head), "%d/%d %s", s.stepIdx + 1, s.script->numSteps,
+                 st.text[0] ? st.text : guideTypeName(st.type));
+        oled.showMultiLineSmallText(head, true, true);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The state machine
+// ---------------------------------------------------------------------------
+
+static void guidePersistProgress(GuideSession& s) {
+    strncpy(globalState.parts.guideSource, s.script->sourcePath,
+            sizeof(globalState.parts.guideSource) - 1);
+    globalState.parts.guideSource[sizeof(globalState.parts.guideSource) - 1] = '\0';
+    globalState.parts.guideStep = (int16_t)s.stepIdx;
+    globalState.markDirty();
+    String serr;
+    if (!SlotManager::getInstance().saveActiveSlot(serr, /*skipValidation=*/true)) {
+        Serial.println("\r\n  (progress save failed: " + serr + ")");
+    }
+}
+
+void guideTick(GuideSession& s) {
+    GuideScript& sc = *s.script;
+
+    switch (s.state) {
+
+        case GuideState::INIT: {
+            // Banner + safe state. Rails/DACs to 0 V until power_on (§3.2);
+            // remembered file values applied by the POWER_ON commit.
+            b.clear();                       // scrub any menu text (no-op OG)
+            guideClearOverlays();
+            guideForcePowerSafe();
+            ReadingDisplay::resetLastShown();
+
+            cycleTerminalColor(true, 5.0, true, &Serial);
+            Serial.print("\r\n=== Guided build: ");
+            Serial.print(sc.title);
+            Serial.print(" === (");
+            Serial.print(sc.numSteps);
+            Serial.println(" steps)");
+            cycleTerminalColor(false, 100.0, true, &Serial);
+            Serial.println("wheel=step  click=confirm  hold/q=quit  n/p/s/v serial keys  t <row>=tap");
+            Serial.println("rails + DACs held at 0V until the power_on step");
+            Serial.flush();
+            guideStatusLine(s, "INIT");
+
+            // Resume bookkeeping: steps before the resume point count as
+            // committed (the slot was saved at each commit). If a power_on
+            // step is already behind us, the circuit was running when the
+            // user left - re-apply the file's power so resume means resume.
+            for (int i = 0; i < s.stepIdx && i < sc.numSteps; i++) {
+                s.committed[i] = true;
+                if (sc.steps[i].type == GuideStepType::POWER_ON) {
+                    setTopRail(sc.topRail, 1, 0);
+                    setBotRail(sc.bottomRail, 1, 0);
+                    setDac0voltage(sc.dac0, 1, 0);
+                    setDac1voltage(sc.dac1, 1, 0);
+                    s.powerApplied = true;
+                    Serial.println("  (resume past power_on: rails re-applied)");
+                }
+            }
+
+            guideRenderFootprints();
+            requestLedShow(1);
+
+            if (sc.numSteps == 0 || s.stepIdx >= sc.numSteps) {
+                s.state = GuideState::DONE;
+            } else {
+                s.state = GuideState::STEP_ENTER;
+            }
+            break;
+        }
+
+        case GuideState::STEP_ENTER: {
+            const GuideStep& st = sc.steps[s.stepIdx];
+            guideShowPrompt(s);
+            s.pulseOn = true;
+            s.lastPulseMs = millis();
+            guideRenderTarget(s, s.pulseOn);
+            requestLedShow(1);
+            if (st.probeConfirm) {
+                s.state = GuideState::STEP_PROBE_WAIT;
+                guideStatusLine(s, "PROBE_WAIT");
+            } else {
+                s.state = GuideState::STEP_WAIT;
+                guideStatusLine(s, "WAIT");
+            }
+            s.waitReturn = s.state;
+            break;
+        }
+
+        case GuideState::STEP_WAIT:
+        case GuideState::STEP_PROBE_WAIT: {
+            // ~2 Hz target pulse (rewrite colors + requestLedShow(1), §4.1).
+            if (millis() - s.lastPulseMs >= 250) {
+                s.lastPulseMs = millis();
+                s.pulseOn = !s.pulseOn;
+                guideRenderTarget(s, s.pulseOn);
+                requestLedShow(1);
+            }
+            guideOledHotplugPoll();
+
+            int tapRow = -1;
+            GuideKey k = guideReadInput(s, tapRow);
+            switch (k) {
+                case GuideKey::QUIT:
+                    s.exitRequested = true;
+                    s.state = GuideState::EXIT;
+                    break;
+                case GuideKey::CONFIRM:
+                    s.verifyOnly = false;
+                    s.state = GuideState::STEP_VERIFY;
+                    break;
+                case GuideKey::VERIFY:
+                    s.verifyOnly = true;
+                    s.state = GuideState::STEP_VERIFY;
+                    break;
+                case GuideKey::BACK:
+                    s.state = GuideState::STEP_BACK;
+                    break;
+                case GuideKey::SKIP:
+                    // Forward past current = skip-with-flag (§3.3). Progress
+                    // moves and persists so resume lands after the skip.
+                    s.skipped[s.stepIdx] = true;
+                    s.committed[s.stepIdx] = false;
+                    Serial.println("\r\n  (skipped)");
+                    s.stepIdx++;
+                    guidePersistProgress(s);
+                    s.state = (s.stepIdx >= sc.numSteps) ? GuideState::DONE
+                                                         : GuideState::STEP_ENTER;
+                    break;
+                case GuideKey::TAP: {
+                    const GuideStep& st = sc.steps[s.stepIdx];
+                    if (s.state == GuideState::STEP_PROBE_WAIT &&
+                        (tapRow == st.n1 || tapRow == st.n2)) {
+                        Serial.print("\r\n  tap on ");
+                        printNodeOrName(tapRow, 0, -1, &Serial);
+                        Serial.println(" - confirmed");
+                        s.verifyOnly = false;
+                        s.state = GuideState::STEP_VERIFY;
+                    } else {
+                        guideIdentifyRow(tapRow);   // identify mode (§3.3)
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+            break;
+        }
+
+        case GuideState::STEP_VERIFY: {
+            // Task 7 fills this in. Every check resolves to NONE here; the
+            // parsed enum is preserved for the day the checks land.
+            const GuideStep& st = sc.steps[s.stepIdx];
+            if (st.check != GuideCheck::NONE) {
+                Serial.print("\r\n  (check ");
+                Serial.print(guideCheckName(st.check));
+                Serial.println(" pending firmware support)");
+            }
+            s.state = GuideState::STEP_RESULT;
+            break;
+        }
+
+        case GuideState::STEP_RESULT: {
+            const GuideStep& st = sc.steps[s.stepIdx];
+            char extra[48];
+            snprintf(extra, sizeof(extra), "check=%s val=pass", guideCheckName(st.check));
+            guideStatusLine(s, "RESULT", extra);
+            if (s.verifyOnly) {
+                s.verifyOnly = false;
+                Serial.println("  verify ok (no commit)");
+                s.state = s.waitReturn;
+            } else {
+                s.state = GuideState::STEP_COMMIT;
+            }
+            break;
+        }
+
+        case GuideState::STEP_COMMIT: {
+            const GuideStep& st = sc.steps[s.stepIdx];
+            String err;
+            bool hardwareChanged = false;
+            switch (st.type) {
+                case GuideStepType::PLACE: {
+                    int added = applyPartPlacement(globalState, st.partIdx, err);
+                    if (added < 0 || err.length() > 0) {
+                        Serial.println("\r\n  (placement warnings: " + err + ")");
+                    }
+                    hardwareChanged = true;
+                    break;
+                }
+                case GuideStepType::CONNECT:
+                    // hasConnection guard: bare addConnection on an existing
+                    // bridge bumps its duplicate count (see expandOnePart) -
+                    // a back-then-forward cycle must not stack duplicates.
+                    if (!globalState.hasConnection(st.n1, st.n2)) {
+                        if (!globalState.addConnection(st.n1, st.n2, err)) {
+                            Serial.println("\r\n  (connect failed: " + err + ")");
+                        }
+                    }
+                    hardwareChanged = true;
+                    break;
+                case GuideStepType::POWER_ON:
+                    if (sc.hasPower) {
+                        setTopRail(sc.topRail, 1, 0);
+                        setBotRail(sc.bottomRail, 1, 0);
+                        setDac0voltage(sc.dac0, 1, 0);
+                        setDac1voltage(sc.dac1, 1, 0);
+                        Serial.print("\r\n  power applied: topRail=");
+                        Serial.print(sc.topRail);
+                        Serial.print("V bottomRail=");
+                        Serial.print(sc.bottomRail);
+                        Serial.println("V");
+                    } else {
+                        Serial.println("\r\n  (no power: section in the project - rails stay at 0V)");
+                    }
+                    // Only claim power is live when something was applied -
+                    // the exit tail's "rails left at 0V" note keys off this.
+                    s.powerApplied = sc.hasPower;
+                    break;
+                case GuideStepType::RUN_SCRIPT:
+                    // Script execution arrives with the provisioning /
+                    // catalog tasks; the step parses + counts today.
+                    Serial.print("\r\n  (run step '");
+                    Serial.print(st.script);
+                    Serial.println("' - script execution lands in a later task, skipped)");
+                    break;
+                default:
+                    break;   // NOTE / VERIFY commit nothing
+            }
+            if (hardwareChanged) {
+                // Net names re-assert inside the refresh (partsReassertNetNames
+                // runs after both refresh paths - the as-built parts contract).
+                refreshConnections(1);
+                guideRenderFootprints();
+            }
+            s.committed[s.stepIdx] = true;
+            s.skipped[s.stepIdx] = false;
+            guideStatusLine(s, "COMMIT");
+            s.stepIdx++;
+            guidePersistProgress(s);
+            s.state = (s.stepIdx >= sc.numSteps) ? GuideState::DONE
+                                                 : GuideState::STEP_ENTER;
+            break;
+        }
+
+        case GuideState::STEP_BACK: {
+            if (s.stepIdx <= 0) {
+                Serial.println("\r\n  (already at the first step)");
+                s.state = GuideState::STEP_ENTER;
+                break;
+            }
+            s.stepIdx--;
+            s.summaryShown = false;   // backing out of DONE re-arms the summary
+            const GuideStep& st = sc.steps[s.stepIdx];
+            String err;
+            bool hardwareChanged = false;
+            switch (st.type) {
+                case GuideStepType::PLACE:
+                    removePartPlacement(globalState, st.partIdx, err);
+                    hardwareChanged = true;
+                    break;
+                case GuideStepType::CONNECT:
+                    if (globalState.hasConnection(st.n1, st.n2)) {
+                        globalState.removeConnection(st.n1, st.n2, err);
+                    }
+                    hardwareChanged = true;
+                    break;
+                case GuideStepType::POWER_ON:
+                    guideForcePowerSafe();
+                    s.powerApplied = false;
+                    Serial.println("\r\n  power back OFF (rails to 0V)");
+                    break;
+                default:
+                    break;
+            }
+            (void)err;   // un-commit is best-effort; a missing bridge is fine
+            if (hardwareChanged) {
+                refreshConnections(1);
+                guideRenderFootprints();
+            }
+            s.committed[s.stepIdx] = false;
+            s.skipped[s.stepIdx] = false;
+            guidePersistProgress(s);
+            guideStatusLine(s, "BACK");
+            s.state = GuideState::STEP_ENTER;
+            break;
+        }
+
+        case GuideState::DONE: {
+            if (!s.summaryShown) {
+                s.summaryShown = true;
+                int commits = 0, skips = 0;
+                for (int i = 0; i < sc.numSteps; i++) {
+                    if (s.committed[i]) commits++;
+                    if (s.skipped[i]) skips++;
+                }
+                cycleTerminalColor(true, 5.0, true, &Serial);
+                Serial.print("\r\n=== ");
+                Serial.print(sc.title);
+                Serial.print(": done. ");
+                Serial.print(commits);
+                Serial.print("/");
+                Serial.print(sc.numSteps);
+                Serial.print(" steps committed");
+                if (skips > 0) {
+                    Serial.print(", ");
+                    Serial.print(skips);
+                    Serial.print(" skipped");
+                }
+                Serial.println(" ===");
+                Serial.println("any key / click to finish (wheel back re-opens the last step)");
+                Serial.flush();
+                if (oled.isConnected()) {
+                    oled.showMultiLineSmallText("Done!", true, true);
+                }
+                guideRenderTarget(s, false);   // stepIdx == numSteps -> clears TGT
+                requestLedShow(1);
+                guideStatusLine(s, "DONE");
+            }
+            // Wait for a MAPPED ack - this consumes the HIL's trailing 'q'
+            // (a byte left unread here would land on the main menu after the
+            // guide returns, where 'q' is the DMX app). Unmapped bytes and
+            // line endings are ignored by guideReadInput already.
+            int tapRow = -1;
+            GuideKey k = guideReadInput(s, tapRow);
+            if (k == GuideKey::BACK) {
+                s.state = GuideState::STEP_BACK;   // re-open the last step
+            } else if (k == GuideKey::CONFIRM || k == GuideKey::SKIP ||
+                       k == GuideKey::QUIT) {
+                s.state = GuideState::EXIT;
+            }
+            break;
+        }
+
+        case GuideState::EXIT: {
+            // Deviation from DESIGN §3.2's "yesNoMenu(Save progress?)",
+            // documented: progress is already durably saved at every commit /
+            // skip / back (direct-into-slot, §7) - the prompt would have
+            // nothing to decide and would eat one serial byte.
+            guideStatusLine(s, "EXIT");
+            s.done = true;
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry / exit
+// ---------------------------------------------------------------------------
+
+static void guideSessionBegin(GuideSession& s, GuideScript* sc, int resumeStep) {
+    memset(&s, 0, sizeof(s));
+    s.script = sc;
+    s.state = GuideState::INIT;
+    s.stepIdx = (resumeStep > 0) ? resumeStep : 0;
+    if (s.stepIdx > sc->numSteps) s.stepIdx = sc->numSteps;
+    s.waitReturn = GuideState::STEP_WAIT;
+
+    // Encoder ownership, the picker/probeCalib way: one detent per step,
+    // clean button edges (the click that launched us must not confirm the
+    // first step), and put the divider back on exit.
+    s.savedRotaryDivider = rotaryDivider;
+    rotaryDivider = 8;
+    resetEncoderPosition = true;
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    encoderDirectionState = NONE;
+    probeButton.getButtonPress(true);   // swallow any stale press
+}
+
+static void guideExitTail(GuideSession& s) {
+    guideClearOverlays();
+    requestLedShow(1);
+    rotaryDivider = s.savedRotaryDivider;
+
+    if (!s.powerApplied) {
+        Serial.println("\r\n  rails + DACs left at 0V (safe state - power_on never ran)");
+        if (oled.isConnected()) {
+            oled.showMultiLineSmallText("Guide closed\nrails at 0V", true, true);
+        }
+    } else {
+        if (oled.isConnected()) {
+            oled.showMultiLineSmallText("Guide closed", true, true);
+        }
+    }
+    ReadingDisplay::resetLastShown();
+
+    // Drain whatever the driver still has buffered so nothing lands on the
+    // main menu's single-char reader after we return ('q' = DMX mode...).
+    delay(50);
+    while (Serial.available() > 0) Serial.read();
+    Serial.flush();
+}
+
+void guideRun(const char* projectYamlPath, int resumeStep) {
+    String err;
+    if (!guideParse(projectYamlPath, guideScript, err)) {
+        Serial.println("\r\nGUIDE parse failed: " + err);
+        return;
+    }
+    if (err.length() > 0) {
+        Serial.println("\r\nGUIDE parse warnings: " + err);
+    }
+    if (guideScript.numSteps == 0) {
+        Serial.println("\r\nGUIDE nothing to do (no steps, no parts)");
+        return;
+    }
+
+    guideSessionBegin(guideSession, &guideScript, resumeStep);
+    while (!guideSession.done) {
+        guideTick(guideSession);
+        jOS.serviceInner();
+        delayMicroseconds(50);
+    }
+    guideExitTail(guideSession);
+}
