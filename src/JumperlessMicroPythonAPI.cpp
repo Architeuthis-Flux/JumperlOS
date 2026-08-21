@@ -1697,25 +1697,36 @@ void jl_send_raw_str( const char* chip_str, int x, int y, int setOrClear ) {
 }
 
 int jl_switch_slot( int slot ) {
-    // Validate slot number
+    // Validate slot number. -2 (SLOT_FILE_CONTEXT) is rejected here as a
+    // TARGET by the same test - you can't "switch to" a file context by
+    // number, only by path.
     if ( slot < 0 || slot >= NUM_SLOTS ) {
         return -1; // Invalid slot number
     }
 
     // Save current slot if different
     if ( netSlot != slot ) {
-        // Hold core-1 frames briefly while changing slot number
-        holdCore1Frames( );
-        delayMicroseconds( 50 );
-
         int old_slot = netSlot;
-        netSlot = slot;
 
-        // Release BEFORE refreshConnections since it internally calls waitCore2
-        releaseCore1Frames( );
-
-        // Refresh connections for the new slot
-        refreshConnections( -1 );
+        // ACTUALLY LOAD THE SLOT. This used to flip netSlot and call
+        // refreshConnections() WITHOUT loading slot `slot`'s file - so the
+        // outgoing context's bridges stayed in globalState under the new
+        // number, and the next idle auto-save wrote them into slot `slot`.
+        // Harmless-looking before this wave (both were numbered slots and the
+        // user "meant" the switch); a live clobber vector the moment a file
+        // context can be the outgoing one, because the run file's content
+        // would land in /slots/slotN.yaml. loadSlot() flushes the outgoing
+        // context first (its :2921 big-event flush) and refreshes hardware
+        // itself, so the old hold/refresh dance around a bare assignment is
+        // gone with it.
+        String err;
+        if ( !SlotManager::getInstance( ).loadSlot( slot, err ) ) {
+            Serial.print( "switch_slot: failed to load slot " );
+            Serial.print( slot );
+            Serial.print( ": " );
+            Serial.println( err );
+            return -1;
+        }
 
         return old_slot; // Return the previous slot number
     }

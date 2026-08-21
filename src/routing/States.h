@@ -10,6 +10,7 @@
 #include "MatrixState.h"
 #include "LEDs.h"
 #include "CH446Q.h"
+#include "RotaryEncoder.h"   // NUM_SLOTS, SLOT_FILE_CONTEXT, extern netSlot
 #include <YAMLDuino.h>
 
 
@@ -554,16 +555,59 @@ public:
     JumperlessState& getActiveState();
     const JumperlessState& getActiveState() const;
     int getActiveSlot() const { return activeSlotNumber; }
-    
+
+    // ---- Path-based active context (design-slots.md §0) --------------------
+    // The active context's identity is ALWAYS a path. Numbered slots 0-7 (and
+    // Python 99) carry their canonical /slots/slotN.yaml here AND keep their
+    // number; anything else sets activeSlotNumber == netSlot ==
+    // SLOT_FILE_CONTEXT and this path is the only identity.
+    /** Full path of the active context. Never null; "" only before the first load. */
+    const char* getActiveSlotPath() const { return activeSlotPath; }
+    /** True when the active context is a file, not a numbered slot. */
+    bool isPathContext() const { return activeSlotNumber == SLOT_FILE_CONTEXT; }
+    /** Display name for the active context, <= 7 chars (OLED row / LED matrix). */
+    String activeContextLabel7() const;
+    /**
+     * Strict canonical-slot-file matcher. Returns N only for an EXACT
+     * "/slots/slot<N>.yaml" (N in 0..NUM_SLOTS-1, digits only, round-trip
+     * checked) or 99 for "/slots/slotPython.yaml"; -1 for everything else.
+     * Deliberately full-path, not basename: a user's /projects/foo/slot3.yaml
+     * is a file context, not slot 3. This retires the "slot_555.yaml".toInt()
+     * == 0 trap that let a project file adopt slot 0 and get clobbered.
+     */
+    static int slotNumberForCanonicalPath(const String& path);
+
     // Slot management
     bool loadSlot(int slotNum, String& errorMsg);
-    /** Load slot state from an arbitrary YAML file path (e.g. /slots/slot3.yaml or any path). */
+    /**
+     * Load slot state from an arbitrary YAML file path and ADOPT it as the
+     * active context: activeSlotNumber/netSlot become
+     * slotNumberForCanonicalPath(path), falling back to SLOT_FILE_CONTEXT,
+     * and activeSlotPath becomes `path`.
+     *
+     * ATOMIC ON FAILURE (contract the launcher's exit table leans on):
+     * tracking (activeSlotNumber / netSlot / activeSlotPath) is adopted ONLY
+     * after a successful open+read. Open failure is the only load-failure path
+     * here - fromYAML never returns false - and on it this returns false with
+     * the PRIOR context fully active and every tracker untouched. Callers may
+     * therefore treat a false return as "nothing happened to the context".
+     */
     bool loadSlotFromPath(const String& path, String& errorMsg);
     bool saveSlot(int slotNum, String& errorMsg, bool skipValidation = false);  // skipValidation for faster auto-saves
+    /** Path-aware save of the active context. THE dispatch point (design §3). */
     bool saveActiveSlot(String& errorMsg, bool skipValidation = false);
+    /** Serialize the active state to an arbitrary path (generalized writeSlotFile). */
+    bool writeStateToPath(const char* path, String& errorMsg, bool skipValidation = false);
     bool slotExists(int slotNum) const;
     bool deleteSlot(int slotNum, String& errorMsg);
     void clearActiveSlot();
+    /**
+     * Remember the active context as the boot context (/slots/last_active.txt).
+     * Self-gating: a no-op while temp-slot or preview mode is active, and for
+     * slot 99 / temp slot 8 - a calibration app or an isolated MicroPython
+     * session must never become what the board boots into.
+     */
+    void updateLastActive();
     
     // Preview mode - loads slot into globalState without applying to hardware
     // Just tracks which slot we should return to when done
@@ -617,17 +661,31 @@ private:
     // State storage - reference to globalState (no duplication!)
     JumperlessState& activeState;
     int activeSlotNumber;
-    
+    // Path identity of the active context. Fixed array, NOT String: the
+    // auto-save path runs from service() on every idle flush and must not
+    // churn the heap. INVARIANT: every `activeSlotNumber = ...` in this class
+    // is paired with an activeSlotPath assignment - a number/path disagreement
+    // is the silent-clobber vector this design exists to close.
+    char activeSlotPath[128];
+
     // Preview mode state
     bool previewModeActive;
     int previewSlotNumber;       // Which slot we're previewing
     int originalSlotNumber;      // Which slot to return to when done
+    char previewOriginalPath[128];  // ...and its path (originalSlotNumber may be -2)
     float originalRailVoltages[2]; // Save rail voltages (topRail, bottomRail) during preview
-    
+
     // Temporary slot mode state (for apps using a working slot)
     bool temporarySlotActive;
     int temporarySlotOriginal;   // Which slot to return to when exiting temp mode
-    
+    char temporarySlotOriginalPath[128];  // ...and its path (may be a run file)
+
+    // Internal: write the active state to activeSlotPath (saveActiveSlot's
+    // SLOT_FILE_CONTEXT branch).
+    bool saveStateToActivePath(String& errorMsg, bool skipValidation);
+    // Internal: set activeSlotPath from a slot number's canonical filename.
+    void setActivePathFromSlot(int slotNum);
+
     // History buffer (circular buffer for undo/redo)
     JumperlessState* historyBuffer;
     int historySize;

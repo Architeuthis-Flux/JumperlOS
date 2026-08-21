@@ -5,6 +5,20 @@
 
 #define NUM_SLOTS 8
 
+// The active context's identity is a PATH, always (design-slots.md §0).
+// For slots 0-7 (and Python slot 99) that path is the canonical
+// /slots/slotN.yaml and activeSlotNumber/netSlot keep their numeric value.
+// For ANY other file both trackers take this sentinel and
+// SlotManager::activeSlotPath is the sole identity.
+//
+// The invariant `netSlot == activeSlotNumber` holds in BOTH worlds - that is
+// what makes a stale `saveSlot(netSlot)` call site fail loudly (saveSlot(-2)
+// prints BUG and returns false) instead of silently clobbering a numbered
+// slot. Test with `== SLOT_FILE_CONTEXT`, never `< 0`: netSlot == -1 and
+// netSlot == NUM_SLOTS are live defcon sentinels from Graphics::attractMode
+// and must keep their existing meaning.
+static constexpr int SLOT_FILE_CONTEXT = -2;
+
 extern volatile int rotaryEncoderMode;
 extern int netSlot;
 extern volatile int slotChanged;
