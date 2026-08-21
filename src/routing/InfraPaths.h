@@ -161,6 +161,10 @@ enum InfraAdcUser : uint8_t {
     INFRA_ADC_TDM,     // FakeGpio TimeDomainMultiplexer (core 1)
     INFRA_ADC_NVSCAN,  // net voltage scan taps (core 1, per-tap acquire)
     INFRA_ADC_MEASURE, // measure mode's ephemeral ADC bridge (core 0)
+    INFRA_ADC_SCAN,    // part-ID / component-scan branch hook (reserved -
+                       // nothing acquires under this name yet: the guided-
+                       // placement checks ride NVSCAN's one-shot tap API,
+                       // which acquires as INFRA_ADC_NVSCAN per tap)
 };
 
 // Acquire a free ADC channel out of candidateMask (bit N = ADCN, ADC0-4).

@@ -64,6 +64,39 @@ float pathCurrentSigned_mA(int pathIndex);
 // own render frames - the LED loop sees each compute tick many times.
 uint32_t netScanComputeGeneration(void);
 
+// ---------------------------------------------------------------------------
+// One-shot tap request API (guide checks - the core 0 side)
+// ---------------------------------------------------------------------------
+// Cross-core request/poll pair for a single momentary voltage tap on ANY
+// node. The background scan only visits ROUTED nets, so an unconnected part
+// row has no fresh nodeVoltage[] - the guided-placement checks need exactly
+// that measurement. Requests are posted from core 0 and serviced INSIDE
+// serviceNetVoltageScan() on the scan core (senseNodeVoltage / pairSenseTap
+// are static and core-affine there: they share the loop with
+// sendAllPathsCore2, so taps can never race a crossbar refresh).
+//
+// Contract:
+//  - Single request in flight; request functions return false while one is
+//    pending. A sequence guard keeps a stale result from reading as fresh -
+//    callers MUST get a successful request before polling the result (after
+//    an abort, an in-flight tap completes into the slots unconsumed; the
+//    next requester overwrites it).
+//  - nodeTapResult / pairTapResult: 0 = pending, 1 = ok, -1 = floating
+//    (drift over the scan's threshold; drift still reported), -2 = route or
+//    ADC failure (transient - lanes busy, safety gates closed - re-request
+//    with a short backoff and bound the retries with your own timeout).
+//    Kind mismatch (polling node result for a pair request or vice versa)
+//    also returns -2. Results stay readable until the next request.
+//  - One-shots serve even while display.net_currents is off or the scan is
+//    input/menu-paused, but sit behind the same HARDWARE safety gates as
+//    scan taps and share the per-tap cadence throttle - a serviced one-shot
+//    displaces at most one scheduled scan tap, so the scan cadence holds.
+// V5 only; OG stubs refuse the request.
+bool requestNodeTap(int node);
+int  nodeTapResult(float* volts, float* drift);
+bool requestPairTap(int n1, int n2);
+int  pairTapResult(float* v1, float* v2);
+
 // Call frequently from the core 2 loop. Self-throttled.
 void serviceNetVoltageScan(void);
 

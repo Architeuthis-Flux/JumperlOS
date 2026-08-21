@@ -384,6 +384,165 @@ static bool pairSenseTap(int node1, int node2, int adcA, int adcB,
 }
 
 // ============================================================================
+// One-shot tap requests (guide checks) - see the header contract
+// ============================================================================
+//
+// Slots are written on core 0 (payload first, __dmb(), then the reqSeq bump)
+// and consumed here (payload first, __dmb(), then doneSeq = reqSeq).
+// reqSeq != doneSeq means a request is in flight; the poll side treats only
+// doneSeq == reqSeq as complete, so a result can never be read against the
+// wrong request. Single request in flight by contract. NO Serial I/O here -
+// this runs on the scan core (dual-core USB hazard); failures speak through
+// the result code and the tap counters.
+
+static volatile int oneShotN1 = -1;
+static volatile int oneShotN2 = -1;
+static volatile bool oneShotIsPair = false;
+static volatile int8_t oneShotCode = -2;
+static volatile float oneShotV1 = 0.0f, oneShotV2 = 0.0f;
+static volatile float oneShotDrift1 = 0.0f;
+static volatile uint32_t oneShotReqSeq = 0;
+static volatile uint32_t oneShotDoneSeq = 0;
+static uint32_t tapOneShot = 0; // serviced one-shots (the i! taps line)
+// Sequential pair fallback (ring down / no second channel free): one node
+// per service pass, so a pass never exceeds the single-tap ~11ms worst case
+// - two full taps back to back would flirt with waitCore2()'s 25ms ceiling.
+static int oneShotPairPhase = 0;
+static float oneShotPairV1 = 0.0f;
+
+bool requestNodeTap(int node) {
+    if (oneShotReqSeq != oneShotDoneSeq) return false; // in flight
+    if (node <= 0 || node >= NODE_VOLTAGE_MAX) return false;
+    oneShotN1 = node;
+    oneShotN2 = -1;
+    oneShotIsPair = false;
+    oneShotPairPhase = 0;
+    __dmb();
+    oneShotReqSeq = oneShotReqSeq + 1;
+    return true;
+}
+
+int nodeTapResult(float* volts, float* drift) {
+    if (oneShotReqSeq != oneShotDoneSeq) return 0; // pending
+    if (oneShotIsPair) return -2;                  // kind mismatch
+    __dmb();
+    if (volts) *volts = oneShotV1;
+    if (drift) *drift = oneShotDrift1;
+    return oneShotCode;
+}
+
+bool requestPairTap(int n1, int n2) {
+    if (oneShotReqSeq != oneShotDoneSeq) return false;
+    if (n1 <= 0 || n1 >= NODE_VOLTAGE_MAX) return false;
+    if (n2 <= 0 || n2 >= NODE_VOLTAGE_MAX) return false;
+    oneShotN1 = n1;
+    oneShotN2 = n2;
+    oneShotIsPair = true;
+    oneShotPairPhase = 0;
+    __dmb();
+    oneShotReqSeq = oneShotReqSeq + 1;
+    return true;
+}
+
+int pairTapResult(float* v1, float* v2) {
+    if (oneShotReqSeq != oneShotDoneSeq) return 0;
+    if (!oneShotIsPair) return -2;
+    __dmb();
+    if (v1) *v1 = oneShotV1;
+    if (v2) *v2 = oneShotV2;
+    return oneShotCode;
+}
+
+// Serviced at the head of serviceNetVoltageScan(), BEFORE the enable/menu/
+// user-input gates: a one-shot IS user-requested work (the guide is waiting
+// on it), bounded at one tap per pass. The hardware-safety gates stay - they
+// exist for route/ADC integrity, not politeness. Shares lastScanUs with the
+// scheduled scan so the two tap kinds interleave at the same cadence.
+static void serviceOneShotTap(void) {
+    if (oneShotReqSeq == oneShotDoneSeq) return; // nothing pending
+    if (core1FramesHeld()) return;
+    if (!core1req::allIdle()) return;
+    if (core1busy || refreshInProgress) return;
+#if USB_AUDIO_ENABLE
+    if (usbAudioOwnsAdc) return;
+#endif
+    if (probeActive != 0) return;
+    if (wavegen.isRunning()) return;
+    if (micros() - lastScanUs < kScanIntervalUs) return;
+
+    core2busy = true;
+    lastScanUs = micros();
+    __dmb(); // request payload visible before we read it
+    int n1 = oneShotN1, n2 = oneShotN2;
+    bool isPair = oneShotIsPair;
+    bool complete = true;
+    int8_t code = -2;
+
+    int adcA = infraAcquireAdc(INFRA_ADC_NVSCAN, 0x0F, true);
+    if (adcA >= 0) {
+        if (!isPair) {
+            uint32_t driftBefore = tapFailDrift;
+            float v;
+            if (senseNodeVoltage(n1, adcA, &v)) {
+                oneShotV1 = v - scanZeroOffset[adcA];
+                code = 1;
+            } else {
+                code = (tapFailDrift != driftBefore) ? -1 : -2;
+            }
+            oneShotDrift1 = (n1 > 0 && n1 < NODE_VOLTAGE_MAX) ? nodeDrift[n1] : 0.0f;
+        } else {
+            // Single-dwell differential when the ring is live and a second
+            // channel frees up; otherwise one node per pass (see above).
+            bool pairDone = false;
+            if (oneShotPairPhase == 0 && adcRingActive()) {
+                int adcB = infraAcquireAdc(INFRA_ADC_NVSCAN,
+                                           (uint8_t)(0x0F & ~(1u << adcA)), true);
+                if (adcB >= 0) {
+                    uint32_t driftBefore = tapFailDrift;
+                    float va, vb;
+                    if (pairSenseTap(n1, n2, adcA, adcB, &va, &vb)) {
+                        oneShotV1 = va - scanZeroOffset[adcA];
+                        oneShotV2 = vb - scanZeroOffset[adcB];
+                        code = 1;
+                    } else {
+                        code = (tapFailDrift != driftBefore) ? -1 : -2;
+                    }
+                    pairDone = true;
+                }
+            }
+            if (!pairDone) {
+                uint32_t driftBefore = tapFailDrift;
+                float v;
+                int node = (oneShotPairPhase == 0) ? n1 : n2;
+                if (senseNodeVoltage(node, adcA, &v)) {
+                    v -= scanZeroOffset[adcA];
+                    if (oneShotPairPhase == 0) {
+                        oneShotPairV1 = v;
+                        oneShotPairPhase = 1;
+                        complete = false; // n2 taps on the next pass
+                    } else {
+                        oneShotV1 = oneShotPairV1;
+                        oneShotV2 = v;
+                        code = 1;
+                    }
+                } else {
+                    code = (tapFailDrift != driftBefore) ? -1 : -2;
+                }
+            }
+        }
+    }
+    infraReleaseAdc(INFRA_ADC_NVSCAN); // releases every channel we hold
+    core2busy = false;
+
+    if (complete) {
+        tapOneShot++;
+        oneShotCode = code;
+        __dmb(); // result payload lands before the done stamp
+        oneShotDoneSeq = oneShotReqSeq;
+    }
+}
+
+// ============================================================================
 // Scan list / known sources
 // ============================================================================
 
@@ -699,8 +858,9 @@ static void printScanStats(Stream* out) {
         }
         out->println();
     }
-    out->printf("[nvscan] taps ok:%lu (pair:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu\n",
-                tapOk, tapPairOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift, tapFailRingStale);
+    out->printf("[nvscan] taps ok:%lu (pair:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
+                tapOk, tapPairOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift, tapFailRingStale,
+                tapOneShot);
     // Sense routes as the taps would compute them right now (peek only -
     // a debug print must not take pool ownership)
     uint8_t freeMask = infraFreeAdcMask(0x0F);
@@ -888,6 +1048,10 @@ static bool pairTapSlot(int adcA) {
 }
 
 void serviceNetVoltageScan(void) {
+    // Guide one-shot taps first: they serve even while the scan is disabled
+    // or input/menu-paused (see the helper's comment for the gate rationale).
+    serviceOneShotTap();
+
     static bool wasEnabled = false;
     if (!jumperlessConfig.display.net_currents) {
         if (wasEnabled) {
@@ -1064,6 +1228,13 @@ float netCurrent_mA(int) { return 0.0f; }
 bool pathCurrentKnown(int) { return false; }
 float pathCurrentSigned_mA(int) { return 0.0f; }
 uint32_t netScanComputeGeneration(void) { return 0; }
+// One-shot taps are a V5 primitive (the OG has no scanner fabric here);
+// refusing the request tells the caller immediately, and the guide checks
+// report themselves unsupported on OG before ever asking.
+bool requestNodeTap(int) { return false; }
+int nodeTapResult(float*, float*) { return -2; }
+bool requestPairTap(int, int) { return false; }
+int pairTapResult(float*, float*) { return -2; }
 void serviceNetVoltageScan(void) {}
 void serviceNetVoltageScanDebug(void) {}
 void printNetVoltageScanStats(Stream* out) { out->println("net current scan: V5 only"); }
