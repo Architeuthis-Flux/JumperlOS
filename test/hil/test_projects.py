@@ -37,7 +37,7 @@ import os
 import re
 import time
 
-from jl import (jl_exec, parse_kv, port1_command, check, finish,
+from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore)
 
 SLOT_PATH = "/slots/slot3.yaml"
@@ -386,6 +386,117 @@ else:
 # port-1 round trip when a terminal client is holding it.)
 out = jl_exec("print('back=', switch_slot(3))", timeout=25)
 time.sleep(1.5)
+
+# (d) The HAPPY path: the picker actually opens, over real listed content, and
+# comes back out without leaving the temp-slot latch set. 6(c) alone would
+# still pass if listProjects always returned 0 (a broken path join, an inverted
+# isDirectory test), so this drives the launcher WITH both projects present:
+#   - port 5 calls run_app("Projects") in a worker thread;
+#   - port 1 watches for the picker's `PROJECTS n=<count>` line - that count IS
+#     listProjects' result, so seeing n>=2 is the happy-path assertion;
+#   - port 1 then sends a byte, which the picker treats exactly like an encoder
+#     hold (Menus.cpp:1992/:2646's "encoder hold, serial byte, or probe button"
+#     convention), and the launcher takes its cancel-before-any-slot-call exit.
+# The cancel byte is '\r' (what port1_command primes connections with, so a
+# leftover copy is inert), re-sent every 0.5 s until the exec returns so a
+# dropped byte can't leave the board sitting in the picker.
+import threading
+
+import serial  # pyserial
+
+_csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
+
+q = port1_command("Q", 1.5)
+m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+slot_before_launch = int(m.group(1)) if m else -1
+check(slot_before_launch == 3, f"active slot before the launch probe is 3 (got {slot_before_launch})")
+
+launch = {}
+
+
+def _launch_projects():
+    try:
+        launch["out"] = jl_exec("run_app('Projects')\nprint('returned=', 1)", timeout=45)
+    except SystemExit as e:                                  # jl_exec fails fast
+        launch["err"] = str(e)
+    except Exception as e:                                   # pragma: no cover
+        launch["err"] = repr(e)
+
+
+worker = None
+buf = ""
+n_listed = None
+sends = 0
+
+ser = serial.Serial(port1_path(), 115200, timeout=0.05)
+try:
+    # Prime the connection BEFORE the launcher opens (the firmware's
+    # connection-init eats the first byte, and that byte would otherwise be the
+    # one meant to cancel the picker).
+    ser.write(b"\r\n")
+    ser.flush()
+    quiet, overall = time.time(), time.time()
+    while time.time() - overall < 4.0:
+        if ser.read(4096):
+            quiet = time.time()
+        elif time.time() - quiet > 0.6:
+            break
+    ser.reset_input_buffer()
+
+    worker = threading.Thread(target=_launch_projects, daemon=True)
+    worker.start()
+
+    last_send = 0.0
+    deadline = time.time() + 35
+    while time.time() < deadline and worker.is_alive():
+        chunk = ser.read(4096)
+        if chunk:
+            buf += _csi.sub("", chunk.decode(errors="replace"))
+        if n_listed is None:
+            mm = re.search(r"PROJECTS n=(\d+)", buf)
+            if mm:
+                n_listed = int(mm.group(1))
+        # Cancel once the picker announced itself; blind-cancel after 12 s so a
+        # missed line can't wedge the board in the picker either.
+        if (n_listed is not None or time.time() - overall > 12) and \
+                time.time() - last_send > 0.5:
+            ser.write(b"\r")
+            ser.flush()
+            last_send = time.time()
+            sends += 1
+    worker.join(timeout=15)
+    chunk = ser.read(4096)
+    if chunk:
+        buf += _csi.sub("", chunk.decode(errors="replace"))
+finally:
+    ser.close()
+
+check(n_listed is not None and n_listed >= 2,
+      f"the picker opened over listProjects' real output (PROJECTS n={n_listed}) "
+      "- listProjects found both projects")
+check("555" in buf and "hiltest" in buf,
+      "the launcher listed both project dirs on the terminal")
+check(worker is not None and not worker.is_alive(),
+      f"run_app('Projects') returned after the serial cancel "
+      f"({sends} cancel byte(s) sent)")
+check("Cancelled" in buf, "the launcher took its cancel exit")
+if "err" in launch:
+    print(f"  info: launch worker error: {launch['err'][:400]}")
+check(parse_kv(launch.get("out", "")).get("returned") == 1,
+      "the REPL exec that launched the app completed normally")
+
+# The latch witness. enterTemporarySlot(8) sets activeSlotNumber = 8 and only
+# exitTemporarySlot puts it back (States.cpp:3235/:3252), so a cancel that
+# wrongly entered - or entered and failed to unwind - shows up as ACTIVE_SLOT:8
+# here. And the follow-up slot write proves the slot machinery still works.
+q = port1_command("Q", 1.5)
+m = re.search(r"ACTIVE_SLOT:(\d+)", q)
+slot_after = int(m.group(1)) if m else -1
+check(slot_after == 3,
+      f"cancelling the picker left no temp slot behind (ACTIVE_SLOT:{slot_after}, not 8)")
+out = jl_exec("print('saved=', nodes_save(3))", timeout=25)
+check(parse_kv(out).get("saved") == 3,
+      "a slot operation still succeeds after the cancelled launch")
 
 # --- 7. Restore the bench --------------------------------------------------
 # Restore the FILE first, switch slots second (same hazard as phase 0).

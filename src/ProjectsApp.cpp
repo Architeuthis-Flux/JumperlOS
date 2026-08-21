@@ -339,13 +339,18 @@ static void drawPickerItem(const char* header, const String& ledLabel,
 }
 
 // Encoder picker shared by the project / variant / slot pickers. Returns the
-// chosen index, or -1 when the user held to cancel.
+// chosen index, or -1 when the user cancelled (encoder hold or a serial byte).
 //
 // Owns inClickMenu for its duration (see the file header) and resets the
 // button state machine on entry so the click that launched the app - or the
 // click that made the previous selection - can't fall through into this loop.
-static int runPicker(const char* header, const String* ledLabels,
-                     const String* titles, const String* summaries, int count) {
+//
+// machineTag is printed once on entry as `<TAG> n=<count>`: one grep-able line
+// per picker so a headless caller can see the picker open and how many entries
+// it holds (test_projects.py phase 6(d) drives the launcher on that line).
+static int runPicker(const char* machineTag, const char* header,
+                     const String* ledLabels, const String* titles,
+                     const String* summaries, int count) {
     if (count <= 0)
         return -1;
 
@@ -354,10 +359,25 @@ static int runPicker(const char* header, const String* ledLabels,
     bool needsDraw = true;
     unsigned long lastShowRequest = 0;
 
+    // Sensitivity: one item per detent. Every picker-shaped consumer of
+    // encoderDirectionState owns this global for its duration and puts it back
+    // (yesNoMenu sets 8, Menus.cpp:2469; the node picker and the history scrub
+    // save/restore, Menus.cpp:5705-5712). The default happens to be 8, but a
+    // value editor that leaked 3/4/12 - or an entry that didn't come through
+    // getMenuSelection, like run_app("Projects") - would otherwise land here.
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 8;
+
     inClickMenu = 1;
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
     encoderDirectionState = NONE;
+
+    Serial.print("\r\n");
+    Serial.print(machineTag);
+    Serial.print(" n=");
+    Serial.println(count);
+    Serial.flush();
 
     while (true) {
         if (needsDraw) {
@@ -381,6 +401,16 @@ static int runPicker(const char* header, const String* ledLabels,
             result = -1;
             break;
         }
+        // Serial byte cancels, the same way it does on every other picker
+        // screen (Menus.cpp:1992, :2646 - "encoder hold, serial byte, or probe
+        // button"). Consumed here: this returns into an app context, not a
+        // command reader, so a byte left in the buffer would land on the
+        // single-char command handler after the app exits.
+        if (Serial.available() > 0) {
+            Serial.read();
+            result = -1;
+            break;
+        }
         if (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED) {
             encoderButtonState = IDLE;
             result = idx;
@@ -399,8 +429,10 @@ static int runPicker(const char* header, const String* ledLabels,
         delayMicroseconds(1000);
     }
 
-    // Leave menu-render mode and put the breadboard back.
+    // Leave menu-render mode, put the breadboard back, hand the encoder
+    // sensitivity back to whoever set it.
     inClickMenu = 0;
+    rotaryDivider = lastDivider;
     b.clear();
     requestLedShow(-1);
     Serial.println();
@@ -450,7 +482,7 @@ static int pickDestinationSlot(void) {
         titles[i] = "Slot " + String(i);
         summaries[i] = used ? "overwrites saved slot" : "empty slot";
     }
-    return runPicker("Slot", ledLabels, titles, summaries, NUM_SLOTS);
+    return runPicker("SLOTS", "Slot", ledLabels, titles, summaries, NUM_SLOTS);
 }
 
 // ============================================================================
@@ -472,7 +504,7 @@ void projectsAppLauncher(void) {
     static ProjectMeta projects[PROJECTS_MAX];
 
     Serial.println("\n\r=== Projects ===");
-    Serial.println("Rotary: Navigate | Short Click: Select | Long Press: Cancel");
+    Serial.println("Rotary: Navigate | Short Click: Select | Long Press or any key: Cancel");
 
     int count = listProjects(projects, PROJECTS_MAX);
     if (count <= 0) {
@@ -494,7 +526,7 @@ void projectsAppLauncher(void) {
         Serial.println("  " + projects[i].dir + "  -  " + projects[i].title);
     }
 
-    int chosen = runPicker("Project", ledLabels, titles, summaries, count);
+    int chosen = runPicker("PROJECTS", "Project", ledLabels, titles, summaries, count);
     if (chosen < 0) {
         // EXIT 2: cancelled before any slot state was touched.
         Serial.println("  Cancelled.");
@@ -526,12 +558,17 @@ void projectsAppLauncher(void) {
                 label.replace(".", "");
                 if (label.length() == 0)
                     label = "default";
+                // Write the derived label BACK: it is what main.<variant>.py
+                // resolution and `_jl_project["variant"]` read downstream, so a
+                // wiring.<v>.yaml with no meta.variant would otherwise display
+                // right and resolve wrong.
+                vMeta[i].variant = label;
             }
             vLed[i] = label;
             vTitle[i] = label;
             vSummary[i] = vMeta[i].summary;
         }
-        int v = runPicker("Variant", vLed, vTitle, vSummary, variantCount);
+        int v = runPicker("VARIANTS", "Variant", vLed, vTitle, vSummary, variantCount);
         if (v < 0) {
             // EXIT 3: cancelled before any slot state was touched.
             Serial.println("  Cancelled.");
