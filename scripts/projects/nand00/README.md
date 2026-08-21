@@ -8,11 +8,11 @@ the truth table and measure it at the same time.
 
 | Part | Value | Package | Rows |
 |------|-------|---------|------|
-| U1   | 74HC00 | DIP-14 | pin 1 at row 5, across the middle gap |
+| U1   | 74HC00 | DIP-14 | pin 1 at row 35, across the middle gap |
 | LED1 | any   | 2-lead  | anode (long leg) 18, cathode 19 |
-| R1   | 330   | axial   | 15 - 16 |
+| R1   | 330   | axial   | 15 - 45, straddling the middle gap |
 
-Top rail is set to **3.3 V**, not 5 V: rows 5, 6 and 7 land on real RP2350
+Top rail is set to **3.3 V**, not 5 V: rows 35, 36 and 37 land on real RP2350
 pins, and those are 3.3 V parts. A 74HC00 is perfectly happy anywhere from
 2 V to 6 V.
 
@@ -20,11 +20,11 @@ Pin map for gate 1:
 
 | 74HC00 pin | Row | Goes to |
 |---|---|---|
-| 1 (1A) | 5 | `RP_GPIO_1` - the Jumperless drives it |
-| 2 (1B) | 6 | `RP_GPIO_2` - the Jumperless drives it |
-| 3 (1Y) | 7 | `RP_GPIO_3` for readback, and R1 -> LED1 -> GND |
-| 7 (GND) | 11 | GND |
-| 14 (VCC) | 35 | top rail |
+| 1 (1A) | 35 | `RP_GPIO_1` - the Jumperless drives it |
+| 2 (1B) | 36 | `RP_GPIO_2` - the Jumperless drives it |
+| 3 (1Y) | 37 | `RP_GPIO_3` for readback, and R1 -> LED1 -> GND |
+| 7 (GND) | 41 | GND |
+| 14 (VCC) | 5 | top rail |
 
 > **Jumperless V5 only.** This project routes breadboard rows to
 > `RP_GPIO_1`, `RP_GPIO_2` and `RP_GPIO_3`, and those nodes exist only on the V5. The original
@@ -75,7 +75,7 @@ breadboard stays completely unconnected and `main.py` reports floating reads.
 ## Troubleshooting
 
 - **Every read says `FLOATING`** - the output pin is not driving. Check that
-  the chip straddles the middle gap with pin 1 (next to the notch) at row 5,
+  the chip straddles the middle gap with pin 1 (next to the notch) at row 35,
   and that the top rail really is at 3.3 V.
 - **The LED never lights but the readback is right** - the LED is backwards.
   The long leg goes in row 18.
@@ -89,5 +89,5 @@ breadboard stays completely unconnected and `main.py` reports floating reads.
   (1Y), not an input, and this wiring drives pin 1 from `RP_GPIO_1` - two
   drivers fighting over one node. Pull it out rather than leaving it
   powered, and use a 74HC00.
-- **The last two rows disagree** - one of the two input legs (rows 5, 6) is
+- **The last two rows disagree** - one of the two input legs (rows 35, 36) is
   not making contact.

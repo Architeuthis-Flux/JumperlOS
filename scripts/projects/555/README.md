@@ -8,15 +8,15 @@ parts into the breadboard.
 
 | Part | Value | Package | Rows |
 |------|-------|---------|------|
-| U1   | NE555 | DIP-8   | pin 1 at row 5, across the middle gap |
-| R1   | 10k   | axial   | 12 - 13 |
-| R2   | 47k   | axial   | 15 - 16 |
+| U1   | NE555 | DIP-8   | pin 1 at row 35, across the middle gap |
+| R1   | 10k   | axial   | 10 - 40, straddling the middle gap |
+| R2   | 47k   | axial   | 13 - 43, straddling the middle gap |
 | C1   | 10uF  | electrolytic | + at 18, - at 19 |
 | LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 |
-| R3   | 330   | axial   | 25 - 26 |
+| R3   | 330   | axial   | 16 - 46, straddling the middle gap |
 
-Top rail is set to 5 V. ADC0 watches OUT (row 7), ADC1 watches the timing
-cap (row 37).
+Top rail is set to 5 V. ADC0 watches OUT (row 37), ADC1 watches the timing
+cap (row 7).
 
 ## What it does
 
@@ -53,7 +53,7 @@ a guide commit sets that flag. Loaded that way, the LED will not blink.
 ## Troubleshooting
 
 - No blink at all: check the 555's orientation - pin 1 (next to the dot) at
-  row 5, and the chip must straddle the middle gap.
+  row 35, and the chip must straddle the middle gap.
 - Blinking way too fast or slow: R1/R2 swapped, or the cap is not 10uF.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.

@@ -8,24 +8,24 @@ decides whether the chip can be written at all.
 
 | Part | Value | Package | Rows |
 |------|-------|---------|------|
-| U1   | 24C02 (or 24C16) | DIP-8 | pin 1 at row 5, across the middle gap |
-| R1   | 4.7k  | axial   | 12 - 13 (SDA pull-up) |
-| R2   | 4.7k  | axial   | 15 - 16 (SCL pull-up) |
+| U1   | 24C02 (or 24C16) | DIP-8 | pin 1 at row 35, across the middle gap |
+| R1   | 4.7k  | axial   | 12 - 42, straddling the middle gap (SDA pull-up) |
+| R2   | 4.7k  | axial   | 15 - 45, straddling the middle gap (SCL pull-up) |
 
 Top rail is set to 3.3 V.
 
-The 24Cxx pinout, and where each pin lands with pin 1 at row 5:
+The 24Cxx pinout, and where each pin lands with pin 1 at row 35:
 
 | Pin | Name | Row | Goes to |
 |---|---|---|---|
-| 1 | A0  | 5  | GND |
-| 2 | A1  | 6  | GND |
-| 3 | A2  | 7  | GND |
-| 4 | GND | 8  | GND |
-| 5 | SDA | 38 | `RP_GPIO_7` (RP pin 26) |
-| 6 | SCL | 37 | `RP_GPIO_8` (RP pin 27) |
-| 7 | WP  | 36 | top rail - **write protected** |
-| 8 | VCC | 35 | top rail |
+| 1 | A0  | 35 | GND |
+| 2 | A1  | 36 | GND |
+| 3 | A2  | 37 | GND |
+| 4 | GND | 38 | GND |
+| 5 | SDA | 8  | `RP_GPIO_7` (RP pin 26) |
+| 6 | SCL | 7  | `RP_GPIO_8` (RP pin 27) |
+| 7 | WP  | 6  | top rail - **write protected** |
+| 8 | VCC | 5  | top rail |
 
 A0-A2 all grounded puts the chip at **0x50**.
 
@@ -45,18 +45,18 @@ gives a rise time of a couple of microseconds - well past the 1 us the
 
 ### Write protect is a wire, not a jumper
 
-Pin 7 (WP) high means "reads only". The wiring holds row 36 at the top
+Pin 7 (WP) high means "reads only". The wiring holds row 6 at the top
 rail, so the chip is genuinely read-only from the moment it powers up -
 not read-only by convention.
 
 The optional write test in `main.py` is the only thing that changes that,
 and it does so by re-routing, not by asking you to move a jumper:
 
-    disconnect(36, TOP_RAIL)
-    connect(36, GND)          # writes enabled for exactly one byte
+    disconnect(6, TOP_RAIL)
+    connect(6, GND)            # writes enabled for exactly one byte
     ...
-    disconnect(36, GND)
-    connect(36, TOP_RAIL)     # in a finally, so it always goes back
+    disconnect(6, GND)
+    connect(6, TOP_RAIL)       # in a finally, so it always goes back
 
 That re-route runs `refreshConnections()`, which re-asserts the slot's GPIO
 configuration onto RP pins 26/27 - so the script rebuilds its `machine.I2C`
@@ -96,9 +96,9 @@ breadboard stays completely unconnected and `main.py` reports an empty bus.
 ## Troubleshooting
 
 - **`i2c devices: []`** - nothing acked. Most often the chip is in
-  backwards: pin 1 is the end with the dot, at row 5, and the chip must
+  backwards: pin 1 is the end with the dot, at row 35, and the chip must
   straddle the middle gap. After that, check that both 4.7k resistors are
-  really in rows 12-13 and 15-16.
+  really straddling the gap at rows 12/42 and 15/45.
 - **A device answers, but not at 0x50** - one of A0/A1/A2 is not reaching
   GND, which shifts the address. 0x51 means A0 is high, 0x52 means A1, and
   so on. Change `ADDR` in `main.py` to match, or re-seat the chip.

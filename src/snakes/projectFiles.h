@@ -48,15 +48,15 @@ parts into the breadboard.
 
 | Part | Value | Package | Rows |
 |------|-------|---------|------|
-| U1   | NE555 | DIP-8   | pin 1 at row 5, across the middle gap |
-| R1   | 10k   | axial   | 12 - 13 |
-| R2   | 47k   | axial   | 15 - 16 |
+| U1   | NE555 | DIP-8   | pin 1 at row 35, across the middle gap |
+| R1   | 10k   | axial   | 10 - 40, straddling the middle gap |
+| R2   | 47k   | axial   | 13 - 43, straddling the middle gap |
 | C1   | 10uF  | electrolytic | + at 18, - at 19 |
 | LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 |
-| R3   | 330   | axial   | 25 - 26 |
+| R3   | 330   | axial   | 16 - 46, straddling the middle gap |
 
-Top rail is set to 5 V. ADC0 watches OUT (row 7), ADC1 watches the timing
-cap (row 37).
+Top rail is set to 5 V. ADC0 watches OUT (row 37), ADC1 watches the timing
+cap (row 7).
 
 ## What it does
 
@@ -93,19 +93,19 @@ a guide commit sets that flag. Loaded that way, the LED will not blink.
 ## Troubleshooting
 
 - No blink at all: check the 555's orientation - pin 1 (next to the dot) at
-  row 5, and the chip must straddle the middle gap.
+  row 35, and the chip must straddle the middle gap.
 - Blinking way too fast or slow: R1/R2 swapped, or the cap is not 10uF.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[3] = { 0xE846A64A, 0x52517D68, 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 3;
+const uint32_t PROJECT_555_README_MD_HASHES[4] = { 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 4;
 
 const char* PROJECT_555_MAIN_PY = R"("""555 LED Flasher - companion script for /projects/555/wiring.yaml
 
 Watches the 555's OUT pin (bridged to ADC0 by the wiring file), counts the
 rising edges past a 2.5 V threshold, and reports the blink rate every 3
-seconds along with the timing cap's voltage (ADC1 -> node 37).
+seconds along with the timing cap's voltage (ADC1 -> node 7).
 
 Runs standalone from the Files browser too - the launcher injects
 _jl_project, but nothing here depends on it.
@@ -165,8 +165,8 @@ except KeyboardInterrupt:
         pass
     print("bye")
 )";
-const uint32_t PROJECT_555_MAIN_PY_HASHES[1] = { 0xD488958C };
-const int PROJECT_555_MAIN_PY_HASH_COUNT = 1;
+const uint32_t PROJECT_555_MAIN_PY_HASHES[2] = { 0x89075267, 0xD488958C };
+const int PROJECT_555_MAIN_PY_HASH_COUNT = 2;
 
 const char* PROJECT_555_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -182,10 +182,10 @@ parts:
     type: ic
     value: "NE555"
     footprint: dip8
-    row: 5
+    row: 35
     pins:
       GND:   {pin: 1, connect: GND,      class: gnd}
-      TRIG:  {pin: 2, connect: 37,       class: signal}
+      TRIG:  {pin: 2, connect: 7,        class: signal}
       OUT:   {pin: 3,                    class: signal}
       RESET: {pin: 4, connect: TOP_RAIL, class: power}
       CTRL:  {pin: 5,                    class: nc}
@@ -195,21 +195,21 @@ parts:
   - name: "R1"
     type: resistor
     value: "10k"
-    footprint: sip2
-    row: 12
-    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 36}}
+    footprint: axial2
+    row: 10
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 6}}
   - name: "R2"
     type: resistor
     value: "47k"
-    footprint: sip2
-    row: 15
-    pins: {A: {pin: 1, connect: 36}, B: {pin: 2, connect: 37}}
+    footprint: axial2
+    row: 13
+    pins: {A: {pin: 1, connect: 6}, B: {pin: 2, connect: 7}}
   - name: "C1"
     type: capacitor
     value: "10uF"
     footprint: sip2
     row: 18
-    pins: {PLUS: {pin: 1, connect: 37}, MINUS: {pin: 2, connect: GND}}
+    pins: {PLUS: {pin: 1, connect: 7}, MINUS: {pin: 2, connect: GND}}
   - name: "LED1"
     type: led
     footprint: sip2
@@ -218,31 +218,31 @@ parts:
   - name: "R3"
     type: resistor
     value: "330"
-    footprint: sip2
-    row: 25
-    pins: {A: {pin: 1, connect: 7}, B: {pin: 2, connect: 22}}
+    footprint: axial2
+    row: 16
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 22}}
 guide:
   title: "555 LED Flasher"
   steps:
     - {do: note, text: "A 555 blinker. Wheel: turn=prev/next, click=confirm, hold=exit."}
-    - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 5."}
-    - {do: place, part: R1, check: continuity, min: 0.1, max: 0.8, text: "10k resistor: rows 12 and 13."}
-    - {do: place, part: R2, check: continuity, min: 0.04, max: 0.3, text: "47k resistor: rows 15 and 16."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 35."}
+    - {do: place, part: R1, check: continuity, min: 0.1, max: 0.8, text: "10k resistor: rows 10 and 40, straddling the middle gap."}
+    - {do: place, part: R2, check: continuity, min: 0.04, max: 0.3, text: "47k resistor: rows 13 and 43, straddling the middle gap."}
     - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19."}
     - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23."}
-    - {do: place, part: R3, check: continuity, min: 5.0, max: 15.0, text: "330 resistor: rows 25 and 26."}
+    - {do: place, part: R3, check: continuity, min: 5.0, max: 15.0, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
-    - {do: verify, target: 7, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
+    - {do: verify, target: 37, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
 bridges:
-  - {n1: ADC0, n2: 7}
-  - {n1: ADC1, n2: 37}
+  - {n1: ADC0, n2: 37}
+  - {n1: ADC1, n2: 7}
 nets:
-  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [37], user: true}
+  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [7], user: true}
 power:
   topRail: 5.0
 )===";
-const uint32_t PROJECT_555_WIRING_YAML_HASHES[1] = { 0xC8CBC62E };
-const int PROJECT_555_WIRING_YAML_HASH_COUNT = 1;
+const uint32_t PROJECT_555_WIRING_YAML_HASHES[2] = { 0x2E55BF41, 0xC8CBC62E };
+const int PROJECT_555_WIRING_YAML_HASH_COUNT = 2;
 
 #endif // INCLUDE_PROJECT_555
 
@@ -258,24 +258,24 @@ decides whether the chip can be written at all.
 
 | Part | Value | Package | Rows |
 |------|-------|---------|------|
-| U1   | 24C02 (or 24C16) | DIP-8 | pin 1 at row 5, across the middle gap |
-| R1   | 4.7k  | axial   | 12 - 13 (SDA pull-up) |
-| R2   | 4.7k  | axial   | 15 - 16 (SCL pull-up) |
+| U1   | 24C02 (or 24C16) | DIP-8 | pin 1 at row 35, across the middle gap |
+| R1   | 4.7k  | axial   | 12 - 42, straddling the middle gap (SDA pull-up) |
+| R2   | 4.7k  | axial   | 15 - 45, straddling the middle gap (SCL pull-up) |
 
 Top rail is set to 3.3 V.
 
-The 24Cxx pinout, and where each pin lands with pin 1 at row 5:
+The 24Cxx pinout, and where each pin lands with pin 1 at row 35:
 
 | Pin | Name | Row | Goes to |
 |---|---|---|---|
-| 1 | A0  | 5  | GND |
-| 2 | A1  | 6  | GND |
-| 3 | A2  | 7  | GND |
-| 4 | GND | 8  | GND |
-| 5 | SDA | 38 | `RP_GPIO_7` (RP pin 26) |
-| 6 | SCL | 37 | `RP_GPIO_8` (RP pin 27) |
-| 7 | WP  | 36 | top rail - **write protected** |
-| 8 | VCC | 35 | top rail |
+| 1 | A0  | 35 | GND |
+| 2 | A1  | 36 | GND |
+| 3 | A2  | 37 | GND |
+| 4 | GND | 38 | GND |
+| 5 | SDA | 8  | `RP_GPIO_7` (RP pin 26) |
+| 6 | SCL | 7  | `RP_GPIO_8` (RP pin 27) |
+| 7 | WP  | 6  | top rail - **write protected** |
+| 8 | VCC | 5  | top rail |
 
 A0-A2 all grounded puts the chip at **0x50**.
 
@@ -295,18 +295,18 @@ gives a rise time of a couple of microseconds - well past the 1 us the
 
 ### Write protect is a wire, not a jumper
 
-Pin 7 (WP) high means "reads only". The wiring holds row 36 at the top
+Pin 7 (WP) high means "reads only". The wiring holds row 6 at the top
 rail, so the chip is genuinely read-only from the moment it powers up -
 not read-only by convention.
 
 The optional write test in `main.py` is the only thing that changes that,
 and it does so by re-routing, not by asking you to move a jumper:
 
-    disconnect(36, TOP_RAIL)
-    connect(36, GND)          # writes enabled for exactly one byte
+    disconnect(6, TOP_RAIL)
+    connect(6, GND)            # writes enabled for exactly one byte
     ...
-    disconnect(36, GND)
-    connect(36, TOP_RAIL)     # in a finally, so it always goes back
+    disconnect(6, GND)
+    connect(6, TOP_RAIL)       # in a finally, so it always goes back
 
 That re-route runs `refreshConnections()`, which re-asserts the slot's GPIO
 configuration onto RP pins 26/27 - so the script rebuilds its `machine.I2C`
@@ -346,9 +346,9 @@ breadboard stays completely unconnected and `main.py` reports an empty bus.
 ## Troubleshooting
 
 - **`i2c devices: []`** - nothing acked. Most often the chip is in
-  backwards: pin 1 is the end with the dot, at row 5, and the chip must
+  backwards: pin 1 is the end with the dot, at row 35, and the chip must
   straddle the middle gap. After that, check that both 4.7k resistors are
-  really in rows 12-13 and 15-16.
+  really straddling the gap at rows 12/42 and 15/45.
 - **A device answers, but not at 0x50** - one of A0/A1/A2 is not reaching
   GND, which shifts the address. 0x51 means A0 is high, 0x52 means A1, and
   so on. Change `ADDR` in `main.py` to match, or re-seat the chip.
@@ -362,13 +362,13 @@ breadboard stays completely unconnected and `main.py` reports an empty bus.
   shares the i2c1 peripheral in every mode. Turn it off while you use this
   project.
 )";
-const uint32_t PROJECT_EEPROM_README_MD_HASHES[4] = { 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
-const int PROJECT_EEPROM_README_MD_HASH_COUNT = 4;
+const uint32_t PROJECT_EEPROM_README_MD_HASHES[5] = { 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
+const int PROJECT_EEPROM_README_MD_HASH_COUNT = 5;
 
 const char* PROJECT_EEPROM_MAIN_PY = R"===("""EEPROM Dumper - companion for /projects/eeprom/wiring.yaml.
 
 SDA row -> RP_GPIO_7 (RP pin 26), SCL row -> RP_GPIO_8 (RP pin 27), so
-machine.I2C(1) reaches the chip. WP (row 36) sits on the top rail, so the
+machine.I2C(1) reaches the chip. WP (row 6) sits on the top rail, so the
 chip is read-only until the write test re-routes that row. See README.md.
 """
 
@@ -376,13 +376,13 @@ import time
 
 _jl_project = globals().get("_jl_project", {})
 
-SDA_PIN = 26        # node RP_GPIO_7 - the wiring routes row 38 here
-SCL_PIN = 27        # node RP_GPIO_8 - the wiring routes row 37 here
+SDA_PIN = 26        # node RP_GPIO_7 - the wiring routes row 8 here
+SCL_PIN = 27        # node RP_GPIO_8 - the wiring routes row 7 here
 I2C_BUS = 1         # 26/27 are i2c1; machine.I2C(0, ...) rejects them
 I2C_HZ = 100000
 ADDR = 0x50         # A0/A1/A2 grounded by the wiring
 ADDR_BITS = 8       # 24C01..24C16; 24C32 and larger need 16
-WP_ROW = 36         # 24Cxx pin 7 = write protect, held high
+WP_ROW = 6          # 24Cxx pin 7 = write protect, held high
 FIRST = 256         # bytes in the opening dump
 TEST_AT = 0xFF      # the one address the write test touches
 
@@ -540,8 +540,8 @@ def main():
 
 main()
 )===";
-const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[3] = { 0x0D73F0A3, 0x70FDD4AE, 0x9B89537B };
-const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 3;
+const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[4] = { 0x5E61C1F1, 0x0D73F0A3, 0x70FDD4AE, 0x9B89537B };
+const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 4;
 
 const char* PROJECT_EEPROM_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -557,7 +557,7 @@ parts:
     type: ic
     value: "24C02"
     footprint: dip8
-    row: 5
+    row: 35
     pins:
       A0:  {pin: 1, connect: GND,       class: signal}
       A1:  {pin: 2, connect: GND,       class: signal}
@@ -570,24 +570,24 @@ parts:
   - name: "R1"
     type: resistor
     value: "4.7k"
-    footprint: sip2
+    footprint: axial2
     row: 12
-    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 38}}
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 8}}
   - name: "R2"
     type: resistor
     value: "4.7k"
-    footprint: sip2
+    footprint: axial2
     row: 15
-    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 37}}
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 7}}
 guide:
   title: "EEPROM Dumper"
   steps:
     - {do: note, text: "A 24Cxx EEPROM on the I2C pins. Turn=prev/next, click=confirm, hold=exit."}
-    - {do: place, part: U1, check: presence, on_fail: warn, text: "24Cxx across the middle gap, pin 1 (the dot) at row 5."}
-    - {do: place, part: R1, check: continuity, text: "4.7k SDA pull-up: rows 12 and 13."}
-    - {do: place, part: R2, check: continuity, text: "4.7k SCL pull-up: rows 15 and 16."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "24Cxx across the middle gap, pin 1 (the dot) at row 35."}
+    - {do: place, part: R1, check: continuity, text: "4.7k SDA pull-up: rows 12 and 42, straddling the middle gap."}
+    - {do: place, part: R2, check: continuity, text: "4.7k SCL pull-up: rows 15 and 45, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power the chip up (3.3V). WP is held high - reads only."}
-    - {do: verify, target: 38, n1: 38, n2: 37, check: i2c, text: "Scanning the bus - a 24Cxx with A0-A2 grounded answers at 0x50."}
+    - {do: verify, target: 8, n1: 8, n2: 7, check: i2c, text: "Scanning the bus - a 24Cxx with A0-A2 grounded answers at 0x50."}
     - {do: note, text: "Built. Run main.py to hex-dump it."}
 power:
   topRail: 3.3
@@ -595,8 +595,8 @@ config:
   gpio:
     pulls: [0,0,0,0,0,0,1,1,0,0]
 )===";
-const uint32_t PROJECT_EEPROM_WIRING_YAML_HASHES[1] = { 0x77CA786A };
-const int PROJECT_EEPROM_WIRING_YAML_HASH_COUNT = 1;
+const uint32_t PROJECT_EEPROM_WIRING_YAML_HASHES[2] = { 0x82F38CF1, 0x77CA786A };
+const int PROJECT_EEPROM_WIRING_YAML_HASH_COUNT = 2;
 
 #endif // INCLUDE_PROJECT_EEPROM
 
@@ -878,11 +878,11 @@ the truth table and measure it at the same time.
 
 | Part | Value | Package | Rows |
 |------|-------|---------|------|
-| U1   | 74HC00 | DIP-14 | pin 1 at row 5, across the middle gap |
+| U1   | 74HC00 | DIP-14 | pin 1 at row 35, across the middle gap |
 | LED1 | any   | 2-lead  | anode (long leg) 18, cathode 19 |
-| R1   | 330   | axial   | 15 - 16 |
+| R1   | 330   | axial   | 15 - 45, straddling the middle gap |
 
-Top rail is set to **3.3 V**, not 5 V: rows 5, 6 and 7 land on real RP2350
+Top rail is set to **3.3 V**, not 5 V: rows 35, 36 and 37 land on real RP2350
 pins, and those are 3.3 V parts. A 74HC00 is perfectly happy anywhere from
 2 V to 6 V.
 
@@ -890,11 +890,11 @@ Pin map for gate 1:
 
 | 74HC00 pin | Row | Goes to |
 |---|---|---|
-| 1 (1A) | 5 | `RP_GPIO_1` - the Jumperless drives it |
-| 2 (1B) | 6 | `RP_GPIO_2` - the Jumperless drives it |
-| 3 (1Y) | 7 | `RP_GPIO_3` for readback, and R1 -> LED1 -> GND |
-| 7 (GND) | 11 | GND |
-| 14 (VCC) | 35 | top rail |
+| 1 (1A) | 35 | `RP_GPIO_1` - the Jumperless drives it |
+| 2 (1B) | 36 | `RP_GPIO_2` - the Jumperless drives it |
+| 3 (1Y) | 37 | `RP_GPIO_3` for readback, and R1 -> LED1 -> GND |
+| 7 (GND) | 41 | GND |
+| 14 (VCC) | 5 | top rail |
 
 > **Jumperless V5 only.** This project routes breadboard rows to
 > `RP_GPIO_1`, `RP_GPIO_2` and `RP_GPIO_3`, and those nodes exist only on the V5. The original
@@ -945,7 +945,7 @@ breadboard stays completely unconnected and `main.py` reports floating reads.
 ## Troubleshooting
 
 - **Every read says `FLOATING`** - the output pin is not driving. Check that
-  the chip straddles the middle gap with pin 1 (next to the notch) at row 5,
+  the chip straddles the middle gap with pin 1 (next to the notch) at row 35,
   and that the top rail really is at 3.3 V.
 - **The LED never lights but the readback is right** - the LED is backwards.
   The long leg goes in row 18.
@@ -959,11 +959,11 @@ breadboard stays completely unconnected and `main.py` reports floating reads.
   (1Y), not an input, and this wiring drives pin 1 from `RP_GPIO_1` - two
   drivers fighting over one node. Pull it out rather than leaving it
   powered, and use a 74HC00.
-- **The last two rows disagree** - one of the two input legs (rows 5, 6) is
+- **The last two rows disagree** - one of the two input legs (rows 35, 36) is
   not making contact.
 )";
-const uint32_t PROJECT_NAND00_README_MD_HASHES[3] = { 0x36273393, 0x6F684328, 0x66A8E629 };
-const int PROJECT_NAND00_README_MD_HASH_COUNT = 3;
+const uint32_t PROJECT_NAND00_README_MD_HASHES[4] = { 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
+const int PROJECT_NAND00_README_MD_HASH_COUNT = 4;
 
 const char* PROJECT_NAND00_MAIN_PY = R"("""Logic Gates 101 - companion script for /projects/nand00/wiring.yaml
 
@@ -981,9 +981,9 @@ import time
 # The launcher injects this global; default so the script also runs standalone.
 _jl_project = globals().get("_jl_project", {})
 
-IN_A = GPIO_1       # node 131 -> row 5  -> 74HC00 pin 1
-IN_B = GPIO_2       # node 132 -> row 6  -> 74HC00 pin 2
-OUT = GPIO_3        # node 133 -> row 7  -> 74HC00 pin 3
+IN_A = GPIO_1       # node 131 -> row 35 -> 74HC00 pin 1
+IN_B = GPIO_2       # node 132 -> row 36 -> 74HC00 pin 2
+OUT = GPIO_3        # node 133 -> row 37 -> 74HC00 pin 3
 
 SETTLE_S = 0.02     # the gate switches in nanoseconds; this is for the LED
 
@@ -1094,8 +1094,8 @@ gpio_set(IN_A, False)
 gpio_set(IN_B, False)
 print("bye")
 )";
-const uint32_t PROJECT_NAND00_MAIN_PY_HASHES[1] = { 0xF896AD16 };
-const int PROJECT_NAND00_MAIN_PY_HASH_COUNT = 1;
+const uint32_t PROJECT_NAND00_MAIN_PY_HASHES[2] = { 0x2EBF9FB3, 0xF896AD16 };
+const int PROJECT_NAND00_MAIN_PY_HASH_COUNT = 2;
 
 const char* PROJECT_NAND00_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -1111,7 +1111,7 @@ parts:
     type: ic
     value: "74HC00"
     footprint: dip14
-    row: 5
+    row: 35
     pins:
       A1:  {pin: 1,  connect: RP_GPIO_1, class: signal}
       B1:  {pin: 2,  connect: RP_GPIO_2, class: signal}
@@ -1135,24 +1135,24 @@ parts:
   - name: "R1"
     type: resistor
     value: "330"
-    footprint: sip2
+    footprint: axial2
     row: 15
-    pins: {A: {pin: 1, connect: 7}, B: {pin: 2, connect: 18}}
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 18}}
 guide:
   title: "Logic Gates 101"
   steps:
     - {do: note, text: "One NAND gate, wired to three GPIOs. Turn=prev/next, click=confirm, hold=exit."}
-    - {do: place, part: U1, check: presence, on_fail: warn, text: "74HC00 across the middle gap, pin 1 (the notch end) at row 5."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "74HC00 across the middle gap, pin 1 (the notch end) at row 35."}
     - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 18, short leg row 19."}
-    - {do: place, part: R1, check: continuity, text: "330 resistor: rows 15 and 16."}
+    - {do: place, part: R1, check: continuity, text: "330 resistor: rows 15 and 45, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power the gate up (3.3V)."}
-    - {do: verify, target: 7, check: voltage, min: 2.2, max: 3.6, text: "Both inputs are low, so NAND out must be high - the LED should be lit."}
+    - {do: verify, target: 37, check: voltage, min: 2.2, max: 3.6, text: "Both inputs are low, so NAND out must be high - the LED should be lit."}
     - {do: note, text: "Built. Run main.py for the truth table and the type-your-own-inputs mode."}
 power:
   topRail: 3.3
 )===";
-const uint32_t PROJECT_NAND00_WIRING_YAML_HASHES[1] = { 0x30DA945C };
-const int PROJECT_NAND00_WIRING_YAML_HASH_COUNT = 1;
+const uint32_t PROJECT_NAND00_WIRING_YAML_HASHES[2] = { 0x8BE41985, 0x30DA945C };
+const int PROJECT_NAND00_WIRING_YAML_HASH_COUNT = 2;
 
 #endif // INCLUDE_PROJECT_NAND00
 

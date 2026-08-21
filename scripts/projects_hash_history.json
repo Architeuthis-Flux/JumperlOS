@@ -1,27 +1,33 @@
 {
   "555/README.md": [
+    "0x7F9D3D88",
     "0xE846A64A",
     "0x52517D68",
     "0x4E203A59"
   ],
   "555/main.py": [
+    "0x89075267",
     "0xD488958C"
   ],
   "555/wiring.yaml": [
+    "0x2E55BF41",
     "0xC8CBC62E"
   ],
   "eeprom/README.md": [
+    "0x97332DFC",
     "0xAF82DCE7",
     "0x965FF7AE",
     "0x35314190",
     "0xF2E7D49B"
   ],
   "eeprom/main.py": [
+    "0x5E61C1F1",
     "0x0D73F0A3",
     "0x70FDD4AE",
     "0x9B89537B"
   ],
   "eeprom/wiring.yaml": [
+    "0x82F38CF1",
     "0x77CA786A"
   ],
   "i2cscrn/README.md": [
@@ -37,14 +43,17 @@
     "0xBEE331D0"
   ],
   "nand00/README.md": [
+    "0x59A4BE23",
     "0x36273393",
     "0x6F684328",
     "0x66A8E629"
   ],
   "nand00/main.py": [
+    "0x2EBF9FB3",
     "0xF896AD16"
   ],
   "nand00/wiring.yaml": [
+    "0x8BE41985",
     "0x30DA945C"
   ]
 }

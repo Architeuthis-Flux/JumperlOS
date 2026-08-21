@@ -12,7 +12,7 @@ parts:
     type: ic
     value: "74HC00"
     footprint: dip14
-    row: 5
+    row: 35
     pins:
       A1:  {pin: 1,  connect: RP_GPIO_1, class: signal}
       B1:  {pin: 2,  connect: RP_GPIO_2, class: signal}
@@ -36,18 +36,18 @@ parts:
   - name: "R1"
     type: resistor
     value: "330"
-    footprint: sip2
+    footprint: axial2
     row: 15
-    pins: {A: {pin: 1, connect: 7}, B: {pin: 2, connect: 18}}
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 18}}
 guide:
   title: "Logic Gates 101"
   steps:
     - {do: note, text: "One NAND gate, wired to three GPIOs. Turn=prev/next, click=confirm, hold=exit."}
-    - {do: place, part: U1, check: presence, on_fail: warn, text: "74HC00 across the middle gap, pin 1 (the notch end) at row 5."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "74HC00 across the middle gap, pin 1 (the notch end) at row 35."}
     - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 18, short leg row 19."}
-    - {do: place, part: R1, check: continuity, text: "330 resistor: rows 15 and 16."}
+    - {do: place, part: R1, check: continuity, text: "330 resistor: rows 15 and 45, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power the gate up (3.3V)."}
-    - {do: verify, target: 7, check: voltage, min: 2.2, max: 3.6, text: "Both inputs are low, so NAND out must be high - the LED should be lit."}
+    - {do: verify, target: 37, check: voltage, min: 2.2, max: 3.6, text: "Both inputs are low, so NAND out must be high - the LED should be lit."}
     - {do: note, text: "Built. Run main.py for the truth table and the type-your-own-inputs mode."}
 power:
   topRail: 3.3

@@ -12,7 +12,7 @@ parts:
     type: ic
     value: "24C02"
     footprint: dip8
-    row: 5
+    row: 35
     pins:
       A0:  {pin: 1, connect: GND,       class: signal}
       A1:  {pin: 2, connect: GND,       class: signal}
@@ -25,24 +25,24 @@ parts:
   - name: "R1"
     type: resistor
     value: "4.7k"
-    footprint: sip2
+    footprint: axial2
     row: 12
-    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 38}}
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 8}}
   - name: "R2"
     type: resistor
     value: "4.7k"
-    footprint: sip2
+    footprint: axial2
     row: 15
-    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 37}}
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 7}}
 guide:
   title: "EEPROM Dumper"
   steps:
     - {do: note, text: "A 24Cxx EEPROM on the I2C pins. Turn=prev/next, click=confirm, hold=exit."}
-    - {do: place, part: U1, check: presence, on_fail: warn, text: "24Cxx across the middle gap, pin 1 (the dot) at row 5."}
-    - {do: place, part: R1, check: continuity, text: "4.7k SDA pull-up: rows 12 and 13."}
-    - {do: place, part: R2, check: continuity, text: "4.7k SCL pull-up: rows 15 and 16."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "24Cxx across the middle gap, pin 1 (the dot) at row 35."}
+    - {do: place, part: R1, check: continuity, text: "4.7k SDA pull-up: rows 12 and 42, straddling the middle gap."}
+    - {do: place, part: R2, check: continuity, text: "4.7k SCL pull-up: rows 15 and 45, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power the chip up (3.3V). WP is held high - reads only."}
-    - {do: verify, target: 38, n1: 38, n2: 37, check: i2c, text: "Scanning the bus - a 24Cxx with A0-A2 grounded answers at 0x50."}
+    - {do: verify, target: 8, n1: 8, n2: 7, check: i2c, text: "Scanning the bus - a 24Cxx with A0-A2 grounded answers at 0x50."}
     - {do: note, text: "Built. Run main.py to hex-dump it."}
 power:
   topRail: 3.3

@@ -12,10 +12,10 @@ parts:
     type: ic
     value: "NE555"
     footprint: dip8
-    row: 5
+    row: 35
     pins:
       GND:   {pin: 1, connect: GND,      class: gnd}
-      TRIG:  {pin: 2, connect: 37,       class: signal}
+      TRIG:  {pin: 2, connect: 7,        class: signal}
       OUT:   {pin: 3,                    class: signal}
       RESET: {pin: 4, connect: TOP_RAIL, class: power}
       CTRL:  {pin: 5,                    class: nc}
@@ -25,21 +25,21 @@ parts:
   - name: "R1"
     type: resistor
     value: "10k"
-    footprint: sip2
-    row: 12
-    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 36}}
+    footprint: axial2
+    row: 10
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 6}}
   - name: "R2"
     type: resistor
     value: "47k"
-    footprint: sip2
-    row: 15
-    pins: {A: {pin: 1, connect: 36}, B: {pin: 2, connect: 37}}
+    footprint: axial2
+    row: 13
+    pins: {A: {pin: 1, connect: 6}, B: {pin: 2, connect: 7}}
   - name: "C1"
     type: capacitor
     value: "10uF"
     footprint: sip2
     row: 18
-    pins: {PLUS: {pin: 1, connect: 37}, MINUS: {pin: 2, connect: GND}}
+    pins: {PLUS: {pin: 1, connect: 7}, MINUS: {pin: 2, connect: GND}}
   - name: "LED1"
     type: led
     footprint: sip2
@@ -48,25 +48,25 @@ parts:
   - name: "R3"
     type: resistor
     value: "330"
-    footprint: sip2
-    row: 25
-    pins: {A: {pin: 1, connect: 7}, B: {pin: 2, connect: 22}}
+    footprint: axial2
+    row: 16
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 22}}
 guide:
   title: "555 LED Flasher"
   steps:
     - {do: note, text: "A 555 blinker. Wheel: turn=prev/next, click=confirm, hold=exit."}
-    - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 5."}
-    - {do: place, part: R1, check: continuity, min: 0.1, max: 0.8, text: "10k resistor: rows 12 and 13."}
-    - {do: place, part: R2, check: continuity, min: 0.04, max: 0.3, text: "47k resistor: rows 15 and 16."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 35."}
+    - {do: place, part: R1, check: continuity, min: 0.1, max: 0.8, text: "10k resistor: rows 10 and 40, straddling the middle gap."}
+    - {do: place, part: R2, check: continuity, min: 0.04, max: 0.3, text: "47k resistor: rows 13 and 43, straddling the middle gap."}
     - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19."}
     - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23."}
-    - {do: place, part: R3, check: continuity, min: 5.0, max: 15.0, text: "330 resistor: rows 25 and 26."}
+    - {do: place, part: R3, check: continuity, min: 5.0, max: 15.0, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
-    - {do: verify, target: 7, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
+    - {do: verify, target: 37, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
 bridges:
-  - {n1: ADC0, n2: 7}
-  - {n1: ADC1, n2: 37}
+  - {n1: ADC0, n2: 37}
+  - {n1: ADC1, n2: 7}
 nets:
-  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [37], user: true}
+  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [7], user: true}
 power:
   topRail: 5.0

@@ -14,9 +14,9 @@ import time
 # The launcher injects this global; default so the script also runs standalone.
 _jl_project = globals().get("_jl_project", {})
 
-IN_A = GPIO_1       # node 131 -> row 5  -> 74HC00 pin 1
-IN_B = GPIO_2       # node 132 -> row 6  -> 74HC00 pin 2
-OUT = GPIO_3        # node 133 -> row 7  -> 74HC00 pin 3
+IN_A = GPIO_1       # node 131 -> row 35 -> 74HC00 pin 1
+IN_B = GPIO_2       # node 132 -> row 36 -> 74HC00 pin 2
+OUT = GPIO_3        # node 133 -> row 37 -> 74HC00 pin 3
 
 SETTLE_S = 0.02     # the gate switches in nanoseconds; this is for the LED
 

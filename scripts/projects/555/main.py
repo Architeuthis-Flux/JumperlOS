@@ -2,7 +2,7 @@
 
 Watches the 555's OUT pin (bridged to ADC0 by the wiring file), counts the
 rising edges past a 2.5 V threshold, and reports the blink rate every 3
-seconds along with the timing cap's voltage (ADC1 -> node 37).
+seconds along with the timing cap's voltage (ADC1 -> node 7).
 
 Runs standalone from the Files browser too - the launcher injects
 _jl_project, but nothing here depends on it.

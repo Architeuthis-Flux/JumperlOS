@@ -1,7 +1,7 @@
 """EEPROM Dumper - companion for /projects/eeprom/wiring.yaml.
 
 SDA row -> RP_GPIO_7 (RP pin 26), SCL row -> RP_GPIO_8 (RP pin 27), so
-machine.I2C(1) reaches the chip. WP (row 36) sits on the top rail, so the
+machine.I2C(1) reaches the chip. WP (row 6) sits on the top rail, so the
 chip is read-only until the write test re-routes that row. See README.md.
 """
 
@@ -9,13 +9,13 @@ import time
 
 _jl_project = globals().get("_jl_project", {})
 
-SDA_PIN = 26        # node RP_GPIO_7 - the wiring routes row 38 here
-SCL_PIN = 27        # node RP_GPIO_8 - the wiring routes row 37 here
+SDA_PIN = 26        # node RP_GPIO_7 - the wiring routes row 8 here
+SCL_PIN = 27        # node RP_GPIO_8 - the wiring routes row 7 here
 I2C_BUS = 1         # 26/27 are i2c1; machine.I2C(0, ...) rejects them
 I2C_HZ = 100000
 ADDR = 0x50         # A0/A1/A2 grounded by the wiring
 ADDR_BITS = 8       # 24C01..24C16; 24C32 and larger need 16
-WP_ROW = 36         # 24Cxx pin 7 = write protect, held high
+WP_ROW = 6          # 24Cxx pin 7 = write protect, held high
 FIRST = 256         # bytes in the opening dump
 TEST_AT = 0xFF      # the one address the write test touches
 
