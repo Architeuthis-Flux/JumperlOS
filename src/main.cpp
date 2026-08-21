@@ -798,6 +798,12 @@ menu:
         }
         firstLoop = 2;
 
+        // Decide which context to come up in BEFORE the first loadfile: pass.
+        // Config is loaded by now (setup() waits on configLoaded), and this
+        // only seeds netSlot / activeSlotPath - loadfile: below does the
+        // actual load, so numbered and file contexts share one load path.
+        seedBootContext( );
+
         goto loadfile;
     }
 

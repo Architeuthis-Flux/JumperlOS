@@ -164,6 +164,19 @@ struct config {
         int rail_priority = 1;
     } routing;
 
+    // Which context the board comes up in. Deliberately NOT where the active
+    // context itself is remembered - that lives in /slots/last_active.txt,
+    // because config saves are full-file rewrites behind a diff gate and
+    // writing config on every slot switch would churn flash and the diff cache.
+    struct slots {
+        // 0 = always boot into boot_slot (the old fixed behavior)
+        // 1 = boot into the LAST-ACTIVE slot file, whatever it is
+        //     (/slots/last_active.txt) - default
+        int boot_mode = 1;
+        // Used when boot_mode == 0. 0-7.
+        int boot_slot = 0;
+    } slots;
+
             // USB CDC settings for flow control behavior
             struct usb_cdc {
                 // When true, ignore DTR line state - allows communication with hosts

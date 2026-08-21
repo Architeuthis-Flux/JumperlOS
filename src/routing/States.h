@@ -608,6 +608,12 @@ public:
      * session must never become what the board boots into.
      */
     void updateLastActive();
+    /**
+     * Point tracking at a path WITHOUT loading it - the boot seed's one use.
+     * main.cpp's loadfile: does the actual load on the first pass, so there is
+     * exactly one load path.
+     */
+    void adoptBootPath(const String& path);
     
     // Preview mode - loads slot into globalState without applying to hardware
     // Just tracks which slot we should return to when done
@@ -743,6 +749,12 @@ void clearAllCustomNetNames(void);                     // Reset all names to def
 // ============================================================================
 
 void applyStateToHardware(void);  // Apply globalState settings to hardware (DACs, GPIO, etc.)
+
+// Decide what context the board boots into (config [slots].boot_mode +
+// /slots/last_active.txt). Call once after configLoaded and BEFORE the first
+// `loadfile:` pass - it only seeds netSlot / activeSlotPath; loadfile: loads.
+void seedBootContext(void);
+extern const char* LAST_ACTIVE_PATH;   // "/slots/last_active.txt"
 
 // ============================================================================
 // State Backup/Restore Functions (for MicroPython entry/exit, undo, etc.)

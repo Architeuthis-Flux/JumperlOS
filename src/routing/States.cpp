@@ -2890,6 +2890,79 @@ void SlotManager::setActivePathFromSlot(int slotNum) {
 // active path.
 const char* LAST_ACTIVE_PATH = "/slots/last_active.txt";
 
+/**
+ * Decide what context the board boots into. Called once from main.cpp's
+ * firstLoop == 1 block, AFTER configLoaded and BEFORE the first `loadfile:`
+ * pass - it only sets up netSlot / activeSlotPath; loadfile: does the actual
+ * load, so there is exactly one load path.
+ *
+ * netSlot = 0 (RotaryEncoder.cpp) stays the pre-config default, which is also
+ * the fresh-board and missing-file answer - i.e. a board that has never
+ * switched slots boots exactly the way it always did.
+ */
+void seedBootContext(void) {
+    SlotManager& mgr = SlotManager::getInstance();
+
+    // boot_mode 0: pin a fixed slot. The escape hatch for the old "always
+    // load slot 0" behavior.
+    if (jumperlessConfig.slots.boot_mode == 0) {
+        int s = jumperlessConfig.slots.boot_slot;
+        if (s < 0 || s >= NUM_SLOTS) s = 0;
+        netSlot = s;
+        mgr.setActiveSlot(s);
+        return;
+    }
+
+    // boot_mode 1 (default): boot into the last-active slot FILE.
+    String path;
+    if (safeFileExists(LAST_ACTIVE_PATH)) {
+        File f = safeFileOpen(LAST_ACTIVE_PATH, "r", 2000);
+        if (f) {
+            path = f.readString();
+            safeFileClose(f, false);
+            path.trim();
+        }
+    }
+
+    if (path.length() == 0) {
+        netSlot = 0;              // no memory yet - old behavior exactly
+        mgr.setActiveSlot(0);
+        return;
+    }
+
+    int n = SlotManager::slotNumberForCanonicalPath(path);
+    if (n >= 0) {
+        netSlot = n;
+        mgr.setActiveSlot(n);
+        return;
+    }
+
+    // A file context. Only seed it if the file is actually still there;
+    // otherwise fall back to slot 0 and rewrite last_active.txt so a deleted
+    // run file doesn't cost a failed load on every boot from here on. (A file
+    // that EXISTS but fails to load is handled in loadfile:, which is where
+    // the load happens.)
+    if (safeFileExists(path.c_str())) {
+        netSlot = SLOT_FILE_CONTEXT;
+        mgr.adoptBootPath(path);
+    } else {
+        Serial.println("Last-active slot file is gone (" + path + ") - booting slot 0");
+        netSlot = 0;
+        mgr.setActiveSlot(0);     // setActiveSlot -> updateLastActive rewrites the file
+    }
+}
+
+/**
+ * Point tracking at a path WITHOUT loading it - the boot seed's one use.
+ * loadfile: performs the actual load on the first pass.
+ */
+void SlotManager::adoptBootPath(const String& path) {
+    activeSlotNumber = SLOT_FILE_CONTEXT;
+    netSlot = SLOT_FILE_CONTEXT;
+    strncpy(activeSlotPath, path.c_str(), sizeof(activeSlotPath) - 1);
+    activeSlotPath[sizeof(activeSlotPath) - 1] = '\0';
+}
+
 void SlotManager::updateLastActive() {
     // SELF-GATING - one choke point, so no caller has to remember the rules:
     //   - never mid-preview (a wheel detent through the Slots menu must not
@@ -3793,6 +3866,8 @@ bool SlotManager::enterPreviewMode(int slotToPreview, String& errorMsg) {
     
     // Remember which context we're currently on (to return to it later) -
     // number AND path, because originalSlotNumber may be SLOT_FILE_CONTEXT.
+    const bool wasAlreadyPreviewing = previewModeActive;
+    const int prevPreviewSlotNumber = previewSlotNumber;
     if (!previewModeActive) {
         originalSlotNumber = activeSlotNumber;
         strncpy(previewOriginalPath, activeSlotPath, sizeof(previewOriginalPath) - 1);
@@ -3804,10 +3879,36 @@ bool SlotManager::enterPreviewMode(int slotToPreview, String& errorMsg) {
 
     String filename = getSlotFilename(slotToPreview);
 
+    // ORDERING TRAP (design-slots.md §2). previewModeActive is raised BEFORE
+    // the internal loadSlot, not after it. Two things gate on that flag inside
+    // loadSlot, and both were being checked while it was still false:
+    //
+    //   1. updateLastActive() - so every wheel detent through the Slots
+    //      preview menu (Menus -> previewSlotColors -> enterPreviewMode)
+    //      stamped the merely-GLANCED-AT slot into last_active.txt. Power loss
+    //      mid-preview would then boot a slot the user never chose.
+    //   2. applyStateToHardware() - so a preview, which is documented as
+    //      "loads into globalState WITHOUT applying to hardware", was in fact
+    //      applying the previewed slot's rails and DACs. Raising the flag
+    //      first makes preview match its own contract; exitPreview's cancel
+    //      path restores rails either way, and its apply path calls
+    //      applyStateToHardware() explicitly.
+    previewModeActive = true;
+    previewSlotNumber = slotToPreview;
+
     // Check if slot file exists
     if (safeFileExists(filename.c_str())) {
         // Slot exists - load it normally
         if (!loadSlot(slotToPreview, errorMsg)) {
+            // Unwind exactly what we changed, so a failed preview neither
+            // leaves the manager stuck in preview mode nor discards an
+            // in-progress preview's original-context bookkeeping.
+            previewModeActive = wasAlreadyPreviewing;
+            previewSlotNumber = wasAlreadyPreviewing ? prevPreviewSlotNumber : -1;
+            if (!wasAlreadyPreviewing) {
+                originalSlotNumber = -1;
+                previewOriginalPath[0] = '\0';
+            }
             return false;
         }
     } else {
@@ -3819,11 +3920,7 @@ bool SlotManager::enterPreviewMode(int slotToPreview, String& errorMsg) {
     }
 
     // activeState.power is now the single source of truth
-    
-    // Mark that we're in preview mode
-    previewModeActive = true;
-    previewSlotNumber = slotToPreview;
-    
+
     return true;
 }
 
