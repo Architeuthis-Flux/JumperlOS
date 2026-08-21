@@ -19,6 +19,7 @@
 // Comment out any project you don't want provisioned
 #define INCLUDE_PROJECT_555
 #define INCLUDE_PROJECT_I2CSCRN
+#define INCLUDE_PROJECT_NAND00
 
 // Convenience define to disable every project at once
 // #define DISABLE_ALL_PROJECTS
@@ -26,6 +27,7 @@
 #ifdef DISABLE_ALL_PROJECTS
 #undef INCLUDE_PROJECT_555
 #undef INCLUDE_PROJECT_I2CSCRN
+#undef INCLUDE_PROJECT_NAND00
 #endif
 
 //==============================================================================
@@ -533,6 +535,278 @@ const int PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT = 1;
 
 #endif // INCLUDE_PROJECT_I2CSCRN
 
+//---------- nand00 (scripts/projects/nand00/) ----------
+#ifdef INCLUDE_PROJECT_NAND00
+const char* PROJECT_NAND00_README_MD = R"(# Logic Gates 101
+
+A 74HC00 quad NAND gate. The Jumperless drives both inputs of gate 1, reads
+its output back, and lights an LED from the same output - so you can watch
+the truth table and measure it at the same time.
+
+## Parts you need
+
+| Part | Value | Package | Rows |
+|------|-------|---------|------|
+| U1   | 74HC00 | DIP-14 | pin 1 at row 5, across the middle gap |
+| LED1 | any   | 2-lead  | anode (long leg) 18, cathode 19 |
+| R1   | 330   | axial   | 15 - 16 |
+
+Top rail is set to **3.3 V**, not 5 V: rows 5, 6 and 7 land on real RP2350
+pins, and those are 3.3 V parts. A 74HC00 is perfectly happy anywhere from
+2 V to 6 V.
+
+Pin map for gate 1:
+
+| 74HC00 pin | Row | Goes to |
+|---|---|---|
+| 1 (1A) | 5 | `RP_GPIO_1` - the Jumperless drives it |
+| 2 (1B) | 6 | `RP_GPIO_2` - the Jumperless drives it |
+| 3 (1Y) | 7 | `RP_GPIO_3` for readback, and R1 -> LED1 -> GND |
+| 7 (GND) | 11 | GND |
+| 14 (VCC) | 35 | top rail |
+
+The other three gates are not used, so their inputs (pins 4, 5, 9, 10, 12,
+13) are tied to GND. That is not decoration: a floating CMOS input drifts
+around its switching threshold, oscillates, and makes the chip draw far more
+current than it should.
+
+## What it does
+
+      A  B  | Y  expected  LED
+      ------+-----------------
+      0  0  | 1  1         on    ok
+      0  1  | 1  1         on    ok
+      1  0  | 1  1         on    ok
+      1  1  | 0  0         off   ok
+
+    All four rows match NAND. That is a working gate.
+
+NAND is "not and": the output is high unless **both** inputs are high. So
+the LED is lit for three of the four input combinations and dark for the
+fourth.
+
+After the table, `main.py` drops into a live mode. Type `10` and the board
+sets A high, B low, and reads the result back:
+
+    A B> 10
+       A=1 B=0 -> Y = HIGH (expected 1)
+
+`q` quits, and Ctrl-C works too.
+
+## Running it
+
+- **Clickwheel:** Apps > Projects > nand00.
+- **Files browser:** open `/projects/nand00/wiring.yaml` to load the
+  circuit, then run `/projects/nand00/main.py`.
+
+## Troubleshooting
+
+- **Every read says `FLOATING`** - the output pin is not driving. Check that
+  the chip straddles the middle gap with pin 1 (next to the notch) at row 5,
+  and that the top rail really is at 3.3 V.
+- **The LED never lights but the readback is right** - the LED is backwards.
+  The long leg goes in row 18.
+- **The LED is on all four rows** - a 74HC**02** (NOR) or a 74HC**08** (AND)
+  will not behave like this; check the part number on the chip. A 74HC00
+  with input pin 1 or 2 not seated will also read high forever, because a
+  floating HC input tends to drift high.
+- **The last two rows disagree** - one of the two input legs (rows 5, 6) is
+  not making contact.
+)";
+const uint32_t PROJECT_NAND00_README_MD_HASHES[1] = { 0x66A8E629 };
+const int PROJECT_NAND00_README_MD_HASH_COUNT = 1;
+
+const char* PROJECT_NAND00_MAIN_PY = R"("""Logic Gates 101 - companion script for /projects/nand00/wiring.yaml
+
+Gate 1 of a 74HC00 is wired so the Jumperless owns all three of its pins:
+GPIO_1 -> pin 1 (A), GPIO_2 -> pin 2 (B), pin 3 (Y) -> GPIO_3 and the LED.
+So the board can drive the inputs, read the output back, and check the chip
+against the truth table it is supposed to obey.
+
+Runs standalone from the Files browser too - the launcher injects
+_jl_project, but nothing here depends on it.
+"""
+
+import time
+
+# The launcher injects this global; default so the script also runs standalone.
+_jl_project = globals().get("_jl_project", {})
+
+IN_A = GPIO_1       # node 131 -> row 5  -> 74HC00 pin 1
+IN_B = GPIO_2       # node 132 -> row 6  -> 74HC00 pin 2
+OUT = GPIO_3        # node 133 -> row 7  -> 74HC00 pin 3
+
+SETTLE_S = 0.02     # the gate switches in nanoseconds; this is for the LED
+
+
+def setup():
+    gpio_set_dir(IN_A, True)      # True = OUTPUT
+    gpio_set_dir(IN_B, True)
+    gpio_set_dir(OUT, False)      # False = INPUT
+    gpio_set_pull(OUT, 0)         # no pull - the 74HC00 drives this line
+    gpio_set(IN_A, False)
+    gpio_set(IN_B, False)
+
+
+def read_out():
+    """(state_object, text, bit_or_None). bit is None when the line floats."""
+    s = gpio_get(OUT)
+    t = str(s)
+    if s == 1:
+        return s, t, 1
+    if s == 0:
+        return s, t, 0
+    return s, t, None
+
+
+def apply(a, b):
+    gpio_set(IN_A, bool(a))
+    gpio_set(IN_B, bool(b))
+    time.sleep(SETTLE_S)
+    return read_out()
+
+
+print("Logic Gates 101 - 74HC00 NAND")
+if _jl_project:
+    print("project: " + str(_jl_project.get("dir", "nand00")) +
+          "  variant: " + str(_jl_project.get("variant", "default")))
+
+setup()
+
+print("")
+print("  A  B  | Y  expected  LED")
+print("  ------+-----------------")
+
+wrong = 0
+floated = 0
+for a, b in ((0, 0), (0, 1), (1, 0), (1, 1)):
+    state, text, bit = apply(a, b)
+    expected = 0 if (a and b) else 1
+    if bit is None:
+        floated += 1
+        verdict = "FLOATING"
+    elif bit != expected:
+        wrong += 1
+        verdict = "WRONG"
+    else:
+        verdict = "ok"
+    print("  %d  %d  | %s  %d         %s   %s"
+          % (a, b, ("1" if bit == 1 else "0" if bit == 0 else "?"),
+             expected, "on " if expected else "off", verdict))
+
+print("")
+if floated:
+    print("%d of 4 reads floated - is the 74HC00 seated, and is the rail on?"
+          % floated)
+elif wrong:
+    print("%d of 4 rows disagree with NAND - wrong chip, or a leg not in "
+          "its hole?" % wrong)
+else:
+    print("All four rows match NAND. That is a working gate.")
+
+try:
+    oled_print("NAND ok" if (not wrong and not floated) else "NAND ??")
+except Exception:
+    pass
+
+print("")
+print("Live mode: type two bits (00, 01, 10, 11) to set the inputs.")
+print("Empty line re-reads without changing anything. 'q' quits.")
+
+try:
+    while True:
+        try:
+            typed = input("A B> ").strip()
+        except EOFError:
+            break
+        if typed == "q":
+            break
+        if typed == "":
+            state, text, bit = read_out()
+            print("   Y = " + text)
+            continue
+        digits = [c for c in typed if c in "01"]
+        if len(digits) != 2:
+            print("   need two bits, like 01")
+            continue
+        a = int(digits[0])
+        b = int(digits[1])
+        state, text, bit = apply(a, b)
+        expected = 0 if (a and b) else 1
+        note = "" if bit == expected else "   <- not what NAND should do"
+        print("   A=%d B=%d -> Y = %s (expected %d)%s"
+              % (a, b, text, expected, note))
+
+except KeyboardInterrupt:
+    pass
+
+# Leave the inputs low: the LED stays on, which is the gate's idle state.
+gpio_set(IN_A, False)
+gpio_set(IN_B, False)
+print("bye")
+)";
+const uint32_t PROJECT_NAND00_MAIN_PY_HASHES[1] = { 0xF896AD16 };
+const int PROJECT_NAND00_MAIN_PY_HASH_COUNT = 1;
+
+const char* PROJECT_NAND00_WIRING_YAML = R"===(version: 2
+sourceOfTruth: bridges
+meta:
+  project: nand00
+  title: "Logic Gates 101"
+  variant: default
+  summary: "A 74HC00 NAND gate driven and read back by the Jumperless"
+  script: main.py
+  needs: ["74HC00 (DIP-14)", "LED", "330"]
+parts:
+  - name: "U1"
+    type: ic
+    value: "74HC00"
+    footprint: dip14
+    row: 5
+    pins:
+      A1:  {pin: 1,  connect: RP_GPIO_1, class: signal}
+      B1:  {pin: 2,  connect: RP_GPIO_2, class: signal}
+      Y1:  {pin: 3,  connect: RP_GPIO_3, class: signal}
+      A2:  {pin: 4,  connect: GND,       class: signal}
+      B2:  {pin: 5,  connect: GND,       class: signal}
+      Y2:  {pin: 6,                      class: nc}
+      GND: {pin: 7,  connect: GND,       class: gnd}
+      Y3:  {pin: 8,                      class: nc}
+      A3:  {pin: 9,  connect: GND,       class: signal}
+      B3:  {pin: 10, connect: GND,       class: signal}
+      Y4:  {pin: 11,                     class: nc}
+      A4:  {pin: 12, connect: GND,       class: signal}
+      B4:  {pin: 13, connect: GND,       class: signal}
+      VCC: {pin: 14, connect: TOP_RAIL,  class: power}
+  - name: "LED1"
+    type: led
+    footprint: sip2
+    row: 18
+    pins: {A: {pin: 1}, K: {pin: 2, connect: GND}}
+  - name: "R1"
+    type: resistor
+    value: "330"
+    footprint: sip2
+    row: 15
+    pins: {A: {pin: 1, connect: 7}, B: {pin: 2, connect: 18}}
+guide:
+  title: "Logic Gates 101"
+  steps:
+    - {do: note, text: "One NAND gate, wired to three GPIOs. Turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "74HC00 across the middle gap, pin 1 (the notch end) at row 5."}
+    - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 18, short leg row 19."}
+    - {do: place, part: R1, check: continuity, text: "330 resistor: rows 15 and 16."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power the gate up (3.3V)."}
+    - {do: verify, target: 7, check: voltage, min: 2.2, max: 3.6, text: "Both inputs are low, so NAND out must be high - the LED should be lit."}
+    - {do: note, text: "Built. Run main.py for the truth table and the type-your-own-inputs mode."}
+power:
+  topRail: 3.3
+)===";
+const uint32_t PROJECT_NAND00_WIRING_YAML_HASHES[1] = { 0x30DA945C };
+const int PROJECT_NAND00_WIRING_YAML_HASH_COUNT = 1;
+
+#endif // INCLUDE_PROJECT_NAND00
+
 //==============================================================================
 // FilesystemStuff.cpp Integration Guide
 //==============================================================================
@@ -552,6 +826,11 @@ const int PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT = 1;
 //         { "/projects/i2cscrn/README.md", PROJECT_I2CSCRN_README_MD, "i2cscrn/README.md", PROJECT_I2CSCRN_README_MD_HASHES, PROJECT_I2CSCRN_README_MD_HASH_COUNT },
 //         { "/projects/i2cscrn/main.py", PROJECT_I2CSCRN_MAIN_PY, "i2cscrn/main.py", PROJECT_I2CSCRN_MAIN_PY_HASHES, PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT },
 //         { "/projects/i2cscrn/wiring.yaml", PROJECT_I2CSCRN_WIRING_YAML, "i2cscrn/wiring.yaml", PROJECT_I2CSCRN_WIRING_YAML_HASHES, PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_PROJECT_NAND00
+//         { "/projects/nand00/README.md", PROJECT_NAND00_README_MD, "nand00/README.md", PROJECT_NAND00_README_MD_HASHES, PROJECT_NAND00_README_MD_HASH_COUNT },
+//         { "/projects/nand00/main.py", PROJECT_NAND00_MAIN_PY, "nand00/main.py", PROJECT_NAND00_MAIN_PY_HASHES, PROJECT_NAND00_MAIN_PY_HASH_COUNT },
+//         { "/projects/nand00/wiring.yaml", PROJECT_NAND00_WIRING_YAML, "nand00/wiring.yaml", PROJECT_NAND00_WIRING_YAML_HASHES, PROJECT_NAND00_WIRING_YAML_HASH_COUNT },
 // #endif
 //
 

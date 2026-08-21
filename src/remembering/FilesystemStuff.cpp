@@ -3906,6 +3906,11 @@ static const ProjectFileInfo projectFiles[] = {
         { "/projects/i2cscrn/main.py", PROJECT_I2CSCRN_MAIN_PY, "i2cscrn/main.py", PROJECT_I2CSCRN_MAIN_PY_HASHES, PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT },
         { "/projects/i2cscrn/wiring.yaml", PROJECT_I2CSCRN_WIRING_YAML, "i2cscrn/wiring.yaml", PROJECT_I2CSCRN_WIRING_YAML_HASHES, PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT },
 #endif
+#ifdef INCLUDE_PROJECT_NAND00
+        { "/projects/nand00/README.md", PROJECT_NAND00_README_MD, "nand00/README.md", PROJECT_NAND00_README_MD_HASHES, PROJECT_NAND00_README_MD_HASH_COUNT },
+        { "/projects/nand00/main.py", PROJECT_NAND00_MAIN_PY, "nand00/main.py", PROJECT_NAND00_MAIN_PY_HASHES, PROJECT_NAND00_MAIN_PY_HASH_COUNT },
+        { "/projects/nand00/wiring.yaml", PROJECT_NAND00_WIRING_YAML, "nand00/wiring.yaml", PROJECT_NAND00_WIRING_YAML_HASHES, PROJECT_NAND00_WIRING_YAML_HASH_COUNT },
+#endif
     };
 
 static const int totalProjectFiles = sizeof( projectFiles ) / sizeof( projectFiles[ 0 ] );

@@ -17,5 +17,14 @@
   ],
   "i2cscrn/wiring.yaml": [
     "0xBEE331D0"
+  ],
+  "nand00/README.md": [
+    "0x66A8E629"
+  ],
+  "nand00/main.py": [
+    "0xF896AD16"
+  ],
+  "nand00/wiring.yaml": [
+    "0x30DA945C"
   ]
 }
