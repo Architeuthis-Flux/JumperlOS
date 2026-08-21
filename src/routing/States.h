@@ -590,6 +590,13 @@ public:
      * == 0 trap that let a project file adopt slot 0 and get clobbered.
      */
     static int slotNumberForCanonicalPath(const String& path);
+    /**
+     * True for a shipped project TEMPLATE: /projects/<dir>/wiring*.yaml.
+     * Such a path is READ-ONLY as an active context - saveActiveSlot refuses
+     * to write it and it can never become the boot context. Per-run project
+     * files are <dir>_<N>.yaml and deliberately do not match.
+     */
+    static bool isTemplatePath(const char* path);
 
     // Slot management
     bool loadSlot(int slotNum, String& errorMsg);

@@ -2897,6 +2897,26 @@ int SlotManager::slotNumberForCanonicalPath(const String& path) {
     return (int)slotNum;
 }
 
+/**
+ * Is this path a shipped PROJECT TEMPLATE?
+ *
+ * True for /projects/<dir>/wiring*.yaml - the same family listVariantFiles
+ * matches (basename startsWith "wiring", endsWith ".yaml"), so it covers
+ * wiring.yaml, wiring_v2.yaml and the wiring_original*.yaml backups too.
+ *
+ * Per-run project files are named <dir>_<N>.yaml and deliberately do NOT
+ * match, so nothing about the run flow is affected.
+ */
+bool SlotManager::isTemplatePath(const char* path) {
+    if (!path || path[0] == '\0') return false;
+    String p(path);
+    if (!p.startsWith("/projects/")) return false;
+    int lastSlash = p.lastIndexOf('/');
+    if (lastSlash < 0) return false;
+    String base = p.substring(lastSlash + 1);
+    return base.startsWith("wiring") && base.endsWith(".yaml");
+}
+
 void SlotManager::setActivePathFromSlot(int slotNum) {
     String fn = getSlotFilename(slotNum);
     strncpy(activeSlotPath, fn.c_str(), sizeof(activeSlotPath) - 1);
@@ -2995,6 +3015,9 @@ void SlotManager::updateLastActive() {
     if (activeSlotNumber == 99 || activeSlotNumber == 8) return;
     if (activeSlotNumber < 0 && activeSlotNumber != SLOT_FILE_CONTEXT) return;
     if (activeSlotPath[0] == '\0') return;
+    // A project TEMPLATE is read-only (see saveStateToActivePath) - a board
+    // must never boot into a context it cannot save.
+    if (isTemplatePath(activeSlotPath)) return;
 
     // Skip the write when nothing changed - this runs on every load and save.
     static char lastWritten[128] = {0};
@@ -3403,6 +3426,31 @@ bool SlotManager::saveStateToActivePath(String& errorMsg, bool skipValidation) {
         errorMsg = "No active slot file to save";
         return false;
     }
+
+    // TEMPLATE PROTECTION (design-slots.md §3). A shipped
+    // /projects/<dir>/wiring*.yaml is a TEMPLATE, not a workspace, and must
+    // never become an auto-saving context.
+    //
+    // This is not hypothetical - it was caught on the bench. Adoption made
+    // `load_project("eeprom")` point the context at the template, the state
+    // went dirty, and the idle auto-save wrote globalState back over it. The
+    // damage is worse than a normal overwrite because toYAML is a WHOLESALE
+    // REWRITE and the `guide:` / `meta:` sections are swallowed on parse and
+    // never re-emitted: three shipped templates came back with their entire
+    // guide sections gone. Refusing the write is the only thing that makes a
+    // raw loadSlotFromPath(template) caller safe.
+    //
+    // The launcher's per-run flow (projectBeginRun -> <dir>_<N>.yaml) does not
+    // match this predicate, so it writes normally; this guard just means a
+    // template is read-only no matter who adopted it.
+    if (isTemplatePath(activeSlotPath)) {
+        errorMsg = "Refusing to auto-save over project template " + String(activeSlotPath);
+        Serial.print("REFUSED: not writing over project template ");
+        Serial.println(activeSlotPath);
+        Serial.flush();
+        return false;
+    }
+
     if (!writeStateToPath(activeSlotPath, errorMsg, skipValidation)) {
         return false;
     }
@@ -4318,7 +4366,21 @@ ServiceStatus SlotManager::service() {
     //     shutdown) already call fileCacheFlushNowAll() which invokes
     //     saveSlot synchronously through this same path - those bypass
     //     the gate.
-    if (hasDirtyState && systemIdleForFlush() && !refreshLocalInProgress && !core1busy) {
+    // A read-only template context can never be auto-saved (see
+    // saveStateToActivePath). Skip the ATTEMPT here rather than letting it
+    // fail every idle pass: the dirty flag deliberately stays set, so an
+    // unguarded attempt would print its refusal ~every 750 ms forever. The
+    // per-call loud refusal still fires for user-initiated saves.
+    bool activeIsReadOnlyTemplate = isPathContext() && isTemplatePath(activeSlotPath);
+    if (hasDirtyState && activeIsReadOnlyTemplate) {
+        static unsigned long lastTemplateNote = 0;
+        if (millis() - lastTemplateNote > 10000) {
+            lastTemplateNote = millis();
+            Serial.print("(unsaved edits: ");
+            Serial.print(activeSlotPath);
+            Serial.println(" is a project template and is not written back)");
+        }
+    } else if (hasDirtyState && systemIdleForFlush() && !refreshLocalInProgress && !core1busy) {
             slowReason = "auto-save";
             unsigned long saveStart = micros();
 

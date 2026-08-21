@@ -49,6 +49,7 @@ _csi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]")
 
 TMP_PROJ = "/projects/slotfiles"
 RUN_FILE = "/projects/slotfiles/slotfiles_1.yaml"
+TEMPLATE_FILE = "/projects/slotfiles/wiring.yaml"
 TRAP_FILE = "/slots/slot_555.yaml"
 LAST_ACTIVE = "/slots/last_active.txt"
 
@@ -66,6 +67,27 @@ power:
   bottomRail: 0.00
   dac0: 3.33
   dac1: 0.00
+"""
+
+# A TEMPLATE, carrying a guide: section. guide:/meta: are swallowed on parse
+# and never re-emitted by toYAML, so an auto-save over a template does not
+# merely overwrite it - it DESTROYS those sections. That is what the
+# read-only guard exists to prevent, and what this fixture detects.
+TEMPLATE_YAML = """version: 2
+sourceOfTruth: bridges
+
+bridges:
+  - {n1: 31, n2: 32, dup: 1}
+
+power:
+  topRail: 0.00
+  bottomRail: 0.00
+  dac0: 3.33
+  dac1: 0.00
+
+guide:
+  - text: "step one"
+  - text: "step two"
 """
 
 # The trap file's content is deliberately DIFFERENT so "which file loaded"
@@ -370,7 +392,52 @@ print("e=", 1 if is_connected(41, 42) else 0)
     check(vals.get("b1") == 1 and vals.get("e") == 1,
           "TEMP-8: the run file's wiring was reloaded from its own path")
 
+    # --- 6b. Project TEMPLATES are read-only -------------------------------
+    # Adoption made this reachable and the bench proved it destructive:
+    # load_project("eeprom") pointed the context at the shipped template, the
+    # state went dirty, and the idle auto-save rewrote it - losing the whole
+    # guide: section, because toYAML is a wholesale rewrite that never
+    # re-emits guide:/meta:. saveActiveSlot now REFUSES to write a
+    # /projects/<dir>/wiring*.yaml. Run files (<dir>_<N>.yaml) do not match
+    # the predicate and are unaffected - phases 1-2 above already proved that.
+    out = jl_exec(f"print('wrote=', 1 if fs_write({TEMPLATE_FILE!r}, {TEMPLATE_YAML!r}) else 0)",
+                  timeout=25)
+    check(parse_kv(out).get("wrote") == 1, f"pushed {TEMPLATE_FILE}")
+    tpl_existed, tpl_before = read_device_file(TEMPLATE_FILE)
+    check(tpl_existed and tpl_before is not None and "guide:" in tpl_before,
+          "the template fixture has a guide: section to lose")
+
+    out = jl_exec(f"print('loaded=', 1 if load_project({TEMPLATE_FILE!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("loaded") == 1, "loaded the template (it still LOADS - only writes are refused)")
+    time.sleep(1.5)
+    slot_tp, path_tp = active_context(1.5)
+    check(slot_tp == -1 and path_tp == TEMPLATE_FILE,
+          f"the template is the active context ({slot_tp}, {path_tp!r})")
+
+    jl_exec("connect(45, 46)", timeout=20)
+    time.sleep(5.0)   # well past the idle flush gate
+
+    tpl_after_exists, tpl_after = read_device_file(TEMPLATE_FILE)
+    check(tpl_after_exists and tpl_after == tpl_before,
+          "TEMPLATE PROTECTION: the template is byte-identical after dirtying "
+          "the state - the auto-save was refused")
+    check(tpl_after is not None and "guide:" in tpl_after,
+          "TEMPLATE PROTECTION: the guide: section survived")
+
+    la_exists, la = read_device_file(LAST_ACTIVE)
+    check(la_exists and la is not None and la.strip() != TEMPLATE_FILE,
+          f"TEMPLATE PROTECTION: a template never becomes the boot context "
+          f"(last_active.txt = {la!r})")
+
     # --- 7. Boot persistence ----------------------------------------------
+    # Back to the run file: phase 6b left the context on the read-only
+    # template, which by design can never be the boot context.
+    out = jl_exec(f"print('loaded=', 1 if load_project({RUN_FILE!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("loaded") == 1, "re-entered the run-file context for the reboot")
+    time.sleep(2.0)
+
     la_exists, la = read_device_file(LAST_ACTIVE)
     check(la_exists and la is not None and la.strip() == RUN_FILE,
           f"last_active.txt holds the run file before the reboot (got {la!r})")
@@ -451,7 +518,7 @@ finally:
     time.sleep(1.5)
 
     out = jl_exec(f"""
-for p in ({RUN_FILE!r}, {TRAP_FILE!r}):
+for p in ({RUN_FILE!r}, {TEMPLATE_FILE!r}, {TRAP_FILE!r}):
     if fs_exists(p):
         jfs.remove(p)
 try:
