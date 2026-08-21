@@ -529,6 +529,16 @@ static bool yStatusFree(int chip, int y) {
     return s == -1 || s == EPHEMERAL_PATH_NET;
 }
 
+// The two predicates every routing tier gates on, at file scope so the
+// failure diagnostics can ask the SAME question the router asked.
+// (buildEphemeralRoute keeps its local lambdas of the same name.)
+static inline bool laneUsable(int chip, int x) {
+    return xColumnFreeHW(chip, x) && xStatusFree(chip, x);
+}
+static inline bool yUsable(int chip, int y) {
+    return yRowFreeHW(chip, y) && yStatusFree(chip, y);
+}
+
 static int laneToChip(int fromChip, int toChip) {
     for (int x = 0; x < 16; x++) {
         if (globalState.connections.chipStates[fromChip].xMap[x] == toChip)
@@ -849,6 +859,78 @@ void fastDisconnectPath(FastPathHandle* p) {
     }
     releasePathLanes(p->path, EPHEMERAL_PATH_NET);
     p->active = false;
+}
+
+// ============================================================================
+// Tap route-failure diagnostics
+// ============================================================================
+//
+// invest-vf-noroute.md §6: when a sense tap is refused, the two numbers that
+// tell #1 (route starvation) from #2 (ring stale) apart are chip K's free-y
+// mask and the target row's own chip x-occupancy - every tap route in every
+// tier of buildEphemeralRoute terminates by closing (K, adcX, y) on a
+// completely free K y row, reached over one free x lane on the row's chip.
+// Kfree with <=1 bit set (or bits whose d-side lane is busy) IS starvation.
+// Read-only and print-free so the scan core can snapshot at the failure.
+void fastPathFailSnapshot(int node, uint16_t* kFreeYMask, uint16_t* kXBusyMask,
+                          int* chip, uint16_t* xBusyMask, uint8_t* bounceOkMask) {
+    // The masks answer with the SAME predicates buildEphemeralRoute gates on
+    // (laneOk = xColumnFreeHW && xStatusFree, yOk = yRowFreeHW &&
+    // yStatusFree), not the raw crosspoint bitfield - a lane claimed by a
+    // live net's routing bookkeeping is just as unusable as a closed one, and
+    // reading only the hardware bits sends you hunting the wrong thing.
+    if (kFreeYMask) {
+        uint16_t m = 0;
+        for (int y = 0; y < 8; y++) {
+            if (yUsable(CHIP_K, y))
+                m |= (uint16_t)(1u << y);
+        }
+        *kFreeYMask = m;
+    }
+    if (kXBusyMask) {
+        // Includes the ADC columns x8-x11: buildEphemeralRoute's very first
+        // gate is laneOk(CHIP_K, adcX), so a busy ADC column refuses every
+        // tier before any lane search happens.
+        uint16_t m = 0;
+        for (int x = 0; x < 16; x++) {
+            if (!laneUsable(CHIP_K, x))
+                m |= (uint16_t)(1u << x);
+        }
+        *kXBusyMask = m;
+    }
+    if (bounceOkMask) {
+        // The LAST tier: when a row's own chip has no free lane to K, I, J or
+        // L, the route must bounce off a neighbour chip's y0 and leave over
+        // that chip's K lane. These are exactly the tier-2 outer guards, so
+        // bounceOk == 0 means the bounce tier was never even entered - the
+        // difference between "no lane pair matched" and "no candidate chip
+        // existed", which is otherwise invisible from the other masks.
+        uint8_t m = 0;
+        for (int n = CHIP_A; n <= CHIP_H; n++) {
+            int nLaneK = laneToChip(n, CHIP_K);
+            if (nLaneK < 0) continue;
+            if (!yUsable(n, 0) || !laneUsable(n, nLaneK) || !yUsable(CHIP_K, n))
+                continue;
+            m |= (uint8_t)(1u << n);
+        }
+        *bounceOkMask = m;
+    }
+    if (chip) *chip = -1;
+    if (xBusyMask) *xBusyMask = 0;
+    int c = -1, pin = -1;
+    bool isX = false;
+    if (node < 0 || !wireTableReady) return;
+    if (!findNodeOnFabric(node, &c, &pin, &isX)) return;
+    if (c < 0 || c >= 12) return;
+    if (chip) *chip = c;
+    if (xBusyMask) {
+        uint16_t m = 0;
+        for (int x = 0; x < 16; x++) {
+            if (!laneUsable(c, x))
+                m |= (uint16_t)(1u << x);
+        }
+        *xBusyMask = m;
+    }
 }
 
 // ============================================================================

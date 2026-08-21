@@ -93,6 +93,14 @@ struct CheckState {
     int tapN1 = -1, tapN2 = -1;
     unsigned long tapBackoffUntilMs = 0;
     int tapHardFails = 0;          // consecutive -2 results
+    // Sequential-same-ADC pair (tapCyclePair): which of the two nodes is
+    // being tapped, the channel node A landed on (node B's hint), A's held
+    // reading, and whether B had to fall back to a different channel.
+    int tapSeqPhase = 0;           // 0 = node A, 1 = node B
+    int tapSeqAdc = -1;
+    float tapSeqV1 = 0;
+    bool tapSeqAdcFallback = false;
+    int tapFailNode = -1;          // node whose tap hard-failed (noroute@N)
 
     // stimulus chain (continuity / vf)
     bool chainLive = false;        // teardown owes ephemeral removal + refresh
@@ -311,26 +319,90 @@ static int tapCycleNode(int node, float* outV, float* outDrift) {
     return r;
 }
 
+// The A/B pair used by vf: TWO SEQUENTIAL ONE-NODE TAPS, preferring the same
+// ADC channel for both - not the simultaneous pair tap this used to request.
+//
+// Why (invest-vf-noroute.md §2/§4 + the wave-2 ruling): a simultaneous pair
+// needs two DISJOINT sense routes closed at once, and the stimulus chain
+// always terminates on the SAME chip as the rows under test - so on a
+// populated board the first route takes the last free chip-K y row and the
+// second starves. Every single tap in the bench session routed while the pair
+// failed 24 times running. Sequential is also the more accurate measurement:
+// the stimulus is DC and held for the whole check, so nothing moves between
+// the two taps, and reading both nodes on the SAME channel makes that
+// channel's zero offset and gain cancel exactly in vA - vB (a simultaneous
+// two-channel read instead turns per-channel gain mismatch into error
+// proportional to V - invest-measurement.md §1.6).
+//
+// Cost: ~11 ms per tap, two taps instead of one dwell. The preferred-ADC hint
+// is best-effort; a fallback to a different channel is reported, not fatal.
+//
+// Same return contract as before: 0 in progress, 1 both values, -1 floating,
+// -2 hard failure. On -2, ck.tapFailNode names the node that could not be
+// reached (the caller reports noroute@<node>) and one diagnostic line plus
+// the tap counters go to Serial - core 0 only, the scan core must never print.
 static int tapCyclePair(int n1, int n2, float* outV1, float* outV2) {
+    int node = (ck.tapSeqPhase == 0) ? n1 : n2;
     if (ck.phase == CkPhase::TAP_REQUEST) {
         if (millis() < ck.tapBackoffUntilMs) return 0;
-        if (requestPairTap(n1, n2)) ck.phase = CkPhase::TAP_WAIT;
+        // Node A takes whatever is free; node B asks for A's channel.
+        int prefer = (ck.tapSeqPhase == 1) ? ck.tapSeqAdc : -1;
+        if (requestNodeTap(node, prefer)) ck.phase = CkPhase::TAP_WAIT;
+        // else: a stale in-flight tap is draining - retry next poll
         return 0;
     }
-    float v1, v2;
-    int r = pairTapResult(&v1, &v2);
+    float v, d;
+    int adcUsed = -1;
+    int r = nodeTapResult(&v, &d, &adcUsed);
     if (r == 0) return 0;
     if (r == -2) {
         ck.phase = CkPhase::TAP_REQUEST;
         ck.tapBackoffUntilMs = millis() + 30;
-        if (++ck.tapHardFails >= kTapHardFailLimit) return -2;
+        if (++ck.tapHardFails >= kTapHardFailLimit) {
+            ck.tapFailNode = node;
+            // report §6's "one print that settles it": Kfree with <=1 bit set
+            // (or bits whose d-side lane is busy) IS route starvation;
+            // node=-1 rc=0 with ringstale moving is the other candidate.
+            OneShotTapFail f;
+            oneShotTapFailInfo(&f);
+            Serial.printf("TAP noroute node=%d->ADC%d rc=%d Kfree=0x%02X "
+                          "Kxbusy=0x%04X %cxbusy=0x%04X bounceOk=0x%02X\n",
+                          f.node, f.adc, f.rc, (unsigned)f.kFreeYMask,
+                          (unsigned)f.kXBusyMask,
+                          (f.chip >= 0 && f.chip < 12) ? (char)('A' + f.chip) : '?',
+                          (unsigned)f.xBusyMask, (unsigned)f.bounceOkMask);
+            printTapCounters(&Serial);
+            ck.tapSeqPhase = 0;
+            return -2;
+        }
         return 0;
     }
     ck.tapHardFails = 0;
     ck.phase = CkPhase::TAP_REQUEST;
-    if (outV1) *outV1 = v1;
-    if (outV2) *outV2 = v2;
-    return r;
+    if (r == -1) {                 // floating: one bad end voids the pair
+        ck.tapFailNode = node;
+        ck.tapSeqPhase = 0;
+        return -1;
+    }
+    if (ck.tapSeqPhase == 0) {     // node A landed - hold it, go get node B
+        ck.tapSeqV1 = v;
+        ck.tapSeqAdc = adcUsed;
+        ck.tapSeqPhase = 1;
+        return 0;
+    }
+    ck.tapSeqPhase = 0;
+    if (adcUsed != ck.tapSeqAdc && !ck.tapSeqAdcFallback) {
+        // Not a failure - the difference just carries the two channels'
+        // offset/gain mismatch instead of cancelling it. Say so once, and
+        // NEVER in `val` (the parseable field stays a plain voltage).
+        ck.tapSeqAdcFallback = true;
+        Serial.printf("  tap: rows %d/%d read on different ADCs (%d/%d) - "
+                      "offset cancellation lost\n",
+                      n1, n2, ck.tapSeqAdc, adcUsed);
+    }
+    if (outV1) *outV1 = ck.tapSeqV1;
+    if (outV2) *outV2 = v;
+    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -948,11 +1020,30 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                 }
                 break;
             }
+            // ESCALATION PATH, if the bench ever noroutes here again:
+            // invest-vf-noroute.md §8 Option 1 - have chainBegin/chainComplete
+            // add the SENSE legs as ephemeral bridges too (rowA->ADC2,
+            // rowB->ADC3, after infraAcquireAdc picks channels), so the full
+            // router plans stimulus and sense together in one
+            // refreshLocalConnections. It has far more route shapes than the
+            // tap builder's three tiers, may lawfully share the GND net's
+            // existing lanes, and ADC bridges are exempt from duplication;
+            // the sampler then reads the ring channels directly, with no
+            // fastConnectPath at all, and a routing failure becomes an honest
+            // "stimulus chain routing failed" at setup. Costs: 5 of 8
+            // ephemeral slots, ADC channels held for the whole check, and the
+            // user-bridged-ADC exclusion has to pick channels first. Not built
+            // now because the sequential-same-ADC taps below need only ONE
+            // route at a time, which is what the bench actually starved on.
             float vA, vB;
             int r = tapCyclePair(ck.chainRowA, ck.chainRowB, &vA, &vB);
             if (r == 0) break;
             if (r == -2) {
-                finishCheck(GUIDE_CHECK_FAIL, "no sense route to the rows", "noroute");
+                // Per-node, like the presence case: an undifferentiated
+                // "noroute" is what made three bench retries say nothing.
+                finishCheck(GUIDE_CHECK_FAIL, "no sense route to the rows",
+                            "noroute@%d",
+                            (ck.tapFailNode > 0) ? ck.tapFailNode : ck.chainRowA);
                 break;
             }
             if (r == -1) {

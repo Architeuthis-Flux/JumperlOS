@@ -132,6 +132,30 @@ static uint32_t sourceAttemptMs[4] = {0, 0, 0, 0};
 static const uint32_t kSourceMeasureFreshMs = 2500;
 static const uint32_t kSourceMeasureIntervalMs = 1000;
 
+// Last fastConnectPath refusal seen by a tap on this core, with the fabric
+// snapshot taken AT the refusal (invest-vf-noroute.md §6). PLAIN statics on
+// purpose: they are written and read only on the scan core, and the
+// background scan taps through the same senseNodeVoltage - so the one-shot
+// service copies them into its own volatiles immediately after its tap
+// returns, before the scan can overwrite them. Core 0 never reads these.
+static int lastRouteFailNode = -1;
+static int lastRouteFailAdc = -1;
+static int lastRouteFailRc = 0;
+static uint16_t lastRouteFailKfree = 0;
+static uint16_t lastRouteFailKxbusy = 0;
+static int lastRouteFailChip = -1;
+static uint16_t lastRouteFailXbusy = 0;
+static uint8_t lastRouteFailBounceOk = 0;
+
+static void noteRouteFail(int node, int adc, int rc) {
+    lastRouteFailNode = node;
+    lastRouteFailAdc = adc;
+    lastRouteFailRc = rc;
+    fastPathFailSnapshot(node, &lastRouteFailKfree, &lastRouteFailKxbusy,
+                         &lastRouteFailChip, &lastRouteFailXbusy,
+                         &lastRouteFailBounceOk);
+}
+
 // Tap failure tallies for the debug print (why nodes go stale)
 static uint32_t tapFailNoRoute = 0;
 static uint32_t tapFailAdcBusy = 0;
@@ -256,6 +280,7 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
     int rc = fastConnectPath(node, adcNode, &handle, 500);
     if (rc != 0) {
         if (!ringLive) __atomic_clear(&readingADC, __ATOMIC_RELEASE);
+        noteRouteFail(node, adc, rc);
         tapFailNoRoute++;
         return false;
     }
@@ -330,11 +355,18 @@ static bool senseNodeVoltage(int node, int adc, float* volts) {
 static bool pairSenseTap(int node1, int node2, int adcA, int adcB,
                          float* v1, float* v2) {
     FastPathHandle h1, h2;
-    if (fastConnectPath(node1, ADC0 + adcA, &h1, 500) != 0) {
+    int rc1 = fastConnectPath(node1, ADC0 + adcA, &h1, 500);
+    if (rc1 != 0) {
+        noteRouteFail(node1, adcA, rc1);
         tapFailNoRoute++;
         return false;
     }
-    if (fastConnectPath(node2, ADC0 + adcB, &h2, 500) != 0) {
+    // Snapshot BEFORE unwinding h1: the whole point of the pair diagnostic is
+    // what the fabric looked like with node1's route already claimed, which is
+    // exactly the pressure that starves node2 (report §4).
+    int rc2 = fastConnectPath(node2, ADC0 + adcB, &h2, 500);
+    if (rc2 != 0) {
+        noteRouteFail(node2, adcB, rc2);
         fastDisconnectPath(&h1);
         tapFailNoRoute++;
         return false;
@@ -405,19 +437,44 @@ static volatile uint32_t oneShotReqSeq = 0;
 static volatile uint32_t oneShotDoneSeq = 0;
 static volatile bool oneShotCancel = false; // core-0 set, scan-core cleared
 static uint32_t tapOneShot = 0; // serviced one-shots (the i! taps line)
-// Sequential pair fallback (ring down / no second channel free): one node
-// per service pass, so a pass never exceeds the single-tap ~11ms worst case
-// - two full taps back to back would flirt with waitCore2()'s 25ms ceiling.
+// Preferred-ADC hint (core 0 writes with the request payload) and the
+// channel actually granted (scan core writes with the result payload) - see
+// the header's PREFERRED-ADC HINT note.
+static volatile int8_t oneShotPreferAdc = -1;
+static volatile int8_t oneShotAdcUsed = -1;
+// Why the last one-shot returned -2, for core 0's diagnostic print. Copied
+// out of the plain lastRouteFail* statics inside the service pass, before
+// the background scan can overwrite them.
+static volatile int16_t oneShotFailNode = -1;
+static volatile int8_t oneShotFailAdc = -1;
+static volatile int8_t oneShotFailRc = 0;
+static volatile uint16_t oneShotFailKfree = 0;
+static volatile uint16_t oneShotFailKxbusy = 0;
+static volatile int8_t oneShotFailChip = -1;
+static volatile uint16_t oneShotFailXbusy = 0;
+static volatile uint8_t oneShotFailBounceOk = 0;
+// Sequential pair fallback (ring down / no second channel free / a pair
+// route refusal - see the Option 0 latch): one node per service pass, so a
+// pass never exceeds the single-tap ~11ms worst case - two full taps back to
+// back would flirt with waitCore2()'s 25ms ceiling.
 static int oneShotPairPhase = 0;
 static float oneShotPairV1 = 0.0f;
+// Option 0 (invest-vf-noroute.md §8): a pairSenseTap that failed on ROUTING
+// (no drift bump) latches here for the rest of THIS request, so the next
+// service pass skips the pair branch and runs the one-node-per-pass path -
+// which needs only one free route at a time and releases it between nodes.
+// Core 0 clears it with each new request; the scan core sets it.
+static volatile bool oneShotPairRouteFailed = false;
 
-bool requestNodeTap(int node) {
+bool requestNodeTap(int node, int preferAdc) {
     if (oneShotReqSeq != oneShotDoneSeq) return false; // in flight
     if (node <= 0 || node >= NODE_VOLTAGE_MAX) return false;
     oneShotN1 = node;
     oneShotN2 = -1;
     oneShotIsPair = false;
     oneShotPairPhase = 0;
+    oneShotPairRouteFailed = false;
+    oneShotPreferAdc = (int8_t)((preferAdc >= 0 && preferAdc < 4) ? preferAdc : -1);
     // A cancel raised against the PREVIOUS request must not carry into this
     // one. It can survive when the scan core completed that request in the
     // same window the cancel was posted (both writers are core 0, so this
@@ -428,12 +485,13 @@ bool requestNodeTap(int node) {
     return true;
 }
 
-int nodeTapResult(float* volts, float* drift) {
+int nodeTapResult(float* volts, float* drift, int* adcUsed) {
     if (oneShotReqSeq != oneShotDoneSeq) return 0; // pending
     if (oneShotIsPair) return -2;                  // kind mismatch
     __dmb();
     if (volts) *volts = oneShotV1;
     if (drift) *drift = oneShotDrift1;
+    if (adcUsed) *adcUsed = oneShotAdcUsed;
     return oneShotCode;
 }
 
@@ -445,6 +503,8 @@ bool requestPairTap(int n1, int n2) {
     oneShotN2 = n2;
     oneShotIsPair = true;
     oneShotPairPhase = 0;
+    oneShotPairRouteFailed = false;
+    oneShotPreferAdc = -1;   // a stale hint must not leak into a pair service
     oneShotCancel = false;   // see requestNodeTap
     __dmb();
     oneShotReqSeq = oneShotReqSeq + 1;
@@ -458,6 +518,19 @@ int pairTapResult(float* v1, float* v2) {
     if (v1) *v1 = oneShotV1;
     if (v2) *v2 = oneShotV2;
     return oneShotCode;
+}
+
+void oneShotTapFailInfo(OneShotTapFail* info) {
+    if (!info) return;
+    __dmb();
+    info->node = oneShotFailNode;
+    info->adc = oneShotFailAdc;
+    info->rc = oneShotFailRc;
+    info->kFreeYMask = oneShotFailKfree;
+    info->kXBusyMask = oneShotFailKxbusy;
+    info->chip = oneShotFailChip;
+    info->xBusyMask = oneShotFailXbusy;
+    info->bounceOkMask = oneShotFailBounceOk;
 }
 
 // Core-0 cancel for a request that no longer has an owner. Without it an
@@ -512,10 +585,30 @@ static void serviceOneShotTap(void) {
     __dmb(); // request payload visible before we read it
     int n1 = oneShotN1, n2 = oneShotN2;
     bool isPair = oneShotIsPair;
+    int prefer = oneShotPreferAdc;
     bool complete = true;
     int8_t code = -2;
 
-    int adcA = infraAcquireAdc(INFRA_ADC_NVSCAN, 0x0F, true);
+    // A fresh window for the route-failure latch: anything left over from the
+    // background scan's taps must not be attributed to this one-shot.
+    lastRouteFailNode = -1;
+    lastRouteFailAdc = -1;
+    lastRouteFailRc = 0;
+    lastRouteFailKfree = 0;
+    lastRouteFailKxbusy = 0;
+    lastRouteFailChip = -1;
+    lastRouteFailXbusy = 0;
+    lastRouteFailBounceOk = 0;
+
+    // Honor the caller's preferred channel first (exact offset/gain
+    // cancellation when two readings get subtracted - see the header), then
+    // fall back to any free channel. A hint is never a reservation: nothing
+    // is held between passes, so the channel can legitimately be gone.
+    int adcA = -1;
+    if (prefer >= 0 && prefer < 4) {
+        adcA = infraAcquireAdc(INFRA_ADC_NVSCAN, (uint8_t)(1u << prefer), true);
+    }
+    if (adcA < 0) adcA = infraAcquireAdc(INFRA_ADC_NVSCAN, 0x0F, true);
     if (adcA >= 0) {
         if (!isPair) {
             uint32_t driftBefore = tapFailDrift;
@@ -531,7 +624,8 @@ static void serviceOneShotTap(void) {
             // Single-dwell differential when the ring is live and a second
             // channel frees up; otherwise one node per pass (see above).
             bool pairDone = false;
-            if (oneShotPairPhase == 0 && adcRingActive()) {
+            if (oneShotPairPhase == 0 && adcRingActive() &&
+                !oneShotPairRouteFailed) {
                 int adcB = infraAcquireAdc(INFRA_ADC_NVSCAN,
                                            (uint8_t)(0x0F & ~(1u << adcA)), true);
                 if (adcB >= 0) {
@@ -541,10 +635,24 @@ static void serviceOneShotTap(void) {
                         oneShotV1 = va - scanZeroOffset[adcA];
                         oneShotV2 = vb - scanZeroOffset[adcB];
                         code = 1;
+                        pairDone = true;
+                    } else if (tapFailDrift != driftBefore) {
+                        code = -1;          // floating - a real verdict, deliver it
+                        pairDone = true;
                     } else {
-                        code = (tapFailDrift != driftBefore) ? -1 : -2;
+                        // Option 0 (invest-vf-noroute.md §8): the pair needs
+                        // TWO simultaneous disjoint sense routes and just
+                        // proved it cannot get them. Latch, and retire the
+                        // pass WITHOUT a result - the next pass takes the
+                        // one-node-per-pass path, which needs one route at a
+                        // time. Deferring to the next pass matters: the failed
+                        // pairSenseTap already spent its connect/unwind time,
+                        // and the ~11ms per-pass budget is held by never
+                        // running two taps in one pass.
+                        oneShotPairRouteFailed = true;
+                        complete = false;
+                        pairDone = true;
                     }
-                    pairDone = true;
                 }
             }
             if (!pairDone) {
@@ -573,6 +681,22 @@ static void serviceOneShotTap(void) {
 
     if (complete) {
         tapOneShot++;
+        oneShotAdcUsed = (int8_t)adcA;
+        if (code == -2) {
+            // Copy the at-refusal snapshot out of the scan-core statics NOW,
+            // while nothing else has run on this core. node == -1 here means
+            // no fastConnectPath was refused at all - then -2 came from ADC
+            // exhaustion (adcA < 0) or a stale ring window, which is exactly
+            // the #1-vs-#2 discriminator of report §6.
+            oneShotFailNode = (int16_t)lastRouteFailNode;
+            oneShotFailAdc = (int8_t)lastRouteFailAdc;
+            oneShotFailRc = (int8_t)lastRouteFailRc;
+            oneShotFailKfree = lastRouteFailKfree;
+            oneShotFailKxbusy = lastRouteFailKxbusy;
+            oneShotFailChip = (int8_t)lastRouteFailChip;
+            oneShotFailXbusy = lastRouteFailXbusy;
+            oneShotFailBounceOk = lastRouteFailBounceOk;
+        }
         oneShotCode = code;
         __dmb(); // result payload lands before the done stamp
         oneShotDoneSeq = oneShotReqSeq;
@@ -868,6 +992,15 @@ static void printSenseRoute(int node, int adc, Stream* out) {
     out->printf(" -> ADC%d\n", adc);
 }
 
+// The tap tallies alone, no config gate: a guide check's hard tap failure
+// needs these whether or not the user has the current display on.
+void printTapCounters(Stream* out) {
+    if (!out) out = &Serial;
+    out->printf("[nvscan] taps ok:%lu (pair:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
+                tapOk, tapPairOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift, tapFailRingStale,
+                tapOneShot);
+}
+
 static void printScanStats(Stream* out) {
     uint32_t ms = millis();
     out->print("[nvscan] nodes:");
@@ -895,9 +1028,7 @@ static void printScanStats(Stream* out) {
         }
         out->println();
     }
-    out->printf("[nvscan] taps ok:%lu (pair:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
-                tapOk, tapPairOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift, tapFailRingStale,
-                tapOneShot);
+    printTapCounters(out);
     // Sense routes as the taps would compute them right now (peek only -
     // a debug print must not take pool ownership)
     uint8_t freeMask = infraFreeAdcMask(0x0F);
@@ -1268,13 +1399,20 @@ uint32_t netScanComputeGeneration(void) { return 0; }
 // One-shot taps are a V5 primitive (the OG has no scanner fabric here);
 // refusing the request tells the caller immediately, and the guide checks
 // report themselves unsupported on OG before ever asking.
-bool requestNodeTap(int) { return false; }
-int nodeTapResult(float*, float*) { return -2; }
+bool requestNodeTap(int, int) { return false; }
+int nodeTapResult(float*, float*, int* adcUsed) {
+    if (adcUsed) *adcUsed = -1;
+    return -2;
+}
 bool requestPairTap(int, int) { return false; }
 int pairTapResult(float*, float*) { return -2; }
+void oneShotTapFailInfo(OneShotTapFail* info) {
+    if (info) *info = OneShotTapFail();
+}
 void cancelOneShotTap(void) {}   // nothing can be in flight here
 void serviceNetVoltageScan(void) {}
 void serviceNetVoltageScanDebug(void) {}
 void printNetVoltageScanStats(Stream* out) { out->println("net current scan: V5 only"); }
+void printTapCounters(Stream* out) { out->println("net current scan: V5 only"); }
 
 #endif // OG_JUMPERLESS
