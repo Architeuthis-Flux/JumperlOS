@@ -50,6 +50,7 @@ _csi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]")
 TMP_PROJ = "/projects/slotfiles"
 RUN_FILE = "/projects/slotfiles/slotfiles_1.yaml"
 TEMPLATE_FILE = "/projects/slotfiles/wiring.yaml"
+BAD_FILE = "/projects/slotfiles/slotfiles_bad.yaml"
 TRAP_FILE = "/slots/slot_555.yaml"
 LAST_ACTIVE = "/slots/last_active.txt"
 
@@ -88,6 +89,23 @@ power:
 guide:
   - text: "step one"
   - text: "step two"
+"""
+
+# A file that PARSES but fails validation: topRail 12.0 is outside the +/-8 V
+# PowerState::validate band, so fromYAML returns false AFTER it has already
+# clear()ed and repopulated globalState. That is the second failure mode the
+# original atomicity contract wrongly assumed could not happen.
+BAD_YAML = """version: 2
+sourceOfTruth: bridges
+
+bridges:
+  - {n1: 51, n2: 52, dup: 1}
+
+power:
+  topRail: 12.00
+  bottomRail: 0.00
+  dac0: 3.33
+  dac1: 0.00
 """
 
 # The trap file's content is deliberately DIFFERENT so "which file loaded"
@@ -409,6 +427,52 @@ print("e=", 1 if is_connected(41, 42) else 0)
     check(vals.get("b1") == 1 and vals.get("e") == 1,
           "TEMP-8: the run file's wiring was reloaded from its own path")
 
+    # --- 6a. Atomic on PARSE failure, not just open failure ----------------
+    # fromYAML ends in `return validate()`, and PowerState::validate rejects
+    # any rail/DAC outside +/-8 V - so a file can parse far enough to REPLACE
+    # globalState and still fail. The original contract assumed this was
+    # unreachable; it is reached by exactly the flows this design endorses
+    # (host-editing a run file over MSC, clicking a hand-written YAML).
+    #
+    # Without the fix, tracking stays on the prior NUMBERED slot while RAM
+    # holds the foreign file's remnants, and the next dirty auto-save writes
+    # them into that slot - with no -2 anywhere, so the loud saveSlot guard
+    # never fires.
+    port1_command("<2", 4.0)
+    time.sleep(1.5)
+    slot_pre, path_pre = active_context(1.5)
+    check(slot_pre == 2, f"on slot 2 before the bad-parse needle (got {slot_pre})")
+    slot2_bad_existed, slot2_bad_before = read_device_file("/slots/slot2.yaml")
+
+    out = jl_exec(f"print('wrote=', 1 if fs_write({BAD_FILE!r}, {BAD_YAML!r}) else 0)",
+                  timeout=25)
+    check(parse_kv(out).get("wrote") == 1, f"pushed {BAD_FILE} (topRail 12.0)")
+
+    out = jl_exec(f"print('loaded=', 1 if load_project({BAD_FILE!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("loaded") == 0,
+          "loading an out-of-range-power YAML FAILS (validate rejects topRail 12.0)")
+    time.sleep(1.5)
+
+    slot_post, path_post = active_context(1.5)
+    check(slot_post == 2 and path_post == "/slots/slot2.yaml",
+          f"ATOMIC-ON-PARSE: the prior context is still fully active "
+          f"(got {slot_post}, {path_post!r} - expected 2, /slots/slot2.yaml)")
+    out = jl_exec("print('foreign=', 1 if is_connected(51, 52) else 0)")
+    check(parse_kv(out).get("foreign") == 0,
+          "ATOMIC-ON-PARSE: the failed file's bridge (51-52) is not live")
+
+    # Dirty the restored context and let the idle auto-save run: it must write
+    # slot 2's OWN content, not the failed file's remnants.
+    jl_exec("connect(53, 54)", timeout=20)
+    time.sleep(4.0)
+    slot2_bad_after_exists, slot2_bad_after = read_device_file("/slots/slot2.yaml")
+    check(slot2_bad_after_exists and slot2_bad_after is not None and
+          "51" not in slot2_bad_after,
+          "ATOMIC-ON-PARSE: slot2.yaml did NOT receive the failed file's content")
+    check(slot2_bad_after is not None and "53" in slot2_bad_after,
+          "ATOMIC-ON-PARSE: slot 2 auto-saved its own edit normally afterwards")
+
     # --- 6b. Project TEMPLATES are read-only -------------------------------
     # Adoption made this reachable and the bench proved it destructive:
     # load_project("eeprom") pointed the context at the shipped template, the
@@ -535,7 +599,7 @@ finally:
     time.sleep(1.5)
 
     out = jl_exec(f"""
-for p in ({RUN_FILE!r}, {TEMPLATE_FILE!r}, {TRAP_FILE!r}):
+for p in ({RUN_FILE!r}, {TEMPLATE_FILE!r}, {BAD_FILE!r}, {TRAP_FILE!r}):
     if fs_exists(p):
         jfs.remove(p)
 try:
