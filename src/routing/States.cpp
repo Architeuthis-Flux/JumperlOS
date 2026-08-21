@@ -2930,6 +2930,14 @@ void SlotManager::setActivePathFromSlot(int slotNum) {
 // active path.
 const char* LAST_ACTIVE_PATH = "/slots/last_active.txt";
 
+// What /slots/last_active.txt is known to contain. Dedups the write, which
+// runs on every load and save. Seeded by seedBootContext() from the value it
+// reads at boot, so the first updateLastActive() after boot does not rewrite
+// the file with the value it just read. Semantics are "what the FILE holds",
+// not "what the context is", so seeding with the read value stays correct on
+// the fallback paths too (those differ, so they still rewrite).
+static char g_lastActiveWritten[128] = {0};
+
 /**
  * Decide what context the board boots into. Called once from main.cpp's
  * firstLoop == 1 block, AFTER configLoaded and BEFORE the first `loadfile:`
@@ -2961,6 +2969,12 @@ void seedBootContext(void) {
             path = f.readString();
             safeFileClose(f, false);
             path.trim();
+            // Seed the dedup cache with what the file actually holds, so the
+            // first updateLastActive() of the session does not rewrite it with
+            // the value just read. The fallback paths below deliberately DO
+            // differ from it, so they still rewrite as intended.
+            strncpy(g_lastActiveWritten, path.c_str(), sizeof(g_lastActiveWritten) - 1);
+            g_lastActiveWritten[sizeof(g_lastActiveWritten) - 1] = '\0';
         }
     }
 
@@ -3021,13 +3035,12 @@ void SlotManager::updateLastActive() {
     if (isTemplatePath(activeSlotPath)) return;
 
     // Skip the write when nothing changed - this runs on every load and save.
-    static char lastWritten[128] = {0};
-    if (strncmp(lastWritten, activeSlotPath, sizeof(lastWritten)) == 0) return;
+    if (strncmp(g_lastActiveWritten, activeSlotPath, sizeof(g_lastActiveWritten)) == 0) return;
 
     if (!safeMkdir("/slots", 2000)) return;
     if (safeFileWriteAll(LAST_ACTIVE_PATH, activeSlotPath, strlen(activeSlotPath), 2000)) {
-        strncpy(lastWritten, activeSlotPath, sizeof(lastWritten) - 1);
-        lastWritten[sizeof(lastWritten) - 1] = '\0';
+        strncpy(g_lastActiveWritten, activeSlotPath, sizeof(g_lastActiveWritten) - 1);
+        g_lastActiveWritten[sizeof(g_lastActiveWritten) - 1] = '\0';
     }
 }
 
@@ -3473,6 +3486,33 @@ bool SlotManager::writeStateToPath(const char* path, String& errorMsg, bool skip
         return false;
     }
 
+    // TEMPLATE PROTECTION (design-slots.md §3) - enforced HERE, at the single
+    // door every state-write goes through, rather than only in
+    // saveStateToActivePath. A shipped /projects/<dir>/wiring*.yaml is a
+    // TEMPLATE, not a workspace, and must never be written with serialized
+    // state by anyone.
+    //
+    // This is not hypothetical - it was caught on the bench. Adoption made
+    // `load_project("eeprom")` point the context at the template, the state
+    // went dirty, and the idle auto-save wrote globalState back over it. The
+    // damage is worse than a normal overwrite because toYAML is a WHOLESALE
+    // REWRITE and the `guide:` / `meta:` sections are swallowed on parse and
+    // never re-emitted: three shipped templates came back with their entire
+    // guide sections gone.
+    //
+    // No legitimate caller writes STATE to a template path - provisioning
+    // installs templates by copying bytes through safeFileWriteAll, not
+    // through this API - so putting the refusal at the bottom costs nothing
+    // and closes the last door. The launcher's per-run files are
+    // <dir>_<N>.yaml and deliberately do not match the predicate.
+    if (isTemplatePath(path)) {
+        errorMsg = "Refusing to write over project template " + String(path);
+        Serial.print("REFUSED: not writing over project template ");
+        Serial.println(path);
+        Serial.flush();
+        return false;
+    }
+
     if (!skipValidation) {
         if (!activeState.validate(errorMsg)) {
             errorMsg = "Cannot save invalid state: " + errorMsg;
@@ -3500,30 +3540,9 @@ bool SlotManager::saveStateToActivePath(String& errorMsg, bool skipValidation) {
         return false;
     }
 
-    // TEMPLATE PROTECTION (design-slots.md §3). A shipped
-    // /projects/<dir>/wiring*.yaml is a TEMPLATE, not a workspace, and must
-    // never become an auto-saving context.
-    //
-    // This is not hypothetical - it was caught on the bench. Adoption made
-    // `load_project("eeprom")` point the context at the template, the state
-    // went dirty, and the idle auto-save wrote globalState back over it. The
-    // damage is worse than a normal overwrite because toYAML is a WHOLESALE
-    // REWRITE and the `guide:` / `meta:` sections are swallowed on parse and
-    // never re-emitted: three shipped templates came back with their entire
-    // guide sections gone. Refusing the write is the only thing that makes a
-    // raw loadSlotFromPath(template) caller safe.
-    //
-    // The launcher's per-run flow (projectBeginRun -> <dir>_<N>.yaml) does not
-    // match this predicate, so it writes normally; this guard just means a
-    // template is read-only no matter who adopted it.
-    if (isTemplatePath(activeSlotPath)) {
-        errorMsg = "Refusing to auto-save over project template " + String(activeSlotPath);
-        Serial.print("REFUSED: not writing over project template ");
-        Serial.println(activeSlotPath);
-        Serial.flush();
-        return false;
-    }
-
+    // The template refusal lives inside writeStateToPath (the single door),
+    // so a template context simply fails to save here - loudly, and WITHOUT
+    // clearing dirty, so nothing is silently lost.
     if (!writeStateToPath(activeSlotPath, errorMsg, skipValidation)) {
         return false;
     }
@@ -4105,8 +4124,17 @@ bool SlotManager::exitPreview(bool applyPreview, String& errorMsg) {
 
         // Now apply the previewed state to hardware (power, GPIO, etc.)
         applyStateToHardware();
-        
-        // activeSlotNumber and netSlot are already set to the previewed slot
+
+        // activeSlotNumber and netSlot are already set to the previewed slot -
+        // but nothing has told last_active.txt yet. The internal saveSlot
+        // above ran while previewModeActive was still true, so its
+        // updateLastActive() was gated off by design. Without this call the
+        // context becomes the previewed slot while the BOOT context still
+        // points at the pre-preview one. Menus' caller happens to follow with
+        // setActiveSlot (which updates it); LEDs' previewSlotColors caller
+        // does not, so it has to be done here.
+        updateLastActive();
+
         return true;
     } else {
         // User wants to cancel - restore original slot AND rail voltages

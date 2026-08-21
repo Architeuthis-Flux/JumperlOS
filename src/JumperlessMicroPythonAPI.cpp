@@ -1617,16 +1617,33 @@ void jl_exit_micropython_restore_entry_state( void ) {
         //
         // The old guard `>= 0 && < NUM_SLOTS` also excluded SLOT_FILE_CONTEXT,
         // so a script entered from a run file never restored its context at all.
+        bool trackingRestored = false;
         if ( pythonEntrySlot == SLOT_FILE_CONTEXT && pythonEntryPath[ 0 ] != '\0' ) {
-            netSlot = SLOT_FILE_CONTEXT;
-            mgr.loadSlotFromPath( String( pythonEntryPath ), errorMsg );
+            // No pre-emptive `netSlot = SLOT_FILE_CONTEXT` here: loadSlotFromPath
+            // sets it itself on success, and on failure setting it early would
+            // leave netSlot == -2 paired with activeSlotNumber == 99 - a broken
+            // pairing that the restore below would then act on.
+            trackingRestored = mgr.loadSlotFromPath( String( pythonEntryPath ), errorMsg );
         } else if ( pythonEntrySlot >= 0 && pythonEntrySlot < NUM_SLOTS ) {
             netSlot = pythonEntrySlot;
             mgr.setActiveSlot( pythonEntrySlot );
+            trackingRestored = true;
         }
 
-        // Restore the entry state (discards Python changes from global state)
-        restoreAndSaveStateBackup( );
+        // Restore the entry state. WITH the save only when tracking actually
+        // came back - if the entry run file was deleted while the script ran,
+        // the active context is still slot 99 (or no context at all), and
+        // saving here would write the entry state over slotPython.yaml: the
+        // very bug the reordering above just fixed, one level down. Restore
+        // without saving in that case; the state is correct in RAM and the
+        // next legitimate save lands wherever the user goes next.
+        if ( trackingRestored ) {
+            restoreAndSaveStateBackup( );
+        } else {
+            Serial.println( "python exit: entry context could not be restored - "
+                            "restoring state without saving" );
+            restoreStateBackup( false );
+        }
     } else {
         // GLOBAL MODE: Changes persist, just clear the backup
         clearStateBackup( );
