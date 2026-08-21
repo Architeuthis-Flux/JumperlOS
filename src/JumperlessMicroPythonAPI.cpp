@@ -32,6 +32,7 @@
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
+#include "ProjectsApp.h" // projectOpenLatestOrNew (load_project's name form)
 #include "WaveGen.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
 
@@ -1840,6 +1841,30 @@ int jl_load_slot_path( const char* path ) {
     }
 
     return 0;
+}
+
+// load_project("<name>") - the NAME form. Under the run-file model "load
+// project 555" means "begin (or re-open) a run of 555", so the name form
+// routes through the launcher's allocator: it opens
+// /projects/<name>/<name>_<maxN>.yaml, or creates <name>_1.yaml from the
+// shipped wiring when the project has no runs yet. LOAD ONLY - no guide, no
+// companion script; `z` is the runner.
+//
+// This is what closes the bench-caught destruction path: load_project("eeprom")
+// used to adopt the SHIPPED TEMPLATE as the auto-saving active context, and the
+// first idle flush rewrote it without its guide:/meta: sections.
+//
+// The LITERAL-PATH form deliberately does NOT come through here - it stays a
+// raw loadSlotFromPath adopt (jl_load_slot_path above), which is exactly why
+// SlotManager's template write-guard is still load-bearing and still tested.
+// Returns 0 on success, -1 on failure (the reason is printed).
+int jl_project_begin_run( const char* name ) {
+    if ( name == nullptr || name[ 0 ] == '\0' ) {
+        Serial.println( "load_project: empty project name" );
+        return -1;
+    }
+    String runPath;
+    return projectOpenLatestOrNew( String( name ), runPath ) ? 0 : -1;
 }
 
 // Scratch part assembled by jl_place_part. static, not a stack local: a

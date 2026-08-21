@@ -32,6 +32,7 @@ extern class oled oled;
 
 // States integration for slot file preview
 #include "States.h"
+#include "ProjectsApp.h"  // projectRunFromTemplate (a wiring*.yaml click starts a RUN)
 #include "Commands.h"   // requestLedShow() (T2.2c)
 
 // Global flag to signal return to main menu after editing
@@ -1276,6 +1277,22 @@ void FileManager::selectCurrentFile( ) {
             shouldExitForScript = true;
             return;  // run() loop will detect this and exit
         } else if ( lower.endsWith( ".yaml" ) &&
+                    SlotManager::isTemplatePath( fullPath.c_str( ) ) ) {
+            // A shipped project TEMPLATE (/projects/<dir>/wiring*.yaml) is not
+            // a context you adopt - it is what a RUN is made from. Route the
+            // click through the project run flow instead: run scan,
+            // load-latest / start-new prompt, then the run file becomes the
+            // active context (design-slots §3, design-launcher §1.3). Every
+            // OTHER .yaml keeps the plain adopt below, run files
+            // (<dir>_<N>.yaml) included.
+            //
+            // Deferred exactly like a .py: the run flow owns the encoder, the
+            // LED matrix and possibly a whole guided build, none of which
+            // belongs inside the file manager's own loop and screen state.
+            pendingProjectPath = fullPath;
+            shouldExitForProject = true;
+            return;  // run() loop will detect this and exit
+        } else if ( lower.endsWith( ".yaml" ) &&
                     ( lower.startsWith( "slot" ) || fullPath.startsWith( "/projects/" ) ) ) {
             // ANY slot YAML clicked here becomes the ACTIVE CONTEXT - a
             // /slots/slotN.yaml by number, anything else (a project run file
@@ -1545,8 +1562,9 @@ void FileManager::run( ) {
             break;
         }
         
-        // Check if a Python script was selected for deferred execution
-        if ( shouldExitForScript ) {
+        // Check if a Python script - or a project template - was selected for
+        // deferred execution
+        if ( shouldExitForScript || shouldExitForProject ) {
             closeAllFiles( );
             clearScreen( );
             running = false;
@@ -2677,6 +2695,12 @@ void filesystemApp( bool waitForEnter ) {
 
     manager.run( );
 
+    // Capture before teardown: the deferred project run must happen with the
+    // FILE_MANAGER context popped and the screen restored (it opens its own
+    // pickers and may run a whole guided build).
+    String pendingProject =
+        manager.getShouldExitForProject( ) ? manager.getPendingProjectPath( ) : String( "" );
+
     // Restore original screen state with all scrollback intact
     restoreScreenState( );
 
@@ -2684,6 +2708,9 @@ void filesystemApp( bool waitForEnter ) {
 
     // Pop context - cleanup callback will be called automatically
     ContextManager::getInstance( ).popContext( );
+
+    if ( pendingProject.length( ) > 0 )
+        projectRunFromTemplate( pendingProject );
 }
 
 // Returns selected .py path or "" if user quit. Exits file manager when done.
@@ -2721,10 +2748,16 @@ String pickPythonScriptFromClickMenu( ) {
         manager.changeDirectory( "/python_scripts" );
 
     String selectedPath;
+    String pendingProject;
     if ( manager.getCurrentPath( ) != "[NO_FS]" ) {
         manager.run( );
         if ( manager.getShouldExitForScript( ) ) {
             selectedPath = manager.getPendingScriptPath( );
+        }
+        // A project template is NOT a script - it must never come back as
+        // selectedPath, which the caller execs as Python.
+        if ( manager.getShouldExitForProject( ) ) {
+            pendingProject = manager.getPendingProjectPath( );
         }
     }
 
@@ -2736,6 +2769,9 @@ String pickPythonScriptFromClickMenu( ) {
     inClickMenu = false;
     b.clear( );
     requestLedShow( -1 );
+
+    if ( pendingProject.length( ) > 0 )
+        projectRunFromTemplate( pendingProject );
 
     return selectedPath;
 }
@@ -3087,8 +3123,14 @@ String filesystemAppPythonScriptsREPL( ) {
     }
     manager.setREPLMode( false );
 
+    String pendingProject =
+        manager.getShouldExitForProject( ) ? manager.getPendingProjectPath( ) : String( "" );
+
     // Pop FILE_MANAGER context - this preserves the transfer path for caller
     ContextManager::getInstance( ).popContext( );
+
+    if ( pendingProject.length( ) > 0 )
+        projectRunFromTemplate( pendingProject );
 
     // Return empty string - caller should use hasTransferPath() to check for file
     // The transfer path (if set by eKilo) is preserved for the caller to read

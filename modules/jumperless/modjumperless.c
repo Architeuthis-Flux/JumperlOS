@@ -114,6 +114,7 @@ int jl_switch_slot( int slot );
 // Projects + parts layer (guided placement). A project wiring.yaml IS a slot
 // YAML, so load_project() rides the same loader the Files browser uses.
 int jl_load_slot_path( const char* path );
+int jl_project_begin_run( const char* name );
 int jl_place_part( const char* name, int row, const char* pins_json,
                    const char* footprint, const char* type, const char* value );
 int jl_remove_part( const char* name );
@@ -2613,20 +2614,28 @@ static MP_DEFINE_CONST_FUN_OBJ_1( jl_switch_slot_obj, jl_switch_slot_func );
 // Projects + parts (guided placement)
 // ---------------------------------------------------------------------------
 
-// load_project("555") -> /projects/555/wiring.yaml
-// load_project("/projects/555/wiring.yaml") -> that literal path
-// Anything containing '/' is taken verbatim. Returns True on success.
+// load_project("555")                        -> begin/re-open a RUN of 555
+// load_project("/projects/555/wiring.yaml")   -> load that literal path
+//
+// The two forms mean different things now that projects run out of per-run
+// state files. The NAME form is "load project 555", which under the run-file
+// model means open /projects/555/555_<maxN>.yaml (or create 555_1.yaml from
+// the shipped wiring when there are no runs yet) - so a script can no longer
+// adopt the SHIPPED TEMPLATE as its auto-saving context and silently rewrite
+// it without guide:/meta:.
+//
+// Anything containing '/' is still taken verbatim through the raw adopting
+// loader: that is the documented "load this exact file" door (a run file, a
+// slot file, a hand-written YAML), and it is deliberately left raw - the
+// template write-guard in SlotManager is what protects it.
+// Returns True on success.
 static mp_obj_t jl_load_project_func( mp_obj_t name_obj ) {
     const char* arg = mp_obj_str_get_str( name_obj );
-    char path[ 128 ];
 
     if ( strchr( arg, '/' ) != NULL ) {
-        snprintf( path, sizeof( path ), "%s", arg );
-    } else {
-        snprintf( path, sizeof( path ), "/projects/%s/wiring.yaml", arg );
+        return mp_obj_new_bool( jl_load_slot_path( arg ) == 0 );
     }
-
-    return mp_obj_new_bool( jl_load_slot_path( path ) == 0 );
+    return mp_obj_new_bool( jl_project_begin_run( arg ) == 0 );
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_load_project_obj, jl_load_project_func );
 
