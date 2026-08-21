@@ -381,6 +381,86 @@ no `N -> 0` before it means someone cleared state mid-hold.
 
 ---
 
+## Branch `projects-guided-placement` — TODO81926 item 3, built (2026-08-20/21)
+
+Not on `dev`. Base `74aa794`, ten tasks, each one reviewed before the next was
+dispatched. What Kevin asked for was "a preloaded folder called projects"; what
+it turned into is a **guided build**: the board knows what the circuit is
+supposed to be, walks you through placing it part by part, lights the holes,
+names the nets as they land, and **measures** each step before it commits it.
+
+The five decisions Plan 3 was waiting on all got answered by building:
+projects are **directories under `/projects/<dir>/`** (`wiring.yaml` +
+`main.py` + `README.md`), they are **provisioned** (compiled into the
+firmware, hash-checked onto the flash, user edits preserved), the menu entry
+is **one `apps[]` row**, the USB-to-screen path is **real MicroPython I2C**,
+and v1 scope is **four starter projects**.
+
+| Task | Commits | What | Verified how |
+|---|---|---|---|
+| 1 | `c747406` | `generate_micropython_examples.py` drift fix (output `src/snakes/`, source `scripts/ex/`) | both boards build |
+| 2 | `a95b0ab`…`352bb23` | **The parts layer.** `parts:` + `guideProgress:` in slot YAML, serializer/parser pair, `{NAME}_{PIN}` net naming re-asserted after every rebuild, indent-hardened section headers, `meta:`/`guide:`/unknown sections contained | `test_parts_roundtrip` (new) |
+| 3 | `d6c114c` | FileManager guard opens to `/projects/*.yaml`; the **555 reference project** authored against task 2's as-built parser | `test_projects` (new) |
+| 4 | `c6a51a4`, `9791259` | **Python bindings**: `load_project` / `place_part` / `remove_part` / `list_parts` / `guide_progress` (+ 10 hand-added QSTRs — see `Building_Native_Module.md`) | roundtrip suite phases 7–8 |
+| 5 | `68c6410`, `273b4e6` | **The launcher**: one Apps line, one `apps[]` row, the `/projects` picker, run-in-temp-slot-8 with an offer to keep | headless two-port drive of `run_app("Projects")` |
+| 6 | `4a58e73`…`6137d9a` | **The guide runtime**: manual-advance session machine, streamed parser, `_GUIDE_` LED overlay channel, destination-slot/resume, and the **`z` command** (headless entry) | `test_guide_flow` (new) |
+| 7 | `5538f21`, `191ae79`, `5de186a` | **The one-shot tap API** (cross-core node/pair voltage taps serviced inside `serviceNetVoltageScan`) and **GuideChecks** — the verify matrix live as a polled sub-state with guaranteed teardown | guide-flow suite to 114 checks |
+| 8 | `80a91db`, `406c2d4` | **Provisioning**: `scripts/generate_projects.py`, `projectFiles[]`, `initializeProjects()`, launcher self-heal | 3-way hash check (repo FNV == header == device) |
+| 9 | `0bf1618`, `f196284`, `7847482`, `4f14b19`, `8f22028` | **Three more projects** — i2cscrn (SSD1306 over real `machine.I2C`), nand00 (74HC00 truth table *measured*), eeprom (24Cxx dumper) | per-project leg-by-leg footprint math + device compile |
+| 10 | this task | Polish: deferred fixes, suite registration, docs | below |
+
+**Suites** (`test/hil/`, all now registered in `run_all.py`):
+`test_parts_roundtrip` 140, `test_projects` 180, `test_guide_flow` 114.
+
+### The three things worth knowing if you touch this
+
+1. **`toYAML` is a wholesale rewrite, so a section the serializer forgets is
+   destroyed by the next idle auto-save.** That is not theoretical — task 2's
+   review caught a well-formed `dip28` being dropped by a bounds check and
+   then *erased* on the following save. `serializeParts` and
+   `deserializeParts` must stay matched, and `place_part`'s validation must
+   stay identical to `commitPart`'s.
+2. **Timestamp-fresh is not value-fresh.** The design said checks could reuse
+   `nodeVoltage[]` under 250 ms old. They can't: the scan smooths through an
+   EMA and is input-paused while the guide runs, so a "fresh" sample served
+   0.77 V for a row held at 2.5 V. Every check taps. See
+   `DESIGN_GUIDED_PLACEMENT.md` §5.1.
+3. **Presence checking is honest about what it can't see.** A bare row and a
+   correctly-seated IC pin look identical to this hardware, so `presence` on
+   `type: ic` reports *unverifiable* rather than warning; real verification
+   waits for `power_on`.
+
+### Follow-ups and known deferred minors
+
+- **Part-ID is designed, not built** — `CodeDocs/DESIGN_PART_ID_FOLLOWUP.md`
+  (Kelvin-via-ISENSE topology, honest accuracy bands, the four hooks already
+  in the format: `part_id`, `type`, `value`, `verify`).
+- **Three of the four projects are V5-only** (the OG has no nodes for RP pins
+  26/27). Disclosed in their READMEs.
+- **`fs_read()` silently truncates at 4095 bytes** (1023 on OG) — a
+  pre-existing static-buffer cap, found here, worked around in the HIL by
+  reading through `jfs.open().read()`. Not this branch's to fix, but it will
+  bite the next person who reads a big file from MicroPython.
+- **`resume-prompt n = restart`** is spec-mandated but collides with the
+  destructive-action vocabulary elsewhere. UX call for Kevin.
+- **`PROJECTS_MAX` is 12 and truncates before sorting** — a 13th project
+  directory hides whichever one FatFS returns last, not whichever sorts last.
+- **Serial-vs-Jerial error streams** and the REPL syntax-highlighter keyword
+  list are repo-wide gaps this branch inherited, not new debt.
+- **`scripts/` vs `pythonStuff/` divergence** is dev-tooling debt, separate
+  from firmware.
+
+### Needs Kevin's hands
+
+The whole point of this branch is a bench experience, and **nothing on the
+bench checklist has been done** — the suites prove the format, the parsers,
+the provisioning and the state machine, not what it feels like to build a 555
+with it. The consolidated, ordered bench script is in
+`.superpowers/sdd/then-we-need-to-buzzing-beacon/task-10-report.md`; the
+per-task detail is in each `task-*-report.md` beside it.
+
+---
+
 ## Open items — ranked
 
 ### 0. The live task list carried into the next chat

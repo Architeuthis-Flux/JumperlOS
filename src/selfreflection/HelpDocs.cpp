@@ -1260,7 +1260,16 @@ Jerial.println(probe_art);
         Jerial.print("  /          ");
         changeTerminalColor(HELP_DESC_COLOR, false);
         Jerial.println("- File Manager (browse/edit files)");
-        
+
+        changeTerminalColor(HELP_COMMAND_COLOR, false);
+        Jerial.print("  Projects   ");
+        changeTerminalColor(HELP_DESC_COLOR, false);
+        Jerial.println("- Guided circuit builds from /projects (clickwheel)");
+        changeTerminalColor(HELP_DESC_COLOR, false);
+        Jerial.println("               Pick a project, and the board walks you through");
+        Jerial.println("               placing each part - lighting the holes, naming the");
+        Jerial.println("               nets, and measuring each step before it commits.");
+
         changeTerminalColor(HELP_NOTE_COLOR, true);
         Jerial.println("\n App Examples:");
         changeTerminalColor(HELP_DESC_COLOR, true);
@@ -1268,7 +1277,15 @@ Jerial.println(probe_art);
         Jerial.println("  Use scope app to visualize signals on ADC pins");
         Jerial.println("  Run calibrate app if voltages seem off");
         Jerial.println("  Use / to browse and edit files directly");
-        
+        Jerial.println("  Open Projects and build the 555 blinker start to finish");
+
+        changeTerminalColor(HELP_NOTE_COLOR, true);
+        Jerial.println("\n Scripted entry to a guided build (skips the pickers):");
+        changeTerminalColor(HELP_COMMAND_COLOR, false);
+        Jerial.println("  z /projects/555/wiring.yaml 3");
+        changeTerminalColor(HELP_DESC_COLOR, false);
+        Jerial.println("  Type 'z?' for the guide's keys.");
+
     } else if (strcmp(category, "scripts") == 0) {
         changeTerminalColor(HELP_DESC_COLOR, true);
         Jerial.println("Python script management and examples:\n");

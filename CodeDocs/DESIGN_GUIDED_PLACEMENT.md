@@ -288,6 +288,25 @@ Cost ≤11 ms worst case on core 2 (budget documented at NetVoltageScan.cpp:250)
 guide polls while pumping. Where a step's rows are already routed and powered, reuse
 `nodeVoltage[]`/`nodeVoltageMs[]` when < ~250 ms old.
 
+> **AS BUILT — the scan-reuse clause above is DEAD. The checks always tap.**
+> The `< ~250 ms old` shortcut was written and then dropped during task 7:
+> the background scan smooths through an alpha-0.3 EMA *and* is input-paused
+> exactly while the guide is being driven, so a **timestamp-fresh sample can
+> still be one EMA step off a stale seed**. On the bench that served 0.77 V
+> for a row a DAC was holding at 2.5 V. Timestamp-fresh is not value-fresh,
+> and a one-shot tap costs ≤11 ms, so `GuideChecks.cpp`'s `VOLTAGE` (and
+> every other tapping check) requests a tap unconditionally. The rationale is
+> repeated at the `case GuideCheck::VOLTAGE` site; don't reintroduce the
+> shortcut without solving the EMA-seed problem.
+>
+> One more piece of the tap API landed after this section was written:
+> **`cancelOneShotTap()`**. A request that loses its owner — a check aborted
+> while the scan core's hardware gates were closed — used to sit in the
+> mailbox and fire later, unowned, closing real routes at a moment nothing
+> was measuring. `guideCheckAbort()` now cancels it; the scan core consumes
+> the request without touching hardware. See the contract in
+> `NetVoltageScan.h`.
+
 ### 5.2 Matrix
 
 | Step / part class | Check | Sequence | Honest limits |
@@ -300,12 +319,53 @@ guide polls while pumping. Where a step's rows are already routed and powered, r
 | `connect` | by construction | Routed bridge; `probe_confirm` adds human ack | — |
 | `power_on` | `rail_sane` | Apply `power:`; wait 100 ms; VCC-class pin rows ≈ topRail ±0.2 V, GND-class ≈ 0 ±0.15 V | Voltage-sanity, not a rail ammeter — say so |
 | `verify` voltage | `voltage` | Tap target, compare band | — |
-| `verify` oscillation | `oscillates` | Route target→free GPIO (ephemeral), count edges over 500 ms–timeoutMs while pumping; f in `min..max` Hz; sub-Hz falls back to `nodeVoltage[]` seeing both levels | The 555 money shot |
+| `verify` oscillation | `oscillates` | Route target→free GPIO (ephemeral), count edges over a window of `max(timeout_ms, 500 ms)` while pumping; f in `min..max` Hz. **No free GPIO → tap fallback, no frequency** (§5.2a) | The 555 money shot |
 | `verify` I2C | `i2c` | `i2cScan(sdaRow, sclRow, ..., leaveConnections=0)` (Apps.cpp:1771); expect ack at author-given address | Powered only |
 | `run` | exit code | MicroPython script; nonzero → fail | Escape hatch |
 
 All checks are polled sub-states — nothing blocks cores; every wait pumps
 `serviceInner()`. `checkFloating()` (2 full refreshes) is NOT used in the loop.
+
+### 5.2a As-built deviations from the matrix
+
+Recorded here so the table above can stay readable. Each is implemented and
+commented at its site in `GuideChecks.cpp`.
+
+- **`oscillates` — the fallback is keyed on GPIO AVAILABILITY, not on
+  frequency.** The matrix says "sub-Hz falls back to `nodeVoltage[]` seeing
+  both levels", which reads as a frequency-triggered second path. It isn't,
+  and it can't be: you cannot know a signal is sub-Hz until after you have
+  failed to measure it. What the code actually does is pick the measurement
+  method up front, from whether a *free routable GPIO exists*. If one does
+  (not MicroPython-owned, no PWM, not the top-OLED pins, no bridge, config
+  direction INPUT — an output-configured pin would drive the net), the check
+  routes the target to it with an ephemeral bridge and counts edges: real Hz,
+  compared against `min..max`. If none is free, it falls back to repeated
+  one-shot **taps** across the window (not raw `nodeVoltage[]`) and reports
+  "both levels seen" as `osc` — a verdict with **no frequency at all**, so a
+  `min/max` band cannot be honoured on that path. Say so to the author rather
+  than inventing a number.
+- **The window is author-sized via `timeout_ms`, and IS the schedule.**
+  `oscWindowMs = max(timeout_ms, 500)`, and the step's effective timeout is
+  then set to `window + 1000 ms`. So `timeout_ms` on an `oscillates` step is
+  not "give up after this" — it is "measure for this long". A slow blinker
+  needs a window long enough to contain several periods (the edge count is
+  divided by 2 and by the window), which is the knob an author reaches for
+  when the sub-Hz case matters. The GPIO path samples once per poll at the
+  guide loop's multi-kHz cadence, so it is good to a few hundred Hz.
+- **`rail_sane` with an explicit `target:`** treats that row as VCC-class
+  (rail ±0.2 V). See the `guide:` format notes in `States.h` for why, and for
+  the `check: voltage` recipe that expresses the GND-class band instead.
+- **`presence` on `type: ic`** returns SKIPPED/`ic_unverified` rather than
+  running the stimulus. The carve-out matches the exact string `ic`; an
+  author who types something else and writes an explicit `check: presence`
+  gets the real (bounded, watchdog-capped) stimulus into the chip's ESD
+  paths. Commented at the site.
+- **`rail_sane`'s honest limit is a doc caveat, not a runtime message.**
+  Hints print only on FAIL, and a rail_sane pass is the common case in every
+  `power_on` step, so "voltage-sanity, not a rail ammeter" lives here and in
+  the source comment instead of on the terminal and OLED after every
+  successful power-up.
 
 ## 6. Net naming
 

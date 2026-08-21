@@ -25,6 +25,12 @@ This script will:
 - Generate QSTR definitions for the Jumperless functions
 - Verify the module integration
 
+> **Read this before you add a Python binding.** That third bullet is the
+> only thing that regenerates QSTRs, and **the ordinary `pio run` firmware
+> build does not run it.** See
+> [QSTRs are partly hand-maintained](#qstrs-are-partly-hand-maintained)
+> below.
+
 ### 2. Build Jumperless Firmware
 
 After MicroPython is built, compile the main firmware:
@@ -67,6 +73,54 @@ The build script will verify:
    ◆ Jumperless module enabled in configuration
 ◆ MicroPython is ready for use with Jumperless native module enabled!
 ```
+
+## QSTRs are partly hand-maintained
+
+`lib/micropython/micropython_embed/genhdr/qstrdefs.generated.h` says
+"automatically generated" at the top, and it is **committed to this repo**.
+Both are true, and together they are a trap:
+
+- **The firmware build runs no qstr extraction pass.** `pio run` compiles the
+  committed header as-is. Only `scripts/build_micropython.sh` regenerates it,
+  and that works against an **external MicroPython checkout** that is not
+  vendored here — so on most machines, most of the time, nothing regenerates
+  it at all.
+- **So adding a `MP_QSTR_foo` to `modules/jumperless/modjumperless.c` means
+  hand-editing that header.** Skipping it does not fail quietly in an
+  interesting way — the build stops with `'MP_QSTR_foo' undeclared`. That is
+  the *good* outcome.
+
+### The two rules a hand-added line must obey
+
+1. **Byte-sorted insertion.** The `QDEF1` pool is registered with
+   `is_sorted = true` (`py/qstr.c`), and `qstr_find_strn` **binary-searches**
+   it with `strncmp`. Insert in byte-sorted position by the string literal —
+   not alphabetically-ish, not at the end. A line in the wrong place does not
+   error: the binary search simply fails to find some *other* qstr, and that
+   name silently resolves as absent at runtime. **This is the silent failure
+   mode.** Re-verify the whole pool is still sorted after editing.
+2. **Correct hash.** The hash is MicroPython's DJB2-derived qstr hash, *not*
+   the FNV-1a used elsewhere in this repo (the `/projects` provisioning
+   table). Per byte:
+
+   ```python
+   h = 5381
+   for b in name.encode():
+       h = ((h * 33) ^ b) & 0xFFFF     # MICROPY_QSTR_BYTES_IN_HASH == 2
+   h = h or 1                          # 0 is reserved for MP_QSTRnull
+   ```
+
+   Recompute the existing entries with this before trusting it — that check
+   is how the algorithm and the 2-byte width were confirmed empirically.
+
+The `QDEF1` line format is
+`QDEF1(MP_QSTR_<name>, <hash>, <byte length>, "<name>")`.
+
+Precedent: commit `68b93e3` added 28 lines this way; the guided-placement
+branch added 10 more (`load_project`, `place_part`, `remove_part`,
+`list_parts`, `guide_progress`, `row`, `footprint`, `placed`, `pins`,
+`class`). A real regeneration reproduces hand-added entries identically, so
+this is a shortcut around a missing build step, not a fork of the file.
 
 ## Troubleshooting
 
