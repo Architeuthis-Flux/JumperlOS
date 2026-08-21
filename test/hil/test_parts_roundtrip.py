@@ -307,8 +307,9 @@ for k in sorted(found):
                    '- name: "C1"', "placed: false",
                    "A: {offset: 0, connect: 52, class: signal}",
                    "B: {offset: 1, class: signal}",
-                   # ...and the overlays: section beside it, so the hijack
-                   # needle (C1's value) has to survive a rewrite too.
+                   # ...and the real overlays: section, so the hijack needle
+                   # (U1's value, the first part - see the SLOT_YAML note) has
+                   # to survive a rewrite too.
                    "\noverlays:\n", '- name: "RTTEST"'):
         check(needle in rewritten, f"rewrite kept: {needle}")
     check(re.search(r'guideProgress: \{source: "/projects/test/wiring.yaml", step: 2\}',

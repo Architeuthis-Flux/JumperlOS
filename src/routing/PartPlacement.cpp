@@ -470,6 +470,19 @@ static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool&
     }
     if (st.parts.numParts >= MAX_PARTS) {
         err += "too many parts (max " + String(MAX_PARTS) + "); ";
+        // UNCONDITIONAL, unlike the malformed-entry warning above. This is the
+        // same erasure class as the dip28 bounds bug: the part parsed fine, it
+        // just didn't fit, and because toYAML is a wholesale rewrite the next
+        // idle auto-save deletes it from the user's slot file for good. The
+        // only other surfacing point (States.cpp's "parts: parse warnings")
+        // sits behind debug.show_node_errors, so with that off the loss was
+        // completely silent - a V5-authored file opened on an OG (MAX_PARTS 6)
+        // drops everything from part 7 on without a word.
+        Serial.print("Dropping part '");
+        Serial.print(p.name[0] ? p.name : "(unnamed)");
+        Serial.print("' - too many parts (max ");
+        Serial.print(MAX_PARTS);
+        Serial.println("); it will be lost on the next save.");
         return;
     }
     st.parts.parts[st.parts.numParts++] = p;

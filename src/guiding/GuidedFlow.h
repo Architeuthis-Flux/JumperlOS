@@ -25,7 +25,11 @@ struct GuideStep {
     uint16_t timeoutMs;     // default 1500
     bool     probeConfirm;  // STEP_PROBE_WAIT gate (tap n1/n2, or `t <row>`)
     char     text[96];      // author prompt (parsed by quote-pair, LAST field)
-    char     script[40];    // RUN_SCRIPT path (execution lands with task 9)
+    char     script[40];    // RUN_SCRIPT path: PARSED AND STORED, NEVER RUN.
+                            // No run-step execution shipped on this branch and
+                            // no bundled project uses `do: run`; the runtime
+                            // prints a skip line and advances (GuidedFlow.cpp,
+                            // RUN_SCRIPT case). Execution is deferred.
 };
 
 // Step capacity. OG runs the same machine but has MAX_PARTS 6 (auto-synthesis

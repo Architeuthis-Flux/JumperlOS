@@ -926,6 +926,23 @@ void projectsAppLauncher(void) {
     // --- keep-prompt ---------------------------------------------------------
     waitForButtonRest(2000);  // the clickwheel hold that ended the script
     notify("Keep this\ncircuit?", "\n\r  Keep this circuit? (click Yes to save it to a slot)", 0);
+    // Same trap the resume prompt hit (see guidedFlowInner): yesNoMenu treats
+    // any non-y/n byte as cancel, and a bare line terminator IS such a byte.
+    // Here it arrives from the script that just ran - a MicroPython input()
+    // consumes through the \r and leaves the \n, and a stray Enter tapped while
+    // the script was streaming sits in the RAW buffer too. Either one silently
+    // answers "don't keep" and restores the previous slot before the user ever
+    // sees the offer. Swallow line endings ONLY - a real y/n/other answer
+    // already in flight must survive.
+    delay(20);
+    while (Serial.available() > 0) {
+        int p = Serial.peek();
+        if (p == '\r' || p == '\n') {
+            Serial.read();
+            continue;
+        }
+        break;
+    }
 
     int keep = yesNoMenu(15000);  // 1 = yes, 0 = no, -1 = cancel/timeout
     if (keep == 1) {

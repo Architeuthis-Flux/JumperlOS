@@ -432,6 +432,17 @@ and v1 scope is **four starter projects**.
 
 ### Follow-ups and known deferred minors
 
+- **`do: run` parses but does not execute.** The guide grammar accepts a run
+  step and stores its path; nothing runs it. The runtime prints a skip line and
+  advances, no bundled project uses it, and execution is deferred — so the
+  format is forward-compatible but the feature is not shipped.
+- **Downgrade path: old firmware silently eats `parts:` / `guideProgress:`.**
+  A slot file written by this branch loads fine on pre-branch firmware — the
+  unknown sections are ignored — but because `toYAML` is a **wholesale
+  rewrite**, the first idle auto-save on that old build re-emits the file
+  without them, permanently. Nothing on this side can prevent it (the old
+  serializer is what drops them). Downgrading with parts-bearing slots means
+  copying them off the board first.
 - **Part-ID is designed, not built** — `CodeDocs/DESIGN_PART_ID_FOLLOWUP.md`
   (Kelvin-via-ISENSE topology, honest accuracy bands, the four hooks already
   in the format: `part_id`, `type`, `value`, `verify`).

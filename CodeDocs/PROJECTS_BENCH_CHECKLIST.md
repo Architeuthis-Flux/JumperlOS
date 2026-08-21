@@ -18,6 +18,13 @@ ordered so nothing invalidates a later step, with task 9's §6.4 correction
       that isn't `y`/`n` makes `yesNoMenu` return −1. **If a picker closes by
       itself, or the keep-prompt instantly self-declines, this is the first
       suspect — not the launcher.**
+      *Narrowed:* one specific cause is now handled in firmware — both the
+      resume prompt and the keep-prompt drain leftover `\r`/`\n` before calling
+      `yesNoMenu`, so a bare line terminator (post-`input()` CRLF remnant, a
+      stray Enter) no longer self-answers either offer. The drain swallows
+      **line endings only**, so every *other* stray byte still returns −1 —
+      which leaves the port-1 client as the remaining suspect for a
+      self-declining prompt.
 - [ ] **If you plan to run `test_encoder_ui`:** regenerate `jl_input.py`'s ADDR
       table from the *currently flashed* ELF (values for the current build are
       in §2 above). It is per-build and lives outside version control.
@@ -230,8 +237,13 @@ mutates `/projects` — so it must not precede any step above.
 - [ ] Also confirm the **old-default-in-place** branch: flash an *unedited* 555
       twice across a version bump — it should be updated in place with no
       `_original` file.
-- [ ] **Known interaction to watch for in (c):** `listProjects` globs
-      `wiring*.yaml`, and `wiring_original.yaml` matches. If a spurious second
-      "variant" appears in the picker, that is the ledgered
-      `_original`-in-variant-glob issue — it must be fixed before the first
-      release that ships a *changed* project file.
+- [ ] **Regression probe for the `_original`-in-variant-glob fix (in (c)):**
+      the variant scan globs `wiring*.yaml`, which `wiring_original.yaml`
+      matches — so it used to show the backup as a second "variant". That was
+      **fixed at `406c2d4`**: `listVariantFiles` now skips any name containing
+      `_original`. This step is what proves the fix on real hardware, since
+      it is the only path that actually *creates* a `_original` file. Expect
+      **exactly one** variant for 555. A spurious second entry means the
+      exclusion regressed (or the backup is being written under a name that
+      doesn't contain `_original`) — check `listVariantFiles` in
+      `src/ProjectsApp.cpp` first.
