@@ -455,9 +455,9 @@ and v1 scope is **four starter projects**.
 The whole point of this branch is a bench experience, and **nothing on the
 bench checklist has been done** — the suites prove the format, the parsers,
 the provisioning and the state machine, not what it feels like to build a 555
-with it. The consolidated, ordered bench script is in
-`.superpowers/sdd/then-we-need-to-buzzing-beacon/task-10-report.md`; the
-per-task detail is in each `task-*-report.md` beside it.
+with it. The consolidated, ordered bench script is committed at
+`CodeDocs/PROJECTS_BENCH_CHECKLIST.md` (extracted from the branch workspace's
+task-10 report so it survives workspace cleanup).
 
 ---
 
