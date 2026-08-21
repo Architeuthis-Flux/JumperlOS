@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Projects subsystem, first slice: the /projects/555/ reference project.
+"""Projects subsystem: the /projects/555/ reference project + provisioning.
 
-Provisioning (projectFiles[] + initializeProjects) and the Python
-load_project() binding land in later tasks, so this test pushes
-scripts/projects/555/* to the board itself and then exercises the SAME
-parser path the relaxed FileManager guard uses: wiring.yaml's content
+The test pushes scripts/projects/555/* to the board itself and then exercises
+the SAME parser path the relaxed FileManager guard uses: wiring.yaml's content
 copied into /slots/slot3.yaml and loaded with '<3'.
 
 Asserts:
@@ -21,8 +19,27 @@ Asserts:
 Phase 6 (task 5) adds a second, minimal project at /projects/hiltest/ and
 covers the two contracts the encoder-driven launcher rests on - load_project()
 on a meta:-first wiring, and the `_jl_project` preamble prepended to the
-companion script. The launcher itself is NOT invoked from here; phase 6's
-comment says why, and the clickwheel flow is a bench checklist instead.
+companion script.
+
+Phase 6(c) (task 8) is the PROVISIONING phase: delete built-in project files
+off the board, drive initializeProjects() through the launcher's self-heal
+call, and prove the files come back byte-exact (on-device FNV-1a == the hash
+compiled into src/snakes/projectFiles.h) while /projects/hiltest - a project
+the firmware has never heard of - is left completely alone.
+
+  CONTRACT CHANGE vs the task-5 shape of this file: 6(c) used to TIME
+  run_app("Projects") taking its empty-list exit (>= 1400 ms) to prove the
+  apps[] row resolves. With the self-heal un-guarded that exit is no longer
+  reachable - provisioning puts 555 back before listProjects() runs, so the
+  picker opens and blocks on the encoder. The apps[]-resolution witness is now
+  the picker's own "PROJECTS n=" line on port 1, which is strictly stronger
+  (it carries listProjects' actual count). The `run_app("NoSuchAppXYZ")`
+  immediate-return control is kept.
+
+Forced refresh (the firmware-update path, initializeProjects(true): untouched
+old defaults updated in place, a user-edited file left alone with this build's
+default parked beside it as wiring_original.yaml) has no serial trigger and is
+NOT covered here - it stays a bench item.
 
 Bench convention: snapshot board state + slot3.yaml + active slot up front,
 restore all three at the end. The /projects/555/ and /projects/hiltest/ files
@@ -35,7 +52,10 @@ the board_state snapshot restores the bench rail voltage afterwards.
 
 import os
 import re
+import threading
 import time
+
+import serial  # pyserial
 
 from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore)
@@ -47,10 +67,129 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SRC_DIR = os.path.join(REPO, "scripts", "projects", "555")
 PROJECT_FILES = ("wiring.yaml", "main.py", "README.md")
 
+# The generated header is the firmware's side of the provisioning contract:
+# whatever hash is compiled in there is what the board must end up holding.
+GENERATED_HEADER = os.path.join(REPO, "src", "snakes", "projectFiles.h")
+
+_csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
+
 
 def local_file(name):
     with open(os.path.join(SRC_DIR, name), "r") as f:
         return f.read()
+
+
+def fnv1a32(data: bytes) -> int:
+    """Same FNV-1a the generator and the firmware's fnv1a32_file() use."""
+    h = 0x811C9DC5
+    for b in data:
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def embedded_hash(var_name):
+    """Pull PROJECT_555_<X>_HASHES[0] out of the generated header."""
+    with open(GENERATED_HEADER, "r") as f:
+        text = f.read()
+    m = re.search(r"const uint32_t " + re.escape(var_name) +
+                  r"_HASHES\[\d+\] = \{ (0x[0-9A-Fa-f]{8})", text)
+    # Normalise to the same "0x%08X" spelling the device prints, so the
+    # comparison is on the VALUE and not on how the hex was capitalised.
+    return ("0x%08X" % int(m.group(1), 16)) if m else None
+
+
+def device_hash(path):
+    """(hash_hex, length) of a device file, hashed ON the device so nothing
+    the serial transport does to the bytes can hide a mismatch."""
+    out = jl_exec(f"""
+p = {path!r}
+if fs_exists(p):
+    b = fs_read(p).encode('utf-8')
+    h = 0x811C9DC5
+    for x in b:
+        h = ((h ^ x) * 0x01000193) & 0xFFFFFFFF
+    print("dhash=", "0x%08X" % h)
+    print("dlen=", len(b))
+else:
+    print("dhash=", "MISSING")
+    print("dlen=", -1)
+""", timeout=40)
+    v = parse_kv(out)
+    return v.get("dhash"), v.get("dlen")
+
+
+def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
+    """Drive run_app('Projects') from port 5 while port 1 watches the picker
+    and cancels it. Shared by the provisioning phase 6(c) and the happy-path
+    phase 6(d) - one copy of the threading/serial dance, not two.
+
+    Returns (buf, n_listed, sends, worker, launch): the de-ANSI'd port-1 text,
+    the count from the picker's "PROJECTS n=" line (None if never seen), how
+    many cancel bytes went out, the worker thread, and the launch result dict.
+    """
+    launch = {}
+
+    def _launch_projects():
+        try:
+            launch["out"] = jl_exec("run_app('Projects')\nprint('returned=', 1)",
+                                    timeout=45)
+        except SystemExit as e:                                  # jl_exec fails fast
+            launch["err"] = str(e)
+        except Exception as e:                                   # pragma: no cover
+            launch["err"] = repr(e)
+
+    buf = ""
+    n_listed = None
+    sends = 0
+    worker = None
+
+    ser = serial.Serial(port1_path(), 115200, timeout=0.05)
+    try:
+        # Prime the connection BEFORE the launcher opens (the firmware's
+        # connection-init eats the first byte, and that byte would otherwise be
+        # the one meant to cancel the picker).
+        ser.write(b"\r\n")
+        ser.flush()
+        quiet, overall = time.time(), time.time()
+        while time.time() - overall < 4.0:
+            if ser.read(4096):
+                quiet = time.time()
+            elif time.time() - quiet > 0.6:
+                break
+        ser.reset_input_buffer()
+
+        worker = threading.Thread(target=_launch_projects, daemon=True)
+        worker.start()
+        overall = time.time()
+
+        last_send = 0.0
+        deadline = time.time() + deadline_s
+        while time.time() < deadline and worker.is_alive():
+            chunk = ser.read(4096)
+            if chunk:
+                buf += _csi.sub("", chunk.decode(errors="replace"))
+            if n_listed is None:
+                mm = re.search(r"PROJECTS n=(\d+)", buf)
+                if mm:
+                    n_listed = int(mm.group(1))
+            # Cancel once the picker announced itself; blind-cancel later so a
+            # missed line can't wedge the board in the picker either. The byte
+            # is '\r' (what port1_command primes with, so a leftover is inert),
+            # re-sent every 0.5 s until the exec returns.
+            if (n_listed is not None or time.time() - overall > blind_cancel_after) \
+                    and time.time() - last_send > 0.5:
+                ser.write(b"\r")
+                ser.flush()
+                last_send = time.time()
+                sends += 1
+        worker.join(timeout=15)
+        chunk = ser.read(4096)
+        if chunk:
+            buf += _csi.sub("", chunk.decode(errors="replace"))
+    finally:
+        ser.close()
+
+    return buf, n_listed, sends, worker, launch
 
 
 def read_device_file(path):
@@ -308,75 +447,109 @@ check(vals.get("hilvariant") == "default",
 check(vals.get("hilwiring") == f"{HIL_DIR}/wiring.yaml",
       f"_jl_project['wiring'] reached the script (got {vals.get('hilwiring')!r})")
 
-# (c) The apps[] row itself. runApp() resolves by name and tells the caller
-# nothing (jl_run_app returns 1 unconditionally; "App not found" goes to port
-# 1), so the observable signal is TIME - and the only launcher path that ends
-# without an encoder is the empty-list exit, which holds its "No projects"
-# message for 1.5 s and returns. So: take every /projects/*/wiring.yaml away
-# (contents held here, written straight back), let the launcher take that
-# exit, and compare its duration against an unregistered app name.
+# (c) PROVISIONING (task 8). projectFiles[] + initializeProjects() install the
+# built-in projects from firmware constants; the launcher calls the unforced
+# variant as a self-heal before it lists. There is no serial command that
+# reaches initializeProjects() and no reboot idiom anywhere in this suite, so
+# the launcher IS the trigger: delete files, run the app, watch them come back.
 #
-# The "are there any projects left?" guard runs ON THE DEVICE, in the same
-# snippet as the run_app call: if a wiring.yaml were still there the launcher
-# would open its picker and block this exec until somebody physically holds
-# the clickwheel. If the deletes fail, the run_app simply doesn't happen.
-out = jl_exec("""
-dirs = []
-for d in jfs.listdir("/projects"):
-    d = d.rstrip("/")
-    if fs_exists("/projects/" + d + "/wiring.yaml"):
-        dirs.append(d)
-print("PROJDIRS|" + ",".join(dirs))
-""", timeout=25)
-m = re.search(r"PROJDIRS\|(.*)", out)
-device_projects = [d for d in (m.group(1).strip().split(",") if m else []) if d]
-print(f"  info: /projects dirs with a wiring.yaml: {device_projects}")
+# What each assertion is for:
+#   - two of 555's three files are deleted, main.py is left alone: the restored
+#     pair proves "create missing", the untouched one proves the per-file
+#     existence check doesn't rewrite what's already right;
+#   - the restored bytes are hashed ON the device and compared to the hash
+#     compiled into src/snakes/projectFiles.h (which is itself cross-checked
+#     against a fresh hash of the repo source) - three-way, so a stale header
+#     or a mangled write both fail loudly;
+#   - /projects/hiltest is NOT in projectFiles[]. Its wiring.yaml is deleted
+#     too and must STAY deleted, and its directory + main.py must survive:
+#     provisioning creates missing files, it never enumerates /projects and
+#     never removes a directory it doesn't know about. That is the coexistence
+#     contract for hand-made projects on a user's board.
+for name, var in (("wiring.yaml", "PROJECT_555_WIRING_YAML"),
+                  ("main.py", "PROJECT_555_MAIN_PY"),
+                  ("README.md", "PROJECT_555_README_MD")):
+    hdr = embedded_hash(var)
+    src = "0x%08X" % fnv1a32(local_file(name).encode("utf-8"))
+    check(hdr == src,
+          f"{var}_HASHES[0] in projectFiles.h ({hdr}) == FNV of "
+          f"scripts/projects/555/{name} ({src}) - generated header is current")
 
-# Gate: only run the probe when the board holds exactly the two projects this
-# test authored, whose contents are right here to write back. Any other
-# project (task 9 adds more) means content this test can't restore.
-known_wirings = {"555": WIRING, "hiltest": HIL_WIRING}
-if sorted(device_projects) == sorted(known_wirings):
-    out = jl_exec("""
-import time
-for d in jfs.listdir("/projects"):
-    d = d.rstrip("/")
-    p = "/projects/" + d + "/wiring.yaml"
+pre_main_hash, pre_main_len = device_hash(f"{PROJ_DIR}/main.py")
+print(f"  info: {PROJ_DIR}/main.py before: {pre_main_hash} ({pre_main_len} bytes)")
+
+out = jl_exec(f"""
+for p in ({PROJ_DIR + "/wiring.yaml"!r}, {PROJ_DIR + "/README.md"!r},
+          {HIL_DIR + "/wiring.yaml"!r}):
     if fs_exists(p):
         jfs.remove(p)
-left = 0
-for d in jfs.listdir("/projects"):
-    d = d.rstrip("/")
-    if fs_exists("/projects/" + d + "/wiring.yaml"):
-        left += 1
-print("left=", left)
-if left == 0:
-    t0 = time.ticks_ms()
-    run_app("NoSuchAppXYZ")
-    t1 = time.ticks_ms()
-    run_app("Projects")
-    t2 = time.ticks_ms()
-    print("missing_ms=", time.ticks_diff(t1, t0))
-    print("projects_ms=", time.ticks_diff(t2, t1))
-""", timeout=40)
-    vals = parse_kv(out)
-    check(vals.get("left") == 0, "temporarily removed every /projects/*/wiring.yaml")
-    check(vals.get("missing_ms") is not None and vals.get("missing_ms") < 300,
-          f"an unregistered app name returns immediately ({vals.get('missing_ms')} ms)")
-    check(vals.get("projects_ms") is not None and vals.get("projects_ms") >= 1400,
-          "run_app('Projects') reached the registered launcher and took its "
-          f"empty-list exit ({vals.get('projects_ms')} ms, the 1.5 s message hold)")
+print("w555=", 1 if fs_exists({PROJ_DIR + "/wiring.yaml"!r}) else 0)
+print("r555=", 1 if fs_exists({PROJ_DIR + "/README.md"!r}) else 0)
+print("m555=", 1 if fs_exists({PROJ_DIR + "/main.py"!r}) else 0)
+print("whil=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
+""", timeout=30)
+vals = parse_kv(out)
+check(vals.get("w555") == 0 and vals.get("r555") == 0 and vals.get("whil") == 0,
+      "deleted 555/wiring.yaml, 555/README.md and hiltest/wiring.yaml")
+check(vals.get("m555") == 1, "left 555/main.py in place (the skip-what-exists case)")
 
-    # Put the wiring files straight back (from this file's own copies).
-    for d, content in known_wirings.items():
-        path = f"/projects/{d}/wiring.yaml"
-        out = jl_exec(f"print('restored=', 1 if fs_write({path!r}, {content!r}) else 0)",
-                      timeout=30)
-        check(parse_kv(out).get("restored") == 1, f"restored {path}")
-else:
-    print("  info: the board holds project dirs this test didn't author - "
-          "skipped the run_app('Projects') probe (it must never leave a "
-          "wiring.yaml behind for the picker to open on)")
+# The trigger. With hiltest's wiring gone and 555's about to be restored, the
+# picker should open over exactly one project.
+buf, n_listed, sends, worker, launch = run_projects_app()
+check(worker is not None and not worker.is_alive(),
+      f"run_app('Projects') returned after the serial cancel ({sends} byte(s))")
+check(n_listed is not None and n_listed >= 1,
+      f"the launcher's self-heal ran and the picker listed a project "
+      f"(PROJECTS n={n_listed}) - initializeProjects() re-created what it needed")
+check("hiltest" not in buf,
+      "hiltest was NOT listed - the firmware did not re-create a project it "
+      "has no table entry for")
+if "err" in launch:
+    print(f"  info: launch worker error: {launch['err'][:400]}")
+
+for name, var in (("wiring.yaml", "PROJECT_555_WIRING_YAML"),
+                  ("README.md", "PROJECT_555_README_MD")):
+    dh, dl = device_hash(f"{PROJ_DIR}/{name}")
+    want = embedded_hash(var)
+    check(dh == want,
+          f"provisioning re-created {PROJ_DIR}/{name} byte-exact "
+          f"(device FNV {dh}, firmware default {want}, {dl} bytes)")
+
+post_main_hash, post_main_len = device_hash(f"{PROJ_DIR}/main.py")
+check(post_main_hash == pre_main_hash and post_main_len == pre_main_len,
+      f"555/main.py was left untouched by the unforced pass ({post_main_hash})")
+
+# Coexistence: hiltest's dir and its other file survived; its wiring did not
+# come back (nothing in projectFiles[] points there).
+out = jl_exec(f"""
+print("hdir=", 1 if fs_exists({HIL_DIR!r}) else 0)
+print("hmain=", 1 if fs_exists({HIL_DIR + "/main.py"!r}) else 0)
+print("hwiring=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
+""", timeout=25)
+vals = parse_kv(out)
+check(vals.get("hdir") == 1, f"{HIL_DIR} still exists - provisioning removed no "
+                             "directory it doesn't know about")
+check(vals.get("hmain") == 1, f"{HIL_DIR}/main.py survived provisioning untouched")
+check(vals.get("hwiring") == 0,
+      f"{HIL_DIR}/wiring.yaml was NOT re-created (not a projectFiles[] entry)")
+
+# The control that survives the contract change: an unregistered app name still
+# returns immediately, so "the launcher took time" means the row resolved.
+out = jl_exec("""
+import time
+t0 = time.ticks_ms()
+run_app("NoSuchAppXYZ")
+t1 = time.ticks_ms()
+print("missing_ms=", time.ticks_diff(t1, t0))
+""", timeout=25)
+check(parse_kv(out).get("missing_ms") is not None and
+      parse_kv(out).get("missing_ms") < 300,
+      f"an unregistered app name returns immediately ({parse_kv(out).get('missing_ms')} ms)")
+
+# Put hiltest's wiring back (this file's own copy) so 6(d) has two projects.
+out = jl_exec(f"print('restored=', 1 if fs_write({HIL_DIR + '/wiring.yaml'!r}, {HIL_WIRING!r}) else 0)",
+              timeout=30)
+check(parse_kv(out).get("restored") == 1, f"restored {HIL_DIR}/wiring.yaml")
 
 # Put the live state back in sync with slot 3's FILE before the restore below
 # rewrites it: load_project() deliberately leaves slot tracking alone
@@ -399,77 +572,14 @@ time.sleep(1.5)
 #     convention), and the launcher takes its cancel-before-any-slot-call exit.
 # The cancel byte is '\r' (what port1_command primes connections with, so a
 # leftover copy is inert), re-sent every 0.5 s until the exec returns so a
-# dropped byte can't leave the board sitting in the picker.
-import threading
-
-import serial  # pyserial
-
-_csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
-
+# dropped byte can't leave the board sitting in the picker. All of that lives
+# in run_projects_app() at the top of this file - 6(c) drives it too.
 q = port1_command("Q", 1.5)
 m = re.search(r"ACTIVE_SLOT:(\d+)", q)
 slot_before_launch = int(m.group(1)) if m else -1
 check(slot_before_launch == 3, f"active slot before the launch probe is 3 (got {slot_before_launch})")
 
-launch = {}
-
-
-def _launch_projects():
-    try:
-        launch["out"] = jl_exec("run_app('Projects')\nprint('returned=', 1)", timeout=45)
-    except SystemExit as e:                                  # jl_exec fails fast
-        launch["err"] = str(e)
-    except Exception as e:                                   # pragma: no cover
-        launch["err"] = repr(e)
-
-
-worker = None
-buf = ""
-n_listed = None
-sends = 0
-
-ser = serial.Serial(port1_path(), 115200, timeout=0.05)
-try:
-    # Prime the connection BEFORE the launcher opens (the firmware's
-    # connection-init eats the first byte, and that byte would otherwise be the
-    # one meant to cancel the picker).
-    ser.write(b"\r\n")
-    ser.flush()
-    quiet, overall = time.time(), time.time()
-    while time.time() - overall < 4.0:
-        if ser.read(4096):
-            quiet = time.time()
-        elif time.time() - quiet > 0.6:
-            break
-    ser.reset_input_buffer()
-
-    worker = threading.Thread(target=_launch_projects, daemon=True)
-    worker.start()
-
-    last_send = 0.0
-    deadline = time.time() + 35
-    while time.time() < deadline and worker.is_alive():
-        chunk = ser.read(4096)
-        if chunk:
-            buf += _csi.sub("", chunk.decode(errors="replace"))
-        if n_listed is None:
-            mm = re.search(r"PROJECTS n=(\d+)", buf)
-            if mm:
-                n_listed = int(mm.group(1))
-        # Cancel once the picker announced itself; blind-cancel after 12 s so a
-        # missed line can't wedge the board in the picker either.
-        if (n_listed is not None or time.time() - overall > 12) and \
-                time.time() - last_send > 0.5:
-            ser.write(b"\r")
-            ser.flush()
-            last_send = time.time()
-            sends += 1
-    worker.join(timeout=15)
-    chunk = ser.read(4096)
-    if chunk:
-        buf += _csi.sub("", chunk.decode(errors="replace"))
-finally:
-    ser.close()
+buf, n_listed, sends, worker, launch = run_projects_app()
 
 check(n_listed is not None and n_listed >= 2,
       f"the picker opened over listProjects' real output (PROJECTS n={n_listed}) "

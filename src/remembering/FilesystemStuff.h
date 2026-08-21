@@ -257,6 +257,14 @@ void initializeMicroPythonExamples(bool forceInitialization = false);
 // Verify MicroPython examples exist
 bool verifyMicroPythonExamples();
 
+// Install the built-in projects into /projects/<dir>/ (the examples system's
+// sibling; see CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md section 1). Unforced:
+// create missing directories/files only. Forced (firmware update): 3-way
+// FNV-1a check that updates untouched old defaults in place and parks the new
+// default beside a user-edited file as *_original*. Never deletes anything,
+// so hand-made projects on the board are left alone.
+void initializeProjects(bool forceInitialization = false);
+
 // Display configuration functions
 int getConfiguredDisplayLines();
 int getConfiguredEditorLines();

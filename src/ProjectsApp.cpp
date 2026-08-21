@@ -720,10 +720,12 @@ static bool guidedFlowInner(const String& wiringPath, int destSlot) {
 void projectsAppLauncher(void) {
     SlotManager& mgr = SlotManager::getInstance();
 
-    // TODO(task 8): initializeProjects() self-heal belongs here - it
-    // (re)provisions /projects from the built-in projectFiles[] table, the way
-    // initializeMicroPythonExamples does for /python_scripts. That function
-    // doesn't exist yet, so v1 lists whatever is already on the filesystem.
+    // Self-heal before listing: (re)creates any missing built-in project file
+    // from projectFiles[], the way initializeMicroPythonExamples does for
+    // /python_scripts. Unforced, so it is an existence check per file and a
+    // silent return when everything is already there - and it only ever
+    // CREATES, so hand-made projects on the board are untouched.
+    initializeProjects();
 
     // static, not a stack local: PROJECTS_MAX * 5 Strings is a lot of app
     // stack for the deepest menu entry path (the same argument
@@ -736,10 +738,13 @@ void projectsAppLauncher(void) {
 
     int count = listProjects(projects, PROJECTS_MAX);
     if (count <= 0) {
-        // EXIT 1: nothing entered, nothing to unwind. This is also the only
-        // path out of the launcher that needs no encoder input, which is what
-        // test_projects.py phase 6(c) times to prove the apps[] row resolves -
-        // it asserts >= 1400 ms, so don't shorten this hold without updating it.
+        // EXIT 1: nothing entered, nothing to unwind. Since task 8 this is a
+        // provisioning-failure path, not a normal one: initializeProjects()
+        // above puts the built-in projects back before we get here, so an
+        // empty list means the writes themselves failed (full/locked FS).
+        // test_projects.py used to TIME this exit to prove the apps[] row
+        // resolves; it now watches for the picker's "PROJECTS n=" line
+        // instead, which the self-heal made both reachable and stronger.
         notify("No\nprojects", "\n\r  No projects found in " + String(PROJECTS_DIR), 1500);
         return;
     }

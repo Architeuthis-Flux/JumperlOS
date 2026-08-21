@@ -342,6 +342,9 @@ void setup( ) {
     // Initialize MicroPython examples at boot so they're ready for USBSer2 REPL access
     initializeMicroPythonExamples( );
 
+    // Same, for the built-in /projects/<dir>/ trees the Projects launcher lists
+    initializeProjects( );
+
     configLoaded = 1;
     startupTimers[ 1 ] = millis( );
     delayMicroseconds( 200 );

@@ -2532,6 +2532,7 @@ void performConfigMigrations(const char* oldVersion, const char* newVersion) {
         Serial.println("  - Refreshing built-in MicroPython examples (preserving user edits)...");
     }
     initializeMicroPythonExamples(true);
+    initializeProjects(true);   // same hash contract for /projects/<dir>/
     if (debugFP) {
         Serial.println("  ✓ Python examples refreshed\n\r");
     }
