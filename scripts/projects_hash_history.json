@@ -9,6 +9,15 @@
   "555/wiring.yaml": [
     "0xC8CBC62E"
   ],
+  "eeprom/README.md": [
+    "0xF2E7D49B"
+  ],
+  "eeprom/main.py": [
+    "0x9B89537B"
+  ],
+  "eeprom/wiring.yaml": [
+    "0x77CA786A"
+  ],
   "i2cscrn/README.md": [
     "0xBFC48EF5"
   ],

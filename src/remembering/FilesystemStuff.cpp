@@ -3911,6 +3911,11 @@ static const ProjectFileInfo projectFiles[] = {
         { "/projects/nand00/main.py", PROJECT_NAND00_MAIN_PY, "nand00/main.py", PROJECT_NAND00_MAIN_PY_HASHES, PROJECT_NAND00_MAIN_PY_HASH_COUNT },
         { "/projects/nand00/wiring.yaml", PROJECT_NAND00_WIRING_YAML, "nand00/wiring.yaml", PROJECT_NAND00_WIRING_YAML_HASHES, PROJECT_NAND00_WIRING_YAML_HASH_COUNT },
 #endif
+#ifdef INCLUDE_PROJECT_EEPROM
+        { "/projects/eeprom/README.md", PROJECT_EEPROM_README_MD, "eeprom/README.md", PROJECT_EEPROM_README_MD_HASHES, PROJECT_EEPROM_README_MD_HASH_COUNT },
+        { "/projects/eeprom/main.py", PROJECT_EEPROM_MAIN_PY, "eeprom/main.py", PROJECT_EEPROM_MAIN_PY_HASHES, PROJECT_EEPROM_MAIN_PY_HASH_COUNT },
+        { "/projects/eeprom/wiring.yaml", PROJECT_EEPROM_WIRING_YAML, "eeprom/wiring.yaml", PROJECT_EEPROM_WIRING_YAML_HASHES, PROJECT_EEPROM_WIRING_YAML_HASH_COUNT },
+#endif
     };
 
 static const int totalProjectFiles = sizeof( projectFiles ) / sizeof( projectFiles[ 0 ] );

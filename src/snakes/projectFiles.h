@@ -18,6 +18,7 @@
 // Define which projects to include at compile time
 // Comment out any project you don't want provisioned
 #define INCLUDE_PROJECT_555
+#define INCLUDE_PROJECT_EEPROM
 #define INCLUDE_PROJECT_I2CSCRN
 #define INCLUDE_PROJECT_NAND00
 
@@ -26,6 +27,7 @@
 
 #ifdef DISABLE_ALL_PROJECTS
 #undef INCLUDE_PROJECT_555
+#undef INCLUDE_PROJECT_EEPROM
 #undef INCLUDE_PROJECT_I2CSCRN
 #undef INCLUDE_PROJECT_NAND00
 #endif
@@ -236,6 +238,398 @@ const uint32_t PROJECT_555_WIRING_YAML_HASHES[1] = { 0xC8CBC62E };
 const int PROJECT_555_WIRING_YAML_HASH_COUNT = 1;
 
 #endif // INCLUDE_PROJECT_555
+
+//---------- eeprom (scripts/projects/eeprom/) ----------
+#ifdef INCLUDE_PROJECT_EEPROM
+const char* PROJECT_EEPROM_README_MD = R"(# EEPROM Dumper
+
+A 24Cxx serial EEPROM in the breadboard, read over I2C and hex-dumped to the
+terminal. The Jumperless makes every connection - including the one that
+decides whether the chip can be written at all.
+
+## Parts you need
+
+| Part | Value | Package | Rows |
+|------|-------|---------|------|
+| U1   | 24C02 (or 24C16) | DIP-8 | pin 1 at row 5, across the middle gap |
+| R1   | 4.7k  | axial   | 12 - 13 (SDA pull-up) |
+| R2   | 4.7k  | axial   | 15 - 16 (SCL pull-up) |
+
+Top rail is set to 3.3 V.
+
+The 24Cxx pinout, and where each pin lands with pin 1 at row 5:
+
+| Pin | Name | Row | Goes to |
+|---|---|---|---|
+| 1 | A0  | 5  | GND |
+| 2 | A1  | 6  | GND |
+| 3 | A2  | 7  | GND |
+| 4 | GND | 8  | GND |
+| 5 | SDA | 38 | `RP_GPIO_7` (RP pin 26) |
+| 6 | SCL | 37 | `RP_GPIO_8` (RP pin 27) |
+| 7 | WP  | 36 | top rail - **write protected** |
+| 8 | VCC | 35 | top rail |
+
+A0-A2 all grounded puts the chip at **0x50**.
+
+### Why the two resistors are not optional
+
+I2C is an open-drain bus: the chips only ever pull the lines *down*, so
+something has to pull them back up. A 4-pin display module has pull-ups
+soldered on it; a bare DIP EEPROM does not. The RP2350's internal pull-ups
+are around 50-80k, and 60k into the crossbar-plus-breadboard capacitance
+gives a rise time of a couple of microseconds - well past the 1 us the
+100 kHz I2C spec allows. 4.7k brings that down to well under 500 ns.
+
+### Write protect is a wire, not a jumper
+
+Pin 7 (WP) high means "reads only". The wiring holds row 36 at the top
+rail, so the chip is genuinely read-only from the moment it powers up -
+not read-only by convention.
+
+The optional write test in `main.py` is the only thing that changes that,
+and it does so by re-routing, not by asking you to move a jumper:
+
+    disconnect(36, TOP_RAIL)
+    connect(36, GND)          # writes enabled for exactly one byte
+    ...
+    disconnect(36, GND)
+    connect(36, TOP_RAIL)     # in a finally, so it always goes back
+
+That re-route runs `refreshConnections()`, which re-asserts the slot's GPIO
+configuration onto RP pins 26/27 - so the script rebuilds its `machine.I2C`
+object afterwards. If you ever see the restore step report a failure,
+re-load the wiring before trusting the chip again.
+
+## What it does
+
+    EEPROM Dumper
+    i2c devices: ['0x50']
+
+    0000  FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF  |................|
+    ...
+    00F0  FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF  |................|
+
+    256 bytes read.  (all 0xFF - an erased chip)
+
+    dump more - total size in bytes (blank = no):
+
+16 bytes to a line with a printable-ASCII gutter, the same shape `hexdump -C`
+uses. Then it offers to read further (for a 24C16, answer `2048`), and last
+of all offers the write test, which defaults to **no**.
+
+`ADDR_BITS = 8` at the top of `main.py` covers the 24C01 through 24C16. A
+24C32 or larger uses a 16-bit word address - set it to 16 for those.
+
+## Running it
+
+- **Clickwheel:** Apps > Projects > eeprom.
+- **Files browser:** open `/projects/eeprom/wiring.yaml` to load the
+  circuit, then run `/projects/eeprom/main.py`.
+
+## Troubleshooting
+
+- **`i2c devices: []`** - nothing acked. Most often the chip is in
+  backwards: pin 1 is the end with the dot, at row 5, and the chip must
+  straddle the middle gap. After that, check that both 4.7k resistors are
+  really in rows 12-13 and 15-16.
+- **A device answers, but not at 0x50** - one of A0/A1/A2 is not reaching
+  GND, which shifts the address. 0x51 means A0 is high, 0x52 means A1, and
+  so on. Change `ADDR` in `main.py` to match, or re-seat the chip.
+- **The dump repeats every 256 bytes** - that is a 24C02, which really is
+  256 bytes; the address wraps.
+- **Reads work but the write test says the byte did not stick** - WP did not
+  reach GND. Watch the terminal for the restore line; if the re-route
+  failed, the chip stayed protected, which is the safe way to fail.
+- **The Jumperless's own top OLED misbehaves while this runs** - in its
+  default `connection_type 0` it lives on GPIO 7/8, the same pins, and it
+  shares the i2c1 peripheral in every mode. Turn it off while you use this
+  project.
+)";
+const uint32_t PROJECT_EEPROM_README_MD_HASHES[1] = { 0xF2E7D49B };
+const int PROJECT_EEPROM_README_MD_HASH_COUNT = 1;
+
+const char* PROJECT_EEPROM_MAIN_PY = R"===("""EEPROM Dumper - companion script for /projects/eeprom/wiring.yaml
+
+Reads a 24Cxx I2C EEPROM over machine.I2C(1) - the wiring file routes the
+chip's SDA row to RP_GPIO_7 (RP pin 26) and its SCL row to RP_GPIO_8 (RP
+pin 27) - and hex-dumps it to the terminal.
+
+Write protect is not a jumper here. WP (pin 7, row 36) is wired to the top
+rail, so the chip powers up read-only; the optional write test re-routes
+that row to GND for the duration of one byte and puts it straight back.
+That re-route is why the bus object is rebuilt afterwards: a routing change
+runs refreshConnections(), which re-asserts the slot config onto GPIO 26/27.
+
+Runs standalone from the Files browser too - the launcher injects
+_jl_project, but nothing here depends on it.
+"""
+
+import time
+
+# The launcher injects this global; default so the script also runs standalone.
+_jl_project = globals().get("_jl_project", {})
+
+SDA_PIN = 26        # RP GPIO 26 = node RP_GPIO_7 - wiring.yaml routes row 38 here
+SCL_PIN = 27        # RP GPIO 27 = node RP_GPIO_8 - wiring.yaml routes row 37 here
+I2C_BUS = 1         # pins 26/27 belong to i2c1; machine.I2C(0, ...) rejects them
+I2C_HZ = 100000
+
+ADDR = 0x50         # A0/A1/A2 are all grounded by the wiring
+ADDR_BITS = 8       # 24C01..24C16 use an 8-bit word address; 24C32 and up use 16
+WP_ROW = 36         # 24Cxx pin 7, held at the top rail = write protected
+FIRST = 256         # bytes in the opening dump
+TEST_AT = 0xFF      # the one address the optional write test touches
+
+PRINTABLE = ("................................"
+             " !\"#$%&'()*+,-./0123456789:;<=>?"
+             "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
+             "`abcdefghijklmnopqrstuvwxyz{|}~.")
+
+
+def open_bus():
+    """Returns an I2C object, or None with an explanation printed."""
+    try:
+        import machine
+    except Exception as e:
+        print("no machine module in this build: " + str(e))
+        return None
+    # Claim the two pins first. Without this, every refreshConnections()
+    # re-asserts the slot config's pull setting onto GPIO 26/27 and can pull
+    # the bus down under the I2C peripheral.
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_claim_pin(n)
+        except Exception:
+            pass
+    try:
+        return machine.I2C(I2C_BUS, scl=SCL_PIN, sda=SDA_PIN, freq=I2C_HZ)
+    except Exception as e:
+        print("could not open I2C on pins %d/%d: %s" % (SDA_PIN, SCL_PIN, str(e)))
+        return None
+
+
+def release_bus():
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_release_pin(n)
+        except Exception:
+            pass
+
+
+def hexdump(data, base=0):
+    for off in range(0, len(data), 16):
+        chunk = data[off:off + 16]
+        hexpart = " ".join("%02X" % b for b in chunk)
+        text = "".join(PRINTABLE[b] if b < 128 else "." for b in chunk)
+        print("%04X  %-47s  |%s|" % (base + off, hexpart, text))
+
+
+def read_block(i2c, start, count):
+    """Sequential read. 32 bytes at a time keeps the buffers small."""
+    out = bytearray()
+    while count > 0:
+        n = 32 if count > 32 else count
+        out += i2c.readfrom_mem(ADDR, start, n, addrsize=ADDR_BITS)
+        start += n
+        count -= n
+    return out
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def write_test(i2c, original):
+    """One byte written, read back, and put back. Returns the live bus."""
+    probe = 0xA5 if original != 0xA5 else 0x5A
+    moved = False
+    try:
+        disconnect(WP_ROW, TOP_RAIL)
+        connect(WP_ROW, GND)
+        moved = True
+        time.sleep(0.05)
+        # The re-route ran a refresh, which re-asserts the GPIO config onto
+        # pins 26/27 - rebuild the bus before touching the chip again.
+        i2c = open_bus()
+        if i2c is None:
+            raise OSError("bus gone after the WP re-route")
+
+        i2c.writeto_mem(ADDR, TEST_AT, bytes((probe,)), addrsize=ADDR_BITS)
+        time.sleep(0.01)                 # 24Cxx write cycle: 5 ms worst case
+        back = i2c.readfrom_mem(ADDR, TEST_AT, 1, addrsize=ADDR_BITS)[0]
+        if back == probe:
+            print("wrote 0x%02X to 0x%02X and read it back - writes work."
+                  % (probe, TEST_AT))
+        else:
+            print("wrote 0x%02X but read 0x%02X back - it did not stick."
+                  % (probe, back))
+
+        i2c.writeto_mem(ADDR, TEST_AT, bytes((original,)), addrsize=ADDR_BITS)
+        time.sleep(0.01)
+        print("restored 0x%02X at address 0x%02X." % (original, TEST_AT))
+    except Exception as e:
+        print("write test failed: " + str(e))
+    finally:
+        if moved:
+            try:
+                disconnect(WP_ROW, GND)
+                connect(WP_ROW, TOP_RAIL)
+                time.sleep(0.05)
+                i2c = open_bus()
+                print("write protect restored (row %d back on the top rail)."
+                      % WP_ROW)
+            except Exception as e:
+                print("COULD NOT RESTORE WRITE PROTECT: " + str(e))
+                print("re-load the project wiring before trusting the chip.")
+    return i2c
+
+
+def main():
+    print("EEPROM Dumper")
+    if _jl_project:
+        print("project: " + str(_jl_project.get("dir", "eeprom")) +
+              "  variant: " + str(_jl_project.get("variant", "default")))
+
+    i2c = open_bus()
+    if i2c is None:
+        print("no bus - nothing to do.")
+        return
+
+    try:
+        found = i2c.scan()
+        print("i2c devices: " + str([hex(a) for a in found]))
+        if ADDR not in found:
+            print("no chip at " + hex(ADDR) + " - check the rail, the pull-ups "
+                  "(rows 12-13 and 15-16) and that A0-A2 really reach GND.")
+            return
+
+        print("")
+        try:
+            data = read_block(i2c, 0x00, FIRST)
+        except Exception as e:
+            print("read failed: " + str(e))
+            return
+
+        hexdump(data, 0)
+        print("")
+        blank = True
+        for b in data:
+            if b != 0xFF:
+                blank = False
+                break
+        print("%d bytes read." % len(data) +
+              ("  (all 0xFF - an erased chip)" if blank else ""))
+
+        try:
+            oled_print("EE %d B" % len(data))
+        except Exception:
+            pass
+
+        # Bigger part? Dump the rest on request.
+        print("")
+        more = ask("dump more - total size in bytes (blank = no): ")
+        if more:
+            try:
+                total = int(more)
+            except ValueError:
+                total = 0
+            if total > FIRST:
+                if total > 256 and ADDR_BITS == 8:
+                    print("note: ADDR_BITS is 8, so anything past 0xFF wraps. "
+                          "Set ADDR_BITS = 16 for a 24C32 or larger.")
+                try:
+                    rest = read_block(i2c, FIRST, total - FIRST)
+                    hexdump(rest, FIRST)
+                    print("")
+                    print("%d bytes read." % total)
+                except Exception as e:
+                    print("read failed: " + str(e))
+
+        # --- the optional write test --------------------------------------
+        # Default is no. WP is a wire the Jumperless owns, so "read-only"
+        # here is real: nothing can write until that row is moved.
+        print("")
+        print("Write test: writes one byte to address 0x%02X, reads it back,"
+              % TEST_AT)
+        print("then puts the original byte back. WP moves to GND for that.")
+        if ask("run the write test? [y/N] ").lower() == "y":
+            original = data[TEST_AT] if len(data) > TEST_AT else 0xFF
+            i2c = write_test(i2c, original)
+        else:
+            print("skipped - the chip stays read-only.")
+
+    except KeyboardInterrupt:
+        print("")
+    finally:
+        release_bus()
+        print("bye")
+
+
+main()
+)===";
+const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[1] = { 0x9B89537B };
+const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 1;
+
+const char* PROJECT_EEPROM_WIRING_YAML = R"===(version: 2
+sourceOfTruth: bridges
+meta:
+  project: eeprom
+  title: "EEPROM Dumper"
+  variant: default
+  summary: "Hex-dump a 24Cxx I2C EEPROM, with write protect held by the board"
+  script: main.py
+  needs: ["24C02 or 24C16 (DIP-8)", "4.7k", "4.7k"]
+parts:
+  - name: "U1"
+    type: ic
+    value: "24C02"
+    footprint: dip8
+    row: 5
+    pins:
+      A0:  {pin: 1, connect: GND,       class: signal}
+      A1:  {pin: 2, connect: GND,       class: signal}
+      A2:  {pin: 3, connect: GND,       class: signal}
+      GND: {pin: 4, connect: GND,       class: gnd}
+      SDA: {pin: 5, connect: RP_GPIO_7, class: signal}
+      SCL: {pin: 6, connect: RP_GPIO_8, class: signal}
+      WP:  {pin: 7, connect: TOP_RAIL,  class: signal}
+      VCC: {pin: 8, connect: TOP_RAIL,  class: power}
+  - name: "R1"
+    type: resistor
+    value: "4.7k"
+    footprint: sip2
+    row: 12
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 38}}
+  - name: "R2"
+    type: resistor
+    value: "4.7k"
+    footprint: sip2
+    row: 15
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 37}}
+guide:
+  title: "EEPROM Dumper"
+  steps:
+    - {do: note, text: "A 24Cxx EEPROM on the I2C pins. Turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "24Cxx across the middle gap, pin 1 (the dot) at row 5."}
+    - {do: place, part: R1, check: continuity, text: "4.7k SDA pull-up: rows 12 and 13."}
+    - {do: place, part: R2, check: continuity, text: "4.7k SCL pull-up: rows 15 and 16."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power the chip up (3.3V). WP is held high - reads only."}
+    - {do: verify, target: 38, n1: 38, n2: 37, check: i2c, text: "Scanning the bus - a 24Cxx with A0-A2 grounded answers at 0x50."}
+    - {do: note, text: "Built. Run main.py to hex-dump it."}
+power:
+  topRail: 3.3
+config:
+  gpio:
+    pulls: [0,0,0,0,0,0,1,1,0,0]
+)===";
+const uint32_t PROJECT_EEPROM_WIRING_YAML_HASHES[1] = { 0x77CA786A };
+const int PROJECT_EEPROM_WIRING_YAML_HASH_COUNT = 1;
+
+#endif // INCLUDE_PROJECT_EEPROM
 
 //---------- i2cscrn (scripts/projects/i2cscrn/) ----------
 #ifdef INCLUDE_PROJECT_I2CSCRN
@@ -821,6 +1215,11 @@ const int PROJECT_NAND00_WIRING_YAML_HASH_COUNT = 1;
 //         { "/projects/555/README.md", PROJECT_555_README_MD, "555/README.md", PROJECT_555_README_MD_HASHES, PROJECT_555_README_MD_HASH_COUNT },
 //         { "/projects/555/main.py", PROJECT_555_MAIN_PY, "555/main.py", PROJECT_555_MAIN_PY_HASHES, PROJECT_555_MAIN_PY_HASH_COUNT },
 //         { "/projects/555/wiring.yaml", PROJECT_555_WIRING_YAML, "555/wiring.yaml", PROJECT_555_WIRING_YAML_HASHES, PROJECT_555_WIRING_YAML_HASH_COUNT },
+// #endif
+// #ifdef INCLUDE_PROJECT_EEPROM
+//         { "/projects/eeprom/README.md", PROJECT_EEPROM_README_MD, "eeprom/README.md", PROJECT_EEPROM_README_MD_HASHES, PROJECT_EEPROM_README_MD_HASH_COUNT },
+//         { "/projects/eeprom/main.py", PROJECT_EEPROM_MAIN_PY, "eeprom/main.py", PROJECT_EEPROM_MAIN_PY_HASHES, PROJECT_EEPROM_MAIN_PY_HASH_COUNT },
+//         { "/projects/eeprom/wiring.yaml", PROJECT_EEPROM_WIRING_YAML, "eeprom/wiring.yaml", PROJECT_EEPROM_WIRING_YAML_HASHES, PROJECT_EEPROM_WIRING_YAML_HASH_COUNT },
 // #endif
 // #ifdef INCLUDE_PROJECT_I2CSCRN
 //         { "/projects/i2cscrn/README.md", PROJECT_I2CSCRN_README_MD, "i2cscrn/README.md", PROJECT_I2CSCRN_README_MD_HASHES, PROJECT_I2CSCRN_README_MD_HASH_COUNT },
