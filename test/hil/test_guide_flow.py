@@ -33,13 +33,19 @@ Covers:
      bare-row verdicts (drained before the tap / caught mid-drain)
  11. continuity refusal: a place step whose row is already routed reports
      `val=skip` + "check skipped (rows in use)" and warn-continues
+ 12. vf tap starvation (/projects/hilvfnr): the bench `noroute` reproduced on
+     a crowded 555-shaped fabric - asserts the per-node `noroute@22` split,
+     the core-0 `TAP noroute ... bounceOk=0x00` diagnostic and the tap
+     counters. See the long note at that phase: its verdict assertion is
+     EXPECTED TO FLIP if invest-vf-noroute.md §8 Option 1 ever lands.
 
 Bench convention: snapshot board state + slot3.yaml + active slot up front,
 restore all three in a finally (a prior round's incident: an uncaught
-exception stranded slot 3 - the try/finally here is that lesson). The
-/projects/hilguide/ tree is REMOVED afterwards: test_projects.py's
-run_app('Projects') probe gates itself on the board holding exactly the two
-projects IT authored, and a leftover hilguide would silently skip that phase.
+exception stranded slot 3 - the try/finally here is that lesson). BOTH
+/projects/hilguide/ and /projects/hilvfnr/ are REMOVED afterwards:
+test_projects.py's run_app('Projects') probe gates itself on the board
+holding exactly the two projects IT authored, and either leftover would
+silently skip that phase.
 
 Port discipline: the guide loop reads its keys straight off port 1, so this
 test holds ONE port-1 connection per drive and sends keys only after the
@@ -179,6 +185,48 @@ guide:
   steps:
     - {do: place, part: RG, check: continuity, timeout_ms: 4000, text: "rows in use refusal"}
 """
+
+# vf tap-starvation fixture (phase 12) - lives in its OWN project dir because
+# it must be a self-contained 555-shaped build. Verbatim from
+# .superpowers/sdd/projects-wave-2-bench-notes/invest-vf-noroute.md §9: it
+# rebuilds the exact committed fabric of Kevin's bench session (10 connect
+# steps + two static ADC bridges applied at load) with rows 22/23 left clean,
+# then runs the identical vf check that failed there 3/3.
+VFNR_DIR = "/projects/hilvfnr"
+VFNR_PATH = VFNR_DIR + "/wiring.yaml"
+VFNR_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilvfnr
+  title: "HIL VF NoRoute"
+parts:
+  - name: "LEDX"
+    type: led
+    footprint: sip2
+    row: 22
+    pins: {A: {pin: 1}, K: {pin: 2, connect: GND}}
+bridges:
+  - {n1: ADC0, n2: 7}
+  - {n1: ADC1, n2: 37}
+guide:
+  title: "HIL VF NoRoute"
+  steps:
+    - {do: connect, n1: 5,  n2: GND,      text: "u1 gnd"}
+    - {do: connect, n1: 6,  n2: 37,       text: "u1 trig"}
+    - {do: connect, n1: 8,  n2: TOP_RAIL, text: "u1 reset"}
+    - {do: connect, n1: 35, n2: TOP_RAIL, text: "u1 vcc"}
+    - {do: connect, n1: 12, n2: TOP_RAIL, text: "r1 a"}
+    - {do: connect, n1: 13, n2: 36,       text: "r1 b"}
+    - {do: connect, n1: 15, n2: 36,       text: "r2 a"}
+    - {do: connect, n1: 16, n2: 37,       text: "r2 b"}
+    - {do: connect, n1: 18, n2: 37,       text: "c1 +"}
+    - {do: connect, n1: 19, n2: GND,      text: "c1 -"}
+    - {do: place, part: LEDX, check: vf, min: 1.4, max: 2.6,
+       on_fail: warn, timeout_ms: 4000, text: "vf tap under 555 state"}
+"""
+VFNR_CONNECT_IDS = ["connect_5", "connect_6", "connect_8", "connect_35",
+                    "connect_12", "connect_13", "connect_15", "connect_16",
+                    "connect_18", "connect_19"]
 
 _csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
 
@@ -709,6 +757,93 @@ print("NETNAME|" + name)
         d.close()
     time.sleep(1.0)
 
+    # --- 12. vf tap starvation: the bench `noroute`, reproduced + diagnosed --
+    #
+    # WHAT THIS PHASE LOCKS IN, AND WHAT IT DELIBERATELY DOES NOT.
+    #
+    # The suite had ZERO vf coverage; its other tap checks are single taps on a
+    # near-empty board, where the direct tier routes trivially - which is why
+    # HIL never hit the bench's `noroute`. This fixture rebuilds the crowded
+    # 555 fabric that starves the sense tap, and asserts the HONEST current
+    # behaviour: rows 22/23 are on chip D, the stimulus chain terminates on
+    # chip D too and eats D's lanes to K, I, J and L, and the last-resort
+    # bounce tier finds no candidate chip at all - so the tap is genuinely
+    # refused. bounceOk=0x00 in the diagnostic below IS that proof.
+    #
+    # !!! THIS ASSERTION IS EXPECTED TO FLIP. !!!
+    # It encodes a real limitation, not a desired outcome. When the escalation
+    # in invest-vf-noroute.md §8 Option 1 lands (the chain adds its sense legs
+    # as ephemeral bridges so the FULL router plans stimulus + sense together,
+    # instead of the tap builder's three tiers planning alone), this fixture
+    # should ROUTE and the two lines to expect become:
+    #     state=RESULT check=vf val=[23]\.\d+V ok=0 on_fail=warn
+    #     no current - LED missing or reversed (flip it?)
+    # Empty holes, so the taps read the full stimulus across the gap and the
+    # value lands outside the 1.4-2.6 band. That pair of lines is not a guess:
+    # it is what this same vf check prints TODAY on a bare fabric, measured at
+    # val=2.83V while validating the sequential-tap rewrite - i.e. the tap
+    # machinery is known-good, and only this fixture's crowded fabric refuses.
+    # When that day comes, flip the two assertions below; do NOT delete the
+    # phase.
+    #
+    # What is genuinely regression-protected here regardless of which way the
+    # verdict goes: the per-node `noroute@<row>` split (an undifferentiated
+    # `noroute` is what made three bench retries say nothing), the scan-core
+    # failure latch surviving cross-core to a correct core-0 print, and the
+    # unconditional tap-counter dump. The scan core must never Serial-print,
+    # so seeing these lines at all proves the latch/print seam works.
+    out = jl_exec(f"""
+for d in ("/projects", {VFNR_DIR!r}):
+    if not fs_exists(d):
+        try:
+            jfs.mkdir(d)
+        except Exception as e:
+            print("mkdirerr=", e)
+print("projdir=", 1 if fs_exists({VFNR_DIR!r}) else 0)
+print("wrote=", 1 if fs_write({VFNR_PATH!r}, {VFNR_WIRING!r}) else 0)
+""", timeout=30)
+    vals = parse_kv(out)
+    check(vals.get("projdir") == 1, f"created {VFNR_DIR} on the board")
+    check(vals.get("wrote") == 1, f"pushed {VFNR_PATH}")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {VFNR_PATH} {SLOT}\r\n".encode())
+        guide_live = True
+        for i, sid in enumerate(VFNR_CONNECT_IDS, start=1):
+            d.expect(rf"GUIDE step={i}/11 id={sid} state=WAIT",
+                     f"vfnr step {i}/11 ({sid}) WAIT", timeout=40)
+            d.send(b"n")
+            d.expect(rf"GUIDE step={i}/11 id={sid} state=COMMIT",
+                     f"vfnr step {i}/11 COMMIT", timeout=40)
+        d.expect(r"GUIDE step=11/11 id=place_LEDX state=WAIT",
+                 "vfnr step 11 (vf place) WAIT", timeout=40)
+        d.send(b"n")
+        d.expect(r"GUIDE step=11/11 id=place_LEDX state=VERIFY check=vf",
+                 "vf check launches on the crowded fabric")
+        # The §6 diagnostic, printed from core 0 once on the hard failure.
+        # rc=-3 is buildEphemeralRoute refusing; bounceOk=0x00 means the last
+        # tier had no candidate chip - route starvation, not a stale ring.
+        d.expect(r"TAP noroute node=2[23]->ADC\d rc=-3 Kfree=0x[0-9A-Fa-f]+ "
+                 r"Kxbusy=0x[0-9A-Fa-f]+ Dxbusy=0x[0-9A-Fa-f]+ bounceOk=0x[0-9A-Fa-f]+",
+                 "tap-failure diagnostic names the node, rc and the fabric masks")
+        d.expect(r"\[nvscan\] taps ok:\d+ .*noroute:\d+ .*ringstale:\d+",
+                 "tap counters print unconditionally on the hard failure")
+        d.expect(r"GUIDE step=11/11 id=place_LEDX state=RESULT check=vf "
+                 r"val=noroute@2[23] ok=0 on_fail=warn",
+                 "vf reports noroute PER NODE (see the flip note above)")
+        d.expect(r"no sense route to the rows", "the human refusal line prints")
+        d.expect(r"check failed - n advances anyway", "warn offers the advance")
+        d.send(b"n")
+        d.expect(r"advancing past the failed check", "second n takes the advance")
+        d.expect(r"GUIDE .* state=DONE", "warn advance reaches DONE")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "EXIT from DONE")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
 finally:
     # --- 6. Restore the bench ----------------------------------------------
     # Unwedge a possibly-still-waiting guide FIRST (its loop owns port 1's
@@ -732,16 +867,21 @@ finally:
     # Project tree OFF the board (test_projects' run_app probe gates on the
     # board holding only ITS two projects).
     out = jl_exec(f"""
-for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r}, {REFUSAL_PATH!r}):
+for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
+          {REFUSAL_PATH!r}, {VFNR_PATH!r}):
     if fs_exists(p):
         jfs.remove(p)
-try:
-    jfs.rmdir({PROJ_DIR!r})
-except Exception:
-    pass
+for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
+    try:
+        jfs.rmdir(dd)
+    except Exception:
+        pass
 print("gone=", 0 if fs_exists({PROJ_DIR!r}) else 1)
+print("gonevfnr=", 0 if fs_exists({VFNR_DIR!r}) else 1)
 """, timeout=25)
-    check(parse_kv(out).get("gone") == 1, f"removed {PROJ_DIR} from the board")
+    vals = parse_kv(out)
+    check(vals.get("gone") == 1, f"removed {PROJ_DIR} from the board")
+    check(vals.get("gonevfnr") == 1, f"removed {VFNR_DIR} from the board")
 
     # slot3.yaml back to its pre-test content (file first, slot switch after -
     # the same hazard ordering test_projects documents).
