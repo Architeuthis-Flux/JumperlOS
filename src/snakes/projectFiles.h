@@ -498,7 +498,7 @@ def main():
         print("i2c devices: " + str([hex(a) for a in found]))
         if ADDR not in found:
             print("no chip at " + hex(ADDR) + " - check the rail, the "
-                  "pull-ups (rows 12-13, 15-16) and A0-A2 to GND.")
+                  "pull-ups (rows 12/42 and 15/45) and A0-A2 to GND.")
             return
         data = read_block(i2c, 0x00, FIRST)
         hexdump(data, 0)
@@ -540,8 +540,8 @@ def main():
 
 main()
 )===";
-const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[4] = { 0x5E61C1F1, 0x0D73F0A3, 0x70FDD4AE, 0x9B89537B };
-const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 4;
+const uint32_t PROJECT_EEPROM_MAIN_PY_HASHES[5] = { 0x1E5C7C14, 0x5E61C1F1, 0x0D73F0A3, 0x70FDD4AE, 0x9B89537B };
+const int PROJECT_EEPROM_MAIN_PY_HASH_COUNT = 5;
 
 const char* PROJECT_EEPROM_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges

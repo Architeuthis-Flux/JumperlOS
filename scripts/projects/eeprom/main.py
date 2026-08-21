@@ -131,7 +131,7 @@ def main():
         print("i2c devices: " + str([hex(a) for a in found]))
         if ADDR not in found:
             print("no chip at " + hex(ADDR) + " - check the rail, the "
-                  "pull-ups (rows 12-13, 15-16) and A0-A2 to GND.")
+                  "pull-ups (rows 12/42 and 15/45) and A0-A2 to GND.")
             return
         data = read_block(i2c, 0x00, FIRST)
         hexdump(data, 0)
