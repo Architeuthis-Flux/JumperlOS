@@ -94,7 +94,10 @@ void saveCurrentSlotToSlot(int slotFrom = 0, int slotTo = 1, int flashOrLocalfro
 void parseStringToBridges();
 
 
-void clearNodeFile(int slot = 0, int flashOrLocal = 0);
+void clearNodeFile(int slot = 0, int flashOrLocal = 0);  // slot < 0 = active context
+// Clear the active context's connections and persist to whatever backs it
+// (numbered slot file OR arbitrary path). Connections only - never power.
+void clearActiveContext(void);
 int lenHelper(int);
 int printLen(int);
 int isNodeValid(int node);

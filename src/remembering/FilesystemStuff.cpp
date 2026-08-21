@@ -1277,24 +1277,42 @@ void FileManager::selectCurrentFile( ) {
             return;  // run() loop will detect this and exit
         } else if ( lower.endsWith( ".yaml" ) &&
                     ( lower.startsWith( "slot" ) || fullPath.startsWith( "/projects/" ) ) ) {
-            // Project wiring files (/projects/<dir>/wiring*.yaml) take the same
-            // slot-load path as slot*.yaml - a project wiring file IS a slot
-            // YAML (v2 plus the contained meta:/parts:/guide: sections). They
-            // are deliberately NOT named slot*.yaml: extractSlotNumberFromPath()
-            // (States.cpp, ~:2876) matches any basename starting "slot" and
-            // ending ".yaml", so "slot_555.yaml" would toInt() to 0 and repoint
-            // activeSlotNumber/netSlot at slot 0 - the idle auto-save would then
-            // write the project over the user's /slots/slot0.yaml. With
-            // "wiring.yaml" its `startsWith("slot")` test returns -1 and
-            // loadSlotFromPath's `if (slotNum >= 0)` guard leaves slot tracking
-            // alone. (Line numbers rot; the two symbol names don't - grep those.)
+            // ANY slot YAML clicked here becomes the ACTIVE CONTEXT - a
+            // /slots/slotN.yaml by number, anything else (a project run file
+            // like 555_1.yaml, a hand-written wiring.yaml) by path.
+            // loadSlotFromPath adopts it, so its later edits auto-save back to
+            // ITSELF.
+            //
+            // The old warning that lived here - "don't name project files
+            // slot*.yaml, because extractSlotNumberFromPath basename-matches
+            // and slot_555.yaml toInt()s to 0, repointing tracking at slot 0
+            // for the auto-save to clobber" - is retired. The strict
+            // SlotManager::slotNumberForCanonicalPath full-path matcher can't
+            // misread those names any more, and an unmatched path now BECOMES
+            // the context instead of being orphaned against a stale number.
+            //
+            // Flush anything unsaved in the OUTGOING context to its own file
+            // before we replace globalState. loadSlotFromPath does a cache
+            // flush, but a state that is merely dirty in RAM has to be written
+            // first, and this is the right place for it: the API itself must
+            // not force a save (that is exactly what the firstLoop guard
+            // exists to prevent at boot).
+            SlotManager& mgr = SlotManager::getInstance( );
+            if ( mgr.getActiveState( ).isDirty( ) ) {
+                String saveErr;
+                if ( !mgr.saveActiveSlot( saveErr ) ) {
+                    Serial.println( "\n\rWarning: could not save current context: " + saveErr );
+                }
+            }
             String err;
-            if ( SlotManager::getInstance( ).loadSlotFromPath( fullPath, err ) ) {
+            if ( mgr.loadSlotFromPath( fullPath, err ) ) {
                 outputToArea( "Loaded slot: " + file->name, FileColors::STATUS );
                 changeTerminalColor( FileColors::STATUS, false );
                 Serial.println( "\n\rLoaded " + file->name );
                 changeTerminalColor( -1, false );
             } else {
+                // Atomic on failure: the previous context is still fully
+                // active and every tracker is untouched.
                 outputToArea( "Load failed: " + err, FileColors::ERROR );
             }
             scheduleOLEDUpdate( );

@@ -1700,12 +1700,18 @@ void printColorName(int hue) {
 void previewSlotColors(int slot, bool showVoltages) {
   // NEW: Preview a slot using SlotManager - just loads into globalState
   // No state copying needed! Just track which slot to return to
-  if (slot == -1) {
-    slot = netSlot;
-  }
-  
   SlotManager& mgr = SlotManager::getInstance();
   String errorMsg;
+
+  // slot < 0 means "preview the current one". From a FILE context there is
+  // nothing to preview - you are already looking at it, and enterPreviewMode
+  // only takes numbered slots - so this is a no-op rather than a failed load.
+  if (slot < 0) {
+    if (mgr.isPathContext()) {
+      return;
+    }
+    slot = netSlot;
+  }
   
   // Enter preview mode - loads slot directly into globalState
   if (!mgr.enterPreviewMode(slot, errorMsg)) {

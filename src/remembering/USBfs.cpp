@@ -587,7 +587,14 @@ void manualRefreshFromUSB() {
     // 6. Additional memory barrier after all cache operations
     __sync_synchronize();
     
-    // 7. Validate current slot
+    // 7. Validate current slot. A file context has no legacy
+    // nodeFileSlot<n>.txt to validate (and netSlot is -2), so validation would
+    // fail and silently skip the refresh. Its state was already reloaded by
+    // the eject path above - just refresh.
+    if (SlotManager::getInstance().isPathContext()) {
+        refreshConnections(-1);
+        return;   // nothing after this in the function; core1busy already cleared above
+    }
     int validation_result = validateNodeFileSlot(netSlot, usb_debug_enabled);
     if (validation_result == 0) {
         if (usb_debug_enabled) {
@@ -727,18 +734,34 @@ void usbUnplugCallback(uint32_t cbData) {
     }
     
     // Reload active slot to pick up any external changes made during USB mode
-    extern int netSlot;
-    if (netSlot >= 0) {
-        Serial.print("◆ Reloading slot ");
-        Serial.print(netSlot);
-        Serial.println(" to pick up external changes...");
-        
+    // Reload the ACTIVE CONTEXT - by path when it's a file. The old
+    // `if (netSlot >= 0)` guard silently skipped the reload for a file
+    // context, so host edits to a project run file made over MSC were
+    // discarded on eject. This is how those edits land.
+    {
+        SlotManager& mgr = SlotManager::getInstance();
         String errorMsg;
-        if (SlotManager::getInstance().loadSlot(netSlot, errorMsg)) {
-            Serial.println("✓ Slot reloaded successfully");
-        } else {
-            Serial.print("✗ Failed to reload slot: ");
-            Serial.println(errorMsg);
+        bool reloaded = false, attempted = false;
+        if (mgr.isPathContext()) {
+            attempted = true;
+            Serial.print("◆ Reloading ");
+            Serial.print(mgr.getActiveSlotPath());
+            Serial.println(" to pick up external changes...");
+            reloaded = mgr.loadSlotFromPath(String(mgr.getActiveSlotPath()), errorMsg);
+        } else if (netSlot >= 0) {
+            attempted = true;
+            Serial.print("◆ Reloading slot ");
+            Serial.print(netSlot);
+            Serial.println(" to pick up external changes...");
+            reloaded = mgr.loadSlot(netSlot, errorMsg);
+        }
+        if (attempted) {
+            if (reloaded) {
+                Serial.println("✓ Slot reloaded successfully");
+            } else {
+                Serial.print("✗ Failed to reload slot: ");
+                Serial.println(errorMsg);
+            }
         }
     }
 }
@@ -845,8 +868,8 @@ bool disableUSBMassStorage(void) {
     if (SlotManager::getInstance().getActiveState().isDirty()) {
         Serial.println("◆ Saving pending changes...");
         String errorMsg;
-        extern int netSlot;
-        if (SlotManager::getInstance().saveSlot(netSlot, errorMsg)) {
+        // Path-aware: saveSlot(netSlot) would be saveSlot(-2) from a file context.
+        if (SlotManager::getInstance().saveActiveSlot(errorMsg)) {
             Serial.println("✓ Pending changes saved");
         } else {
             Serial.print("⚠ Warning: Could not save pending changes: ");
@@ -855,19 +878,34 @@ bool disableUSBMassStorage(void) {
     }
     
     // Reload active slot to pick up any external changes made during USB mode
-    extern int netSlot;
-    if (netSlot >= 0) {
-        Serial.print("◆ Reloading slot ");
-        Serial.print(netSlot);
-        Serial.println(" to pick up external changes...");
-        
-        // Use SlotManager to reload the current slot
+    // Reload the ACTIVE CONTEXT - by path when it's a file. The old
+    // `if (netSlot >= 0)` guard silently skipped the reload for a file
+    // context, so host edits to a project run file made over MSC were
+    // discarded on eject. This is how those edits land.
+    {
+        SlotManager& mgr = SlotManager::getInstance();
         String errorMsg;
-        if (SlotManager::getInstance().loadSlot(netSlot, errorMsg)) {
-            Serial.println("✓ Slot reloaded successfully");
-        } else {
-            Serial.print("✗ Failed to reload slot: ");
-            Serial.println(errorMsg);
+        bool reloaded = false, attempted = false;
+        if (mgr.isPathContext()) {
+            attempted = true;
+            Serial.print("◆ Reloading ");
+            Serial.print(mgr.getActiveSlotPath());
+            Serial.println(" to pick up external changes...");
+            reloaded = mgr.loadSlotFromPath(String(mgr.getActiveSlotPath()), errorMsg);
+        } else if (netSlot >= 0) {
+            attempted = true;
+            Serial.print("◆ Reloading slot ");
+            Serial.print(netSlot);
+            Serial.println(" to pick up external changes...");
+            reloaded = mgr.loadSlot(netSlot, errorMsg);
+        }
+        if (attempted) {
+            if (reloaded) {
+                Serial.println("✓ Slot reloaded successfully");
+            } else {
+                Serial.print("✗ Failed to reload slot: ");
+                Serial.println(errorMsg);
+            }
         }
     }
     
@@ -978,7 +1016,14 @@ void printUSBMassStorageStatus(void) {
     Serial.printf("│ FatFSUSB:      %-16s │\n", FatFSUSB.testUnitReady() ? "READY" : "NOT READY");
     Serial.printf("│ Debug Mode:    %-16s │\n", usb_debug_enabled ? "ENABLED" : "DISABLED");
     Serial.println("├─────────────────────────────────┤");
-    Serial.printf("│ Current Slot:  %-16d │\n", netSlot);
+    {
+        SlotManager& mgr = SlotManager::getInstance();
+        if (mgr.isPathContext()) {
+            Serial.printf("│ Current File: %-17.17s │\n", mgr.getActiveSlotPath());
+        } else {
+            Serial.printf("│ Current Slot:  %-16d │\n", netSlot);
+        }
+    }
     Serial.println("│ Manual refresh: type 'y' after  │");
     Serial.println("│ mounting to refresh connections │");
     Serial.println("╰─────────────────────────────────╯");

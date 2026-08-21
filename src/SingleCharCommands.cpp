@@ -929,7 +929,9 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
     delay( 6 );
     refreshPaths( );
     clearAllNTCC( );
-    clearNodeFile( netSlot, 0 );
+    // Clear the ACTIVE context, whatever backs it. Passing netSlot here would
+    // hand -2 to saveSlot from a file context.
+    clearActiveContext( );
     refreshConnections( -1, 1, 1 );
     digitalWrite( RESETPIN, LOW );
     target->println( "Cleared all connections" );
@@ -979,7 +981,10 @@ CommandResult cmd_loadNodeFile( char c, const String& line ) {
 
     // savePreformattedNodeFile handles parsing to RAM, marking dirty, and refresh
     // No need to call refreshConnections again - that would do the work twice!
-    savePreformattedNodeFile( serSource, netSlot, rotaryEncoderMode, line );
+    // -1, not netSlot: FileParsing's "no Slot N prefix" branch resolves -1 to
+    // the ACTIVE context and persists it path-aware. Forwarding netSlot would
+    // hand -2 down from a file context.
+    savePreformattedNodeFile( serSource, -1, rotaryEncoderMode, line );
 
     // Validation happens inside savePreformattedNodeFile via refreshLocalConnections
     // which calls the same validation logic. Don't duplicate the work here.
@@ -1041,6 +1046,11 @@ CommandResult cmd_cycleSlots( char c, const String& line ) {
             return CMD_DONT_SHOW_MENU;
         }
         netSlot = requestedSlot;
+    } else if ( netSlot == SLOT_FILE_CONTEXT ) {
+        // Bare '<' from a file context goes to slot 0 rather than trying to
+        // "increment" a sentinel. Leaving the file context is fine: the dirty
+        // pre-save in loadfile: flushes it to its own file first.
+        netSlot = 0;
     } else if ( netSlot == 7 ) {
         netSlot = 0;
     } else {
@@ -1331,7 +1341,16 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
         bool isActiveSlot = ( currentActiveSlot == slotNum );
 
         if ( isActiveSlot ) {
-            // ========== ACTIVE SLOT: Parse directly and apply to hardware ==========
+            // ========== ACTIVE CONTEXT: Parse directly and apply to hardware ==========
+            // Covers a numbered slot AND a file context: slotNum defaulted to
+            // getActiveSlot() above, so from a file context both sides of the
+            // isActiveSlot test are SLOT_FILE_CONTEXT and we land here. The
+            // only difference is that persistence and the reapply-reload go
+            // through the path instead of the number.
+            const bool intoFile = ( slotNum == SLOT_FILE_CONTEXT );
+            const String ctxPath = String( mgr.getActiveSlotPath( ) );
+            const String ctxLabel = intoFile ? ctxPath : ( "slot " + String( slotNum ) );
+
             // Only clear connections, not power settings to prevent LED flicker
             // When we avoid clearing power, the LEDs won't blink to 0V between updates
             mgr.getActiveState( ).connections.clear( );
@@ -1340,11 +1359,13 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
 
             // Parse directly into active state
             if ( parseWokwiDiagram( jsonContent, mgr.getActiveState( ), slotNum, errorMsg, fromApp ) ) {
-                if ( mgr.saveSlot( slotNum, errorMsg ) ) {
+                bool saved = intoFile ? mgr.saveActiveSlot( errorMsg )
+                                      : mgr.saveSlot( slotNum, errorMsg );
+                if ( saved ) {
                     if ( !fromApp ) {
-                        Jerial.println( "  ✓ Saved and applied to slot " + String( slotNum ) );
+                        Jerial.println( "  ✓ Saved and applied to " + ctxLabel );
                     } else if ( debugFP ) {
-                        Jerial.println( "  ✓ Saved and applied to slot " + String( slotNum ) + " (app mode)" );
+                        Jerial.println( "  ✓ Saved and applied to " + ctxLabel + " (app mode)" );
                     }
                     success = true;
 
@@ -1352,7 +1373,9 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                     if ( !fromApp || debugFP ) {
                         Jerial.println( "  ↻ Applying to hardware..." );
                     }
-                    if ( mgr.loadSlot( slotNum, errorMsg ) ) {
+                    bool applied = intoFile ? mgr.loadSlotFromPath( ctxPath, errorMsg )
+                                            : mgr.loadSlot( slotNum, errorMsg );
+                    if ( applied ) {
                         if ( !fromApp || debugFP ) {
                             Jerial.println( "  ✓ Applied to hardware" );
                         }
@@ -1707,9 +1730,19 @@ CommandResult cmd_queryActiveSlot( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
 
-    // Output in a format easy for the app to parse
+    // Output in a format easy for the app to parse.
+    //
+    // ACTIVE_SLOT is 0-7 or 99 for a numbered slot and -1 for a file context.
+    // -1, not the internal -2: -1 already means "no numbered slot" to every
+    // existing integer parser, so nothing downstream has to learn a new value.
+    //
+    // ACTIVE_PATH ALWAYS follows - numbered slots report their canonical
+    // /slots/slotN.yaml too. The path line is the new truth; the int line is
+    // back-compat. (There is deliberately no ACTIVE_CONTEXT: line.)
     target->print( "ACTIVE_SLOT:" );
-    target->println( activeSlot );
+    target->println( activeSlot == SLOT_FILE_CONTEXT ? -1 : activeSlot );
+    target->print( "ACTIVE_PATH:" );
+    target->println( mgr.getActiveSlotPath( ) );
     target->flush( );
 
     return CMD_DONT_SHOW_MENU;
@@ -3671,7 +3704,9 @@ CommandResult cmd_testStates( char c, const String& line ) {
 
             Jerial.println( "\n\r─── Current State ───" );
             Jerial.println( "Connections: " + String( state.connections.numBridges ) );
-            Jerial.println( "Active Slot: " + String( mgr.getActiveSlot( ) ) );
+            Jerial.println( mgr.isPathContext( )
+                                ? ( "Active File: " + String( mgr.getActiveSlotPath( ) ) )
+                                : ( "Active Slot: " + String( mgr.getActiveSlot( ) ) ) );
 
             if ( state.connections.numBridges > 0 ) {
                 Jerial.println( "\n\rConnections in state:" );

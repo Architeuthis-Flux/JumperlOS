@@ -4715,13 +4715,27 @@ done:
 
 int attractMode(void) {
 
+  // Entering the wheel cycle from a FILE context starts at the ends of the
+  // 0-7 ring rather than trying to ++/-- a sentinel. The file context is LEFT
+  // by wheel-cycling - its content was already auto-saved to its own file, and
+  // loadfile:'s dirty pre-save flushes anything newer. The ways back IN are
+  // the Files browser, the Projects launcher, and boot; there is deliberately
+  // no phantom "file" position in the ring this wave.
+  //
+  // NOTE: netSlot = -1 and netSlot = NUM_SLOTS below stay reserved defcon
+  // sentinels. -2 must never collide with them, which is exactly what the
+  // explicit SLOT_FILE_CONTEXT check (instead of a `< 0` test) guarantees.
   if (encoderDirectionState == DOWN) {
     // attractMode = 0;
     defconDisplay = -1;
-    netSlot++;
-    if (netSlot >= NUM_SLOTS) {
-      netSlot = -1;
-      defconDisplay = 0;
+    if (netSlot == SLOT_FILE_CONTEXT) {
+      netSlot = 0;
+    } else {
+      netSlot++;
+      if (netSlot >= NUM_SLOTS) {
+        netSlot = -1;
+        defconDisplay = 0;
+      }
     }
     // Jerial.print("netSlot = ");
     // Jerial.println(netSlot);
@@ -4733,10 +4747,14 @@ int attractMode(void) {
   } else if (encoderDirectionState == UP) {
     // attractMode = 0;
     defconDisplay = -1;
-    netSlot--;
-    if (netSlot <= -1) {
-      netSlot = NUM_SLOTS;
-      defconDisplay = 0;
+    if (netSlot == SLOT_FILE_CONTEXT) {
+      netSlot = NUM_SLOTS - 1;
+    } else {
+      netSlot--;
+      if (netSlot <= -1) {
+        netSlot = NUM_SLOTS;
+        defconDisplay = 0;
+      }
     }
     // Jerial.print("netSlot = ");
     // Jerial.println(netSlot);

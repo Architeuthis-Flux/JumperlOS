@@ -4271,7 +4271,17 @@ int doMenuAction( int menuPosition, int selection ) {
              -1 ) {
 
             if ( currentAction.from[ 0 ] >= 0 && currentAction.from[ 0 ] < NUM_SLOTS ) {
-                saveCurrentSlotToSlot( netSlot, currentAction.from[ 0 ] );
+                // Save the ACTIVE STATE to the chosen destination. This used
+                // to be saveCurrentSlotToSlot(netSlot, dest), which LOADED
+                // netSlot first and then saved it - a reload that was always
+                // redundant (the active state IS the source) and that fails
+                // outright with netSlot == -2. saveSlot(dest) also moves the
+                // context to dest, number and path together.
+                String errorMsg;
+                if ( !SlotManager::getInstance( ).saveSlot( currentAction.from[ 0 ], errorMsg ) ) {
+                    Serial.println( "Error saving to slot " +
+                                    String( currentAction.from[ 0 ] ) + ": " + errorMsg );
+                }
                 netSlot = currentAction.from[ 0 ];
             }
 

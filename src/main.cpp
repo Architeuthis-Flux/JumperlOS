@@ -1383,9 +1383,31 @@ loadfile:
         }
     }
     startupTimers[ 12 ] = millis( );
-    // Load YAML state from slot file into globalState
+    // Load YAML state from the active context into globalState. Branch on the
+    // sentinel EXACTLY - never on `< 0`: netSlot == -1 and netSlot == NUM_SLOTS
+    // are live defcon sentinels set by Graphics::attractMode, and they must
+    // keep failing through to clearActiveSlot() the way they always have.
+    //
+    // On the very first pass this is what executes the boot seed: seedBootContext()
+    // has already put either a number or (-2 + activeSlotPath) in place.
     String loadError;
-    if ( !mgr.loadSlot( netSlot, loadError ) ) {
+    bool loadOk;
+    if ( netSlot == SLOT_FILE_CONTEXT ) {
+        String ctxPath = String( mgr.getActiveSlotPath( ) );
+        loadOk = mgr.loadSlotFromPath( ctxPath, loadError );
+        if ( !loadOk ) {
+            // The boot context's file vanished or won't open. Fall back to
+            // slot 0 AND rewrite last_active.txt, so the failure doesn't
+            // recur on every boot from here on.
+            Serial.println( "Active slot file unavailable (" + ctxPath + "): " + loadError );
+            Serial.println( "Falling back to slot 0" );
+            netSlot = 0;
+            loadOk = mgr.loadSlot( 0, loadError );  // rewrites last_active via updateLastActive
+        }
+    } else {
+        loadOk = mgr.loadSlot( netSlot, loadError );
+    }
+    if ( !loadOk ) {
         if ( debugFP ) {
             Serial.print( "Warning: Failed to load slot " );
             Serial.print( netSlot );

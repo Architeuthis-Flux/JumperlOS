@@ -362,19 +362,22 @@ bool removeBridgeFromState(int node1, int node2, bool autoRefresh) {
 
 /**
  * @brief Save globalState to YAML file
- * @param slot Slot number to save to (-1 = use current netSlot)
+ * @param slot Slot number to save to (negative = the ACTIVE CONTEXT, which
+ *             may be a numbered slot OR an arbitrary file path)
  * @return true if saved successfully
+ *
+ * The -1 convention is resolved through saveActiveSlot, NOT by substituting
+ * netSlot: from a file context netSlot is SLOT_FILE_CONTEXT, and forwarding
+ * it into saveSlot would trip the saveSlot(-2) BUG guard. Any negative value
+ * is mapped defensively, so no caller can reintroduce that.
  */
 bool saveStateToSlot(int slot) {
-    if (slot == -1) {
-        slot = netSlot;
-    }
-    
     String errorMsg;
     SlotManager& mgr = SlotManager::getInstance();
-    
-    bool success = mgr.saveSlot(slot, errorMsg);
-    
+
+    bool success = (slot < 0) ? mgr.saveActiveSlot(errorMsg)
+                              : mgr.saveSlot(slot, errorMsg);
+
     if (!success) {
         Jerial.print("Failed to save state to slot ");
         Jerial.print(slot);
@@ -559,11 +562,18 @@ void inputNodeFileList(int addRotaryConnections) {
                         input.indexOf("Slot ") >= 0 || input.indexOf("slot ") >= 0);
   
   if (!hasSlotPrefix) {
-    // No "Slot X" prefix - use active slot and parse directly
+    // No "Slot X" prefix - parse directly into the ACTIVE CONTEXT, whatever
+    // backs it. The numeric assumption is gone from this branch: it always
+    // worked on mgr.getActiveState() anyway, and now persists through
+    // saveActiveSlot instead of a slot number that may be SLOT_FILE_CONTEXT.
+    SlotManager& mgrCtx = SlotManager::getInstance();
+    String ctxLabel = mgrCtx.isPathContext()
+                          ? String(mgrCtx.getActiveSlotPath())
+                          : ("slot " + String(netSlot));
     if (debugFP) {
-      Jerial.println("◆ No slot prefix found, using active slot " + String(netSlot));
+      Jerial.println("◆ No slot prefix found, using active context " + ctxLabel);
     }
-    
+
     // Find connection data between { and }
     int openBrace = input.indexOf('{');
     int closeBrace = input.indexOf('}', openBrace + 1);
@@ -580,16 +590,13 @@ void inputNodeFileList(int addRotaryConnections) {
     connections.trim();
     
     if (debugFP) {
-      Jerial.println("◆ Active slot " + String(netSlot) + " connections: " + connections);
+      Jerial.println("◆ Active context " + ctxLabel + " connections: " + connections);
     }
-    
+
     // NEVER copy JumperlessState - work directly with the singleton
     SlotManager& mgr = SlotManager::getInstance();
     String errorMsg;
-    
-    // Use the active slot
-    int slotNum = netSlot;
-    
+
     // Clear the active state and populate it directly (NO COPIES!)
     mgr.getActiveState().clear();
     
@@ -640,21 +647,22 @@ void inputNodeFileList(int addRotaryConnections) {
     // Use centralized locked connections handler instead of inline logic
     // (locked connections are re-added by infraEvaluate at the next rebuild)
     
-   // Jerial.println("◆ Active slot " + String(slotNum) + ": parsed " + String(connCount) + " connections");
-    
-    // Save and apply to active slot
-    if (mgr.saveSlot(slotNum, errorMsg)) {
-     // Jerial.println("  ✓ Saved to /slots/slot" + String(slotNum) + ".yaml");
-     // Jerial.println("  ↻ Reloading active slot to apply changes...");
-      if (mgr.loadSlot(slotNum, errorMsg)) {
-      //  Jerial.println("  ✓ Applied to hardware");
-      } else {
+   // Jerial.println("◆ Active context " + ctxLabel + ": parsed " + String(connCount) + " connections");
+
+    // Save and apply to the active context - path-aware on both halves.
+    bool wasPathCtx = mgr.isPathContext();
+    String ctxPath = String(mgr.getActiveSlotPath());
+    int ctxSlot = mgr.getActiveSlot();
+    if (mgr.saveActiveSlot(errorMsg)) {
+      bool applied = wasPathCtx ? mgr.loadSlotFromPath(ctxPath, errorMsg)
+                                : mgr.loadSlot(ctxSlot, errorMsg);
+      if (!applied) {
         Jerial.println("  ✗ Failed to apply: " + errorMsg);
       }
     } else {
       Jerial.println("  ✗ Failed to save: " + errorMsg);
     }
-    
+
     return;
   }
   
@@ -714,8 +722,19 @@ void inputNodeFileList(int addRotaryConnections) {
     String errorMsg;
     
     // Remember which slot was active
+    // Save/restore the active CONTEXT as a (number, path) pair - the saved
+    // context may be a file, and loadSlot(-2) can't bring it back.
     int savedActiveSlot = mgr.getActiveSlot();
+    String savedActivePath = String(mgr.getActiveSlotPath());
     bool needToRestore = (savedActiveSlot != slotNum);
+    auto restoreSavedCtx = [&]() {
+      String e;
+      if (savedActiveSlot == SLOT_FILE_CONTEXT && savedActivePath.length() > 0) {
+        mgr.loadSlotFromPath(savedActivePath, e);
+      } else if (savedActiveSlot >= 0) {
+        mgr.loadSlot(savedActiveSlot, e);
+      }
+    };
     
     // Clear the active state and populate it directly (NO COPIES!)
     mgr.getActiveState().clear();
@@ -780,10 +799,10 @@ void inputNodeFileList(int addRotaryConnections) {
       Jerial.println("  ✓ Saved to /slots/slot" + String(slotNum) + ".yaml");
       slotsProcessed++;
       
-      // If we modified a non-active slot, reload the original active slot
+      // If we modified a non-active slot, reload the original active context
       if (needToRestore) {
-        // Reload the original active slot to restore hardware state
-        mgr.loadSlot(savedActiveSlot, errorMsg);
+        // Reload the original active context to restore hardware state
+        restoreSavedCtx();
       } else {
         // We just saved the active slot, reload it to apply changes
         Jerial.println("  ↻ Reloading active slot to apply changes...");
@@ -795,12 +814,12 @@ void inputNodeFileList(int addRotaryConnections) {
       }
     } else {
       Jerial.println("  ✗ Failed to save: " + errorMsg);
-      // Restore the original slot on failure
+      // Restore the original context on failure
       if (needToRestore) {
-        mgr.loadSlot(savedActiveSlot, errorMsg);
+        restoreSavedCtx();
       }
     }
-    
+
     // Move to next slot
     startIdx = closeBrace + 1;
   }
@@ -1249,16 +1268,42 @@ void printNodeFile(int slot, int printOrString, int flashOrLocal,
 }
 
 
+// Clear the ACTIVE context's connections and persist to whatever backs it -
+// a numbered slot file or an arbitrary path. Deliberately scoped to
+// connections only, like clearNodeFile: `x` must not reset power and drop the
+// user's rails to 0 V.
+void clearActiveContext(void) {
+  globalState.clearAllConnections();
+  String errorMsg;
+  SlotManager& mgr = SlotManager::getInstance();
+  if (!mgr.saveActiveSlot(errorMsg)) {
+    if (debugFP) {
+      Jerial.println("◇ clearActiveContext: save failed: " + errorMsg);
+    }
+  }
+}
+
 void clearNodeFile(int slot, int flashOrLocal) {
   // MIGRATED: Now uses globalState and SlotManager
-  
+
+  // A negative slot means "the active context" - which may be a file, not a
+  // number. Delegate rather than handing -1/-2 to saveSlot.
+  if (slot < 0) {
+    if (flashOrLocal == 0) {
+      clearActiveContext();
+    } else {
+      globalState.clearAllConnections();
+    }
+    return;
+  }
+
   // Clear all connections in globalState
   globalState.clearAllConnections();
-  
+
   // (Locked connections are infra functions now - re-added by
   // infraEvaluate() at the next rebuild; this inline clone is gone.)
   String errorMsg;
-  
+
   if (flashOrLocal == 0) {
     // Save the cleared state to the slot
     SlotManager& mgr = SlotManager::getInstance();
@@ -1950,7 +1995,17 @@ void readStringFromSerial(int source, int addRemove) {
     }
 
   } while (finished == 0);
-  printNodeFile(netSlot, 0, 0, 0, true, &Jerial);
+  // flashOrLocal == 0 makes printNodeFile open the LEGACY "nodeFileSlot<n>.txt",
+  // which no longer exists for any slot - this call has been a no-op for every
+  // context since the YAML migration, numbered or not. Keep it a no-op rather
+  // than letting a file context build "nodeFileSlot-2.txt": pass the active
+  // number when there is one, and skip entirely when there isn't.
+  {
+    SlotManager& mgr = SlotManager::getInstance();
+    if (!mgr.isPathContext()) {
+      printNodeFile(mgr.getActiveSlot(), 0, 0, 0, true, &Jerial);
+    }
+  }
 }
 
 int parseStringToNode(int source) { return 0; }

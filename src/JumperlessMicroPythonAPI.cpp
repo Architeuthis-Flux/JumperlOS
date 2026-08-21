@@ -168,6 +168,7 @@ extern Stream* mp_interrupt_check_stream;
 
 PythonConnectionContext connectionContext = PYTHON_CONTEXT_GLOBAL; // Default to global mode
 static int pythonEntrySlot = -1;                                   // Track which slot was active when entering Python
+static char pythonEntryPath[128] = "";                             // ...and its path (pythonEntrySlot may be SLOT_FILE_CONTEXT)
 
 // C-compatible wrapper functions for MicroPython
 extern "C" {
@@ -1412,14 +1413,22 @@ int jl_nodes_is_connected( int node1, int node2 ) {
 }
 
 int jl_nodes_save( int slot ) {
-    int target_slot = ( slot == -1 ) ? netSlot : slot; // Use current slot if -1
+    // -1 means "the ACTIVE CONTEXT". Resolve that through saveStateToSlot's
+    // negative convention (which dispatches to saveActiveSlot) rather than by
+    // substituting netSlot - from a file context netSlot is SLOT_FILE_CONTEXT
+    // and forwarding it would trip the saveSlot(-2) BUG guard.
+    SlotManager& saveMgr = SlotManager::getInstance( );
+    const bool toActive = ( slot < 0 );
+    // Reported back to Python: the real slot number for a numbered context,
+    // -2 for "saved to the active file" (documented in the API).
+    int target_slot = toActive ? saveMgr.getActiveSlot( ) : slot;
 
     // Hold core-1 frames while saving to prevent race conditions
     holdCore1Frames( );
     delayMicroseconds( 50 );
 
     // Save globalState to YAML
-    saveStateToSlot( target_slot );
+    saveStateToSlot( toActive ? -1 : slot );
 
     // Release BEFORE refreshConnections since it internally calls waitCore2
     releaseCore1Frames( );
@@ -1431,8 +1440,13 @@ int jl_nodes_save( int slot ) {
 }
 
 void jl_init_micropython_local_copy( void ) {
-    // Store which slot was active when entering Python
+    // Store which CONTEXT was active when entering Python - number AND path.
+    // pythonEntrySlot may be SLOT_FILE_CONTEXT (a script launched from a
+    // project run file), and restoring by number alone can't get back there.
     pythonEntrySlot = netSlot;
+    strncpy( pythonEntryPath, SlotManager::getInstance( ).getActiveSlotPath( ),
+             sizeof( pythonEntryPath ) - 1 );
+    pythonEntryPath[ sizeof( pythonEntryPath ) - 1 ] = '\0';
 
     if ( connectionContext == PYTHON_CONTEXT_ISOLATED ) {
         // ISOLATED MODE: Save current state to backup and switch to Python slot
@@ -1592,14 +1606,27 @@ void jl_exit_micropython_restore_entry_state( void ) {
         // Save current Python state to Python slot
         mgr.saveSlot( PYTHON_SLOT_NUMBER, errorMsg );
 
-        // Restore the entry state (discards Python changes from global state)
-        restoreAndSaveStateBackup( );
-
-        // Restore the original slot number
-        if ( pythonEntrySlot >= 0 && pythonEntrySlot < NUM_SLOTS ) {
+        // Restore the ENTRY CONTEXT'S TRACKING FIRST, then restore the state.
+        // Ordering bug fixed here: restoreAndSaveStateBackup() ends in a save
+        // of the active context, and the active context was still slot 99 at
+        // this point - so the restored ENTRY state was written straight over
+        // slotPython.yaml, silently undoing the save two lines above. Moving
+        // the tracking restore ahead of it makes that save land on the entry
+        // context (where the same content already lives), which is what the
+        // "restore the entry state" intent always meant.
+        //
+        // The old guard `>= 0 && < NUM_SLOTS` also excluded SLOT_FILE_CONTEXT,
+        // so a script entered from a run file never restored its context at all.
+        if ( pythonEntrySlot == SLOT_FILE_CONTEXT && pythonEntryPath[ 0 ] != '\0' ) {
+            netSlot = SLOT_FILE_CONTEXT;
+            mgr.loadSlotFromPath( String( pythonEntryPath ), errorMsg );
+        } else if ( pythonEntrySlot >= 0 && pythonEntrySlot < NUM_SLOTS ) {
             netSlot = pythonEntrySlot;
             mgr.setActiveSlot( pythonEntrySlot );
         }
+
+        // Restore the entry state (discards Python changes from global state)
+        restoreAndSaveStateBackup( );
     } else {
         // GLOBAL MODE: Changes persist, just clear the backup
         clearStateBackup( );
@@ -3596,6 +3623,11 @@ int jl_set_state(const char* jsonState, int clearFirst, int fromWokwi) {
             safeFileClose(f, false);
         }
 
+        // May be SLOT_FILE_CONTEXT. parseWokwiDiagram only carries the number
+        // for its messages - it parses into the state object it is handed and
+        // never saves - and persistence here is the SlotManager idle auto-save,
+        // which is path-aware (service() -> saveActiveSlot). So a file context
+        // needs no special case: the diagram lands in the active file.
         int activeSlot = SlotManager::getInstance().getActiveSlot();
         bool success = parseWokwiDiagram(json, globalState, activeSlot, errorMsg);
 

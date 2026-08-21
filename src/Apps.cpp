@@ -410,8 +410,10 @@ void calibrateProbeSwitchThresholds( void ) {
     Serial.println( "This will automatically set the switch position detection thresholds\n\r" );
     Serial.println( "(any serial key aborts without saving)\n\r" );
 
-    int tempSlot = 8;
-    netSlot = tempSlot;
+    // (No manual `netSlot = 8` here: enterTemporarySlot sets netSlot,
+    // activeSlotNumber AND activeSlotPath together. Assigning netSlot first
+    // used to be harmless; with the path companion it would desync the pair
+    // for the instant before enterTemporarySlot ran.)
     SlotManager::getInstance( ).enterTemporarySlot( 8 );  // Save current slot, switch to temp slot 8
     refreshConnections( -1, 0 );
     // routableBufferPower( 1, 1, 1 );

@@ -184,7 +184,21 @@ uint32_t g_globalTxnId = 0;
 // "live, no redo pending"; less than head (in ring sense) means the
 // slot has been undone and can redo. Initialized to g_txnHead (== 0)
 // for every slot at boot - no slot has any history yet.
-size_t g_slotCursor[NUM_SLOTS] = {0};
+//
+// NUM_SLOTS+1 buckets: index NUM_SLOTS (8) is the SHARED FILE-CONTEXT bucket.
+// Every path context (every project run file, every arbitrary slot YAML) uses
+// that one bucket rather than a per-file ring - undo is a within-session tool,
+// and per-file rings would multiply the ring's memory by the number of files
+// on flash. Before this, an out-of-range netSlot was simply ignored by
+// slotSwapIfNeeded, so a file context kept the PREVIOUS numbered slot's ring
+// active and tagged its new records with that slot's number.
+//
+// SESSION-ONLY: bucket-8 transactions are never written to /undo.hist (see
+// undoSerialize / undoHasPersistableTxns). The restore path clamps any
+// slot >= NUM_SLOTS to 0, so persisted file-context txns would replay into
+// slot 0's history on older firmware.
+static constexpr int UNDO_FILE_BUCKET = NUM_SLOTS;
+size_t g_slotCursor[NUM_SLOTS + 1] = {0};
 
 // Active slot for the open transaction (and for the auto-detect path).
 // -1 means undo isn't initialized; otherwise tracks netSlot.
@@ -1050,12 +1064,26 @@ void undoRebuildLabel(UndoTxn& t) {
 // Are there any committed, non-obsolete txns we'd want to persist? Used by
 // the persist path to tell "nothing to save" (delete the stale file) apart
 // from "serialize produced 0 bytes despite live history" (keep the old file).
+// FILE-CONTEXT UNDO IS SESSION-ONLY. Transactions tagged with the shared file
+// bucket are never written to /undo.hist: undoDeserialize clamps any
+// slot >= NUM_SLOTS to 0, so a persisted file-context txn would replay into
+// slot 0's history (on this firmware and, worse, on older firmware). This
+// predicate has to agree with undoSerialize's selection loop below - if only
+// one of them skipped the bucket you would get either persisted -2 txns or a
+// permanent dirty-retry loop when bucket-8 history is all that exists.
+static inline bool undoTxnIsPersistable(const UndoTxn& t) {
+    if (t.opCount == 0) return false;
+    if (t.flags & UNDO_TXN_OBSOLETE) return false;
+    if (t.slot == (uint8_t)UNDO_FILE_BUCKET) return false;
+    return true;
+}
+
 bool undoHasPersistableTxns(void) {
     if (!g_ops || !g_txns) return false;
     size_t pos = g_txnTail;
     while (pos != g_txnHead) {
         const UndoTxn& t = g_txns[pos];
-        if (t.opCount != 0 && !(t.flags & UNDO_TXN_OBSOLETE)) return true;
+        if (undoTxnIsPersistable(t)) return true;
         pos = (pos + 1) % g_txnCap;
     }
     return false;
@@ -1089,7 +1117,7 @@ size_t undoSerialize(uint8_t* buf, size_t cap) {
         while (pos != g_txnTail && nKept < maxTxns) {
             pos = (pos + g_txnCap - 1) % g_txnCap;
             const UndoTxn& t = g_txns[pos];
-            if (t.opCount != 0 && !(t.flags & UNDO_TXN_OBSOLETE)) {
+            if (undoTxnIsPersistable(t)) {
                 // Measure this txn's text (header + op lines, no blob bodies).
                 TextWriter mw{nullptr, 0, 0, false};
                 undoEmitTxnHeader(mw, t);
@@ -1440,6 +1468,10 @@ bool undoDeserialize(const uint8_t* buf, size_t len) {
     }
 
     // Cursors are linear txn indices; with tail==0 that's also the ring index.
+    // The FILE bucket is not in the file (its txns are never persisted), so it
+    // starts live at head - anything else would leave it pointing into another
+    // slot's restored history.
+    g_slotCursor[UNDO_FILE_BUCKET] = g_txnHead;
     for (int s = 0; s < NUM_SLOTS; s++) {
         if (s < fileNumSlots) {
             uint32_t v = fileCursors[s];
@@ -1537,19 +1569,30 @@ namespace {
 // when the txn opened, so closing here lands the ops under the correct
 // (old) slot tag before we flip g_activeSlot to the new one.
 void slotSwap(int slot) {
-    if (slot < 0 || slot >= NUM_SLOTS) return;
+    if (slot < 0 || slot > UNDO_FILE_BUCKET) return;
     if (g_activeSlot == slot) return;
     if (g_inTxn) undoEndTxn();
     g_activeSlot = slot;
+}
+
+// Map a global netSlot value to a cursor bucket. ONLY SLOT_FILE_CONTEXT maps
+// to the shared file bucket; netSlot == 8 (the apps' temporary slot) keeps its
+// existing "ignored, out of range" behavior, and the defcon sentinels
+// (-1 / NUM_SLOTS) are ignored as before.
+inline int undoBucketForNetSlot(int slot) {
+    if (slot == SLOT_FILE_CONTEXT) return UNDO_FILE_BUCKET;
+    if (slot < 0 || slot >= NUM_SLOTS) return -1;
+    return slot;
 }
 
 // Auto-detect: if `netSlot` differs from g_activeSlot, swap. Called at
 // the top of every public API entry point.
 inline void slotSwapIfNeeded() {
     if (g_activeSlot < 0) return;  // not initialized
-    if (netSlot == g_activeSlot) return;
-    if (netSlot < 0 || netSlot >= NUM_SLOTS) return;
-    slotSwap(netSlot);
+    int bucket = undoBucketForNetSlot(netSlot);
+    if (bucket < 0) return;
+    if (bucket == g_activeSlot) return;
+    slotSwap(bucket);
 }
 
 }  // namespace
@@ -1646,12 +1689,16 @@ void undoInit(void) {
 
     g_opHead = g_opTail = 0;
     g_txnHead = g_txnTail = 0;
-    for (int i = 0; i < NUM_SLOTS; i++) g_slotCursor[i] = 0;
+    for (int i = 0; i <= UNDO_FILE_BUCKET; i++) g_slotCursor[i] = 0;
     g_blobUsed = 0;
     g_globalTxnId = 0;
     g_inTxn = false;
 
-    g_activeSlot = (netSlot >= 0 && netSlot < NUM_SLOTS) ? netSlot : 0;
+    {
+        // Boot may already be sitting in a file context (boot-last-active).
+        int bucket = undoBucketForNetSlot(netSlot);
+        g_activeSlot = (bucket >= 0) ? bucket : 0;
+    }
 
     Serial.printf("[Undo] init: %u ops + %u txns + %u KB blob shared across %d slots (%s, active=%d)\n",
         (unsigned)g_opCap, (unsigned)g_txnCap, (unsigned)(g_blobCap / 1024),
@@ -1680,7 +1727,7 @@ void undoInit(void) {
         char summary[200];
         size_t off = 0;
         summary[0] = '\0';
-        for (int s = 0; s < NUM_SLOTS; s++) {
+        for (int s = 0; s <= UNDO_FILE_BUCKET; s++) {
             size_t reach = 0, undoable = 0;
             bool pastCursor = (g_slotCursor[s] == g_txnTail);
             size_t pos = g_txnTail;
@@ -1809,7 +1856,7 @@ void undoWipeHistory(void) {
     // Empty the shared ring + per-slot cursors.
     g_opHead = g_opTail = 0;
     g_txnHead = g_txnTail = 0;
-    for (int s = 0; s < NUM_SLOTS; s++) g_slotCursor[s] = 0;
+    for (int s = 0; s <= UNDO_FILE_BUCKET; s++) g_slotCursor[s] = 0;
     g_globalTxnId = 0;
     g_blobUsed = 0;
     g_waypointsDirty = true;
@@ -1885,8 +1932,11 @@ bool undoRestore(void) {
 
 void undoOnSlotSwitch(int newSlot) {
     if (g_activeSlot < 0) return;
-    if (newSlot < 0 || newSlot >= NUM_SLOTS) return;
-    slotSwap(newSlot);
+    // Same mapping the auto-detect uses: SLOT_FILE_CONTEXT -> the shared file
+    // bucket, 0..NUM_SLOTS-1 -> themselves, everything else ignored.
+    int bucket = undoBucketForNetSlot(newSlot);
+    if (bucket < 0) return;
+    slotSwap(bucket);
 }
 
 void undoBeginIngest(void) {
@@ -1946,7 +1996,7 @@ void undoBeginTxn(const char* label, UndoSource source) {
         size_t evicting = g_txnTail;
         g_opTail = opEndOfTxn(g_txnTail);
         g_txnTail = txnRingNext(g_txnTail);
-        for (int s = 0; s < NUM_SLOTS; s++) {
+        for (int s = 0; s <= UNDO_FILE_BUCKET; s++) {
             if (g_slotCursor[s] == evicting) g_slotCursor[s] = g_txnTail;
         }
         g_waypointsDirty = true;
@@ -2037,7 +2087,7 @@ static void appendOp(const UndoOp& op) {
             size_t evicting = g_txnTail;
             g_opTail = opEndOfTxn(g_txnTail);
             g_txnTail = txnRingNext(g_txnTail);
-            for (int s = 0; s < NUM_SLOTS; s++) {
+            for (int s = 0; s <= UNDO_FILE_BUCKET; s++) {
                 if (g_slotCursor[s] == evicting) g_slotCursor[s] = g_txnTail;
             }
             g_waypointsDirty = true;
@@ -2728,12 +2778,13 @@ void undoDumpStatus(void) {
     // Per-slot summary - shared ring, just counts how many txns each
     // slot owns and where its cursor sits.
     Serial.println("        per-slot summary:");
-    for (int i = 0; i < NUM_SLOTS; i++) {
+    for (int i = 0; i <= UNDO_FILE_BUCKET; i++) {
         int slotTotal = countSlotTxns(i);
         if (slotTotal == 0 && i != g_activeSlot) continue;
         int slotUndone = countSlotUndone(i, g_slotCursor[i]);
-        Serial.printf("          slot %d%s  txns %d  cursor %d\n",
-            i, (i == g_activeSlot) ? " *" : "  ",
+        Serial.printf("          %-7s%s  txns %d  cursor %d\n",
+            (i == UNDO_FILE_BUCKET) ? "file" : (String("slot ") + String(i)).c_str(),
+            (i == g_activeSlot) ? " *" : "  ",
             slotTotal, -slotUndone);
     }
 }

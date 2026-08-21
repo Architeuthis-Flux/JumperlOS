@@ -767,37 +767,59 @@ bool parseWokwiDiagramFromFile(const String& filename, int slotNum, String& erro
     
     // NEVER copy JumperlessState - work directly with the singleton
     SlotManager& mgr = SlotManager::getInstance();
-    
-    // Remember which slot was active
+
+    // Remember which CONTEXT was active - number AND path. savedActiveSlot may
+    // be SLOT_FILE_CONTEXT (a project run file was active when `W <file>` ran),
+    // and loadSlot(-2) can't restore that; the path can. Same companion
+    // treatment as printSlotInfo's dance.
     int savedActiveSlot = mgr.getActiveSlot();
+    String savedActivePath = String(mgr.getActiveSlotPath());
     bool needToRestore = (savedActiveSlot != slotNum);
-    
+    auto restoreSaved = [&]() {
+        String e;
+        if (savedActiveSlot == SLOT_FILE_CONTEXT && savedActivePath.length() > 0) {
+            mgr.loadSlotFromPath(savedActivePath, e);
+        } else if (savedActiveSlot >= 0) {
+            mgr.loadSlot(savedActiveSlot, e);
+        }
+    };
+
+    // The target may itself be "the active context" when the caller defaulted
+    // to it (SingleCharCommands' `W <file>` with no slot argument).
+    const bool intoFile = (slotNum == SLOT_FILE_CONTEXT);
+    const String targetLabel = intoFile ? savedActivePath : ("slot " + String(slotNum));
+
     // Clear the active state and parse directly into it (NO COPIES!)
     mgr.getActiveState().clear();
-    mgr.setActiveSlot(slotNum);
-    
+    if (!intoFile) {
+        mgr.setActiveSlot(slotNum);   // setActiveSlot(-2) would be meaningless
+    }
+
     // Parse directly into the active state (no temp object!)
     if (!parseWokwiDiagram(jsonContent, mgr.getActiveState(), slotNum, errorMsg)) {
-        // Restore original slot on parse failure
+        // Restore original context on parse failure
         if (needToRestore) {
-            mgr.loadSlot(savedActiveSlot, errorMsg);
+            restoreSaved();
         }
         return false;
     }
-    
+
     // Save it
     bool success = false;
-    if (mgr.saveSlot(slotNum, errorMsg)) {
-        Serial.println("  ✓ Saved Wokwi diagram to slot " + String(slotNum));
+    bool saved = intoFile ? mgr.saveActiveSlot(errorMsg) : mgr.saveSlot(slotNum, errorMsg);
+    if (saved) {
+        Serial.println("  ✓ Saved Wokwi diagram to " + targetLabel);
         success = true;
-        
-        // If we modified a non-active slot, reload the original active slot
+
+        // If we modified a non-active slot, reload the original active context
         if (needToRestore) {
-            mgr.loadSlot(savedActiveSlot, errorMsg);
+            restoreSaved();
         } else {
-            // We just saved the active slot, reload it to apply changes
+            // We just saved the active context, reload it to apply changes
             Serial.println("  ↻ Reloading active slot to apply changes...");
-            if (mgr.loadSlot(slotNum, errorMsg)) {
+            bool applied = intoFile ? mgr.loadSlotFromPath(savedActivePath, errorMsg)
+                                    : mgr.loadSlot(slotNum, errorMsg);
+            if (applied) {
                 Serial.println("  ✓ Applied to hardware");
             } else {
                 Serial.println("  ✗ Failed to apply: " + errorMsg);
@@ -805,12 +827,12 @@ bool parseWokwiDiagramFromFile(const String& filename, int slotNum, String& erro
         }
     } else {
         Serial.println("  ✗ Failed to save: " + errorMsg);
-        // Restore the original slot on failure
+        // Restore the original context on failure
         if (needToRestore) {
-            mgr.loadSlot(savedActiveSlot, errorMsg);
+            restoreSaved();
         }
     }
-    
+
     return success;
 }
 
