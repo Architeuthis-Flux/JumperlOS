@@ -254,6 +254,21 @@ static void guideIdentifyRow(int row) {
 static const char* GUIDE_OVERLAY_FP  = "_GUIDE_FP_";
 static const char* GUIDE_OVERLAY_TGT = "_GUIDE_TGT_";
 
+// One warning per session when addOverlay refuses (-1: the destination
+// project already fills the 8 overlay slots) - without it the guide just
+// silently paints no LEDs and a bench user has no idea why. Reset by
+// guideSessionBegin (which runs on BOTH targets, so the flag itself lives
+// outside the V5 guard below). The TGT overlay rewrites at ~2 Hz, hence
+// once, not per-call.
+static bool guideOverlayAddWarned = false;
+
+// LED overlay painting is V5-only: the OG has one LED per breadboard row and
+// no overlay fabric, so every call site below is already inside a
+// `#if defined(OG_JUMPERLESS) return;` early-out. Guarding the whole BLOCK
+// and not just the call sites is what keeps guideOverlayScratch - 300 x 4 B
+// = 1.2 KB - out of the OG's ~50 KB of total free SRAM.
+#if !defined(OG_JUMPERLESS)
+
 // Dim class colors + pin-1 marker (DESIGN §4.1).
 static const uint32_t GUIDE_COLOR_POWER  = 0x1A0000;
 static const uint32_t GUIDE_COLOR_GND    = 0x001A02;
@@ -295,14 +310,6 @@ static void guidePaintNode(uint32_t* buf300, int node, uint32_t color) {
 // Scratch overlay buffer (300 x 4 B): static, single-threaded modal use.
 static uint32_t guideOverlayScratch[MAX_OVERLAY_PIXELS];
 
-// One warning per session when addOverlay refuses (-1: the destination
-// project already fills the 8 overlay slots) - without it the guide just
-// silently paints no LEDs and a bench user has no idea why. Reset by
-// guideSessionBegin. The TGT overlay rewrites at ~2 Hz, hence once, not
-// per-call.
-static bool guideOverlayAddWarned = false;
-
-#if !defined(OG_JUMPERLESS)   // call sites compile out on OG (no overlays)
 static void guideAddOverlayWarned(const char* name) {
     if (graphicOverlayState.addOverlay(name, 1, 1, 30, 10, guideOverlayScratch) < 0 &&
         !guideOverlayAddWarned) {
@@ -311,7 +318,8 @@ static void guideAddOverlayWarned(const char* name) {
                        " slots are full; OLED/terminal guidance continues)");
     }
 }
-#endif
+
+#endif // !OG_JUMPERLESS (overlay painting block)
 
 // _GUIDE_FP_: dim outlines of every PLACED part (rebuilt whole on commit /
 // back). Persistent for the whole guide; never serialized (reserved-name

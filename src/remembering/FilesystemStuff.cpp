@@ -1281,12 +1281,13 @@ void FileManager::selectCurrentFile( ) {
             // slot-load path as slot*.yaml - a project wiring file IS a slot
             // YAML (v2 plus the contained meta:/parts:/guide: sections). They
             // are deliberately NOT named slot*.yaml: extractSlotNumberFromPath()
-            // (States.cpp:2873) matches any basename starting "slot" and ending
-            // ".yaml", so "slot_555.yaml" would toInt() to 0 and repoint
+            // (States.cpp, ~:2873) matches any basename starting "slot" and
+            // ending ".yaml", so "slot_555.yaml" would toInt() to 0 and repoint
             // activeSlotNumber/netSlot at slot 0 - the idle auto-save would then
             // write the project over the user's /slots/slot0.yaml. With
-            // "wiring.yaml" it returns -1 (:2877) and loadSlotFromPath leaves
-            // slot tracking alone (:3080, guarded on `slotNum >= 0`).
+            // "wiring.yaml" its `startsWith("slot")` test returns -1 and
+            // loadSlotFromPath's `if (slotNum >= 0)` guard leaves slot tracking
+            // alone. (Line numbers rot; the two symbol names don't - grep those.)
             String err;
             if ( SlotManager::getInstance( ).loadSlotFromPath( fullPath, err ) ) {
                 outputToArea( "Loaded slot: " + file->name, FileColors::STATUS );

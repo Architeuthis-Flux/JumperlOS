@@ -272,8 +272,16 @@ struct ConfigState {
 // parseNodeName(), the exact helper `bridges:` parsing uses. `class:` is
 // signal|power|gnd|nc (default signal). Unknown keys inside a part entry are
 // skipped without error; malformed part entries are skipped with a warning,
-// like bridges. Pin and part names must not be reserved section keywords
-// ("overlays" especially - the overlays pass strstr-scans the whole file).
+// like bridges. A pin name may not begin with '-' or '#': pin names are
+// emitted UNQUOTED as `      <NAME>: {...}`, so "- X" would reload as a
+// parts-LIST entry (every following pin misattributed to a phantom part) and
+// "#X" as a comment. parsePinEntry refuses it on every path (YAML and
+// place_part alike, with a parse warning); jl_place_part carries a matched
+// second copy so the two predicates cannot drift.
+// (Section-keyword names like `overlays` used to be dangerous too, because
+// the overlays pass strstr-scanned the whole file; it now matches only an
+// UN-INDENTED `overlays:` line and stops at the next un-indented header, so
+// a part/pin/value carrying the word is harmless.)
 //
 // guideProgress round-trips as ONE top-level flow-map line - the only shape
 // parsed and the only shape emitted (keep serializer and parser matched):
@@ -281,6 +289,17 @@ struct ConfigState {
 // Emitted only while guideSource is non-empty. `meta:` and `guide:` sections
 // are swallowed on parse and NOT round-tripped - the launcher and the guide
 // runtime re-read the project file themselves.
+//
+// `guide:` FORMAT NOTES (parsed by guiding/GuidedFlow.cpp, documented in
+// CodeDocs/DESIGN_GUIDED_PLACEMENT.md §2/§5 - listed here because this is
+// the file the section shares):
+//   - a rail_sane step with an explicit `target:` is checked as VCC-class,
+//     i.e. "within 0.2 V of the top rail". The format cannot say which class
+//     a single named row is, so one band has to be the default and VCC is
+//     the useful one; GND-class rows are what the classless form finds by
+//     itself from the parts' own `class: gnd` pins. For an explicit "this
+//     row should be at 0 V" check, use `check: voltage` with
+//     min: -0.15 / max: 0.15.
 //
 // fromYAML INDENT-HARDENING: top-level section headers are recognized on
 // UN-indented lines only (the serializer never indents them), so a nested

@@ -1267,11 +1267,14 @@ bool JumperlessState::toYAML(String& output, int showANSI) const {
     // Config section
     serializeConfig(output);
 
-    // Parts section - MUST stay before overlays: deserializeOverlaysFromYAML
-    // strstr-scans forward from "overlays:" with no section-end bound, so any
-    // parts entries emitted after it would be eaten as garbage overlays. Also
-    // load-bearing for persistence: toYAML is a wholesale rewrite - a section
-    // not emitted here is destroyed by the SlotManager idle auto-save.
+    // Parts section. The old "MUST stay before overlays:" note is retired:
+    // deserializeOverlaysFromYAML used to strstr forward from the FIRST
+    // "overlays:" substring anywhere with no section-end bound, so parts
+    // emitted after it were eaten as garbage overlays. It now anchors on an
+    // un-indented `overlays:` line and stops at the next un-indented header,
+    // so the two sections are order-independent. Still load-bearing for
+    // persistence, though: toYAML is a wholesale rewrite - a section not
+    // emitted here is destroyed by the SlotManager idle auto-save.
     serializeParts(*this, output);
 
     // Graphic overlays section

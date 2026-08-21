@@ -1861,12 +1861,24 @@ int jl_place_part( const char* name, int row, const char* pins_json,
 
     // Pin names are emitted UNQUOTED as `      <NAME>: {...}`. A ':' is
     // already impossible (parseInlinePins cuts the name at the first colon),
-    // but a control character or a leading '#' still corrupts the section on
-    // reload - '#' makes the whole line a comment and the pin vanishes.
+    // but a control character or a leading '#' / '-' still corrupts the
+    // section on reload:
+    //   '#' makes the whole line a comment and the pin vanishes;
+    //   '-' is the parts LIST marker - a pin named "- X" serializes as
+    //       `      - X: {...}`, which deserializeParts' `startsWith("- ")`
+    //       test reads as a NEW part entry, so every pin after it is
+    //       misattributed to a phantom part. Same data-corruption class as
+    //       the '#' case, one character away.
+    // parsePinEntry (PartPlacement.cpp) applies the SAME leading-char rule
+    // and runs first on this path - parsePartPinsSpec above already dropped
+    // such a pin, and a part left with no pins returns -1 up there. This
+    // loop is the deliberate second copy: the two predicates must stay in
+    // step (the same rule this function's commitPart-parity note states),
+    // and it also covers any pin that reaches p.pins by another route.
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
         if ( !partStringSafe( p.pins[ j ].name, "pin name" ) ) return -1;
-        if ( p.pins[ j ].name[ 0 ] == '#' ) {
-            Serial.println( "place_part: a pin name may not start with '#'" );
+        if ( p.pins[ j ].name[ 0 ] == '#' || p.pins[ j ].name[ 0 ] == '-' ) {
+            Serial.println( "place_part: a pin name may not start with '#' or '-'" );
             return -1;
         }
     }
@@ -2010,6 +2022,32 @@ int jl_get_num_parts( void ) {
 // footprint is the "dip8"/"sip2" spelling serializeParts emits, node is the
 // resolved board node (-1 when the leg would leave the board) and connect is
 // -1 when the leg only occupies a hole. Empty string for a bad index.
+// The record this builds is split by literal delimiters on the MicroPython
+// side (jl_rec_field in modules/jumperless/modjumperless.c: '|' between the
+// part fields, ';' between pin records, ',' inside one). None of those can
+// appear IN a user string or list_parts() silently misaligns - every field
+// after the stray byte shifts by one and a part comes back wearing another
+// field's value. The strings that reach here are not all API-guarded: a part
+// loaded from a hand-written slot YAML never passed partStringSafe.
+//
+// SUBSTITUTE rather than escape: the reader is a hand-rolled splitter with no
+// un-escaping pass (there is no CSV/JSON library on board), so an escape
+// would just move the problem. The cost is that a name containing a
+// delimiter comes back through list_parts() with '_' in its place and no
+// longer string-matches the stored part - visible, not silent, and only for
+// names the format never intended.
+static const char* partRecordSafe( const char* s, char* out, size_t outLen ) {
+    size_t i = 0;
+    if ( s != nullptr ) {
+        for ( ; s[ i ] != '\0' && i + 1 < outLen; i++ ) {
+            char c = s[ i ];
+            out[ i ] = ( c == '|' || c == ';' || c == ',' ) ? '_' : c;
+        }
+    }
+    out[ i ] = '\0';
+    return out;
+}
+
 const char* jl_get_part_info( int idx ) {
 #if defined( OG_JUMPERLESS )
     static char partBuffer[ 640 ]; // RP2040: scarce SRAM, MAX_PART_PINS is 16
@@ -2022,17 +2060,25 @@ const char* jl_get_part_info( int idx ) {
         return partBuffer;
     }
 
+    // Sized for the longest field this can hold (PartDefinition::name[16]).
+    char safeName[ 16 ], safeType[ 16 ], safeValue[ 16 ];
     const PartDefinition& p = globalState.parts.parts[ idx ];
     int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|",
-                        p.name, p.typeStr, p.value, (int)p.baseRow,
+                        partRecordSafe( p.name, safeName, sizeof( safeName ) ),
+                        partRecordSafe( p.typeStr, safeType, sizeof( safeType ) ),
+                        partRecordSafe( p.value, safeValue, sizeof( safeValue ) ),
+                        (int)p.baseRow,
                         p.footprint == 1 ? "dip" : "sip", (unsigned)p.pinCount,
                         p.placed ? 1 : 0 );
 
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
         if ( pos < 0 || pos > (int)sizeof( partBuffer ) - 48 ) break;
         const PartPin& pin = p.pins[ j ];
+        char safePin[ 12 ];   // PartPin::name[12]
         pos += snprintf( partBuffer + pos, sizeof( partBuffer ) - pos, "%s%s,%d,%d,%s",
-                         ( j == 0 ) ? "" : ";", pin.name, partPinNode( p, pin ),
+                         ( j == 0 ) ? "" : ";",
+                         partRecordSafe( pin.name, safePin, sizeof( safePin ) ),
+                         partPinNode( p, pin ),
                          (int)pin.connect, partPinClassName( pin.pinClass ) );
     }
 

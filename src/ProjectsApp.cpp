@@ -185,6 +185,15 @@ int listProjects(ProjectMeta* out, int maxOut) {
     int found = 0;
     bool was_paused = pauseCore2ForFlash(100);
     Dir d = FatFS.openDir(PROJECTS_DIR);
+    // TRUNCATE-BEFORE-SORT, deliberately: the bound stops the WALK, and the
+    // alphabetical sort below only orders what survived it. With more than
+    // PROJECTS_MAX project directories on the board, the ones kept are the
+    // first PROJECTS_MAX in FatFS directory order (which follows creation),
+    // NOT the alphabetically-first PROJECTS_MAX - so adding a 13th project
+    // hides a directory that sorts early rather than one that sorts late.
+    // Sorting first would need the whole directory in RAM, which is what
+    // this fixed String[PROJECTS_MAX] exists to avoid inside the Core-1
+    // pause. Raise PROJECTS_MAX (ProjectsApp.h) if that ever bites.
     while (d.next() && found < PROJECTS_MAX && found < maxOut) {
         if (!d.isDirectory())
             continue;

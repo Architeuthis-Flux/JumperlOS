@@ -358,6 +358,21 @@ static void parsePinEntry(PartDefinition& p, const String& pinName, const String
         err += "part " + String(p.name) + ": bad pin name '" + nm + "'; ";
         return;
     }
+    // A leading '-' or '#' can never survive serializeParts: pins are emitted
+    // UNQUOTED as `      <NAME>: {...}`, so "- X" comes back as a parts-list
+    // entry marker and "#X" as a comment. Refuse it HERE too (the inline
+    // `pins: {...}` form and place_part's pins_json both land in this
+    // function) so a name that cannot round-trip never enters the table -
+    // the same store-only-what-reloads rule commitPart() enforces for the
+    // part itself. This is the FIRST line of defence on every path - the
+    // API's own leading-char check (jl_place_part) sits downstream of
+    // parsePartPinsSpec and is the matched second copy, kept so the two
+    // predicates can't drift.
+    if (nm.charAt(0) == '-' || nm.charAt(0) == '#') {
+        err += "part " + String(p.name) + ": pin name '" + nm +
+               "' may not start with '-' or '#'; ";
+        return;
+    }
     strncpy(pin.name, nm.c_str(), sizeof(pin.name) - 1);
 
     String v = extractFlowField(body, "pin:");

@@ -403,6 +403,7 @@ static volatile float oneShotV1 = 0.0f, oneShotV2 = 0.0f;
 static volatile float oneShotDrift1 = 0.0f;
 static volatile uint32_t oneShotReqSeq = 0;
 static volatile uint32_t oneShotDoneSeq = 0;
+static volatile bool oneShotCancel = false; // core-0 set, scan-core cleared
 static uint32_t tapOneShot = 0; // serviced one-shots (the i! taps line)
 // Sequential pair fallback (ring down / no second channel free): one node
 // per service pass, so a pass never exceeds the single-tap ~11ms worst case
@@ -417,6 +418,11 @@ bool requestNodeTap(int node) {
     oneShotN2 = -1;
     oneShotIsPair = false;
     oneShotPairPhase = 0;
+    // A cancel raised against the PREVIOUS request must not carry into this
+    // one. It can survive when the scan core completed that request in the
+    // same window the cancel was posted (both writers are core 0, so this
+    // clear cannot race the set).
+    oneShotCancel = false;
     __dmb();
     oneShotReqSeq = oneShotReqSeq + 1;
     return true;
@@ -439,6 +445,7 @@ bool requestPairTap(int n1, int n2) {
     oneShotN2 = n2;
     oneShotIsPair = true;
     oneShotPairPhase = 0;
+    oneShotCancel = false;   // see requestNodeTap
     __dmb();
     oneShotReqSeq = oneShotReqSeq + 1;
     return true;
@@ -453,6 +460,22 @@ int pairTapResult(float* v1, float* v2) {
     return oneShotCode;
 }
 
+// Core-0 cancel for a request that no longer has an owner. Without it an
+// aborted check's pending tap sat in the mailbox and fired LATER, unowned:
+// it still closed real routes and burned a cadence slot, at a moment nothing
+// was expecting hardware activity (the gate-closed abort path - the guide
+// aborts while the scan core is refusing to service).
+//
+// GUARDED on a request actually being in flight: guideCheckBegin() calls
+// guideCheckAbort() unconditionally to clear any prior run, so an
+// unconditional flag-set would arm a cancel that ate the NEXT check's first
+// tap - one wasted cadence interval per check, systematically.
+void cancelOneShotTap(void) {
+    if (oneShotReqSeq == oneShotDoneSeq) return; // nothing pending to cancel
+    oneShotCancel = true;
+    __dmb();
+}
+
 // Serviced at the head of serviceNetVoltageScan(), BEFORE the enable/menu/
 // user-input gates: a one-shot IS user-requested work (the guide is waiting
 // on it), bounded at one tap per pass. The hardware-safety gates stay - they
@@ -460,6 +483,20 @@ int pairTapResult(float* v1, float* v2) {
 // scheduled scan so the two tap kinds interleave at the same cadence.
 static void serviceOneShotTap(void) {
     if (oneShotReqSeq == oneShotDoneSeq) return; // nothing pending
+    // Cancel BEFORE the tap starts (cancelOneShotTap, core 0): consume the
+    // request without touching hardware and retire the sequence so the
+    // mailbox is free for the next owner. -2 is the poller's documented
+    // transient code, so the one race that can still happen - a cancel
+    // arriving while this pass already ran - costs the caller at most one
+    // benign retry. Not counted in tapOneShot: no tap was serviced.
+    if (oneShotCancel) {
+        oneShotCancel = false;
+        oneShotPairPhase = 0;
+        oneShotCode = -2;
+        __dmb();
+        oneShotDoneSeq = oneShotReqSeq;
+        return;
+    }
     if (core1FramesHeld()) return;
     if (!core1req::allIdle()) return;
     if (core1busy || refreshInProgress) return;
@@ -1235,6 +1272,7 @@ bool requestNodeTap(int) { return false; }
 int nodeTapResult(float*, float*) { return -2; }
 bool requestPairTap(int, int) { return false; }
 int pairTapResult(float*, float*) { return -2; }
+void cancelOneShotTap(void) {}   // nothing can be in flight here
 void serviceNetVoltageScan(void) {}
 void serviceNetVoltageScanDebug(void) {}
 void printNetVoltageScanStats(Stream* out) { out->println("net current scan: V5 only"); }

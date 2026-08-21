@@ -78,9 +78,16 @@ uint32_t netScanComputeGeneration(void);
 // Contract:
 //  - Single request in flight; request functions return false while one is
 //    pending. A sequence guard keeps a stale result from reading as fresh -
-//    callers MUST get a successful request before polling the result (after
-//    an abort, an in-flight tap completes into the slots unconsumed; the
-//    next requester overwrites it).
+//    callers MUST get a successful request before polling the result.
+//  - cancelOneShotTap(): call it from core 0 when a request loses its owner
+//    (an aborted check). It is a no-op unless a request is actually pending;
+//    otherwise the scan core consumes that request WITHOUT touching hardware
+//    on its next pass and retires the sequence. Without it a pending tap
+//    outlived its owner and fired later unowned - real routes closing at a
+//    moment nothing expected hardware activity. A cancel that races the
+//    tap's own completion is harmless: the result the owner never polls is
+//    simply overwritten by the next request, and a cancel raised against a
+//    finished request is dropped when the next request is posted.
 //  - nodeTapResult / pairTapResult: 0 = pending, 1 = ok, -1 = floating
 //    (drift over the scan's threshold; drift still reported), -2 = route or
 //    ADC failure (transient - lanes busy, safety gates closed - re-request
@@ -96,6 +103,7 @@ bool requestNodeTap(int node);
 int  nodeTapResult(float* volts, float* drift);
 bool requestPairTap(int n1, int n2);
 int  pairTapResult(float* v1, float* v2);
+void cancelOneShotTap(void);   // core 0: abandon a request that lost its owner
 
 // Call frequently from the core 2 loop. Self-throttled.
 void serviceNetVoltageScan(void);

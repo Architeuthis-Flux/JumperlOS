@@ -2524,17 +2524,18 @@ void performConfigMigrations(const char* oldVersion, const char* newVersion) {
         Serial.println("  - Set default startup image to images/bubbleJumpThin.bin");
     }
     
-    // Refresh built-in examples on every firmware update.
+    // Refresh built-in examples AND projects on every firmware update.
     // The hash system in initializeMicroPythonExamples protects user-edited files:
     // unmodified defaults are updated in-place; user-modified files are left alone
     // and a new firmware default is written as _original / _original1 / etc.
     if (debugFP) {
-        Serial.println("  - Refreshing built-in MicroPython examples (preserving user edits)...");
+        Serial.println("  - Refreshing built-in MicroPython examples and projects "
+                       "(preserving user edits)...");
     }
     initializeMicroPythonExamples(true);
     initializeProjects(true);   // same hash contract for /projects/<dir>/
     if (debugFP) {
-        Serial.println("  ✓ Python examples refreshed\n\r");
+        Serial.println("  ✓ Python examples and projects refreshed\n\r");
     }
 
     // Add one-time migrations here as needed for specific version transitions.

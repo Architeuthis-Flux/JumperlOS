@@ -411,51 +411,100 @@ void serializeOverlaysToYAML(String& output, int withANSI ) {
     }
 }
 
+// Start of the `overlays:` SECTION, or nullptr. The header only counts on an
+// UN-INDENTED line - the same recognition rule deserializeParts and fromYAML
+// use. A bare strstr(text, "overlays:") matched the substring ANYWHERE: a pin
+// named `overlays`, a value string containing the word, or a file that simply
+// writes some other section first would hijack the scan and every field
+// lookup below would then read out of the wrong region.
+static const char* findOverlaysSection(const char* yaml) {
+    for (const char* p = yaml; ; ) {
+        const char* hit = strstr(p, "overlays:");
+        if (!hit) return nullptr;
+        if (hit == yaml || *(hit - 1) == '\n') return hit;  // column 0 only
+        p = hit + 1;
+    }
+}
+
+// End of the section: the first UN-INDENTED line after the header. Blank and
+// comment lines do NOT end it (deserializeParts skips those before its
+// !indented break, and the serializer emits a blank line between sections).
+// Returns a pointer to the terminator, never past the NUL.
+static const char* findSectionEnd(const char* sectionStart) {
+    const char* line = strchr(sectionStart, '\n');
+    while (line != nullptr) {
+        const char* next = line + 1;
+        if (*next == '\0') return next;
+        if (*next == ' ' || *next == '\t') {         // indented: still ours
+            line = strchr(next, '\n');
+            continue;
+        }
+        if (*next == '\r' || *next == '\n') {        // blank line: tolerated
+            line = strchr(next, '\n');
+            continue;
+        }
+        if (*next == '#') {                          // comment: tolerated
+            line = strchr(next, '\n');
+            continue;
+        }
+        return next;                                 // next top-level section
+    }
+    return sectionStart + strlen(sectionStart);
+}
+
 bool deserializeOverlaysFromYAML(const char* yamlContent, String& errorMsg) {
     graphicOverlayState.clearAll();
-    
-    const char* overlaysSection = strstr(yamlContent, "overlays:");
+
+    const char* overlaysSection = findOverlaysSection(yamlContent);
     if (!overlaysSection) {
         return true;  // No overlays is fine
     }
-    
+
+    // EVERY scan below is bounded by sectionEnd: strstr walks to the NUL, so
+    // an unbounded lookup could pull a `row:` or a `colors:` out of whatever
+    // section follows. Tolerance semantics are otherwise unchanged - a
+    // malformed entry is skipped, missing fields keep their defaults, and the
+    // function still always returns true.
+    const char* sectionEnd = findSectionEnd(overlaysSection);
     const char* pos = overlaysSection;
-    
-    while ((pos = strstr(pos, "- name:")) != nullptr) {
+
+    while (pos < sectionEnd && (pos = strstr(pos, "- name:")) != nullptr) {
+        if (pos >= sectionEnd) break;
         char name[32] = {0};
         int startRow = 0, startCol = 0, width = 1, height = 1;
         uint32_t colors[MAX_OVERLAY_PIXELS] = {0};
         int numColors = 0;
-        
+
+        // Find extent of this overlay entry (next "- name:" in the section,
+        // else the section end)
+        const char* nextEntry = strstr(pos + 7, "- name:");
+        const char* entryEnd = (nextEntry && nextEntry < sectionEnd) ? nextEntry : sectionEnd;
+
         // Parse name
         const char* nameStart = strstr(pos, "\"");
-        if (nameStart) {
+        if (nameStart && nameStart < entryEnd) {
             nameStart++;
             const char* nameEnd = strchr(nameStart, '\"');
-            if (nameEnd) {
+            if (nameEnd && nameEnd < entryEnd) {
                 int len = nameEnd - nameStart;
                 if (len > 31) len = 31;
                 strncpy(name, nameStart, len);
             }
         }
-        
-        // Find extent of this overlay entry (next "- name:" or end of overlays section)
-        const char* nextEntry = strstr(pos + 7, "- name:");
-        const char* entryEnd = nextEntry ? nextEntry : overlaysSection + strlen(overlaysSection);
 
         // Parse row/col/width/height (must be within this overlay)
         const char* rowPos = strstr(pos, "row:");
         if (rowPos && rowPos < entryEnd) startRow = atoi(rowPos + 4);
-        
+
         const char* colPos = strstr(pos, "col:");
         if (colPos && colPos < entryEnd) startCol = atoi(colPos + 4);
-        
+
         const char* widthPos = strstr(pos, "width:");
         if (widthPos && widthPos < entryEnd) width = atoi(widthPos + 6);
-        
+
         const char* heightPos = strstr(pos, "height:");
         if (heightPos && heightPos < entryEnd) height = atoi(heightPos + 7);
-        
+
         // Parse colors
         const char* colorsPos = strstr(pos, "colors:");
         if (colorsPos && colorsPos < entryEnd) {
@@ -472,14 +521,14 @@ bool deserializeOverlaysFromYAML(const char* yamlContent, String& errorMsg) {
                 }
             }
         }
-        
+
         if (name[0] != '\0' && width > 0 && height > 0) {
             graphicOverlayState.addOverlay(name, startRow, startCol, width, height, colors);
         }
-        
+
         pos++;
     }
-    
+
     return true;
 }
 

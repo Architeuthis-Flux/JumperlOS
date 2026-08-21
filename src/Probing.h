@@ -96,14 +96,31 @@ public:
     const char* getName() const override { return "ProbeButton"; }
     ServicePriority getPriority() const override { return ServicePriority::CRITICAL; }
     
-    //@brief Get the current button state
-    //@return 0 = neither pressed, 1 = remove button, 2 = connect button
+    // BUTTON NUMBERING - read this before using the values below.
+    //
+    // These three return the RAW, PRE-SWAP button code, and which physical
+    // button a raw 1 or 2 means DEPENDS ON hardware.probe_revision: the
+    // sample decoders (checkProbeButtonHardware and the PIO handler in
+    // Probing.cpp) map an all-high sample to 2 on revision >= 4 and to 1 on
+    // revision <= 3, and the reverse for all-low. The rev-4 probe swapped
+    // the two switches.
+    //
+    // The USER-FACING convention - what every caller outside this class
+    // should speak - is fixed and revision-independent:
+    //     0 = none, 1 = CONNECT (front), 2 = REMOVE (rear)
+    // Callers reach it by applying the compensating swap when
+    // probe_revision > 3. The two implementations of that swap are
+    // jl_probe_button_* (JumperlessMicroPythonAPI.cpp) and guideProbeButton
+    // (GuidedFlow.cpp); copy one of them, don't invent a third rule.
+    //
+    //@brief Get the current button state (raw, see the note above)
+    //@return 0 = neither pressed, 1/2 = the two buttons, revision-dependent
     int getButtonState() const { return currentButtonState; }
-    //@brief Get the current button press
-    //@return 0 = no press, 1 = remove button, 2 = connect button
+    //@brief Get the current button press (raw, see the note above)
+    //@return 0 = no press, 1/2 = the two buttons, revision-dependent
     int getButtonPress(bool consume = true);
-    //@brief Check the probe button hardware
-    //@return 0 = neither pressed, 1 = remove button, 2 = connect button
+    //@brief Check the probe button hardware (raw, see the note above)
+    //@return 0 = neither pressed, 1/2 = the two buttons, revision-dependent
     int checkProbeButtonHardware(void);
 
     // Run the press/release/double-tap state machine against a freshly

@@ -28,8 +28,9 @@
 // Measurement plumbing: node voltages come from NVSCAN's one-shot tap API
 // (requestNodeTap / requestPairTap, serviced on the scan core - see
 // NetVoltageScan.h). Discipline: a request must SUCCEED before its result
-// is ever polled, so a tap left in flight by an aborted check drains into
-// the slots unconsumed and can never be read as fresh by the next check.
+// is ever polled, so a result left in the slots by an aborted check can
+// never be read as fresh by the next one - and guideCheckAbort() calls
+// cancelOneShotTap(), so the abandoned REQUEST doesn't fire later either.
 
 #include "GuidedFlow.h"
 
@@ -452,6 +453,26 @@ void guideCheckBegin(const GuideCheckRun& run) {
             // seated IC would warn-fail every auto-synthesized place step.
             // Report it honestly as unverifiable instead - real
             // verification arrives at power_on / verify steps.
+            //
+            // The carve-out is keyed on the EXACT string "ic", which is the
+            // only value the parts format documents for a chip (States.h:
+            // resistor|capacitor|diode|led|bjt|fet|ic). An author who types
+            // something else - "IC", "dip", "74hc00", or nothing - and then
+            // writes an explicit `check: presence` on that step gets the
+            // real stimulus instead: 3.3 V through the ~122 ohm DAC0/ISENSE
+            // chain into an UNPOWERED chip's pins, i.e. current through the
+            // die's ESD clamps. That is bounded by construction (charge is
+            // <50 ms, the 50 mA INA watchdog aborts, and teardown drops the
+            // DAC to 0 V) and is the same exposure a vf/continuity check on
+            // any part accepts - so it is documented, not blocked. The
+            // default-by-type path cannot reach it on its own:
+            // guideDefaultCheckForPart (GuidedFlow.cpp) picks PRESENCE only
+            // for typeStr "capacitor" or "ic", so landing here with some
+            // other typeStr takes a deliberate author action - an explicit
+            // `check: presence` on the step, or a per-part `verify:`
+            // override. Widening the carve-out to a fuzzy match would be
+            // worse: it would silently skip real 2-lead checks whose
+            // typeStr merely contained "ic".
             if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts &&
                 strcmp(globalState.parts.parts[st.partIdx].typeStr, "ic") == 0) {
                 finishCheck(GUIDE_CHECK_SKIPPED,
@@ -700,8 +721,19 @@ void guideCheckBegin(const GuideCheckRun& run) {
 
         case GuideCheck::RAIL_SANE: {
             if (st.target >= 1) {
+                // DOCUMENTED ASSUMPTION: an explicit `target:` on a
+                // rail_sane step is checked as VCC-class - "within 0.2 V of
+                // the top rail". A step is a single row here, and the format
+                // has no way to say which class that row is, so one of the
+                // two bands has to be the default; VCC is the useful one
+                // (a GND row is what collectClassRows() finds from the
+                // parts' own pin classes, and a "is this row at 0 V" check
+                // is what `voltage` with min/max exists for). Authors who
+                // want the GND band write `check: voltage` with
+                // min: -0.15 / max: 0.15 instead. Mirrored in the States.h
+                // guide: format comment.
                 ck.rows[ck.numRows] = st.target;
-                ck.rowClass[ck.numRows] = 1; // treat an explicit target as VCC-class
+                ck.rowClass[ck.numRows] = 1;
                 ck.numRows++;
             } else {
                 collectClassRows();
@@ -1081,8 +1113,15 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                 }
                 ck.rowIdx++;
                 if (ck.rowIdx >= ck.numRows) {
-                    // Voltage-sanity only, not a rail ammeter - §5.2's honest
-                    // limit rides in the hint on pass too.
+                    // Hint deliberately nullptr. §5.2's honest limit -
+                    // "voltage-sanity, not a rail ammeter" - is a DOC
+                    // caveat, not a bench message: GuidedFlow only prints
+                    // guideCheckHint() when a check FAILS (`if (!pass &&
+                    // hint...)`), and a rail_sane pass is the common case in
+                    // every power_on step. Surfacing it on pass would print
+                    // a disclaimer to the terminal AND the OLED on every
+                    // successful power-up. The value string still carries
+                    // what was actually measured.
                     finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV@%d", v, row);
                 }
             }
@@ -1107,9 +1146,14 @@ void guideCheckAbort(void) {
     ck.active = false;
     ck.result = GUIDE_CHECK_RUNNING;
     ck.phase = CkPhase::IDLE;
-    // A tap still in flight on the scan core completes into the request
-    // slots unconsumed; the request-before-poll discipline (tapCycle* only
-    // polls after ITS OWN request succeeded) keeps it unreadable as fresh.
+    // Hand the tap mailbox back. The request-before-poll discipline
+    // (tapCycle* only polls after ITS OWN request succeeded) already made a
+    // surviving result unreadable as fresh, but the REQUEST itself outlived
+    // us: after a gate-closed abort it stayed pending and the scan core ran
+    // it whenever its gates reopened - routes closing on a board nobody was
+    // measuring. cancelOneShotTap() is a no-op when nothing is pending, so
+    // guideCheckBegin's unconditional abort costs the next check nothing.
+    cancelOneShotTap();
 }
 
 #else // OG_JUMPERLESS ---------------------------------------------------------
