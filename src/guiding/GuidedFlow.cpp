@@ -1412,18 +1412,32 @@ static void guideExitTail(GuideSession& s) {
     Serial.flush();
 }
 
-void guideRun(const char* projectYamlPath, int resumeStep) {
+GuideRunResult guideRun(const char* projectYamlPath, int resumeStep) {
     String err;
     if (!guideParse(projectYamlPath, guideScript, err)) {
         Serial.println("\r\nGUIDE parse failed: " + err);
-        return;
+        return GuideRunResult::PARSE_FAILED;
     }
     if (err.length() > 0) {
         Serial.println("\r\nGUIDE parse warnings: " + err);
     }
     if (guideScript.numSteps == 0) {
         Serial.println("\r\nGUIDE nothing to do (no steps, no parts)");
-        return;
+        return GuideRunResult::NOTHING_TO_DO;
+    }
+
+    // A finished build must not be relaunched (design-launcher §1.4): a saved
+    // step at or past the end - including a source that was edited down to
+    // FEWER steps than the saved index - means "complete". guideSessionBegin's
+    // clamp would otherwise drop the user straight into the DONE summary.
+    if (resumeStep >= guideScript.numSteps) {
+        Serial.print("\r\nGUIDE already complete (step ");
+        Serial.print(resumeStep);
+        Serial.print("/");
+        Serial.print(guideScript.numSteps);
+        Serial.println(")");
+        Serial.flush();
+        return GuideRunResult::ALREADY_COMPLETE;
     }
 
     guideSessionBegin(guideSession, &guideScript, resumeStep);
@@ -1433,4 +1447,9 @@ void guideRun(const char* projectYamlPath, int resumeStep) {
         delayMicroseconds(50);
     }
     guideExitTail(guideSession);
+
+    // COMPLETED means every step was reached, whichever key dismissed the DONE
+    // summary; a quit from any wait state leaves stepIdx short of numSteps.
+    return (guideSession.stepIdx >= guideScript.numSteps) ? GuideRunResult::COMPLETED
+                                                          : GuideRunResult::QUIT;
 }

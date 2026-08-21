@@ -735,13 +735,19 @@ void SingleCharCommands::initializeCommands( ) {
                      "Test overlay.",
                      cmd_testOverlay, MENU_DEBUG, CAT_ADVANCED, true, SER3_IRRELEVANT );
 
-    registerCommand( 'z', "run guided project (z <path> <slot>)",
-                     "Run the guided-placement flow for a project wiring, headless.\n"
-                     "Usage: z /projects/<dir>/wiring.yaml <slot 0-7>\n"
-                     "Builds DIRECTLY into the given destination slot (no temp slot),\n"
-                     "bypassing the encoder pickers - the HIL / scripted entry.\n"
-                     "A resume offer still appears when a slot holds progress for the\n"
-                     "same wiring (y = resume, n = restart, other byte = cancel).\n"
+    registerCommand( 'z', "run project (z <project>[ new|load|run=N])",
+                     "Run a project headless - guided or not - the HIL / scripted entry.\n"
+                     "Usage: z <project>[ new|load|run=<N>][ noscript]\n"
+                     "<project> = a directory name (555) or a wiring path\n"
+                     "  (/projects/555/wiring.alt.yaml - picks that variant for a new run).\n"
+                     "No mode arg = load the latest run when one exists, else start new.\n"
+                     "  new      force a fresh /projects/<dir>/<dir>_<N+1>.yaml\n"
+                     "  load     force the latest run file (errors when there is none)\n"
+                     "  run=<N>  open that specific run file\n"
+                     "  noscript skip the companion script\n"
+                     "The run file becomes the ACTIVE CONTEXT and stays it - destination\n"
+                     "slots are gone. Guided projects resume from the run file's own\n"
+                     "guideProgress; there is no prompt on this path.\n"
                      "Guide keys on this stream: n/space=next  p=back  s=skip\n"
                      "v=verify  q=quit  t <row>=probe-tap override.",
                      cmd_guidedProject, MENU_DEBUG, CAT_APPS, true, SER3_INTERACTIVE );
@@ -777,35 +783,108 @@ CommandResult cmd_testOverlay( char c, const String& line ) {
     return CMD_DONT_SHOW_MENU;
 }
 
-// z <path> <slot>: the guided-placement runner's headless entry. Both
-// arguments required - this command exists so the HIL (and any script) can
-// reach runGuidedProject's inner flow without the encoder pickers, and a
-// destination slot default would silently overwrite whatever it guessed.
+// z <project>[ new|load|run=<N>][ noscript]: the project runner's headless
+// entry (design-launcher §5.1). Destination slots are GONE - a launch opens or
+// creates /projects/<dir>/<dir>_<N>.yaml and leaves it as the active context,
+// so there is nothing left for a slot argument to mean.
+//
+// <project> is a project directory name ("555") or a wiring path
+// ("/projects/555/wiring.alt.yaml", which selects that variant for a NEW run).
+// No mode arg = load latest when runs exist, else new: the launcher's own
+// defaults but WITHOUT the interactive prompt, because headless has to be
+// deterministic.
+//
+// LOUD-FAIL on the old grammar. A stale `z <path> 3` must break visibly, not
+// silently into a slot write, so a bare all-digit token ANYWHERE after the
+// project is a usage error. Note the token-wise parse: `z 555` is a perfectly
+// good all-digit PROJECT name and must keep working - only a digit token that
+// FOLLOWS the project is the old destination slot.
+static bool zTokenIsRunEquals( const String& tok, int& nOut ) {
+    if ( !tok.startsWith( "run=" ) ) return false;
+    String num = tok.substring( 4 );
+    if ( num.length( ) == 0 || num.length( ) > 4 ) return false;
+    for ( unsigned int i = 0; i < num.length( ); i++ ) {
+        if ( num.charAt( i ) < '0' || num.charAt( i ) > '9' ) return false;
+    }
+    nOut = num.toInt( );
+    return nOut >= 1;
+}
+
 CommandResult cmd_guidedProject( char c, const String& line ) {
+    static const char* USAGE =
+        "Usage: z <project>[ new|load|run=<N>][ noscript]  "
+        "(destination slots are gone - runs live in the project folder)";
+
     String args = ( line.length( ) > 1 ) ? line.substring( 1 ) : String( "" );
     args.trim( );
-
-    int lastSpace = args.lastIndexOf( ' ' );
-    String path = ( lastSpace > 0 ) ? args.substring( 0, lastSpace ) : String( "" );
-    String slotStr = ( lastSpace > 0 ) ? args.substring( lastSpace + 1 ) : String( "" );
-    path.trim( );
-    slotStr.trim( );
-
-    bool slotOk = slotStr.length( ) > 0;
-    for ( unsigned int i = 0; i < slotStr.length( ); i++ ) {
-        if ( slotStr.charAt( i ) < '0' || slotStr.charAt( i ) > '9' ) slotOk = false;
-    }
-    int slot = slotOk ? slotStr.toInt( ) : -1;
-
-    if ( path.length( ) == 0 || !slotOk || slot < 0 || slot > 7 ) {
-        Jerial.println( "Usage: z /projects/<dir>/wiring.yaml <slot 0-7>" );
+    if ( args.length( ) == 0 ) {
+        Jerial.println( USAGE );
         return CMD_DONT_SHOW_MENU;
     }
-    if ( !safeFileExists( path.c_str( ) ) ) {
-        Jerial.println( "GUIDE error file not found: " + path );
+
+    String project;
+    ProjectRunMode mode = ProjectRunMode::DEFAULT;
+    int runN = 0;
+    bool noScript = false;
+    bool modeSeen = false;
+
+    int pos = 0;
+    while ( pos < (int)args.length( ) ) {
+        int sp = args.indexOf( ' ', pos );
+        String tok = ( sp < 0 ) ? args.substring( pos ) : args.substring( pos, sp );
+        pos = ( sp < 0 ) ? args.length( ) : sp + 1;
+        tok.trim( );
+        if ( tok.length( ) == 0 ) continue;
+
+        if ( project.length( ) == 0 ) {
+            project = tok;
+            continue;
+        }
+
+        int n = 0;
+        if ( tok == "noscript" ) {
+            noScript = true;
+        } else if ( tok == "new" || tok == "load" || zTokenIsRunEquals( tok, n ) ) {
+            if ( modeSeen ) {
+                Jerial.println( USAGE );
+                return CMD_DONT_SHOW_MENU;
+            }
+            modeSeen = true;
+            if ( tok == "new" ) {
+                mode = ProjectRunMode::NEW;
+            } else if ( tok == "load" ) {
+                mode = ProjectRunMode::LOAD;
+            } else {
+                mode = ProjectRunMode::RUN_N;
+                runN = n;
+            }
+        } else {
+            // Includes the old grammar's bare destination slot.
+            Jerial.println( USAGE );
+            return CMD_DONT_SHOW_MENU;
+        }
+    }
+
+    if ( project.length( ) == 0 ) {
+        Jerial.println( USAGE );
         return CMD_DONT_SHOW_MENU;
     }
-    runGuidedProjectTo( path, slot );
+
+    // Contradictory input: a wiring PATH names a variant, but load/run=<N>
+    // opens an existing run file whose own runSource decides the variant. The
+    // argument would be silently ignored, so refuse instead.
+    if ( project.indexOf( '/' ) >= 0 &&
+         ( mode == ProjectRunMode::LOAD || mode == ProjectRunMode::RUN_N ) ) {
+        Jerial.println( USAGE );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    if ( project.indexOf( '/' ) >= 0 && !safeFileExists( project.c_str( ) ) ) {
+        Jerial.println( "PROJECT error file not found: " + project );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    runProjectHeadless( project, mode, runN, noScript );
     return CMD_DONT_SHOW_MENU;
 }
 

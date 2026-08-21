@@ -1,47 +1,49 @@
 // SPDX-License-Identifier: MIT
-// Projects launcher - the Apps-menu entry that turns /projects/<dir>/ into a
-// running circuit. Design: CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md §1.
+// Projects launcher - the Apps-menu entry (now a TOP-LEVEL menu row) that
+// turns /projects/<dir>/ into a running circuit. Design:
+// CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md §1, reworked by
+// .superpowers/sdd/projects-wave-2-bench-notes/design-launcher.md.
 //
-// Flow (non-guided path):
-//   listProjects -> project picker -> variant picker (only when >1 wiring*.yaml)
-//   -> guided seam (runGuidedProject, task 6) -> enterTemporarySlot(8)
-//   -> loadSlotFromPath(wiring) -> run main[.variant].py with `_jl_project`
-//   injected -> keep-prompt -> saveSlot(n) / exitTemporarySlot.
+// Flow:
+//   listProjects -> project picker
+//   -> scanRunFiles: runs exist? load-latest / start-new prompt
+//   -> start-new: variant picker (only when >1 genuine wiring*.yaml)
+//                 -> projectBeginRun: copy the wiring to <dir>_<N+1>.yaml,
+//                    open it as the PERSISTENT active context
+//   -> load-latest: open <dir>_<maxN>.yaml, variant resolved from runSource
+//   -> guided?  guideRun on the CANONICAL wiring path (never the run file)
+//      not guided? run main[.variant].py with `_jl_project` injected
+//   -> the run file stays the active context when the launcher returns.
 //
-// TWO LATCHES run through this file; every exit path has to leave both clean:
+// ONE LATCH runs through this file now: Menus::inClickMenu. Core 1 only
+// renders b.print() text while it is 1 (main.cpp:1817) and only renders NETS
+// while it is 0 (main.cpp:1746) - and doMenuAction clears it before running an
+// app (Menus.cpp:463). So the pickers raise it for their own duration and drop
+// it again (plus b.clear() + requestLedShow(-1), the
+// pickPythonScriptFromClickMenu exit idiom) BEFORE the project's nets need to
+// show.
 //
-//  1. SlotManager::temporarySlotActive (States.cpp:3220/:3241/:3266).
-//     enterTemporarySlot refuses to nest, so a latch left set here bricks
-//     every future temp-slot app until reboot. Rules:
-//       - cancel BEFORE enterTemporarySlot -> plain return, no slot calls;
-//       - enterTemporarySlot returning false -> plain return. We do NOT own
-//         the latch in that case and exiting it would clobber whoever does;
-//       - every path after a successful enter ends in exitTemporarySlot(...).
-//     The keep sequence is EXACTLY saveSlot(n) -> exitTemporarySlot(false) ->
-//     loadSlot(n) -> refreshConnections(-1): saveSlot sets activeSlotNumber
-//     while the latch is still up, exitTemporarySlot(false) restores tracking
-//     without touching hardware, loadSlot makes the kept project live. A
-//     saveSlot FAILURE must not continue into that sequence - it would discard
-//     the user's circuit and load a stale slot n - so it falls back to the
-//     decline path (full exitTemporarySlot restore).
+// The SECOND latch is gone. The non-guided path used to borrow temp slot 8
+// and end in a keep-prompt plus a destination-slot picker; the run file IS the
+// persistence now, so the temp-slot enter/exit pair, the slot picker and the
+// whole keep sequence were deleted from this file - the temp-slot latch is not
+// touched here at all any more, by name or by call. (The machinery itself
+// survives for the calibration apps: Apps.cpp and SelfTest.cpp still use it.)
 //
-//  2. Menus::inClickMenu. Core 1 only renders b.print() text while it is 1
-//     (main.cpp:1817) and only renders NETS while it is 0 (main.cpp:1746) -
-//     and doMenuAction clears it before running an app (Menus.cpp:463). So the
-//     pickers raise it for their own duration and drop it again (plus
-//     b.clear() + requestLedShow(-1), the pickPythonScriptFromClickMenu exit
-//     idiom) BEFORE the project's nets need to show.
+// CANCEL CONTRACT (design-launcher §2.2, the exit table): no state is touched
+// until every prompt has been answered, so any cancel before the run file
+// loads is a pure return. After it loads there is nothing to restore -
+// persistence is the feature, exactly like clicking a YAML in Files.
 
 #include "ProjectsApp.h"
 
 #include "Commands.h"         // requestLedShow, refreshConnections
-#include "FileCache.h"        // fileCacheFlushNowAll (guided slot switch)
+#include "FileCache.h"        // fileCacheFlushNowAll (context switch)
 #include "FilesystemStuff.h"  // safeFile*, FatFS Dir walk
 #include "Graphics.h"         // b.print (no-op on OG)
-#include "GuidedFlow.h"       // guideRun / guideForcePowerSafe (task 6)
+#include "GuidedFlow.h"       // guideRun / GuideRunResult
 #include "JumperlOS.h"        // jOS.serviceInner()
 #include "Menus.h"            // inClickMenu, yesNoMenu
-#include "PartPlacement.h"    // removePartPlacement (guided restart path)
 #include "Python_Proper.h"    // executePythonFileContent, setGlobalStreamWithInterrupt
 #include "RotaryEncoder.h"    // encoder state machine
 #include "States.h"           // SlotManager
@@ -60,6 +62,10 @@ static const int LED_ROW_CHARS = 7;
 // the top, so this never has to walk the parts:/bridges: bulk.
 static const int META_SCAN_MAX_LINES = 64;
 
+// Copy chunk for copyFileRaw. File::readString() is reserved for scripts:
+// wiring files run to several KB and the chunked loop is cheaper on heap.
+static const size_t RUNFILE_COPY_CHUNK = 512;
+
 // ============================================================================
 // Small string helpers
 // ============================================================================
@@ -71,6 +77,12 @@ static String projectDirOfPath(const String& path) {
         return String("");
     int prev = path.lastIndexOf('/', last - 1);
     return path.substring(prev + 1, last);
+}
+
+// "/projects/555/wiring.yaml" -> "wiring.yaml"
+static String baseNameOfPath(const String& path) {
+    int last = path.lastIndexOf('/');
+    return (last < 0) ? path : path.substring(last + 1);
 }
 
 // Value after the first ':' on an already-trimmed `key: value` line. A quoted
@@ -111,6 +123,47 @@ static String pyStringSafe(const String& s) {
         out += c;
     }
     return out;
+}
+
+static bool allDigits(const String& s) {
+    if (s.length() == 0)
+        return false;
+    for (unsigned int i = 0; i < s.length(); i++) {
+        if (s.charAt(i) < '0' || s.charAt(i) > '9')
+            return false;
+    }
+    return true;
+}
+
+// Is `name` this directory's run-file pattern, `<dir>_<1..4 digits>.yaml`?
+// nOut receives the run number when it matches. The suffix test is
+// case-insensitive; the prefix must match `<dir>_` EXACTLY, which is what
+// keeps scanRunFiles from ever eating a variant (design §3).
+static bool runFileNumber(const String& name, const String& dir, int& nOut) {
+    nOut = 0;
+    String prefix = dir + "_";
+    if (!name.startsWith(prefix))
+        return false;
+    String lower = name;
+    lower.toLowerCase();
+    if (!lower.endsWith(".yaml"))
+        return false;
+    int midStart = (int)prefix.length();
+    int midEnd = (int)name.length() - 5;   // strlen(".yaml")
+    if (midEnd <= midStart)
+        return false;
+    String mid = name.substring(midStart, midEnd);
+    // 1-4 digits. A 5+ digit file is deliberately IGNORED by the scan (and so
+    // can never be "latest") - the cap is what keeps the name <= dir+5 chars.
+    if (mid.length() > 4 || !allDigits(mid))
+        return false;
+    long n = mid.toInt();
+    if (String(n) != mid)                  // no leading zeros
+        return false;
+    if (n < 1 || n > PROJECT_RUN_MAX_N)
+        return false;
+    nOut = (int)n;
+    return true;
 }
 
 // ============================================================================
@@ -238,7 +291,14 @@ int listProjects(ProjectMeta* out, int maxOut) {
 // but are backup copies, not variants - listing one would offer the user a
 // bogus picker entry that loads the firmware default OVER the edit they were
 // deliberately given a backup of.
-static int listVariantFiles(const String& projectPath, String* outNames, int maxOut) {
+//
+// ALSO EXCLUDES this directory's RUN FILES. The two namespaces are disjoint
+// unless the project directory is itself named `wiring*` (where
+// `wiring_1.yaml` matches both patterns); projectBeginRun refuses to create
+// runs in such a directory, and this is the matching guard on the variant
+// side (design-launcher §3, belt and braces).
+static int listVariantFiles(const String& projectPath, const String& dir,
+                            String* outNames, int maxOut) {
     if (outNames == nullptr || maxOut <= 0)
         return 0;
 
@@ -255,6 +315,9 @@ static int listVariantFiles(const String& projectPath, String* outNames, int max
             continue;
         if (lower.indexOf("_original") >= 0)
             continue;
+        int runN = 0;
+        if (runFileNumber(name, dir, runN))
+            continue;   // a run file in a `wiring*`-named project dir
         outNames[found++] = name;
     }
     unpauseCore2ForFlash(was_paused);
@@ -282,8 +345,8 @@ static int listVariantFiles(const String& projectPath, String* outNames, int max
 }
 
 // Cheap text scan for an un-indented `parts:` or `guide:` line - the "is this
-// a guided project?" test the guided seam is gated on. Deliberately not the
-// full parser: task 6 re-reads the file itself.
+// a guided project?" test. Deliberately not the full parser: the guide runtime
+// re-reads the file itself.
 static bool wiringHasGuideSections(const String& wiringPath) {
     File f = safeFileOpen(wiringPath.c_str(), "r");
     if (!f)
@@ -306,17 +369,190 @@ static bool wiringHasGuideSections(const String& wiringPath) {
     return found;
 }
 
-// Forward declarations for the guided flow (implemented below the picker
-// helpers they use).
-static bool guidedFlowInner(const String& wiringPath, int destSlot);
+// ============================================================================
+// Run files (design-launcher §1)
+// ============================================================================
 
-bool runGuidedProject(const String& dir, const String& wiringPath) {
-    (void)dir;
-    return guidedFlowInner(wiringPath, -1);   // -1 = interactive pickers
+int projectScanRunFiles(const String& projectPath, const String& dir, int& countOut) {
+    countOut = 0;
+    int maxN = 0;
+
+    // The listVariantFiles walk verbatim: FatFS.openDir under a Core-1 pause
+    // and NOTHING else inside it.
+    bool was_paused = pauseCore2ForFlash(100);
+    Dir d = FatFS.openDir(projectPath);
+    while (d.next()) {
+        if (d.isDirectory())
+            continue;
+        int n = 0;
+        if (!runFileNumber(d.fileName(), dir, n))
+            continue;
+        countOut++;
+        if (n > maxN)
+            maxN = n;
+    }
+    unpauseCore2ForFlash(was_paused);
+    return maxN;
 }
 
-bool runGuidedProjectTo(const String& wiringPath, int destSlot) {
-    return guidedFlowInner(wiringPath, destSlot);
+static String runFilePath(const String& projectPath, const String& dir, int n) {
+    return projectPath + "/" + dir + "_" + String(n) + ".yaml";
+}
+
+// Verbatim byte copy, chunked. Deletes a partial destination on any failure -
+// exit D's "partial file deleted" half.
+static bool copyFileRaw(const String& src, const String& dst, String& err) {
+    File in = safeFileOpen(src.c_str(), "r");
+    if (!in) {
+        err = "cannot read " + src;
+        return false;
+    }
+    File out = safeFileOpen(dst.c_str(), "w");
+    if (!out) {
+        safeFileClose(in, false);
+        err = "cannot create " + dst;
+        return false;
+    }
+
+    static uint8_t buf[RUNFILE_COPY_CHUNK];
+    bool ok = true;
+    while (in.available()) {
+        size_t got = in.read(buf, RUNFILE_COPY_CHUNK);
+        if (got == 0)
+            break;
+        if (out.write(buf, got) != got) {
+            ok = false;
+            err = "short write to " + dst;
+            break;
+        }
+    }
+    safeFileClose(in, false);
+    safeFileClose(out, true);
+    if (!ok)
+        safeFileDelete(dst.c_str());
+    return ok;
+}
+
+// True when the manager sits in the deliberate NO-ACTIVE-CONTEXT terminal
+// state (task-4 report, fix round 2 / NEW-3): activeSlotNumber == -1 with an
+// empty path, nothing routed, nothing powered beyond defaults, nothing
+// auto-savable. For a FILE context this is the DETERMINISTIC outcome of
+// re-loading a path whose YAML is invalid (a host MSC edit over the active run
+// file lands here every time - the restore re-reads the same bad file and
+// arbitrary paths have no .bak mirror). Not an error to fight; a state to
+// name.
+static bool noActiveContext(SlotManager& mgr) {
+    return mgr.getActiveSlot() == -1 && mgr.getActiveSlotPath()[0] == '\0';
+}
+
+static void reportIfNoActiveContext(SlotManager& mgr) {
+    if (!noActiveContext(mgr))
+        return;
+    Serial.println("\r\n  No active context - the previous one could not be "
+                   "restored either. Nothing is routed or powered.");
+    Serial.println("  Load a slot ('<0') or click a YAML in Files to continue.");
+    Serial.flush();
+}
+
+// Flush a dirty OUTGOING context to its OWN file before it is replaced. Done
+// at the CALL SITE, never inside loadSlotFromPath - forcing a save inside the
+// API is exactly what the boot firstLoop guard exists to prevent
+// (FilesystemStuff.cpp's FileManager click path makes the same argument).
+static void flushActiveContextIfDirty(SlotManager& mgr) {
+    if (!mgr.getActiveState().isDirty())
+        return;
+    String saveErr;
+    if (!mgr.saveActiveSlot(saveErr)) {
+        // A read-only template context refuses here by design (task 4's
+        // single write door). Say so and carry on - the incoming context is
+        // about to replace it anyway.
+        Serial.println("\n\r  (could not save the current context: " + saveErr + ")");
+    }
+}
+
+bool projectBeginRun(const String& dir, const String& templatePath,
+                     String& runPathOut, String& err) {
+    runPathOut = "";
+
+    // Namespace refusal (design §3 / task-4 review Q4). PREFIX, not equality:
+    // SlotManager::isTemplatePath() false-positives on
+    // /projects/wiringX/wiringX_1.yaml, so a run file in a `wiring*`-named
+    // directory would be treated as a read-only template and never save. The
+    // `slot*` half keeps run files out of a name that reads as a slot file.
+    String lowerDir = dir;
+    lowerDir.toLowerCase();
+    if (dir.length() == 0 || lowerDir.startsWith("wiring") || lowerDir.startsWith("slot")) {
+        err = "project directory '" + dir +
+              "' cannot hold run files (names starting with wiring/slot are reserved)";
+        return false;
+    }
+
+    if (!safeFileExists(templatePath.c_str())) {
+        err = "no such wiring: " + templatePath;
+        return false;
+    }
+
+    String projectPath = String(PROJECTS_DIR) + "/" + dir;
+    int count = 0;
+    int maxN = projectScanRunFiles(projectPath, dir, count);
+    if (maxN >= PROJECT_RUN_MAX_N) {
+        err = "run number cap reached for " + dir + " - delete old runs";
+        return false;
+    }
+
+    SlotManager& mgr = SlotManager::getInstance();
+    String runPath = runFilePath(projectPath, dir, maxN + 1);
+
+    flushActiveContextIfDirty(mgr);
+    // Big-event flush of the OUTGOING context's cache before its state is
+    // replaced (the loadSlot precedent, States.cpp:2918).
+    fileCacheFlushNowAll("project_begin_run");
+
+    // Copy + validate-by-load, one retry. A load failure deletes the file we
+    // just created (never something we did not create - see design §6.1) and
+    // tries again; the second failure leaves the previous context untouched,
+    // because loadSlotFromPath is atomic on BOTH open and parse failure.
+    for (int attempt = 0; attempt < 2; attempt++) {
+        String cerr;
+        if (!copyFileRaw(templatePath, runPath, cerr)) {
+            err = cerr;
+            if (attempt == 1)
+                return false;
+            continue;
+        }
+        String lerr;
+        if (mgr.loadSlotFromPath(runPath, lerr)) {
+            // Stamp the variant provenance the path itself cannot encode, and
+            // persist it right away so a reboot resolves the same script.
+            JumperlessState& st = mgr.getActiveState();
+            strncpy(st.runSource, templatePath.c_str(), sizeof(st.runSource) - 1);
+            st.runSource[sizeof(st.runSource) - 1] = '\0';
+            st.markDirty();
+            String serr;
+            if (!mgr.saveActiveSlot(serr, /*skipValidation=*/true)) {
+                Serial.println("\r\n  (could not stamp runSource in " + runPath +
+                               ": " + serr + ")");
+            }
+            runPathOut = runPath;
+            return true;
+        }
+        err = lerr;
+        safeFileDelete(runPath.c_str());
+    }
+    reportIfNoActiveContext(mgr);
+    return false;
+}
+
+// Open an existing run file as the active context. Same atomicity guarantee.
+static bool projectOpenRunFile(const String& runPath, String& err) {
+    SlotManager& mgr = SlotManager::getInstance();
+    flushActiveContextIfDirty(mgr);
+    fileCacheFlushNowAll("project_open_run");
+    if (mgr.loadSlotFromPath(runPath, err)) {
+        return true;
+    }
+    reportIfNoActiveContext(mgr);
+    return false;
 }
 
 // ============================================================================
@@ -363,8 +599,8 @@ static void drawPickerItem(const char* header, const String& ledLabel,
     Serial.flush();
 }
 
-// Encoder picker shared by the project / variant / slot pickers. Returns the
-// chosen index, or -1 when the user cancelled (encoder hold or a serial byte).
+// Encoder picker shared by the project / variant pickers. Returns the chosen
+// index, or -1 when the user cancelled (encoder hold or a serial byte).
 //
 // Owns inClickMenu for its duration (see the file header) and resets the
 // button state machine on entry so the click that launched the app - or the
@@ -373,8 +609,6 @@ static void drawPickerItem(const char* header, const String& ledLabel,
 // machineTag is printed once on entry as `<TAG> n=<count>`: one grep-able line
 // per picker so a headless caller can see the picker open and how many entries
 // it holds (test_projects.py phase 6(d) drives the launcher on that line).
-// startIdx pre-selects an entry (the guided destination picker defaults to
-// the first empty slot); out of range falls back to 0.
 static int runPicker(const char* machineTag, const char* header,
                      const String* ledLabels, const String* titles,
                      const String* summaries, int count, int startIdx = 0) {
@@ -466,10 +700,10 @@ static int runPicker(const char* machineTag, const char* header,
     return result;
 }
 
-// After a script ends the user is often still holding the clickwheel (holding
-// is how you interrupt one - Python_Proper.cpp:5016 raises KeyboardInterrupt).
-// Wait for the button to come back to rest so the keep-prompt doesn't read
-// that same hold as "cancel" the instant it opens.
+// After a script or a guide ends the user is often still holding the clickwheel
+// (holding is how you interrupt a script - Python_Proper.cpp:5016 raises
+// KeyboardInterrupt). Wait for the button to come back to rest so the next
+// prompt doesn't read that same hold as "cancel" the instant it opens.
 static void waitForButtonRest(unsigned long timeoutMs) {
     unsigned long start = millis();
     unsigned long restSince = 0;
@@ -493,253 +727,560 @@ static void waitForButtonRest(unsigned long timeoutMs) {
     encoderDirectionState = NONE;
 }
 
-// Slot picker for the keep-flow: 0-7 with an occupied indicator. -1 = cancel.
-static int pickDestinationSlot(void) {
-    // static for the same reason the launcher's arrays are: label arrays are
-    // Strings, and this runs at the bottom of the deepest menu call path.
-    static String ledLabels[NUM_SLOTS];
-    static String titles[NUM_SLOTS];
-    static String summaries[NUM_SLOTS];
-
-    SlotManager& mgr = SlotManager::getInstance();
-    Serial.println("\n\r  Save this circuit to which slot?");
-    for (int i = 0; i < NUM_SLOTS; i++) {
-        bool used = mgr.slotExists(i);
-        ledLabels[i] = String(i) + (used ? " used" : " free");
-        titles[i] = "Slot " + String(i);
-        summaries[i] = used ? "overwrites saved slot" : "empty slot";
-    }
-    return runPicker("SLOTS", "Slot", ledLabels, titles, summaries, NUM_SLOTS);
-}
-
-// ============================================================================
-// Guided flow (task 6): destination slot + resume, then guideRun
-// ============================================================================
-// NO temp slots anywhere in this path - the guide builds DIRECTLY into a
-// destination slot (DESIGN_GUIDED_PLACEMENT.md §7, Kevin's decision), which
-// is why the seam is called before enterTemporarySlot in the launcher.
-// Every return from guidedFlowInner is `true`: once the wiring is known to
-// be guided, the guided flow owns the interaction - including cancels at its
-// own pickers (returning false there would drop the user into the non-guided
-// temp-slot path they never asked for).
-
-// Cheap text scan of /slots/slotN.yaml for a guideProgress line bound to
-// this wiring. toYAML emits it on line 3 (right after version/sourceOfTruth),
-// so a short bounded read is enough. Returns the slot, with the saved step in
-// stepOut; -1 when no slot resumes this project.
-static int findGuideProgressSlot(const String& wiringPath, int& stepOut) {
-    stepOut = 0;
-    String needle = "\"" + wiringPath + "\"";
-    for (int n = 0; n < NUM_SLOTS; n++) {
-        String path = "/slots/slot" + String(n) + ".yaml";
-        File f = safeFileOpen(path.c_str(), "r");
-        if (!f)
+// yesNoMenu treats ANY non-y/n byte as cancel, and a bare line terminator IS
+// such a byte: the `z ...\r\n` command line leaves its '\n' in the RAW Serial
+// buffer, a MicroPython input() consumes through the '\r' and leaves the '\n',
+// and a stray Enter tapped while a script streamed sits there too. Either one
+// would silently cancel a prompt before anyone saw it (bench-reproduced).
+// Swallow LINE ENDINGS ONLY - a real y/n/other answer already in flight must
+// survive.
+static void drainLineEndings(void) {
+    delay(20);
+    while (Serial.available() > 0) {
+        int p = Serial.peek();
+        if (p == '\r' || p == '\n') {
+            Serial.read();
             continue;
-        int lines = 0;
-        int found = -1;
-        while (f.available() && lines < 20) {
-            String line = f.readStringUntil('\n');
-            lines++;
-            if (line.length() == 0)
-                continue;
-            if (line.charAt(0) == ' ' || line.charAt(0) == '\t')
-                continue;   // guideProgress: is a top-level line
-            String t = line;
-            t.trim();
-            if (!t.startsWith("guideProgress:"))
-                continue;
-            if (t.indexOf(needle) < 0)
-                break;   // bound to a different project - this slot is out
-            int stepIdx = t.indexOf("step:");
-            if (stepIdx >= 0) {
-                int endIdx = t.indexOf('}', stepIdx);
-                if (endIdx < 0)
-                    endIdx = t.length();
-                String val = t.substring(stepIdx + 5, endIdx);
-                val.trim();
-                stepOut = val.toInt();
-            }
-            found = n;
-            break;
         }
-        safeFileClose(f, false);
-        if (found >= 0)
-            return found;
+        break;
     }
-    return -1;
 }
 
-// Destination picker for the guided flow: slots 0-7 with occupied indicator,
-// default = first empty (modeled on the task-5 keep-prompt picker). -1 =
-// cancel (encoder hold or serial byte - the guide's own keys start AFTER
-// this picker returns, so a byte here is a cancel, not a guide key).
-static int pickGuideDestinationSlot(void) {
-    static String ledLabels[NUM_SLOTS];
-    static String titles[NUM_SLOTS];
-    static String summaries[NUM_SLOTS];
+// ============================================================================
+// The shared inner flow: run file -> guide -> script
+// ============================================================================
 
-    SlotManager& mgr = SlotManager::getInstance();
-    Serial.println("\n\r  Build this guided project into which slot?");
-    int firstEmpty = 0;
-    bool haveEmpty = false;
-    for (int i = 0; i < NUM_SLOTS; i++) {
-        bool used = mgr.slotExists(i);
-        if (!used && !haveEmpty) {
-            firstEmpty = i;
-            haveEmpty = true;
-        }
-        ledLabels[i] = String(i) + (used ? " used" : " free");
-        titles[i] = "Slot " + String(i);
-        summaries[i] = used ? "overwrites saved slot" : "empty slot";
+// Everything the flow needs to know about the run it is about to perform.
+struct RunContext {
+    String dir;          // project directory name
+    String projectPath;  // /projects/<dir>
+    String runPath;      // /projects/<dir>/<dir>_<N>.yaml (the active context)
+    String wiringPath;   // the CANONICAL wiring this run came from (runSource)
+    ProjectMeta meta;    // meta: of wiringPath (variant/script resolution)
+    bool interactive;    // encoder/terminal session (offers prompts) vs headless
+    bool noScript;       // headless `noscript`
+};
+
+// main.<variant>.py -> meta.script -> main.py. "" when the project ships no
+// script, which is a legitimate project shape (wiring only).
+static String resolveScriptPath(const RunContext& rc) {
+    if (rc.meta.variant.length() > 0) {
+        String candidate = rc.projectPath + "/main." + rc.meta.variant + ".py";
+        if (safeFileExists(candidate.c_str()))
+            return candidate;
     }
-    return runPicker("GSLOTS", "Build in", ledLabels, titles, summaries,
-                     NUM_SLOTS, firstEmpty);
+    if (rc.meta.script.length() > 0) {
+        String candidate = rc.meta.script.startsWith("/")
+                               ? rc.meta.script
+                               : (rc.projectPath + "/" + rc.meta.script);
+        if (safeFileExists(candidate.c_str()))
+            return candidate;
+    }
+    String candidate = rc.projectPath + "/main.py";
+    if (safeFileExists(candidate.c_str()))
+        return candidate;
+    return String("");
 }
 
-static bool guidedFlowInner(const String& wiringPath, int destSlot) {
+static void runCompanionScript(const RunContext& rc, const String& scriptPath) {
+    String content;
+    File f = safeFileOpen(scriptPath.c_str(), "r");
+    if (!f) {
+        Serial.println("  Failed to open " + scriptPath);
+        return;
+    }
+    content = f.readString();
+    safeFileClose(f, false);
+
+    if (content.length() == 0) {
+        Serial.println("  Script is empty: " + scriptPath);
+        return;
+    }
+
+    // Companion-script contract: the wiring is loaded and routed, the RUN FILE
+    // is the active context, and `_jl_project` names where it all came from.
+    // "wiring" keeps its canonical-wiring-path value (provenance, unchanged
+    // semantics); "run" is new - it is the state file the script's own
+    // mutations will be saved into.
+    String preamble = "_jl_project = {\"dir\": \"" + pyStringSafe(rc.dir) +
+                      "\", \"variant\": \"" + pyStringSafe(rc.meta.variant) +
+                      "\", \"wiring\": \"" + pyStringSafe(rc.wiringPath) +
+                      "\", \"run\": \"" + pyStringSafe(rc.runPath) + "\"}\n";
+    content = preamble + content;
+
+    // The screen-clear / stream / encoder-settle dance from
+    // runPythonScriptFromPath (Apps.cpp:198). Replicated rather than shared:
+    // that helper takes a PATH and reads the file itself, and what we have to
+    // run is generated CONTENT.
+    Serial.print("\033[2J\033[H");
+    Serial.flush();
+    delay(30);
+    setGlobalStreamWithInterrupt(&Serial);
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    delay(400);
+
+    Serial.println("\r\nRunning " + scriptPath + " ...\r\n");
+    executePythonFileContent(content.c_str());
+    Serial.println("\r\n--- script finished ---");
+}
+
+// Save the run file and print the closing one-liner (exit rows G and H).
+static void finishRun(const RunContext& rc) {
     SlotManager& mgr = SlotManager::getInstance();
     String err;
+    if (!mgr.saveActiveSlot(err, /*skipValidation=*/true)) {
+        Serial.println("\r\n  (could not save " + rc.runPath + ": " + err + ")");
+    }
+    Serial.println("\r\n  Run saved to " + baseNameOfPath(rc.runPath) +
+                   " (now your active circuit).");
+    Serial.flush();
+}
 
-    // --- resume scan -------------------------------------------------------
-    int resumeStep = 0;
-    int resumeSlot = findGuideProgressSlot(wiringPath, resumeStep);
-    if (resumeSlot >= 0) {
-        // Machine-parseable line BEFORE the menu, so a headless driver can
-        // see the offer and answer it (yesNoMenu accepts serial y/n; any
-        // other byte cancels - the HIL's 'q' path).
-        Serial.print("\r\nGUIDE resume slot=");
-        Serial.print(resumeSlot);
+// The companion script, offered or run. `afterGuide` selects Kevin's OFFER
+// (exit H) over the unconditional run non-guided launches get.
+static void runOrOfferScript(const RunContext& rc, bool afterGuide) {
+    String scriptPath = resolveScriptPath(rc);
+
+    if (rc.noScript) {
+        Serial.println("\r\nSCRIPT offer=" +
+                       (scriptPath.length() ? scriptPath : String("none")));
+        Serial.println("SCRIPT action=skip");
+        Serial.flush();
+        finishRun(rc);
+        return;
+    }
+
+    if (scriptPath.length() == 0) {
+        // No script is a legitimate project shape (wiring only) - the circuit
+        // is live and the run file keeps it.
+        if (afterGuide) {
+            Serial.println("\r\nSCRIPT offer=none");
+            Serial.println("SCRIPT action=skip");
+        }
+        Serial.println("  (no companion script - wiring only)");
+        finishRun(rc);
+        return;
+    }
+
+    bool run = true;
+    if (afterGuide && rc.interactive) {
+        // Kevin's binding addition: the companion script is OPTIONAL after a
+        // guided build. Decline/timeout leaves the run file active and the
+        // rails exactly where the guide left them (a completed 555 keeps
+        // blinking on hardware alone).
+        waitForButtonRest(1500);
+        Serial.println("\r\nSCRIPT offer=" + scriptPath);
+        Serial.flush();
+        notify("Run\nmain.py?",
+               "\n\r  Build complete. Run " + baseNameOfPath(scriptPath) +
+                   "? y/click = run, n/other/timeout(15s) = done",
+               0);
+        drainLineEndings();
+        int r = yesNoMenu(15000, /*startOption=*/1);   // 1 = yes, 0/-1 = done
+        b.clear();
+        requestLedShow(-1);
+        run = (r == 1);
+    } else if (afterGuide) {
+        // Headless guided-complete: runs the script unless `noscript` said
+        // otherwise (handled above). No prompt - headless must be
+        // deterministic.
+        Serial.println("\r\nSCRIPT offer=" + scriptPath);
+    }
+
+    Serial.println(run ? "SCRIPT action=run" : "SCRIPT action=skip");
+    Serial.flush();
+
+    if (run) {
+        runCompanionScript(rc, scriptPath);
+        // The clickwheel hold that ended the script must not fall through.
+        waitForButtonRest(2000);
+    }
+    finishRun(rc);
+}
+
+// The guide + script half, shared by every entry point. `guideSource` is the
+// CANONICAL wiring path (never the run file: the run file loses its `guide:`
+// section on the first save, so a guide parsed from it would work once and
+// never resume). resumeStep < 0 = fresh.
+static void runGuideThenScript(const RunContext& rc, const String& guideSource,
+                               int resumeStep) {
+    if (resumeStep >= 0) {
+        Serial.print("\r\nGUIDE resume file=");
+        Serial.print(rc.runPath);
         Serial.print(" step=");
         Serial.println(resumeStep);
         Serial.flush();
-        notify("Resume?\nstep " + String(resumeStep + 1),
-               "\n\r  Guided build in progress (slot " + String(resumeSlot) +
-                   ", step " + String(resumeStep + 1) +
-                   "). y/click Yes = resume, n = restart, other = cancel",
-               0);
-        // The `z <path> <slot>` command line that can launch this flow ends
-        // in \r\n; the line reader consumes through the \r and the \n stays
-        // in the RAW Serial buffer. yesNoMenu treats any non-y/n byte as
-        // cancel, so that leftover terminator would cancel the resume offer
-        // before anyone saw it (bench-reproduced). Swallow line endings ONLY
-        // - a real y/n/other answer already in flight must survive.
-        delay(20);
-        while (Serial.available() > 0) {
-            int p = Serial.peek();
-            if (p == '\r' || p == '\n') {
-                Serial.read();
-                continue;
-            }
+    }
+
+    GuideRunResult gr = guideRun(guideSource.c_str(), resumeStep);
+    switch (gr) {
+        case GuideRunResult::QUIT:
+            // Exit F: the run file is active with guideProgress at the quit
+            // step, rails wherever the guide left them. Nothing to do -
+            // resume works next launch. NO power is written here: the rails
+            // restore is task 7's (bench note: rails return "to where they
+            // were").
+            return;
+        case GuideRunResult::PARSE_FAILED:
+            Serial.println("\r\n  guide source missing: " + guideSource +
+                           " - start a new run to rebuild");
             break;
+        case GuideRunResult::NOTHING_TO_DO:
+        case GuideRunResult::ALREADY_COMPLETE:
+        case GuideRunResult::COMPLETED:
+        default:
+            break;
+    }
+    runOrOfferScript(rc, /*afterGuide=*/true);
+}
+
+// The whole flow once the run file is open and RUNFILE has been printed.
+// `freshWiring` is set on the start-new path (the chosen variant); on the
+// load-latest path the guide source comes from the loaded state instead.
+static void runOpenedRunFile(RunContext& rc, bool fresh) {
+    SlotManager& mgr = SlotManager::getInstance();
+    JumperlessState& st = mgr.getActiveState();
+
+    // loadSlotFromPath already routed and applied the state; this second pass
+    // is the belt-and-braces refresh and doubles as the "put the nets back on
+    // the matrix now that the picker released inClickMenu" redraw.
+    refreshConnections(-1);
+
+    if (fresh) {
+        if (wiringHasGuideSections(rc.wiringPath)) {
+            runGuideThenScript(rc, rc.wiringPath, -1);
+            return;
         }
-        int r = yesNoMenu(20000);   // 1 = resume, 0 = restart, -1 = cancel
+        runOrOfferScript(rc, /*afterGuide=*/false);
+        return;
+    }
+
+    // --- load-latest: the guided-ness gate reads the LOADED state -----------
+    // wiringHasGuideSections() only works on files that still carry `guide:`,
+    // and the run file lost it on its first save. Two ways in:
+    //   1. guideProgress survived -> RESUME at the saved step;
+    //   2. no progress, but runSource names a wiring that IS guided -> a fresh
+    //      guide on this run file. (Deviation from design §1.4, argued in the
+    //      report: the strict "guideSource non-empty" gate makes a run that
+    //      was quit before its FIRST commit permanently non-guided, which
+    //      would run main.py against a circuit nobody built.)
+    if (st.parts.guideSource[0] != '\0') {
+        String src(st.parts.guideSource);
+        int step = st.parts.guideStep;
+        if (step < 0)
+            step = 0;
+        runGuideThenScript(rc, src, step);
+        return;
+    }
+    if (rc.wiringPath.length() > 0 && wiringHasGuideSections(rc.wiringPath)) {
+        runGuideThenScript(rc, rc.wiringPath, -1);
+        return;
+    }
+    runOrOfferScript(rc, /*afterGuide=*/false);
+}
+
+// Fill rc.meta / rc.wiringPath from the loaded state's runSource. Empty or
+// dangling runSource falls back to the default wiring with a one-line warning
+// (design §1.2) - variant resolution then yields main.py.
+static void resolveVariantFromRunSource(RunContext& rc) {
+    SlotManager& mgr = SlotManager::getInstance();
+    JumperlessState& st = mgr.getActiveState();
+    String src(st.runSource);
+
+    if (src.length() > 0 && safeFileExists(src.c_str())) {
+        rc.wiringPath = src;
+        readProjectMeta(src, rc.meta);
+        rc.meta.dir = rc.dir;
+        return;
+    }
+    if (src.length() > 0) {
+        Serial.println("  runSource missing: " + src + " - falling back to main.py");
+    }
+    String fallback = rc.projectPath + "/wiring.yaml";
+    rc.wiringPath = safeFileExists(fallback.c_str()) ? fallback : String("");
+    rc.meta = ProjectMeta();
+    rc.meta.dir = rc.dir;
+    if (rc.wiringPath.length() > 0) {
+        readProjectMeta(rc.wiringPath, rc.meta);
+        rc.meta.dir = rc.dir;
+    }
+    // A dangling runSource must not resolve a variant script.
+    rc.meta.variant = "";
+}
+
+static void printRunFileLine(const String& path, const char* action) {
+    Serial.print("\r\nRUNFILE path=");
+    Serial.print(path);
+    Serial.print(" action=");
+    Serial.println(action);
+    Serial.flush();
+}
+
+// ============================================================================
+// Interactive entry: the launcher's inner flow for one chosen project
+// ============================================================================
+//
+// `forcedWiring` != "" pins the variant (the Files-browser click on a specific
+// wiring*.yaml); the variant picker is then skipped entirely.
+static void projectRunInteractive(const String& dir, const String& forcedWiring,
+                                  const ProjectMeta& listedMeta) {
+    RunContext rc;
+    rc.dir = dir;
+    rc.projectPath = String(PROJECTS_DIR) + "/" + dir;
+    rc.interactive = true;
+    rc.noScript = false;
+    rc.meta = listedMeta;
+    rc.meta.dir = dir;
+
+    int runCount = 0;
+    int maxN = projectScanRunFiles(rc.projectPath, dir, runCount);
+
+    // --- the merged load-latest / start-new prompt (design §1.3) ------------
+    // The run scan comes BEFORE the variant picker, deliberately: run files
+    // are not partitioned by variant, so "load latest" must not be offered
+    // after a variant choice it might contradict. Loading resolves its variant
+    // from runSource instead.
+    bool loadLatest = false;
+    if (maxN >= 1) {
+        String latest = runFilePath(rc.projectPath, dir, maxN);
+        Serial.print("\r\nRUNS n=");
+        Serial.print(runCount);
+        Serial.print(" latest=");
+        Serial.println(latest);
+        Serial.flush();
+
+        notify("Load run " + String(maxN) + "?\nNo = new run",
+               "\n\r  " + dir + ": " + String(runCount) + " previous run" +
+                   (runCount == 1 ? "" : "s") + ". y/click Yes = load latest (" +
+                   baseNameOfPath(latest) + "), n = start new (" +
+                   String(dir) + "_" + String(maxN + 1) + ".yaml), other = cancel",
+               0);
+        drainLineEndings();
+        int r = yesNoMenu(20000, /*startOption=*/1);
         b.clear();
         requestLedShow(-1);
-        if (r == 1) {
-            if (!mgr.loadSlot(resumeSlot, err)) {
-                notify("Load\nfailed", "\n\r  Failed to load slot " +
-                                           String(resumeSlot) + ": " + err, 2000);
-                return true;
-            }
-            guideRun(wiringPath.c_str(), resumeStep);
-            return true;
-        }
-        if (r == -1) {
-            Serial.println("\r\nGUIDE cancelled");
+        if (r < 0) {
+            // EXIT B: cancel or timeout at the load/new prompt. Nothing was
+            // touched.
             Serial.println("  Cancelled.");
-            return true;
+            return;
         }
-        // r == 0: restart. Un-place everything, clear the binding, save the
-        // cleaned slot, then run the fresh path below. (The fresh path's
-        // loadSlotFromPath replaces the state wholesale anyway; this cleanup
-        // is what makes a cancel-at-the-destination-picker leave the old
-        // slot honest rather than half-built.)
-        if (mgr.loadSlot(resumeSlot, err)) {
-            JumperlessState& st = mgr.getActiveState();
-            String rerr;
-            for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
-                if (st.parts.parts[i].placed)
-                    removePartPlacement(st, i, rerr);
-            }
-            st.parts.guideSource[0] = '\0';
-            st.parts.guideStep = 0;
-            refreshConnections(-1);
-            mgr.saveSlot(resumeSlot, err, /*skipValidation=*/true);
-            Serial.println("\r\n  Restarted - previous progress cleared.");
-        } else {
-            Serial.println("\r\n  (could not load slot " + String(resumeSlot) +
-                           " to clear it: " + err + ")");
+        loadLatest = (r == 1);
+
+        if (runCount >= PROJECT_RUN_PILEUP_HINT) {
+            Serial.println("  (" + String(runCount) + " run files in " + rc.projectPath +
+                           " - old runs can be deleted from Files)");
         }
     }
 
-    // --- destination slot --------------------------------------------------
-    int dest = destSlot;
-    if (dest < 0) {
-        dest = pickGuideDestinationSlot();
-        if (dest < 0) {
-            // Cancel at the destination picker: nothing was modified (or the
-            // restart cleanup above already saved a consistent slot). Still
-            // `true` - the guided flow owns this wiring, see the block
-            // comment above.
-            Serial.println("\r\nGUIDE cancelled");
-            Serial.println("  Cancelled.");
-            return true;
+    if (loadLatest) {
+        String runPath = runFilePath(rc.projectPath, dir, maxN);
+        String err;
+        if (!projectOpenRunFile(runPath, err)) {
+            // EXIT E: both the load and (for a parse failure) the restore are
+            // handled inside loadSlotFromPath. The previous context is still
+            // active unless the terminal state was reported above.
+            notify("Load\nfailed", "\n\r  Failed to load " + runPath + ": " + err, 2000);
+            Serial.println("  (start a new run to rebuild from the project wiring)");
+            return;
         }
-    } else if (dest >= NUM_SLOTS) {
-        Serial.println("\r\nGUIDE error bad destination slot " + String(dest));
+        rc.runPath = runPath;
+        printRunFileLine(runPath, "load");
+        resolveVariantFromRunSource(rc);
+        runOpenedRunFile(rc, /*fresh=*/false);
+        return;
+    }
+
+    // --- start new: variant picker, then allocate the run file --------------
+    String wiringPath = forcedWiring;
+    if (wiringPath.length() == 0) {
+        wiringPath = rc.projectPath + "/wiring.yaml";
+        String variantFiles[PROJECT_VARIANTS_MAX];
+        int variantCount = listVariantFiles(rc.projectPath, dir, variantFiles,
+                                            PROJECT_VARIANTS_MAX);
+        if (variantCount > 1) {
+            static String vLed[PROJECT_VARIANTS_MAX];
+            static String vTitle[PROJECT_VARIANTS_MAX];
+            static String vSummary[PROJECT_VARIANTS_MAX];
+            static ProjectMeta vMeta[PROJECT_VARIANTS_MAX];
+            for (int i = 0; i < variantCount; i++) {
+                String path = rc.projectPath + "/" + variantFiles[i];
+                readProjectMeta(path, vMeta[i]);
+                String label = vMeta[i].variant;
+                if (label.length() == 0) {
+                    // No meta.variant: fall back to the filename's middle part,
+                    // "wiring.nano.yaml" -> "nano" ("wiring.yaml" -> "default").
+                    label = variantFiles[i];
+                    label.replace("wiring", "");
+                    label.replace(".yaml", "");
+                    label.replace(".", "");
+                    if (label.length() == 0)
+                        label = "default";
+                    // Write the derived label BACK: it is what main.<variant>.py
+                    // resolution and `_jl_project["variant"]` read downstream, so a
+                    // wiring.<v>.yaml with no meta.variant would otherwise display
+                    // right and resolve wrong.
+                    vMeta[i].variant = label;
+                }
+                vLed[i] = label;
+                vTitle[i] = label;
+                vSummary[i] = vMeta[i].summary;
+            }
+            int v = runPicker("VARIANTS", "Variant", vLed, vTitle, vSummary, variantCount);
+            if (v < 0) {
+                // EXIT C: cancelled before any state was touched.
+                Serial.println("  Cancelled.");
+                return;
+            }
+            wiringPath = rc.projectPath + "/" + variantFiles[v];
+            rc.meta = vMeta[v];
+            rc.meta.dir = dir;
+        }
+    } else {
+        readProjectMeta(wiringPath, rc.meta);
+        rc.meta.dir = dir;
+    }
+
+    String runPath;
+    String err;
+    if (!projectBeginRun(dir, wiringPath, runPath, err)) {
+        // EXIT D / E: the copy or the load failed (the partial file is already
+        // deleted, one retry already spent). Previous context untouched.
+        notify("Run file\nfailed", "\n\r  Could not start a run of " + dir + ": " + err,
+               2000);
+        return;
+    }
+    rc.runPath = runPath;
+    rc.wiringPath = wiringPath;
+    printRunFileLine(runPath, "new");
+    runOpenedRunFile(rc, /*fresh=*/true);
+}
+
+void projectRunFromTemplate(const String& wiringPath) {
+    String dir = projectDirOfPath(wiringPath);
+    ProjectMeta meta;
+    readProjectMeta(wiringPath, meta);
+    meta.dir = dir;
+    projectRunInteractive(dir, wiringPath, meta);
+}
+
+// ============================================================================
+// Headless entries (the `z` command, MicroPython load_project)
+// ============================================================================
+
+// Split "<project>" into (dir, templatePath). A '/' anywhere makes it a path.
+static bool resolveProjectArg(const String& project, String& dirOut,
+                              String& templateOut) {
+    if (project.indexOf('/') >= 0) {
+        dirOut = projectDirOfPath(project);
+        templateOut = project;
+    } else {
+        dirOut = project;
+        templateOut = String(PROJECTS_DIR) + "/" + project + "/wiring.yaml";
+    }
+    return dirOut.length() > 0 && templateOut.length() > 0;
+}
+
+bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
+                        bool noScript) {
+    String dir, templatePath;
+    if (!resolveProjectArg(project, dir, templatePath)) {
+        Serial.println("PROJECT error cannot resolve '" + project + "'");
+        return false;
+    }
+
+    RunContext rc;
+    rc.dir = dir;
+    rc.projectPath = String(PROJECTS_DIR) + "/" + dir;
+    rc.interactive = false;
+    rc.noScript = noScript;
+
+    int runCount = 0;
+    int maxN = projectScanRunFiles(rc.projectPath, dir, runCount);
+
+    // DEFAULT: load latest when runs exist, else new - the launcher's own
+    // defaults WITHOUT the prompt (headless has to be deterministic).
+    ProjectRunMode effective = mode;
+    if (effective == ProjectRunMode::DEFAULT)
+        effective = (maxN >= 1) ? ProjectRunMode::LOAD : ProjectRunMode::NEW;
+
+    if (effective == ProjectRunMode::LOAD || effective == ProjectRunMode::RUN_N) {
+        int wantN = (effective == ProjectRunMode::LOAD) ? maxN : runN;
+        Serial.print("\r\nRUNS n=");
+        Serial.print(runCount);
+        if (maxN >= 1) {
+            Serial.print(" latest=");
+            Serial.print(runFilePath(rc.projectPath, dir, maxN));
+        }
+        Serial.println();
+        Serial.flush();
+        if (wantN < 1) {
+            Serial.println("PROJECT error no run files for " + dir);
+            return false;
+        }
+        String runPath = runFilePath(rc.projectPath, dir, wantN);
+        if (!safeFileExists(runPath.c_str())) {
+            Serial.println("PROJECT error no such run file: " + runPath);
+            return false;
+        }
+        String err;
+        if (!projectOpenRunFile(runPath, err)) {
+            Serial.println("PROJECT error load failed: " + err);
+            return false;
+        }
+        rc.runPath = runPath;
+        printRunFileLine(runPath, "load");
+        resolveVariantFromRunSource(rc);
+        runOpenedRunFile(rc, /*fresh=*/false);
         return true;
     }
 
-    // --- fresh start into the destination slot -----------------------------
-    // loadSlotFromPath -> setActiveSlot(dest) -> force rails 0V -> saveSlot
-    // -> guideRun. The slot-tracking switch is DEFERRED until the load
-    // succeeds (task-6 review IMPORTANT 1): a failed fromYAML can leave
-    // globalState partially mutated, and pointing activeSlotNumber at dest
-    // first would let the next idle auto-save write that partial state into
-    // dest. No auto-save can fire in between - SlotManager is HIGH priority
-    // and this whole flow only pumps the CRITICAL inner set.
-    // (loadSlotFromPath applies the file's power: momentarily before the 0V
-    // force lands - noted in the report.)
-    // Capture the prior context as a (number, path) PAIR - prevSlot may be
-    // SLOT_FILE_CONTEXT now (a guided run launched while a project run file
-    // was active), and loadSlot(-2) cannot restore that.
-    int prevSlot = mgr.getActiveSlot();
-    String prevPath = String(mgr.getActiveSlotPath());
-    if (prevSlot != dest) {
-        // Big-event flush of the OUTGOING slot before its state is replaced
-        // - the loadSlot precedent (States.cpp:2918, review IMPORTANT 2):
-        // switching away must not drop its pending writes.
-        fileCacheFlushNowAll("guided_slot_switch");
+    // NEW
+    String runPath, err;
+    if (!projectBeginRun(dir, templatePath, runPath, err)) {
+        Serial.println("PROJECT error " + err);
+        return false;
     }
-    if (!mgr.loadSlotFromPath(wiringPath, err)) {
-        // We already own the interaction; falling back to the non-guided
-        // path would just fail the same load again. Reload the prior slot
-        // so live state and (unchanged) slot tracking agree again.
-        notify("Load\nfailed", "\n\r  Failed to load " + wiringPath + ": " + err, 2000);
-        Serial.println("\r\nGUIDE error load failed");
-        String rerr;
-        bool restored;
-        if (prevSlot == SLOT_FILE_CONTEXT && prevPath.length() > 0) {
-            restored = mgr.loadSlotFromPath(prevPath, rerr);
-        } else {
-            restored = mgr.loadSlot(prevSlot, rerr);
+    rc.runPath = runPath;
+    rc.wiringPath = templatePath;
+    readProjectMeta(templatePath, rc.meta);
+    rc.meta.dir = dir;
+    printRunFileLine(runPath, "new");
+    runOpenedRunFile(rc, /*fresh=*/true);
+    return true;
+}
+
+bool projectOpenLatestOrNew(const String& project, String& runPathOut) {
+    runPathOut = "";
+    String dir, templatePath;
+    if (!resolveProjectArg(project, dir, templatePath)) {
+        Serial.println("load_project: cannot resolve '" + project + "'");
+        return false;
+    }
+    String projectPath = String(PROJECTS_DIR) + "/" + dir;
+    int runCount = 0;
+    int maxN = projectScanRunFiles(projectPath, dir, runCount);
+
+    if (maxN >= 1) {
+        String runPath = runFilePath(projectPath, dir, maxN);
+        String err;
+        if (!projectOpenRunFile(runPath, err)) {
+            Serial.println("load_project failed: " + err);
+            return false;
         }
-        if (!restored) {
-            Serial.println("  (could not restore " +
-                           (prevSlot == SLOT_FILE_CONTEXT ? prevPath
-                                                          : ("slot " + String(prevSlot))) +
-                           ": " + rerr + ")");
-        }
+        runPathOut = runPath;
+        printRunFileLine(runPath, "load");
         return true;
     }
-    mgr.setActiveSlot(dest);
-    guideForcePowerSafe();
-    if (!mgr.saveSlot(dest, err, /*skipValidation=*/true)) {
-        Serial.println("\r\n  (initial save to slot " + String(dest) +
-                       " failed: " + err + " - continuing, commits will retry)");
+
+    String runPath, err;
+    if (!projectBeginRun(dir, templatePath, runPath, err)) {
+        Serial.println("load_project failed: " + err);
+        return false;
     }
-    Serial.println("\r\n  Building into slot " + String(dest) + ".");
-    guideRun(wiringPath.c_str(), -1);
+    runPathOut = runPath;
+    printRunFileLine(runPath, "new");
     return true;
 }
 
@@ -748,8 +1289,6 @@ static bool guidedFlowInner(const String& wiringPath, int destSlot) {
 // ============================================================================
 
 void projectsAppLauncher(void) {
-    SlotManager& mgr = SlotManager::getInstance();
-
     // Self-heal before listing: (re)creates any missing built-in project file
     // from projectFiles[], the way initializeMicroPythonExamples does for
     // /python_scripts. Unforced, so it is an existence check per file and a
@@ -772,9 +1311,6 @@ void projectsAppLauncher(void) {
         // provisioning-failure path, not a normal one: initializeProjects()
         // above puts the built-in projects back before we get here, so an
         // empty list means the writes themselves failed (full/locked FS).
-        // test_projects.py used to TIME this exit to prove the apps[] row
-        // resolves; it now watches for the picker's "PROJECTS n=" line
-        // instead, which the self-heal made both reachable and stronger.
         notify("No\nprojects", "\n\r  No projects found in " + String(PROJECTS_DIR), 1500);
         return;
     }
@@ -791,199 +1327,10 @@ void projectsAppLauncher(void) {
 
     int chosen = runPicker("PROJECTS", "Project", ledLabels, titles, summaries, count);
     if (chosen < 0) {
-        // EXIT 2: cancelled before any slot state was touched.
+        // EXIT A: cancelled before any state was touched.
         Serial.println("  Cancelled.");
         return;
     }
 
-    ProjectMeta meta = projects[chosen];
-    String projectPath = String(PROJECTS_DIR) + "/" + meta.dir;
-    String wiringPath = projectPath + "/wiring.yaml";
-
-    // --- variant picker (only when the project ships more than one wiring) ---
-    String variantFiles[PROJECT_VARIANTS_MAX];
-    int variantCount = listVariantFiles(projectPath, variantFiles, PROJECT_VARIANTS_MAX);
-    if (variantCount > 1) {
-        static String vLed[PROJECT_VARIANTS_MAX];
-        static String vTitle[PROJECT_VARIANTS_MAX];
-        static String vSummary[PROJECT_VARIANTS_MAX];
-        static ProjectMeta vMeta[PROJECT_VARIANTS_MAX];
-        for (int i = 0; i < variantCount; i++) {
-            String path = projectPath + "/" + variantFiles[i];
-            readProjectMeta(path, vMeta[i]);
-            String label = vMeta[i].variant;
-            if (label.length() == 0) {
-                // No meta.variant: fall back to the filename's middle part,
-                // "wiring.nano.yaml" -> "nano" ("wiring.yaml" -> "default").
-                label = variantFiles[i];
-                label.replace("wiring", "");
-                label.replace(".yaml", "");
-                label.replace(".", "");
-                if (label.length() == 0)
-                    label = "default";
-                // Write the derived label BACK: it is what main.<variant>.py
-                // resolution and `_jl_project["variant"]` read downstream, so a
-                // wiring.<v>.yaml with no meta.variant would otherwise display
-                // right and resolve wrong.
-                vMeta[i].variant = label;
-            }
-            vLed[i] = label;
-            vTitle[i] = label;
-            vSummary[i] = vMeta[i].summary;
-        }
-        int v = runPicker("VARIANTS", "Variant", vLed, vTitle, vSummary, variantCount);
-        if (v < 0) {
-            // EXIT 3: cancelled before any slot state was touched.
-            Serial.println("  Cancelled.");
-            return;
-        }
-        wiringPath = projectPath + "/" + variantFiles[v];
-        meta = vMeta[v];
-        meta.dir = projects[chosen].dir;
-    }
-
-    // --- guided seam (task 6 owns everything past a `true` here) -------------
-    if (wiringHasGuideSections(wiringPath) && runGuidedProject(meta.dir, wiringPath)) {
-        // EXIT 4: the guided flow ran the whole show INCLUDING its own slot
-        // choice - it is called before enterTemporarySlot precisely so there is
-        // no latch of ours for it to trip over.
-        return;
-    }
-
-    // --- non-guided path: temp slot 8 ---------------------------------------
-    if (!mgr.enterTemporarySlot(8)) {
-        // EXIT 5: someone else holds the latch (or slot 8 was refused). We do
-        // NOT own it, so we must not exit it - that would restore the other
-        // owner's original slot out from under them.
-        notify("Slot busy", "\n\r  Could not enter the temporary slot (already in use).", 1500);
-        return;
-    }
-
-    String err;
-    if (!mgr.loadSlotFromPath(wiringPath, err)) {
-        // EXIT 6: load failed - unwind the latch we just took.
-        mgr.exitTemporarySlot();
-        notify("Load\nfailed", "\n\r  Failed to load " + wiringPath + ": " + err, 2000);
-        return;
-    }
-    // loadSlotFromPath already routed and applied the state; this second pass
-    // is the brief's belt-and-braces refresh and doubles as the "put the nets
-    // back on the matrix now that the picker released inClickMenu" redraw.
-    refreshConnections(-1);
-
-    Serial.println("\n\r  Loaded " + wiringPath);
-
-    // --- resolve the companion script ---------------------------------------
-    // main.<variant>.py if present, else meta.script, else main.py.
-    String scriptPath;
-    if (meta.variant.length() > 0) {
-        String candidate = projectPath + "/main." + meta.variant + ".py";
-        if (safeFileExists(candidate.c_str()))
-            scriptPath = candidate;
-    }
-    if (scriptPath.length() == 0 && meta.script.length() > 0) {
-        String candidate = meta.script.startsWith("/") ? meta.script
-                                                       : (projectPath + "/" + meta.script);
-        if (safeFileExists(candidate.c_str()))
-            scriptPath = candidate;
-    }
-    if (scriptPath.length() == 0) {
-        String candidate = projectPath + "/main.py";
-        if (safeFileExists(candidate.c_str()))
-            scriptPath = candidate;
-    }
-
-    if (scriptPath.length() == 0) {
-        // No script is a legitimate project shape (wiring only) - the circuit
-        // is live, so fall through to the keep-prompt rather than unwinding.
-        Serial.println("  (no companion script - wiring only)");
-    } else {
-        String content;
-        File f = safeFileOpen(scriptPath.c_str(), "r");
-        if (!f) {
-            Serial.println("  Failed to open " + scriptPath);
-        } else {
-            content = f.readString();
-            safeFileClose(f, false);
-        }
-
-        if (content.length() == 0) {
-            Serial.println("  Script is empty: " + scriptPath);
-        } else {
-            // Companion-script contract: the wiring is loaded and routed, temp
-            // slot 8 is active, and `_jl_project` names where it all came from.
-            String preamble = "_jl_project = {\"dir\": \"" + pyStringSafe(meta.dir) +
-                              "\", \"variant\": \"" + pyStringSafe(meta.variant) +
-                              "\", \"wiring\": \"" + pyStringSafe(wiringPath) + "\"}\n";
-            content = preamble + content;
-
-            // The screen-clear / stream / encoder-settle dance from
-            // runPythonScriptFromPath (Apps.cpp:198). Replicated rather than
-            // shared: that helper takes a PATH and reads the file itself, and
-            // what we have to run is generated CONTENT.
-            Serial.print("\033[2J\033[H");
-            Serial.flush();
-            delay(30);
-            setGlobalStreamWithInterrupt(&Serial);
-            encoderButtonState = IDLE;
-            lastButtonEncoderState = IDLE;
-            delay(400);
-
-            Serial.println("\r\nRunning " + scriptPath + " ...\r\n");
-            executePythonFileContent(content.c_str());
-            Serial.println("\r\n--- script finished ---");
-        }
-    }
-
-    // --- keep-prompt ---------------------------------------------------------
-    waitForButtonRest(2000);  // the clickwheel hold that ended the script
-    notify("Keep this\ncircuit?", "\n\r  Keep this circuit? (click Yes to save it to a slot)", 0);
-    // Same trap the resume prompt hit (see guidedFlowInner): yesNoMenu treats
-    // any non-y/n byte as cancel, and a bare line terminator IS such a byte.
-    // Here it arrives from the script that just ran - a MicroPython input()
-    // consumes through the \r and leaves the \n, and a stray Enter tapped while
-    // the script was streaming sits in the RAW buffer too. Either one silently
-    // answers "don't keep" and restores the previous slot before the user ever
-    // sees the offer. Swallow line endings ONLY - a real y/n/other answer
-    // already in flight must survive.
-    delay(20);
-    while (Serial.available() > 0) {
-        int p = Serial.peek();
-        if (p == '\r' || p == '\n') {
-            Serial.read();
-            continue;
-        }
-        break;
-    }
-
-    int keep = yesNoMenu(15000);  // 1 = yes, 0 = no, -1 = cancel/timeout
-    if (keep == 1) {
-        int slot = pickDestinationSlot();
-        if (slot >= 0) {
-            String saveErr;
-            if (mgr.saveSlot(slot, saveErr)) {
-                // EXIT 7 (the keep path), in exactly this order - see the file
-                // header's save-order note.
-                mgr.exitTemporarySlot(false);
-                String loadErr;
-                if (!mgr.loadSlot(slot, loadErr))
-                    Serial.println("  Saved, but reloading slot " + String(slot) +
-                                   " failed: " + loadErr);
-                refreshConnections(-1);
-                notify("Saved to\nslot " + String(slot),
-                       "\n\r  Saved to slot " + String(slot), 1200);
-                return;
-            }
-            // EXIT 8: save failed. Do NOT continue the keep sequence - that
-            // would drop the circuit and load a stale slot. Fall through to the
-            // decline path so the user's original slot comes back intact.
-            Serial.println("  Save failed: " + saveErr);
-        }
-        // slot < 0: cancelled at the slot picker -> decline path below.
-    }
-
-    // EXIT 9: declined / timed out / cancelled at the slot picker / save
-    // failed. Full restore: original slot tracking, state and hardware.
-    mgr.exitTemporarySlot();
-    notify("Restored", "\n\r  Not kept - restored the previous slot.", 900);
+    projectRunInteractive(projects[chosen].dir, String(""), projects[chosen]);
 }

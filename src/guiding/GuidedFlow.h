@@ -62,11 +62,25 @@ struct GuideScript {
 // skipped with warnings appended to err (parse-warning style, like bridges).
 bool guideParse(const char* yamlPath, GuideScript& out, String& err);
 
+// How a guideRun() call ended. The launcher needs this to tell exit F (quit
+// mid-build: leave the run file alone, resume works next launch) from exit H
+// (the build finished: offer the companion script) - design-launcher §2.2.
+enum class GuideRunResult : uint8_t {
+    PARSE_FAILED,      // the guide source could not be read (dangling runSource)
+    NOTHING_TO_DO,     // parsed, but no steps and no parts to synthesize from
+    ALREADY_COMPLETE,  // resumeStep >= numSteps: the build is finished, no session ran
+    QUIT,              // the user quit before the last step
+    COMPLETED          // every step was reached (DONE was shown)
+};
+
 // BLOCKING guide runner (probeMode's shape: session struct + tick machine,
 // pumping jOS.serviceInner() every pass). resumeStep < 0 = fresh start.
-// Assumes the caller (ProjectsApp's guided seam / the 'z' command) already
-// loaded the wiring into the destination slot and made it active.
-void guideRun(const char* projectYamlPath, int resumeStep = -1);
+// Assumes the caller (ProjectsApp's run flow / the 'z' command) already loaded
+// the wiring into the ACTIVE CONTEXT - which is now the project's run file,
+// while `projectYamlPath` stays the CANONICAL wiring (the run file loses its
+// `guide:` section on the first save, so a guide parsed from it would work
+// once and never resume).
+GuideRunResult guideRun(const char* projectYamlPath, int resumeStep = -1);
 
 struct GuideSession;               // ProbeSession-style, defined in the .cpp
 void guideTick(GuideSession& s);
