@@ -558,6 +558,7 @@ void JumperlessState::clear() {
     display.clear();
     config.setDefaults();
     parts.clear();             // parts table + guideProgress scalars
+    runSource[0] = '\0';       // per-run project origin (see States.h)
     clearAllCustomNetNames();  // Reset all custom net names to defaults
     dirty = false;
     lastModifiedTime = 0;
@@ -1253,6 +1254,13 @@ bool JumperlessState::toYAML(String& output, int showANSI) const {
         output += "guideProgress: {source: \"" + String(parts.guideSource) +
                   "\", step: " + String(parts.guideStep) + "}\n";
     }
+
+    // runSource scalar - ONE flow line, matched with the parser below.
+    // Emitted only when non-empty (see States.h: an unemitted-but-parsed
+    // scalar is destroyed by the idle auto-save).
+    if (runSource[0] != '\0') {
+        output += "runSource: \"" + String(runSource) + "\"\n";
+    }
     output += "\n";
 
     // Bridges section
@@ -1357,6 +1365,17 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
                 String val = line.substring(stepIdx + 5, endIdx);
                 val.trim();
                 parts.guideStep = (int16_t)val.toInt();
+            }
+        }
+        else if (!indented && line.startsWith("runSource:")) {
+            // ONE shape only (matched with toYAML above):
+            //   runSource: "/projects/555/wiring.yaml"
+            int q1 = line.indexOf('"');
+            int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
+            if (q1 >= 0 && q2 > q1) {
+                String src = line.substring(q1 + 1, q2);
+                strncpy(runSource, src.c_str(), sizeof(runSource) - 1);
+                runSource[sizeof(runSource) - 1] = '\0';
             }
         }
         else if (!indented && line.startsWith("bridges:")) {

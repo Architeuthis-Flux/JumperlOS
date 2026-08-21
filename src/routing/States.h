@@ -389,7 +389,21 @@ public:
     DisplayState display;
     ConfigState config;
     PartsState parts;      // guided-placement parts table (+ guideProgress scalars)
-    
+
+    // Where this state's circuit came from, when it is a per-run project file.
+    // Round-trips as ONE un-indented top-level flow-scalar line, emitted only
+    // while non-empty:
+    //     runSource: "/projects/555/wiring.yaml"
+    // The launcher writes it when it allocates a run file; nothing else reads
+    // it yet. It lives here rather than in PartsState because it describes the
+    // whole context, not the parts table.
+    //
+    // ROUND-TRIP IS LOAD-BEARING (same rule as parts/guideProgress): toYAML is
+    // a wholesale rewrite, so a scalar that is PARSED but not EMITTED is
+    // destroyed by the very next SlotManager idle auto-save. Serializer and
+    // parser must land in the same commit, always.
+    char runSource[96];
+
     // Metadata
     int version;  // State format version for future compatibility
     
