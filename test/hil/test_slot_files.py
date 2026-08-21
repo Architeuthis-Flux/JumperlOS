@@ -462,8 +462,17 @@ print("e=", 1 if is_connected(41, 42) else 0)
     check(parse_kv(out).get("foreign") == 0,
           "ATOMIC-ON-PARSE: the failed file's bridge (51-52) is not live")
 
-    # Dirty the restored context and let the idle auto-save run: it must write
-    # slot 2's OWN content, not the failed file's remnants.
+    # Idle window with NO mutation first: a failed load must not cause a write
+    # at all. (fromYAML's own bridge-dropping sanitizer can call markDirty(),
+    # so "nothing was dirtied" is a real thing to check, not a tautology.)
+    time.sleep(4.0)
+    slot2_idle_exists, slot2_idle = read_device_file("/slots/slot2.yaml")
+    check(slot2_idle_exists == slot2_bad_existed and slot2_idle == slot2_bad_before,
+          "ATOMIC-ON-PARSE: slot2.yaml is byte-identical after an idle window "
+          "with no mutation - the failed load wrote nothing")
+
+    # NOW dirty the restored context and let the idle auto-save run: it must
+    # write slot 2's OWN content, not the failed file's remnants.
     jl_exec("connect(53, 54)", timeout=20)
     time.sleep(4.0)
     slot2_bad_after_exists, slot2_bad_after = read_device_file("/slots/slot2.yaml")
@@ -472,6 +481,44 @@ print("e=", 1 if is_connected(41, 42) else 0)
           "ATOMIC-ON-PARSE: slot2.yaml did NOT receive the failed file's content")
     check(slot2_bad_after is not None and "53" in slot2_bad_after,
           "ATOMIC-ON-PARSE: slot 2 auto-saved its own edit normally afterwards")
+
+    # The OTHER restore branch: prior context is a FILE, not a numbered slot.
+    # savedSlot == SLOT_FILE_CONTEXT takes the recursive loadSlotFromPath arm
+    # instead of loadSlot, so it needs its own coverage - the two arms share
+    # nothing but the capture.
+    out = jl_exec(f"print('loaded=', 1 if load_project({RUN_FILE!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("loaded") == 1, "back in the run-file context for the path-prior branch")
+    time.sleep(1.5)
+    run_pre_exists, run_pre = read_device_file(RUN_FILE)
+
+    out = jl_exec(f"print('loaded=', 1 if load_project({BAD_FILE!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("loaded") == 0, "the bad file fails from a FILE context too")
+    time.sleep(1.5)
+
+    slot_fp, path_fp = active_context(1.5)
+    check(slot_fp == -1 and path_fp == RUN_FILE,
+          f"ATOMIC-ON-PARSE (path prior): the run-file context is still active "
+          f"(got {slot_fp}, {path_fp!r})")
+    out = jl_exec("""
+print("foreign=", 1 if is_connected(51, 52) else 0)
+print("own=", 1 if is_connected(11, 12) else 0)
+""")
+    vals = parse_kv(out)
+    check(vals.get("foreign") == 0 and vals.get("own") == 1,
+          "ATOMIC-ON-PARSE (path prior): the run file's own wiring is live and "
+          "the failed file's bridge is not - the prior context was re-loaded")
+
+    jl_exec("connect(55, 56)", timeout=20)
+    time.sleep(4.0)
+    run_post_exists, run_post = read_device_file(RUN_FILE)
+    check(run_post_exists and run_post is not None and "51" not in run_post,
+          "ATOMIC-ON-PARSE (path prior): the run file did NOT receive the "
+          "failed file's content")
+    check(run_post is not None and "55" in run_post,
+          "ATOMIC-ON-PARSE (path prior): the run file auto-saved its own edit "
+          "normally afterwards")
 
     # --- 6b. Project TEMPLATES are read-only -------------------------------
     # Adoption made this reachable and the bench proved it destructive:
