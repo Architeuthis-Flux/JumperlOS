@@ -1000,8 +1000,19 @@ int JumperlessState::getEphemeralConnectionCount() const {
 // The undo record was already gated on `prev != voltage`; the dirty mark now
 // matches it. Float-exact comparison is right for the same reason it is right
 // for the undo gate - the re-assert hands back the identical float it parsed.
-// Note this can only ever SUPPRESS a dirty mark for a write that changed
-// nothing; it never clears an existing one, so no pending edit can be lost.
+// It never CLEARS an existing mark, so nothing already dirty can be lost.
+//
+// THE LIMIT OF THIS GATE, and it is a real one: it can only judge what THIS
+// FUNCTION can see. A caller that writes power.* ITSELF and only then calls
+// the setter arrives with prev == voltage, and the change - which is real -
+// looks like a no-op from in here. Three callers do exactly that, and each
+// owns its own markDirty() as a result: the encoder rail slider
+// (Menus.cpp:2941 railCommitEdit, gated on the rails actually moving), the
+// menu's OUTPUT>Voltage action (Menus.cpp, gated on a power field actually
+// being written) and JsonStateParser::parsePowerSection (JsonState.cpp:668).
+// If you add a fourth pre-writer, it must mark for itself - do not "fix" it by
+// weakening this gate, which is what keeps every load from rewriting its own
+// file.
 void JumperlessState::setDacVoltage(int dacNum, float voltage) {
     float prev = (dacNum == 0) ? power.dac0 : power.dac1;
     if (dacNum == 0) {

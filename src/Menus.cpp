@@ -4300,16 +4300,31 @@ int doMenuAction( int menuPosition, int selection ) {
         }
         requestLedShow( -1 );
 
-        // PERSIST IT (w3-5). The old comment here said "State is marked dirty
-        // by setRailVoltage()" - that stopped being true when the setter gained
-        // its no-op gate, and it was already fragile: currentAction.analogVoltage
-        // is assigned from the slider's roundedCurrentChoice, which the slider
-        // has ALREADY written straight into globalState.power, so the setTopRail
-        // calls above arrive with prev == voltage and mark nothing. A rail
-        // committed from the menu is a user edit; say so explicitly instead of
-        // relying on a setter side effect that the caller has defeated.
-        // (No configChanged - voltages live in state, not config.)
-        globalState.markDirty();
+        // NO markDirty() HERE, DELIBERATELY (w3-5 fix round 2).
+        //
+        // The old comment here said "State is marked dirty by setRailVoltage()",
+        // which stopped being true when the setter gained its no-op gate. Fix
+        // round 1 replaced it with an unconditional mark, and that was wrong in
+        // the other direction: this branch is reached from
+        // `getActionFloat(); return doMenuAction();` (:1490-1495), which runs
+        // doMenuAction() after EVERY exit from the slider - confirm, long-press
+        // cancel and serial cancel alike. Short-pressing without turning
+        // anything would therefore have dirtied the state and made the next
+        // idle flush rewrite the slot file: one more no-change rewrite, which
+        // is the exact class of bug this task exists to remove.
+        //
+        // Both cases are already covered without a mark here:
+        //   * the slider PRE-WROTE globalState.power, so the setters above see
+        //     prev == voltage and stay quiet - and railCommitEdit() (:2941) has
+        //     already marked, but only when the rails actually moved. It is the
+        //     single owner of that decision and it runs on all three exits.
+        //   * a future Rails menu entry that reaches RAILSACTION WITHOUT the
+        //     slider (a preset voltage, actions[] != 3) does no pre-write, so
+        //     setTopRail/setBotRail arrive with prev != voltage and the setter's
+        //     own mark fires normally.
+        // The pre-write is the only thing that can hide a change from the
+        // setter, and the only pre-writer is the slider. So: nothing to do here.
+        // (No configChanged either - voltages live in state, not config.)
 
     } else if ( currentCategory == SLOTSACTION ) { //! Slots
 
@@ -4431,6 +4446,17 @@ int doMenuAction( int menuPosition, int selection ) {
 
             printActionStruct( );
 
+            // Did the loop below actually PRE-WRITE a power field? Only then is
+            // there an edit the setters cannot see (w3-5 fix round 2). This
+            // branch is reached from `selectNodeAction(); ... doMenuAction();`
+            // (:1444/:1477) with the return value unchecked, and
+            // selectNodeAction() returns -1 on cancel (:2673) - so a cancelled
+            // node pick lands here with every from[]/to[] still -1, the loop
+            // body never runs, and an unconditional mark (which is what fix
+            // round 1 left here) would dirty the state for a visit that changed
+            // nothing at all.
+            bool wroteAPowerField = false;
+
             for ( int i = 0; i < 10; i++ ) {
                 if ( currentAction.from[ i ] != -1 && currentAction.to[ i ] != -1 ) {
                     switch ( currentAction.from[ i ] ) {
@@ -4438,11 +4464,13 @@ int doMenuAction( int menuPosition, int selection ) {
                         addBridgeToState( DAC0, currentAction.to[ i ] );
                         // setDac0_5Vvoltage(currentAction.analogVoltage);
                         globalState.power.dac0 = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         break;
                     case 1:
 
                         addBridgeToState( DAC1, currentAction.to[ i ] );
                         globalState.power.dac1 = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         // setDac1_8Vvoltage(currentAction.analogVoltage);
                         break;
                         // break;
@@ -4450,10 +4478,12 @@ int doMenuAction( int menuPosition, int selection ) {
                     case 2:
                         addBridgeToState( TOP_RAIL, currentAction.to[ i ] );
                         globalState.power.topRail = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         break;
                     case 3:
                         addBridgeToState( BOTTOM_RAIL, currentAction.to[ i ] );
                         globalState.power.bottomRail = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         break;
 
                     default:
@@ -4467,13 +4497,15 @@ int doMenuAction( int menuPosition, int selection ) {
             // review's list): the cases above assign globalState.power.dac0 /
             // dac1 / topRail / bottomRail DIRECTLY, so setRailsAndDACs() - which
             // re-reads those same fields - hands every setter prev == voltage
-            // and marks nothing. Today the dirty flag arrives incidentally from
-            // the addBridgeToState() next to each assignment, which is both
+            // and marks nothing. Before this, the dirty flag arrived incidentally
+            // from the addBridgeToState() next to each assignment, which is both
             // fragile (it is persisting a VOLTAGE on the strength of a BRIDGE
             // add) and lossy when that add is refused (isConnectionAllowed, or
-            // MAX_BRIDGES). Mark it for the reason it is actually true: the
-            // user set a voltage.
-            globalState.markDirty();
+            // MAX_BRIDGES). Mark it for the reason it is actually true - the
+            // user set a voltage - and ONLY when one was actually set.
+            if ( wroteAPowerField ) {
+                globalState.markDirty();
+            }
 
         } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf(
                         "UART" ) != -1 ) {

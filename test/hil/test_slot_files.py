@@ -716,6 +716,13 @@ print("own=", 1 if is_connected(11, 12) else 0)
     #     connections are untouched and applyJSONState never reaches the
     #     clearAllConnections() that used to dirty the state by accident - the
     #     payload is pure power, exactly the case that silently did not persist.
+    #
+    #     `L`, NOT `J` - do not "correct" this. `J` SHOWS JSON state and `L`
+    #     LOADS it (SingleCharCommands.cpp:675-681). Sending the payload after
+    #     a `J` opens no paste prompt, so every byte of it is fed to the MENU as
+    #     single-char commands - which is its own small adventure, and the check
+    #     then fails for a reason that has nothing to do with the firmware.
+    #     (Ask how we know.)
     prompt, out = port1_paste(
         "L power",
         ('{"power": {"top_rail": %s, "bottom_rail": 0.00,'
