@@ -990,11 +990,53 @@ static void guideShowPrompt(const GuideSession& s) {
 // The state machine
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The step ring (design §3): numSteps + 1 positions, DONE sitting at index
+// numSteps. Browsing is EPHEMERAL - the cursor is not progress.
+// ---------------------------------------------------------------------------
+
+// Lowest step that is neither committed nor skipped, or numSteps when none.
+// THIS, not the browse cursor, is what resume means (§3.2): out-of-order
+// commits must not change where the next launch picks up.
+static int guideFirstUnfinished(const GuideSession& s) {
+    for (int i = 0; i < s.script->numSteps && i < MAX_GUIDE_STEPS; i++) {
+        if (!s.committed[i] && !s.skipped[i]) return i;
+    }
+    return s.script->numSteps;
+}
+
+// Lowest step that is not COMMITTED - a skipped step counts as unfinished
+// here. The DONE view's confirm uses this ("jump to the first thing you have
+// not actually built"), while persistence uses guideFirstUnfinished, where a
+// deliberate skip is a decision the resume must respect.
+static int guideFirstIncomplete(const GuideSession& s) {
+    for (int i = 0; i < s.script->numSteps && i < MAX_GUIDE_STEPS; i++) {
+        if (!s.committed[i]) return i;
+    }
+    return s.script->numSteps;
+}
+
+// Next unfinished step after `from`, wrapping; numSteps when none is left.
+// The post-commit cursor rule (§3.1): after a jumped-back commit, stepIdx + 1
+// would land on an already-committed step's WAIT.
+static int guideNextUnfinished(const GuideSession& s, int from) {
+    int n = s.script->numSteps;
+    if (n <= 0) return 0;
+    for (int d = 1; d <= n; d++) {
+        int i = (from + d) % n;
+        if (!s.committed[i] && !s.skipped[i]) return i;
+    }
+    return n;
+}
+
 static void guidePersistProgress(GuideSession& s) {
     strncpy(globalState.parts.guideSource, s.script->sourcePath,
             sizeof(globalState.parts.guideSource) - 1);
     globalState.parts.guideSource[sizeof(globalState.parts.guideSource) - 1] = '\0';
-    globalState.parts.guideStep = (int16_t)s.stepIdx;
+    // NOT the cursor (§3.2): the browse position is ephemeral, so what gets
+    // written is the first genuinely unfinished step. Resume lands right no
+    // matter how far the wheel wandered.
+    globalState.parts.guideStep = (int16_t)guideFirstUnfinished(s);
     globalState.markDirty();
     String serr;
     if (!SlotManager::getInstance().saveActiveSlot(serr, /*skipValidation=*/true)) {
@@ -1427,6 +1469,23 @@ static void guideAdjustLeave(GuideSession& s, bool cancel) {
                                                                     : "WAIT");
 }
 
+// The wheel's whole job (design §3.1). PURE NAVIGATION: no skip flag, no
+// un-commit, no persistence - it only moves the cursor around a ring of
+// numSteps + 1 positions with the DONE view at index numSteps, wrapping at
+// BOTH ends. THE WHEEL CAN NEVER EXIT THE GUIDE; hold and `q` are the only
+// ways out, from anywhere. `>` and `<` are its serial twins.
+static void guideBrowse(GuideSession& s, int dir) {
+    int n = s.script->numSteps;
+    int next = s.stepIdx + dir;
+    if (next > n) next = 0;        // past the DONE view -> back to step 1
+    if (next < 0) next = n;        // before step 1 -> into the DONE view
+    s.stepIdx = next;
+    // Any landing re-arms the summary: browsing OUT of DONE must let the next
+    // arrival print it again (today only STEP_BACK cleared this).
+    s.summaryShown = false;
+    s.state = (s.stepIdx >= n) ? GuideState::DONE : GuideState::STEP_ENTER;
+}
+
 // Skip-with-flag (§3.3): shared by the wait states' skip key, a mid-check
 // skip (which aborts the check first at its call site), and on_fail: skip.
 static void guideDoSkip(GuideSession& s) {
@@ -1459,8 +1518,8 @@ void guideTick(GuideSession& s) {
             Serial.print(sc.numSteps);
             Serial.println(" steps)");
             cycleTerminalColor(false, 100.0, true, &Serial);
-            Serial.println("wheel=step  click=confirm  dblclick=adjust  hold/q=quit  "
-                           "n/p/s/v  t <row>=tap  m <row>=move  c=snap");
+            Serial.println("wheel=browse  click=confirm  dblclick=adjust  hold/q=quit  "
+                           "n/p/s/v  t/m <row>  c=snap  >/<=browse");
             Serial.println("rails + DACs held at 0V until the power_on step");
             Serial.flush();
             guideStatusLine(s, "INIT");
@@ -1508,6 +1567,13 @@ void guideTick(GuideSession& s) {
             // LEFT; letting it ripen here would confirm this one for free.
             s.pendingConfirmMs = 0;
             guideShowPrompt(s);
+            // Browsing means landing on steps with history - say so, so a
+            // confirm here is never a surprise.
+            if (s.committed[s.stepIdx]) {
+                Serial.println("  (already committed - click re-verifies)");
+            } else if (s.skipped[s.stepIdx]) {
+                Serial.println("  (skipped)");
+            }
             s.pulseOn = true;
             s.lastPulseMs = millis();
             guideRenderTarget(s, s.pulseOn);
@@ -1542,7 +1608,11 @@ void guideTick(GuideSession& s) {
                     s.state = GuideState::EXIT;
                     break;
                 case GuideKey::CONFIRM:
-                    s.verifyOnly = false;
+                    // Confirming an ALREADY COMMITTED step re-verifies it and
+                    // never re-commits (§3.1): no duplicate bridges, no second
+                    // cursor advance. Browsing back to check your work is the
+                    // whole point of the ring.
+                    s.verifyOnly = s.committed[s.stepIdx];
                     s.state = GuideState::STEP_VERIFY;
                     break;
                 case GuideKey::VERIFY:
@@ -1558,13 +1628,10 @@ void guideTick(GuideSession& s) {
                     guideDoSkip(s);
                     break;
                 case GuideKey::NEXT:
-                    // The browse rework lands in the next commit; until then
-                    // the wheel keeps today's meaning so this commit is a
-                    // behaviour-preserving one for everything but ADJUST.
-                    guideDoSkip(s);
+                    guideBrowse(s, +1);
                     break;
                 case GuideKey::PREV:
-                    s.state = GuideState::STEP_BACK;
+                    guideBrowse(s, -1);
                     break;
                 case GuideKey::ADJUST: {
                     // Double-click = "let me put this somewhere else". Only a
@@ -1909,8 +1976,12 @@ void guideTick(GuideSession& s) {
             }
             s.committed[s.stepIdx] = true;
             s.skipped[s.stepIdx] = false;
-            guideStatusLine(s, "COMMIT");
-            s.stepIdx++;
+            guideStatusLine(s, "COMMIT");   // still names the step we built
+            // Post-commit cursor rule (§3.1): the NEXT UNFINISHED step,
+            // wrapping - not stepIdx + 1, which after a jumped-back commit
+            // drops the user on an already-committed step's WAIT.
+            s.stepIdx = guideNextUnfinished(s, s.stepIdx);
+            s.summaryShown = false;
             guidePersistProgress(s);
             s.state = (s.stepIdx >= sc.numSteps) ? GuideState::DONE
                                                  : GuideState::STEP_ENTER;
@@ -1961,17 +2032,22 @@ void guideTick(GuideSession& s) {
         }
 
         case GuideState::DONE: {
+            // The DONE VIEW (§3.3): a browsable summary, not a doorway. It is
+            // reached by committing the last unfinished step OR by wheeling
+            // past either end of the ring, and it is left the same three ways
+            // - browse out, confirm, or quit.
             if (!s.summaryShown) {
                 s.summaryShown = true;
-                int commits = 0, skips = 0;
+                int commits = 0, skips = 0, unfinished = 0;
                 for (int i = 0; i < sc.numSteps; i++) {
                     if (s.committed[i]) commits++;
-                    if (s.skipped[i]) skips++;
+                    else if (s.skipped[i]) skips++;
+                    else unfinished++;
                 }
                 cycleTerminalColor(true, 5.0, true, &Serial);
                 Serial.print("\r\n=== ");
                 Serial.print(sc.title);
-                Serial.print(": done. ");
+                Serial.print(": ");
                 Serial.print(commits);
                 Serial.print("/");
                 Serial.print(sc.numSteps);
@@ -1981,15 +2057,64 @@ void guideTick(GuideSession& s) {
                     Serial.print(skips);
                     Serial.print(" skipped");
                 }
+                if (unfinished > 0) {
+                    Serial.print(", ");
+                    Serial.print(unfinished);
+                    Serial.print(" unfinished");
+                }
                 Serial.println(" ===");
-                Serial.println("any key / click to finish (wheel back re-opens the last step)");
+                // Name them - "1 unfinished" with no index is a scavenger
+                // hunt on a 20-step build. Capped so a long list cannot bury
+                // the summary line itself.
+                int listed = 0;
+                for (int i = 0; i < sc.numSteps && listed < 8; i++) {
+                    if (!s.skipped[i]) continue;
+                    char id[32];
+                    guideStepId(sc, i, id, sizeof(id));
+                    Serial.print("  skipped:    [");
+                    Serial.print(i + 1);
+                    Serial.print("] ");
+                    Serial.println(id);
+                    listed++;
+                }
+                listed = 0;
+                for (int i = 0; i < sc.numSteps && listed < 8; i++) {
+                    if (s.committed[i] || s.skipped[i]) continue;
+                    char id[32];
+                    guideStepId(sc, i, id, sizeof(id));
+                    Serial.print("  unfinished: [");
+                    Serial.print(i + 1);
+                    Serial.print("] ");
+                    Serial.println(id);
+                    listed++;
+                }
+                bool allBuilt = (guideFirstIncomplete(s) >= sc.numSteps);
+                Serial.println(allBuilt
+                    ? "wheel=browse  click=finish  hold/q=exit"
+                    : "wheel=browse  click=jump to the first unbuilt step  hold/q=exit");
                 Serial.flush();
                 if (oled.isConnected()) {
-                    oled.showMultiLineSmallText("Done!", true, true);
+                    char head[48];
+                    if (allBuilt) {
+                        snprintf(head, sizeof(head), "Done! %d/%d", commits, sc.numSteps);
+                    } else {
+                        snprintf(head, sizeof(head), "Done?\n%d left",
+                                 sc.numSteps - commits);
+                    }
+                    oled.showMultiLineSmallText(head, true, true);
                 }
                 guideRenderTarget(s, false);   // stepIdx == numSteps -> clears TGT
                 requestLedShow(1);
                 guideStatusLine(s, "DONE");
+                // Machine line for the HIL: the summary's three counters, in
+                // the grammar the status lines already use.
+                Serial.print("\r\nGUIDE done committed=");
+                Serial.print(commits);
+                Serial.print(" skipped=");
+                Serial.print(skips);
+                Serial.print(" unfinished=");
+                Serial.println(unfinished);
+                Serial.flush();
             }
             // Wait for a MAPPED ack - this consumes the HIL's trailing 'q'
             // (a byte left unread here would land on the main menu after the
@@ -1997,11 +2122,32 @@ void guideTick(GuideSession& s) {
             // line endings are ignored by guideReadInput already.
             int tapRow = -1;
             GuideKey k = guideReadInput(s, tapRow);
-            if (k == GuideKey::BACK) {
-                s.state = GuideState::STEP_BACK;   // re-open the last step
-            } else if (k == GuideKey::CONFIRM || k == GuideKey::SKIP ||
-                       k == GuideKey::QUIT) {
-                s.state = GuideState::EXIT;
+            switch (k) {
+                case GuideKey::NEXT: guideBrowse(s, +1); break;
+                case GuideKey::PREV: guideBrowse(s, -1); break;
+                case GuideKey::BACK:
+                    s.state = GuideState::STEP_BACK;   // re-open the last step
+                    break;
+                case GuideKey::CONFIRM: {
+                    // Confirm FINISHES only when everything is actually built.
+                    // Otherwise it is the shortcut back to the work: jump to
+                    // the first step that was never committed (a skipped one
+                    // counts - the user asked to come back to it).
+                    int target = guideFirstIncomplete(s);
+                    if (target >= sc.numSteps) {
+                        s.state = GuideState::EXIT;
+                    } else {
+                        s.stepIdx = target;
+                        s.summaryShown = false;
+                        s.state = GuideState::STEP_ENTER;
+                    }
+                    break;
+                }
+                case GuideKey::QUIT:
+                    s.state = GuideState::EXIT;
+                    break;
+                default:
+                    break;   // s / v / t / m / c: nothing to do at the summary
             }
             break;
         }
@@ -2108,8 +2254,14 @@ GuideRunResult guideRun(const char* projectYamlPath, int resumeStep) {
     }
     guideExitTail(guideSession);
 
-    // COMPLETED means every step was reached, whichever key dismissed the DONE
-    // summary; a quit from any wait state leaves stepIdx short of numSteps.
-    return (guideSession.stepIdx >= guideScript.numSteps) ? GuideRunResult::COMPLETED
-                                                          : GuideRunResult::QUIT;
+    // COMPLETED means NOTHING IS LEFT UNFINISHED - every step is committed or
+    // deliberately skipped. It deliberately no longer keys off stepIdx: with
+    // the browse ring the cursor can sit at the DONE view with half the build
+    // untouched, and quitting from there must read as exit F (resume next
+    // launch, no script offer), not as a finished build. Every pre-browse
+    // path is unchanged: reaching DONE by walking the steps leaves nothing
+    // unfinished by construction.
+    return (guideFirstUnfinished(guideSession) >= guideScript.numSteps)
+               ? GuideRunResult::COMPLETED
+               : GuideRunResult::QUIT;
 }
