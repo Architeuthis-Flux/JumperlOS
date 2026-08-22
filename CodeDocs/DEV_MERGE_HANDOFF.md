@@ -504,7 +504,12 @@ is code now:
 | 9 | Eleven parked items, the checklist rewrite, this documentation, and the full `run_all` pass |
 
 **Suites**: `test_slot_files` 72 (new in wave 2), `test_parts_roundtrip` 179,
-`test_projects` 233, `test_guide_flow` 355. `run_all` 11/11.
+`test_projects` 233, `test_guide_flow` **359** (355 at the full run of record;
++4 from the apostrophe needle that closed a review finding on the
+continuation-line detector). `run_all` **11/11** is that full pass; the later
+one-token detector fix re-ran only the four suites that reach `guideParse`, on
+its own reflashed build. **These are the "hold or grow" baselines for whatever
+comes next.**
 (`test_encoder_ui` SKIPs on any freshly built firmware until its `jl_input.py`
 ADDR table is regenerated; `run_all` counts a clean skip as a pass.)
 

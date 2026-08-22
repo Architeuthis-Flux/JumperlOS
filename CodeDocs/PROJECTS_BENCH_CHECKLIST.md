@@ -44,6 +44,24 @@ short version of what moved:
   and the symptom is `NameError: name 'jfs' isn't defined` followed by raw-REPL
   timeouts. It reads as a firmware fault and is not one. Pin it to
   `/dev/cu.usbmodemJLV5port5`.
+- [ ] **The HIL suites treat parts of the board as SCRATCH, and a killed run
+  leaves the damage behind.** Before you run them, back up anything you care
+  about in these two places — they are restored by a `finally`, and a run that
+  is interrupted (Ctrl+C, a tool timeout, an unplugged cable) never reaches it:
+  - **`/slots/slot3.yaml`** is overwritten by `test_projects` **and**
+    `test_parts_roundtrip`. **Do not keep work in slot 3.** One killed run
+    during wave 2 destroyed its contents permanently — numbered slots have a
+    `/.bak` mirror only for the last *successful* load, which by then was
+    already the test fixture.
+  - **`/config.txt`** gets `test_config`'s **fail-safe droop sentinels**
+    (`probe_droop_ohms = -55.5`, `probe_droop_v0 = 2.599`). They are chosen so a
+    board that boots with them falls through to safe defaults rather than to a
+    believable-but-wrong calibration — but they are not your values. `test_config`
+    also toggles `[top_oled] show_in_terminal` twice and relies on reaching the
+    second one.
+  **After any interrupted run, check both before trusting the board**, and look
+  for leftover `<dir>_<N>.yaml` run files and stray `/projects/hil*` fixture
+  directories while you are there.
 - [ ] Note the board's `top_oled.lock_connection` / `sda_row` / `scl_row`. In
   `connection_type 0` the top OLED lives on **GPIO 7/8** — the very pins the
   `i2cscrn` and `eeprom` projects use, and the pins the guide's `oscillates`
@@ -56,6 +74,13 @@ short version of what moved:
   guide's INIT parked them; task 7 closed it by deferring the load's power apply
   until guided-ness is decided. HIL proves the *ordering*; only a scope proves
   the absence of a 20 ms pulse. Quit the guide with `q` when you have the trace.
+  **Then put 555 back to having no runs**, or §1.2's first check below is
+  invalidated before you reach it: `z 555 new` mints
+  `/projects/555/555_1.yaml`, so delete that file (Files browser, or
+  `jfs.remove("/projects/555/555_1.yaml")` from the REPL) and `<0` back to a
+  slot before starting §1. If you would rather not, run the trace against a
+  throwaway project instead — any directory under `/projects/` with a
+  `wiring.yaml` carrying a `power:` section will do.
 
 Machine grammar to watch on port 1 throughout (a companion to the human text,
 and what a headless driver keys on):
@@ -474,6 +499,8 @@ from and what to do. **Board state is noted per item** so you can batch them.
 | 8 | probe buttons on the prompts | clear |
 | 9 | the variant picker | clear (needs a file you add) |
 | 10 | headless guided-complete **with** a script | parts optional |
+| 11 | OLED-absent run | any (unplug the OLED) |
+| 12 | the matrix-picker gate | any (diagnostic, only if a picker looks blank) |
 
 - [ ] **1 — Ctrl+C vs the wheel hold** *(task 1)*. Run any long script and stop it
   **both ways**: `Ctrl+C` on port 1, and a 3-second clickwheel hold. Both must
