@@ -79,16 +79,59 @@ clickwheel to stop it.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > 555, and walk the guided build - that is
-  what wires the parts up. Then run `main.py` when it offers.
-- **Headless:** `z /projects/555/wiring.yaml <slot 0-7>` on the terminal
-  drives the same flow, then run `/projects/555/main.py`.
+- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+  **555**, and walk the guided build. That is what wires the parts up. Run
+  `main.py` when it offers at the end.
+- **Headless:** `z 555` on the terminal drives the same flow. Add `new` to
+  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
+  one, `noscript` to stop at the wiring.
 
-Opening `wiring.yaml` in the Files browser loads the file and makes the two
-ADC tap connections from its `bridges:` section, but it does **not** wire the
-circuit. Parts are bridged only as the guided build confirms each one -
-`expandPartsToBridges()` skips any part still marked `placed: false`, and only
-a guide commit sets that flag. Loaded that way, the LED will not blink.
+Launching a project does not borrow a slot any more. It opens
+`/projects/555/555_<N>.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. Your build
+is saved into it at every step, the board comes back to it after a power cycle,
+and the next launch offers to reload it or to start run N+1 (the old one stays
+on disk). The shipped `wiring.yaml` is a read-only template and is never
+written to.
+
+Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
+route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
+part still marked `placed: false`, so a run you have not walked through yet has
+nothing on the breadboard except whatever its `bridges:` section already held.
+
+## Moving parts around
+
+**Compact vs expanded.** Every two-leg part can sit two ways. **Expanded** puts
+it at its own rows and the Jumperless routes its connections through the
+crossbar underneath - good while you are building, because each part is easy to
+see and to test on its own. **Compact** is how you would breadboard it by hand:
+the legs go straight into the rows they connect to - a resistor from a chip's
+pin row to the rail goes leg-in-row-7, leg-in-the-rail - and the routed
+connections for that part disappear, because the legs themselves make the
+contact.
+
+Tap a part's lit footprint with the probe (or double-click the wheel, then
+double-click again) to flip that one part between the two. **Every part
+remembers its own setting.** A leg whose endpoint is not a real hole - `GND` and
+the analog pins live in the crossbar, not on the board - keeps its own row and
+its routed connection either way, so a compact part can still have one bridge.
+
+To **move** a part, tap any free hole and pin 1 jumps there, or double-click the
+wheel and turn to slide it. On the terminal, `m <row>` and `c` do the same two
+things. Chips (DIPs) sit with pin 1 - the dot or the notch - on the **bottom
+half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
+
+**Browsing.** The wheel moves *between* steps rather than confirming them, and
+the ring wraps: turn past the last step and you land on a summary of what is
+built, skipped and still outstanding; turn again and you are back at step 1. A
+turn never ends the build - hold the wheel, or press `q`, for that. You can skip
+a part with `s` and come back to it later, and confirming at the summary jumps
+you to the first thing you have not built yet.
+
+> Measuring and *identifying* an unknown part (`identify_part(leftmost_row=...)`)
+> is planned but is not in this release. What the guide shows today is the value
+> each verify step measures - a resistance, a diode drop, a rail voltage.
 
 ## Troubleshooting
 
@@ -98,8 +141,8 @@ a guide commit sets that flag. Loaded that way, the LED will not blink.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[4] = { 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 4;
+const uint32_t PROJECT_555_README_MD_HASHES[5] = { 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 5;
 
 const char* PROJECT_555_MAIN_PY = R"("""555 LED Flasher - companion script for /projects/555/wiring.yaml
 
@@ -332,16 +375,59 @@ of all offers the write test, which defaults to **no**.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > eeprom, and walk the guided build. That is
-  what actually wires the board. Then run `main.py` when it offers.
-- **Headless:** `z /projects/eeprom/wiring.yaml <slot 0-7>` on the terminal
-  drives the same flow, then run `/projects/eeprom/main.py`.
+- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+  **eeprom**, and walk the guided build. That is what wires the parts up. Run
+  `main.py` when it offers at the end.
+- **Headless:** `z eeprom` on the terminal drives the same flow. Add `new` to
+  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
+  one, `noscript` to stop at the wiring.
 
-Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
-This project has no `bridges:` section at all - every connection lives in
-`parts:`, and `expandPartsToBridges()` skips any part still marked
-`placed: false`, which only a guide commit clears. Loaded that way the
-breadboard stays completely unconnected and `main.py` reports an empty bus.
+Launching a project does not borrow a slot any more. It opens
+`/projects/eeprom/eeprom_<N>.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. Your build
+is saved into it at every step, the board comes back to it after a power cycle,
+and the next launch offers to reload it or to start run N+1 (the old one stays
+on disk). The shipped `wiring.yaml` is a read-only template and is never
+written to.
+
+Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
+route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
+part still marked `placed: false`, so a run you have not walked through yet has
+nothing on the breadboard except whatever its `bridges:` section already held.
+
+## Moving parts around
+
+**Compact vs expanded.** Every two-leg part can sit two ways. **Expanded** puts
+it at its own rows and the Jumperless routes its connections through the
+crossbar underneath - good while you are building, because each part is easy to
+see and to test on its own. **Compact** is how you would breadboard it by hand:
+the legs go straight into the rows they connect to - a resistor from a chip's
+pin row to the rail goes leg-in-row-7, leg-in-the-rail - and the routed
+connections for that part disappear, because the legs themselves make the
+contact.
+
+Tap a part's lit footprint with the probe (or double-click the wheel, then
+double-click again) to flip that one part between the two. **Every part
+remembers its own setting.** A leg whose endpoint is not a real hole - `GND` and
+the analog pins live in the crossbar, not on the board - keeps its own row and
+its routed connection either way, so a compact part can still have one bridge.
+
+To **move** a part, tap any free hole and pin 1 jumps there, or double-click the
+wheel and turn to slide it. On the terminal, `m <row>` and `c` do the same two
+things. Chips (DIPs) sit with pin 1 - the dot or the notch - on the **bottom
+half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
+
+**Browsing.** The wheel moves *between* steps rather than confirming them, and
+the ring wraps: turn past the last step and you land on a summary of what is
+built, skipped and still outstanding; turn again and you are back at step 1. A
+turn never ends the build - hold the wheel, or press `q`, for that. You can skip
+a part with `s` and come back to it later, and confirming at the summary jumps
+you to the first thing you have not built yet.
+
+> Measuring and *identifying* an unknown part (`identify_part(leftmost_row=...)`)
+> is planned but is not in this release. What the guide shows today is the value
+> each verify step measures - a resistance, a diode drop, a rail voltage.
 
 ## Troubleshooting
 
@@ -362,8 +448,8 @@ breadboard stays completely unconnected and `main.py` reports an empty bus.
   shares the i2c1 peripheral in every mode. Turn it off while you use this
   project.
 )";
-const uint32_t PROJECT_EEPROM_README_MD_HASHES[5] = { 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
-const int PROJECT_EEPROM_README_MD_HASH_COUNT = 5;
+const uint32_t PROJECT_EEPROM_README_MD_HASHES[6] = { 0x69A73992, 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
+const int PROJECT_EEPROM_README_MD_HASH_COUNT = 6;
 
 const char* PROJECT_EEPROM_MAIN_PY = R"===("""EEPROM Dumper - companion for /projects/eeprom/wiring.yaml.
 
@@ -653,16 +739,59 @@ and COM pin configuration by itself.
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > i2cscrn, and walk the guided build. That is
-  what actually wires the board. Then run `main.py` when it offers.
-- **Headless:** `z /projects/i2cscrn/wiring.yaml <slot 0-7>` on the terminal
-  drives the same flow, then run `/projects/i2cscrn/main.py`.
+- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+  **i2cscrn**, and walk the guided build. That is what wires the parts up. Run
+  `main.py` when it offers at the end.
+- **Headless:** `z i2cscrn` on the terminal drives the same flow. Add `new` to
+  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
+  one, `noscript` to stop at the wiring.
 
-Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
-This project has no `bridges:` section at all - every connection lives in
-`parts:`, and `expandPartsToBridges()` skips any part still marked
-`placed: false`, which only a guide commit clears. Loaded that way the
-breadboard stays completely unconnected and `main.py` reports an empty bus.
+Launching a project does not borrow a slot any more. It opens
+`/projects/i2cscrn/i2cscrn_<N>.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. Your build
+is saved into it at every step, the board comes back to it after a power cycle,
+and the next launch offers to reload it or to start run N+1 (the old one stays
+on disk). The shipped `wiring.yaml` is a read-only template and is never
+written to.
+
+Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
+route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
+part still marked `placed: false`, so a run you have not walked through yet has
+nothing on the breadboard except whatever its `bridges:` section already held.
+
+## Moving parts around
+
+**Compact vs expanded.** Every two-leg part can sit two ways. **Expanded** puts
+it at its own rows and the Jumperless routes its connections through the
+crossbar underneath - good while you are building, because each part is easy to
+see and to test on its own. **Compact** is how you would breadboard it by hand:
+the legs go straight into the rows they connect to - a resistor from a chip's
+pin row to the rail goes leg-in-row-7, leg-in-the-rail - and the routed
+connections for that part disappear, because the legs themselves make the
+contact.
+
+Tap a part's lit footprint with the probe (or double-click the wheel, then
+double-click again) to flip that one part between the two. **Every part
+remembers its own setting.** A leg whose endpoint is not a real hole - `GND` and
+the analog pins live in the crossbar, not on the board - keeps its own row and
+its routed connection either way, so a compact part can still have one bridge.
+
+To **move** a part, tap any free hole and pin 1 jumps there, or double-click the
+wheel and turn to slide it. On the terminal, `m <row>` and `c` do the same two
+things. Chips (DIPs) sit with pin 1 - the dot or the notch - on the **bottom
+half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
+
+**Browsing.** The wheel moves *between* steps rather than confirming them, and
+the ring wraps: turn past the last step and you land on a summary of what is
+built, skipped and still outstanding; turn again and you are back at step 1. A
+turn never ends the build - hold the wheel, or press `q`, for that. You can skip
+a part with `s` and come back to it later, and confirming at the summary jumps
+you to the first thing you have not built yet.
+
+> Measuring and *identifying* an unknown part (`identify_part(leftmost_row=...)`)
+> is planned but is not in this release. What the guide shows today is the value
+> each verify step measures - a resistance, a diode drop, a rail voltage.
 
 ## Troubleshooting
 
@@ -682,8 +811,8 @@ breadboard stays completely unconnected and `main.py` reports an empty bus.
 - **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
   Long crossbar paths plus breadboard capacitance slow the edges down.
 )";
-const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[3] = { 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
-const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 3;
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[4] = { 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 4;
 
 const char* PROJECT_I2CSCRN_MAIN_PY = R"("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml.
 
@@ -931,16 +1060,59 @@ sets A high, B low, and reads the result back:
 
 ## Running it
 
-- **Clickwheel:** Apps > Projects > nand00, and walk the guided build. That is
-  what actually wires the board. Then run `main.py` when it offers.
-- **Headless:** `z /projects/nand00/wiring.yaml <slot 0-7>` on the terminal
-  drives the same flow, then run `/projects/nand00/main.py`.
+- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+  **nand00**, and walk the guided build. That is what wires the parts up. Run
+  `main.py` when it offers at the end.
+- **Headless:** `z nand00` on the terminal drives the same flow. Add `new` to
+  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
+  one, `noscript` to stop at the wiring.
 
-Opening `wiring.yaml` in the Files browser loads the file but wires **nothing**.
-This project has no `bridges:` section at all - every connection lives in
-`parts:`, and `expandPartsToBridges()` skips any part still marked
-`placed: false`, which only a guide commit clears. Loaded that way the
-breadboard stays completely unconnected and `main.py` reports floating reads.
+Launching a project does not borrow a slot any more. It opens
+`/projects/nand00/nand00_<N>.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. Your build
+is saved into it at every step, the board comes back to it after a power cycle,
+and the next launch offers to reload it or to start run N+1 (the old one stays
+on disk). The shipped `wiring.yaml` is a read-only template and is never
+written to.
+
+Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
+route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
+part still marked `placed: false`, so a run you have not walked through yet has
+nothing on the breadboard except whatever its `bridges:` section already held.
+
+## Moving parts around
+
+**Compact vs expanded.** Every two-leg part can sit two ways. **Expanded** puts
+it at its own rows and the Jumperless routes its connections through the
+crossbar underneath - good while you are building, because each part is easy to
+see and to test on its own. **Compact** is how you would breadboard it by hand:
+the legs go straight into the rows they connect to - a resistor from a chip's
+pin row to the rail goes leg-in-row-7, leg-in-the-rail - and the routed
+connections for that part disappear, because the legs themselves make the
+contact.
+
+Tap a part's lit footprint with the probe (or double-click the wheel, then
+double-click again) to flip that one part between the two. **Every part
+remembers its own setting.** A leg whose endpoint is not a real hole - `GND` and
+the analog pins live in the crossbar, not on the board - keeps its own row and
+its routed connection either way, so a compact part can still have one bridge.
+
+To **move** a part, tap any free hole and pin 1 jumps there, or double-click the
+wheel and turn to slide it. On the terminal, `m <row>` and `c` do the same two
+things. Chips (DIPs) sit with pin 1 - the dot or the notch - on the **bottom
+half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
+
+**Browsing.** The wheel moves *between* steps rather than confirming them, and
+the ring wraps: turn past the last step and you land on a summary of what is
+built, skipped and still outstanding; turn again and you are back at step 1. A
+turn never ends the build - hold the wheel, or press `q`, for that. You can skip
+a part with `s` and come back to it later, and confirming at the summary jumps
+you to the first thing you have not built yet.
+
+> Measuring and *identifying* an unknown part (`identify_part(leftmost_row=...)`)
+> is planned but is not in this release. What the guide shows today is the value
+> each verify step measures - a resistance, a diode drop, a rail voltage.
 
 ## Troubleshooting
 
@@ -962,8 +1134,8 @@ breadboard stays completely unconnected and `main.py` reports floating reads.
 - **The last two rows disagree** - one of the two input legs (rows 35, 36) is
   not making contact.
 )";
-const uint32_t PROJECT_NAND00_README_MD_HASHES[4] = { 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
-const int PROJECT_NAND00_README_MD_HASH_COUNT = 4;
+const uint32_t PROJECT_NAND00_README_MD_HASHES[5] = { 0x94003C75, 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
+const int PROJECT_NAND00_README_MD_HASH_COUNT = 5;
 
 const char* PROJECT_NAND00_MAIN_PY = R"("""Logic Gates 101 - companion script for /projects/nand00/wiring.yaml
 

@@ -1,5 +1,6 @@
 {
   "555/README.md": [
+    "0x561E244A",
     "0x7F9D3D88",
     "0xE846A64A",
     "0x52517D68",
@@ -15,6 +16,7 @@
     "0xC8CBC62E"
   ],
   "eeprom/README.md": [
+    "0x69A73992",
     "0x97332DFC",
     "0xAF82DCE7",
     "0x965FF7AE",
@@ -33,6 +35,7 @@
     "0x77CA786A"
   ],
   "i2cscrn/README.md": [
+    "0xF62F698B",
     "0x9006DDCB",
     "0x4A5A7256",
     "0xBFC48EF5"
@@ -45,6 +48,7 @@
     "0xBEE331D0"
   ],
   "nand00/README.md": [
+    "0x94003C75",
     "0x59A4BE23",
     "0x36273393",
     "0x6F684328",
