@@ -362,16 +362,13 @@ void jl_dac_set( int channel, float voltage, int save ) {
 float jl_dac_get( int channel ) {
     float voltage = 0.0f;
 
-    // DAC 0/1 report the voltage actually on the pin, including save=False
-    // writes; the rails only ever move through the state.
-    if ( channel == 0 ) {
-        voltage = getDacHardwareVoltage( 0 );
-    } else if ( channel == 1 ) {
-        voltage = getDacHardwareVoltage( 1 );
-    } else if ( channel == 2 ) {
-        voltage = globalState.power.topRail;
-    } else if ( channel == 3 ) {
-        voltage = globalState.power.bottomRail;
+    // Every channel reports the voltage actually on the pin, including
+    // save=False writes. The rails used to read globalState.power on the old
+    // "the rails only ever move through the state" assumption; the guide's
+    // save=0 exit restore ended that, and dac_get() reporting 0 V over a live
+    // rail is exactly the false-bug this whole readout path exists to avoid.
+    if ( channel >= 0 && channel <= 3 ) {
+        voltage = getDacHardwareVoltage( channel );
     }
 
     return voltage;

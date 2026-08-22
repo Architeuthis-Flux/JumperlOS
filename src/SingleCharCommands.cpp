@@ -3881,6 +3881,27 @@ CommandResult cmd_printYAML( char c, const String& line ) {
         else if ( yamlArg[ 0 ] == '1' ) showANSI = 1;
     }
 
+    // Hardware-truth advisory, not a rewrite. Y's body IS the save format -
+    // S pastes it back and slot files are written by the same toYAML() - so it
+    // must keep printing globalState.power verbatim. But a save=0 rail write
+    // (the guide's exit restore) deliberately moves the rails without touching
+    // that state, and a dump silently reading 0 V over live rails is the same
+    // "rails aren't setting" false-bug the other readouts just stopped
+    // telling. Name the divergence instead of hiding it.
+    {
+        float hwTop = getDacHardwareVoltage( 2 );
+        float hwBot = getDacHardwareVoltage( 3 );
+        if ( fabsf( hwTop - globalState.power.topRail ) > 0.02f ||
+             fabsf( hwBot - globalState.power.bottomRail ) > 0.02f ) {
+            target->print( "  (rails are physically at top=" );
+            target->print( hwTop, 2 );
+            target->print( "V bot=" );
+            target->print( hwBot, 2 );
+            target->println( "V - the power: below is this context's SAVED" );
+            target->println( "   state, which is what S pastes back)" );
+        }
+    }
+
     String yamlOutput;
     if ( globalState.toYAML( yamlOutput, showANSI ) ) {
         target->print( yamlOutput );

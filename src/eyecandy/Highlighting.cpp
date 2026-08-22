@@ -1018,7 +1018,10 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
                     char value[ 28 ];
-                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.topRail );
+                    // Hardware truth, not the persisted value: a save=0 write
+                    // (the guide's rail restore) moves the rail without
+                    // touching globalState.power.
+                    snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 2 ) );
                     char curBuf[ 16 ];
                     showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
@@ -1030,7 +1033,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
                     char value[ 28 ];
-                    snprintf( value, sizeof( value ), "%0.2f V", (float)globalState.power.bottomRail );
+                    snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 3 ) );
                     char curBuf[ 16 ];
                     showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
@@ -1644,8 +1647,9 @@ int Highlighting::checkForReadingChanges( void ) {
     // Check for rail connections (nets 2, 3)
     if ( showReadingNet == 2 || showReadingNet == 3 ) {
         bool top = ( showReadingNet == 2 );
-        float currentRailVoltage = top ? globalState.power.topRail
-                                       : globalState.power.bottomRail;
+        // Hardware truth (see the rail readout above): a save=0 rail write
+        // moves the pin without touching globalState.power.
+        float currentRailVoltage = getDacHardwareVoltage( top ? 2 : 3 );
         float estCurrent = netCurrent_mA( showReadingNet );
 
         // Check if change is significant (>0.05V dead zone / >0.1mA)

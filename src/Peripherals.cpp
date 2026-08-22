@@ -1388,6 +1388,20 @@ void setRailsAndDACs( int saveEEPROM ) {
     setDac1voltage( globalState.power.dac1, 1, saveEEPROM );
     // delay(10);
 }
+// The voltage most recently WRITTEN to each rail, whether or not the write was
+// persisted - the exact twin of s_dacHwVolts below, and for the same reason.
+// Until now "the rails only ever move through the state" was true, so every
+// rail readout could read globalState.power. The guide's exit restore broke
+// that: it puts the user's pre-guide rails back with save=0 on purpose (the
+// project's run file must keep the safe 0 V it was left at), which left every
+// readout on the board reporting 0 V over rails that were physically live -
+// the "rails aren't setting" false-bug class.
+//
+// PERSISTENCE NEVER READS THIS. What gets saved is globalState.power,
+// untouched; this array feeds READOUTS only (dac_get 2/3, the rail net
+// reading, the rail LED dots).  -100 = never written.
+float railHwVolts[ 2 ] = { -100.0f, -100.0f };   // [0] = top, [1] = bottom
+
 void setTopRail( float value, int save, int saveEEPROM ) {
 
     int dacValue = ( value * 4095 / dacSpread[ 2 ] ) + dacZero[ 2 ];
@@ -1407,7 +1421,9 @@ void setTopRail( float value, int save, int saveEEPROM ) {
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
     (void)wrote;
-    
+
+    railHwVolts[ 0 ] = value;   // hardware truth, persisted or not
+
     // Update globalState for YAML persistence (single source of truth)
     // ONLY update when save == 1 to avoid spurious dirty marks
     if ( save ) {
@@ -1437,6 +1453,9 @@ void setBotRail( float value, int save, int saveEEPROM ) {
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
     (void)wrote;
+
+    railHwVolts[ 1 ] = value;   // hardware truth, persisted or not
+
     if ( save ) {
         // Update globalState for YAML persistence (single source of truth)
         globalState.setRailVoltage(false, value);  // false = bottom rail
@@ -1473,6 +1492,14 @@ bool dacUserClaimed( int dac ) {
 float getDacHardwareVoltage( int dac ) {
     if ( dac == 0 || dac == 1 ) {
         return ( s_dacHwVolts[ dac ] > -99.0f ) ? s_dacHwVolts[ dac ] : getDacVoltage( dac );
+    }
+    // Channels 2/3 are the rails, and they now answer the same way (see
+    // railHwVolts). Before the guide's save=0 restore existed, rails only ever
+    // moved through the state, so this fell through to globalState.power - and
+    // still does until the first rail write of the session.
+    if ( dac == 2 || dac == 3 ) {
+        int r = dac - 2;
+        return ( railHwVolts[ r ] > -99.0f ) ? railHwVolts[ r ] : getDacVoltage( dac );
     }
     return getDacVoltage( dac );
 }
