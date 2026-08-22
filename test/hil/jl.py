@@ -74,10 +74,22 @@ def finish(name):
 # read. Several suites open their own serial.Serial on port 1 because they have
 # to drive an interactive app keystroke by keystroke, and those readers bypass
 # this function entirely unless they call it themselves. So: ANY raw port-1
-# reader must pass what it drains through fault_scan(). The ones that exist
-# today do (test_projects.py's run_app probe and GuideDriver, test_guide_flow's
-# GuideDriver and its unwedge drain, test_paste_state's _collect) - keep it that
-# way when adding another.
+# reader must pass what it drains through fault_scan(). The ones that exist at
+# the time of writing all do:
+#
+#   test_projects.py     the run_app probe, and its local GuideDriver
+#   test_guide_flow.py   GuideDriver, and the teardown's unwedge drain
+#   test_paste_state.py  _collect (every caller, banner included)
+#   test_slot_files.py   the Switch Calib probe, and _fm_drain - the funnel for
+#                        the whole Files-browser driver, which is the one that
+#                        presses the delete-the-active-file key that w3-1 proved
+#                        reaches abort()
+#
+# Treat that list as a snapshot, not a guarantee: it is only true until someone
+# opens the next serial.Serial. `grep -n "serial.Serial(" test/hil/*.py` is the
+# authoritative question, and every PORT-1 hit should have a fault_scan near it.
+# (port7.py is the one legitimate exception in that grep: the banners are
+# printed to port 1, so a port-7 reader has nothing to witness.)
 #
 # The connect banner is the part that must not be skipped, and it is also the
 # part that cannot be shared: a post-fault [crashlog] is printed ONCE, to the
