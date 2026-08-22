@@ -1058,8 +1058,9 @@ static void runOpenedRunFile(RunContext& rc, bool fresh) {
 }
 
 // Fill rc.meta / rc.wiringPath from the loaded state's runSource. Empty or
-// dangling runSource falls back to the default wiring with a one-line warning
-// (design §1.2) - variant resolution then yields main.py.
+// dangling runSource falls back to the DEFAULT WIRING with a one-line warning
+// (design §1.2) - that wiring is then both the guide source and the variant
+// resolution, so the script collapses to main.py as a consequence.
 static void resolveVariantFromRunSource(RunContext& rc) {
     SlotManager& mgr = SlotManager::getInstance();
     JumperlessState& st = mgr.getActiveState();
@@ -1072,7 +1073,12 @@ static void resolveVariantFromRunSource(RunContext& rc) {
         return;
     }
     if (src.length() > 0) {
-        Serial.println("  runSource missing: " + src + " - falling back to main.py");
+        // "the default wiring", not "main.py": the fallback below also sets
+        // rc.wiringPath to the project's wiring.yaml, which the load-latest
+        // guided arm will happily use as a GUIDE source. Only the variant
+        // script resolution collapses to main.py.
+        Serial.println("  runSource missing: " + src +
+                       " - falling back to the default wiring");
     }
     String fallback = rc.projectPath + "/wiring.yaml";
     rc.wiringPath = safeFileExists(fallback.c_str()) ? fallback : String("");
@@ -1290,6 +1296,16 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
     ProjectRunMode effective = mode;
     if (effective == ProjectRunMode::DEFAULT)
         effective = (maxN >= 1) ? ProjectRunMode::LOAD : ProjectRunMode::NEW;
+
+    // `z <wiring path>` with an EXPLICIT load/run=<N> is refused by the parser
+    // (SingleCharCommands.cpp) precisely because the path names a variant the
+    // run file's own runSource would override. The bare form reaches the same
+    // place silently whenever runs already exist, so say so instead: the path
+    // argument selected nothing, and `... new` is the spelling that honours it.
+    if (mode == ProjectRunMode::DEFAULT && effective == ProjectRunMode::LOAD &&
+        project.indexOf('/') >= 0) {
+        Serial.println("  (variant taken from runSource; the path argument was not used)");
+    }
 
     if (effective == ProjectRunMode::LOAD || effective == ProjectRunMode::RUN_N) {
         int wantN = (effective == ProjectRunMode::LOAD) ? maxN : runN;

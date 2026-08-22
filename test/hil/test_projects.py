@@ -92,6 +92,9 @@ from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
 
 SLOT_PATH = "/slots/slot3.yaml"
 PROJ_DIR = "/projects/555"
+# Module scope so the teardown can remove it even when the phase that
+# creates it never ran. 7 chars, the dir-name convention.
+HIL_DIR = "/projects/hiltest"
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC_DIR = os.path.join(REPO, "scripts", "projects", "555")
@@ -474,7 +477,6 @@ for i in range(1, 40):
     # setGlobalStreamWithInterrupt(&Serial), moving the MicroPython stream to
     # port 1 out from under the port-5 caller. That, and the clickwheel
     # navigation itself, stay bench-checklist items.
-    HIL_DIR = "/projects/hiltest"  # 7 chars, the dir-name convention
     HIL_WIRING = """version: 2
 sourceOfTruth: bridges
 meta:
@@ -1408,7 +1410,7 @@ finally:
         leave_context_to_slot3()
         total = 0
         for _pdir, _prefix in ((PROJ_DIR, "555_"),
-                               ("/projects/hiltest", "hiltest_"),
+                               (HIL_DIR, "hiltest_"),
                                ("/projects/i2cscrn", "i2cscrn_"),
                                ("/projects/nand00", "nand00_"),
                                ("/projects/eeprom", "eeprom_")):
@@ -1419,6 +1421,33 @@ finally:
         raise
     except Exception as e:  # pragma: no cover
         print(f"  info: run-file cleanup failed: {e!r}")
+
+    # /projects/hiltest is THIS SUITE'S FIXTURE, not a shipped project - it is
+    # written from the constants above at the top of phase 6 and provisioning
+    # never re-creates it (that is one of the things phase 6 asserts). Leaving
+    # it behind put a test artifact in the user's project picker and in every
+    # later suite's view of the board. Phase 6 needs two projects; the BENCH
+    # does not, and the four shipped ones give the clickwheel plenty to walk.
+    try:
+        out = jl_exec(f"""
+if fs_exists({HIL_DIR!r}):
+    for nm in jfs.listdir({HIL_DIR!r}):
+        try:
+            jfs.remove({HIL_DIR!r} + "/" + nm)
+        except Exception as e:
+            print("rmerr=", e)
+    try:
+        jfs.rmdir({HIL_DIR!r})
+    except Exception as e:
+        print("rmdirerr=", e)
+print("hiltestgone=", 0 if fs_exists({HIL_DIR!r}) else 1)
+""", timeout=30)
+        check(parse_kv(out).get("hiltestgone") == 1,
+              f"removed {HIL_DIR} - the suite's own fixture project is off the bench")
+    except SystemExit:
+        raise
+    except Exception as e:  # pragma: no cover
+        print(f"  info: hiltest cleanup failed: {e!r}")
 
     # Restore the FILE first, switch slots second (same hazard as phase 0).
     if slot3_existed:
@@ -1441,6 +1470,6 @@ print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
     if snapshot is not None:
         check(board_state_restore(snapshot), "board state restored to pre-test snapshot")
 
-print("  info: /projects/555/ and /projects/hiltest/ left on the board - two "
-      "entries so the clickwheel bench check can exercise picker navigation")
+print("  info: /projects/555/ left on the board (a shipped project; provisioning "
+      "would restore it anyway). The suite's own /projects/hiltest fixture is gone.")
 finish("test_projects")

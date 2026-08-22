@@ -1580,6 +1580,11 @@ int guideCheckPoll(char* valOut, size_t valLen) {
     // Peripherals poll for the bus). Once per CURRENT_SENSE_POLL_INTERVAL_MS is
     // the same cadence the chip is converting at, so it cannot miss a fault for
     // longer than the primary watchdog's own sample period.
+    // The 50 here MIRRORS Peripherals.cpp's file-static
+    // CURRENT_SENSE_POLL_INTERVAL_MS; it is deliberately a literal and must
+    // not be "fixed" into a reference to that constant, which has internal
+    // linkage and would turn this into a link error. If the poll interval ever
+    // moves, move this with it (and the two comments that quote it above).
     if (ck.chainLive && (millis() - ck.ina1LastCheckMs) >= 50) {
         ck.ina1LastCheckMs = millis();
         float i1 = INA1.getCurrent_mA();

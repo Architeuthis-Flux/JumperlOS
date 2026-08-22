@@ -480,6 +480,25 @@ static String guideFlowField(const String& body, const char* key) {
     return val;
 }
 
+// True when `body` opens a flow map this line does not close - i.e. a
+// `- {...` step that wrapped onto the following line. Quote-aware: `text:`
+// prose is free to contain a brace and must not be read as structure.
+static bool guideFlowMapUnclosed(const String& body) {
+    int depth = 0;
+    char quote = 0;
+    for (unsigned int i = 0; i < body.length(); i++) {
+        char c = body.charAt(i);
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '{') depth++;
+        else if (c == '}' && depth > 0) depth--;
+    }
+    return depth > 0;
+}
+
 static String guideScalar(const String& rest) {
     String v = rest;
     v.trim();
@@ -744,6 +763,40 @@ bool guideParse(const char* yamlPath, GuideScript& out, String& err) {
 
         if (line.startsWith("- ")) {
             if (!inSteps) continue;   // stray list item outside steps:
+            String body = line.substring(2);
+            body.trim();
+
+            // CONTINUATION LINES (task 8 discovery, fixed here). A step whose
+            // flow map wrapped onto the next line used to SWALLOW the step
+            // after it: the wrapped tail fell through to the key:value arm
+            // below, which sets inSteps = false, and the next `- ` item was
+            // then dropped by the guard above - two authored steps parsed as
+            // ONE, with no diagnostic at all. Join the tail on instead.
+            //
+            // Every single-line step leaves depth 0 on the first test, so this
+            // loop never runs for one and no existing file changes behaviour.
+            // BOUNDED on purpose: this parser is streamed line-by-line because
+            // a whole-file String killed the heap on the bench, so an unclosed
+            // brace must not be allowed to accumulate the rest of the file.
+            const int  MAX_CONT_LINES = 4;
+            const unsigned int MAX_STEP_CHARS = 512;
+            int joined = 0;
+            while (guideFlowMapUnclosed(body) && f.available() &&
+                   joined < MAX_CONT_LINES && body.length() < MAX_STEP_CHARS) {
+                String cont = f.readStringUntil('\n');
+                cont.replace("\r", "");
+                cont.trim();
+                joined++;
+                if (cont.length() == 0 || cont.startsWith("#")) continue;
+                body += " ";
+                body += cont;
+            }
+            if (guideFlowMapUnclosed(body)) {
+                err += "guide step " + String(out.numSteps + 1) +
+                       ": flow map never closes (truncated after " +
+                       String(joined) + " continuation line(s)); ";
+            }
+
             if (out.numSteps >= MAX_GUIDE_STEPS) {
                 if (!capWarned) {
                     err += "guide: more than " + String(MAX_GUIDE_STEPS) +
@@ -752,8 +805,6 @@ bool guideParse(const char* yamlPath, GuideScript& out, String& err) {
                 }
                 continue;
             }
-            String body = line.substring(2);
-            body.trim();
             guideParseStepLine(body, out, err);
             explicitSteps++;
             continue;
@@ -777,6 +828,16 @@ bool guideParse(const char* yamlPath, GuideScript& out, String& err) {
         } else if (key == "steps") {
             inSteps = true;
         } else {
+            // Inside steps:, a line that is neither a `- ` item nor a
+            // guide-level key is a BLOCK-style step body ("- id: x" then
+            // "  do: place"), which this parser does not support. The
+            // flow-map wrap is joined above; this is the residual, and it
+            // is worth saying out loud because inSteps goes false here and
+            // the step that follows is then dropped in silence.
+            if (inSteps) {
+                err += "guide step spans lines - unsupported, next step may "
+                       "be lost (at '" + key + ":'); ";
+            }
             inSteps = false;   // unknown guide: scalar - ignore
         }
     }
@@ -2167,8 +2228,11 @@ void guideTick(GuideSession& s) {
             // - browse out, confirm, or quit.
             if (!s.summaryShown) {
                 s.summaryShown = true;
-                // ARRIVAL CLEAR, symmetric with STEP_ENTER's (:1612) and the
-                // reason the headline invariant actually holds. A wheel click
+                // ARRIVAL CLEAR, symmetric with STEP_ENTER's own
+                // `pendingConfirmMs = 0` (search STEP_ENTER, not a line
+                // number - the last one written here went stale within the
+                // same fix round), and the reason the headline invariant
+                // actually holds. A wheel click
                 // arms a 260 ms pend; a turn INTO this view inside that window
                 // - or an impatient click in the last 260 ms of the 900 ms
                 // pass-hold on the final step - would otherwise let the pend
@@ -2181,9 +2245,20 @@ void guideTick(GuideSession& s) {
                 // so an unconditional clear would zero the pend before it
                 // could mature and would silently kill the LEGITIMATE
                 // wheel-click-at-DONE (finish / jump to the first unbuilt
-                // step). Every arrival sets summaryShown false first
-                // (guideBrowse, STEP_COMMIT, STEP_BACK, the DONE-confirm jump,
-                // and INIT's memset), so once is enough.
+                // step).
+                //
+                // SIX arrivals reach this state, and the guard fires on every
+                // one. Five set summaryShown false as part of the transition:
+                // guideBrowse, STEP_COMMIT, STEP_BACK, the DONE-confirm jump,
+                // and INIT's memset. The sixth - guideDoSkip skipping the LAST
+                // step - does not, and does not need to: summaryShown is set
+                // true nowhere except inside this block, every path that
+                // LEAVES DONE clears it on the way out, and guideDoSkip is
+                // reachable only from an active WAIT/VERIFY/RESULT state,
+                // never from DONE itself. So it is already false when the skip
+                // lands here. (HIL phase 17's `s s s` is the witness: the
+                // last of those three skips arrives by exactly this path and
+                // the summary prints.)
                 s.pendingConfirmMs = 0;
                 int commits = 0, skips = 0, unfinished = 0;
                 for (int i = 0; i < sc.numSteps; i++) {

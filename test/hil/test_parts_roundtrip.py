@@ -243,6 +243,41 @@ print("unplaced=", 1 if is_connected(50, 52) else 0)
     check(vals.get("unplaced") == 0,
           "placed: false part C1 was NOT expanded (50-52 absent)")
 
+    # --- 2a. list_parts() exposes `placement` (task 9 §A item 4) -------------
+    # The mode is what partPinNode resolved every `node` through, so without
+    # it a script cannot tell a COMPACT leg sitting in its endpoint hole from
+    # an expanded leg that happens to have landed on the same row. C1 is the
+    # one part in SLOT_YAML that sets it, so this needle covers the whole
+    # path at once: parser -> PartDefinition::placement -> jl_get_part_info's
+    # record -> the binding's positional split -> the dict key.
+    #
+    # The two node assertions are what make it non-vacuous: under compact,
+    # pin A (connect: 52, a real hole row) IS node 52, and open pin B follows
+    # its partner into the adjacent row 53 - neither is C1's footprint row
+    # (50/51), so a hard-coded "expanded" would fail them.
+    out = jl_exec("""
+by = {}
+for p in list_parts():
+    by[p['name']] = p
+print("c1place=", by['C1']['placement'])
+print("c1anode=", by['C1']['pins']['A']['node'])
+print("c1bnode=", by['C1']['pins']['B']['node'])
+print("u1place=", by['U1']['placement'])
+print("r1place=", by['R1']['placement'])
+""")
+    vals = parse_kv(out)
+    check(vals.get("c1place") == "compact",
+          "list_parts: C1's placement: compact is exposed as 'compact'")
+    check(vals.get("c1anode") == 52,
+          "list_parts: C1 pin A's node is its connect: hole (52) - the node "
+          "really was resolved in compact mode")
+    check(vals.get("c1bnode") == 53,
+          "list_parts: C1's open pin B followed its partner into row 53")
+    check(vals.get("u1place") == "expanded",
+          "list_parts: a part with no placement: reports 'expanded' (the default)")
+    check(vals.get("r1place") == "expanded",
+          "list_parts: R1 too - the field is per-part, not global")
+
     # --- 2b. The overlays: section survived a parts value that says
     # "overlays:" -------------------------------------------------------------
     # Section-hijack regression (see the SLOT_YAML note): a bare

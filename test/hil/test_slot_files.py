@@ -645,10 +645,22 @@ finally:
         port1_command(f"`[slots] boot_slot = {boot_slot_before}", 2.0)
     time.sleep(1.5)
 
+    # Sweep the WHOLE fixture directory, not just the four files this suite
+    # names: the allocator is monotonic, so a re-run (or a phase that failed
+    # after minting <dir>_2.yaml) leaves a run file behind that the named list
+    # never mentions - and rmdir refuses a directory that still holds one, so
+    # the leftover silently becomes permanent. Same sweep test_projects and
+    # test_parts_roundtrip already do.
     out = jl_exec(f"""
 for p in ({RUN_FILE!r}, {TEMPLATE_FILE!r}, {BAD_FILE!r}, {TRAP_FILE!r}):
     if fs_exists(p):
         jfs.remove(p)
+if fs_exists({TMP_PROJ!r}):
+    for nm in jfs.listdir({TMP_PROJ!r}):
+        try:
+            jfs.remove({TMP_PROJ!r} + "/" + nm)
+        except Exception as e:
+            print("rmerr=", e)
 try:
     jfs.rmdir({TMP_PROJ!r})
 except Exception as e:

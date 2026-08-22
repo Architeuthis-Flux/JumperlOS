@@ -2001,18 +2001,34 @@ void Highlighting::adjustRailVoltage(int rail) {
     config.liveUpdateMin = 0.0;
     config.liveUpdateMax = 5.0;
     
-    // Set initial value and label based on which rail
+    // Set initial value and label based on which rail.
+    //
+    // RULING (wave 2, task 7 §8.4 / concern 4): seed from HARDWARE TRUTH
+    // (getDacHardwareVoltage(2|3) -> railHwVolts[]), not globalState.power.
+    // The two diverge whenever a guide quit before its power_on restored the
+    // user's rails with save=0 - the rails physically carry the restored
+    // voltage while the saved state still reads 0 V. Seeding from the saved
+    // state made the adjuster open at 0 V and, because liveUpdateInRange
+    // writes as you turn, the FIRST detent yanked a live 3.3 V rail down to
+    // near zero. Opening at what the rail is actually doing is the only
+    // non-surprising behaviour.
+    //
+    // This is a write site, not a readout, and that is deliberate here: an
+    // explicit adjust-confirm IS a deliberate write - the user is looking at
+    // the rail and choosing its value - so persisting the hardware truth they
+    // just confirmed is exactly right, and the divergence heals as a result.
+    // (Cancel still writes nothing; the callback restores the entry value.)
     switch (rail) {
         case 0: // Both rails
-            config.initialValue = (globalState.power.topRail + globalState.power.bottomRail) / 2.0;
+            config.initialValue = (getDacHardwareVoltage(2) + getDacHardwareVoltage(3)) / 2.0;
             config.label = "Rails";
             break;
         case 1: // Top rail
-            config.initialValue = globalState.power.topRail;
+            config.initialValue = getDacHardwareVoltage(2);
             config.label = "Top Rail";
             break;
         case 2: // Bottom rail
-            config.initialValue = globalState.power.bottomRail;
+            config.initialValue = getDacHardwareVoltage(3);
             config.label = "Bot Rail";
             break;
     }

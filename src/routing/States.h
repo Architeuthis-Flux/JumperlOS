@@ -356,6 +356,16 @@ struct ConfigState {
 //     part) a `max:` under 5 ohms, logs "min/max look like legacy mA" and
 //     falls back to the derived band. VF/VOLTAGE/OSCILLATES min/max are
 //     unchanged (volts / volts / Hz).
+//   - ONE STEP IS ONE `- {...}` FLOW MAP. Block style (`- id: x` on one line,
+//     `  do: place` on the next) is NOT parsed: each field line falls through
+//     to the guide-level key arm, which ends the steps: list, so the step
+//     AFTER it is dropped. That used to happen in silence - two authored
+//     steps parsing as one - and now prints "guide step spans lines -
+//     unsupported, next step may be lost". A flow map that merely WRAPS
+//     (`- {do: place, part: U1,` / `   text: "..."}`) is fine: guideParse
+//     joins continuation lines until the braces balance, bounded at 4 lines /
+//     512 chars so an unclosed brace cannot swallow the file. `text:` must
+//     still be the LAST field of the joined line.
 //   - a `do: connect` step's `n1:`/`n2:` are LITERAL rows and do NOT
 //     re-derive when a part moves. A part's OWN wiring does re-derive for
 //     free (bridges are never stored per part - expandOnePart recomputes

@@ -2672,7 +2672,8 @@ static const char* jl_rec_field( const char** cursor, char delim, size_t* len ) 
 }
 
 // list_parts() -> list of dicts:
-//   {name, type, value, row, footprint, placed, pins: {PIN: {node, connect, class}}}
+//   {name, type, value, row, footprint, placed, placement,
+//    pins: {PIN: {node, connect, class}}}
 static mp_obj_t jl_list_parts_func( void ) {
     mp_obj_t list = mp_obj_new_list( 0, NULL );
     int numParts = jl_get_num_parts( );
@@ -2681,7 +2682,7 @@ static mp_obj_t jl_list_parts_func( void ) {
         const char* rec = jl_get_part_info( i );
         if ( rec == NULL || rec[ 0 ] == '\0' ) continue;
 
-        // name|type|value|row|footprint|placed|PIN,node,connect,class;...
+        // name|type|value|row|footprint|placed|placement|PIN,node,connect,class;...
         const char* cur = rec;
         size_t len;
         const char* name = jl_rec_field( &cur, '|', &len );
@@ -2694,8 +2695,10 @@ static mp_obj_t jl_list_parts_func( void ) {
         const char* footprint = jl_rec_field( &cur, '|', &len );
         size_t fp_len = len;
         const char* placed = jl_rec_field( &cur, '|', &len );
+        const char* placement = jl_rec_field( &cur, '|', &len );
+        size_t placement_len = len;
 
-        mp_obj_t dict = mp_obj_new_dict( 7 );
+        mp_obj_t dict = mp_obj_new_dict( 8 );
         mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_name ),
                            mp_obj_new_str( name, name_len ) );
         mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_type ),
@@ -2708,6 +2711,10 @@ static mp_obj_t jl_list_parts_func( void ) {
                            mp_obj_new_str( footprint, fp_len ) );
         mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_placed ),
                            mp_obj_new_bool( atoi( placed ) != 0 ) );
+        // "expanded" | "compact" | "custom" - the mode every pin's `node`
+        // below was resolved through (partPinNode is the sole authority).
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_placement ),
+                           mp_obj_new_str( placement, placement_len ) );
 
         mp_obj_t pins = mp_obj_new_dict( 0 );
         while ( *cur != '\0' ) {
@@ -4790,7 +4797,7 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "        pin/offset place the leg, connect is a row or node name, class: signal|power|gnd|nc\n" );
         mp_printf( &mp_plat_print, "        footprint \"dip8\"/\"sip2\" (default: a SIP strip sized from the pins listed)\n" );
         mp_printf( &mp_plat_print, "   remove_part(name)                - Remove a part: bridges, net names and entry (0 = ok)\n" );
-        mp_printf( &mp_plat_print, "   list_parts()                     - Parts as dicts (name/type/value/row/footprint/placed/pins)\n" );
+        mp_printf( &mp_plat_print, "   list_parts()                     - Parts as dicts (name/type/value/row/footprint/placed/placement/pins)\n" );
         mp_printf( &mp_plat_print, "   guide_progress()                 - Guided-placement step, -1 when no guide is loaded\n\n" );
         mp_printf( &mp_plat_print, "  Context (controls persistence):\n" );
         mp_printf( &mp_plat_print, "   context_toggle()                 - Toggle global/python mode\n" );

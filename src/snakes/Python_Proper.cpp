@@ -721,8 +721,11 @@ extern "C" void mp_hal_check_interrupt(void) {
       millis() >= clickwheel_interrupt_ignore_until) {
     // Single-fire via the flag, NOT a direct sched call. Two independent
     // consumers read mp_interrupt_requested: the top-of-function check above
-    // (~:645) schedules exactly once and clears the flag on the NEXT call to
-    // this function - that's the normal-script delivery path. But the C
+    // (~:645) CONSUMES it on the next entry to this function - schedule and
+    // clear happen together, in that one visit, so it can only fire once no
+    // matter how many ticks pass before it runs. That's the normal-script
+    // delivery path. (The flag is set here, at the bottom of the current
+    // visit; the consumer is above us and has already run.) But the C
     // blocking loops (jl_probe_read_blocking / jl_probe_button_blocking in
     // JumperlessMicroPythonAPI.cpp) poll this flag directly and clear it
     // themselves when they see it true; they never check mp_pending_exception,

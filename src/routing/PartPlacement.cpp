@@ -12,6 +12,8 @@
 #include "NetManager.h"   // findNodeInNet
 #include "config.h"       // jumperlessConfig (warning gating)
 
+#include <cstdarg>        // geomReason's va_list
+
 // States.cpp's node-name resolution - the exact helper `bridges:` uses.
 extern int parseNodeName(const String& nodeName);
 extern String nodeValueToString(int nodeValue);
@@ -154,6 +156,22 @@ int partPinNode(const PartDefinition& p, const PartPin& pin) {
     return partPinFootprintNode(p, pin);
 }
 
+// Every refusal message below goes through this, so the nullptr / zero-length
+// guard is applied ONCE at the write instead of only on the entry clear. The
+// old shape tested `reason != nullptr` for the initial `reason[0] = '\0'` and
+// then snprintf'd straight into the same pointer - i.e. it documented a
+// nullptr-tolerant contract the body did not honour. Every current caller
+// passes a real buffer; this makes the header's contract true anyway.
+static void geomReason(char* reason, size_t reasonLen, const char* fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void geomReason(char* reason, size_t reasonLen, const char* fmt, ...) {
+    if (reason == nullptr || reasonLen == 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(reason, reasonLen, fmt, ap);
+    va_end(ap);
+}
+
 // Whole-part geometry predicate - see PartPlacement.h for why it is shared.
 bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
     if (reason != nullptr && reasonLen > 0) reason[0] = '\0';
@@ -163,15 +181,15 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
     // silently dropped a well-formed dip28/dip40 - and the next auto-save then
     // erased it from the user's slot file.
     if (p.pinCount < 1 || p.pinCount > 60) {
-        snprintf(reason, reasonLen, "footprint pin count must be 1-60");
+        geomReason(reason, reasonLen, "footprint pin count must be 1-60");
         return false;
     }
     if (p.footprint != 0 && (p.pinCount % 2) != 0) {
-        snprintf(reason, reasonLen, "a dip/axial footprint needs an even pin count");
+        geomReason(reason, reasonLen, "a dip/axial footprint needs an even pin count");
         return false;
     }
     if (p.baseRow < 1 || p.baseRow > 60) {
-        snprintf(reason, reasonLen, "row: must be 1-60");
+        geomReason(reason, reasonLen, "row: must be 1-60");
         return false;
     }
 
@@ -182,7 +200,7 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
         // that alone only fails PLACEMENT (0 bridges); rejecting the entry
         // itself keeps it from round-tripping through an idle auto-save.
         if (p.baseRow < 31 || p.baseRow > 60) {
-            snprintf(reason, reasonLen,
+            geomReason(reason, reasonLen,
                      "dip pin 1 (row:) must be on the bottom half (31-60)");
             return false;
         }
@@ -195,7 +213,7 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
         // rejected, not just the pins that don't fit.
         int half = p.pinCount / 2;
         if ((p.baseRow - 30) + (half - 1) > 30) {
-            snprintf(reason, reasonLen,
+            geomReason(reason, reasonLen,
                      "dip%d at row %d does not fit the board (far-side columns run past row 30)",
                      (int)p.pinCount, (int)p.baseRow);
             return false;
@@ -207,7 +225,7 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
         bool top = (p.baseRow <= 30);
         int lastNode = p.baseRow + (p.pinCount - 1);
         if ((top && lastNode > 30) || (!top && lastNode > 60)) {
-            snprintf(reason, reasonLen,
+            geomReason(reason, reasonLen,
                      "sip%d at row %d does not fit the %s half (runs past row %d)",
                      (int)p.pinCount, (int)p.baseRow, top ? "top" : "bottom",
                      top ? 30 : 60);
@@ -218,11 +236,11 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
         // on the top half so pin 2 (row+30) lands on-board. No separate span
         // check needed: the legs are always exactly 30 apart.
         if (p.pinCount != 2) {
-            snprintf(reason, reasonLen, "axial2 must have exactly 2 pins");
+            geomReason(reason, reasonLen, "axial2 must have exactly 2 pins");
             return false;
         }
         if (p.baseRow < 1 || p.baseRow > 30) {
-            snprintf(reason, reasonLen,
+            geomReason(reason, reasonLen,
                      "axial2 pin 1 (row:) must be on the top half (1-30)");
             return false;
         }
@@ -239,11 +257,11 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
         const PartPin& pin = p.pins[j];
         if (partPinFootprintNode(p, pin) >= 0) continue;
         if (pin.offset >= 0) {
-            snprintf(reason, reasonLen,
+            geomReason(reason, reasonLen,
                      "pin %s (offset: %d) does not land on the board from row %d",
                      pin.name, (int)pin.offset, (int)p.baseRow);
         } else {
-            snprintf(reason, reasonLen,
+            geomReason(reason, reasonLen,
                      "pin %s (pin: %d) does not land on the board from row %d",
                      pin.name, (int)pin.pinNumber, (int)p.baseRow);
         }

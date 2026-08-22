@@ -5724,14 +5724,26 @@ def list_parts() -> List[Dict]:
 
     Returns:
         A list of dicts:
-        {'name', 'type', 'value', 'row', 'footprint', 'placed',
+        {'name', 'type', 'value', 'row', 'footprint', 'placed', 'placement',
          'pins': {PIN: {'node', 'connect', 'class'}}}
         'node' is the resolved breadboard node for the leg (-1 if off-board),
         'connect' is the node it bridges to (-1 for none).
 
+        'placement' is 'expanded', 'compact' or 'custom', and it is the mode
+        every 'node' above was resolved through:
+          expanded  legs sit at the footprint rows and a bridge runs to each
+                    'connect' endpoint (the default)
+          compact   a leg whose 'connect' is a real hole row (1-60 or a rail)
+                    sits IN that hole, so 'node' == 'connect' and no bridge
+                    exists for it - the breadboard-native shape
+          custom    expanded geometry at a row the user moved the part to
+        Without it a compact leg is indistinguishable from an expanded one
+        that happens to have landed on the same row.
+
     Example:
         for p in list_parts():
-            print(p['name'], p['footprint'], 'placed' if p['placed'] else 'pending')
+            print(p['name'], p['footprint'], p['placement'],
+                  'placed' if p['placed'] else 'pending')
     """
     ...
 
@@ -6790,8 +6802,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[10] = { 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 10;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[11] = { 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 11;
 #endif
 
 //==============================================================================

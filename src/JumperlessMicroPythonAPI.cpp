@@ -2175,13 +2175,22 @@ const char* jl_get_part_info( int idx ) {
     // Sized for the longest field this can hold (PartDefinition::name[16]).
     char safeName[ 16 ], safeType[ 16 ], safeValue[ 16 ];
     const PartDefinition& p = globalState.parts.parts[ idx ];
-    int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|",
+    // The `placement` field rides between `placed` and the pins list. It is
+    // the mode partPinNode() resolved every `node` below through, so a script
+    // reading a leg's node without it cannot tell a compact leg sitting in its
+    // endpoint hole from an expanded one that merely happens to be there.
+    // jl_list_parts_func() splits this record positionally - keep the two in
+    // step, and keep the pins list LAST (it is the only ';'-joined field).
+    int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|%s|",
                         partRecordSafe( p.name, safeName, sizeof( safeName ) ),
                         partRecordSafe( p.typeStr, safeType, sizeof( safeType ) ),
                         partRecordSafe( p.value, safeValue, sizeof( safeValue ) ),
                         (int)p.baseRow,
                         p.footprint == 1 ? "dip" : ( p.footprint == 2 ? "axial" : "sip" ), (unsigned)p.pinCount,
-                        p.placed ? 1 : 0 );
+                        p.placed ? 1 : 0,
+                        p.placement == PART_PLACEMENT_COMPACT
+                            ? "compact"
+                            : ( p.placement == PART_PLACEMENT_CUSTOM ? "custom" : "expanded" ) );
 
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
         if ( pos < 0 || pos > (int)sizeof( partBuffer ) - 48 ) break;

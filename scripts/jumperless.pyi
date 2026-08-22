@@ -811,14 +811,26 @@ def list_parts() -> List[Dict]:
 
     Returns:
         A list of dicts:
-        {'name', 'type', 'value', 'row', 'footprint', 'placed',
+        {'name', 'type', 'value', 'row', 'footprint', 'placed', 'placement',
          'pins': {PIN: {'node', 'connect', 'class'}}}
         'node' is the resolved breadboard node for the leg (-1 if off-board),
         'connect' is the node it bridges to (-1 for none).
 
+        'placement' is 'expanded', 'compact' or 'custom', and it is the mode
+        every 'node' above was resolved through:
+          expanded  legs sit at the footprint rows and a bridge runs to each
+                    'connect' endpoint (the default)
+          compact   a leg whose 'connect' is a real hole row (1-60 or a rail)
+                    sits IN that hole, so 'node' == 'connect' and no bridge
+                    exists for it - the breadboard-native shape
+          custom    expanded geometry at a row the user moved the part to
+        Without it a compact leg is indistinguishable from an expanded one
+        that happens to have landed on the same row.
+
     Example:
         for p in list_parts():
-            print(p['name'], p['footprint'], 'placed' if p['placed'] else 'pending')
+            print(p['name'], p['footprint'], p['placement'],
+                  'placed' if p['placed'] else 'pending')
     """
     ...
 

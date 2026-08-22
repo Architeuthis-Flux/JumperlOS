@@ -282,6 +282,32 @@ guide:
     - {do: place, part: RG, check: continuity, timeout_ms: 4000, text: "rows in use refusal"}
 """
 
+# Continuation-line fixture (phase 11b, task 9 §A item 11). A `guide:` step
+# whose flow map wraps onto a second line used to SWALLOW the step after it:
+# the wrapped tail fell through guideParse's key:value arm, which cleared
+# inSteps, and the next `- ` item was then dropped in silence - two authored
+# steps parsed as ONE. Task 8 found it while writing fixtures (its report
+# §7.3 measured it three ways). Both halves of the fix are witnessed here:
+#   - step 1 WRAPS, and both its text and step 2 must survive the join;
+#   - the trailing `stray:` line is the residual BLOCK-style shape, which the
+#     parser still cannot support and must now warn about instead of eating
+#     the next step in silence.
+# Note-only steps: nothing here touches hardware.
+CONT_PATH = PROJ_DIR + "/contline.yaml"
+CONT_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilguide
+  title: "HIL Continuation"
+guide:
+  title: "HIL Continuation"
+  steps:
+    - {do: note,
+       text: "step one wrapped onto two lines"}
+    - {do: note, text: "step two must survive"}
+    stray: notastep
+"""
+
 # vf tap-starvation fixture (phase 12) - lives in its OWN project dir because
 # it must be a self-contained 555-shaped build. Verbatim from
 # .superpowers/sdd/projects-wave-2-bench-notes/invest-vf-noroute.md §9: it
@@ -1030,6 +1056,43 @@ print("NETNAME|" + name)
         d.close()
     time.sleep(1.0)
 
+    # --- 11b. a wrapped flow-map step no longer eats the next one -----------
+    #
+    # See CONT_WIRING. THE COUNT IS THE ASSERTION: before the fix this file
+    # parsed as ONE step, so "(2 steps)" and a reachable `step=2/2` are both
+    # things that could not have been printed. The prompt text is the second
+    # half - it lives entirely on the continuation line, so seeing it proves
+    # the tail was joined rather than merely tolerated.
+    out = jl_exec(f'print("wrote=", 1 if fs_write({CONT_PATH!r}, {CONT_WIRING!r}) else 0)',
+                  timeout=30)
+    check(parse_kv(out).get("wrote") == 1, "pushed the continuation-line fixture")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {CONT_PATH} new\r\n".encode())
+        guide_live = True
+        # The residual, block-style shape: loud now, silent before.
+        d.expect(r"guide step spans lines - unsupported, next step may be lost",
+                 "a block-style line inside steps: warns instead of eating the "
+                 "next step in silence", timeout=40)
+        d.expect(r"=== Guided build: HIL Continuation === \(2 steps\)",
+                 "the wrapped step and the one after it BOTH parsed (2 steps)")
+        # STEP_ENTER prints the prompt BEFORE its status line, so expect the
+        # text first (the suite's standing ordering trap).
+        d.expect(r"step one wrapped onto two lines",
+                 "the continuation line's own text: reached the step")
+        d.expect(r"GUIDE step=1/2 id=note_1 state=WAIT", "wrapped step 1 waits")
+        d.send(b"n")
+        d.expect(r"step two must survive",
+                 "the step AFTER the wrapped one was not swallowed")
+        d.expect(r"GUIDE step=2/2 id=note_2 state=WAIT", "step 2 waits")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "EXIT from the continuation fixture")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
     # --- 12. vf tap starvation: the bench `noroute`, reproduced + diagnosed --
     #
     # WHAT THIS PHASE LOCKS IN, AND WHAT IT DELIBERATELY DOES NOT.
@@ -1349,6 +1412,13 @@ print("r_med=", rs[len(rs) // 2])
 print("r_min=", rs[0])
 print("r_max=", rs[-1])
 print("r_2wire=", 3.3 / (i_med / 1000.0))
+# Q1's margin datum, MEASURED rather than argued: INA1 (0x41, R57 in DAC0's
+# OUTPUT path) is the watchdog that trips at 50 mA on fault current bypassing
+# the ground-side shunt. This is what it reads on a healthy low-resistance
+# loop, i.e. how much headroom the trip actually has over the harshest
+# legitimate operating point the suite produces. Reported, never asserted -
+# a threshold assertion here would just re-encode the constant.
+print("ina1_mA=", ina_get_current(1) * 1000.0)
 # the loop is deliberately LEFT LIVE - the scale assertion below reads the
 # shunt register through `z shunt` at this same ~14 mA operating point.
 """, timeout=90)
@@ -1375,6 +1445,11 @@ print("r_2wire=", 3.3 / (i_med / 1000.0))
           f"THE POINT: 2-wire would have reported {r_2wire:.0f} ohm for the same "
           f"part that 4-wire measures at {r_med:.0f} - the difference is the "
           f"stimulus path, and it is why bands could never be honest before")
+    # Datum only (no assertion): the INA1 source watchdog's headroom at the
+    # harshest healthy operating point this suite builds.
+    print(f"  info: INA1 sees {abs(vals.get('ina1_mA', 0.0)):.2f} mA leaving DAC0 "
+          f"on this ~{abs(vals.get('i_mA', 0.0)):.1f} mA loop - the source "
+          f"watchdog trips at 50 mA")
 
     # THE SHUNT REGISTER'S SCALE, under load. Everything else in the suite
     # reads INA0's CURRENT register (12c, 12d above) or reads the shunt
@@ -2113,7 +2188,7 @@ finally:
     # a directory that still holds a <dir>_<N>.yaml).
     out = jl_exec(f"""
 for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
-          {REFUSAL_PATH!r}, {VFNR_PATH!r}, {STARVE_PATH!r}, {LEGACY_PATH!r},
+          {REFUSAL_PATH!r}, {CONT_PATH!r}, {VFNR_PATH!r}, {STARVE_PATH!r}, {LEGACY_PATH!r},
           {RAIL_OK_PATH!r}, {RAIL_GND_PATH!r}, {RAIL_FLOAT_PATH!r}):
     if fs_exists(p):
         jfs.remove(p)
