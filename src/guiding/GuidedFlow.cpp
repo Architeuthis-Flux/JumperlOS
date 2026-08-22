@@ -365,7 +365,11 @@ static void guideRenderFootprints(void) {
         for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
             const PartPin& pin = p.pins[j];
             int node = partPinNode(p, pin);
-            if (node < 0) continue;
+            // 1-60 only: a compact leg sitting in a RAIL hole has no overlay
+            // cells (guidePaintNode skips it), so counting it as `any` used to
+            // register an entirely transparent overlay and burn one of the
+            // eight slots for nothing (T6 review, nit 4).
+            if (node < 1 || node > 60) continue;
             uint32_t color = (pin.pinNumber == 1) ? GUIDE_COLOR_PIN1
                                                   : guidePinClassColor(pin.pinClass);
             guidePaintNode(guideOverlayScratch, node, color);
@@ -402,7 +406,7 @@ static void guideRenderTarget(const GuideSession& s, bool pulseOn) {
                 for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
                     const PartPin& pin = p.pins[j];
                     int node = partPinNode(p, pin);
-                    if (node < 0) continue;
+                    if (node < 1 || node > 60) continue;   // rails paint nothing
                     uint32_t base = (pin.pinNumber == 1) ? GUIDE_COLOR_PIN1
                                                          : guidePinClassColor(pin.pinClass);
                     guidePaintNode(guideOverlayScratch, node,
@@ -1469,6 +1473,46 @@ static void guideAdjustLeave(GuideSession& s, bool cancel) {
                                                                     : "WAIT");
 }
 
+// ---------------------------------------------------------------------------
+// What the RESULT screen is ABOUT (design §5)
+// ---------------------------------------------------------------------------
+
+// The header line of the reading: the part for a place step ("R1 10k"), the
+// check's own name otherwise ("continuity").
+static void guideResultHeadName(const GuideScript& sc, int stepIdx,
+                                char* out, size_t outLen) {
+    const GuideStep& st = sc.steps[stepIdx];
+    if (st.type == GuideStepType::PLACE && st.partIdx >= 0 &&
+        st.partIdx < globalState.parts.numParts) {
+        const PartDefinition& p = globalState.parts.parts[st.partIdx];
+        if (p.value[0] != '\0') {
+            snprintf(out, outLen, "%s %s", p.name, p.value);
+        } else {
+            snprintf(out, outLen, "%s", p.name);
+        }
+        return;
+    }
+    snprintf(out, outLen, "%s", guideCheckName(st.check));
+}
+
+// The node label in the reading's top-right corner: the step's declared
+// target, else the first row the step's part actually occupies, else a connect
+// endpoint, else nothing (show() renders name-only when rowNode <= 0).
+static int guideResultPrimaryRow(const GuideScript& sc, int stepIdx) {
+    const GuideStep& st = sc.steps[stepIdx];
+    if (st.target > 0) return st.target;
+    if (st.type == GuideStepType::PLACE && st.partIdx >= 0 &&
+        st.partIdx < globalState.parts.numParts) {
+        const PartDefinition& p = globalState.parts.parts[st.partIdx];
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            int node = partPinNode(p, p.pins[j]);
+            if (node > 0) return node;
+        }
+    }
+    if (st.n1 > 0) return st.n1;
+    return -1;
+}
+
 // The wheel's whole job (design §3.1). PURE NAVIGATION: no skip flag, no
 // un-commit, no persistence - it only moves the cursor around a ring of
 // numSteps + 1 positions with the DONE view at index numSteps, wrapping at
@@ -1861,13 +1905,58 @@ void guideTick(GuideSession& s) {
                          guideCheckName(st.check), s.checkVal, onFailName);
             }
             guideStatusLine(s, "RESULT", extra);
+
+            // THE MEASUREMENT, on the panel (design §5). Only for checks that
+            // actually measured something: `check: none` synthesises a PASS
+            // with val="pass" and never touched the hardware, and
+            // SKIPPED/UNSUPPORTED refused to run - a reading screen for any of
+            // those would be a lie (and a 900 ms stall on every note step).
+            bool measuredResult = (st.check != GuideCheck::NONE) &&
+                                  (s.checkOutcome == GUIDE_CHECK_PASS ||
+                                   s.checkOutcome == GUIDE_CHECK_FAIL);
+            if (measuredResult) {
+                char headName[40];
+                guideResultHeadName(sc, s.stepIdx, headName, sizeof(headName));
+                // resetLastShown FIRST: show() drops repeats by content, and a
+                // `v` re-run that measures the same value must still repaint.
+                ReadingDisplay::resetLastShown();
+                ReadingDisplay::show(headName, guideResultPrimaryRow(sc, s.stepIdx),
+                                     s.checkVal, nullptr, pass ? "ok" : "FAIL");
+            }
+
             const char* hint = guideCheckHint();
             if (!pass && hint != nullptr && hint[0] != '\0') {
+                // AFTER the value, deliberately: the OLED ends on the
+                // actionable sentence, and the hint slot in show() is sized
+                // for a tag like "adjust?", not for 96 chars of prose.
                 Serial.print("  ");
                 Serial.println(hint);
                 Serial.flush();
                 if (oled.isConnected()) {
                     oled.showMultiLineSmallText(hint, true, true);
+                }
+            }
+
+            // On a PASS the machine walks straight into COMMIT -> STEP_ENTER,
+            // which repaints the panel with the next prompt inside ~1 ms, so
+            // the reading would never be seen. Hold it - interruptibly, the
+            // notify-style pump: any guide key breaks out, so an impatient `n`
+            // costs nothing. On a fail nothing repaints, so no hold is needed.
+            if (measuredResult && pass) {
+                unsigned long holdUntil = millis() + 900;
+                while ((long)(millis() - holdUntil) < 0) {
+                    jOS.serviceInner();
+                    int hRow = -1;
+                    GuideKey hk = guideReadInput(s, hRow);
+                    if (hk == GuideKey::QUIT) {
+                        // A hold/`q` during the display hold means LEAVE, not
+                        // "skip the animation" - it must not be swallowed.
+                        s.exitRequested = true;
+                        s.state = GuideState::EXIT;
+                        return;
+                    }
+                    if (hk != GuideKey::NONE) break;
+                    delayMicroseconds(200);
                 }
             }
 
