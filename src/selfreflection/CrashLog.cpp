@@ -11,6 +11,7 @@
 #include <hardware/regs/psm.h>
 #include <hardware/regs/watchdog.h>
 #include <pico/platform.h>
+#include <stdio.h>
 #ifdef PICO_RP2350
 #include <hardware/structs/powman.h>
 #endif
@@ -52,6 +53,66 @@ enum { SLOT_HDR = 0, SLOT_PC };
 static inline void __not_in_flash_func( slotWrite )( unsigned i, uint32_t v ) {
     *crashSlot( i ) = v;
 }
+
+// ---------------------------------------------------------------------------
+// ABORT LATCH. A HardFault whose CFSR is 0 and whose HFSR is DEBUGEVT is not a
+// wild pointer - it is a BKPT with no debugger, i.e. a DELIBERATE abort(). The
+// stacked PC/LR then say `_exit` / `abort` and nothing about WHO called abort,
+// which is the only interesting question. (2026-08-22: exactly that record came
+// off Kevin's bench and could not be attributed.)
+//
+// The firmware has five ways to reach abort() and none of them announce
+// themselves on the USB console:
+//   * operator new on a failed malloc (-fno-exceptions -> __throw_bad_alloc)
+//   * std::vector length/alloc failures
+//   * newlib assert() - __assert_func fiprintf()s to stderr, which on this
+//     target goes nowhere a bench user can see. SPIFTL's flash GC/metadata
+//     asserts and the TLSF PSRAM allocator's ~50 asserts are all live.
+// So: latch the CALLER of abort()/assert() into a reset-retained scratch word
+// and print it with the crash report on the next boot. Zero cost on every path
+// that never aborts.
+//
+// RP2350 only: watchdog scratch 3 is the one word this file's slot map (POWMAN
+// 0-7 + watchdog 0-2) leaves unclaimed, and nothing in the SDK or this tree
+// touches it. RP2040 has no spare - the OG build gets the live print only.
+#ifdef PICO_RP2350
+#define CRASHLOG_HAS_ABORT_SLOT 1
+static inline volatile uint32_t* __not_in_flash_func( abortSiteSlot )( void ) {
+    return &watchdog_hw->scratch[ 3 ];
+}
+#endif
+
+// Flash text on both boards lives in 0x10000000..0x10400000; a Thumb return
+// address has bit 0 set. Anything else in the slot is residue, not a site.
+//
+// FLASH ONLY is deliberate, not an oversight. Every caller of abort() in this
+// image - operator new, the three std::vector throw helpers, and all 789
+// __assert_func sites (SPIFTL, TLSF, ArduinoJson, MicroPython) - is
+// flash-resident; the one and only RAM-address call to abort is
+// __assert_func's own, and rejecting that is exactly right, because
+// __assert_func has already stashed the asserting function. Widen this if a
+// __not_in_flash_func ever grows an assert.
+static inline bool abortSitePlausible( uint32_t v ) {
+    return ( v & 1u ) && v >= 0x10000100u && v < 0x10400000u;
+}
+
+// FIRST writer wins: __assert_func stashes the asserting function, and the
+// abort() it then calls must not overwrite it with its own caller (which would
+// just be __assert_func).
+//
+// RAM-resident, and called BEFORE anything else in abort(): SPIFTL's asserts
+// can fire with XIP disabled mid-flash-program, where the console print that
+// follows would itself fault. Stash first and even that fault arrives carrying
+// the abort site.
+static void __not_in_flash_func( crashlogStashAbortSite )( uint32_t pc ) {
+#ifdef CRASHLOG_HAS_ABORT_SLOT
+    if ( !abortSitePlausible( *abortSiteSlot( ) ) ) *abortSiteSlot( ) = pc;
+#else
+    (void) pc;
+#endif
+}
+
+static uint32_t g_bootAbortSite = 0;
 
 static bool g_reportedThisBoot = false;
 // Latched once at boot. The scratch registers survive far more than our own
@@ -193,6 +254,75 @@ void __attribute__((naked, section(".time_critical.crashlog"))) isr_hardfault( v
         ".ltorg                \n" );
 }
 
+// --- abort()/assert() interception (see the ABORT LATCH note above) ---------
+// Strong definitions. The linker resolves `abort` / `__assert_func` here and
+// never pulls newlib's abort.o or assert.o, so there is no duplicate symbol.
+//
+// Both end in the SAME `bkpt` newlib's abort would have reached (via _exit), so
+// isr_hardfault still records the fault, still reboots, and the existing
+// [crashlog] report still prints - it just gains a line naming the caller.
+
+// Best-effort console notice. The scratch stash is the reliable half; this is
+// the half you get to read immediately. No String, no heap: abort's commonest
+// cause IS a failed allocation.
+//
+// GUARDED to core 0, thread mode, interrupts enabled. Serial/TinyUSB is core
+// 0's, and delay()/flush() need the timer and the USB pump to be running - from
+// an IRQ, from core 1, or with interrupts masked they could block forever,
+// which would be strictly worse than the silent reboot this replaces (no
+// crashlog, no bootloop guard). In those contexts the stash alone carries the
+// evidence and we go straight to the bkpt.
+static void __attribute__((noinline)) crashlogAnnounceAbort( const char* what,
+                                                             uint32_t site,
+                                                             const char* file,
+                                                             int line,
+                                                             const char* expr ) {
+    uint32_t ipsr, primask;
+    __asm volatile( "mrs %0, ipsr" : "=r"( ipsr ) );
+    __asm volatile( "mrs %0, primask" : "=r"( primask ) );
+    if ( ipsr != 0 || primask != 0 || ( sio_hw->cpuid & 0xFu ) != 0 ) return;
+
+    char buf[ 192 ];
+    if ( expr ) {
+        snprintf( buf, sizeof( buf ), "\n\r[abort] %s: %s:%d: %s (site 0x%08lX)\n\r",
+                  what, file ? file : "?", line, expr, (unsigned long) site );
+    } else {
+        snprintf( buf, sizeof( buf ), "\n\r[abort] %s from 0x%08lX\n\r",
+                  what, (unsigned long) site );
+    }
+    Serial.print( buf );
+    Serial.flush( );
+    // Give TinyUSB time to actually ship it: a bkpt one instruction later
+    // strands anything still sitting in the CDC FIFO. delay() pumps the device
+    // task through yield() on this core.
+    for ( int i = 0; i < 20; i++ ) {
+        Serial.flush( );
+        delay( 10 );
+    }
+}
+
+// Both live in RAM, like the fault handler and for the same reason: SPIFTL's
+// asserts are the ones most likely to fire with XIP disabled mid-program, and
+// a flash-resident abort() could not even reach the stash. The console notice
+// after it still touches flash (the format strings are .rodata) and may fault -
+// by then the site is already committed, so that fault arrives named too.
+void __attribute__((noreturn)) __not_in_flash_func( abort )( void ) {
+    crashlogStashAbortSite( (uint32_t) __builtin_return_address( 0 ) );
+    crashlogAnnounceAbort( "abort()", (uint32_t) __builtin_return_address( 0 ),
+                           NULL, 0, NULL );
+    __breakpoint( );
+    for ( ;; ) { __asm volatile( "wfi" ); }
+}
+
+void __attribute__((noreturn)) __not_in_flash_func( __assert_func )( const char* file, int line,
+                                                                     const char* func, const char* expr ) {
+    (void) func;
+    crashlogStashAbortSite( (uint32_t) __builtin_return_address( 0 ) );
+    crashlogAnnounceAbort( "assert", (uint32_t) __builtin_return_address( 0 ),
+                           file, line, expr );
+    abort( );
+}
+
 } // extern "C"
 
 static bool headerValid( uint32_t hdr ) {
@@ -227,6 +357,16 @@ bool crashlogLast( CrashRecord* out ) {
 
 void crashlogLatchAtBoot( void ) {
     if ( g_bootRecordValid ) return;
+#ifdef CRASHLOG_HAS_ABORT_SLOT
+    // Consume the abort site UNCONDITIONALLY, before the no-crash early return
+    // below: leaving a stale address armed would let it be attributed to some
+    // later, unrelated HardFault.
+    {
+        const uint32_t site = *abortSiteSlot( );
+        *abortSiteSlot( ) = 0;
+        if ( abortSitePlausible( site ) ) g_bootAbortSite = site;
+    }
+#endif
     if ( !crashlogPending( ) ) { g_bootRecordValid = false; return; }
     if ( !crashlogLast( &g_bootRecord ) ) return;
     g_bootRecordValid = true;
@@ -266,6 +406,15 @@ void crashlogReportOnce( Stream& out ) {
                 (unsigned long) r.cfsr, (unsigned long) r.hfsr,
                 (unsigned long) r.bfar, (unsigned long) r.mmfar );
 #endif
+    // A CFSR of 0 with HFSR.DEBUGEVT (bit 31) is a BKPT, not a bad access -
+    // i.e. abort()/assert(), whose caller the stacked frame never shows. Name
+    // it here or the record is unattributable (see the ABORT LATCH note).
+    if ( g_bootAbortSite ) {
+        out.printf( "[crashlog]   DELIBERATE abort()/assert() - called from 0x%08lX (symbolize this, not PC/LR)\n\r",
+                    (unsigned long) g_bootAbortSite );
+    } else if ( r.cfsr == 0 && ( r.hfsr & 0x80000000u ) ) {
+        out.println( "[crashlog]   CFSR=0 + HFSR.DEBUGEVT = a BKPT: abort()/assert() with no site latched" );
+    }
     out.println( "[crashlog]   Symbolize with: arm-none-eabi-addr2line -C -f -e .pio/build/jumperless_v5/firmware.elf <PC> <LR>" );
 #ifdef PICO_RP2350
     if ( g_stkofRawCount ) {

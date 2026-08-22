@@ -160,6 +160,69 @@ else:
     return True, body.strip()
 
 
+# --- File-manager driving (phase 6c) -----------------------------------------
+# The delete-the-active-file crash was reported through the Files browser, so
+# one leg of that needle has to actually BE the Files browser. These helpers
+# drive it over port 1 by reading the rendered screen ("Current Path: X |
+# Files: n | Selected: i/n") rather than counting blind keystrokes - a missed
+# keypress then fails loudly instead of silently opening some other file (ask
+# how we know).
+_FM_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78=]")
+_FM_STATUS = re.compile(
+    r"Current Path:\s*(\S+)\s*\|\s*Files:\s*(\d+)\s*\|\s*Selected:\s*(\d+)/(\d+)")
+_FM_DOWN = b"\x1b[B"
+_FM_UP = b"\x1b[A"
+
+
+def _fm_vis(b):
+    return _FM_CSI.sub("", b.decode(errors="replace"))
+
+
+def _fm_drain(ser, secs):
+    end = time.time() + secs
+    buf = b""
+    while time.time() < end:
+        c = ser.read(4096)
+        if c:
+            buf += c
+            end = max(end, time.time() + 0.25)   # keep reading while it talks
+    return buf
+
+
+def _fm_send(ser, data, wait=0.9):
+    ser.write(data)
+    ser.flush()
+    return _fm_drain(ser, wait)
+
+
+def _fm_state(ser):
+    """Force a redraw with 'r' and return (path, selected, count) or None."""
+    text = _fm_vis(_fm_send(ser, b"r", 1.2))
+    m = None
+    for m in _FM_STATUS.finditer(text):
+        pass
+    return (m.group(1), int(m.group(3)), int(m.group(4))) if m else None
+
+
+def _fm_order(listing, path):
+    """FileManager::refreshListing's ordering: '..' first, then directories,
+    then files, each alphabetical; dotfiles skipped."""
+    dirs = sorted(n.rstrip("/") for n in listing if n.endswith("/"))
+    files = sorted(n for n in listing
+                   if not n.endswith("/") and not n.startswith("."))
+    return ([".."] if path != "/" else []) + dirs + files
+
+
+def _fm_goto(ser, target):
+    st = _fm_state(ser)
+    for _ in range(60):
+        if st is None or st[1] == target:
+            return st
+        _fm_send(ser, _FM_DOWN if target > st[1] else _FM_UP, 0.5)
+        st = _fm_state(ser)
+    return None
+
+
 print("=== test_slot_files: the active context is a path ===")
 
 # --- 0. Snapshot the bench ---------------------------------------------------
@@ -558,6 +621,150 @@ print("own=", 1 if is_connected(11, 12) else 0)
           f"TEMPLATE PROTECTION: a template never becomes the boot context "
           f"(last_active.txt = {la!r})")
 
+    # --- 6c. DELETE THE ACTIVE RUN FILE OUT FROM UNDER THE CONTEXT ---------
+    # THE BENCH CRASH (wave-2 §1.2, Kevin 2026-08-20): deleting the file that
+    # IS the active context from the Files browser, then leaving the browser,
+    # HardFaulted core 0 and rebooted. The crashlog decoded to _exit / abort
+    # with CFSR=0 and HFSR.DEBUGEVT - a DELIBERATE abort(), not a wild
+    # pointer. Nothing asserted this flow before, in either direction.
+    #
+    # The wave-2 contract is that it is HARMLESS: a save to a path IS a
+    # create, so the next dirty auto-save re-creates the file. Both legs
+    # below assert that contract AND that the board is still standing:
+    #   (a) the plain path - remove the file, dirty the state, let the idle
+    #       flush run: the file comes back, carrying the edit;
+    #   (b) the FILES BROWSER path - delete it with the browser's own x/y and
+    #       leave with CTRL+Q, which is exactly what crashed.
+    # A reboot is caught three ways: the CDC node disappears, a fresh
+    # [crashlog] line appears in the captured output (a clean run has none),
+    # and 'Q' stops answering with the expected context.
+    out = jl_exec(f"print('loaded=', 1 if load_project({RUN_FILE!r}) else 0)",
+                  timeout=30)
+    check(parse_kv(out).get("loaded") == 1, "6c: on the run file to delete it")
+    time.sleep(1.5)
+
+    # (a) delete it from underneath, then dirty + idle-flush.
+    out = jl_exec(f"""
+jfs.remove({RUN_FILE!r})
+print("gone=", 0 if fs_exists({RUN_FILE!r}) else 1)
+connect(57, 58)
+""", timeout=30)
+    check(parse_kv(out).get("gone") == 1,
+          "6c: the ACTIVE run file is deleted while it is the context")
+    time.sleep(4.0)   # idle flush gate is ~750 ms; 4 s is generous
+    out = jl_exec(f"print('back=', 1 if fs_exists({RUN_FILE!r}) else 0)", timeout=25)
+    check(parse_kv(out).get("back") == 1,
+          "6c: the auto-save RE-CREATED the deleted active file (a save is a create)")
+    slot_d, path_d = active_context(2.5)
+    check(slot_d == -1 and path_d == RUN_FILE,
+          f"6c: the context survived the delete (slot={slot_d}, path={path_d!r})")
+    _exists, body = read_device_file(RUN_FILE)
+    check(body is not None and "n1: 57" in body and "n2: 58" in body,
+          "6c: the re-created file carries the edit made after the delete")
+
+    # (b) the same thing through the Files browser, ending in CTRL+Q.
+    import serial  # pyserial (jl.py imports it the same way)
+
+    def _listing(out_text):
+        m = re.search(r"L=\s*\[(.*?)\]", out_text, re.S)
+        return re.findall(r"'([^']*)'", m.group(1)) if m else []
+
+    # EVERY directory listing has to be fetched BEFORE the browser opens: the
+    # file manager owns Core 0 for its whole session, so the MicroPython REPL
+    # on port 5 cannot answer while it is up (it times out waiting for the raw
+    # REPL, which fails the suite mid-phase with the browser still on screen).
+    root_order = _fm_order(_listing(jl_exec("print('L=', fs_listdir('/'))", timeout=25)), "/")
+    proj_order = _fm_order(
+        _listing(jl_exec("print('L=', fs_listdir('/projects'))", timeout=25)), "/projects")
+    fixture = _fm_order(
+        _listing(jl_exec(f"print('L=', fs_listdir({TMP_PROJ!r}))", timeout=25)), TMP_PROJ)
+
+    hops = [("/", root_order, "projects"),
+            ("/projects", proj_order, TMP_PROJ.rsplit("/", 1)[1])]
+
+    fm_captured = ""
+    fm_ok = True
+    ser = serial.Serial(port1_path(), 115200, timeout=0.1)
+    try:
+        _fm_send(ser, b"\r\n", 2.0)
+        opened = _fm_vis(_fm_send(ser, b"/\r\n", 4.0))
+        if "Press Enter" in opened:
+            opened += _fm_vis(_fm_send(ser, b"\r", 3.0))
+        fm_captured += opened
+        check("JUMPERLESS FILE MANAGER" in opened, "6c: the Files browser opened")
+
+        st = _fm_state(ser)
+        for _ in range(6):                        # climb to root
+            if st is None or st[0] == "/":
+                break
+            _fm_send(ser, b".", 1.2)
+            st = _fm_state(ser)
+        for want_path, order, name in hops:
+            st = _fm_state(ser)
+            if st is None or st[0] != want_path or name not in order:
+                fm_ok = False
+                break
+            if _fm_goto(ser, order.index(name) + 1) is None:
+                fm_ok = False
+                break
+            _fm_send(ser, b"\r", 1.6)
+        st = _fm_state(ser)
+        check(fm_ok and st is not None and st[0] == TMP_PROJ,
+              f"6c: navigated the browser to {TMP_PROJ} (at {st[0] if st else None})")
+
+        if st is not None and st[0] == TMP_PROJ:
+            target = RUN_FILE.rsplit("/", 1)[1]
+            check(target in fixture, f"6c: {target} is listed in the browser")
+            if target in fixture and _fm_goto(ser, fixture.index(target) + 1):
+                prompt = _fm_vis(_fm_send(ser, b"x", 1.6))
+                fm_captured += prompt
+                check("Delete file" in prompt,
+                      "6c: the browser asked to confirm the delete")
+                done = _fm_vis(_fm_send(ser, b"y", 2.0))
+                fm_captured += done
+                check("Deleted:" in done,
+                      "6c: the browser deleted the ACTIVE run file")
+
+        # THE CRASHING KEYSTROKE.
+        out_q = _fm_vis(_fm_send(ser, b"\x11", 6.0))
+        out_q += _fm_vis(_fm_drain(ser, 6.0))
+        fm_captured += out_q
+        check("Exiting File Manager" in out_q,
+              "6c: the Files browser exited with the active file gone")
+    finally:
+        # Leave the browser NO MATTER WHAT. A phase that dies with the file
+        # manager still up strands Core 0 inside it: every later jl_exec times
+        # out waiting for a raw REPL that cannot answer, so the suite's own
+        # teardown fails too and the fixture/slot restores never run.
+        try:
+            if "Exiting File Manager" not in fm_captured:
+                _fm_send(ser, b"\x11", 3.0)
+        except Exception:
+            pass
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+    node_alive = all(os.path.exists(port1_path()) for _ in range(3))
+    check(node_alive, "6c: the CDC node never disappeared (no reboot)")
+    check("[crashlog]" not in fm_captured,
+          "6c: NO crashlog banner - the board did not HardFault on the way out")
+    slot_f, path_f = active_context(3.0)
+    check(slot_f == -1 and path_f == RUN_FILE,
+          f"6c: the board still answers, still on {RUN_FILE} "
+          f"(slot={slot_f}, path={path_f!r})")
+
+    # Put the fixture back the way the design says it comes back - by dirtying
+    # the context, not by re-writing RUN_YAML over it. The live state carries
+    # phase 2's 41-42 edit, which phase 7's boot-persistence check reads back
+    # out of this file; a fresh RUN_YAML would silently delete that witness.
+    jl_exec("connect(59, 60)", timeout=25)
+    time.sleep(4.0)
+    out = jl_exec(f"print('restored=', 1 if fs_exists({RUN_FILE!r}) else 0)", timeout=25)
+    check(parse_kv(out).get("restored") == 1,
+          "6c: the browser's delete also heals on the next dirty auto-save")
+
     # --- 7. Boot persistence ----------------------------------------------
     # Back to the run file: phase 6b left the context on the read-only
     # template, which by design can never be the boot context.
@@ -671,10 +878,23 @@ print("gone=", 0 if (fs_exists({TMP_PROJ!r}) or fs_exists({TRAP_FILE!r})) else 1
           f"removed {TMP_PROJ} and {TRAP_FILE}")
 
     # Restore the numbered slot files this suite may have disturbed.
+    #
+    # "Did not exist" is a state that has to be restored TOO, and it was not:
+    # phase 6a switches to slot 2 and auto-saves the fixture's own bridges into
+    # /slots/slot2.yaml, so a bench that starts with a slot file ABSENT comes
+    # out of the run with that file present, and no later run ever removes it -
+    # the snapshot/restore pair then perpetuates the residue instead of undoing
+    # it. Put the absence back. (General hygiene; every slot file happened to
+    # exist on the bench this was written on, so it changes nothing there.)
     for path, existed, before in (("/slots/slot0.yaml", slot0_existed, slot0_before),
                                   ("/slots/slot2.yaml", slot2_existed, slot2_before)):
         if existed and before is not None:
             jl_exec(f"fs_write({path!r}, {before!r})", timeout=25)
+        elif not existed:
+            jl_exec(f"""
+if fs_exists({path!r}):
+    jfs.remove({path!r})
+""", timeout=25)
 
     # Path-aware: the bench may have been on a file context when we started.
     restore_context(orig_slot, orig_path)
