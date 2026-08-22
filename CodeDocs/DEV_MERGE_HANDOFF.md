@@ -467,8 +467,128 @@ The whole point of this branch is a bench experience, and **nothing on the
 bench checklist has been done** — the suites prove the format, the parsers,
 the provisioning and the state machine, not what it feels like to build a 555
 with it. The consolidated, ordered bench script is committed at
-`CodeDocs/PROJECTS_BENCH_CHECKLIST.md` (extracted from the branch workspace's
-task-10 report so it survives workspace cleanup).
+`CodeDocs/PROJECTS_BENCH_CHECKLIST.md`.
+
+> Kevin then **did** the bench pass and wrote `>>>` notes through that file.
+> Wave 2 is the answer to those notes. The checklist has since been rewritten
+> for wave 2; the annotated wave-1 copy is preserved at commit `6dfaf7c`.
+
+## Branch `projects-guided-placement` — WAVE 2, the bench notes answered (2026-08-21/22)
+
+Base `6dfaf7c` (the annotated checklist). Nine tasks, each reviewed before the
+next was dispatched. Kevin's notes asked for six things, and every one of them
+is code now:
+
+| Kevin's note | What it became |
+|---|---|
+| "our 555 pinout is mirrored — pin 1 should be on the bottom (35)" | the **DIP anchor flip** + the new `axial2` footprint, so 2-leg parts straddle the ravine the way real ones do |
+| "allow the user to change the location, and skip parts and come back" | **move/snap/ADJUST**, three placement modes, and skip-and-return through a browsable DONE view |
+| "they snap to compact (on the actual rows) and then you can drag them to expanded, each part independently" | **`placement: expanded\|compact\|custom`**, per part, per pin |
+| "when we spin the clickwheel to the end it should loop until we hold to exit" | the **browse ring**: a wheel TURN can never reach EXIT |
+| "instead of saving it to a slot… make a new file for each run of the project. 555_1.yaml… ask load/new" | **run files**, and slots-become-files underneath them |
+| "we should use our adc based current sensing" / "show the measured value" | the **measurement rework**: ground-side shunt, four-wire R in ohms, the value on the OLED |
+| "put projects in the top level of the clickwheel menu" | done |
+| "just set the rails to where they were, not 0V" | rail capture/restore across a guide session |
+| "always load the last active slot file" | `[slots] boot_mode = 1`, `/slots/last_active.txt` |
+
+| Task | What landed |
+|---|---|
+| 1 | Clickwheel-hold interrupt is **single-fire via the flag** (the direct `mp_sched_keyboard_interrupt()` call is deleted, because the C blocking loops poll the flag directly and a scheduled exception never reaches them); `categoryRanges[16]` + a guard |
+| 2 | vf `noroute` investigated and mitigated: sequential-same-ADC taps, an ADC hint, the Option-0 fallback, chip-D name-table fix, and the diagnostics that proved a **single** tap can starve |
+| 3 | The **geometry flip**: DIP pin 1 anchors the bottom half, `axial2` arrives, the four project wirings are re-authored, and a partial part is now **rejected whole** with an unconditional print |
+| 4 | **Slots become files** — `CodeDocs/DESIGN_SLOT_FILES.md`. Path-based active context, `last_active.txt`, `[slots]` config, the strict matcher, the template write-guard, the atomic-on-parse-failure contract and the `-1/-1` terminal state |
+| 5 | **The launcher rework** — run files, the merged load/new prompt, Projects at the top level, the new `z` grammar, the script offer. GSLOTS, the keep-flow and the temp-slot borrow are deleted |
+| 6 | **Placement modes + move plumbing** — the `placement` byte, mode-aware `partPinNode`, `guideMovePart`/`guideSnapPart`, tap precedence, `m`/`c`, and one shared `partGeometryOk` |
+| 7 | **Guide session UX** — ADJUST, the pended confirm, browse/wrap/DONE, first-unfinished resume, rails capture/restore, `railHwVolts` hardware truth, and the measured value on the panel |
+| 8 | **The measurement rework** — ground-side shunt, Option-1 sense routing, two-point correction, honest ohm bands, `rail_sane` measuring the rail, the INA1 source watchdog |
+| 9 | Eleven parked items, the checklist rewrite, this documentation, and the full `run_all` pass |
+
+**Suites**: `test_slot_files` 72 (new in wave 2), `test_parts_roundtrip` 179,
+`test_projects` 233, `test_guide_flow` 355. `run_all` 11/11.
+(`test_encoder_ui` SKIPs on any freshly built firmware until its `jl_input.py`
+ADDR table is regenerated; `run_all` counts a clean skip as a pass.)
+
+### The two things left that need a uf2 flashed
+
+Everything else on `PROJECTS_BENCH_CHECKLIST.md` runs on the build that is on
+the board. These two cannot:
+
+1. **The forced-refresh / version-bump items (checklist §5).**
+   `checkAndHandleFirmwareUpdate()` only fires across a `VERSION` change, so
+   proving that a user's edit to `/projects/555/wiring.yaml` survives — arriving
+   as `wiring_original.yaml` — and that the variant picker still offers exactly
+   one variant, needs a **bumped build flashed twice**. It reflashes the board
+   and mutates `/projects`, which is why it is the LAST section of the
+   checklist.
+2. **The OG smoke test (checklist §4).** Needs the `jumperless_og` uf2 on an OG
+   board: guided flows must run with terminal/OLED guidance and **no LED
+   painting**, and every check must report `val=unsupported ok=0` and
+   warn-continue. Three of the four projects are V5-only (no nodes for RP pins
+   26/27) — use the 555.
+
+### Downgrade notes for wave 2
+
+Same mechanism as wave 1's `parts:` note above, three more fields:
+
+- **`placement:` is dropped silently by old firmware.** Unknown keys are skipped
+  by design, and the next auto-save rewrites the file without the byte. The part
+  comes back **expanded**: its legs move from the endpoint holes back to the
+  footprint rows and the routed bridges reappear. Nothing is lost except the
+  mode (`row:` survives — it is an old field), and the circuit stays
+  **electrically equivalent**, because expanded and compact are two ways to make
+  the same connections. Stated at the `placement:` doc block in `States.h`.
+- **`runSource:` is dropped the same way.** A run file that loses it falls back
+  to the project's default `wiring.yaml` for both its guide source and its
+  variant script, with one printed line. Harmless for single-variant projects,
+  which is all four shipped ones.
+- **`[slots]` is inert on old firmware**, and `/slots/last_active.txt` is an
+  unreferenced file. Old boot is the hardcoded `netSlot 0`. **No hazard** —
+  configManager's parser skips unknown sections and the incremental saver even
+  preserves unknown lines.
+- **Behaviour change, not a downgrade issue, but it belongs in the release
+  notes:** a file whose out-of-bounds `offset:` (or over-`pinCount` `pin:`) pin
+  used to place *partially* now has the **whole part dropped**, with an
+  unconditional print naming the pin. That is deliberate — a partial part is
+  never right, and silence plus a wholesale-rewrite auto-save is exactly how
+  parts vanish — but a user with such a file will see a part disappear that
+  previously half-worked.
+
+### Deferred past wave 2, on purpose
+
+- **`jl_switch_slot`'s return-value ambiguity.** It returns the *previous* slot
+  on success and `-1` on error, and the binding raises on `-1` — so from the
+  `-1/-1` terminal state the switch **works and then raises**. Agreed future
+  shape: `-2` = failure, `-1` = legal "no previous slot", binding raises only on
+  `-2`. Not fixed in-wave because it changes a published Python contract and no
+  wave-2 path calls it. Full detail: `DESIGN_SLOT_FILES.md` §8.
+- **ADC-scan current as the PRIMARY current source, pending task #32.** The
+  guide's checks read INA0; the scan estimate is a **diagnostic-only**
+  crosscheck (log-only at I ≥ 2 mA, >25 % disagreement names #32 in the
+  message). Making the scan primary waits on #32 closing.
+- **Out-of-order resume re-walks.** `guideProgress` is one scalar, so commits
+  made beyond the first unfinished step come back flagged unfinished. Safe
+  (`expandOnePart` and CONNECT's commit are both `hasConnection`-guarded, so no
+  bridge is duplicated) but it makes the user re-confirm work that is already
+  built. The fix is a `committed[]` bitmap in the YAML.
+- **No authored-row memory for `custom`.** `m 44` → custom, `c` → compact, `c`
+  → expanded leaves the part at row 44 marked *expanded*: the "deliberately
+  positioned" marker is gone even though the row is not. Needs a second byte to
+  remember the pre-compact mode. Likewise "moved back to the authored row" stays
+  `custom`, because no authored row is stored anywhere and capturing it would
+  mean parsing a second file mid-session.
+- **`unconnectablePaths[]` has an unguarded push site** in
+  `NetsToChipConnections.cpp` (~:4549 writes without the `< 10` bound its two
+  siblings have). `routeRefused()` clamps its *read* to 10 entries so it cannot
+  follow the overflow, but the write itself is a real, pre-existing buffer
+  overrun. Found in wave 2, out of scope for it.
+- **The RING path's gain residual.** The two-point correction cancels channel
+  offset, not channel gain (~1–2 % of each node's voltage, under 2 % of R at a
+  real 330 Ω part — inside `tol_meas`, no verdict changes). The known fix is a
+  second ring dwell with the channels swapped; disclosed in `ringReadPair`'s
+  header.
+- **Four rungs of the sense-fallback ladder are inspection-only.** Every one of
+  them needs the router or the ring to fail in a way no authored fixture
+  produces on a near-empty board.
 
 ---
 
