@@ -241,17 +241,33 @@ def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
 
 
 def read_device_file(path):
-    """Return (exists, content) for a device file via the REPL."""
+    """Return (exists, content) for a device file via the REPL.
+
+    Reads through jfs.open().read() in chunks, NOT fs_read(): fs_read()
+    silently truncates at 4095 bytes (1023 on OG) - a pre-existing
+    static-buffer cap - so a comparison against a source file larger than that
+    fails on the truncation rather than on the content, which is exactly how it
+    was found (the 555 README grew past the cap in wave 2 and this function
+    reported a mismatch for a file that had just been written correctly).
+    device_hash() below already reads this way; the two now match.
+    """
     out = jl_exec(f"""
 p = {path!r}
 if fs_exists(p):
     print("EXISTS= 1")
     print("<<<FILE>>>")
-    print(fs_read(p))
+    f = jfs.open(p, "r")
+    while True:
+        c = f.read(256)
+        if not c:
+            break
+        print(c, end="")
+    f.close()
+    print()
     print("<<<END>>>")
 else:
     print("EXISTS= 0")
-""", timeout=25)
+""", timeout=40)
     if "EXISTS= 1" not in out:
         return False, ""
     m = re.search(r"<<<FILE>>>\r?\n(.*)<<<END>>>", out, re.DOTALL)

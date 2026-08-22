@@ -463,16 +463,27 @@ _csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
 
 
 def read_device_file(path):
+    """Chunked through jfs.open(), NOT fs_read(): fs_read() silently truncates
+    at 4095 bytes (a pre-existing static-buffer cap), which turns any
+    comparison against a larger file into a false mismatch. Matched with
+    test_projects.py's copy."""
     out = jl_exec(f"""
 p = {path!r}
 if fs_exists(p):
     print("EXISTS= 1")
     print("<<<FILE>>>")
-    print(fs_read(p))
+    f = jfs.open(p, "r")
+    while True:
+        c = f.read(256)
+        if not c:
+            break
+        print(c, end="")
+    f.close()
+    print()
     print("<<<END>>>")
 else:
     print("EXISTS= 0")
-""", timeout=25)
+""", timeout=40)
     if "EXISTS= 1" not in out:
         return False, ""
     m = re.search(r"<<<FILE>>>\r?\n(.*)<<<END>>>", out, re.DOTALL)
