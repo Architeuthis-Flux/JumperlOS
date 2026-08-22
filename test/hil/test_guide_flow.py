@@ -1349,9 +1349,8 @@ print("r_med=", rs[len(rs) // 2])
 print("r_min=", rs[0])
 print("r_max=", rs[-1])
 print("r_2wire=", 3.3 / (i_med / 1000.0))
-dac_set(DAC0, 0.0)
-time.sleep(0.1)
-nodes_clear()
+# the loop is deliberately LEFT LIVE - the scale assertion below reads the
+# shunt register through `z shunt` at this same ~14 mA operating point.
 """, timeout=90)
     vals = parse_kv(out)
     vA = vals.get("vA", 0.0)
@@ -1376,6 +1375,33 @@ nodes_clear()
           f"THE POINT: 2-wire would have reported {r_2wire:.0f} ohm for the same "
           f"part that 4-wire measures at {r_med:.0f} - the difference is the "
           f"stimulus path, and it is why bands could never be honest before")
+
+    # THE SHUNT REGISTER'S SCALE, under load. Everything else in the suite
+    # reads INA0's CURRENT register (12c, 12d above) or reads the shunt
+    # register UNLOADED (12e, where the answer is ~0 either way), and every
+    # guide-level phase lands on `open` / `no current` where the scale is
+    # irrelevant - so a 2x error in inaShuntCurrent_mA()'s `/2.0f`, or reading
+    # getShuntVoltage() in volts instead of millivolts, would pass the entire
+    # suite while corrupting every resistance the rework computes. The loop is
+    # still live at ~14 mA, so the two registers must now agree.
+    i_reg_mA = abs(vals.get("i_mA", 0.0))
+    out = port1_command("z shunt 16", collect_seconds=6.0)
+    m = re.search(r"SHUNT n=(\d+) .*mean_mA=(-?[\d.]+)", out)
+    check(m is not None,
+          f"'z shunt' answers under load (got: {out[-160:]!r})")
+    if m:
+        i_shunt_mA = abs(float(m.group(2)))
+        check(abs(i_shunt_mA - i_reg_mA) <= max(0.1 * i_reg_mA, 0.3),
+              f"SCALE: the shunt register reads {i_shunt_mA:.2f} mA where the "
+              f"current register reads {i_reg_mA:.2f} mA (within 10%) - the "
+              f"/2.0f across the 2 ohm R1, and mV-not-volts, are both right")
+    jl_exec("""
+import time
+dac_set(DAC0, 0.0)
+time.sleep(0.1)
+nodes_clear()
+time.sleep(0.2)
+""", timeout=30)
 
     # --- 12e. the shunt register's quantization floor ------------------------
     #
