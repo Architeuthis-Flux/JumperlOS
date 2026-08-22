@@ -80,10 +80,16 @@ Covers:
      unfinished step - and what the run file persists is step 1 (the first
      unfinished), NOT the cursor. Relaunch resumes at step 2. Under the old
      rule this file would have said step 3 and step 2 would never be built.
- 17. rail restore (task 7 ruling 1): rails set to known values, a guided
-     launch quit BEFORE power_on, and the exit tail names exactly those values
-     coming back. The run file keeps 0 V (save=0), which is asserted too - it
-     is a deliberate divergence, not an oversight.
+ 17. all-skipped is not built: skip every step, reach DONE with
+     `committed=0 skipped=3 unfinished=0`, quit - and the companion script is
+     NOT offered ("nothing was built"), with no SCRIPT lines at all, while the
+     run file is still saved and announced.
+ 18. rail restore (task 7 ruling 1): rails and DAC1 set to known values, a
+     guided launch quit BEFORE power_on, and both halves asserted - the exit
+     tail names the values, and dac_get reads them back off the PINS (DAC1 is
+     the independent witness that the restore physically ran: INIT drove it to
+     0 and nothing else touches it). The run file still holds 0 V, because the
+     restore is save=0 on purpose.
 
 BENCH-ONLY, NOT COVERED HERE. This suite never turns the wheel and cannot
 touch a hole, so the ENCODER half of task 7 has no automated witness: the
@@ -91,6 +97,12 @@ touch a hole, so the ENCODER half of task 7 has no automated witness: the
 slide inside it, and every probe-pad gesture. What IS covered is everything
 those gestures funnel into - `>`/`<` are the wheel's browse twins and `m`/`c`
 the pads' absolute twins, all running the same handlers.
+
+In particular the PEND RACE that fix round 1 closed (a wheel click, then a
+turn into the DONE view inside 260 ms, maturing into a CONFIRM that exits)
+cannot be built from here at all: nothing serial arms a pend - only the
+encoder's RELEASED edge does - so `>` into DONE carries nothing with it. It
+is a bench check, and the report says so.
 
 Bench convention: snapshot board state + the active CONTEXT up front, restore
 both in a finally (a prior round's incident: an uncaught exception stranded
@@ -1160,6 +1172,18 @@ print("b46=", 1 if is_connected(46, "GND") else 0)
         d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT",
                  "`<` browses back to the committed place step")
 
+        # RULING (fix round 1): `s` cannot skip a step that is already built.
+        # Clearing the flag while the commit's bridges are still on the fabric
+        # would make the session and the hardware disagree; `p` is the gesture
+        # that un-commits, and it removes the bridges too. Only reachable at
+        # all because browsing can park the cursor on a committed step.
+        pos_before_skip = d.pos
+        d.send(b"s")
+        d.expect(r"\(already committed - p removes it first\)",
+                 "s is REFUSED on an already-committed step")
+        check("state=" not in d.buf[pos_before_skip:d.pos],
+              "the refused skip changed no state and advanced no cursor")
+
         # The move, WHILE PLACED. Old rows must be vacated on the fabric and
         # new rows live - that is the remove->mutate->reapply invariant.
         d.send(b"m 44\r")
@@ -1341,22 +1365,69 @@ print("b=", 1 if is_connected(45, "GND") else 0)
         d.close()
     time.sleep(1.0)
 
-    # --- 17. Rail restore: the values, named and given back -----------------
+    # --- 17. An all-skipped build is not a built circuit ---------------------
+    #
+    # RULING (fix round 1). Skipping every step reaches DONE and returns
+    # COMPLETED - "nothing left unfinished" is literally true - but no bridge
+    # was ever placed, and running the companion script against a circuit
+    # nobody assembled is worse than not running it. The run file is still
+    # saved; only the script is suppressed, and NO SCRIPT lines are printed so
+    # a headless driver can tell this apart from `offer=none`.
+    d = GuideDriver()
+    try:
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
+        guide_live = True
+        d.expect_runfile("new", "all-skipped phase allocated its own run file")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "all-skipped phase at step 1")
+        d.send(b"s")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "skipped step 1")
+        d.send(b"s")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "skipped step 2")
+        d.send(b"s")
+        d.expect(r"GUIDE done committed=0 skipped=3 unfinished=0",
+                 "all three skipped: DONE has nothing unfinished AND nothing built")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "q exits the all-skipped build")
+        guide_live = False
+        d.expect(r"\(nothing was built - no script offer\)",
+                 "COMPLETED with zero commits does not offer the companion script")
+        d.expect(r"Run saved to " + PROJ + r"_\d+\.yaml",
+                 "the run file is still saved and announced - only the script is "
+                 "suppressed")
+        time.sleep(0.7)
+        d.pump()
+    finally:
+        d.close()
+    check("SCRIPT offer" not in d.buf,
+          "no SCRIPT lines at all for a circuit nobody built")
+    time.sleep(1.0)
+
+    # --- 18. Rail restore: the values, named AND actually on the pins -------
     #
     # RULING 1. Quit before power_on and the bench you had comes back. The
-    # rails are set through the REPL with save=True so they are in
+    # rails and DAC1 are set through the REPL with save=True so they are in
     # globalState.power, which is what the launcher captures.
+    #
+    # DAC1 is here on purpose: it is the one channel that proves the RESTORE
+    # RAN, rather than proving the exit tail printed a string. The guide's INIT
+    # drove it to 0 V, nothing else touches it (DAC0 is the probe feed and
+    # re-parks itself), so 1.25 V can only be back on that pin because
+    # restoreUserPower() physically put it there.
     out = jl_exec("""
 dac_set(2, 3.3, True)
 dac_set(3, -1.5, True)
+dac_set(1, 1.25, True)
 print("top=", dac_get(2))
 print("bot=", dac_get(3))
+print("dac1=", dac_get(1))
 """, timeout=25)
     vals = parse_kv(out)
     check(vals.get("top") is not None and abs(float(vals.get("top")) - 3.3) < 0.2 and
           vals.get("bot") is not None and abs(float(vals.get("bot")) + 1.5) < 0.2,
           f"bench rails set to 3.3 / -1.5 before the launch "
           f"(top={vals.get('top')}, bot={vals.get('bot')})")
+    check(vals.get("dac1") is not None and abs(float(vals.get("dac1")) - 1.25) < 0.15,
+          f"DAC1 set to 1.25 before the launch (got {vals.get('dac1')})")
 
     d = GuideDriver()
     try:
@@ -1374,26 +1445,33 @@ print("bot=", dac_get(3))
         d.close()
     time.sleep(1.0)
 
-    # The deliberate divergence (design §4.2): the restore is save=0, so the
-    # RUN FILE - and globalState with it - keeps the safe 0 V that
-    # guideForcePowerSafe wrote, while the hardware carries the user's bench.
-    # A half-built project re-opened later must still come up unpowered. This
-    # asserts the choice rather than tolerating it: flipping to save=1 would
-    # write the user's rails into someone else's project file.
+    # THE HARDWARE HALF. dac_get now answers channels 2/3 from railHwVolts -
+    # the voltage last written to the pin, save or not - exactly as it has
+    # always answered 0/1 from s_dacHwVolts. So this reads what is physically
+    # on the rails, not what the run file remembers, and DAC1 is the
+    # independent witness that restoreUserPower() ran at all.
     out = jl_exec("""
 print("top=", dac_get(2))
 print("bot=", dac_get(3))
+print("dac1=", dac_get(1))
 """, timeout=25)
     vals = parse_kv(out)
-    check(vals.get("top") is not None and abs(float(vals.get("top"))) < 0.2 and
-          vals.get("bot") is not None and abs(float(vals.get("bot"))) < 0.2,
-          f"save=0: the run file's power stays at the safe 0 V "
-          f"(state top={vals.get('top')}, bot={vals.get('bot')})")
-    # And the hazard the save=0 rule exists to prevent, asserted directly: the
+    check(vals.get("top") is not None and abs(float(vals.get("top")) - 3.3) < 0.2,
+          f"RESTORED: the top rail is physically back at 3.3 V "
+          f"(got {vals.get('top')})")
+    check(vals.get("bot") is not None and abs(float(vals.get("bot")) + 1.5) < 0.2,
+          f"RESTORED: the bottom rail is physically back at -1.5 V "
+          f"(got {vals.get('bot')})")
+    check(vals.get("dac1") is not None and abs(float(vals.get("dac1")) - 1.25) < 0.15,
+          f"RESTORED: DAC1 is back at 1.25 V - INIT drove it to 0 and nothing "
+          f"but the restore could have returned it (got {vals.get('dac1')})")
+    # THE BINDING save=0 CHECK, and the hazard the rule exists to prevent: the
     # user's bench voltage must never end up written into someone else's
-    # project file. (The 0.00 the guide put in globalState lands in this file
-    # on the next idle auto-save; what matters here and now is that 3.3 does
-    # not.)
+    # project file. Live rails and the file diverge ON PURPOSE here - a
+    # half-built project re-opened later must still come up unpowered - and
+    # this is the assertion that would catch a flip to save=1. (The 0.00 the
+    # guide put in globalState lands in this file on the next idle auto-save;
+    # what matters here and now is that 3.3 does not.)
     _, rr_yaml = read_device_file(run_rr)
     check("topRail: 3.3" not in rr_yaml,
           "save=0: the user's 3.3 V was NEVER written into the project's run "
@@ -1402,9 +1480,11 @@ print("bot=", dac_get(3))
     out = jl_exec("""
 dac_set(2, 0.0, True)
 dac_set(3, 0.0, True)
+dac_set(1, 0.0, True)
 print("zeroed= 1")
 """, timeout=25)
-    check(parse_kv(out).get("zeroed") == 1, "rails zeroed after the restore phase")
+    check(parse_kv(out).get("zeroed") == 1,
+          "rails and DAC1 zeroed after the restore phase")
 
 finally:
     # --- 6. Restore the bench ----------------------------------------------
