@@ -1257,6 +1257,32 @@ print("gone=", 0 if fs_exists({run1!r}) else 1)
         d.close()
     time.sleep(1.0)
 
+    # run=<N> opens ONE specific run file - the grammar's determinism knob, so
+    # a scripted driver can name the file it means instead of trusting whatever
+    # "latest" happens to be. _2 is deliberately NOT the latest here (_3 is).
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest run=2 noscript\r\n")
+        m = d.expect(r"RUNFILE path=(\S+) action=load",
+                     "run=<N> opened a run file")
+        check(m is not None and m.group(1) == f"{HIL_DIR}/hiltest_2.yaml",
+              f"run=2 opened _2, not the latest _3 (got "
+              f"{m.group(1) if m else None!r})")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # ...and re-open _3 so the terminal-state needle below targets the file it
+    # names (the needle needs the bad YAML written over the ACTIVE context).
+    d = GuideDriver()
+    try:
+        d.send(b"z hiltest run=3 noscript\r\n")
+        d.expect(r"RUNFILE path=" + re.escape(run3 or "x") + r" action=load",
+                 "back on _3 for the terminal-state needle")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
     # (v) The `z` grammar. The old `z <path> <slot>` must break VISIBLY rather
     # than silently writing a slot, and an all-digit PROJECT NAME must keep
     # working - `z 555` is a project, not a destination slot.
