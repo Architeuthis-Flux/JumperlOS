@@ -611,6 +611,17 @@ mutates `/projects` — so it must not precede any step above. Delete any
   `src/ProjectsApp.cpp` first.
 - [ ] **Run files are not touched by provisioning.** Park a `555_1.yaml` in
   `/projects/555` across the refresh and confirm it comes back byte-identical.
+  - **But an IN-PROGRESS run's resume bookkeeping is only advisory afterwards.**
+    Compose the two items above: the run file survives byte-identical, carrying
+    `guideProgress: {source: /projects/555/wiring.yaml, step: k}` — and the
+    in-place branch just rewrote that wiring. Step *text* is always re-read from
+    `guideSource` (States.h), so `k` and the INIT `committed[]` backfill now
+    index a step list that may have changed length or order. Degradation is
+    graceful by construction (the resume clamp reports `already complete` on a
+    shrunk list, and `hasConnection`/`expandOnePart` guards mean no bridge is
+    ever duplicated), but the *labels* can lie about what was actually built.
+    After an in-place template update, either `p`/`v` re-walk anything doubtful
+    or — the clean path — start a new run.
 - [ ] Finally, put the bench back: active context on **slot 0**,
   `[slots] boot_mode = 1`, `boot_slot = 0`, rails and DACs at 0 V, and no
   leftover run files in the four project directories.

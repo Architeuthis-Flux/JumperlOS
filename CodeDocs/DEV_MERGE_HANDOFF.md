@@ -581,6 +581,15 @@ Same mechanism as wave 1's `parts:` note above, three more fields:
   remember the pre-compact mode. Likewise "moved back to the authored row" stays
   `custom`, because no authored row is stored anywhere and capturing it would
   mean parsing a second file mid-session.
+- **No `--port` pass-through in the HIL harness.** `jumperless.py` caches the
+  REPL port and then trusts the cache blindly for as long as that device node
+  exists, so a re-detect (one interrupted run is enough) can silently land every
+  later `jl_exec` on a *different* dev board on the same bench — the symptoms
+  read as a firmware fault (`NameError: name 'jfs' isn't defined`, then raw-REPL
+  timeouts) and are not one. Worked around in the checklist §0 by pinning the
+  cached port by hand; the proper close is a `--port` pass-through in
+  `test/hil/jl.py`, or a probe that rejects a device with no `jfs`. Neither was
+  in any wave-2 task's scope.
 - **`unconnectablePaths[]` has an unguarded push site** in
   `NetsToChipConnections.cpp` (~:4549 writes without the `< 10` bound its two
   siblings have). `routeRefused()` clamps its *read* to 10 entries so it cannot
