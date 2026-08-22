@@ -161,10 +161,22 @@ enum InfraAdcUser : uint8_t {
     INFRA_ADC_TDM,     // FakeGpio TimeDomainMultiplexer (core 1)
     INFRA_ADC_NVSCAN,  // net voltage scan taps (core 1, per-tap acquire)
     INFRA_ADC_MEASURE, // measure mode's ephemeral ADC bridge (core 0)
-    INFRA_ADC_SCAN,    // part-ID / component-scan branch hook (reserved -
-                       // nothing acquires under this name yet: the guided-
-                       // placement checks ride NVSCAN's one-shot tap API,
-                       // which acquires as INFRA_ADC_NVSCAN per tap)
+    INFRA_ADC_SCAN,    // part-ID / component-scan branch hook. STILL RESERVED:
+                       // nothing acquires under this name. It stayed reserved
+                       // on purpose - the guided-placement checks were given
+                       // their OWN enumerator below rather than squatting this
+                       // one, because infraReleaseAdc() releases every channel
+                       // a NAME owns, so two consumers sharing an enumerator
+                       // means whichever finishes first frees the other's
+                       // channels out from under it, mid-measurement.
+    INFRA_ADC_GUIDE,   // guided-placement continuity/vf sense bridges (core 0).
+                       // Unlike every other pool user this one holds TWO
+                       // channels for the whole check: invest-vf-noroute.md
+                       // §8 Option 1 routes rowA->ADCx and rowB->ADCy as
+                       // ephemeral bridges alongside the stimulus chain, and
+                       // the sampler reads the ring directly. The guide's
+                       // one-shot TAP fallback is separate and still acquires
+                       // per tap as INFRA_ADC_NVSCAN.
 };
 
 // Acquire a free ADC channel out of candidateMask (bit N = ADCN, ADC0-4).
