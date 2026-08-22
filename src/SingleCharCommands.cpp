@@ -832,7 +832,10 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
     // GUIDEBAND line out, so the band table can be regression-tested without
     // a part in a hole. Lives on `z` rather than a new single char because
     // this harness is single-char-plus-args and the band IS guide machinery.
-    if ( args.startsWith( "band" ) ) {
+    // Exact token, not a prefix: `args.startsWith("band")` would shadow any
+    // project whose directory name begins with it, and the launcher must stay
+    // able to open every project on the board.
+    if ( args == "band" || args.startsWith( "band " ) ) {
         String rest = args.substring( 4 );
         rest.trim( );
         Stream* target = Jerial.getResponseTarget( );
@@ -866,7 +869,7 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
     // this thing see 70 uA" - the question the old current register got
     // wrong. Read-only: it watches the Peripherals poll's field, it does not
     // touch the chip.
-    if ( args.startsWith( "shunt" ) ) {
+    if ( args == "shunt" || args.startsWith( "shunt " ) ) {   // exact token, see above
         Stream* target = Jerial.getResponseTarget( );
         if ( target == nullptr ) target = &Jerial;
         String rest = args.substring( 5 );
