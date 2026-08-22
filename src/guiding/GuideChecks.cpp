@@ -1596,13 +1596,16 @@ int guideCheckPoll(char* valOut, size_t valLen) {
             // Option-1 fold). Stages, all polled:
             //
             //   OFS_SETTLE   chain live, DAC0 held at 0 V
-            //   OFS_SAMPLE   4 fresh shunt samples -> I_ofs; |I_ofs| < 0.3 mA
-            //                or the isense path is leaking
+            //   OFS_SAMPLE   4 fresh shunt samples -> I_ofs, plus the sense
+            //                pair at that same zero point; |I_ofs| < 1 mA or
+            //                the isense path is leaking
             //   (energize)   DAC0 -> V_stim, save=0
             //   STIM_SETTLE  60 ms
             //   STIM_SAMPLE  8 fresh shunt samples -> I_raw; I_part = raw-ofs
             //   V_READ       the two sense channels, one ring dwell
-            //   compute      R = (V_A - V_B) / I_part   |   Vf = V_A - V_B
+            //   compute      two-point: R = dV / I_part, Vf = dV, where both
+            //                dV and I_part are differences between the
+            //                energized and zero-stimulus operating points
             //
             // Current comes from INA0's SHUNT-VOLTAGE register, not its
             // current register: 10 uV/LSB across the 2 ohm R1 is 5 uA/LSB,
