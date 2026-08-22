@@ -518,7 +518,29 @@ print("e=", 1 if is_connected(41, 42) else 0)
     time.sleep(1.5)
     slot_pre, path_pre = active_context(1.5)
     check(slot_pre == 2, f"on slot 2 before the bad-parse needle (got {slot_pre})")
+
+    # ARM THE CANARY (w3-t5). "byte-identical after the failed load" is only a
+    # real assertion if a rewrite would actually CHANGE the bytes, and a
+    # rewrite of an unmodified context normally reproduces itself exactly - so
+    # for a long time this check passed while the firmware was writing the
+    # file on every failed load. (It went red only when it happened to catch
+    # the net-colour race, which is a different bug and an unreliable witness.)
+    #
+    # So: let the context settle to its own fixed point, then put a MARKER
+    # COMMENT in the file. toYAML is a wholesale rewrite and never re-emits a
+    # comment, and the parser skips '#' lines (States.cpp:1365), so the marker
+    # changes nothing about the state the file describes - it only makes "was
+    # this file rewritten?" answerable from the bytes, every run.
+    time.sleep(4.0)   # let the post-`<2` idle pass finish before marking
+    _, _settled = read_device_file("/slots/slot2.yaml")
+    marker = "# w3t5-canary do-not-rewrite"
+    if _settled is not None:
+        jl_exec(f"print('marked=', 1 if fs_write('/slots/slot2.yaml', "
+                f"{(_settled + chr(10) + marker + chr(10))!r}) else 0)", timeout=25)
     slot2_bad_existed, slot2_bad_before = read_device_file("/slots/slot2.yaml")
+    check(slot2_bad_before is not None and marker in slot2_bad_before,
+          "the no-write canary is ARMED: slot2.yaml carries the marker comment "
+          "that any rewrite would erase")
 
     out = jl_exec(f"print('wrote=', 1 if fs_write({BAD_FILE!r}, {BAD_YAML!r}) else 0)",
                   timeout=25)
@@ -541,6 +563,8 @@ print("e=", 1 if is_connected(41, 42) else 0)
     # Idle window with NO mutation first: a failed load must not cause a write
     # at all. (fromYAML's own bridge-dropping sanitizer can call markDirty(),
     # so "nothing was dirtied" is a real thing to check, not a tautology.)
+    # The marker seeded above is what makes this deterministic: a rewrite
+    # erases it whether or not the content would otherwise have differed.
     time.sleep(4.0)
     slot2_idle_exists, slot2_idle = read_device_file("/slots/slot2.yaml")
     check(slot2_idle_exists == slot2_bad_existed and slot2_idle == slot2_bad_before,
