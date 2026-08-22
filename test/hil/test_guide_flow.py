@@ -49,12 +49,32 @@ Covers:
      bare-row verdicts (drained before the tap / caught mid-drain)
  11. continuity refusal: a place step whose row is already routed reports
      `val=skip` + "check skipped (rows in use)" and warn-continues
- 12. vf tap starvation (/projects/hilvfnr): the bench `noroute` reproduced on
-     a crowded 555-shaped fabric - asserts the per-node `noroute@22` split,
-     the core-0 `TAP noroute ... bounceOk=0x00` diagnostic and the tap
-     counters. See the long note at that phase: its verdict assertion is
-     EXPECTED TO FLIP if invest-vf-noroute.md §8 Option 1 ever lands, and the
-     flip is one line - `VFNR_EXPECT_REFUSAL = False`.
+ 12. vf on the starving fabric (/projects/hilvfnr): the crowded 555-shaped
+     build that made the bench - and this fixture - refuse with `noroute`.
+     Option 1 landed in task 8, so it now MEASURES: `val=2.9xV`. That flip is
+     the measurement wave's marquee regression and `VFNR_EXPECT_REFUSAL` is
+     the one line holding it.
+ 12b. the diagnostic seam the flip uncovered (/projects/hilstv): every ADC
+     user-claimed, so the taps starve on the POOL instead of on routing - the
+     scan-core latch still reaches core 0, now reading `node=-1 rc=0`, which
+     is invest-vf-noroute.md §6's other discriminator.
+ 12c. the ground-side topology, measured: old chain ~2.3 mA with no part, new
+     chain < 0.3 mA, and a bridged positive control drawing real current so
+     "no current" cannot mean "the leg never routed". Plus INA0-vs-INA1.
+ 12d. four-wire R against a known crossbar 'part': the five-leg chain by hand,
+     both sense channels reading, R stable over 10 repeats - and 2-wire
+     reporting several times more for the same part, which is the whole
+     reason the rework exists. (The guide-level version is not constructible
+     without real parts - see the task-8 report §1.7.)
+ 12e. the shunt register's quantization floor via `z shunt`.
+ 12f. the band table off-bench via `z band` - §2.5's numbers plus the reject
+     table, with no hardware in the path.
+ 12g. rail_sane's three verdicts (/projects/hilrail): a row on a 5.00V-set
+     rail PASSES on the measured rail (the bench failure, replayed), a row on
+     GND fails, an unconnected row fails.
+ 12h. the ohm flip's two legacy-mA guards (/projects/hilleg): a band that does
+     not bracket `value:`, and a value-less band under 5 ohm, both warn and
+     fall back to the derived band - while a real ohm band is honoured.
  13. move + snap (task 6): `m <row>` and `c` - the headless twins of the probe
      pads - refused BY NAME off a place step, an off-board move refused with
      its reason, then a move to row 44 (placement=custom, in the machine line
@@ -304,6 +324,114 @@ guide:
 VFNR_CONNECT_IDS = ["connect_5", "connect_6", "connect_8", "connect_35",
                     "connect_12", "connect_13", "connect_15", "connect_16",
                     "connect_18", "connect_19"]
+
+# ---------------------------------------------------------------------------
+# Task-8 fixtures: the measurement rework
+# ---------------------------------------------------------------------------
+
+# Phase 12b - the diagnostic seam, starved by ADC exhaustion instead of route
+# starvation. Same crowded 555-shaped fabric as hilvfnr, but ALL FOUR pool
+# channels carry a user bridge, so infraAdcUserClaimed excludes every one of
+# them: Option 1 cannot acquire its two sense channels, the tap fallback
+# cannot acquire one, and the refusal is structural. Rows 41/42 for ADC2/ADC3
+# sit on chip F, away from the rows under test (22/23 are chip D), so the only
+# thing they change is the ADC ledger.
+STARVE_PROJ = "hilstv"
+STARVE_DIR = "/projects/" + STARVE_PROJ
+STARVE_PATH = STARVE_DIR + "/wiring.yaml"
+STARVE_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilstv
+  title: "HIL ADC Starve"
+parts:
+  - name: "LEDY"
+    type: led
+    footprint: sip2
+    row: 22
+    pins: {A: {pin: 1}, K: {pin: 2, connect: GND}}
+bridges:
+  - {n1: ADC0, n2: 7}
+  - {n1: ADC1, n2: 37}
+  - {n1: ADC2, n2: 41}
+  - {n1: ADC3, n2: 42}
+guide:
+  title: "HIL ADC Starve"
+  steps:
+    - {do: place, part: LEDY, check: vf, min: 1.4, max: 2.6, on_fail: warn, timeout_ms: 6000, text: "vf with every ADC user-claimed"}
+"""
+
+# Phase 12g - rail_sane's three verdicts. Each fixture places ONE part whose
+# pin classes are what collectClassRows() collects, then powers up: the part
+# must be COMMITTED first, because rail_sane reads placed parts' pins.
+# topRail 5.0 on purpose - the bench failure was a 5 V rail measuring ~4.78.
+RAIL_DIR = "/projects/hilrail"
+RAIL_OK_PATH = RAIL_DIR + "/ok.yaml"
+RAIL_GND_PATH = RAIL_DIR + "/gnd.yaml"
+RAIL_FLOAT_PATH = RAIL_DIR + "/float.yaml"
+
+
+def _rail_wiring(title, a_pin):
+    return """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilrail
+  title: "%s"
+parts:
+  - name: "PWR"
+    type: resistor
+    value: "1k"
+    footprint: sip2
+    row: 8
+    pins: {A: {pin: 1, %sclass: power}, B: {pin: 2, connect: GND, class: gnd}}
+power:
+  topRail: 5.0
+guide:
+  title: "%s"
+  steps:
+    - {do: place, part: PWR, check: none, text: "the power-class part"}
+    - {do: power_on, check: rail_sane, timeout_ms: 6000, text: "power up 5V"}
+""" % (title, a_pin, title)
+
+
+RAIL_OK_WIRING = _rail_wiring("HIL Rail OK", "connect: TOP_RAIL, ")
+RAIL_GND_WIRING = _rail_wiring("HIL Rail GND", "connect: GND, ")
+RAIL_FLOAT_WIRING = _rail_wiring("HIL Rail Float", "")
+
+# Phase 12h - the ohm flip's two legacy-mA guards, plus the honoured-ohm case.
+LEGACY_DIR = "/projects/hilleg"
+LEGACY_PATH = LEGACY_DIR + "/wiring.yaml"
+LEGACY_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilleg
+  title: "HIL Legacy Bands"
+parts:
+  - name: "RLEG"
+    type: resistor
+    value: "10k"
+    footprint: sip2
+    row: 50
+    pins: {A: {pin: 1}, B: {pin: 2}}
+  - name: "RBARE"
+    type: resistor
+    footprint: sip2
+    row: 54
+    pins: {A: {pin: 1}, B: {pin: 2}}
+  - name: "ROHM"
+    type: resistor
+    value: "100"
+    footprint: sip2
+    row: 57
+    pins: {A: {pin: 1}, B: {pin: 2}}
+guide:
+  title: "HIL Legacy Bands"
+  steps:
+    - {do: place, part: RLEG, check: continuity, min: 0.1, max: 0.8, on_fail: warn, timeout_ms: 6000, text: "value parses, band does not bracket it"}
+    - {do: place, part: RBARE, check: continuity, min: 0.04, max: 0.3, on_fail: warn, timeout_ms: 6000, text: "no value, max under 5 ohm"}
+    - {do: place, part: ROHM, check: continuity, min: 20, max: 900, on_fail: warn, timeout_ms: 6000, text: "a real ohm band"}
+"""
+
 
 _csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
 
@@ -915,40 +1043,38 @@ print("NETNAME|" + name)
     # bounce tier finds no candidate chip at all - so the tap is genuinely
     # refused. bounceOk=0x00 in the diagnostic below IS that proof.
     #
-    # !!! THE VERDICT THIS PHASE ASSERTS IS EXPECTED TO FLIP. !!!
-    # It encodes a real limitation, not a desired outcome. When the escalation
-    # in invest-vf-noroute.md §8 Option 1 lands (the chain adds its sense legs
-    # as ephemeral bridges so the FULL router plans stimulus + sense together,
-    # instead of the tap builder's three tiers planning alone), this fixture
-    # should ROUTE instead of refusing.
+    # !!! THE FLIP HAPPENED (task 8). !!!
+    # This phase asserted a refusal because the tap builder planned its sense
+    # route ALONE, in three tiers, after the stimulus chain had already eaten
+    # chip D's escapes - task 2 measured that with bounceOk=0x00, no candidate
+    # chip left in the whole fabric. invest-vf-noroute.md §8 Option 1 has now
+    # landed: the chain adds rowA->ADCx and rowB->ADCy as ephemeral bridges in
+    # the SAME refreshLocalConnections as the stimulus, so the full router -
+    # which has far more route shapes and may lawfully share the net's own
+    # lanes - plans all five legs together, and the sampler reads the ring
+    # channels with no fastConnectPath anywhere.
     #
-    # THE FLIP IS ONE LINE: set VFNR_EXPECT_REFUSAL = False, just below.
-    # Everything branch-dependent hangs off that flag, so nothing else in this
-    # phase needs editing and no refusal-only assertion can be left behind to
-    # fail a genuinely-fixed run. Do NOT delete the phase.
+    # So the exact fabric that starved on Kevin's bench AND in this fixture
+    # now MEASURES. That is the wave's marquee regression and this line is
+    # what holds it: VFNR_EXPECT_REFUSAL stays False.
     #
-    # The routed-branch lines are not a guess: they are what this same vf check
-    # prints TODAY on a bare fabric, measured at val=2.83V while validating the
-    # sequential-tap rewrite. So the tap machinery is known-good; only this
-    # fixture's crowded fabric refuses it.
+    # The routed-branch value is measured, not predicted: this same vf check
+    # reads ~2.9 V on empty rows (the full stimulus across the gap, less the
+    # chain's own drops, minus the two-point offset correction).
     #
-    # Note what does NOT change across the flip: the check FAILS either way
-    # (ok=0, on_fail=warn), because rows 22/23 are empty holes - routed, the
-    # taps read the full stimulus across the gap, which lands outside the
-    # 1.4-2.6 band as "no current". So the whole warn-advance tail below is
-    # shared and stays put.
+    # What does NOT change across the flip: the check FAILS either way (ok=0,
+    # on_fail=warn), because rows 22/23 are empty holes - routed, the sense
+    # legs read the full stimulus across the gap, which lands outside the
+    # 1.4-2.6 band as "no current". So the warn-advance tail is shared.
     #
-    # Regression-protected on BOTH branches: the fixture builds the crowded
-    # fabric, the vf check reaches a terminal verdict, and the warn-advance
-    # tail works. Protected on the refusal branch specifically (i.e. today):
-    # the per-node `noroute@<row>` split - an undifferentiated `noroute` is
-    # what made three bench retries say nothing - plus the scan-core failure
-    # latch surviving cross-core into a correct core-0 print and the
-    # unconditional tap-counter dump. The scan core must never Serial-print,
-    # so seeing those two lines at all is what proves the latch/print seam.
-    # When the flip happens, that seam loses its coverage here; it would then
-    # want a fixture that still starves a tap (a deliberately crowded chip).
-    VFNR_EXPECT_REFUSAL = True
+    # THE SEAM THE FLIP UNCOVERED. The refusal branch was the only exercise of
+    # the scan-core latch -> core-0 print path (the scan core must never
+    # Serial-print, so seeing `TAP noroute ...` + the counters at all is what
+    # proves the latch survives cross-core). Phase 12b below is its
+    # replacement: a fixture that starves the taps a DIFFERENT way - by
+    # user-claiming every ADC the pool could hand out - so the diagnostic seam
+    # keeps its coverage. Do NOT delete either phase.
+    VFNR_EXPECT_REFUSAL = False
     out = jl_exec(f"""
 for d in ("/projects", {VFNR_DIR!r}):
     if not fs_exists(d):
@@ -998,7 +1124,12 @@ print("wrote=", 1 if fs_write({VFNR_PATH!r}, {VFNR_WIRING!r}) else 0)
             # full stimulus across the gap, outside the 1.4-2.6 band.
             d.expect(r"GUIDE step=11/11 id=place_LEDX state=RESULT check=vf "
                      r"val=[23]\.\d+V ok=0 on_fail=warn",
-                     "vf routed and reported a measured voltage")
+                     "vf ROUTED on the starving fabric and reported a measured "
+                     "voltage (Option 1: the marquee regression)")
+            # The §4 detail line, on a FAIL - the measurement prints either way
+            # now, and vf carries the current it was measured at (§1.10).
+            d.expect(r"LEDX vf [23]\.\d+V @ .*\(band 1\.40-2\.60V\)",
+                     "vf detail carries the value AND the current, on a fail")
             d.expect(r"no current - LED missing or reversed",
                      "empty rows 22/23 report no current, not a refusal")
         # Shared tail: warn-class failure either way.
@@ -1008,6 +1139,443 @@ print("wrote=", 1 if fs_write({VFNR_PATH!r}, {VFNR_WIRING!r}) else 0)
         d.expect(r"GUIDE .* state=DONE", "warn advance reaches DONE")
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "EXIT from DONE")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # --- 12b. the diagnostic seam, starved a DIFFERENT way ------------------
+    #
+    # Phase 12's flip took the scan-core-latch -> core-0-print path out of the
+    # suite: a routed tap prints neither the `TAP noroute` line nor the
+    # counters, and that seam is load-bearing (the scan core must NEVER
+    # Serial-print, so it latches into volatiles and core 0 formats them).
+    #
+    # This fixture starves the taps by exhausting the OTHER resource. Every
+    # channel the pool can hand out - ADC0-3 - is claimed by a user bridge, so
+    # `infraAdcUserClaimed` excludes all four: chainBegin cannot acquire the
+    # two it needs for Option 1's sense legs and falls back to task 2's
+    # one-shot taps, and those cannot acquire one either. The refusal is
+    # therefore honest and structural, not manufactured - a user really can
+    # bridge all four ADCs, and the 555 project already bridges two.
+    #
+    # The DIAGNOSTIC SHAPE DIFFERS from phase 12's old one, deliberately:
+    # nothing called fastConnectPath, so the latch carries node=-1 rc=0 with
+    # empty masks. That is exactly the discriminator invest-vf-noroute.md §6
+    # asked for - "node=-1 rc=0 means -2 came from ADC exhaustion or a stale
+    # ring, not from route starvation" - and asserting it here keeps BOTH
+    # readings of the line under test.
+    #
+    # vf, not continuity: a continuity check with a parsed value degrades to
+    # the §1.9 current-only verdict instead of refusing, which is correct
+    # behaviour and the wrong thing to assert here.
+    out = jl_exec(f"""
+for d in ("/projects", {STARVE_DIR!r}):
+    if not fs_exists(d):
+        try:
+            jfs.mkdir(d)
+        except Exception as e:
+            print("mkdirerr=", e)
+print("projdir=", 1 if fs_exists({STARVE_DIR!r}) else 0)
+print("wrote=", 1 if fs_write({STARVE_PATH!r}, {STARVE_WIRING!r}) else 0)
+""", timeout=30)
+    vals = parse_kv(out)
+    check(vals.get("projdir") == 1, f"created {STARVE_DIR} on the board")
+    check(vals.get("wrote") == 1, f"pushed {STARVE_PATH}")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {STARVE_PATH} new\r\n".encode())
+        guide_live = True
+        d.expect(r"GUIDE step=1/1 id=place_LEDY state=WAIT",
+                 "adc-starved fixture step 1 WAIT", timeout=40)
+        d.send(b"n")
+        d.expect(r"GUIDE step=1/1 id=place_LEDY state=VERIFY check=vf",
+                 "vf launches with every ADC user-claimed")
+        # node=-1 rc=0: no fastConnectPath was refused - the pool had nothing
+        # to grant. Masks are zero for the same reason.
+        d.expect(r"TAP noroute node=-1->ADC-1 rc=0 Kfree=0x[0-9A-Fa-f]+ "
+                 r"Kxbusy=0x[0-9A-Fa-f]+ \?xbusy=0x[0-9A-Fa-f]+ "
+                 r"bounceOk=0x[0-9A-Fa-f]+",
+                 "the scan-core latch reaches core 0 and names ADC exhaustion")
+        d.expect(r"\[nvscan\] taps ok:\d+ .*noroute:\d+ .*ringstale:\d+",
+                 "tap counters print unconditionally on the hard failure")
+        d.expect(r"GUIDE step=1/1 id=place_LEDY state=RESULT check=vf "
+                 r"val=noroute@2[23] ok=0 on_fail=warn",
+                 "vf refuses PER NODE when no ADC can be had")
+        d.expect(r"no sense route to the rows", "the human refusal line prints")
+        d.expect(r"check failed - n advances anyway", "warn offers the advance")
+        d.send(b"n")
+        d.expect(r"GUIDE .* state=DONE", "warn advance reaches DONE")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "EXIT from DONE")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # --- 12c. the ground-side topology, measured -----------------------------
+    #
+    # invest-measurement.md §5 item 2 - the go/no-go that chose §1.2 over §1.3,
+    # re-run as a regression. Three readings, and the THIRD is what makes the
+    # second mean anything:
+    #
+    #   A  old top-side chain, no part  -> the CURR_SENSE- sink, ~2.3 mA
+    #   B  new ground-side chain, no part -> must be < 0.3 mA
+    #   C  new ground-side chain + a rowA<->rowB bridge -> real loop current
+    #
+    # Without C, B reads the same whether the topology works or the
+    # ISENSE_MINUS->GND leg silently failed to route: no loop, no current
+    # either way. C proves the loop is closed.
+    out = jl_exec("""
+import time
+nodes_clear()
+time.sleep(0.2)
+dac_set(DAC0, 0.0)
+time.sleep(0.1)
+
+def loop_mA():
+    v = []
+    for _ in range(8):
+        v.append(ina_get_current(0) * 1000.0)
+        time.sleep(0.05)
+    v.sort()
+    return v[len(v) // 2]
+
+# A: the OLD chain - DAC0 -> shunt -> row, with the sink downstream of nothing
+connect(DAC0, ISENSE_PLUS)
+connect(ISENSE_MINUS, 34)
+connect(44, GND)
+time.sleep(0.3)
+dac_set(DAC0, 3.3)
+time.sleep(0.4)
+print("old_mA=", loop_mA())
+dac_set(DAC0, 0.0)
+nodes_clear()
+time.sleep(0.2)
+
+# B: the NEW chain - the shunt sits between the far row and ground
+connect(DAC0, 34)
+connect(44, ISENSE_PLUS)
+connect(ISENSE_MINUS, GND)
+time.sleep(0.3)
+dac_set(DAC0, 3.3)
+time.sleep(0.4)
+print("new_mA=", loop_mA())
+
+# C: positive control - close the loop with a crossbar 'part'
+connect(34, 44)
+time.sleep(0.3)
+print("closed_mA=", loop_mA())
+print("ina1_mA=", ina_get_current(1) * 1000.0)
+dac_set(DAC0, 0.0)
+time.sleep(0.1)
+nodes_clear()
+""", timeout=90)
+    vals = parse_kv(out)
+    old_mA = abs(vals.get("old_mA", 0.0))
+    new_mA = abs(vals.get("new_mA", 99.0))
+    closed_mA = abs(vals.get("closed_mA", 0.0))
+    ina1_mA = abs(vals.get("ina1_mA", 0.0))
+    check(old_mA > 1.0,
+          f"the OLD top-side chain still shows the CURR_SENSE- sink "
+          f"({old_mA:.3f} mA with no part) - the control that makes B mean something")
+    check(new_mA < 0.3,
+          f"GROUND-SIDE: no part, no current through the shunt "
+          f"({new_mA:.3f} mA < 0.3) - the sink is structurally gone")
+    check(closed_mA > 2.0,
+          f"and the loop really is closed: bridging the rows draws "
+          f"{closed_mA:.2f} mA, so ISENSE_MINUS->GND routed")
+    # §1.7's INA1 crosscheck, on a loop where both should see the same current.
+    check(abs(ina1_mA - closed_mA) <= (0.1 * closed_mA + 0.2),
+          f"INA0 ({closed_mA:.2f} mA) and INA1 ({ina1_mA:.2f} mA) agree within "
+          f"10% + 0.2 mA - no current leaking outside the part path")
+
+    # --- 12d. four-wire R against a known crossbar 'part' --------------------
+    #
+    # §5 item 3, adapted - see the report's §1.7. The guide-level version
+    # (author a continuity step over two bridged rows) is NOT constructible:
+    # the stimulus refusal rule refuses to energize a row that already carries
+    # a user bridge, and a bridge is the only way to make two rows conduct
+    # without a real part. So this drives the SAME five-leg topology
+    # chainBegin builds - three stimulus legs plus Option 1's two sense ADC
+    # bridges - by hand, and asserts the arithmetic the check performs on it.
+    #
+    # The assertion that matters is the LAST one: 4-wire and 2-wire disagree
+    # by the whole stimulus path, which is the entire reason the rework exists.
+    out = jl_exec("""
+import time
+nodes_clear()
+time.sleep(0.2)
+dac_set(DAC0, 0.0)
+time.sleep(0.1)
+connect(DAC0, 34)
+connect(44, ISENSE_PLUS)
+connect(ISENSE_MINUS, GND)
+connect(34, ADC2)
+connect(44, ADC3)
+connect(34, 44)
+time.sleep(0.4)
+
+i = []
+for _ in range(4):
+    i.append(ina_get_current(0) * 1000.0)
+    time.sleep(0.06)
+i.sort()
+i_ofs = i[len(i) // 2]
+va_ofs = adc_get(2)
+vb_ofs = adc_get(3)
+print("i_ofs_mA=", i_ofs)
+
+dac_set(DAC0, 3.3)
+time.sleep(0.3)
+i = []
+for _ in range(8):
+    i.append(ina_get_current(0) * 1000.0)
+    time.sleep(0.06)
+i.sort()
+i_med = i[len(i) // 2]
+print("i_mA=", i_med)
+print("vA=", adc_get(2))
+print("vB=", adc_get(3))
+
+rs = []
+for _ in range(10):
+    dv = (adc_get(2) - adc_get(3)) - (va_ofs - vb_ofs)
+    rs.append(dv / ((i_med - i_ofs) / 1000.0))
+    time.sleep(0.03)
+rs.sort()
+print("r_med=", rs[len(rs) // 2])
+print("r_min=", rs[0])
+print("r_max=", rs[-1])
+print("r_2wire=", 3.3 / (i_med / 1000.0))
+dac_set(DAC0, 0.0)
+time.sleep(0.1)
+nodes_clear()
+""", timeout=90)
+    vals = parse_kv(out)
+    vA = vals.get("vA", 0.0)
+    vB = vals.get("vB", 0.0)
+    r_med = vals.get("r_med", 0.0)
+    r_2wire = vals.get("r_2wire", 0.0)
+    spread = abs(vals.get("r_max", 0.0) - vals.get("r_min", 0.0))
+    check(vA > 1.0,
+          f"the rowA sense bridge routed and reads the stimulus ({vA:.3f} V) - "
+          f"Option 1's sense leg is on the row")
+    check(0.05 < vB < vA,
+          f"the rowB sense bridge routed and reads the drop above the shunt "
+          f"({vB:.3f} V), below rowA as the current direction demands")
+    # A crossbar bridge is 1-3 crosspoints at a measured mean 41.8 ohm each.
+    check(10.0 < r_med < 250.0,
+          f"4-wire R across the crossbar 'part' is crosspoint-scale "
+          f"({r_med:.1f} ohm)")
+    check(spread < 0.2 * abs(r_med),
+          f"and it is stable: {spread:.1f} ohm spread over 10 reads "
+          f"(< 20% of {r_med:.1f})")
+    check(r_2wire > 2.0 * r_med,
+          f"THE POINT: 2-wire would have reported {r_2wire:.0f} ohm for the same "
+          f"part that 4-wire measures at {r_med:.0f} - the difference is the "
+          f"stimulus path, and it is why bands could never be honest before")
+
+    # --- 12e. the shunt register's quantization floor ------------------------
+    #
+    # §5 item 7. The whole measurement now rides on INA0's shunt-voltage
+    # register instead of its current register, because the latter is
+    # calibrated to 30.5 uA/bit and a 47k part at 3.3 V is two counts. The
+    # shunt register's LSB is a hardware constant 10 uV - 5 uA across R1 - and
+    # this asserts the noise floor is actually that good.
+    # `active` needs BOTH isense nodes routed - the poll skips entirely
+    # otherwise - so route the unloaded chain first and hold DAC0 at 0.
+    jl_exec("""
+import time
+nodes_clear()
+time.sleep(0.2)
+dac_set(DAC0, 0.0)
+connect(DAC0, 34)
+connect(44, ISENSE_PLUS)
+connect(ISENSE_MINUS, GND)
+time.sleep(0.4)
+""", timeout=30)
+    out = port1_command("z shunt 32", collect_seconds=8.0)
+    jl_exec("import time\nnodes_clear()\ntime.sleep(0.2)\n", timeout=25)
+    m = re.search(r"SHUNT n=(\d+) mean_mV=(-?[\d.]+) min_mV=(-?[\d.]+) "
+                  r"max_mV=(-?[\d.]+) spread_lsb=([\d.]+)", out)
+    check(m is not None, f"'z shunt 32' reports the register (got: {out[-160:]!r})")
+    if m:
+        check(int(m.group(1)) >= 16,
+              f"collected {m.group(1)} fresh shunt samples")
+        check(float(m.group(5)) <= 4.0,
+              f"unloaded shunt-register spread is {m.group(5)} LSB (<= 4, i.e. "
+              f"+/-2) - 5 uA/LSB is real resolution, not a rounding artifact")
+
+    # --- 12f. the band table, off-bench --------------------------------------
+    #
+    # §5 item 1. `z band` runs the same parsePartValue / guideResistorBand the
+    # check runs, with no hardware in the path at all, so the shipped band
+    # table is regression-tested without a part in a hole. The rows here ARE
+    # invest-measurement.md §2.5's table.
+    BAND_CASES = [
+        # (command args, expected regex, what)
+        ("10k resistor",   r"kind=ohms .*band=8\.00k-12\.0k stim=3\.3",
+         "10k -> 8.00k-12.0k at 3.3V (555 R1, eeprom-scale)"),
+        ("47k resistor",   r"kind=ohms .*band=35\.2k-58\.8k stim=5\.0",
+         "47k -> 35.2k-58.8k and the >=20k rule drives it at 5V (555 R2)"),
+        ("330 resistor",   r"kind=ohms .*band=264-396 stim=3\.3",
+         "330 -> 264-396 (555 R3, nand00 R1)"),
+        ("4.7k resistor",  r"kind=ohms .*band=3\.76k-5\.64k stim=3\.3",
+         "4.7k -> 3.76k-5.64k (eeprom R1/R2)"),
+        ("10k resistor 5", r"kind=ohms .*tol=10 .*band=9\.00k-11\.0k",
+         "an author tol: 5 tightens 10k to +/-10% total"),
+        ("1M resistor",    r"kind=ohms ohms=1e\+06 ",
+         "'M' on a resistor is mega"),
+        ("1m resistor",    r"kind=ohms ohms=1e\+06 ",
+         "and so is 'm' - the shipped convention, milliohms are a non-goal"),
+        ("470R resistor",  r"kind=ohms ohms=470 ",
+         "a trailing R is an ohm unit, not a multiplier"),
+        ("10uF capacitor", r"kind=farads v=1e-05 band=none",
+         "10uF parses as farads and gets no resistor band"),
+        ("100nF capacitor", r"kind=farads v=1e-07 band=none", "100nF parses"),
+        # the reject table (§2.1)
+        ("10uF resistor",  r"kind=none v=-1", "unit/type contradiction is rejected"),
+        ("1M capacitor",   r"kind=none v=-1", "megafarads are rejected"),
+        ("2k2 resistor",   r"kind=none v=-1", "'2k2' infix is rejected, not misparsed"),
+        ("NE555 ic",       r"kind=none v=-1", "a part number with no digits leading"),
+        ("24C02 ic",       r"kind=none v=-1", "a part number with digits leading"),
+        ("0 resistor",     r"kind=none v=-1", "zero is not a part value"),
+        ("-10k resistor",  r"kind=none v=-1", "negative is not a part value"),
+    ]
+    for args, rx, what in BAND_CASES:
+        out = port1_command(f"z band {args}", collect_seconds=1.2)
+        line = ""
+        for ln in out.splitlines():
+            if "GUIDEBAND" in ln:
+                line = ln.strip()
+                break
+        check(re.search(rx, line) is not None, f"z band {args}: {what}")
+        time.sleep(0.1)
+
+    # --- 12g. rail_sane: the bench failure, replayed ------------------------
+    #
+    # §3 + §5 item 6. The bench read 4.74 V on row 8 of a rail SET to 5.00 and
+    # the check failed it, because it compared the row against the setpoint -
+    # while the net-scan work had already proved this board's rails run ~220 mV
+    # low. The rule is now two-step: gate the rail against its setpoint
+    # generously (the board check), then compare rows against the MEASURED
+    # rail tightly and on the same ADC channel (the wiring check). A healthy
+    # board passes; a miswired row still fails by volts.
+    #
+    # Three fixtures, one per verdict, each a placed part whose pin classes
+    # are what collectClassRows() finds.
+    for path, wiring, expect_rx, expect_what, detail_rx in (
+        (RAIL_OK_PATH, RAIL_OK_WIRING,
+         r"state=RESULT check=rail_sane val=[45]\.\d+V@8 ok=1",
+         "THE REGRESSION: a row bridged to a 5.00V-set rail PASSES on its "
+         "measured value (this exact reading failed on the bench)",
+         r"rail: meas [45]\.\d+V \(set 5\.00V\); worst row delta 0\.\d+V @8"),
+        (RAIL_GND_PATH, RAIL_GND_WIRING,
+         r"state=RESULT check=rail_sane val=-?\d\.\d+V@8 ok=0",
+         "a power-class row wired to GND still fails, by volts of margin",
+         r"rail: meas [45]\.\d+V \(set 5\.00V\); row 8 reads -?\d\.\d+V"),
+        (RAIL_FLOAT_PATH, RAIL_FLOAT_WIRING,
+         r"state=RESULT check=rail_sane val=(float@8|-?\d\.\d+V@8) ok=0",
+         "an unconnected power-class row fails (floating, or off the rail)",
+         None),
+    ):
+        jl_exec(f"""
+for d in ("/projects", {RAIL_DIR!r}):
+    if not fs_exists(d):
+        try:
+            jfs.mkdir(d)
+        except Exception as e:
+            print("mkdirerr=", e)
+print("wrote=", 1 if fs_write({{p!r}}, {{w!r}}) else 0)
+""".format(p=path, w=wiring), timeout=30)
+        d = GuideDriver()
+        try:
+            d.send(f"z {path} new\r\n".encode())
+            guide_live = True
+            d.expect(r"GUIDE step=1/2 id=place_PWR state=WAIT",
+                     f"{path}: the power-class part step", timeout=40)
+            d.send(b"n")
+            d.expect(r"GUIDE step=1/2 id=place_PWR state=COMMIT",
+                     f"{path}: part committed, its bridges live")
+            d.expect(r"GUIDE step=2/2 id=power_on state=WAIT",
+                     f"{path}: power_on step")
+            d.send(b"n")
+            d.expect(r"GUIDE step=2/2 id=power_on state=VERIFY check=rail_sane",
+                     f"{path}: rail_sane launches")
+            d.expect(expect_rx, expect_what, timeout=30)
+            if detail_rx:
+                d.expect(detail_rx,
+                         "the detail line names the MEASURED rail and the setpoint")
+            if "ok=0" in expect_rx:
+                d.expect(r"check failed - n advances anyway", "warn offers the advance")
+                d.send(b"n")
+            d.expect(r"GUIDE .* state=DONE", f"{path}: reaches DONE")
+            d.send(b"q")
+            d.expect(r"GUIDE .* state=EXIT", f"{path}: EXIT")
+            guide_live = False
+        finally:
+            d.close()
+        # Rails are live after a committed power_on - put them back before the
+        # next fixture measures anything.
+        jl_exec("import time\ndac_set(TOP_RAIL, 0.0)\ndac_set(BOTTOM_RAIL, 0.0)\n"
+                "nodes_clear()\ntime.sleep(0.2)\n", timeout=25)
+        time.sleep(1.0)
+
+    # --- 12h. the ohm flip's two legacy guards ------------------------------
+    #
+    # §2.3 + §5 item 8. Continuity min/max used to be MILLIAMPS. They are ohms
+    # now, so a file still carrying the old numbers would read "0.1-0.8 ohms"
+    # and fail everything. Two guards, and this fixture trips both:
+    #   RLEG  value 10k + min 0.1/max 0.8 -> the band does not BRACKET 10k
+    #   RBARE no value  + max 0.3         -> no real resistor band is under 5 ohm
+    # Both must log the warning and fall back to the derived band; the third
+    # step proves an ohm band that IS meaningful is honoured as authored.
+    jl_exec(f"""
+for d in ("/projects", {LEGACY_DIR!r}):
+    if not fs_exists(d):
+        try:
+            jfs.mkdir(d)
+        except Exception as e:
+            print("mkdirerr=", e)
+print("wrote=", 1 if fs_write({LEGACY_PATH!r}, {LEGACY_WIRING!r}) else 0)
+""", timeout=30)
+    d = GuideDriver()
+    try:
+        d.send(f"z {LEGACY_PATH} new\r\n".encode())
+        guide_live = True
+        d.expect(r"GUIDE step=1/3 id=place_RLEG state=WAIT", "legacy fixture step 1",
+                 timeout=40)
+        d.send(b"n")
+        d.expect(r"min/max look like legacy mA \(0\.1-0\.8\) - ignoring, using "
+                 r"the value-derived ohm band",
+                 "GUARD 1: an authored band that does not bracket value: is legacy mA")
+        d.expect(r"state=RESULT check=continuity val=open ok=0",
+                 "and the check runs on the derived band, reporting the honest open")
+        d.expect(r"RLEG: open \(.*band 8\.00k-12\.0k\)",
+                 "the detail line proves the DERIVED band was used, not 0.1-0.8")
+        d.expect(r"check failed - n advances anyway", "warn advance offered")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RBARE state=WAIT", "legacy fixture step 2")
+        d.send(b"n")
+        d.expect(r"min/max look like legacy mA \(0\.04-0\.3\) - ignoring",
+                 "GUARD 2: a value-less part whose max is under 5 ohm is legacy mA")
+        d.expect(r"state=RESULT check=continuity val=open ok=0",
+                 "value-less legacy step falls back to 'something conducts'")
+        d.expect(r"check failed - n advances anyway", "warn advance offered")
+        d.send(b"n")
+        d.expect(r"GUIDE step=3/3 id=place_ROHM state=WAIT", "legacy fixture step 3")
+        d.send(b"n")
+        d.expect(r"state=RESULT check=continuity val=open ok=0",
+                 "a real ohm band runs without any legacy warning")
+        d.expect(r"ROHM: open \(.*band 20-900\)",
+                 "an authored band that DOES bracket the value is honoured as ohms")
+        d.expect(r"check failed - n advances anyway", "warn advance offered")
+        d.send(b"n")
+        d.expect(r"GUIDE .* state=DONE", "legacy fixture reaches DONE")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "legacy fixture EXIT")
         guide_live = False
     finally:
         d.close()
@@ -1519,11 +2087,12 @@ finally:
     # a directory that still holds a <dir>_<N>.yaml).
     out = jl_exec(f"""
 for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
-          {REFUSAL_PATH!r}, {VFNR_PATH!r}):
+          {REFUSAL_PATH!r}, {VFNR_PATH!r}, {STARVE_PATH!r}, {LEGACY_PATH!r},
+          {RAIL_OK_PATH!r}, {RAIL_GND_PATH!r}, {RAIL_FLOAT_PATH!r}):
     if fs_exists(p):
         jfs.remove(p)
 runs = 0
-for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
+for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR!r}):
     if not fs_exists(dd):
         continue
     try:
@@ -1537,7 +2106,7 @@ for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
                 runs += 1
             except Exception as e:
                 print("rmerr=", e)
-for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
+for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR!r}):
     try:
         jfs.rmdir(dd)
     except Exception:
@@ -1545,11 +2114,15 @@ for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}):
 print("runsremoved=", runs)
 print("gone=", 0 if fs_exists({PROJ_DIR!r}) else 1)
 print("gonevfnr=", 0 if fs_exists({VFNR_DIR!r}) else 1)
+print("gonet8=", 0 if (fs_exists({STARVE_DIR!r}) or fs_exists({RAIL_DIR!r})
+                       or fs_exists({LEGACY_DIR!r})) else 1)
 """, timeout=30)
     vals = parse_kv(out)
     print(f"  info: removed {vals.get('runsremoved')} leftover run file(s)")
     check(vals.get("gone") == 1, f"removed {PROJ_DIR} from the board")
     check(vals.get("gonevfnr") == 1, f"removed {VFNR_DIR} from the board")
+    check(vals.get("gonet8") == 1,
+          "removed the task-8 fixture dirs (hilstv / hilrail / hilleg)")
 
     if snapshot is not None:
         check(board_state_restore(snapshot), "board state restored to pre-test snapshot")
