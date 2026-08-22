@@ -405,6 +405,7 @@ print("rc_nopins=", place_part("BAD3", 20, '{}'))
 print("rc_diptop=", place_part("BAD4", 5, '{"A": {"pin": 1, "connect": 32}}', "dip8"))
 print("rc_axbot=", place_part("BAD5", 35, '{"A": {"pin": 1, "connect": 32}}', "axial2"))
 print("rc_dipfit=", place_part("BAD6", 58, '{"A": {"pin": 1, "connect": 50}, "D": {"pin": 4, "connect": 51}}', "dip8"))
+print("rc_offbad=", place_part("BAD7", 25, '{"A": {"offset": 0, "connect": 40}, "B": {"offset": 10, "connect": 41}}', "sip2"))
 print("rc_quote=", place_part('U"X', 30, '{"A": {"pin": 1, "connect": 31}}'))
 print("rc_nl=", place_part("U\\nX", 30, '{"A": {"pin": 1, "connect": 31}}'))
 print("rc_pinnl=", place_part("UNL", 30, '{"A\\nB": {"pin": 1, "connect": 31}}'))
@@ -438,6 +439,17 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
     # WHOLE part must be refused, not just the pins that don't fit.
     check(vals.get("rc_dipfit") == -1,
           "place_part with a dip8 at row 58 (does not fit the board) is refused (-1)")
+    # THE OFFSET GAP (wave 2, routed from task 3's re-review). An `offset:`
+    # pin bypasses nodeForPin entirely, so the footprint SPAN check never saw
+    # it: sip2 at row 25 spans 25-26 and passes, while pin B's offset 10 puts
+    # it at row 35 - across the ravine, off its own half. The part used to be
+    # accepted and then placed PARTIALLY (pin A bridged, pin B silently
+    # nowhere), which is the same silent-loss class as the dip8-at-58 needle
+    # above. The whole part must be refused now, on this path AND on the YAML
+    # path - both call the same partGeometryOk().
+    check(vals.get("rc_offbad") == -1,
+          "place_part with an out-of-bounds offset: pin (row 25 + 10 crosses "
+          "the ravine) is refused (-1) - the whole part, not just that pin")
     # Charset guard: serializeParts emits name/value quoted and type/pin names
     # bare, so a '"' truncates the field at reload and a newline writes an
     # UN-INDENTED line into parts: - where deserializeParts breaks out and drops
@@ -470,6 +482,7 @@ print("ax1b=", 1 if is_connected(57, 41) else 0)
 print("bad=", 1 if is_connected(20, 30) else 0)
 print("diptopbad=", 1 if is_connected(5, 32) else 0)
 print("dipfitbad=", 1 if is_connected(58, 50) else 0)
+print("offbad=", 1 if is_connected(25, 40) else 0)
 print("badchar=", 1 if is_connected(30, 31) else 0)
 for i in range(1, 59):
     nodes = get_net_nodes(i)
@@ -488,6 +501,9 @@ for i in range(1, 59):
     check(vals.get("dipfitbad") == 0,
           "no PARTIAL placement from the rejected off-board dip8 (58-50 absent, "
           "even though pin 1 alone would have fit)")
+    check(vals.get("offbad") == 0,
+          "no PARTIAL placement from the rejected offset: part (25-40 absent, "
+          "even though pin A's offset 0 alone would have fit)")
     check(vals.get("badchar") == 0,
           "no bridge from any charset-refused place_part call (30-31 absent)")
 

@@ -55,6 +55,16 @@ Covers:
      counters. See the long note at that phase: its verdict assertion is
      EXPECTED TO FLIP if invest-vf-noroute.md §8 Option 1 ever lands, and the
      flip is one line - `VFNR_EXPECT_REFUSAL = False`.
+ 13. move + snap (task 6): `m <row>` and `c` - the headless twins of the probe
+     pads - refused BY NAME off a place step, an off-board move refused with
+     its reason, then a move to row 44 (placement=custom, in the machine line
+     AND in the run file) and a compact snap whose compact-eligible leg loses
+     its bridge while the GND leg keeps one. `c` again round-trips to
+     expanded, and expanded being the DEFAULT means the run file ends with no
+     `placement:` line at all. Not covered here (encoder-side, task 7): the
+     wheel slide, double-click ADJUST and the probe pads themselves - this
+     suite never turns the wheel and cannot touch a hole, which is exactly
+     why the serial twins exist.
 
 Bench convention: snapshot board state + the active CONTEXT up front, restore
 both in a finally (a prior round's incident: an uncaught exception stranded
@@ -105,6 +115,13 @@ WIRING_PATH = PROJ_DIR + "/wiring.yaml"
 # the class default (continuity) would now really run - and really fail - on
 # a phantom part with nothing in the holes. The check phases below have their
 # own fixtures.
+#
+# RG's TWO PIN CLASSES ARE THE POINT (phase 13). Pin A's endpoint is row 50 -
+# a physical hole - so compact placement puts the leg IN row 50 and emits no
+# bridge. Pin B's endpoint is GND, which lives in the crossbar and has no
+# holes at all, so that leg keeps its footprint row AND its bridge in either
+# mode. One part therefore witnesses both halves of the per-pin compact rule;
+# a part wired only to holes would never prove the fallback exists.
 WIRING = """version: 2
 sourceOfTruth: bridges
 meta:
@@ -117,7 +134,7 @@ parts:
     value: "1k"
     footprint: sip2
     row: 45
-    pins: {A: {pin: 1, connect: 50}, B: {pin: 2}}
+    pins: {A: {pin: 1, connect: 50}, B: {pin: 2, connect: GND, class: gnd}}
 guide:
   title: "HIL Guide"
   steps:
@@ -816,6 +833,13 @@ print("NETNAME|" + name)
         d.send(f"z {REFUSAL_PATH} new\r\n".encode())
         guide_live = True
         d.expect(r"GUIDE step=1/1 id=place_RG state=WAIT", "refusal fixture step 1")
+        # Free ride on this fixture: ITS RG has no `connect:` on either pin,
+        # so there is no hole for a leg to jump into and compact has nothing
+        # to compact TO. The refusal must name that and change nothing - the
+        # continuity phase below then runs exactly as it always did.
+        d.send(b"c")
+        d.expect(r"move refused: no leg has a hole-row endpoint to sit in",
+                 "compact is refused on a part with no hole-row endpoint")
         d.send(b"n")
         d.expect(r"GUIDE step=1/1 id=place_RG state=VERIFY check=continuity",
                  "continuity check launches")
@@ -941,6 +965,119 @@ print("wrote=", 1 if fs_write({VFNR_PATH!r}, {VFNR_WIRING!r}) else 0)
     finally:
         d.close()
     time.sleep(1.0)
+
+    # --- 13. Move + snap: the pads' headless twins --------------------------
+    #
+    # Kevin's control-surface principle says the probe pads are ABSOLUTE - tap
+    # a hole and the part acts THERE - and the wheel is relative. This suite
+    # can do neither: it never turns the wheel and it cannot touch a hole. So
+    # what it drives is the absolute pair's SERIAL twins, `m <row>` (move pin 1
+    # to this row) and `c` (flip this part compact/expanded), which run through
+    # exactly the same handlers the pads do. The tap rules and the wheel are
+    # bench items.
+    #
+    # RG is wired one leg to a hole (row 50) and one leg to GND (crossbar, no
+    # holes), so ONE part witnesses both halves of the per-pin compact rule -
+    # see the fixture note at the top.
+    d = GuideDriver()
+    try:
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
+        guide_live = True
+        run_mv = d.expect_runfile("new", "move/snap phase allocated its own run file")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "move phase step 1 (note) WAIT")
+        # (a) Both keys are refused BY NAME off a place step. A note step has
+        # no part, so there is nothing to move and nothing to snap.
+        d.send(b"m 44\r")
+        d.expect(r"\(m <row> works on place steps only\)",
+                 "m <row> is refused on a non-place step")
+        d.send(b"c")
+        d.expect(r"\(c works on place steps only\)", "c is refused on a non-place step")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "step 2 (place RG) WAIT")
+
+        # (b) An illegal move is refused WITH ITS REASON and changes nothing.
+        # sip2 at row 60 would put pin 2 at row 61 - the same shared predicate
+        # (partGeometryOk) the parser and place_part() apply, so the guide can
+        # never move a part into a shape the next load would drop.
+        d.send(b"m 60\r")
+        d.expect(r"move refused: sip2 at row 60 does not fit the bottom half",
+                 "an off-board move is refused and names its reason")
+
+        # (c) The move itself: pin 1 to row 44. The mode becomes CUSTOM - the
+        # marker that says the user put it here deliberately - and a move never
+        # silently flips compact/expanded (that is c's job).
+        d.send(b"m 44\r")
+        d.expect(r"GUIDE move part=RG row=44 placement=custom",
+                 "m 44 moves pin 1 and marks the placement custom")
+        time.sleep(1.5)   # guidePersistProgress writes the run file immediately
+        _, mv_yaml = read_device_file(run_mv)
+        check("row: 44" in mv_yaml, "the RUN FILE carries the moved row: 44")
+        check("placement: custom" in mv_yaml,
+              "the RUN FILE carries placement: custom (serializer + parser "
+              "landed together, so it survives the next auto-save)")
+
+        # (d) The snap. Compact is per-pin, so this is one line for a whole
+        # geometry change: pin A's leg goes INTO row 50, pin B stays on its
+        # footprint row because GND has no holes.
+        d.send(b"c")
+        d.expect(r"GUIDE move part=RG row=44 placement=compact",
+                 "c snaps RG to compact")
+        time.sleep(1.5)
+        _, mv_yaml = read_device_file(run_mv)
+        check("placement: compact" in mv_yaml, "the RUN FILE now says placement: compact")
+        check("row: 44" in mv_yaml, "the snap kept the moved row (row: is still 44)")
+
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=COMMIT", "the compact RG commits")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "step 3 WAIT")
+        # THE compact assertion, taken mid-guide over the REPL (mpRemote is in
+        # the inner set): the compact-eligible leg's bridge is GONE, because
+        # the leg IS the connection now, while the fabric-endpoint leg still
+        # has its routed bridge. One part, both behaviours.
+        out = jl_exec("""
+print("abridge=", 1 if is_connected(44, 50) else 0)
+print("bbridge=", 1 if is_connected(45, "GND") else 0)
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("abridge") == 0,
+              "COMPACT: pin A's 44->50 bridge is ABSENT (the leg sits in row 50)")
+        check(vals.get("bbridge") == 1,
+              "COMPACT: pin B keeps its footprint row AND its GND bridge "
+              "(fabric endpoints have no holes to sit in)")
+
+        # (e) The round trip. p un-commits, c flips back, and the bridge the
+        # compact leg replaced comes back - remove -> mutate -> reapply is the
+        # whole re-derivation, nothing is stored per part.
+        d.send(b"p")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=BACK", "p un-commits the compact RG")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "back at step 2")
+        d.send(b"c")
+        d.expect(r"GUIDE move part=RG row=44 placement=expanded",
+                 "c again returns RG to expanded")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=COMMIT", "the expanded RG commits")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "step 3 WAIT after the round trip")
+        out = jl_exec("""
+print("abridge=", 1 if is_connected(44, 50) else 0)
+print("bbridge=", 1 if is_connected(45, "GND") else 0)
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("abridge") == 1,
+              "EXPANDED again: pin A's 44->50 bridge is back")
+        check(vals.get("bbridge") == 1, "EXPANDED again: pin B's GND bridge is still there")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit the move/snap session")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.5)
+
+    _, mv_yaml = read_device_file(run_mv)
+    check("row: 44" in mv_yaml, "the run file kept the moved row after the round trip")
+    check("placement:" not in mv_yaml,
+          "expanded is the DEFAULT and is NOT emitted - a full round trip "
+          "leaves no placement: line behind, so pre-wave-2 files are "
+          "byte-identical after a rewrite")
 
 finally:
     # --- 6. Restore the bench ----------------------------------------------
