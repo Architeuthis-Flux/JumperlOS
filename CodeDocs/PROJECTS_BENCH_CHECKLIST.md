@@ -9,34 +9,212 @@ Wave 2 changed enough that the wave-1 copy of this file is not worth diffing
 against — it is preserved at commit `6dfaf7c` if you want the archaeology. The
 short version of what moved:
 
-| Was (wave 1) | Is now |
-|---|---|
-| Projects lived under **Apps** | **top-level** clickwheel row, before Apps |
+
+| Was (wave 1)                                                  | Is now                                                                                                            |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Projects lived under **Apps**                                 | **top-level** clickwheel row, before Apps                                                                         |
 | a project ran into a **destination slot**, then a keep-prompt | a project opens `/projects/<dir>/<dir>_<N>.yaml`, a **run file**, as your persistent context — no prompt, no slot |
-| slots were eight numbered files | any YAML anywhere can be the active context; the board **boots the last active one** |
-| DIP pin 1 anchored the **top** half | pin 1 (the dot) anchors the **bottom** half — **row 35** on every shipped project |
-| 2-leg parts sat in two adjacent rows | resistors are `axial2` and **straddle the ravine** (row *r* and *r*+30) |
-| continuity reported **milliamps** | continuity reports **ohms**, four-wire, on pass and on fail |
-| `rail_sane` compared rows to the **setpoint** | it measures the rail, then compares rows to the **measurement** |
-| the guide walked forward and exited off the end | the wheel **browses** a ring, wraps through a **DONE view**, and only a hold/`q` quits |
+| slots were eight numbered files                               | any YAML anywhere can be the active context; the board **boots the last active one**                              |
+| DIP pin 1 anchored the **top** half                           | pin 1 (the dot) anchors the **bottom** half — **row 35** on every shipped project                                 |
+| 2-leg parts sat in two adjacent rows                          | resistors are `axial2` and **straddle the ravine** (row *r* and *r*+30)                                           |
+| continuity reported **milliamps**                             | continuity reports **ohms**, four-wire, on pass and on fail                                                       |
+| `rail_sane` compared rows to the **setpoint**                 | it measures the rail, then compares rows to the **measurement**                                                   |
+| the guide walked forward and exited off the end               | the wheel **browses** a ring, wraps through a **DONE view**, and only a hold/`q` quits                            |
+
+
+> > > Deleting the active slot causes the Jumperless to reboot, just load slot0.yml
+
+```
+
 
 ---
 
+╭───────────────────────────────────────────────────────────────────────────╮
+
+│                            JUMPERLESS FILE MANAGER                        │
+
+╰───────────────────────────────────────────────────────────────────────────╯
+
+⌘ Current Path: /projects/555  |  Files: 4  |  Selected: 4/4
+
+
+
+    ⌘ ..                                               <UP>
+
+    ⍺ [README.md](http://README.md)                                         4 KB
+
+    𓆚 [main.py](http://main.py)                                           1 KB
+
+►   ⟐ wiring.yaml                                       2 KB
+
+
+
+
+
+
+
+
+
+ [enter] = open   │ h = help │ v = quick view │ ↑↓/wheel = nav │ . = up dir   |
+
+ CTRL + q = quit  │ e = edit │ n = new file   │ d = new dir    │ u = memory   |
+
+
+
+⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯⋯
+
+
+
+
+
+
+
+
+
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+
+
+
+Exiting File Manager...
+
+
+
+
+
+
+Port /dev/cu.usbmodemJLV5port1 disconnected
+
+Reconnected to /dev/cu.usbmodemJLV5port1
+
+
+
+FileCache: disabled (compile-time pass-through to FatFS)
+
+[Undo] init: 512 ops + 128 txns + 4 KB blob shared across 8 slots (SRAM-only, active=0)
+
+[Undo] persist budget: 24 txns / 3072 B body, 5344 B scratch reserved
+
+[Undo] restore: no /undo_history.txt on flash (first boot or never persisted)
+
+[Undo] restore=0 head=0 tail=0 gid=0 active=0 netSlot=0 reachable=0
+
+
+
+
+
+
+
+
+
+Last-active slot file is gone (/projects/555/555_2.yaml) - booting slot 0
+
+                                                                                               ▄▄▄▄       ▄▄▄▄▄▄▄    ▄▄▄▄▄▄▄▄▄  
+
+                                            ▄▄▄▄▄        ▄▄▄▄▄   ▄▄▄▄▄▄▄▄▄▄▄   ▄▄▄▄▄▄      ▄▄▄▄    ▄   ▄▄▄      ▄  ▄▄          ▄
+
+      ▄▄▄▄▄▄  ▄▄    ▄▄▄▄▄  ▄▄▄    ▄▄▄ ▄ ▄▄▄▄     ▄▄  ▄▄▄▄     ▄▄▄          ▄ ▄▄      ▄   ▄▄           ▄▄           ▄    ▄▄      
+
+    ▄▄     ▄ ▄  ▄▄ ▄▄   ▄▄▄  ▄▄        ▄          ▄ ▄              ▄▄▄▄▄                 ▄        ▄▄▀     ▄  ▄           ▀    ▄ 
+
+                                ▄▄        ▄               ▄▄▄▄▀        ▀                     ▄  ▀▀            ▄▄▄      ▄ ▄▄▀▀▀▀ 
+
+    ▀                                       ▀             ▀▀    ▄    ▀  ▀            ▀         ▄▄▄▄▄  ▄    ▄ ▄    ▀       ▄▄▄   
+
+     ▀             ▀▄           ▄                         ▄▄▄▄ ▀    ▄▄                       ▄▄    ▄   ▄      ▄▄▄  ▀ ▄▄       ▄ 
+
+                                                        ▄▄   ▄          ▄▄  ▄ ▄                    ▄▀  ▀ ▄▄▄      ▄  ▀▀▀ ▄    ▄▄
+
+      ▀▄    ▄                     ▄         ▄▄▄              ▄▀      ▄▄▄   ▄▀                 ▄  ▀▀        ▀ ▄      ▄▄▄ ▄       
+
+                   ▄             ▄                       ▄  ▀              ▄           ▄▄       ▄▄▄▄ ▄ ▄▄▄▄  ▄     ▄    ▄▄      
+
+▄ ▄▄ ▄        ▄    ▄            ▄▀          ▄▄▄▄▄▀▀        ▄▄▄▄▄       ▄   ▄ ▄      ▄▄▄  ▄     ▄▄                               
+
+     ▄ ▄                                    ▄ ▀           ▄▄   ▄        ▄    ▄                      ▄  ▄            ▄       ▄   
+
+             ▀         ▄                           ▀ ▄         ▄  ▄      ▄   ▄  ▄      ▄▄ ▀ ▄▄▄▄▄▄  ▀    ▄▄▄▄▄▄▄ ▀ ▀        ▀   
+
+ ▄               ▄    ▄ ▀  ▄  ▄     ▄▄   ▄▄▄        ▀  ▄▄▄▄▄   ▀      ▀ ▀      ▀        ▀  ▀      ▀     ▀      ▀     ▀▀▀▀▀▀     
+
+ ▀ ▄     ▄      ▀      ▀  ▀    ▀  ▀   ▀ ▀   ▀        ▀     ▀▀     ▀▀▀     ▀▀▀    ▀▀▀▀▀▀                                         
+
+  ▀       ▀       ▀▀▀▀      ▀▀                                                                                                  
+
+
+
+[crashlog] The last reset was a HardFault on core 0 (uptime 684858 ms, fault #1 since power-on):
+
+[crashlog]   PC=0x1010CE86 LR=0x100FF56B xPSR=0x29100000 SP=0x20081840 EXC_RETURN=0xFFFFFFE9
+
+[crashlog]   CFSR=0x00000000 HFSR=0x80000000 BFAR=0xE000ED38 MMFAR=0xE000ED34
+
+[crashlog]   Symbolize with: arm-none-eabi-addr2line -C -f -e .pio/build/jumperless_v5/firmware.elf <PC> <LR>
+
+
+
+
+
+Menu
+
+
+
+'help' for docs or [command]?
+
+
+
+m = show this menu
+
+e = show extra options (0)
+
+n = show net list
+
+
+
+      `/~ = edit / print config
+
+p = microPython REPL
+
+> = send Python formatted command
+
+/ = show filesystem / run script
+
+      U/u = enable/disable USB Mass Storage
+
+
+
+x = clear all connections
+
++ = add connections
+
+- = remove connections
+
+
+
+[MP] GC heap: 48 KB (configured 64 KB doesn't fit; 28 KB C heap left)
+
+
+
+
+```
+
+
+
 ## 0. Prelude — do these first or you will chase ghosts
 
-- [ ] **Close the** `jumperless` **terminal client on port 1.** Any stray byte
+- [x] **Close the** `jumperless` **terminal client on port 1.** Any stray byte
   cancels a picker (the `selectNodeAction` convention), and any byte that is not
   `y`/`n` makes `yesNoMenu` return −1 — i.e. **cancel**. Firmware drains leftover
   `\r`/`\n` before every offer, so a bare line terminator no longer self-answers
   one; every *other* stray byte still does. **If a picker closes by itself or a
   prompt instantly self-declines, this is the first suspect, not the launcher.**
-- [ ] **Clear the breadboard.** §1 is the no-parts pass, and several of its steps
+- [x] **Clear the breadboard.** §1 is the no-parts pass, and several of its steps
   (the tap rules, the collision refusal, the overlay eyeball) want empty holes.
-- [ ] **If you plan to run** `test_encoder_ui`: regenerate `jl_input.py`'s ADDR
+- [x] **If you plan to run** `test_encoder_ui`: regenerate `jl_input.py`'s ADDR
   table from the *currently flashed* ELF. It is per-build, it lives outside
   version control, and a stale one makes the suite SKIP (which `run_all` counts
   as a pass — so a SKIP here is expected, not a regression).
-- [ ] **If you run the HIL suites with another USB dev board plugged in, check
+- [x] **If you run the HIL suites with another USB dev board plugged in, check
   `~/.cursor/skills/jumperless-v5/.jumperless_port` first.** `jumperless.py`
   caches the REPL port and then trusts the cache blindly as long as that device
   still exists. If a re-detect ever picks a *different* board — an interrupted
@@ -48,21 +226,21 @@ short version of what moved:
   leaves the damage behind.** Before you run them, back up anything you care
   about in these two places — they are restored by a `finally`, and a run that
   is interrupted (Ctrl+C, a tool timeout, an unplugged cable) never reaches it:
-  - **`/slots/slot3.yaml`** is overwritten by `test_projects` **and**
-    `test_parts_roundtrip`. **Do not keep work in slot 3.** One killed run
-    during wave 2 destroyed its contents permanently — numbered slots have a
-    `/.bak` mirror only for the last *successful* load, which by then was
-    already the test fixture.
-  - **`/config.txt`** gets `test_config`'s **fail-safe droop sentinels**
-    (`probe_droop_ohms = -55.5`, `probe_droop_v0 = 2.599`). They are chosen so a
-    board that boots with them falls through to safe defaults rather than to a
-    believable-but-wrong calibration — but they are not your values. `test_config`
-    also toggles `[top_oled] show_in_terminal` twice and relies on reaching the
-    second one.
+  - `/slots/slot3.yaml` is overwritten by `test_projects` **and**
+  `test_parts_roundtrip`. **Do not keep work in slot 3.** One killed run
+  during wave 2 destroyed its contents permanently — numbered slots have a
+  `/.bak` mirror only for the last *successful* load, which by then was
+  already the test fixture.
+  - `/config.txt` gets `test_config`'s **fail-safe droop sentinels**
+  (`probe_droop_ohms = -55.5`, `probe_droop_v0 = 2.599`). They are chosen so a
+  board that boots with them falls through to safe defaults rather than to a
+  believable-but-wrong calibration — but they are not your values. `test_config`
+  also toggles `[top_oled] show_in_terminal` twice and relies on reaching the
+  second one.
   **After any interrupted run, check both before trusting the board**, and look
   for leftover `<dir>_<N>.yaml` run files and stray `/projects/hil*` fixture
   directories while you are there.
-- [ ] Note the board's `top_oled.lock_connection` / `sda_row` / `scl_row`. In
+- [x] Note the board's `top_oled.lock_connection` / `sda_row` / `scl_row`. In
   `connection_type 0` the top OLED lives on **GPIO 7/8** — the very pins the
   `i2cscrn` and `eeprom` projects use, and the pins the guide's `oscillates`
   picker may claim. Turn it off before those two.
@@ -107,20 +285,29 @@ Destination slots are gone: a stale `z 555 3` loud-fails with the usage line.
 
 ---
 
+
+
 ## 1. No parts needed — menu, files, run files, slots, the guide's hands
+
+
 
 ### 1.1 Projects is a top-level menu row
 
-- [ ] Wheel through the clickwheel menu: **`Projects` appears before `Apps`**, not
+- [x] Wheel through the clickwheel menu: `Projects` **appears before** `Apps`, not
   inside it. Click it.
-- [ ] The picker lists the **four shipped projects** — `555`, `eeprom`,
+- [x] The picker lists the **four shipped projects** — `555`, `eeprom`,
   `i2cscrn`, `nand00` — and port 1 says `PROJECTS n=4`. If you see `hiltest`,
   a HIL run left its fixture behind (the suite removes it now; an older build's
   leftovers can be deleted from Files).
-- [ ] `i2cscrn` is 7 glyphs, exactly the LED-matrix row limit — check it renders
+- [x] `i2cscrn` is 7 glyphs, exactly the LED-matrix row limit — check it renders
   whole. Title + summary on the OLED, mirrored on the terminal.
-- [ ] Hold to cancel: `  Cancelled.` and **your context is untouched** — press
+- [ ] >>>But Projects is too long and splits at the S, what if we rename it Guides
+- [x] Hold to cancel:   `Cancelled.` and **your context is untouched** — press
   `Q` and confirm both the number and the path are what they were.
+
+> > > dragging a part doesn't clear the LEDs behind it, filling up the board
+
+
 
 ### 1.2 The run-file lifecycle
 
@@ -130,21 +317,20 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
 - [ ] Launch `555` on a project with no runs yet. There is **no prompt** — port 1
   says `RUNFILE path=/projects/555/555_1.yaml action=new`, and `Q` afterwards
   reports `ACTIVE_SLOT:-1` + `ACTIVE_PATH:/projects/555/555_1.yaml`.
-- [ ] Quit the guide (`q`) and **relaunch `555`**. Now the prompt appears:
+- [x] Quit the guide (`q`) and **relaunch** `555`. Now the prompt appears:
   `RUNS n=1 latest=…555_1.yaml`, the OLED reads `Load run 1?` / `No = new run`,
-  and the terminal offers `y/click Yes = load latest (555_1.yaml), n = start new
-  (555_2.yaml), other = cancel`.
-  - [ ] **A bare CLICK answers Yes.** (`yesNoMenu` used to open on *No* while
+  and the terminal offers `y/click Yes = load latest (555_1.yaml), n = start new (555_2.yaml), other = cancel`.
+  - [x] **A bare CLICK answers Yes.** (`yesNoMenu` used to open on *No* while
     every prompt said "click Yes"; it now opens on the highlighted option the
     text names.) Confirm the highlight starts on Yes.
-  - [ ] Answer **n** → `555_2.yaml action=new`, and **`555_1.yaml` still exists
+  - [x] Answer **n** → `555_2.yaml action=new`, and **`555_1.yaml` still exists
     on disk with its own `guideProgress`.** Start-new is not destructive any
     more; run N+1 leaves run N alone.
-  - [ ] Answer **y** on a third launch → `action=load`, and you resume at the
+  - [x] Answer **y** on a third launch → `action=load`, and you resume at the
     step you quit on (`GUIDE resume file=… step=<k>`).
-  - [ ] **Hold, or let it time out (20 s)** → `  Cancelled.`, nothing loaded,
+  - [x] **Hold, or let it time out (20 s)** →   `Cancelled.`, nothing loaded,
     context untouched.
-- [ ] **The pile-up hint**: get to 20 run files in one project (a loop of
+- [x] **The pile-up hint**: get to 20 run files in one project (a loop of
   `z 555 new noscript` + `q` is the fast way) and confirm
   `(20 run files in /projects/555 - old runs can be deleted from Files)`.
   Then do exactly that — **delete them from the Files browser** — and confirm:
@@ -153,7 +339,7 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
   - [ ] the allocator **does not reuse numbers**: after deleting `_1` while `_2`
     exists, the next new run is `_3` (HIL asserts this; the point here is that
     deleting from Files takes the same path);
-  - [ ] **deleting the run file you are currently ON is the interesting one, and
+  - [x] **deleting the run file you are currently ON is the interesting one, and
     it is not asserted anywhere — write down what actually happens.** The
     manager still holds the path, so the next dirty auto-save will try to write
     it. Two plausible outcomes and both are acceptable behaviour: the file is
@@ -161,13 +347,18 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
     `service()` prints its failure **throttled to once per 10 s** rather than
     once per idle pass. What must NOT happen is a crash, a wedge, or a write
     landing somewhere else. `<0` recovers either way.
-- [ ] **Clicking `/projects/555/wiring.yaml` in the Files browser starts a run**
+  - [ ] >>>I pasted a dump of what happens above, it reboots.
+    - [ ] >>>We should make a compile time flag and set it to overwrite the same file every time. if a user wants to save the project, they can do `slots` > `save to`. because yeah that's making way too many files
+- [x] **Clicking** `/projects/555/wiring.yaml` **in the Files browser starts a run**
   — it no longer adopts the shipped template. The file manager closes *first*,
   then the prompt/guide comes up on a clean terminal.
 - [ ] Click `README.md` in the same directory → opens in **eKilo**, not a load.
 - [ ] Run a `main.py` from the Files-browser click menu, *after* a guided build
   has wired the board. This is the only path that exercises `File::readString()`
   on a ~5.7 KB script, which no HIL check can reach.
+- [ ] >>>for some readson the 555 always starts with 2 ADCs wired that arent necessary
+
+
 
 ### 1.3 Slots are files now
 
@@ -177,9 +368,8 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
 - [ ] **Boot-last-active across a power cycle.** With `[slots] boot_mode = 1`
   (the default), leave the board on a **run file**, unplug and replug. It must
   come back **in that run file's context with its wiring live** — not slot 0.
-- [ ] **`boot_mode = 0` pins a slot.** Set `` `[slots] boot_mode = 0 `` and
-  `` `[slots] boot_slot = 5 ``, reboot: it comes up on slot 5 with the canonical
-  path. **Put `boot_mode` back to 1 and `boot_slot` back to 0 before you go on** —
+- [ ] `boot_mode = 0` **pins a slot.** Set ``[slots] boot_mode = 0` and
+  ``[slots] boot_slot = 5`, reboot: it comes up on slot 5 with the canonical path. **Put**` boot_mode`**back to 1 and**`boot_slot` **back to 0 before you go on** —
   every later step assumes the default.
 - [ ] The **Slots preview** (spinning the wheel through the Slots menu) **no
   longer applies rail power** to hardware. Wheel through a slot that has a 5 V
@@ -187,7 +377,11 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
   you actually load. (Task 4: the preview gate now also stops every detent from
   stamping a merely-glanced-at slot into `last_active.txt`.)
 
+
+
 ### 1.4 The guided build, with your hands and no parts
+
+>>>honestly this whole thing is confusing, we need to streamline this interface.
 
 Launch `z 555 new` (or the menu). Every check will fail — the holes are empty —
 which is exactly what you want while you exercise the input surface. The banner
@@ -199,29 +393,28 @@ wheel=browse  click=confirm  dblclick=adjust  hold/q=quit  n/p/s/v  t/m <row>  c
 rails + DACs held at 0V until the power_on step
 ```
 
-- [ ] **THE DIP FLIP.** Step 2 reads *"555 across the middle gap, pin 1 (the dot)
+- [x] **THE DIP FLIP.** Step 2 reads *"555 across the middle gap, pin 1 (the dot)
   at **row 35**."* — bottom half, dot at the bottom-left, the way a real chip
   sits. The `_GUIDE_FP_` footprint overlay must light **rows 35–38 and 5–8**
   (pin 1 = 35, pin 8 = 5), and the `_GUIDE_TGT_` pulse must be on **35**.
   A top-half anchor here is the mirrored bug coming back.
-- [ ] **Resistors straddle the ravine.** Step 3 says *"10k resistor: rows 10 and
+- [x] **Resistors straddle the ravine.** Step 3 says *"10k resistor: rows 10 and
   40"* — `axial2`, one leg each side. Same for the 47k (13/43) and the 330
   (16/46). The cap and the LED stay radial, two adjacent rows.
-- [ ] **A wheel TURN can never leave the guide.** Turn past the last step: you
+- [x] **A wheel TURN can never leave the guide.** Turn past the last step: you
   land in the **DONE view** (`GUIDE done committed=… skipped=… unfinished=…`),
   turn again and you **wrap to step 1**. Turn backwards off step 1 and you wrap
   into DONE. `state=EXIT` must not appear anywhere in that walk.
-- [ ] **Click confirms, with a 260 ms pend.** Wheel-click has a deliberate
+- [x] **Click confirms, with a 260 ms pend.** Wheel-click has a deliberate
   ~quarter-second delay before it commits (it is how the double-click is
   distinguished). Serial `n` and probe CONNECT are instant. If the guide feels
   sluggish, this is why — it is not a bug.
 - [ ] **Double-click enters ADJUST** on a place step. Its own one-liner prints:
-  `adjust <PART>: wheel=slide  click=drop  dblclick=snap  hold/q=cancel  (probe:
-  tap=move, CONNECT=drop, REMOVE=cancel)`. Then:
+  `adjust <PART>: wheel=slide  click=drop  dblclick=snap  hold/q=cancel  (probe: tap=move, CONNECT=drop, REMOVE=cancel)`. Then:
   - [ ] **wheel = slide** the part to the next LEGAL row (it scans up to 30 rows
     and skips illegal ones); each detent prints `GUIDE move …` and `now: …`.
-  - [ ] **click = drop**, **hold/`q` = cancel** and the part goes back where it
-    was — *`q` in ADJUST cancels the adjust, it does not quit the guide.* Two
+  - [ ] **click = drop**, **hold/**`q` **= cancel** and the part goes back where it
+    was — `q` *in ADJUST cancels the adjust, it does not quit the guide.* Two
     presses get you out.
   - [ ] **double-click inside ADJUST cycles compact ↔ expanded.**
   - [ ] Slide into a wall (row 60 on a bottom-half part) → `(no legal row that
@@ -230,7 +423,7 @@ rails + DACs held at 0V until the power_on step
   1. a `probe_confirm` target → confirms the step;
   2. **the part's own glowing footprint** → snap (cycles compact/expanded);
   3. a **free** hole → move pin 1 there (on a DIP, a tap on rows 1–30 maps to
-     `+30`, because pin 1 lives on the bottom half);
+    `+30`, because pin 1 lives on the bottom half);
   4. anything else → the row's net is identified and printed.
   Rule 3's "free" is stricter than the move checker on purpose: tapping a row
   that already carries a net falls through to *identify*, while typing
@@ -248,8 +441,8 @@ rails + DACs held at 0V until the power_on step
   Commit the rest; at DONE the summary counts it (`skipped=1`) and a **confirm
   at DONE jumps back to the skipped step** rather than exiting. Commit it and
   DONE goes clean.
-- [ ] **`s` on a step you already committed is refused**: `(already committed -
-  p removes it first)`. `p` (or probe REMOVE) un-commits *and pulls the
+- [ ] `s` **on a step you already committed is refused**: `(already committed -
+  p removes it first)`.` p` (or probe REMOVE) un-commits *and pulls the
   hardware*; the flag and the fabric never disagree.
 - [ ] **The script offer.** Walk a build to a clean DONE and confirm at DONE:
   `SCRIPT offer=/projects/555/main.py`, the OLED asks `Run main.py?`, and
@@ -257,26 +450,26 @@ rails + DACs held at 0V until the power_on step
   file active and the rails where the guide left them.
 - [ ] **A build where you skipped everything offers nothing**: `s` through all
   the steps → `GUIDE done committed=0 skipped=N unfinished=0`, `q`, and
-  `  (nothing was built - no script offer)` with **no `SCRIPT` lines at all**.
+    `(nothing was built - no script offer)` with **no** `SCRIPT` **lines at all**.
   The run file is still saved — persistence is unconditional.
 - [ ] **Rails on the way out.** Set the rails to something you will recognise
   (3.3 / −1.5), launch guided, quit before `power_on`. The exit tail names the
   values coming back: `rails + DACs restored (top=3.30V bot=-1.50V dac0=… dac1=…)
-  - the project never powered up`, and the rails are physically there. Quit
-  *after* a committed `power_on` instead and the **project's** power stands.
+  - the project never powered up`, and the rails are physically there. Quit *after* a committed` power_on` instead and the **project's** power stands.
 - [ ] **The readouts agree with the hardware, not the file.** In that same
   window (after a restore, before the next context switch) check that
   `dac_get(2)` / `dac_get(3)`, the OLED rail reading and the rail LED dots all
   show the **physical** 3.3 / −1.5. `Y` deliberately still prints the *saved*
   `power:` — it is the paste format — and now says so above it:
-  `(rails are physically at top=3.30V bot=-1.50V - the power: below is this
-  context's SAVED state, which is what S pastes back)`.
+  `(rails are physically at top=3.30V bot=-1.50V - the power: below is this context's SAVED state, which is what S pastes back)`.
 - [ ] **The rail adjuster opens on the physical value** in that same window
   (click a rail net, adjust). Wave 2 pointed it at hardware truth: before, it
   opened at the saved 0 V and — because it live-updates as you turn — the first
   detent yanked a live 3.3 V rail toward zero.
 
 ---
+
+
 
 ## 2. Real parts — the measurement pass
 
@@ -289,18 +482,22 @@ Two off-bench helpers worth a line each — neither touches hardware:
 
 - `z band <value> [type] [tol]` → prints the parsed value and the derived band.
 - `z shunt [n]` → n fresh INA0 **shunt-register** samples, their spread in LSBs
-  (10 µV each, 5 µA across the 2 Ω R1) and the mean current.
+(10 µV each, 5 µA across the 2 Ω R1) and the mean current.
+
+
 
 ### 2.1 The shipped band table
 
-| project | part | value | stimulus | expected `val=` | band |
-|---|---|---|---|---|---|
-| 555 | R1 | 10k | 3.3 V | ~`9.?k` | **8.00k–12.0k** |
-| 555 | R2 | 47k | **5.0 V** (the ≥20 kΩ escalation) | ~`4?.?k` | **35.2k–58.8k** |
-| 555 | R3 | 330 | 3.3 V | ~`3??` | **264–396** |
-| nand00 | R1 | 330 | 3.3 V | ~`3??` | **264–396** |
-| eeprom | R1, R2 | 4.7k | 3.3 V | ~`4.?k` | **3.76k–5.64k** |
-| i2cscrn | — | — | — | no continuity steps | — |
+
+| project | part   | value | stimulus                          | expected `val=`     | band            |
+| ------- | ------ | ----- | --------------------------------- | ------------------- | --------------- |
+| 555     | R1     | 10k   | 3.3 V                             | ~`9.?k`             | **8.00k–12.0k** |
+| 555     | R2     | 47k   | **5.0 V** (the ≥20 kΩ escalation) | ~`4?.?k`            | **35.2k–58.8k** |
+| 555     | R3     | 330   | 3.3 V                             | ~`3??`              | **264–396**     |
+| nand00  | R1     | 330   | 3.3 V                             | ~`3??`              | **264–396**     |
+| eeprom  | R1, R2 | 4.7k  | 3.3 V                             | ~`4.?k`             | **3.76k–5.64k** |
+| i2cscrn | —      | —     | —                                 | no continuity steps | —               |
+
 
 (`35.2k` and not `35.3k` is real: `%.1fk` rounds 35250 Ω half-to-even.)
 
@@ -308,9 +505,8 @@ Two off-bench helpers worth a line each — neither touches hardware:
 
 - [ ] Straddle the ravine with it and confirm: `val=0.9?k`–`1.1k`, `ok=1`, with
   the detail line `R1: 1.02k (band 800-1.20k, 3.2mA @ 3.3V)`.
-- [ ] **Pull it, re-run with `v`** → `val=open ok=0`, hint *"no conduction -
-  part missing, or a leg not seated?"*, detail `R1: open (1uA at 3.3V across
-  the rows; band 800-1.20k)`. This is the new shape — not a small current.
+- [ ] **Pull it, re-run with** `v` → `val=open ok=0`, hint *"no conduction -
+  part missing, or a leg not seated?"*, detail `R1: open (1uA at 3.3V across the rows; band 800-1.20k)`. This is the new shape — not a small current.
 - [ ] **Both legs on the same side of the ravine** (so the two rows short) →
   `val=short ok=0`, hint *"reads as a short - are the legs bridging the
   ravine?"*. Worth doing once: it is the single most common miswiring on an
@@ -321,6 +517,8 @@ Two off-bench helpers worth a line each — neither touches hardware:
   `val=toohighR`, *"resistance too large to measure - placed unverified"*.
   There is nothing to measure past that, so the check says so instead of
   guessing. (This replaced the old 0.15 mA-floor refusal.)
+
+
 
 ### 2.3 vf — a real LED
 
@@ -333,6 +531,8 @@ Two off-bench helpers worth a line each — neither touches hardware:
   (flip it?)"*. Missing and reversed are electrically identical from here, and
   the hint says both. `on_fail: retry` re-offers the step — flip it and confirm.
 
+
+
 ### 2.4 presence — a ≥100 nF cap, and the IC carve-out
 
 - [ ] 2-leg cap, both rows free → `val=hold2.??V@<rowA> ok=1`. Pull it →
@@ -344,6 +544,8 @@ Two off-bench helpers worth a line each — neither touches hardware:
   check keeps the OLD top-side chain deliberately, because it charges rather
   than measures current.
 
+
+
 ### 2.5 rail_sane — it changed meaning, and the change is the point
 
 The old rule ("a power row within 0.2 V of the **setpoint**") is gone. Two gates
@@ -351,7 +553,7 @@ now: the **rail itself** within 0.25 V + 5 % of its setpoint, then each
 power-class row within max(0.15 V, 3 %) of the **measured** rail, read on the
 same ADC.
 
-- [ ] Power up the 555 build. **`val=4.7?V@5 ok=1` is a PASS** on a 5.00 V rail —
+- [ ] Power up the 555 build. `val=4.7?V@5 ok=1` **is a PASS** on a 5.00 V rail —
   this board's rails genuinely run ~220 mV low, and the check finally knows it.
   (Wave 1 recorded `4.74V@8 ok=0` as a failure; it was the check that was wrong.)
   Detail: `rail: meas 4.77V (set 5.00V); worst row delta 0.01V @8`. The `@`
@@ -370,9 +572,10 @@ same ADC.
   current is plausible for the nominal value."* It is a current, not a
   resistance, and must not be read as one.
 - [ ] **On your own older files** you may see `min/max look like legacy mA (…) -
-  ignoring, using the value-derived ohm band`. That is the guard working, not a
-  bug: a band that does not bracket `value:`, or a value-less part whose `max:`
+  ignoring, using the value-derived ohm band`. That is the guard working, not a bug: a band that does not bracket` value:`, or a value-less part whose` max:`
   is under 5 Ω, is assumed to be pre-wave-2 milliamps.
+
+
 
 ### 2.6 §1.8 accuracy spot-checks, against a DMM
 
@@ -392,7 +595,7 @@ swapped.
 
 ### 2.7 The three starter projects, end to end
 
-Common shape: **Projects → `<name>`** (or `z <name> new`), walk the guide, run
+Common shape: **Projects →** `<name>` (or `z <name> new`), walk the guide, run
 `main.py` when it is offered.
 
 #### 2.7a `555` — NE555, 10k, 47k, 10 µF, LED, 330
@@ -408,6 +611,8 @@ Common shape: **Projects → `<name>`** (or `z <name> new`), walk the guide, run
   tap fallback's honest `val=osc ok=1` + *"tap fallback: both levels seen;
   frequency not measured (no free GPIO)"*.
 
+
+
 #### 2.7b `nand00` — 74HC00 (DIP-14), LED, 330
 
 - [ ] Placement: 74HC00 **pin 1 (notch end) at row 35** → A1=35, B1=36, Y1=37,
@@ -419,7 +624,7 @@ Common shape: **Projects → `<name>`** (or `z <name> new`), walk the guide, run
   high). `val=float` means the chip is not seated.
 - [ ] `main.py`: the four-row truth table, all `ok`, ending *"All four rows match
   NAND. That is a working gate."* **Watch the LED during the table — it must go
-  dark exactly once, on the `1 1` row.**
+  dark exactly once, on the** `1 1` **row.**
 - [ ] Live mode: `11` → `Y = LOW (expected 0)`, LED dark. `10` → `Y = HIGH`, lit.
 - [ ] Failure shapes: all four `FLOATING` → chip unseated or rail off. `WRONG` on
   the last two rows only → an input leg (row 35 or 36) not making contact.
@@ -427,6 +632,8 @@ Common shape: **Projects → `<name>`** (or `z <name> new`), walk the guide, run
   row (`1 1`) — AND is NAND's inverse. A **74HC02**'s pin 1 is an *output* while
   this wiring drives pin 1 from `RP_GPIO_1`: two drivers on one node — pull it
   out rather than leave it powered.
+
+
 
 #### 2.7c `eeprom` — 24C02/24C16 (DIP-8), two 4.7 kΩ
 
@@ -448,12 +655,16 @@ Common shape: **Projects → `<name>`** (or `z <name> new`), walk the guide, run
 - [ ] **The write test** — answer `y`: `wrote 0xA5, read 0xA5 back - writes work`
   / `restored 0xFF at 0xFF.` / `write protect restored (row 6 on the rail).`
   Then prove the protection is real: answer `n` on a second run and check with
-  `Q` that **row 6 is bridged to `TOP_RAIL`, not GND**. If you ever see
+  `Q` that **row 6 is bridged to** `TOP_RAIL`**, not GND**. If you ever see
   `COULD NOT RESTORE WRITE PROTECT`, re-load the wiring before trusting the chip.
 - [ ] Wrong address: `0x51` → A0 not reaching GND, `0x52` → A1, and so on.
   Nothing acks → most often the chip is in backwards; then check both pull-ups.
 
+
+
 #### 2.7d `i2cscrn` — an SSD1306 4-pin I²C module
+
+>>> we need to generalize this, have users tap each signal and allow them to choose from a list of different oled drivers and sizes. And when I exit the app, it claers the data lines. And we should have the app just constantly sending our startup animation as they're wiring so we know when it's right
 
 **Turn the top OLED off first** if it is enabled: in `connection_type 0` it
 lives on GPIO 7/8 — these very pins — and shares i2c1 in every mode.
@@ -472,35 +683,39 @@ lives on GPIO 7/8 — these very pins — and shares i2c1 in every mode.
 - [ ] 128×64 panel: set `HEIGHT = 64` → `panel up: 128x64, 8 rows of 16 chars`.
 - [ ] Garbage after a while → drop `I2C_HZ` to `50000`.
 
+
+
 ### 2.8 rail_sane replay
 
 - [ ] With any project powered, deliberately set the top rail 1 V away from what
-  the project asked for (`` `[power] `` or the rail adjuster) and re-run the
-  `power_on` check with `v`. It must fail on the **rail-vs-setpoint** gate
-  (`rail: meas 4.00V, set 5.00V - outside …`), not on the row gate — the two
+  the project asked for (``[power]`or the rail adjuster) and re-run the`power_on`check with`v`. It must fail on the **rail-vs-setpoint** gate (`rail: meas 4.00V, set 5.00V - outside …`), not on the row gate — the two
   failures say different things and the detail line distinguishes them.
 
 ---
+
+
 
 ## 3. The accumulated bench-only items
 
 Everything the HIL suites structurally cannot reach, each with where it came
 from and what to do. **Board state is noted per item** so you can batch them.
 
-| # | Item | Board |
-|---|---|---|
-| 1 | Ctrl+C vs wheel-hold discriminator | clear |
-| 2 | wheel-hold inside a blocking call | clear |
-| 3 | the pend race (click + flick) | clear |
-| 4 | the pass-hold pend race | clear |
-| 5 | MSC host-edit round-trip | clear |
-| 6 | corrupt-run-file terminal state | clear |
-| 7 | the interactive prompts | clear |
-| 8 | probe buttons on the prompts | clear |
-| 9 | the variant picker | clear (needs a file you add) |
-| 10 | headless guided-complete **with** a script | parts optional |
-| 11 | OLED-absent run | any (unplug the OLED) |
-| 12 | the matrix-picker gate | any (diagnostic, only if a picker looks blank) |
+
+| #   | Item                                       | Board                                          |
+| --- | ------------------------------------------ | ---------------------------------------------- |
+| 1   | Ctrl+C vs wheel-hold discriminator         | clear                                          |
+| 2   | wheel-hold inside a blocking call          | clear                                          |
+| 3   | the pend race (click + flick)              | clear                                          |
+| 4   | the pass-hold pend race                    | clear                                          |
+| 5   | MSC host-edit round-trip                   | clear                                          |
+| 6   | corrupt-run-file terminal state            | clear                                          |
+| 7   | the interactive prompts                    | clear                                          |
+| 8   | probe buttons on the prompts               | clear                                          |
+| 9   | the variant picker                         | clear (needs a file you add)                   |
+| 10  | headless guided-complete **with** a script | parts optional                                 |
+| 11  | OLED-absent run                            | any (unplug the OLED)                          |
+| 12  | the matrix-picker gate                     | any (diagnostic, only if a picker looks blank) |
+
 
 - [ ] **1 — Ctrl+C vs the wheel hold** *(task 1)*. Run any long script and stop it
   **both ways**: `Ctrl+C` on port 1, and a 3-second clickwheel hold. Both must
@@ -574,6 +789,8 @@ from and what to do. **Board state is noted per item** so you can batch them.
 
 ---
 
+
+
 ## 4. OG smoke (needs an OG board)
 
 Unchanged scope from wave 1.
@@ -586,6 +803,8 @@ Unchanged scope from wave 1.
   the OG has no nodes for RP pins 26/27. Use the **555** for OG.
 
 ---
+
+
 
 ## 5. LAST — forced refresh. Do this after everything else.
 
@@ -600,7 +819,7 @@ mutates `/projects` — so it must not precede any step above. Delete any
   one** variant for 555.
 - [ ] Also confirm the **old-default-in-place** branch: flash an *unedited* 555
   twice across a version bump — it is updated in place, with no `_original`.
-- [ ] **Regression probe for the `_original`-in-variant-glob fix (part (c)).** The
+- [ ] **Regression probe for the** `_original`**-in-variant-glob fix (part (c)).** The
   variant scan globs `wiring*.yaml`, which `wiring_original.yaml` matches, so it
   used to show the backup as a second "variant". Fixed at `406c2d4`:
   `listVariantFiles` skips any name containing `_original`. This step is what
@@ -612,16 +831,17 @@ mutates `/projects` — so it must not precede any step above. Delete any
 - [ ] **Run files are not touched by provisioning.** Park a `555_1.yaml` in
   `/projects/555` across the refresh and confirm it comes back byte-identical.
   - **But an IN-PROGRESS run's resume bookkeeping is only advisory afterwards.**
-    Compose the two items above: the run file survives byte-identical, carrying
-    `guideProgress: {source: /projects/555/wiring.yaml, step: k}` — and the
-    in-place branch just rewrote that wiring. Step *text* is always re-read from
-    `guideSource` (States.h), so `k` and the INIT `committed[]` backfill now
-    index a step list that may have changed length or order. Degradation is
-    graceful by construction (the resume clamp reports `already complete` on a
-    shrunk list, and `hasConnection`/`expandOnePart` guards mean no bridge is
-    ever duplicated), but the *labels* can lie about what was actually built.
-    After an in-place template update, either `p`/`v` re-walk anything doubtful
-    or — the clean path — start a new run.
+  Compose the two items above: the run file survives byte-identical, carrying
+  `guideProgress: {source: /projects/555/wiring.yaml, step: k}` — and the
+  in-place branch just rewrote that wiring. Step *text* is always re-read from
+  `guideSource` (States.h), so `k` and the INIT `committed[]` backfill now
+  index a step list that may have changed length or order. Degradation is
+  graceful by construction (the resume clamp reports `already complete` on a
+  shrunk list, and `hasConnection`/`expandOnePart` guards mean no bridge is
+  ever duplicated), but the *labels* can lie about what was actually built.
+  After an in-place template update, either `p`/`v` re-walk anything doubtful
+  or — the clean path — start a new run.
 - [ ] Finally, put the bench back: active context on **slot 0**,
   `[slots] boot_mode = 1`, `boot_slot = 0`, rails and DACs at 0 V, and no
   leftover run files in the four project directories.
+
