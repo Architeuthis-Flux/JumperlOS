@@ -144,6 +144,54 @@ void guideCheckBegin(const GuideCheckRun& run);
 int  guideCheckPoll(char* valOut, size_t valLen);
 // Optional human hint after a terminal poll ("" when none) - "flip it?" etc.
 const char* guideCheckHint(void);
+// The long-form terminal line for a terminal poll ("" when none):
+// "R2: 46.3k (band 35.3k-58.8k, 105uA @ 5.0V)". Printed on PASS AND FAIL -
+// invest-measurement.md §4: "show what it reads as it's placed", not "show it
+// when it's wrong". The OLED gets ck.val through ReadingDisplay; this is the
+// terminal's fuller sentence and it may contain spaces.
+const char* guideCheckDetail(void);
 void guideCheckAbort(void);
+
+// ---------------------------------------------------------------------------
+// Part values, bands and display formatting (invest-measurement.md §2 / §4)
+// ---------------------------------------------------------------------------
+// Pure functions - no hardware, no state - so they build on BOTH targets and
+// the `guideband` debug command can exercise the whole band derivation
+// off-bench. Implemented in GuideChecks.cpp OUTSIDE its OG_JUMPERLESS guard.
+
+enum class PartValueKind : uint8_t { NONE, OHMS, FARADS, HENRIES, VOLTS };
+struct ParsedPartValue {
+    PartValueKind kind;
+    float v;        // ohms / farads / henries / volts; -1 when kind == NONE
+};
+
+// PartDefinition.value ("10k", "4.7k", "330", "1M", "10uF", "100nF") with
+// typeStr disambiguating unitless strings and the m/M quirk. Grammar: a
+// strtof prefix, optional spaces, an optional multiplier char
+// (p n u µ k K m M), an optional unit token (F H V R / "ohm"). On a RESISTOR
+// both `m` and `M` mean MEGA - the shipped convention, milliohms are a
+// non-goal; on a capacitor/inductor `m` is milli and `M` is a reject.
+// Rejected (kind NONE, v -1): no digits, v <= 0, trailing junk ("2k2", "4R7"
+// infix notation are documented non-goals), and any unit/type contradiction
+// ("10uF" declared on a resistor).
+ParsedPartValue parsePartValue(const char* s, const char* typeStr);
+
+// ~3 significant figures, always <= 7 chars: 330 / 4.68k / 46.3k / 220k /
+// 1.20M. Fits ck.val[24] with room for a prefix.
+void formatOhms(float r, char* out, size_t n);
+
+// The derived continuity band in OHMS. tol_total = tol_author (per-part
+// `tol:`, 0 = the 15 % default) + tol_meas (R <= 10k: 5, <= 100k: 10, else
+// 25). Returns false when rNom is unusable.
+bool guideResistorBand(float rNom, uint8_t tolAuthorPct, float* lo, float* hi);
+
+// Stimulus volts a continuity check drives for this nominal R
+// (invest-measurement.md §1.5): 3.3 V by default, 5.0 V at >= 20k to lift the
+// current off the shunt's floor. rNom <= 0 (no parsed value) gives 3.3.
+float guideStimulusVolts(float rNom);
+
+// `guideband <value> [type] [tol]` - the debug command's whole body. Prints
+// one machine-parseable GUIDEBAND line.
+void guideBandReport(const char* value, const char* typeStr, int tolPct, Stream* out);
 
 #endif // GUIDED_FLOW_H

@@ -34,18 +34,168 @@
 
 #include "GuidedFlow.h"
 
+// ---------------------------------------------------------------------------
+// Part values, bands, display formatting - BOTH TARGETS
+// ---------------------------------------------------------------------------
+// Deliberately ABOVE the OG_JUMPERLESS guard: these are pure functions with no
+// hardware in them, the `guideband` debug command runs on either board, and
+// building them in the OG env is what catches signature drift (that env has
+// caught it before - task 2). Contracts are in GuidedFlow.h.
+
+static PartValueKind kindFromTypeStr(const char* typeStr) {
+    if (typeStr == nullptr) return PartValueKind::NONE;
+    if (strcmp(typeStr, "resistor") == 0) return PartValueKind::OHMS;
+    if (strcmp(typeStr, "capacitor") == 0) return PartValueKind::FARADS;
+    if (strcmp(typeStr, "inductor") == 0) return PartValueKind::HENRIES;
+    return PartValueKind::NONE;
+}
+
+ParsedPartValue parsePartValue(const char* s, const char* typeStr) {
+    ParsedPartValue r = { PartValueKind::NONE, -1.0f };
+    if (s == nullptr || s[0] == '\0') return r;
+    char* end = nullptr;
+    float v = strtof(s, &end);
+    if (end == s) return r;      // no numeric prefix at all: "NE555", "SSD1306"
+    if (!(v > 0.0f)) return r;   // 0 and negatives are not part values
+    while (*end == ' ') end++;
+
+    const PartValueKind typeKind = kindFromTypeStr(typeStr);
+    float mult = 1.0f;
+    bool sawMult = false;
+    switch (*end) {
+        case 'p': mult = 1e-12f; sawMult = true; break;
+        case 'n': mult = 1e-9f;  sawMult = true; break;
+        case 'u': mult = 1e-6f;  sawMult = true; break;
+        case (char)0xB5: mult = 1e-6f; sawMult = true; break;  // bare micro sign
+        case (char)0xC2:                                       // UTF-8 'µ'
+            if ((unsigned char)end[1] == 0xB5) { end++; mult = 1e-6f; sawMult = true; }
+            break;
+        case 'k': case 'K': mult = 1e3f; sawMult = true; break;
+        // THE m/M QUIRK. On a resistor BOTH mean mega: that is the shipped
+        // convention the deleted parseResistanceOhms documented ("1m = meg
+        // here"), and milliohms are an explicit non-goal - nobody writes a
+        // 1 milliohm part into a breadboard project. On a capacitor or
+        // inductor `m` is milli (10mH is real) and `M` is meaningless.
+        case 'm': mult = (typeKind == PartValueKind::OHMS) ? 1e6f : 1e-3f;
+                  sawMult = true; break;
+        case 'M': if (typeKind != PartValueKind::OHMS) return r;
+                  mult = 1e6f; sawMult = true; break;
+        default: break;
+    }
+    if (sawMult) end++;
+    while (*end == ' ') end++;
+
+    // Optional unit token. Anything ELSE trailing is a reject: "2k2" / "4R7"
+    // infix notation are documented non-goals (no shipped file uses them) and
+    // silently misparsing them would be worse than refusing.
+    PartValueKind unitKind = PartValueKind::NONE;
+    if (*end != '\0') {
+        if (*end == 'F' || *end == 'f')      { unitKind = PartValueKind::FARADS;  end += 1; }
+        else if (*end == 'H' || *end == 'h') { unitKind = PartValueKind::HENRIES; end += 1; }
+        else if (*end == 'V' || *end == 'v') { unitKind = PartValueKind::VOLTS;   end += 1; }
+        else if (*end == 'R' || *end == 'r') { unitKind = PartValueKind::OHMS;    end += 1; }
+        else if ((end[0] == 'o' || end[0] == 'O') && (end[1] == 'h' || end[1] == 'H') &&
+                 (end[2] == 'm' || end[2] == 'M')) { unitKind = PartValueKind::OHMS; end += 3; }
+        else return r;
+        if (*end == 's' || *end == 'S') end++;   // "ohms"
+        while (*end == ' ') end++;
+        if (*end != '\0') return r;              // trailing junk
+    }
+
+    if (unitKind != PartValueKind::NONE && typeKind != PartValueKind::NONE &&
+        unitKind != typeKind) {
+        return r;                                 // "10uF" declared a resistor
+    }
+    PartValueKind kind = (unitKind != PartValueKind::NONE) ? unitKind : typeKind;
+    if (kind == PartValueKind::NONE) return r;    // "24C02" on an ic
+    r.kind = kind;
+    r.v = v * mult;
+    return r;
+}
+
+void formatOhms(float r, char* out, size_t n) {
+    if (out == nullptr || n == 0) return;
+    if (!(r >= 0.0f)) { snprintf(out, n, "?"); return; }
+    if (r < 1000.0f)          snprintf(out, n, "%.0f", (double)r);
+    else if (r < 10000.0f)    snprintf(out, n, "%.2fk", (double)(r / 1000.0f));
+    else if (r < 100000.0f)   snprintf(out, n, "%.1fk", (double)(r / 1000.0f));
+    else if (r < 1000000.0f)  snprintf(out, n, "%.0fk", (double)(r / 1000.0f));
+    else                      snprintf(out, n, "%.2fM", (double)(r / 1000000.0f));
+}
+
+bool guideResistorBand(float rNom, uint8_t tolAuthorPct, float* lo, float* hi) {
+    if (!(rNom > 0.0f)) return false;
+    // tol_author covers the PART (5-10 % parts plus drift); tol_meas covers
+    // the METER, and it grows with R because the shunt's one-LSB floor is a
+    // bigger fraction of a smaller current (invest-measurement.md §1.8).
+    const float tolAuthor = (tolAuthorPct > 0) ? (float)tolAuthorPct : 15.0f;
+    const float tolMeas = (rNom <= 10000.0f) ? 5.0f
+                        : (rNom <= 100000.0f) ? 10.0f : 25.0f;
+    const float t = tolAuthor + tolMeas;
+    if (lo) *lo = rNom * (1.0f - t / 100.0f);
+    if (hi) *hi = rNom * (1.0f + t / 100.0f);
+    return true;
+}
+
+float guideStimulusVolts(float rNom) {
+    // 5 V at >= 20k lifts the current off the shunt floor (47k: ~105 uA
+    // instead of 70 uA). Rows and the buffered +/-8 V sense path are rated for
+    // it and the worst-case misplacement current at >= 20k is < 0.25 mA.
+    return (rNom >= 20000.0f) ? 5.0f : 3.3f;
+}
+
+void guideBandReport(const char* value, const char* typeStr, int tolPct, Stream* out) {
+    if (out == nullptr) return;
+    ParsedPartValue p = parsePartValue(value, typeStr);
+    const char* kindName = (p.kind == PartValueKind::OHMS)    ? "ohms"
+                         : (p.kind == PartValueKind::FARADS)  ? "farads"
+                         : (p.kind == PartValueKind::HENRIES) ? "henries"
+                         : (p.kind == PartValueKind::VOLTS)   ? "volts" : "none";
+    if (p.kind != PartValueKind::OHMS) {
+        out->printf("GUIDEBAND value=%s type=%s kind=%s v=%.6g band=none\n\r",
+                    (value != nullptr) ? value : "",
+                    (typeStr != nullptr && typeStr[0]) ? typeStr : "-",
+                    kindName, (double)p.v);
+        return;
+    }
+    float lo = 0, hi = 0;
+    guideResistorBand(p.v, (uint8_t)((tolPct > 0 && tolPct < 100) ? tolPct : 0), &lo, &hi);
+    const float tolAuthor = (tolPct > 0 && tolPct < 100) ? (float)tolPct : 15.0f;
+    const float tolMeas = (p.v <= 10000.0f) ? 5.0f : (p.v <= 100000.0f) ? 10.0f : 25.0f;
+    char loStr[12], hiStr[12], nomStr[12];
+    formatOhms(lo, loStr, sizeof(loStr));
+    formatOhms(hi, hiStr, sizeof(hiStr));
+    formatOhms(p.v, nomStr, sizeof(nomStr));
+    out->printf("GUIDEBAND value=%s type=%s kind=ohms ohms=%.4g nom=%s tol=%.0f "
+                "lo=%.4g hi=%.4g band=%s-%s stim=%.1f\n\r",
+                (value != nullptr) ? value : "",
+                (typeStr != nullptr && typeStr[0]) ? typeStr : "-",
+                (double)p.v, nomStr, (double)(tolAuthor + tolMeas),
+                (double)lo, (double)hi, loStr, hiStr,
+                (double)guideStimulusVolts(p.v));
+}
+
 #if !defined(OG_JUMPERLESS)
 
+#include "AdcRing.h"         // the always-on ring: Option 1's sense sampler
 #include "Apps.h"            // i2cScan (§5.2: reuse, real signature checked)
 #include "Commands.h"        // refreshLocalConnections, waitCore2
 #include "InfraPaths.h"      // infraIsBridge (user-claim test), infraOwnsNode
 #include "JumperlessDefines.h"
 #include "NetVoltageScan.h"  // the one-shot tap request API
 #include "PartPlacement.h"   // partPinNode
-#include "Peripherals.h"     // currentSenseState, setDacXvoltage, setTop/BotRail, gpioDef
+#include "Peripherals.h"     // currentSenseState, inaShuntCurrent_mA, INA1, gpioDef
 #include "States.h"          // globalState
 #include "config.h"
 #include "hardware/gpio.h"
+
+// The router's own verdict on what it could not route. Reset at the top of
+// every assignment pass (NetsToChipConnections.cpp), so after a
+// refreshLocalConnections + waitCore2 this list names exactly the bridges
+// THIS refresh failed to place - which is how a check tells "the sense leg
+// did not route" from "the sense leg routed and read 0 V".
+extern int numberOfUnconnectablePaths;
+extern int unconnectablePaths[10][2];
 
 // ---------------------------------------------------------------------------
 // State
@@ -55,16 +205,26 @@ enum class CkPhase : uint8_t {
     IDLE,
     TAP_REQUEST,  // posting a one-shot tap (retries while a stale one drains)
     TAP_WAIT,     // polling the tap result
-    BASE_SETTLE,  // baseline chain live (no GND return), pre-sample wait
-    BASE_SAMPLE,  // collecting the dead-part INA baseline
-    CHAIN_GROW,   // add the rowB->GND return leg, re-energize
-    STIM_SETTLE,  // full chain live, waiting before sampling the INA
-    STIM_SAMPLE,  // collecting INA readings (continuity) / pair tap (vf)
+    OFS_SETTLE,   // chain live, DAC0 held at 0 V, pre-sample wait
+    OFS_SAMPLE,   // zero-stimulus shunt offset (invest-measurement.md §1.4)
+    STIM_SETTLE,  // energized, waiting before sampling the shunt
+    STIM_SAMPLE,  // collecting shunt-register samples
+    V_READ,       // reading the two sense channels (ring bridges or taps)
     PRES_CHARGE,  // presence: rows tied to the stimulus, charging
     PRES_UNROUTE, // presence: strand the charge, then tap row by row
     OSC_COUNT,    // counting edges on the ephemeral GPIO route
     RAIL_SETTLE,  // transient power applied, 100 ms wait (rail_sane)
+    RAIL_REF,     // rail_sane: tapping the RAIL itself, before any row (§3)
     DONE,
+};
+
+// How the check reads rowA/rowB while the stimulus is held.
+enum class SenseMode : uint8_t {
+    RING,    // Option 1: the sense legs are ephemeral ADC bridges routed WITH
+             // the stimulus chain; the sampler reads the ring channels direct
+    TAPS,    // fallback: T2's sequential-same-ADC one-shot taps
+    CURRENT, // §1.9 last resort: no voltage at all, judge I against a wide
+             // plausibility band derived from R_nom
 };
 
 // Max rows a multi-row check iterates (part pins for presence, class-tagged
@@ -102,19 +262,32 @@ struct CheckState {
     bool tapSeqAdcFallback = false;
     int tapFailNode = -1;          // node whose tap hard-failed (noroute@N)
 
-    // stimulus chain (continuity / vf)
+    // stimulus chain (continuity / vf). FIVE legs now - the ground-side
+    // topology's three plus Option 1's two sense bridges (see chainBegin).
     bool chainLive = false;        // teardown owes ephemeral removal + refresh
-    bool chainAdded[3] = {false, false, false};
+    bool chainAdded[5] = {false, false, false, false, false};
+    // The exact endpoints each leg was added with, so teardown removes what
+    // was added without re-deriving which topology this check built.
+    int legNode[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
     int chainRowA = -1, chainRowB = -1;
-    float stimVolts = 0;           // chainComplete re-applies after the grow
+    float stimVolts = 0;
     unsigned long stimAppliedMs = 0;
-    float bandLo = 0, bandHi = 0;  // resolved min/max for this run
+    float bandLo = 0, bandHi = 0;  // resolved band for this run (OHMS / volts)
 
-    // INA sampling
+    // measurement (§1.4)
+    SenseMode senseMode = SenseMode::TAPS;
+    int senseAdcA = -1, senseAdcB = -1;  // ring channels held for the check
+    float rNom = -1.0f;            // parsed part value in ohms, -1 = none
+    uint8_t tolAuthorPct = 0;      // per-part `tol:`, 0 = the 15 % default
+    bool bandFromAuthor = false;   // explicit min/max survived the legacy guards
     float inaSum = 0;
     int inaCount = 0;
     uint32_t inaLastMs = 0;
-    float inaBaseline = 0;         // dead-part chain current (see chainBegin)
+    float iOfs_mA = 0;             // zero-stimulus shunt offset
+    float iPart_mA = 0;            // I_raw - I_ofs
+    float vSenseA = 0, vSenseB = 0;
+    bool haveVsense = false;
+    char detail[112];              // the terminal's long-form line (§4)
 
     // oscillates
     int oscGpioIdx = -1;           // gpioDef index of the ephemeral route; -1 = tap fallback
@@ -129,6 +302,12 @@ struct CheckState {
 
     // rail_sane transient (this check applied power; teardown restores)
     bool railTransient = false;
+    float railMeasured = 0;        // §3: the rail's OWN measured voltage
+    bool railRefPending = false;   // the in-flight tap is the rail's, not a row's
+    int railAdc = -1;              // channel the rail tap landed on - every
+                                   // row is then compared on the SAME one
+    float railWorstDelta = 0;
+    int railWorstRow = -1;
 
     // presence bookkeeping (charge-retention - see the PRESENCE case)
     int presLegsAdded = 0;         // ISENSE_MINUS->rows[i] legs live, i < this
@@ -198,18 +377,67 @@ static bool resolveRowPair(const GuideStep& st, int* rowA, int* rowB) {
     return false;
 }
 
-// "10k" / "4.7k" / "470" / "1M" -> ohms, -1 when unparseable. Feeds the
-// derived continuity band when the author gave no min/max.
-static float parseResistanceOhms(const char* s) {
-    if (s == nullptr || s[0] == '\0') return -1.0f;
-    char* end = nullptr;
-    float v = strtof(s, &end);
-    if (end == s || v <= 0.0f) return -1.0f;
-    while (*end == ' ') end++;
-    char suffix = *end;
-    if (suffix == 'k' || suffix == 'K') v *= 1000.0f;
-    else if (suffix == 'M' || suffix == 'm') v *= 1000000.0f; // "1m" = meg here
-    return v;
+// Did THIS refresh refuse to route the pair (n1,n2)? Order-insensitive.
+// unconnectablePaths[] holds up to 10 entries and is rebuilt every routing
+// pass, so it is only meaningful immediately after refreshLocalConnections().
+static bool routeRefused(int n1, int n2) {
+    int n = numberOfUnconnectablePaths;
+    if (n > 10) n = 10;   // the producer has one unguarded push site
+    for (int i = 0; i < n; i++) {
+        int a = unconnectablePaths[i][0], b = unconnectablePaths[i][1];
+        if ((a == n1 && b == n2) || (a == n2 && b == n1)) return true;
+    }
+    return false;
+}
+
+// Read BOTH sense channels out of ONE ring dwell (Option 1's sampler). Same
+// fresh-window discipline as pairSenseTap: a generation bump or too few
+// sweeps means the window is not ours, and best-available history describes
+// whatever was on the channel before - fail the read instead of trusting it.
+// No fastConnectPath anywhere: the sense legs are already closed as ordinary
+// ephemeral bridges, so this is a pure memory read of ~600 us.
+//
+// Core 0. The ring's readers are documented as either-core safe (the sample
+// counter is under a claimed SIO spinlock) and nothing here touches the
+// converter, the ADC lock or a crosspoint.
+static bool ringReadPair(int chA, int chB, float* vA, float* vB,
+                         float* driftA, float* driftB) {
+    if (chA < 0 || chB < 0) return false;
+    if (!adcRingActive()) {
+        // Legacy START_ONCE path (the D-menu A/B toggle). No shared-sweep
+        // trick available; two ordinary reads of a DC-held node are fine.
+        *vA = readAdcVoltage(chA, 8);
+        *vB = readAdcVoltage(chB, 8);
+        if (driftA) *driftA = 0.0f;
+        if (driftB) *driftB = 0.0f;
+        return true;
+    }
+    uint32_t gen = adcRingGeneration();
+    uint32_t s0 = adcRingSweeps();
+    delayMicroseconds(500);
+    uint32_t s1 = adcRingSweeps();
+    if (!adcRingActive() || adcRingGeneration() != gen || (s1 - s0) < 17) return false;
+    int rawEarlyA = adcRingMeanWindow(chA, s0 + 9, 8);
+    int rawEarlyB = adcRingMeanWindow(chB, s0 + 9, 8);
+    int rawLateA  = adcRingMeanWindow(chA, s1, 8);
+    int rawLateB  = adcRingMeanWindow(chB, s1, 8);
+    if (!adcRingActive() || adcRingGeneration() != gen) return false;
+    const float scaleA = adcSpread[chA] / 4095.0f, zeroA = adcZero[chA];
+    const float scaleB = adcSpread[chB] / 4095.0f, zeroB = adcZero[chB];
+    float earlyA = (float)rawEarlyA * scaleA - zeroA;
+    float earlyB = (float)rawEarlyB * scaleB - zeroB;
+    *vA = (float)rawLateA * scaleA - zeroA;
+    *vB = (float)rawLateB * scaleB - zeroB;
+    if (driftA) *driftA = *vA - earlyA;
+    if (driftB) *driftB = *vB - earlyB;
+    return true;
+}
+
+// One fresh ring read of a single channel (rail_sane's reference tap rides
+// the ordinary one-shot tap path; this is for Option-1 consumers only).
+static bool ringReadOne(int ch, float* v) {
+    float dummy = 0, dA = 0, dB = 0;
+    return ringReadPair(ch, ch, v, &dummy, &dA, &dB);
 }
 
 // Terminal-state funnel: teardown FIRST (before anything can early-return),
@@ -231,6 +459,16 @@ static int finishCheck(int result, const char* hintText, const char* valFmt, ...
     return result;
 }
 
+// The terminal's long-form line (§4). Set before finishCheck; printed by
+// GuidedFlow on PASS AND FAIL. Spaces are fine here - unlike ck.val, this is
+// never a machine token.
+static void setDetail(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(ck.detail, sizeof(ck.detail), fmt, args);
+    va_end(args);
+}
+
 // Remove everything this check may have put on the board. Idempotent; the
 // single teardown funnel for pass / fail / timeout / abort. DAC and rails
 // go back to globalState.power TRUTH (0 V before power_on commits; the
@@ -244,14 +482,27 @@ static void checkTeardown(void) {
         // charge discharges its rows through the still-closed legs here -
         // fine, an aborted check owes no stranded charge.)
         setDac0voltage(globalState.power.dac0, 0, 0);
+        // The three stimulus legs. PRESENCE still builds the OLD top-side
+        // chain (DAC0->ISENSE_PLUS, ISENSE_MINUS->rowA, rowB->GND) because it
+        // charges rather than measures current; continuity/vf build the
+        // ground-side one (DAC0->rowA, rowB->ISENSE_PLUS, ISENSE_MINUS->GND).
+        // chainHeadA/B remember which pair each leg actually used so teardown
+        // never has to re-derive the topology.
         if (ck.chainAdded[0]) {
-            removed |= globalState.removeEphemeralConnection(DAC0, ISENSE_PLUS, err, false, 0);
+            removed |= globalState.removeEphemeralConnection(ck.legNode[0][0], ck.legNode[0][1], err, false, 0);
         }
         if (ck.chainAdded[1]) {
-            removed |= globalState.removeEphemeralConnection(ISENSE_MINUS, ck.chainRowA, err, false, 0);
+            removed |= globalState.removeEphemeralConnection(ck.legNode[1][0], ck.legNode[1][1], err, false, 0);
         }
         if (ck.chainAdded[2]) {
-            removed |= globalState.removeEphemeralConnection(ck.chainRowB, GND, err, false, 0);
+            removed |= globalState.removeEphemeralConnection(ck.legNode[2][0], ck.legNode[2][1], err, false, 0);
+        }
+        // Option 1's two sense bridges.
+        if (ck.chainAdded[3]) {
+            removed |= globalState.removeEphemeralConnection(ck.legNode[3][0], ck.legNode[3][1], err, false, 0);
+        }
+        if (ck.chainAdded[4]) {
+            removed |= globalState.removeEphemeralConnection(ck.legNode[4][0], ck.legNode[4][1], err, false, 0);
         }
         if (!ck.presStranded) {
             for (int i = 0; i < ck.presLegsAdded; i++) {
@@ -261,7 +512,15 @@ static void checkTeardown(void) {
         }
         ck.presLegsAdded = 0;
         ck.chainLive = false;
-        ck.chainAdded[0] = ck.chainAdded[1] = ck.chainAdded[2] = false;
+        for (int i = 0; i < 5; i++) ck.chainAdded[i] = false;
+    }
+    // Option 1 holds its two sense channels for the whole check (unlike the
+    // one-shot taps, which acquire and release per tap). Hand them back on
+    // EVERY exit path - a mid-check abort included, which is why this sits in
+    // the teardown funnel and not at the end of the happy path.
+    if (ck.senseAdcA >= 0 || ck.senseAdcB >= 0) {
+        infraReleaseAdc(INFRA_ADC_SCAN);
+        ck.senseAdcA = ck.senseAdcB = -1;
     }
     if (ck.oscGpioIdx >= 0) {
         removed |= globalState.removeEphemeralConnection(ck.oscTarget,
@@ -296,15 +555,22 @@ static void checkTeardown(void) {
 
 static const int kTapHardFailLimit = 8;
 
-static int tapCycleNode(int node, float* outV, float* outDrift) {
+// preferAdc / adcUsed: rail_sane compares every row against the RAIL's own
+// reading, so both taps want the same channel - that is what makes "ADC gain
+// error genuinely cancels" true rather than aspirational (§1.6/§3). A hint is
+// never a reservation; adcUsed reports what was actually granted.
+static int tapCycleNode(int node, float* outV, float* outDrift,
+                        int preferAdc = -1, int* adcUsed = nullptr) {
     if (ck.phase == CkPhase::TAP_REQUEST) {
         if (millis() < ck.tapBackoffUntilMs) return 0;
-        if (requestNodeTap(node)) ck.phase = CkPhase::TAP_WAIT;
+        if (requestNodeTap(node, preferAdc)) ck.phase = CkPhase::TAP_WAIT;
         // else: a stale in-flight tap is draining - retry next poll
         return 0;
     }
     float v, d;
-    int r = nodeTapResult(&v, &d);
+    int usedAdc = -1;
+    int r = nodeTapResult(&v, &d, &usedAdc);
+    if (adcUsed) *adcUsed = usedAdc;
     if (r == 0) return 0;
     if (r == -2) {
         ck.phase = CkPhase::TAP_REQUEST;
@@ -409,63 +675,138 @@ static int tapCyclePair(int n1, int n2, float* outV1, float* outV2) {
 // Begin
 // ---------------------------------------------------------------------------
 
-// Build + energize the continuity/vf stimulus chain, in TWO stages:
+// Add one leg and remember its endpoints for the teardown funnel.
+static bool addLeg(int slot, int n1, int n2) {
+    String err;
+    ck.legNode[slot][0] = n1;
+    ck.legNode[slot][1] = n2;
+    ck.chainAdded[slot] = globalState.addEphemeralConnection(n1, n2, err, false, 0);
+    return ck.chainAdded[slot];
+}
+
+// Build + energize the continuity/vf stimulus chain: GROUND-SIDE SHUNT plus
+// Option 1's sense bridges, ALL FIVE LEGS IN ONE refreshLocalConnections.
 //
-//   stage 1 (baseline): DAC0 -> ISENSE_PLUS (INA0's shunt is the ammeter),
-//                       ISENSE_MINUS -> rowA - and NO GND return, so no
-//                       loop exists through the part yet
-//   stage 2 (chainComplete): + rowB -> GND, the real measurement
+//   DAC0 --- rowA --- [part] --- rowB --- ISENSE_PLUS
+//                                          [2 ohm shunt R1, INA0]
+//                                        ISENSE_MINUS --- GND
+//   rowA --- ADC(chA)          rowB --- ADC(chB)      (high-Z sense legs)
 //
-// Why the baseline: the CURR_SENSE- net carries a constant board-internal
-// load - bench-measured ~2.3 mA at 3.3 V on V5 r7 with the shunt fed and
-// NOTHING routed downstream (identical on every row tried; scales with the
-// stimulus voltage; suspect: the U12 DAC_1-repurpose path hanging on
-// CURR_SENSE). Raw INA current is therefore part current PLUS that sink -
-// enough to false-pass an empty row against a ~2 mA band. Stage 1 measures
-// the sink at the exact stimulus voltage each run; the check evaluates
-// (total - baseline). All ephemeral (LED option 0), one refresh per stage;
-// the teardown funnel cleans up any partial chain.
+// WHY THE SHUNT MOVED TO THE GROUND SIDE (invest-measurement.md §1.2, proved
+// on the bench 2026-08-21 before this was written). The CURR_SENSE- net
+// carries a constant board-internal sink: with the OLD top-side chain
+// (DAC0->ISENSE_PLUS, ISENSE_MINUS->rowA, rowB->GND) and NO part, INA0 read
+// 2.319 mA - every milliamp of it through the shunt, which is why the old
+// code had to measure and subtract a baseline, and why that subtraction
+// systematically UNDER-reported part current (under load the CURR_SENSE- node
+// sits lower, so the sink draws less than its unloaded baseline). With the
+// shunt on the ground side the same empty chain reads 0.000 mA: the sink now
+// hangs DOWNSTREAM of the shunt, where it can only split current that has
+// already been counted. Positive control from the same session: bridging
+// rowA to rowB read 16.17 mA, so the ISENSE_MINUS->GND leg really does route
+// and really does close the loop. The BASE_SETTLE / BASE_SAMPLE / CHAIN_GROW
+// baseline dance and its second refresh are gone with it.
+//
+// WHY THE SENSE LEGS RIDE THE SAME REFRESH (invest-vf-noroute.md §8 Option 1).
+// The one-shot tap builder plans a sense route ALONE, in three tiers, after
+// the stimulus chain has already claimed the escape lanes of the very chip
+// the rows under test live on - task 2 measured that starving with
+// bounceOk=0x00, i.e. not one of chips A-H could serve as a bounce. Adding
+// rowA->ADCx / rowB->ADCy as ordinary ephemeral bridges hands the whole
+// problem to the FULL router, which plans stimulus and sense together, has
+// far more route shapes, and may lawfully share the target net's own lanes.
+// ADC bridges are exempt from fillUnusedPaths duplication, and the refresh
+// passes fillUnused=0 anyway. Cost: 5 of the 8 ephemeral slots and two ADC
+// channels held for the whole check.
+//
+// No current flows in the sense legs (the ADC path is a ~1M divider), so
+// every ohm of stimulus-path resistance drops out of V_rowA - V_rowB. That is
+// the whole 4-wire fix: R = (V_A - V_B) / I_part contains no crosspoint
+// count, no crosspoint resistance, no DAC output impedance and no sink.
 static bool chainBegin(int rowA, int rowB, float stimulusVolts) {
     ck.chainRowA = rowA;
     ck.chainRowB = rowB;
     ck.stimVolts = stimulusVolts;
     ck.chainLive = true; // set BEFORE the adds so teardown always runs
-    String err;
-    ck.chainAdded[0] = globalState.addEphemeralConnection(DAC0, ISENSE_PLUS, err, false, 0);
-    ck.chainAdded[1] = ck.chainAdded[0] &&
-        globalState.addEphemeralConnection(ISENSE_MINUS, rowA, err, false, 0);
-    if (!ck.chainAdded[1]) return false;
+
+    // Channels FIRST - the user-claimed-ADC exclusion has to pick before the
+    // bridges are authored. infraAcquireAdc's keep-what-you-own rule is gated
+    // on the candidate mask, so masking chA's bit out of the second call is
+    // what makes one user hold two channels. Mask 0x0F: ADC0-3 only (ADC4 is
+    // not on the calibrated tap path), allowSharedTdm=false (we are routing a
+    // BRIDGE onto the channel - riding along on TDM's would be a real
+    // electrical conflict, not a shared read).
+    ck.senseAdcA = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);
+    if (ck.senseAdcA >= 0) {
+        ck.senseAdcB = infraAcquireAdc(INFRA_ADC_SCAN,
+                                       (uint8_t)(0x0F & ~(1u << ck.senseAdcA)), false);
+    }
+    if (ck.senseAdcA < 0 || ck.senseAdcB < 0) {
+        // Both free channels are user-bridged (the 555 file does exactly this
+        // with ADC0/ADC1). Fall back to task 2's sequential-same-ADC one-shot
+        // taps, which acquire ONE channel per tap under NVSCAN - §1.6 calls
+        // that the preferred same-ADC mode anyway, so this is a degrade in
+        // routing robustness, not in accuracy.
+        infraReleaseAdc(INFRA_ADC_SCAN);
+        ck.senseAdcA = ck.senseAdcB = -1;
+        ck.senseMode = SenseMode::TAPS;
+    } else {
+        ck.senseMode = SenseMode::RING;
+    }
+
+    bool ok = addLeg(0, DAC0, rowA) &&
+              addLeg(1, rowB, ISENSE_PLUS) &&
+              addLeg(2, ISENSE_MINUS, GND);
+    if (ok && ck.senseMode == SenseMode::RING) {
+        ok = addLeg(3, rowA, ADC0 + ck.senseAdcA) &&
+             addLeg(4, rowB, ADC0 + ck.senseAdcB);
+    }
+    if (!ok) return false;
+
     refreshLocalConnections(0, 0, 0); // LED option 0: no visual disruption
     waitCore2();
+
+    // The router's own verdict, read while it is still about THIS refresh.
+    // A stimulus leg that could not be placed is a hard, honest setup failure.
+    if (routeRefused(DAC0, rowA) || routeRefused(rowB, ISENSE_PLUS) ||
+        routeRefused(ISENSE_MINUS, GND)) {
+        return false;
+    }
+    // A SENSE leg that could not be placed is different: the old check had no
+    // sense route at all and still ran, so refusing here would make a check
+    // unrunnable where it used to work (§1.9's standing rule). Degrade to the
+    // taps instead and say so once.
+    if (ck.senseMode == SenseMode::RING &&
+        (routeRefused(rowA, ADC0 + ck.senseAdcA) ||
+         routeRefused(rowB, ADC0 + ck.senseAdcB))) {
+        Serial.printf("  sense: chain routed but a sense bridge did not "
+                      "(rows %d/%d) - falling back to one-shot taps\n\r", rowA, rowB);
+        ck.senseMode = SenseMode::TAPS;
+    }
+
     // save=0: state truth stays at the guide's safe 0 V - the slot cannot
     // persist the stimulus, and infra's DAC0 probe-power candidate stays
     // non-viable (it reads state) for the whole check.
-    setDac0voltage(stimulusVolts, 0, 0);
+    // Held at ZERO first: OFS_SAMPLE wants the zero-stimulus offset of the
+    // whole isense path, which is also the leak test the ground-side topology
+    // has to keep passing.
+    setDac0voltage(0.0f, 0, 0);
     ck.stimAppliedMs = millis();
     ck.inaSum = 0;
     ck.inaCount = 0;
     ck.inaLastMs = currentSenseState.lastUpdatedMs;
-    ck.phase = CkPhase::BASE_SETTLE;
+    ck.phase = CkPhase::OFS_SETTLE;
     return true;
 }
 
-// Stage 2: stimulus off for the topology change (no live voltage while the
-// refresh rewires crosspoints), add the GND return, re-energize.
-static bool chainComplete(void) {
-    setDac0voltage(globalState.power.dac0, 0, 0);
-    String err;
-    ck.chainAdded[2] =
-        globalState.addEphemeralConnection(ck.chainRowB, GND, err, false, 0);
-    if (!ck.chainAdded[2]) return false;
-    refreshLocalConnections(0, 0, 0);
-    waitCore2();
-    setDac0voltage(ck.stimVolts, 0, 0);
-    ck.stimAppliedMs = millis();
-    ck.inaSum = 0;
-    ck.inaCount = 0;
-    ck.inaLastMs = currentSenseState.lastUpdatedMs;
-    ck.phase = CkPhase::STIM_SETTLE;
-    return true;
+// Does this rail_sane run owe a reference tap? Only power-class rows are
+// compared against the measured rail; a GND-only run needs no reference (the
+// breadboard minus rails are hard ground - §3 step 3).
+static bool railSaneNeedsRef(void) {
+    for (int i = 0; i < ck.numRows; i++) {
+        if (ck.rowClass[i] == 1) return true;
+    }
+    return false;
 }
 
 // Collect the class-tagged rows of every placed part (rail_sane).
@@ -501,6 +842,7 @@ void guideCheckBegin(const GuideCheckRun& run) {
     ck.startMs = millis();
     ck.val[0] = '\0';
     ck.hint[0] = '\0';
+    ck.detail[0] = '\0';
     ck.phase = CkPhase::TAP_REQUEST;
 
     const GuideStep& st = *run.step;
@@ -609,16 +951,17 @@ void guideCheckBegin(const GuideCheckRun& run) {
             ck.chainRowB = presRowB;
             ck.chainLive = true; // BEFORE the adds: teardown always runs
             {
+                // PRESENCE keeps the OLD top-side chain deliberately: it
+                // CHARGES a row and then strands the charge, so the shunt is
+                // not in the measurement at all and the ground-side move
+                // (which exists to keep the CURR_SENSE- sink out of the
+                // ammeter) buys it nothing. Its legs are removed by the same
+                // funnel through legNode[].
                 String err;
-                ck.chainAdded[0] =
-                    globalState.addEphemeralConnection(DAC0, ISENSE_PLUS, err, false, 0);
-                bool ok = ck.chainAdded[0];
+                bool ok = addLeg(0, DAC0, ISENSE_PLUS);
                 if (ck.presGrounded) {
-                    ck.chainAdded[1] = ok &&
-                        globalState.addEphemeralConnection(ISENSE_MINUS, ck.chainRowA, err, false, 0);
-                    ck.chainAdded[2] = ck.chainAdded[1] &&
-                        globalState.addEphemeralConnection(ck.chainRowB, GND, err, false, 0);
-                    ok = ck.chainAdded[2];
+                    ok = ok && addLeg(1, ISENSE_MINUS, ck.chainRowA);
+                    ok = ok && addLeg(2, ck.chainRowB, GND);
                 } else {
                     for (int i = 0; ok && i < ck.numRows; i++) {
                         ok = globalState.addEphemeralConnection(ISENSE_MINUS, ck.rows[i],
@@ -646,6 +989,12 @@ void guideCheckBegin(const GuideCheckRun& run) {
 
         case GuideCheck::CONTINUITY:
         case GuideCheck::VF: {
+            // The INA poll runs at 50 ms, not 10 - so the §1.4 sample counts
+            // (4 offset + 8 loaded) cost ~600 ms on their own, plus two
+            // settles and the chain refresh. Raise the floor the way the
+            // presence case does rather than let a tight authored timeout
+            // false-fail a measurement that was going fine.
+            if (ck.timeoutMs < 1400) ck.timeoutMs = 1400;
             int rowA, rowB;
             if (!resolveRowPair(st, &rowA, &rowB)) {
                 finishCheck(GUIDE_CHECK_UNSUPPORTED,
@@ -665,38 +1014,67 @@ void guideCheckBegin(const GuideCheckRun& run) {
                             "check skipped (DAC0/ISENSE in use)", "skip");
                 break;
             }
-            // Band: author's min/max when meaningful; else derived from the
-            // part's value ("10k" -> I = 3.3 / (R + ~120 ohm path), +/-40%);
-            // else a permissive default. INA path floor: below ~0.15 mA the
-            // shunt reading is noise - refuse honestly rather than guess.
+            // CONTINUITY BANDS ARE OHMS NOW (invest-measurement.md §2.3) -
+            // the check measures resistance, so an author's min/max name
+            // ohms, not milliamps. That is a silent semantic flip for any
+            // file still carrying the old mA numbers, so TWO guards catch
+            // them; the shipped projects had theirs stripped in the same
+            // wave, and provisioning refreshes those files on a version bump.
             if (ck.check == GuideCheck::CONTINUITY) {
-                if (st.max > st.min) {
+                if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
+                    const PartDefinition& p = globalState.parts.parts[st.partIdx];
+                    ParsedPartValue pv = parsePartValue(p.value, p.typeStr);
+                    if (pv.kind == PartValueKind::OHMS) ck.rNom = pv.v;
+                    ck.tolAuthorPct = p.tol;
+                }
+                bool authored = (st.max > st.min);
+                bool legacy = false;
+                if (authored) {
+                    if (ck.rNom > 0.0f) {
+                        // GUARD 1 (value parses): explicit bounds that do not
+                        // BRACKET the nominal value are not ohms. 555 R3's old
+                        // "5.0-15.0" mA would read as 5-15 ohms and fail a real
+                        // 330 - and a max<5 test alone would miss it.
+                        legacy = !(st.min <= ck.rNom && ck.rNom <= st.max);
+                    } else {
+                        // GUARD 2 (value-less part): no real resistor band
+                        // lives below 5 ohms, while every old mA band does.
+                        legacy = (st.max < 5.0f);
+                    }
+                }
+                if (authored && !legacy) {
                     ck.bandLo = st.min;
                     ck.bandHi = st.max;
+                    ck.bandFromAuthor = true;
                 } else {
-                    float ohms = -1.0f;
-                    if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
-                        ohms = parseResistanceOhms(
-                            globalState.parts.parts[st.partIdx].value);
+                    if (legacy) {
+                        Serial.printf("  min/max look like legacy mA (%.3g-%.3g) - "
+                                      "ignoring, using the value-derived ohm band\n\r",
+                                      (double)st.min, (double)st.max);
                     }
-                    if (ohms > 0.0f) {
-                        float i_mA = 3.3f / (ohms + 120.0f) * 1000.0f;
-                        if (i_mA < 0.15f) {
-                            finishCheck(GUIDE_CHECK_UNSUPPORTED,
-                                        "resistance too large for the INA path", "toohighR");
-                            break;
-                        }
-                        ck.bandLo = 0.6f * i_mA;
-                        ck.bandHi = 1.4f * i_mA + 0.5f;
+                    if (ck.rNom > 0.0f) {
+                        guideResistorBand(ck.rNom, ck.tolAuthorPct, &ck.bandLo, &ck.bandHi);
                     } else {
-                        ck.bandLo = 0.2f;
-                        ck.bandHi = 50.0f;
+                        // §2.4: no value, no usable bounds (a jumper wire) -
+                        // "something conducts" is the only honest verdict.
+                        ck.bandLo = 0.0f;
+                        ck.bandHi = 100000.0f;
                     }
                 }
-                if (!chainBegin(rowA, rowB, 3.3f)) {
+                // §1.5's measurable ceiling. At 5 V the loop still delivers
+                // ~25 uA (one useful multiple of the shunt's 5 uA LSB) at
+                // ~200k; past 470k there is nothing to measure, so say so
+                // instead of guessing. This replaces the old 0.15 mA floor.
+                if (ck.rNom > 470000.0f) {
+                    finishCheck(GUIDE_CHECK_UNSUPPORTED,
+                                "resistance too large to measure - placed unverified",
+                                "toohighR");
+                    break;
+                }
+                if (!chainBegin(rowA, rowB, guideStimulusVolts(ck.rNom))) {
                     finishCheck(GUIDE_CHECK_FAIL, "stimulus chain routing failed", "setup");
                 }
-            } else { // VF
+            } else { // VF - min/max stay VOLTS, untouched by the ohm flip
                 ck.bandLo = (st.max > st.min) ? st.min : 0.5f;
                 ck.bandHi = (st.max > st.min) ? st.max : 2.9f;
                 if (!chainBegin(rowA, rowB, 3.0f)) { // keep stimulus <= 3.3 V
@@ -832,8 +1210,12 @@ void guideCheckBegin(const GuideCheckRun& run) {
                 ck.railTransient = true;
                 ck.stimAppliedMs = millis();
                 ck.phase = CkPhase::RAIL_SETTLE; // §5.2: wait 100 ms
+            } else if (railSaneNeedsRef()) {
+                // Rails already live: skip the settle, go straight to the
+                // reference tap (§3 step 1).
+                ck.phase = CkPhase::RAIL_REF;
             }
-            // else: rails already live (or a verify step) - measure directly.
+            // else: GND-class rows only - no reference tap is owed.
             break;
         }
 
@@ -849,9 +1231,193 @@ void guideCheckBegin(const GuideCheckRun& run) {
 // ---------------------------------------------------------------------------
 
 // The rail target a VCC-class row is compared against: the transient values
-// while this check applied them, state truth otherwise.
+// while this check applied them, state truth otherwise. §3 keeps this only as
+// the SETPOINT the measured rail is gated against - rows are compared to the
+// measurement, not to this.
 static float railSaneTopTarget(void) {
     return ck.railTransient ? ck.script->topRail : globalState.power.topRail;
+}
+
+// ---------------------------------------------------------------------------
+// Measurement helpers (continuity / vf)
+// ---------------------------------------------------------------------------
+
+// One FRESH shunt sample, on a Peripherals-poll tick we have not counted yet.
+// The 10 ms poll re-asks the chip from serviceInner (which the guide loop
+// pumps between check polls); we only watch the stamp. Same pattern the old
+// current_mA averaging used - the field read is the new part.
+static bool inaAccumulateFresh(void) {
+    if (!currentSenseState.active) return false;
+    if (currentSenseState.lastUpdatedMs == ck.inaLastMs) return false;
+    if (currentSenseState.lastUpdatedMs <= ck.stimAppliedMs) return false;
+    ck.inaLastMs = currentSenseState.lastUpdatedMs;
+    ck.inaSum += inaShuntCurrent_mA();
+    ck.inaCount++;
+    return true;
+}
+
+// "105uA" / "4.20mA" - three significant figures either side of 1 mA.
+static void formatCurrent(float mA, char* out, size_t n) {
+    float a = fabsf(mA);
+    if (a < 1.0f) snprintf(out, n, "%.0fuA", (double)(mA * 1000.0f));
+    else          snprintf(out, n, "%.2fmA", (double)mA);
+}
+
+// The signed scan-estimated current through one live path, when the net
+// voltage scan happens to know it. Used ONLY as a printed diagnostic.
+static bool scanCurrentFor(int n1, int n2, float* out) {
+    ConnectionState& c = globalState.connections;
+    for (int i = 0; i < c.numPaths && i < MAX_BRIDGES; i++) {
+        int a = c.paths[i].node1, b = c.paths[i].node2;
+        if (!((a == n1 && b == n2) || (a == n2 && b == n1))) continue;
+        if (!pathCurrentKnown(i)) return false;
+        *out = pathCurrentSigned_mA(i);
+        return true;
+    }
+    return false;
+}
+
+// invest-measurement.md §1.7's two cross-checks. NEITHER can fail a part -
+// they print, and that is all.
+static void senseCrosschecks(void) {
+    const float i0 = fabsf(ck.iPart_mA);
+
+    // (1) INA1 (0x41), whose 2 ohm R57 sits in DAC0's OUTPUT path, sees the
+    // total current DAC0 sources. In this topology that should be the part
+    // current; a persistent excess means something outside the part path is
+    // drawing from the stimulus. Read-only - INA1's configuration is as
+    // untouchable as INA0's, and nothing else consumes its conversion flag in
+    // steady state.
+    float i1 = fabsf(INA1.getCurrent_mA());
+    if (INA1.getLastError() == 0 && (i1 - i0) > (0.1f * i0 + 0.2f)) {
+        Serial.printf("  note: INA1 sees %.2f mA leaving DAC0 but INA0 measured "
+                      "%.2f mA through the part - current is leaking outside the "
+                      "part path\n\r", (double)i1, (double)i0);
+    }
+
+    // (2) The net scan's own Ohm's-law estimate for the rowB leg, LOG ONLY and
+    // only where it has the resolution to mean anything (>= 2 mA).
+    //
+    // TASK #32 IS OPEN (CodeDocs/DEV_MERGE_HANDOFF.md): scan-vs-INA agreement
+    // was re-proven at exactly ONE operating point after the pair-tap
+    // hardening, +/-6 % per-route structure remains, and the regression window
+    // (rows 34-79) was never bisected. The handoff says to leave #32 open
+    // until Kevin agrees the number holds - so this disagreement NEVER fails a
+    // part, and the 25 % threshold is a conversation starter, not a spec.
+    float iScan = 0;
+    if (i0 >= 2.0f && scanCurrentFor(ck.chainRowB, ISENSE_PLUS, &iScan)) {
+        float d = fabsf(fabsf(iScan) - i0);
+        if (d > 0.25f * i0) {
+            Serial.printf("  note: net-scan estimates %.2f mA on the rowB leg vs "
+                          "INA0's %.2f mA (>25%% apart; task #32 is open - "
+                          "diagnostic only)\n\r", (double)iScan, (double)i0);
+        }
+    }
+}
+
+// R = (V_A - V_B) / I_part, and the honest verdicts around it (§4).
+static void evaluateContinuity(void) {
+    const GuideStep& st = *ck.step;
+    const char* partName = "R";
+    if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
+        partName = globalState.parts.parts[st.partIdx].name;
+    }
+    char iStr[16];
+    formatCurrent(ck.iPart_mA, iStr, sizeof(iStr));
+    char loStr[12], hiStr[12];
+    formatOhms(ck.bandLo, loStr, sizeof(loStr));
+    formatOhms(ck.bandHi, hiStr, sizeof(hiStr));
+
+    // §1.9's last resort: no voltage at all. Judge the current against a WIDE
+    // plausibility band derived from R_nom assuming 0-600 ohm of unknown path,
+    // and mark the value `~` so it can never be read as a measured resistance.
+    if (!ck.haveVsense) {
+        float iLo = ck.stimVolts / (1.4f * ck.rNom + 600.0f) * 1000.0f;
+        float iHi = 1.4f * ck.stimVolts / ck.rNom * 1000.0f;
+        bool ok = (fabsf(ck.iPart_mA) >= iLo && fabsf(ck.iPart_mA) <= iHi);
+        char nomStr[12];
+        formatOhms(ck.rNom, nomStr, sizeof(nomStr));
+        setDetail("%s: R NOT measured (no sense route) - %s, plausible band "
+                  "%.3g-%.3g mA for %s", partName, iStr, (double)iLo, (double)iHi, nomStr);
+        char hint[96];
+        snprintf(hint, sizeof(hint),
+                 "R not measured (no sense route) - current %s %s for %s",
+                 iStr, ok ? "is plausible" : "is NOT plausible", nomStr);
+        finishCheck(ok ? GUIDE_CHECK_PASS : GUIDE_CHECK_FAIL, hint, "~%s", iStr);
+        return;
+    }
+
+    const float vPart = ck.vSenseA - ck.vSenseB;
+    // The measurable floor: one useful multiple of the shunt's 5 uA LSB. Below
+    // it the division is noise over noise, and "open" is the true answer for
+    // every part a guide step actually places.
+    if (fabsf(ck.iPart_mA) < 0.025f) {
+        setDetail("%s: open (%s at %.1fV across the rows; band %s-%s)",
+                  partName, iStr, (double)ck.stimVolts, loStr, hiStr);
+        finishCheck(GUIDE_CHECK_FAIL,
+                    "no conduction - part missing, or a leg not seated?", "open");
+        return;
+    }
+    const float rMeas = vPart / (ck.iPart_mA / 1000.0f);
+    char rStr[12];
+    formatOhms(rMeas, rStr, sizeof(rStr));
+    const bool pass = (rMeas >= ck.bandLo && rMeas <= ck.bandHi);
+    setDetail("%s: %s (band %s-%s, %s @ %.1fV)", partName, rStr, loStr, hiStr,
+              iStr, (double)ck.stimVolts);
+    if (pass) {
+        finishCheck(GUIDE_CHECK_PASS, nullptr, "%s", rStr);
+        return;
+    }
+    // A dead short reads as a short, not as "wrong value" - the two need
+    // different things done about them.
+    if (rMeas < 5.0f) {
+        finishCheck(GUIDE_CHECK_FAIL,
+                    "reads as a short - are the legs bridging the ravine?", "short");
+        return;
+    }
+    char hint[96];
+    if (ck.rNom > 0.0f && !ck.bandFromAuthor) {
+        char nomStr[12];
+        formatOhms(ck.rNom, nomStr, sizeof(nomStr));
+        const float tolMeas = (ck.rNom <= 10000.0f) ? 5.0f
+                            : (ck.rNom <= 100000.0f) ? 10.0f : 25.0f;
+        const float tolTotal = ((ck.tolAuthorPct > 0) ? (float)ck.tolAuthorPct : 15.0f)
+                               + tolMeas;
+        snprintf(hint, sizeof(hint), "reads %s, expected %s +/-%.0f%% - wrong part?",
+                 rStr, nomStr, (double)tolTotal);
+    } else {
+        snprintf(hint, sizeof(hint), "reads %s, expected %s-%s - wrong part?",
+                 rStr, loStr, hiStr);
+    }
+    finishCheck(GUIDE_CHECK_FAIL, hint, "%s", rStr);
+}
+
+// Vf = V_A - V_B, now reported WITH the current it was measured at (§1.10).
+static void evaluateVf(void) {
+    const GuideStep& st = *ck.step;
+    const char* partName = "LED";
+    if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
+        partName = globalState.parts.parts[st.partIdx].name;
+    }
+    const float vf = ck.vSenseA - ck.vSenseB;
+    char iStr[16];
+    formatCurrent(ck.iPart_mA, iStr, sizeof(iStr));
+    setDetail("%s vf %.2fV @ %s (band %.2f-%.2fV)", partName, (double)vf, iStr,
+              (double)ck.bandLo, (double)ck.bandHi);
+    const bool conducting = (fabsf(ck.iPart_mA) > 0.5f);
+    const bool inBand = (vf >= ck.bandLo && vf <= ck.bandHi);
+    if (conducting && inBand) {
+        finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV", (double)vf);
+    } else if (!conducting) {
+        // Full stimulus across the gap, no current: missing and reversed are
+        // electrically identical from here - §5.2's honest "flip it?".
+        finishCheck(GUIDE_CHECK_FAIL,
+                    "no current - LED missing or reversed (flip it?)",
+                    "%.2fV", (double)vf);
+    } else {
+        finishCheck(GUIDE_CHECK_FAIL, "Vf outside the expected band",
+                    "%.2fV", (double)vf);
+    }
 }
 
 int guideCheckPoll(char* valOut, size_t valLen) {
@@ -964,113 +1530,152 @@ int guideCheckPoll(char* valOut, size_t valLen) {
 
         case GuideCheck::CONTINUITY:
         case GuideCheck::VF: {
-            // Shared stimulus staging: baseline (no GND return) -> grow ->
-            // loaded sample. Only the evaluation at the end differs.
-            if (ck.phase == CkPhase::BASE_SETTLE) {
-                if (millis() - ck.stimAppliedMs >= 60) ck.phase = CkPhase::BASE_SAMPLE;
-                break;
-            }
-            if (ck.phase == CkPhase::BASE_SAMPLE) {
-                // Average 4 FRESH INA polls (Peripherals re-asks the chip
-                // every 10 ms from serviceInner - we just watch the stamp).
-                if (currentSenseState.active &&
-                    currentSenseState.lastUpdatedMs != ck.inaLastMs &&
-                    currentSenseState.lastUpdatedMs > ck.stimAppliedMs) {
+            // THE MEASUREMENT MACHINE (invest-measurement.md §1.4, with the
+            // Option-1 fold). Stages, all polled:
+            //
+            //   OFS_SETTLE   chain live, DAC0 held at 0 V
+            //   OFS_SAMPLE   4 fresh shunt samples -> I_ofs; |I_ofs| < 0.3 mA
+            //                or the isense path is leaking
+            //   (energize)   DAC0 -> V_stim, save=0
+            //   STIM_SETTLE  60 ms
+            //   STIM_SAMPLE  8 fresh shunt samples -> I_raw; I_part = raw-ofs
+            //   V_READ       the two sense channels, one ring dwell
+            //   compute      R = (V_A - V_B) / I_part   |   Vf = V_A - V_B
+            //
+            // Current comes from INA0's SHUNT-VOLTAGE register, not its
+            // current register: 10 uV/LSB across the 2 ohm R1 is 5 uA/LSB,
+            // six times finer than the calibrated 30.5 uA/LSB current LSB
+            // that turned the bench's 47k (70 uA = 2 counts) into val=0.03mA.
+            // The check NEVER touches INA0's configuration - the Peripherals
+            // poll owns the chip's cadence and its conversion flag.
+            if (ck.phase == CkPhase::OFS_SETTLE) {
+                if (millis() - ck.stimAppliedMs >= 30) {
+                    ck.phase = CkPhase::OFS_SAMPLE;
+                    ck.inaSum = 0;
+                    ck.inaCount = 0;
                     ck.inaLastMs = currentSenseState.lastUpdatedMs;
-                    ck.inaSum += currentSenseState.current_mA;
-                    ck.inaCount++;
-                }
-                if (ck.inaCount >= 4) {
-                    ck.inaBaseline = ck.inaSum / ck.inaCount;
-                    ck.phase = CkPhase::CHAIN_GROW;
                 }
                 break;
             }
-            if (ck.phase == CkPhase::CHAIN_GROW) {
-                if (!chainComplete()) {
-                    finishCheck(GUIDE_CHECK_FAIL, "stimulus chain routing failed", "setup");
+            if (ck.phase == CkPhase::OFS_SAMPLE) {
+                inaAccumulateFresh();
+                if (ck.inaCount >= 4) {
+                    ck.iOfs_mA = ck.inaSum / ck.inaCount;
+                    // The ground-side topology's standing guarantee: with the
+                    // stimulus at 0 V nothing should be moving through the
+                    // shunt. The old top-side chain read 2.319 mA here (the
+                    // CURR_SENSE- sink); this one measured 0.000 mA on the
+                    // bench. A real reading now means the isense path picked
+                    // up something it should not have.
+                    if (fabsf(ck.iOfs_mA) > 0.3f) {
+                        setDetail("isense offset %.2f mA at 0 V stimulus "
+                                  "(expected < 0.3)", (double)ck.iOfs_mA);
+                        finishCheck(GUIDE_CHECK_FAIL,
+                                    "isense path is leaking - something else is "
+                                    "driving the sense chain",
+                                    "leak%.2fmA", (double)ck.iOfs_mA);
+                        break;
+                    }
+                    setDac0voltage(ck.stimVolts, 0, 0); // save=0 as always
+                    ck.stimAppliedMs = millis();
+                    ck.phase = CkPhase::STIM_SETTLE;
                 }
                 break;
             }
             if (ck.phase == CkPhase::STIM_SETTLE) {
                 if (millis() - ck.stimAppliedMs >= 60) {
-                    ck.phase = (ck.check == GuideCheck::CONTINUITY)
-                                   ? CkPhase::STIM_SAMPLE
-                                   : CkPhase::TAP_REQUEST; // vf pair-taps A/B
-                }
-                break;
-            }
-            if (ck.check == GuideCheck::CONTINUITY) {
-                if (currentSenseState.active &&
-                    currentSenseState.lastUpdatedMs != ck.inaLastMs &&
-                    currentSenseState.lastUpdatedMs > ck.stimAppliedMs) {
+                    ck.phase = CkPhase::STIM_SAMPLE;
+                    ck.inaSum = 0;
+                    ck.inaCount = 0;
                     ck.inaLastMs = currentSenseState.lastUpdatedMs;
-                    ck.inaSum += currentSenseState.current_mA;
-                    ck.inaCount++;
-                }
-                if (ck.inaCount >= 4) {
-                    float i_mA = fabsf(ck.inaSum / ck.inaCount - ck.inaBaseline);
-                    bool pass = (i_mA >= ck.bandLo && i_mA <= ck.bandHi);
-                    finishCheck(pass ? GUIDE_CHECK_PASS : GUIDE_CHECK_FAIL,
-                                pass ? nullptr
-                                     : (i_mA < ck.bandLo
-                                            ? "current below band - part missing or wrong value?"
-                                            : "current above band - wrong value or a short?"),
-                                "%.2fmA", i_mA);
                 }
                 break;
             }
-            // ESCALATION PATH, if the bench ever noroutes here again:
-            // invest-vf-noroute.md §8 Option 1 - have chainBegin/chainComplete
-            // add the SENSE legs as ephemeral bridges too (rowA->ADC2,
-            // rowB->ADC3, after infraAcquireAdc picks channels), so the full
-            // router plans stimulus and sense together in one
-            // refreshLocalConnections. It has far more route shapes than the
-            // tap builder's three tiers, may lawfully share the GND net's
-            // existing lanes, and ADC bridges are exempt from duplication;
-            // the sampler then reads the ring channels directly, with no
-            // fastConnectPath at all, and a routing failure becomes an honest
-            // "stimulus chain routing failed" at setup. Costs: 5 of 8
-            // ephemeral slots, ADC channels held for the whole check, and the
-            // user-bridged-ADC exclusion has to pick channels first. Not built
-            // now because the sequential-same-ADC taps below need only ONE
-            // route at a time, which is what the bench actually starved on.
-            float vA, vB;
-            int r = tapCyclePair(ck.chainRowA, ck.chainRowB, &vA, &vB);
-            if (r == 0) break;
-            if (r == -2) {
-                // Per-node, like the presence case: an undifferentiated
-                // "noroute" is what made three bench retries say nothing.
-                finishCheck(GUIDE_CHECK_FAIL, "no sense route to the rows",
-                            "noroute@%d",
-                            (ck.tapFailNode > 0) ? ck.tapFailNode : ck.chainRowA);
+            if (ck.phase == CkPhase::STIM_SAMPLE) {
+                inaAccumulateFresh();
+                if (ck.inaCount >= 8) {
+                    ck.iPart_mA = ck.inaSum / ck.inaCount - ck.iOfs_mA;
+                    ck.phase = (ck.senseMode == SenseMode::RING)
+                                   ? CkPhase::V_READ
+                                   : CkPhase::TAP_REQUEST;
+                }
                 break;
             }
-            if (r == -1) {
-                finishCheck(GUIDE_CHECK_FAIL,
-                            "no stable reading across the part - is it seated?", "float");
-                break;
+
+            // ---- the voltage half -------------------------------------
+            if (ck.senseMode == SenseMode::RING) {
+                // Option 1's sampler: the sense legs are already closed as
+                // ordinary bridges, so this is a pure ring read - no
+                // fastConnectPath, no tier search, nothing that can starve.
+                float dA = 0, dB = 0;
+                if (!ringReadPair(ck.senseAdcA, ck.senseAdcB,
+                                  &ck.vSenseA, &ck.vSenseB, &dA, &dB)) {
+                    // A non-fresh window is transient (a resync, a lapped
+                    // dwell). Retry; the check timeout bounds the loop, and
+                    // eight misses in a row means the ring is not serving us.
+                    if (++ck.tapHardFails >= kTapHardFailLimit) {
+                        ck.tapHardFails = 0;
+                        Serial.println("  sense: ring would not serve a fresh "
+                                       "window - falling back to one-shot taps");
+                        ck.senseMode = SenseMode::TAPS;
+                        ck.phase = CkPhase::TAP_REQUEST;
+                    }
+                    break;
+                }
+                ck.tapHardFails = 0;
+                // ROUTED-OR-NOT, measured. rowA is wired straight to DAC0, so
+                // a sense leg that really landed MUST have followed the
+                // stimulus up. (rowB deliberately gets no such gate: ~0 V is
+                // its correct value in this topology and an unrouted channel
+                // reads the same - see the report's §1 limitation note.)
+                if (ck.vSenseA < 0.25f && ck.stimVolts >= 1.0f) {
+                    Serial.printf("  sense: rowA reads %.3f V under a %.1f V "
+                                  "stimulus - the sense bridge is not on the row; "
+                                  "falling back to one-shot taps\n\r",
+                                  (double)ck.vSenseA, (double)ck.stimVolts);
+                    ck.senseMode = SenseMode::TAPS;
+                    ck.phase = CkPhase::TAP_REQUEST;
+                    break;
+                }
+                ck.haveVsense = true;
+            } else if (ck.senseMode == SenseMode::TAPS) {
+                float vA, vB;
+                int r = tapCyclePair(ck.chainRowA, ck.chainRowB, &vA, &vB);
+                if (r == 0) break;
+                if (r == -2) {
+                    // §1.9: the old continuity check needed NO voltage tap,
+                    // so refusing here would make a check unrunnable where it
+                    // used to run. Degrade to a current-only plausibility
+                    // verdict instead - flagged with a leading `~` in val so
+                    // nobody mistakes it for a measured resistance.
+                    if (ck.check == GuideCheck::CONTINUITY && ck.rNom > 0.0f) {
+                        ck.senseMode = SenseMode::CURRENT;
+                        break;
+                    }
+                    finishCheck(GUIDE_CHECK_FAIL, "no sense route to the rows",
+                                "noroute@%d",
+                                (ck.tapFailNode > 0) ? ck.tapFailNode : ck.chainRowA);
+                    break;
+                }
+                if (r == -1) {
+                    finishCheck(GUIDE_CHECK_FAIL,
+                                "no stable reading across the part - is it seated?",
+                                "float");
+                    break;
+                }
+                ck.vSenseA = vA;
+                ck.vSenseB = vB;
+                ck.haveVsense = true;
             }
-            float vf = vA - vB;
-            // Part current = raw INA minus the dead-part baseline (the
-            // board-internal CURR_SENSE sink - see chainBegin).
-            float i_mA = currentSenseState.active
-                             ? fabsf(currentSenseState.current_mA - ck.inaBaseline)
-                             : 0.0f;
-            bool conducting = (i_mA > 0.5f);
-            bool inBand = (vf >= ck.bandLo && vf <= ck.bandHi);
-            if (conducting && inBand) {
-                finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV", vf);
-            } else if (!conducting) {
-                // Full stimulus across the gap, no current: missing and
-                // reversed are electrically identical from here - §5.2's
-                // honest "flip it?".
-                finishCheck(GUIDE_CHECK_FAIL,
-                            "no current - LED missing or reversed (flip it?)",
-                            "%.2fV", vf);
+
+            // ---- diagnostics (§1.7) - never a verdict, only a hint -----
+            senseCrosschecks();
+
+            // ---- the verdict -------------------------------------------
+            if (ck.check == GuideCheck::CONTINUITY) {
+                evaluateContinuity();
             } else {
-                finishCheck(GUIDE_CHECK_FAIL, "Vf outside the expected band",
-                            "%.2fV", vf);
+                evaluateVf();
             }
             break;
         }
@@ -1160,8 +1765,66 @@ int guideCheckPoll(char* valOut, size_t valLen) {
         }
 
         case GuideCheck::RAIL_SANE: {
+            // §3: MEASURE THE RAIL, THEN COMPARE THE ROWS TO THE MEASUREMENT.
+            //
+            // The old rule compared every row against the rail SETPOINT, but
+            // the net-scan work already proved this board's rails run ~220 mV
+            // below setpoint (`sources: 101=set5.00V/meas4.79V`). So a row at
+            // 4.74 V on a rail that really measures 4.78 V - a HEALTHY board -
+            // failed a +/-0.2 V setpoint test. Two gates now:
+            //   1. the rail itself vs its setpoint, generously (the BOARD check)
+            //   2. each power row vs the MEASURED rail, tightly, on the SAME
+            //      ADC channel so gain error genuinely cancels (the WIRING check)
             if (ck.phase == CkPhase::RAIL_SETTLE) {
-                if (millis() - ck.stimAppliedMs >= 100) ck.phase = CkPhase::TAP_REQUEST;
+                if (millis() - ck.stimAppliedMs >= 100) {
+                    ck.phase = railSaneNeedsRef() ? CkPhase::RAIL_REF
+                                                  : CkPhase::TAP_REQUEST;
+                }
+                break;
+            }
+            if (ck.phase == CkPhase::RAIL_REF) {
+                // Hand the wheel to the tap sub-machine, which owns
+                // TAP_REQUEST/TAP_WAIT; railRefPending is what says the tap
+                // now in flight is the RAIL's, not a row's.
+                ck.railRefPending = true;
+                ck.railAdc = -1;
+                ck.phase = CkPhase::TAP_REQUEST;
+                break;
+            }
+            if (ck.railRefPending) {
+                float v, d;
+                int adcUsed = -1;
+                int r = tapCycleNode(TOP_RAIL, &v, &d, -1, &adcUsed);
+                if (r == 0) break;
+                if (r == -2 || r == -1) {
+                    // The reference tap is an IMPROVEMENT, not a prerequisite:
+                    // refusing here would fail a check that used to pass. Fall
+                    // back to the setpoint comparison and say so once.
+                    Serial.printf("  rail: could not tap the rail itself "
+                                  "(%s) - comparing rows against the %.2fV "
+                                  "setpoint instead\n\r",
+                                  (r == -2) ? "no sense route" : "reads floating",
+                                  (double)railSaneTopTarget());
+                    ck.railMeasured = railSaneTopTarget();
+                    ck.railAdc = -1;
+                    ck.railRefPending = false;
+                    ck.tapHardFails = 0;
+                    break;
+                }
+                ck.railMeasured = v;
+                ck.railAdc = adcUsed;
+                ck.railRefPending = false;
+                // GATE 1, the board check. 0.25 V + 5 % is wide on purpose:
+                // it is asking "is the supply alive and roughly right", not
+                // "is it calibrated".
+                const float setpoint = railSaneTopTarget();
+                if (fabsf(v - setpoint) > (0.25f + 0.05f * fabsf(setpoint))) {
+                    setDetail("rail: meas %.2fV, set %.2fV - outside "
+                              "0.25V+5%% of setpoint", (double)v, (double)setpoint);
+                    finishCheck(GUIDE_CHECK_FAIL,
+                                "the rail itself is off - check power",
+                                "rail%.2fV", (double)v);
+                }
                 break;
             }
             int row = ck.rows[ck.rowIdx];
@@ -1173,7 +1836,7 @@ int guideCheckPoll(char* valOut, size_t valLen) {
             // timestamp-fresh != value-fresh deviation as VOLTAGE above).
             {
                 float d;
-                int r = tapCycleNode(row, &v, &d);
+                int r = tapCycleNode(row, &v, &d, ck.railAdc);
                 if (r == 0) break;
                 if (r == -2) {
                     finishCheck(GUIDE_CHECK_FAIL, "no sense route to the row",
@@ -1192,14 +1855,26 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                 if (ck.rowClass[ck.rowIdx] == 2) {
                     ok = (fabsf(v) <= 0.15f); // GND-class: 0 +/- 0.15 V
                 } else {
-                    ok = (fabsf(v - railSaneTopTarget()) <= 0.2f); // VCC: rail +/- 0.2 V
+                    // GATE 2, the wiring check: relative to the MEASURED rail,
+                    // through the same sense-path class and the same channel.
+                    float tol = 0.03f * fabsf(ck.railMeasured);
+                    if (tol < 0.15f) tol = 0.15f;
+                    float delta = fabsf(v - ck.railMeasured);
+                    ok = (delta <= tol);
+                    if (delta > fabsf(ck.railWorstDelta)) {
+                        ck.railWorstDelta = delta;
+                        ck.railWorstRow = row;
+                    }
                 }
                 if (!ok) {
+                    setDetail("rail: meas %.2fV (set %.2fV); row %d reads %.2fV",
+                              (double)ck.railMeasured, (double)railSaneTopTarget(),
+                              row, (double)v);
                     finishCheck(GUIDE_CHECK_FAIL,
                                 (ck.rowClass[ck.rowIdx] == 2)
                                     ? "gnd-class row is off 0V - miswired?"
-                                    : "power-class row is off the rail voltage - miswired?",
-                                "%.2fV@%d", v, row);
+                                    : "row is off the rail - miswired?",
+                                "%.2fV@%d", (double)v, row);
                     break;
                 }
                 ck.rowIdx++;
@@ -1211,9 +1886,19 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                     // hint...)`), and a rail_sane pass is the common case in
                     // every power_on step. Surfacing it on pass would print
                     // a disclaimer to the terminal AND the OLED on every
-                    // successful power-up. The value string still carries
-                    // what was actually measured.
-                    finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV@%d", v, row);
+                    // successful power-up. The detail line below is NOT a
+                    // disclaimer - it is the measurement, which §4 wants on
+                    // pass as well as fail.
+                    if (ck.railWorstRow > 0) {
+                        setDetail("rail: meas %.2fV (set %.2fV); worst row "
+                                  "delta %.2fV @%d", (double)ck.railMeasured,
+                                  (double)railSaneTopTarget(),
+                                  (double)ck.railWorstDelta, ck.railWorstRow);
+                    } else {
+                        setDetail("rail: %d gnd-class row(s) within 0.15V of 0",
+                                  ck.numRows);
+                    }
+                    finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV@%d", (double)v, row);
                 }
             }
             break;
@@ -1230,6 +1915,10 @@ int guideCheckPoll(char* valOut, size_t valLen) {
 
 const char* guideCheckHint(void) {
     return ck.hint;
+}
+
+const char* guideCheckDetail(void) {
+    return ck.detail;
 }
 
 void guideCheckAbort(void) {
@@ -1263,6 +1952,8 @@ int guideCheckPoll(char* valOut, size_t valLen) {
 const char* guideCheckHint(void) {
     return "electrical checks need V5 hardware";
 }
+
+const char* guideCheckDetail(void) { return ""; }
 
 void guideCheckAbort(void) {}
 

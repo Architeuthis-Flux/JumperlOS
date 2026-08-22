@@ -1950,6 +1950,17 @@ void guideTick(GuideSession& s) {
                                      s.checkVal, nullptr, pass ? "ok" : "FAIL");
             }
 
+            // THE MEASUREMENT IN WORDS, on PASS AND FAIL (invest-measurement
+            // §4: "show what it reads as it's placed", not "show it when it's
+            // wrong"). Terminal only - the OLED already got ck.val through
+            // ReadingDisplay above, and this line is a sentence, not a token.
+            const char* detail = guideCheckDetail();
+            if (measuredResult && detail != nullptr && detail[0] != '\0') {
+                Serial.print("  ");
+                Serial.println(detail);
+                Serial.flush();
+            }
+
             const char* hint = guideCheckHint();
             if (!pass && hint != nullptr && hint[0] != '\0') {
                 // AFTER the value, deliberately: the OLED ends on the
