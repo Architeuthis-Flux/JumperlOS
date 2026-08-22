@@ -88,6 +88,7 @@ parts:
   - name: "R1"
     type: resistor
     value: "10k"
+    tol: 5
     footprint: sip2
     row: 20
     placed: true
@@ -330,6 +331,11 @@ for k in sorted(found):
                    # key, default to expanded, and the serializer would omit it
                    # again - the wholesale-rewrite erasure class, invisible.
                    "placement: compact",
+                   # The same erasure class for wave 2's `tol:` (the author
+                   # tolerance the derived continuity band adds to tol_meas).
+                   # R1 is the only part that sets it, so this is the parse
+                   # half; the count assertion below is the emit half.
+                   "tol: 5",
                    "A: {offset: 0, connect: 52, class: signal}",
                    "B: {offset: 1, class: signal}",
                    # ...and the real overlays: section, so the hijack needle
@@ -343,6 +349,10 @@ for k in sorted(found):
           "plain bridge 55-42 (dup 2) survived the rewrite")
     check("frobnicate" not in rewritten,
           "unknown part key was tolerated on parse (and not resurrected)")
+    check(rewritten.count("tol:") == 1,
+          "tol: came back on exactly the ONE part that set it - an unset tol "
+          "is the 15% default and emitting 'tol: 0' would both lie and rewrite "
+          "every pre-wave-2 file")
     check(rewritten.count("placement:") == 1,
           "placement: came back on exactly the ONE part that set it - the "
           "other three are expanded, the default, which is never emitted "
