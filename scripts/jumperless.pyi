@@ -727,22 +727,36 @@ CURRENT_SLOT: int
 # ============================================================================
 
 def load_project(name_or_path: str) -> bool:
-    """Load a project's wiring into the live state
+    """Load a project, or any slot YAML, into the live state
 
-    A project wiring.yaml IS a slot YAML, so this takes the same loader the
-    Files browser uses: bridges, nets, power and any `parts:` section are
-    applied and routed immediately.
+    THE TWO FORMS MEAN DIFFERENT THINGS.
+
+    A NAME ("555") begins or re-opens a RUN of that project: it opens
+    /projects/555/555_<highest N>.yaml, or creates 555_1.yaml as a copy of the
+    project's wiring when there are no runs yet, and makes it the active
+    context. Load only - the guide and the companion script are `z`'s job.
+    This is deliberately NOT the shipped /projects/555/wiring.yaml: that file
+    is a read-only TEMPLATE, and adopting it as an auto-saving context is what
+    used to rewrite projects without their guide:/meta: sections.
+
+    A PATH (anything containing '/') is loaded literally through the same
+    adopting loader the Files browser uses: bridges, nets, power and any
+    `parts:` section are applied and routed immediately, and that file becomes
+    the active context. Use this for a run file, a slot file, or a
+    hand-written YAML. A project template loads this way too, but stays
+    read-only - saves to it are refused.
 
     Args:
-        name_or_path: "555" -> /projects/555/wiring.yaml.
+        name_or_path: "555" -> begin/re-open a run of project 555.
                       Anything containing '/' is used as a literal path.
 
     Returns:
-        True if the file loaded, False otherwise (the reason is printed)
+        True on success, False otherwise (the reason is printed)
 
     Example:
-        load_project("555")
-        load_project("/slots/slot3.yaml")
+        load_project("555")                       # run file, active context
+        load_project("/projects/555/555_2.yaml")  # that exact run
+        load_project("/slots/slot3.yaml")         # any slot YAML
     """
     ...
 
