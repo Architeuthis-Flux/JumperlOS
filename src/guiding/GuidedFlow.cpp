@@ -437,6 +437,47 @@ static void guideClearOverlays(void) {
 #endif
 }
 
+// THE DRAG TRAIL, and why the guide's every LED refresh is CLEAR-FIRST.
+//
+// Kevin, wave 3: ">>> dragging a part doesn't clear the LEDs behind it,
+// filling up the board".
+//
+// The overlays themselves were never the accumulator, and that is worth
+// stating because it is the obvious suspect: guideRenderFootprints() and
+// guideRenderTarget() both memset guideOverlayScratch and repaint it whole,
+// and GraphicOverlayState::addOverlay() memcpy-REPLACES the stored pixels of
+// an overlay that already exists. Register `_GUIDE_FP_` after a move and its
+// 300 cells describe the new footprint exactly, with nothing of the old one
+// left in them.
+//
+// The accumulation is one layer down, in the LED pipeline:
+//   1. renderGraphicOverlays() writes only NON-TRANSPARENT overlay pixels
+//      into the `leds` buffer (GraphicOverlays.cpp: `if (color == 0)
+//      continue;`). Cells that stopped being lit are not painted black -
+//      they are simply not painted.
+//   2. showNets() only lights rows that belong to a net (lightUpNet); it
+//      never clears the buffer either.
+//   3. clearLEDsExceptRails() runs ONLY when core 1 took a request carrying
+//      core1req::LED_CLEAR - i.e. a NEGATIVE requestLedShow() (main.cpp,
+//      `if (clearBeforeSend == 1)`).
+// The guide only ever posted requestLedShow(1). So every hole a footprint
+// ever occupied stayed lit at its last colour for the rest of the session,
+// and each move added its vacated rows to the pile: the board fills up.
+//
+// Highlighting.cpp:267/620 already solved exactly this bug this exact way
+// ("use a negative value to force clearBeforeSend, ensuring old highlights
+// are fully cleared"). One helper so no guide site can forget: the clear is
+// per FRAME and costs a memset on core 2, which is why "clear and rebuild
+// the whole _GUIDE_ namespace on every applied move" is affordable.
+//
+// This also fixes two ghosts nobody had named: browsing to the DONE view
+// removes `_GUIDE_TGT_` (its pixels used to stay lit under the summary), and
+// guideExitTail removes BOTH overlays (their pixels used to survive the guide
+// and sit on the board afterwards).
+static void guideShowLeds(void) {
+    requestLedShow(-1);   // negative = LED_CLEAR | LED_NETS
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
@@ -1357,7 +1398,7 @@ static bool guideMovePart(GuideSession& s, int partIdx, int newRow,
     globalState.markDirty();
     guidePersistProgress(s);
     guideRenderTarget(s, s.pulseOn);
-    requestLedShow(1);
+    guideShowLeds();
 
     Serial.print("\r\nGUIDE move part=");
     Serial.print(p.name);
@@ -1615,7 +1656,7 @@ void guideTick(GuideSession& s) {
             }
 
             guideRenderFootprints();
-            requestLedShow(1);
+            guideShowLeds();
 
             if (sc.numSteps == 0 || s.stepIdx >= sc.numSteps) {
                 s.state = GuideState::DONE;
@@ -1635,7 +1676,7 @@ void guideTick(GuideSession& s) {
             s.pulseOn = true;
             s.lastPulseMs = millis();
             guideRenderTarget(s, s.pulseOn);
-            requestLedShow(1);
+            guideShowLeds();
             if (st.probeConfirm) {
                 s.state = GuideState::STEP_PROBE_WAIT;
                 guideStatusLine(s, "PROBE_WAIT");
@@ -1649,12 +1690,12 @@ void guideTick(GuideSession& s) {
 
         case GuideState::STEP_WAIT:
         case GuideState::STEP_PROBE_WAIT: {
-            // ~2 Hz target pulse (rewrite colors + requestLedShow(1), §4.1).
+            // ~2 Hz target pulse (rewrite colors + a clear-first show, §4.1).
             if (millis() - s.lastPulseMs >= 250) {
                 s.lastPulseMs = millis();
                 s.pulseOn = !s.pulseOn;
                 guideRenderTarget(s, s.pulseOn);
-                requestLedShow(1);
+                guideShowLeds();
             }
             guideOledHotplugPoll();
 
@@ -2142,7 +2183,7 @@ void guideTick(GuideSession& s) {
                     oled.showMultiLineSmallText(head, true, true);
                 }
                 guideRenderTarget(s, false);   // stepIdx == numSteps -> clears TGT
-                requestLedShow(1);
+                guideShowLeds();
                 guideStatusLine(s, "DONE");
                 // Machine line for the HIL: the summary's three counters, in
                 // the grammar the status lines already use.
@@ -2234,7 +2275,7 @@ static void guideExitTail(GuideSession& s) {
     // the batching wheel-slide is gone.
     guideCheckAbort();
     guideClearOverlays();
-    requestLedShow(1);
+    guideShowLeds();
     rotaryDivider = s.savedRotaryDivider;
 
     if (!s.powerApplied) {
