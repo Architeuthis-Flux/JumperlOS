@@ -980,6 +980,28 @@ int JumperlessState::getEphemeralConnectionCount() const {
 }
 
 // Power management
+// A SETTER THAT WROTE THE SAME VALUE DID NOT MODIFY THE STATE (w3-t5).
+//
+// markDirty() used to fire unconditionally here and in setRailVoltage below,
+// which made every LOAD leave the state dirty: loadSlot/loadSlotFromPath end
+// in applyStateToHardware() -> setRailsAndDACs(0), which re-asserts the state's
+// OWN just-parsed topRail/bottomRail/dac0/dac1 with save=1. Four no-op writes,
+// four dirty marks, and ~1 s later the idle auto-save rewrote the file that had
+// just been read - a wholesale toYAML rewrite of a context nobody had touched.
+//
+// That is what broke T4's atomicity contract. The parse-failure restore arm in
+// loadSlotFromPath re-loads the prior context through exactly this tail, so
+// EVERY failed load dirtied the prior context and wrote its file, when the
+// contract says a failed load writes nothing. It is also what turned the
+// core-2 net-colour race into a file-visible bug (see serializeNets): the
+// spurious save fires within milliseconds of the net rebuild, often before
+// core 2's next assignNetColors pass has re-filled nets[].color.
+//
+// The undo record was already gated on `prev != voltage`; the dirty mark now
+// matches it. Float-exact comparison is right for the same reason it is right
+// for the undo gate - the re-assert hands back the identical float it parsed.
+// Note this can only ever SUPPRESS a dirty mark for a write that changed
+// nothing; it never clears an existing one, so no pending edit can be lost.
 void JumperlessState::setDacVoltage(int dacNum, float voltage) {
     float prev = (dacNum == 0) ? power.dac0 : power.dac1;
     if (dacNum == 0) {
@@ -987,7 +1009,9 @@ void JumperlessState::setDacVoltage(int dacNum, float voltage) {
     } else if (dacNum == 1) {
         power.dac1 = voltage;
     }
-    markDirty();
+    if (prev != voltage) {
+        markDirty();
+    }
 
     if (!g_undoApplying && prev != voltage) {
         undoRecordDacSet(dacNum, prev, voltage);
@@ -1005,7 +1029,11 @@ void JumperlessState::setRailVoltage(bool isTopRail, float voltage) {
     } else {
         power.bottomRail = voltage;
     }
-    markDirty();
+    // Same no-op gate as setDacVoltage above - see the comment there for why
+    // an unconditional markDirty() here made every load rewrite its own file.
+    if (prev != voltage) {
+        markDirty();
+    }
 
     // Rails reuse the DAC undo op with extended channel encoding:
     //   2 = top rail, 3 = bottom rail. The apply/revert path in Undo.cpp
@@ -1836,7 +1864,37 @@ void JumperlessState::serializeNets(String& output) const {
             // Use the net's assigned color
             rgbColor netRgb = state.connections.nets[i].color;
             netColor = packRgb(netRgb.r, netRgb.g, netRgb.b);
-            colorName = colorValueToName(netColor);
+
+            // ZERO MEANS "NOT COMPUTED YET", NOT BLACK (w3-t5).
+            //
+            // nets[].color is filled in by assignNetColors(), which runs on
+            // CORE 2 as part of drawWires(). Core 0 zeroes it every time the
+            // net table is rebuilt (clear()/syncNetsFromBridges on any load or
+            // any connect), so between that rebuild and core 2's next render
+            // pass every auto color reads 0x000000 - and a save landing in
+            // that window used to persist `color: black` over the user's
+            // colors. Measured at ~6 ms after a failed load's restore, which
+            // is why it looked like a failed-load bug; a plain connect() hits
+            // the same window.
+            //
+            // An auto color is never legitimately zero (assignNetColors emits
+            // full-value HSV hues and the non-zero rail colors), and a
+            // deliberately black USER color short-circuits above via
+            // customColors. So zero here can only mean "core 2 has not caught
+            // up yet". netColors[] is the other half of the same assignment
+            // (assignNetColors writes both together) and still holds the last
+            // rendered color for this index, which is what the next pass will
+            // recompute; fall back to it, and if even that is unset, emit no
+            // color: field at all rather than a false one. Colors are
+            // recomputed on load and re-emitted on the next save either way.
+            if (netColor == 0) {
+                extern rgbColor netColors[MAX_NETS];
+                rgbColor cached = netColors[i];
+                netColor = packRgb(cached.r, cached.g, cached.b);
+            }
+            if (netColor != 0) {
+                colorName = colorValueToName(netColor);
+            }
         }
         
         // Check if net is animated (check if any of its nodes are in the animation order)
@@ -1854,8 +1912,10 @@ void JumperlessState::serializeNets(String& output) const {
         output += "  - {num: " + String(state.connections.nets[i].number);
         output += ", nodes: " + nodesList;
         
-        // Only print color if not animated
-        if (!animated) {
+        // Only print color if not animated - and only if we HAVE one (the
+        // zero-means-not-computed-yet case above deliberately leaves it empty
+        // rather than emitting a false `black`).
+        if (!animated && colorName.length() > 0) {
             output += ", color: " + colorName;
         }
         
@@ -3350,6 +3410,28 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
                 restored = loadSlotFromPath(String(savedPath), restoreErr);
             }
             restoringContext = false;
+        }
+
+        // A FAILED LOAD WRITES NOTHING (T4's atomicity contract, w3-t5).
+        //
+        // The no-op gate on the power setters removed the four spurious dirty
+        // marks the restore's own applyStateToHardware() used to leave behind,
+        // but the contract has to hold for prior contexts that re-dirty for
+        // OTHER reasons on the way back in - a parts-bearing slot re-expands
+        // through expandPartsToBridges -> addConnection, and fromYAML's
+        // board-portability sanitizer can drop bridges and mark dirty too.
+        // Whatever the reason, at this point RAM was just re-loaded from the
+        // prior context's own file, so there is nothing in it that the file
+        // does not already contain and no idle auto-save should follow.
+        //
+        // NUANCE, deliberate: if the restore came back through loadSlot's
+        // /.bak mirror rescue, that path marks dirty ON PURPOSE so the next
+        // save rewrites the damaged canonical. Clearing here defers that heal
+        // to the user's next real edit rather than performing it as a
+        // side-effect of a failed load - which is what "a failed load writes
+        // nothing" requires. The mirror stays intact either way.
+        if (restored) {
+            activeState.clearDirty();
         }
 
         if (!restored) {
