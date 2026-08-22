@@ -144,8 +144,11 @@ extern CurrentSenseState currentSenseState;
 // (invest-measurement.md 1.4). 10 uV/LSB fixed = 5 uA/LSB, six times finer
 // than the calibrated current register's 30.5 uA/LSB - which is why the
 // guide's continuity/vf measurement reads THIS and not current_mA. The field
-// is refreshed by the 10 ms Peripherals poll; a reader averages it across
-// lastUpdatedMs ticks. Never write INA0 config to "improve" it.
+// is refreshed by the Peripherals poll at CURRENT_SENSE_POLL_INTERVAL_MS
+// (50 ms - the figure the guide check's sample counts and its 1400 ms timeout
+// floor are built on); a reader averages it across lastUpdatedMs ticks, which
+// only advance when the read actually landed. Never write INA0 config to
+// "improve" it.
 static inline float inaShuntCurrent_mA(void) {
     return currentSenseState.shuntVoltage_mV / 2.0f; // 2 ohm shunt R1
 }

@@ -234,7 +234,8 @@ static bool pollCurrentSenseMeasurement() {
     // returns 0 on an I2C error, and a fake 0 mV reads downstream as a
     // confident "no current". Hold the previous value instead.
     float shunt_mV = INA0.getShuntVoltage_mV();
-    if ( INA0.getLastError() == 0 ) {
+    bool shuntOk = ( INA0.getLastError() == 0 );
+    if ( shuntOk ) {
         currentSenseState.shuntVoltage_mV = shunt_mV;
     }
 
@@ -247,7 +248,16 @@ static bool pollCurrentSenseMeasurement() {
     currentSenseState.currentDirection = direction;
 
     currentSenseState.active = true;
-    currentSenseState.lastUpdatedMs = now;
+    // The stamp is what makes a sample FRESH to a consumer (the guide check's
+    // inaAccumulateFresh averages one reading per new stamp). Holding the
+    // previous shuntVoltage_mV on an I2C error is only half the fix: stamping
+    // anyway would hand that held value out as a new sample and let it be
+    // averaged twice. Advance the stamp only when the shunt read really
+    // landed. current_mA already returned early on ITS error, so a stamped
+    // tick means both halves are good.
+    if ( shuntOk ) {
+        currentSenseState.lastUpdatedMs = now;
+    }
 
     return true;
 }
