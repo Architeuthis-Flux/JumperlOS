@@ -36,6 +36,14 @@ short version of what moved:
   table from the *currently flashed* ELF. It is per-build, it lives outside
   version control, and a stale one makes the suite SKIP (which `run_all` counts
   as a pass — so a SKIP here is expected, not a regression).
+- [ ] **If you run the HIL suites with another USB dev board plugged in, check
+  `~/.cursor/skills/jumperless-v5/.jumperless_port` first.** `jumperless.py`
+  caches the REPL port and then trusts the cache blindly as long as that device
+  still exists. If a re-detect ever picks a *different* board — an interrupted
+  run is enough to trigger one — every later `jl_exec` runs on the wrong device,
+  and the symptom is `NameError: name 'jfs' isn't defined` followed by raw-REPL
+  timeouts. It reads as a firmware fault and is not one. Pin it to
+  `/dev/cu.usbmodemJLV5port5`.
 - [ ] Note the board's `top_oled.lock_connection` / `sda_row` / `scl_row`. In
   `connection_type 0` the top OLED lives on **GPIO 7/8** — the very pins the
   `i2cscrn` and `eeprom` projects use, and the pins the guide's `oscillates`
@@ -115,12 +123,19 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
   `z 555 new noscript` + `q` is the fast way) and confirm
   `(20 run files in /projects/555 - old runs can be deleted from Files)`.
   Then do exactly that — **delete them from the Files browser** — and confirm:
-  - [ ] deleting a run file that is **not** active just removes it;
-  - [ ] deleting the **active** run file leaves you on a context whose file is
-    gone: nothing crashes, and the next save prints its failure (throttled to
-    once per 10 s) rather than spinning. `<0` recovers.
+  - [ ] deleting a run file that is **not** active just removes it, and `Q` still
+    reports the context you were on;
   - [ ] the allocator **does not reuse numbers**: after deleting `_1` while `_2`
-    exists, the next new run is `_3`.
+    exists, the next new run is `_3` (HIL asserts this; the point here is that
+    deleting from Files takes the same path);
+  - [ ] **deleting the run file you are currently ON is the interesting one, and
+    it is not asserted anywhere — write down what actually happens.** The
+    manager still holds the path, so the next dirty auto-save will try to write
+    it. Two plausible outcomes and both are acceptable behaviour: the file is
+    silently re-created (a save to a path is a create), or the write fails and
+    `service()` prints its failure **throttled to once per 10 s** rather than
+    once per idle pass. What must NOT happen is a crash, a wedge, or a write
+    landing somewhere else. `<0` recovers either way.
 - [ ] **Clicking `/projects/555/wiring.yaml` in the Files browser starts a run**
   — it no longer adopts the shipped template. The file manager closes *first*,
   then the prompt/guide comes up on a clean terminal.
