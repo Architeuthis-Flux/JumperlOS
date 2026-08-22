@@ -220,7 +220,23 @@ static bool pollCurrentSenseMeasurement() {
 
     currentSenseState.current_mA = current_mA;
     currentSenseState.busVoltage_V = busVoltage;
-    currentSenseState.shuntVoltage_mV = 0.0f;
+
+    // SHUNT VOLTAGE: the fine current source (invest-measurement.md 0(a)/1.7).
+    // The current register's LSB is fixed by setMaxCurrentShunt(1, 2.0) at
+    // 30.5 uA/bit, so a 47k part at 3.3 V (~70 uA) is TWO counts - which is
+    // exactly the bench's val=0.03mA. The shunt-voltage register's LSB is a
+    // hardware constant 10 uV, i.e. 5 uA across the 2 ohm R1: six times finer,
+    // and available without touching calibration. THE CONFIG STAYS UNTOUCHED -
+    // this poll owns the chip's cadence and its CNVR flag; consumers only read
+    // the field (see inaShuntCurrent_mA in Peripherals.h).
+    //
+    // Same failed-read discipline as the current read above: getShuntVoltage()
+    // returns 0 on an I2C error, and a fake 0 mV reads downstream as a
+    // confident "no current". Hold the previous value instead.
+    float shunt_mV = INA0.getShuntVoltage_mV();
+    if ( INA0.getLastError() == 0 ) {
+        currentSenseState.shuntVoltage_mV = shunt_mV;
+    }
 
     int direction = 0;
     if ( current_mA > CURRENT_SENSE_DIRECTION_EPSILON_MA ) {

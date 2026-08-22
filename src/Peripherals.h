@@ -140,6 +140,16 @@ struct CurrentSenseState {
 
 extern CurrentSenseState currentSenseState;
 
+// INA0's shunt-voltage register as a current, through the 2 ohm R1
+// (invest-measurement.md 1.4). 10 uV/LSB fixed = 5 uA/LSB, six times finer
+// than the calibrated current register's 30.5 uA/LSB - which is why the
+// guide's continuity/vf measurement reads THIS and not current_mA. The field
+// is refreshed by the 10 ms Peripherals poll; a reader averages it across
+// lastUpdatedMs ticks. Never write INA0 config to "improve" it.
+static inline float inaShuntCurrent_mA(void) {
+    return currentSenseState.shuntVoltage_mV / 2.0f; // 2 ohm shunt R1
+}
+
 struct gpio_function_name_struct {
     gpio_function_t function;
     char name[10];
