@@ -432,6 +432,10 @@ void serializeParts(const JumperlessState& st, String& out) {
         out += "  - name: \"" + String(p.name) + "\"\n";
         if (p.typeStr[0] != '\0') out += "    type: " + String(p.typeStr) + "\n";
         if (p.value[0] != '\0')   out += "    value: \"" + String(p.value) + "\"\n";
+        // Same emit-only-when-set rule as `placement:` below: an unset tol is
+        // the 15 % default, and emitting "tol: 0" would both lie and rewrite
+        // every pre-wave-2 file. Parser half is in parsePartLine.
+        if (p.tol > 0)            out += "    tol: " + String((int)p.tol) + "\n";
         if (p.partId[0] != '\0')  out += "    part_id: \"" + String(p.partId) + "\"\n";
         const char* fpName = (p.footprint == 1) ? "dip" : (p.footprint == 2) ? "axial" : "sip";
         out += "    footprint: " + String(fpName) + String(p.pinCount) + "\n";
@@ -719,6 +723,15 @@ static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, b
     } else if (key == "value") {
         String v = parseScalar(rest);
         strncpy(p.value, v.c_str(), sizeof(p.value) - 1);
+        inPins = false;
+    } else if (key == "tol") {
+        // Author tolerance in PERCENT for the derived continuity band
+        // (invest-measurement.md §2.2): `tol: 5` on a 1 % part tightens the
+        // band, absence keeps the 15 % default that covers 5-10 % parts plus
+        // drift. 0 and out-of-range values mean "unset" rather than "0 %",
+        // which would make every band empty.
+        long v = parseScalar(rest).toInt();
+        p.tol = (v > 0 && v < 100) ? (uint8_t)v : 0;
         inPins = false;
     } else if (key == "part_id") {
         String v = parseScalar(rest);

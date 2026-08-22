@@ -344,6 +344,18 @@ struct ConfigState {
 //     itself from the parts' own `class: gnd` pins. For an explicit "this
 //     row should be at 0 V" check, use `check: voltage` with
 //     min: -0.15 / max: 0.15.
+//   - CONTINUITY `min:`/`max:` ARE OHMS (wave 2). They used to be milliamps,
+//     because the check compared a raw INA current against an authored
+//     current band; it now measures RESISTANCE four-wire (the sense legs ride
+//     the stimulus chain, the shunt sits on the ground side) and divides, so
+//     an authored bound names ohms. `value:` + the optional per-part `tol:`
+//     (percent) derive the band on their own - tol_author (default 15) +
+//     tol_meas (5 / 10 / 25 by decade) - and explicit min/max still WIN when
+//     they are given. Two guards catch a file still carrying the old numbers:
+//     a band that does not BRACKET the parsed `value:`, or (for a value-less
+//     part) a `max:` under 5 ohms, logs "min/max look like legacy mA" and
+//     falls back to the derived band. VF/VOLTAGE/OSCILLATES min/max are
+//     unchanged (volts / volts / Hz).
 //   - a `do: connect` step's `n1:`/`n2:` are LITERAL rows and do NOT
 //     re-derive when a part moves. A part's OWN wiring does re-derive for
 //     free (bridges are never stored per part - expandOnePart recomputes
@@ -387,6 +399,9 @@ struct PartDefinition {
     uint8_t  defaultVerify;    // GuideCheck (raw uint8 until the guide runtime lands)
     uint32_t outlineColor;     // 0 = per-class defaults
     char     value[12];        // "10k" etc.
+    uint8_t  tol;              // `tol:` percent for the derived continuity
+                               // band (invest-measurement.md §2.2). 0 = unset
+                               // -> the 15 % default; serialized only when set
     bool     placed;           // runtime: expansion applied (guide progress)
     uint8_t  placement;        // PART_PLACEMENT_* - serialized only when non-default
     PartPin  pins[MAX_PART_PINS];

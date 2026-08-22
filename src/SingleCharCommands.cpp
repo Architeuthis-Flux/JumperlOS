@@ -39,6 +39,7 @@
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "ProjectsApp.h" // z: guided-project runner (headless/HIL entry)
+#include "GuidedFlow.h"  // z band: parsePartValue / guideResistorBand report
 #include "WaveGen.h"    // X: the wavegen stream line (T3.3)
 #include "AdcRing.h"    // X: the ADC ring line (T2.1)
 #include "Python_Proper.h"
@@ -819,6 +820,40 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
     args.trim( );
     if ( args.length( ) == 0 ) {
         Jerial.println( USAGE );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z band <value> [type] [tol]` - the value parser and continuity band
+    // derivation, off-bench (invest-measurement.md §5 item 1). It runs no
+    // guide and touches no hardware: pure functions in, one machine-parseable
+    // GUIDEBAND line out, so the band table can be regression-tested without
+    // a part in a hole. Lives on `z` rather than a new single char because
+    // this harness is single-char-plus-args and the band IS guide machinery.
+    if ( args.startsWith( "band" ) ) {
+        String rest = args.substring( 4 );
+        rest.trim( );
+        Stream* target = Jerial.getResponseTarget( );
+        if ( target == nullptr ) target = &Jerial;
+        if ( rest.length( ) == 0 ) {
+            target->println( "Usage: z band <value> [type] [tolPercent]   "
+                             "e.g. 'z band 47k resistor'" );
+            return CMD_DONT_SHOW_MENU;
+        }
+        String v, t, tolTok;
+        int p = 0;
+        for ( int f = 0; f < 3 && p < (int)rest.length( ); f++ ) {
+            int sp = rest.indexOf( ' ', p );
+            String tok = ( sp < 0 ) ? rest.substring( p ) : rest.substring( p, sp );
+            p = ( sp < 0 ) ? rest.length( ) : sp + 1;
+            tok.trim( );
+            if ( tok.length( ) == 0 ) { f--; continue; }
+            if ( f == 0 ) v = tok;
+            else if ( f == 1 ) t = tok;
+            else tolTok = tok;
+        }
+        if ( t.length( ) == 0 ) t = "resistor";
+        guideBandReport( v.c_str( ), t.c_str( ),
+                         ( tolTok.length( ) > 0 ) ? (int)tolTok.toInt( ) : 0, target );
         return CMD_DONT_SHOW_MENU;
     }
 
