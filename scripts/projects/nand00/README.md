@@ -92,16 +92,16 @@ pin row to the rail goes leg-in-row-7, leg-in-the-rail - and the routed
 connections for that part disappear, because the legs themselves make the
 contact.
 
-Tap a part's lit footprint with the probe (or double-click the wheel, then
-double-click again) to flip that one part between the two. **Every part
-remembers its own setting.** A leg whose endpoint is not a real hole - `GND` and
-the analog pins live in the crossbar, not on the board - keeps its own row and
-its routed connection either way, so a compact part can still have one bridge.
+Tap a part's lit footprint with the probe to flip that one part between the
+two. **Every part remembers its own setting.** A leg whose endpoint is not a
+real hole - `GND` and the analog pins live in the crossbar, not on the board -
+keeps its own row and its routed connection either way, so a compact part can
+still have one bridge.
 
-To **move** a part, tap any free hole and pin 1 jumps there, or double-click the
-wheel and turn to slide it. On the terminal, `m <row>` and `c` do the same two
-things. Chips (DIPs) sit with pin 1 - the dot or the notch - on the **bottom
-half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+To **move** a part, tap any free hole and pin 1 jumps there. The wheel never
+moves a part - it only browses the steps. On the terminal, `m <row>` and `c` do
+the same two things the probe does. Chips (DIPs) sit with pin 1 - the dot or
+the notch - on the **bottom half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
 middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
 
 **Browsing.** The wheel moves *between* steps rather than confirming them, and
