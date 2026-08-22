@@ -66,10 +66,24 @@ def finish(name):
 #                   before the deliberate bkpt.
 #
 # Before this, "no crashlog anywhere in the run" was a human grepping the log
-# afterwards (task w3-1 report §7). Now it is enforced, which also turns every
-# existing suite into a passive abort detector for free: any test that talks to
-# port 1 will fail loudly the moment the board faults under it, instead of
-# reporting some downstream symptom.
+# afterwards (task w3-1 report §7). Now it is enforced for everything that goes
+# through this module - port1_command (including its connect banner) and
+# port1_paste - which turns those suites into passive abort detectors for free.
+#
+# THE LIMIT, AND THE RULE THAT FOLLOWS FROM IT. This only sees bytes THIS MODULE
+# read. Several suites open their own serial.Serial on port 1 because they have
+# to drive an interactive app keystroke by keystroke, and those readers bypass
+# this function entirely unless they call it themselves. So: ANY raw port-1
+# reader must pass what it drains through fault_scan(). The ones that exist
+# today do (test_projects.py's run_app probe and GuideDriver, test_guide_flow's
+# GuideDriver and its unwedge drain, test_paste_state's _collect) - keep it that
+# way when adding another.
+#
+# The connect banner is the part that must not be skipped, and it is also the
+# part that cannot be shared: a post-fault [crashlog] is printed ONCE, to the
+# FIRST terminal that attaches after the reboot. Whichever reader gets there
+# first is the only one that can ever see it, so every reader scans its own
+# banner and none of them can assume another will.
 _FAULT_RE = re.compile(r"^.*\[(crashlog|abort)\].*$", re.M)
 
 # Set once, and only by fault_scan. port1_wait_ready's blanket `except

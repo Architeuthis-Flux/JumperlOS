@@ -80,8 +80,7 @@ static inline void __not_in_flash_func( slotWrite )( unsigned i, uint32_t v ) {
 //     CHOKE POINTS. __throw_bad_alloc `bl`s abort, so the latched address is
 //     inside __throw_bad_alloc - not the allocation that failed. A latched site
 //     that symbolizes to a throw helper or to operator new means only "an
-//     allocation failed somewhere". crashlogAbortFrameScan() below exists to
-//     recover the frames above it; treat those as candidates, not as an answer.
+//     allocation failed somewhere" - treat it as a candidate, not an answer.
 //   * panic() - 13 SDK call sites (hard_assert, panic_unsupported, the flash
 //     and multicore guards) - is `naked` and ends in its OWN bkpt without ever
 //     entering abort(). Identical CFSR=0 + HFSR.DEBUGEVT fingerprint, NOTHING

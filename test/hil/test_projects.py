@@ -88,7 +88,7 @@ import serial  # pyserial
 
 from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
-                active_context, restore_context)
+                active_context, restore_context, fault_scan)
 
 SLOT_PATH = "/slots/slot3.yaml"
 PROJ_DIR = "/projects/555"
@@ -196,14 +196,26 @@ def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
         # Prime the connection BEFORE the launcher opens (the firmware's
         # connection-init eats the first byte, and that byte would otherwise be
         # the one meant to cancel the picker).
+        #
+        # THIS IS A RAW PORT-1 READER, so it owns its own fault witness: jl.py's
+        # fault_scan only sees bytes jl.py itself read, and a suite that opens
+        # its own connection bypasses it entirely. The connect banner matters
+        # most - the firmware prints a post-fault [crashlog] exactly once, to
+        # the FIRST terminal that attaches after the reboot, so whichever
+        # reader gets there first is the only one that can ever see it.
         ser.write(b"\r\n")
         ser.flush()
         quiet, overall = time.time(), time.time()
+        banner = b""
         while time.time() - overall < 4.0:
-            if ser.read(4096):
+            b = ser.read(4096)
+            if b:
+                banner += b
                 quiet = time.time()
             elif time.time() - quiet > 0.6:
                 break
+        fault_scan(_csi.sub("", banner.decode(errors="replace")),
+                   "the run_app probe's connect banner")
         ser.reset_input_buffer()
 
         worker = threading.Thread(target=_launch_projects, daemon=True)
@@ -234,6 +246,7 @@ def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
         chunk = ser.read(4096)
         if chunk:
             buf += _csi.sub("", chunk.decode(errors="replace"))
+        fault_scan(buf, "the run_app probe")
     finally:
         ser.close()
 
@@ -811,21 +824,38 @@ print("missing_ms=", time.ticks_diff(t1, t0))
             self.ser = serial.Serial(port1_path(), 115200, timeout=0.05)
             self.buf = ""
             self.pos = 0
+            self._scanned = 0
             # Prime the connection: the firmware's connection-init eats the first
             # byte(s) - the same idiom phase 6(d) uses.
+            #
+            # RAW PORT-1 READER: it carries its own fault witness (see the note
+            # on the run_app probe above). The banner is scanned here because a
+            # post-fault [crashlog] is printed once, to whichever terminal
+            # attaches first.
             self.ser.write(b"\r\n")
             self.ser.flush()
             quiet, overall = time.time(), time.time()
+            banner = b""
             while time.time() - overall < 4.0:
-                if self.ser.read(4096):
+                b = self.ser.read(4096)
+                if b:
+                    banner += b
                     quiet = time.time()
                 elif time.time() - quiet > 0.6:
                     break
+            fault_scan(_csi.sub("", banner.decode(errors="replace")),
+                       "the guide driver's connect banner")
             self.ser.reset_input_buffer()
 
         def send(self, data):
             self.ser.write(data)
             self.ser.flush()
+
+        def _scan(self):
+            # Scan only what is new, so one fault is reported once.
+            if len(self.buf) > self._scanned:
+                fault_scan(self.buf[self._scanned:], "the guide driver")
+                self._scanned = len(self.buf)
 
         def expect(self, pattern, what, timeout=25):
             deadline = time.time() + timeout
@@ -834,6 +864,7 @@ print("missing_ms=", time.ticks_diff(t1, t0))
                 chunk = self.ser.read(4096)
                 if chunk:
                     self.buf += _csi.sub("", chunk.decode(errors="replace"))
+                    self._scan()
                 m = rx.search(self.buf, self.pos)
                 if m:
                     self.pos = m.end()
@@ -848,6 +879,7 @@ print("missing_ms=", time.ticks_diff(t1, t0))
                 chunk = self.ser.read(4096)
                 if chunk:
                     self.buf += _csi.sub("", chunk.decode(errors="replace"))
+                    self._scan()
             finally:
                 self.ser.close()
 

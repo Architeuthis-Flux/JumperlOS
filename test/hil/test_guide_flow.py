@@ -167,7 +167,7 @@ import serial  # pyserial
 
 from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
-                active_context, restore_context)
+                active_context, restore_context, fault_scan)
 
 PROJ = "hilguide"
 PROJ_DIR = "/projects/" + PROJ
@@ -554,16 +554,29 @@ class GuideDriver:
         self.ser = serial.Serial(port1_path(), 115200, timeout=0.05)
         self.buf = ""
         self.pos = 0
+        self._scanned = 0
         # Prime the connection: the firmware's connection-init eats the first
         # byte(s) - same idiom as test_projects phase 6(d).
+        #
+        # THIS IS A RAW PORT-1 READER, so it carries its own fault witness:
+        # jl.py's fault_scan only sees the bytes jl.py itself read, and a
+        # driver that opens its own connection bypasses it entirely. The
+        # connect banner is scanned because the firmware prints a post-fault
+        # [crashlog] exactly ONCE, to the first terminal that attaches after
+        # the reboot - whoever gets there first is the only one who can see it.
         self.ser.write(b"\r\n")
         self.ser.flush()
         quiet, overall = time.time(), time.time()
+        banner = b""
         while time.time() - overall < 4.0:
-            if self.ser.read(4096):
+            b = self.ser.read(4096)
+            if b:
+                banner += b
                 quiet = time.time()
             elif time.time() - quiet > 0.6:
                 break
+        fault_scan(_csi.sub("", banner.decode(errors="replace")),
+                   "the guide driver's connect banner")
         self.ser.reset_input_buffer()
 
     def send(self, data):
@@ -574,6 +587,10 @@ class GuideDriver:
         chunk = self.ser.read(4096)
         if chunk:
             self.buf += _csi.sub("", chunk.decode(errors="replace"))
+            # Scan only what is new, so one fault is reported once.
+            if len(self.buf) > self._scanned:
+                fault_scan(self.buf[self._scanned:], "the guide driver")
+                self._scanned = len(self.buf)
 
     def expect(self, pattern, what, timeout=25):
         """Returns the re.Match on success (truthy, so `if d.expect(...)`
@@ -2343,11 +2360,15 @@ finally:
         try:
             ser = serial.Serial(port1_path(), 115200, timeout=0.05)
             try:
+                # Raw reader, own fault witness (see GuideDriver.__init__).
+                unwedge = b""
                 for _ in range(3):
                     ser.write(b"q")
                     ser.flush()
                     time.sleep(0.5)
-                    ser.read(4096)
+                    unwedge += ser.read(4096) or b""
+                fault_scan(_csi.sub("", unwedge.decode(errors="replace")),
+                           "the guide unwedge drain")
             finally:
                 ser.close()
             print("  info: sent unwedge 'q' to a possibly-live guide session")
