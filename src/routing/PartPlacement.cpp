@@ -78,10 +78,11 @@ int PartDefinition::nodeForPin(int k) const {
     return node;
 }
 
-// `offset` wins when >= 0 (same-side offset from baseRow); otherwise the
-// footprint math on the 1-based physical pin number. Exported (PartPlacement.h)
-// so list_parts() reports the same node the expansion actually bridges.
-int partPinNode(const PartDefinition& p, const PartPin& pin) {
+// FOOTPRINT geometry for one pin: `offset` wins when >= 0 (same-side offset
+// from baseRow); otherwise the footprint math on the 1-based physical pin
+// number. This is what `placement: expanded|custom` uses directly and what a
+// compact part's non-eligible legs fall back to.
+static int partPinFootprintNode(const PartDefinition& p, const PartPin& pin) {
     if (pin.offset >= 0) {
         int node = p.baseRow + pin.offset;
         if (node < 1 || node > 60) return -1;
@@ -89,6 +90,166 @@ int partPinNode(const PartDefinition& p, const PartPin& pin) {
         return node;
     }
     return p.nodeForPin(pin.pinNumber);
+}
+
+// A leg can only physically go into a HOLE: the 60 breadboard rows plus the
+// two rail hole rows. GND (100) and every other fabric-only node (DAC/ADC/
+// GPIO/ISENSE) lives in the crossbar and has no holes at all, which is why
+// compact is per-pin and not all-or-nothing.
+static bool partNodeIsHoleRow(int node) {
+    return (node >= 1 && node <= 60) || node == TOP_RAIL || node == BOTTOM_RAIL;
+}
+
+bool partPinCompactEligible(const PartDefinition& p, const PartPin& pin) {
+    if (p.footprint == 1) return false;   // ICs never compact - legs ARE the footprint
+    if (pin.pinClass == 3) return false;  // nc: the leg is deliberately unconnected
+    if (pin.connect < 0) return false;    // open leg: follows its partner instead
+    return partNodeIsHoleRow(pin.connect);
+}
+
+// The compact node of the ONE other compact-eligible pin, for the open-leg
+// follow rule. -1 when there is no partner or when there are several (3+ pin
+// parts have no unambiguous "the other leg", so an open leg on one just keeps
+// its footprint row).
+static int partCompactPartnerNode(const PartDefinition& p, const PartPin& self) {
+    int found = -1;
+    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+        const PartPin& other = p.pins[j];
+        if (&other == &self || strcmp(other.name, self.name) == 0) continue;
+        if (!partPinCompactEligible(p, other)) continue;
+        if (found >= 0) return -1;   // ambiguous
+        found = other.connect;
+    }
+    return found;
+}
+
+// THE geometry authority (PartPlacement.h): the node a leg actually occupies.
+// Mode-aware by design, so bridges, removal, overlays, checks, net names and
+// list_parts all inherit a placement change without re-deriving anything.
+//
+// Compact (design §2.2): a compact-eligible leg IS its endpoint, so it
+// returns pin.connect - and bridge suppression then comes out FREE, because
+// expandOnePart already skips `node == pin.connect`. Everything else falls
+// through to the footprint math above.
+int partPinNode(const PartDefinition& p, const PartPin& pin) {
+    if (p.placement == PART_PLACEMENT_COMPACT) {
+        if (partPinCompactEligible(p, pin)) return pin.connect;
+        // Open leg (no `connect:`, not nc): it has no endpoint to jump to, so
+        // it follows its partner into the adjacent row - the radial default
+        // from the photo (LED anode in row 22, cathode in 23). The fallback is
+        // -1 at a HALF boundary, not just at row 60: node 30 and node 31 are
+        // opposite corners of the board, so partner+1 must stay in the same
+        // half. A partner sitting in a RAIL (or no unambiguous partner at all)
+        // leaves the open leg on its footprint row.
+        if (pin.connect < 0 && pin.pinClass != 3) {
+            int partner = partCompactPartnerNode(p, pin);
+            if (partner >= 1 && partner <= 60) {
+                bool top = (partner <= 30);
+                int adj = partner + 1;
+                if ((top && adj > 30) || (!top && adj > 60)) adj = partner - 1;
+                if (adj >= 1 && ((top && adj <= 30) || (!top && adj >= 31))) return adj;
+            }
+        }
+    }
+    return partPinFootprintNode(p, pin);
+}
+
+// Whole-part geometry predicate - see PartPlacement.h for why it is shared.
+bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
+    if (reason != nullptr && reasonLen > 0) reason[0] = '\0';
+    // pinCount is the footprint's PHYSICAL pin count - bound it by the board
+    // geometry (60 rows), NOT by MAX_PART_PINS, which only caps how many pins
+    // are LISTED (numPins, enforced in parsePinEntry). Bounding it by storage
+    // silently dropped a well-formed dip28/dip40 - and the next auto-save then
+    // erased it from the user's slot file.
+    if (p.pinCount < 1 || p.pinCount > 60) {
+        snprintf(reason, reasonLen, "footprint pin count must be 1-60");
+        return false;
+    }
+    if (p.footprint != 0 && (p.pinCount % 2) != 0) {
+        snprintf(reason, reasonLen, "a dip/axial footprint needs an even pin count");
+        return false;
+    }
+    if (p.baseRow < 1 || p.baseRow > 60) {
+        snprintf(reason, reasonLen, "row: must be 1-60");
+        return false;
+    }
+
+    if (p.footprint == 1) {
+        // DIP pin 1 (row:) must anchor the bottom half - the old top-anchored
+        // mapping was the mirrored bug (wave 2, bench-found). nodeForPin()
+        // would already return -1 for every pin of a top-anchored DIP, but
+        // that alone only fails PLACEMENT (0 bridges); rejecting the entry
+        // itself keeps it from round-tripping through an idle auto-save.
+        if (p.baseRow < 31 || p.baseRow > 60) {
+            snprintf(reason, reasonLen,
+                     "dip pin 1 (row:) must be on the bottom half (31-60)");
+            return false;
+        }
+        // Column-fit: the U-shape's far side must land within the top half -
+        // (row-30) + N/2 - 1 <= 30 (binding geometry). Below this bound the
+        // near side overflows past row 60 at the SAME row the far side
+        // overflows past row 30 (both sides share one inequality), so a chip
+        // that doesn't fit would otherwise place SOME pins and silently drop
+        // the rest - a partial chip is never right, so the whole entry is
+        // rejected, not just the pins that don't fit.
+        int half = p.pinCount / 2;
+        if ((p.baseRow - 30) + (half - 1) > 30) {
+            snprintf(reason, reasonLen,
+                     "dip%d at row %d does not fit the board (far-side columns run past row 30)",
+                     (int)p.pinCount, (int)p.baseRow);
+            return false;
+        }
+    } else if (p.footprint == 0) {
+        // SIP: the whole run must stay on baseRow's half - nodeForPin()
+        // already refuses a leg that crosses the ravine, so an over-length
+        // SIP strip is the same partial-chip failure mode as an oversized DIP.
+        bool top = (p.baseRow <= 30);
+        int lastNode = p.baseRow + (p.pinCount - 1);
+        if ((top && lastNode > 30) || (!top && lastNode > 60)) {
+            snprintf(reason, reasonLen,
+                     "sip%d at row %d does not fit the %s half (runs past row %d)",
+                     (int)p.pinCount, (int)p.baseRow, top ? "top" : "bottom",
+                     top ? 30 : 60);
+            return false;
+        }
+    } else if (p.footprint == 2) {
+        // axial2: a two-leg part straddling the ravine - pin 1 (row:) must be
+        // on the top half so pin 2 (row+30) lands on-board. No separate span
+        // check needed: the legs are always exactly 30 apart.
+        if (p.pinCount != 2) {
+            snprintf(reason, reasonLen, "axial2 must have exactly 2 pins");
+            return false;
+        }
+        if (p.baseRow < 1 || p.baseRow > 30) {
+            snprintf(reason, reasonLen,
+                     "axial2 pin 1 (row:) must be on the top half (1-30)");
+            return false;
+        }
+    }
+
+    // Every LISTED pin must resolve on the footprint. The span checks above
+    // cover the footprint's own run, but a listed pin can still leave the
+    // board two ways they never saw: an `offset:` (which bypasses nodeForPin
+    // entirely and used to carry only its own private bounds test - wave-2
+    // gap, routed here from task 3's re-review) and a `pin:` number beyond
+    // pinCount. Both used to be accepted and then placed PARTIALLY, which is
+    // the same silent-partial-loss class the span checks exist to stop.
+    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+        const PartPin& pin = p.pins[j];
+        if (partPinFootprintNode(p, pin) >= 0) continue;
+        if (pin.offset >= 0) {
+            snprintf(reason, reasonLen,
+                     "pin %s (offset: %d) does not land on the board from row %d",
+                     pin.name, (int)pin.offset, (int)p.baseRow);
+        } else {
+            snprintf(reason, reasonLen,
+                     "pin %s (pin: %d) does not land on the board from row %d",
+                     pin.name, (int)pin.pinNumber, (int)p.baseRow);
+        }
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +437,15 @@ void serializeParts(const JumperlessState& st, String& out) {
         out += "    footprint: " + String(fpName) + String(p.pinCount) + "\n";
         out += "    row: " + String(p.baseRow) + "\n";
         out += "    placed: " + String(p.placed ? "true" : "false") + "\n";
+        // Emitted only when non-default (the defaultVerify/color precedent),
+        // so every pre-wave-2 file is byte-identical after a rewrite. The
+        // parser below is its matched half and lands in the SAME commit - a
+        // parsed-but-not-emitted field is erased by the next idle auto-save.
+        if (p.placement == PART_PLACEMENT_COMPACT) {
+            out += "    placement: compact\n";
+        } else if (p.placement == PART_PLACEMENT_CUSTOM) {
+            out += "    placement: custom\n";
+        }
         if (p.defaultVerify != 0) out += "    verify: " + String(p.defaultVerify) + "\n";
         if (p.outlineColor != 0) {
             char hexBuf[12];
@@ -464,98 +634,39 @@ static void partInit(PartDefinition& p) {
 static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool& bad, String& err) {
     if (!open) return;
     open = false;
-    // pinCount is the footprint's PHYSICAL pin count - bound it by the board
-    // geometry (60 rows), NOT by MAX_PART_PINS, which only caps how many pins
-    // are LISTED (numPins, enforced in parsePinEntry). Bounding it by storage
-    // silently dropped a well-formed dip28/dip40 - and the next auto-save
-    // then erased it from the user's slot file.
-    bool valid = !bad &&
-                 p.name[0] != '\0' &&
-                 p.pinCount >= 1 && p.pinCount <= 60 &&
-                 p.baseRow >= 1 && p.baseRow <= 60 &&
-                 (p.footprint == 0 || (p.pinCount % 2) == 0);
-    // Geometry rejections below are UNCONDITIONAL prints, matching the
-    // MAX_PARTS branch further down (and unlike it, these are the failure
-    // mode every pre-wave-2 user file hits): the only other surfacing point,
-    // States.cpp's "parts: parse warnings", sits behind
-    // debug.show_node_errors, so with that off a stale top-anchored DIP (or
-    // an off-board footprint span) was dropped with zero output, and the
-    // next idle auto-save erased it from the file for good.
+    // Geometry rejections are UNCONDITIONAL prints, matching the MAX_PARTS
+    // branch further down (and unlike it, these are the failure mode every
+    // pre-wave-2 user file hits): the only other surfacing point, States.cpp's
+    // "parts: parse warnings", sits behind debug.show_node_errors, so with
+    // that off a stale top-anchored DIP (or an off-board footprint span, or an
+    // out-of-bounds `offset:`) was dropped with zero output, and the next idle
+    // auto-save erased it from the file for good.
+    //
+    // The predicate itself is partGeometryOk() - the SAME one jl_place_part()
+    // applies on the API path and the guide's move check applies before a
+    // move. `bad` and the name are parse state, not geometry, so they stay
+    // here.
     const char* pname = p.name[0] ? p.name : "(unnamed)";
-    if (valid && p.footprint == 1) {
-        // DIP pin 1 (row:) must anchor the bottom half - the old top-anchored
-        // mapping was the mirrored bug (wave 2, bench-found). nodeForPin()
-        // would already return -1 for every pin of a top-anchored DIP, but
-        // that alone only fails PLACEMENT (0 bridges); rejecting the entry
-        // itself here keeps it from round-tripping through an idle auto-save.
-        if (p.baseRow < 31 || p.baseRow > 60) {
+    bool valid = !bad && p.name[0] != '\0';
+    if (valid) {
+        char reason[128];
+        if (!partGeometryOk(p, reason, sizeof(reason))) {
             valid = false;
-            Serial.print("part '"); Serial.print(pname);
-            Serial.println("': dip pin 1 (row:) must be on the bottom half (31-60); dropped.");
-            err += "part " + String(p.name) +
-                   ": dip pin 1 (row:) must be on the bottom half (31-60); ";
-        } else {
-            // Column-fit: the U-shape's far side must land within the top
-            // half - (row-30) + N/2 - 1 <= 30 (binding geometry). Below this
-            // bound the near side overflows past row 60 at the SAME row the
-            // far side overflows past row 30 (both sides share one
-            // inequality), so a chip that doesn't fit would otherwise place
-            // SOME pins and silently drop the rest - a partial chip is never
-            // right, so the whole entry is rejected, not just the pins that
-            // don't fit.
-            int half = p.pinCount / 2;
-            if ((p.baseRow - 30) + (half - 1) > 30) {
-                valid = false;
-                Serial.print("part '"); Serial.print(pname);
-                Serial.print("': dip");
-                Serial.print(p.pinCount);
-                Serial.print(" at row ");
-                Serial.print(p.baseRow);
-                Serial.println(" does not fit the board (far-side columns run past row 30); dropped.");
-                err += "part " + String(p.name) + ": dip" + String(p.pinCount) +
-                       " at row " + String(p.baseRow) +
-                       " does not fit the board (far-side columns run past row 30); ";
-            }
-        }
-    } else if (valid && p.footprint == 0) {
-        // SIP: the whole run must stay on baseRow's half - nodeForPin()
-        // already refuses a leg that crosses the ravine, so an over-length
-        // SIP strip is the same partial-chip failure mode as an oversized
-        // DIP: some pins land, the rest silently don't.
-        bool top = (p.baseRow <= 30);
-        int lastNode = p.baseRow + (p.pinCount - 1);
-        if ((top && lastNode > 30) || (!top && lastNode > 60)) {
-            valid = false;
-            Serial.print("part '"); Serial.print(pname);
-            Serial.print("': sip");
-            Serial.print(p.pinCount);
-            Serial.print(" at row ");
-            Serial.print(p.baseRow);
-            Serial.println(top ? " does not fit the top half (runs past row 30); dropped."
-                                : " does not fit the bottom half (runs past row 60); dropped.");
-            err += "part " + String(p.name) + ": sip" + String(p.pinCount) +
-                   " at row " + String(p.baseRow) +
-                   (top ? " does not fit the top half (runs past row 30); "
-                        : " does not fit the bottom half (runs past row 60); ");
+            Serial.print("part '"); Serial.print(pname); Serial.print("': ");
+            Serial.print(reason); Serial.println("; dropped.");
+            err += "part " + String(pname) + ": " + String(reason) + "; ";
         }
     }
-    // axial2: a two-leg part straddling the ravine - pin 1 (row:) must be on
-    // the top half so pin 2 (row+30) lands on-board. No separate span check
-    // needed: the two legs are always exactly 30 apart, so row in 1-30
-    // already guarantees both resolve.
-    if (valid && p.footprint == 2) {
-        if (p.pinCount != 2) {
-            valid = false;
-            Serial.print("part '"); Serial.print(pname);
-            Serial.println("': axial2 must have exactly 2 pins; dropped.");
-            err += "part " + String(p.name) + ": axial2 must have exactly 2 pins; ";
-        } else if (p.baseRow < 1 || p.baseRow > 30) {
-            valid = false;
-            Serial.print("part '"); Serial.print(pname);
-            Serial.println("': axial2 pin 1 (row:) must be on the top half (1-30); dropped.");
-            err += "part " + String(p.name) +
-                   ": axial2 pin 1 (row:) must be on the top half (1-30); ";
-        }
+    // A hand-written `placement: compact` on a DIP is a lying byte: compact is
+    // refused for ICs everywhere else, so normalize it HERE rather than only
+    // guarding it in partPinNode - the serializer then heals the file on the
+    // next save instead of carrying the contradiction forever.
+    if (valid && p.placement == PART_PLACEMENT_COMPACT && p.footprint == 1) {
+        p.placement = PART_PLACEMENT_EXPANDED;
+        Serial.print("part '"); Serial.print(pname);
+        Serial.println("': ICs don't compact - placement reset to expanded.");
+        err += "part " + String(pname) +
+               ": ICs don't compact - placement reset to expanded; ";
     }
     if (!valid) {
         err += "skipped malformed part entry '" + String(p.name) + "'; ";
@@ -647,6 +758,22 @@ static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, b
             // keep the default (false) but WARN - a silent false would
             // persist through the next auto-save
             err += "part " + String(p.name) + ": unparseable placed '" + rest + "' (kept false); ";
+        }
+        inPins = false;
+    } else if (key == "placement") {
+        // Matched half of the serializer's non-default emit. An unknown value
+        // falls back to the default AND warns - a silent reinterpretation
+        // would be written back on the next save as if the user had asked
+        // for it.
+        String v = parseScalar(rest);
+        v.toLowerCase();
+        if (v == "compact")       p.placement = PART_PLACEMENT_COMPACT;
+        else if (v == "custom")   p.placement = PART_PLACEMENT_CUSTOM;
+        else if (v == "expanded") p.placement = PART_PLACEMENT_EXPANDED;
+        else {
+            p.placement = PART_PLACEMENT_EXPANDED;
+            err += "part " + String(p.name) + ": unknown placement '" + v +
+                   "' (kept expanded); ";
         }
         inPins = false;
     } else if (key == "verify") {

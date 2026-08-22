@@ -66,6 +66,13 @@ config:
   #define MAX_PART_PINS 24
 #endif
 
+// PartDefinition::placement - how a part's legs sit on the board (guide-UX
+// design §2.1). EXPANDED is the default and the only value the pre-wave-2
+// format could express, so it is the one the serializer omits.
+#define PART_PLACEMENT_EXPANDED 0   // legs at the footprint rows + routed bridges
+#define PART_PLACEMENT_COMPACT  1   // legs go straight into their connect: holes
+#define PART_PLACEMENT_CUSTOM   2   // expanded-shaped, but the user moved row:
+
 // Forward declarations
 class JumperlessState;
 class SlotManager;
@@ -262,10 +269,30 @@ struct ConfigState {
 //                           # requires 1-30 (top half; pin 2 = row+30), SIP
 //                           # is legal on either half
 //       placed: false       # runtime flag; always serialized
+//       placement: compact  # expanded (default, OMITTED) | compact | custom
 //       pins:
 //         GND:  {pin: 1, connect: GND, class: gnd}
 //         TRIG: {pin: 2, connect: 7, class: signal}
 //         A:    {offset: 0, connect: 45}
+//
+// PLACEMENT MODES (guide-UX design §2, PartPlacement.cpp partPinNode()):
+// `expanded` (0, the default) puts every leg at its footprint row and lets
+// expandOnePart() route a bridge from there to the pin's `connect:` node.
+// `compact` (1) is how you would breadboard it by hand - a leg whose
+// `connect:` is a PHYSICAL HOLE ROW (1-60, TOP_RAIL, BOTTOM_RAIL) goes
+// straight into that hole and emits NO bridge, because the leg itself is the
+// connection. Per-pin, not all-or-nothing: a leg whose endpoint is
+// fabric-only (GND=100 has no holes; DAC/ADC/GPIO likewise), `class: nc`, or
+// absent keeps its footprint row and its bridge. ICs never compact (their
+// legs ARE the footprint) - a hand-written `placement: compact` on a DIP is
+// normalized back to expanded on parse, with a warning. `custom` (2) is
+// expanded geometry from a row: the user moved by hand; the marker exists so
+// a future re-provision does not snap it back. Unknown values parse as
+// expanded with a warning. Emitted only when non-default (the verify/color
+// precedent), so pre-wave-2 files are byte-identical after a rewrite - and
+// note the converse: an OLDER firmware opening a new file DROPS `placement:`
+// silently (unknown keys are skipped by design), so the part comes back
+// expanded.
 //
 // PIN FORMS PARSED: both the nested block form above (one `NAME: {...}` per
 // line under `pins:`) and the inline one-line form
@@ -273,6 +300,18 @@ struct ConfigState {
 // parse in block form only (`- name: ...`). `pin:` is the 1-based physical
 // pin number placed by the DIP/SIP footprint math; `offset:` places the pin
 // at baseRow+offset on the same side and WINS over `pin:` when >= 0.
+// `offset:` IS EXPANDED-MODE GEOMETRY ONLY - it names a footprint row, so a
+// compact-eligible pin ignores it (the leg goes to `connect:` instead) and it
+// is what a non-eligible pin falls back to. It also predates `axial2`, which
+// makes most historical uses obsolete: the old way to straddle the ravine was
+// a sip2 with `{offset: 0}` / `{offset: 30}` (which does not even parse -
+// offsets may not cross the ravine), so a 2-leg part should now declare
+// `footprint: axial2` and plain `pin: 1` / `pin: 2`. Offsets are still the
+// right tool for a leg that sits at a fixed distance from pin 1 on a strip
+// with gaps. An offset that lands off-board (or on the far half) now REJECTS
+// THE WHOLE PART, exactly like an oversized DIP/SIP span - see partGeometryOk
+// in PartPlacement.cpp; before wave 2 such a part was accepted and then
+// placed partially, which is the same silent-partial-loss class.
 // `connect:` is node-only - a row number 1-60 or any node name resolvable by
 // parseNodeName(), the exact helper `bridges:` parsing uses. `class:` is
 // signal|power|gnd|nc (default signal). Unknown keys inside a part entry are
@@ -340,6 +379,7 @@ struct PartDefinition {
     uint32_t outlineColor;     // 0 = per-class defaults
     char     value[12];        // "10k" etc.
     bool     placed;           // runtime: expansion applied (guide progress)
+    uint8_t  placement;        // PART_PLACEMENT_* - serialized only when non-default
     PartPin  pins[MAX_PART_PINS];
     // Geometry for 1-based PHYSICAL pin k, `row:` = pin 1's ACTUAL hole
     // (bench verdict, wave 2 - photo-confirmed real chips sit dot/notch at
@@ -360,6 +400,13 @@ struct PartDefinition {
     // wrong half. Per-pin `offset` overrides are applied by PartPlacement.cpp
     // (offset wins when >= 0). Full geometry + the wave-2 bench story:
     // CodeDocs/DESIGN_GUIDED_PLACEMENT.md.
+    //
+    // This is FOOTPRINT geometry only. The node a leg actually occupies is
+    // partPinNode(p, pin) (PartPlacement.h) - the single exported geometry
+    // authority, which consults `placement` first and falls through to here.
+    // Every consumer (bridge expansion, removal, LED overlays, check row
+    // resolution, net naming, list_parts) goes through partPinNode so compact
+    // rows propagate by construction; nothing may re-derive geometry itself.
     int nodeForPin(int k) const;
 };
 

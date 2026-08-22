@@ -27,8 +27,31 @@ void makePinNetName(const PartDefinition& p, const PartPin& pin, char out[32]); 
 
 // Shared with the MicroPython bindings (place_part / list_parts) so the pins
 // grammar and the geometry rules have exactly ONE implementation.
-int  partPinNode(const PartDefinition& p, const PartPin& pin);   // resolved node (offset wins), -1 off-board
+//
+// partPinNode() is THE geometry authority: it consults p.placement first
+// (compact legs sit in their `connect:` hole) and falls through to the
+// footprint/offset math otherwise. Every consumer - expandOnePart's bridges,
+// removePartPlacement, the guide's _GUIDE_FP_/_GUIDE_TGT_ overlays,
+// GuideChecks' row resolution, partsReassertNetNames and list_parts - calls
+// it, so a mode change propagates everywhere without a second derivation.
+int  partPinNode(const PartDefinition& p, const PartPin& pin);   // resolved node, -1 off-board
 const char* partPinClassName(uint8_t pinClass);                  // "signal"|"power"|"gnd"|"nc"
 int  parsePartPinsSpec(PartDefinition& p, const char* spec, String& err); // JSON/flow pins map -> p.pins[]
+
+// Whole-part geometry predicate at p.baseRow: footprint sanity (pin count,
+// even DIP/axial count, row 1-60), the per-footprint SPAN, and every LISTED
+// pin resolving on the footprint - `offset:` forms included. ONE
+// implementation shared by commitPart() (parse), jl_place_part() (API) and
+// the guide's move-legality check, because an entry accepted by one and
+// rejected by another is the silent-erasure class: it round-trips into the
+// user's file and the next load drops it. Fills `reason` (a message
+// fragment like "dip8 at row 58 does not fit the board (...)") when false.
+bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen);
+
+// True when `pin` would sit in its `connect:` hole under compact placement -
+// i.e. that endpoint is a physical hole row (1-60 / TOP_RAIL / BOTTOM_RAIL),
+// the pin is not `class: nc`, and the part is not a DIP. Exported for the
+// guide's snap-refusal reasons ("no pin is compact-eligible").
+bool partPinCompactEligible(const PartDefinition& p, const PartPin& pin);
 
 #endif // PART_PLACEMENT_H

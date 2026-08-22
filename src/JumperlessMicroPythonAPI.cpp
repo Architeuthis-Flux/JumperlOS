@@ -2009,67 +2009,19 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         p.pinCount = (uint8_t)high;
     }
 
-    // The SAME predicate commitPart() applies on parse (PartPlacement.cpp).
-    // An entry that passes here but would fail there gets auto-saved into the
-    // slot YAML and then silently DROPPED on the next load - the erasure bug
-    // commit 352bb23 fixed. Keep the two in step.
-    if ( p.pinCount < 1 || p.pinCount > 60 ) {
-        Serial.println( "place_part: footprint pin count must be 1-60" );
-        return -1;
-    }
-    if ( p.footprint == 1 && ( p.pinCount % 2 ) != 0 ) {
-        Serial.println( "place_part: a DIP needs an even pin count" );
-        return -1;
-    }
-    if ( p.baseRow < 1 || p.baseRow > 60 ) {
-        Serial.println( "place_part: row must be 1-60" );
-        return -1;
-    }
-    // The SAME predicate commitPart() applies on parse (PartPlacement.cpp),
-    // kept in step for the same reason as the pin-count check above: an entry
-    // that passes here but fails there gets auto-saved and then silently
-    // DROPPED on the next load.
-    if ( p.footprint == 1 && ( p.baseRow < 31 || p.baseRow > 60 ) ) {
-        Serial.println( "place_part: dip pin 1 (row) must be on the bottom half (31-60)" );
-        return -1;
-    }
-    // Column-fit: same inequality commitPart() applies - (row-30) + N/2 - 1
-    // <= 30. Without it a chip that doesn't fit places SOME pins and silently
-    // drops the rest here (0 exit code, partial bridges) while commitPart()
-    // rejects the WHOLE entry on the next load - the exact accept-here-
-    // reject-there asymmetry the "keep the two in step" comments above exist
-    // to prevent.
-    if ( p.footprint == 1 && p.baseRow >= 31 && p.baseRow <= 60 ) {
-        int half = p.pinCount / 2;
-        if ( ( p.baseRow - 30 ) + ( half - 1 ) > 30 ) {
-            Serial.print( "place_part: dip" );
-            Serial.print( p.pinCount );
-            Serial.print( " at row " );
-            Serial.print( p.baseRow );
-            Serial.println( " does not fit the board (far-side columns run past row 30)" );
-            return -1;
-        }
-    }
-    if ( p.footprint == 0 ) {
-        bool top = ( p.baseRow <= 30 );
-        int lastNode = p.baseRow + ( p.pinCount - 1 );
-        if ( ( top && lastNode > 30 ) || ( !top && lastNode > 60 ) ) {
-            Serial.print( "place_part: sip" );
-            Serial.print( p.pinCount );
-            Serial.print( " at row " );
-            Serial.print( p.baseRow );
-            Serial.println( top ? " does not fit the top half (runs past row 30)"
-                                 : " does not fit the bottom half (runs past row 60)" );
-            return -1;
-        }
-    }
-    if ( p.footprint == 2 ) {
-        if ( p.pinCount != 2 ) {
-            Serial.println( "place_part: axial2 must have exactly 2 pins" );
-            return -1;
-        }
-        if ( p.baseRow < 1 || p.baseRow > 30 ) {
-            Serial.println( "place_part: axial2 pin 1 (row) must be on the top half (1-30)" );
+    // The SAME predicate commitPart() applies on parse - now literally the
+    // same function (partGeometryOk, PartPlacement.cpp) instead of a hand
+    // copy that had to be kept in step. An entry that passes here but would
+    // fail there gets auto-saved into the slot YAML and then silently DROPPED
+    // on the next load - the erasure bug commit 352bb23 fixed. Sharing the
+    // predicate makes that drift impossible rather than merely discouraged,
+    // and it is how the wave-2 `offset:` gap (an offset pin that lands
+    // off-board) becomes an API refusal too, in one edit.
+    {
+        char reason[ 128 ];
+        if ( !partGeometryOk( p, reason, sizeof( reason ) ) ) {
+            Serial.print( "place_part: " );
+            Serial.println( reason );
             return -1;
         }
     }
