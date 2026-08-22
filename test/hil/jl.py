@@ -53,6 +53,49 @@ def finish(name):
 
 
 # ----------------------------------------------------------------------------
+# Fault witness
+# ----------------------------------------------------------------------------
+# Every byte this module reads off port 1 passes through here. The firmware
+# announces a fault two ways and both are unambiguous:
+#
+#   [crashlog] ...  printed once on the boot AFTER a HardFault. crashlogPending
+#                   is set by isr_hardfault and by nothing else, so a clean
+#                   reboot - machine.reset(), a UF2 load, reboot_board() - never
+#                   produces one. Seeing it mid-suite means the board faulted.
+#   [abort] ...     printed live, at the instant abort()/assert() is entered,
+#                   before the deliberate bkpt.
+#
+# Before this, "no crashlog anywhere in the run" was a human grepping the log
+# afterwards (task w3-1 report §7). Now it is enforced, which also turns every
+# existing suite into a passive abort detector for free: any test that talks to
+# port 1 will fail loudly the moment the board faults under it, instead of
+# reporting some downstream symptom.
+_FAULT_RE = re.compile(r"^.*\[(crashlog|abort)\].*$", re.M)
+
+# Set once, and only by fault_scan. port1_wait_ready's blanket `except
+# SystemExit` (which exists so a still-enumerating port does not kill the poll)
+# would otherwise swallow the one exit that must never be swallowed.
+_fault_message = ""
+
+
+def fault_scan(text, where=""):
+    """Fail fast if the board announced a fault. Returns text unchanged."""
+    global _fault_message
+    lines = [m.group(0).strip() for m in _FAULT_RE.finditer(text or "")]
+    if not lines:
+        return text
+    _fault_message = (
+        "FAIL: the board reported a FAULT" + (f" during {where}" if where else "")
+        + " - the run is invalid from here:\n  "
+        + "\n  ".join(lines[:12])
+        + "\n(a [crashlog] banner means the PREVIOUS boot HardFaulted; an "
+          "[abort] line means it just did. Symbolize the 'called from' address, "
+          "not PC/LR.)"
+    )
+    sys.exit(_fault_message)
+
+
+# ----------------------------------------------------------------------------
 # REPL (port 5) via the skill's jumperless.py
 # ----------------------------------------------------------------------------
 
@@ -146,7 +189,10 @@ def port1_paste(cmd, payload, settle=3.5):
     with serial.Serial(port1_path(), 115200, timeout=0.05) as ser:
         ser.write(b"\r\n")
         ser.flush()
-        _collect(ser, 1.5)  # connection-init banner
+        # The connection-init banner is where a post-fault [crashlog] appears -
+        # it is printed once, to the first terminal that attaches after the
+        # reboot - so it gets scanned even though nothing else reads it.
+        fault_scan(_collect(ser, 1.5), f"the connect banner before '{cmd}'")
         ser.reset_input_buffer()
         ser.write(cmd.encode() + b"\r\n")
         ser.flush()
@@ -154,6 +200,7 @@ def port1_paste(cmd, payload, settle=3.5):
         ser.write(payload)
         ser.flush()
         out = _collect(ser, settle)
+    fault_scan(prompt + out, f"the '{cmd}' paste")
     return prompt, out
 
 
@@ -283,7 +330,12 @@ def port1_wait_ready(timeout=25.0):
             if slot is not None:
                 return True
         except (serial.SerialException, OSError, SystemExit):
-            pass
+            # This blanket catch is what makes the poll tolerant of a port that
+            # is still enumerating - but it would also swallow fault_scan's
+            # exit, and this poll runs immediately after every reboot, which is
+            # exactly when a post-fault [crashlog] is printed. Re-raise those.
+            if _fault_message:
+                raise SystemExit(_fault_message)
         time.sleep(0.5)
     return False
 
@@ -303,11 +355,21 @@ def port1_command(cmd, collect_seconds=2.5):
         ser.flush()
         quiet_start = time.time()
         overall = time.time()
+        banner = b""
         while time.time() - overall < 4.0:
-            if ser.read(4096):
+            chunk = ser.read(4096)
+            if chunk:
+                banner += chunk
                 quiet_start = time.time()
             elif time.time() - quiet_start > 0.6:
                 break
+        # The banner was previously read and thrown away, which is precisely
+        # where a post-fault [crashlog] lands: the firmware prints it once, to
+        # the first terminal that attaches after the reboot. Scan it before
+        # discarding it, or the suite's only fault witness is a human grepping
+        # the log afterwards.
+        fault_scan(_ANSI.sub("", banner.decode(errors="replace")),
+                   f"the connect banner before '{cmd}'")
         ser.reset_input_buffer()
         ser.write(cmd.encode() + b"\r\n")
         ser.flush()
@@ -317,4 +379,5 @@ def port1_command(cmd, collect_seconds=2.5):
             chunk = ser.read(4096)
             if chunk:
                 buf += chunk
-        return _ANSI.sub("", buf.decode(errors="replace"))
+        return fault_scan(_ANSI.sub("", buf.decode(errors="replace")),
+                          f"the '{cmd}' command")

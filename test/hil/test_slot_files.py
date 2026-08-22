@@ -140,7 +140,20 @@ print(data)
 
 
 def read_device_file(path):
-    """(exists, contents) for a file on the board."""
+    """(exists, contents) for a file on the board.
+
+    `exists` is TRI-STATE and the distinction is load-bearing:
+        True  - the board said EXISTS=1
+        False - the board said EXISTS=0, i.e. CONFIRMED ABSENT
+        None  - the read produced neither, i.e. the REPL answer was garbled or
+                truncated. We know nothing.
+
+    It used to collapse the last two into False, which is fine for a comparison
+    ("did the bytes change") and NOT fine for anything that acts on absence: the
+    teardown's restore-the-absence arm would delete a real /slots/slotN.yaml
+    because one flaky read looked like "it was never there". None is falsy, so
+    every comparison caller is unaffected; only the deleting caller inspects it.
+    """
     out = jl_exec(f"""
 p = {path!r}
 if fs_exists(p):
@@ -152,7 +165,7 @@ else:
     print("EXISTS=0")
 """, timeout=25)
     if "EXISTS=1" not in out:
-        return False, None
+        return (False if "EXISTS=0" in out else None), None
     try:
         body = out.split("BEGIN", 1)[1].rsplit("END", 1)[0]
     except IndexError:
@@ -684,7 +697,11 @@ connect(57, 58)
 
     fm_captured = ""
     fm_ok = True
-    ser = serial.Serial(port1_path(), 115200, timeout=0.1)
+    # Resolve the node path NOW, while it certainly exists: port1_path()
+    # sys.exit()s when it is gone, so calling it after a suspected reboot would
+    # kill the suite instead of failing the check that is looking for one.
+    PORT1_NODE = port1_path()
+    ser = serial.Serial(PORT1_NODE, 115200, timeout=0.1)
     try:
         _fm_send(ser, b"\r\n", 2.0)
         opened = _fm_vis(_fm_send(ser, b"/\r\n", 4.0))
@@ -718,12 +735,26 @@ connect(57, 58)
             if target in fixture and _fm_goto(ser, fixture.index(target) + 1):
                 prompt = _fm_vis(_fm_send(ser, b"x", 1.6))
                 fm_captured += prompt
-                check("Delete file" in prompt,
-                      "6c: the browser asked to confirm the delete")
-                done = _fm_vis(_fm_send(ser, b"y", 2.0))
-                fm_captured += done
-                check("Deleted:" in done,
-                      "6c: the browser deleted the ACTIVE run file")
+                # Assert the NAME, not just that a prompt appeared. The firmware
+                # puts it in the prompt verbatim ("Delete file 'x'? (y/N): ",
+                # FilesystemStuff.cpp:1808), and this is the one keystroke in
+                # the whole driver that destroys data - the place where "a
+                # missed key fails loudly" has to actually hold. If _fm_order
+                # ever drifts from refreshListing (a case-folding change, a new
+                # dotfile rule, a truncated listing) the selection lands one row
+                # off, and one row off from the run file is wiring.yaml - the
+                # template whose survival phase 6b asserts.
+                named = f"Delete file '{target}'" in prompt
+                check(named,
+                      f"6c: the browser is asking about {target} specifically, "
+                      f"not merely 'a file'")
+                if not named:
+                    _fm_send(ser, b"n", 1.2)      # refuse it; do NOT guess
+                else:
+                    done = _fm_vis(_fm_send(ser, b"y", 2.0))
+                    fm_captured += done
+                    check("Deleted:" in done,
+                          "6c: the browser deleted the ACTIVE run file")
 
         # THE CRASHING KEYSTROKE.
         out_q = _fm_vis(_fm_send(ser, b"\x11", 6.0))
@@ -736,18 +767,41 @@ connect(57, 58)
         # manager still up strands Core 0 inside it: every later jl_exec times
         # out waiting for a raw REPL that cannot answer, so the suite's own
         # teardown fails too and the fixture/slot restores never run.
+        #
+        # And it may not BE the browser. A dropped keystroke can leave a nested
+        # app on top of it - during development this driver opened a .bin in the
+        # bitmap editor, which answers CTRL+Q with "Save before quitting?
+        # (y/n/c)" and stays put until someone answers. So: CTRL+Q, look at what
+        # came back, answer a save prompt with 'n', try ESC too, up to three
+        # rounds, and say so loudly if the browser never announced its exit.
         try:
-            if "Exiting File Manager" not in fm_captured:
-                _fm_send(ser, b"\x11", 3.0)
-        except Exception:
-            pass
+            left = "Exiting File Manager" in fm_captured
+            for _ in range(3):
+                if left:
+                    break
+                back = _fm_vis(_fm_send(ser, b"\x11", 2.5))
+                if "Save before quitting" in back or "(y/n/c)" in back:
+                    back += _fm_vis(_fm_send(ser, b"n", 2.5))   # discard, never save
+                if "Exiting File Manager" not in back:
+                    back += _fm_vis(_fm_send(ser, b"\x1b", 1.5))
+                fm_captured += back
+                left = "Exiting File Manager" in back
+            if not left:
+                print("  info: could not confirm the file manager exited - "
+                      "later phases may fail on a stranded Core 0")
+        except Exception as e:
+            print(f"  info: file-manager recovery raised {e!r}")
         try:
             ser.close()
         except Exception:
             pass
 
-    node_alive = all(os.path.exists(port1_path()) for _ in range(3))
-    check(node_alive, "6c: the CDC node never disappeared (no reboot)")
+    # One observation, honestly described. The old form evaluated the same
+    # predicate three times with no delay (so it was never three samples) via
+    # port1_path(), which sys.exit()s when the node is gone - so it could not
+    # report False at all: a reboot killed the suite instead of failing here.
+    node_alive = os.path.exists(PORT1_NODE) if PORT1_NODE else True
+    check(node_alive, "6c: the CDC node is still present (a reboot removes it)")
     check("[crashlog]" not in fm_captured,
           "6c: NO crashlog banner - the board did not HardFault on the way out")
     slot_f, path_f = active_context(3.0)
@@ -886,15 +940,24 @@ print("gone=", 0 if (fs_exists({TMP_PROJ!r}) or fs_exists({TRAP_FILE!r})) else 1
     # the snapshot/restore pair then perpetuates the residue instead of undoing
     # it. Put the absence back. (General hygiene; every slot file happened to
     # exist on the bench this was written on, so it changes nothing there.)
+    #
+    # `existed is False` and NOT `not existed`: read_device_file returns None
+    # when the snapshot read was garbled, and this arm DELETES. Deleting a
+    # user's real slot file because one REPL answer came back truncated is
+    # exactly the class of thing this wave outlawed after guide_flow's sweep
+    # took Kevin's 555_1/555_2. Absence has to be positive evidence (EXISTS=0),
+    # never the absence of evidence.
     for path, existed, before in (("/slots/slot0.yaml", slot0_existed, slot0_before),
                                   ("/slots/slot2.yaml", slot2_existed, slot2_before)):
         if existed and before is not None:
             jl_exec(f"fs_write({path!r}, {before!r})", timeout=25)
-        elif not existed:
+        elif existed is False:
             jl_exec(f"""
 if fs_exists({path!r}):
     jfs.remove({path!r})
 """, timeout=25)
+        else:
+            print(f"  info: {path} snapshot read was inconclusive - leaving it alone")
 
     # Path-aware: the bench may have been on a file context when we started.
     restore_context(orig_slot, orig_path)
