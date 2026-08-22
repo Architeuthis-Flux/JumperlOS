@@ -436,16 +436,12 @@ static bool ringReadPair(int chA, int chB, float* vA, float* vB,
     return true;
 }
 
-// One fresh ring read of a single channel (rail_sane's reference tap rides
-// the ordinary one-shot tap path; this is for Option-1 consumers only).
-static bool ringReadOne(int ch, float* v) {
-    float dummy = 0, dA = 0, dB = 0;
-    return ringReadPair(ch, ch, v, &dummy, &dA, &dB);
-}
-
 // Terminal-state funnel: teardown FIRST (before anything can early-return),
 // then record the outcome. Every terminal path goes through here.
 static void checkTeardown(void);
+// Option 1 -> one-shot taps, bridges and channels and all (defined below,
+// called from chainBegin above it).
+static void dropSenseLegsToTaps(bool energized);
 
 static int finishCheck(int result, const char* hintText, const char* valFmt, ...) {
     checkTeardown();
@@ -784,7 +780,7 @@ static bool chainBegin(int rowA, int rowB, float stimulusVolts) {
          routeRefused(rowB, ADC0 + ck.senseAdcB))) {
         Serial.printf("  sense: chain routed but a sense bridge did not "
                       "(rows %d/%d) - falling back to one-shot taps\n\r", rowA, rowB);
-        ck.senseMode = SenseMode::TAPS;
+        dropSenseLegsToTaps(false);
     }
 
     // save=0: state truth stays at the guide's safe 0 V - the slot cannot
@@ -810,6 +806,53 @@ static bool railSaneNeedsRef(void) {
         if (ck.rowClass[i] == 1) return true;
     }
     return false;
+}
+
+// Give up on Option 1 mid-check and hand the voltage half back to the one-shot
+// taps. This is NOT just a mode flag - three things have to come apart or the
+// fallback is worse than the failure it handles:
+//
+//  1. the two sense BRIDGES come off the fabric. Leaving them would point a
+//     live ephemeral bridge at an ADC node that a tap is about to
+//     fastConnectPath onto - the one thing the tap router's wouldShort
+//     validation exists to prevent;
+//  2. the two CHANNELS go back to the pool. The tap acquires under
+//     INFRA_ADC_NVSCAN and would otherwise be starved of exactly the two
+//     channels we proved were free;
+//  3. the ring-measured OFFSET pair is discarded. The taps read both nodes on
+//     ONE channel, so subtracting a delta captured on two different channels
+//     would inject the very mismatch the two-point correction removes.
+//
+// The stimulus drops for the refresh (no live voltage while crosspoints move,
+// the same rule chainComplete used to follow) and comes back after.
+// `energized`: whether the stimulus is currently applied. Explicit rather
+// than inferred from ck.phase, because chainBegin calls this BEFORE the first
+// setDac0voltage and inferring would energize the chain early.
+static void dropSenseLegsToTaps(bool energized) {
+    String err;
+    bool removed = false;
+    if (energized) setDac0voltage(0.0f, 0, 0);
+    for (int slot = 3; slot <= 4; slot++) {
+        if (!ck.chainAdded[slot]) continue;
+        removed |= globalState.removeEphemeralConnection(ck.legNode[slot][0],
+                                                         ck.legNode[slot][1],
+                                                         err, false, 0);
+        ck.chainAdded[slot] = false;
+    }
+    if (removed) {
+        refreshLocalConnections(0, 0, 0);
+        waitCore2();
+    }
+    infraReleaseAdc(INFRA_ADC_SCAN);
+    ck.senseAdcA = ck.senseAdcB = -1;
+    ck.haveVofs = false;
+    ck.senseMode = SenseMode::TAPS;
+    ck.tapHardFails = 0;
+    ck.tapSeqPhase = 0;
+    if (energized) {
+        setDac0voltage(ck.stimVolts, 0, 0);
+        ck.phase = CkPhase::TAP_REQUEST;
+    }
 }
 
 // Collect the class-tagged rows of every placed part (rail_sane).
@@ -1651,11 +1694,9 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                     // dwell). Retry; the check timeout bounds the loop, and
                     // eight misses in a row means the ring is not serving us.
                     if (++ck.tapHardFails >= kTapHardFailLimit) {
-                        ck.tapHardFails = 0;
                         Serial.println("  sense: ring would not serve a fresh "
                                        "window - falling back to one-shot taps");
-                        ck.senseMode = SenseMode::TAPS;
-                        ck.phase = CkPhase::TAP_REQUEST;
+                        dropSenseLegsToTaps(true);
                     }
                     break;
                 }
@@ -1670,8 +1711,7 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                                   "stimulus - the sense bridge is not on the row; "
                                   "falling back to one-shot taps\n\r",
                                   (double)ck.vSenseA, (double)ck.stimVolts);
-                    ck.senseMode = SenseMode::TAPS;
-                    ck.phase = CkPhase::TAP_REQUEST;
+                    dropSenseLegsToTaps(true);
                     break;
                 }
                 ck.haveVsense = true;
