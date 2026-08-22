@@ -289,10 +289,17 @@ guide:
 # steps parsed as ONE. Task 8 found it while writing fixtures (its report
 # §7.3 measured it three ways). Both halves of the fix are witnessed here:
 #   - step 1 WRAPS, and both its text and step 2 must survive the join;
+#   - step 3 carries an APOSTROPHE outside any double-quoted run (a `script:`
+#     path; `part: O'Brien` is the same shape). The first cut of the detector
+#     honoured `'` as a string delimiter - which nothing else in this parser
+#     does - so that balanced line reported UNCLOSED, the join ate step 4, and
+#     a file that parsed clean before the join existed silently lost a step.
+#     Step 4 existing is the assertion;
 #   - the trailing `stray:` line is the residual BLOCK-style shape, which the
 #     parser still cannot support and must now warn about instead of eating
 #     the next step in silence.
-# Note-only steps: nothing here touches hardware.
+# `do: run` parses and counts but never executes, so this fixture still
+# touches no hardware.
 CONT_PATH = PROJ_DIR + "/contline.yaml"
 CONT_WIRING = """version: 2
 sourceOfTruth: bridges
@@ -305,6 +312,8 @@ guide:
     - {do: note,
        text: "step one wrapped onto two lines"}
     - {do: note, text: "step two must survive"}
+    - {do: run, script: /python_scripts/o'brien.py, text: "an apostrophe OUTSIDE double quotes"}
+    - {do: note, text: "step four survives the apostrophe"}
     stray: notastep
 """
 
@@ -1086,17 +1095,30 @@ print("NETNAME|" + name)
         d.expect(r"guide step spans lines - unsupported, next step may be lost",
                  "a block-style line inside steps: warns instead of eating the "
                  "next step in silence", timeout=40)
-        d.expect(r"=== Guided build: HIL Continuation === \(2 steps\)",
-                 "the wrapped step and the one after it BOTH parsed (2 steps)")
+        d.expect(r"=== Guided build: HIL Continuation === \(4 steps\)",
+                 "the wrapped step, the one after it AND the apostrophe-bearing "
+                 "step's successor all parsed (4 steps)")
         # STEP_ENTER prints the prompt BEFORE its status line, so expect the
         # text first (the suite's standing ordering trap).
         d.expect(r"step one wrapped onto two lines",
                  "the continuation line's own text: reached the step")
-        d.expect(r"GUIDE step=1/2 id=note_1 state=WAIT", "wrapped step 1 waits")
+        d.expect(r"GUIDE step=1/4 id=note_1 state=WAIT", "wrapped step 1 waits")
         d.send(b"n")
         d.expect(r"step two must survive",
                  "the step AFTER the wrapped one was not swallowed")
-        d.expect(r"GUIDE step=2/2 id=note_2 state=WAIT", "step 2 waits")
+        d.expect(r"GUIDE step=2/4 id=note_2 state=WAIT", "step 2 waits")
+        d.send(b"n")
+        # The apostrophe is the point: a balanced line must NOT be treated as
+        # unclosed. The commit echoes script:, so this also proves the field
+        # parsed intact rather than merely surviving.
+        d.expect(r"GUIDE step=3/4 id=run_3 state=WAIT",
+                 "the apostrophe-bearing step is step 3 of 4, not a join victim")
+        d.send(b"n")
+        d.expect(r"run step '/python_scripts/o'brien\.py'",
+                 "script: kept its apostrophe through the parse")
+        d.expect(r"step four survives the apostrophe",
+                 "THE NEEDLE: the step after the apostrophe was not swallowed")
+        d.expect(r"GUIDE step=4/4 id=note_4 state=WAIT", "step 4 waits")
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "EXIT from the continuation fixture")
         guide_live = False

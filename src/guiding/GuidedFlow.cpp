@@ -481,18 +481,32 @@ static String guideFlowField(const String& body, const char* key) {
 }
 
 // True when `body` opens a flow map this line does not close - i.e. a
-// `- {...` step that wrapped onto the following line. Quote-aware: `text:`
-// prose is free to contain a brace and must not be read as structure.
+// `- {...` step that wrapped onto the following line. Double-quote-aware:
+// `text:` prose is free to contain a brace and must not be read as structure.
+//
+// DOUBLE QUOTES ONLY, and that is not an omission. This format blesses exactly
+// one string delimiter: guideFlowField splits on bare , and } with no quote
+// handling at all, guideScalar strips `"`, and guideParseStepLine pairs
+// `"` ... `"` to lift `text:`. A detector that also honoured `'` would be the
+// only thing in the parser that did - and it would turn an ordinary apostrophe
+// into an unterminated string, swallow the closing brace, and report a
+// perfectly balanced line as unclosed. The join would then eat the NEXT line,
+// which may be the next step. `{part: O'Brien, ...}` parsed clean before the
+// join existed and must keep doing so.
+//
+// Residual, stated so nobody "fixes" it back: a SINGLE-quoted YAML string
+// carrying an unmatched `{` is misread. That shape was never supported here
+// anyway - guideScalar would keep the quotes as literal characters.
 static bool guideFlowMapUnclosed(const String& body) {
     int depth = 0;
-    char quote = 0;
+    bool inString = false;
     for (unsigned int i = 0; i < body.length(); i++) {
         char c = body.charAt(i);
-        if (quote != 0) {
-            if (c == quote) quote = 0;
+        if (inString) {
+            if (c == '"') inString = false;
             continue;
         }
-        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '"') { inString = true; continue; }
         if (c == '{') depth++;
         else if (c == '}' && depth > 0) depth--;
     }
