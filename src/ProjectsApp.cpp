@@ -851,7 +851,22 @@ static void finishRun(const RunContext& rc) {
 // whether or not a script exists and whether or not it ran:
 //   SCRIPT offer=<resolved path>|none
 //   SCRIPT action=run|skip
-static void runOrOfferScript(const RunContext& rc, bool afterGuide) {
+// `nothingBuilt` is the guided gate (fix round 1): a build whose every step
+// was skipped reaches DONE and returns COMPLETED - nothing is left unfinished -
+// but no bridge was ever placed, and running the companion script against a
+// circuit nobody assembled is worse than not running it. The run file is still
+// saved and announced (the persistence half of exits G/H is unconditional);
+// only the offer and the run are suppressed, and no SCRIPT lines are printed,
+// so a headless driver can tell this case from `offer=none`.
+static void runOrOfferScript(const RunContext& rc, bool afterGuide,
+                             bool nothingBuilt = false) {
+    if (nothingBuilt) {
+        Serial.println("\r\n  (nothing was built - no script offer)");
+        Serial.flush();
+        finishRun(rc);
+        return;
+    }
+
     String scriptPath = resolveScriptPath(rc);
 
     // Announce the resolution BEFORE any prompt: a headless driver watches for
@@ -946,7 +961,13 @@ static void runGuideThenScript(const RunContext& rc, const String& guideSource,
         Serial.flush();
     }
 
-    GuideRunResult gr = guideRun(guideSource.c_str(), resumeStep, &preGuidePower);
+    int builtSteps = 0;
+    GuideRunResult gr = guideRun(guideSource.c_str(), resumeStep, &preGuidePower,
+                                 &builtSteps);
+    // Only a session that ran can report "nothing was built". The no-session
+    // results below are plain context loads (see the report's §4.1) and keep
+    // their script.
+    bool nothingBuilt = false;
     switch (gr) {
         case GuideRunResult::QUIT:
         case GuideRunResult::COMPLETED:
@@ -959,6 +980,7 @@ static void runGuideThenScript(const RunContext& rc, const String& guideSource,
             // is active with guideProgress at the quit step and resume works
             // next launch.
             if (gr == GuideRunResult::QUIT) return;
+            nothingBuilt = (builtSteps < 1);
             break;
         case GuideRunResult::PARSE_FAILED:
             Serial.println("\r\n  guide source missing: " + guideSource +
@@ -978,7 +1000,7 @@ static void runGuideThenScript(const RunContext& rc, const String& guideSource,
             applyStatePowerToHardware();
             break;
     }
-    runOrOfferScript(rc, /*afterGuide=*/true);
+    runOrOfferScript(rc, /*afterGuide=*/true, nothingBuilt);
 }
 
 // The whole flow once the run file is open and RUNFILE has been printed.

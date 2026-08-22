@@ -1437,6 +1437,18 @@ static void guideAdjustSlide(GuideSession& s, int partIdx, int dir) {
     Serial.flush();
 }
 
+// The one-line history note a wait-state arrival prints. Shared by STEP_ENTER
+// (a browse landing) and guideAdjustLeave, so the two ways of arriving at the
+// same wait state say the same thing.
+static void guideShowStepHistoryNote(const GuideSession& s) {
+    if (s.stepIdx < 0 || s.stepIdx >= s.script->numSteps) return;
+    if (s.committed[s.stepIdx]) {
+        Serial.println("  (already committed - click re-verifies)");
+    } else if (s.skipped[s.stepIdx]) {
+        Serial.println("  (skipped)");
+    }
+}
+
 static void guideAdjustEnter(GuideSession& s, int partIdx) {
     const PartDefinition& p = globalState.parts.parts[partIdx];
     s.adjustEntryRow = p.baseRow;
@@ -1469,6 +1481,7 @@ static void guideAdjustLeave(GuideSession& s, bool cancel) {
     guideAdjustFlush(s);
     s.state = s.waitReturn;
     guideShowPrompt(s);
+    guideShowStepHistoryNote(s);
     guideStatusLine(s, (s.waitReturn == GuideState::STEP_PROBE_WAIT) ? "PROBE_WAIT"
                                                                     : "WAIT");
 }
@@ -1532,7 +1545,20 @@ static void guideBrowse(GuideSession& s, int dir) {
 
 // Skip-with-flag (§3.3): shared by the wait states' skip key, a mid-check
 // skip (which aborts the check first at its call site), and on_fail: skip.
-static void guideDoSkip(GuideSession& s) {
+// Returns false when the skip was REFUSED and the caller must decide where to
+// go instead (nothing has been changed in that case).
+static bool guideDoSkip(GuideSession& s) {
+    // RULING (fix round 1): a COMMITTED step cannot be skipped. Clearing
+    // committed[i] while the bridges that commit built are still on the fabric
+    // is a session/fabric divergence - the flag would say "never done" about
+    // hardware that is done. Only became reachable when browsing let the
+    // cursor park on a committed step. `p` / probe REMOVE is the gesture that
+    // un-commits, and it removes the hardware too.
+    if (s.committed[s.stepIdx]) {
+        Serial.println("\r\n  (already committed - p removes it first)");
+        Serial.flush();
+        return false;
+    }
     s.skipped[s.stepIdx] = true;
     s.committed[s.stepIdx] = false;
     Serial.println("\r\n  (skipped)");
@@ -1540,6 +1566,7 @@ static void guideDoSkip(GuideSession& s) {
     guidePersistProgress(s);
     s.state = (s.stepIdx >= s.script->numSteps) ? GuideState::DONE
                                                 : GuideState::STEP_ENTER;
+    return true;
 }
 
 void guideTick(GuideSession& s) {
@@ -1613,11 +1640,7 @@ void guideTick(GuideSession& s) {
             guideShowPrompt(s);
             // Browsing means landing on steps with history - say so, so a
             // confirm here is never a surprise.
-            if (s.committed[s.stepIdx]) {
-                Serial.println("  (already committed - click re-verifies)");
-            } else if (s.skipped[s.stepIdx]) {
-                Serial.println("  (skipped)");
-            }
+            guideShowStepHistoryNote(s);
             s.pulseOn = true;
             s.lastPulseMs = millis();
             guideRenderTarget(s, s.pulseOn);
@@ -1868,7 +1891,10 @@ void guideTick(GuideSession& s) {
                 } else if (k == GuideKey::SKIP) {
                     guideCheckAbort();
                     s.checkRunning = false;
-                    guideDoSkip(s);
+                    // A REFUSED skip must still leave VERIFY: checkRunning is
+                    // already false, so staying here would simply re-begin the
+                    // check on the next tick, forever.
+                    if (!guideDoSkip(s)) s.state = s.waitReturn;
                 } else if (k == GuideKey::BACK) {
                     guideCheckAbort();
                     s.checkRunning = false;
@@ -1981,7 +2007,10 @@ void guideTick(GuideSession& s) {
             bool measured = (s.checkOutcome == GUIDE_CHECK_FAIL);
             switch (st.onFail) {
                 case GuideOnFail::SKIP:
-                    guideDoSkip(s);
+                    // (Unreachable on a committed step - the verify-only
+                    // branch above returns first - but never leave RESULT
+                    // without a next state.)
+                    if (!guideDoSkip(s)) s.state = s.waitReturn;
                     break;
                 case GuideOnFail::RETRY:
                     Serial.println("  ✗ check failed - fix it and confirm to re-run (s skips)");
@@ -2127,6 +2156,24 @@ void guideTick(GuideSession& s) {
             // - browse out, confirm, or quit.
             if (!s.summaryShown) {
                 s.summaryShown = true;
+                // ARRIVAL CLEAR, symmetric with STEP_ENTER's (:1612) and the
+                // reason the headline invariant actually holds. A wheel click
+                // arms a 260 ms pend; a turn INTO this view inside that window
+                // - or an impatient click in the last 260 ms of the 900 ms
+                // pass-hold on the final step - would otherwise let the pend
+                // mature HERE, where a CONFIRM on an all-built guide means
+                // EXIT. That is a wheel turn leaving the guide, which is
+                // exactly what must never happen.
+                //
+                // It belongs INSIDE this entry block, not at the top of the
+                // case: the case body runs every tick while resting in DONE,
+                // so an unconditional clear would zero the pend before it
+                // could mature and would silently kill the LEGITIMATE
+                // wheel-click-at-DONE (finish / jump to the first unbuilt
+                // step). Every arrival sets summaryShown false first
+                // (guideBrowse, STEP_COMMIT, STEP_BACK, the DONE-confirm jump,
+                // and INIT's memset), so once is enough.
+                s.pendingConfirmMs = 0;
                 int commits = 0, skips = 0, unfinished = 0;
                 for (int i = 0; i < sc.numSteps; i++) {
                     if (s.committed[i]) commits++;
@@ -2330,10 +2377,13 @@ static void guideExitTail(GuideSession& s) {
 }
 
 GuideRunResult guideRun(const char* projectYamlPath, int resumeStep,
-                        GuideRunPower* power) {
-    // Answer the out-param before ANY early return: a caller that reads
-    // `applied` after a parse failure must see "nothing was energized".
+                        GuideRunPower* power, int* committedOut) {
+    // Answer the out-params before ANY early return: a caller that reads
+    // `applied` after a parse failure must see "nothing was energized", and a
+    // caller that reads the commit count must see "no session, nothing built"
+    // rather than whatever the previous session left in the static.
     if (power != nullptr) power->applied = false;
+    if (committedOut != nullptr) *committedOut = 0;
     String err;
     if (!guideParse(projectYamlPath, guideScript, err)) {
         Serial.println("\r\nGUIDE parse failed: " + err);
@@ -2376,6 +2426,13 @@ GuideRunResult guideRun(const char* projectYamlPath, int resumeStep,
     }
     guideExitTail(guideSession);
     if (power != nullptr) power->applied = guideSession.powerApplied;
+    if (committedOut != nullptr) {
+        int built = 0;
+        for (int i = 0; i < guideScript.numSteps && i < MAX_GUIDE_STEPS; i++) {
+            if (guideSession.committed[i]) built++;
+        }
+        *committedOut = built;
+    }
 
     // COMPLETED means NOTHING IS LEFT UNFINISHED - every step is committed or
     // deliberately skipped. It deliberately no longer keys off stepIdx: with

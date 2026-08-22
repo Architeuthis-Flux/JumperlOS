@@ -99,8 +99,14 @@ struct GuideRunPower {
 // while `projectYamlPath` stays the CANONICAL wiring (the run file loses its
 // `guide:` section on the first save, so a guide parsed from it would work
 // once and never resume).
+// `committedOut` receives how many steps this SESSION ended up with committed
+// (0 on every early return, since no session ran). The launcher gates the
+// companion-script offer on it: a build whose every step was skipped reaches
+// DONE and returns COMPLETED - "nothing left unfinished" is true - but nothing
+// was BUILT, and a script must not run on a circuit nobody assembled.
 GuideRunResult guideRun(const char* projectYamlPath, int resumeStep = -1,
-                        GuideRunPower* power = nullptr);
+                        GuideRunPower* power = nullptr,
+                        int* committedOut = nullptr);
 
 struct GuideSession;               // ProbeSession-style, defined in the .cpp
 void guideTick(GuideSession& s);
