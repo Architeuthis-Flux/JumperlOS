@@ -60,9 +60,19 @@ extern bool parseBoolean(const String& val, bool& success);
 // ---------------------------------------------------------------------------
 
 enum class GuideState : uint8_t {
-    INIT, STEP_ENTER, STEP_WAIT, STEP_PROBE_WAIT, STEP_VERIFY, STEP_RESULT,
-    STEP_COMMIT, STEP_BACK, DONE, EXIT
+    INIT, STEP_ENTER, STEP_WAIT, STEP_PROBE_WAIT, STEP_ADJUST, STEP_VERIFY,
+    STEP_RESULT, STEP_COMMIT, STEP_BACK, DONE, EXIT
 };
+
+// Wheel-click confirm pend (guide-UX design §1.3). The encoder only reports
+// DOUBLECLICKED on the SECOND press, so a confirm consumed instantly off
+// RELEASED would swallow the first click of every double-click. Every wheel
+// click therefore waits doubleClickLength (250 ms, RotaryEncoder.cpp:345) plus
+// 10 ms of slack before it becomes a CONFIRM. THE NAMED COST: ~260 ms of
+// latency on every wheel confirm. Serial `n`/space and the probe CONNECT
+// button are unaffected and still confirm instantly, so the HIL grammar and
+// its timing do not move.
+#define GUIDE_CONFIRM_PEND_MS 260
 
 struct GuideSession {
     GuideScript* script;
@@ -85,6 +95,22 @@ struct GuideSession {
     char checkVal[24];                  // machine token for the RESULT val=
     bool checkWarned;                   // measured warn-fail on this step: the
                                         // next confirm advances without re-run
+    // STEP_ADJUST (design §1.1). Entry geometry so hold/`q` can put the part
+    // back exactly where it was; adjustDirty batches the wheel slide's YAML
+    // writes (see guideAdjustSlide).
+    int16_t adjustEntryRow;
+    uint8_t adjustEntryPlacement;
+    bool    adjustDirty;
+    // Wheel-click confirm pend (§1.3). 0 = nothing armed; otherwise the
+    // millis() of the click's RELEASE, which becomes a CONFIRM after
+    // GUIDE_CONFIRM_PEND_MS unless a DOUBLECLICKED consumes it first.
+    unsigned long pendingConfirmMs;
+    // Pre-guide rails, captured by the LAUNCHER before its run-file load
+    // (design §4.2 as corrected). The guide only ever REPORTS them at the exit
+    // tail - the caller owns the actual restore, because the early-return
+    // paths never reach a session at all.
+    bool  haveRestorePower;
+    float restoreTop, restoreBot, restoreDac0, restoreDac1;
 };
 
 // Single static instances - GuideScript is ~7.5 KB (V5) and the guide is a
@@ -770,8 +796,12 @@ bool guideParse(const char* yamlPath, GuideScript& out, String& err) {
 // Input
 // ---------------------------------------------------------------------------
 
+// NEXT/PREV are the WHEEL's own keys. They are deliberately NOT SKIP/BACK any
+// more (design §3.1): a wheel turn navigates and nothing else - it never
+// skips, never un-commits, and CAN NEVER EXIT THE GUIDE. Only hold and `q`
+// leave. `s` and `p`/probe-REMOVE keep their teeth.
 enum class GuideKey : uint8_t { NONE, CONFIRM, SKIP, BACK, VERIFY, QUIT, TAP,
-                                MOVE, SNAP };
+                                MOVE, SNAP, NEXT, PREV, ADJUST };
 
 // `t <row>` / `m <row>`: digits until newline or 300 ms of silence. Shared by
 // both keys so the two number readers can never drift.
@@ -813,32 +843,63 @@ static GuideKey guideReadInput(GuideSession& s, int& tapRow) {
     tapRow = -1;
     rotaryEncoderButtonStuff();
 
-    // Encoder: hold = quit, click (RELEASED off PRESSED - probeCalib's edge,
-    // Apps.cpp:858) = confirm, wheel = skip forward / back.
+    // Encoder: hold = quit, double-click = adjust, click = PENDED confirm
+    // (§1.3), wheel = browse next / prev.
+    //
+    // ORDER IS LOAD-BEARING. DOUBLECLICKED is tested FIRST because the encoder
+    // sets it on the SECOND press (RotaryEncoder.cpp:590) while the first
+    // click's RELEASED has already armed the pend; consuming it here both
+    // cancels that pend and stops the second click's own release from arming
+    // another (the release sets lastButtonEncoderState from the state we just
+    // cleared to IDLE, so the RELEASED test below cannot fire off it).
+    if (encoderButtonState == DOUBLECLICKED) {
+        encoderButtonState = IDLE;
+        lastButtonEncoderState = IDLE;
+        s.pendingConfirmMs = 0;
+        return GuideKey::ADJUST;
+    }
     if (encoderButtonState == HELD) {
         encoderButtonState = IDLE;
+        s.pendingConfirmMs = 0;
         return GuideKey::QUIT;
     }
     if (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED) {
         encoderButtonState = IDLE;
+        // ARM, don't confirm: a second press inside doubleClickLength turns
+        // this into ADJUST instead. millis() can be 0 exactly once per ~49
+        // days and 0 is the "nothing armed" sentinel, hence the nudge.
+        s.pendingConfirmMs = millis();
+        if (s.pendingConfirmMs == 0) s.pendingConfirmMs = 1;
+        return GuideKey::NONE;
+    }
+    if (s.pendingConfirmMs != 0 &&
+        millis() - s.pendingConfirmMs >= GUIDE_CONFIRM_PEND_MS) {
+        s.pendingConfirmMs = 0;
         return GuideKey::CONFIRM;
     }
     if (encoderDirectionState == UP) {
         encoderDirectionState = NONE;
-        return GuideKey::SKIP;
+        return GuideKey::NEXT;
     }
     if (encoderDirectionState == DOWN) {
         encoderDirectionState = NONE;
-        return GuideKey::BACK;
+        return GuideKey::PREV;
     }
 
     // Probe buttons (post-polarity-swap): CONNECT = confirm, REMOVE = back.
+    // Either one also disarms a pending wheel confirm - two confirms from one
+    // gesture pair would advance two steps.
     int pb = guideProbeButton();
-    if (pb == 1) return GuideKey::CONFIRM;
-    if (pb == 2) return GuideKey::BACK;
+    if (pb == 1) { s.pendingConfirmMs = 0; return GuideKey::CONFIRM; }
+    if (pb == 2) { s.pendingConfirmMs = 0; return GuideKey::BACK; }
 
     if (Serial.available() > 0) {
         char c = Serial.read();
+        // A serial key outranks a pending wheel confirm for the same reason
+        // (unconditional: at the guide's prompt nothing types but the user,
+        // and a stray byte swallowing a click is far cheaper than a stray
+        // byte plus a click advancing two steps).
+        s.pendingConfirmMs = 0;
         switch (c) {
             case 'n': case ' ': return GuideKey::CONFIRM;
             case 'p':           return GuideKey::BACK;
@@ -846,6 +907,12 @@ static GuideKey guideReadInput(GuideSession& s, int& tapRow) {
             case 'v':           return GuideKey::VERIFY;
             case 'q':           return GuideKey::QUIT;
             case 'c':           return GuideKey::SNAP;
+            // The WHEEL's serial twins (§7.1). The wheel is relative, so its
+            // twins are relative too - and like the wheel they only ever
+            // browse: `>` past the last step lands in the DONE view, `>`
+            // again wraps to step 1, and neither can exit.
+            case '>':           return GuideKey::NEXT;
+            case '<':           return GuideKey::PREV;
             case 't': {
                 int row = guideReadRowArg("t");
                 if (row < 0) return GuideKey::NONE;
@@ -866,6 +933,7 @@ static GuideKey guideReadInput(GuideSession& s, int& tapRow) {
     // Probe tap (deduped): the same path `t <row>` feeds.
     int probeRow = justReadProbe();
     if (probeRow >= 1 && probeRow <= 60) {
+        s.pendingConfirmMs = 0;
         tapRow = probeRow;
         return GuideKey::TAP;
     }
@@ -1053,6 +1121,27 @@ static bool guideMoveLegal(const PartDefinition& cand, int partIdx,
     return true;
 }
 
+// An AUTO-SYNTHESIZED place step's prompt spells out the row ("Place R1 (10k),
+// pin 1 at row 45") and that text is baked at parse time, so a move leaves it
+// lying. We wrote that sentence, so we can rewrite it; authored prose we
+// cannot, and the live "now: ..." line at the end of guideMovePart covers
+// both. Format kept in lockstep with guideSynthesizeSteps.
+static void guideRefreshPlaceStepText(GuideScript& sc, int stepIdx, int partIdx) {
+    if (!sc.autoFromParts) return;
+    if (stepIdx < 0 || stepIdx >= sc.numSteps) return;
+    GuideStep& st = sc.steps[stepIdx];
+    if (st.type != GuideStepType::PLACE || st.partIdx != partIdx) return;
+    if (partIdx < 0 || partIdx >= globalState.parts.numParts) return;
+    const PartDefinition& p = globalState.parts.parts[partIdx];
+    if (p.value[0] != '\0') {
+        snprintf(st.text, sizeof(st.text), "Place %s (%s), pin 1 at row %d",
+                 p.name, p.value, p.baseRow);
+    } else {
+        snprintf(st.text, sizeof(st.text), "Place %s, pin 1 at row %d",
+                 p.name, p.baseRow);
+    }
+}
+
 // THE mutation sequence (design §1.1). Every applied move or snap goes
 // through here, from the tap pads, the wheel (task 7) and the serial twins
 // alike, and emits exactly one machine line.
@@ -1067,8 +1156,12 @@ static bool guideMoveLegal(const PartDefinition& cand, int partIdx,
 // move": they are never stored per part. expandOnePart recomputes
 // partPinNode against pin.connect at apply time, so remove → mutate → reapply
 // IS the re-derivation.
+// `persist == false` batches the run-file write (the wheel slide's use: one
+// YAML rewrite per detent would be tens of ms of lag and tens of flash writes
+// per revolution). The session then carries adjustDirty until the slide
+// settles - see guideAdjustSlide / guideAdjustFlush.
 static bool guideMovePart(GuideSession& s, int partIdx, int newRow,
-                          uint8_t newPlacement) {
+                          uint8_t newPlacement, bool persist = true) {
     if (partIdx < 0 || partIdx >= globalState.parts.numParts) return false;
     PartDefinition& p = globalState.parts.parts[partIdx];
     if (newRow == p.baseRow && newPlacement == p.placement) {
@@ -1142,7 +1235,12 @@ static bool guideMovePart(GuideSession& s, int partIdx, int newRow,
         Serial.println("\r\n  (move warnings: " + err + ")");
     }
     globalState.markDirty();
-    guidePersistProgress(s);
+    if (persist) {
+        guidePersistProgress(s);
+        s.adjustDirty = false;
+    } else {
+        s.adjustDirty = true;
+    }
     guideRenderTarget(s, s.pulseOn);
     requestLedShow(1);
 
@@ -1163,6 +1261,12 @@ static bool guideMovePart(GuideSession& s, int partIdx, int newRow,
         bool stillMine = false;
         for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
             if (partPinNode(p, p.pins[j]) == node) { stillMine = true; break; }
+            // A `connect:` row is STILL COVERED even when no leg sits in it:
+            // the leg that left brought its routed bridge back to exactly that
+            // endpoint. Without this, every compact -> expanded snap flagged
+            // the endpoint row it had been sitting in as "vacated" while the
+            // returning bridge still reached it (T6 review, nit 3).
+            if (p.pins[j].connect == node) { stillMine = true; break; }
         }
         if (stillMine) continue;
         for (int i = s.stepIdx; i < s.script->numSteps; i++) {
@@ -1178,6 +1282,25 @@ static bool guideMovePart(GuideSession& s, int partIdx, int newRow,
             Serial.println(" just left)");
         }
     }
+    Serial.flush();
+
+    // The prompt was baked at STEP_ENTER and still names the OLD row (T6
+    // review). Refresh the text where we OWN it (auto-synthesized steps are
+    // the ones that spell out "pin 1 at row N"), then re-render prompt + OLED
+    // so the terminal and the panel agree with the part's new geometry.
+    // Authored prose is left alone - we cannot rewrite someone's sentence -
+    // which is why the live line below prints either way.
+    if (s.stepIdx >= 0 && s.stepIdx < s.script->numSteps) {
+        guideRefreshPlaceStepText(*s.script, s.stepIdx, partIdx);
+        guideShowPrompt(s);
+    }
+    Serial.print("  now: ");
+    Serial.print(p.name);
+    Serial.print(" pin 1 at row ");
+    Serial.print(p.baseRow);
+    Serial.print(" (");
+    Serial.print(guidePlacementName(p.placement));
+    Serial.println(")");
     Serial.flush();
     return true;
 }
@@ -1226,6 +1349,84 @@ static int guidePlaceStepPart(const GuideSession& s, const char* what) {
     return -1;
 }
 
+// ---------------------------------------------------------------------------
+// STEP_ADJUST - the wheel's relative half (design §1.1)
+// ---------------------------------------------------------------------------
+
+// Land the batched slide writes. Called on every way OUT of ADJUST, so the
+// run file is durable again the moment the wheel stops (a power cut mid-slide
+// loses the slide and keeps the entry row - coherent either way, because the
+// row on disk always describes a shape the next load can build).
+static void guideAdjustFlush(GuideSession& s) {
+    if (!s.adjustDirty) return;
+    s.adjustDirty = false;
+    guidePersistProgress(s);
+}
+
+// One detent = the NEXT LEGAL row in that direction, scanning up to 30 (§1.5).
+// Illegal rows are stepped over silently - the wheel should feel like sliding
+// the part, not like hitting every refusal on the way.
+static void guideAdjustSlide(GuideSession& s, int partIdx, int dir) {
+    if (partIdx < 0 || partIdx >= globalState.parts.numParts) return;
+    const PartDefinition& p = globalState.parts.parts[partIdx];
+    // A slide never flips compact<->expanded (that is the snap gesture's job,
+    // §1.4): a compact part stays compact and an expanded one becomes CUSTOM,
+    // the marker that says the user chose this row.
+    uint8_t mode = (p.placement == PART_PLACEMENT_COMPACT)
+                       ? PART_PLACEMENT_COMPACT : PART_PLACEMENT_CUSTOM;
+    char reason[128];
+    for (int d = 1; d <= 30; d++) {
+        int cand = (int)p.baseRow + dir * d;
+        if (cand < 1 || cand > 60) break;   // rails are never slide targets
+        guideMoveScratch = p;
+        guideMoveScratch.baseRow = (int16_t)cand;
+        guideMoveScratch.placement = mode;
+        if (!guideMoveLegal(guideMoveScratch, partIdx, reason, sizeof(reason))) continue;
+        guideMovePart(s, partIdx, cand, mode, /*persist=*/false);
+        return;
+    }
+    Serial.print("\r\n  (no legal row for ");
+    Serial.print(p.name);
+    Serial.println(dir > 0 ? " further down)" : " further up)");
+    Serial.flush();
+}
+
+static void guideAdjustEnter(GuideSession& s, int partIdx) {
+    const PartDefinition& p = globalState.parts.parts[partIdx];
+    s.adjustEntryRow = p.baseRow;
+    s.adjustEntryPlacement = p.placement;
+    s.adjustDirty = false;
+    s.state = GuideState::STEP_ADJUST;
+    Serial.print("\r\n  adjust ");
+    Serial.print(p.name);
+    Serial.println(": wheel=slide  click=drop  dblclick=snap  hold/q=cancel"
+                   "  (probe: tap=move, CONNECT=drop, REMOVE=cancel)");
+    Serial.flush();
+    guideStatusLine(s, "ADJUST");
+}
+
+// Both ways out. Cancel restores the ENTRY geometry through the same
+// remove->mutate->reapply helper every other move uses; drop just keeps what
+// the wheel built. Neither can leave the guide - ADJUST returns to its wait
+// state and the wait state's own hold/`q` is what quits.
+static void guideAdjustLeave(GuideSession& s, bool cancel) {
+    int partIdx = guidePlaceStepPart(s, nullptr);
+    if (cancel && partIdx >= 0) {
+        const PartDefinition& p = globalState.parts.parts[partIdx];
+        if (p.baseRow != s.adjustEntryRow || p.placement != s.adjustEntryPlacement) {
+            guideMovePart(s, partIdx, s.adjustEntryRow, s.adjustEntryPlacement);
+            Serial.println("  (adjust cancelled - put back where it was)");
+        } else {
+            Serial.println("\r\n  (adjust cancelled)");
+        }
+    }
+    guideAdjustFlush(s);
+    s.state = s.waitReturn;
+    guideShowPrompt(s);
+    guideStatusLine(s, (s.waitReturn == GuideState::STEP_PROBE_WAIT) ? "PROBE_WAIT"
+                                                                    : "WAIT");
+}
+
 // Skip-with-flag (§3.3): shared by the wait states' skip key, a mid-check
 // skip (which aborts the check first at its call site), and on_fail: skip.
 static void guideDoSkip(GuideSession& s) {
@@ -1258,8 +1459,8 @@ void guideTick(GuideSession& s) {
             Serial.print(sc.numSteps);
             Serial.println(" steps)");
             cycleTerminalColor(false, 100.0, true, &Serial);
-            Serial.println("wheel=step  click=confirm  hold/q=quit  n/p/s/v serial keys  "
-                           "t <row>=tap  m <row>=move  c=snap");
+            Serial.println("wheel=step  click=confirm  dblclick=adjust  hold/q=quit  "
+                           "n/p/s/v  t <row>=tap  m <row>=move  c=snap");
             Serial.println("rails + DACs held at 0V until the power_on step");
             Serial.flush();
             guideStatusLine(s, "INIT");
@@ -1303,6 +1504,9 @@ void guideTick(GuideSession& s) {
         case GuideState::STEP_ENTER: {
             const GuideStep& st = sc.steps[s.stepIdx];
             s.checkWarned = false;   // a fresh step arrival re-arms its check
+            // Any wheel click still ripening belongs to the step we just
+            // LEFT; letting it ripen here would confirm this one for free.
+            s.pendingConfirmMs = 0;
             guideShowPrompt(s);
             s.pulseOn = true;
             s.lastPulseMs = millis();
@@ -1349,10 +1553,31 @@ void guideTick(GuideSession& s) {
                     s.state = GuideState::STEP_BACK;
                     break;
                 case GuideKey::SKIP:
-                    // Forward past current = skip-with-flag (§3.3). Progress
-                    // moves and persists so resume lands after the skip.
+                    // Explicit skip-with-flag (§3.3). Progress moves and
+                    // persists so resume lands after the skip.
                     guideDoSkip(s);
                     break;
+                case GuideKey::NEXT:
+                    // The browse rework lands in the next commit; until then
+                    // the wheel keeps today's meaning so this commit is a
+                    // behaviour-preserving one for everything but ADJUST.
+                    guideDoSkip(s);
+                    break;
+                case GuideKey::PREV:
+                    s.state = GuideState::STEP_BACK;
+                    break;
+                case GuideKey::ADJUST: {
+                    // Double-click = "let me put this somewhere else". Only a
+                    // PLACE step has geometry to adjust.
+                    int idx = guidePlaceStepPart(s, nullptr);
+                    if (idx < 0) {
+                        Serial.println("\r\n  (nothing to adjust on this step)");
+                        Serial.flush();
+                        break;
+                    }
+                    guideAdjustEnter(s, idx);
+                    break;
+                }
                 case GuideKey::MOVE: {
                     // `m <row>` is the LITERAL twin of a tap: no DIP +30
                     // convenience here (that belongs to the pad, which cannot
@@ -1410,6 +1635,79 @@ void guideTick(GuideSession& s) {
                 }
                 default:
                     break;
+            }
+            break;
+        }
+
+        case GuideState::STEP_ADJUST: {
+            // Same 2 Hz target pulse as the wait states - the part's footprint
+            // is what the user is dragging, so it has to keep breathing.
+            if (millis() - s.lastPulseMs >= 250) {
+                s.lastPulseMs = millis();
+                s.pulseOn = !s.pulseOn;
+                guideRenderTarget(s, s.pulseOn);
+                requestLedShow(1);
+            }
+            guideOledHotplugPoll();
+
+            int partIdx = guidePlaceStepPart(s, nullptr);
+            if (partIdx < 0) {
+                // The step stopped being a place step underneath us (a part
+                // dropped by a reload). Nothing to adjust - fall back rather
+                // than sit in a state with no subject.
+                s.state = s.waitReturn;
+                break;
+            }
+
+            int tapRow = -1;
+            GuideKey k = guideReadInput(s, tapRow);
+            switch (k) {
+                case GuideKey::NEXT:  guideAdjustSlide(s, partIdx, +1); break;
+                case GuideKey::PREV:  guideAdjustSlide(s, partIdx, -1); break;
+                case GuideKey::CONFIRM:
+                    // Drop it here. Probe CONNECT arrives as CONFIRM too.
+                    guideAdjustLeave(s, /*cancel=*/false);
+                    break;
+                case GuideKey::ADJUST:
+                case GuideKey::SNAP:
+                    // Double-click (or `c`) cycles compact<->expanded and
+                    // STAYS in adjust - snapping is part of positioning.
+                    guideSnapPart(s, partIdx);
+                    break;
+                case GuideKey::QUIT:
+                case GuideKey::BACK:
+                    // hold, `q`, `p` and probe REMOVE all CANCEL here. `q`
+                    // deliberately does NOT quit the guide from ADJUST: it is
+                    // the symmetric twin of hold, and one gesture must not
+                    // mean "undo my move" and "leave the build" at once.
+                    guideAdjustLeave(s, /*cancel=*/true);
+                    break;
+                case GuideKey::MOVE:
+                    guideMovePartToRow(s, partIdx, tapRow);
+                    break;
+                case GuideKey::TAP: {
+                    // Rules 2-3 of §1.2, minus the probe_confirm rule (there
+                    // is nothing to confirm while adjusting): the part's own
+                    // lit footprint snaps, a free hole takes pin 1, anything
+                    // else identifies.
+                    const PartDefinition& p = globalState.parts.parts[partIdx];
+                    bool onFootprint = false;
+                    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                        if (partPinNode(p, p.pins[j]) == tapRow) { onFootprint = true; break; }
+                    }
+                    if (onFootprint) {
+                        guideSnapPart(s, partIdx);
+                    } else if (guideRowIsFree(tapRow)) {
+                        int want = tapRow;
+                        if (p.footprint == 1 && want <= 30) want += 30;
+                        guideMovePartToRow(s, partIdx, want);
+                    } else {
+                        guideIdentifyRow(tapRow);
+                    }
+                    break;
+                }
+                default:
+                    break;   // SKIP / VERIFY are meaningless mid-adjust
             }
             break;
         }
@@ -1475,6 +1773,11 @@ void guideTick(GuideSession& s) {
 
         case GuideState::STEP_RESULT: {
             const GuideStep& st = sc.steps[s.stepIdx];
+            // The mid-check poll shares guideReadInput, so a wheel click
+            // released while the check ran left a pend behind. Mid-check the
+            // wheel is IGNORED (§7.1) - discard it rather than let it act on
+            // the result.
+            s.pendingConfirmMs = 0;
             bool pass = (s.checkOutcome == GUIDE_CHECK_PASS);
             const char* onFailName =
                 (st.onFail == GuideOnFail::RETRY)  ? "retry"
@@ -1742,7 +2045,9 @@ static void guideSessionBegin(GuideSession& s, GuideScript* sc, int resumeStep) 
 
 static void guideExitTail(GuideSession& s) {
     // Belt and braces: no exit path leaves a check's stimulus or ephemeral
-    // routes behind (abort is idempotent - a no-op when nothing is running).
+    // routes behind (abort is idempotent - a no-op when nothing is running),
+    // and no batched slide write is left unlanded.
+    guideAdjustFlush(s);
     guideCheckAbort();
     guideClearOverlays();
     requestLedShow(1);
