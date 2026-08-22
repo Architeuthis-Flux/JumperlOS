@@ -344,6 +344,15 @@ struct ConfigState {
 //     itself from the parts' own `class: gnd` pins. For an explicit "this
 //     row should be at 0 V" check, use `check: voltage` with
 //     min: -0.15 / max: 0.15.
+//   - a `do: connect` step's `n1:`/`n2:` are LITERAL rows and do NOT
+//     re-derive when a part moves. A part's OWN wiring does re-derive for
+//     free (bridges are never stored per part - expandOnePart recomputes
+//     partPinNode against `pin.connect` every time it applies), so route
+//     part wiring through the parts' `pin.connect` fields wherever you can
+//     and keep `connect:` steps for board-to-board jumpers. When a move
+//     vacates a row a later `connect:` step names, the guide prints
+//     `(note: step k targets row NN, which <part> just left)` - it cannot
+//     fix the step, only tell you the file has gone stale.
 //
 // fromYAML INDENT-HARDENING: top-level section headers are recognized on
 // UN-indented lines only (the serializer never indents them), so a nested

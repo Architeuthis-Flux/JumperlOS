@@ -22,6 +22,12 @@ bool deserializeParts(JumperlessState& st, const char* yaml, String& err); // ow
 int  expandPartsToBridges(JumperlessState& st, String& err);               // slot load: placed==true parts (idempotent)
 int  applyPartPlacement(JumperlessState& st, int partIdx, String& err);    // one part (guide commit)
 int  removePartPlacement(JumperlessState& st, int partIdx, String& err);   // back/undo
+// INVARIANT: never change a part's `baseRow` or `placement` while
+// `placed == true` other than as remove -> mutate -> reapply
+// (guideMovePart(), GuidedFlow.cpp, is the only such mutator). Both functions
+// above recompute their bridge endpoints from partPinNode, so removal MUST
+// see the same geometry the apply used; mutating first strands every existing
+// bridge on the fabric with nothing left that can find it again.
 void partsReassertNetNames(JumperlessState& st);                           // after net rebuilds (names survive merges)
 void makePinNetName(const PartDefinition& p, const PartPin& pin, char out[32]); // {NAME}_{PIN}, [A-Z0-9_], <=31 chars
 

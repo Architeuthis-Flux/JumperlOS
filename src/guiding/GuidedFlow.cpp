@@ -770,14 +770,45 @@ bool guideParse(const char* yamlPath, GuideScript& out, String& err) {
 // Input
 // ---------------------------------------------------------------------------
 
-enum class GuideKey : uint8_t { NONE, CONFIRM, SKIP, BACK, VERIFY, QUIT, TAP };
+enum class GuideKey : uint8_t { NONE, CONFIRM, SKIP, BACK, VERIFY, QUIT, TAP,
+                                MOVE, SNAP };
+
+// `t <row>` / `m <row>`: digits until newline or 300 ms of silence. Shared by
+// both keys so the two number readers can never drift.
+static int guideReadRowArg(const char* what) {
+    String num;
+    unsigned long last = millis();
+    while (millis() - last < 300) {
+        if (Serial.available() > 0) {
+            char d = Serial.read();
+            last = millis();
+            if (d >= '0' && d <= '9') { num += d; continue; }
+            if (d == ' ' && num.length() == 0) continue;
+            break;   // newline / anything else ends the number
+        }
+        jOS.serviceInner();
+        delayMicroseconds(200);
+    }
+    int row = num.toInt();
+    if (num.length() > 0 && row >= 1 && row <= 60) return row;
+    Serial.print("\r\n  ");
+    Serial.print(what);
+    Serial.println(" <row>: row must be 1-60");
+    return -1;
+}
 
 // One input event per tick. Serial keys (port 1): n/space=confirm-next,
-// p=back, s=skip, v=verify, q=quit, `t <row>`=probe-tap override. \r, \n and
-// unmapped bytes are explicitly ignored - the launch command line's
-// terminator and the port-priming newline land in this loop's lap, and a
-// stray byte must never advance a step (it cancels PICKERS by convention,
+// p=back, s=skip, v=verify, q=quit, `t <row>`=probe-tap override,
+// `m <row>`=move the current place-part's pin 1, c=snap compact/expanded.
+// \r, \n and unmapped bytes are explicitly ignored - the launch command
+// line's terminator and the port-priming newline land in this loop's lap, and
+// a stray byte must never advance a step (it cancels PICKERS by convention,
 // but the guide owns its keys - the picker handoff rule from the brief).
+//
+// m and c are the HEADLESS TWINS of the probe pads (Kevin's control-surface
+// principle: the pads are absolute - tap a hole and it acts THERE - so the
+// serial forms are absolute too, a row number and a mode toggle, never a
+// relative nudge). `tapRow` carries the row for TAP and MOVE alike.
 static GuideKey guideReadInput(GuideSession& s, int& tapRow) {
     tapRow = -1;
     rotaryEncoderButtonStuff();
@@ -814,28 +845,18 @@ static GuideKey guideReadInput(GuideSession& s, int& tapRow) {
             case 's':           return GuideKey::SKIP;
             case 'v':           return GuideKey::VERIFY;
             case 'q':           return GuideKey::QUIT;
+            case 'c':           return GuideKey::SNAP;
             case 't': {
-                // `t <row>`: digits until newline or 300 ms of silence.
-                String num;
-                unsigned long last = millis();
-                while (millis() - last < 300) {
-                    if (Serial.available() > 0) {
-                        char d = Serial.read();
-                        last = millis();
-                        if (d >= '0' && d <= '9') { num += d; continue; }
-                        if (d == ' ' && num.length() == 0) continue;
-                        break;   // newline / anything else ends the number
-                    }
-                    jOS.serviceInner();
-                    delayMicroseconds(200);
-                }
-                int row = num.toInt();
-                if (num.length() > 0 && row >= 1 && row <= 60) {
-                    tapRow = row;
-                    return GuideKey::TAP;
-                }
-                Serial.println("\r\n  t <row>: row must be 1-60");
-                return GuideKey::NONE;
+                int row = guideReadRowArg("t");
+                if (row < 0) return GuideKey::NONE;
+                tapRow = row;
+                return GuideKey::TAP;
+            }
+            case 'm': {
+                int row = guideReadRowArg("m");
+                if (row < 0) return GuideKey::NONE;
+                tapRow = row;
+                return GuideKey::MOVE;
             }
             default:
                 return GuideKey::NONE;   // \r \n and unmapped: ignored
@@ -913,6 +934,298 @@ static void guidePersistProgress(GuideSession& s) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Moving and snapping a placed part (guide-UX design §1.1-§1.5, §2.2-§2.4)
+// ---------------------------------------------------------------------------
+
+static const char* guidePlacementName(uint8_t pl) {
+    if (pl == PART_PLACEMENT_COMPACT) return "compact";
+    if (pl == PART_PLACEMENT_CUSTOM)  return "custom";
+    return "expanded";
+}
+
+// Candidate geometry is evaluated on a COPY of the part with the proposed
+// row/mode - never on the live entry, because the live one is still expanded
+// on the fabric until the remove→mutate→reapply sequence below runs.
+// static: a PartDefinition is ~500 B and the guide is a modal, single-
+// threaded app (the same argument deserializeParts makes for its `cur`).
+static PartDefinition guideMoveScratch;
+
+// "Free hole" for tap rule 3 (§1.2): a real breadboard row that no PLACED
+// part already has a leg in and that carries no net. NOTE this is deliberately
+// STRICTER than the move-legality rule below: `m <row>` onto a row that
+// carries a net is a legal move (joining an existing net by placement is
+// normal breadboarding, §1.5 rule 2), but a TAP there means "tell me what this
+// row is" - identify has to keep working on every occupied row, which is the
+// only affordance the probe has as a voltmeter.
+static bool guideRowIsFree(int row) {
+    if (row < 1 || row > 60) return false;
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            if (partPinNode(p, p.pins[j]) == row) return false;
+        }
+    }
+    int netNum = findNodeInNet(row);
+    if (netNum > 0 && netNum < MAX_NETS &&
+        globalState.connections.nets[netNum].number == netNum) {
+        return false;
+    }
+    return true;
+}
+
+// §1.5: is `cand` (a scratch copy already carrying the proposed row + mode) a
+// legal place for part `partIdx` to sit? Fills `reason` with the specific
+// refusal when not - "off-board", "collides with R3", "dip pin 1 (row:) must
+// be on the bottom half (31-60)". A refusal changes nothing at all.
+static bool guideMoveLegal(const PartDefinition& cand, int partIdx,
+                           char* reason, size_t reasonLen) {
+    reason[0] = '\0';
+
+    // Rule 1a: the footprint span itself, plus every listed pin resolving on
+    // it - the SAME predicate the parser and place_part() apply, so the guide
+    // can never move a part into a shape the next load would drop.
+    if (!partGeometryOk(cand, reason, reasonLen)) return false;
+
+    if (cand.placement == PART_PLACEMENT_COMPACT) {
+        if (cand.footprint == 1) {
+            snprintf(reason, reasonLen,
+                     "ICs don't compact - their legs are the footprint");
+            return false;
+        }
+        bool anyEligible = false;
+        for (int j = 0; j < cand.numPins && j < MAX_PART_PINS; j++) {
+            if (partPinCompactEligible(cand, cand.pins[j])) { anyEligible = true; break; }
+        }
+        if (!anyEligible) {
+            snprintf(reason, reasonLen,
+                     "no leg has a hole-row endpoint to sit in");
+            return false;
+        }
+        // Same-row collapse (§2.2): two legs of ONE part in one row is a
+        // short through the part - meaningless, so compact is refused rather
+        // than silently building it.
+        for (int a = 0; a < cand.numPins && a < MAX_PART_PINS; a++) {
+            int na = partPinNode(cand, cand.pins[a]);
+            if (na < 0) continue;
+            for (int b = a + 1; b < cand.numPins && b < MAX_PART_PINS; b++) {
+                if (partPinNode(cand, cand.pins[b]) != na) continue;
+                snprintf(reason, reasonLen,
+                         "legs %s and %s would both land on ",
+                         cand.pins[a].name, cand.pins[b].name);
+                size_t at = strlen(reason);
+                if (at < reasonLen) {
+                    snprintf(reason + at, reasonLen - at, "node %d", na);
+                }
+                return false;
+            }
+        }
+    }
+
+    // Rule 1b: every listed pin resolves in the mode it will actually sit in
+    // (partGeometryOk only walked the footprint).
+    for (int j = 0; j < cand.numPins && j < MAX_PART_PINS; j++) {
+        if (partPinNode(cand, cand.pins[j]) >= 0) continue;
+        snprintf(reason, reasonLen, "pin %s lands off-board", cand.pins[j].name);
+        return false;
+    }
+
+    // Rule 2: no two PARTS' legs may share a 5-hole row (that silently merges
+    // their nets). Rails are excluded - a rail is a long bus, and two legs in
+    // it are exactly what the user asked for. Rows that merely carry a net or
+    // a bridge are ALLOWED and only get a heads-up (printed by the caller).
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        if (i == partIdx) continue;   // self never collides with itself
+        const PartDefinition& other = globalState.parts.parts[i];
+        if (!other.placed) continue;
+        for (int j = 0; j < cand.numPins && j < MAX_PART_PINS; j++) {
+            int mine = partPinNode(cand, cand.pins[j]);
+            if (mine < 1 || mine > 60) continue;
+            for (int k = 0; k < other.numPins && k < MAX_PART_PINS; k++) {
+                if (partPinNode(other, other.pins[k]) != mine) continue;
+                snprintf(reason, reasonLen, "collides with %s at row %d",
+                         other.name, mine);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// THE mutation sequence (design §1.1). Every applied move or snap goes
+// through here, from the tap pads, the wheel (task 7) and the serial twins
+// alike, and emits exactly one machine line.
+//
+// INVARIANT: never flip p.placement or p.baseRow while p.placed == true
+// except through this remove → mutate → reapply order. removePartPlacement
+// recomputes its bridge endpoints from partPinNode, so it MUST run against
+// the geometry that applied them - mutating first strands every old bridge on
+// the fabric with nothing left that knows how to find it.
+//
+// This is also the whole answer to "how do connect: bridges re-derive after a
+// move": they are never stored per part. expandOnePart recomputes
+// partPinNode against pin.connect at apply time, so remove → mutate → reapply
+// IS the re-derivation.
+static bool guideMovePart(GuideSession& s, int partIdx, int newRow,
+                          uint8_t newPlacement) {
+    if (partIdx < 0 || partIdx >= globalState.parts.numParts) return false;
+    PartDefinition& p = globalState.parts.parts[partIdx];
+    if (newRow == p.baseRow && newPlacement == p.placement) {
+        Serial.print("\r\n  (");
+        Serial.print(p.name);
+        Serial.print(" is already ");
+        Serial.print(guidePlacementName(newPlacement));
+        Serial.print(" at row ");
+        Serial.print(newRow);
+        Serial.println(")");
+        return false;
+    }
+
+    guideMoveScratch = p;
+    guideMoveScratch.baseRow = (int16_t)newRow;
+    guideMoveScratch.placement = newPlacement;
+
+    char reason[128];
+    if (!guideMoveLegal(guideMoveScratch, partIdx, reason, sizeof(reason))) {
+        Serial.print("\r\n  move refused: ");
+        Serial.println(reason);
+        Serial.flush();
+        return false;
+    }
+
+    // Everything that must be read BEFORE the fabric changes: the rows this
+    // part is about to leave (for the staleness scan) and the nets the new
+    // rows already belong to (for the heads-up, which would otherwise report
+    // the part's own freshly-merged net back to itself).
+    int vacated[MAX_PART_PINS];
+    int numVacated = 0;
+    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+        int node = partPinNode(p, p.pins[j]);
+        if (node >= 1 && node <= 60) vacated[numVacated++] = node;
+    }
+    static char joinNote[4][64];
+    int numJoins = 0;
+    for (int j = 0; j < guideMoveScratch.numPins && j < MAX_PART_PINS &&
+                    numJoins < 4; j++) {
+        int node = partPinNode(guideMoveScratch, guideMoveScratch.pins[j]);
+        if (node < 1 || node > 60) continue;
+        // Not news if the part is already there, and not news if the net it
+        // "joins" is the one its OWN legs are currently making - snapping a
+        // committed part to compact moves a leg into a row its own bridge
+        // already reached, which is the whole point, not a surprise.
+        bool wasMine = false;
+        int netHere = findNodeInNet(node);
+        for (int v = 0; v < numVacated; v++) {
+            if (vacated[v] == node) wasMine = true;
+            if (netHere > 0 && findNodeInNet(vacated[v]) == netHere) wasMine = true;
+        }
+        if (wasMine) continue;
+        char nameBuf[16];
+        const char* netName = guideNetNameForNode(node, nameBuf, sizeof(nameBuf));
+        if (strcmp(netName, "(no net)") == 0) continue;
+        snprintf(joinNote[numJoins++], sizeof(joinNote[0]),
+                 "  (row %d joins net %s)", node, netName);
+    }
+
+    bool wasPlaced = p.placed;
+    String err;
+    if (wasPlaced) removePartPlacement(globalState, partIdx, err);
+    p.baseRow = (int16_t)newRow;
+    p.placement = newPlacement;
+    if (wasPlaced) {
+        applyPartPlacement(globalState, partIdx, err);
+        refreshConnections(1);
+        guideRenderFootprints();
+    }
+    if (err.length() > 0) {
+        Serial.println("\r\n  (move warnings: " + err + ")");
+    }
+    globalState.markDirty();
+    guidePersistProgress(s);
+    guideRenderTarget(s, s.pulseOn);
+    requestLedShow(1);
+
+    Serial.print("\r\nGUIDE move part=");
+    Serial.print(p.name);
+    Serial.print(" row=");
+    Serial.print(p.baseRow);
+    Serial.print(" placement=");
+    Serial.println(guidePlacementName(p.placement));
+    for (int i = 0; i < numJoins; i++) Serial.println(joinNote[i]);
+
+    // Staleness scan (§1.1 caveat): authored `connect:` steps carry LITERAL
+    // rows and do not re-derive, so one aimed at a row this part just left is
+    // now pointing at an empty hole. Cheap to notice, impossible to guess at
+    // later.
+    for (int v = 0; v < numVacated; v++) {
+        int node = vacated[v];
+        bool stillMine = false;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            if (partPinNode(p, p.pins[j]) == node) { stillMine = true; break; }
+        }
+        if (stillMine) continue;
+        for (int i = s.stepIdx; i < s.script->numSteps; i++) {
+            const GuideStep& st = s.script->steps[i];
+            if (st.type != GuideStepType::CONNECT) continue;
+            if (st.n1 != node && st.n2 != node) continue;
+            Serial.print("  (note: step ");
+            Serial.print(i + 1);
+            Serial.print(" targets row ");
+            Serial.print(node);
+            Serial.print(", which ");
+            Serial.print(p.name);
+            Serial.println(" just left)");
+        }
+    }
+    Serial.flush();
+    return true;
+}
+
+// The snap gesture (§2.4): compact <-> expanded for one part. Leaving compact
+// always lands on EXPANDED - `custom` marks a row the user chose, and the row
+// is preserved across the round trip either way, so nothing is lost that the
+// file does not still say.
+static void guideSnapPart(GuideSession& s, int partIdx) {
+    if (partIdx < 0 || partIdx >= globalState.parts.numParts) return;
+    const PartDefinition& p = globalState.parts.parts[partIdx];
+    uint8_t next = (p.placement == PART_PLACEMENT_COMPACT) ? PART_PLACEMENT_EXPANDED
+                                                           : PART_PLACEMENT_COMPACT;
+    guideMovePart(s, partIdx, p.baseRow, next);
+}
+
+// A move never silently flips compact<->expanded (that is the snap gesture's
+// job, §1.4): a compact part stays compact - only its footprint-fallback legs
+// travel with baseRow - and an expanded one becomes CUSTOM, the marker that
+// says "the user put it here deliberately, don't snap it back". Moving a
+// custom part to yet another row keeps it custom.
+static void guideMovePartToRow(GuideSession& s, int partIdx, int newRow) {
+    if (partIdx < 0 || partIdx >= globalState.parts.numParts) return;
+    const PartDefinition& p = globalState.parts.parts[partIdx];
+    uint8_t mode = p.placement;
+    if (mode != PART_PLACEMENT_COMPACT && newRow != p.baseRow) {
+        mode = PART_PLACEMENT_CUSTOM;
+    }
+    guideMovePart(s, partIdx, newRow, mode);
+}
+
+// The current step's part index when it is a PLACE step, else -1 (with the
+// refusal note the m/c keys and the tap rules share).
+static int guidePlaceStepPart(const GuideSession& s, const char* what) {
+    const GuideStep& st = s.script->steps[s.stepIdx];
+    if (st.type == GuideStepType::PLACE && st.partIdx >= 0 &&
+        st.partIdx < globalState.parts.numParts) {
+        return st.partIdx;
+    }
+    if (what != nullptr) {
+        Serial.print("\r\n  (");
+        Serial.print(what);
+        Serial.println(" works on place steps only)");
+        Serial.flush();
+    }
+    return -1;
+}
+
 // Skip-with-flag (§3.3): shared by the wait states' skip key, a mid-check
 // skip (which aborts the check first at its call site), and on_fail: skip.
 static void guideDoSkip(GuideSession& s) {
@@ -945,7 +1258,8 @@ void guideTick(GuideSession& s) {
             Serial.print(sc.numSteps);
             Serial.println(" steps)");
             cycleTerminalColor(false, 100.0, true, &Serial);
-            Serial.println("wheel=step  click=confirm  hold/q=quit  n/p/s/v serial keys  t <row>=tap");
+            Serial.println("wheel=step  click=confirm  hold/q=quit  n/p/s/v serial keys  "
+                           "t <row>=tap  m <row>=move  c=snap");
             Serial.println("rails + DACs held at 0V until the power_on step");
             Serial.flush();
             guideStatusLine(s, "INIT");
@@ -1039,7 +1353,23 @@ void guideTick(GuideSession& s) {
                     // moves and persists so resume lands after the skip.
                     guideDoSkip(s);
                     break;
+                case GuideKey::MOVE: {
+                    // `m <row>` is the LITERAL twin of a tap: no DIP +30
+                    // convenience here (that belongs to the pad, which cannot
+                    // type), so `m 5` on a DIP earns the honest refusal.
+                    int idx = guidePlaceStepPart(s, "m <row>");
+                    if (idx >= 0) guideMovePartToRow(s, idx, tapRow);
+                    break;
+                }
+                case GuideKey::SNAP: {
+                    int idx = guidePlaceStepPart(s, "c");
+                    if (idx >= 0) guideSnapPart(s, idx);
+                    break;
+                }
                 case GuideKey::TAP: {
+                    // Tap precedence (§1.2), in this exact order:
+                    //   1 probe_confirm match  2 the part's own lit footprint
+                    //   3 a free hole          4 identify (the fallback)
                     const GuideStep& st = sc.steps[s.stepIdx];
                     if (s.state == GuideState::STEP_PROBE_WAIT &&
                         (tapRow == st.n1 || tapRow == st.n2)) {
@@ -1048,9 +1378,34 @@ void guideTick(GuideSession& s) {
                         Serial.println(" - confirmed");
                         s.verifyOnly = false;
                         s.state = GuideState::STEP_VERIFY;
-                    } else {
-                        guideIdentifyRow(tapRow);   // identify mode (§3.3)
+                        break;
                     }
+                    int idx = guidePlaceStepPart(s, nullptr);   // silent: rules 2-3
+                    if (idx >= 0) {
+                        const PartDefinition& p = globalState.parts.parts[idx];
+                        // 2. The footprint is what `_GUIDE_TGT_` is lighting
+                        // up, so "tap the thing that's glowing" flips how it
+                        // sits.
+                        bool onFootprint = false;
+                        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                            if (partPinNode(p, p.pins[j]) == tapRow) { onFootprint = true; break; }
+                        }
+                        if (onFootprint) {
+                            guideSnapPart(s, idx);
+                            break;
+                        }
+                        // 3. A free hole means "put pin 1 HERE". DIP
+                        // convenience: pin 1 lives on the bottom half, so a
+                        // top-half tap means the same column across the
+                        // ravine.
+                        if (guideRowIsFree(tapRow)) {
+                            int want = tapRow;
+                            if (p.footprint == 1 && want <= 30) want += 30;
+                            guideMovePartToRow(s, idx, want);
+                            break;
+                        }
+                    }
+                    guideIdentifyRow(tapRow);   // 4. identify mode (§3.3)
                     break;
                 }
                 default:
