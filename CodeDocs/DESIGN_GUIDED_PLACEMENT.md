@@ -23,7 +23,7 @@ flat `type:`/`value:`/`part_id:`, and the starter catalog is 4 projects).
 |---|---|
 | Language | **Hybrid-declarative**: `parts:` (TODO-component-placement.md format + extensions) auto-generates placement steps; optional `guide:` adds ordering, free text, power-on, verify overrides |
 | Runtime shape | **Blocking app loop** pumping `jOS.serviceInner()`, internally `GuideSession` struct + `guideTick()` enum-state machine — exactly probeMode's T3.1 M1 shape (Probing.cpp:2643), liftable to a Service later |
-| LED channel | **GraphicOverlays** (rendered last over live nets, main.cpp ~1809) in `requestLedShow(1)` netlist mode; never mode 3 (would evict live nets); no `b.print()` breadboard text in v1 (mode-2 menu buffer conflict) |
+| LED channel | **GraphicOverlays** (rendered last over live nets, main.cpp ~1809) in netlist mode; never mode 3 (would evict live nets); no `b.print()` breadboard text in v1 (mode-2 menu buffer conflict). **Wave 3: every guide show is CLEAR-FIRST** (`requestLedShow(-1)`) — see §4.1 |
 | Guide persistence | ~~Direct-into-slot (destination chosen up front)~~ → **wave 2: direct into the RUN FILE** the launcher already opened as the active context: half-built project persists; `guideProgress:` scalars round-trip; step text always re-read from the canonical project wiring, never from the run file |
 | Placement shape | **wave 2**: per part, `expanded` (legs at the footprint rows + bridges) / `compact` (a leg sits IN its `connect:` hole) / `custom` (expanded geometry at a row the user moved it to) — §1.5 |
 | Net naming | Named **as each step commits**, but authoritative source is the parts table, **re-asserted after every rebuild** (fixes name loss on net merges) |
@@ -325,18 +325,22 @@ STEP_RESULT     pass -> STEP_COMMIT; fail -> on_fail policy
 STEP_COMMIT     applyPartPlacement / addConnection, set net names, refreshConnections(1),
                 saveActiveSlot(skipValidation), progress++, -> STEP_ENTER
 STEP_BACK       removePartPlacement / removeConnection, progress--, -> STEP_ENTER
-GUIDE_DONE      summary, requestLedShow(1); -> exit
+GUIDE_DONE      summary, a clear-first LED show; -> exit
 GUIDE_EXIT      (hold or 'q') yesNoMenu("Save progress?") -> exit tail
 ```
 
 **As built (wave 2), the machine gained a resting state and the ring:**
 
 ```
-STEP_ADJUST     a MODAL move session on a place step (double-click / dblclick twin).
-                Wheel SLIDES the part to the next legal row, click DROPS,
-                dblclick cycles compact/expanded, hold/q CANCELS (restoring row
-                AND mode). Emits `state=ADJUST`; leaving it re-emits the wait
-                state and the landing annotation.
+STEP_ADJUST     REMOVED IN WAVE 3 (W3-T2). It was a MODAL move session on a
+                place step, entered by double-click: the wheel SLID the part to
+                the next legal row, click DROPPED, dblclick cycled
+                compact/expanded, hold/q CANCELLED. Kevin killed it - "honestly
+                this whole thing is confusing, we need to streamline this
+                interface" - along with the 260 ms confirm pend that existed
+                only to tell its double-click from a click. There is no
+                `state=ADJUST` any more and the wheel never moves a part.
+                Moving is a DIRECT GESTURE: tap a free hole (or `m <row>`).
 DONE            NOT a doorway - a browsable SUMMARY VIEW. Entered by committing
                 the last unfinished step, by wheeling past either end of the
                 ring, or by skipping the last step. Emits
@@ -357,53 +361,56 @@ DONE with the whole build untouched, and quitting from there must not claim a
 finished build (offering the script, printing "Run saved"). A confirm at DONE
 with work outstanding **jumps to the first unbuilt step** instead of exiting.
 
-**The 260 ms confirm pend, and the race it created.** `guideReadInput` tests
-`DOUBLECLICKED` first, then `HELD`, then RELEASED-off-PRESSED — which no longer
-returns CONFIRM but arms `pendingConfirmMs` and returns NONE; a later tick past
-260 ms returns CONFIRM. That is what makes the double-click distinguishable, and
-it costs ~260 ms of latency on every wheel-click confirm (serial `n` and probe
-CONNECT stay instant). The pend is cleared by any probe button, any serial byte,
-`STEP_ENTER`, `STEP_RESULT`, **and DONE's arrival block** — the last one is
-load-bearing: a click on the last step followed by a turn inside 260 ms, or an
-impatient click in the final quarter-second of the 900 ms pass-hold, would
-otherwise let the pend mature *at DONE*, where CONFIRM on an all-built guide
-means EXIT. I.e. a wheel turn ending the guide. The clear must sit **inside**
-`if (!summaryShown)`, not at the top of the case: the case body runs every tick
-while resting in DONE, so an unconditional clear would kill the legitimate
-wheel-click-at-DONE. **No HIL needle is constructible** — a pend can only be
-armed by an encoder RELEASE, and every serial byte clears one. It is bench
-item 3/4 in the checklist.
+**The 260 ms confirm pend — REMOVED IN WAVE 3 (W3-T2), with the race it
+created.** As built in wave 2, `guideReadInput` tested `DOUBLECLICKED` first,
+then `HELD`, then RELEASED-off-PRESSED — which armed `pendingConfirmMs` instead
+of confirming, and a later tick past 260 ms returned CONFIRM. That was what made
+the double-click distinguishable, at a cost of ~260 ms on every wheel confirm.
+It opened a race that the final fix wave had to close with a DONE-arrival clear
+(F1): a click on the last step followed by a turn inside 260 ms could let the
+pend mature *at DONE*, where CONFIRM on an all-built guide means EXIT — a wheel
+turn ending the guide.
 
-### 3.3 Controls — AS BUILT (wave 2)
+Killing the double-click gesture killed the whole apparatus. RELEASED returns
+CONFIRM immediately again, so a confirm always acts in the state the machine is
+actually in and no pend can mature anywhere; `pendingConfirmMs`, all five clear
+sites, and F1's arrival guard are gone. The encoder still emits `DOUBLECLICKED`
+and the guide simply does not read it (RotaryEncoder.cpp untouched) — the second
+release then carries `lastButtonEncoderState == DOUBLECLICKED`, which the
+confirm arm rejects, so a double-click is **exactly one confirm**. Bench items
+3/4 in the checklist are retired accordingly.
+
+### 3.3 Controls — AS BUILT (wave 3, after the ADJUST kill)
 
 Kevin's **control-surface principle**: the pads are ABSOLUTE (tap a row, the part
-goes there), the wheel is RELATIVE (turn, it slides). Every gesture has a serial
-twin so HIL can drive the logic even where it cannot drive the input.
+goes there), the wheel is RELATIVE — and **browsing IS its relative job**. It
+does not also slide parts. Every gesture has a serial twin so HIL can drive the
+logic even where it cannot drive the input.
 
-| gesture / key | WAIT / PROBE_WAIT | ADJUST | DONE view | mid-check (VERIFY) | RESULT hold |
-|---|---|---|---|---|---|
-| wheel turn | **browse** prev/next, wraps through DONE | slide to the next LEGAL row (± , scans 30) | browse (wraps into the steps) | ignored | breaks the hold |
-| wheel click | confirm — **pended 260 ms**; on a committed step it re-verifies | drop at the new row | finish when all built, else jump to the first unbuilt step | ignored (pend discarded at RESULT) | breaks the hold |
-| wheel double-click | enter ADJUST (place steps; else "nothing to adjust on this step") | cycle compact/expanded, stay in ADJUST | ignored | ignored | breaks the hold |
-| wheel hold | quit guide | **cancel** adjust | quit guide | abort check + quit | **quits** (not swallowed) |
-| probe CONNECT | confirm (instant) | drop | finish/jump as click | ignored | breaks the hold |
-| probe REMOVE | un-commit / `STEP_BACK` | cancel adjust | re-open the last step | abort + back | breaks the hold |
-| probe tap | 1 probe_confirm → confirm; 2 own footprint → snap; 3 free hole → move pin 1; 4 else → identify | 2/3/4 (no probe_confirm mid-adjust) | ignored | ignored | breaks the hold |
-| `n` / space | confirm (instant, no pend) | drop | finish/jump as click | ignored | breaks the hold |
-| `p` | un-commit / back | cancel adjust | re-open the last step | abort + back | breaks the hold |
-| `s` | skip-with-flag — **refused on a committed step** | ignored | ignored | abort + skip (same refusal) | breaks the hold |
-| `v` | verify-only | ignored | ignored | ignored | breaks the hold |
-| `q` | quit | **cancel adjust — NOT quit** (symmetric with hold) | quit | abort + quit | **quits** |
-| `t <row>` | simulated tap (all four rules) | simulated tap (rules 2–4) | ignored | ignored | breaks the hold |
-| `m <row>` | move pin 1 (place steps only, refused by name otherwise) | same | ignored | ignored | breaks the hold |
-| `c` | cycle compact/expanded | same | ignored | ignored | breaks the hold |
-| `>` / `<` | browse next / prev | **slide** — the wheel's twins slide where the wheel slides | browse | ignored | breaks the hold |
+| gesture / key | WAIT / PROBE_WAIT | DONE view | mid-check (VERIFY) | RESULT hold |
+|---|---|---|---|---|
+| wheel turn | **browse** prev/next, wraps through DONE | browse (wraps into the steps) | ignored | breaks the hold |
+| wheel click | confirm — **instant**; on a committed step it re-verifies | finish when all built, else jump to the first unbuilt step | ignored | breaks the hold |
+| wheel double-click | nothing — unconsumed, and yields exactly ONE confirm | same | same | same |
+| wheel hold | quit guide | quit guide | abort check + quit | **quits** (not swallowed) |
+| probe CONNECT | confirm (instant) | finish/jump as click | ignored | breaks the hold |
+| probe REMOVE | un-commit / `STEP_BACK` | re-open the last step | abort + back | breaks the hold |
+| probe tap | 1 probe_confirm → confirm; 2 own footprint → snap; 3 free hole → move pin 1; 4 else → identify | ignored | ignored | breaks the hold |
+| `n` / space | confirm | finish/jump as click | ignored | breaks the hold |
+| `p` | un-commit / back | re-open the last step | abort + back | breaks the hold |
+| `s` | skip-with-flag — **refused on a committed step** | ignored | abort + skip (same refusal) | breaks the hold |
+| `v` | verify-only | ignored | ignored | breaks the hold |
+| `q` | quit | quit | abort + quit | **quits** |
+| `t <row>` | simulated tap (all four rules) | ignored | ignored | breaks the hold |
+| `m <row>` | move pin 1 (place steps only, refused by name otherwise) | ignored | ignored | breaks the hold |
+| `c` | cycle compact/expanded | ignored | ignored | breaks the hold |
+| `>` / `<` | browse next / prev | browse | ignored | breaks the hold |
 
-Banners, verbatim:
+Banner, verbatim — one line, gestures only. The serial twins all still work and
+`help apps` still documents them; they are simply no longer advertised:
 
 ```
-wheel=browse  click=confirm  dblclick=adjust  hold/q=quit  n/p/s/v  t/m <row>  c=snap  >/<=browse
-  adjust RG: wheel=slide  click=drop  dblclick=snap  hold/q=cancel  (probe: tap=move, CONNECT=drop, REMOVE=cancel)
+wheel=browse  click=confirm  hold/q=quit  probe: tap=move/snap/identify
 ```
 
 **Tap precedence** in `STEP_WAIT`/`STEP_PROBE_WAIT`, first match wins: (1) a
@@ -447,7 +454,7 @@ bridge — joining an existing net by placement is ordinary breadboarding. Print
 `(row N joins net NETNAME)`, suppressed when the "net being joined" is one the
 part's own legs already make (which otherwise fires on every compact snap of a
 committed part). **Rails are exempt from rule 13** — a rail is a long bus and two
-legs in it is what the user asked for; rails are never slide/move *targets*
+legs in it is what the user asked for; rails are never move *targets*
 either (`baseRow` moves within 1-60 only, and rails are reachable only as compact
 endpoints).
 
@@ -461,9 +468,10 @@ endpoints).
   `guideDoSkip` returns a bool for this, because a refusal has to leave the
   caller somewhere — the **mid-check** skip path has already aborted the check,
   so a refusal that stayed in `STEP_VERIFY` would re-begin it forever.
-- **`q` means two different things one state apart** — quit in WAIT, cancel in
-  ADJUST. That is symmetric with hold, and it is the one place in the table where
-  a key does not mean the same thing everywhere. Two presses still get you out.
+- **`q` and hold mean QUIT everywhere** (wave 3). They briefly meant "cancel"
+  inside ADJUST — the one place in the table where a key did not mean the same
+  thing everywhere — and that special case died with the mode. One press, from
+  any state.
 
 **Probe-button polarity**: the `probe_revision>3` swap lives only in
 `jl_probe_button_*` (JumperlessMicroPythonAPI.cpp:2144); raw
@@ -496,8 +504,22 @@ Two overlays with reserved names (excluded from YAML persistence next to the
   (power `0x1A0000`, gnd `0x001A02`, signal `0x000818`, nc `0x040404`, pin-1 marker
   `0x180800`). Persistent for the whole guide.
 - `_GUIDE_TGT_`: current step's target holes, pulsed ~2 Hz by rewriting colors from
-  `guideTick` + `requestLedShow(1)`. Mode 1 keeps live nets rendering underneath;
-  overlays paint last (main.cpp:1809).
+  `guideTick` + a clear-first show. Netlist mode keeps live nets rendering
+  underneath; overlays paint last (main.cpp:1809).
+
+**Every guide LED show is CLEAR-FIRST (`requestLedShow(-1)`), wave 3.** Kevin:
+">>> dragging a part doesn't clear the LEDs behind it, filling up the board".
+Both renderers already rebuilt their overlay whole (memset the scratch, repaint,
+and `addOverlay` memcpy-REPLACES a same-named overlay), so the overlay layer was
+never the accumulator. The trail lived one layer down: `renderGraphicOverlays()`
+writes only NON-transparent cells into the persistent `leds` buffer, `showNets()`
+only lights rows that belong to a net, and `clearLEDsExceptRails()` runs ONLY on
+a request carrying `core1req::LED_CLEAR` — a NEGATIVE `requestLedShow()`. The
+guide only ever posted `1`, so every hole a footprint had ever occupied stayed
+lit for the session. `guideShowLeds()` posts `-1` at all six show sites (move,
+INIT, STEP_ENTER, the pulse, DONE, the exit tail); Highlighting.cpp:267/620 uses
+the same technique for the same bug class. Cost: one 300-pixel memset per guide
+frame on core 2.
 
 `connect` steps: light all 5 holes of both rows (n1 static, n2 pulsing).
 
@@ -802,7 +824,7 @@ tail, and the **caller performs** the restore, with `save=0`.
 
 | Path | `guideRun` returns | Session ran? | Rails afterwards |
 |---|---|---|---|
-| quit from WAIT / PROBE_WAIT / ADJUST, before `power_on` | `QUIT` | yes | **captured user values restored** |
+| quit from WAIT / PROBE_WAIT, before `power_on` | `QUIT` | yes | **captured user values restored** |
 | quit mid-check (VERIFY abort), before `power_on` | `QUIT` | yes | captured values restored |
 | quit from the DONE view with steps unfinished | `QUIT` | yes | captured values restored |
 | quit after a committed `power_on` **with** a `power:` section | `QUIT` | yes | **the project's power stands** |
@@ -899,9 +921,9 @@ available):
 - `test_slot_files.py`: the path-context layer underneath (DESIGN_SLOT_FILES.md §10).
 - Bench: **CodeDocs/PROJECTS_BENCH_CHECKLIST.md** is the ordered session script.
   What is structurally unreachable from a suite, and therefore lives only there:
-  every **encoder** gesture (the 260 ms pend and its two race shapes, the
-  double-click into ADJUST, the wheel slide) — a pend can only be armed by an
-  encoder RELEASE and every serial byte clears one; every **probe pad** gesture
+  every **encoder** gesture (the click, the turn, and the double-click that
+  must still yield exactly ONE confirm now that nothing consumes it) — no serial
+  byte can produce an encoder edge; every **probe pad** gesture
   (the tap precedence, the DIP `+30` mapping, tap-to-snap) — this suite has no
   probe; the **interactive prompts** (headless never prompts, by design); the
   **no-blip** scope trace; **real-part accuracy** against a DMM; and the LED

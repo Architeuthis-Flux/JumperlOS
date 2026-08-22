@@ -270,8 +270,8 @@ RUNS n=<count> latest=<path>             before the load/new prompt
 RUNFILE path=<path> action=new|load      the run file decision, every door
 GUIDE resume file=<path> step=<k>        a real resume (not a fresh start)
 GUIDE already complete (step k/n)        the completion clamp
-GUIDE step=<i>/<n> id=<id> state=<S>     S = INIT|WAIT|PROBE_WAIT|ADJUST|
-                                             VERIFY|RESULT|COMMIT|BACK|DONE|EXIT
+GUIDE step=<i>/<n> id=<id> state=<S>     S = INIT|WAIT|PROBE_WAIT|VERIFY|
+                                             RESULT|COMMIT|BACK|DONE|EXIT
 GUIDE ... state=RESULT check=<c> val=<v> ok=<0|1>[ on_fail=<policy>]
 GUIDE move part=<name> row=<r> placement=<expanded|compact|custom>
 GUIDE done committed=<c> skipped=<s> unfinished=<u>
@@ -383,13 +383,21 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
 
 >>>honestly this whole thing is confusing, we need to streamline this interface.
 
+**Answered in wave 3 (W3-T2): the ADJUST mode is gone.** Direct gestures only —
+probe tap on a free hole = move, tap on the part's own lit footprint = snap.
+The wheel browses and never slides a part; there is no double-click gesture and
+no mode banner, and the 260 ms confirm pend went with them, so a wheel click
+confirms instantly again. The serial twins (`n p s v q m c t > <`) all still
+work and `help apps` still documents them — they are simply no longer
+advertised on the banner.
+
 Launch `z 555 new` (or the menu). Every check will fail — the holes are empty —
 which is exactly what you want while you exercise the input surface. The banner
 you should see on INIT:
 
 ```
 === Guided build: 555 LED Flasher === (9 steps)
-wheel=browse  click=confirm  dblclick=adjust  hold/q=quit  n/p/s/v  t/m <row>  c=snap  >/<=browse
+wheel=browse  click=confirm  hold/q=quit  probe: tap=move/snap/identify
 rails + DACs held at 0V until the power_on step
 ```
 
@@ -405,20 +413,24 @@ rails + DACs held at 0V until the power_on step
   land in the **DONE view** (`GUIDE done committed=… skipped=… unfinished=…`),
   turn again and you **wrap to step 1**. Turn backwards off step 1 and you wrap
   into DONE. `state=EXIT` must not appear anywhere in that walk.
-- [x] **Click confirms, with a 260 ms pend.** Wheel-click has a deliberate
-  ~quarter-second delay before it commits (it is how the double-click is
-  distinguished). Serial `n` and probe CONNECT are instant. If the guide feels
-  sluggish, this is why — it is not a bug.
-- [ ] **Double-click enters ADJUST** on a place step. Its own one-liner prints:
-  `adjust <PART>: wheel=slide  click=drop  dblclick=snap  hold/q=cancel  (probe: tap=move, CONNECT=drop, REMOVE=cancel)`. Then:
-  - [ ] **wheel = slide** the part to the next LEGAL row (it scans up to 30 rows
-    and skips illegal ones); each detent prints `GUIDE move …` and `now: …`.
-  - [ ] **click = drop**, **hold/**`q` **= cancel** and the part goes back where it
-    was — `q` *in ADJUST cancels the adjust, it does not quit the guide.* Two
-    presses get you out.
-  - [ ] **double-click inside ADJUST cycles compact ↔ expanded.**
-  - [ ] Slide into a wall (row 60 on a bottom-half part) → `(no legal row that
-    way)`, once per detent. Noisy on a fast spin; harmless.
+- [ ] **Click confirms INSTANTLY** (W3-T2). The 260 ms pend is gone — the wheel
+  click acts on its own release, like `n` and probe CONNECT always did. If it
+  still feels laggy, that is a new bug, not the documented cost it used to be.
+- [ ] **Double-click does nothing at all**, and that is the check: click twice
+  fast on a place step and you must get **exactly one confirm**, not two, and
+  no mode. (The encoder still emits DOUBLECLICKED; the guide does not read it,
+  and the second release carries `lastButtonEncoderState == DOUBLECLICKED`,
+  which the confirm arm rejects. Two commits from one gesture is the regression
+  to watch for.)
+- [ ] **`q` and hold quit from EVERYWHERE again** — no state swallows them, no
+  "two presses get you out".
+- [ ] **THE DRAG TRAIL** (W3-T2, the fix with no HIL witness). Commit a part,
+  then move it four or five times in a row — `m 44`, `m 40`, `m 36`, tap a free
+  hole, `c`. **Only the current footprint may be lit.** Every hole the part has
+  left must go dark on the same frame. Before the fix, overlay pixels were
+  painted into a buffer nothing ever cleared and the board filled up as you
+  dragged. Watch the exit too: quitting the guide must leave **no** guide
+  pixels behind on the board.
 - [ ] **Tap gestures** (probe on the pads — the one input path HIL cannot reach):
   1. a `probe_confirm` target → confirms the step;
   2. **the part's own glowing footprint** → snap (cycles compact/expanded);
@@ -705,8 +717,8 @@ from and what to do. **Board state is noted per item** so you can batch them.
 | --- | ------------------------------------------ | ---------------------------------------------- |
 | 1   | Ctrl+C vs wheel-hold discriminator         | clear                                          |
 | 2   | wheel-hold inside a blocking call          | clear                                          |
-| 3   | the pend race (click + flick)              | clear                                          |
-| 4   | the pass-hold pend race                    | clear                                          |
+| 3   | *(retired — the pend it raced is gone)*    | —                                              |
+| 4   | *(retired — same)*                         | —                                              |
 | 5   | MSC host-edit round-trip                   | clear                                          |
 | 6   | corrupt-run-file terminal state            | clear                                          |
 | 7   | the interactive prompts                    | clear                                          |
@@ -732,17 +744,19 @@ from and what to do. **Board state is noted per item** so you can batch them.
   `probe_button_blocking()` — these C loops poll the interrupt flag *directly*
   and never see a scheduled exception, so a hold must break them out. This is
   the case a direct `mp_sched_keyboard_interrupt()` could never reach.
-- [ ] **3 — the pend race, forward flick** *(task 7, blocking fix, no possible HIL
-  needle)*. On the **last step of a completed build**: click the wheel, then
-  **turn forward inside a quarter-second**. You must land in the DONE view **and
-  stay there**. Before the fix, the pend matured after the turn had already
-  landed you at DONE, and a CONFIRM at DONE on an all-built guide means EXIT —
-  i.e. a wheel turn ended the guide.
-- [ ] **4 — the pend race, impatient click** *(same fix, other half)*. On a
-  passing check on the **final** step, click during the 900 ms pass-hold, in its
-  last quarter-second. Same requirement: DONE, and stay. Then check the
-  legitimate gesture still works — a plain click at DONE finishes (or jumps to
-  the first unbuilt step).
+- **3 and 4 — the two pend races: RETIRED (W3-T2).** Both recipes tested a
+  260 ms confirm pend maturing in a state the user had already left. The pend
+  is gone — a wheel click confirms on its own RELEASED edge, in the state the
+  machine is actually in — so neither race can be built any more and the
+  final-fix-wave F1 guard that closed them was removed with it. What survives
+  is the invariant they protected, and it is still worth one pass:
+  - [ ] **A wheel turn can never exit the guide.** On the last step of a
+    completed build, click and then flick forward; on a passing check's 900 ms
+    pass-hold, click impatiently. Either way you land in the DONE view and
+    **stay**. Then confirm the legitimate gesture still works — a plain click
+    at DONE finishes, or jumps to the first unbuilt step.
+  - [ ] **One double-click is one confirm.** Two fast clicks on a place step
+    must commit once, not twice (see §1.4).
 - [ ] **5 — MSC host-edit round-trip** *(task 4, the harness cannot mount)*. Load
   a run file, mount the board as USB MSC, **edit the run file from the host**,
   eject. The edit must be **live** — this path used to discard host edits to a

@@ -87,7 +87,13 @@ Covers:
      invariant this whole layer rests on - had zero coverage. Commit the part
      FIRST, then move and snap it while it is live on the fabric, and assert
      the old rows' bridges are gone, the new rows' are live, and the run file
-     agrees.
+     agrees. It ends with the W3-T2 needle: TWO CONSECUTIVE `m <row>` moves,
+     then the `_GUIDE_FP_` overlay read back at the DONE view (where it is the
+     only overlay registered) - exactly ten cells lit, at the two columns the
+     part now occupies and nowhere else, so the footprint overlay is proven to
+     be rebuilt whole rather than accumulated. The run file must already carry
+     the SECOND move, because moves persist as they happen now that the wheel
+     slide's batching is gone.
  13c. TWO parts, the F1 regression (final whole-branch review): every other
      fixture here has one part, so the inter-part collision rule never fired
      and nobody noticed it refused Kevin's photo gesture. Commit a dip8, then
@@ -119,17 +125,25 @@ Covers:
      restore is save=0 on purpose.
 
 BENCH-ONLY, NOT COVERED HERE. This suite never turns the wheel and cannot
-touch a hole, so the ENCODER half of task 7 has no automated witness: the
-260 ms confirm pend, the double-click that enters STEP_ADJUST, the wheel
-slide inside it, and every probe-pad gesture. What IS covered is everything
-those gestures funnel into - `>`/`<` are the wheel's browse twins and `m`/`c`
-the pads' absolute twins, all running the same handlers.
+touch a hole, so the physical input surface has no automated witness: the
+wheel click, the wheel turn, and every probe-pad gesture. What IS covered is
+everything those gestures funnel into - `>`/`<` are the wheel's browse twins
+and `m`/`c` the pads' absolute twins, all running the same handlers.
 
-In particular the PEND RACE that fix round 1 closed (a wheel click, then a
-turn into the DONE view inside 260 ms, maturing into a CONFIRM that exits)
-cannot be built from here at all: nothing serial arms a pend - only the
-encoder's RELEASED edge does - so `>` into DONE carries nothing with it. It
-is a bench check, and the report says so.
+(W3-T2 pruned what used to stand here: the 260 ms confirm pend, the
+double-click into STEP_ADJUST, the wheel slide inside it, and the pend race
+the final fix wave closed. All four are gone from the firmware - Kevin's
+"this whole thing is confusing, we need to streamline this interface" ruling
+- so they are not untested, they do not exist. A wheel click now confirms on
+its own RELEASED edge, which is why no pend can mature in a state the user
+already left.)
+
+Also bench-only, and NOT fakeable from here: the LED drag trail itself. The
+`_GUIDE_FP_` overlay is readable through overlay_serialize() and phase 13b
+asserts it, but the trail Kevin saw was in the `leds` buffer underneath -
+overlay pixels that stopped being lit were never repainted black because
+nothing posted a LED_CLEAR. No REPL surface reads that buffer back, so the
+clear-first fix is verified by eye on the bench (checklist SS1.4).
 
 Bench convention: snapshot board state + the active CONTEXT up front, restore
 both in a finally (a prior round's incident: an uncaught exception stranded
@@ -1993,6 +2007,103 @@ print("b=", 1 if is_connected(45, "GND") else 0)
         _, pm_yaml = read_device_file(run_pm)
         check("placement: compact" in pm_yaml,
               "PLACED SNAP: the run file says placement: compact")
+
+        # --- W3-T2 needle: TWO consecutive moves, then the overlay ----------
+        #
+        # Kevin: ">>> dragging a part doesn't clear the LEDs behind it,
+        # filling up the board". Two things are being nailed down here.
+        #
+        # 1. THE OVERLAY IS REBUILT WHOLE, not appended to. `_GUIDE_FP_` is a
+        #    full 30x10 grid re-registered on every applied move, so after two
+        #    moves in a row it must describe the CURRENT footprint and nothing
+        #    else - not one cell of rows 44/45/46 or 40/41 may still be lit.
+        #    This is the layer the fix's investigation cleared of suspicion,
+        #    and it is the layer that would silently regress if someone made
+        #    guideRenderFootprints() incremental.
+        # 2. Every move PERSISTS as it happens now that the wheel slide's
+        #    batching (`persist=false` + adjustDirty + guideAdjustFlush) is
+        #    gone with the ADJUST mode - the run file must already say row 36
+        #    without anything having "landed" it.
+        #
+        # WHAT THIS DOES NOT COVER, stated so nobody reads it as more than it
+        # is: the trail Kevin SAW lives in the `leds` buffer, one layer below
+        # the overlay - renderGraphicOverlays() paints only non-transparent
+        # cells and showNets() never clears, so a cell that stops being lit
+        # keeps its last colour until a LED_CLEAR request runs
+        # clearLEDsExceptRails(). There is no REPL surface that reads that
+        # buffer back, so the clear-first fix itself is a BENCH item
+        # (checklist SS1.4). This needle guards the layer that IS readable.
+        #
+        # Read at the DONE view on purpose: `_GUIDE_TGT_` is removed there, so
+        # `_GUIDE_FP_` is the only overlay in the JSON and its 300-cell colors
+        # array cannot be pushed past jl_overlay_serialize()'s 4096-byte
+        # static buffer by a second overlay. ncells= is the witness that the
+        # array arrived whole.
+        #
+        # Geometry: RG is COMPACT, so pin A's leg sits in its `connect:` row
+        # 50 whatever baseRow says, and only pin B (endpoint GND, no hole)
+        # travels - baseRow + 1. Node -> overlay cell is guidePaintNode's:
+        # col = ((n - 1) % 30) + 1, and a node > 30 fills overlay rows 6-10.
+        # So row 36 compact must light exactly col 7 (node 37) and col 20
+        # (node 50), five sub-rows each = 10 cells.
+        d.send(b"m 40\r")
+        d.expect(r"GUIDE move part=RG row=40 placement=compact",
+                 "consecutive move 1 of 2: m 40 (compact stays compact)")
+        d.send(b"m 36\r")
+        d.expect(r"GUIDE move part=RG row=36 placement=compact",
+                 "consecutive move 2 of 2: m 36")
+
+        # Into the DONE view, where the target overlay is gone.
+        d.send(b">")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT",
+                 "browsed off the place step toward DONE")
+        d.send(b">")
+        d.expect(r"GUIDE done committed=2 skipped=0 unfinished=1",
+                 "reached the DONE view (only _GUIDE_FP_ is registered here)")
+
+        out = jl_exec("""
+s = overlay_serialize()
+i = s.find('_GUIDE_FP_')
+if i < 0:
+    print("found= 0")
+else:
+    print("found= 1")
+    j = s.find('"colors":[', i)
+    k = s.find(']', j)
+    cells = s[j + 10:k].split(',')
+    print("ncells=", len(cells))
+    lit = []
+    n = 0
+    for c in cells:
+        if c.replace('"', '') != '000000':
+            lit.append(n)
+        n = n + 1
+    print("nlit=", len(lit))
+    print("cols=", "-".join([str((x % 30) + 1) for x in lit]))
+    print("rows=", "-".join([str((x // 30) + 1) for x in lit]))
+""", timeout=30)
+        vals = parse_kv(out)
+        check(vals.get("found") == 1,
+              "the _GUIDE_FP_ footprint overlay is registered after two moves")
+        check(vals.get("ncells") == 300,
+              "the overlay's colors array arrived WHOLE (300 cells, not "
+              f"truncated) - got {vals.get('ncells')}")
+        lit_cols = sorted(set(str(vals.get("cols", "")).split("-")))
+        lit_rows = sorted(set(str(vals.get("rows", "")).split("-")))
+        check(vals.get("nlit") == 10,
+              "exactly 10 overlay cells are lit - two nodes x five sub-rows, "
+              f"no drag trail (got {vals.get('nlit')})")
+        check(lit_cols == ["20", "7"],
+              "the lit columns are EXACTLY node 37 (col 7) and node 50 "
+              f"(col 20) - rows 40/41/44/45/46 left nothing behind (got {lit_cols})")
+        check(lit_rows == ["10", "6", "7", "8", "9"],
+              f"and they sit in the bottom half, overlay rows 6-10 (got {lit_rows})")
+
+        time.sleep(1.5)
+        _, pm_yaml = read_device_file(run_pm)
+        check("row: 36" in pm_yaml,
+              "the SECOND consecutive move persisted on its own - no batching "
+              "left to flush now that the wheel slide is gone")
 
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "quit the placed-move session")
