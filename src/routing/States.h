@@ -845,7 +845,30 @@ void clearAllCustomNetNames(void);                     // Reset all names to def
 // Hardware Application Function
 // ============================================================================
 
-void applyStateToHardware(void);  // Apply globalState settings to hardware (DACs, GPIO, etc.)
+// Apply globalState settings to hardware (DACs, GPIO, etc.). `skipPower`
+// applies the GPIO half ONLY - see slotLoadDeferPowerApply below.
+void applyStateToHardware(bool skipPower = false);
+
+// Apply ONLY the active state's power (rails + both DACs) to hardware. The
+// completion half of a deferred load: whoever set slotLoadDeferPowerApply owes
+// the context either this call or a deliberate substitute.
+void applyStatePowerToHardware(void);
+
+// GUIDED-LAUNCH TRANSIENT CLOSE (guide-UX design §4, task 7). Set it TRUE
+// immediately before a loadSlotFromPath() whose power must not reach the rails
+// yet - the guided launcher's run-file load, where the project's `power:`
+// would otherwise energize the board for tens of ms before the guide's INIT
+// forces 0 V. loadSlotFromPath LATCHES AND CLEARS it on entry, so:
+//   - it is consumed by exactly one load and can never leak to the next one;
+//   - the parse-failure restore recursion and the terminal-state clear inside
+//     that same call still apply power normally (they re-enter with the flag
+//     already false), which is what keeps "nothing powered beyond defaults"
+//     and "a restored context asserts its power" true;
+//   - a retry loop must re-arm it before EACH attempt.
+// Every other context switch - boot, Files clicks, slot cycling, non-guided
+// project runs - never touches it and keeps task 4's apply-power-on-load
+// guarantee unchanged.
+extern bool slotLoadDeferPowerApply;
 
 // Decide what context the board boots into (config [slots].boot_mode +
 // /slots/last_active.txt). Call once after configLoaded and BEFORE the first

@@ -2200,9 +2200,31 @@ static void guideExitTail(GuideSession& s) {
     rotaryDivider = s.savedRotaryDivider;
 
     if (!s.powerApplied) {
-        Serial.println("\r\n  rails + DACs left at 0V (safe state - power_on never ran)");
-        if (oled.isConnected()) {
-            oled.showMultiLineSmallText("Guide closed\nrails at 0V", true, true);
+        // Ruling 1 (design §4.2): nothing the guide did energized the project,
+        // so the user's own rails come back. THE TAIL ONLY REPORTS - the
+        // caller performs the restore, because it also owns the early-return
+        // paths that never reach a session. save=0 there is deliberate: the
+        // run file keeps the safe 0 V guideForcePowerSafe wrote, so a
+        // half-built project re-opened later still comes up unpowered.
+        if (s.haveRestorePower) {
+            Serial.print("\r\n  rails + DACs restored (top=");
+            Serial.print(s.restoreTop, 2);
+            Serial.print("V bot=");
+            Serial.print(s.restoreBot, 2);
+            Serial.print("V dac0=");
+            Serial.print(s.restoreDac0, 2);
+            Serial.print("V dac1=");
+            Serial.print(s.restoreDac1, 2);
+            Serial.println("V) - the project never powered up");
+            if (oled.isConnected()) {
+                oled.showMultiLineSmallText("Guide closed\nrails restored", true, true);
+            }
+        } else {
+            // No capture (a caller that did not pass one) - say what is true.
+            Serial.println("\r\n  rails + DACs left at 0V (safe state - power_on never ran)");
+            if (oled.isConnected()) {
+                oled.showMultiLineSmallText("Guide closed\nrails at 0V", true, true);
+            }
         }
     } else {
         if (oled.isConnected()) {
@@ -2218,7 +2240,11 @@ static void guideExitTail(GuideSession& s) {
     Serial.flush();
 }
 
-GuideRunResult guideRun(const char* projectYamlPath, int resumeStep) {
+GuideRunResult guideRun(const char* projectYamlPath, int resumeStep,
+                        GuideRunPower* power) {
+    // Answer the out-param before ANY early return: a caller that reads
+    // `applied` after a parse failure must see "nothing was energized".
+    if (power != nullptr) power->applied = false;
     String err;
     if (!guideParse(projectYamlPath, guideScript, err)) {
         Serial.println("\r\nGUIDE parse failed: " + err);
@@ -2247,12 +2273,20 @@ GuideRunResult guideRun(const char* projectYamlPath, int resumeStep) {
     }
 
     guideSessionBegin(guideSession, &guideScript, resumeStep);
+    if (power != nullptr && power->haveCaptured) {
+        guideSession.haveRestorePower = true;
+        guideSession.restoreTop  = power->topRail;
+        guideSession.restoreBot  = power->bottomRail;
+        guideSession.restoreDac0 = power->dac0;
+        guideSession.restoreDac1 = power->dac1;
+    }
     while (!guideSession.done) {
         guideTick(guideSession);
         jOS.serviceInner();
         delayMicroseconds(50);
     }
     guideExitTail(guideSession);
+    if (power != nullptr) power->applied = guideSession.powerApplied;
 
     // COMPLETED means NOTHING IS LEFT UNFINISHED - every step is committed or
     // deliberately skipped. It deliberately no longer keys off stepIdx: with

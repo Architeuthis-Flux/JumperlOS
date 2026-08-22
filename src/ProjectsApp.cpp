@@ -44,6 +44,7 @@
 #include "GuidedFlow.h"       // guideRun / GuideRunResult
 #include "JumperlOS.h"        // jOS.serviceInner()
 #include "Menus.h"            // inClickMenu, yesNoMenu
+#include "Peripherals.h"      // setTopRail / setBotRail / setDac*voltage (rail restore)
 #include "Python_Proper.h"    // executePythonFileContent, setGlobalStreamWithInterrupt
 #include "RotaryEncoder.h"    // encoder state machine
 #include "States.h"           // SlotManager
@@ -471,7 +472,7 @@ static void flushActiveContextIfDirty(SlotManager& mgr) {
 }
 
 bool projectBeginRun(const String& dir, const String& templatePath,
-                     String& runPathOut, String& err) {
+                     String& runPathOut, String& err, bool deferPower) {
     runPathOut = "";
 
     // Namespace refusal (design §3 / task-4 review Q4). PREFIX, not equality:
@@ -521,6 +522,9 @@ bool projectBeginRun(const String& dir, const String& templatePath,
             continue;
         }
         String lerr;
+        // Re-armed per attempt: loadSlotFromPath latches and clears the flag,
+        // so a second try would otherwise energize what the first deferred.
+        slotLoadDeferPowerApply = deferPower;
         if (mgr.loadSlotFromPath(runPath, lerr)) {
             // Stamp the variant provenance the path itself cannot encode, and
             // persist it right away so a reboot resolves the same script.
@@ -543,11 +547,14 @@ bool projectBeginRun(const String& dir, const String& templatePath,
     return false;
 }
 
-// Open an existing run file as the active context. Same atomicity guarantee.
-static bool projectOpenRunFile(const String& runPath, String& err) {
+// Open an existing run file as the active context. Same atomicity guarantee,
+// and the same deferPower contract as projectBeginRun above.
+static bool projectOpenRunFile(const String& runPath, String& err,
+                               bool deferPower = false) {
     SlotManager& mgr = SlotManager::getInstance();
     flushActiveContextIfDirty(mgr);
     fileCacheFlushNowAll("project_open_run");
+    slotLoadDeferPowerApply = deferPower;
     if (mgr.loadSlotFromPath(runPath, err)) {
         return true;
     }
@@ -889,6 +896,42 @@ static void runOrOfferScript(const RunContext& rc, bool afterGuide) {
     finishRun(rc);
 }
 
+// ---------------------------------------------------------------------------
+// The rails across a guided launch (guide-UX design §4, task 7)
+// ---------------------------------------------------------------------------
+//
+// THE POINT: launching a guided project must not disturb the user's bench.
+// The rails they had set stay live until the guide's INIT parks everything at
+// 0 V, and they come back on the way out unless the project's own power_on
+// step took ownership.
+//
+// CAPTURED at the top of each launcher entry, from LIVE globalState.power -
+// the last moment the user's pre-project values still exist, because the very
+// next thing either entry does is load a run file over them.
+static GuideRunPower preGuidePower;
+
+static void captureUserPower(void) {
+    preGuidePower.haveCaptured = true;
+    preGuidePower.topRail    = globalState.power.topRail;
+    preGuidePower.bottomRail = globalState.power.bottomRail;
+    preGuidePower.dac0       = globalState.power.dac0;
+    preGuidePower.dac1       = globalState.power.dac1;
+    preGuidePower.applied    = false;
+}
+
+// save=0 IS DELIBERATE and load-bearing: the destination run file must keep
+// the safe 0 V that guideForcePowerSafe(save=1) wrote into it, so a half-built
+// project re-opened later still comes up unpowered. Live rails and the file
+// diverge on purpose here; the divergence heals the next time the project's
+// own power values are committed.
+static void restoreUserPower(void) {
+    if (!preGuidePower.haveCaptured) return;
+    setTopRail(preGuidePower.topRail, 0, 0);
+    setBotRail(preGuidePower.bottomRail, 0, 0);
+    setDac0voltage(preGuidePower.dac0, 0, 0);
+    setDac1voltage(preGuidePower.dac1, 0, 0);
+}
+
 // The guide + script half, shared by every entry point. `guideSource` is the
 // CANONICAL wiring path (never the run file: the run file loses its `guide:`
 // section on the first save, so a guide parsed from it would work once and
@@ -903,23 +946,36 @@ static void runGuideThenScript(const RunContext& rc, const String& guideSource,
         Serial.flush();
     }
 
-    GuideRunResult gr = guideRun(guideSource.c_str(), resumeStep);
+    GuideRunResult gr = guideRun(guideSource.c_str(), resumeStep, &preGuidePower);
     switch (gr) {
         case GuideRunResult::QUIT:
-            // Exit F: the run file is active with guideProgress at the quit
-            // step, rails wherever the guide left them. Nothing to do -
-            // resume works next launch. NO power is written here: the rails
-            // restore is task 7's (bench note: rails return "to where they
-            // were").
-            return;
+        case GuideRunResult::COMPLETED:
+            // A SESSION RAN, so the rails ruling governs: power_on applied the
+            // project's values -> they are the correct final state and nothing
+            // is restored; it never ran -> the user's captured bench comes
+            // back. The exit tail has already NAMED whichever it is.
+            if (!preGuidePower.applied) restoreUserPower();
+            // Exit F additionally means: nothing else to do here. The run file
+            // is active with guideProgress at the quit step and resume works
+            // next launch.
+            if (gr == GuideRunResult::QUIT) return;
+            break;
         case GuideRunResult::PARSE_FAILED:
             Serial.println("\r\n  guide source missing: " + guideSource +
                            " - start a new run to rebuild");
+            applyStatePowerToHardware();
             break;
         case GuideRunResult::NOTHING_TO_DO:
         case GuideRunResult::ALREADY_COMPLETE:
-        case GuideRunResult::COMPLETED:
         default:
+            // NO SESSION RAN (parse failure, nothing to build, or a finished
+            // build being re-opened), so nothing ever took the rails over from
+            // the file. This is a plain context load and task 4's guarantee
+            // applies: the run file's own power goes to the hardware, which
+            // the guided load deliberately deferred. Restoring the user's
+            // bench here instead would leave a completed project sitting
+            // unpowered while its script runs - see the report's deviation.
+            applyStatePowerToHardware();
             break;
     }
     runOrOfferScript(rc, /*afterGuide=*/true);
@@ -937,36 +993,45 @@ static void runOpenedRunFile(RunContext& rc, bool fresh) {
     // the matrix now that the picker released inClickMenu" redraw.
     refreshConnections(-1);
 
-    if (fresh) {
-        if (wiringHasGuideSections(rc.wiringPath)) {
-            runGuideThenScript(rc, rc.wiringPath, -1);
-            return;
-        }
-        runOrOfferScript(rc, /*afterGuide=*/false);
-        return;
-    }
-
-    // --- load-latest: the guided-ness gate reads the LOADED state -----------
-    // wiringHasGuideSections() only works on files that still carry `guide:`,
-    // and the run file lost it on its first save. Two ways in:
+    // --- the guided-ness decision, made BEFORE any power lands -------------
+    // The launcher's run-file load ran with its rail/DAC apply DEFERRED
+    // (projectBeginRun / projectOpenRunFile's deferPower), because on a guided
+    // launch the project's `power:` must never reach the rails ahead of its
+    // own power_on step. Everything below therefore has to settle guided-ness
+    // first and then either hand the rails to the guide or complete the load.
+    //
+    // On the FRESH path the wiring still carries `guide:`. On the load-latest
+    // path wiringHasGuideSections() cannot help - the run file lost that
+    // section on its first save - so there are two ways in:
     //   1. guideProgress survived -> RESUME at the saved step;
     //   2. no progress, but runSource names a wiring that IS guided -> a fresh
     //      guide on this run file. (Deviation from design §1.4, argued in the
-    //      report: the strict "guideSource non-empty" gate makes a run that
-    //      was quit before its FIRST commit permanently non-guided, which
+    //      task-5 report: the strict "guideSource non-empty" gate makes a run
+    //      that was quit before its FIRST commit permanently non-guided, which
     //      would run main.py against a circuit nobody built.)
-    if (st.parts.guideSource[0] != '\0') {
-        String src(st.parts.guideSource);
-        int step = st.parts.guideStep;
-        if (step < 0)
-            step = 0;
-        runGuideThenScript(rc, src, step);
+    String guideSource;
+    int resumeStep = -1;
+    if (fresh) {
+        if (wiringHasGuideSections(rc.wiringPath))
+            guideSource = rc.wiringPath;
+    } else if (st.parts.guideSource[0] != '\0') {
+        guideSource = String(st.parts.guideSource);
+        resumeStep = st.parts.guideStep;
+        if (resumeStep < 0)
+            resumeStep = 0;
+    } else if (rc.wiringPath.length() > 0 && wiringHasGuideSections(rc.wiringPath)) {
+        guideSource = rc.wiringPath;
+    }
+
+    if (guideSource.length() > 0) {
+        runGuideThenScript(rc, guideSource, resumeStep);
         return;
     }
-    if (rc.wiringPath.length() > 0 && wiringHasGuideSections(rc.wiringPath)) {
-        runGuideThenScript(rc, rc.wiringPath, -1);
-        return;
-    }
+
+    // Not guided: complete the deferred load right here, which is task 4's
+    // apply-power-on-load guarantee arriving a few milliseconds later than it
+    // used to and otherwise unchanged.
+    applyStatePowerToHardware();
     runOrOfferScript(rc, /*afterGuide=*/false);
 }
 
@@ -1015,6 +1080,10 @@ static void printRunFileLine(const String& path, const char* action) {
 // wiring*.yaml); the variant picker is then skipped entirely.
 static void projectRunInteractive(const String& dir, const String& forcedWiring,
                                   const ProjectMeta& listedMeta) {
+    // Before anything is loaded: the user's own rails are still live in
+    // globalState.power, and this is the only moment they are.
+    captureUserPower();
+
     RunContext rc;
     rc.dir = dir;
     rc.projectPath = String(PROJECTS_DIR) + "/" + dir;
@@ -1067,7 +1136,7 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
     if (loadLatest) {
         String runPath = runFilePath(rc.projectPath, dir, maxN);
         String err;
-        if (!projectOpenRunFile(runPath, err)) {
+        if (!projectOpenRunFile(runPath, err, /*deferPower=*/true)) {
             // EXIT E: both the load and (for a parse failure) the restore are
             // handled inside loadSlotFromPath. The previous context is still
             // active unless the terminal state was reported above.
@@ -1134,7 +1203,7 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
 
     String runPath;
     String err;
-    if (!projectBeginRun(dir, wiringPath, runPath, err)) {
+    if (!projectBeginRun(dir, wiringPath, runPath, err, /*deferPower=*/true)) {
         // EXIT D / E: the copy or the load failed (the partial file is already
         // deleted, one retry already spent). Previous context untouched.
         notify("Run file\nfailed", "\n\r  Could not start a run of " + dir + ": " + err,
@@ -1180,6 +1249,11 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
         return false;
     }
 
+    // Same capture point as the interactive entry, for the same reason - the
+    // headless door (`z`, and load_project's name form via the launcher) must
+    // give the bench back too.
+    captureUserPower();
+
     RunContext rc;
     rc.dir = dir;
     rc.projectPath = String(PROJECTS_DIR) + "/" + dir;
@@ -1215,7 +1289,7 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
             return false;
         }
         String err;
-        if (!projectOpenRunFile(runPath, err)) {
+        if (!projectOpenRunFile(runPath, err, /*deferPower=*/true)) {
             Serial.println("PROJECT error load failed: " + err);
             return false;
         }
@@ -1228,7 +1302,7 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
 
     // NEW
     String runPath, err;
-    if (!projectBeginRun(dir, templatePath, runPath, err)) {
+    if (!projectBeginRun(dir, templatePath, runPath, err, /*deferPower=*/true)) {
         Serial.println("PROJECT error " + err);
         return false;
     }

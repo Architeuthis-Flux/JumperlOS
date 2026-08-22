@@ -73,6 +73,25 @@ enum class GuideRunResult : uint8_t {
     COMPLETED          // every step was reached (DONE was shown)
 };
 
+// The rails across a guide session (guide-UX design §4, task 7).
+//
+// IN: the user's pre-guide rail/DAC values, captured by the LAUNCHER from live
+// globalState.power BEFORE its run-file load - the last moment they still
+// exist. The guide only REPORTS them (the exit tail names what is coming
+// back); the caller owns the actual restore, because guideRun's early returns
+// never start a session at all.
+//
+// OUT: `applied` is true when a power_on step really energized the project's
+// rails (or a resume past one re-applied them). THE RULE: applied == true ->
+// the project's power is the correct final state, restore nothing;
+// applied == false -> put the captured values back with save=0, so the run
+// file keeps the safe 0 V that guideForcePowerSafe wrote.
+struct GuideRunPower {
+    bool  haveCaptured;
+    float topRail, bottomRail, dac0, dac1;
+    bool  applied;              // out
+};
+
 // BLOCKING guide runner (probeMode's shape: session struct + tick machine,
 // pumping jOS.serviceInner() every pass). resumeStep < 0 = fresh start.
 // Assumes the caller (ProjectsApp's run flow / the 'z' command) already loaded
@@ -80,7 +99,8 @@ enum class GuideRunResult : uint8_t {
 // while `projectYamlPath` stays the CANONICAL wiring (the run file loses its
 // `guide:` section on the first save, so a guide parsed from it would work
 // once and never resume).
-GuideRunResult guideRun(const char* projectYamlPath, int resumeStep = -1);
+GuideRunResult guideRun(const char* projectYamlPath, int resumeStep = -1,
+                        GuideRunPower* power = nullptr);
 
 struct GuideSession;               // ProbeSession-style, defined in the .cpp
 void guideTick(GuideSession& s);

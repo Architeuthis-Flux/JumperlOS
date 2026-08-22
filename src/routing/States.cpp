@@ -2727,11 +2727,22 @@ bool JumperlessState::fromLegacyNodeFile(const String& nodeFileContent, String& 
  * - GPIO directions and pull resistors match the loaded config
  * - All hardware reflects the state loaded from the file
  */
-void applyStateToHardware() {
+// See States.h for the full contract. Latched and cleared by loadSlotFromPath.
+bool slotLoadDeferPowerApply = false;
+
+void applyStatePowerToHardware(void) {
+    setRailsAndDACs(0);
+}
+
+void applyStateToHardware(bool skipPower) {
     // Apply power settings (DACs and rails)
     // Note: Pass save=0 to avoid updating globalState (it's already loaded)
     //       and saveEEPROM=0 to avoid writing to EEPROM
-    setRailsAndDACs(0);  // This applies topRail, bottomRail, dac0, dac1 from globalState
+    // skipPower is the guided-launch transient close: the GPIO half still
+    // runs, only the rails/DACs wait for the caller's explicit apply.
+    if (!skipPower) {
+        setRailsAndDACs(0);  // applies topRail, bottomRail, dac0, dac1 from globalState
+    }
 
 
 
@@ -3291,6 +3302,14 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     strncpy(savedPath, activeSlotPath, sizeof(savedPath) - 1);
     savedPath[sizeof(savedPath) - 1] = '\0';
 
+    // LATCH AND CLEAR (States.h): the deferral belongs to THIS load only. The
+    // parse-failure restore below re-enters this function and the terminal
+    // path calls applyStateToHardware() directly - both must apply power
+    // normally, and both now see a cleared flag. It also means a leaked
+    // set-and-forget can cost at most one load its rails.
+    const bool deferPower = slotLoadDeferPowerApply;
+    slotLoadDeferPowerApply = false;
+
     if (!safeFileExists(path.c_str())) {
         errorMsg = "File not found: " + path;
         return false;   // tracking untouched - prior context still active
@@ -3405,7 +3424,10 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     refreshConnections(-1, 1, 1);
     finalizeFakeGpioAfterRouting();
     if (!previewModeActive) {
-        applyStateToHardware();   // re-assert this context's power: rails + DACs
+        // re-assert this context's power: rails + DACs (unless the caller
+        // deferred it - the guided launch closes the project-power transient
+        // by owning the apply itself; States.h has the whole contract)
+        applyStateToHardware(/*skipPower=*/deferPower);
     }
 
     // ---- ADOPT --------------------------------------------------------

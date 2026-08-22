@@ -95,8 +95,14 @@ int listProjects(ProjectMeta* out, int maxOut);
 //
 // Refuses a project directory named wiring*/slot* (see the namespace invariant
 // above) and a project whose run counter has reached PROJECT_RUN_MAX_N.
+//
+// `deferPower` hands the load's rail/DAC apply to the CALLER
+// (slotLoadDeferPowerApply, States.h): the launcher uses it so a guided
+// project's `power:` cannot reach the rails before its power_on step. The
+// caller then owes the context either applyStatePowerToHardware() or a
+// deliberate substitute - the guide's own 0 V, or the pre-guide restore.
 bool projectBeginRun(const String& dir, const String& templatePath,
-                     String& runPathOut, String& err);
+                     String& runPathOut, String& err, bool deferPower = false);
 
 // Highest existing run number for `dir` inside `projectPath`, 0 when none.
 // countOut receives how many run files exist (the pile-up hint's input).
