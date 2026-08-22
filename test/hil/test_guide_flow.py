@@ -61,10 +61,36 @@ Covers:
      AND in the run file) and a compact snap whose compact-eligible leg loses
      its bridge while the GND leg keeps one. `c` again round-trips to
      expanded, and expanded being the DEFAULT means the run file ends with no
-     `placement:` line at all. Not covered here (encoder-side, task 7): the
-     wheel slide, double-click ADJUST and the probe pads themselves - this
-     suite never turns the wheel and cannot touch a hole, which is exactly
-     why the serial twins exist.
+     `placement:` line at all.
+ 13b. the PLACED move (task 6 review): every move above happens with the part
+     un-placed, so guideMovePart's remove -> mutate -> reapply branch - the
+     invariant this whole layer rests on - had zero coverage. Commit the part
+     FIRST, then move and snap it while it is live on the fabric, and assert
+     the old rows' bridges are gone, the new rows' are live, and the run file
+     agrees.
+ 14. browse + wrap (task 7): `>` past the last step lands in the DONE view
+     (`GUIDE done committed= skipped= unfinished=`), `>` again WRAPS to step 1
+     with NO EXIT emitted anywhere in between - the wheel and its serial twins
+     can never leave the guide - and `q` at DONE is what exits.
+ 15. skip-and-return: `s` at step 2, commit the rest, DONE reports skipped=1,
+     confirm JUMPS to the skipped step instead of exiting, commit it, DONE is
+     clean and the next confirm exits.
+ 16. persisted first-unfinished + the post-commit wrap: commit step 1, browse
+     to step 3, commit it OUT OF ORDER - the cursor wraps to step 2, the only
+     unfinished step - and what the run file persists is step 1 (the first
+     unfinished), NOT the cursor. Relaunch resumes at step 2. Under the old
+     rule this file would have said step 3 and step 2 would never be built.
+ 17. rail restore (task 7 ruling 1): rails set to known values, a guided
+     launch quit BEFORE power_on, and the exit tail names exactly those values
+     coming back. The run file keeps 0 V (save=0), which is asserted too - it
+     is a deliberate divergence, not an oversight.
+
+BENCH-ONLY, NOT COVERED HERE. This suite never turns the wheel and cannot
+touch a hole, so the ENCODER half of task 7 has no automated witness: the
+260 ms confirm pend, the double-click that enters STEP_ADJUST, the wheel
+slide inside it, and every probe-pad gesture. What IS covered is everything
+those gestures funnel into - `>`/`<` are the wheel's browse twins and `m`/`c`
+the pads' absolute twins, all running the same handlers.
 
 Bench convention: snapshot board state + the active CONTEXT up front, restore
 both in a finally (a prior round's incident: an uncaught exception stranded
@@ -610,8 +636,11 @@ print("conn=", 1 if is_connected(52, 53) else 0)
         d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "resumed step 3 WAIT")
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "quit the resumed session")
-        d.expect(r"rails \+ DACs left at 0V",
-                 "no power_on behind the resume -> exit notes rails at 0V")
+        # TASK 7 ruling 1, and the resume-then-quit variant of it: no power_on
+        # ran behind this resume, so the guide gives the bench back instead of
+        # leaving the rails parked at 0 V. Phase 17 pins the actual VALUES.
+        d.expect(r"rails \+ DACs restored \(top=",
+                 "no power_on behind the resume -> the user's rails are restored")
         guide_live = False
     finally:
         d.close()
@@ -714,8 +743,10 @@ print("NETNAME|" + name)
         guide_live = False
     finally:
         d.close()
-    check("rails + DACs left at 0V" not in d.buf,
-          "no 'rails at 0V' note when power was re-applied on resume")
+    check("rails + DACs restored" not in d.buf and
+          "rails + DACs left at 0V" not in d.buf,
+          "power was re-applied on resume -> the guide restores NOTHING and "
+          "says nothing about the rails (the project's power stands)")
     time.sleep(1.0)
 
     # --- 9. No-power fixture: the powerApplied-asymmetry witness ------------
@@ -757,8 +788,12 @@ print("NETNAME|" + name)
         d.expect(r"GUIDE step=4/4 id=note_4 state=WAIT", "resumed at step 4")
         d.send(b"q")
         d.expect(r"GUIDE .* state=EXIT", "quit the no-power resumed session")
-        d.expect(r"rails \+ DACs left at 0V \(safe state",
-                 "exit tail keeps the 'rails at 0V' note (the asymmetry fix)")
+        # The asymmetry witness survives task 7's rewording: a committed
+        # power_on with NOTHING to apply still counts as "the project never
+        # powered up", so the exit tail restores rather than staying silent.
+        d.expect(r"rails \+ DACs restored \(top=",
+                 "a power_on with nothing to apply still restores the user's "
+                 "rails (the asymmetry fix, re-aimed at the new line)")
         guide_live = False
     finally:
         d.close()
@@ -1078,6 +1113,298 @@ print("bbridge=", 1 if is_connected(45, "GND") else 0)
           "expanded is the DEFAULT and is NOT emitted - a full round trip "
           "leaves no placement: line behind, so pre-wave-2 files are "
           "byte-identical after a rewrite")
+
+    # --- 13b. The PLACED move: remove -> mutate -> reapply -------------------
+    #
+    # THE COVERAGE DEBT (task 6 review). Every move in phase 13 happens with
+    # RG un-placed, so guideMovePart's `wasPlaced == true` branch - remove the
+    # part's bridges against the geometry that APPLIED them, mutate, reapply -
+    # had no witness at all, and it is the branch the whole placement layer
+    # rests on. Mutating first strands every old bridge on the fabric with
+    # nothing left that knows how to find it, and that failure is invisible
+    # until someone looks at the crossbar.
+    #
+    # So: commit the part FIRST, then move it and snap it while it is live.
+    # RG is a sip2 at row 45 - pin A (connect 50) at 45, pin B (connect GND)
+    # at 46 - so the authored placement is 45->50 and 46->GND.
+    d = GuideDriver()
+    try:
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
+        guide_live = True
+        run_pm = d.expect_runfile("new", "placed-move phase allocated its own run file")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "placed-move step 1 WAIT")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "step 2 (place RG) WAIT")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=COMMIT", "RG is COMMITTED - now it is live")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "step 3 WAIT")
+
+        out = jl_exec("""
+print("a45=", 1 if is_connected(45, 50) else 0)
+print("b46=", 1 if is_connected(46, "GND") else 0)
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("a45") == 1 and vals.get("b46") == 1,
+              "PLACED: the authored bridges 45->50 and 46->GND are live "
+              f"(got a45={vals.get('a45')}, b46={vals.get('b46')})")
+
+        # Browse back to the place step - `<` is the wheel's serial twin, and
+        # a committed step re-entered this way is exactly the browse landing
+        # the annotation exists for.
+        # ORDER: STEP_ENTER renders the prompt and its history annotation
+        # FIRST and emits the status line last, so the expects run in that
+        # order too (this driver only ever searches forward).
+        d.send(b"<")
+        d.expect(r"\(already committed - click re-verifies\)",
+                 "a committed browse landing says so")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT",
+                 "`<` browses back to the committed place step")
+
+        # The move, WHILE PLACED. Old rows must be vacated on the fabric and
+        # new rows live - that is the remove->mutate->reapply invariant.
+        d.send(b"m 44\r")
+        d.expect(r"GUIDE move part=RG row=44 placement=custom",
+                 "m 44 moves the LIVE part")
+        out = jl_exec("""
+print("old_a=", 1 if is_connected(45, 50) else 0)
+print("old_b=", 1 if is_connected(46, "GND") else 0)
+print("new_a=", 1 if is_connected(44, 50) else 0)
+print("new_b=", 1 if is_connected(45, "GND") else 0)
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("old_a") == 0,
+              "PLACED MOVE: the old 45->50 bridge is GONE (remove ran against "
+              "the geometry that applied it)")
+        check(vals.get("old_b") == 0, "PLACED MOVE: the old 46->GND bridge is GONE")
+        check(vals.get("new_a") == 1, "PLACED MOVE: the new 44->50 bridge is live")
+        check(vals.get("new_b") == 1, "PLACED MOVE: the new 45->GND bridge is live")
+
+        time.sleep(1.5)   # guidePersistProgress writes the run file immediately
+        _, pm_yaml = read_device_file(run_pm)
+        check("row: 44" in pm_yaml and "placement: custom" in pm_yaml,
+              "PLACED MOVE: the run file agrees (row: 44 + placement: custom)")
+        check("placed: true" in pm_yaml,
+              "PLACED MOVE: the part is still placed: true after the move")
+
+        # And the snap, also while placed: pin A's leg goes INTO row 50 and
+        # its bridge disappears; pin B's fabric endpoint keeps both.
+        d.send(b"c")
+        d.expect(r"GUIDE move part=RG row=44 placement=compact",
+                 "c snaps the LIVE part to compact")
+        out = jl_exec("""
+print("a=", 1 if is_connected(44, 50) else 0)
+print("b=", 1 if is_connected(45, "GND") else 0)
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("a") == 0,
+              "PLACED SNAP: compact removed pin A's bridge (the leg is the "
+              "connection now)")
+        check(vals.get("b") == 1, "PLACED SNAP: pin B's GND bridge survives")
+        time.sleep(1.5)
+        _, pm_yaml = read_device_file(run_pm)
+        check("placement: compact" in pm_yaml,
+              "PLACED SNAP: the run file says placement: compact")
+
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit the placed-move session")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # --- 14. Browse + wrap: THE WHEEL CAN NEVER EXIT THE GUIDE --------------
+    #
+    # Kevin: "when we spin the clickwheel around to get to the end, it should
+    # just loop until we hold to exit - you'd want to see the whole thing
+    # first." `>` and `<` are the wheel's serial twins and run the same
+    # handler, so this is the one automated witness that browsing wraps
+    # through the DONE view instead of walking out of the guide.
+    d = GuideDriver()
+    try:
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
+        guide_live = True
+        d.expect_runfile("new", "browse phase allocated its own run file")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "browse phase at step 1")
+        d.send(b">")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT",
+                 "`>` browses forward WITHOUT skipping or committing")
+        d.send(b">")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "`>` again -> step 3")
+        d.send(b">")
+        d.expect(r"GUIDE done committed=0 skipped=0 unfinished=3",
+                 "past the last step is the DONE VIEW, and it counts honestly "
+                 "(browsing committed nothing)")
+        d.send(b">")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT",
+                 "`>` at DONE WRAPS to step 1 - the ring closes")
+        # THE assertion of this phase: no EXIT anywhere in that whole lap.
+        check("state=EXIT" not in d.buf[:d.pos],
+              "NOTHING the wheel did emitted EXIT - a full lap through DONE "
+              "never leaves the guide")
+        d.send(b"<")
+        d.expect(r"GUIDE done committed=0 skipped=0 unfinished=3",
+                 "`<` from step 1 wraps BACKWARD into the DONE view")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "q at DONE is what exits")
+        guide_live = False
+        time.sleep(0.7)
+        d.pump()
+    finally:
+        d.close()
+    # Quitting with everything unfinished is exit F, not a finished build:
+    # no script offer, no "Run saved" - the launcher returns immediately.
+    check("SCRIPT offer" not in d.buf,
+          "quitting from DONE with unfinished steps is exit F (no script "
+          "offer) - COMPLETED means nothing is left unfinished, not 'the "
+          "cursor reached the end'")
+    time.sleep(1.0)
+
+    # --- 15. Skip and return ------------------------------------------------
+    # A skipped step is not abandoned: the DONE view counts it, and confirm
+    # there jumps back to it instead of leaving.
+    d = GuideDriver()
+    try:
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
+        guide_live = True
+        d.expect_runfile("new", "skip-and-return phase allocated its own run file")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "skip phase at step 1")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "step 2 WAIT")
+        d.send(b"s")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "s skips step 2")
+        d.send(b"n")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=COMMIT", "step 3 commits")
+        d.expect(r"GUIDE done committed=2 skipped=1 unfinished=0",
+                 "DONE reports the skip")
+        d.send(b"n")
+        d.expect(r"\(skipped\)", "the landing says the step was skipped")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT",
+                 "confirm at DONE JUMPS to the skipped step instead of exiting")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=COMMIT", "the skipped step commits")
+        d.expect(r"GUIDE done committed=3 skipped=0 unfinished=0",
+                 "DONE is clean - the skip flag cleared on commit")
+        d.send(b"n")
+        d.expect(r"GUIDE .* state=EXIT", "confirm at a clean DONE finishes")
+        guide_live = False
+        d.expect(r"SCRIPT offer=none", "an all-committed build reaches the script step")
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # --- 16. Persisted first-unfinished + the post-commit wrap ---------------
+    #
+    # THE RULE (design §3.2): browse position is EPHEMERAL, so what the run
+    # file stores is the first genuinely unfinished step - never the cursor.
+    # Committing OUT OF ORDER is what makes the two differ: under the old
+    # `stepIdx + 1` rule this file would have said step 3 and step 2 would
+    # have been silently skipped forever by every resume.
+    d = GuideDriver()
+    try:
+        d.send(f"z {WIRING_PATH} new\r\n".encode())
+        guide_live = True
+        run_pu = d.expect_runfile("new", "persistence phase allocated its own run file")
+        d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "persistence phase at step 1")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT", "step 1 committed, cursor at step 2")
+        d.send(b">")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=WAIT", "browsed PAST step 2 to step 3")
+        d.send(b"n")
+        d.expect(r"GUIDE step=3/3 id=connect_52 state=COMMIT", "step 3 commits OUT OF ORDER")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT",
+                 "the post-commit cursor WRAPS to step 2 - the only unfinished "
+                 "step - instead of walking off the end")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit from step 2")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.5)
+
+    _, pu_yaml = read_device_file(run_pu)
+    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 1}}' in pu_yaml,
+          "the run file persisted the FIRST UNFINISHED step (1 = step 2), not "
+          "the cursor and not stepIdx + 1")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {PROJ} load\r\n".encode())
+        guide_live = True
+        d.expect(r"GUIDE resume file=" + re.escape(run_pu) + r" step=1",
+                 "resume reads the first-unfinished index back")
+        d.expect(r"GUIDE step=2/3 id=place_RG state=WAIT",
+                 "resume lands on the step that was never built", timeout=40)
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit the resumed persistence session")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # --- 17. Rail restore: the values, named and given back -----------------
+    #
+    # RULING 1. Quit before power_on and the bench you had comes back. The
+    # rails are set through the REPL with save=True so they are in
+    # globalState.power, which is what the launcher captures.
+    out = jl_exec("""
+dac_set(2, 3.3, True)
+dac_set(3, -1.5, True)
+print("top=", dac_get(2))
+print("bot=", dac_get(3))
+""", timeout=25)
+    vals = parse_kv(out)
+    check(vals.get("top") is not None and abs(float(vals.get("top")) - 3.3) < 0.2 and
+          vals.get("bot") is not None and abs(float(vals.get("bot")) + 1.5) < 0.2,
+          f"bench rails set to 3.3 / -1.5 before the launch "
+          f"(top={vals.get('top')}, bot={vals.get('bot')})")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {POWER_PATH} new\r\n".encode())
+        guide_live = True
+        run_rr = d.expect_runfile("new", "rail-restore phase allocated its own run file")
+        d.expect(r"GUIDE step=1/4 id=note_1 state=WAIT",
+                 "rail-restore phase at step 1 (power_on is step 3, never reached)")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit BEFORE power_on")
+        d.expect(r"rails \+ DACs restored \(top=3\.30V bot=-1\.50V",
+                 "the exit tail names the EXACT values coming back")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
+    # The deliberate divergence (design §4.2): the restore is save=0, so the
+    # RUN FILE - and globalState with it - keeps the safe 0 V that
+    # guideForcePowerSafe wrote, while the hardware carries the user's bench.
+    # A half-built project re-opened later must still come up unpowered. This
+    # asserts the choice rather than tolerating it: flipping to save=1 would
+    # write the user's rails into someone else's project file.
+    out = jl_exec("""
+print("top=", dac_get(2))
+print("bot=", dac_get(3))
+""", timeout=25)
+    vals = parse_kv(out)
+    check(vals.get("top") is not None and abs(float(vals.get("top"))) < 0.2 and
+          vals.get("bot") is not None and abs(float(vals.get("bot"))) < 0.2,
+          f"save=0: the run file's power stays at the safe 0 V "
+          f"(state top={vals.get('top')}, bot={vals.get('bot')})")
+    # And the hazard the save=0 rule exists to prevent, asserted directly: the
+    # user's bench voltage must never end up written into someone else's
+    # project file. (The 0.00 the guide put in globalState lands in this file
+    # on the next idle auto-save; what matters here and now is that 3.3 does
+    # not.)
+    _, rr_yaml = read_device_file(run_rr)
+    check("topRail: 3.3" not in rr_yaml,
+          "save=0: the user's 3.3 V was NEVER written into the project's run "
+          "file")
+
+    out = jl_exec("""
+dac_set(2, 0.0, True)
+dac_set(3, 0.0, True)
+print("zeroed= 1")
+""", timeout=25)
+    check(parse_kv(out).get("zeroed") == 1, "rails zeroed after the restore phase")
 
 finally:
     # --- 6. Restore the bench ----------------------------------------------
