@@ -283,9 +283,11 @@ struct CheckState {
     float inaSum = 0;
     int inaCount = 0;
     uint32_t inaLastMs = 0;
-    float iOfs_mA = 0;             // zero-stimulus shunt offset
+    float iOfs_mA = 0;             // zero-stimulus shunt current
     float iPart_mA = 0;            // I_raw - I_ofs
     float vSenseA = 0, vSenseB = 0;
+    float vOfsA = 0, vOfsB = 0;    // the sense pair at the zero-stimulus point
+    bool haveVofs = false;
     bool haveVsense = false;
     char detail[112];              // the terminal's long-form line (§4)
 
@@ -307,6 +309,7 @@ struct CheckState {
     int railAdc = -1;              // channel the rail tap landed on - every
                                    // row is then compared on the SAME one
     float railWorstDelta = 0;
+    float railWorstV = 0;
     int railWorstRow = -1;
 
     // presence bookkeeping (charge-retention - see the PRESENCE case)
@@ -1288,8 +1291,14 @@ static void senseCrosschecks(void) {
     // drawing from the stimulus. Read-only - INA1's configuration is as
     // untouchable as INA0's, and nothing else consumes its conversion flag in
     // steady state.
+    //
+    // Gated on there BEING a part current to compare against: on an open row
+    // i0 is ~0 and any board-internal draw on DAC0's rail trips the test, so
+    // an ungated version printed "current is leaking" under every honest
+    // `open` verdict (caught on the bench, 2.17 mA vs 0.00 mA on empty rows).
+    // "Nothing flows through the part" is what val=open already says.
     float i1 = fabsf(INA1.getCurrent_mA());
-    if (INA1.getLastError() == 0 && (i1 - i0) > (0.1f * i0 + 0.2f)) {
+    if (i0 >= 0.5f && INA1.getLastError() == 0 && (i1 - i0) > (0.1f * i0 + 0.2f)) {
         Serial.printf("  note: INA1 sees %.2f mA leaving DAC0 but INA0 measured "
                       "%.2f mA through the part - current is leaking outside the "
                       "part path\n\r", (double)i1, (double)i0);
@@ -1347,7 +1356,12 @@ static void evaluateContinuity(void) {
         return;
     }
 
-    const float vPart = ck.vSenseA - ck.vSenseB;
+    // Two-point: the offset operating point's own delta comes off, so a
+    // constant additive error in either channel (and the INA's register
+    // zero, already out via I_part) cancels exactly. A resistor is ohmic,
+    // so the slope between the two points IS its resistance.
+    const float vOfs = ck.haveVofs ? (ck.vOfsA - ck.vOfsB) : 0.0f;
+    const float vPart = (ck.vSenseA - ck.vSenseB) - vOfs;
     // The measurable floor: one useful multiple of the shunt's 5 uA LSB. Below
     // it the division is noise over noise, and "open" is the true answer for
     // every part a guide step actually places.
@@ -1399,7 +1413,12 @@ static void evaluateVf(void) {
     if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
         partName = globalState.parts.parts[st.partIdx].name;
     }
-    const float vf = ck.vSenseA - ck.vSenseB;
+    // Same two-point correction as continuity: at 0 V stimulus a diode is
+    // off, so the offset delta is the two channels' mismatch (plus the
+    // few mV the DAC0 zero-offset drops across whatever is there) and
+    // taking it off is exactly right.
+    const float vf = (ck.vSenseA - ck.vSenseB) -
+                     (ck.haveVofs ? (ck.vOfsA - ck.vOfsB) : 0.0f);
     char iStr[16];
     formatCurrent(ck.iPart_mA, iStr, sizeof(iStr));
     setDetail("%s vf %.2fV @ %s (band %.2f-%.2fV)", partName, (double)vf, iStr,
@@ -1561,15 +1580,33 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                 inaAccumulateFresh();
                 if (ck.inaCount >= 4) {
                     ck.iOfs_mA = ck.inaSum / ck.inaCount;
-                    // The ground-side topology's standing guarantee: with the
-                    // stimulus at 0 V nothing should be moving through the
-                    // shunt. The old top-side chain read 2.319 mA here (the
-                    // CURR_SENSE- sink); this one measured 0.000 mA on the
-                    // bench. A real reading now means the isense path picked
-                    // up something it should not have.
-                    if (fabsf(ck.iOfs_mA) > 0.3f) {
-                        setDetail("isense offset %.2f mA at 0 V stimulus "
-                                  "(expected < 0.3)", (double)ck.iOfs_mA);
+                    // THE ZERO POINT IS A REAL OPERATING POINT, not just a
+                    // tare. Bench measurement while building this: DAC0's
+                    // "0 V" output actually sits at about -73 mV, and through
+                    // a low-resistance part that is a genuine -0.40 mA - the
+                    // part really is conducting it. So the offset sample is
+                    // the FIRST of two operating points, and the sense pair
+                    // gets read here too (RING mode only - the tap mode reads
+                    // both nodes on one channel, which cancels the channel
+                    // offset by itself). R and Vf then come out of the
+                    // DIFFERENCE between the two points, which cancels the
+                    // INA's register zero AND the two channels' offsets
+                    // exactly, instead of subtracting a current that was
+                    // never an artifact.
+                    if (ck.senseMode == SenseMode::RING) {
+                        float dA = 0, dB = 0;
+                        ck.haveVofs = ringReadPair(ck.senseAdcA, ck.senseAdcB,
+                                                   &ck.vOfsA, &ck.vOfsB, &dA, &dB);
+                    }
+                    // The leak gate survives, at the level that means what it
+                    // says. The old top-side chain read 2.319 mA here (the
+                    // CURR_SENSE- sink) and the ground-side one reads 0.000 mA
+                    // with no part; the worst honest reading is the DAC0
+                    // zero-offset through a dead short, ~0.4 mA. 1 mA sits
+                    // clear of that and still catches the sink by 2x.
+                    if (fabsf(ck.iOfs_mA) > 1.0f) {
+                        setDetail("isense reads %.2f mA with the stimulus at 0 V "
+                                  "(expected under 1)", (double)ck.iOfs_mA);
                         finishCheck(GUIDE_CHECK_FAIL,
                                     "isense path is leaking - something else is "
                                     "driving the sense chain",
@@ -1861,8 +1898,9 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                     if (tol < 0.15f) tol = 0.15f;
                     float delta = fabsf(v - ck.railMeasured);
                     ok = (delta <= tol);
-                    if (delta > fabsf(ck.railWorstDelta)) {
+                    if (ck.railWorstRow < 0 || delta > fabsf(ck.railWorstDelta)) {
                         ck.railWorstDelta = delta;
+                        ck.railWorstV = v;
                         ck.railWorstRow = row;
                     }
                 }
@@ -1894,11 +1932,18 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                                   "delta %.2fV @%d", (double)ck.railMeasured,
                                   (double)railSaneTopTarget(),
                                   (double)ck.railWorstDelta, ck.railWorstRow);
+                        // §4 wants `4.74V@8` - the POWER row, which is what
+                        // the check is really about. Iteration order put the
+                        // gnd-class row last and it reported `-0.00V@9`, a
+                        // true but useless number.
+                        finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV@%d",
+                                    (double)ck.railWorstV, ck.railWorstRow);
                     } else {
                         setDetail("rail: %d gnd-class row(s) within 0.15V of 0",
                                   ck.numRows);
+                        finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV@%d",
+                                    (double)v, row);
                     }
-                    finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV@%d", (double)v, row);
                 }
             }
             break;

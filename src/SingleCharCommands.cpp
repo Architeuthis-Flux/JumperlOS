@@ -750,7 +750,10 @@ void SingleCharCommands::initializeCommands( ) {
                      "slots are gone. Guided projects resume from the run file's own\n"
                      "guideProgress; there is no prompt on this path.\n"
                      "Guide keys on this stream: n/space=next  p=back  s=skip\n"
-                     "v=verify  q=quit  t <row>=probe-tap override.",
+                     "v=verify  q=quit  t <row>=probe-tap override.\n"
+                     "Diagnostics (no guide runs; z band touches no hardware at all):\n"
+                     "  z band <value> [type] [tol]  parsed value + derived continuity band\n"
+                     "  z shunt [n]                  n fresh INA0 shunt-register samples",
                      cmd_guidedProject, MENU_DEBUG, CAT_APPS, true, SER3_INTERACTIVE );
 }
 
@@ -854,6 +857,53 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
         if ( t.length( ) == 0 ) t = "resistor";
         guideBandReport( v.c_str( ), t.c_str( ),
                          ( tolTok.length( ) > 0 ) ? (int)tolTok.toInt( ) : 0, target );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z shunt [n]` - n fresh samples of INA0's shunt-voltage register, the
+    // register the continuity measurement now rides on. Prints the spread in
+    // LSBs (10 uV each, 5 uA across R1), which is the honest answer to "can
+    // this thing see 70 uA" - the question the old current register got
+    // wrong. Read-only: it watches the Peripherals poll's field, it does not
+    // touch the chip.
+    if ( args.startsWith( "shunt" ) ) {
+        Stream* target = Jerial.getResponseTarget( );
+        if ( target == nullptr ) target = &Jerial;
+        String rest = args.substring( 5 );
+        rest.trim( );
+        int want = ( rest.length( ) > 0 ) ? (int)rest.toInt( ) : 32;
+        if ( want < 2 ) want = 2;
+        if ( want > 64 ) want = 64;
+        float lo = 1e9f, hi = -1e9f, sum = 0;
+        int got = 0;
+        unsigned long lastStamp = currentSenseState.lastUpdatedMs;
+        unsigned long deadline = millis( ) + (unsigned long)want * 120u + 1000u;
+        // Bail fast when the INA has nothing to say (ISENSE not routed), so
+        // the caller gets an answer instead of the full sampling deadline.
+        unsigned long graceUntil = millis( ) + 400;
+        while ( got < want && (long)( millis( ) - deadline ) < 0 ) {
+            jOS.serviceInner( );
+            if ( !currentSenseState.active ) {
+                if ( got == 0 && (long)( millis( ) - graceUntil ) > 0 ) break;
+                continue;
+            }
+            if ( currentSenseState.lastUpdatedMs == lastStamp ) continue;
+            lastStamp = currentSenseState.lastUpdatedMs;
+            float mv = currentSenseState.shuntVoltage_mV;
+            if ( mv < lo ) lo = mv;
+            if ( mv > hi ) hi = mv;
+            sum += mv;
+            got++;
+        }
+        if ( got == 0 ) {
+            target->println( "SHUNT n=0 active=0 (ISENSE_PLUS/MINUS not both routed)" );
+            return CMD_DONT_SHOW_MENU;
+        }
+        // 10 uV per LSB is a hardware constant of the INA219 shunt register.
+        target->printf( "SHUNT n=%d mean_mV=%.4f min_mV=%.4f max_mV=%.4f "
+                        "spread_lsb=%.1f mean_mA=%.4f\n\r",
+                        got, (double)( sum / got ), (double)lo, (double)hi,
+                        (double)( ( hi - lo ) / 0.010f ), (double)( sum / got / 2.0f ) );
         return CMD_DONT_SHOW_MENU;
     }
 
