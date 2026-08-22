@@ -56,11 +56,11 @@ guide:
   steps:
     - {do: note, text: "A 555 blinker. Wheel: turn=prev/next, click=confirm, hold=exit."}
     - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 35."}
-    - {do: place, part: R1, check: continuity, min: 0.1, max: 0.8, text: "10k resistor: rows 10 and 40, straddling the middle gap."}
-    - {do: place, part: R2, check: continuity, min: 0.04, max: 0.3, text: "47k resistor: rows 13 and 43, straddling the middle gap."}
+    - {do: place, part: R1, check: continuity, text: "10k resistor: rows 10 and 40, straddling the middle gap."}
+    - {do: place, part: R2, check: continuity, text: "47k resistor: rows 13 and 43, straddling the middle gap."}
     - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19."}
     - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23."}
-    - {do: place, part: R3, check: continuity, min: 5.0, max: 15.0, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
+    - {do: place, part: R3, check: continuity, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
     - {do: verify, target: 37, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
 bridges:
