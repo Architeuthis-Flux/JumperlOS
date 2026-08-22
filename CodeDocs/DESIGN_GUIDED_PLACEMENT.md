@@ -561,6 +561,13 @@ guide polls while pumping. Where a step's rows are already routed and powered, r
 
 ### 5.2 Matrix
 
+> **The `continuity`, `vf` and `rail_sane` rows below are WAVE-1 and are no
+> longer what the code does** — the chain is ground-side, the sense legs ride
+> it, continuity reports **ohms**, and `rail_sane` measures the rail before it
+> judges the rows. Kept for the reasoning that produced them; **§5.3 is the
+> as-built machine**. `presence`, `i2c`, `voltage`, `oscillates` and `connect`
+> are unchanged (presence deliberately keeps the old top-side chain).
+
 | Step / part class | Check | Sequence | Honest limits |
 |---|---|---|---|
 | `note` | none | — | — |
