@@ -41,9 +41,9 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
-                board_state_capture, board_state_restore,
-                active_context, restore_context, reboot_board)
+from jl import (jl_exec, parse_kv, port1_command, port1_path, port1_paste,
+                check, finish, board_state_capture, board_state_restore,
+                active_context, restore_context, reboot_board, fault_scan)
 
 _csi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]")
 
@@ -139,6 +139,24 @@ print(data)
 """, timeout=20)
 
 
+def _distinct_rail(yaml_text):
+    """A topRail target the file does not already carry, so a check for it
+    cannot pass on a leftover value from an earlier run."""
+    for cand in ("2.70", "1.80", "3.40", "4.60", "0.90"):
+        if f"topRail: {cand}" not in (yaml_text or ""):
+            return cand
+    return "2.70"   # unreachable in practice; five distinct candidates
+
+
+def _power_line(yaml_text):
+    """The topRail line out of a slot YAML, for a failure message that says
+    what the file actually holds instead of just 'not equal'."""
+    for l in (yaml_text or "").splitlines():
+        if l.strip().startswith("topRail:"):
+            return l.strip()
+    return "(no topRail line)"
+
+
 def read_device_file(path):
     """(exists, contents) for a file on the board.
 
@@ -192,6 +210,20 @@ def _fm_vis(b):
 
 
 def _fm_drain(ser, secs):
+    """Drain the Files-browser connection, and WITNESS IT.
+
+    This is a raw port-1 reader, so jl.py's fault_scan never sees these bytes
+    unless they are handed to it here (see the rule in jl.py's fault-witness
+    block). It is also the highest-value place in the suite for the witness to
+    live: the browser's delete-the-active-file keystroke is the exact
+    keystroke w3-1 proved reaches abort(). Every _fm_* helper funnels through
+    this function, so one call covers the whole driver - including the browser
+    open, which is where a post-reboot [crashlog] would land.
+
+    Phase 6c's own "no crashlog banner" check still stands; this just makes the
+    board's announcement stop the run at the instant it happens instead of at
+    the end of the phase.
+    """
     end = time.time() + secs
     buf = b""
     while time.time() < end:
@@ -199,6 +231,8 @@ def _fm_drain(ser, secs):
         if c:
             buf += c
             end = max(end, time.time() + 0.25)   # keep reading while it talks
+    fault_scan(_FM_CSI.sub("", buf.decode(errors="replace")),
+               "the Files-browser driver")
     return buf
 
 
@@ -451,14 +485,24 @@ print("edit_live=", 1 if is_connected(43, 44) else 0)
         # Prime the connection BEFORE the app opens - the firmware's
         # connection-init eats the first byte, and that byte would otherwise
         # be the abort key.
+        #
+        # RAW PORT-1 READER: it carries its own fault witness (jl.py's
+        # fault_scan only sees bytes jl.py itself read). The banner especially
+        # - a post-fault [crashlog] is printed once, to the first terminal that
+        # attaches after the reboot.
         ser.write(b"\r\n")
         ser.flush()
         quiet, overall = time.time(), time.time()
+        banner = b""
         while time.time() - overall < 4.0:
-            if ser.read(4096):
+            b = ser.read(4096)
+            if b:
+                banner += b
                 quiet = time.time()
             elif time.time() - quiet > 0.6:
                 break
+        fault_scan(_csi.sub("", banner.decode(errors="replace")),
+                   "the Switch Calib probe's connect banner")
         ser.reset_input_buffer()
 
         worker = threading.Thread(target=_launch_switch_calib, daemon=True)
@@ -528,10 +572,20 @@ print("e=", 1 if is_connected(41, 42) else 0)
     #
     # So: let the context settle to its own fixed point, then put a MARKER
     # COMMENT in the file. toYAML is a wholesale rewrite and never re-emits a
-    # comment, and the parser skips '#' lines (States.cpp:1365), so the marker
+    # comment, and the parser skips '#' lines (States.cpp:1361), so the marker
     # changes nothing about the state the file describes - it only makes "was
     # this file rewritten?" answerable from the bytes, every run.
-    time.sleep(4.0)   # let the post-`<2` idle pass finish before marking
+    # Let the post-`<2` idle pass finish before marking.
+    #
+    # IF THIS CHECK EVER REDS AND THE FAILED-LOAD PATH LOOKS INNOCENT, SUSPECT
+    # THE `<2`. This wait exists because the load BEFORE the needle used to
+    # leave the state dirty (w3-5: the power re-assert marked a no-op write) and
+    # its auto-save has to land before the marker goes in. If a regression
+    # reintroduces a post-load write with a latency LONGER than 4 s, the marker
+    # is seeded and then wiped by that late write - the check still reds, which
+    # is right, but it will blame the failed load rather than the load before
+    # it. Widen this wait to tell the two apart.
+    time.sleep(4.0)
     _, _settled = read_device_file("/slots/slot2.yaml")
     marker = "# w3t5-canary do-not-rewrite"
     if _settled is not None:
@@ -619,6 +673,88 @@ print("own=", 1 if is_connected(11, 12) else 0)
     check(run_post is not None and "55" in run_post,
           "ATOMIC-ON-PARSE (path prior): the run file auto-saved its own edit "
           "normally afterwards")
+
+    # --- 6a-bis. THE OTHER HALF OF THE DIRTY GATE --------------------------
+    # w3-5 made setRailVoltage/setDacVoltage mark dirty only when the value
+    # actually changed, which is what stopped every load from rewriting its own
+    # file. That gate has a caller class it cannot see: code that writes
+    # globalState.power.* DIRECTLY and only then calls the setter. By then
+    # prev == voltage, the setter concludes "nothing changed", and the edit is
+    # real but unpersisted. Three sites do this - the encoder rail menu
+    # (Menus.cpp), the menu's Voltage node action, and
+    # JsonStateParser::parsePowerSection (JsonState.cpp) - and each now marks
+    # dirty itself.
+    #
+    # parsePowerSection is the only one of the three with a headless door, and
+    # it has two: the `L <section>` paste on port 1 and MicroPython set_state().
+    # Both are exercised here. THE ENCODER MENU CANNOT BE DRIVEN FROM THIS
+    # BENCH (its loop reads the encoder/probe; serial only cancels it, and the
+    # SWD input harness needs a probe that is not attached), so it stays a
+    # by-hand check: set a rail from the menu, switch slots, come back.
+    #
+    # The negative control at the end matters as much as the two positives: if
+    # someone "fixes" a future persistence bug by reverting the no-op gate,
+    # these two checks stay green while the every-load-rewrite bug comes back.
+    port1_command("<2", 4.0)
+    time.sleep(4.0)
+    _, pre_power = read_device_file("/slots/slot2.yaml")
+
+    # NOTE the key names: the JSON layer is snake_case (`top_rail`), the YAML
+    # layer is camelCase (`topRail:`). extractFloat DEFAULTS a missing key to
+    # the value already in globalState, so a camelCase payload here would apply
+    # cleanly, return success, change nothing, and make both checks below pass
+    # vacuously against a firmware that is still broken. (Ask how we know.)
+    #
+    # Both targets are chosen to DIFFER from what the file already holds, and
+    # both checks require the bytes to have changed as well as the new value to
+    # be present. Otherwise a leftover rail from an earlier run makes the check
+    # pass without the firmware doing anything - which is how the first draft of
+    # this needle "passed" on a build with the fix removed.
+    ta = _distinct_rail(pre_power)
+
+    # (a) power-only L paste. `L power` is the PARTIAL form (a section arg), so
+    #     connections are untouched and applyJSONState never reaches the
+    #     clearAllConnections() that used to dirty the state by accident - the
+    #     payload is pure power, exactly the case that silently did not persist.
+    prompt, out = port1_paste(
+        "L power",
+        ('{"power": {"top_rail": %s, "bottom_rail": 0.00,'
+         ' "dac0": 3.33, "dac1": 0.00}}\r\n\r\n' % ta).encode(), 4.0)
+    check("State applied successfully" in out,
+          "6a-bis: a power-only 'L power' paste was applied")
+    time.sleep(5.0)
+    _, post_j = read_device_file("/slots/slot2.yaml")
+    check(post_j is not None and post_j != pre_power
+          and f"topRail: {ta}" in post_j,
+          "6a-bis: PRE-WRITE PERSISTENCE (L paste): the pasted rail reached "
+          f"slot2.yaml (wanted topRail: {ta}) - got {_power_line(post_j)!r}")
+
+    # (b) the same parser through the MicroPython door. clear_first=False for
+    #     the same reason `L power` is partial.
+    tb = _distinct_rail(post_j)
+    out = jl_exec('print("rc=", set_state(\'{"power": {"top_rail": %s,'
+                  ' "bottom_rail": 0.00, "dac0": 3.33, "dac1": 0.00}}\', False))'
+                  % tb, timeout=30)
+    time.sleep(5.0)
+    _, post_ss = read_device_file("/slots/slot2.yaml")
+    check(post_ss is not None and post_ss != post_j
+          and f"topRail: {tb}" in post_ss,
+          "6a-bis: PRE-WRITE PERSISTENCE (set_state): the applied rail reached "
+          f"slot2.yaml (wanted topRail: {tb}) - got {_power_line(post_ss)!r}")
+
+    # (c) NEGATIVE CONTROL: the no-op gate is still doing its job. Leaving and
+    #     re-entering slot 2 re-asserts its rails through the very setters the
+    #     two checks above depend on - and must still write nothing.
+    jl_exec(f"load_project({RUN_FILE!r})", timeout=30)
+    time.sleep(2.0)
+    port1_command("<2", 4.0)
+    time.sleep(1.0)
+    _, ctrl_pre = read_device_file("/slots/slot2.yaml")
+    time.sleep(5.0)
+    _, ctrl_post = read_device_file("/slots/slot2.yaml")
+    check(ctrl_pre is not None and ctrl_post == ctrl_pre,
+          "6a-bis: NEGATIVE CONTROL - a plain slot load still writes nothing "
+          "(the no-op dirty gate was not reverted to buy the two checks above)")
 
     # --- 6b. Project TEMPLATES are read-only -------------------------------
     # Adoption made this reachable and the bench proved it destructive:

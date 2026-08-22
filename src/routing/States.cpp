@@ -3421,8 +3421,12 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
         // through expandPartsToBridges -> addConnection, and fromYAML's
         // board-portability sanitizer can drop bridges and mark dirty too.
         // Whatever the reason, at this point RAM was just re-loaded from the
-        // prior context's own file, so there is nothing in it that the file
-        // does not already contain and no idle auto-save should follow.
+        // prior context's own file, so RAM is a SUBSET of that file - never a
+        // superset. (Not "identical": the sanitizer case above means RAM can
+        // hold LESS than the file, which is exactly why it marked dirty.) Its
+        // rewrite is therefore deferred to the user's next real edit, the same
+        // deferral the /.bak mirror heal below gets, and for the same reason:
+        // "a failed load writes nothing" outranks "tidy the file up now".
         //
         // NUANCE, deliberate: if the restore came back through loadSlot's
         // /.bak mirror rescue, that path marks dirty ON PURPOSE so the next

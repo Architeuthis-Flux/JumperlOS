@@ -657,7 +657,16 @@ bool JsonStateParser::parsePowerSection(const String& json) {
     
 
     setRailsAndDACs(0); // Apply without saving to EEPROM
-    
+
+    // PERSIST IT (w3-5). The four assignments above are a PRE-WRITE: by the
+    // time setRailsAndDACs(0) re-reads globalState.power and calls the setters,
+    // prev == voltage on all four, so the setters' no-op dirty gate correctly
+    // sees no change and marks nothing. applyJSONState() only dirties the state
+    // incidentally, through clearAllConnections(), and only when the payload
+    // carries a "nets" section - so a POWER-ONLY J paste / MicroPython JSON
+    // apply would reach hardware and RAM and never be written to the file.
+    globalState.markDirty();
+
     // Serial.printf("Top Rail: %f, Bottom Rail: %f, DAC0: %f, DAC1: %f\n", getDacVoltage(2), getDacVoltage(3), getDacVoltage(0), getDacVoltage(1));
     return true;
 }

@@ -2924,16 +2924,30 @@ float getActionFloat( int menuPosition, int rail ) {
     // below leave prev==voltage so setRailVoltage's recording guard
     // skips it). At loop exit we record ONE undo entry capturing the
     // (initial -> final) jump - so a rail drag becomes a single undo
-    // step. railRecordUndo() is a small lambda below the loop.
+    // step. railCommitEdit() is a small lambda below the loop.
+    //
+    // IT ALSO OWNS THE DIRTY MARK, and must (w3-5). The pre-write above is
+    // exactly the shape that hides an edit from setRailVoltage: by the time
+    // setTopRail() -> setRailVoltage() runs, power.topRail ALREADY holds the
+    // new value, so prev == voltage and the setter's guards - undo AND, since
+    // w3-5's no-op gate, markDirty - both correctly conclude "nothing changed".
+    // Nothing else in this file persists the drag (there is no other
+    // markDirty/saveActiveSlot in Menus.cpp, and setTopRail's saveEEPROM arm is
+    // dead code), so without the mark here a rail set from the encoder/probe
+    // menu is lost on the next slot switch or reboot. Same change detection as
+    // the undo record, so an untouched slider still dirties nothing.
     float undoInitialTopRail = globalState.power.topRail;
     float undoInitialBotRail = globalState.power.bottomRail;
-    auto railRecordUndo = [&]() {
+    auto railCommitEdit = [&]() {
         if ( rail < 0 || rail > 2 ) return;  // not a rail context
         bool changedTop = ( rail == 0 || rail == 1 ) &&
                           undoInitialTopRail != globalState.power.topRail;
         bool changedBot = ( rail == 0 || rail == 2 ) &&
                           undoInitialBotRail != globalState.power.bottomRail;
         if ( !changedTop && !changedBot ) return;
+
+        // The rails really moved - this is a user edit and must persist.
+        globalState.markDirty();
         // Bundle both rail changes into a single transaction so the user gets
         // ONE undo step for "rails to 2.7V" rather than two (one per rail) when
         // rail==0. The label is derived from the recorded ops by undoEndTxn (a
@@ -2977,7 +2991,7 @@ float getActionFloat( int menuPosition, int rail ) {
             // Long-press is a "leave the rails wherever the slider was last"
             // exit. The hardware/state still got mutated during the drag,
             // so we still need to record one undo step.
-            railRecordUndo();
+            railCommitEdit();
             return roundedCurrentChoice; // Return current choice without applying
         }
 
@@ -3001,7 +3015,7 @@ float getActionFloat( int menuPosition, int rail ) {
                 selectNodeAction( );
             }
 
-            railRecordUndo();
+            railCommitEdit();
             return roundedCurrentChoice;
         }
 
@@ -3009,7 +3023,7 @@ float getActionFloat( int menuPosition, int rail ) {
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
             requestLedShow( -1 );
-            railRecordUndo();
+            railCommitEdit();
             return roundedCurrentChoice;
         }
 
@@ -4286,8 +4300,16 @@ int doMenuAction( int menuPosition, int selection ) {
         }
         requestLedShow( -1 );
 
-        // State is marked dirty by setRailVoltage() - will auto-save before next reload
-        // No need for configChanged - voltages are in state, not config
+        // PERSIST IT (w3-5). The old comment here said "State is marked dirty
+        // by setRailVoltage()" - that stopped being true when the setter gained
+        // its no-op gate, and it was already fragile: currentAction.analogVoltage
+        // is assigned from the slider's roundedCurrentChoice, which the slider
+        // has ALREADY written straight into globalState.power, so the setTopRail
+        // calls above arrive with prev == voltage and mark nothing. A rail
+        // committed from the menu is a user edit; say so explicitly instead of
+        // relying on a setter side effect that the caller has defeated.
+        // (No configChanged - voltages live in state, not config.)
+        globalState.markDirty();
 
     } else if ( currentCategory == SLOTSACTION ) { //! Slots
 
@@ -4441,6 +4463,17 @@ int doMenuAction( int menuPosition, int selection ) {
             }
             refreshConnections( );
             setRailsAndDACs( );
+            // THIRD instance of the pre-write shape (w3-5 sweep, not in the
+            // review's list): the cases above assign globalState.power.dac0 /
+            // dac1 / topRail / bottomRail DIRECTLY, so setRailsAndDACs() - which
+            // re-reads those same fields - hands every setter prev == voltage
+            // and marks nothing. Today the dirty flag arrives incidentally from
+            // the addBridgeToState() next to each assignment, which is both
+            // fragile (it is persisting a VOLTAGE on the strength of a BRIDGE
+            // add) and lossy when that add is refused (isConnectionAllowed, or
+            // MAX_BRIDGES). Mark it for the reason it is actually true: the
+            // user set a voltage.
+            globalState.markDirty();
 
         } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf(
                         "UART" ) != -1 ) {

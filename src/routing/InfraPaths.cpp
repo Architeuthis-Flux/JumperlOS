@@ -239,8 +239,10 @@ static void parkDacAtMeasureTarget(int dacNum) {
     // load): parking above 3.3V logic clips the pad ladder's high end.
     float target = jumperlessConfig.calibration.measure_mode_output_voltage;
     if (target < 3.0f || target > 3.6f) target = 3.33f;
-    // save only when the STATE value actually moves (setDacVoltage marks the
-    // state dirty unconditionally); the hardware decision is the driver's.
+    // save only when the STATE value actually moves; the hardware decision is
+    // the driver's. (setDacVoltage now applies the same no-op gate itself -
+    // w3-5 - so this is belt-and-braces rather than load-bearing, but it also
+    // uses a 5 mV epsilon where the setter compares exactly, so keep it.)
     bool stateOff = fabsf(getDacVoltage(dacNum) - target) > 0.005f;
     if (dacNum == 0) {
         setDac0voltage(target, stateOff ? 1 : 0, 0, false);
