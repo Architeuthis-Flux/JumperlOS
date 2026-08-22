@@ -39,7 +39,9 @@ TMP_WIRING = TMP_PROJ + "/wiring.yaml"
 # The slot under test. Covers: unknown top-level section with indented
 # content BEFORE bridges (containment), a plain bridge with dup, a dip8 with
 # pin numbers + connects incl. GND / TOP_RAIL / a row + an unknown key, a
-# sip2 with offsets, and the guideProgress scalar.
+# sip2 with offsets, C1's `placement: compact` (the PARSE half of the
+# placement byte - it is placed: false, so it round-trips as pure data), and
+# the guideProgress scalar.
 #
 # U1's value is the string "overlays:" ON PURPOSE - it is the section-hijack
 # needle. deserializeOverlaysFromYAML used to strstr() the WHOLE file for
@@ -106,6 +108,7 @@ parts:
     footprint: sip2
     row: 50
     placed: false
+    placement: compact
     pins:
       A: {offset: 0, connect: 52}
       B: {offset: 1}
@@ -319,6 +322,14 @@ for k in sorted(found):
                    "P1: {pin: 1, connect: 17, class: signal}",
                    "P28: {pin: 28, connect: 18, class: signal}",
                    '- name: "C1"', "placed: false",
+                   # The PARSE half of the placement byte. C1 is the only part
+                   # in this file that sets it, and it is placed: false, so
+                   # this is a pure data round-trip - no expansion changes.
+                   # Without this needle a typo in parsePartLine's key would
+                   # pass every suite: the field would be skipped as an unknown
+                   # key, default to expanded, and the serializer would omit it
+                   # again - the wholesale-rewrite erasure class, invisible.
+                   "placement: compact",
                    "A: {offset: 0, connect: 52, class: signal}",
                    "B: {offset: 1, class: signal}",
                    # ...and the real overlays: section, so the hijack needle
@@ -332,6 +343,10 @@ for k in sorted(found):
           "plain bridge 55-42 (dup 2) survived the rewrite")
     check("frobnicate" not in rewritten,
           "unknown part key was tolerated on parse (and not resurrected)")
+    check(rewritten.count("placement:") == 1,
+          "placement: came back on exactly the ONE part that set it - the "
+          "other three are expanded, the default, which is never emitted "
+          "(so pre-wave-2 files stay byte-identical through a rewrite)")
     # The serializer nests fakeGpio under config ("  fakeGpio:") - the parser's
     # indent-hardening explicitly exempts it. Guard the exemption.
     check(re.search(r"fakeGpio:\s*\n\s*- \{slot: 8, node: 25, mode: 0", rewritten) is not None,
