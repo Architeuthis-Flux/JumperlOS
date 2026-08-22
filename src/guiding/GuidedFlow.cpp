@@ -1220,10 +1220,29 @@ static bool guideMoveLegal(const PartDefinition& cand, int partIdx,
         return false;
     }
 
-    // Rule 2: no two PARTS' legs may share a 5-hole row (that silently merges
-    // their nets). Rails are excluded - a rail is a long bus, and two legs in
-    // it are exactly what the user asked for. Rows that merely carry a net or
-    // a bridge are ALLOWED and only get a heads-up (printed by the caller).
+    // Rule 2: no two PARTS' legs may share a 5-hole row when nobody ASKED for
+    // that share - it silently merges two nets. Three exemptions, all of them
+    // "the share is authored, not accidental":
+    //
+    //  - a rail: a rail is a long bus and two legs in it is what a rail is
+    //    for (the `mine < 1 || mine > 60` skip below);
+    //  - the part itself (`i == partIdx`);
+    //  - THE ENDPOINT ROW A LEG DECLARES. A compact leg lands, by
+    //    construction, on its own `pin.connect` - and in any real project
+    //    that row is the leg of the very part it is wired to. Refusing it
+    //    killed the photo semantics in the flagship scenario: in the shipped
+    //    555, once U1 commits, `c` on R1/R2/R3/C1 every one came back
+    //    `collides with U1 at row N`, because "resistor leg straight into the
+    //    chip's pin row" IS the gesture. Landing on the row you declare a
+    //    connection to is the feature. No merge can be silent there - the
+    //    file says the two belong together - and the electrical side is
+    //    already right by construction: expandOnePart suppresses the bridge
+    //    (node == pin.connect) and removePartPlacement's hasConnection guard
+    //    skips it symmetrically. Expanded/custom moves are untouched in
+    //    practice: their resolved nodes are footprint rows, not endpoints.
+    //
+    // Rows that merely carry a net or a bridge were never refused at all -
+    // they only get a heads-up (printed by the caller).
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
         if (i == partIdx) continue;   // self never collides with itself
         const PartDefinition& other = globalState.parts.parts[i];
@@ -1231,6 +1250,7 @@ static bool guideMoveLegal(const PartDefinition& cand, int partIdx,
         for (int j = 0; j < cand.numPins && j < MAX_PART_PINS; j++) {
             int mine = partPinNode(cand, cand.pins[j]);
             if (mine < 1 || mine > 60) continue;
+            if (cand.pins[j].connect == mine) continue;   // authored share
             for (int k = 0; k < other.numPins && k < MAX_PART_PINS; k++) {
                 if (partPinNode(other, other.pins[k]) != mine) continue;
                 snprintf(reason, reasonLen, "collides with %s at row %d",

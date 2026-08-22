@@ -88,6 +88,13 @@ Covers:
      FIRST, then move and snap it while it is live on the fabric, and assert
      the old rows' bridges are gone, the new rows' are live, and the run file
      agrees.
+ 13c. TWO parts, the F1 regression (final whole-branch review): every other
+     fixture here has one part, so the inter-part collision rule never fired
+     and nobody noticed it refused Kevin's photo gesture. Commit a dip8, then
+     snap a resistor whose `connect:` names one of the chip's pin rows - the
+     snap must SUCCEED with the leg IN that row and its bridge suppressed,
+     while a share nobody declared (moving the footprint onto another of the
+     chip's rows) is still refused.
  14. browse + wrap (task 7): `>` past the last step lands in the DONE view
      (`GUIDE done committed= skipped= unfinished=`), `>` again WRAPS to step 1
      with NO EXIT emitted anywhere in between - the wheel and its serial twins
@@ -280,6 +287,45 @@ guide:
   title: "HIL Refusal"
   steps:
     - {do: place, part: RG, check: continuity, timeout_ms: 4000, text: "rows in use refusal"}
+"""
+
+# TWO-part compact fixture (phase 13c) - the F1 regression, and the only
+# fixture in this file with more than one part. Everything else here places a
+# single part, which is exactly why nine reviews and every green suite missed
+# that the inter-part collision rule refused Kevin's photo gesture: a compact
+# leg lands ON its `connect:` row, and in any real project that row holds the
+# leg of the chip it is wired to.
+#
+# Geometry (binding, wave 2): UC is a dip8 at row 35, so pin 1 -> node 35 and
+# pin 3 -> node 37. RC is a sip2 at row 45 (legs 45/46) whose pin A DECLARES
+# `connect: 37` - the chip's OUT-side leg row - and whose pin B goes to the
+# rail. Snap RC compact and leg A must land IN row 37, sharing the row with
+# UC's own leg. That share is authored; refusing it is the bug.
+COMPACT_PATH = PROJ_DIR + "/compact.yaml"
+COMPACT_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilguide
+  title: "HIL Compact"
+parts:
+  - name: "UC"
+    type: ic
+    footprint: dip8
+    row: 35
+    pins:
+      P1: {pin: 1, connect: GND, class: gnd}
+      P3: {pin: 3, connect: 50, class: signal}
+  - name: "RC"
+    type: resistor
+    value: "10k"
+    footprint: sip2
+    row: 45
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: TOP_RAIL, class: power}}
+guide:
+  title: "HIL Compact"
+  steps:
+    - {do: place, part: UC, check: none, text: "place the chip first"}
+    - {do: place, part: RC, check: none, text: "then snap the resistor onto its pin row"}
 """
 
 # Continuation-line fixture (phase 11b, task 9 §A item 11). A `guide:` step
@@ -1938,6 +1984,106 @@ print("b=", 1 if is_connected(45, "GND") else 0)
         d.close()
     time.sleep(1.0)
 
+    # --- 13c. TWO parts: the compact leg lands on the chip's pin row --------
+    #
+    # THE F1 REGRESSION (final whole-branch review). Compact puts an eligible
+    # leg AT its `pin.connect`, and in any real project that row is the leg of
+    # the part it is wired to - Kevin's photo is literally "resistors directly
+    # between 6 and 7, and 7 to top rail" on a committed 555. The inter-part
+    # collision rule had no exemption for that, so once the chip was committed
+    # EVERY compact-eligible part in the shipped 555/eeprom/nand00 came back
+    # `collides with U1 at row N`: the flagship gesture, dead in its flagship
+    # scenario.
+    #
+    # Nothing caught it because every other fixture in this file has ONE part.
+    # This one has two, in the natural build order (chip first), and it pins
+    # both halves of the rule:
+    #   - the AUTHORED share (RC's pin A declares connect: 37, and 37 is UC's
+    #     pin-3 leg row) must SUCCEED, with the bridge suppressed and the leg
+    #     reported in row 37 by list_parts;
+    #   - a share NOBODY declared (moving RC's footprint onto UC's pin-1 row)
+    #     must still be REFUSED, or the fix would have traded one bug for the
+    #     silent net merge the rule exists to prevent.
+    out = jl_exec(f'print("wrote=", 1 if fs_write({COMPACT_PATH!r}, {COMPACT_WIRING!r}) else 0)',
+                  timeout=30)
+    check(parse_kv(out).get("wrote") == 1, "pushed the two-part compact fixture")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {COMPACT_PATH} new\r\n".encode())
+        guide_live = True
+        run_cx = d.expect_runfile("new", "two-part compact fixture allocated its run file")
+        d.expect(r"GUIDE step=1/2 id=place_UC state=WAIT", "step 1 (place the chip) WAIT")
+        d.send(b"n")
+        d.expect(r"GUIDE step=1/2 id=place_UC state=COMMIT",
+                 "the chip COMMITS - its legs are now live on rows 35 and 37")
+        d.expect(r"GUIDE step=2/2 id=place_RC state=WAIT", "step 2 (place RC) WAIT")
+
+        out = jl_exec("""
+print("ucp3=", 1 if is_connected(37, 50) else 0)
+print("ucp1=", 1 if is_connected(35, "GND") else 0)
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("ucp3") == 1 and vals.get("ucp1") == 1,
+              "the chip's own bridges are live (37->50, 35->GND) - so row 37 "
+              "really is occupied by a placed part's leg")
+
+        # (a) THE CONTROL, first, while RC is still expanded: row 35 is UC's
+        # pin-1 leg and RC declares no connection to it. Still a collision.
+        d.send(b"m 35\r")
+        d.expect(r"move refused: collides with UC at row 35",
+                 "an UNDECLARED share of another part's row is still refused")
+
+        # (b) THE FIX: pin A's endpoint IS row 37, so landing there is the
+        # gesture, not a collision.
+        d.send(b"c")
+        d.expect(r"GUIDE move part=RC row=45 placement=compact",
+                 "compact SUCCEEDS onto the chip's pin row (F1: this came back "
+                 "'collides with UC at row 37' before the fix)")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/2 id=place_RC state=COMMIT", "the compact RC commits")
+
+        out = jl_exec("""
+print("expbridge=", 1 if is_connected(45, 37) else 0)
+print("railbridge=", 1 if is_connected(46, "TOP_RAIL") else 0)
+print("ucp3=", 1 if is_connected(37, 50) else 0)
+by = {}
+for p in list_parts():
+    by[p['name']] = p
+rc = by.get('RC', {'pins': {}})
+print("rcanode=", rc['pins']['A']['node'])
+print("rcbnode=", rc['pins']['B']['node'])
+""", timeout=25)
+        vals = parse_kv(out)
+        check(vals.get("rcanode") == 37,
+              f"LEG IN THE ROW: RC pin A resolves to node 37 - the chip's own "
+              f"pin row (got {vals.get('rcanode')})")
+        check(vals.get("rcbnode") == 101,
+              f"RC pin B resolves to the rail hole row TOP_RAIL=101 "
+              f"(got {vals.get('rcbnode')})")
+        check(vals.get("expbridge") == 0,
+              "BRIDGE SUPPRESSED: no 45->37 routed bridge - the leg IS the "
+              "connection")
+        check(vals.get("railbridge") == 0,
+              "BRIDGE SUPPRESSED: no 46->TOP_RAIL bridge either (both legs are "
+              "compact-eligible, so this part routes nothing at all)")
+        check(vals.get("ucp3") == 1,
+              "the chip's 37->50 bridge is untouched by the snap")
+
+        d.expect(r"GUIDE .* state=DONE", "both steps committed -> DONE")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit the two-part session")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.5)
+
+    _, cx_yaml = read_device_file(run_cx)
+    check("placement: compact" in cx_yaml,
+          "the run file persisted RC's compact placement")
+    check(cx_yaml.count("placement:") == 1,
+          "and only RC's - the chip stays expanded (ICs never compact)")
+
     # --- 14. Browse + wrap: THE WHEEL CAN NEVER EXIT THE GUIDE --------------
     #
     # Kevin: "when we spin the clickwheel around to get to the end, it should
@@ -2221,7 +2367,8 @@ finally:
     # a directory that still holds a <dir>_<N>.yaml).
     out = jl_exec(f"""
 for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
-          {REFUSAL_PATH!r}, {CONT_PATH!r}, {VFNR_PATH!r}, {STARVE_PATH!r}, {LEGACY_PATH!r},
+          {REFUSAL_PATH!r}, {CONT_PATH!r}, {COMPACT_PATH!r},
+          {VFNR_PATH!r}, {STARVE_PATH!r}, {LEGACY_PATH!r},
           {RAIL_OK_PATH!r}, {RAIL_GND_PATH!r}, {RAIL_FLOAT_PATH!r}):
     if fs_exists(p):
         jfs.remove(p)
