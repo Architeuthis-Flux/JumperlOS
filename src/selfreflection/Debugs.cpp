@@ -1079,6 +1079,56 @@ void action_pioStatus() {
     printPIOStateMachines();
 }
 
+// ── Boot heap ledger ────────────────────────────────────────────────────────
+//
+// Records only; printing is deferred because most of these stages run before
+// USB has enumerated and anything written to Serial there is simply lost -
+// which is exactly why the biggest consumers were invisible.
+namespace {
+struct HeapMark { const char* label; uint32_t freeAfter; };
+constexpr int kHeapMarksMax = 28;
+HeapMark s_heapMarks[kHeapMarksMax];
+int      s_heapMarkCount = 0;
+}  // namespace
+
+void heapMark(const char* label) {
+    if (s_heapMarkCount >= kHeapMarksMax) return;
+    // The label is always a string literal, so store the pointer, not a copy -
+    // a ledger that allocates would be measuring itself.
+    s_heapMarks[s_heapMarkCount].label = label;
+    s_heapMarks[s_heapMarkCount].freeAfter = (uint32_t)rp2040.getFreeHeap();
+    s_heapMarkCount++;
+}
+
+void heapLedgerPrint() {
+    if (s_heapMarkCount < 2) {
+        Serial.println("\n\rheap ledger: nothing recorded this boot");
+        return;
+    }
+    Serial.println("\n\r\033[1m=== Boot heap ledger (SRAM) ===\033[0m");
+    Serial.printf("%-30s %10s %10s\n\r", "after stage", "free", "consumed");
+    uint32_t prev = s_heapMarks[0].freeAfter;
+    Serial.printf("%-30s %10lu %10s\n\r", s_heapMarks[0].label,
+                  (unsigned long)prev, "-");
+    int32_t biggest = 0;
+    const char* biggestLabel = "";
+    for (int i = 1; i < s_heapMarkCount; i++) {
+        int32_t used = (int32_t)prev - (int32_t)s_heapMarks[i].freeAfter;
+        // A stage that FREES more than it takes is worth seeing too, so print
+        // the signed delta rather than clamping at zero.
+        Serial.printf("%-30s %10lu %+10ld\n\r", s_heapMarks[i].label,
+                      (unsigned long)s_heapMarks[i].freeAfter, (long)used);
+        if (used > biggest) { biggest = used; biggestLabel = s_heapMarks[i].label; }
+        prev = s_heapMarks[i].freeAfter;
+    }
+    Serial.printf("\n\rtotal consumed during boot: %ld bytes; largest single "
+                  "stage: %s (%ld)\n\r",
+                  (long)((int32_t)s_heapMarks[0].freeAfter -
+                         (int32_t)s_heapMarks[s_heapMarkCount - 1].freeAfter),
+                  biggestLabel, (long)biggest);
+    Serial.flush();
+}
+
 void action_memoryUsage() {
     Serial.println("\n\r╭────────────────────────────────────╮");
     Serial.println("│        DETAILED MEMORY USAGE       │");
@@ -1089,6 +1139,9 @@ void action_memoryUsage() {
     Serial.println("Total Heap:      " + String(rp2040.getTotalHeap()) + " bytes");
     Serial.println("Free Heap:       " + String(rp2040.getFreeHeap()) + " bytes");
     Serial.println("Used Heap:       " + String(rp2040.getTotalHeap() - rp2040.getFreeHeap()) + " bytes");
+
+    // The totals say there is a problem; the ledger says which stage caused it.
+    heapLedgerPrint();
     
     // PSRAM if available
     size_t psramSize = rp2040.getPSRAMSize();
