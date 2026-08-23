@@ -159,7 +159,20 @@ EXPECTED_PAIRS = [(35, "GND"), (36, 44), (38, "TOP_RAIL"), (5, "TOP_RAIL"),
 
 
 def read_device_file(path):
-    """Return (exists, content) for a device file via the REPL."""
+    """Return (exists, content) for a device file via the REPL.
+
+    `exists` is TRI-STATE: True (the board said EXISTS= 1), False (the board
+    said EXISTS= 0, i.e. CONFIRMED ABSENT) or None (neither - the answer was
+    garbled, so we know nothing).
+
+    The distinction is load-bearing in exactly one place: the teardown's arm
+    that DELETES /slots/slot3.yaml and reports "did not exist before". Deleting
+    a user's real slot 3 because one REPL answer came back truncated is the
+    class of loss this wave outlawed after guide_flow's sweep took Kevin's
+    555_1/555_2, and test_slot_files.py has carried the tri-state since. It was
+    never propagated here. None is falsy and the content stays a str, so every
+    comparison caller is unaffected; only the deleting caller inspects it.
+    """
     out = jl_exec(f"""
 p = {path!r}
 if fs_exists(p):
@@ -171,7 +184,7 @@ else:
     print("EXISTS= 0")
 """, timeout=20)
     if "EXISTS= 1" not in out:
-        return False, ""
+        return (False if "EXISTS= 0" in out else None), ""
     m = re.search(r"<<<FILE>>>\r?\n(.*)<<<END>>>", out, re.DOTALL)
     return True, (m.group(1) if m else "")
 
@@ -831,11 +844,17 @@ print("stale=", 1 if is_connected(55, 42) else 0)
     check(path_after_lp != TMP_WIRING,
           "the shipped wiring template did NOT become the active context")
     time.sleep(2.0)  # give the idle auto-save a chance to misbehave
+    # `is not None` on BOTH ends: read_device_file's third state is "the answer
+    # was garbled". Two garbled reads compare equal (None == None, "" == ""),
+    # so without this the check passes on NO EVIDENCE - the vacuous-green shape
+    # this wave is hunting.
     slot0_after_exists, slot0_after = read_device_file("/slots/slot0.yaml")
-    check(slot0_after_exists == slot0_existed and slot0_after == slot0_before,
+    check(slot0_existed is not None and slot0_after_exists is not None
+          and slot0_after_exists == slot0_existed and slot0_after == slot0_before,
           "slot-clobber regression: /slots/slot0.yaml is byte-identical after load_project")
     slot3_lp_after_exists, slot3_lp_after = read_device_file(SLOT_PATH)
-    check(slot3_lp_after_exists == slot3_lp_existed and slot3_lp_after == slot3_lp_before,
+    check(slot3_lp_existed is not None and slot3_lp_after_exists is not None
+          and slot3_lp_after_exists == slot3_lp_existed and slot3_lp_after == slot3_lp_before,
           "slot-clobber regression: slot3.yaml (the context we loaded FROM) is "
           "byte-identical - the project's content did not land in it")
 
@@ -886,16 +905,26 @@ print("gone=", 0 if fs_exists({TMP_PROJ!r}) else 1)
     # Restore the FILE first, switch slots second: if orig_slot happened to be 3,
     # switching first would make slot 3 active again and the idle auto-save could
     # clobber the restored content (the same hazard handled before phase 1).
+    # `slot3_existed is False` and NOT `not slot3_existed`: read_device_file
+    # returns None when the phase-0 read was garbled, and THIS ARM DELETES. See
+    # the helper's docstring - absence has to be positive evidence (EXISTS= 0),
+    # never the absence of evidence.
     if slot3_existed:
         out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)")
         check(parse_kv(out).get("restored") == 1, "restored slot3.yaml prior content")
-    else:
+    elif slot3_existed is False:
         out = jl_exec(f"""
 if fs_exists({SLOT_PATH!r}):
     jfs.remove({SLOT_PATH!r})
 print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
 """)
         check(parse_kv(out).get("removed") == 1, "removed the test's slot3.yaml (did not exist before)")
+    else:
+        check(False,
+              "the phase-0 snapshot read of /slots/slot3.yaml was INCONCLUSIVE "
+              "(neither EXISTS= 1 nor EXISTS= 0 came back). Leaving the file "
+              "alone rather than guessing - but this run's slot3 holds the "
+              "suite's fixture, so restore it by hand.")
 
     # Path-aware: a file context has no "<n" to go back to.
     restore_context(orig_slot, orig_path)

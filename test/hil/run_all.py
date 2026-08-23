@@ -80,6 +80,18 @@ snapshot = jl.board_state_capture()
 if snapshot is None:
     print("WARNING: could not snapshot the board state - it will NOT be restored after the suite")
 
+# ...and the ACTIVE CONTEXT, which the runner alone used to skip. Every suite
+# pairs board_state_capture with active_context at phase 0 and restore_context
+# in its finally (test_projects:360/1971, test_parts_roundtrip:187/901,
+# test_slot_files:292/1152, test_guide_flow:696/2601); the runner captured the
+# electrical state and nothing else. A suite that dies before its own
+# restore_context - jl_exec sys.exits on any REPL failure, and three of the four
+# run exit-prone cleanups BEFORE their restore_context - leaves the board on ITS
+# context, and the runner's final 'S' paste then lands there instead of on the
+# user's slot. The bench looks right until the next reboot.
+orig_slot, orig_path = jl.active_context(1.5)
+print(f"pre-suite context: slot {orig_slot}, path {orig_path!r}")
+
 results = {}
 for name in TESTS:
     if selector and selector not in name:
@@ -119,20 +131,49 @@ for name in TESTS:
             print("  WARNING: the board did not come back from the reset",
                   flush=True)
 
+# CONTEXT BEFORE STATE. The restore is an 'S' paste, which lands in whatever
+# context is active - so the context has to be the user's again first, or the
+# paste writes the user's circuit into a suite fixture that the next teardown
+# deletes.
+if orig_slot is not None or orig_path:
+    jl.restore_context(orig_slot, orig_path)
+    now_slot, now_path = jl.active_context(1.5)
+    if (now_slot, now_path) != (orig_slot, orig_path):
+        print(f"\nWARNING: could not put the board back on its pre-suite "
+              f"context: wanted slot {orig_slot} / {orig_path!r}, got slot "
+              f"{now_slot} / {now_path!r}. The state restore below will land in "
+              f"the WRONG context - fix the context by hand before trusting the "
+              f"bench.")
+    else:
+        print(f"\nactive context restored: slot {now_slot}, {now_path!r}")
+
 if snapshot is not None:
     if jl.board_state_restore(snapshot):
-        print("\nboard state restored to the pre-suite snapshot")
+        print("board state restored to the pre-suite snapshot")
     else:
         print("\nWARNING: board state restore FAILED - the bench nets/rails are "
               "whatever the last test left; reload your slot or reboot")
 
 print("\n" + "=" * 66)
 fails = 0
+skipped = 0
 for name, rc in results.items():
-    status = "PASS" if rc == 0 else "FAIL"
-    if rc != 0:
+    # A SKIPPED suite is not a passing one. jl.skip() exits with SKIP_EXIT so
+    # this line can tell "asserted nothing, by design" from "asserted
+    # everything and they held" - it used to print PASS for both, which is how
+    # a probe-less bench read as full green on test_encoder_ui.
+    if rc == jl.SKIP_EXIT:
+        status = "SKIP"
+        skipped += 1
+    elif rc != 0:
+        status = "FAIL"
         fails += 1
+    else:
+        status = "PASS"
     print(f"  {status}  {name}")
+passed = len(results) - fails - skipped
 print(f"HIL suite: {'PASS' if fails == 0 else 'FAIL'} "
-      f"({len(results) - fails}/{len(results)} files passed)")
+      f"({passed}/{len(results)} files passed"
+      + (f", {skipped} SKIPPED - they asserted nothing" if skipped else "")
+      + ")")
 sys.exit(1 if fails else 0)

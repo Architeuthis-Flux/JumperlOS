@@ -69,11 +69,31 @@ time.sleep(1.0)
 rc, out = jl_input("status")
 check(in_click_menu(out) == 1, "click opened the menu (inClickMenu == 1)")
 
+# WHAT THESE TWO CHECKS PROVE, AND WHAT THEY DO NOT. Read the message strings
+# literally: they assert the SWD INJECTION was accepted - jl_input's step path
+# writes encoderDirectionState/encoderDirectionConsumed over OpenOCD and prints
+# "stepped N" without ever reading firmware state back, so rc == 0 is a
+# statement about OpenOCD, not about the menu. A menu loop that had stopped
+# honouring UP/DOWN entirely would still show green here.
+#
+# They are deliberately NOT strengthened. The injection writes
+# encoderDirectionState, which is the OUTPUT of the decode in
+# src/RotaryEncoder.cpp - so the failure people most want covered (the C7
+# rewrite decoding turns backwards) is BELOW this injection point and is
+# undetectable from here with or without a stronger assertion. Asserting the
+# selection index would test the menu's consumption of an injected direction,
+# which is worth having but is not encoder coverage; making it look like
+# encoder coverage would be worse than the honest label. The real thing needs
+# wheel-level injection (an A/B quadrature drive) or a human turning the knob.
+#
+# The other three checks in this file DO assert firmware state (inClickMenu).
 rc, _ = jl_input("step", "fwd", "1")
-check(rc == 0, "one step forward accepted")
+check(rc == 0, "step-forward injection accepted by the SWD tool (does NOT "
+                "prove the menu selection moved - see the note above)")
 time.sleep(0.5)
 rc, _ = jl_input("step", "back", "1")
-check(rc == 0, "one step back accepted")
+check(rc == 0, "step-back injection accepted by the SWD tool (does NOT prove "
+                "the menu selection moved - see the note above)")
 time.sleep(0.5)
 
 # Close with the universal quit: physical-pin long hold (>=1500ms) on GPIO 11

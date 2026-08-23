@@ -39,14 +39,32 @@ def check(cond, msg):
         _failures.append(msg)
 
 
+# A SKIPPED SUITE IS NOT A PASSING SUITE. skip() used to exit 0, so run_all
+# printed "PASS test_encoder_ui.py" for a file that asserted nothing at all
+# (no debug probe -> skip at line 32, before a single check). That is the same
+# manufactured confidence this wave is hunting, one level up. The distinct code
+# lets run_all say SKIP without turning a probe-less bench red - which is the
+# documented design of those gates, and Kevin's call to change if he wants to.
+SKIP_EXIT = 77
+
+
 def skip(msg):
     print(f"SKIP: {msg}")
-    sys.exit(0)
+    sys.exit(SKIP_EXIT)
 
 
 def finish(name):
     if _failures:
         print(f"{name}: FAIL ({len(_failures)}/{_checks} checks failed)")
+        sys.exit(1)
+    if _checks == 0:
+        # "PASS (0 checks)" is the purest form of the thing this wave is
+        # hunting: a green line that asserts nothing. A suite that reaches
+        # finish() having run no check either lost every branch to a silent
+        # skip or should have called skip() and said so.
+        print(f"{name}: FAIL - reached finish() with ZERO checks run. A suite "
+              f"that asserts nothing is not a passing suite; use skip() if it "
+              f"genuinely cannot run here.")
         sys.exit(1)
     print(f"{name}: PASS ({_checks} checks)")
     sys.exit(0)
@@ -119,6 +137,79 @@ def fault_scan(text, where=""):
           "not PC/LR.)"
     )
     sys.exit(_fault_message)
+
+
+# THE WITNESS IS PURELY NEGATIVE, so it can fail OPEN. Every assertion built on
+# fault_scan is an ABSENCE check ("no [crashlog] in this output"), which means a
+# _FAULT_RE that has stopped matching - a typo, a "helpful" tightening, a
+# firmware tag rename - is indistinguishable from a clean run. Every suite keeps
+# printing PASS and the passive abort detection this module advertises as "free"
+# is simply gone.
+#
+# One positive self-test at import closes that. The fixtures are the firmware's
+# REAL lines, copied from src/selfreflection/CrashLog.cpp:361/365/493 - not
+# plausible-looking inventions - so this also pins the harness to the tags the
+# firmware actually emits. (It cannot prove the firmware still PRINTS them:
+# there is no serial command that produces a crashlog on demand. That half is
+# the firmware-side ask recorded in the hunt findings.)
+_FAULT_FIXTURES = (
+    # CrashLog.cpp:361 - snprintf(... "\n\r[abort] %s from 0x%08lX\n\r" ...)
+    "\n\r[abort] assertion failed from 0x10004E2C\n\r",
+    # CrashLog.cpp:365 - the fully-named form
+    "\n\r[abort] Assertion failed: States.cpp:1204: idx < MAX_PARTS "
+    "(site 0x10012A08)\n\r",
+    # CrashLog.cpp:493 - the post-boot report's first line
+    "\n\r[crashlog] The last reset was a HardFault on core 0 (uptime 41235 ms, "
+    "fault #2 since power-on):\n\r",
+    # CrashLog.cpp:496 - a continuation line, matched on its own
+    "[crashlog]   PC=0x100048F0 LR=0x10004902 xPSR=0x61000000 SP=0x20081F30 "
+    "EXC_RETURN=0xFFFFFFED\n\r",
+)
+
+_BENIGN_FIXTURES = (
+    "ok: everything is fine\nACTIVE_SLOT:0\nACTIVE_PATH:/slots/slot0.yaml\n",
+    "",
+    None,
+    # Must NOT trip on prose that merely talks about the tags - the suites print
+    # exactly this kind of line.
+    "  info: the crashlog banner would appear here\n",
+)
+
+
+def _fault_witness_selftest():
+    """Prove the witness still bites, at import, before any suite runs."""
+    global _fault_message
+    for fx in _FAULT_FIXTURES:
+        try:
+            fault_scan(fx, "the fault-witness self-test")
+        except SystemExit:
+            continue
+        sys.exit(
+            "FAIL: jl.py's fault witness is INERT - _FAULT_RE did not match a "
+            "known-good firmware fault line:\n  " + repr(fx) + "\n"
+            "Every suite's 'no crashlog' assertion is an ABSENCE check, so a "
+            "witness that stopped matching passes everything silently. Fix "
+            "_FAULT_RE (or, if the firmware renamed the tag, fix both and say "
+            "so) before trusting any run."
+        )
+    for fx in _BENIGN_FIXTURES:
+        try:
+            fault_scan(fx, "the fault-witness self-test")
+        except SystemExit:
+            sys.exit(
+                "FAIL: jl.py's fault witness is TRIGGER-HAPPY - _FAULT_RE "
+                "matched text that is not a fault:\n  " + repr(fx) + "\n"
+                "Every suite would abort on ordinary output."
+            )
+    # fault_scan sets _fault_message as a side effect, and port1_wait_ready
+    # re-raises on it (`if _fault_message: raise SystemExit(...)`) so a real
+    # fault cannot be swallowed by its blanket except. The self-test's four
+    # deliberate matches must not leave that armed, or the FIRST reboot of the
+    # run aborts with a fixture as its evidence.
+    _fault_message = ""
+
+
+_fault_witness_selftest()
 
 
 # ----------------------------------------------------------------------------
@@ -375,25 +466,152 @@ def port1_paste(cmd, payload, settle=3.5):
     return prompt, out
 
 
+# ----------------------------------------------------------------------------
+# The bench snapshot  (THE INVARIANT: the suite leaves the bench as it found it)
+# ----------------------------------------------------------------------------
+# This pair is the harness's only promise to the user, and until H2 the whole of
+# it was a PRINTED MESSAGE: board_state_restore's verdict was
+# `"State applied successfully" in out`, i.e. the string cmd_loadYAMLState
+# prints once fromYAML returns true. Five call sites treat that boolean as proof
+# the bench came back (test_slot_files, test_parts_roundtrip, test_projects,
+# test_guide_flow, run_all). It witnesses "the board parsed and applied
+# SOMETHING"; it cannot witness "the board is what it was".
+#
+# Two halves, and they fix different failures:
+#   * capture drained 'Y' for a FIXED 3.0 s and sanity-checked only that
+#     "version:" and "power:" appeared. power: is emitted BEFORE parts: and
+#     overlays: (toYAML order: header, bridges, nets, power, config, parts,
+#     overlays - States.cpp:1330-1392), so a capture truncated inside parts:
+#     passed the check, pasted cleanly, and silently dropped the tail. It now
+#     drains until the port goes QUIET, which is what actually stops it
+#     truncating; the header checks stay as the coarse net underneath.
+#   * restore now COMPARES. It re-reads the board with a second capture and
+#     diffs the bridge set, the four power values, the section headers and the
+#     parts (name/row/placed) against the snapshot it was asked to apply.
+#
+# WHAT THE COMPARISON CANNOT DO, stated so nobody reads more into it: it proves
+# the board matches THE SNAPSHOT. If the snapshot itself was lossy the restore
+# is faithful to a lossy document, and both sides agree. That is why the quiet
+# drain matters as much as the diff.
+#
+# Nets are deliberately NOT compared: net numbers and colours are derived from
+# the bridges at apply time and legitimately renumber, so diffing them would
+# manufacture failures. Bridges are the ground truth (sourceOfTruth: bridges).
+
+_STATE_BRIDGE_RE = re.compile(r"^\s*-\s*\{n1:\s*(-?\w+),\s*n2:\s*(-?\w+)")
+_STATE_POWER_RE = re.compile(r"^\s*(topRail|bottomRail|dac0|dac1):\s*(-?[0-9.]+)")
+_STATE_PART_RE = re.compile(r'^\s*-\s*name:\s*"?([^"\n]*?)"?\s*$')
+_STATE_PART_ROW_RE = re.compile(r"^\s*row:\s*(-?\d+)")
+_STATE_PART_PLACED_RE = re.compile(r"^\s*placed:\s*(\w+)")
+
+
+def state_fingerprint(yaml):
+    """The parts of a 'Y' document that MUST survive a restore, as data.
+
+    Returns dict(bridges=frozenset, power=dict, sections=tuple, parts=tuple).
+    Deliberately structural: two documents that differ only in whitespace,
+    net numbering or colour compare equal.
+    """
+    section = None
+    bridges = set()
+    power = {}
+    sections = []
+    parts = []
+    for raw in (yaml or "").splitlines():
+        line = raw.rstrip("\r")
+        if line[:1] not in (" ", "\t", "") and line.rstrip().endswith(":"):
+            section = line.strip()[:-1]
+            sections.append(section)
+            continue
+        if section == "bridges":
+            m = _STATE_BRIDGE_RE.match(line)
+            if m:
+                bridges.add(frozenset((m.group(1), m.group(2))))
+        elif section == "power":
+            m = _STATE_POWER_RE.match(line)
+            if m:
+                power[m.group(1)] = m.group(2)
+        elif section == "parts":
+            m = _STATE_PART_RE.match(line)
+            if m:
+                parts.append({"name": m.group(1), "row": None, "placed": None})
+            elif parts:
+                m = _STATE_PART_ROW_RE.match(line)
+                if m:
+                    parts[-1]["row"] = m.group(1)
+                m = _STATE_PART_PLACED_RE.match(line)
+                if m:
+                    parts[-1]["placed"] = m.group(1)
+    return {"bridges": frozenset(bridges),
+            "power": power,
+            "sections": tuple(sections),
+            "parts": tuple((p["name"], p["row"], p["placed"]) for p in parts)}
+
+
+def state_fingerprint_diff(want, got):
+    """Human-readable differences between two state_fingerprint()s ([] = same)."""
+    diffs = []
+    miss = want["bridges"] - got["bridges"]
+    extra = got["bridges"] - want["bridges"]
+    if miss:
+        diffs.append("bridges LOST: "
+                     + ", ".join(sorted("-".join(sorted(b)) for b in miss)))
+    if extra:
+        diffs.append("bridges ADDED: "
+                     + ", ".join(sorted("-".join(sorted(b)) for b in extra)))
+    for k in ("topRail", "bottomRail", "dac0", "dac1"):
+        a, b = want["power"].get(k), got["power"].get(k)
+        if a != b:
+            diffs.append(f"power.{k}: wanted {a}, got {b}")
+    for sec in ("bridges", "parts", "overlays"):
+        if (sec in want["sections"]) != (sec in got["sections"]):
+            diffs.append(f"section '{sec}': wanted "
+                         f"{'present' if sec in want['sections'] else 'absent'}, "
+                         f"got {'present' if sec in got['sections'] else 'absent'}")
+    if want["parts"] != got["parts"]:
+        diffs.append(f"parts: wanted {list(want['parts'])}, got {list(got['parts'])}")
+    return diffs
+
+
 def board_state_capture():
     """Snapshot the board's full state (bridges + power) as a pastable YAML,
     or None if the board didn't produce one. Forces line mode first (the
-    suite's standing assumption)."""
+    suite's standing assumption).
+
+    Drains until the port goes quiet rather than for a fixed window - see the
+    note above. There is no reliable terminator line to check for: toYAML's
+    last always-emitted line is config's `  oled: {...}`, and parts:/overlays:
+    (the sections a truncation would eat) come AFTER it, so "the document ends
+    with X" is not something this format supports. Not truncating is the
+    guarantee; the header checks are only the coarse net.
+    """
     port1_command("B1", 1.5)
-    y = port1_command("Y", 3.0)
+    y = port1_command("Y", 3.0, quiet_after=0.7, max_seconds=20.0)
     # An empty board prints "nets:" with no "bridges:" section - still a
     # valid, pastable snapshot (restoring "no user nets" is exactly right).
     if "version:" not in y or "power:" not in y:
+        return None
+    if "config:" not in y or "oled: {" not in y:
+        # config: is unconditional and oled: is its last line, so this really
+        # is a truncated read rather than an empty bench.
+        print("  FAIL: the 'Y' snapshot is TRUNCATED - it has no config:/oled: "
+              f"tail ({len(y)} bytes read). Refusing to call it a snapshot; the "
+              "bench will NOT be restored from it.")
         return None
     yaml = y[y.index("version:"):]
     return "\n".join(l.rstrip("\r") for l in yaml.split("\n")).rstrip() + "\n\n"
 
 
-def board_state_restore(yaml):
+def board_state_restore(yaml, verify=True):
     """Paste a board_state_capture() snapshot back. Returns True when the
-    board confirmed it. The suite's cleanup (nodes_clear + zeroed rails) used
-    to simply STAY on the board - twice now that read as a firmware bug on
-    the bench ('rails aren't setting', 'current sensing isn't working')."""
+    board confirmed it AND a fresh capture matches the snapshot. The suite's
+    cleanup (nodes_clear + zeroed rails) used to simply STAY on the board -
+    twice now that read as a firmware bug on the bench ('rails aren't setting',
+    'current sensing isn't working').
+
+    `verify=False` exists for one caller only: the verification pass itself
+    must not recurse. Everything else takes the check.
+    """
     prompt, out = port1_paste("S", yaml.encode())
     ok = "State applied successfully" in out
     # Applying a pasted power section claims DAC0 as a user write, which
@@ -405,7 +623,27 @@ def board_state_restore(yaml):
         v = float(m.group(1))
         if 2.80 <= v <= 3.90:
             jl_exec(f"dac_set(0, {v}, True)", timeout=15)
-    return ok
+    if not ok:
+        print("  FAIL: the board did not print 'State applied successfully' for "
+              "the restore paste.")
+        return False
+    if not verify:
+        return True
+    time.sleep(1.0)
+    again = board_state_capture()
+    if again is None:
+        print("  FAIL: the restore was applied but the board would not produce "
+              "a snapshot to verify it against.")
+        return False
+    diffs = state_fingerprint_diff(state_fingerprint(yaml),
+                                   state_fingerprint(again))
+    if diffs:
+        print("  FAIL: the board does NOT match the snapshot it was restored "
+              "from - the bench was left different from how the suite found it:")
+        for d in diffs:
+            print(f"    - {d}")
+        return False
+    return True
 
 
 def active_context(collect_seconds=1.5):
@@ -497,45 +735,113 @@ def run_file_capture(path):
     """Snapshot a run file (or its absence) to <path>.hilbak on the device.
 
     Returns a dict to hand back to run_file_restore(). Raises nothing on a
-    missing file - "it wasn't there" is a state worth restoring too."""
+    missing file - "it wasn't there" is a state worth restoring too.
+
+    A SURVIVING <path>.hilbak IS AN EMERGENCY, not a leftover to tidy. This
+    function used to open with `if fs_exists(bak): jfs.remove(bak)`, which is
+    the exact sequence that launders a user's circuit out of existence: run 1
+    captures the user's bytes, dies before its restore (its teardown's first
+    statement is a jl_exec, and jl_exec sys.exits on any transport failure), and
+    leaves the SUITE'S fixture body in the run file. Run 2 then deletes the only
+    surviving copy of the user's data and re-snapshots the fixture as "the
+    pre-test state" - after which run 2's teardown prints "restored ... to its
+    pre-test state (byte-exact)". The user's circuit is gone and the harness
+    certified the opposite.
+
+    So the bak is now treated as evidence: refuse, name the file, and tell the
+    operator how to put it back by hand. This DOES wedge every subsequent run
+    until someone acts, which is the point - the alternative silently destroys
+    data. (The friendlier variant - adopt the surviving bak as the true
+    pre-test state and self-heal - is written up in the H2 report as an option
+    for Kevin; it is strictly worse in one corner, where the user edited the run
+    file between the aborted run and this one.)
+
+    The `hash` in the returned dict is what makes "byte-exact" a MEASUREMENT
+    rather than a word in a message: it is FNV-1a/32 over the source bytes,
+    folded into the copy loop (same algorithm as test_projects.device_hash and
+    the firmware's fnv1a32_file), and run_file_restore re-hashes what it put
+    back and refuses to agree unless the two match.
+    """
     out = jl_exec(f"""
 p = {path!r}
 bak = p + ".hilbak"
 if fs_exists(bak):
-    jfs.remove(bak)
-if fs_exists(p):
+    print("stalebak= 1")
+elif fs_exists(p):
     s = jfs.open(p, "rb"); d = jfs.open(bak, "wb")
     n = 0
+    h = 0x811C9DC5
     while True:
         c = s.read(512)
         if not c:
             break
         d.write(c); n += len(c)
+        for x in c:
+            h = ((h ^ x) * 0x01000193) & 0xFFFFFFFF
     s.close(); d.close()
     print("existed= 1")
     print("bytes=", n)
+    print("fnv=", "0x%08X" % h)
 else:
     print("existed= 0")
-""", timeout=45)
+""", timeout=60)
     vals = parse_kv(out)
+    if vals.get("stalebak") == 1:
+        sys.exit(
+            f"FAIL: {path}.hilbak already exists.\n"
+            "That backup is a snapshot an EARLIER HIL run took and never "
+            "restored - i.e. a run died between its capture and its teardown, "
+            f"and {path} is currently holding whatever that run left behind, "
+            "NOT the user's content.\n"
+            "Overwriting the backup here would destroy the only surviving copy "
+            "and then certify the test's own bytes as 'the pre-test state', so "
+            "this run stops instead.\n"
+            "Put it back by hand first (port 5 REPL):\n"
+            f"  s = jfs.open({path!r} + '.hilbak', 'rb'); "
+            f"d = jfs.open({path!r}, 'wb')\n"
+            "  while True:\n"
+            "      c = s.read(512)\n"
+            "      if not c: break\n"
+            "      d.write(c)\n"
+            "  s.close(); d.close(); jfs.remove(" + repr(path) + " + '.hilbak')\n"
+            "...then re-run. (If you are sure the backup is worthless, just "
+            f"remove {path}.hilbak.)"
+        )
     return {"path": path,
             "existed": vals.get("existed") == 1,
-            "bytes": vals.get("bytes")}
+            "bytes": vals.get("bytes"),
+            "hash": vals.get("fnv")}
 
 
 def run_file_restore(snap):
     """Put a run_file_capture() snapshot back byte-exact, or restore its
     absence. The caller must have LEFT the run-file context first (a run file
     that is still active is re-created by the next switch's dirty pre-save).
-    Returns True when the board agrees the file is back the way it was."""
+    Returns True when the board agrees the file is back the way it was.
+
+    TWO THINGS THIS USED TO GET WRONG, both of which made a green check out of
+    a loss:
+
+      * with `want == 1` and NO .hilbak the copy-back was skipped entirely and
+        the verdict was `fs_exists(p) == want` - true, because the file the TEST
+        wrote is still sitting there. "Nothing to restore from" is a FAILURE and
+        is reported as one now.
+      * "byte-exact" was a word in the caller's message; nothing compared bytes.
+        The restored file is now re-hashed on the device and checked against the
+        FNV-1a the capture took. A mismatch KEEPS the .hilbak - it is the only
+        remaining copy of the wanted content, and evidence for the next attempt.
+    """
     if not snap:
         return False
     path = snap["path"]
     want = 1 if snap["existed"] else 0
+    wanthash = snap.get("hash") or ""
     out = jl_exec(f"""
 p = {path!r}
 bak = p + ".hilbak"
 want = {want}
+wanth = {wanthash!r}
+nobak = 0
 if want:
     if fs_exists(bak):
         s = jfs.open(bak, "rb"); d = jfs.open(p, "wb")
@@ -545,35 +851,109 @@ if want:
                 break
             d.write(c)
         s.close(); d.close()
+    else:
+        nobak = 1
+    got = ""
+    if fs_exists(p):
+        f = jfs.open(p, "rb")
+        h = 0x811C9DC5
+        while True:
+            c = f.read(512)
+            if not c:
+                break
+            for x in c:
+                h = ((h ^ x) * 0x01000193) & 0xFFFFFFFF
+        f.close()
+        got = "0x%08X" % h
+        print("fnv=", got)
+    # KEEP the backup when the bytes did not come back: it is then the only
+    # copy of the wanted content, and the evidence for the next attempt.
+    if nobak == 0 and fs_exists(bak) and (wanth == "" or got == wanth):
         jfs.remove(bak)
 else:
     if fs_exists(p):
         jfs.remove(p)
     if fs_exists(bak):
         jfs.remove(bak)
+print("nobak=", nobak)
 print("ok=", 1 if (1 if fs_exists(p) else 0) == want else 0)
 print("bakgone=", 0 if fs_exists(bak) else 1)
-""", timeout=45)
+""", timeout=60)
     vals = parse_kv(out)
+    if vals.get("nobak") == 1:
+        print(f"  FAIL: {path}.hilbak is MISSING - there is nothing to restore "
+              f"from, so {path} still holds whatever this run left in it. "
+              f"(The capture said the file existed and was {snap.get('bytes')} "
+              f"bytes, hash {wanthash}.)")
+        return False
+    if want:
+        got = vals.get("fnv")
+        if wanthash and got != wanthash:
+            print(f"  FAIL: {path} was restored but is NOT byte-exact: the "
+                  f"capture hashed {wanthash}, the file now hashes {got}. The "
+                  f"backup at {path}.hilbak was KEPT - it is the only copy of "
+                  f"the wanted bytes.")
+            return False
     return vals.get("ok") == 1 and vals.get("bakgone") == 1
 
 
-def purge_numbered_runs(pdir, dirname):
-    """Delete /projects/<pdir>/<dirname>_<digits>.yaml ONLY.
+def list_numbered_runs(pdir, dirname):
+    """Sorted basenames of /projects/<pdir>/<dirname>_<digits>.yaml.
 
-    Deliberately NOT a startswith(prefix) sweep: `"555_".startswith` matches
-    555_run.yaml, and a suite that deletes THAT deletes the user's circuit.
-    Digits-only keeps the numbered-mode cleanup working without touching the
-    single run file."""
+    The companion of purge_numbered_runs: a suite takes this at phase 0 so its
+    teardown can tell the files IT created from the ones that were already
+    there. Anything in the phase-0 listing is USER DATA and must be left alone.
+    """
     out = jl_exec(f"""
 pre = {dirname!r} + "_"
-n = 0
 if fs_exists({pdir!r}):
     for nm in jfs.listdir({pdir!r}):
         if not (nm.startswith(pre) and nm.endswith(".yaml")):
             continue
         mid = nm[len(pre):-5]
         if len(mid) == 0 or not mid.isdigit():
+            continue
+        print("NUMBERED", nm)
+""", timeout=30)
+    return sorted(l.split(" ", 1)[1].strip()
+                  for l in out.splitlines() if l.startswith("NUMBERED "))
+
+
+def purge_numbered_runs(pdir, dirname, only):
+    """Delete /projects/<pdir>/<dirname>_<digits>.yaml, AND ONLY the basenames
+    listed in `only`.
+
+    `only` is MANDATORY, and that is the whole point. The digits-only match was
+    already a deliberate narrowing (a `startswith("555_")` sweep matches
+    555_run.yaml, and a suite that deletes THAT deletes the user's circuit) -
+    but "digit-suffixed" is not the same as "mine". A user who hand-named a
+    saved circuit /projects/555/555_1.yaml through the Files browser, or who
+    once ran a JL_PROJECT_RUN_HISTORY build, owns every one of those names. The
+    unconditional sweep this replaced deleted them all and printed the count as
+    successful cleanup. (Proven on the bench: a planted /projects/555/555_9.yaml
+    did not survive one teardown.)
+
+    So the caller must name the files it PROVABLY created - e.g. the difference
+    between a phase-0 list_numbered_runs() and the same listing at teardown.
+    Returns (deleted_count, skipped_basenames).
+    """
+    only = sorted(set(only or ()))
+    if not only:
+        return 0, []
+    out = jl_exec(f"""
+pre = {dirname!r} + "_"
+allow = {only!r}
+n = 0
+if fs_exists({pdir!r}):
+    for nm in jfs.listdir({pdir!r}):
+        if nm not in allow:
+            continue
+        if not (nm.startswith(pre) and nm.endswith(".yaml")):
+            print("refused=", nm)
+            continue
+        mid = nm[len(pre):-5]
+        if len(mid) == 0 or not mid.isdigit():
+            print("refused=", nm)
             continue
         try:
             jfs.remove({pdir!r} + "/" + nm)
@@ -582,7 +962,10 @@ if fs_exists({pdir!r}):
             print("rmerr=", e)
 print("purged=", n)
 """, timeout=30)
-    return parse_kv(out).get("purged")
+    n = parse_kv(out).get("purged")
+    refused = [l.split("=", 1)[1].strip()
+               for l in out.splitlines() if l.strip().startswith("refused=")]
+    return (int(n) if n is not None else 0), refused
 
 
 def reboot_board():
@@ -651,8 +1034,18 @@ def port1_wait_ready(timeout=25.0):
     return False
 
 
-def port1_command(cmd, collect_seconds=2.5):
-    """Send a single-char command line on port 1, return de-ANSI'd output."""
+def port1_command(cmd, collect_seconds=2.5, quiet_after=None, max_seconds=None):
+    """Send a single-char command line on port 1, return de-ANSI'd output.
+
+    `quiet_after` switches the RESPONSE drain from a fixed window to the same
+    quiet-detection the connect banner already uses: keep reading until the
+    port has been silent for that long, bounded by `max_seconds` (default
+    4x collect_seconds). Use it for commands whose output has no fixed size -
+    'Y' being the one that matters, where a fixed 3.0 s window silently
+    truncated the bench snapshot. Everything else keeps the fixed window,
+    because for a short reply a fixed drain is one round trip and a quiet
+    drain is a guess about the firmware's pacing.
+    """
     import serial  # pyserial
 
     with serial.Serial(port1_path(), 115200, timeout=0.2) as ser:
@@ -684,11 +1077,25 @@ def port1_command(cmd, collect_seconds=2.5):
         ser.reset_input_buffer()
         ser.write(cmd.encode() + b"\r\n")
         ser.flush()
-        deadline = time.time() + collect_seconds
         buf = b""
-        while time.time() < deadline:
-            chunk = ser.read(4096)
-            if chunk:
-                buf += chunk
+        if quiet_after:
+            hard = time.time() + (max_seconds or collect_seconds * 4)
+            last = time.time()
+            while time.time() < hard:
+                chunk = ser.read(4096)
+                if chunk:
+                    buf += chunk
+                    last = time.time()
+                elif buf and time.time() - last > quiet_after:
+                    break
+                elif not buf and time.time() - last > max(quiet_after,
+                                                          collect_seconds):
+                    break   # the command produced nothing at all
+        else:
+            deadline = time.time() + collect_seconds
+            while time.time() < deadline:
+                chunk = ser.read(4096)
+                if chunk:
+                    buf += chunk
         return fault_scan(_ANSI.sub("", buf.decode(errors="replace")),
                           f"the '{cmd}' command")

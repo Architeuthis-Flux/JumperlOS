@@ -195,13 +195,16 @@ import time
 
 # Auto-skip BEFORE jl.py helpers run (they sys.exit(FAIL) when the board is
 # missing; an absent board should be a clean SKIP for this suite).
+# Exit 77, not 0: jl.SKIP_EXIT, so run_all prints SKIP rather than PASS for a
+# file that asserted nothing. Hardcoded because jl is deliberately not imported
+# until after these gates (importing it is what sys.exits on a missing board).
 if not glob.glob("/dev/cu.*JLV5port1"):
     print("SKIP: board unavailable - no /dev/cu.*JLV5port1 device present")
-    raise SystemExit(0)
+    raise SystemExit(77)
 if not glob.glob("/dev/cu.*JLV5port5"):
     print("SKIP: board unavailable - no /dev/cu.*JLV5port5 device present "
           "(port 1 exists; is the board half-enumerated?)")
-    raise SystemExit(0)
+    raise SystemExit(77)
 
 import serial  # pyserial
 

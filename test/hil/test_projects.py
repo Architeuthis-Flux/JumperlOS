@@ -115,6 +115,7 @@ from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
                 active_context, restore_context, fault_scan,
                 project_run_mode, project_run_path, purge_numbered_runs,
+                list_numbered_runs,
                 run_file_capture, run_file_restore, reboot_board)
 
 SLOT_PATH = "/slots/slot3.yaml"
@@ -283,6 +284,23 @@ def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
 def read_device_file(path):
     """Return (exists, content) for a device file via the REPL.
 
+    `exists` is TRI-STATE, and the distinction is load-bearing:
+        True  - the board said EXISTS= 1
+        False - the board said EXISTS= 0, i.e. CONFIRMED ABSENT
+        None  - the read produced neither, i.e. the answer was garbled or
+                truncated. We know nothing.
+
+    It used to collapse the last two into False. Fine for a comparison ("did
+    the bytes change"), NOT fine for the one caller that ACTS on absence: the
+    teardown's `else` arm deletes /slots/slot3.yaml and reports "removed the
+    test's slot3.yaml (did not exist before)", so one flaky snapshot read would
+    delete a user's real slot 3 behind a green check. test_slot_files.py has
+    carried this tri-state since guide_flow's sweep took Kevin's 555_1/555_2;
+    it was never propagated here. Absence has to be positive evidence.
+
+    None is falsy and the content stays a str, so every comparison caller is
+    unaffected; only the deleting caller inspects the third state.
+
     Reads through jfs.open().read() in chunks, NOT fs_read(): fs_read()
     silently truncates at 4095 bytes (1023 on OG) - a pre-existing
     static-buffer cap - so a comparison against a source file larger than that
@@ -309,7 +327,7 @@ else:
     print("EXISTS= 0")
 """, timeout=40)
     if "EXISTS= 1" not in out:
-        return False, ""
+        return (False if "EXISTS= 0" in out else None), ""
     m = re.search(r"<<<FILE>>>\r?\n(.*)<<<END>>>", out, re.DOTALL)
     return True, (m.group(1) if m else "")
 
@@ -379,6 +397,28 @@ print(f"  info: firmware run-file mode: {RUN_MODE} "
 # for the same reason the others are: the finally needs it bound.
 REAL_PROJECT_DIRS = (PROJ_DIR, "/projects/i2cscrn", "/projects/nand00",
                      "/projects/eeprom")
+
+# ...and the NUMBERED namespace in those same directories, for the same reason.
+# The teardown used to sweep every <dir>_<digits>.yaml unconditionally and print
+# the count as cleanup. Nothing in a single-file build creates one (the launcher
+# writes <dir>_run.yaml; runFilePath(), the numbered namer, is inside
+# `#if JL_PROJECT_RUN_HISTORY` and src/config.h defaults that to 0), so on the
+# flashed firmware 100% of what that sweep deleted was USER data - a circuit
+# hand-named 555_1.yaml through the Files browser, or a leftover from a history
+# build. Proven on this bench before the fix: a planted /projects/555/555_9.yaml
+# did not survive one teardown.
+#
+# So the same snapshot/restore convention the run files already use applies to
+# the numbered namespace: record what was there BEFORE, and the teardown may
+# remove only what appeared during the run.
+pre_numbered = {d: list_numbered_runs(d, d.rsplit("/", 1)[-1])
+                for d in REAL_PROJECT_DIRS}
+_pre_n = sum(len(v) for v in pre_numbered.values())
+print(f"  info: {_pre_n} pre-existing NUMBERED run file(s) in the shipped "
+      f"projects - these are the USER's and the teardown will not touch them"
+      + (f": {[d + '/' + n for d, v in pre_numbered.items() for n in v]}"
+         if _pre_n else ""))
+
 real_run_snaps = [run_file_capture(project_run_path(d)) for d in REAL_PROJECT_DIRS]
 _held = [s["path"] for s in real_run_snaps if s["existed"]]
 print(f"  info: run-file snapshots taken for {len(real_run_snaps)} shipped "
@@ -597,9 +637,12 @@ for i in range(1, 40):
     # must NOT have been renamed - naming net 1 is exactly the trap the reference
     # YAML's original `num: 1` fell into.
     for num, expected in ((1, "GND"), (2, "Top Rail")):
-        if num in nets:
-            check(nets[num][0] == expected,
-                  f"special net {num} still named {expected!r} (got {nets[num][0]!r})")
+        # `num in nets` is part of the ASSERTION, not a guard around it: a
+        # firmware change that made the special net vanish entirely used to
+        # delete this check instead of failing it (the silent-skip shape).
+        check(num in nets and nets[num][0] == expected,
+              f"special net {num} exists and is still named {expected!r} "
+              f"(got {nets[num][0]!r if num in nets else 'NO SUCH NET'})")
 
     # --- 5. Parts survive a wholesale toYAML rewrite, still unplaced -----------
     out = jl_exec("print('saved=', nodes_save(3))")
@@ -2079,19 +2122,43 @@ finally:
     # names:
     #   * a SHIPPED project's <dir>_run.yaml is the USER'S circuit. It is put
     #     back byte-exact from phase 0's snapshot (or removed again if it did
-    #     not exist). Numbered leftovers this suite minted go through
-    #     purge_numbered_runs(), which matches digits and therefore cannot
-    #     touch <dir>_run.yaml.
+    #     not exist). Numbered leftovers THIS RUN MINTED go through
+    #     purge_numbered_runs(), which now takes an explicit allow-list: the
+    #     difference between the phase-0 listing and this one. Anything that
+    #     was already there when the suite started is the user's and is left
+    #     alone - the unconditional digits sweep this replaced deleted those
+    #     too and called it cleanup.
     #   * /projects/hiltest is this suite's own fixture directory and is
     #     deleted outright below.
     try:
         leave_context_to_slot3()
         total = 0
+        left_alone = 0
+        survivors_ok = True
         for _pdir in REAL_PROJECT_DIRS:
-            n = purge_numbered_runs(_pdir, _pdir.rsplit("/", 1)[-1])
-            total += int(n) if n is not None else 0
-        print(f"  info: removed {total} NUMBERED run file(s) from shipped "
-              f"projects (digits-only sweep - <dir>_run.yaml is never in it)")
+            _name = _pdir.rsplit("/", 1)[-1]
+            _now = set(list_numbered_runs(_pdir, _name))
+            _theirs = set(pre_numbered.get(_pdir, ()))
+            _mine = sorted(_now - _theirs)
+            left_alone += len(_now & _theirs)
+            if _mine:
+                n, refused = purge_numbered_runs(_pdir, _name, only=_mine)
+                total += n
+                if refused:
+                    print(f"  info: purge_numbered_runs refused {refused} in "
+                          f"{_pdir} (not a numbered run file)")
+            # The delete-only-what-you-made rule, asserted rather than trusted.
+            _after = set(list_numbered_runs(_pdir, _name))
+            _lost = sorted(_theirs - _after)
+            if _lost:
+                survivors_ok = False
+                print(f"  info: {_pdir} lost pre-existing numbered file(s): {_lost}")
+        check(survivors_ok,
+              f"every pre-existing NUMBERED run file in the shipped projects "
+              f"survived the suite ({left_alone} left alone, {total} minted by "
+              f"this run removed)")
+        print(f"  info: removed {total} NUMBERED run file(s) THIS RUN CREATED; "
+              f"left {left_alone} pre-existing one(s) alone (user data)")
         restored = 0
         for _snap in real_run_snaps:
             ok = run_file_restore(_snap)
@@ -2133,11 +2200,17 @@ print("hiltestgone=", 0 if fs_exists({HIL_DIR!r}) else 1)
         print(f"  info: hiltest cleanup failed: {e!r}")
 
     # Restore the FILE first, switch slots second (same hazard as phase 0).
+    #
+    # `slot3_existed is False` and NOT `not slot3_existed`: read_device_file
+    # returns None when the phase-0 read was garbled, and THIS ARM DELETES.
+    # Deleting a user's real slot 3 because one REPL answer came back truncated
+    # - and then printing "did not exist before" as an ok: line - is the shape
+    # test_slot_files outlawed after guide_flow's sweep took Kevin's 555_1/555_2.
     if slot3_existed:
         out = jl_exec(f"print('restored=', 1 if fs_write({SLOT_PATH!r}, {slot3_before!r}) else 0)",
                       timeout=30)
         check(parse_kv(out).get("restored") == 1, "restored slot3.yaml prior content")
-    else:
+    elif slot3_existed is False:
         out = jl_exec(f"""
 if fs_exists({SLOT_PATH!r}):
     jfs.remove({SLOT_PATH!r})
@@ -2145,6 +2218,12 @@ print("removed=", 0 if fs_exists({SLOT_PATH!r}) else 1)
 """)
         check(parse_kv(out).get("removed") == 1,
               "removed the test's slot3.yaml (did not exist before)")
+    else:
+        check(False,
+              "the phase-0 snapshot read of /slots/slot3.yaml was INCONCLUSIVE "
+              "(neither EXISTS= 1 nor EXISTS= 0 came back). Leaving the file "
+              "alone rather than guessing - but this run's slot3 state is the "
+              "suite's fixture, not the bench's, so restore it by hand.")
 
     # Path-aware: a file context has no "<n" to go back to.
     restore_context(orig_slot, orig_path)

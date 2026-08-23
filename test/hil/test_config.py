@@ -4,6 +4,7 @@
 release keys (probe_droop_v0, crosspoint_resistance, net_currents,
 net_voltage_scan) exist in /config.txt."""
 
+import os
 import time
 
 from jl import jl_exec, port1_command, check, finish, device_text
@@ -257,23 +258,74 @@ try:
     for k in ("generation", "revision", "probe_revision", "probe_led_on_button_pin"):
         check(after.get(("hardware", k)) == snap.get(("hardware", k)),
               f"hardware.{k} survived `reset ({snap.get(('hardware', k))})")
+
+    # THE NEGATIVE CONTROL FOR THE RESTORE BELOW, on demand.
+    #
+    # On a healthy board `reset preserves calibration by struct copy, so the
+    # finally's restore loop has nothing to do and "the calibration is put back"
+    # is untestable on a green run - which is exactly how the hole survived: the
+    # skip was load-bearing ONLY in the red case, where it hurt. Set
+    # H2_INJECT_CAL_DAMAGE=1 to damage one calibration key here and watch the
+    # teardown either repair it (fixed) or leave the board mis-calibrated while
+    # reporting the damage as a `leftover diffs:` list (the old behaviour).
+    #
+    # Both directions were run on the bench; see the H2 report.
+    if os.environ.get("H2_INJECT_CAL_DAMAGE"):
+        port1_command("`[calibration] probe_pad_ohms = 77.7", collect_seconds=2)
+        time.sleep(1.5)
+        print("  info: H2_INJECT_CAL_DAMAGE - probe_pad_ohms forced to 77.7 to "
+              "stand in for a `reset that wiped calibration. The teardown must "
+              "put it back.")
 finally:
     # Put the sentinel's original back first, then every other key `reset
-    # changed (skip [config]/[firmware] version lines the firmware owns).
-    after = parse_cfg(read_config())
+    # changed (skip the [firmware] version line the firmware owns).
+    #
+    # CALIBRATION IS RESTORED TOO, and that is the H2 fix. This loop used to
+    # open `if sec == "calibration" or key == "firmware_version": continue`,
+    # which is a no-op on a green run (reset preserves calibration by struct
+    # copy, so nothing differs) and load-bearing on a RED one - the run that
+    # correctly catches a regression in resetConfigToDefaults was the run that
+    # left probe_pad_ohms, crosspoint_resistance, the hysteresis pair,
+    # probe_max/min_measure and measure_mode_output_voltage sitting at defaults
+    # on Kevin's board, with every probe measurement and every droop-compensated
+    # current wrong until he re-ran the self test, and nothing telling him to.
+    # The loss was reported only inside a truncated `leftover diffs:` list.
+    # Proven both ways on the bench with H2_INJECT_CAL_DAMAGE - see the report.
+    #
+    # The sentinel's own key goes back FIRST, and `after` is read AFTER it: the
+    # phase deliberately planted 123.4 there, so leaving it in the read would
+    # make probe_droop_ohms show up as "a calibration key `reset wiped" on every
+    # single green run and train everyone to ignore the warning below.
     if ohms_orig is not None:
         port1_command(f"`[calibration] probe_droop_ohms = {ohms_orig}", collect_seconds=1.5)
+        time.sleep(1.5)
+    after = parse_cfg(read_config())
     restored = 0
+    cal_repaired = []
     for (sec, key), val in snap.items():
-        if sec == "calibration" or key == "firmware_version":
+        if key == "firmware_version":
             continue
         if after.get((sec, key)) != val:
             port1_command(f"`[{sec}] {key} = {val}", collect_seconds=1.5)
             restored += 1
+            if sec == "calibration":
+                cal_repaired.append(key)
     time.sleep(2.5)
     final = parse_cfg(read_config())
     diffs = [(sk, v, final.get(sk)) for sk, v in snap.items()
              if sk[1] != "firmware_version" and final.get(sk) != v]
+    if cal_repaired:
+        print("  WARNING: `reset CHANGED calibration keys that it must preserve "
+              f"({', '.join(sorted(cal_repaired))}). They have been written back "
+              "from this test's phase-0 snapshot of /config.txt, so the board is "
+              "usable - but the survival checks above are the real result and "
+              "resetConfigToDefaults() has regressed.")
+    cal_still_wrong = sorted(k for (sec, k), v in snap.items()
+                             if sec == "calibration" and final.get((sec, k)) != v)
+    if cal_still_wrong:
+        print("  *** YOUR CALIBRATION WAS RESET AND COULD NOT BE RESTORED: "
+              + ", ".join(cal_still_wrong) + " - RE-RUN THE SELF TEST before "
+              "trusting any probe measurement or current reading. ***")
     check(not diffs, f"config restored to its pre-reset contents ({restored} keys re-applied; leftover diffs: {diffs[:4]})")
     # The restore loop's last writes arm a deferred config save. Its flash
     # window stalls USB, and in run_all.py the NEXT test file opens the port

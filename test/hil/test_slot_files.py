@@ -762,16 +762,102 @@ print("own=", 1 if is_connected(11, 12) else 0)
     # (c) NEGATIVE CONTROL: the no-op gate is still doing its job. Leaving and
     #     re-entering slot 2 re-asserts its rails through the very setters the
     #     two checks above depend on - and must still write nothing.
+    #
+    #     THIS CONTROL COULD NOT FAIL until H2, in two independent ways, and it
+    #     is the only guard on w3-5's no-op gate:
+    #
+    #       * TIMING. It used to sample ctrl_pre AFTER the `<2`: port1_command
+    #         drains for its full collect_seconds with no early exit, so `<2`
+    #         returned at T0+4.0 s, and +sleep(1.0) +the REPL round trip put the
+    #         first sample at >=T0+5 s. The auto-save it is hunting fires from
+    #         SlotManager's idle service ~750 ms after the load (systemIdleForFlush,
+    #         externVars.cpp) - already inside ctrl_pre. Comparing two samples
+    #         taken after the event can only ever be equal.
+    #       * IDENTICAL CONTENT. Even with perfect timing, "the bytes did not
+    #         change" cannot tell "nothing wrote the file" from "the file was
+    #         rewritten with exactly the same content" - and the every-load
+    #         rewrite bug rewrites a slot with its own values, so the content IS
+    #         the same. That is what the w3t5 marker was invented for, and the
+    #         marker seeded earlier in this suite had been erased by several
+    #         legitimate rewrites long before this phase.
+    #
+    #     The canary closes both. A comment line is appended to slot2.yaml while
+    #     slot 2 is NOT the active context (so nothing can race the write), and
+    #     it must still be there after the load and a long idle window. toYAML
+    #     never re-emits comments (it is a wholesale rewrite from RAM) and the
+    #     parser skips '#' lines (States.cpp:1433), so the marker survives IF
+    #     AND ONLY IF nothing rewrote the file - whatever the content would have
+    #     been. Set H2_INJECT_SLOT2_REWRITE=1 to see it bite; both directions
+    #     were run on the bench (see the H2 report).
+    CANARY = "# h2-canary-slot2-must-not-be-rewritten"
     jl_exec(f"load_project({RUN_FILE!r})", timeout=30)
     time.sleep(2.0)
-    port1_command("<2", 4.0)
-    time.sleep(1.0)
+    out = jl_exec(f"""
+p = "/slots/slot2.yaml"
+f = jfs.open(p, "a")
+jfs.write(f, {CANARY + chr(10)!r})
+jfs.close(f)
+print("planted=", 1 if {CANARY!r} in fs_read(p) else 0)
+""", timeout=25)
+    check(parse_kv(out).get("planted") == 1,
+          "6a-bis: canary comment planted in slot2.yaml while slot 2 is not the "
+          "active context")
     _, ctrl_pre = read_device_file("/slots/slot2.yaml")
-    time.sleep(5.0)
+
+    port1_command("<2", 4.0)
+    if os.environ.get("H2_INJECT_SLOT2_REWRITE"):
+        # The defect, injected: ANY rewrite of the loaded slot's file. A
+        # reverted no-op gate produces one with IDENTICAL content, so this
+        # injection uses the same shape - nodes_save() re-serializes the state
+        # that was just loaded.
+        jl_exec("print('saved=', nodes_save())", timeout=25)
+        print("  info: H2_INJECT_SLOT2_REWRITE - forced one rewrite of "
+              "slot2.yaml from the state that was just loaded, which is exactly "
+              "what reverting the no-op dirty gate does on every load")
+    time.sleep(6.0)
     _, ctrl_post = read_device_file("/slots/slot2.yaml")
-    check(ctrl_pre is not None and ctrl_post == ctrl_pre,
-          "6a-bis: NEGATIVE CONTROL - a plain slot load still writes nothing "
+    check(ctrl_post is not None and CANARY in ctrl_post,
+          "6a-bis: NEGATIVE CONTROL - the canary comment survived a plain slot "
+          "load and a 6 s idle window, so NOTHING rewrote /slots/slot2.yaml "
           "(the no-op dirty gate was not reverted to buy the two checks above)")
+    check(ctrl_pre is not None and ctrl_post == ctrl_pre,
+          "6a-bis: NEGATIVE CONTROL - and the bytes are unchanged too")
+    if os.environ.get("H2_INJECT_SLOT2_REWRITE") and ctrl_pre and ctrl_post:
+        _a = "\n".join(l for l in ctrl_pre.splitlines() if CANARY not in l).strip()
+        _b = "\n".join(l for l in ctrl_post.splitlines() if CANARY not in l).strip()
+        print(f"  info: ignoring the canary line, the two samples are "
+              f"{'IDENTICAL' if _a == _b else 'DIFFERENT'} - i.e. the "
+              f"byte-comparison alone would have "
+              f"{'stayed GREEN through this rewrite' if _a == _b else 'caught it'}")
+
+    # Take the canary back out: every later phase reads this file, and a stray
+    # comment in a slot the teardown restores anyway is just noise. (If the
+    # file was rewritten the marker is already gone and this is a no-op.)
+    jl_exec(f"""
+p = "/slots/slot2.yaml"
+lines = []
+buf = ""
+f = jfs.open(p, "r")
+done = False
+while not done:
+    chunk = jfs.read(f, 512)
+    if not chunk:
+        done = True
+    else:
+        buf += chunk
+    while "\\n" in buf:
+        ln, buf = buf.split("\\n", 1)
+        if {CANARY!r} not in ln:
+            lines.append(ln + "\\n")
+jfs.close(f)
+if buf and {CANARY!r} not in buf:
+    lines.append(buf)
+f = jfs.open(p, "w")
+for ln in lines:
+    jfs.write(f, ln)
+jfs.close(f)
+print("canarygone=", 0 if {CANARY!r} in fs_read(p) else 1)
+""", timeout=30)
 
     # --- 6b. Project TEMPLATES are read-only -------------------------------
     # Adoption made this reachable and the bench proved it destructive:
@@ -913,7 +999,16 @@ connect(57, 58)
         if st is not None and st[0] == TMP_PROJ:
             target = RUN_FILE.rsplit("/", 1)[1]
             check(target in fixture, f"6c: {target} is listed in the browser")
-            if target in fixture and _fm_goto(ser, fixture.index(target) + 1):
+            # _fm_goto's result is ASSERTED, not merely branched on. A False
+            # here used to delete the whole delete-the-active-file needle - the
+            # five checks below, the crashlog witness among them - and report
+            # nothing at all: the phase that exists because the browser's delete
+            # once reached abort() would have vanished from a green run.
+            _goto_ok = target in fixture and _fm_goto(ser, fixture.index(target) + 1)
+            check(_goto_ok,
+                  f"6c: the browser selection landed on {target} (row "
+                  f"{fixture.index(target) + 1 if target in fixture else '?'})")
+            if _goto_ok:
                 prompt = _fm_vis(_fm_send(ser, b"x", 1.6))
                 fm_captured += prompt
                 # Assert the NAME, not just that a prompt appeared. The firmware
@@ -1072,20 +1167,86 @@ print("e=", 1 if is_connected(41, 42) else 0)
 
 finally:
     # --- 9. Teardown -------------------------------------------------------
+    # TWO RULES, and they were both broken here.
+    #
+    # (1) THE BOOT CONFIGURATION GOES BACK FIRST. Phase 7 writes
+    #     `[slots] boot_slot = 5` and `boot_mode = 0`, which pins EVERY future
+    #     power-up of the board to /slots/slot5.yaml. It is the only teardown
+    #     item whose loss silently changes what the board does forever after,
+    #     so nothing that can raise may run ahead of it.
+    #
+    # (2) EVERY STEP IS INDIVIDUALLY GUARDED, and against BaseException - not
+    #     `except Exception`. The one guard that used to exist here was
+    #     `except Exception` around the `<2` bounce, which does NOT catch
+    #     SystemExit, and SystemExit is precisely what port1_command raises on
+    #     the two paths this suite makes reachable: port1_path() exits when the
+    #     CDC node is gone (jl.py) and fault_scan() exits on a [crashlog]/
+    #     [abort] banner - i.e. exactly the failed-reboot case phase 7 exists
+    #     to detect. One of those anywhere in the teardown skipped the boot
+    #     restore, the fixture sweep, the slot0/slot2 restore, restore_context
+    #     AND board_state_restore, all silently.
+    #
+    # A swallowed SystemExit is still a real event, so the first one is kept
+    # and re-raised at the END of the teardown - unless an exception from the
+    # try block is already in flight, which must win (it is the actual failure;
+    # a teardown hiccup must not replace it).
+    _teardown_fault = None
+
+    def _step(label, fn):
+        """Run one teardown step. A failure prints and does not skip the rest."""
+        global _teardown_fault
+        try:
+            return fn()
+        except BaseException as e:   # SystemExit included, deliberately
+            print(f"  info: teardown step '{label}' FAILED: {e!r} - continuing "
+                  f"with the rest of the teardown")
+            if _teardown_fault is None:
+                _teardown_fault = e
+            return None
+
+    # (1) The boot configuration, before anything else can raise.
+    def _restore_boot():
+        if boot_mode_before is not None:
+            port1_command(f"`[slots] boot_mode = {boot_mode_before}", 2.0)
+        if boot_slot_before is not None:
+            port1_command(f"`[slots] boot_slot = {boot_slot_before}", 2.0)
+        time.sleep(1.5)
+
+    _step("restore boot_mode/boot_slot", _restore_boot)
+
+    # ...and PROVE it landed, rather than trusting the two writes. This is the
+    # difference between "we sent the command" and "the board will boot where
+    # the user left it".
+    if boot_mode_before is not None:
+        def _verify_boot():
+            cfg_end = read_config()
+            m_m = re.search(r"boot_mode\s*=\s*(\d+)", cfg_end)
+            m_s = re.search(r"boot_slot\s*=\s*(\d+)", cfg_end)
+            got_m = int(m_m.group(1)) if m_m else None
+            got_s = int(m_s.group(1)) if m_s else None
+            check(got_m == boot_mode_before and got_s == boot_slot_before,
+                  f"BOOT CONFIG RESTORED: /config.txt is back to boot_mode="
+                  f"{boot_mode_before}, boot_slot={boot_slot_before} (got "
+                  f"{got_m}, {got_s}) - the board boots where the user left it")
+        _step("verify boot_mode/boot_slot", _verify_boot)
+
     # ORDER MATTERS: leave any FILE context BEFORE deleting the files it
     # points at. A file context auto-saves back to ITSELF, so a switch after
     # the delete would re-create what we just removed.
-    try:
+    def _bounce():
+        # THE NEGATIVE CONTROL for the ordering and the guards above, on demand.
+        # This is where the real SystemExit comes from - port1_path() when the
+        # CDC node is gone, fault_scan() on a [crashlog]/[abort] banner - and
+        # before H2 it skipped every teardown step including the boot restore.
+        # H2_INJECT_TEARDOWN_EXIT=1 reproduces it; both directions were run on
+        # the bench (see the H2 report).
+        if os.environ.get("H2_INJECT_TEARDOWN_EXIT"):
+            raise SystemExit("H2_INJECT_TEARDOWN_EXIT: standing in for "
+                             "port1_path()/fault_scan() exiting at the bounce")
         port1_command("<2", 4.0)
         time.sleep(1.5)
-    except Exception as e:
-        print(f"  info: bounce to slot 2 failed: {e}")
 
-    if boot_mode_before is not None:
-        port1_command(f"`[slots] boot_mode = {boot_mode_before}", 2.0)
-    if boot_slot_before is not None:
-        port1_command(f"`[slots] boot_slot = {boot_slot_before}", 2.0)
-    time.sleep(1.5)
+    _step("bounce to slot 2", _bounce)
 
     # Sweep the WHOLE fixture directory, not just the four files this suite
     # names: a re-run, or a phase that failed part-way, leaves a run file
@@ -1098,7 +1259,8 @@ finally:
     # one run file per project, <dir>_run.yaml is the user's circuit, and a
     # guide_flow sweep of exactly this shape once took Kevin's real 555_1 and
     # 555_2. test_projects.py snapshots and restores instead.
-    out = jl_exec(f"""
+    def _sweep_fixtures():
+        out = jl_exec(f"""
 for p in ({RUN_FILE!r}, {TEMPLATE_FILE!r}, {BAD_FILE!r}, {TRAP_FILE!r}):
     if fs_exists(p):
         jfs.remove(p)
@@ -1114,8 +1276,10 @@ except Exception as e:
     print("rmdirerr=", e)
 print("gone=", 0 if (fs_exists({TMP_PROJ!r}) or fs_exists({TRAP_FILE!r})) else 1)
 """, timeout=30)
-    check(parse_kv(out).get("gone") == 1,
-          f"removed {TMP_PROJ} and {TRAP_FILE}")
+        check(parse_kv(out).get("gone") == 1,
+              f"removed {TMP_PROJ} and {TRAP_FILE}")
+
+    _step("sweep the fixture directory", _sweep_fixtures)
 
     # Restore the numbered slot files this suite may have disturbed.
     #
@@ -1133,23 +1297,37 @@ print("gone=", 0 if (fs_exists({TMP_PROJ!r}) or fs_exists({TRAP_FILE!r})) else 1
     # exactly the class of thing this wave outlawed after guide_flow's sweep
     # took Kevin's 555_1/555_2. Absence has to be positive evidence (EXISTS=0),
     # never the absence of evidence.
-    for path, existed, before in (("/slots/slot0.yaml", slot0_existed, slot0_before),
-                                  ("/slots/slot2.yaml", slot2_existed, slot2_before)):
-        if existed and before is not None:
-            jl_exec(f"fs_write({path!r}, {before!r})", timeout=25)
-        elif existed is False:
-            jl_exec(f"""
+    def _restore_slot_files():
+        for path, existed, before in (("/slots/slot0.yaml", slot0_existed, slot0_before),
+                                      ("/slots/slot2.yaml", slot2_existed, slot2_before)):
+            if existed and before is not None:
+                jl_exec(f"fs_write({path!r}, {before!r})", timeout=25)
+            elif existed is False:
+                jl_exec(f"""
 if fs_exists({path!r}):
     jfs.remove({path!r})
 """, timeout=25)
-        else:
-            print(f"  info: {path} snapshot read was inconclusive - leaving it alone")
+            else:
+                print(f"  info: {path} snapshot read was inconclusive - leaving it alone")
+
+    _step("restore /slots/slot0.yaml and /slots/slot2.yaml", _restore_slot_files)
 
     # Path-aware: the bench may have been on a file context when we started.
-    restore_context(orig_slot, orig_path)
-    time.sleep(1.5)
+    def _restore_ctx():
+        restore_context(orig_slot, orig_path)
+        time.sleep(1.5)
+
+    _step("restore the active context", _restore_ctx)
 
     if snapshot is not None:
-        check(board_state_restore(snapshot), "board state restored to pre-test snapshot")
+        _step("restore the board state",
+              lambda: check(board_state_restore(snapshot),
+                            "board state restored to pre-test snapshot"))
+
+    # A teardown step that blew up is still a real event. Report it - unless the
+    # try block is already unwinding one, which is the actual failure and must
+    # not be replaced by a teardown hiccup.
+    if _teardown_fault is not None and sys.exc_info()[1] is None:
+        raise _teardown_fault
 
 finish("test_slot_files")
