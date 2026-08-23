@@ -115,7 +115,7 @@ from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
                 active_context, restore_context, fault_scan,
                 project_run_mode, project_run_path, purge_numbered_runs,
-                run_file_capture, run_file_restore)
+                run_file_capture, run_file_restore, reboot_board)
 
 SLOT_PATH = "/slots/slot3.yaml"
 PROJ_DIR = "/projects/555"
@@ -797,8 +797,11 @@ exec({preamble!r} + src)
     # (c) PROVISIONING (task 8). projectFiles[] + initializeProjects() install the
     # built-in projects from firmware constants; the launcher calls the unforced
     # variant as a self-heal before it lists. There is no serial command that
-    # reaches initializeProjects() and no reboot idiom anywhere in this suite, so
-    # the launcher IS the trigger: delete files, run the app, watch them come back.
+    # reaches initializeProjects() and nothing has rebooted the board at this
+    # point in the suite, so the launcher IS the trigger: delete files, run the
+    # app, watch them come back. (6(e) does reset once, LATER and for a
+    # different reason - see the note there; this phase's argument is already
+    # spent by then.)
     #
     # What each assertion is for:
     #   - two of 555's three files are deleted, main.py is left alone: the restored
@@ -1279,7 +1282,19 @@ for ln in fs_read("/slots/slot3.yaml").split("\\n"):
         # complaint; deep into a long HIL session the same heap refuses 4 KB. So
         # a MemoryError HERE is a statement about this suite's heap, not about
         # the script, and is reported as exactly that instead of as a failure.
-        out = jl_exec(f"""
+        #
+        # i2cscrn is EXEMPT BY NAME, deterministically: its script is ~12 KB
+        # since wave 3 and this route needs the whole source as one contiguous
+        # MicroPython string, which does not fit mid-suite. It is not skipped
+        # coverage - (v-b) below compiles AND RUNS it through the launcher's
+        # own runner, which lexes from a C pointer and is the path users take.
+        if proj == "i2cscrn":
+            print(f"  info: {pdir}/main.py is compiled and RUN by (v-b) below "
+                  f"through the launcher's runner - the whole-source REPL "
+                  f"allocation this step makes does not fit a script that size")
+            vals = {}
+        else:
+            out = jl_exec(f"""
 import gc
 gc.collect()
 try:
@@ -1294,8 +1309,10 @@ except MemoryError as e:
 src = None
 gc.collect()
 """, timeout=45)
-        vals = parse_kv(out)
-        if vals.get("nomem") == 1:
+            vals = parse_kv(out)
+        if proj == "i2cscrn":
+            pass
+        elif vals.get("nomem") == 1:
             print(f"  info: {pdir}/main.py device-compile skipped - this session's "
                   f"MicroPython heap is too fragmented to hold the source. The "
                   f"launcher's run path does not make this allocation; running the "
@@ -1305,103 +1322,190 @@ gc.collect()
                   f"{pdir}/main.py compiles under this MicroPython "
                   f"({vals.get('srclen')} bytes read through jfs, uncapped)")
 
-        # (v-b) i2cscrn ONLY: drive the tap-to-assign flow through its TYPED
-        # TWIN (wave 3, Kevin's bench note: "have users tap each signal and
-        # allow them to choose from a list of different oled drivers and sizes.
-        # And when I exit the app, it clears the data lines").
+        # (v-b) i2cscrn ONLY: drive the whole new flow through the REAL
+        # runner and the REAL stdin (wave 3, Kevin's bench note: "have users
+        # tap each signal and allow them to choose from a list of different
+        # oled drivers and sizes. And when I exit the app, it clears the data
+        # lines").
         #
         # Every probe gesture in that script has a typed equivalent at the same
-        # prompt - that is the control-surface rule, and it is also the only
-        # reason this is testable. `_i2cscrn = {"feed": ...}` is served by the
-        # SAME poll_line() the human path uses, so this walks the real prompts,
-        # the real parser and the real routing; there is no non-interactive
-        # branch to rot. NO PANEL IS NEEDED: the beacon scans, finds nothing,
-        # prints its heartbeat dot, and the feed's trailing `q` takes the exit
-        # path - which is the half of the flow worth asserting anyway.
+        # prompt - the control-surface rule - and that is what makes this
+        # testable at all. NO PANEL IS NEEDED: the beacon scans, finds nothing,
+        # and a typed `q` takes the exit path, which is the half worth
+        # asserting anyway.
         #
-        # The feed remaps SCL/SDA to rows 41/42 (proving the script re-routes
-        # rather than assuming rows 5-8) and picks driver 2. Row 5 -> GND is
+        # WHY A SCRATCH PROJECT AND NOT `exec(fs_read(...))` ON THE REPL:
+        # the REPL route needs the whole source as one contiguous MicroPython
+        # string and then compiles it out of the same heap - it MemoryErrors on
+        # a script this size (measured: 25 KB free, largest block ~8-10 KB).
+        # The launcher's runner lexes from a C pointer, which is both the path
+        # users actually take and the one that fits. /projects/hili2c is this
+        # suite's own fixture: a wiring with NO guide: section, so `z hili2c`
+        # runs the script immediately, plus a byte-exact on-device copy of the
+        # shipped i2cscrn main.py (hash-compared, so it cannot drift).
+        #
+        # The feed remaps SCL/SDA to rows 41/42 - proving the script re-routes
+        # rather than assuming rows 5-8 - and picks driver 2. Row 5 -> GND is
         # ARMED BY HAND first, so the run also proves the don't-touch-what-
-        # isn't-mine rule: the script reports it, does not count it, and leaves
-        # it behind when it tears its own routes down.
+        # isn't-mine rule: reported, not counted, and still there at the end.
         if proj == "i2cscrn":
-            out = jl_exec("""
-connect(5, "GND")
-print("armed=", 1 if is_connected(5, "GND") else 0)
-""", timeout=25)
-            check(parse_kv(out).get("armed") == 1,
-                  "i2cscrn: armed a pre-existing 5 -> GND route the script must not remove")
-
+            I2C_DIR = "/projects/hili2c"
+            # The 5 -> GND bridge is IN THE WIRING, not connected by hand:
+            # `z hili2c` loads the run file and that load clears the board, so
+            # anything armed beforehand is gone before the script starts. This
+            # way the route is live for exactly the right reason - it is part
+            # of the circuit the user already had - and the script has to
+            # notice it, not re-make it, and not take it away.
+            I2C_WIRING = ("version: 2\nsourceOfTruth: bridges\nmeta:\n"
+                          "  project: hili2c\n  title: \"HIL i2cscrn drive\"\n"
+                          "  variant: default\n"
+                          "  summary: \"no guide - runs the script directly\"\n"
+                          "  script: main.py\n"
+                          "bridges:\n  - {n1: 5, n2: GND}\n")
             out = jl_exec(f"""
-import gc
-gc.collect()
-_pre = set(globals().keys())
 try:
-    f = jfs.open({pdir + "/main.py"!r}, "r")
-    src = f.read(f.size())
-    f.close()
-    _i2cscrn = {{"feed": "5\\n6\\n41\\n42\\n2\\nq\\n"}}
-    exec(src)
-    print("ranok=", 1)
-except MemoryError:
-    print("nomem=", 1)
-src = None
-for _n in list(globals().keys()):
-    if _n not in _pre and _n not in ("_pre", "_n", "gc"):
-        try:
-            globals().pop(_n)
-        except Exception:
-            pass
-gc.collect()
+    jfs.mkdir({I2C_DIR!r})
+except Exception as e:
+    pass
+print("dir=", 1 if fs_exists({I2C_DIR!r}) else 0)
+print("w=", 1 if fs_write({I2C_DIR + "/wiring.yaml"!r}, {I2C_WIRING!r}) else 0)
+# Chunked copy: never a contiguous allocation the size of the script.
+_s = jfs.open({pdir + "/main.py"!r}, "r")
+_d = jfs.open({I2C_DIR + "/main.py"!r}, "w")
+_n = 0
+while True:
+    _c = _s.read(512)
+    if not _c:
+        break
+    jfs.write(_d, _c)
+    _n += len(_c)
+_s.close()
+_d.close()
+print("copied=", _n)
 """, timeout=60)
-            if parse_kv(out).get("nomem") == 1:
-                print("  info: i2cscrn main.py feed-drive skipped - this "
-                      "session's MicroPython heap could not hold the source. "
-                      "The launcher's run path does not make this allocation; "
-                      "driving the script by hand is a bench item.")
-            else:
-                for needle, what in (
-                        ("assignment: GND 5  VCC 6  SCL 41  SDA 42",
-                         "tap-to-assign took all four rows from the typed twin, "
-                         "including the two remapped off the default header"),
-                        ("driver: SSD1306 128x64",
-                         "the driver menu took '2' and resolved to SSD1306 128x64"),
-                        ("was already routed - left alone",
-                         "the pre-existing 5 -> GND route was reported and NOT "
-                         "re-made"),
-                        ("routed=3",
-                         "exactly 3 routes were made (VCC/SCL/SDA - GND was "
-                         "already there)"),
-                        ("waiting for the panel",
-                         "the wiring beacon ran (it scans before it will accept "
-                         "a quit, so this is a real scan with no panel present)"),
-                        ("unrouted=3",
-                         "the exit removed exactly the 3 routes it made"),
-                        ("bye",
-                         "the script reached its finally: and exited cleanly on "
-                         "the typed q")):
-                    check(needle in out, f"i2cscrn: {what} ({needle!r})")
+            vals = parse_kv(out)
+            check(vals.get("dir") == 1 and vals.get("w") == 1,
+                  f"i2cscrn: built the {I2C_DIR} drive fixture (no guide: section)")
 
-                # EXIT CLEARS THE DATA LINES - and the power routing with them.
-                out = jl_exec("""
+            # THE ONE REBOOT IN THIS SUITE, and it is here for a measured
+            # reason: MicroPython compiles the companion script on the device,
+            # and a ~11 KB source needs more heap than a long HIL session has
+            # left. Measured on this board - 39 KB free after a reset compiles
+            # it; ~25 KB mid-suite raises MemoryError inside execfile. A reset
+            # makes this phase deterministic instead of a coin flip on how
+            # fragmented the heap happens to be, and it costs ~10 s.
+            #
+            # SAFE HERE, and only here: phase 6(c)'s "the LAUNCHER is the only
+            # provisioning trigger" argument is already spent (it ran and
+            # passed above), the phases after this one are self-contained
+            # jl_exec/GuideDriver sequences, and phase 7 restores the context,
+            # slot 3 and the board state from host-side snapshots regardless.
+            check(reboot_board(),
+                  "i2cscrn: rebooted for a fresh MicroPython heap before the "
+                  "script drive (the compile needs it; see the note above)")
+            time.sleep(1.0)
+            src_h, _sl = device_hash(f"{pdir}/main.py")
+            cp_h, cp_l = device_hash(f"{I2C_DIR}/main.py")
+            check(cp_h == src_h,
+                  f"i2cscrn: the drive fixture is a BYTE-EXACT copy of the "
+                  f"shipped main.py ({cp_h}, {cp_l} bytes) - the drive below "
+                  f"cannot test a script that has drifted from the real one")
+
+            d = GuideDriver()
+            try:
+                # \r only: a trailing \n survives the command reader and
+                # would land on the script's first prompt as a bare Enter.
+                # (main.py drains its input before prompting for exactly this
+                # reason, but not sending it is the belt to that's braces.)
+                d.send(b"z hili2c\r")
+                # If the launcher cannot build the script buffer it now SAYS so
+                # (ProjectsApp.cpp runCompanionScript) instead of printing
+                # nothing - the wave-3 fix. Either way this expect names it.
+                d.expect(r"SCRIPT action=run",
+                         "i2cscrn: the launcher ran the companion script")
+                d.expect(r"Type to Screen",
+                         "i2cscrn: the script actually started (a companion "
+                         "script that is too big for the heap prints NOTHING - "
+                         "see runCompanionScript)")
+                m = d.expect(r"Where is the panel\?",
+                             "i2cscrn: tap-to-assign opened")
+                # ONE ANSWER AT A TIME, each waited for before the next.
+                # Not just tidiness: a whole burst pasted into a running
+                # companion script comes back mangled on this board
+                # (characters dropped and duplicated - see the report's
+                # concerns), while answer-then-wait is reliable. It is also
+                # what a human does, and it turns every step of the assignment
+                # into its own assertion.
+                #
+                # Guarded on the prompt actually appearing: bytes sent when no
+                # script is reading land on the single-char command handler
+                # instead (a stray `q` starts the DMX app).
+                for _sig, _row in (("GND", 5), ("VCC", 6),
+                                   ("SCL", 41), ("SDA", 42)):
+                    if m:
+                        d.send(("%d\r" % _row).encode())
+                        m = d.expect(r"%s = row %d \(typed\)" % (_sig, _row),
+                                     f"i2cscrn: {_sig} took row {_row} from the "
+                                     f"TYPED TWIN")
+                d.expect(r"assignment: GND 5\s+VCC 6\s+SCL 41\s+SDA 42",
+                         "i2cscrn: the assignment reads back what was typed - "
+                         "two of the four remapped off the default header")
+                m = d.expect(r"Panel type:", "i2cscrn: the driver menu opened")
+                if m:
+                    d.send(b"2\r")
+                d.expect(r"driver: SSD1306 128x64",
+                         "i2cscrn: the driver menu took '2' -> SSD1306 128x64")
+                d.expect(r"GND row 5 -> GND was already routed - left alone",
+                         "i2cscrn: the pre-existing route was reported, not re-made")
+                d.expect(r"routed=3",
+                         "i2cscrn: exactly 3 routes made (VCC/SCL/SDA)")
+                m = d.expect(r"waiting for the panel",
+                             "i2cscrn: the wiring beacon ran (it scans before "
+                             "it will accept a quit, so this is a real scan)")
+                if m:
+                    d.send(b"q\r\n")
+                d.expect(r"unrouted=3",
+                         "i2cscrn: the exit removed exactly the 3 it made")
+                d.expect(r"bye", "i2cscrn: the script's finally: ran")
+                d.expect(r"--- script finished ---",
+                         "i2cscrn: the launcher regained control")
+            finally:
+                d.close()
+                time.sleep(1.0)
+
+            # EXIT CLEARS THE DATA LINES - and the power route with them.
+            out = jl_exec("""
 print("scl=", 1 if is_connected(41, "RP_GPIO_8") else 0)
 print("sda=", 1 if is_connected(42, "RP_GPIO_7") else 0)
 print("vcc=", 1 if is_connected(6, "TOP_RAIL") else 0)
 print("gnd=", 1 if is_connected(5, "GND") else 0)
-""", timeout=25)
-                vals = parse_kv(out)
-                check(vals.get("scl") == 0 and vals.get("sda") == 0,
-                      f"i2cscrn: exit cleared the DATA lines - 41->RP_GPIO_8 and "
-                      f"42->RP_GPIO_7 are both gone (got {vals.get('scl')}, "
-                      f"{vals.get('sda')})")
-                check(vals.get("vcc") == 0,
-                      "i2cscrn: exit cleared the POWER route it made too "
-                      "(6 -> TOP_RAIL gone)")
-                check(vals.get("gnd") == 1,
-                      "i2cscrn: the route it did NOT make survived - 5 -> GND is "
-                      "still there (it only cleans up after itself)")
+""", timeout=30)
+            vals = parse_kv(out)
+            check(vals.get("scl") == 0 and vals.get("sda") == 0,
+                  f"i2cscrn: exit cleared the DATA lines - 41->RP_GPIO_8 and "
+                  f"42->RP_GPIO_7 are gone (got {vals.get('scl')}, {vals.get('sda')})")
+            check(vals.get("vcc") == 0,
+                  "i2cscrn: exit cleared the POWER route it made too (6 -> TOP_RAIL)")
+            check(vals.get("gnd") == 1,
+                  "i2cscrn: the route it did NOT make survived - the wiring's "
+                  "own 5 -> GND is still there (it only cleans up after itself)")
 
-            jl_exec('disconnect(5, "GND")', timeout=25)
+            out = jl_exec(f"""
+if fs_exists({I2C_DIR!r}):
+    for nm in jfs.listdir({I2C_DIR!r}):
+        try:
+            jfs.remove({I2C_DIR!r} + "/" + nm)
+        except Exception as e:
+            print("rmerr=", e)
+    try:
+        jfs.rmdir({I2C_DIR!r})
+    except Exception as e:
+        print("rmdirerr=", e)
+print("gone=", 0 if fs_exists({I2C_DIR!r}) else 1)
+""", timeout=40)
+            check(parse_kv(out).get("gone") == 1,
+                  f"i2cscrn: removed the {I2C_DIR} drive fixture")
+            leave_context_to_slot3()
 
         # (vi) the guide: section parses. Drive `z ... new` far enough to see
         # the first step, then quit - no part is confirmed, so nothing is

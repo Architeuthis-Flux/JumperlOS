@@ -885,19 +885,15 @@ static String resolveScriptPath(const RunContext& rc) {
 }
 
 static void runCompanionScript(const RunContext& rc, const String& scriptPath) {
-    String content;
     File f = safeFileOpen(scriptPath.c_str(), "r");
     if (!f) {
         Serial.println("  Failed to open " + scriptPath);
         return;
     }
-    content = f.readString();
+    size_t scriptBytes = f.size();
+    // Close it right here: MicroPython opens the same path itself below, and
+    // nothing in this function ever reads a byte through this handle.
     safeFileClose(f, false);
-
-    if (content.length() == 0) {
-        Serial.println("  Script is empty: " + scriptPath);
-        return;
-    }
 
     // Companion-script contract: the wiring is loaded and routed, the RUN FILE
     // is the active context, and `_jl_project` names where it all came from.
@@ -908,12 +904,46 @@ static void runCompanionScript(const RunContext& rc, const String& scriptPath) {
                       "\", \"variant\": \"" + pyStringSafe(rc.meta.variant) +
                       "\", \"wiring\": \"" + pyStringSafe(rc.wiringPath) +
                       "\", \"run\": \"" + pyStringSafe(rc.runPath) + "\"}\n";
-    content = preamble + content;
+
+    // THE SOURCE NEVER COMES INTO RAM. What we hand MicroPython is a ~250-byte
+    // command - the preamble, then `execfile("<path>")` - and MicroPython's
+    // lexer streams the script off the filesystem itself. Both statements are
+    // one exec, so `_jl_project` is in the same globals the script then reads,
+    // and executePythonFileContent's session bookkeeping still runs exactly
+    // once around the whole thing.
+    //
+    // The obvious spelling - `content = f.readString(); content = preamble +
+    // content;` - needed TWO full-size Strings alive at once on an Arduino
+    // heap that settles around 19 KB free here, so the peak was ~2x the
+    // script. Worse, it failed SILENTLY: Arduino's operator+ returns an
+    // invalidated String when the allocation fails, the assignment left
+    // `content` EMPTY, executePythonFileContent's `!*src` guard returned false
+    // without printing, and the terminal showed "Running ... " followed
+    // straight by "--- script finished ---". The emptiness check also sat
+    // BEFORE the concatenation, so nothing could catch it. Measured on the
+    // bench (wave 3): 4.5 KB ran, 6.4 KB ran, 6.6 KB was silent - and the
+    // shipped eeprom script is 6441 bytes. Fixing it to ONE reserved buffer
+    // was not enough either: a 12.5 KB reserve still failed mid-session with
+    // 25 KB free, because that heap has no contiguous block that size.
+    // Streaming is the only shape with no size ceiling at all.
+    if (scriptBytes == 0) {
+        Serial.println("  Script is empty: " + scriptPath);
+        return;
+    }
+    String content = preamble + "execfile(\"" + pyStringSafe(scriptPath) + "\")\n";
+    if (content.length() == 0) {
+        // Belt and braces: even this little String can fail, and silence is
+        // exactly the failure mode this whole block exists to kill.
+        Serial.println("  Out of memory launching " + scriptPath + " (" +
+                       String(rp2040.getFreeHeap() / 1024) +
+                       " KB heap free). Nothing was run.");
+        return;
+    }
 
     // The screen-clear / stream / encoder-settle dance from
     // runPythonScriptFromPath (Apps.cpp:198). Replicated rather than shared:
-    // that helper takes a PATH and reads the file itself, and what we have to
-    // run is generated CONTENT.
+    // that helper runs a bare path, and what we have to run is a path WITH the
+    // `_jl_project` preamble in front of it.
     Serial.print("\033[2J\033[H");
     Serial.flush();
     delay(30);
