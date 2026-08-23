@@ -2619,10 +2619,10 @@ static MP_DEFINE_CONST_FUN_OBJ_1( jl_switch_slot_obj, jl_switch_slot_func );
 //
 // The two forms mean different things now that projects run out of per-run
 // state files. The NAME form is "load project 555", which under the run-file
-// model means open /projects/555/555_<maxN>.yaml (or create 555_1.yaml from
-// the shipped wiring when there are no runs yet) - so a script can no longer
-// adopt the SHIPPED TEMPLATE as its auto-saving context and silently rewrite
-// it without guide:/meta:.
+// model means open /projects/555/555_run.yaml (or create it from the shipped
+// wiring when there is no run yet) - so a script can no longer adopt the
+// SHIPPED TEMPLATE as its auto-saving context and silently rewrite it without
+// guide:/meta:. ONE run file per project, reused.
 //
 // Anything containing '/' is still taken verbatim through the raw adopting
 // loader: that is the documented "load this exact file" door (a run file, a
@@ -4790,7 +4790,8 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "   switch_slot(slot)                - Switch to different slot (0-7)\n" );
         mp_printf( &mp_plat_print, "   CURRENT_SLOT                     - Get current slot number\n\n" );
         mp_printf( &mp_plat_print, "  Projects and parts (guided placement):\n" );
-        mp_printf( &mp_plat_print, "   load_project(\"555\")              - Load /projects/555/wiring.yaml (a '/' = literal path)\n" );
+        mp_printf( &mp_plat_print, "   load_project(\"555\")              - Begin/reopen a RUN of 555: /projects/555/555_run.yaml\n" );
+        mp_printf( &mp_plat_print, "        a NAME opens the project's one run file; anything with a '/' is a literal path\n" );
         mp_printf( &mp_plat_print, "   place_part(name, row, pins_json) - Place a part, expand its pins to bridges (0 = ok)\n" );
         mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value)\n" );
         mp_printf( &mp_plat_print, "        pins_json: {\"A\": {\"pin\": 1, \"connect\": \"GND\"}, \"B\": {\"pin\": 2, \"connect\": 7}}\n" );

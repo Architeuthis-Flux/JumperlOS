@@ -419,7 +419,31 @@ active context; that is the whole keep flow now.
 - [ ] Run a `main.py` from the Files-browser click menu, *after* a guided build
   has wired the board. This is the only path that exercises `File::readString()`
   on a ~5.7 KB script, which no HIL check can reach.
-- [ ] >>>for some readson the 555 always starts with 2 ADCs wired that arent necessary
+> \>\>\>for some readson the 555 always starts with 2 ADCs wired that arent necessary
+>
+> Fixed in wave 3. `scripts/projects/555/wiring.yaml` shipped `ADC0-37` and
+> `ADC1-7` in its `bridges:` section — the two taps `main.py` measures with —
+> and they appeared the moment the project opened. The wiring file now has
+> **no `bridges:` and no `nets:` section at all**, and `main.py` makes its own
+> taps at start-up and removes them on the way out (only the ones it actually
+> created, so a tap you wired yourself survives). The `nets:` entry that named
+> node 7 `TIMING` went with them: it could only ever attach because the ADC1
+> tap put node 7 in a net at load time.
+
+- [ ] **Open `555` and look at the board before you place anything.** Zero
+  wires: no ADC taps, no anything. `z 555 new` then `b` (bridge array) — or
+  `print(get_num_bridges())` on the REPL — should show only infrastructure,
+  nothing touching rows 1–60. This is the same shape `eeprom`/`nand00`/
+  `i2cscrn` already had; the 555 was the odd one out.
+- [ ] **Then run `main.py` and watch the taps appear and leave.** Finish the
+  build (or just `z 555 noscript` and run the script from Files), and check the
+  first line after the banner: `measuring: ADC0 on row 37 (OUT), ADC1 on row 7
+  (cap)`. Two new wires. Hold the clickwheel / Ctrl-C to exit → `bye`, and both
+  are **gone** again.
+- [ ] **The don't-touch-what-isn't-mine case.** `connect("ADC0", 37)` by hand
+  first, then run `main.py`: it prints `tap ADC0-37 was already there - leaving
+  it alone`, and after it exits your bridge is **still there** (only ADC1's tap
+  is removed).
 
 
 
@@ -685,6 +709,11 @@ Common shape: **Guides →** `<name>` (or `z <name> new`), walk the guide, run
 - [ ] **Do one oscillates run with all 8 GPIOs deliberately claimed** to see the
   tap fallback's honest `val=osc ok=1` + *"tap fallback: both levels seen;
   frequency not measured (no free GPIO)"*.
+- [ ] `oscillates` needs **no pre-wired ADC tap** and never did — it borrows a
+  free routable GPIO (or falls back to probe taps). Worth one glance now that
+  the wiring file no longer pre-bridges row 37: the step must still pass.
+- [ ] `main.py`'s taps: see §1.2's three 555-tap items. The frequency line
+  (`freq: 1.3? Hz   cap: 2.?? V`) only reads sensibly once they are up.
 
 
 

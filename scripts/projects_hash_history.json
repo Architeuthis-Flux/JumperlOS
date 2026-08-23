@@ -1,5 +1,6 @@
 {
   "555/README.md": [
+    "0x043F6084",
     "0x0F3158A4",
     "0x72FF45E0",
     "0x561E244A",
@@ -9,15 +10,18 @@
     "0x4E203A59"
   ],
   "555/main.py": [
+    "0xFD94A80B",
     "0x89075267",
     "0xD488958C"
   ],
   "555/wiring.yaml": [
+    "0x8E29492C",
     "0xEEC03F56",
     "0x2E55BF41",
     "0xC8CBC62E"
   ],
   "eeprom/README.md": [
+    "0xF79BAFCE",
     "0x60313AF8",
     "0x8CCB4F44",
     "0x69A73992",
@@ -54,6 +58,7 @@
     "0xBEE331D0"
   ],
   "nand00/README.md": [
+    "0x3D3A125D",
     "0x1B3E29C7",
     "0xA7C19863",
     "0x94003C75",

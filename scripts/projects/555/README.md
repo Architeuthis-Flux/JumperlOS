@@ -15,8 +15,15 @@ parts into the breadboard.
 | LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 |
 | R3   | 330   | axial   | 16 - 46, straddling the middle gap |
 
-Top rail is set to 5 V. ADC0 watches OUT (row 37), ADC1 watches the timing
-cap (row 7).
+Top rail is set to 5 V. Nothing else is pre-wired: opening the project leaves
+the breadboard completely bare, and every connection appears as you confirm
+each part in the guide.
+
+`main.py` needs two measurement taps - **ADC0 on row 37 (OUT)** and **ADC1 on
+row 7 (the timing cap)** - so *it* makes them when it starts and removes them
+when it exits. They used to ship in the wiring file, which put two wires on the
+board before you had placed a single part. If you had already tapped one of
+those rows yourself, the script notices and leaves your connection alone.
 
 ## What it does
 
@@ -39,25 +46,28 @@ clickwheel to stop it.
 
 ## Running it
 
-- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+- **Clickwheel:** `Guides` - it is a top-level menu row, before `Apps` - then
   **555**, and walk the guided build. That is what wires the parts up. Run
   `main.py` when it offers at the end.
 - **Headless:** `z 555` on the terminal drives the same flow. Add `new` to
-  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
-  one, `noscript` to stop at the wiring.
+  start over from the wiring, `load` to reopen the run you already have,
+  `noscript` to stop at the wiring.
 
 Launching a project does not borrow a slot any more. It opens
-`/projects/555/555_<N>.yaml` - a **run file** - and makes it your active
-circuit, exactly as if you had clicked a YAML in the Files browser. Your build
-is saved into it at every step, the board comes back to it after a power cycle,
-and the next launch offers to reload it or to start run N+1 (the old one stays
-on disk). The shipped `wiring.yaml` is a read-only template and is never
-written to.
+`/projects/555/555_run.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. There is
+**one run file per project** and it is reused: your build is saved into it at
+every step, the board comes back to it after a power cycle, and the next launch
+reopens it silently - unless you quit a guided build part way through, in which
+case you are asked once whether to resume or to start over. To keep a run,
+`slots` > `save to` while it is active. The shipped `wiring.yaml` is a
+read-only template and is never written to.
 
 Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
 route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
-part still marked `placed: false`, so a run you have not walked through yet has
-nothing on the breadboard except whatever its `bridges:` section already held.
+part still marked `placed: false`. This project has no `bridges:` section at
+all, so a run you have not walked through yet has **nothing** on the
+breadboard.
 
 ## Moving parts around
 

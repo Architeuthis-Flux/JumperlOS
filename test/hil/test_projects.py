@@ -8,8 +8,13 @@ copied into /slots/slot3.yaml and loaded with '<3'.
 
 Asserts:
   - the three project files land under /projects/555/ byte-identical
-  - the wiring loads: ADC0-37 and ADC1-7 bridges exist, topRail is 5 V
-  - the custom `nets:` name resolves - the net holding node 7 is "TIMING"
+  - the wiring loads with topRail 5 V and NOTHING on the breadboard: since
+    wave 3 the 555 has no `bridges:` and no `nets:` section at all (its two
+    pre-wired ADC taps, ADC0-37 and ADC1-7, moved into main.py, which makes
+    them at start-up and removes them on exit), so a bare load must leave
+    zero non-infra bridges touching rows 1-60 and no net over any row
+  - the custom `nets:` NAME path moved with them: phase 6(a)'s hiltest
+    fixture declares one over its own 20-21 bridge and asserts it resolves
     (the net NUMBER is discovered, not hardcoded: it is topology-dependent)
   - parts are in the state but NOT expanded (no `placed:` in the file ->
     default false): rows 35/5/10/13 have no part bridges, while a wholesale
@@ -433,8 +438,69 @@ print("projdir=", 1 if fs_exists({PROJ_DIR!r}) else 0)
     check("SLOT_CHANGED:3" in resp, "'<3' loaded the 555 wiring (SLOT_CHANGED:3 seen)")
     time.sleep(2.0)  # let the load + refresh + reconcile settle
 
+    # ------------------------------------------------------------------
+    # INFRA_ROWS - computed ONCE here, used by every "a fresh load leaves the
+    # breadboard unconnected" assertion in this file (phase 3's 555 and phase
+    # 6(e)'s three).
+    #
+    # Those assertions count bridges touching rows 1-60. Infrastructure lives off-board on a
+    # DEFAULT config, but not on every config: with top_oled.lock_connection
+    # = 1 the oled_i2c infra path bridges sda_row<->gpio_sda and
+    # scl_row<->gpio_scl (InfraPaths.cpp), and those rows are config values.
+    # They default to NANO_D2/NANO_D3 = 72/73 (off the breadboard), but a
+    # bench running the OLED on breadboard holes puts them in 1-60, where
+    # they would false-fail a check that has nothing to do with the OLED.
+    # So read the live config once and exclude exactly those two rows.
+    # Streamed in 512-byte chunks and parsed on the DEVICE (test_config.py's
+    # jfs.read idiom): /config.txt is several KB and this must not depend on a
+    # contiguous MicroPython allocation deep into a long session. The last
+    # chunk gets a synthetic "\n" so a file with no trailing newline still
+    # flushes its final line through the same splitter.
+    _cfg = jl_exec("""
+f = jfs.open("/config.txt", "r")
+sec = ""
+buf = ""
+done = False
+while not done:
+    chunk = jfs.read(f, 512)
+    if not chunk:
+        buf += "\\n"
+        done = True
+    else:
+        buf += chunk
+    while "\\n" in buf:
+        ln, buf = buf.split("\\n", 1)
+        s = ln.strip()
+        if s.startswith("["):
+            sec = s
+        elif sec == "[top_oled]" and "=" in s:
+            k, v = s.split("=", 1)
+            k = k.strip()
+            if k in ("lock_connection", "sda_row", "scl_row"):
+                print("OLED|%s|%s" % (k, v.strip().rstrip(";").strip()))
+jfs.close(f)
+""", timeout=30)
+    _oled = {}
+    for _line in _cfg.splitlines():
+        _m = re.match(r"\s*OLED\|(\w+)\|(-?\d+)\s*$", _line)
+        if _m:
+            _oled[_m.group(1)] = int(_m.group(2))
+    if _oled.get("lock_connection") == 1:
+        INFRA_ROWS = tuple(sorted({r for r in (_oled.get("sda_row"), _oled.get("scl_row"))
+                                   if r is not None and 1 <= r <= 60}))
+    else:
+        INFRA_ROWS = ()
+    if INFRA_ROWS:
+        print(f"  info: top_oled.lock_connection=1 with breadboard rows "
+              f"{INFRA_ROWS} - excluding the oled_i2c infra bridges from the "
+              f"row-bridge count")
+    else:
+        print(f"  info: no OLED infra bridges expected on rows 1-60 "
+              f"(lock_connection={_oled.get('lock_connection')}, "
+              f"sda_row={_oled.get('sda_row')}, scl_row={_oled.get('scl_row')})")
+
     # --- 3. Bridges, rail, and the un-expanded parts ---------------------------
-    out = jl_exec("""
+    out = jl_exec(f"""
 print("adc0=", 1 if is_connected("ADC0", 37) else 0)
 print("adc1=", 1 if is_connected("ADC1", 7) else 0)
 # parts are NOT placed (no `placed:` key -> default false), so none of the
@@ -444,24 +510,64 @@ print("u1vcc=", 1 if is_connected(5, "TOP_RAIL") else 0)
 print("r1a=", 1 if is_connected(10, "TOP_RAIL") else 0)
 print("r2b=", 1 if is_connected(43, 7) else 0)
 print("c1m=", 1 if is_connected(19, "GND") else 0)
-print("nbridges=", get_num_bridges())
+n = get_num_bridges()
+print("nbridges=", n)
+rowb = 0
+infra_rows = {INFRA_ROWS!r}
+for i in range(n):
+    b = get_bridge(i)
+    if (1 <= b[0] <= 60) or (1 <= b[1] <= 60):
+        print("ROWBRIDGE|%s" % str(b))
+        if b[0] in infra_rows or b[1] in infra_rows:
+            continue
+        rowb += 1
+print("rowbridges=", rowb)
 """)
     vals = parse_kv(out)
-    check(vals.get("adc0") == 1, "bridge ADC0 <-> 37 exists after load")
-    check(vals.get("adc1") == 1, "bridge ADC1 <-> 7 exists after load")
+    # THE TAPS ARE GONE (wave 3, Kevin's bench note: "for some reason the 555
+    # always starts with 2 ADCs wired that aren't necessary"). wiring.yaml used
+    # to ship ADC0-37 and ADC1-7 in its `bridges:` section; main.py makes them
+    # itself now and removes them on the way out. Asserted as ABSENT, and the
+    # row-bridge count below is what makes the absence mean something: a needle
+    # that only says "not connected" would keep passing if the whole load
+    # silently did nothing.
+    check(vals.get("adc0") == 0,
+          "NO pre-wired ADC0 <-> 37 tap after load (main.py owns that tap now)")
+    check(vals.get("adc1") == 0,
+          "NO pre-wired ADC1 <-> 7 tap after load (main.py owns that tap now)")
+    # The 555 is now in the same class as the other three shipped projects
+    # (phase 6(e) asserts this shape for i2cscrn / nand00 / eeprom): its whole
+    # circuit lives in parts:, it has no bridges: section at all, so a bare
+    # load must leave every breadboard row untouched. Counted as "non-infra
+    # bridges touching rows 1-60", not as get_num_bridges() == 0 - see the
+    # INFRA_ROWS block above phase 3 for why a bare zero fails on a healthy
+    # board.
+    check(vals.get("rowbridges") == 0,
+          f"555: a fresh load leaves the breadboard unconnected - 0 non-infra "
+          f"bridges touch rows 1-60 (total bridges {vals.get('nbridges')}; "
+          f"excluded infra rows {INFRA_ROWS})")
     check(vals.get("u1gnd") == 0, "part not expanded: U1 GND (row 35) has no GND bridge")
     check(vals.get("u1vcc") == 0, "part not expanded: U1 VCC (row 5) has no TOP_RAIL bridge")
     check(vals.get("r1a") == 0, "part not expanded: R1 A (row 10, axial2) has no TOP_RAIL bridge")
     check(vals.get("r2b") == 0, "part not expanded: R2 B (row 43, axial2 row 13 + 30) has no 7 bridge")
     check(vals.get("c1m") == 0, "part not expanded: C1 MINUS (row 19) has no GND bridge")
 
-    # --- 4. The custom nets: name --------------------------------------------
-    # Net numbers are topology-dependent (1-5 are the pre-created special nets:
-    # GND / Top Rail / Bottom Rail / DAC0 / DAC1), so DISCOVER the net holding
-    # node 7 (the RC timing junction - THR/TRIG - now that wave 2 re-anchored
-    # U1 to the bottom half) rather than hardcoding it - and print it, because
-    # wiring.yaml's `nets:` entry has to name that number for deserializeNets
-    # to attach.
+    # --- 4. The net table after a parts-only load -----------------------------
+    # This phase used to assert the custom `nets:` NAME: wiring.yaml declared
+    # {num: 7, name: "TIMING"} and the net holding node 7 came back named
+    # TIMING. That only ever worked because the ADC1-7 tap put node 7 in a net
+    # AT LOAD TIME - the `nets:` entry went out with the taps in wave 3, since
+    # a name that can never attach is worse than no name.
+    #
+    # So the assertion flips to the other side of the same coin: a parts-only
+    # load must create NO net over any breadboard row. That is the net-table
+    # view of phase 3's rowbridges == 0, and unlike the old needle it cannot go
+    # vacuous - a load that silently did nothing fails phase 5's part checks.
+    #
+    # deserializeNets' name-attach path is NOT lost: phase 6(a)'s hiltest
+    # fixture - this suite's own scratch project, so no shipped file has to
+    # carry a bridge for the test's benefit - declares a `nets:` name over its
+    # 20-21 bridge and asserts it resolves.
     out = jl_exec("""
 for i in range(1, 40):
     nodes = get_net_nodes(i)
@@ -477,16 +583,16 @@ for i in range(1, 40):
     for num in sorted(nets):
         print(f"  info: net {num}: {nets[num][0]!r} nodes {nets[num][1]}")
 
-    net7 = None
+    row_nets = []
     for num, (name, nodes) in nets.items():
         toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
-        if "7" in toks:
-            net7 = (num, name)
-    check(net7 is not None, "a net containing node 7 exists")
-    if net7:
-        check(net7[1] == "TIMING",
-              f"net holding node 7 resolves to the nets: name TIMING (net {net7[0]}, "
-              f"name {net7[1]!r}; wiring.yaml declares num: 7)")
+        rows = [t for t in toks if t.isdigit() and 1 <= int(t) <= 60
+                and int(t) not in INFRA_ROWS]
+        if rows:
+            row_nets.append((num, name, rows))
+    check(not row_nets,
+          f"a parts-only load put no breadboard row in any net "
+          f"(offending nets: {row_nets})")
     # The pre-created special nets (1=GND 2=Top Rail 3=Bottom Rail 4=DAC0 5=DAC1)
     # must NOT have been renamed - naming net 1 is exactly the trap the reference
     # YAML's original `num: 1` fell into.
@@ -523,7 +629,11 @@ for i in range(1, 40):
     # The inline one-line pins form (R1/R2/C1/LED1/R3 in wiring.yaml) parsed:
     check("B: {pin: 2, connect: 6, class: signal}" in rewritten,
           "inline `pins: {A: {...}, B: {...}}` form parsed (R1 B -> DIS node 6)")
-    check('name: "TIMING"' in rewritten, "the TIMING net name survived the rewrite")
+    # Was: `name: "TIMING"` survived the rewrite. wiring.yaml no longer declares
+    # a nets: entry (it went out with the ADC taps - phase 4), so the needle is
+    # inverted: the dropped name must not come back from anywhere.
+    check('name: "TIMING"' not in rewritten,
+          "the dropped TIMING net name did not reappear in the rewrite")
     check("topRail: 5.00" in rewritten, "power: topRail: 5.0 parsed and round-tripped")
     # Documented as-built contract: meta:/guide: are swallowed, never re-emitted.
     check("meta:" not in rewritten and "guide:" not in rewritten,
@@ -562,6 +672,8 @@ meta:
   script: main.py
 bridges:
   - {n1: 20, n2: 21}
+nets:
+  - {num: 6, name: "HILNET", color: 0x00ff88, nodes: [20, 21], user: true}
 """
     HIL_MAIN = """# HIL marker script - see test/hil/test_projects.py phase 6.
 _jl_project = globals().get("_jl_project", {})
@@ -598,15 +710,56 @@ print("w2=", 1 if fs_write({HIL_DIR + "/main.py"!r}, {HIL_MAIN!r}) else 0)
     # A wiring.yaml whose FIRST section is meta: is exactly the case the
     # launcher hands the slot parser, so this also proves meta: doesn't derail
     # the parse.
+    # ARM the staleness needle first. This used to read
+    # `is_connected("ADC1", 7)` - one of the 555's pre-wired ADC taps - and
+    # assert it was gone after the hiltest load. Wave 3 removed those taps, so
+    # that needle would now pass on an empty board for the wrong reason. A
+    # scratch 41-42 bridge, asserted PRESENT before the load and ABSENT after,
+    # cannot go vacuous.
+    out = jl_exec("""
+connect(41, 42)
+print("armed=", 1 if is_connected(41, 42) else 0)
+""", timeout=25)
+    check(parse_kv(out).get("armed") == 1,
+          "armed the staleness needle: a scratch 41-42 bridge on the pre-load context")
+
     out = jl_exec("""
 print("loaded=", 1 if load_project("hiltest") else 0)
 print("br=", 1 if is_connected(20, 21) else 0)
-print("stale555=", 1 if is_connected("ADC1", 7) else 0)
+print("stale=", 1 if is_connected(41, 42) else 0)
+for i in range(1, 40):
+    nodes = get_net_nodes(i)
+    if not nodes:
+        continue
+    print("NET|%d|%s|%s" % (i, str(get_net_name(i)), str(nodes)))
 """, timeout=25)
     vals = parse_kv(out)
     check(vals.get("loaded") == 1, "load_project('hiltest') began a run of the project")
     check(vals.get("br") == 1, "hiltest wiring's bridge 20-21 is live (meta: parsed past)")
-    check(vals.get("stale555") == 0, "the previous wiring's bridges are gone (fresh state)")
+    check(vals.get("stale") == 0,
+          "the pre-load context's 41-42 bridge is gone (fresh state, not a merge)")
+
+    # deserializeNets' NAME-ATTACH path, moved here from phase 4 when the 555
+    # stopped shipping bridges to hang a net on. The fixture declares
+    # {num: 6, name: "HILNET"} and the number is topology-dependent, so
+    # DISCOVER the net holding node 20 rather than trusting the declaration.
+    hnets = {}
+    for line in out.splitlines():
+        m = re.match(r"\s*NET\|(\d+)\|(.*)\|(.*?)\s*$", line)
+        if m:
+            hnets[int(m.group(1))] = (m.group(2).strip(), m.group(3).strip())
+    for num in sorted(hnets):
+        print(f"  info: net {num}: {hnets[num][0]!r} nodes {hnets[num][1]}")
+    net20 = None
+    for num, (name, nodes) in hnets.items():
+        toks = [t.strip() for t in nodes.replace("[", "").replace("]", "").split(",")]
+        if "20" in toks:
+            net20 = (num, name)
+    check(net20 is not None, "a net containing node 20 exists after the hiltest load")
+    if net20:
+        check(net20[1] == "HILNET",
+              f"the fixture's `nets:` name attached: net holding node 20 is "
+              f"HILNET (net {net20[0]}, name {net20[1]!r}; the file declares num: 6)")
 
     lp_slot, lp_path = active_context(1.5)
     RUN_NAME_RE = (r"^" + re.escape(HIL_DIR) + r"/hiltest_run\.yaml$"
@@ -977,62 +1130,9 @@ print("missing_ms=", time.ticks_diff(t1, t0))
         except SyntaxError as e:
             check(False, f"scripts/projects/{_p}/main.py: {e}")
 
-    # The "a fresh load leaves the breadboard unconnected" assertion below
-    # counts bridges touching rows 1-60. Infrastructure lives off-board on a
-    # DEFAULT config, but not on every config: with top_oled.lock_connection
-    # = 1 the oled_i2c infra path bridges sda_row<->gpio_sda and
-    # scl_row<->gpio_scl (InfraPaths.cpp), and those rows are config values.
-    # They default to NANO_D2/NANO_D3 = 72/73 (off the breadboard), but a
-    # bench running the OLED on breadboard holes puts them in 1-60, where
-    # they would false-fail a check that has nothing to do with the OLED.
-    # So read the live config once and exclude exactly those two rows.
-    # Streamed in 512-byte chunks and parsed on the DEVICE (test_config.py's
-    # jfs.read idiom): /config.txt is several KB and this must not depend on a
-    # contiguous MicroPython allocation deep into a long session. The last
-    # chunk gets a synthetic "\n" so a file with no trailing newline still
-    # flushes its final line through the same splitter.
-    _cfg = jl_exec("""
-f = jfs.open("/config.txt", "r")
-sec = ""
-buf = ""
-done = False
-while not done:
-    chunk = jfs.read(f, 512)
-    if not chunk:
-        buf += "\\n"
-        done = True
-    else:
-        buf += chunk
-    while "\\n" in buf:
-        ln, buf = buf.split("\\n", 1)
-        s = ln.strip()
-        if s.startswith("["):
-            sec = s
-        elif sec == "[top_oled]" and "=" in s:
-            k, v = s.split("=", 1)
-            k = k.strip()
-            if k in ("lock_connection", "sda_row", "scl_row"):
-                print("OLED|%s|%s" % (k, v.strip().rstrip(";").strip()))
-jfs.close(f)
-""", timeout=30)
-    _oled = {}
-    for _line in _cfg.splitlines():
-        _m = re.match(r"\s*OLED\|(\w+)\|(-?\d+)\s*$", _line)
-        if _m:
-            _oled[_m.group(1)] = int(_m.group(2))
-    if _oled.get("lock_connection") == 1:
-        INFRA_ROWS = tuple(sorted({r for r in (_oled.get("sda_row"), _oled.get("scl_row"))
-                                   if r is not None and 1 <= r <= 60}))
-    else:
-        INFRA_ROWS = ()
-    if INFRA_ROWS:
-        print(f"  info: top_oled.lock_connection=1 with breadboard rows "
-              f"{INFRA_ROWS} - excluding the oled_i2c infra bridges from the "
-              f"row-bridge count")
-    else:
-        print(f"  info: no OLED infra bridges expected on rows 1-60 "
-              f"(lock_connection={_oled.get('lock_connection')}, "
-              f"sda_row={_oled.get('sda_row')}, scl_row={_oled.get('scl_row')})")
+    # INFRA_ROWS (the OLED's breadboard-row infra bridges, if the bench has
+    # any) is computed once before phase 3 and reused here - the row-bridge
+    # count below and the 555's in phase 3 exclude exactly the same rows.
 
     for proj, want_steps, want_parts in TASK9_PROJECTS:
         print(f"  --- 6(e) {proj} ---")

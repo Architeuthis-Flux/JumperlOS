@@ -5645,9 +5645,11 @@ def load_project(name_or_path: str) -> bool:
     THE TWO FORMS MEAN DIFFERENT THINGS.
 
     A NAME ("555") begins or re-opens a RUN of that project: it opens
-    /projects/555/555_<highest N>.yaml, or creates 555_1.yaml as a copy of the
-    project's wiring when there are no runs yet, and makes it the active
-    context. Load only - the guide and the companion script are `z`'s job.
+    /projects/555/555_run.yaml, or creates it as a copy of the project's wiring
+    when there is no run yet, and makes it the active context. There is ONE run
+    file per project and it is reused - a later `new` overwrites it rather than
+    piling up numbered files. Load only - the guide and the companion script
+    are `z`'s job.
     This is deliberately NOT the shipped /projects/555/wiring.yaml: that file
     is a read-only TEMPLATE, and adopting it as an auto-saving context is what
     used to rewrite projects without their guide:/meta: sections.
@@ -5667,9 +5669,9 @@ def load_project(name_or_path: str) -> bool:
         True on success, False otherwise (the reason is printed)
 
     Example:
-        load_project("555")                       # run file, active context
-        load_project("/projects/555/555_2.yaml")  # that exact run
-        load_project("/slots/slot3.yaml")         # any slot YAML
+        load_project("555")                         # run file, active context
+        load_project("/projects/555/555_run.yaml")  # that file, literally
+        load_project("/slots/slot3.yaml")           # any slot YAML
     """
     ...
 
@@ -6802,8 +6804,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[11] = { 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 11;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[12] = { 0x3AC5793C, 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 12;
 #endif
 
 //==============================================================================

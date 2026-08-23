@@ -55,8 +55,15 @@ parts into the breadboard.
 | LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 |
 | R3   | 330   | axial   | 16 - 46, straddling the middle gap |
 
-Top rail is set to 5 V. ADC0 watches OUT (row 37), ADC1 watches the timing
-cap (row 7).
+Top rail is set to 5 V. Nothing else is pre-wired: opening the project leaves
+the breadboard completely bare, and every connection appears as you confirm
+each part in the guide.
+
+`main.py` needs two measurement taps - **ADC0 on row 37 (OUT)** and **ADC1 on
+row 7 (the timing cap)** - so *it* makes them when it starts and removes them
+when it exits. They used to ship in the wiring file, which put two wires on the
+board before you had placed a single part. If you had already tapped one of
+those rows yourself, the script notices and leaves your connection alone.
 
 ## What it does
 
@@ -79,25 +86,28 @@ clickwheel to stop it.
 
 ## Running it
 
-- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+- **Clickwheel:** `Guides` - it is a top-level menu row, before `Apps` - then
   **555**, and walk the guided build. That is what wires the parts up. Run
   `main.py` when it offers at the end.
 - **Headless:** `z 555` on the terminal drives the same flow. Add `new` to
-  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
-  one, `noscript` to stop at the wiring.
+  start over from the wiring, `load` to reopen the run you already have,
+  `noscript` to stop at the wiring.
 
 Launching a project does not borrow a slot any more. It opens
-`/projects/555/555_<N>.yaml` - a **run file** - and makes it your active
-circuit, exactly as if you had clicked a YAML in the Files browser. Your build
-is saved into it at every step, the board comes back to it after a power cycle,
-and the next launch offers to reload it or to start run N+1 (the old one stays
-on disk). The shipped `wiring.yaml` is a read-only template and is never
-written to.
+`/projects/555/555_run.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. There is
+**one run file per project** and it is reused: your build is saved into it at
+every step, the board comes back to it after a power cycle, and the next launch
+reopens it silently - unless you quit a guided build part way through, in which
+case you are asked once whether to resume or to start over. To keep a run,
+`slots` > `save to` while it is active. The shipped `wiring.yaml` is a
+read-only template and is never written to.
 
 Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
 route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
-part still marked `placed: false`, so a run you have not walked through yet has
-nothing on the breadboard except whatever its `bridges:` section already held.
+part still marked `placed: false`. This project has no `bridges:` section at
+all, so a run you have not walked through yet has **nothing** on the
+breadboard.
 
 ## Moving parts around
 
@@ -141,14 +151,23 @@ you to the first thing you have not built yet.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[7] = { 0x0F3158A4, 0x72FF45E0, 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 7;
+const uint32_t PROJECT_555_README_MD_HASHES[8] = { 0x043F6084, 0x0F3158A4, 0x72FF45E0, 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 8;
 
-const char* PROJECT_555_MAIN_PY = R"("""555 LED Flasher - companion script for /projects/555/wiring.yaml
+const char* PROJECT_555_MAIN_PY = R"===("""555 LED Flasher - companion script for /projects/555/wiring.yaml
 
-Watches the 555's OUT pin (bridged to ADC0 by the wiring file), counts the
-rising edges past a 2.5 V threshold, and reports the blink rate every 3
-seconds along with the timing cap's voltage (ADC1 -> node 7).
+Watches the 555's OUT pin, counts the rising edges past a 2.5 V threshold, and
+reports the blink rate every 3 seconds along with the timing cap's voltage.
+
+THE TAPS ARE THIS SCRIPT'S, NOT THE PROJECT'S. wiring.yaml used to ship
+ADC0-37 and ADC1-7 in its `bridges:` section, so opening the project put two
+wires on the board that the circuit does not need and the user never asked
+for. They belong to the measurement, not to the 555, so they are made here at
+start-up and taken back down on the way out - and only the ones this run
+actually created, so a tap you wired yourself survives.
+
+  ADC0 -> row 37   the 555's OUT pin (U1 pin 3, dip8 anchored at row 35)
+  ADC1 -> row 7    the RC timing junction - THR/TRIG and C1's + leg
 
 Runs standalone from the Files browser too - the launcher injects
 _jl_project, but nothing here depends on it.
@@ -162,11 +181,53 @@ _jl_project = globals().get("_jl_project", {})
 THRESHOLD = 2.5     # volts - the 555's OUT swings rail to rail
 REPORT_MS = 3000    # print a line this often
 
+OUT_ROW = 37        # U1 pin 3
+CAP_ROW = 7         # THR / TRIG / C1+
+
+# (node, row) pairs this script may need to bridge for its own measurement.
+# The nodes are named as STRINGS on purpose: connect/disconnect/is_connected
+# all take a NodeRef, and the string form works from a plain Files-browser run
+# where the module's bare ADC0/ADC1 constants may not be in scope.
+TAPS = (("ADC0", OUT_ROW), ("ADC1", CAP_ROW))
+
+# Filled in below with only the taps WE made, so the teardown cannot remove a
+# connection that was already on the board when we got here.
+made = []
+
+
+def taps_up():
+    """Bridge ADC0/ADC1 to the rows we measure. Idempotent and non-destructive."""
+    for node, row in TAPS:
+        try:
+            if is_connected(node, row):
+                print("tap %s-%d was already there - leaving it alone"
+                      % (str(node), row))
+                continue
+            connect(node, row)
+            made.append((node, row))
+        except Exception as e:
+            print("could not tap %s-%d: %s" % (str(node), row, str(e)))
+
+
+def taps_down():
+    """Remove exactly the taps taps_up() made. Safe to call twice."""
+    while made:
+        node, row = made.pop()
+        try:
+            disconnect(node, row)
+        except Exception as e:
+            print("could not un-tap %s-%d: %s" % (str(node), row, str(e)))
+
+
 print("555 astable running...")
 print("Hold the clickwheel to exit.")
 if _jl_project:
     print("project: " + str(_jl_project.get("dir", "555")) +
           "  variant: " + str(_jl_project.get("variant", "default")))
+
+taps_up()
+print("measuring: ADC0 on row %d (OUT), ADC1 on row %d (cap)"
+      % (OUT_ROW, CAP_ROW))
 
 try:
     oled_connect()
@@ -202,14 +263,19 @@ try:
         time.sleep(0.002)   # ~500 Hz sampling: plenty for a ~1.4 Hz blink
 
 except KeyboardInterrupt:
+    pass
+finally:
+    # finally, not just the except arm: a break, an unexpected exception and a
+    # clean fall-through all have to leave the board the way we found it.
+    taps_down()
     try:
         oled_clear()
     except Exception:
         pass
     print("bye")
-)";
-const uint32_t PROJECT_555_MAIN_PY_HASHES[2] = { 0x89075267, 0xD488958C };
-const int PROJECT_555_MAIN_PY_HASH_COUNT = 2;
+)===";
+const uint32_t PROJECT_555_MAIN_PY_HASHES[3] = { 0xFD94A80B, 0x89075267, 0xD488958C };
+const int PROJECT_555_MAIN_PY_HASH_COUNT = 3;
 
 const char* PROJECT_555_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -276,16 +342,19 @@ guide:
     - {do: place, part: R3, check: continuity, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
     - {do: verify, target: 37, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
-bridges:
-  - {n1: ADC0, n2: 37}
-  - {n1: ADC1, n2: 7}
-nets:
-  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [7], user: true}
+# NO bridges: and no nets: on purpose. Opening this project must leave the
+# breadboard completely unconnected - every connection here belongs to a part
+# and waits for the guide to commit it. The two ADC taps that used to live here
+# (ADC0-37 on OUT, ADC1-7 on the timing cap) showed up as two wires nobody
+# asked for the moment the project opened; main.py makes them itself now, and
+# takes them back down when it exits. The `nets:` entry that named node 7
+# "TIMING" went with them - it could only ever attach because the ADC1 tap put
+# node 7 in a net at load time.
 power:
   topRail: 5.0
 )===";
-const uint32_t PROJECT_555_WIRING_YAML_HASHES[3] = { 0xEEC03F56, 0x2E55BF41, 0xC8CBC62E };
-const int PROJECT_555_WIRING_YAML_HASH_COUNT = 3;
+const uint32_t PROJECT_555_WIRING_YAML_HASHES[4] = { 0x8E29492C, 0xEEC03F56, 0x2E55BF41, 0xC8CBC62E };
+const int PROJECT_555_WIRING_YAML_HASH_COUNT = 4;
 
 #endif // INCLUDE_PROJECT_555
 
@@ -375,25 +444,28 @@ of all offers the write test, which defaults to **no**.
 
 ## Running it
 
-- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+- **Clickwheel:** `Guides` - it is a top-level menu row, before `Apps` - then
   **eeprom**, and walk the guided build. That is what wires the parts up. Run
   `main.py` when it offers at the end.
 - **Headless:** `z eeprom` on the terminal drives the same flow. Add `new` to
-  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
-  one, `noscript` to stop at the wiring.
+  start over from the wiring, `load` to reopen the run you already have,
+  `noscript` to stop at the wiring.
 
 Launching a project does not borrow a slot any more. It opens
-`/projects/eeprom/eeprom_<N>.yaml` - a **run file** - and makes it your active
-circuit, exactly as if you had clicked a YAML in the Files browser. Your build
-is saved into it at every step, the board comes back to it after a power cycle,
-and the next launch offers to reload it or to start run N+1 (the old one stays
-on disk). The shipped `wiring.yaml` is a read-only template and is never
-written to.
+`/projects/eeprom/eeprom_run.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. There is
+**one run file per project** and it is reused: your build is saved into it at
+every step, the board comes back to it after a power cycle, and the next launch
+reopens it silently - unless you quit a guided build part way through, in which
+case you are asked once whether to resume or to start over. To keep a run,
+`slots` > `save to` while it is active. The shipped `wiring.yaml` is a
+read-only template and is never written to.
 
 Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
 route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
-part still marked `placed: false`, so a run you have not walked through yet has
-nothing on the breadboard except whatever its `bridges:` section already held.
+part still marked `placed: false`. This project has no `bridges:` section at
+all, so a run you have not walked through yet has **nothing** on the
+breadboard.
 
 ## Moving parts around
 
@@ -448,8 +520,8 @@ you to the first thing you have not built yet.
   shares the i2c1 peripheral in every mode. Turn it off while you use this
   project.
 )";
-const uint32_t PROJECT_EEPROM_README_MD_HASHES[8] = { 0x60313AF8, 0x8CCB4F44, 0x69A73992, 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
-const int PROJECT_EEPROM_README_MD_HASH_COUNT = 8;
+const uint32_t PROJECT_EEPROM_README_MD_HASHES[9] = { 0xF79BAFCE, 0x60313AF8, 0x8CCB4F44, 0x69A73992, 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
+const int PROJECT_EEPROM_README_MD_HASH_COUNT = 9;
 
 const char* PROJECT_EEPROM_MAIN_PY = R"===("""EEPROM Dumper - companion for /projects/eeprom/wiring.yaml.
 
@@ -1060,25 +1132,28 @@ sets A high, B low, and reads the result back:
 
 ## Running it
 
-- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+- **Clickwheel:** `Guides` - it is a top-level menu row, before `Apps` - then
   **nand00**, and walk the guided build. That is what wires the parts up. Run
   `main.py` when it offers at the end.
 - **Headless:** `z nand00` on the terminal drives the same flow. Add `new` to
-  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
-  one, `noscript` to stop at the wiring.
+  start over from the wiring, `load` to reopen the run you already have,
+  `noscript` to stop at the wiring.
 
 Launching a project does not borrow a slot any more. It opens
-`/projects/nand00/nand00_<N>.yaml` - a **run file** - and makes it your active
-circuit, exactly as if you had clicked a YAML in the Files browser. Your build
-is saved into it at every step, the board comes back to it after a power cycle,
-and the next launch offers to reload it or to start run N+1 (the old one stays
-on disk). The shipped `wiring.yaml` is a read-only template and is never
-written to.
+`/projects/nand00/nand00_run.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. There is
+**one run file per project** and it is reused: your build is saved into it at
+every step, the board comes back to it after a power cycle, and the next launch
+reopens it silently - unless you quit a guided build part way through, in which
+case you are asked once whether to resume or to start over. To keep a run,
+`slots` > `save to` while it is active. The shipped `wiring.yaml` is a
+read-only template and is never written to.
 
 Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
 route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
-part still marked `placed: false`, so a run you have not walked through yet has
-nothing on the breadboard except whatever its `bridges:` section already held.
+part still marked `placed: false`. This project has no `bridges:` section at
+all, so a run you have not walked through yet has **nothing** on the
+breadboard.
 
 ## Moving parts around
 
@@ -1134,8 +1209,8 @@ you to the first thing you have not built yet.
 - **The last two rows disagree** - one of the two input legs (rows 35, 36) is
   not making contact.
 )";
-const uint32_t PROJECT_NAND00_README_MD_HASHES[7] = { 0x1B3E29C7, 0xA7C19863, 0x94003C75, 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
-const int PROJECT_NAND00_README_MD_HASH_COUNT = 7;
+const uint32_t PROJECT_NAND00_README_MD_HASHES[8] = { 0x3D3A125D, 0x1B3E29C7, 0xA7C19863, 0x94003C75, 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
+const int PROJECT_NAND00_README_MD_HASH_COUNT = 8;
 
 const char* PROJECT_NAND00_MAIN_PY = R"("""Logic Gates 101 - companion script for /projects/nand00/wiring.yaml
 

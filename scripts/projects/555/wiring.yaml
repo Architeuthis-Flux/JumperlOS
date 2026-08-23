@@ -63,10 +63,13 @@ guide:
     - {do: place, part: R3, check: continuity, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
     - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
     - {do: verify, target: 37, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
-bridges:
-  - {n1: ADC0, n2: 37}
-  - {n1: ADC1, n2: 7}
-nets:
-  - {num: 7, name: "TIMING", color: 0xff8800, nodes: [7], user: true}
+# NO bridges: and no nets: on purpose. Opening this project must leave the
+# breadboard completely unconnected - every connection here belongs to a part
+# and waits for the guide to commit it. The two ADC taps that used to live here
+# (ADC0-37 on OUT, ADC1-7 on the timing cap) showed up as two wires nobody
+# asked for the moment the project opened; main.py makes them itself now, and
+# takes them back down when it exits. The `nets:` entry that named node 7
+# "TIMING" went with them - it could only ever attach because the ADC1 tap put
+# node 7 in a net at load time.
 power:
   topRail: 5.0
