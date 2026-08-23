@@ -40,8 +40,11 @@ enforced throughout:
     /projects/555; 6(e) drives `z <proj>/wiring.yaml new`, which OVERWRITES
     <proj>_run.yaml) is covered by a run_file_capture() taken in phase 0 and
     a run_file_restore() in the teardown - bytes back, or absence back;
-  * cleanup of a real project uses purge_numbered_runs() (digits only), never
-    a startswith("<dir>_") sweep, because that matches <dir>_run.yaml.
+  * cleanup of a real project uses purge_numbered_runs() with an explicit
+    allow-list - the difference between a phase-0 list_numbered_runs() and the
+    same listing at teardown - never a startswith("<dir>_") sweep (that matches
+    <dir>_run.yaml) and no longer even a blanket digits sweep (a user's
+    hand-named 555_1.yaml is digit-suffixed too, and the old sweep ate it).
 
 The mode itself is PROBED with jl.project_run_mode(), not assumed: the
 numbered scheme still compiles behind JL_PROJECT_RUN_HISTORY, and the phases
@@ -347,9 +350,9 @@ def purge_fixture_runs(pdir, prefix):
 
     Only ever call this on /projects/hiltest. On a shipped project the same
     sweep would delete <dir>_run.yaml, which is the user's circuit; those use
-    purge_numbered_runs() plus the phase-0 snapshot instead. (This is the
-    ledger's concern g, and with one well-known filename it is no longer a
-    theoretical one.)"""
+    the phase-0 run_file_capture() plus an ALLOW-LISTED purge_numbered_runs()
+    instead. (This is the ledger's concern g, and with one well-known filename
+    it is no longer a theoretical one.)"""
     out = jl_exec(f"""
 n = 0
 if fs_exists({pdir!r}):
@@ -640,9 +643,10 @@ for i in range(1, 40):
         # `num in nets` is part of the ASSERTION, not a guard around it: a
         # firmware change that made the special net vanish entirely used to
         # delete this check instead of failing it (the silent-skip shape).
-        check(num in nets and nets[num][0] == expected,
+        got_name = nets[num][0] if num in nets else "NO SUCH NET"
+        check(num in nets and got_name == expected,
               f"special net {num} exists and is still named {expected!r} "
-              f"(got {nets[num][0]!r if num in nets else 'NO SUCH NET'})")
+              f"(got {got_name!r})")
 
     # --- 5. Parts survive a wholesale toYAML rewrite, still unplaced -----------
     out = jl_exec("print('saved=', nodes_save(3))")

@@ -602,15 +602,12 @@ def board_state_capture():
     return "\n".join(l.rstrip("\r") for l in yaml.split("\n")).rstrip() + "\n\n"
 
 
-def board_state_restore(yaml, verify=True):
+def board_state_restore(yaml):
     """Paste a board_state_capture() snapshot back. Returns True when the
     board confirmed it AND a fresh capture matches the snapshot. The suite's
     cleanup (nodes_clear + zeroed rails) used to simply STAY on the board -
     twice now that read as a firmware bug on the bench ('rails aren't setting',
     'current sensing isn't working').
-
-    `verify=False` exists for one caller only: the verification pass itself
-    must not recurse. Everything else takes the check.
     """
     prompt, out = port1_paste("S", yaml.encode())
     ok = "State applied successfully" in out
@@ -627,8 +624,6 @@ def board_state_restore(yaml, verify=True):
         print("  FAIL: the board did not print 'State applied successfully' for "
               "the restore paste.")
         return False
-    if not verify:
-        return True
     time.sleep(1.0)
     again = board_state_capture()
     if again is None:
