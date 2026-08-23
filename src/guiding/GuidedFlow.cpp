@@ -1139,6 +1139,12 @@ static void guidePersistProgress(GuideSession& s) {
     // written is the first genuinely unfinished step. Resume lands right no
     // matter how far the wheel wandered.
     globalState.parts.guideStep = (int16_t)guideFirstUnfinished(s);
+    // The step TOTAL goes with it (`of:` in the flow map). This is the only
+    // place that knows numSteps AND writes the file, and the single-run-file
+    // launcher needs "step < of" answerable from the FILE ALONE - it decides
+    // whether to prompt before it is allowed to load anything. See the
+    // guideProgress format note in States.h.
+    globalState.parts.guideTotal = (int16_t)s.script->numSteps;
     globalState.markDirty();
     String serr;
     if (!SlotManager::getInstance().saveActiveSlot(serr, /*skipValidation=*/true)) {

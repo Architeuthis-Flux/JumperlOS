@@ -1274,6 +1274,59 @@ size_t JumperlessState::estimateRAMUsage() const {
 // YAML Serialization
 // ============================================================================
 
+// THE guideProgress FLOW-MAP READER. One function, two callers - fromYAML's
+// parse arm and SlotManager::scanGuideProgressFile (the launcher's load-free
+// mid-flight probe) - so the "ONE shape only" contract in States.h cannot
+// drift between them.
+//
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
+//
+// `of:` is optional; 0 out means "the file does not say". Any out param may
+// be null. Returns true when the line at least named a source.
+static bool parseGuideProgressLine(const String& line, String* sourceOut,
+                                   int* stepOut, int* totalOut) {
+    if (sourceOut != nullptr) *sourceOut = "";
+    if (stepOut != nullptr) *stepOut = 0;
+    if (totalOut != nullptr) *totalOut = 0;
+
+    int q1 = line.indexOf('"');
+    int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
+    bool haveSource = (q1 >= 0 && q2 > q1);
+    if (haveSource && sourceOut != nullptr) {
+        *sourceOut = line.substring(q1 + 1, q2);
+    }
+
+    // Search for the scalar keys AFTER the quoted source, so a path
+    // containing "step:" or "of:" cannot be mistaken for one.
+    int from = (q2 > 0) ? q2 : 0;
+
+    int stepIdx = line.indexOf("step:", from);
+    if (stepIdx >= 0 && stepOut != nullptr) {
+        // Stop at the next key as well as at '}': "3, of: 5".toInt() happens
+        // to give 3, but relying on that is how a third key breaks this.
+        int endIdx = line.indexOf(',', stepIdx);
+        int brace = line.indexOf('}', stepIdx);
+        if (endIdx < 0 || (brace >= 0 && brace < endIdx)) endIdx = brace;
+        if (endIdx < 0) endIdx = (int)line.length();
+        String val = line.substring(stepIdx + 5, endIdx);
+        val.trim();
+        *stepOut = val.toInt();
+    }
+
+    int ofIdx = line.indexOf("of:", from);
+    if (ofIdx >= 0 && totalOut != nullptr) {
+        int endIdx = line.indexOf(',', ofIdx);
+        int brace = line.indexOf('}', ofIdx);
+        if (endIdx < 0 || (brace >= 0 && brace < endIdx)) endIdx = brace;
+        if (endIdx < 0) endIdx = (int)line.length();
+        String val = line.substring(ofIdx + 3, endIdx);
+        val.trim();
+        int total = val.toInt();
+        *totalOut = (total > 0) ? total : 0;
+    }
+    return haveSource;
+}
+
 bool JumperlessState::toYAML(String& output, int showANSI) const {
     output = "";
     
@@ -1291,7 +1344,15 @@ bool JumperlessState::toYAML(String& output, int showANSI) const {
     // a guide is bound to this slot.
     if (parts.guideSource[0] != '\0') {
         output += "guideProgress: {source: \"" + String(parts.guideSource) +
-                  "\", step: " + String(parts.guideStep) + "}\n";
+                  "\", step: " + String(parts.guideStep);
+        // `of:` (the step total) only when it is KNOWN. Same rule as
+        // runSource: emit nothing rather than a zero, so a hand-written or
+        // pre-`of:` file round-trips byte-identically instead of growing a
+        // meaningless "of: 0".
+        if (parts.guideTotal > 0) {
+            output += ", of: " + String(parts.guideTotal);
+        }
+        output += "}\n";
     }
 
     // runSource scalar - ONE flow line, matched with the parser below.
@@ -1389,22 +1450,18 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         }
         else if (!indented && line.startsWith("guideProgress:")) {
             // ONE shape only (matched with toYAML - see States.h):
-            //   guideProgress: {source: "/projects/555/wiring.yaml", step: 3}
-            int q1 = line.indexOf('"');
-            int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
-            if (q1 >= 0 && q2 > q1) {
-                String src = line.substring(q1 + 1, q2);
-                strncpy(parts.guideSource, src.c_str(), sizeof(parts.guideSource) - 1);
+            //   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
+            // `of:` is OPTIONAL (0 = unknown): a hand-written file, or one
+            // written before the field existed, simply has none. The reader
+            // is SHARED with the launcher's load-free probe.
+            String gsrc;
+            int gstep = 0, gtotal = 0;
+            if (parseGuideProgressLine(line, &gsrc, &gstep, &gtotal)) {
+                strncpy(parts.guideSource, gsrc.c_str(), sizeof(parts.guideSource) - 1);
                 parts.guideSource[sizeof(parts.guideSource) - 1] = '\0';
             }
-            int stepIdx = line.indexOf("step:", (q2 > 0) ? q2 : 0);
-            if (stepIdx >= 0) {
-                int endIdx = line.indexOf('}', stepIdx);
-                if (endIdx == -1) endIdx = line.length();
-                String val = line.substring(stepIdx + 5, endIdx);
-                val.trim();
-                parts.guideStep = (int16_t)val.toInt();
-            }
+            parts.guideStep = (int16_t)gstep;
+            parts.guideTotal = (int16_t)gtotal;
         }
         else if (!indented && line.startsWith("runSource:")) {
             // ONE shape only (matched with toYAML above):
@@ -2998,6 +3055,49 @@ bool SlotManager::isTemplatePath(const char* path) {
     if (lastSlash < 0) return false;
     String base = p.substring(lastSlash + 1);
     return base.startsWith("wiring") && base.endsWith(".yaml");
+}
+
+/**
+ * Load-free `guideProgress:` probe - see the declaration in States.h for why
+ * the launcher cannot just load the file and look.
+ *
+ * Streamed line by line (the guideParse / readProjectMeta idiom: a whole-file
+ * String is what killed the heap on the bench), and it STOPS at the first
+ * bulk section header, because toYAML emits guideProgress in the header
+ * block, above bridges:/nets:/parts:.
+ */
+bool SlotManager::scanGuideProgressFile(const char* path, String* sourceOut,
+                                        int* stepOut, int* totalOut) {
+    if (sourceOut != nullptr) *sourceOut = "";
+    if (stepOut != nullptr) *stepOut = 0;
+    if (totalOut != nullptr) *totalOut = 0;
+    if (path == nullptr || path[0] == '\0') return false;
+
+    File f = safeFileOpen(path, "r");
+    if (!f) return false;
+
+    bool found = false;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.replace("\r", "");
+        bool indented = (line.length() > 0 &&
+                         (line.charAt(0) == ' ' || line.charAt(0) == '\t'));
+        if (indented) continue;
+        line.trim();
+        if (line.length() == 0 || line.startsWith("#")) continue;
+        if (line.startsWith("guideProgress:")) {
+            parseGuideProgressLine(line, sourceOut, stepOut, totalOut);
+            found = true;
+            break;
+        }
+        // The header block is over - nothing below here can be guideProgress.
+        if (line.startsWith("bridges:") || line.startsWith("nets:") ||
+            line.startsWith("parts:")) {
+            break;
+        }
+    }
+    safeFileClose(f, false);
+    return found;
 }
 
 void SlotManager::setActivePathFromSlot(int slotNum) {

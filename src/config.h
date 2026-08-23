@@ -4,6 +4,32 @@
 //Jumperless config
 #include "JumperlessDefines.h"
 
+// ---------------------------------------------------------------------------
+// Compile-time behaviour flags (not user-settable; -D on the build line)
+// ---------------------------------------------------------------------------
+//
+// JL_PROJECT_RUN_HISTORY - how many run files a project keeps.
+//
+//   0 (DEFAULT)  ONE run file per project, /projects/<dir>/<dir>_run.yaml,
+//                silently reused. A prompt appears only when a guided build
+//                is MID-FLIGHT in it (resume / start fresh, which overwrites
+//                from the template). Kevin's ruling: the numbered files
+//                "make way too many files", and keeping a run is what
+//                `slots` > `save to` is for.
+//
+//   1            The wave-2 numbered scheme: /projects/<dir>/<dir>_<N>.yaml,
+//                N = max+1 per launch, a load-latest / start-new prompt,
+//                `z ... run=<N>`, and the >=20-file pile-up hint. Kept
+//                COMPILING - not deleted - so the history behaviour can come
+//                back on a build flag.
+//
+// Both modes share the same create/validate/recover, resume, runSource and
+// terminal-state machinery; only the NAME and the prompt policy differ.
+// ProjectsApp.h carries the naming/namespace invariants for both.
+#ifndef JL_PROJECT_RUN_HISTORY
+#define JL_PROJECT_RUN_HISTORY 0
+#endif
+
 
 // extern int hwRevision;
 // extern int probeRevision;

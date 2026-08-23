@@ -736,8 +736,9 @@ void SingleCharCommands::initializeCommands( ) {
                      "Test overlay.",
                      cmd_testOverlay, MENU_DEBUG, CAT_ADVANCED, true, SER3_IRRELEVANT );
 
-    registerCommand( 'z', "run project (z <project>[ new|load|run=N])",
+    registerCommand( 'z', "run project (z <project>[ new|load])",
                      "Run a project headless - guided or not - the HIL / scripted entry.\n"
+#if JL_PROJECT_RUN_HISTORY
                      "Usage: z <project>[ new|load|run=<N>][ noscript]\n"
                      "<project> = a directory name (555) or a wiring path\n"
                      "  (/projects/555/wiring.alt.yaml - picks that variant for a new run).\n"
@@ -746,6 +747,19 @@ void SingleCharCommands::initializeCommands( ) {
                      "  load     force the latest run file (errors when there is none)\n"
                      "  run=<N>  open that specific run file\n"
                      "  noscript skip the companion script\n"
+#else
+                     "Usage: z <project>[ new|load][ noscript]\n"
+                     "<project> = a directory name (555) or a wiring path\n"
+                     "  (/projects/555/wiring.alt.yaml - picks that variant for a new run).\n"
+                     "This build keeps ONE run file per project, /projects/<dir>/<dir>_run.yaml.\n"
+                     "No mode arg = reuse it when it exists (a mid-flight guided build\n"
+                     "  RESUMES - headless never prompts), else create it.\n"
+                     "  new      rewrite <dir>_run.yaml from the wiring (OVERWRITES it)\n"
+                     "  load     force the existing run file (errors when there is none)\n"
+                     "  noscript skip the companion script\n"
+                     "  run=<N>  refused - JL_PROJECT_RUN_HISTORY grammar\n"
+                     "To KEEP a run, `slots` > `save to` while it is the active context.\n"
+#endif
                      "The run file becomes the ACTIVE CONTEXT and stays it - destination\n"
                      "slots are gone. Guided projects resume from the run file's own\n"
                      "guideProgress; there is no prompt on this path.\n"
@@ -822,8 +836,14 @@ static bool zTokenIsRunEquals( const String& tok, int& nOut ) {
 
 CommandResult cmd_guidedProject( char c, const String& line ) {
     static const char* USAGE =
+#if JL_PROJECT_RUN_HISTORY
         "Usage: z <project>[ new|load|run=<N>][ noscript]  "
         "(destination slots are gone - runs live in the project folder)";
+#else
+        "Usage: z <project>[ new|load][ noscript]  "
+        "(destination slots are gone - the run lives in the project folder as "
+        "<dir>_run.yaml)";
+#endif
 
     String args = ( line.length( ) > 1 ) ? line.substring( 1 ) : String( "" );
     args.trim( );

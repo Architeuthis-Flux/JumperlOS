@@ -4,16 +4,23 @@
 // CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md §1, reworked by
 // .superpowers/sdd/projects-wave-2-bench-notes/design-launcher.md.
 //
-// Flow:
+// Flow (JL_PROJECT_RUN_HISTORY = 0, the default - ONE run file per project):
 //   listProjects -> project picker
-//   -> scanRunFiles: runs exist? load-latest / start-new prompt
-//   -> start-new: variant picker (only when >1 genuine wiring*.yaml)
-//                 -> projectBeginRun: copy the wiring to <dir>_<N+1>.yaml,
-//                    open it as the PERSISTENT active context
-//   -> load-latest: open <dir>_<maxN>.yaml, variant resolved from runSource
+//   -> <dir>_run.yaml absent? variant picker (only when >1 genuine
+//      wiring*.yaml) -> projectBeginRun copies the wiring into it. No prompt.
+//   -> <dir>_run.yaml present, guided build MID-FLIGHT in it? ONE prompt:
+//      resume / start fresh (overwrites from the template) / cancel.
+//   -> <dir>_run.yaml present otherwise (finished guide, non-guided, plain
+//      state)? SILENTLY reopen it. No prompt. Keeping a run is Slots>save-to.
 //   -> guided?  guideRun on the CANONICAL wiring path (never the run file)
 //      not guided? run main[.variant].py with `_jl_project` injected
 //   -> the run file stays the active context when the launcher returns.
+//
+// Flow (JL_PROJECT_RUN_HISTORY = 1 - the wave-2 numbered scheme, kept
+// compiling so the behaviour can come back on a build flag):
+//   ... -> scanRunFiles: runs exist? load-latest / start-new prompt
+//   -> start-new: variant picker -> <dir>_<N+1>.yaml
+//   -> load-latest: open <dir>_<maxN>.yaml, variant resolved from runSource
 //
 // ONE LATCH runs through this file now: Menus::inClickMenu. Core 1 only
 // renders b.print() text while it is 1 (main.cpp:1817) and only renders NETS
@@ -167,6 +174,34 @@ static bool runFileNumber(const String& name, const String& dir, int& nOut) {
     return true;
 }
 
+// Is `name` this directory's SINGLE run file, `<dir>_run.yaml`? Same shape as
+// runFileNumber's test - exact `<dir>_` prefix, case-insensitive extension -
+// so the two exclusions behave identically on both sides of the namespace.
+//
+// COLLISION PROOF, both directions:
+//   - vs. the numbered pattern: the middle here is the literal "run", which
+//     allDigits() rejects, so no `<dir>_run.yaml` is ever a numbered run file
+//     and no `<dir>_<N>.yaml` is ever this one. A project directory called
+//     `Xrun` is not a counterexample: its single run file is `Xrun_run.yaml`,
+//     whose middle is still "run", and its numbered files are `Xrun_<N>.yaml`.
+//   - vs. the variant glob `wiring*.yaml`: `<dir>_run.yaml` starts with the
+//     directory name, so it can only start with "wiring" when the DIRECTORY
+//     does - which projectBeginRun refuses outright (and which is also what
+//     would make SlotManager::isTemplatePath() false-positive on it).
+//     listVariantFiles skips it anyway, belt and braces.
+static bool isSingleRunFileName(const String& name, const String& dir) {
+    String want = dir + PROJECT_RUN_SUFFIX;
+    if (!name.startsWith(want))
+        return false;
+    String lower = name;
+    lower.toLowerCase();
+    return lower.length() == want.length() + 5 && lower.endsWith(".yaml");
+}
+
+String projectRunFilePath(const String& dir) {
+    return String(PROJECTS_DIR) + "/" + dir + "/" + dir + PROJECT_RUN_SUFFIX ".yaml";
+}
+
 // ============================================================================
 // meta: scan and project/variant listing
 // ============================================================================
@@ -293,11 +328,14 @@ int listProjects(ProjectMeta* out, int maxOut) {
 // bogus picker entry that loads the firmware default OVER the edit they were
 // deliberately given a backup of.
 //
-// ALSO EXCLUDES this directory's RUN FILES. The two namespaces are disjoint
-// unless the project directory is itself named `wiring*` (where
-// `wiring_1.yaml` matches both patterns); projectBeginRun refuses to create
+// ALSO EXCLUDES this directory's RUN FILES - BOTH spellings, `<dir>_run.yaml`
+// and `<dir>_<N>.yaml`. The namespaces are disjoint unless the project
+// directory is itself named `wiring*` (where `wiring_run.yaml` /
+// `wiring_1.yaml` match both patterns); projectBeginRun refuses to create
 // runs in such a directory, and this is the matching guard on the variant
-// side (design-launcher §3, belt and braces).
+// side (design-launcher §3, belt and braces). The `_run` half is checked in
+// both compile modes: an old numbered board can be reflashed to either, and a
+// leftover file must never surface as a variant.
 static int listVariantFiles(const String& projectPath, const String& dir,
                             String* outNames, int maxOut) {
     if (outNames == nullptr || maxOut <= 0)
@@ -317,7 +355,7 @@ static int listVariantFiles(const String& projectPath, const String& dir,
         if (lower.indexOf("_original") >= 0)
             continue;
         int runN = 0;
-        if (runFileNumber(name, dir, runN))
+        if (runFileNumber(name, dir, runN) || isSingleRunFileName(name, dir))
             continue;   // a run file in a `wiring*`-named project dir
         outNames[found++] = name;
     }
@@ -396,9 +434,11 @@ int projectScanRunFiles(const String& projectPath, const String& dir, int& count
     return maxN;
 }
 
+#if JL_PROJECT_RUN_HISTORY
 static String runFilePath(const String& projectPath, const String& dir, int n) {
     return projectPath + "/" + dir + "_" + String(n) + ".yaml";
 }
+#endif
 
 // Verbatim byte copy, chunked. Deletes a partial destination on any failure -
 // exit D's "partial file deleted" half.
@@ -494,15 +534,28 @@ bool projectBeginRun(const String& dir, const String& templatePath,
     }
 
     String projectPath = String(PROJECTS_DIR) + "/" + dir;
+
+    // The only thing the two modes disagree about is WHICH FILE gets written;
+    // everything below - the flush, the copy, the validate-by-load, the one
+    // retry, the runSource stamp - is shared, which is the point of picking
+    // the path here rather than forking the function.
+#if JL_PROJECT_RUN_HISTORY
     int count = 0;
     int maxN = projectScanRunFiles(projectPath, dir, count);
     if (maxN >= PROJECT_RUN_MAX_N) {
         err = "run number cap reached for " + dir + " - delete old runs";
         return false;
     }
+    String runPath = runFilePath(projectPath, dir, maxN + 1);
+#else
+    // Single-file mode: ONE name, and this call is BOTH "create it" and
+    // "start fresh over it". An existing file is overwritten deliberately -
+    // the caller only gets here after the mid-flight prompt was answered `n`,
+    // or when there was nothing unfinished to protect.
+    String runPath = projectRunFilePath(dir);
+#endif
 
     SlotManager& mgr = SlotManager::getInstance();
-    String runPath = runFilePath(projectPath, dir, maxN + 1);
 
     flushActiveContextIfDirty(mgr);
     // Big-event flush of the OUTGOING context's cache before its state is
@@ -560,6 +613,37 @@ static bool projectOpenRunFile(const String& runPath, String& err,
     }
     reportIfNoActiveContext(mgr);
     return false;
+}
+
+// Is a guided build MID-FLIGHT in this run file? The single-file launcher's
+// one prompt hangs off this, and it has to be answerable WITHOUT loading:
+// the prompt offers `cancel`, and a cancel must leave the previous context
+// untouched (the exit table's row B). So it is a header-only text scan -
+// SlotManager::scanGuideProgressFile, which shares its flow-map reader with
+// fromYAML's parse arm.
+//
+// `of:` (the step total, written by the guide runtime alongside the step) is
+// what makes this decidable at all: numSteps cannot be recomputed here,
+// because guideParse resolves `part:` names - and synthesizes auto steps -
+// against the LIVE parts table, which at this moment still holds the previous
+// context. A file that does not carry `of:` therefore reads as "unknown", and
+// unknown means NOT mid-flight: reopen it silently and let the existing
+// resume gates in runOpenedRunFile do exactly what they always did. Both
+// error directions are benign - under-detect resumes (nothing is overwritten,
+// which is the whole risk), over-detect costs one prompt whose default
+// (y/click) is resume - and guideRun's ALREADY_COMPLETE clamp is still the
+// backstop against a file that lies.
+static bool runFileMidFlight(const String& runPath, int& stepOut, int& totalOut) {
+    stepOut = 0;
+    totalOut = 0;
+    String src;
+    if (!SlotManager::scanGuideProgressFile(runPath.c_str(), &src, &stepOut, &totalOut))
+        return false;
+    if (src.length() == 0 || totalOut <= 0)
+        return false;
+    if (stepOut < 0)
+        stepOut = 0;
+    return stepOut < totalOut;
 }
 
 // ============================================================================
@@ -1103,7 +1187,113 @@ static void printRunFileLine(const String& path, const char* action) {
 // ============================================================================
 // Interactive entry: the launcher's inner flow for one chosen project
 // ============================================================================
-//
+
+// What the run-file decision came to. REOPEN carries the path to open; FRESH
+// means "copy the (possibly picked) wiring in"; CANCEL means nothing was
+// touched and nothing will be.
+enum class RunFileChoice : uint8_t { CANCEL, REOPEN, FRESH };
+
+// The run-file decision, prompts included. Split out because it is the ONE
+// place the two compile modes genuinely differ, and burying a 60-line #if in
+// the middle of projectRunInteractive made both halves unreadable.
+static RunFileChoice chooseRunFile(RunContext& rc, const String& dir,
+                                   String& reopenPath) {
+    reopenPath = "";
+
+#if JL_PROJECT_RUN_HISTORY
+    int runCount = 0;
+    int maxN = projectScanRunFiles(rc.projectPath, dir, runCount);
+
+    // --- the merged load-latest / start-new prompt (design §1.3) ------------
+    // The run scan comes BEFORE the variant picker, deliberately: run files
+    // are not partitioned by variant, so "load latest" must not be offered
+    // after a variant choice it might contradict. Loading resolves its variant
+    // from runSource instead.
+    if (maxN < 1)
+        return RunFileChoice::FRESH;
+
+    String latest = runFilePath(rc.projectPath, dir, maxN);
+    Serial.print("\r\nRUNS n=");
+    Serial.print(runCount);
+    Serial.print(" latest=");
+    Serial.println(latest);
+    Serial.flush();
+
+    notify("Load run " + String(maxN) + "?\nNo = new run",
+           "\n\r  " + dir + ": " + String(runCount) + " previous run" +
+               (runCount == 1 ? "" : "s") + ". y/click Yes = load latest (" +
+               baseNameOfPath(latest) + "), n = start new (" +
+               String(dir) + "_" + String(maxN + 1) + ".yaml), other = cancel",
+           0);
+    drainLineEndings();
+    int r = yesNoMenu(20000, /*startOption=*/1);
+    b.clear();
+    requestLedShow(-1);
+    if (r < 0) {
+        // EXIT B: cancel or timeout at the load/new prompt. Nothing was
+        // touched.
+        Serial.println("  Cancelled.");
+        return RunFileChoice::CANCEL;
+    }
+
+    if (runCount >= PROJECT_RUN_PILEUP_HINT) {
+        Serial.println("  (" + String(runCount) + " run files in " + rc.projectPath +
+                       " - old runs can be deleted from Files)");
+    }
+    if (r == 1) {
+        reopenPath = latest;
+        return RunFileChoice::REOPEN;
+    }
+    return RunFileChoice::FRESH;
+#else
+    // SINGLE-FILE MODE. One name, silently reused; the ONLY prompt is the one
+    // that protects an unfinished guided build from being overwritten.
+    (void)rc;   // no directory scan here - the name is known
+    String runPath = projectRunFilePath(dir);
+    if (!safeFileExists(runPath.c_str())) {
+        // Nothing to reuse and nothing to protect: create and go, no prompt.
+        // No RUNS line either - there are no runs to count.
+        return RunFileChoice::FRESH;
+    }
+
+    // RUNS stays truthful: in this mode there is exactly one, and it is both
+    // the latest and the only.
+    Serial.print("\r\nRUNS n=1 latest=");
+    Serial.println(runPath);
+    Serial.flush();
+
+    int step = 0, total = 0;
+    if (!runFileMidFlight(runPath, step, total)) {
+        // Finished guide, non-guided, or plain state -> SILENTLY reopen.
+        reopenPath = runPath;
+        return RunFileChoice::REOPEN;
+    }
+
+    notify("Resume build?\nNo = start over",
+           "\n\r  " + dir + ": an unfinished guided build is in " +
+               baseNameOfPath(runPath) + " (step " + String(step + 1) + " of " +
+               String(total) + "). y/click Yes = resume, n = start fresh "
+               "(OVERWRITES it from the project wiring), other = cancel",
+           0);
+    drainLineEndings();
+    int r = yesNoMenu(20000, /*startOption=*/1);
+    b.clear();
+    requestLedShow(-1);
+    if (r < 0) {
+        // EXIT B, unchanged: cancel or timeout before anything was touched.
+        Serial.println("  Cancelled.");
+        return RunFileChoice::CANCEL;
+    }
+    if (r == 1) {
+        reopenPath = runPath;
+        return RunFileChoice::REOPEN;
+    }
+    Serial.println("  (starting fresh - " + baseNameOfPath(runPath) +
+                   " is rewritten from the project wiring)");
+    return RunFileChoice::FRESH;
+#endif
+}
+
 // `forcedWiring` != "" pins the variant (the Files-browser click on a specific
 // wiring*.yaml); the variant picker is then skipped entirely.
 static void projectRunInteractive(const String& dir, const String& forcedWiring,
@@ -1120,49 +1310,21 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
     rc.meta = listedMeta;
     rc.meta.dir = dir;
 
-    int runCount = 0;
-    int maxN = projectScanRunFiles(rc.projectPath, dir, runCount);
+    String runPath;
+    RunFileChoice choice = chooseRunFile(rc, dir, runPath);
+    if (choice == RunFileChoice::CANCEL)
+        return;   // EXIT B: nothing touched, nothing to restore
 
-    // --- the merged load-latest / start-new prompt (design §1.3) ------------
-    // The run scan comes BEFORE the variant picker, deliberately: run files
-    // are not partitioned by variant, so "load latest" must not be offered
-    // after a variant choice it might contradict. Loading resolves its variant
-    // from runSource instead.
-    bool loadLatest = false;
-    if (maxN >= 1) {
-        String latest = runFilePath(rc.projectPath, dir, maxN);
-        Serial.print("\r\nRUNS n=");
-        Serial.print(runCount);
-        Serial.print(" latest=");
-        Serial.println(latest);
-        Serial.flush();
-
-        notify("Load run " + String(maxN) + "?\nNo = new run",
-               "\n\r  " + dir + ": " + String(runCount) + " previous run" +
-                   (runCount == 1 ? "" : "s") + ". y/click Yes = load latest (" +
-                   baseNameOfPath(latest) + "), n = start new (" +
-                   String(dir) + "_" + String(maxN + 1) + ".yaml), other = cancel",
-               0);
-        drainLineEndings();
-        int r = yesNoMenu(20000, /*startOption=*/1);
-        b.clear();
-        requestLedShow(-1);
-        if (r < 0) {
-            // EXIT B: cancel or timeout at the load/new prompt. Nothing was
-            // touched.
-            Serial.println("  Cancelled.");
-            return;
+    if (choice == RunFileChoice::REOPEN) {
+        // A Files-browser click names a VARIANT, and a reopen does not honour
+        // it - the run file's own runSource decides, exactly as on the
+        // headless load path. Say so rather than ignoring it silently; this
+        // is the one cell of the mode matrix where the door the user came
+        // through has less say than the file they land in.
+        if (forcedWiring.length() > 0) {
+            Serial.println("  (variant taken from runSource; the clicked file was "
+                           "not used - start fresh to change variant)");
         }
-        loadLatest = (r == 1);
-
-        if (runCount >= PROJECT_RUN_PILEUP_HINT) {
-            Serial.println("  (" + String(runCount) + " run files in " + rc.projectPath +
-                           " - old runs can be deleted from Files)");
-        }
-    }
-
-    if (loadLatest) {
-        String runPath = runFilePath(rc.projectPath, dir, maxN);
         String err;
         if (!projectOpenRunFile(runPath, err, /*deferPower=*/true)) {
             // EXIT E: both the load and (for a parse failure) the restore are
@@ -1179,7 +1341,10 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
         return;
     }
 
-    // --- start new: variant picker, then allocate the run file --------------
+    // --- start fresh: variant picker, then write the run file ---------------
+    // In single-file mode this OVERWRITES <dir>_run.yaml; in numbered mode it
+    // allocates <dir>_<N+1>.yaml. Either way the wiring choice happens here,
+    // after the run-file decision, because a reopen would have ignored it.
     String wiringPath = forcedWiring;
     if (wiringPath.length() == 0) {
         wiringPath = rc.projectPath + "/wiring.yaml";
@@ -1229,7 +1394,6 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
         rc.meta.dir = dir;
     }
 
-    String runPath;
     String err;
     if (!projectBeginRun(dir, wiringPath, runPath, err, /*deferPower=*/true)) {
         // EXIT D / E: the copy or the load failed (the partial file is already
@@ -1288,19 +1452,39 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
     rc.interactive = false;
     rc.noScript = noScript;
 
+#if JL_PROJECT_RUN_HISTORY
     int runCount = 0;
     int maxN = projectScanRunFiles(rc.projectPath, dir, runCount);
+    bool haveRun = (maxN >= 1);
+#else
+    (void)runN;
+    String singlePath = projectRunFilePath(dir);
+    bool haveRun = safeFileExists(singlePath.c_str());
 
-    // DEFAULT: load latest when runs exist, else new - the launcher's own
-    // defaults WITHOUT the prompt (headless has to be deterministic).
+    // `run=<N>` is the OTHER mode's grammar. Name the mode rather than
+    // guessing what the caller meant - a scripted driver that asks for a
+    // specific numbered run on a single-file build has a stale assumption,
+    // and silently opening <dir>_run.yaml instead would hide it. This line is
+    // also the suites' mode probe.
+    if (mode == ProjectRunMode::RUN_N) {
+        Serial.println("PROJECT error run=<N> needs a JL_PROJECT_RUN_HISTORY build - "
+                       "this build keeps ONE run file per project (" + dir +
+                       PROJECT_RUN_SUFFIX ".yaml)");
+        return false;
+    }
+#endif
+
+    // DEFAULT: reuse the existing run file, else new - the launcher's own
+    // defaults WITHOUT the prompt (headless has to be deterministic, so a
+    // mid-flight guided build RESUMES here instead of asking).
     ProjectRunMode effective = mode;
     if (effective == ProjectRunMode::DEFAULT)
-        effective = (maxN >= 1) ? ProjectRunMode::LOAD : ProjectRunMode::NEW;
+        effective = haveRun ? ProjectRunMode::LOAD : ProjectRunMode::NEW;
 
     // `z <wiring path>` with an EXPLICIT load/run=<N> is refused by the parser
     // (SingleCharCommands.cpp) precisely because the path names a variant the
     // run file's own runSource would override. The bare form reaches the same
-    // place silently whenever runs already exist, so say so instead: the path
+    // place silently whenever a run already exists, so say so instead: the path
     // argument selected nothing, and `... new` is the spelling that honours it.
     if (mode == ProjectRunMode::DEFAULT && effective == ProjectRunMode::LOAD &&
         project.indexOf('/') >= 0) {
@@ -1308,6 +1492,7 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
     }
 
     if (effective == ProjectRunMode::LOAD || effective == ProjectRunMode::RUN_N) {
+#if JL_PROJECT_RUN_HISTORY
         int wantN = (effective == ProjectRunMode::LOAD) ? maxN : runN;
         Serial.print("\r\nRUNS n=");
         Serial.print(runCount);
@@ -1322,6 +1507,21 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
             return false;
         }
         String runPath = runFilePath(rc.projectPath, dir, wantN);
+#else
+        Serial.print("\r\nRUNS n=");
+        Serial.print(haveRun ? 1 : 0);
+        if (haveRun) {
+            Serial.print(" latest=");
+            Serial.print(singlePath);
+        }
+        Serial.println();
+        Serial.flush();
+        if (!haveRun) {
+            Serial.println("PROJECT error no run files for " + dir);
+            return false;
+        }
+        String runPath = singlePath;
+#endif
         if (!safeFileExists(runPath.c_str())) {
             Serial.println("PROJECT error no such run file: " + runPath);
             return false;
@@ -1361,11 +1561,18 @@ bool projectOpenLatestOrNew(const String& project, String& runPathOut) {
         return false;
     }
     String projectPath = String(PROJECTS_DIR) + "/" + dir;
+#if JL_PROJECT_RUN_HISTORY
     int runCount = 0;
     int maxN = projectScanRunFiles(projectPath, dir, runCount);
+    bool haveRun = (maxN >= 1);
+    String existing = haveRun ? runFilePath(projectPath, dir, maxN) : String("");
+#else
+    String existing = projectRunFilePath(dir);
+    bool haveRun = safeFileExists(existing.c_str());
+#endif
 
-    if (maxN >= 1) {
-        String runPath = runFilePath(projectPath, dir, maxN);
+    if (haveRun) {
+        String runPath = existing;
         String err;
         if (!projectOpenRunFile(runPath, err)) {
             Serial.println("load_project failed: " + err);

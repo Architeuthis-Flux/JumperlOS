@@ -329,10 +329,25 @@ struct ConfigState {
 //
 // guideProgress round-trips as ONE top-level flow-map line - the only shape
 // parsed and the only shape emitted (keep serializer and parser matched):
-//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3}
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
 // Emitted only while guideSource is non-empty. `meta:` and `guide:` sections
 // are swallowed on parse and NOT round-tripped - the launcher and the guide
 // runtime re-read the project file themselves.
+//
+// `of:` is the STEP TOTAL the guide had when it last persisted progress, and
+// it is emitted only when non-zero (the runSource rule: an unemitted scalar
+// would be destroyed by the next idle auto-save, so serializer and parser
+// land in the same commit - they do). It exists because the SINGLE-RUN-FILE
+// launcher has to answer "is a guided build MID-FLIGHT in this file?" from
+// the FILE ALONE, before anything is loaded: numSteps cannot be recomputed
+// launcher-side, since guideParse resolves `part:` names (and synthesizes
+// auto steps) against the LIVE parts table, which at that moment still holds
+// the previous context. step < of means unfinished. A file with no `of:`
+// (hand-written, or written before this field existed) reads as total 0 =
+// "unknown", and the launcher then treats it as NOT mid-flight - it reopens
+// silently and the existing resume gates do the right thing anyway.
+// SlotManager::scanGuideProgressFile() is the load-free reader; it lives
+// beside the parse arm in States.cpp so the two cannot drift.
 //
 // `guide:` FORMAT NOTES (parsed by guiding/GuidedFlow.cpp, documented in
 // CodeDocs/DESIGN_GUIDED_PLACEMENT.md §2/§5 - listed here because this is
@@ -451,6 +466,10 @@ struct PartsState {                 // member of JumperlessState
     // re-read from guideSource by the guide runtime, never stored here)
     char    guideSource[96];
     int16_t guideStep;
+    // Step TOTAL as of the last persist (`of:` in the flow map, 0 = unknown).
+    // Written by the guide runtime, read by the launcher's mid-flight gate -
+    // see the guideProgress format note above.
+    int16_t guideTotal;
     void clear();
     int findByName(const char* n) const;   // -1 when absent
 };
@@ -675,9 +694,27 @@ public:
      * True for a shipped project TEMPLATE: /projects/<dir>/wiring*.yaml.
      * Such a path is READ-ONLY as an active context - saveActiveSlot refuses
      * to write it and it can never become the boot context. Per-run project
-     * files are <dir>_<N>.yaml and deliberately do not match.
+     * files are <dir>_run.yaml (or <dir>_<N>.yaml under
+     * JL_PROJECT_RUN_HISTORY) and deliberately do not match.
      */
     static bool isTemplatePath(const char* path);
+    /**
+     * Read a slot/run file's `guideProgress:` line WITHOUT loading it.
+     *
+     * The single-run-file launcher has to decide "is a guided build
+     * mid-flight in here?" BEFORE it touches the active context, because the
+     * prompt it may raise can still be cancelled - and a cancel must leave
+     * the previous context untouched (the launcher's exit table, row B). A
+     * load would already have replaced it.
+     *
+     * Returns true when an un-indented `guideProgress:` line was found; the
+     * out params (any of them may be null) then carry source / step / total,
+     * with total 0 meaning "the file does not say". Scanning stops at the
+     * first `bridges:`/`nets:`/`parts:` header, so this never walks the bulk
+     * of a slot file: guideProgress is emitted in toYAML's header block.
+     */
+    static bool scanGuideProgressFile(const char* path, String* sourceOut,
+                                      int* stepOut, int* totalOut);
 
     // Slot management
     bool loadSlot(int slotNum, String& errorMsg);
