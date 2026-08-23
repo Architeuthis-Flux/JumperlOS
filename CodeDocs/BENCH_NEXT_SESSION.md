@@ -177,4 +177,9 @@ catch it if it returns; the too-many-files complaint is the single run file in
 §1; "this whole thing is confusing" is the ADJUST mode being gone.
 
 **Housekeeping:** `/projects/555/555_run.yaml` on your board right now is a
-103-byte test leftover — safe to delete.
+103-byte test leftover — safe to delete. And `/slots/slot2.yaml` holds HIL
+fixture wiring (11-12, 13-14, 41-42, 53-54, top rail 1.80 V), not yours: the
+overnight suite uses slot 2 as its scratch pad, and a run that was killed
+part-way never put your version back. Reload slot 2 if it held something you
+wanted — the harness fix that stops the next one from happening landed the same
+night.

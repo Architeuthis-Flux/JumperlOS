@@ -743,13 +743,24 @@ def run_file_capture(path):
     pre-test state (byte-exact)". The user's circuit is gone and the harness
     certified the opposite.
 
-    So the bak is now treated as evidence: refuse, name the file, and tell the
-    operator how to put it back by hand. This DOES wedge every subsequent run
-    until someone acts, which is the point - the alternative silently destroys
-    data. (The friendlier variant - adopt the surviving bak as the true
-    pre-test state and self-heal - is written up in the H2 report as an option
-    for Kevin; it is strictly worse in one corner, where the user edited the run
-    file between the aborted run and this one.)
+    So the bak is treated as evidence, and the two cases are split on the one
+    question that decides whether anything is at stake - IS IT DIFFERENT FROM
+    THE FILE?
+
+      * IDENTICAL to the current run file: nothing was lost. The earlier run
+        died after its capture but before it changed anything, which is by far
+        the commonest way a run dies. There is nothing to restore, so the stale
+        bak is deleted and this run continues, SILENTLY - a 3 a.m. run must not
+        stop for a backup that carries zero information.
+      * DIFFERENT: the bak is the only surviving copy of the user's content and
+        the run file holds what the dead run left. This run stops, names both
+        files, says which is which, and gives the literal command to resolve it.
+
+    That keeps the no-silent-data-loss property (nothing is ever overwritten
+    without the operator seeing it) while letting the harmless case heal itself.
+    Adopting a DIFFERING bak automatically was considered and rejected: it would
+    silently overwrite an edit the user made between the aborted run and this
+    one.
 
     The `hash` in the returned dict is what makes "byte-exact" a MEASUREMENT
     rather than a word in a message: it is FNV-1a/32 over the source bytes,
@@ -760,8 +771,32 @@ def run_file_capture(path):
     out = jl_exec(f"""
 p = {path!r}
 bak = p + ".hilbak"
+stale = 0
 if fs_exists(bak):
+    # Byte-for-byte, streamed - not a hash. This decides whether a run stops,
+    # so it is the exact question and not a 32-bit proxy for it. A bak with no
+    # file beside it can never be identical: the file it snapshotted has been
+    # deleted since, which is a difference worth stopping for.
+    same = 0
+    if fs_exists(p):
+        a = jfs.open(p, "rb"); b = jfs.open(bak, "rb")
+        same = 1
+        while True:
+            ca = a.read(512)
+            cb = b.read(512)
+            if ca != cb:
+                same = 0
+                break
+            if not ca:
+                break
+        a.close(); b.close()
+    if same:
+        jfs.remove(bak)      # nothing was lost; nothing to say
+    else:
+        stale = 1
+if stale:
     print("stalebak= 1")
+    print("pgone=", 0 if fs_exists(p) else 1)
 elif fs_exists(p):
     s = jfs.open(p, "rb"); d = jfs.open(bak, "wb")
     n = 0
@@ -782,25 +817,38 @@ else:
 """, timeout=60)
     vals = parse_kv(out)
     if vals.get("stalebak") == 1:
+        bak = path + ".hilbak"
+        gone = vals.get("pgone") == 1
         sys.exit(
-            f"FAIL: {path}.hilbak already exists.\n"
-            "That backup is a snapshot an EARLIER HIL run took and never "
-            "restored - i.e. a run died between its capture and its teardown, "
-            f"and {path} is currently holding whatever that run left behind, "
-            "NOT the user's content.\n"
-            "Overwriting the backup here would destroy the only surviving copy "
-            "and then certify the test's own bytes as 'the pre-test state', so "
-            "this run stops instead.\n"
-            "Put it back by hand first (port 5 REPL):\n"
-            f"  s = jfs.open({path!r} + '.hilbak', 'rb'); "
-            f"d = jfs.open({path!r}, 'wb')\n"
+            (f"FAIL: {bak} exists and the run file it backs up is GONE."
+             if gone else
+             f"FAIL: {bak} exists AND DIFFERS from {path}.")
+            + " An earlier HIL run died between its capture and its teardown, "
+              "so what is on the board is:\n"
+            f"\n"
+            f"  {bak}\n"
+            f"      YOUR content, as it was before that run touched it. The\n"
+            f"      only surviving copy.\n"
+            f"  {path}\n"
+            + ("      DOES NOT EXIST - the dead run left it deleted.\n"
+               if gone else
+               "      whatever the dead run left behind. NOT your content.\n")
+            + f"\n"
+            "Continuing would overwrite the backup with the test's own bytes "
+            "and then certify them as 'the pre-test state', so this run stops "
+            "instead. (A backup that MATCHES the file byte for byte is deleted "
+            "automatically and stops nothing - this one does not match.)\n"
+            "\n"
+            "To resolve, put your content back on the port-5 REPL:\n"
+            f"  s = jfs.open({bak!r}, 'rb'); d = jfs.open({path!r}, 'wb')\n"
             "  while True:\n"
             "      c = s.read(512)\n"
             "      if not c: break\n"
             "      d.write(c)\n"
-            "  s.close(); d.close(); jfs.remove(" + repr(path) + " + '.hilbak')\n"
-            "...then re-run. (If you are sure the backup is worthless, just "
-            f"remove {path}.hilbak.)"
+            f"  s.close(); d.close(); jfs.remove({bak!r})\n"
+            "\n"
+            f"...then re-run. If you are certain the backup is worthless, "
+            f"`jfs.remove({bak!r})` on its own is enough."
         )
     return {"path": path,
             "existed": vals.get("existed") == 1,
