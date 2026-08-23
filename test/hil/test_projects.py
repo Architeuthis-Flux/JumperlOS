@@ -1101,11 +1101,17 @@ print("missing_ms=", time.ticks_diff(t1, t0))
     # connect -1 = "the leg just occupies the hole". Node numbers are the ones
     # JumperlessDefines.h assigns: GND 100, TOP_RAIL 101, RP_GPIO_1..3 131/132/133,
     # RP_GPIO_7 137 (RP pin 26, SDA), RP_GPIO_8 138 (RP pin 27, SCL).
+    #
+    # ORDER MATTERS, for one measured reason: i2cscrn's sub-phase (v-b) below
+    # compiles and RUNS a ~12 KB companion script, which leaves the
+    # MicroPython heap fragmented enough that the NEXT project's step (v) -
+    # which needs its whole source as one contiguous string - can take its
+    # pre-existing "too fragmented" skip and quietly cost a check. Observed:
+    # with i2cscrn first, eeprom's compile skipped. i2cscrn goes LAST so the
+    # two cheap compiles happen on the cleaner heap and the heavy phase has
+    # nothing after it. (The phases are otherwise independent; each loads its
+    # own wiring and each tears down what it makes.)
     TASK9_PROJECTS = (
-        ("i2cscrn", 5, (
-            ("DISP", "sip4", 5, (("GND", 5, 100), ("VCC", 6, 101),
-                                 ("SCL", 7, 138), ("SDA", 8, 137))),
-        )),
         ("nand00", 7, (
             ("U1", "dip14", 35, (("A1", 35, 131), ("B1", 36, 132), ("Y1", 37, 133),
                                  ("A2", 38, 100), ("GND", 41, 100), ("Y3", 11, -1),
@@ -1119,6 +1125,10 @@ print("missing_ms=", time.ticks_diff(t1, t0))
                                 ("WP", 6, 101), ("VCC", 5, 101))),
             ("R1", "axial2", 12, (("A", 12, 101), ("B", 42, 8))),
             ("R2", "axial2", 15, (("A", 15, 101), ("B", 45, 7))),
+        )),
+        ("i2cscrn", 5, (
+            ("DISP", "sip4", 5, (("GND", 5, 100), ("VCC", 6, 101),
+                                 ("SCL", 7, 138), ("SDA", 8, 137))),
         )),
     )
 
