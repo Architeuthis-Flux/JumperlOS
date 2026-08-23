@@ -894,7 +894,7 @@ const int PROJECT_EEPROM_WIRING_YAML_HASH_COUNT = 2;
 
 //---------- i2cscrn (scripts/projects/i2cscrn/) ----------
 #ifdef INCLUDE_PROJECT_I2CSCRN
-const char* PROJECT_I2CSCRN_README_MD = R"(# Type to Screen
+const char* PROJECT_I2CSCRN_README_MD = R"===(# Type to Screen
 
 An I2C OLED module pushed into the breadboard - **anywhere** on it - wired to
 the Jumperless's I2C pins by the crossbar. You type a line in the terminal, it
@@ -987,13 +987,31 @@ cleans up after itself*, and a guided build's bridges are your saved circuit,
 not its mess. Run it after a guided build and it will find all four routes
 already there, make none, and remove none.
 
-### Driving it without hands
+### No prompt needs a keyboard
 
-Everything the probe can do here, typed input can do too, so the whole flow is
-scriptable over the serial port: launch it (`z i2cscrn`, or the Files browser)
-and send `5`, `6`, `41`, `42`, `2`, `q` as lines. That is exactly how
-`test_projects.py` exercises it with no panel attached - through the real
-launcher, the real prompts and the real stdin.
+Every question this script asks answers to all three surfaces, and the wheel
+alone is enough to get from launch to a working screen:
+
+| | probe | clickwheel | terminal |
+|---|---|---|---|
+| **which row is this signal in** | tap the hole (absolute) | turn to nudge the row, click to take it | type `1`-`60`, or enter for the default |
+| **which panel do you have** | — | turn the list, click to take it | type `1`-`3`, or enter for the default |
+| **give up** | — | hold | `q` |
+
+**One direction rule everywhere: up = previous / −1, down = next / +1**, click
+takes, hold quits. The wheel has no double-click; two fast presses are two
+ordinary clicks, so nothing here breaks if you click twice.
+
+The panel-type question used to be typing-only, which quietly made a keyboard
+mandatory for a flow that otherwise never needed one. The current OLED shows
+the candidate row or panel name as you turn, so the whole thing is usable with
+the terminal closed.
+
+Because typed input still answers everything, the flow stays scriptable over
+the serial port: launch it (`z i2cscrn`, or the Files browser) and send `5`,
+`6`, `41`, `42`, `2`, `q` as lines. That is exactly how `test_projects.py`
+exercises it with no panel attached - through the real launcher, the real
+prompts and the real stdin.
 
 > **A note on script size.** Until wave 3 the launcher needed *two* full-size
 > copies of the source in RAM to prepend `_jl_project`, against an Arduino heap
@@ -1006,9 +1024,12 @@ launcher, the real prompts and the real stdin.
 > failure branch now prints.
 >
 > One bound survives, a level up: **MicroPython's compiler** needs heap
-> proportional to the source. Around 12 KB compiles on a freshly booted board
-> (~39 KB free) and raises `MemoryError` on the ~25 KB left deep into a long
-> session. This script is about 12 KB. If you grow it, watch for that.
+> proportional to the source. Measured on this board: **13 KB runs on a fresh
+> boot, 15 KB raises `MemoryError` even there** - and much less than 13 KB
+> survives deep into a long session, because the interpreter heap never resets
+> between scripts. This script is about 13 KB and that is the ceiling, not a
+> comfortable middle. If you add to it, take the space back out of the prose
+> (which belongs in this file) rather than out of the margin.
 
 ## Running it
 
@@ -1078,6 +1099,21 @@ you to the first thing you have not built yet.
   leave it running and re-seat one wire at a time. Check GND and VCC first (a
   panel with no power cannot ack anything), then that the rows you assigned are
   the rows the legs are actually in, then the SDA/SCL order.
+- **"panel up at 0x3c" then "panel went away (ETIMEDOUT)", over and over** -
+  fixed 2026-08-23, and worth knowing why. A full 128x32 frame is 513 bytes;
+  at 100 kHz that is 513 x 9 bits = **~46 ms** of bus time, and `machine.I2C`'s
+  **default timeout is 50 ms**. Every frame ran 4 ms from the edge, so the
+  panel initialised, drew its splash, and then threw `ETIMEDOUT` the moment
+  anything - a stretched clock, a slow rise through the crossbar - ate the
+  margin. The beacon read that as the panel vanishing and went back to
+  scanning, forever. `I2C_TIMEOUT_US` is now 400 ms, roughly 8x the frame; a
+  128x64 panel needs twice the bus time and still clears it comfortably.
+- **Every address answers (a "bus" of 100+ devices)** - that is not devices,
+  it is SDA unable to rise, so the master reads its own low back as an ack
+  from everyone. Almost always a missing pull-up: the internal one is ~50k,
+  far too weak to pull a routed breadboard net up inside a 100 kHz bit time.
+  A 4-pin module brings its own; a bare panel needs 4.7k. The script says so
+  in as many words rather than pretending it found a hundred chips.
 - **Wrong rows assigned** - `q`, enter, and run it again. Nothing is
   remembered between runs, and the exit removed whatever it had routed.
 - **A device answers, but at some other address** - the script tries `0x3C`
@@ -1095,22 +1131,17 @@ you to the first thing you have not built yet.
   off (or move it to the hardwired pins) while you play with this project.
 - **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
   Long crossbar paths plus breadboard capacitance slow the edges down.
-)";
-const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[9] = { 0x6392E24F, 0xBCF87B83, 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
-const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 9;
+)===";
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[10] = { 0x6AF0D1BF, 0x6392E24F, 0xBCF87B83, 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 10;
 
-const char* PROJECT_I2CSCRN_MAIN_PY = R"===("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml.
+const char* PROJECT_I2CSCRN_MAIN_PY = R"===("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml, see README.md.
 
-Bring up an I2C OLED wired ANYWHERE on the breadboard, then type at it: tap
-each signal (or type its row), pick a driver/size, then a beacon that rescans
-until the panel answers - wire it up while it runs. On the way out it removes
-exactly the bridges it made. Walkthrough in README.md.
+An I2C OLED wired anywhere on the breadboard, typed at. Every prompt answers to
+probe, wheel AND terminal, and only the bridges made here are removed.
 
-KEEP COMPANION SCRIPTS LEAN. MicroPython compiles them on the device out of a
-heap whose size depends on how long the session has been running: measured,
-~12 KB of source compiles on a freshly booted board (~39 KB free) and raises
-MemoryError on the ~25 KB left deep into a long one. This file is about 12 KB,
-so it is at the edge of the good case - prose belongs in README.md, not here.
+KEEP UNDER ~13 KB - it is compiled on-device from one never-resetting heap, and
+15 KB raises MemoryError even on a fresh boot. Prose goes in README.md.
 """
 
 import sys
@@ -1121,6 +1152,9 @@ _jl_project = globals().get("_jl_project", {})
 SDA_PIN = 26           # RP_GPIO_7 \ fixed by the hardware; only the
 SCL_PIN = 27           # RP_GPIO_8 / breadboard row is yours to choose
 I2C_HZ = 100000
+# Must clear a full frame: 513 B is ~46 ms at 100 kHz vs a 50 ms default -
+# that 4 ms of margin was the ETIMEDOUT "panel went away" loop. Sum in README.
+I2C_TIMEOUT_US = 400000
 ADDRS = (0x3C, 0x3D)
 
 # label, kind, width, height. First is the default.
@@ -1151,8 +1185,7 @@ _lastcr = False
 
 
 def ask():
-    """A typed line once enter arrives, else None. Never blocks, so the probe
-    can be watched at the same prompt."""
+    """A typed line once enter arrives, else None. Never blocks."""
     global _inbuf, _lastcr
     if _poll is None:
         return input()
@@ -1188,9 +1221,7 @@ def ask():
 
 
 def drain():
-    """Swallow whatever is already buffered before the first prompt. The
-    newline that launched this script is still in the stream, and it would
-    otherwise answer the GND prompt with "keep the default"."""
+    """Swallow buffered input - the launching newline would answer prompt 1."""
     global _inbuf, _lastcr
     if _poll is None:
         return
@@ -1213,56 +1244,103 @@ def say(text):
         pass
 
 
-def ask_row(name, default):
-    print("  %-3s  tap its hole, or type a row 1-60 (enter=%d, q=quit)"
-          % (name, default))
-    say("Tap\n%s" % name)
+_wbtn = 0
+
+
+HELDS = (2, 5, 6)      # HELD, LONG_HELD, MEDIUM_HELD - all mean "quit"
+
+
+def wheel():
+    """'up'|'down'|'click'|'hold'|None. up=-1, down=+1, click takes, hold quits.
+
+    Click is edge-triggered on ENTERING released, not on having seen PRESSED:
+    the injected press writes RELEASED straight out. Ending a hold is no click.
+    """
+    global _wbtn
+    try:
+        d = clickwheel_get_direction()
+        b = clickwheel_get_button()
+    except Exception:
+        return None
+    if d == 1:
+        return "up"
+    if d == 2:
+        return "down"
+    was, _wbtn = _wbtn, b
+    if b in HELDS:
+        return "hold"
+    if b == 3 and was != 3:
+        return None if was in HELDS else "click"
+    return None
+
+
+def choose(lo, hi, start, render, probe=False, dflt=None):
+    """The loop both prompts share: wheel turns/clicks, probe taps (rows only),
+    terminal types, enter takes the default. Wraps, never runs off the end.
+    Returns (value, which surface answered) - the provenance is worth saying
+    out loud, and it is what the HIL suite reads to know a typed answer landed
+    as typed."""
+    v = start
+    render(v)
     while True:
+        w = wheel()
+        if w == "hold":
+            raise Abort()
+        if w == "up" or w == "down":
+            v = lo + (v - lo + (-1 if w == "up" else 1)) % (hi - lo + 1)
+            render(v)
+            continue
+        if w == "click":
+            return v, "wheel"
         line = ask()
         if line is not None:
-            s = line.strip().lower()
-            if s == "":
-                print("       %s = row %d (default)" % (name, default))
-                return default
-            if s in ("q", "quit"):
+            t = line.strip().lower()
+            if t in ("q", "quit"):
                 raise Abort()
-            if s.isdigit() and 1 <= int(s) <= 60:
-                print("       %s = row %s (typed)" % (name, s))
-                return int(s)
-            print("       ? not a row 1-60: " + s)
-            continue
-        try:
-            pad = probe_read(False)
-            p = -1 if pad == NO_PAD else int(pad)
-        except Exception:
-            p = -1
-        if 1 <= p <= 60:
-            print("       %s = row %d (tapped)" % (name, p))
-            return p
+            if t == "":
+                return (dflt if dflt is not None else v), "default"
+            if t.isdigit() and lo <= int(t) <= hi:
+                return int(t), "typed"
+            print("  ? %d-%d, or use the wheel" % (lo, hi))
+        if probe:
+            try:
+                pad = probe_read(False)
+                pv = -1 if pad == NO_PAD else int(pad)
+            except Exception:
+                pv = -1
+            if lo <= pv <= hi:
+                return pv, "tapped"
         time.sleep(0.02)
 
 
+def ask_row(name, default):
+    print("  %-3s  tap it, turn+click the wheel, or type 1-60 (enter=%d, q)"
+          % (name, default))
+
+    def show(v):
+        say("Tap %s\nor row %d" % (name, v))
+        print("       %s -> row %-3d\r" % (name, v), end="")
+
+    r, how = choose(1, 60, default, show, True, default)
+    print("\n       %s = row %d (%s)" % (name, r, how))
+    return r
+
+
 def ask_driver():
-    print("Panel type:")
-    for i, d in enumerate(DRIVERS):
-        print("  %d) %s%s" % (i + 1, d[0], "   (default)" if i == 0 else ""))
-    say("Panel\ntype?")
-    while True:
-        line = ask()
-        if line is None:
-            time.sleep(0.02)
-            continue
-        s = line.strip().lower() or "1"
-        if s in ("q", "quit"):
-            raise Abort()
-        if s.isdigit() and 1 <= int(s) <= len(DRIVERS):
-            d = DRIVERS[int(s) - 1]
-            print("driver: %s (%s %dx%d)" % d)
-            return d
-        print("  ? pick 1-%d" % len(DRIVERS))
+    print("Panel type: turn the wheel and click, or type 1-%d" % len(DRIVERS))
+    for n, d in enumerate(DRIVERS):
+        print("  %d) %s%s" % (n + 1, d[0], "   (default)" if n == 0 else ""))
+
+    def show(v):
+        say("Panel?\n%s" % DRIVERS[v - 1][0])
+        print("   > %-16s\r" % DRIVERS[v - 1][0], end="")
+
+    d = DRIVERS[choose(1, len(DRIVERS), 1, show, False, 1)[0] - 1]
+    print("\ndriver: %s (%s %dx%d)" % d)
+    return d
 
 
-# Only what WE made: after a guided build those bridges are the user's circuit.
+# Only what WE made - after a guided build the rest is the user's circuit.
 made = []
 
 
@@ -1271,6 +1349,8 @@ def route(rows):
         row = rows[name]
         try:
             if is_connected(row, node):
+                # Wording is a contract: test_projects reads this line, and
+                # "left alone" is what tells the user their wiring survived.
                 print("  %s row %d -> %s was already routed - left alone"
                       % (name, row, node))
                 continue
@@ -1284,7 +1364,7 @@ def route(rows):
         v = dac_get("TOP_RAIL")
         print("top rail: %.2f V" % v)
         if v < 3.0 or v > 5.5:
-            print("  WARNING: outside 3.0-5.5 V. This never changes a rail.")
+            print("  WARNING: outside 3.0-5.5 V (this never sets a rail)")
     except Exception:
         pass
 
@@ -1302,8 +1382,7 @@ def unroute():
 
 
 def pins(claim):
-    # Claim, or refreshConnections() re-asserts the slot config's pulls onto
-    # GPIO 26/27 underneath the I2C peripheral.
+    # Or refreshConnections() re-asserts config pulls under the peripheral.
     for n in (GPIO_7, GPIO_8):
         try:
             gpio_claim_pin(n) if claim else gpio_release_pin(n)
@@ -1321,8 +1400,7 @@ class Screen:
         self.tx = bytearray(1 + len(self.buf))
         self.tx[0] = 0x40                    # "data follows"
         self.rows, self.cols = self.pages, w // 8
-        # SH1106 shim 1/2: its pump is 0xAD/0x8B, and it has no 0x20 memory
-        # addressing mode command at all.
+        # SH1106 shim 1/2: pump is 0xAD/0x8B and it has no 0x20 command.
         pump = (0xAD, 0x8B) if kind == "sh1106" else (0x8D, 0x14, 0x20, 0x00)
         for c in ((0xAE, 0xD5, 0x80, 0xA8, h - 1, 0xD3, 0x00, 0x40) + pump +
                   (0xA1, 0xC8, 0xDA, 0x02 if h == 32 else 0x12, 0x81, 0xCF,
@@ -1334,8 +1412,7 @@ class Screen:
 
     def show(self):
         if self.kind == "sh1106":
-            # Shim 2/2: set the page pointer per page, starting at column 2 -
-            # its RAM is 132 wide with the glass wired to 2..129.
+            # Shim 2/2: page pointer per page from column 2 (132-wide RAM).
             mv = memoryview(self.tx)
             for pg in range(self.pages):
                 self.cmd(0xB0 | pg); self.cmd(0x02); self.cmd(0x10)
@@ -1365,12 +1442,9 @@ class Screen:
 
 
 def beacon(i2c, kind, w, h):
-    """Rescan until something answers, then animate. Returns a Screen.
-
-    The quit check is at the BOTTOM: one real scan always happens before the
-    first chance to bail out.
-    """
-    print("waiting for the panel - wire it up now ('q' + enter to give up)")
+    """Rescan until answered, then animate. Quit check is at the BOTTOM."""
+    print("waiting for the panel - wire it up now (hold the wheel or 'q' to"
+          " give up)")
     say("Waiting\nfor panel")
     scr = None
     frame = dots = splash_at = 0
@@ -1387,15 +1461,13 @@ def beacon(i2c, kind, w, h):
                 except Exception:
                     found = []
                 if len(found) > 8:
-                    # Every address "answering" is not a bus full of chips: it
-                    # is SDA unable to rise, so the master reads its own low as
-                    # an ACK from everyone. Almost always a missing pull-up.
+                    # Not a bus full of chips - SDA cannot rise, so the master
+                    # reads its own low back as an ACK from everyone.
                     if not stuck:
                         stuck = True
-                        print("\nevery address answered - SDA is stuck low, not %d"
-                              " devices." % len(found))
-                        print("  the panel's own pull-ups should do this; check"
-                              " SDA is really on its row")
+                        print("\nevery address answered - SDA stuck low, not"
+                              " %d devices; check SDA's row and its pull-up"
+                              % len(found))
                     found = []
                 addr = None
                 for a in ADDRS:
@@ -1415,8 +1487,8 @@ def beacon(i2c, kind, w, h):
                     dots += 1
                     print(".", end="")
                     if dots % 40 == 0:
-                        print("  (nothing yet - check GND/VCC first, then the"
-                              " SDA/SCL order)")
+                        print("  (nothing yet - check GND/VCC, then SDA/SCL"
+                              " order)")
         else:
             try:
                 scr.splash(frame)
@@ -1428,6 +1500,8 @@ def beacon(i2c, kind, w, h):
                 if time.ticks_diff(time.ticks_ms(), splash_at) >= SPLASH_MS:
                     return scr
                 nap = 0.08
+        if wheel() == "hold":
+            raise Abort()
         line = ask()
         if line is not None and line.strip().lower() in ("q", "quit"):
             raise Abort()
@@ -1441,7 +1515,7 @@ if _jl_project:
 scr = None
 try:
     drain()
-    print("Where is the panel? Enter alone keeps the guide's header rows.")
+    print("Where is the panel? Enter alone keeps the guide's rows.")
     rows = {}
     for _nm, _df, _nd in SIGNALS:
         rows[_nm] = ask_row(_nm, _df)
@@ -1451,13 +1525,16 @@ try:
     pins(True)
     route(rows)
     import machine
-    i2c = machine.I2C(1, scl=SCL_PIN, sda=SDA_PIN, freq=I2C_HZ)
+    i2c = machine.I2C(1, scl=SCL_PIN, sda=SDA_PIN, freq=I2C_HZ,
+                      timeout=I2C_TIMEOUT_US)
     scr = beacon(i2c, kind, w, h)
 
-    print("Type a line and press enter. Empty line clears. 'q' quits.")
+    print("Type a line + enter. Empty clears. 'q' or hold quits.")
     history = []
     print("> ", end="")
     while True:
+        if wheel() == "hold":
+            break
         typed = ask()
         if typed is None:
             time.sleep(0.02)
@@ -1480,8 +1557,7 @@ except (KeyboardInterrupt, Abort):
 except Exception as e:
     print("stopped: " + str(e))
 finally:
-    # finally, not just the except arms: q, Ctrl-C, an exception and a clean
-    # fall-through all have to leave the board the way we found it.
+    # finally, not the except arms: every exit path restores the board.
     if scr is not None:
         try:
             scr.lines([])
@@ -1491,8 +1567,8 @@ finally:
     pins(False)
     print("bye")
 )===";
-const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[6] = { 0xF166AB80, 0xCB6D158D, 0x6D63CA5E, 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
-const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 6;
+const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[11] = { 0x024D8AA9, 0x59E93C91, 0xE21C8E8E, 0x6E22A6DD, 0xBEFB8273, 0xF166AB80, 0xCB6D158D, 0x6D63CA5E, 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
+const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 11;
 
 const char* PROJECT_I2CSCRN_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges

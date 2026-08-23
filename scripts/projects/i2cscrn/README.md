@@ -91,13 +91,31 @@ cleans up after itself*, and a guided build's bridges are your saved circuit,
 not its mess. Run it after a guided build and it will find all four routes
 already there, make none, and remove none.
 
-### Driving it without hands
+### No prompt needs a keyboard
 
-Everything the probe can do here, typed input can do too, so the whole flow is
-scriptable over the serial port: launch it (`z i2cscrn`, or the Files browser)
-and send `5`, `6`, `41`, `42`, `2`, `q` as lines. That is exactly how
-`test_projects.py` exercises it with no panel attached - through the real
-launcher, the real prompts and the real stdin.
+Every question this script asks answers to all three surfaces, and the wheel
+alone is enough to get from launch to a working screen:
+
+| | probe | clickwheel | terminal |
+|---|---|---|---|
+| **which row is this signal in** | tap the hole (absolute) | turn to nudge the row, click to take it | type `1`-`60`, or enter for the default |
+| **which panel do you have** | — | turn the list, click to take it | type `1`-`3`, or enter for the default |
+| **give up** | — | hold | `q` |
+
+**One direction rule everywhere: up = previous / −1, down = next / +1**, click
+takes, hold quits. The wheel has no double-click; two fast presses are two
+ordinary clicks, so nothing here breaks if you click twice.
+
+The panel-type question used to be typing-only, which quietly made a keyboard
+mandatory for a flow that otherwise never needed one. The current OLED shows
+the candidate row or panel name as you turn, so the whole thing is usable with
+the terminal closed.
+
+Because typed input still answers everything, the flow stays scriptable over
+the serial port: launch it (`z i2cscrn`, or the Files browser) and send `5`,
+`6`, `41`, `42`, `2`, `q` as lines. That is exactly how `test_projects.py`
+exercises it with no panel attached - through the real launcher, the real
+prompts and the real stdin.
 
 > **A note on script size.** Until wave 3 the launcher needed *two* full-size
 > copies of the source in RAM to prepend `_jl_project`, against an Arduino heap
@@ -110,9 +128,12 @@ launcher, the real prompts and the real stdin.
 > failure branch now prints.
 >
 > One bound survives, a level up: **MicroPython's compiler** needs heap
-> proportional to the source. Around 12 KB compiles on a freshly booted board
-> (~39 KB free) and raises `MemoryError` on the ~25 KB left deep into a long
-> session. This script is about 12 KB. If you grow it, watch for that.
+> proportional to the source. Measured on this board: **13 KB runs on a fresh
+> boot, 15 KB raises `MemoryError` even there** - and much less than 13 KB
+> survives deep into a long session, because the interpreter heap never resets
+> between scripts. This script is about 13 KB and that is the ceiling, not a
+> comfortable middle. If you add to it, take the space back out of the prose
+> (which belongs in this file) rather than out of the margin.
 
 ## Running it
 
@@ -182,6 +203,21 @@ you to the first thing you have not built yet.
   leave it running and re-seat one wire at a time. Check GND and VCC first (a
   panel with no power cannot ack anything), then that the rows you assigned are
   the rows the legs are actually in, then the SDA/SCL order.
+- **"panel up at 0x3c" then "panel went away (ETIMEDOUT)", over and over** -
+  fixed 2026-08-23, and worth knowing why. A full 128x32 frame is 513 bytes;
+  at 100 kHz that is 513 x 9 bits = **~46 ms** of bus time, and `machine.I2C`'s
+  **default timeout is 50 ms**. Every frame ran 4 ms from the edge, so the
+  panel initialised, drew its splash, and then threw `ETIMEDOUT` the moment
+  anything - a stretched clock, a slow rise through the crossbar - ate the
+  margin. The beacon read that as the panel vanishing and went back to
+  scanning, forever. `I2C_TIMEOUT_US` is now 400 ms, roughly 8x the frame; a
+  128x64 panel needs twice the bus time and still clears it comfortably.
+- **Every address answers (a "bus" of 100+ devices)** - that is not devices,
+  it is SDA unable to rise, so the master reads its own low back as an ack
+  from everyone. Almost always a missing pull-up: the internal one is ~50k,
+  far too weak to pull a routed breadboard net up inside a 100 kHz bit time.
+  A 4-pin module brings its own; a bare panel needs 4.7k. The script says so
+  in as many words rather than pretending it found a hundred chips.
 - **Wrong rows assigned** - `q`, enter, and run it again. Nothing is
   remembered between runs, and the exit removed whatever it had routed.
 - **A device answers, but at some other address** - the script tries `0x3C`
