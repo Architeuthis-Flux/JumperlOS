@@ -225,20 +225,26 @@ if _jl_project:
     print("project: " + str(_jl_project.get("dir", "555")) +
           "  variant: " + str(_jl_project.get("variant", "default")))
 
-taps_up()
-print("measuring: ADC0 on row %d (OUT), ADC1 on row %d (cap)"
-      % (OUT_ROW, CAP_ROW))
-
+# EVERYTHING FROM taps_up() ON IS INSIDE THE try, so the `finally` below owns
+# the taps from the instant they exist. The set-up is not instantaneous - it
+# makes two crossbar connections, brings up the OLED and takes a real ADC
+# reading - and a Ctrl-C or a clickwheel hold anywhere in that window would
+# otherwise strand ADC0-37 and ADC1-7 on the board, which is the exact state
+# this script exists to avoid leaving behind.
 try:
-    oled_connect()
-except Exception:
-    pass
+    taps_up()
+    print("measuring: ADC0 on row %d (OUT), ADC1 on row %d (cap)"
+          % (OUT_ROW, CAP_ROW))
 
-edges = 0
-above = adc_get(0) > THRESHOLD
-window_start = time.ticks_ms()
+    try:
+        oled_connect()
+    except Exception:
+        pass
 
-try:
+    edges = 0
+    above = adc_get(0) > THRESHOLD
+    window_start = time.ticks_ms()
+
     while True:
         out_v = adc_get(0)
         if out_v > THRESHOLD:
@@ -274,8 +280,8 @@ finally:
         pass
     print("bye")
 )===";
-const uint32_t PROJECT_555_MAIN_PY_HASHES[3] = { 0xFD94A80B, 0x89075267, 0xD488958C };
-const int PROJECT_555_MAIN_PY_HASH_COUNT = 3;
+const uint32_t PROJECT_555_MAIN_PY_HASHES[4] = { 0x2BE6A1DA, 0xFD94A80B, 0x89075267, 0xD488958C };
+const int PROJECT_555_MAIN_PY_HASH_COUNT = 4;
 
 const char* PROJECT_555_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -861,21 +867,20 @@ and send `5`, `6`, `41`, `42`, `2`, `q` as lines. That is exactly how
 `test_projects.py` exercises it with no panel attached - through the real
 launcher, the real prompts and the real stdin.
 
-If you are calling the script from your own MicroPython code rather than
-typing at it, `main.py` also reads a pre-supplied `_i2cscrn = {"feed": "..."}`
-global before it looks at the terminal, through the **same** reader - there is
-no separate non-interactive branch to rot:
-
-    _i2cscrn = {"feed": "5\n6\n7\n8\n1\nq\n"}
-
-> **A note on script size.** Companion scripts are compiled on the device out
-> of a heap that settles around 19 KB free. Until wave 3 the launcher needed
-> *two* full-size copies of the source to prepend `_jl_project`, so anything
-> past roughly 6 KB failed - and failed **silently**, printing `Running ...`
-> and then `--- script finished ---` with nothing between. That is fixed
-> (`runCompanionScript`, `src/ProjectsApp.cpp`: one reserved buffer, and every
-> failure branch now prints), but the budget is still finite. If you grow this
-> script, watch for that.
+> **A note on script size.** Until wave 3 the launcher needed *two* full-size
+> copies of the source in RAM to prepend `_jl_project`, against an Arduino heap
+> that settles around 19 KB free - so anything past roughly 6 KB failed, and
+> failed **silently**, printing `Running ...` and then `--- script finished ---`
+> with nothing between. Fixed in `runCompanionScript`
+> (`src/ProjectsApp.cpp`): **the source is never copied into RAM at all**. The
+> runner hands MicroPython a short `execfile()` and the lexer streams the script
+> off the filesystem, so there is no Arduino-side ceiling left, and every
+> failure branch now prints.
+>
+> One bound survives, a level up: **MicroPython's compiler** needs heap
+> proportional to the source. Around 12 KB compiles on a freshly booted board
+> (~39 KB free) and raises `MemoryError` on the ~25 KB left deep into a long
+> session. This script is about 12 KB. If you grow it, watch for that.
 
 ## Running it
 
@@ -963,8 +968,8 @@ you to the first thing you have not built yet.
 - **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
   Long crossbar paths plus breadboard capacitance slow the edges down.
 )";
-const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[8] = { 0xBCF87B83, 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
-const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 8;
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[9] = { 0x6392E24F, 0xBCF87B83, 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 9;
 
 const char* PROJECT_I2CSCRN_MAIN_PY = R"===("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml.
 
@@ -973,9 +978,11 @@ each signal (or type its row), pick a driver/size, then a beacon that rescans
 until the panel answers - wire it up while it runs. On the way out it removes
 exactly the bridges it made. Walkthrough in README.md.
 
-KEEP COMPANION SCRIPTS LEAN. MicroPython compiles them on the device, and deep
-into a session the compiler runs out of heap somewhere past ~8 KB of source.
-Prose belongs in README.md.
+KEEP COMPANION SCRIPTS LEAN. MicroPython compiles them on the device out of a
+heap whose size depends on how long the session has been running: measured,
+~12 KB of source compiles on a freshly booted board (~39 KB free) and raises
+MemoryError on the ~25 KB left deep into a long one. This file is about 12 KB,
+so it is at the edge of the good case - prose belongs in README.md, not here.
 """
 
 import sys
@@ -1344,8 +1351,8 @@ finally:
     pins(False)
     print("bye")
 )===";
-const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[4] = { 0x6D63CA5E, 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
-const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 4;
+const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[5] = { 0xCB6D158D, 0x6D63CA5E, 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
+const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 5;
 
 const char* PROJECT_I2CSCRN_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges

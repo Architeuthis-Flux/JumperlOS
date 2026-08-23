@@ -925,7 +925,17 @@ static void runCompanionScript(const RunContext& rc, const String& scriptPath) {
     // shipped eeprom script is 6441 bytes. Fixing it to ONE reserved buffer
     // was not enough either: a 12.5 KB reserve still failed mid-session with
     // 25 KB free, because that heap has no contiguous block that size.
-    // Streaming is the only shape with no size ceiling at all.
+    // Streaming is the only shape with no ARDUINO-side ceiling at all.
+    //
+    // ONE BOUND SURVIVES, and it is not this file's to fix: MicroPython's
+    // COMPILER still needs heap proportional to the source. Measured on the
+    // bench - ~12 KB compiles on a freshly booted board (~39 KB free) and
+    // raises MemoryError on the ~25 KB left deep into a long session. That is
+    // why test_projects' i2cscrn drive resets the board before it runs a
+    // 12 KB companion script, and why the bundled scripts are kept lean. If
+    // you are here to change how scripts are launched: the source no longer
+    // costs Arduino heap, but its SIZE still costs MicroPython heap, and the
+    // failure is a loud traceback rather than the old silence.
     if (scriptBytes == 0) {
         Serial.println("  Script is empty: " + scriptPath);
         return;
@@ -953,7 +963,16 @@ static void runCompanionScript(const RunContext& rc, const String& scriptPath) {
     delay(400);
 
     Serial.println("\r\nRunning " + scriptPath + " ...\r\n");
-    executePythonFileContent(content.c_str());
+    // The return is checked, not discarded: executePythonFileContent answers
+    // false WITHOUT printing when initMicroPythonQuiet() fails
+    // (Python_Proper.cpp - an mpAllocHeap() failure), which is the last branch
+    // that can still reproduce the exact silence this function was rewritten
+    // to kill. mpAllocHeap prints its own ladder failures, so this is a
+    // backstop rather than the only witness - but "every failure branch
+    // prints" has to mean every one.
+    if (!executePythonFileContent(content.c_str())) {
+        Serial.println("\r\n  (MicroPython would not start - nothing was run)");
+    }
     Serial.println("\r\n--- script finished ---");
 }
 

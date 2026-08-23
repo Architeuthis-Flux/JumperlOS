@@ -69,20 +69,26 @@ if _jl_project:
     print("project: " + str(_jl_project.get("dir", "555")) +
           "  variant: " + str(_jl_project.get("variant", "default")))
 
-taps_up()
-print("measuring: ADC0 on row %d (OUT), ADC1 on row %d (cap)"
-      % (OUT_ROW, CAP_ROW))
-
+# EVERYTHING FROM taps_up() ON IS INSIDE THE try, so the `finally` below owns
+# the taps from the instant they exist. The set-up is not instantaneous - it
+# makes two crossbar connections, brings up the OLED and takes a real ADC
+# reading - and a Ctrl-C or a clickwheel hold anywhere in that window would
+# otherwise strand ADC0-37 and ADC1-7 on the board, which is the exact state
+# this script exists to avoid leaving behind.
 try:
-    oled_connect()
-except Exception:
-    pass
+    taps_up()
+    print("measuring: ADC0 on row %d (OUT), ADC1 on row %d (cap)"
+          % (OUT_ROW, CAP_ROW))
 
-edges = 0
-above = adc_get(0) > THRESHOLD
-window_start = time.ticks_ms()
+    try:
+        oled_connect()
+    except Exception:
+        pass
 
-try:
+    edges = 0
+    above = adc_get(0) > THRESHOLD
+    window_start = time.ticks_ms()
+
     while True:
         out_v = adc_get(0)
         if out_v > THRESHOLD:

@@ -5,9 +5,11 @@ each signal (or type its row), pick a driver/size, then a beacon that rescans
 until the panel answers - wire it up while it runs. On the way out it removes
 exactly the bridges it made. Walkthrough in README.md.
 
-KEEP COMPANION SCRIPTS LEAN. MicroPython compiles them on the device, and deep
-into a session the compiler runs out of heap somewhere past ~8 KB of source.
-Prose belongs in README.md.
+KEEP COMPANION SCRIPTS LEAN. MicroPython compiles them on the device out of a
+heap whose size depends on how long the session has been running: measured,
+~12 KB of source compiles on a freshly booted board (~39 KB free) and raises
+MemoryError on the ~25 KB left deep into a long one. This file is about 12 KB,
+so it is at the edge of the good case - prose belongs in README.md, not here.
 """
 
 import sys
