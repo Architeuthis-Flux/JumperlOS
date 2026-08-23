@@ -13,7 +13,18 @@ session; that one is the detail when something looks wrong.
 ## 0a. Today's two (5 min) — start here
 
 Added 2026-08-23, after your two reports. Both are on the board already
-(firmware **5.7.4.2**; the version bump is what re-provisions `/projects`).
+(firmware **5.7.4.3**; the version bump is what re-provisions `/projects`).
+
+- [ ] **Replug the USB first, then run `test_guide_flow.py` once.** This is the
+  one loop I could not close. Every suite run late in the session died on
+  `device reports readiness to read but returned no data` at a *different*
+  phase, drifting earlier each time — and it reproduces on the **pre-change**
+  firmware at 179 checks, so it is not this work. It smells like the host's
+  CDC stack after a dozen re-enumerations in one day, which a physical replug
+  fixes and I cannot do from here. What I did get: `test_projects` **280/280
+  PASS**, and `test_guide_flow` **395 checks deep with every new assertion
+  green** before the drop. One clean run after a replug turns that into a
+  simple "green".
 
 - [ ] **`i2cscrn`, end to end.** The root cause was not the wiring and not your
   panel: `machine.I2C.scan()` probes every address with a **zero-length write**,
@@ -174,6 +185,32 @@ Do it on a **bare board**; that is the case it was rewritten for.
   the panel to life the moment the last wire lands.
 - [ ] **Pick the wrong panel size on purpose**, confirm the driver list works.
 - [ ] **`q` on exit** — the routes it made are gone.
+
+---
+
+## 5b. Three things found on 2026-08-23 that are yours to rule on
+
+1. **Provisioning cannot tell damage from a user edit.** Your board was
+   carrying a `/projects/i2cscrn/main.py` truncated to 2620 of 12939 bytes, cut
+   off mid-function. Because a damaged file hashes like an edited one,
+   provisioning *preserved* it and parked the good default beside it as
+   `main_original.py` — twice. Repaired, and every shipped file now matches the
+   repo byte for byte. But the trap stands: a half-written companion script is
+   permanent until someone deletes it by hand. Worth a plausibility rule (a
+   Python file that does not compile is not a user edit), which is your call.
+2. **Your OLED config says `connection_type = i2c0`** (GPIO 4/5), not the
+   GPIO 7/8 you answered when I asked. No harm done — it actually cleared the
+   OLED of any involvement in the i2c bug — but if the menu made that hard to
+   read off, that is a small UX thing worth knowing. Related hazard for
+   *other* people: on a **default** board (`connection_type = 0`) the stock
+   OLED sits on RP 26/27 at 0x3C, which is exactly where `i2cscrn` puts the
+   user's panel. Same bus, same address. Not your board; still a real trap.
+3. **`board_state_restore` drops `parts:`.** The `S` paste path does not carry
+   the parts section, so any suite that snapshots a board with parts placed
+   restores it without them — and reports the mismatch as a failed restore.
+   Your bench had six parts on it this morning, which is how I hit it. Logged
+   as a finding, not fixed today; your 555 run file was restored by writing the
+   captured bytes back directly, and verified against the snapshot.
 
 ---
 
