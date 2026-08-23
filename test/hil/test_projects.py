@@ -1582,6 +1582,159 @@ print("progress=", guide_progress())
               f"{proj}: no guide progress was committed (guide_progress()="
               f"{vals.get('progress')})")
 
+        # (vii) i2cscrn ONLY: THE I2C TEARDOWN NEEDLE (wave H1, the CRITICAL).
+        #
+        # WHAT IT GUARDS. The i2c check used to call
+        # `i2cScan(n1, n2, 26, 27, leaveConnections=0, internalScan=0)`, whose
+        # tail removed RP_GPIO_26<->n1 and RP_GPIO_27<->n2 unconditionally.
+        # Those two nodes ARE RP_GPIO_7/RP_GPIO_8 (137/138 - the names alias),
+        # and n1/n2 on this project's verify step are 8 and 7, so the removals
+        # landed exactly on the two bridges DISP's own place step had just
+        # committed. Bridges the scan had never added, belonging to the user.
+        # markDirty came with them, so the next commit rewrote the run file
+        # without the wiring - and main.py then ran against a board the guide
+        # had just unwired. Nothing else in the suite drives this step.
+        #
+        # WHAT IT ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. Three things:
+        # the two bridges are live BEFORE the check, they are still live
+        # AFTER it, and the bridge COUNT is unchanged across it (so a leaked
+        # ephemeral leg from the new routing path fails here too). It does NOT
+        # assert the scan's verdict: with no panel plugged in, a floating
+        # pulled-up bus ACKs a nondeterministic number of ghost addresses
+        # (0, 1 and 4 all observed on the same bench in one session), so any
+        # assertion on `%ddev` would be a flake generator. on_fail defaults to
+        # WARN, which is what lets the drive advance past either outcome.
+        #
+        # THE DURABLE HALF is the last check: after the step commits, the RUN
+        # FILE on disk must still carry both bridges. Read as TEXT and
+        # normalized here rather than by reloading the file - a reload would
+        # re-expand DISP's placed pins and manufacture the bridges back,
+        # hiding exactly the loss this is looking for.
+        #
+        # RUN-FILE SAFETY: /projects/i2cscrn/i2cscrn_run.yaml is covered by
+        # phase 0's run_file_capture(), the same snapshot phase (vi) above
+        # relies on.
+        if proj == "i2cscrn":
+            print("  --- 6(e-vii) i2cscrn: the i2c check must not eat the "
+                  "project's own SDA/SCL bridges ---")
+
+            def _i2c_bridge_state():
+                o = jl_exec("""
+print("sda=", 1 if is_connected(8, 137) else 0)
+print("scl=", 1 if is_connected(7, 138) else 0)
+print("nb=", get_num_bridges())
+""", timeout=30)
+                return parse_kv(o)
+
+            guide_live = False
+            before = after = None
+            d = GuideDriver()
+            try:
+                d.send(f"z {proj} new\r\n".encode())
+                guide_live = True
+                d.expect(r"GUIDE step=1/5 \S+ state=WAIT",
+                         "i2c needle: step 1 (note) is waiting")
+                d.send(b"n")
+                d.expect(r"GUIDE step=2/5 \S+ state=WAIT",
+                         "i2c needle: step 2 (place DISP) is waiting")
+                d.send(b"n")
+                m = d.expect(r"GUIDE step=2/5 \S+ state=RESULT check=presence "
+                             r"val=\S+ ok=(\d)",
+                             "i2c needle: the presence check reported", timeout=45)
+                # No panel on the bench, so presence fails on_fail: warn and a
+                # second confirm advances. If a panel IS plugged in it passes
+                # and commits straight through - both are fine here.
+                if m and m.group(1) == "0":
+                    d.send(b"n")
+                d.expect(r"GUIDE step=3/5 \S+ state=WAIT",
+                         "i2c needle: step 3 (power_on) is waiting", timeout=45)
+                d.send(b"n")
+                m = d.expect(r"GUIDE step=3/5 \S+ state=RESULT check=rail_sane "
+                             r"val=\S+ ok=(\d)",
+                             "i2c needle: rail_sane reported", timeout=45)
+                if m and m.group(1) == "0":
+                    d.send(b"n")
+                d.expect(r"GUIDE step=4/5 \S+ state=WAIT",
+                         "i2c needle: step 4 (the i2c verify) is waiting",
+                         timeout=45)
+
+                # DISP is committed: its four legs are on the fabric and the
+                # two that matter are the SDA/SCL bridges to the I2C pins.
+                before = _i2c_bridge_state()
+                check(before.get("sda") == 1 and before.get("scl") == 1,
+                      f"i2c needle: the committed wiring is live before the "
+                      f"check - 8<->RP_GPIO_7 and 7<->RP_GPIO_8 (got "
+                      f"{before.get('sda')}, {before.get('scl')})")
+
+                d.send(b"n")
+                d.expect(r"GUIDE step=4/5 \S+ state=VERIFY check=i2c",
+                         "i2c needle: the i2c check launched")
+                # i2cScan is the one BLOCKING check: a 128-address sweep plus
+                # its own ~2 s LED/OLED result UI. Generous window.
+                m = d.expect(r"GUIDE step=4/5 \S+ state=RESULT check=i2c "
+                             r"val=(\S+) ok=(\d)",
+                             "i2c needle: the i2c check finished", timeout=60)
+                print(f"  info: i2c verdict was {m.group(1) if m else '??'} "
+                      f"(not asserted - ghost ACKs on a panel-less bus)")
+
+                after = _i2c_bridge_state()
+                check(after.get("sda") == 1 and after.get("scl") == 1,
+                      f"i2c needle: THE CRITICAL - the project's own SDA/SCL "
+                      f"bridges SURVIVED the i2c check (8<->RP_GPIO_7 "
+                      f"{after.get('sda')}, 7<->RP_GPIO_8 {after.get('scl')})")
+                check(before.get("nb") == after.get("nb"),
+                      f"i2c needle: the check is bridge-count neutral - "
+                      f"{before.get('nb')} before, {after.get('nb')} after "
+                      f"(nothing removed, and no ephemeral leg leaked out of "
+                      f"the teardown funnel)")
+
+                # Advance past the step so it COMMITS and the guide saves the
+                # run file - the destructive removal's markDirty only reached
+                # disk at the next explicit save, which is the half a user
+                # actually loses.
+                if m and m.group(2) == "0":
+                    d.send(b"n")
+                d.expect(r"GUIDE step=5/5 \S+ state=WAIT",
+                         "i2c needle: the verify step committed and step 5 "
+                         "(the closing note) is waiting", timeout=45)
+                d.send(b"q")
+                d.expect(r"GUIDE .* state=EXIT", "i2c needle: 'q' left the guide")
+                guide_live = False
+            finally:
+                if guide_live:
+                    d.send(b"q")
+                    time.sleep(0.5)
+                d.close()
+                time.sleep(1.0)
+
+            # The durable half, straight out of the saved file.
+            rpath = project_run_path(pdir)
+            exists, ryaml = read_device_file(rpath)
+            check(exists, f"i2c needle: the run file {rpath} was written")
+            # Bridges serialize with node NAMES (nodeValueToString), so
+            # normalize before comparing: GPIO_7 == RP_GPIO_7 == 137.
+            _alias = {"GPIO_7": 137, "RP_GPIO_7": 137, "RP_GPIO_26": 137,
+                      "GPIO_8": 138, "RP_GPIO_8": 138, "RP_GPIO_27": 138}
+
+            def _node(tok):
+                tok = tok.strip()
+                return _alias.get(tok, tok)
+
+            pairs = set()
+            for mm in re.finditer(r"-\s*\{n1:\s*([^,}]+),\s*n2:\s*([^,}]+)",
+                                  ryaml or ""):
+                a, b = _node(mm.group(1)), _node(mm.group(2))
+                pairs.add(frozenset((str(a), str(b))))
+            want_sda = frozenset(("8", "137"))
+            want_scl = frozenset(("7", "138"))
+            check(want_sda in pairs and want_scl in pairs,
+                  f"i2c needle: the SAVED run file still carries both I2C "
+                  f"bridges after the check committed - this is what the user "
+                  f"runs main.py against (pairs found: "
+                  f"{sorted(tuple(sorted(p)) for p in pairs)})")
+
+            leave_context_to_slot3()
+
     # --- 6(f). RUN FILES: the exit table, the allocator, the terminal state ---
     # Everything the temp-slot keep-flow used to do is gone; this is what
     # replaced it. Driven headless from PORT 1 on purpose: the launcher moves
