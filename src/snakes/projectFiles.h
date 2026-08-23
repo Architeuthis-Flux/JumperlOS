@@ -762,24 +762,27 @@ const int PROJECT_EEPROM_WIRING_YAML_HASH_COUNT = 2;
 #ifdef INCLUDE_PROJECT_I2CSCRN
 const char* PROJECT_I2CSCRN_README_MD = R"(# Type to Screen
 
-An SSD1306 OLED module pushed into the breadboard, wired to the Jumperless's
-I2C pins by the crossbar. You type a line in the terminal, it appears on the
-panel. No jumper wires - the Jumperless makes every connection.
+An I2C OLED module pushed into the breadboard - **anywhere** on it - wired to
+the Jumperless's I2C pins by the crossbar. You type a line in the terminal, it
+appears on the panel. No jumper wires: the Jumperless makes every connection.
 
 ## Parts you need
 
 | Part | Package | Rows |
 |------|---------|------|
-| DISP | SSD1306 I2C module, 4-pin header | 5 - 8 |
+| DISP | SSD1306 / SH1106 I2C module, 4-pin header | 5 - 8 *(the default; any rows work)* |
 
-The four pins go, in order: **GND at row 5, VCC at row 6, SCL at row 7,
-SDA at row 8**. That is the pin order printed on nearly every cheap 0.96"
-and 0.91" module, but *check your silkscreen before powering up* - a few
-boards swap VCC and GND, and that is the one mistake that kills the panel.
+The guided build places the header in rows 5-8 in the usual pin order - **GND
+5, VCC 6, SCL 7, SDA 8** - because a guide needs somewhere concrete to point.
+But those rows are only a **default**: `main.py` asks where each signal
+actually is, and re-routes to match. *Check your silkscreen before powering
+up* - a few boards swap VCC and GND, and that is the one mistake that kills
+the panel.
 
-Top rail is set to 3.3 V. Rows 7 and 8 are routed to `RP_GPIO_8` (RP pin 27,
-SCL) and `RP_GPIO_7` (RP pin 26, SDA) - the same pair the built-in I2C
-scanner uses.
+Top rail is set to 3.3 V. Whichever rows you use, SCL is routed to `RP_GPIO_8`
+(RP pin 27) and SDA to `RP_GPIO_7` (RP pin 26) - the same pair the built-in
+I2C scanner uses. Those two are fixed by the hardware; only the breadboard row
+is yours to choose.
 
 > **Jumperless V5 only.** This project routes breadboard rows to
 > `RP_GPIO_7` and `RP_GPIO_8`, and those nodes exist only on the V5. The original
@@ -788,48 +791,108 @@ scanner uses.
 
 ## What it does
 
-`main.py` opens `machine.I2C(1, scl=27, sda=26)`, scans the bus, and then
-loops on `input()`. Each line you type is pushed onto a short history and
-redrawn on the panel:
+`main.py` runs four steps, in order.
 
-    Type to Screen
-    i2c devices: ['0x3c']
-    panel up: 128x32, 4 rows of 16 chars
-    Type a line and press enter. Empty line clears. 'q' quits.
-    > hello jumperless
+**1. Tap-to-assign.** It asks where each of GND / VCC / SCL / SDA is. At every
+one of those prompts you can **tap the hole with the probe** *or* **type the
+row number** - both are live at the same time, and pressing enter alone keeps
+the default. Every probe gesture here has a typed twin, which is what makes
+the whole flow drivable from a terminal, from a script, and from the HIL:
 
-An empty line clears the screen, `q` quits, and Ctrl-C works too.
+    Where is the panel? Enter alone keeps the guide's header rows.
+      GND  tap its hole with the probe, or type a row 1-60 (enter = 5, q = quit)
+           GND = row 5 (default)
+      VCC  tap its hole with the probe, or type a row 1-60 (enter = 6, q = quit)
+           VCC = row 41 (tapped)
+      ...
+    assignment: GND 5  VCC 41  SCL 7  SDA 8
 
-The driver is deliberately tiny: MicroPython's `framebuf` module supplies
-the pixel buffer and the built-in 8x8 font, and the `Screen` class in
-`main.py` only adds the SSD1306 command set on top (init sequence, column
-and page window, the `0x40` data prefix).
+**2. Driver and size.** A three-item menu - enter picks the first:
 
-`HEIGHT = 32` at the top of `main.py` is the one thing to change for a
-128x64 panel - set it to 64 and the driver picks the right multiplex ratio
-and COM pin configuration by itself.
+    Panel type:
+      1) SSD1306 128x32   (default)
+      2) SSD1306 128x64
+      3) SH1106  128x64
+
+**3. The wiring beacon.** It routes what you assigned, then loops: scan the
+bus, and the moment something answers, initialise it and start drawing an
+animation. **You can wire the panel up while this is running** and watch it
+spring to life the instant the last wire is right. The terminal shows a quiet
+row of dots, not one error per attempt:
+
+    waiting for the panel - wire it up now ('q' + enter to give up)
+    ............
+    panel up at 0x3c: 128x32, 4 rows of 16 chars
+
+**4. Type to screen.** Each line you type is pushed onto a short history and
+redrawn. An empty line clears, `q` quits, Ctrl-C works. If the panel falls off
+the bus mid-session, the script drops back to the beacon instead of dying -
+push the module back in and it comes straight back.
+
+The driver is deliberately tiny: MicroPython's `framebuf` module supplies the
+pixel buffer and the built-in 8x8 font, and the `Screen` class only adds the
+command set. **The SH1106 shim is two small differences**, both in `Screen`:
+its charge pump is `0xAD/0x8B` instead of `0x8D/0x14`, and it has no
+memory-addressing-mode command at all - so `show()` sets the page pointer per
+page and starts each row at **column 2**, because the SH1106's RAM is 132
+columns wide with the glass wired to 2..129. Miss that offset and the whole
+image sits two pixels left, wrapped.
+
+### What it leaves behind: nothing of its own
+
+On the way out - `q`, Ctrl-C, or any other exit - the script blanks the panel,
+releases its GPIO claims, and **removes exactly the bridges it made**. It
+records each route as it makes it, and a route that was already on the board
+when it started is reported and left alone:
+
+    GND row 5 -> GND was already routed - left alone
+    SDA row 8 -> RP_GPIO_7
+
+That is the deliberate reading of "clear the data lines on exit": *this script
+cleans up after itself*, and a guided build's bridges are your saved circuit,
+not its mess. Run it after a guided build and it will find all four routes
+already there, make none, and remove none.
+
+### Driving it from a script
+
+`main.py` reads a pre-supplied `_i2cscrn = {"feed": "..."}` global before it
+looks at the terminal, through the **same** reader the human path uses - there
+is no separate non-interactive branch to rot:
+
+    _i2cscrn = {"feed": "5\n6\n7\n8\n1\nq\n"}
+    exec(open("/projects/i2cscrn/main.py").read())
+
+That walks the real prompts, the real parser and the real routing, then quits
+out of the beacon - which is exactly how `test_projects.py` exercises it with
+no panel attached.
 
 ## Running it
 
-- **Clickwheel:** `Projects` - it is a top-level menu row, before `Apps` - then
+- **Clickwheel:** `Guides` - it is a top-level menu row, before `Apps` - then
   **i2cscrn**, and walk the guided build. That is what wires the parts up. Run
   `main.py` when it offers at the end.
 - **Headless:** `z i2cscrn` on the terminal drives the same flow. Add `new` to
-  force a fresh run, `load` to reopen the latest one, `run=<N>` for a specific
-  one, `noscript` to stop at the wiring.
+  start over from the wiring, `load` to reopen the run you already have,
+  `noscript` to stop at the wiring.
+- **`main.py` on its own** is enough if you would rather not walk the guide at
+  all: it does its own assignment and its own routing, so a module dropped in
+  any four rows comes up from a bare board.
 
 Launching a project does not borrow a slot any more. It opens
-`/projects/i2cscrn/i2cscrn_<N>.yaml` - a **run file** - and makes it your active
-circuit, exactly as if you had clicked a YAML in the Files browser. Your build
-is saved into it at every step, the board comes back to it after a power cycle,
-and the next launch offers to reload it or to start run N+1 (the old one stays
-on disk). The shipped `wiring.yaml` is a read-only template and is never
-written to.
+`/projects/i2cscrn/i2cscrn_run.yaml` - a **run file** - and makes it your active
+circuit, exactly as if you had clicked a YAML in the Files browser. There is
+**one run file per project** and it is reused: your build is saved into it at
+every step, the board comes back to it after a power cycle, and the next launch
+reopens it silently - unless you quit a guided build part way through, in which
+case you are asked once whether to resume or to start over. To keep a run,
+`slots` > `save to` while it is active. The shipped `wiring.yaml` is a
+read-only template and is never written to.
 
 Clicking `wiring.yaml` in the Files browser starts a run the same way. Either
 route, **only a guide commit wires a part**: `expandPartsToBridges()` skips any
-part still marked `placed: false`, so a run you have not walked through yet has
-nothing on the breadboard except whatever its `bridges:` section already held.
+part still marked `placed: false`. This project has no `bridges:` section at
+all, so a run you have not walked through yet has **nothing** on the
+breadboard.
 
 ## Moving parts around
 
@@ -867,11 +930,17 @@ you to the first thing you have not built yet.
 
 ## Troubleshooting
 
-- **`i2c devices: []`** - nothing acked. Check that the module is really in
-  rows 5-8 with GND at 5, that the top rail is at 3.3 V, and that SCL/SDA
-  are not swapped (row 7 is SCL, row 8 is SDA).
-- **A device answers, but at some other address** - most 128x64 boards can
-  be strapped to 0x3D. Change `ADDR` at the top of `main.py`.
+- **The dots never stop** - nothing is acking. The beacon is the diagnostic:
+  leave it running and re-seat one wire at a time. Check GND and VCC first (a
+  panel with no power cannot ack anything), then that the rows you assigned are
+  the rows the legs are actually in, then the SDA/SCL order.
+- **Wrong rows assigned** - `q`, enter, and run it again. Nothing is
+  remembered between runs, and the exit removed whatever it had routed.
+- **A device answers, but at some other address** - the script tries `0x3C`
+  and `0x3D`, which covers effectively every module. Anything else: add it to
+  `ADDRS` at the top of `main.py`.
+- **The panel lights up but the image is shifted two pixels and wrapped** -
+  it is an SH1106, not an SSD1306. Pick option 3.
 - **Bare panel, no breakout board** - the 4-pin modules carry their own
   pull-up resistors. A raw panel does not; add 4.7k from row 7 and from
   row 8 up to the top rail (that is exactly what the `eeprom` project
@@ -883,33 +952,335 @@ you to the first thing you have not built yet.
 - **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
   Long crossbar paths plus breadboard capacitance slow the edges down.
 )";
-const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[6] = { 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
-const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 6;
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[7] = { 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 7;
 
-const char* PROJECT_I2CSCRN_MAIN_PY = R"("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml.
+const char* PROJECT_I2CSCRN_MAIN_PY = R"===("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml.
 
-SCL row -> RP_GPIO_8 (RP pin 27), SDA row -> RP_GPIO_7 (RP pin 26), so
-machine.I2C(1) reaches the panel. framebuf owns the pixels and the 8x8
-font; Screen only adds the SSD1306 command set. See README.md.
+Bring up an I2C OLED that is wired ANYWHERE on the breadboard, then type at it.
+
+Four things happen, in order:
+
+  1. TAP-TO-ASSIGN. For each of GND / VCC / SCL / SDA the script asks which
+     hole it is in. Tap the hole with the probe, or type the row number - both
+     work at the same prompt, and pressing enter keeps the default (the guide's
+     header rows 5-8). Every probe gesture here has a typed twin; that is what
+     makes the flow drivable from a terminal, a script or the HIL.
+  2. DRIVER / SIZE. A three-item menu: SSD1306 128x32, SSD1306 128x64,
+     SH1106 128x64. The SH1106 is the same framebuffer with a different way of
+     pushing it out - see Screen.show().
+  3. THE WIRING BEACON. The script then loops: scan the bus, and the moment
+     something answers, initialise it and start drawing an animation. So you
+     can wire the panel up WHILE this is running and watch it spring to life
+     the instant the last wire is right. The terminal shows a quiet heartbeat,
+     not an error per attempt.
+  4. TYPE TO SCREEN, as before - and if the panel falls off the bus mid-session
+     the script drops back to the beacon instead of dying.
+
+On the way out - a typed `q`, Ctrl-C, or the script ending - it blanks the
+panel, releases the GPIO claims and REMOVES EXACTLY THE BRIDGES IT MADE. A
+route that was already on the board when the script started (a guided build's,
+or one you made yourself) is left alone: this script only cleans up after
+itself. See README.md.
+
+SCL rides RP_GPIO_8 (RP pin 27) and SDA rides RP_GPIO_7 (RP pin 26), so
+machine.I2C(1) reaches the panel. Those are fixed by the hardware; only the
+BREADBOARD ROW is yours to choose. framebuf owns the pixels and the 8x8 font;
+Screen only adds the command set.
 """
+
+import sys
+import time
 
 _jl_project = globals().get("_jl_project", {})
 
-SDA_PIN = 26        # node RP_GPIO_7 - wiring.yaml routes row 8 here
-SCL_PIN = 27        # node RP_GPIO_8 - wiring.yaml routes row 7 here
-I2C_BUS = 1         # 26/27 are i2c1; machine.I2C(0, ...) rejects them
-I2C_HZ = 100000     # the scanner's rate - kind to breadboard capacitance
-ADDR = 0x3C         # 0x3D on a few 128x64 boards
-WIDTH = 128
-HEIGHT = 32         # <- set to 64 for a 128x64 panel
+# SCRIPTED INPUT. Set _i2cscrn = {"feed": "5\n6\n7\n8\n1\nq\n"} before exec'ing
+# this file and poll_line() serves those lines before it looks at the terminal.
+# It is the SAME reader the human path uses, so a scripted run walks the real
+# prompts, the real parser and the real assignment - there is no bypass branch
+# to rot. That is how test_projects drives this script with no panel attached.
+_i2cscrn = globals().get("_i2cscrn", {})
 
+SDA_PIN = 26        # node RP_GPIO_7 - fixed by the hardware
+SCL_PIN = 27        # node RP_GPIO_8 - fixed by the hardware
+I2C_BUS = 1         # 26/27 are i2c1; machine.I2C(0, ...) rejects them
+I2C_HZ = 100000     # kind to breadboard capacitance
+ADDRS = (0x3C, 0x3D)   # 0x3D on a few 128x64 boards
+
+# (label, kind, width, height). The first is the default.
+DRIVERS = (("SSD1306 128x32", "ssd1306", 128, 32),
+           ("SSD1306 128x64", "ssd1306", 128, 64),
+           ("SH1106  128x64", "sh1106", 128, 64))
+
+# (signal, default row, the node it has to reach). The default rows are the
+# guide's placement - wiring.yaml puts the module header in rows 5-8.
+SIGNALS = (("GND", 5, "GND"),
+           ("VCC", 6, "TOP_RAIL"),
+           ("SCL", 7, "RP_GPIO_8"),
+           ("SDA", 8, "RP_GPIO_7"))
+
+RETRY_MS = 300      # beacon: how often to re-scan a bus with nothing on it
+FRAME_MS = 80       # beacon: animation frame interval once the panel answers
+SPLASH_MS = 2500    # how long to animate before dropping into the type loop
+
+
+class Abort(Exception):
+    """A typed `q`. Handled exactly like Ctrl-C."""
+
+
+# ---------------------------------------------------------------------------
+# One input reader for everything: scripted feed, then the terminal.
+# ---------------------------------------------------------------------------
+
+_feed = _i2cscrn.get("feed", "")
+try:
+    import select
+    _poll = select.poll()
+    _poll.register(sys.stdin, select.POLLIN)
+except Exception:
+    _poll = None
+_inbuf = ""
+
+# With no poller and no feed there is no way to watch the probe and the
+# terminal at once, so the prompts fall back to a blocking input(). The typed
+# twin still works; only the tap does not.
+TYPED_ONLY = (_poll is None and not _feed)
+
+
+def poll_line():
+    """A typed line (no newline) once enter arrives, else None. Never blocks."""
+    global _inbuf, _feed
+    if _feed:
+        nl = _feed.find("\n")
+        if nl < 0:
+            line, _feed = _feed, ""
+        else:
+            line, _feed = _feed[:nl], _feed[nl + 1:]
+        line = line.replace("\r", "")
+        print(line)
+        return line
+    if _poll is None:
+        return None
+    try:
+        if not _poll.poll(0):
+            return None
+        ch = sys.stdin.read(1)
+    except Exception:
+        return None
+    if not ch:
+        return None
+    if ch == "\x03":                 # Ctrl-C
+        raise KeyboardInterrupt
+    if ch in ("\n", "\r"):
+        line, _inbuf = _inbuf, ""
+        print()
+        return line
+    if ch in ("\x08", "\x7f"):       # backspace
+        if _inbuf:
+            _inbuf = _inbuf[:-1]
+            print("\b \b", end="")
+        return None
+    _inbuf += ch
+    print(ch, end="")                # echo
+    return None
+
+
+def read_line_blocking(prompt):
+    """The TYPED_ONLY fallback."""
+    try:
+        return input(prompt)
+    except EOFError:
+        raise Abort()
+
+
+def tapped_row():
+    """The row the probe just touched, or None. Never blocks."""
+    if TYPED_ONLY:
+        return None
+    try:
+        pad = probe_read(False)
+        if pad == NO_PAD:
+            return None
+        p = int(pad)
+    except Exception:
+        return None
+    return p if 1 <= p <= 60 else -1     # -1 = touched, but not a row
+
+
+def oled_say(text):
+    """Mirror onto the board's own OLED if it has one. Never fatal."""
+    try:
+        oled_print(text)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 1. Tap-to-assign
+# ---------------------------------------------------------------------------
+
+def ask_row(name, default):
+    print("  %-3s  tap its hole with the probe, or type a row 1-60 "
+          "(enter = %d, q = quit)" % (name, default))
+    oled_say("Tap\n%s" % name)
+    while True:
+        line = (read_line_blocking("  %s> " % name) if TYPED_ONLY
+                else poll_line())
+        if line is not None:
+            s = line.strip().lower()
+            if s == "":
+                print("       %s = row %d (default)" % (name, default))
+                return default
+            if s in ("q", "quit"):
+                raise Abort()
+            if s.isdigit() and 1 <= int(s) <= 60:
+                print("       %s = row %s (typed)" % (name, s))
+                return int(s)
+            print("       ? %r is not a row 1-60" % line)
+            continue
+        p = tapped_row()
+        if p is not None:
+            if p < 0:
+                print("       that pad is not a breadboard hole - tap 1-60")
+            else:
+                print("       %s = row %d (tapped)" % (name, p))
+                return p
+        time.sleep(0.02)
+
+
+def assign():
+    print("Where is the panel? Enter alone keeps the guide's header rows.")
+    rows = {}
+    for name, default, _node in SIGNALS:
+        rows[name] = ask_row(name, default)
+    print("assignment: " + "  ".join("%s %d" % (n, rows[n])
+                                     for n, _d, _x in SIGNALS))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 2. Driver / size
+# ---------------------------------------------------------------------------
+
+def ask_driver():
+    print("Panel type:")
+    for i, d in enumerate(DRIVERS):
+        print("  %d) %s%s" % (i + 1, d[0], "   (default)" if i == 0 else ""))
+    oled_say("Panel\ntype?")
+    while True:
+        line = (read_line_blocking("  driver> ") if TYPED_ONLY
+                else poll_line())
+        if line is None:
+            time.sleep(0.02)
+            continue
+        s = line.strip().lower()
+        if s == "":
+            s = "1"
+        if s in ("q", "quit"):
+            raise Abort()
+        if s.isdigit() and 1 <= int(s) <= len(DRIVERS):
+            d = DRIVERS[int(s) - 1]
+            print("driver: %s (%s %dx%d)" % (d[0], d[1], d[2], d[3]))
+            return d
+        print("  ? pick 1-%d" % len(DRIVERS))
+
+
+# ---------------------------------------------------------------------------
+# Routing - and the record of what WE made, so the teardown cannot take
+# anything that was already there (a guided build's bridges are the user's
+# saved circuit; they survive).
+# ---------------------------------------------------------------------------
+
+made = []
+
+
+def route(rows):
+    for name, _default, node in SIGNALS:
+        row = rows[name]
+        try:
+            if is_connected(row, node):
+                print("  %s row %d -> %s was already routed - left alone"
+                      % (name, row, node))
+                continue
+            connect(row, node)
+            made.append((row, node))
+            print("  %s row %d -> %s" % (name, row, node))
+        except Exception as e:
+            print("  could not route %s row %d -> %s: %s"
+                  % (name, row, node, str(e)))
+    print("routed=%d" % len(made))
+
+
+def rail_note():
+    """Report the top rail, never set it. Writing a rail here would dirty the
+    active context and rewrite the user's file - the defect class W3-T5 just
+    closed. If the rail is wrong, that is the user's call to make."""
+    try:
+        v = dac_get("TOP_RAIL")
+    except Exception:
+        return
+    print("top rail: %.2f V" % v)
+    if v < 3.0 or v > 5.5:
+        print("  WARNING: outside 3.0-5.5 V - most panels want 3.3 V or 5 V. "
+              "This script never changes a rail; set it yourself if it is wrong.")
+
+
+def unroute():
+    n = 0
+    while made:
+        row, node = made.pop()
+        try:
+            disconnect(row, node)
+            n += 1
+        except Exception as e:
+            print("  could not un-route %d -> %s: %s" % (row, node, str(e)))
+    print("unrouted=%d" % n)
+
+
+def claim_pins():
+    # Claim the pins, or every refreshConnections() re-asserts the slot
+    # config's pulls onto GPIO 26/27 underneath the I2C peripheral.
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_claim_pin(n)
+        except Exception:
+            pass
+
+
+def release_pins():
+    for n in (GPIO_7, GPIO_8):
+        try:
+            gpio_release_pin(n)
+        except Exception:
+            pass
+
+
+def open_bus():
+    """An I2C object, or None with an explanation printed."""
+    try:
+        import machine
+    except Exception as e:
+        print("no machine module: " + str(e))
+        return None
+    try:
+        return machine.I2C(I2C_BUS, scl=SCL_PIN, sda=SDA_PIN, freq=I2C_HZ)
+    except Exception as e:
+        print("no I2C on %d/%d: %s" % (SDA_PIN, SCL_PIN, str(e)))
+        return None
+
+
+# ---------------------------------------------------------------------------
+# The panel
+# ---------------------------------------------------------------------------
 
 class Screen:
-    def __init__(self, i2c, addr, width, height):
+    def __init__(self, i2c, addr, kind, width, height):
         import framebuf
         self.i2c = i2c
         self.addr = addr
+        self.kind = kind
         self.width = width
+        self.height = height
         self.pages = height // 8
         self.buf = bytearray(self.pages * width)
         self.fb = framebuf.FrameBuffer(self.buf, width, height,
@@ -918,18 +1289,44 @@ class Screen:
         self.tx[0] = 0x40             # "data follows"
         self.rows = self.pages        # 8 px per text row
         self.cols = width // 8        # 8 px per character
-        # off, clkdiv, mux, offset, startline, pump, horiz mode, seg remap,
-        # com scan dec, com pins, contrast, precharge, vcomh, RAM, normal, on
-        for c in (0xAE, 0xD5, 0x80, 0xA8, height - 1, 0xD3, 0x00, 0x40,
-                  0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8,
-                  0xDA, 0x02 if height == 32 else 0x12,
-                  0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF):
+        for c in self._init_cmds():
             self.cmd(c)
+
+    def _init_cmds(self):
+        h = self.height
+        # off, clkdiv, mux, offset, startline, pump, (mode), seg remap, com
+        # scan dec, com pins, contrast, precharge, vcomh, RAM, normal, on
+        if self.kind == "sh1106":
+            # THE WHOLE SH1106 SHIM, half 1 of 2: its charge pump is 0xAD/0x8B
+            # rather than 0x8D/0x14, and it has NO 0x20 memory-addressing-mode
+            # command at all. Everything else is the same controller family.
+            return (0xAE, 0xD5, 0x80, 0xA8, h - 1, 0xD3, 0x00, 0x40,
+                    0xAD, 0x8B, 0xA1, 0xC8,
+                    0xDA, 0x02 if h == 32 else 0x12,
+                    0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF)
+        return (0xAE, 0xD5, 0x80, 0xA8, h - 1, 0xD3, 0x00, 0x40,
+                0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8,
+                0xDA, 0x02 if h == 32 else 0x12,
+                0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF)
 
     def cmd(self, c):
         self.i2c.writeto(self.addr, bytes((0x00, c)))   # 0x00 = command
 
     def show(self):
+        if self.kind == "sh1106":
+            # Half 2 of 2: with no addressing mode the pointer has to be set
+            # per page, and the SH1106's RAM is 132 columns wide with the glass
+            # wired to columns 2..129 - hence the column-low nibble of 2. Miss
+            # that and the whole image sits two pixels to the left, wrapped.
+            mv = memoryview(self.tx)
+            for page in range(self.pages):
+                self.cmd(0xB0 | page)     # page address
+                self.cmd(0x02)            # column low nibble  = 2 (the offset)
+                self.cmd(0x10)            # column high nibble = 0
+                start = page * self.width
+                self.tx[1:1 + self.width] = self.buf[start:start + self.width]
+                self.i2c.writeto(self.addr, mv[:1 + self.width])
+            return
         self.cmd(0x21); self.cmd(0); self.cmd(self.width - 1)   # columns
         self.cmd(0x22); self.cmd(0); self.cmd(self.pages - 1)   # pages
         self.tx[1:] = self.buf
@@ -943,90 +1340,179 @@ class Screen:
             y += 8
         self.show()
 
+    def splash(self, frame):
+        """The wiring beacon's animation - a sweeping bar under the name."""
+        w, h = self.width, self.height
+        self.fb.fill(0)
+        self.fb.text("JUMPERLESS", max(0, (w - 80) // 2), 0, 1)
+        self.fb.text("type to screen", max(0, (w - 112) // 2), 10, 1)
+        span = w + 32
+        x = (frame * 8) % span - 32
+        self.fb.fill_rect(x, h - 6, 32, 4, 1)
+        self.fb.hline(0, h - 1, w, 1)
+        self.show()
 
-def open_bus():
-    """An I2C object, or None with an explanation printed."""
+
+# ---------------------------------------------------------------------------
+# 3. The wiring beacon
+# ---------------------------------------------------------------------------
+
+def try_open(i2c, kind, width, height):
+    """One scan + init attempt. A Screen on success, None on any failure."""
     try:
-        import machine
-    except Exception as e:
-        print("no machine module: " + str(e))
+        found = i2c.scan()
+    except Exception:
         return None
-    # Claim the pins, or every refreshConnections() re-asserts the slot
-    # config's pulls onto GPIO 26/27 underneath the I2C peripheral.
-    for n in (GPIO_7, GPIO_8):
-        try:
-            gpio_claim_pin(n)
-        except Exception:
-            pass
+    addr = None
+    for a in ADDRS:
+        if a in found:
+            addr = a
+            break
+    if addr is None:
+        return None
     try:
-        return machine.I2C(I2C_BUS, scl=SCL_PIN, sda=SDA_PIN, freq=I2C_HZ)
+        scr = Screen(i2c, addr, kind, width, height)
     except Exception as e:
-        print("no I2C on %d/%d: %s" % (SDA_PIN, SCL_PIN, str(e)))
+        print("\npanel answered at %s but would not init: %s"
+              % (hex(addr), str(e)))
         return None
+    print("\npanel up at %s: %dx%d, %d rows of %d chars"
+          % (hex(addr), width, height, scr.rows, scr.cols))
+    oled_say("Panel\nup!")
+    return scr
 
 
-print("Type to Screen")
-if _jl_project:
-    print("project: " + str(_jl_project.get("dir", "i2cscrn")))
+def beacon(i2c, kind, width, height):
+    """Loop until something answers on the bus, then animate. Returns a Screen.
 
-scr = None
-i2c = open_bus()
-if i2c is not None:
-    found = i2c.scan()
-    print("i2c devices: " + str([hex(a) for a in found]))
-    if ADDR not in found:
-        print("no panel at " + hex(ADDR) + " - check power, the SDA/SCL "
-              "order, and the address jumper")
-    else:
-        try:
-            scr = Screen(i2c, ADDR, WIDTH, HEIGHT)
-            scr.lines(["Type to Screen", "ready."])
-            print("panel up: %dx%d, %d rows of %d chars"
-                  % (WIDTH, HEIGHT, scr.rows, scr.cols))
-        except Exception as e:
-            print("panel init failed: " + str(e))
-if scr is None:
-    print("terminal-only mode - fix the wiring and re-run.")
-print("Type a line and press enter. Empty line clears. 'q' quits.")
+    Wire the panel WHILE this runs. Every failure is a 300 ms retry and a dot,
+    never a stack trace - the terminal stays readable while your hands are on
+    the breadboard.
 
-history = []
-try:
+    The quit check is at the BOTTOM of the loop on purpose: one scan always
+    happens before the first chance to bail, so a scripted run exercises the
+    real scan path rather than short-circuiting past it.
+    """
+    print("waiting for the panel - wire it up now ('q' + enter to give up)")
+    oled_say("Waiting\nfor panel")
+    scr = None
+    frame = 0
+    dots = 0
+    splash_started = 0
+    last_try = None
     while True:
-        try:
-            typed = input("> ")
-        except EOFError:
-            break
-        if typed == "q":
-            break
+        now = time.ticks_ms()
+        if scr is None:
+            nap = 0.02
+            if last_try is None or time.ticks_diff(now, last_try) >= RETRY_MS:
+                last_try = now
+                scr = try_open(i2c, kind, width, height)
+                if scr is None:
+                    dots += 1
+                    print(".", end="")
+                    if dots % 40 == 0:
+                        print("  (still nothing at %s - check GND/VCC first, "
+                              "then the SDA/SCL order)"
+                              % "/".join(hex(a) for a in ADDRS))
+                else:
+                    splash_started = time.ticks_ms()
+                    frame = 0
+        else:
+            try:
+                scr.splash(frame)
+            except Exception as e:
+                print("panel went away (%s) - back to waiting" % str(e))
+                scr = None
+                dots = 0
+                last_try = None
+                nap = 0.02
+            else:
+                frame += 1
+                if time.ticks_diff(time.ticks_ms(), splash_started) >= SPLASH_MS:
+                    return scr
+                nap = FRAME_MS / 1000.0
+
+        line = poll_line()
+        if line is not None and line.strip().lower() in ("q", "quit"):
+            raise Abort()
+        time.sleep(nap)
+
+
+# ---------------------------------------------------------------------------
+# 4. Type to screen
+# ---------------------------------------------------------------------------
+
+def type_loop(i2c, scr, kind, width, height):
+    print("Type a line and press enter. Empty line clears. 'q' quits.")
+    history = []
+    if not TYPED_ONLY:
+        print("> ", end="")
+    while True:
+        typed = (read_line_blocking("> ") if TYPED_ONLY else poll_line())
+        if typed is None:
+            time.sleep(0.02)
+            continue
+        if typed.strip().lower() in ("q", "quit"):
+            return
         if typed == "":
             history = []
         else:
             history.append(typed)
-            history = history[-(scr.rows if scr else 4):]
-        if scr is None:
-            print("screen: " + str(history))
-        else:
+            history = history[-scr.rows:]
+        try:
+            scr.lines(history)
+        except Exception as e:
+            print("write failed (%s) - back to the beacon" % str(e))
+            scr = beacon(i2c, kind, width, height)
             try:
                 scr.lines(history)
-            except Exception as e:
-                print("write failed: " + str(e))
-except KeyboardInterrupt:
-    pass
+            except Exception:
+                pass
+        if not TYPED_ONLY:
+            print("> ", end="")
 
-if scr is not None:
-    try:
-        scr.lines([])
-    except Exception:
-        pass
-for n in (GPIO_7, GPIO_8):
-    try:
-        gpio_release_pin(n)
-    except Exception:
-        pass
-print("bye")
-)";
-const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[2] = { 0xDC3D3F52, 0x79C8D0B3 };
-const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 2;
+
+# ---------------------------------------------------------------------------
+
+print("Type to Screen")
+if _jl_project:
+    print("project: " + str(_jl_project.get("dir", "i2cscrn")))
+if TYPED_ONLY:
+    print("note: no non-blocking stdin here - prompts are type-only "
+          "(the probe cannot be watched at the same time)")
+
+scr = None
+i2c = None
+try:
+    rows = assign()
+    label, kind, width, height = ask_driver()
+    claim_pins()
+    route(rows)
+    rail_note()
+    i2c = open_bus()
+    if i2c is None:
+        print("terminal-only mode - no I2C peripheral to talk through.")
+    else:
+        scr = beacon(i2c, kind, width, height)
+        type_loop(i2c, scr, kind, width, height)
+except (KeyboardInterrupt, Abort):
+    pass
+finally:
+    # finally, not just the except arm: a `q`, a Ctrl-C, an unexpected
+    # exception and a clean fall-through all have to leave the board the way
+    # we found it. Blank the panel, drop the GPIO claims, and remove EXACTLY
+    # the bridges route() made - nothing that was already there.
+    if scr is not None:
+        try:
+            scr.lines([])
+        except Exception:
+            pass
+    unroute()
+    release_pins()
+    print("bye")
+)===";
+const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[3] = { 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
+const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 3;
 
 const char* PROJECT_I2CSCRN_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -1053,17 +1539,20 @@ guide:
   steps:
     - {do: note, text: "An SSD1306 the Jumperless talks to. Turn=prev/next, click=confirm, hold=exit."}
     - {do: place, part: DISP, check: presence, on_fail: warn, text: "Header in rows 5-8: GND 5, VCC 6, SCL 7, SDA 8. Check the silkscreen order."}
+    # 5-8 is the DEFAULT, not a requirement: main.py asks where each signal
+    # actually is (tap the hole, or type the row) and re-routes to match. The
+    # guide places it here so there is something concrete to build against.
     - {do: power_on, check: rail_sane, text: "Confirm to power the display (3.3V on the top rail)."}
     - {do: verify, target: 8, n1: 8, n2: 7, check: i2c, text: "Scanning the bus - the panel should answer (0x3C on nearly every module)."}
-    - {do: note, text: "Wired. Run main.py and type a line - it lands on the screen."}
+    - {do: note, text: "Wired. Run main.py: it asks where each signal is, offers a driver list, then waits for the panel."}
 power:
   topRail: 3.3
 config:
   gpio:
     pulls: [0,0,0,0,0,0,1,1,0,0]
 )===";
-const uint32_t PROJECT_I2CSCRN_WIRING_YAML_HASHES[1] = { 0xBEE331D0 };
-const int PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT = 1;
+const uint32_t PROJECT_I2CSCRN_WIRING_YAML_HASHES[2] = { 0xB48355B8, 0xBEE331D0 };
+const int PROJECT_I2CSCRN_WIRING_YAML_HASH_COUNT = 2;
 
 #endif // INCLUDE_PROJECT_I2CSCRN
 

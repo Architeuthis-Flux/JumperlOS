@@ -1305,6 +1305,104 @@ gc.collect()
                   f"{pdir}/main.py compiles under this MicroPython "
                   f"({vals.get('srclen')} bytes read through jfs, uncapped)")
 
+        # (v-b) i2cscrn ONLY: drive the tap-to-assign flow through its TYPED
+        # TWIN (wave 3, Kevin's bench note: "have users tap each signal and
+        # allow them to choose from a list of different oled drivers and sizes.
+        # And when I exit the app, it clears the data lines").
+        #
+        # Every probe gesture in that script has a typed equivalent at the same
+        # prompt - that is the control-surface rule, and it is also the only
+        # reason this is testable. `_i2cscrn = {"feed": ...}` is served by the
+        # SAME poll_line() the human path uses, so this walks the real prompts,
+        # the real parser and the real routing; there is no non-interactive
+        # branch to rot. NO PANEL IS NEEDED: the beacon scans, finds nothing,
+        # prints its heartbeat dot, and the feed's trailing `q` takes the exit
+        # path - which is the half of the flow worth asserting anyway.
+        #
+        # The feed remaps SCL/SDA to rows 41/42 (proving the script re-routes
+        # rather than assuming rows 5-8) and picks driver 2. Row 5 -> GND is
+        # ARMED BY HAND first, so the run also proves the don't-touch-what-
+        # isn't-mine rule: the script reports it, does not count it, and leaves
+        # it behind when it tears its own routes down.
+        if proj == "i2cscrn":
+            out = jl_exec("""
+connect(5, "GND")
+print("armed=", 1 if is_connected(5, "GND") else 0)
+""", timeout=25)
+            check(parse_kv(out).get("armed") == 1,
+                  "i2cscrn: armed a pre-existing 5 -> GND route the script must not remove")
+
+            out = jl_exec(f"""
+import gc
+gc.collect()
+_pre = set(globals().keys())
+try:
+    f = jfs.open({pdir + "/main.py"!r}, "r")
+    src = f.read(f.size())
+    f.close()
+    _i2cscrn = {{"feed": "5\\n6\\n41\\n42\\n2\\nq\\n"}}
+    exec(src)
+    print("ranok=", 1)
+except MemoryError:
+    print("nomem=", 1)
+src = None
+for _n in list(globals().keys()):
+    if _n not in _pre and _n not in ("_pre", "_n", "gc"):
+        try:
+            globals().pop(_n)
+        except Exception:
+            pass
+gc.collect()
+""", timeout=60)
+            if parse_kv(out).get("nomem") == 1:
+                print("  info: i2cscrn main.py feed-drive skipped - this "
+                      "session's MicroPython heap could not hold the source. "
+                      "The launcher's run path does not make this allocation; "
+                      "driving the script by hand is a bench item.")
+            else:
+                for needle, what in (
+                        ("assignment: GND 5  VCC 6  SCL 41  SDA 42",
+                         "tap-to-assign took all four rows from the typed twin, "
+                         "including the two remapped off the default header"),
+                        ("driver: SSD1306 128x64",
+                         "the driver menu took '2' and resolved to SSD1306 128x64"),
+                        ("was already routed - left alone",
+                         "the pre-existing 5 -> GND route was reported and NOT "
+                         "re-made"),
+                        ("routed=3",
+                         "exactly 3 routes were made (VCC/SCL/SDA - GND was "
+                         "already there)"),
+                        ("waiting for the panel",
+                         "the wiring beacon ran (it scans before it will accept "
+                         "a quit, so this is a real scan with no panel present)"),
+                        ("unrouted=3",
+                         "the exit removed exactly the 3 routes it made"),
+                        ("bye",
+                         "the script reached its finally: and exited cleanly on "
+                         "the typed q")):
+                    check(needle in out, f"i2cscrn: {what} ({needle!r})")
+
+                # EXIT CLEARS THE DATA LINES - and the power routing with them.
+                out = jl_exec("""
+print("scl=", 1 if is_connected(41, "RP_GPIO_8") else 0)
+print("sda=", 1 if is_connected(42, "RP_GPIO_7") else 0)
+print("vcc=", 1 if is_connected(6, "TOP_RAIL") else 0)
+print("gnd=", 1 if is_connected(5, "GND") else 0)
+""", timeout=25)
+                vals = parse_kv(out)
+                check(vals.get("scl") == 0 and vals.get("sda") == 0,
+                      f"i2cscrn: exit cleared the DATA lines - 41->RP_GPIO_8 and "
+                      f"42->RP_GPIO_7 are both gone (got {vals.get('scl')}, "
+                      f"{vals.get('sda')})")
+                check(vals.get("vcc") == 0,
+                      "i2cscrn: exit cleared the POWER route it made too "
+                      "(6 -> TOP_RAIL gone)")
+                check(vals.get("gnd") == 1,
+                      "i2cscrn: the route it did NOT make survived - 5 -> GND is "
+                      "still there (it only cleans up after itself)")
+
+            jl_exec('disconnect(5, "GND")', timeout=25)
+
         # (vi) the guide: section parses. Drive `z ... new` far enough to see
         # the first step, then quit - no part is confirmed, so nothing is
         # placed. `new` (not a bare launch) so the phase is deterministic

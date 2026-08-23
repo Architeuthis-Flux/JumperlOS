@@ -766,25 +766,72 @@ Common shape: **Guides →** `<name>` (or `z <name> new`), walk the guide, run
 
 
 
-#### 2.7d `i2cscrn` — an SSD1306 4-pin I²C module
+#### 2.7d `i2cscrn` — an SSD1306 / SH1106 4-pin I²C module
 
->>> we need to generalize this, have users tap each signal and allow them to choose from a list of different oled drivers and sizes. And when I exit the app, it claers the data lines. And we should have the app just constantly sending our startup animation as they're wiring so we know when it's right
+> \>\>\> we need to generalize this, have users tap each signal and allow them to choose from a list of different oled drivers and sizes. And when I exit the app, it claers the data lines. And we should have the app just constantly sending our startup animation as they're wiring so we know when it's right
+>
+> Done in wave 3, all four, in `main.py` — no firmware change was needed; the
+> probe and I²C are fully scriptable. **Tap-to-assign** for GND/VCC/SCL/SDA,
+> with a **typed twin at every prompt** (tap the hole *or* type the row; enter
+> keeps the default). A **driver/size menu** — SSD1306 128×32, SSD1306 128×64,
+> SH1106 128×64. A **wiring beacon**: it re-scans the bus every 300 ms and the
+> instant something answers it initialises and animates, so you wire the panel
+> up *while it runs*. And an exit that **removes exactly the bridges it made** —
+> data lines and the power routing — while leaving alone any route that was
+> already there.
 
 **Turn the top OLED off first** if it is enabled: in `connection_type 0` it
 lives on GPIO 7/8 — these very pins — and shares i2c1 in every mode.
 
+The guided build is unchanged; the script is what changed.
+
 - [ ] Placement: module header **rows 5–8 — GND 5, VCC 6, SCL 7, SDA 8**.
-  *Check the silkscreen* — some boards swap VCC/GND, and that is the one mistake
-  that kills the panel.
+  These are now the **default**, not a requirement. *Check the silkscreen* —
+  some boards swap VCC/GND, and that is the one mistake that kills the panel.
 - [ ] Step 2 → `ic_unverified` (correct). Step 3 (`power_on`) →
   `val=3.3?V@6 ok=1`; `val=float@6` or `val=0.00V@6` → module not seated.
 - [ ] Step 4 (i2c) → `val=1dev ok=1`, `3C` in the grid.
-- [ ] `main.py` first lines, exactly: `Type to Screen` / `project: i2cscrn` /
-  `i2c devices: ['0x3c']` / `panel up: 128x32, 4 rows of 16 chars` / the prompt.
-- [ ] Type `hello` + enter → `hello` **on the panel**, top-left, 8 px font. Three
-  more lines → four stacked, oldest scrolls off. Empty line → **clears**. `q` →
-  clears, `bye`.
-- [ ] 128×64 panel: set `HEIGHT = 64` → `panel up: 128x64, 8 rows of 16 chars`.
+
+**The new `main.py` flow.** Do this one on a **bare board** (no guided build
+first) — that is the case the whole rewrite exists for.
+
+- [ ] `main.py` opens with `Type to Screen` / `project: i2cscrn` / `Where is the
+  panel? Enter alone keeps the guide's header rows.` then the four prompts.
+- [ ] **TAP each one.** With the probe in SELECT, tap the hole each leg is in →
+  `GND = row 5 (tapped)` and so on. This is the headline item: the HIL can only
+  drive the typed twin, so the probe half is bench-only.
+- [ ] **TYPE one instead.** At any prompt type a row number + enter →
+  `… = row N (typed)`. Bare enter → `… = row N (default)`. A junk answer →
+  `? 'xyz' is not a row 1-60` and it asks again. `q` → clean exit.
+- [ ] Put the module somewhere **other than rows 5–8** and assign it there. The
+  summary line must read back what you actually chose:
+  `assignment: GND 41  VCC 42  SCL 43  SDA 44`, and the panel must come up.
+- [ ] Driver menu: enter → `SSD1306 128x32`; `2` → `SSD1306 128x64` and
+  `8 rows of 16 chars`; `3` → the **SH1106** path. On an SH1106 panel, option 2
+  gives a two-pixel-left, wrapped image and option 3 is correct — that is the
+  whole shim (page-at-a-time writes, column offset 2).
+- [ ] **THE BEACON.** Start `main.py` with the module *not yet in the board*.
+  Terminal: `waiting for the panel - wire it up now ('q' + enter to give up)`
+  then a row of dots, and every 40 dots a hint line. Now push the module in →
+  it must **spring to life** with the sweeping-bar animation within ~300 ms,
+  and the terminal prints `panel up at 0x3c: 128x32, …`. Then the type prompt.
+- [ ] **Pull a wire out mid-session** (probe the SDA row out, or lift the
+  module) and type a line: `write failed (…) - back to the beacon`, dots
+  resume, and pushing it back in brings it straight back.
+- [ ] Type `hello` + enter → `hello` **on the panel**, top-left, 8 px font.
+  Three more lines → four stacked, oldest scrolls off. Empty line → **clears**.
+- [ ] **EXIT CLEARS THE DATA LINES.** `q` → the panel blanks, then
+  `unrouted=4` and `bye`. Check with `b` (bridge array) or `Q`: the four routes
+  are **gone**. Ctrl-C must do exactly the same thing (it goes through the same
+  `finally`).
+- [ ] **…but only the ones it made.** Walk the guided build FIRST (so all four
+  routes are already on the board), then run `main.py`: it prints
+  `… was already routed - left alone` four times, `routed=0`, and on exit
+  `unrouted=0` — **your build survives**. This is the deliberate reading of
+  "clears the data lines" and the one worth Kevin's opinion.
+- [ ] Rail check: `top rail: 3.30 V`. Set the top rail to 1.8 V and re-run →
+  the `WARNING: outside 3.0-5.5 V` line, and the script still does **not**
+  change the rail.
 - [ ] Garbage after a while → drop `I2C_HZ` to `50000`.
 
 

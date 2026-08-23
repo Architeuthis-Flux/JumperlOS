@@ -43,6 +43,7 @@
     "0x77CA786A"
   ],
   "i2cscrn/README.md": [
+    "0x185ED360",
     "0x08C60795",
     "0x5D79CA91",
     "0xF62F698B",
@@ -51,10 +52,12 @@
     "0xBFC48EF5"
   ],
   "i2cscrn/main.py": [
+    "0x5883C818",
     "0xDC3D3F52",
     "0x79C8D0B3"
   ],
   "i2cscrn/wiring.yaml": [
+    "0xB48355B8",
     "0xBEE331D0"
   ],
   "nand00/README.md": [
