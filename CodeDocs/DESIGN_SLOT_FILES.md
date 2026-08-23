@@ -206,6 +206,24 @@ It names the canonical wiring a run file was copied from — the provenance the
 path itself cannot encode, and what variant resolution reads (see
 DESIGN_PROJECTS_SUBSYSTEM.md §1b).
 
+`guideProgress:` follows the same round-trip rule and gained a third key in
+wave 3:
+
+```
+guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
+```
+
+`of:` is the step TOTAL as of the last persist, written by
+`guidePersistProgress` (the only code that both knows `numSteps` and saves the
+file) and **emitted only when non-zero** — so a hand-written or pre-`of:` file
+round-trips byte-identical and reads as "total unknown". It exists because the
+single-run-file launcher must answer *"is a guided build mid-flight in this
+file?"* from the FILE ALONE, before it is allowed to load anything: its prompt
+offers `cancel`, and a cancel must leave the previous context untouched.
+`SlotManager::scanGuideProgressFile()` is that load-free reader, and it shares
+one flow-map parser with `fromYAML`'s arm so the "ONE shape only" contract
+cannot drift.
+
 ---
 
 ## 4. The template write-guard
@@ -248,9 +266,16 @@ exactly: tracking would stay on the previous slot and the auto-save would write
 the template's content into THAT. Adoption plus a write-guard is the shape that
 is safe at every step.
 
-Run files (`<dir>_<N>.yaml`) deliberately do not match the predicate. A dirty
-*template* context that is switched away from hits the loud refusal and drops its
-edits: that is the guard working, and it is disclosed at the site.
+Run files deliberately do not match the predicate — **neither spelling**,
+`<dir>_run.yaml` (the wave-3 default) nor `<dir>_<N>.yaml` (behind
+`JL_PROJECT_RUN_HISTORY`). `isTemplatePath` tests the BASENAME for a `wiring`
+prefix, and a run file begins with the project's directory name instead; the one
+collision, a project directory literally called `wiring*`, is refused outright
+by `projectBeginRun`. DESIGN_PROJECTS_SUBSYSTEM.md §1b carries the full
+disjointness table.
+
+A dirty *template* context that is switched away from hits the loud refusal and
+drops its edits: that is the guard working, and it is disclosed at the site.
 
 ---
 
@@ -395,6 +420,14 @@ context silently discarded the edits until this was fixed.)
   pre-wave-2 firmware loses its resume offer after upgrade (`findGuideProgressSlot`
   is deleted; resume reads run files). The slot's committed bridges and
   `guideProgress:` line remain in the file, just not offered.
+- **Numbered run files after the wave-3 upgrade**: `<dir>_<N>.yaml` files
+  already on a board become **inert leftovers**. Nothing scans for them, opens
+  one or deletes one — the launcher uses `<dir>_run.yaml` only. They are
+  ordinary YAMLs: loadable by clicking them in Files, and removable there too.
+- **`of:` downgrade is safe**: pre-wave-3 firmware ignores the extra key when
+  parsing `guideProgress:` and re-emits the line without it. The build's step
+  and source survive; only the total is lost, and a file with no total simply
+  reads as "unknown" to a wave-3 launcher (which then reopens silently).
 - **Undo history file**: unchanged format.
 - **Jumperless App / port-1 clients** must tolerate `ACTIVE_SLOT:-1`,
   `SLOT_CHANGED:-1`, and the JSON `"slot": -1` + `"slot_path"` field. Numbered

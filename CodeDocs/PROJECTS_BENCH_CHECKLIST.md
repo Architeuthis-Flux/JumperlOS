@@ -13,7 +13,7 @@ short version of what moved:
 | Was (wave 1)                                                  | Is now                                                                                                            |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Projects lived under **Apps**                                 | **top-level** clickwheel row, before Apps                                                                         |
-| a project ran into a **destination slot**, then a keep-prompt | a project opens `/projects/<dir>/<dir>_<N>.yaml`, a **run file**, as your persistent context — no prompt, no slot |
+| a project ran into a **destination slot**, then a keep-prompt | a project opens `/projects/<dir>/<dir>_run.yaml`, a **run file**, as your persistent context — no prompt, no slot. **One per project**, reused; to keep a run, `slots` > `save to` |
 | slots were eight numbered files                               | any YAML anywhere can be the active context; the board **boots the last active one**                              |
 | DIP pin 1 anchored the **top** half                           | pin 1 (the dot) anchors the **bottom** half — **row 35** on every shipped project                                 |
 | 2-leg parts sat in two adjacent rows                          | resistors are `axial2` and **straddle the ravine** (row *r* and *r*+30)                                           |
@@ -238,8 +238,14 @@ x = clear all connections
   also toggles `[top_oled] show_in_terminal` twice and relies on reaching the
   second one.
   **After any interrupted run, check both before trusting the board**, and look
-  for leftover `<dir>_<N>.yaml` run files and stray `/projects/hil*` fixture
-  directories while you are there.
+  for stray `/projects/hil*` fixture directories while you are there.
+  - **The run files themselves are now protected**: with one well-known name
+  per project, a suite's fixture run file WOULD BE yours, so every suite either
+  fixtures into a scratch project directory or snapshots the real
+  `<dir>_run.yaml` to `<dir>_run.yaml.hilbak` and restores it in the `finally`.
+  An interrupted run can therefore leave a `.hilbak` beside a project's run
+  file — harmless, and safe to delete from Files (or to copy back by hand if
+  the run file itself looks wrong).
 - [x] Note the board's `top_oled.lock_connection` / `sda_row` / `scl_row`. In
   `connection_type 0` the top OLED lives on **GPIO 7/8** — the very pins the
   `i2cscrn` and `eeprom` projects use, and the pins the guide's `oscillates`
@@ -252,10 +258,10 @@ x = clear all connections
   guide's INIT parked them; task 7 closed it by deferring the load's power apply
   until guided-ness is decided. HIL proves the *ordering*; only a scope proves
   the absence of a 20 ms pulse. Quit the guide with `q` when you have the trace.
-  **Then put 555 back to having no runs**, or §1.2's first check below is
-  invalidated before you reach it: `z 555 new` mints
-  `/projects/555/555_1.yaml`, so delete that file (Files browser, or
-  `jfs.remove("/projects/555/555_1.yaml")` from the REPL) and `<0` back to a
+  **Then put 555 back to having no run file**, or §1.2's first check below is
+  invalidated before you reach it: `z 555 new` writes
+  `/projects/555/555_run.yaml`, so delete that file (Files browser, or
+  `jfs.remove("/projects/555/555_run.yaml")` from the REPL) and `<0` back to a
   slot before starting §1. If you would rather not, run the trace against a
   throwaway project instead — any directory under `/projects/` with a
   `wiring.yaml` carrying a `power:` section will do.
@@ -266,7 +272,11 @@ and what a headless driver keys on):
 ```
 PROJECTS n=<count>                       the project picker opened
 VARIANTS n=<count>                       the variant picker opened (dormant)
-RUNS n=<count> latest=<path>             before the load/new prompt
+RUNS n=<count> latest=<path>             a run file already exists (n=1 in
+                                         single-file mode). No line at all when
+                                         a launch has no run file to reuse; an
+                                         explicit `z <dir> load` with none does
+                                         print `RUNS n=0` before its error
 RUNFILE path=<path> action=new|load      the run file decision, every door
 GUIDE resume file=<path> step=<k>        a real resume (not a fresh start)
 GUIDE already complete (step k/n)        the completion clamp
@@ -280,8 +290,10 @@ PROJECT error <reason>                   headless failure (z, load_project)
 ACTIVE_SLOT:<n|-1>  +  ACTIVE_PATH:<path>     (`Q`; -1 means "a file")
 ```
 
-`z <project>[ new|load|run=<N>][ noscript]` drives all of it headlessly.
-Destination slots are gone: a stale `z 555 3` loud-fails with the usage line.
+`z <project>[ new|load][ noscript]` drives all of it headlessly.
+Destination slots are gone: a stale `z 555 3` loud-fails with the usage line,
+and `run=<N>` — the numbered scheme's grammar — is refused by name
+(`PROJECT error run=<N> needs a JL_PROJECT_RUN_HISTORY build …`).
 
 ---
 
@@ -312,34 +324,62 @@ Destination slots are gone: a stale `z 555 3` loud-fails with the usage line.
 ### 1.2 The run-file lifecycle
 
 This is the wave's central change: launching a project no longer borrows a slot
-and no longer asks where to keep it. It **opens a file and makes it yours**.
+and no longer asks where to keep it. It **opens a file and makes it yours** —
+and since wave 3 it is always the **same** file, `/projects/<dir>/<dir>_run.yaml`,
+reused silently. **To keep a run**, use `slots` > `save to` while it is the
+active context; that is the whole keep flow now.
 
-- [ ] Launch `555` on a project with no runs yet. There is **no prompt** — port 1
-  says `RUNFILE path=/projects/555/555_1.yaml action=new`, and `Q` afterwards
-  reports `ACTIVE_SLOT:-1` + `ACTIVE_PATH:/projects/555/555_1.yaml`.
-- [x] Quit the guide (`q`) and **relaunch** `555`. Now the prompt appears:
-  `RUNS n=1 latest=…555_1.yaml`, the OLED reads `Load run 1?` / `No = new run`,
-  and the terminal offers `y/click Yes = load latest (555_1.yaml), n = start new (555_2.yaml), other = cancel`.
-  - [x] **A bare CLICK answers Yes.** (`yesNoMenu` used to open on *No* while
+> **Numbered history is a compile-time flag.** `JL_PROJECT_RUN_HISTORY=1`
+> (src/config.h) restores the wave-2 `<dir>_<N>.yaml` allocator, its
+> load-latest/start-new prompt, `z … run=<N>` and the ≥20-file pile-up hint. It
+> is `0` in shipped builds. Everything below describes the default. Old
+> numbered files already on a board are **inert leftovers**: the launcher never
+> scans for, opens or deletes one — remove them from Files.
+
+- [ ] Launch `555` on a project with no run file yet. There is **no prompt** —
+  port 1 says `RUNFILE path=/projects/555/555_run.yaml action=new` (and **no
+  `RUNS` line**, because there is nothing to count), and `Q` afterwards reports
+  `ACTIVE_SLOT:-1` + `ACTIVE_PATH:/projects/555/555_run.yaml`.
+- [ ] Walk the guide to **DONE**, then **relaunch** `555`. There is **still no
+  prompt** — a finished build reopens silently: `RUNS n=1 latest=…555_run.yaml`
+  then `RUNFILE … action=load`, followed by `GUIDE already complete (step n/n)`.
+  Your built circuit is still on the board.
+- [ ] Now the one prompt that survives. Launch, quit the guide **mid-build**
+  (`q` after a commit or two), and relaunch. The OLED reads
+  `Resume build?` / `No = start over`, and the terminal offers
+  `y/click Yes = resume, n = start fresh (OVERWRITES it from the project wiring), other = cancel`
+  with the step number in it (`an unfinished guided build is in 555_run.yaml (step 2 of 5)`).
+  - [ ] **A bare CLICK answers Yes.** (`yesNoMenu` used to open on *No* while
     every prompt said "click Yes"; it now opens on the highlighted option the
     text names.) Confirm the highlight starts on Yes.
-  - [x] Answer **n** → `555_2.yaml action=new`, and **`555_1.yaml` still exists
-    on disk with its own `guideProgress`.** Start-new is not destructive any
-    more; run N+1 leaves run N alone.
-  - [x] Answer **y** on a third launch → `action=load`, and you resume at the
-    step you quit on (`GUIDE resume file=… step=<k>`).
-  - [x] **Hold, or let it time out (20 s)** →   `Cancelled.`, nothing loaded,
-    context untouched.
-- [x] **The pile-up hint**: get to 20 run files in one project (a loop of
-  `z 555 new noscript` + `q` is the fast way) and confirm
-  `(20 run files in /projects/555 - old runs can be deleted from Files)`.
-  Then do exactly that — **delete them from the Files browser** — and confirm:
+  - [ ] Answer **y** → `action=load` and you resume at the step you quit on
+    (`GUIDE resume file=… step=<k>`), committed bridges intact.
+  - [ ] Answer **n** → `  (starting fresh - 555_run.yaml is rewritten from the
+    project wiring)`, then `action=new`, and the guide restarts at step 1 with
+    nothing placed. **This overwrites the unfinished build — that is the
+    point of the prompt.** Confirm the directory still holds exactly ONE run
+    file afterwards.
+  - [ ] **Hold, or let it time out (20 s)** →   `Cancelled.`, nothing loaded,
+    context untouched (`Q` reports the same number AND path as before).
+- [ ] **The prompt must NOT appear** for: a project with no run file, a finished
+  guided build, a non-guided project, or a run file with no `guideProgress` at
+  all (quit before the first commit). Walk at least the non-guided case —
+  relaunching one should go straight from `RUNS n=1` to `action=load`.
+- [ ] **The `of:` field.** Open a mid-flight run file over MSC or with
+  `cat /projects/555/555_run.yaml` from the Files browser: the progress line
+  reads `guideProgress: {source: "…", step: 2, of: 5}`. That total is what the
+  launcher compares against to decide whether to prompt, and it is read
+  **without loading the file** (the prompt can still be cancelled, so nothing
+  may be touched before it is answered). Hand-edit `of:` out of the line and
+  relaunch: the prompt should **stop appearing** and the build should resume
+  silently — "total unknown" is deliberately the quiet, non-destructive branch.
+- [ ] **Deleting run files from the Files browser** — the only way they ever go
+  away, since the firmware never removes one:
   - [ ] deleting a run file that is **not** active just removes it, and `Q` still
     reports the context you were on;
-  - [ ] the allocator **does not reuse numbers**: after deleting `_1` while `_2`
-    exists, the next new run is `_3` (HIL asserts this; the point here is that
-    deleting from Files takes the same path);
-  - [x] **deleting the run file you are currently ON is the interesting one, and
+  - [ ] deleting a leftover `<dir>_<N>.yaml` from an older build works the same
+    way, and nothing in the launcher misses it;
+  - [ ] **deleting the run file you are currently ON is the interesting one, and
     it is not asserted anywhere — write down what actually happens.** The
     manager still holds the path, so the next dirty auto-save will try to write
     it. Two plausible outcomes and both are acceptable behaviour: the file is
@@ -348,10 +388,21 @@ and no longer asks where to keep it. It **opens a file and makes it yours**.
     once per idle pass. What must NOT happen is a crash, a wedge, or a write
     landing somewhere else. `<0` recovers either way.
   - [ ] >>>I pasted a dump of what happens above, it reboots.
-    - [ ] >>>We should make a compile time flag and set it to overwrite the same file every time. if a user wants to save the project, they can do `slots` > `save to`. because yeah that's making way too many files
+    - [x] >>>We should make a compile time flag and set it to overwrite the same file every time. if a user wants to save the project, they can do `slots` > `save to`. because yeah that's making way too many files
+      - **DONE (wave 3, W3-T3).** That is now the default and the rest of this
+        section describes it: one `<dir>_run.yaml`, overwritten, no prompt
+        unless a guided build is unfinished in it. `JL_PROJECT_RUN_HISTORY=1`
+        is the flag that brings the numbered files back.
 - [x] **Clicking** `/projects/555/wiring.yaml` **in the Files browser starts a run**
   — it no longer adopts the shipped template. The file manager closes *first*,
   then the prompt/guide comes up on a clean terminal.
+  - [ ] **The odd cell, worth eyeballing once.** A click names a VARIANT, but
+    when the run file already exists and is not mid-flight the launcher
+    **reopens it silently** and the run file's own `runSource:` decides the
+    variant — so the file you clicked is not the file you get. It says so:
+    `  (variant taken from runSource; the clicked file was not used - start
+    fresh to change variant)`. To actually switch variant, answer *start
+    fresh* at the mid-flight prompt, or delete the run file first.
 - [ ] Click `README.md` in the same directory → opens in **eKilo**, not a load.
 - [ ] Run a `main.py` from the Files-browser click menu, *after* a guided build
   has wired the board. This is the only path that exercises `File::readString()`
@@ -842,11 +893,12 @@ mutates `/projects` — so it must not precede any step above. Delete any
   entry means the exclusion regressed (or the backup is being written under a
   name that does not contain `_original`) — check `listVariantFiles` in
   `src/ProjectsApp.cpp` first.
-- [ ] **Run files are not touched by provisioning.** Park a `555_1.yaml` in
+- [ ] **Run files are not touched by provisioning.** Park a `555_run.yaml` in
   `/projects/555` across the refresh and confirm it comes back byte-identical.
+  (Copy your real one aside first if it holds work you want.)
   - **But an IN-PROGRESS run's resume bookkeeping is only advisory afterwards.**
   Compose the two items above: the run file survives byte-identical, carrying
-  `guideProgress: {source: /projects/555/wiring.yaml, step: k}` — and the
+  `guideProgress: {source: /projects/555/wiring.yaml, step: k, of: n}` — and the
   in-place branch just rewrote that wiring. Step *text* is always re-read from
   `guideSource` (States.h), so `k` and the INIT `committed[]` backfill now
   index a step list that may have changed length or order. Degradation is

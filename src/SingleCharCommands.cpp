@@ -809,8 +809,11 @@ CommandResult cmd_testOverlay( char c, const String& line ) {
 
 // z <project>[ new|load|run=<N>][ noscript]: the project runner's headless
 // entry (design-launcher §5.1). Destination slots are GONE - a launch opens or
-// creates /projects/<dir>/<dir>_<N>.yaml and leaves it as the active context,
-// so there is nothing left for a slot argument to mean.
+// creates the project's run file and leaves it as the active context, so there
+// is nothing left for a slot argument to mean. Which file: /projects/<dir>/
+// <dir>_run.yaml by default (ONE per project, reused), or <dir>_<N>.yaml under
+// JL_PROJECT_RUN_HISTORY - which is also the only build where `run=<N>` means
+// anything, so the other one refuses it by name.
 //
 // <project> is a project directory name ("555") or a wiring path
 // ("/projects/555/wiring.alt.yaml", which selects that variant for a NEW run).

@@ -1280,11 +1280,15 @@ void FileManager::selectCurrentFile( ) {
                     SlotManager::isTemplatePath( fullPath.c_str( ) ) ) {
             // A shipped project TEMPLATE (/projects/<dir>/wiring*.yaml) is not
             // a context you adopt - it is what a RUN is made from. Route the
-            // click through the project run flow instead: run scan,
-            // load-latest / start-new prompt, then the run file becomes the
-            // active context (design-slots §3, design-launcher §1.3). Every
-            // OTHER .yaml keeps the plain adopt below, run files
-            // (<dir>_<N>.yaml) included.
+            // click through the project run flow instead: reuse or create
+            // the project's run file (prompting only when a guided build is
+            // mid-flight in it), and that run file becomes the active context
+            // (design-slots §3, DESIGN_PROJECTS_SUBSYSTEM §1b). Every OTHER
+            // .yaml keeps the plain adopt below, run files included.
+            //
+            // NOTE the one asymmetry this creates: the click names a VARIANT,
+            // but a silent reopen resolves the variant from the run file's own
+            // runSource: instead. The launcher prints a line saying so.
             //
             // Deferred exactly like a .py: the run flow owns the encoder, the
             // LED matrix and possibly a whole guided build, none of which

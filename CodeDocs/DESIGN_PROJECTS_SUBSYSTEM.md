@@ -1,4 +1,4 @@
-# Projects Subsystem — Design (2026-08-20, as-built through wave 2)
+# Projects Subsystem — Design (2026-08-22, as-built through wave 3)
 
 Companion to the approved plan (projects + guided placement branch). Sibling docs:
 DESIGN_GUIDED_PLACEMENT.md, **DESIGN_SLOT_FILES.md** (the path-based active
@@ -7,9 +7,10 @@ context this subsystem is now built on), DESIGN_PART_ID_FOLLOWUP.md.
 > **WAVE 2 SUPERSEDES THE SLOT FLOW.** Sections 0 and 1 below are the original
 > wave-1 design and are kept for their reasoning; the **destination-slot picker,
 > the temp-slot borrow and the keep-prompt are all deleted from the firmware**.
-> A launch now opens `/projects/<dir>/<dir>_<N>.yaml` — a **run file** — as the
-> persistent active context. **§1b is the as-built contract**; where it and §1
-> disagree, §1b wins. The same goes for the `z` grammar (destination slots are
+> A launch now opens `/projects/<dir>/<dir>_run.yaml` — a **run file** — as the
+> persistent active context (wave 3: ONE per project, reused; the numbered
+> `<dir>_<N>.yaml` scheme lives behind `JL_PROJECT_RUN_HISTORY`).
+> **§1b is the as-built contract**; where it and §1 disagree, §1b wins. The same goes for the `z` grammar (destination slots are
 > gone) and for variant selection (a load resolves its variant from the run
 > file's own `runSource:`).
 
@@ -23,7 +24,7 @@ context this subsystem is now built on), DESIGN_PART_ID_FOLLOWUP.md.
 | File naming | `wiring*.yaml`, NOT `slot_*.yaml` — relax the FileManager guard instead (see the `extractSlotNumberFromPath` trap) |
 | Provisioning | Parallel `projectFiles[]` table + `initializeProjects(force)` mirroring the examples system; new `scripts/generate_projects.py` → `src/snakes/projectFiles.h` |
 | Menu | ~~One line under Apps~~ → **wave 2: a TOP-LEVEL clickwheel row, before Apps**; one `apps[]` row; dynamic picker in the launcher |
-| Slot flow (non-guided) | ~~`enterTemporarySlot(8)` → keep-prompt → `saveSlot(n)`~~ → **wave 2: `projectBeginRun` → `<dir>_<N>.yaml` is the persistent context. No temp slot, no destination picker, no keep-prompt.** See §1b |
+| Slot flow (non-guided) | ~~`enterTemporarySlot(8)` → keep-prompt → `saveSlot(n)`~~ → **wave 2: `projectBeginRun` → the run file is the persistent context. No temp slot, no destination picker, no keep-prompt. Wave 3: ONE run file per project, `<dir>_run.yaml`; keeping a run is `slots` > `save to`.** See §1b |
 | Python API | `jl_load_slot_path()` + `jumperless.load_project(name_or_path)` — **wave 2 splits the two forms**, see §1b |
 | Config keys | **None** for v1 (provisioning is existence/hash-driven like examples). Wave 2 adds `[slots] boot_mode` / `boot_slot` — those belong to DESIGN_SLOT_FILES.md, not here |
 
@@ -173,29 +174,103 @@ mode.
 
 ### The run file
 
-A launch **allocates or opens** `/projects/<dir>/<dir>_<N>.yaml` and leaves it as
-the active context when the launcher returns. That is the whole persistence
-model: there is no destination to choose and nothing to keep, because the run
-file *is* the kept thing, exactly like clicking a YAML in the Files browser.
+A launch **opens or creates** the project's run file and leaves it as the
+active context when the launcher returns. That is the whole persistence model:
+there is no destination to choose and nothing to keep, because the run file
+*is* the kept thing, exactly like clicking a YAML in the Files browser.
+
+**ONE FILE PER PROJECT is the default** (wave 3, Kevin's ruling — the numbered
+files "make way too many files"):
+
+```
+/projects/<dir>/<dir>_run.yaml
+```
+
+silently reused on every launch. **To KEEP a run**, use `slots` > `save to`
+while it is the active context — that is the documented keep flow, and it is
+why the launcher no longer mints a file per launch.
+
+The wave-2 numbered scheme is not deleted; it compiles behind
+**`JL_PROJECT_RUN_HISTORY`** (`src/config.h`, `0` by default), where the run
+file is `<dir>_<N>.yaml`, `N = max+1` per launch, with the load-latest prompt,
+`z … run=<N>` and the pile-up hint. Everything below that is not marked
+"numbered mode" holds in both.
 
 - The file is a byte copy of the chosen `wiring*.yaml`, plus a `runSource:`
   scalar naming the wiring it came from (the path itself cannot encode which
   variant produced it).
-- `N` is **monotonic and never reused**: the allocator scans the directory for
-  `<dir>_<n>.yaml` and takes `max(n)+1`, capped at 9999. Deleting `_1` while `_2`
-  exists yields `_3`, not `_1`.
-- ≥20 run files prints a hint pointing at Files. The firmware never deletes a
-  run file — it is user data.
+- **The prompt policy** (single-file mode). Absent → create and go, no prompt.
+  Present with a guided build **mid-flight** in it → exactly one prompt,
+  `y/click = resume, n = start fresh (overwrites), other = cancel`. Present
+  otherwise — finished guide, non-guided, plain state → **silently reopen**.
+- **Mid-flight** means the file's `guideProgress` says `step < of`. See
+  "Deciding mid-flight" below; it is the reason `of:` exists.
+- **Start fresh re-copies the template over the existing file.** Same
+  validate-by-load + one-retry + delete-on-double-failure discipline as create:
+  the user consented at the prompt and the old bytes were gone at the first
+  write, so there is nothing extra to protect.
+- Numbered mode only: `N` is **monotonic and never reused** (`max(n)+1`, capped
+  at 9999 — deleting `_1` while `_2` exists yields `_3`); ≥20 run files prints a
+  hint pointing at Files.
+- The firmware **never deletes a run file** — it is user data. Old numbered
+  files on a board that gets reflashed to single-file mode are **inert
+  leftovers**: nothing scans for them, opens one or removes one. Delete them
+  from the Files browser.
 - **Namespace refusal**: a project directory whose name starts with `wiring` or
-  `slot` is refused. `startsWith`, not equality: `/projects/wiringX/wiringX_1.yaml`
+  `slot` is refused. `startsWith`, not equality: `/projects/wiringX/wiringX_run.yaml`
   would otherwise match `isTemplatePath()` and be a run file that can never be
-  saved. `listVariantFiles` skips the directory's own run-file pattern and
-  `projectScanRunFiles` requires the exact `<dir>_` prefix, so the two guards
-  cannot drift.
+  saved. `listVariantFiles` skips **both** run-file spellings (in both compile
+  modes) and `projectScanRunFiles` requires the exact `<dir>_` prefix followed
+  by 1–4 **digits**, so the guards cannot drift.
 - Shipped `wiring*.yaml` templates stay **read-only**: `writeStateToPath` refuses
   any `/projects/<dir>/wiring*.yaml`, `updateLastActive` gates on the same
   predicate, and the idle auto-save skips the *attempt* (rate-limited note). Run
   files deliberately do not match the predicate. See DESIGN_SLOT_FILES.md §4.
+
+#### Naming disjointness — the proof, both directions
+
+| Pair | Why they cannot collide |
+|---|---|
+| `<dir>_run.yaml` vs `<dir>_<N>.yaml` | the numbered matcher requires the middle to be 1–4 **digits** with no leading zero; `"run"` is not. A directory literally called `Xrun` is not a counterexample — its single run file is `Xrun_run.yaml`, middle still `"run"` |
+| `<dir>_run.yaml` vs the variant glob `wiring*.yaml` | the run file starts with the **directory name**, so it can only start with `wiring` when the directory does — which `projectBeginRun` refuses. `listVariantFiles` skips it anyway |
+| `<dir>_run.yaml` vs `isTemplatePath()` | same predicate as the variant glob (basename `startsWith("wiring")`), same argument |
+| `<dir>_run.yaml` vs `slotNumberForCanonicalPath` | that matcher is anchored on the literal `/slots/slot` prefix. A run file is an ordinary **path context** and reports `ACTIVE_SLOT:-1` + its path |
+| `<dir>_run.yaml` vs provisioning | `initializeProjects` iterates the compiled `projectFiles[]` canonical paths only and the forced-refresh branch writes `wiring_original*.yaml`. Neither namespace can reach the other |
+
+#### Deciding mid-flight without loading the file
+
+The prompt offers **cancel**, and a cancel must leave the previous context
+untouched (exit **B** below). So the decision has to be made *before*
+`loadSlotFromPath` runs — which rules out reading `guideProgress` out of the
+loaded state.
+
+It also rules out recomputing `numSteps` launcher-side: `guideParse` resolves
+`part:` names, and synthesizes `auto:` steps, against the **live** parts table,
+which at that moment still holds the *previous* context. A pre-load parse would
+silently drop every `place` step.
+
+So the guide runtime persists the total alongside the step.
+`guidePersistProgress` is the only code that both knows `numSteps` and writes
+the file, and the progress line round-trips as
+
+```
+guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
+```
+
+`of:` is emitted **only when non-zero** (the `runSource:` rule — an unemitted
+scalar is destroyed by the next idle auto-save, so serializer and parser land
+together). A hand-written or pre-`of:` file therefore round-trips byte-identical
+and reads as *total unknown*, and unknown means **not mid-flight**: reopen
+silently and let the existing resume gates do what they always did.
+
+Both error directions are benign, which is why "unknown → reopen" is safe:
+under-detect resumes (nothing is overwritten, which is the entire risk),
+over-detect costs one prompt whose default is resume — and `guideRun`'s
+`ALREADY_COMPLETE` clamp is still the backstop against a file that lies.
+
+`SlotManager::scanGuideProgressFile()` is the load-free reader. It shares one
+flow-map parser (`parseGuideProgressLine`, States.cpp) with `fromYAML`'s parse
+arm, so the "ONE shape only" contract cannot drift between them.
 
 ### The exit table (A–H) — the behavioural contract
 
@@ -204,12 +279,12 @@ file *is* the kept thing, exactly like clicking a YAML in the Files browser.
 | Exit | Where | Live state after | On disk | Launcher does |
 |---|---|---|---|---|
 | **A** | hold / serial byte at the project picker | previous context | untouched | `  Cancelled.`, return |
-| **B** | cancel or 20 s timeout at the load/new prompt | previous context | untouched | `  Cancelled.`, return |
+| **B** | cancel or 20 s timeout at the run-file prompt (single-file: the mid-flight resume/fresh prompt; numbered: load-latest/start-new) | previous context | untouched | `  Cancelled.`, return |
 | **C** | cancel at the variant picker | previous context | untouched | `  Cancelled.`, return |
 | **D** | run-file create/copy fails | previous context | partial destination **deleted**; copy+load retried once | `notify()` + return |
 | **E** | run-file load fails (both tries) | previous context — **or** the terminal no-active-context state | the file we created is deleted | `notify()`, hint `(start a new run to rebuild from the project wiring)`, return |
 | **F** | guide quit (hold/`q`) mid-build | run file active; rails per the rails rule below | run file holds `guideProgress` at the quit step | **nothing** — no script, no offer, and no `SCRIPT` lines at all |
-| **G** | script ends / KeyboardInterrupt | run file active, the script's mutations live | run file saved | `waitForButtonRest(2000)` → `saveActiveSlot` → `  Run saved to <dir>_<N>.yaml (now your active circuit).` |
+| **G** | script ends / KeyboardInterrupt | run file active, the script's mutations live | run file saved | `waitForButtonRest(2000)` → `saveActiveSlot` → `  Run saved to <dir>_run.yaml (now your active circuit).` |
 | **H** | guide completes | run file active, powered per its own `power_on` | saved at every commit, then again by `finishRun` | the script **offer**: `SCRIPT offer=<path>`, prompt, `SCRIPT action=run\|skip` |
 
 Two things the table cannot hold:
@@ -230,8 +305,9 @@ Two things the table cannot hold:
 |---|---|
 | start-new, >1 genuine `wiring*.yaml` | the variant picker (`VARIANTS n=`) |
 | start-new, one wiring | that wiring |
-| **load-latest / `run=<N>`** | the run file's **`runSource:`** — the picker is not offered, because run files are not partitioned by variant and "load latest" must not be offered after a variant choice it might contradict |
-| Files-browser click on a specific `wiring*.yaml` | that file pins the variant; the picker is skipped |
+| **reopen** (silent reuse, mid-flight resume, or numbered load-latest / `run=<N>`) | the run file's **`runSource:`** — the picker is not offered, because a run file is not partitioned by variant and reopening must not contradict a variant choice |
+| Files-browser click on a specific `wiring*.yaml`, run file **absent** or the user chose *start fresh* | that file pins the variant; the picker is skipped |
+| Files-browser click on a specific `wiring*.yaml`, run file **reopened** | `runSource:` wins and the clicked file is **not** used. The launcher says so: `  (variant taken from runSource; the clicked file was not used - start fresh to change variant)`. This is the one place the door the user came through has less say than the file they land in |
 | `runSource:` empty or dangling | the project's default `wiring.yaml`, with one printed line. That wiring is then also the **guide** source; the variant script collapses to `main.py` as a consequence |
 
 Script resolution: `main.<variant>.py` → `meta.script` → `main.py`.
@@ -260,14 +336,25 @@ non-guided launches get the same power apply a few milliseconds later.
 ### The `z` grammar
 
 ```
-z <project>[ new|load|run=<N>][ noscript]
+z <project>[ new|load][ noscript]              single-file mode (default)
+z <project>[ new|load|run=<N>][ noscript]      JL_PROJECT_RUN_HISTORY
 ```
 
 - `<project>` is a directory name (`555`) or a wiring path
   (`/projects/555/wiring.alt.yaml`, which selects that variant for a NEW run).
-- **No mode arg** = load latest when runs exist, else new — the launcher's own
-  defaults *without* the interactive prompt, because headless has to be
-  deterministic.
+- **No mode arg** = reuse the run file when it exists, else new — the
+  launcher's own defaults *without* the interactive prompt, because headless
+  has to be deterministic. A **mid-flight guided build therefore RESUMES**
+  here; only the interactive door asks.
+- `new` **overwrites** `<dir>_run.yaml` from the wiring, mid-flight or not.
+  Explicit is explicit, and headless never prompts.
+- `load` errors when there is no run file (`PROJECT error no run files for
+  <dir>`, after a truthful `RUNS n=0`).
+- **`run=<N>` is refused by NAME on a single-file build**:
+  `PROJECT error run=<N> needs a JL_PROJECT_RUN_HISTORY build - this build
+  keeps ONE run file per project (<dir>_run.yaml)`. Quietly opening
+  `<dir>_run.yaml` instead would hide a stale assumption in whatever is
+  driving. The HIL uses this line as its compile-mode probe.
 - **Loud-fail on the old grammar.** A bare all-digit token *after* the project is
   the deleted destination slot and is a usage error. The parse is token-wise, so
   `z 555` is still a perfectly good all-digit **project** name.
@@ -284,8 +371,11 @@ z <project>[ new|load|run=<N>][ noscript]
 
 `load_project` splits **by form**, and the split is what the two forms mean:
 
-- `load_project("555")` → `projectOpenLatestOrNew` → open `555_<maxN>.yaml`, or
-  create `555_1.yaml`. **Load only** — no guide, no script.
+- `load_project("555")` → `projectOpenLatestOrNew` → open `555_run.yaml`, or
+  create it from the wiring (numbered mode: open `555_<maxN>.yaml` / create
+  `555_1.yaml`). **Load only** — no guide, no script, and never a prompt: a
+  mid-flight guided build is simply reopened, because resuming it is the
+  launcher's job.
 - `load_project("/any/path.yaml")` → unchanged raw `loadSlotFromPath`.
 
 The name form is precisely what destroyed three shipped templates during wave 2
@@ -303,11 +393,12 @@ write-guard that protects it — reachable and tested.
 | `GSLOTS n=8` | **dead** — the destination picker is deleted |
 | `SLOTS` (keep-flow picker) | **dead** — the keep-flow is deleted |
 | `GUIDE resume slot=<n> step=<k>` | **dead** → `GUIDE resume file=<path> step=<k>` |
-| `RUNS n=<count> latest=<path>` | **new** — before the interactive prompt (n≥1) and from every headless `load` / `run=<N>` |
+| `RUNS n=<count> latest=<path>` | **new** — printed whenever a run file already exists, before the prompt (if any) and from every headless `load`. Single-file mode: always `n=1` when the file is there, and **no RUNS line at all** when it is not, since there are no runs to count |
 | `RUNFILE path=<path> action=new\|load` | **new** — after the run-file decision, before guide/script; emitted on **every** door (launcher, `z`, FileManager click, `load_project("<name>")`) |
 | `GUIDE already complete (step k/n)` | **new** — the completion clamp refusing to relaunch a finished build |
 | `SCRIPT offer=<path>\|none` / `SCRIPT action=run\|skip` | **new** — on every path that reaches the script step. **Not** exit F (a guide quit returns first), and **suppressed entirely** when a guide SESSION ran and committed zero steps, where `  (nothing was built - no script offer)` prints instead |
-| `PROJECT error <reason>` | **new** — headless failures (`z`, `load_project`) |
+| `PROJECT error <reason>` | **new** — headless failures (`z`, `load_project`). Includes the single-file build's `run=<N> needs a JL_PROJECT_RUN_HISTORY build …` mode refusal |
+| `  (variant taken from runSource; the clicked file was not used - start fresh to change variant)` | **new (wave 3)** — a Files-browser click on a `wiring*.yaml` that ends in a silent reopen |
 | `ACTIVE_CONTEXT: <path>` | **never existed.** The status surface is `ACTIVE_SLOT:<n\|-1>` + `ACTIVE_PATH:<path>` (DESIGN_SLOT_FILES.md §5) |
 
 ### Companion script contract

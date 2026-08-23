@@ -845,7 +845,7 @@ static void drainLineEndings(void) {
 struct RunContext {
     String dir;          // project directory name
     String projectPath;  // /projects/<dir>
-    String runPath;      // /projects/<dir>/<dir>_<N>.yaml (the active context)
+    String runPath;      // the project's run file (now the active context)
     String wiringPath;   // the CANONICAL wiring this run came from (runSource)
     ProjectMeta meta;    // meta: of wiringPath (variant/script resolution)
     bool interactive;    // encoder/terminal session (offers prompts) vs headless

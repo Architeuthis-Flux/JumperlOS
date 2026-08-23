@@ -1270,9 +1270,11 @@ Jerial.println(probe_art);
         Jerial.println("               project and the board walks you through placing");
         Jerial.println("               each part - lighting the holes, naming the nets,");
         Jerial.println("               and measuring each step before it commits.");
-        Jerial.println("               A launch opens /projects/<dir>/<dir>_<N>.yaml (a");
+        Jerial.println("               A launch opens /projects/<dir>/<dir>_run.yaml (a");
         Jerial.println("               RUN FILE) as your active circuit and keeps it -");
         Jerial.println("               destination slots and the keep-prompt are gone.");
+        Jerial.println("               ONE run file per project, reused. To keep a run,");
+        Jerial.println("               use slots > save to while it is active.");
 
         changeTerminalColor(HELP_NOTE_COLOR, true);
         Jerial.println("\n App Examples:");

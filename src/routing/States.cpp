@@ -3044,8 +3044,11 @@ int SlotManager::slotNumberForCanonicalPath(const String& path) {
  * matches (basename startsWith "wiring", endsWith ".yaml"), so it covers
  * wiring.yaml, wiring_v2.yaml and the wiring_original*.yaml backups too.
  *
- * Per-run project files are named <dir>_<N>.yaml and deliberately do NOT
- * match, so nothing about the run flow is affected.
+ * Per-run project files are named <dir>_run.yaml (or <dir>_<N>.yaml under
+ * JL_PROJECT_RUN_HISTORY) and deliberately do NOT match - both begin with the
+ * project's DIRECTORY name, so neither can start with "wiring" unless the
+ * directory does, which projectBeginRun refuses. Nothing about the run flow is
+ * affected.
  */
 bool SlotManager::isTemplatePath(const char* path) {
     if (!path || path[0] == '\0') return false;
@@ -3763,8 +3766,9 @@ bool SlotManager::writeStateToPath(const char* path, String& errorMsg, bool skip
     // No legitimate caller writes STATE to a template path - provisioning
     // installs templates by copying bytes through safeFileWriteAll, not
     // through this API - so putting the refusal at the bottom costs nothing
-    // and closes the last door. The launcher's per-run files are
-    // <dir>_<N>.yaml and deliberately do not match the predicate.
+    // and closes the last door. The launcher's per-run files - <dir>_run.yaml,
+    // or <dir>_<N>.yaml under JL_PROJECT_RUN_HISTORY - deliberately do not
+    // match the predicate.
     if (isTemplatePath(path)) {
         errorMsg = "Refusing to write over project template " + String(path);
         Serial.print("REFUSED: not writing over project template ");
