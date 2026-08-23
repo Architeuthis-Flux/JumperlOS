@@ -1792,8 +1792,16 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
     // removes ONLY what it actually added: addConnection() returns true for a
     // pair that already exists (it just bumps the duplicate count), so "the add
     // succeeded" is not the same question as "the bridge is mine".
+    //
+    // The "defaulting to GPIO 26/27" line belongs ONLY to an external scan
+    // that was given no rows: for the internal bus those pins are not in the
+    // path at all and the message is simply false there (the old gate never
+    // printed it for an internal scan, because the old gate sent that case
+    // down the ADD branch instead - the bug).
     bool addedSda = false, addedScl = false;
-    if ( sdaRow < 0 || sclRow < 0 || internalScan != 0 ) {
+    if ( internalScan != 0 ) {
+        // On-board Wire: nothing to route, nothing to say about RP 26/27.
+    } else if ( sdaRow < 0 || sclRow < 0 ) {
         Serial.println( "defaulting to \n\n\rGPIO 26 = SDA\n\rGPIO 27 = SCL" );
     } else {
         addedSda = !globalState.hasConnection( RP_GPIO_26, sdaRow ) &&

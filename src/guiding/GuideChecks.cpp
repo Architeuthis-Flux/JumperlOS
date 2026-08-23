@@ -240,6 +240,9 @@ enum class SenseMode : uint8_t {
 #define CK_ROWCLASS_GND 2
 #define CK_ROWCLASS_BOT 3
 
+// The hint buffer, named so ckHint() below can assert against it.
+#define CK_HINT_MAX 96
+
 struct CheckState {
     bool active = false;
     GuideCheck check = GuideCheck::NONE;
@@ -307,6 +310,11 @@ struct CheckState {
     int oscGpioIdx = -1;           // gpioDef index of the ephemeral route; -1 = tap fallback
     int oscTarget = -1;            // remembered for teardown (never deref step there)
     bool oscPreTapPending = false; // the safety sample, before any GPIO route
+    // Why the tap fallback was entered - it decides what the verdict may
+    // honestly claim, and it is quoted back to the user. 0 = no routable GPIO
+    // was free, 1 = the project's rails exceed the GPIO domain, 2 = the target
+    // itself read above it.
+    uint8_t oscFallbackReason = 0;
     bool oscLastLevel = false, oscHaveLevel = false;
     uint32_t oscEdges = 0;
     unsigned long oscSettleUntilMs = 0;
@@ -344,10 +352,29 @@ struct CheckState {
     // outcome
     int result = GUIDE_CHECK_RUNNING;
     char val[24];
-    char hint[96];
+    char hint[CK_HINT_MAX];
 };
 
 static CheckState ck;
+
+// A hint that does not FIT is worse than no hint: finishCheck strncpy's into
+// ck.hint and GuidedFlow prints the result on the terminal AND on the 128x32
+// OLED, so an over-long one is severed mid-word at the reader
+// ("...so presence means nothi"). Two of the H1 wave's four new hints did
+// exactly that and shipped through a bench run, because the evidence block
+// only ever showed `val=`, never the sentence.
+//
+// Wrap a hint literal in ckHint() and the compiler proves it fits. The array
+// size is deduced, so this costs nothing at runtime and cannot be fooled by a
+// concatenation. Existing hints top out at 88 bytes; keep new ones there too -
+// the cap is the buffer, but the OLED is the real reader.
+template <size_t N>
+static constexpr const char* ckHint(const char (&s)[N]) {
+    static_assert(N <= CK_HINT_MAX,
+                  "guide check hint is longer than ck.hint[] - it would be cut "
+                  "mid-word on the terminal and the OLED");
+    return s;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1047,10 +1074,27 @@ static void collectClassRows(void) {
 // the deterministic half.
 //
 // Either refusal is EXPLAINED and then falls through to the existing high-Z
-// tap fallback, which is safe at 5 V (the sense path is the +/-8 V divider)
-// and still reaches an honest verdict for the 555: taps land on both levels
-// across the window, span > 1 V, val=osc. A refusal, not a silent risk, and
-// not a lost check either.
+// tap fallback, which is safe at 5 V (the sense path is the +/-8 V divider).
+//
+// WHAT THIS COSTS, PLAINLY. The shipped 555 runs `power: topRail: 5.0`, so its
+// final step - the project's marquee verification, `min: 0.3, max: 30` on the
+// OUT pin - now takes gate 1 on EVERY run and can no longer be measured. The
+// tap fallback still proves the pin is SWINGING, but not how fast, so that
+// step now reports UNVERIFIED (GUIDE_CHECK_SKIPPED, val=unmeasured) instead of
+// "1.4 Hz, inside the band". That is a real loss of verification for the one
+// shipped project that uses this check, and it is the honest reading: the
+// alternative was a PASS that silently waived the author's band, which is
+// worse than an admitted gap. Warn-class still advances the build.
+//
+// THE WAY BACK, NOT BUILT TONIGHT. The fallback already takes repeated taps
+// through the window; timestamping the level TRANSITIONS between them would
+// give a real frequency estimate over the slow end of the band. Budget: a tap
+// is ~11 ms plus poll overhead, so the effective sample rate is tens of Hz and
+// Nyquist puts the usable ceiling at a few Hz - the 555's own ~1.4 Hz blink is
+// comfortably measurable, 30 Hz is not. That would restore real verification
+// for the common case and leave only the fast end unmeasured, which the
+// verdict could then say precisely. Wants its own bench session with a real
+// 555 on the board.
 static const float kOscGpioMaxV = 3.6f;   // the FT pad's 3.3V domain, with margin
 static const uint32_t kOscPreTapBudgetMs = 300; // room for the safety tap + retries
 
@@ -1219,8 +1263,8 @@ void guideCheckBegin(const GuideCheckRun& run) {
                 }
                 if (badSupply >= 0) {
                     finishCheck(GUIDE_CHECK_SKIPPED,
-                                "can't charge a supply node - rail/GND/DAC/ISENSE "
-                                "holds its own voltage, so presence means nothing there",
+                                ckHint("can't charge a supply node - it holds its "
+                                       "own voltage, so presence means nothing"),
                                 "supply@%d", badSupply);
                     break;
                 }
@@ -1303,8 +1347,8 @@ void guideCheckBegin(const GuideCheckRun& run) {
             if (nodeIsDrivenSource(rowA) || nodeIsDrivenSource(rowB)) {
                 int bad = nodeIsDrivenSource(rowA) ? rowA : rowB;
                 finishCheck(GUIDE_CHECK_SKIPPED,
-                            "can't stimulate a supply node - rail/GND/DAC/ISENSE "
-                            "drives its own current, so there is nothing to measure",
+                            ckHint("can't stimulate a supply node - a rail/GND/DAC "
+                                   "drives its own current"),
                             "supply@%d", bad);
                 break;
             }
@@ -1473,15 +1517,38 @@ void guideCheckBegin(const GuideCheckRun& run) {
                 const bool haveSda = globalState.hasConnection(st.n1, RP_GPIO_26);
                 const bool haveScl = globalState.hasConnection(st.n2, RP_GPIO_27);
                 ck.chainLive = true;   // BEFORE the adds: teardown always runs
+                // Short-circuit is deliberate and safe: if leg 0 fails, leg 1
+                // is never attempted and its chainAdded[] stays false, so
+                // teardown removes exactly the one that landed. checkTeardown
+                // clears chainAdded[] wholesale afterwards, so a later check
+                // cannot inherit either slot.
                 if (!addLeg(0, st.n1, RP_GPIO_26) ||
                     !addLeg(1, st.n2, RP_GPIO_27)) {
                     finishCheck(GUIDE_CHECK_FAIL,
-                                "could not route n1/n2 to the I2C pins", "setup");
+                                ckHint("could not route n1/n2 to the I2C pins"),
+                                "setup");
                     break;
                 }
                 if (!haveSda || !haveScl) {
                     refreshLocalConnections(0, 0, 0);
                     waitCore2();
+                    // addLeg() returning true means the pair entered STATE, not
+                    // that the router placed it - chainBegin makes the same
+                    // distinction right after its own refresh. Without this, a
+                    // router refusal reaches the user as "no I2C ack - is the
+                    // device powered?" and sends them hunting a power fault on
+                    // a bus that was never connected. routeRefused() reads
+                    // unconnectablePaths[], which is rebuilt every routing pass
+                    // and is only meaningful immediately after the refresh -
+                    // hence right here, not later.
+                    if (routeRefused(st.n1, RP_GPIO_26) ||
+                        routeRefused(st.n2, RP_GPIO_27)) {
+                        finishCheck(GUIDE_CHECK_FAIL,
+                                    ckHint("the router could not reach the I2C pins - "
+                                           "the bus was never connected"),
+                                    "refused");
+                        break;
+                    }
                     Serial.printf("  i2c: routed %s%s%s to RP 26/27 for the scan "
                                   "(removed again afterwards)\n\r",
                                   haveSda ? "" : "SDA",
@@ -1529,6 +1596,22 @@ void guideCheckBegin(const GuideCheckRun& run) {
                 // auto-synthesized power_on steps in partless projects flow.
                 finishCheck(GUIDE_CHECK_PASS, "no power/gnd-class pins to verify", "norows");
                 break;
+            }
+            // Raise the floor the way presence and continuity/vf do, now that
+            // numRows is final. rail_sane had been living on the bare 1500 ms
+            // default, which was fine while it took ONE reference tap; a
+            // mixed-supply project takes TWO, and at the file's own ~250 ms per
+            // tap a four-row build needs ~1600 ms and would have started
+            // intermittently reporting `timeout` on exactly the project shape
+            // the bottom-rail fix exists to serve. 400 ms of headroom covers
+            // the 100 ms RAIL_SETTLE and the poll overhead around it. A floor,
+            // not an override - an author's longer timeout: still wins.
+            {
+                uint32_t taps = (uint32_t)ck.numRows
+                              + (railSaneNeedsTopRef() ? 1u : 0u)
+                              + (railSaneNeedsBotRef() ? 1u : 0u);
+                uint32_t need = 400 + 250u * taps;
+                if (ck.timeoutMs < need) ck.timeoutMs = need;
             }
             if (ck.step->type == GuideStepType::POWER_ON && !ck.powerApplied) {
                 // The stimulus of this check IS the power application - the
@@ -2179,6 +2262,7 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                 const float ceiling = oscSupplyCeiling();
                 if (ceiling > kOscGpioMaxV) {
                     ck.oscPreTapPending = false;
+                    ck.oscFallbackReason = 1;
                     Serial.printf("  osc: this project drives its rails at "
                                   "%.2f V - the frequency check drives a 3.3 V "
                                   "pin and will not connect to a node that can "
@@ -2197,6 +2281,7 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                 ck.oscPreTapPending = false;
                 ck.tapHardFails = 0;
                 if (r == 1 && fabsf(v) > kOscGpioMaxV) {
+                    ck.oscFallbackReason = 2;
                     Serial.printf("  osc: target sits at %.2f V - the frequency "
                                   "check drives a 3.3 V pin and will not connect "
                                   "to it. Falling back to high-Z taps (frequency "
@@ -2268,9 +2353,47 @@ int guideCheckPoll(char* valOut, size_t valLen) {
             }
             if (millis() - ck.oscWindowStartMs >= ck.oscWindowMs) {
                 if (ck.oscTapOks >= 2 && (ck.oscVHi - ck.oscVLo) > 1.0f) {
-                    finishCheck(GUIDE_CHECK_PASS,
-                                "tap fallback: both levels seen; frequency not measured (no free GPIO)",
-                                "osc");
+                    // BOTH LEVELS SEEN. What that is worth depends entirely on
+                    // what the author asked for, and this used to ignore the
+                    // question: it returned PASS unconditionally, never reading
+                    // st.min/st.max - the band is evaluated ONLY on the GPIO
+                    // edge-counting path above. While the fallback was reached
+                    // only when no GPIO happened to be free that was academic.
+                    // The supply-ceiling gate made it the PRIMARY path for the
+                    // one shipped project that uses this check, so a 555
+                    // blinking at 500 Hz - or at 0.05 Hz - would have come back
+                    // ok=1 against `min: 0.3, max: 30`.
+                    //
+                    // A guide that cannot measure something must say so; it may
+                    // never call it good. So: an authored band that was never
+                    // evaluated is SKIPPED, not PASS. Warn-class still advances
+                    // the step (SKIPPED never "measured" anything, so GuidedFlow
+                    // proceeds on the confirm already given) - the difference is
+                    // that the step reads UNVERIFIED instead of CONFIRMED, and
+                    // the hint says which.
+                    //
+                    // With no band the author only asked "is it oscillating?",
+                    // and both levels across the window answers exactly that.
+                    // That stays a PASS.
+                    const GuideStep& stO = *ck.step;
+                    const bool bandAuthored = (stO.max > stO.min);
+                    const char* why =
+                        (ck.oscFallbackReason == 1) ? "rails exceed the 3.3V GPIO domain"
+                        : (ck.oscFallbackReason == 2) ? "target sits above the 3.3V GPIO domain"
+                                                      : "no routable GPIO was free";
+                    setDetail("osc: %s - saw both levels, span %.2fV; frequency "
+                              "not measured", why, (double)(ck.oscVHi - ck.oscVLo));
+                    if (bandAuthored) {
+                        finishCheck(GUIDE_CHECK_SKIPPED,
+                                    ckHint("oscillating, but the frequency could not be "
+                                           "measured - band NOT checked"),
+                                    "unmeasured");
+                    } else {
+                        finishCheck(GUIDE_CHECK_PASS,
+                                    ckHint("both levels seen - oscillating; frequency "
+                                           "not measured"),
+                                    "osc");
+                    }
                 } else if (ck.oscTapOks == 0 && ck.oscTapFloats >= 2) {
                     finishCheck(GUIDE_CHECK_FAIL,
                                 "row never read stable - floating, or oscillating too fast for taps",
