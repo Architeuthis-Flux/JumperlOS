@@ -70,8 +70,8 @@ enum class GuideState : uint8_t {
 // free hole MOVES the part, a tap on its own lit footprint SNAPS it, and the
 // wheel BROWSES and nothing else. With no double-click gesture left to
 // disambiguate, a wheel click confirms the instant it is released again (the
-// pend existed only to tell click from double-click). The encoder still emits
-// DOUBLECLICKED; the guide simply does not consume it - see guideReadInput.
+// pend existed only to tell click from double-click). As of 2026-08-22 the
+// driver does not emit DOUBLECLICKED at all - see guideReadInput.
 
 struct GuideSession {
     GuideScript* script;
@@ -964,21 +964,22 @@ static GuideKey guideReadInput(int& tapRow) {
     // next / prev. There is no double-click gesture any more, so nothing has
     // to be disambiguated and nothing waits.
     //
-    // THE UNCONSUMED DOUBLECLICKED, walked through, because "we just don't
-    // read it" is only safe if the driver's own edges stay coherent
-    // (RotaryEncoder.cpp is deliberately NOT touched):
+    // TWO FAST CLICKS ARE TWO CONFIRMS, walked through, because this changed
+    // on 2026-08-22 when the driver stopped emitting DOUBLECLICKED at all
+    // (Kevin's rule: "double click on the rotary encoder should not be a
+    // thing"):
     //   press 1   -> PRESSED
     //   release 1 -> lastButtonEncoderState = PRESSED, state = RELEASED, and
-    //                the test below fires: ONE confirm, state cleared to IDLE.
-    //   press 2   -> inside doubleClickLength the driver sets DOUBLECLICKED
-    //                (RotaryEncoder.cpp:590). No arm below matches it; the
-    //                guide does nothing.
-    //   release 2 -> the driver copies DOUBLECLICKED into
-    //                lastButtonEncoderState and sets RELEASED. The test below
-    //                demands lastButtonEncoderState == PRESSED, so the second
-    //                click is SWALLOWED, not confirmed twice.
-    // Net: a double-click on the wheel is exactly one confirm. A click that
-    // turns into a hold still reaches HELD and still quits.
+    //                the test below fires: confirm #1, state cleared to IDLE.
+    //   press 2   -> PRESSED again. No 250 ms window, no special case.
+    //   release 2 -> lastButtonEncoderState = PRESSED, state = RELEASED, and
+    //                the test below fires again: confirm #2.
+    // Net: a fast pair advances two steps (or, on a committed step, confirms
+    // and then re-verifies). That is the intended reading of the rule — the
+    // wheel has one click and it always means the same thing. The old wave-3
+    // "exactly ONE confirm" invariant was a consequence of the driver
+    // swallowing the second click, not a guide decision, and it is retired.
+    // A click that turns into a hold still reaches HELD and still quits.
     if (encoderButtonState == HELD) {
         encoderButtonState = IDLE;
         return GuideKey::QUIT;

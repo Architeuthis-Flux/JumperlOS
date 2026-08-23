@@ -374,11 +374,20 @@ turn ending the guide.
 Killing the double-click gesture killed the whole apparatus. RELEASED returns
 CONFIRM immediately again, so a confirm always acts in the state the machine is
 actually in and no pend can mature anywhere; `pendingConfirmMs`, all five clear
-sites, and F1's arrival guard are gone. The encoder still emits `DOUBLECLICKED`
-and the guide simply does not read it (RotaryEncoder.cpp untouched) — the second
-release then carries `lastButtonEncoderState == DOUBLECLICKED`, which the
-confirm arm rejects, so a double-click is **exactly one confirm**. Bench items
-3/4 in the checklist are retired accordingly.
+sites, and F1's arrival guard are gone. Bench items 3/4 in the checklist are
+retired accordingly.
+
+**Superseded 2026-08-22 (the standing rule).** Wave 3 left the driver alone, so
+the encoder still *emitted* `DOUBLECLICKED` and the second release carried
+`lastButtonEncoderState == DOUBLECLICKED`, which the confirm arm rejected — a
+fast pair was **exactly one confirm**. Kevin then ruled: *"double click on the
+rotary encoder should not be a thing."* The driver no longer emits the state at
+all, so both presses are ordinary PRESSED→RELEASED cycles and a fast pair is
+now **two confirms** (advance two steps, or confirm then re-verify on a
+committed step). That "exactly one confirm" line was never a guide decision —
+it was the driver swallowing the second click — and it is retired. Note this
+also means the second click is no longer *lost* anywhere else in the tree; see
+the note on task #27 in `DEV_MERGE_HANDOFF.md`.
 
 ### 3.3 Controls — AS BUILT (wave 3, after the ADJUST kill)
 
@@ -391,7 +400,7 @@ logic even where it cannot drive the input.
 |---|---|---|---|---|
 | wheel turn | **browse** prev/next, wraps through DONE | browse (wraps into the steps) | ignored | breaks the hold |
 | wheel click | confirm — **instant**; on a committed step it re-verifies | finish when all built, else jump to the first unbuilt step | ignored | breaks the hold |
-| wheel double-click | nothing — unconsumed, and yields exactly ONE confirm | same | same | same |
+| wheel double-click | *not a gesture.* Two fast clicks are two clicks: **TWO confirms** | same | same | same |
 | wheel hold | quit guide | quit guide | abort check + quit | **quits** (not swallowed) |
 | probe CONNECT | confirm (instant) | finish/jump as click | ignored | breaks the hold |
 | probe REMOVE | un-commit / `STEP_BACK` | re-open the last step | abort + back | breaks the hold |
@@ -921,9 +930,10 @@ available):
 - `test_slot_files.py`: the path-context layer underneath (DESIGN_SLOT_FILES.md §10).
 - Bench: **CodeDocs/PROJECTS_BENCH_CHECKLIST.md** is the ordered session script.
   What is structurally unreachable from a suite, and therefore lives only there:
-  every **encoder** gesture (the click, the turn, and the double-click that
-  must still yield exactly ONE confirm now that nothing consumes it) — no serial
-  byte can produce an encoder edge; every **probe pad** gesture
+  every **encoder** gesture (the click, the turn, and the fast pair that must
+  now yield TWO confirms — the driver stopped emitting DOUBLECLICKED on
+  2026-08-22) — no serial byte can produce an encoder edge; every **probe pad**
+  gesture
   (the tap precedence, the DIP `+30` mapping, tap-to-snap) — this suite has no
   probe; the **interactive prompts** (headless never prompts, by design); the
   **no-blip** scope trace; **real-part accuracy** against a DMM; and the LED

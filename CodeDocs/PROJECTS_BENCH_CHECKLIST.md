@@ -605,12 +605,13 @@ rails + DACs held at 0V until the power_on step
 - [ ] **Click confirms INSTANTLY** (W3-T2). The 260 ms pend is gone — the wheel
   click acts on its own release, like `n` and probe CONNECT always did. If it
   still feels laggy, that is a new bug, not the documented cost it used to be.
-- [ ] **Double-click does nothing at all**, and that is the check: click twice
-  fast on a place step and you must get **exactly one confirm**, not two, and
-  no mode. (The encoder still emits DOUBLECLICKED; the guide does not read it,
-  and the second release carries `lastButtonEncoderState == DOUBLECLICKED`,
-  which the confirm arm rejects. Two commits from one gesture is the regression
-  to watch for.)
+- [ ] **Two fast clicks are TWO confirms** *(changed 2026-08-22 — this item used
+  to demand the opposite)*. Click twice fast on a place step: you get **two
+  confirms** (two steps advance, or a confirm then a re-verify), and no mode.
+  There is no double-click gesture to detect any more — the driver stopped
+  emitting `DOUBLECLICKED`, so both presses are ordinary clicks. The regression
+  to watch for is now the **old** behaviour: a fast pair that produces only one
+  confirm means the second click is being swallowed again.
 - [ ] **`q` and hold quit from EVERYWHERE again** — no state swallows them, no
   "two presses get you out".
 - [ ] **THE DRAG TRAIL** (W3-T2, the fix with no HIL witness). Commit a part,
@@ -998,9 +999,9 @@ from and what to do. **Board state is noted per item** so you can batch them.
     at DONE finishes, or jumps to the first unbuilt step.
   - [ ] **A click is INSTANT again.** The 260 ms pend is gone, so a click on a
     place step commits on its own RELEASED edge with no delay — that is the
-    thing to feel. A double-click is now simply two confirms' worth of input
-    arriving at a step that only has one thing to confirm; it must not undo,
-    re-commit or skip anything (see §1.4).
+    thing to feel. Two fast clicks are two ordinary clicks and therefore **two
+    confirms** (2026-08-22); they must not undo or skip anything, but they will
+    legitimately advance two steps (see §1.4).
 - [ ] **5 — MSC host-edit round-trip** *(task 4, the harness cannot mount)*. Load
   a run file, mount the board as USB MSC, **edit the run file from the host**,
   eject. The edit must be **live** — this path used to discard host edits to a

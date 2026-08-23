@@ -39,6 +39,12 @@ the *caller*. Paste both lines — that is the whole diagnosis.
   Keeping a build is `Slots` → `save to`.
 - [ ] **The click is instant again.** No quarter-second lag, no ADJUST mode,
   no double-click gesture — all of it is gone.
+- [ ] **Two fast clicks are two clicks now.** In any menu, click-click fast:
+  **two** actions. The old firmware ate the second one — that was the driver
+  calling it a "double-click" and no menu knowing what that meant. Then click a
+  few sloppy singles: **exactly one** action each. A doubled action on a single
+  click is the thing to report — it would mean the button is bouncing, which
+  the board's RC on the encoder pin is supposed to prevent.
 - [ ] **The drag trail is gone.** In a guide, move a part with the probe: tap a
   free hole, then another, then another. Old footprints must go dark as it
   moves. *(This is the one wave-3 headline with no automated witness.)*

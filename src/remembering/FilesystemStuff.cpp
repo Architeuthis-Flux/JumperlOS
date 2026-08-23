@@ -1682,7 +1682,7 @@ void FileManager::run( ) {
         }
         // Keep the shared state machine from leaking FM-era events to the
         // main screen: consume anything it latched while we own the wheel.
-        if ( encoderButtonState == RELEASED || encoderButtonState == DOUBLECLICKED ) {
+        if ( encoderButtonState == RELEASED ) {
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
         }

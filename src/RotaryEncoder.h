@@ -48,7 +48,7 @@ enum encoderDirectionStates { NONE,UP,DOWN };
  * - Core 1: Polls encoderButtonState in menu loops (~1000μs intervals)
  * 
  * TIMING PROTECTION (Critical for multi-core reliability):
- * - RELEASED and DOUBLECLICKED states persist for minimum 15ms
+ * - RELEASED persists for minimum 15ms
  * - lastButtonEncoderState is FROZEN during the 15ms hold period
  * - This preserves the transition that Core 1 checks: (RELEASED && PRESSED)
  * - Without freezing, Core 2 would update lastButtonEncoderState to RELEASED,
@@ -68,8 +68,20 @@ enum encoderDirectionStates { NONE,UP,DOWN };
  * - PRESSED → HELD (if held long enough)
  * - PRESSED → RELEASED (on release, holds 15ms with lastButtonEncoderState frozen)
  * - RELEASED → IDLE (manual clear by Core 1, or auto after 15ms)
- * - IDLE → DOUBLECLICKED (on quick double press, holds 15ms with freeze)
- * - DOUBLECLICKED → IDLE (manual clear by Core 1, or auto after 15ms)
+ *
+ * NO DOUBLE-CLICK. Kevin's standing rule (2026-08-22): "double click on the
+ * rotary encoder should not be a thing." The wheel's entire vocabulary is
+ * TURN / CLICK / HOLD. Two fast presses are TWO CLICKS — each runs its own
+ * ordinary PRESSED → RELEASED cycle and each is consumed. The driver never
+ * sets DOUBLECLICKED, and no consumer may require or interpret one.
+ * (The probe's double-tap is a separate, established feature and is NOT
+ * affected by this rule — see Probing.h's doubleClickConnect/Disconnect.)
+ *
+ * DOUBLECLICKED below is RESERVED, NEVER EMITTED. It stays in the enum on
+ * purpose: it pins the ordinals of LONG_HELD (5) and MEDIUM_HELD (6), and the
+ * MicroPython API exposes its value as CLICKWHEEL_DOUBLECLICKED = 4. Deleting
+ * it would silently renumber both. jl_clickwheel_get_button() can no longer
+ * return 4.
  */
 enum encoderButtonStates { IDLE, PRESSED, HELD, RELEASED, DOUBLECLICKED, LONG_HELD, MEDIUM_HELD};
 
