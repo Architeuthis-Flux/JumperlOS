@@ -482,7 +482,7 @@ is code now:
 | Kevin's note | What it became |
 |---|---|
 | "our 555 pinout is mirrored — pin 1 should be on the bottom (35)" | the **DIP anchor flip** + the new `axial2` footprint, so 2-leg parts straddle the ravine the way real ones do |
-| "allow the user to change the location, and skip parts and come back" | **move/snap/ADJUST**, three placement modes, and skip-and-return through a browsable DONE view |
+| "allow the user to change the location, and skip parts and come back" | **move/snap**, three placement modes, and skip-and-return through a browsable DONE view. *(Shipped with an `ADJUST` mode too — **wave 3 removed it**; see the wave-3 section.)* |
 | "they snap to compact (on the actual rows) and then you can drag them to expanded, each part independently" | **`placement: expanded\|compact\|custom`**, per part, per pin |
 | "when we spin the clickwheel to the end it should loop until we hold to exit" | the **browse ring**: a wheel TURN can never reach EXIT |
 | "instead of saving it to a slot… make a new file for each run of the project. 555_1.yaml… ask load/new" | **run files**, and slots-become-files underneath them |
@@ -499,7 +499,7 @@ is code now:
 | 4 | **Slots become files** — `CodeDocs/DESIGN_SLOT_FILES.md`. Path-based active context, `last_active.txt`, `[slots]` config, the strict matcher, the template write-guard, the atomic-on-parse-failure contract and the `-1/-1` terminal state |
 | 5 | **The launcher rework** — run files, the merged load/new prompt, Projects at the top level, the new `z` grammar, the script offer. GSLOTS, the keep-flow and the temp-slot borrow are deleted |
 | 6 | **Placement modes + move plumbing** — the `placement` byte, mode-aware `partPinNode`, `guideMovePart`/`guideSnapPart`, tap precedence, `m`/`c`, and one shared `partGeometryOk` |
-| 7 | **Guide session UX** — ADJUST, the pended confirm, browse/wrap/DONE, first-unfinished resume, rails capture/restore, `railHwVolts` hardware truth, and the measured value on the panel |
+| 7 | **Guide session UX** — ADJUST, the pended confirm, browse/wrap/DONE, first-unfinished resume, rails capture/restore, `railHwVolts` hardware truth, and the measured value on the panel. **ADJUST and the pended confirm are GONE as of wave 3** (Kevin: *"honestly this whole thing is confusing"*) — this row is the wave-2 record, not current capability |
 | 8 | **The measurement rework** — ground-side shunt, Option-1 sense routing, two-point correction, honest ohm bands, `rail_sane` measuring the rail, the INA1 source watchdog |
 | 9 | Eleven parked items, the checklist rewrite, this documentation, and the full `run_all` pass |
 
@@ -591,6 +591,12 @@ Same mechanism as wave 1's `parts:` note above, three more fields:
   cached port by hand; the proper close is a `--port` pass-through in
   `test/hil/jl.py`, or a probe that rejects a device with no `jfs`. Neither was
   in any wave-2 task's scope.
+  **Wave-3 status: STILL OPEN, and W3-T1/T5's harness work did NOT close it.**
+  What those tasks did (`e299cb3`, `2fec6bd`) was the *fault-witness* half —
+  every raw `serial.Serial` port-1 reader now scans what it drains through
+  `fault_scan`, including its own connect banner, so a post-fault `[crashlog]`
+  can no longer be swallowed by whichever reader happens to attach first. That
+  is a different problem from port PINNING. Keep pinning by hand per §0.
 - **`unconnectablePaths[]` has an unguarded push site** in
   `NetsToChipConnections.cpp` (~:4549 writes without the `< 10` bound its two
   siblings have). `routeRefused()` clamps its *read* to 10 entries so it cannot
@@ -604,6 +610,127 @@ Same mechanism as wave 1's `parts:` note above, three more fields:
 - **Four rungs of the sense-fallback ladder are inspection-only.** Every one of
   them needs the router or the ring to fail in a way no authored fixture
   produces on a near-empty board.
+
+---
+
+## Branch `projects-guided-placement` — WAVE 3, the second bench pass (2026-08-22)
+
+Base `4545073` — Kevin's `>>>` notes written through
+`CodeDocs/PROJECTS_BENCH_CHECKLIST.md` on the wave-2 build. Seven findings,
+five tasks, each reviewed before the next was dispatched.
+
+| Kevin's note | What it became |
+|---|---|
+| "deleting the active run file HardFaults" (crashlog + transcript pasted inline) | **W3-T1.** The behaviour the design promises already worked on the flashed build — proven five ways on hardware, no behaviour change needed. What shipped is the **instrument**: an abort/assert latch in `CrashLog.cpp` that records the *caller* of `abort()` in a reset-retained word and names it on the next boot. The caller is still unknown; the latch is armed for the next time |
+| "run files pile up… make overwrite-same-file the compile-time default" | **W3-T3.** ONE run file per project, `<dir>_run.yaml`, silently reused. The wave-2 numbered allocator lives on behind `JL_PROJECT_RUN_HISTORY`. A mid-flight guided build gets ONE prompt (resume / start over / cancel); everything else reopens silently |
+| "'Projects' is too long and splits at the S — rename it Guides" | **W3-T4.** The top-level row, the `apps[]` entry, the picker header, the banner and the help lines all say **Guides**. `/projects`, `PROJECTS n=`, `RUNFILE`, `RUNS`, `SCRIPT`, `GUIDE` deliberately unchanged |
+| "dragging a part leaves stale footprint LEDs behind" | **W3-T2.** Every guide LED show is clear-first |
+| "the 555 pre-wires 2 unnecessary ADC taps" | **W3-T4.** `bridges:` (and the `nets:` entry that depended on it) removed; `main.py` makes its own taps and takes them down on the way out, leaving alone any it did not make |
+| "honestly this whole thing is confusing, we need to streamline this interface" | **W3-T2.** **ADJUST is dead** and so is the pended confirm — a click is instant again |
+| "i2cscrn should generalize — tap-to-assign, driver/size list, clear the data lines on exit, blast the startup animation while wiring" | **W3-T4.** All four, in the script. Every probe gesture has a typed twin |
+| *(found on the way, nobody asked)* | **W3-T5.** Every load left the state dirty and the idle auto-save rewrote the file it had just read; and `nets[].color` could be persisted as `black` from a cross-core race. Both fixed at the root |
+| *(found on the way, nobody asked)* | **W3-T4 part 3b.** Companion scripts past ~6 KB never ran, and said nothing about it |
+
+| Task | What landed |
+|---|---|
+| **T1** | The abort/assert latch (`CrashLog.cpp`), `test_slot_files` phase 6c, and the fault-witness rule for raw port-1 readers |
+| **T5** | `setRailVoltage`/`setDacVoltage` no longer mark dirty on a no-op write; `loadSlotFromPath` clears dirty after a successful restore; `serializeNets` treats colour 0 as "not computed yet"; three pre-write menu sites mark their own edits, gated so a cancel does not |
+| **T2** | ADJUST and the pended confirm removed; the drag LED trail fixed (clear-first) |
+| **T3** | `<dir>_run.yaml`, the mid-flight prompt, `guideProgress`'s new `of:` field, and the suite invariant that a test may never delete a run file it did not create |
+| **T4** | The `Guides` rename; the 555's taps; the i2cscrn generalization; the companion-script runner fix; these docs |
+
+**Suites** on the closing build: `test_slot_files` 92, `test_parts_roundtrip`
+179, `test_projects` **264** (239 at T3's close), `test_guide_flow` 386.
+`run_all` 11/11. **These are the "hold or grow" baselines now.**
+
+### The companion-script runner bug (W3-T4 part 3b) — read this one
+
+`runCompanionScript` built the script buffer as `content = f.readString();
+content = preamble + content`, which needs **two** full-size Strings alive at
+once. The Arduino heap on this board settles around **19 KB free**, so the peak
+was ~2x the script. When the allocation failed, Arduino's `operator+` returned
+an invalidated String, the assignment left `content` **empty**, and
+`executePythonFileContent`'s `!*src` guard returned false **without printing
+anything** — the terminal showed `Running … ` followed straight by
+`--- script finished ---`. The emptiness check sat *before* the concatenation,
+so nothing caught it.
+
+Measured on the bench, through a no-guide scratch project: **4.5 KB ran,
+6.4 KB ran, 6.6 KB was silent**, 12 KB and 19 KB were silent. Treat that as a
+heap-state-dependent bracket, not a threshold. **The shipped `eeprom`
+companion script is 6441 bytes** — it ran that day, and 6561 did not. It has
+been one bad heap day from silently doing nothing since it shipped, and its
+end-to-end checklist item had never been ticked.
+
+Fixed by never bringing the source into RAM: the runner now execs a ~250-byte
+`_jl_project = {…}` + `execfile("<path>")` and MicroPython's lexer streams the
+file off the filesystem. Every failure branch prints. A single reserved buffer
+was tried first and was **not enough** — a 12.5 KB reserve still failed with
+25 KB free, because that heap has no contiguous block that size.
+
+**Still finite, one level up:** MicroPython's *compiler* also needs heap. ~12 KB
+of source compiles on a fresh 39 KB heap and raises `MemoryError` on the ~25 KB
+left deep in a long session. That is why `test_projects` resets the board once
+before it drives the i2cscrn script, and why companion scripts should stay lean.
+
+### Downgrade notes for wave 3
+
+- **`guideProgress:` grew an `of:` field** — `{source: …, step: k, of: n}`. Old
+  firmware's `step:` extraction stops on the digits, so it keeps step and
+  source and re-emits without the total; a wave-3 launcher then reads that file
+  as "total unknown" and reopens it silently instead of prompting. Emitted only
+  when non-zero, so a hand-written or pre-`of:` file round-trips unchanged.
+- **`<dir>_run.yaml` on old firmware** is an ordinary YAML: the numbered scanner
+  never matches it, so an old build simply does not see it as a run and starts
+  allocating `<dir>_1.yaml` beside it. Nothing is lost; open it from Files.
+- **Numbered run files left on a board flashed forward** are inert leftovers.
+  Single-file mode never scans for one, opens one or deletes one. Remove them
+  from the Files browser.
+- **The `Guides` rename is a firmware-side string only.** Nothing on disk, in a
+  config, or in any machine line changed, so a downgrade just shows `Projects`
+  again.
+
+### Deferred past wave 3, on purpose
+
+- **The colour-ownership deep fix.** W3-T5 stopped the *false* value reaching
+  the file, but `nets[].color` is still written by core 2 and read by core 0
+  with no handshake — and the §3c fallback added a **second** unsynchronized
+  cross-core read, `netColors[]` (`States.cpp:1891-1893`). Assigning colours at
+  rebuild time on core 0 is the fix and it must cover **both arrays**. Capped:
+  the emitted value is never read back on load, so the worst case is a cosmetic
+  stale or torn colour, self-corrected on the next save.
+- **The stale-voltage-on-cancel bug — PRE-EXISTING, and Kevin decides.**
+  `getActionFloat`'s cancel exits never set `currentAction.analogVoltage` (only
+  the confirm branch does, `Menus.cpp:3003`), so RAILSACTION afterwards runs
+  with whatever was left over — `0.0` from `clearAction()` or a value from an
+  earlier action in the same session. If that is what happens, a long-press
+  cancel does not abandon the drag: it snaps the rail to a stale voltage **and
+  persists it**. Surfaced by W3-T5's re-review while tracing something else; it
+  predates all of this work. It is item 4 of the encoder-menu bench card in the
+  checklist — one minute with the wheel decides whether it is real.
+- **`jl_switch_slot`'s return-value ambiguity** — unchanged from wave 2.
+  `-2` = failure, `-1` = legal "no previous slot", binding raises only on `-2`.
+  Still not fixed because it changes a published Python contract and no wave-3
+  path calls it either. `DESIGN_SLOT_FILES.md` §8.
+- **`--port` pass-through** — still open; see the wave-2 entry above for why
+  W3-T1/T5's fault-witness work is a *different* problem.
+- **Provisioning is version-gated, and it will bite whoever edits
+  `scripts/projects/**` next.** The forced pass that walks the hash history runs
+  only on a FIRMWARE VERSION CHANGE (`configManager.cpp:2558`); the unforced
+  pass skips any file that already exists. So rebuilding at the same version
+  leaves the OLD file on the bench board and `test_projects`' three-way hash
+  check fails on it. The workaround is mechanical — delete the changed files
+  from the board and let the boot/launcher self-heal put them back — and a
+  release that bumps the version resolves it for users automatically. Hit in
+  W3-T2 (concern 1) and again in W3-T4.
+- **Bursty typed input into a running companion script is unreliable** — a
+  whole line-block pasted at once comes back with characters dropped and
+  duplicated; answer-then-wait is reliable. Seen while building the i2cscrn
+  drive, worked around there, not investigated. Suspect the interaction between
+  `select.poll(sys.stdin)` and the CDC reader.
+- **The interactive prompts still have no automated witness** — the mid-flight
+  resume prompt (T3), the probe half of i2cscrn's tap-to-assign, the drag-trail
+  visual, and the rail-menu items. All are on the wave-3 bench card.
 
 ---
 

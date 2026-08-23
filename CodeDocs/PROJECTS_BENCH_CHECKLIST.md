@@ -1,9 +1,13 @@
-# Projects branch — wave-2 bench session
+# Projects branch — the bench session (waves 2 and 3)
 
-One ordered script for the `projects-guided-placement` branch as it stands after
-wave 2. Run it top to bottom: **each section can invalidate the ones after it**,
-which is why the forced-refresh step is last and why §1 (no parts) comes before
-§2 (parts in the holes).
+One ordered script for the `projects-guided-placement` branch. Run it top to
+bottom: **each section can invalidate the ones after it**, which is why the
+forced-refresh step is last and why §1 (no parts) comes before §2 (parts in the
+holes).
+
+**Short on time? §0.5 is the whole of wave 3 in one ~20-minute pass**, in the
+order that needs the fewest board-state changes. Everything below it is the
+wave-2 script, updated where wave 3 changed the answer.
 
 Wave 2 changed enough that the wave-1 copy of this file is not worth diffing
 against — it is preserved at commit `6dfaf7c` if you want the archaeology. The
@@ -107,7 +111,7 @@ FileCache: disabled (compile-time pass-through to FatFS)
 
 
 
-Last-active slot file is gone (/projects/555/555_2.yaml) - booting slot 0
+Last-active slot file is gone (/projects/555/555_run.yaml) - booting slot 0
 
                                                                                                ▄▄▄▄       ▄▄▄▄▄▄▄    ▄▄▄▄▄▄▄▄▄  
 
@@ -298,6 +302,90 @@ and `run=<N>` — the numbered scheme's grammar — is refused by name
 ---
 
 
+
+## 0.5 THE WAVE-3 SESSION — one ordered pass, ~20 minutes
+
+Everything wave 3 changed or found, in the order that needs the fewest board
+state changes. Each row says where the detail lives. **Do this pass first**;
+the rest of this document is the wave-2 script and still stands.
+
+**A. Board clear, no parts (5 min).**
+
+- [ ] **`Guides` renders whole.** Wheel the top-level menu: the row before
+  `Apps` reads **`Guides`**, six glyphs, no truncation and no split at the S.
+  Click it: banner `=== Guides ===`, picker header `Guide`, and port 1 still
+  says `PROJECTS n=4` — the machine tag deliberately kept its old spelling.
+  Detail: §1.1.
+- [ ] **555 opens clean.** `z 555 new`, then `b`: **nothing on rows 1-60**. The
+  two ADC taps that used to appear before you placed a part are gone. Detail:
+  §1.2 and §2.7a.
+- [ ] **The run-file lifecycle**, all four rows of §1.2: no prompt on a first
+  launch, no prompt on a finished build, **one** prompt mid-flight (and it must
+  say `OVERWRITES`), and a cancel that leaves the context untouched. Then the
+  Files-click oddity — clicking `wiring.yaml` on a reopen ignores the clicked
+  variant and says so.
+- [ ] **A click is instant.** §3 #3/#4. No 260 ms pend, no ADJUST mode
+  anywhere; the `a` key and the ADJUST banner are gone.
+
+**B. The encoder menu — the card W3-T5 needs (4 items, ~1 min).** Everything
+about the rail menu in that task is verified by inspection only: its loop reads
+the encoder and probe, serial merely *cancels* it, and the SWD harness needs a
+probe that is not attached. Recipes in `task-w3-5-report.md` §6.
+
+- [ ] **1. Does a rail set from the menu survive?** Set a rail, switch slots,
+  come back. The voltage must still be there. *(If this fails, the pre-write is
+  not being marked.)*
+- [ ] **2. Does a no-touch visit stay quiet?** Open the rail slider,
+  short-press immediately without turning, back out. Nothing should be written.
+- [ ] **3. Does a cancelled node pick stay quiet?** OUTPUT > … > Voltage, then
+  cancel the node selection. Same expectation.
+  > **How to SEE 2 and 3**, since a spurious rewrite of an unchanged context is
+  > byte-identical: append a comment to the active slot file from the REPL
+  > (`fs_write('/slots/slot2.yaml', fs_read('/slots/slot2.yaml') + '\n# probe\n')`),
+  > do the menu action, wait ~5 s, then
+  > `print('# probe' in fs_read('/slots/slot2.yaml'))`. **True = nothing was
+  > rewritten = pass.** (`nodes_has_changes()` is NOT a witness — it diffs
+  > against the MicroPython session's snapshot, not the dirty flag.)
+- [ ] **4. PRE-EXISTING, and the one that might be a real bug: cancel out of
+  the slider — did the rail move?** `getActionFloat`'s cancel exits never set
+  `currentAction.analogVoltage`, so RAILSACTION afterwards may run with a stale
+  value and **persist** it. If a long-press cancel snaps the rail somewhere,
+  that is it, and it wants Kevin's decision — it predates all of wave 3.
+
+**C. The guide, with your hands and no parts (3 min).**
+
+- [ ] **The drag trail is gone.** Move a part around with the probe (tap a free
+  hole, then another, then another). The old footprint LEDs must vanish as it
+  goes — no smear left behind. This is W3-T2's headline and it has no
+  automated witness. Detail: §1.4.
+- [ ] **A wheel turn can never exit the guide** (§3 #3), and the DONE ring
+  still wraps.
+
+**D. `i2cscrn`, the new flow (8 min, needs the module).** Full card in §2.7d.
+Do it on a **bare board** — that is the case the rewrite exists for.
+
+- [ ] Tap each of GND/VCC/SCL/SDA with the probe; then run it again and **type**
+  the rows instead. Both must work at the same prompt.
+- [ ] Put the module somewhere other than rows 5-8 and prove the assignment
+  line reads back what you chose.
+- [ ] Start it with the module **not yet in the board** and watch the beacon
+  bring it to life the moment the last wire lands.
+- [ ] `q` → the four routes are gone. Then walk the guided build first and run
+  it again: it reports all four as already routed and removes **none**.
+
+**E. Companion scripts, after W3-T4 part 3b (2 min).** This one is new and it
+matters more than it looks: until this wave, a companion script past about
+6 KB **silently did nothing**, and the shipped `eeprom` script is 6441 bytes.
+
+- [ ] **Run `eeprom`'s `main.py` end to end.** It has never been ticked off.
+  It must print `EEPROM Dumper` and its scan result — not `Running …` followed
+  straight by `--- script finished ---`.
+- [ ] **Run `i2cscrn`'s and `555`'s too**, same reason.
+- [ ] If any of them ever goes quiet again, the runner now **says why** — look
+  for an `Out of memory launching …` line, and report the size and the free
+  heap it names.
+
+---
 
 ## 1. No parts needed — menu, files, run files, slots, the guide's hands
 
@@ -894,8 +982,11 @@ from and what to do. **Board state is noted per item** so you can batch them.
     pass-hold, click impatiently. Either way you land in the DONE view and
     **stay**. Then confirm the legitimate gesture still works — a plain click
     at DONE finishes, or jumps to the first unbuilt step.
-  - [ ] **One double-click is one confirm.** Two fast clicks on a place step
-    must commit once, not twice (see §1.4).
+  - [ ] **A click is INSTANT again.** The 260 ms pend is gone, so a click on a
+    place step commits on its own RELEASED edge with no delay — that is the
+    thing to feel. A double-click is now simply two confirms' worth of input
+    arriving at a step that only has one thing to confirm; it must not undo,
+    re-commit or skip anything (see §1.4).
 - [ ] **5 — MSC host-edit round-trip** *(task 4, the harness cannot mount)*. Load
   a run file, mount the board as USB MSC, **edit the run file from the host**,
   eject. The edit must be **live** — this path used to discard host edits to a
