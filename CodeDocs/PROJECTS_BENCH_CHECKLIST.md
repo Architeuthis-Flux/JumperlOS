@@ -772,9 +772,9 @@ from and what to do. **Board state is noted per item** so you can batch them.
 | 4   | *(retired — same)*                         | —                                              |
 | 5   | MSC host-edit round-trip                   | clear                                          |
 | 6   | corrupt-run-file terminal state            | clear                                          |
-| 7   | the interactive prompts                    | clear                                          |
+| 7   | the mid-flight resume/fresh prompt         | clear                                          |
 | 8   | probe buttons on the prompts               | clear                                          |
-| 9   | the variant picker                         | clear (needs a file you add)                   |
+| 9   | the variant picker (start-fresh only)      | clear (needs a file you add)                   |
 | 10  | headless guided-complete **with** a script | parts optional                                 |
 | 11  | OLED-absent run                            | any (unplug the OLED)                          |
 | 12  | the matrix-picker gate                     | any (diagnostic, only if a picker looks blank) |
@@ -821,24 +821,40 @@ from and what to do. **Board state is noted per item** so you can batch them.
   routed**, both rails at 0 V. That is a safe stop, not data loss. `<0` or a
   reboot recovers. Confirm the save-failure print is **throttled** (once per
   10 s), not once per idle pass.
-- [ ] **7 — the interactive prompts** *(task 5; headless never prompts, by
-  design)*. Cover the wording and the defaults on all three: the load/new prompt
-  (§1.2), the script offer (§1.4), and the variant picker (#9). For each: a bare
-  **click answers Yes**, a **hold cancels**, a **timeout cancels**, and the OLED
-  text matches the terminal text.
+- [ ] **7 — the interactive prompts** *(task 5, reshaped by W3-T3; headless
+  never prompts, by design)*. There are only **two** prompts left in the flow,
+  plus one picker. Cover the wording and the defaults on each: the **mid-flight
+  resume / start-fresh** prompt (§1.2 — the ONLY run-file prompt now; the
+  wave-2 load/new prompt is gone with the numbered files), the **script offer**
+  (§1.4), and the **variant picker** (#9). For each: a bare **click answers
+  Yes**, a **hold cancels**, a **timeout cancels**, and the OLED text matches
+  the terminal text.
+  - The mid-flight prompt is also the only one that can **destroy** something —
+    answering `n` rewrites the unfinished build from the template. Read the
+    wording with that in mind; it must say `OVERWRITES`.
 - [ ] **8 — probe buttons on the new prompts** *(task 5)*. The control-surface
   principle says wheel + probe + serial everywhere. `yesNoMenu` is the shared
   idiom and nothing bespoke was invented, but the probe path was never
   exercised: CONNECT = yes, REMOVE = no, on every prompt above.
-- [ ] **9 — the variant picker** *(task 5, dormant)*. Nothing bundled ships two
-  `wiring*.yaml`. Drop a copy of `/projects/555/wiring.yaml` as
-  `/projects/555/wiring.alt.yaml` with `meta.variant: alt`, then launch and
-  answer **n** (start new): `VARIANTS n=2` with labels `default` / `alt`.
-  Confirm it appears **only** on the start-new path — load-latest resolves its
-  variant from the run file's own `runSource:` and never asks.
-  Then, with runs present, try `z /projects/555/wiring.alt.yaml` with **no mode
-  arg**: it resolves to LOAD and now says so —
-  `(variant taken from runSource; the path argument was not used)`.
+- [ ] **9 — the variant picker** *(task 5, dormant; reshaped by W3-T3)*.
+  Nothing bundled ships two `wiring*.yaml`. Drop a copy of
+  `/projects/555/wiring.yaml` as `/projects/555/wiring.alt.yaml` with
+  `meta.variant: alt`. The picker opens on the **start-fresh** path only, and
+  there are exactly two ways to reach it:
+  - [ ] **no run file** — delete `/projects/555/555_run.yaml` first, then
+    launch: `VARIANTS n=2` with labels `default` / `alt`, and no prompt before
+    it.
+  - [ ] **start fresh at the mid-flight prompt** — quit a guided build partway,
+    relaunch, answer **n**, and the picker opens after the prompt.
+  - [ ] Confirm it does **not** appear on a silent reopen (a finished or
+    non-guided run file): that path resolves its variant from the run file's
+    own `runSource:` and never asks.
+  - [ ] And with a run file present, `z /projects/555/wiring.alt.yaml` with
+    **no mode arg** resolves to LOAD and says so —
+    `(variant taken from runSource; the path argument was not used)`. The
+    Files-browser click on the same file, landing on a reopen, prints the
+    matching line about the *clicked* file.
+
   Delete `wiring.alt.yaml` afterwards, or §5's variant count will be wrong.
 - [ ] **10 — headless guided-complete WITH a companion script** *(task 5; both
   halves are tested separately, their junction is not)*. `z 555 new`, walk the

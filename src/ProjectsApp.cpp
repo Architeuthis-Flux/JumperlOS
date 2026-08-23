@@ -563,9 +563,19 @@ bool projectBeginRun(const String& dir, const String& templatePath,
     fileCacheFlushNowAll("project_begin_run");
 
     // Copy + validate-by-load, one retry. A load failure deletes the file we
-    // just created (never something we did not create - see design §6.1) and
-    // tries again; the second failure leaves the previous context untouched,
-    // because loadSlotFromPath is atomic on BOTH open and parse failure.
+    // just wrote and tries again; the second failure leaves the previous
+    // context untouched, because loadSlotFromPath is atomic on BOTH open and
+    // parse failure.
+    //
+    // NOTE what "the file we just wrote" means in SINGLE-FILE mode: design
+    // §6.1's rule used to be "never delete something we did not create", and
+    // here it reads "created OR OVERWROTE in this session". A start-fresh
+    // lands on an existing <dir>_run.yaml, so a double failure deletes a file
+    // that was the user's a moment ago - but its old bytes were already gone
+    // at the FIRST copy, and the user consented to that at the mid-flight
+    // prompt (or there was nothing unfinished to protect). Leaving the corpse
+    // would only leave an unloadable file behind. ProjectsApp.h's header
+    // comment states the same thing.
     for (int attempt = 0; attempt < 2; attempt++) {
         String cerr;
         if (!copyFileRaw(templatePath, runPath, cerr)) {

@@ -1842,10 +1842,12 @@ int jl_load_slot_path( const char* path ) {
 
 // load_project("<name>") - the NAME form. Under the run-file model "load
 // project 555" means "begin (or re-open) a run of 555", so the name form
-// routes through the launcher's allocator: it opens
-// /projects/<name>/<name>_<maxN>.yaml, or creates <name>_1.yaml from the
-// shipped wiring when the project has no runs yet. LOAD ONLY - no guide, no
-// companion script; `z` is the runner.
+// routes through the launcher: it opens /projects/<name>/<name>_run.yaml, or
+// creates it from the shipped wiring when the project has no run file yet.
+// LOAD ONLY - no guide, no companion script, and never a prompt (a mid-flight
+// guided build is simply reopened; resuming it is `z`'s / the launcher's job).
+// Under JL_PROJECT_RUN_HISTORY the same door opens <name>_<maxN>.yaml or
+// creates <name>_1.yaml instead.
 //
 // This is what closes the bench-caught destruction path: load_project("eeprom")
 // used to adopt the SHIPPED TEMPLATE as the auto-saving active context, and the

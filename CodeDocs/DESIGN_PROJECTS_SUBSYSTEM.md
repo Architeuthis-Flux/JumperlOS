@@ -281,10 +281,10 @@ arm, so the "ONE shape only" contract cannot drift between them.
 | **A** | hold / serial byte at the project picker | previous context | untouched | `  Cancelled.`, return |
 | **B** | cancel or 20 s timeout at the run-file prompt (single-file: the mid-flight resume/fresh prompt; numbered: load-latest/start-new) | previous context | untouched | `  Cancelled.`, return |
 | **C** | cancel at the variant picker | previous context | untouched | `  Cancelled.`, return |
-| **D** | run-file create/copy fails | previous context | partial destination **deleted**; copy+load retried once | `notify()` + return |
-| **E** | run-file load fails (both tries) | previous context — **or** the terminal no-active-context state | the file we created is deleted | `notify()`, hint `(start a new run to rebuild from the project wiring)`, return |
+| **D** | run-file create/copy fails | previous context | partial destination **deleted**; copy+load retried once. In single-file mode the "destination" may be an **existing** `<dir>_run.yaml` that start-fresh was overwriting — its old bytes were gone at the first copy, so what is deleted is the half-written replacement | `notify()` + return |
+| **E** | run-file load fails (both tries) | previous context — **or** the terminal no-active-context state | the file we created **or overwrote** is deleted (see D; the rule is "created or overwrote *in this session*", never a file we merely found) | `notify()`, hint `(start a new run to rebuild from the project wiring)`, return |
 | **F** | guide quit (hold/`q`) mid-build | run file active; rails per the rails rule below | run file holds `guideProgress` at the quit step | **nothing** — no script, no offer, and no `SCRIPT` lines at all |
-| **G** | script ends / KeyboardInterrupt | run file active, the script's mutations live | run file saved | `waitForButtonRest(2000)` → `saveActiveSlot` → `  Run saved to <dir>_run.yaml (now your active circuit).` |
+| **G** | script ends / KeyboardInterrupt | run file active, the script's mutations live | run file saved | `waitForButtonRest(2000)` → `saveActiveSlot` → `  Run saved to <basename> (now your active circuit).` — mode-specific: `<dir>_run.yaml` by default, `<dir>_<N>.yaml` under `JL_PROJECT_RUN_HISTORY` |
 | **H** | guide completes | run file active, powered per its own `power_on` | saved at every commit, then again by `finishRun` | the script **offer**: `SCRIPT offer=<path>`, prompt, `SCRIPT action=run\|skip` |
 
 Two things the table cannot hold:

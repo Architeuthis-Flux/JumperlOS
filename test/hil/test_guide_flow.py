@@ -28,11 +28,15 @@ Single: "start fresh" REWRITES the one file, which is precisely why the
 interactive launcher puts a prompt in front of it when the build in there is
 unfinished. Both halves are asserted, branched on the probe.
 
-RUN-FILE PROTECTION. Everything this file touches lives in /projects/hilguide,
-/projects/hilvfnr and /projects/hilstv - directories the suite creates and
-removes. It never launches a SHIPPED project, so it never writes a run file
-the user owns. Keep it that way: with one well-known filename, a `z 555 new`
-anywhere in here would overwrite the user's 555 circuit.
+RUN-FILE PROTECTION. Everything this file touches lives in ALL FIVE of its own
+fixture directories - /projects/hilguide, /projects/hilvfnr, /projects/hilstv,
+/projects/hilrail and /projects/hilleg - which the suite creates and which the
+teardown sweeps and removes wholesale (that list and the teardown's must stay
+in step; the sweep deletes every .yaml, run files included, and is only legal
+because every directory in it is suite-owned). It never launches a SHIPPED
+project, so it never writes a run file the user owns. Keep it that way: with
+one well-known filename, a `z 555 new` anywhere in here would overwrite the
+user's 555 circuit.
 
 The guide runtime now also stamps the step TOTAL into the progress line
 (`guideProgress: {source: ..., step: k, of: n}`) - the launcher's mid-flight
