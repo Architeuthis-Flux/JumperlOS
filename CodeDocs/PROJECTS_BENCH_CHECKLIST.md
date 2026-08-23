@@ -487,7 +487,21 @@ active context; that is the whole keep flow now.
     `service()` prints its failure **throttled to once per 10 s** rather than
     once per idle pass. What must NOT happen is a crash, a wedge, or a write
     landing somewhere else. `<0` recovers either way.
-  - [ ] >>>I pasted a dump of what happens above, it reboots.
+  - [x] >>>I pasted a dump of what happens above, it reboots.
+      - **INVESTIGATED (wave 3, W3-T1): not reproducible, and the delete flow
+        is sound.** Five faithful hardware repros — `jfs`-remove of the active
+        file, the browser's own delete, twenty deletions in one session, the
+        exact `z 555 new noscript` ×20 pile-up, ten open/close cycles — all
+        survive on the pristine build, and recreate-on-save holds. The pasted
+        crashlog symbolizes to a deliberate `abort()` (`PC=_exit`, `LR=abort`,
+        `CFSR=0`), not a wild pointer, so the caller was never in the fault
+        registers to begin with. The fix is therefore an instrument: `abort()`
+        and `__assert_func()` are now owned by the crash logger, which latches
+        the **caller's address** in watchdog scratch and names it at the next
+        boot. If it happens again, send the `[abort]` line — that identifies
+        it in one shot. Ranked suspects meanwhile: heap exhaustion through
+        `operator new` (which lands on a shared throw helper, disclosed) and
+        SPIFTL's own asserts.
     - [x] >>>We should make a compile time flag and set it to overwrite the same file every time. if a user wants to save the project, they can do `slots` > `save to`. because yeah that's making way too many files
       - **DONE (wave 3, W3-T3).** That is now the default and the rest of this
         section describes it: one `<dir>_run.yaml`, overwritten, no prompt
