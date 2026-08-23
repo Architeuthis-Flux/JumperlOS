@@ -329,7 +329,7 @@ struct ConfigState {
 //
 // guideProgress round-trips as ONE top-level flow-map line - the only shape
 // parsed and the only shape emitted (keep serializer and parser matched):
-//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5, skipped: 0x4}
 // Emitted only while guideSource is non-empty. `meta:` and `guide:` sections
 // are swallowed on parse and NOT round-tripped - the launcher and the guide
 // runtime re-read the project file themselves.
@@ -348,6 +348,21 @@ struct ConfigState {
 // silently and the existing resume gates do the right thing anyway.
 // SlotManager::scanGuideProgressFile() is the load-free reader; it lives
 // beside the parse arm in States.cpp so the two cannot drift.
+//
+// `skipped:` is the SKIP SET as a hex bitmask, bit i = step i was deliberately
+// skipped. It exists because `step:` is guideFirstUnfinished, which treats a
+// skipped step as finished - so a skip always lands strictly BELOW the resume
+// cursor and the resume loop cannot otherwise tell it from a commit. That
+// mattered most for `power_on`: promoting a skipped one to committed made INIT
+// re-energize the rails under the banner promising 0 V. Emitted only when the
+// writer actually KNOWS the skip set (the guide runtime persisting a live
+// session), never speculatively - so a hand-written file, or one written
+// before this key existed, round-trips byte-identically and reads back as
+// "skip set unknown" rather than as a false "nothing was skipped". An unknown
+// skip set is the one case in which resume REFUSES to re-apply power. Older
+// firmware reading a new file ignores the key: parseGuideProgressLine only
+// looks up the keys it knows, and the `,`/`}`-bounded value scan for `step:`
+// and `of:` is unaffected by a trailing key.
 //
 // `guide:` FORMAT NOTES (parsed by guiding/GuidedFlow.cpp, documented in
 // CodeDocs/DESIGN_GUIDED_PLACEMENT.md §2/§5 - listed here because this is
@@ -470,6 +485,19 @@ struct PartsState {                 // member of JumperlessState
     // Written by the guide runtime, read by the launcher's mid-flight gate -
     // see the guideProgress format note above.
     int16_t guideTotal;
+    // The SKIP SET (`skipped:` in the flow map): bit i set = step i was
+    // deliberately skipped. `guideStep` alone cannot express this - it is
+    // guideFirstUnfinished, which counts a skip as finished, so a skipped step
+    // always sits strictly BELOW the resume cursor and used to be promoted to
+    // committed by INIT. MAX_GUIDE_STEPS is 48 on V5 / 24 on OG, so 64 bits
+    // covers the whole table.
+    uint64_t guideSkipped;
+    // Is `guideSkipped` AUTHORITATIVE? False means the file did not carry a
+    // `skipped:` key, which is NOT the same as "no steps were skipped": it is
+    // a hand-written file, or one written before this field existed. The
+    // distinction is load-bearing - INIT refuses to re-energize rails from an
+    // unknown skip set (see the resume loop in guiding/GuidedFlow.cpp).
+    bool    guideSkippedKnown;
     void clear();
     int findByName(const char* n) const;   // -1 when absent
 };

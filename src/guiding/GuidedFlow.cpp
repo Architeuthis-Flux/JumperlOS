@@ -83,6 +83,12 @@ struct GuideSession {
     GuideState waitReturn;              // where a verify-only RESULT returns to
     bool committed[MAX_GUIDE_STEPS];
     bool skipped[MAX_GUIDE_STEPS];
+    // The resumed file did not carry a `skipped:` key, so skipped[] above is
+    // EMPTY BY IGNORANCE, not by fact - a hand-written flow map, or one from
+    // firmware that predates the key. INIT must not read "no skips" out of it,
+    // because the one irreversible consequence of guessing wrong is energizing
+    // the rails on a power_on the user actually skipped.
+    bool skipSetUnknown;
     bool powerApplied;                  // a POWER_ON step has run (rails live)
     bool summaryShown;                  // DONE printed its summary already
     unsigned long lastPulseMs;
@@ -1146,6 +1152,26 @@ static void guidePersistProgress(GuideSession& s) {
     // whether to prompt before it is allowed to load anything. See the
     // guideProgress format note in States.h.
     globalState.parts.guideTotal = (int16_t)s.script->numSteps;
+    // The SKIP SET goes with it. `guideStep` above is guideFirstUnfinished,
+    // which counts a skip as FINISHED, so every skipped step lands strictly
+    // BELOW the resume cursor - and without this mask the INIT resume loop
+    // cannot tell those steps from committed ones and promotes them. For a
+    // power_on step that promotion re-energized the rails under the banner
+    // that promises 0 V; it also let the DONE summary and the "nothing was
+    // built" script gate count skips as built work.
+    //
+    // The WHOLE array is packed, not just the part below the cursor: the
+    // browse ring lets the user skip a step ABOVE where the cursor ends up,
+    // and that decision has to survive too.
+    uint64_t mask = 0;
+    for (int i = 0; i < s.script->numSteps && i < MAX_GUIDE_STEPS && i < 64; i++) {
+        if (s.skipped[i]) mask |= ((uint64_t)1 << i);
+    }
+    globalState.parts.guideSkipped = mask;
+    // A live session ALWAYS knows its own skip set, so this write is what
+    // turns an "unknown" file (hand-written, or from firmware predating the
+    // key) into a known one. Nothing else in the firmware sets this true.
+    globalState.parts.guideSkippedKnown = true;
     globalState.markDirty();
     String serr;
     if (!SlotManager::getInstance().saveActiveSlot(serr, /*skipValidation=*/true)) {
@@ -1642,19 +1668,35 @@ void guideTick(GuideSession& s) {
             Serial.flush();
             guideStatusLine(s, "INIT");
 
-            // Resume bookkeeping: steps before the resume point count as
-            // committed (the slot was saved at each commit). If a power_on
-            // step is already behind us, the circuit was running when the
-            // user left - re-apply the file's power so resume means resume.
+            // Resume bookkeeping. Steps before the resume point were either
+            // BUILT or deliberately SKIPPED, and the difference is the whole
+            // point: `step:` in the flow map is guideFirstUnfinished, which
+            // counts a skip as finished, so a skipped step always sits below
+            // the cursor. Until the skip set was persisted this loop marked
+            // every one of them committed - and for a power_on that meant
+            // re-energizing the rails two lines under the banner above, which
+            // has just promised they are held at 0 V. skipped[] has already
+            // been rehydrated by guideSessionBegin.
             for (int i = 0; i < s.stepIdx && i < sc.numSteps; i++) {
+                if (s.skipped[i]) continue;   // a skip is not a commit
                 s.committed[i] = true;
                 if (sc.steps[i].type == GuideStepType::POWER_ON) {
-                    // Mirror of the COMMIT path: only claim powerApplied when
-                    // the file actually has power to apply. (Was asymmetric -
-                    // an unconditional powerApplied=true here suppressed the
-                    // exit tail's "rails at 0V" note for a project with no
-                    // power: section, even though nothing was ever applied.)
-                    if (sc.hasPower) {
+                    if (s.skipSetUnknown) {
+                        // The file has no `skipped:` key, so "this power_on
+                        // was committed" is a GUESS, and the wrong guess turns
+                        // the rails on under a banner promising 0 V. Refuse:
+                        // leave it uncommitted and make the human confirm it.
+                        // The next persist writes a real skip set, so a file
+                        // only lands here once.
+                        s.committed[i] = false;
+                        Serial.println("  (resume past power_on: this run file predates skip tracking - rails stay at 0V, confirm the power_on step to energize)");
+                    } else if (sc.hasPower) {
+                        // Mirror of the COMMIT path: only claim powerApplied
+                        // when the file actually has power to apply. (Was
+                        // asymmetric - an unconditional powerApplied=true here
+                        // suppressed the exit tail's "rails at 0V" note for a
+                        // project with no power: section, even though nothing
+                        // was ever applied.)
                         setTopRail(sc.topRail, 1, 0);
                         setBotRail(sc.bottomRail, 1, 0);
                         setDac0voltage(sc.dac0, 1, 0);
@@ -1664,6 +1706,23 @@ void guideTick(GuideSession& s) {
                     } else {
                         Serial.println("  (resume past power_on: project has no power: section - rails stay at 0V)");
                     }
+                }
+            }
+            // Say out loud what was NOT rebuilt. The skipped power_on is the
+            // headline: it is the one step whose promotion had a physical
+            // consequence, so it gets a line of its own rather than a count.
+            for (int i = 0; i < s.stepIdx && i < sc.numSteps; i++) {
+                if (!s.skipped[i]) continue;
+                if (sc.steps[i].type == GuideStepType::POWER_ON) {
+                    Serial.println("  (resume: power_on was skipped - rails stay at 0V)");
+                } else {
+                    char id[24];
+                    guideStepId(sc, i, id, sizeof(id));
+                    Serial.print("  (resume: step ");
+                    Serial.print(i + 1);
+                    Serial.print(" ");
+                    Serial.print(id);
+                    Serial.println(" was skipped - not rebuilt)");
                 }
             }
 
@@ -2267,6 +2326,28 @@ static void guideSessionBegin(GuideSession& s, GuideScript* sc, int resumeStep) 
     s.stepIdx = (resumeStep > 0) ? resumeStep : 0;
     if (s.stepIdx > sc->numSteps) s.stepIdx = sc->numSteps;
     s.waitReturn = GuideState::STEP_WAIT;
+
+    // Rehydrate the SKIP SET from the flow map before INIT runs, so INIT's
+    // resume loop can tell a skipped step from a committed one instead of
+    // promoting every index below the cursor. The whole mask is read, not
+    // just the part below the cursor: the browse ring can skip a step ABOVE
+    // where the cursor lands, and that decision has to survive too.
+    //
+    // Gated on the SOURCE matching, because the flow map belongs to whatever
+    // guide last persisted into this slot - a different project's skip set
+    // must never bleed into this one. `guideSkippedKnown` false means the file
+    // predates the key (or was hand-written): the mask stays empty and
+    // s.skipSetUnknown tells INIT to distrust it.
+    s.skipSetUnknown = true;
+    if (globalState.parts.guideSkippedKnown &&
+        strncmp(globalState.parts.guideSource, sc->sourcePath,
+                sizeof(globalState.parts.guideSource)) == 0) {
+        s.skipSetUnknown = false;
+        uint64_t mask = globalState.parts.guideSkipped;
+        for (int i = 0; i < sc->numSteps && i < MAX_GUIDE_STEPS && i < 64; i++) {
+            if (mask & ((uint64_t)1 << i)) s.skipped[i] = true;
+        }
+    }
 
     // Encoder ownership, the picker/probeCalib way: one detent per step,
     // clean button edges (the click that launched us must not confirm the

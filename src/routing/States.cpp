@@ -1279,15 +1279,22 @@ size_t JumperlessState::estimateRAMUsage() const {
 // mid-flight probe) - so the "ONE shape only" contract in States.h cannot
 // drift between them.
 //
-//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5, skipped: 0x4}
 //
-// `of:` is optional; 0 out means "the file does not say". Any out param may
-// be null. Returns true when the line at least named a source.
+// `of:` and `skipped:` are optional; 0 out means "the file does not say". For
+// `skipped:` that ambiguity is load-bearing, so it gets its own presence flag
+// (skippedKnownOut) - an ABSENT skip set is not an EMPTY one, and only the
+// absent case makes resume refuse to re-energize rails. Any out param may be
+// null. Returns true when the line at least named a source.
 static bool parseGuideProgressLine(const String& line, String* sourceOut,
-                                   int* stepOut, int* totalOut) {
+                                   int* stepOut, int* totalOut,
+                                   uint64_t* skippedOut = nullptr,
+                                   bool* skippedKnownOut = nullptr) {
     if (sourceOut != nullptr) *sourceOut = "";
     if (stepOut != nullptr) *stepOut = 0;
     if (totalOut != nullptr) *totalOut = 0;
+    if (skippedOut != nullptr) *skippedOut = 0;
+    if (skippedKnownOut != nullptr) *skippedKnownOut = false;
 
     int q1 = line.indexOf('"');
     int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
@@ -1324,6 +1331,26 @@ static bool parseGuideProgressLine(const String& line, String* sourceOut,
         int total = val.toInt();
         *totalOut = (total > 0) ? total : 0;
     }
+
+    // `skipped:` - the skip-set bitmask, hex ("0x4"). String::toInt() is
+    // decimal only, so this one goes through strtoull with base 0 (which
+    // accepts the 0x prefix, and a bare decimal from a hand-edited file).
+    // Presence is reported separately: absent != empty (see the header note).
+    int skIdx = line.indexOf("skipped:", from);
+    if (skIdx >= 0) {
+        int endIdx = line.indexOf(',', skIdx);
+        int brace = line.indexOf('}', skIdx);
+        if (endIdx < 0 || (brace >= 0 && brace < endIdx)) endIdx = brace;
+        if (endIdx < 0) endIdx = (int)line.length();
+        String val = line.substring(skIdx + 8, endIdx);
+        val.trim();
+        if (val.length() > 0) {
+            if (skippedOut != nullptr) {
+                *skippedOut = (uint64_t)strtoull(val.c_str(), nullptr, 0);
+            }
+            if (skippedKnownOut != nullptr) *skippedKnownOut = true;
+        }
+    }
     return haveSource;
 }
 
@@ -1351,6 +1378,19 @@ bool JumperlessState::toYAML(String& output, int showANSI) const {
         // meaningless "of: 0".
         if (parts.guideTotal > 0) {
             output += ", of: " + String(parts.guideTotal);
+        }
+        // `skipped:` on the SAME rule, and for the same reason: emit it only
+        // when this state actually KNOWS the skip set, so a hand-written file
+        // (or one predating the key) round-trips byte-identically instead of
+        // acquiring a "skipped: 0x0" that would be read back as an
+        // authoritative "nothing was skipped". Writing a speculative zero here
+        // is exactly how the silent-rail-energize bug would come back: an idle
+        // auto-save would launder "unknown" into "known-empty".
+        if (parts.guideSkippedKnown) {
+            char maskBuf[24];
+            snprintf(maskBuf, sizeof(maskBuf), "0x%llx",
+                     (unsigned long long)parts.guideSkipped);
+            output += ", skipped: " + String(maskBuf);
         }
         output += "}\n";
     }
@@ -1450,18 +1490,26 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         }
         else if (!indented && line.startsWith("guideProgress:")) {
             // ONE shape only (matched with toYAML - see States.h):
-            //   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5}
-            // `of:` is OPTIONAL (0 = unknown): a hand-written file, or one
-            // written before the field existed, simply has none. The reader
-            // is SHARED with the launcher's load-free probe.
+            //   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5, skipped: 0x4}
+            // `of:` and `skipped:` are OPTIONAL (0 = unknown): a hand-written
+            // file, or one written before the field existed, simply has none.
+            // For `skipped:` the ABSENCE is carried through as its own flag,
+            // because an unknown skip set and an empty one must not resume the
+            // same way. The reader is SHARED with the launcher's load-free
+            // probe.
             String gsrc;
             int gstep = 0, gtotal = 0;
-            if (parseGuideProgressLine(line, &gsrc, &gstep, &gtotal)) {
+            uint64_t gskip = 0;
+            bool gskipKnown = false;
+            if (parseGuideProgressLine(line, &gsrc, &gstep, &gtotal,
+                                       &gskip, &gskipKnown)) {
                 strncpy(parts.guideSource, gsrc.c_str(), sizeof(parts.guideSource) - 1);
                 parts.guideSource[sizeof(parts.guideSource) - 1] = '\0';
             }
             parts.guideStep = (int16_t)gstep;
             parts.guideTotal = (int16_t)gtotal;
+            parts.guideSkipped = gskip;
+            parts.guideSkippedKnown = gskipKnown;
         }
         else if (!indented && line.startsWith("runSource:")) {
             // ONE shape only (matched with toYAML above):

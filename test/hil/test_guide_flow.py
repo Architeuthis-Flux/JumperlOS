@@ -64,6 +64,12 @@ Covers:
   8. power fixture: power_on commit applies topRail 2.5V (default rail_sane
      check passes as norows), resume past it RE-applies power and the exit
      tail stays silent about 0V
+ 8b. the mirror of 8, and the H3 item-1 needle: a SKIPPED power_on must stay
+     skipped across a resume. The run file carries the skip SET (`skipped:
+     0x4`), the resumed INIT says "power_on was skipped - rails stay at 0V"
+     instead of energizing them under the 0V banner, the DONE summary reads
+     committed=2 skipped=1 (not committed=3), and the exit tail restores the
+     user's own rails because nothing was ever energized
   9. no-power fixture: the powerApplied-asymmetry witness - resume past a
      power_on in a project with NO power: section keeps the "rails at 0V"
      exit note (and never claims a re-apply)
@@ -635,10 +641,10 @@ else:
     return True, (m.group(1) if m else "")
 
 
-def guide_progress_needle(source, step, total):
+def guide_progress_needle(source, step, total, skipped=0):
     """The exact one-line flow map toYAML emits for guideProgress.
 
-        guideProgress: {source: "<path>", step: <k>, of: <n>}
+        guideProgress: {source: "<path>", step: <k>, of: <n>, skipped: 0x<m>}
 
     `of:` - the step TOTAL as of the last persist - arrived with W3-T3 and is
     written by guidePersistProgress, the only code that both knows numSteps
@@ -652,8 +658,26 @@ def guide_progress_needle(source, step, total):
     the mid-flight gate. step == of is a FINISHED build (silent reopen);
     step < of is MID-FLIGHT (the one prompt). `of:` is emitted only when
     non-zero, so a hand-written fixture with no total round-trips unchanged -
-    test_parts_roundtrip's exact-shape needle depends on that."""
-    return f'guideProgress: {{source: "{source}", step: {step}, of: {total}}}'
+    test_parts_roundtrip's exact-shape needle depends on that.
+
+    `skipped:` (H3 item 1) is the SKIP SET as a hex bitmask, bit i = step i was
+    deliberately skipped. It has to be persisted because `step:` above is
+    guideFirstUnfinished, which counts a skip as FINISHED - so a skipped step
+    always sits strictly BELOW the resume cursor, and the INIT resume loop used
+    to promote every index below the cursor to `committed`. For a `power_on`
+    step that promotion RE-ENERGIZED THE RAILS on the next launch, two lines
+    under the banner that promises they are held at 0 V.
+
+    A live guide session always knows its own skip set, so every runtime
+    persist emits this key - INCLUDING `skipped: 0x0`, which is why the
+    no-skips call sites still assert it. The key is never written
+    speculatively: a hand-written flow map, or one from firmware predating the
+    key, carries no `skipped:` at all and reads back as "unknown" rather than
+    as a false "nothing was skipped" - and only the unknown case makes resume
+    refuse to re-energize a rail. test_parts_roundtrip's exact-shape needle
+    (no `of:`, so no `skipped:`) depends on that omission too."""
+    return (f'guideProgress: {{source: "{source}", step: {step}, of: {total}, '
+            f'skipped: {hex(skipped)}}}')
 
 
 class GuideDriver:
@@ -1158,6 +1182,99 @@ print("NETNAME|" + name)
           "power was re-applied on resume -> the guide restores NOTHING and "
           "says nothing about the rails (the project's power stands)")
     time.sleep(1.0)
+
+    # --- 8b. A SKIPPED power_on must stay skipped across a resume ------------
+    #
+    # H3 item 1, and the reason `skipped:` exists in the flow map at all.
+    #
+    # THE BUG THIS PINS. `guideStep` in the flow map is guideFirstUnfinished,
+    # whose own comment says a SKIPPED step counts as FINISHED - so a skipped
+    # step always lands strictly BELOW the persisted resume cursor. INIT's
+    # resume loop then walked every index below the cursor doing
+    # `committed[i] = true`, with nothing persisted that could tell a commit
+    # from a skip. For a `power_on` step that promotion called setTopRail /
+    # setBotRail / setDac*: THE RAILS CAME UP AT THE PROJECT'S VOLTAGE, two
+    # lines under the banner that had just printed "rails + DACs held at 0V
+    # until the power_on step". The user skipped power on purpose - the bench
+    # supply was not ready - and the next launch energized it for them.
+    #
+    # Two knock-ons ride along and are asserted here too: the promotion set
+    # powerApplied, which suppressed the exit tail's restore of the user's own
+    # bench rails; and the promoted skips were counted as built work by the
+    # DONE summary and by the "nothing was built, no script offer" gate.
+    #
+    # Phase 8 above is the mirror image (power_on COMMITTED -> resume DOES
+    # re-apply and restores nothing). The pair is the point: the fix must not
+    # be "never re-apply", it must be "re-apply exactly what was committed".
+    d = GuideDriver()
+    try:
+        d.send(f"z {POWER_PATH} new\r\n".encode())
+        guide_live = True
+        run_sk = d.expect_runfile("new", "skipped-power phase allocated its own run file")
+        d.expect(r"GUIDE step=1/4 id=note_1 state=WAIT", "skipped-power phase at step 1")
+        d.send(b"n")
+        d.expect(r"GUIDE step=2/4 id=connect_52 state=WAIT", "step 2 WAIT")
+        d.send(b"n")
+        d.expect(r"GUIDE step=3/4 id=power_on state=WAIT", "step 3 (power_on) WAIT")
+        d.send(b"s")
+        d.expect(r"\(skipped\)", "s skips the power_on instead of committing it")
+        d.expect(r"GUIDE step=4/4 id=note_4 state=WAIT", "step 4 WAIT, rails never came up")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit at step 4 with power_on skipped")
+        guide_live = False
+    finally:
+        d.close()
+    check("power applied: topRail" not in d.buf,
+          "a skipped power_on applies no power in the first session")
+    time.sleep(1.5)
+
+    _, sk_yaml = read_device_file(run_sk)
+    # THE FORMAT ASSERTION. Steps 0 and 1 committed, step 2 (power_on) skipped,
+    # step 3 unfinished -> first-unfinished is 3, and the skip set is bit 2 =
+    # 0x4. Without the mask this line would be indistinguishable from "three
+    # steps committed", which is precisely how the rails got energized.
+    check(guide_progress_needle(POWER_PATH, 3, 4, skipped=0x4) in sk_yaml,
+          "the run file persists the SKIP SET (bit 2 = the power_on) beside "
+          "the first-unfinished step, not just the scalar")
+    check("topRail: 2.5" not in sk_yaml,
+          "a skipped power_on leaves the run file's rails at 0V")
+
+    d = GuideDriver()
+    try:
+        d.send(f"z {PROJ} load\r\n".encode())
+        guide_live = True
+        d.expect(r"GUIDE resume file=" + re.escape(run_sk) + r" step=3",
+                 "resume past the SKIPPED power_on, from its own run file")
+        # THE HEADLINE ASSERTION - the one line that is the whole finding.
+        d.expect(r"resume: power_on was skipped - rails stay at 0V",
+                 "the resume HONOURS the skip: the rails are not energized",
+                 timeout=40)
+        d.expect(r"GUIDE step=4/4 id=note_4 state=WAIT", "resumed at step 4")
+        # The skip survived as a SKIP, not as a commit: 2 built, 1 skipped,
+        # 1 unfinished. Under the bug this read committed=3.
+        d.send(b">")
+        d.expect(r"GUIDE done committed=2 skipped=1 unfinished=1",
+                 "the resumed DONE summary counts the skip as a SKIP, and the "
+                 "promoted-skip inflation of the built count is gone")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "quit the skip-resumed session")
+        # Knock-on (a): powerApplied stayed false, so the guide gives the
+        # user's own bench rails back instead of silently keeping the
+        # project's. Phase 8 asserts the exact opposite for a COMMITTED
+        # power_on - that contrast is the regression guard.
+        d.expect(r"rails \+ DACs restored \(top=",
+                 "nothing was energized, so the user's rails are restored")
+        guide_live = False
+    finally:
+        d.close()
+    check("rails re-applied" not in d.buf,
+          "NO re-apply claim behind a skipped power_on")
+    time.sleep(1.0)
+
+    _, sk2_yaml = read_device_file(run_sk)
+    check("topRail: 2.5" not in sk2_yaml,
+          "the resumed session never wrote the project's rail voltage - the "
+          "physical witness that setTopRail was never called")
 
     # --- 9. No-power fixture: the powerApplied-asymmetry witness ------------
     out = jl_exec(f'print("wrote=", 1 if fs_write({NOPOWER_PATH!r}, {NOPOWER_WIRING!r}) else 0)',
