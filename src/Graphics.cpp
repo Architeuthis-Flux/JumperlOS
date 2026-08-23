@@ -4719,7 +4719,7 @@ int attractMode(void) {
   // 0-7 ring rather than trying to ++/-- a sentinel. The file context is LEFT
   // by wheel-cycling - its content was already auto-saved to its own file, and
   // loadfile:'s dirty pre-save flushes anything newer. The ways back IN are
-  // the Files browser, the Projects launcher, and boot; there is deliberately
+  // the Files browser, the Guides launcher, and boot; there is deliberately
   // no phantom "file" position in the ring this wave.
   //
   // NOTE: netSlot = -1 and netSlot = NUM_SLOTS below stay reserved defcon

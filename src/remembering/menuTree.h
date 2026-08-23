@@ -83,12 +83,16 @@ String menuLines[150] = {
 
   // Top-level, childless: selecting it walks off the end of its (empty)
   // submenu range into doMenuAction, the same way Files and History do, and
-  // getActionCategory()'s "Projects" branch sends it to APPSACTION ->
-  // runApp(-1, "Projects"). Placed at the head of the "things you run"
-  // cluster, after the wiring tools (Rails/Connect/Output/Show). 8 chars
-  // renders as 7 glyphs on the LED half-row ("Project"), the same truncation
-  // the launcher applies via ledFit - no \31 needed.
-  "Projects",
+  // getActionCategory()'s "Guides" branch sends it to APPSACTION ->
+  // runApp(-1, "Guides"). Placed at the head of the "things you run"
+  // cluster, after the wiring tools (Rails/Connect/Output/Show).
+  //
+  // The row was "Projects" through wave 2. 8 chars only fit as 7 glyphs on the
+  // LED half-row, so it rendered as "Project" - it split at the S. "Guides" is
+  // 6 glyphs and renders whole. The rename is HUMAN-SURFACE ONLY: the
+  // directory is still /projects, and the machine grammar (`PROJECTS n=`,
+  // `RUNFILE`, `RUNS`, `SCRIPT`, `GUIDE`) is unchanged.
+  "Guides",
 
   "Apps",
   "-Bounce \31Startup",

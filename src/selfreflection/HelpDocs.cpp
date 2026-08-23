@@ -1262,7 +1262,7 @@ Jerial.println(probe_art);
         Jerial.println("- File Manager (browse/edit files)");
 
         changeTerminalColor(HELP_COMMAND_COLOR, false);
-        Jerial.print("  Projects   ");
+        Jerial.print("  Guides     ");
         changeTerminalColor(HELP_DESC_COLOR, false);
         Jerial.println("- Guided circuit builds from /projects");
         changeTerminalColor(HELP_DESC_COLOR, false);
@@ -1283,7 +1283,7 @@ Jerial.println(probe_art);
         Jerial.println("  Use scope app to visualize signals on ADC pins");
         Jerial.println("  Run calibrate app if voltages seem off");
         Jerial.println("  Use / to browse and edit files directly");
-        Jerial.println("  Open Projects and build the 555 blinker start to finish");
+        Jerial.println("  Open Guides and build the 555 blinker start to finish");
 
         changeTerminalColor(HELP_NOTE_COLOR, true);
         Jerial.println("\n While a guided build is running:");

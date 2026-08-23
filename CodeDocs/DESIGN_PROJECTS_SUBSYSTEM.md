@@ -119,9 +119,17 @@ rodata. Non-issue.
   from `previousMenuPositions[1]` — a static `--555` leaf at depth 2 resolves to its
   depth-1 parent. And no new top-level category: `categoryRanges[10][2]`
   (Menus.cpp:199) is already over-subscribed at 12 top-levels.
-- menuTree.h (after :98): `"-Project\31s",` — `\31` breaks the matrix render at
-  7 chars; `normalizeSpaces` strips it so the label matches app name `Projects`.
-- Apps.cpp:75: `{ "Projects", 25, 1, projectsAppLauncher },`.
+- menuTree.h: `"Guides",` — a childless TOP-LEVEL row, at the head of the
+  "things you run" cluster. 6 glyphs, so it renders whole on the LED half-row
+  and needs no `\31`. **Named `Projects` through wave 2**, where 8 chars
+  rendered as 7 glyphs (`Project`) and split at the S — that is the whole
+  reason for the rename. The directory is still `/projects` and the machine
+  grammar (`PROJECTS n=`, `RUNFILE`, `RUNS`, `SCRIPT`, `GUIDE`) is unchanged:
+  the split between the human word and the machine word is deliberate.
+- Apps.cpp: `{ "Guides", 25, 1, projectsAppLauncher },`. This row and the
+  menuTree.h line are ONE unit — `getActionCategory` matches the menu line's
+  text and `runApp(-1, name)` name-matches it against `apps[]`, so renaming
+  either alone kills the row silently.
 - **Launcher** — new `src/ProjectsApp.h/.cpp`, modeled on the `imagesApp(true)`
   selection loop (ImagesApp.cpp:264-400: `jOS.serviceInner()`, encoder delta,
   `encoderButtonState` RELEASED=select / HELD=cancel) and `runPythonScriptFromPath`

@@ -20,7 +20,7 @@ Phase 6 (task 5) adds a second, minimal project at /projects/hiltest/. It
 opens with the two contracts the encoder-driven launcher rests on -
 load_project() on a meta:-first wiring, and the `_jl_project` preamble
 prepended to the companion script - and then drives the launcher ITSELF:
-6(c)/6(d) call run_app("Projects") for real from two ports at once (port 5
+6(c)/6(d) call run_app("Guides") for real from two ports at once (port 5
 runs it in a worker thread, port 1 watches the picker and cancels it).
 
 RUN-FILE PROTECTION IS AN INVARIANT OF THIS FILE (W3-T3). The launcher's
@@ -61,7 +61,7 @@ compiled into src/snakes/projectFiles.h) while /projects/hiltest - a project
 the firmware has never heard of - is left completely alone.
 
   CONTRACT CHANGE vs the task-5 shape of this file: 6(c) used to TIME
-  run_app("Projects") taking its empty-list exit (>= 1400 ms) to prove the
+  run_app("Guides") taking its empty-list exit (>= 1400 ms) to prove the
   apps[] row resolves. With the self-heal un-guarded that exit is no longer
   reachable - provisioning puts 555 back before listProjects() runs, so the
   picker opens and blocks on the encoder. The apps[]-resolution witness is now
@@ -189,7 +189,7 @@ else:
 
 
 def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
-    """Drive run_app('Projects') from port 5 while port 1 watches the picker
+    """Drive run_app('Guides') from port 5 while port 1 watches the picker
     and cancels it. Shared by the provisioning phase 6(c) and the happy-path
     phase 6(d) - one copy of the threading/serial dance, not two.
 
@@ -201,7 +201,7 @@ def run_projects_app(blind_cancel_after=12.0, deadline_s=35):
 
     def _launch_projects():
         try:
-            launch["out"] = jl_exec("run_app('Projects')\nprint('returned=', 1)",
+            launch["out"] = jl_exec("run_app('Guides')\nprint('returned=', 1)",
                                     timeout=45)
         except SystemExit as e:                                  # jl_exec fails fast
             launch["err"] = str(e)
@@ -541,7 +541,7 @@ for i in range(1, 40):
     #      on the device (mirroring the construction, not invoking the launcher).
     #
     # The launcher ITSELF is driven too - 6(c) and 6(d) below call
-    # run_app("Projects") for real, from two ports at once: port 5 runs the
+    # run_app("Guides") for real, from two ports at once: port 5 runs the
     # call in a worker thread while port 1 watches the picker and cancels it
     # (run_projects_app(), top of this file). That two-port dance is what makes
     # it reachable at all: the picker loop polls the encoder and
@@ -716,7 +716,7 @@ print("whil=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
     # picker should open over exactly one project.
     buf, n_listed, sends, worker, launch = run_projects_app()
     check(worker is not None and not worker.is_alive(),
-          f"run_app('Projects') returned after the serial cancel ({sends} byte(s))")
+          f"run_app('Guides') returned after the serial cancel ({sends} byte(s))")
     check(n_listed is not None and n_listed >= 1,
           f"the launcher's self-heal ran and the picker listed a project "
           f"(PROJECTS n={n_listed}) - initializeProjects() re-created what it needed")
@@ -800,7 +800,7 @@ print("missing_ms=", time.ticks_diff(t1, t0))
     # comes back out without leaving the temp-slot latch set. 6(c) alone would
     # still pass if listProjects always returned 0 (a broken path join, an inverted
     # isDirectory test), so this drives the launcher WITH both projects present:
-    #   - port 5 calls run_app("Projects") in a worker thread;
+    #   - port 5 calls run_app("Guides") in a worker thread;
     #   - port 1 watches for the picker's `PROJECTS n=<count>` line - that count IS
     #     listProjects' result, so seeing n>=2 is the happy-path assertion;
     #   - port 1 then sends a byte, which the picker treats exactly like an encoder
@@ -822,7 +822,7 @@ print("missing_ms=", time.ticks_diff(t1, t0))
     check("555" in buf and "hiltest" in buf,
           "the launcher listed both project dirs on the terminal")
     check(worker is not None and not worker.is_alive(),
-          f"run_app('Projects') returned after the serial cancel "
+          f"run_app('Guides') returned after the serial cancel "
           f"({sends} cancel byte(s) sent)")
     check("Cancelled" in buf, "the launcher took its cancel exit")
     if "err" in launch:

@@ -4054,17 +4054,23 @@ actionCategories getActionCategory( void ) {
         return APPSACTION;  // Python = same as Files (click-menu file browser)
 
     } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
-                    "Projects" ) != -1 ) {
-        // Projects = the launcher app row, promoted to a childless TOP-LEVEL
+                    "Guides" ) != -1 ) {
+        // Guides = the launcher app row, promoted to a childless TOP-LEVEL
         // entry (menuTree.h). Selecting one walks off the end of its empty
         // submenu range and lands in doMenuAction, exactly the way Files and
         // History do. The APPSACTION arm's appNameIdx then falls back to
         // previousMenuPositions[0] for single-level entries, so this yields
-        // runApp(-1, "Projects"), which name-matches the apps[] row
-        // { "Projects", 25, 1, projectsAppLauncher } - zero Apps.cpp changes.
+        // runApp(-1, "Guides"), which name-matches the apps[] row
+        // { "Guides", 25, 1, projectsAppLauncher }. This string and that row
+        // are ONE unit - rename either and the top-level row goes dead
+        // silently, because the menu line's own text IS runApp's name arg.
         //
-        // Order-safe: no earlier keyword above is a substring of "Projects"
-        // ("Probe" is not - Pro-b vs Pro-j).
+        // Order-safe: none of the keywords tested above this one - Slots,
+        // Rails, Show, Output, Arduino, Probe, Connect, Display, Apps,
+        // Routing, OLED, Calib, History, Files, Python - is a substring of
+        // "Guides", so no earlier arm can claim the row. (Was "Projects"
+        // through wave 2; the same check held there for "Probe" - Pro-b vs
+        // Pro-j.)
         return APPSACTION;
 
     } else {

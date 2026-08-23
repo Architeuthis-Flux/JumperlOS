@@ -19,7 +19,7 @@
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
-#include "ProjectsApp.h"  // projectsAppLauncher - the "Projects" apps[] row
+#include "ProjectsApp.h"  // projectsAppLauncher - the "Guides" apps[] row
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
@@ -99,7 +99,10 @@ struct app apps[ NUM_APPS ] = {
     { "Xbar   Test", 22, 1, crossbarTestApp },
     { "Tip    Voltage", 23, 1, tipVoltageTestApp },
     { "PSRAM  Test", 24, 1, psramTestApp },
-    { "Projects", 25, 1, projectsAppLauncher },
+    // Name-matched by runApp(-1, name) with the TOP-LEVEL menu line's own text
+    // (menuTree.h "Guides" -> Menus.cpp getActionCategory -> APPSACTION), so
+    // this string and that one move together or the row goes dead.
+    { "Guides", 25, 1, projectsAppLauncher },
     // others can remain uninitialized (works=0)
 };
 

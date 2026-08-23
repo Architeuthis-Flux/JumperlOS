@@ -12,7 +12,7 @@ short version of what moved:
 
 | Was (wave 1)                                                  | Is now                                                                                                            |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Projects lived under **Apps**                                 | **top-level** clickwheel row, before Apps                                                                         |
+| Projects lived under **Apps**                                 | a **top-level** clickwheel row, before Apps — and since wave 3 it is called **`Guides`** (`Projects` split at the S on the LED matrix) |
 | a project ran into a **destination slot**, then a keep-prompt | a project opens `/projects/<dir>/<dir>_run.yaml`, a **run file**, as your persistent context — no prompt, no slot. **One per project**, reused; to keep a run, `slots` > `save to` |
 | slots were eight numbered files                               | any YAML anywhere can be the active context; the board **boots the last active one**                              |
 | DIP pin 1 anchored the **top** half                           | pin 1 (the dot) anchors the **bottom** half — **row 35** on every shipped project                                 |
@@ -303,17 +303,29 @@ and `run=<N>` — the numbered scheme's grammar — is refused by name
 
 
 
-### 1.1 Projects is a top-level menu row
+### 1.1 `Guides` is a top-level menu row
 
-- [x] Wheel through the clickwheel menu: `Projects` **appears before** `Apps`, not
-  inside it. Click it.
+> \>\>\>But Projects is too long and splits at the S, what if we rename it Guides
+>
+> Done in wave 3. The row, the `apps[]` entry, the picker header, the terminal
+> banner and the help line all say **Guides** now. What did NOT change: the
+> `/projects` directory, the `PROJECTS n=` picker line, and every other machine
+> token (`RUNFILE`, `RUNS`, `SCRIPT`, `GUIDE`). The split is deliberate — the
+> word the user reads moved, the words a script greps for did not.
+
+- [ ] Wheel through the clickwheel menu: `Guides` **appears before** `Apps`, not
+  inside it, and renders **whole** — 6 glyphs, no truncation, no split at the S.
+  Click it.
 - [x] The picker lists the **four shipped projects** — `555`, `eeprom`,
-  `i2cscrn`, `nand00` — and port 1 says `PROJECTS n=4`. If you see `hiltest`,
-  a HIL run left its fixture behind (the suite removes it now; an older build's
-  leftovers can be deleted from Files).
+  `i2cscrn`, `nand00` — and port 1 says `PROJECTS n=4` (the machine tag keeps
+  its old spelling on purpose). If you see `hiltest`, a HIL run left its fixture
+  behind (the suite removes it now; an older build's leftovers can be deleted
+  from Files).
+- [ ] The picker header reads `Guide` on the LED matrix top half and in the
+  terminal mirror (`  Guide: <title>`); the terminal banner above it reads
+  `=== Guides ===`.
 - [x] `i2cscrn` is 7 glyphs, exactly the LED-matrix row limit — check it renders
   whole. Title + summary on the OLED, mirrored on the terminal.
-- [ ] >>>But Projects is too long and splits at the S, what if we rename it Guides
 - [x] Hold to cancel:   `Cancelled.` and **your context is untouched** — press
   `Q` and confirm both the number and the path are what they were.
 
@@ -658,7 +670,7 @@ swapped.
 
 ### 2.7 The three starter projects, end to end
 
-Common shape: **Projects →** `<name>` (or `z <name> new`), walk the guide, run
+Common shape: **Guides →** `<name>` (or `z <name> new`), walk the guide, run
 `main.py` when it is offered.
 
 #### 2.7a `555` — NE555, 10k, 47k, 10 µF, LED, 330

@@ -179,7 +179,7 @@ TEARDOWN ORDER IS LOAD-BEARING: leave the run-file context FIRST, then delete
 the run files, or the switch's dirty pre-save re-creates what was just removed
 (test_parts_roundtrip learned that one). BOTH /projects/hilguide/ and
 /projects/hilvfnr/ are removed afterwards, run files included:
-test_projects.py's run_app('Projects') probe gates itself on the board holding
+test_projects.py's run_app('Guides') probe gates itself on the board holding
 exactly the two projects IT authored, and either leftover would silently skip
 that phase.
 

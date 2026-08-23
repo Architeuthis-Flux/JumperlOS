@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Projects launcher - the Apps-menu entry (now a TOP-LEVEL menu row) that
+// Guides launcher - the "Guides" TOP-LEVEL menu row (named "Projects"
+// through wave 2; the directory is still /projects) that
 // turns /projects/<dir>/ into a running circuit. Design:
 // CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md §1, reworked by
 // .superpowers/sdd/projects-wave-2-bench-notes/design-launcher.md.
@@ -726,7 +727,7 @@ static int runPicker(const char* machineTag, const char* header,
     // (yesNoMenu sets 8, Menus.cpp:2469; the node picker and the history scrub
     // save/restore, Menus.cpp:5705-5712). The default happens to be 8, but a
     // value editor that leaked 3/4/12 - or an entry that didn't come through
-    // getMenuSelection, like run_app("Projects") - would otherwise land here.
+    // getMenuSelection, like run_app("Guides") - would otherwise land here.
     int lastDivider = rotaryDivider;
     rotaryDivider = 8;
 
@@ -1621,7 +1622,7 @@ void projectsAppLauncher(void) {
     // The launcher is not re-entrant, so a single instance is fine.
     static ProjectMeta projects[PROJECTS_MAX];
 
-    Serial.println("\n\r=== Projects ===");
+    Serial.println("\n\r=== Guides ===");
     Serial.println("Rotary: Navigate | Short Click: Select | Long Press or any key: Cancel");
 
     int count = listProjects(projects, PROJECTS_MAX);
@@ -1630,7 +1631,7 @@ void projectsAppLauncher(void) {
         // provisioning-failure path, not a normal one: initializeProjects()
         // above puts the built-in projects back before we get here, so an
         // empty list means the writes themselves failed (full/locked FS).
-        notify("No\nprojects", "\n\r  No projects found in " + String(PROJECTS_DIR), 1500);
+        notify("No\nguides", "\n\r  No guides found in " + String(PROJECTS_DIR), 1500);
         return;
     }
 
@@ -1644,7 +1645,10 @@ void projectsAppLauncher(void) {
         Serial.println("  " + projects[i].dir + "  -  " + projects[i].title);
     }
 
-    int chosen = runPicker("PROJECTS", "Project", ledLabels, titles, summaries, count);
+    // "PROJECTS" is the MACHINE tag (`PROJECTS n=<count>`, frozen grammar -
+    // test_projects drives the launcher on it). "Guide" is the human header
+    // painted on the LED matrix, the OLED and the terminal mirror.
+    int chosen = runPicker("PROJECTS", "Guide", ledLabels, titles, summaries, count);
     if (chosen < 0) {
         // EXIT A: cancelled before any state was touched.
         Serial.println("  Cancelled.");

@@ -181,7 +181,7 @@ bool projectOpenLatestOrNew(const String& project, String& runPathOut);
 // project with the clicked file as the chosen variant (design-slots §3).
 void projectRunFromTemplate(const String& wiringPath);
 
-// The app entry point (apps[] row "Projects" / top-level menu line "Projects").
+// The app entry point (apps[] row "Guides" / top-level menu line "Guides").
 void projectsAppLauncher(void);
 
 #endif // PROJECTS_APP_H
