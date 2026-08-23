@@ -42,6 +42,33 @@ TESTS = [
 # running it in the middle of projects is not - so they stay adjacent and in
 # this order. All three hold port 1 for their drives, like test_paste_state.
 
+# ---------------------------------------------------------------------------
+# Deliberate resets  (W3-T7)
+# ---------------------------------------------------------------------------
+# The board is NOT reset between suites as a matter of course: a reset costs
+# ~12 s and, worse, it would hide exactly the kind of accumulation this harness
+# should notice. It is applied only where the damage was MEASURED and is
+# genuinely irreversible.
+#
+# MicroPython's GC does not compact. Freeing an object leaves a hole where it
+# sat, so the largest CONTIGUOUS block - the number that decides whether the
+# next compile raises MemoryError - only ever recovers on a reset. Measured on
+# the bench (W3-T7): running the shipped 12.3 KB i2cscrn script through the
+# launcher took the heap from ~29 KB largest block to ~6 KB, and deleting every
+# global that script left behind gave back 11% of it. Nothing short of a reset
+# fixes that, and test_guide_flow - the longest suite, and the one W3-T2 saw
+# MemoryError coming out of - would otherwise run its whole length on a 6 KB
+# largest block.
+#
+# The value is the reason it exists; keep them together.
+RESET_AFTER = {
+    "test_projects.py":
+        "it runs the 12.3 KB i2cscrn script through the launcher, which leaves "
+        "the largest contiguous block at ~6 KB (from ~29 KB). MicroPython "
+        "cannot compact, so only a reset restores it - and test_guide_flow "
+        "runs next.",
+}
+
 here = os.path.dirname(os.path.abspath(__file__))
 selector = sys.argv[1] if len(sys.argv) > 1 else ""
 
@@ -57,9 +84,40 @@ results = {}
 for name in TESTS:
     if selector and selector not in name:
         continue
-    print(f"\n=== {name} " + "=" * max(0, 60 - len(name)))
+    print(f"\n=== {name} " + "=" * max(0, 60 - len(name)), flush=True)
     proc = subprocess.run([sys.executable, os.path.join(here, name)], cwd=here)
     results[name] = proc.returncode
+
+    # Heap read-out between suites. Cheap (~1 s) and permanent: "free" and
+    # "maxblk" are different diseases, and "retained" is the harness's own
+    # namespace hygiene (jl_exec's epilogue should keep it at 0 all run long,
+    # so a suite that starts leaking is visible here instead of silent).
+    # Every line names its suite and flushes: this file is usually read as a
+    # redirected log, where unflushed prints arrive in 8 KB blocks long after
+    # the subprocess output they belong to, and an unlabelled "heap:" line in
+    # the middle of that is unattributable.
+    try:
+        free, alloc, maxblk = jl.device_heap()
+        held_n, held_b = jl.device_globals()
+        warn = "   <-- LOW CONTIGUOUS BLOCK" if 0 <= maxblk < 8192 else ""
+        held = f", retained {held_n} globals/{held_b}B" if held_n else ""
+        print(f"  heap after {name}: free {free}, largest block "
+              f"{maxblk}{held}{warn}", flush=True)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"  heap after {name}: read failed ({e!r})", flush=True)
+
+    if name in RESET_AFTER:
+        print(f"  resetting the board after {name}: {RESET_AFTER[name]}",
+              flush=True)
+        if jl.reboot_board():
+            free, alloc, maxblk = jl.device_heap()
+            print(f"  heap after the reset: free {free}, largest block "
+                  f"{maxblk}", flush=True)
+        else:
+            print("  WARNING: the board did not come back from the reset",
+                  flush=True)
 
 if snapshot is not None:
     if jl.board_state_restore(snapshot):

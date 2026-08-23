@@ -1322,15 +1322,31 @@ gc.collect()
             vals = parse_kv(out)
         if proj == "i2cscrn":
             pass
-        elif vals.get("nomem") == 1:
-            print(f"  info: {pdir}/main.py device-compile skipped - this session's "
-                  f"MicroPython heap is too fragmented to hold the source. The "
-                  f"launcher's run path does not make this allocation; running the "
-                  f"script from the picker is a bench item.")
         else:
-            check(vals.get("compiled") == 1,
-                  f"{pdir}/main.py compiles under this MicroPython "
-                  f"({vals.get('srclen')} bytes read through jfs, uncapped)")
+            # A `nomem` here used to print "info: ... skipped" and call NO
+            # check(), so a fragmented heap quietly cost an assertion and the
+            # suite still printed PASS. That is how this defect stayed hidden
+            # for three sightings: the fragmentation the suite exists to catch
+            # was deleting the test that would have caught it. Nothing else in
+            # the harness compares the check count to its 264 baseline, so the
+            # loss was invisible.
+            #
+            # It is a FAILURE now, deliberately. If the heap cannot hold a
+            # shipped script's source, that IS the defect - go red and say so.
+            # W3-T7 measured why this happens and fixed the harness-side causes
+            # (jl.device_text, the jl_exec namespace epilogue, the reset before
+            # guide_flow in run_all), so a nomem here means something regressed
+            # or a new allocation crept in - both worth a red run.
+            if vals.get("nomem") == 1:
+                check(False,
+                      f"{pdir}/main.py compiles under this MicroPython - got "
+                      f"MemoryError instead: the session heap has no contiguous "
+                      f"block the size of the source. This is the W3-T7 defect "
+                      f"recurring, not an environmental skip.")
+            else:
+                check(vals.get("compiled") == 1,
+                      f"{pdir}/main.py compiles under this MicroPython "
+                      f"({vals.get('srclen')} bytes read through jfs, uncapped)")
 
         # (v-b) i2cscrn ONLY: drive the whole new flow through the REAL
         # runner and the REAL stdin (wave 3, Kevin's bench note: "have users

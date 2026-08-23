@@ -56,7 +56,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from jl import (jl_exec, parse_kv, port1_command, port1_path, port1_paste,
                 check, finish, board_state_capture, board_state_restore,
-                active_context, restore_context, reboot_board, fault_scan)
+                active_context, restore_context, reboot_board, fault_scan,
+                device_text)
 
 _csi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]")
 
@@ -138,18 +139,14 @@ power:
 
 
 def read_config():
-    """The board's /config.txt, verbatim."""
-    return jl_exec("""
-f = jfs.open("/config.txt", "r")
-data = ""
-while True:
-    chunk = jfs.read(f, 512)
-    if not chunk:
-        break
-    data += chunk
-jfs.close(f)
-print(data)
-""", timeout=20)
+    """The board's /config.txt, verbatim.
+
+    Streams via jl.device_text() rather than accumulating on the device: this
+    exact call site is where W3-T2 saw `MemoryError ... allocating 2049 bytes`
+    coming out of guide_flow, which is the 4th concatenation of the old
+    `data += chunk` loop. See jl.device_text() for the full accounting.
+    """
+    return device_text("/config.txt")
 
 
 def _distinct_rail(yaml_text):

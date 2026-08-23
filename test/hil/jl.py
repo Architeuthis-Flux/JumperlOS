@@ -142,8 +142,120 @@ def find_jumperless_py():
     )
 
 
+# ----------------------------------------------------------------------------
+# Device namespace hygiene  (THE INVARIANT: a snippet leaves no globals behind)
+# ----------------------------------------------------------------------------
+# jumperless.py runs `exec` with soft_reboot=False, so the device's __main__
+# namespace SURVIVES every snippet, every suite, and the whole run - until a
+# machine.reset(). Anything a snippet binds at top level stays live forever.
+#
+# This is not a style point. Measured across one full run_all: the harness
+# accumulated ~55 distinct names, and the big ones were whole-file strings.
+#
+# WHAT THIS FIXES AND WHAT IT DOES NOT - both measured, because the difference
+# decides where the real fix has to go:
+#   * it DOES reclaim free bytes. In the bench experiment, deleting one
+#     script's 82 globals returned 4.8 KB of free heap.
+#   * it does NOT restore the largest CONTIGUOUS block. Same experiment:
+#     the allocation cost 17.6 KB of maxblk and the delete gave back 1.9 KB
+#     of it - 11%. MicroPython's GC never compacts, so freeing an object
+#     leaves a hole exactly where it sat.
+# So cleanup buys headroom and keeps growth bounded; only NOT ALLOCATING (see
+# device_text) or a reset cures fragmentation. Both are worth having.
+#
+# Safety: an AST pass over every jl_exec snippet in test/hil confirmed that no
+# snippet reads a global another snippet bound (55 names bound, zero
+# cross-snippet reads), so deleting them between snippets cannot break one.
+# Underscore-prefixed names are deliberately left alone - they are the escape
+# hatch for anything that must deliberately persist (the heap probes use it).
+#
+# Set JL_KEEP_DEVICE_GLOBALS=1 to disable, e.g. when hand-debugging on the REPL
+# and you want a snippet's variables to still be there afterwards.
+
+_HYGIENE_PROLOGUE = (
+    "import gc as _hilgc\n"
+    "if '_hilkeep' not in globals():\n"
+    "    _hilkeep = set(globals().keys())\n"
+    "    _hilkeep.add('_hilkeep')\n"
+)
+
+_HYGIENE_EPILOGUE = (
+    "\nfor _hilk in [_k for _k in globals().keys() "
+    "if _k not in _hilkeep and not _k.startswith('_')]:\n"
+    "    del globals()[_hilk]\n"
+    "_hilgc.collect()\n"
+)
+
+
+def device_globals():
+    """(count, summed len()) of globals the harness has left on the device.
+
+    Observability for the invariant above: with the epilogue on this should sit
+    at zero all run long, so a future suite that starts retaining something is
+    VISIBLE rather than silent. run_all prints it between suites.
+    """
+    # Underscore names throughout: this snippet must not count ITSELF.
+    out = jl_exec("""
+_n = 0
+_b = 0
+for _k in globals().keys():
+    if _k in _hilkeep or _k.startswith('_'):
+        continue
+    _n += 1
+    try:
+        _b += len(globals()[_k])
+    except Exception:
+        pass
+print("retained_n=", _n)
+print("retained_bytes=", _b)
+""", timeout=20)
+    v = parse_kv(out)
+    return int(v.get("retained_n", -1)), int(v.get("retained_bytes", -1))
+
+
+def device_heap():
+    """(free, alloc, maxblk) for the device's MicroPython heap.
+
+    maxblk - the largest CONTIGUOUS block, found by a binary-search ladder of
+    bytearray() allocations - is the number that actually predicts a
+    MemoryError. Free heap and contiguity are different diseases: across one
+    full run_all, free fell ~12 KB while maxblk fell from 29 KB to 6 KB, and
+    every reported MemoryError in this suite's history was a contiguity
+    failure with plenty of free bytes left.
+    """
+    out = jl_exec("""
+import gc
+gc.collect()
+_f = gc.mem_free()
+_a = gc.mem_alloc()
+_lo = 0
+_hi = _f + 2048
+while _lo + 64 < _hi:
+    _md = (_lo + _hi) // 2
+    try:
+        _b = bytearray(_md)
+        del _b
+        _lo = _md
+    except MemoryError:
+        _hi = _md
+gc.collect()
+print("free=", _f)
+print("alloc=", _a)
+print("maxblk=", _lo)
+""", timeout=30)
+    v = parse_kv(out)
+    return (int(v.get("free", -1)), int(v.get("alloc", -1)),
+            int(v.get("maxblk", -1)))
+
+
 def jl_exec(code, timeout=15):
-    """Run a MicroPython snippet on the device, return its stdout."""
+    """Run a MicroPython snippet on the device, return its stdout.
+
+    The snippet is wrapped so it leaves no globals behind - see the
+    "Device namespace hygiene" note above.
+    """
+    if not os.environ.get("JL_KEEP_DEVICE_GLOBALS"):
+        code = _HYGIENE_PROLOGUE + code + _HYGIENE_EPILOGUE
     jl = find_jumperless_py()
     with tempfile.NamedTemporaryFile(
         "w", suffix=".py", delete=False, prefix="hil_"
@@ -167,6 +279,39 @@ def jl_exec(code, timeout=15):
             "Check the board connection and try again."
         )
     return proc.stdout
+
+
+def device_text(path, chunk=512):
+    """Return a device file's contents as host text, WITHOUT ever building it
+    as one contiguous MicroPython string.
+
+    USE THIS instead of the `data = ""` / `data += chunk` idiom. That idiom is
+    what produced this suite's recurring `MemoryError`, and the byte counts in
+    the reports name it exactly: MicroPython asks the allocator for len+1 bytes
+    for a str, so accumulating a 3114-byte /config.txt in 512-byte chunks walks
+    it up through 513, 1025, 1537, 2049, 2561, 3073, 3115 - and W3-T2 reported
+    "allocating 2049 bytes" while W3-T4 reported "allocating 3115 bytes". Two
+    sightings, one loop, two different iterations of it.
+
+    Worse than the transient: the loop leaves the finished string bound to a
+    global (`data`) in the device's __main__, which persists for the WHOLE
+    session because jumperless.py runs exec with soft_reboot=False. Measured on
+    the bench: 3.1 KB retained that way cost 11 KB of largest contiguous block,
+    and - because MicroPython's GC does not compact - deleting it afterwards
+    does NOT give the contiguity back. Not allocating it is the only fix.
+
+    Streaming to the host peaks at `chunk` bytes on the device instead.
+    """
+    return jl_exec(f"""
+f = jfs.open({path!r}, "r")
+while True:
+    c = jfs.read(f, {int(chunk)})
+    if not c:
+        break
+    print(c, end="")
+jfs.close(f)
+print()
+""", timeout=30)
 
 
 def parse_kv(out):
