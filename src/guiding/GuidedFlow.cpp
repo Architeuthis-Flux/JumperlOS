@@ -340,8 +340,13 @@ static void guideAddOverlayWarned(const char* name) {
 #endif // !OG_JUMPERLESS (overlay painting block)
 
 // _GUIDE_FP_: dim outlines of every PLACED part (rebuilt whole on commit /
-// back). Persistent for the whole guide; never serialized (reserved-name
-// exclusion in GraphicOverlays.cpp).
+// back). Persistent for the whole guide; never written into a SLOT FILE - the
+// reserved-name exclusion is overlayIsSessionOnly(), and it gates the YAML
+// serializer only. serializeOverlaysToJSON() has no such filter and DOES emit
+// `_GUIDE_` overlays, which is deliberate: that is the surface
+// overlay_serialize() exposes to the REPL, and test_guide_flow's phase-13b
+// needle reads this overlay through it to prove the footprint is rebuilt whole
+// rather than accumulated.
 static void guideRenderFootprints(void) {
 #if defined(OG_JUMPERLESS)
     return;   // overlays no-op on OG (see the fallback note above)

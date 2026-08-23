@@ -2061,7 +2061,13 @@ print("b=", 1 if is_connected(45, "GND") else 0)
         d.expect(r"GUIDE done committed=2 skipped=0 unfinished=1",
                  "reached the DONE view (only _GUIDE_FP_ is registered here)")
 
+        # The del + gc.collect() tail is not tidiness: a bare `s = ...` in the
+        # REPL leaves the ~2.8 KB JSON string AND the 300-element `cells` list
+        # bound in device globals for the rest of the session, and this suite
+        # runs inside a longer sequence that has been seen to hit a
+        # MicroPython MemoryError on a later allocation. Free them here.
         out = jl_exec("""
+import gc
 s = overlay_serialize()
 i = s.find('_GUIDE_FP_')
 if i < 0:
@@ -2081,6 +2087,9 @@ else:
     print("nlit=", len(lit))
     print("cols=", "-".join([str((x % 30) + 1) for x in lit]))
     print("rows=", "-".join([str((x // 30) + 1) for x in lit]))
+    del cells, lit
+del s
+gc.collect()
 """, timeout=30)
         vals = parse_kv(out)
         check(vals.get("found") == 1,
