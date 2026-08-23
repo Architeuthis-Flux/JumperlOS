@@ -1,19 +1,30 @@
 # 555 LED Flasher
 
-An NE555 wired as an astable multivibrator, blinking an LED at about 1.4 Hz.
-The Jumperless makes every connection between the parts; you only push the
-parts into the breadboard.
+An NE555 wired as an astable multivibrator, blinking an LED. The Jumperless
+makes every connection between the parts; you only push the parts into the
+breadboard.
 
 ## Parts you need
 
-| Part | Value | Package | Rows |
-|------|-------|---------|------|
-| U1   | NE555 | DIP-8   | pin 1 at row 35, across the middle gap |
-| R1   | 10k   | axial   | 10 - 40, straddling the middle gap |
-| R2   | 47k   | axial   | 13 - 43, straddling the middle gap |
-| C1   | 10uF  | electrolytic | + at 18, - at 19 |
-| LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 |
-| R3   | 330   | axial   | 16 - 46, straddling the middle gap |
+**The values below are what is in the drawer, not what the project requires.**
+Nothing in the guide fails you for using something else: each resistor step
+measures what you put in and reports it, and `main.py` works out the blink rate
+*your* parts should give. Bring roughly the right order of magnitude and the
+project tells you what you built.
+
+| Part | Suggested | Package | Rows | Anything from |
+|------|-----------|---------|------|---------------|
+| U1   | NE555 | DIP-8   | pin 1 at row 35, across the middle gap | - |
+| R1   | 10k   | axial   | 10 - 40, straddling the middle gap | 1k - 100k |
+| R2   | 47k   | axial   | 13 - 43, straddling the middle gap | 1k - 100k |
+| C1   | 10uF  | electrolytic | + at 18, - at 19 | 1uF - 100uF |
+| LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 | any colour |
+| R3   | 330   | axial   | 16 - 46, straddling the middle gap | 100R - 2k |
+
+The steps still fail on the two things that are mistakes rather than choices:
+a resistor reading **open** (a leg not seated in the hole) or **short** (both
+legs the same side of the ravine), and an LED drawing **no current**, which is
+what a backwards LED looks like electrically.
 
 Top rail is set to 5 V. Nothing else is pre-wired: opening the project leaves
 the breadboard completely bare, and every connection appears as you confirm
@@ -27,22 +38,45 @@ those rows yourself, the script notices and leaves your connection alone.
 
 ## What it does
 
-R1 charges C1 through R1+R2 and discharges it through R2, so
+C1 charges through R1+R2 and discharges through R2, so
 
-    f = 1.44 / ((R1 + 2*R2) * C1) = 1.44 / (104k * 10uF) = ~1.4 Hz
+    f    = 1.44 / ((R1 + 2*R2) * C1)
+    duty = (R1 + R2) / (R1 + 2*R2)
 
-The LED blinks at that rate, slightly longer on than off: OUT is high for
-0.693*(R1+R2)*C1 = 0.395 s and low for 0.693*R2*C1 = 0.326 s, so the duty
-cycle is ~54.8%.
+With the suggested parts that is 1.44 / (104k * 10uF) = **~1.4 Hz** at a
+**~55%** duty cycle - slightly longer on than off, because the charge path is
+the longer one.
 
-`main.py` counts the edges on OUT and prints a line every 3 seconds
-(counting whole edges in a 3 s window means the printed frequency lands on
-a 1/3 Hz grid - ±0.33 Hz resolution):
+`main.py` does not assume any of that. It asks the board what is actually
+placed, via `list_parts()`:
 
-    freq: 1.38 Hz   cap: 2.91 V
+- **R1, R2** come back with a `measured` field - the ohms the guide's
+  continuity check really read across that resistor, four-wire, during the
+  build. That is the number the prediction uses.
+- **C1** has no `measured` field, because capacitance is not something this
+  hardware can measure. Its `value:` is taken on trust, and the script says so.
 
-and mirrors the frequency to the OLED if one is attached. Hold the
-clickwheel to stop it.
+Then it counts rising edges on OUT and the fraction of samples above 2.5 V, and
+prints both sides every 3 seconds:
+
+    your parts: R1 9.83k  R2 47.2k  C1 10uF   (R measured)
+    they predict: 1.41 Hz, 55% high
+    measured: 1.33 Hz, 54% high   (predicted 1.41 Hz, 55%)   cap 2.91 V
+      the blink implies C1 = 10.6uF
+
+That last line solves the equation backwards for the one component nothing can
+measure. If it lands far from the value on your capacitor, the capacitor is the
+part that is not what the file thinks it is - electrolytics of this size are
+routinely -20/+80% and this is how you see yours. Counting whole edges in a 3 s
+window puts the measured frequency on a 1/3 Hz grid, so treat ±0.33 Hz as the
+resolution, not as disagreement.
+
+The frequency is mirrored to the OLED if one is attached. Hold the clickwheel
+to stop it.
+
+If you run `main.py` straight from the Files browser rather than after a guided
+build, there are no measurements to read - `measured` is RAM-only and does not
+survive a reboot - so it falls back to the file's values and tells you it did.
 
 ## Running it
 
@@ -107,6 +141,12 @@ you to the first thing you have not built yet.
 
 - No blink at all: check the 555's orientation - pin 1 (next to the dot) at
   row 35, and the chip must straddle the middle gap.
-- Blinking way too fast or slow: R1/R2 swapped, or the cap is not 10uF.
+- Blinking at a rate you did not expect: read the script's own two lines before
+  suspecting a fault. If `measured` and `predicted` agree, the circuit is
+  working correctly and the parts are simply not the ones the file suggests. If
+  they disagree and `the blink implies C1 = ...` is far from your cap's marking,
+  believe the implied value.
+- A resistor step says **open**: a leg is not in the hole, or it is in the wrong
+  row. It is not complaining about the value - no value is enforced.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.

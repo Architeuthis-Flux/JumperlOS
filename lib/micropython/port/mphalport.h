@@ -88,13 +88,52 @@ static inline void mp_hal_pin_output(mp_hal_pin_obj_t pin) {
                pin, gpio_get_function(pin), GPIO_FUNC_SIO, gpio_get_dir(pin));
     }
 }
-static inline void mp_hal_pin_open_drain_with_value(mp_hal_pin_obj_t pin, int v) { if (v) { gpio_set_dir(pin, 1); gpio_put(pin, 0); } else { gpio_put(pin, 0); gpio_set_dir(pin, 0); } }
+// OPEN-DRAIN EMULATION. Every bit-banged bus in the tree runs through these
+// three: SoftI2C, onewire, and - the one that bit users - the zero-length-write
+// fallback inside machine_i2c_jl.c, which is the path machine.I2C.scan() takes
+// for EVERY address it probes (extmod/machine_i2c.c: scan() calls writeto with
+// a NULL buffer of length 0, and the RP2 hardware block cannot emit that).
+//
+// An open-drain pin has exactly two states, and neither of them drives high:
+//   asserted -> SIO output, latch 0  (the pin pulls the line down)
+//   released -> SIO input            (the pull-up takes the line up)
+// The SIO OUT latch therefore stays 0 forever; only the direction moves.
+//
+// All three were wrong, in two independent ways, and both ways are invisible
+// to a compile-only test:
+//
+//  1. INVERTED. od_low set dir=0 (input = released) and od_high set dir=1
+//     (output, latch 0 = driven low) - each one did the other's job.
+//  2. STILL ON THE PERIPHERAL. open_drain_with_value never took the pad off
+//     GPIO_FUNC_SIO's competitor. machine.I2C sets funcsel=GPIO_FUNC_I2C in
+//     its constructor, so on the scan path the I2C block still owned both
+//     pads and every SIO write above landed nowhere. The block sits idle
+//     during a bit-bang, so SDA and SCL just rest on their pull-ups: the bus
+//     never moves, nothing can ACK, and scan() returns an empty list on a
+//     bus with a healthy device on it. (Reported from the bench as "the I2C
+//     lines are just held high" - they were, by the pull-ups, because no
+//     master was talking.) machine_i2c_jl.c restores funcsel=I2C after the
+//     fallback, which is the tell: it always expected us to claim the pad.
+//
+// Pulls are deliberately left as configured, unlike the upstream rp2 port
+// which clears them here. On this board the internal pull-up IS the bus's
+// pull-up on a routed breadboard net - it is what a project's
+// `config: gpio: pulls:` exists to turn on - so clearing it would strand a
+// module that has no pull-ups of its own with a line that can never rise.
+static inline void mp_hal_pin_od_low(mp_hal_pin_obj_t pin) { gpio_set_dir(pin, GPIO_OUT); }
+static inline void mp_hal_pin_od_high(mp_hal_pin_obj_t pin) { gpio_set_dir(pin, GPIO_IN); }
+static inline void mp_hal_pin_open_drain_with_value(mp_hal_pin_obj_t pin, int v) {
+    // Latch 0 BEFORE the direction so a stale 1 cannot drive the line high for
+    // even a cycle, and claim the pad LAST so it only leaves the peripheral
+    // once the SIO side already holds the state we want.
+    gpio_put(pin, 0);
+    if (v) { mp_hal_pin_od_high(pin); } else { mp_hal_pin_od_low(pin); }
+    gpio_set_function(pin, GPIO_FUNC_SIO);
+}
 static inline void mp_hal_pin_open_drain(mp_hal_pin_obj_t pin) { mp_hal_pin_open_drain_with_value(pin, 1); }
 static inline void mp_hal_pin_config(mp_hal_pin_obj_t pin, uint32_t mode, uint32_t pull, uint32_t alt) { (void)alt; gpio_set_dir(pin, mode); gpio_set_pulls(pin, pull == 1, pull == 2); }
 static inline int mp_hal_pin_read(mp_hal_pin_obj_t pin) { return (int)gpio_get(pin); }
 static inline void mp_hal_pin_write(mp_hal_pin_obj_t pin, int v) { gpio_put(pin, v); }
-static inline void mp_hal_pin_od_low(mp_hal_pin_obj_t pin) { gpio_set_dir(pin, 0); }
-static inline void mp_hal_pin_od_high(mp_hal_pin_obj_t pin) { gpio_set_dir(pin, 1); }
 
 // Additional pin control functions required by bitstream
 static inline void mp_hal_pin_high(mp_hal_pin_obj_t pin) { 

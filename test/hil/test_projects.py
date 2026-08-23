@@ -1739,11 +1739,27 @@ print("nb=", get_num_bridges())
                 # run file - the destructive removal's markDirty only reached
                 # disk at the next explicit save, which is the half a user
                 # actually loses.
-                if m and m.group(2) == "0":
-                    d.send(b"n")
-                d.expect(r"GUIDE step=5/5 \S+ state=WAIT",
-                         "i2c needle: the verify step committed and step 5 "
-                         "(the closing note) is waiting", timeout=45)
+                #
+                # UNCONDITIONAL, and that is the fix: this used to send the
+                # confirm only on ok=0, which made the phase pass exactly when
+                # the bus was quiet and hang for 45 s when it was not. The
+                # verdict here is bench-dependent - see the "ghost ACKs on a
+                # panel-less bus" note above, where a pulled-down SDA reports
+                # all 126 addresses as present - so a branch on it is a coin
+                # flip. A verify step waits for its confirm either way; and in
+                # the case where a pass had already carried the guide to step 5,
+                # this `n` merely confirms that closing note and the expect
+                # below still finds the line it printed on the way there.
+                d.send(b"n")
+                # ANY step-5 state, not WAIT specifically. What this phase needs
+                # to know is that the verify step committed and the guide moved
+                # on; step 5 is a `note`, so when the confirm above is already
+                # buffered as it enters, it runs RESULT -> COMMIT -> DONE
+                # without ever printing a WAIT. Insisting on WAIT made the
+                # assertion depend on the arrival timing of a keystroke.
+                d.expect(r"GUIDE step=5/5 \S+ state=(?:WAIT|RESULT|COMMIT|DONE)",
+                         "i2c needle: the verify step committed and the guide "
+                         "reached step 5 (the closing note)", timeout=45)
                 d.send(b"q")
                 d.expect(r"GUIDE .* state=EXIT", "i2c needle: 'q' left the guide")
                 guide_live = False

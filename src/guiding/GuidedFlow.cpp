@@ -673,6 +673,15 @@ static void guideParseStepLine(const String& body, GuideScript& out, String& err
         bool bval = parseBoolean(v, ok);
         if (ok) st.probeConfirm = bval;
     }
+    // `enforce: false` -> measure and report, do not judge. Note the negation:
+    // the struct field is bandAdvisory (see GuidedFlow.h for why it is stored
+    // that way round).
+    v = guideFlowField(fields, "enforce:");
+    if (v.length() > 0) {
+        bool ok;
+        bool bval = parseBoolean(v, ok);
+        if (ok) st.bandAdvisory = !bval;
+    }
     v = guideFlowField(fields, "script:");
     if (v.length() > 0) {
         String sp = guideScalar(v);
@@ -703,6 +712,18 @@ static void guideParseStepLine(const String& body, GuideScript& out, String& err
     if (st.type == GuideStepType::POWER_ON && st.check == GuideCheck::NONE &&
         guideFlowField(fields, "check:").length() == 0) {
         st.check = GuideCheck::RAIL_SANE;
+    }
+    // `enforce:` waives a band that was DERIVED from a part's value:, which is
+    // only continuity and vf. On every other check the min/max IS the author's
+    // own statement of intent, and waiving it would leave a step that measures
+    // and then does nothing with the answer. Say so at parse time rather than
+    // shipping a field that silently no-ops (H3's unsatisfiable-gate ruling).
+    if (st.bandAdvisory && st.check != GuideCheck::CONTINUITY &&
+        st.check != GuideCheck::VF) {
+        err += "guide step " + String(out.numSteps + 1) + ": enforce: only "
+               "applies to continuity/vf (ignored on " +
+               String(guideCheckName(st.check)) + "); ";
+        st.bandAdvisory = false;
     }
 
     out.steps[out.numSteps++] = st;

@@ -94,7 +94,24 @@ hatch).
 (**OHMS for continuity as of wave 2** — see §5.3; V for vf/voltage, Hz for
 oscillates), `tol` (per-part, percent, on the part not the step), `on_fail` (`warn` [default: show ✗,
 allow manual advance] | `retry` | `skip` | `block` [advance only via explicit skip
-gesture]), `timeout_ms` (default 1500), `probe_confirm`, `text` (last).
+gesture]), `timeout_ms` (default 1500), `probe_confirm`, `enforce` (see below),
+`text` (last).
+
+**`enforce: false` — measure, report, do not judge.** Applies to `continuity`
+and `vf` only, which are the two checks whose band is *derived from a part's
+`value:`* rather than authored outright; on any other check it is a parse-time
+warning and is ignored, because there the `min`/`max` IS the author's intent and
+waiving it would leave a step that measures and then does nothing. What it
+waives is exactly the in-band verdict. What still fails is what is a placement
+mistake rather than a value mistake: **open** (a leg not seated), **short**
+(<5 Ω — both legs the same side of the ravine), and on `vf` **no current**
+(missing or backwards). The measurement is reported in the step's detail line
+either way, and lands in the part's `measuredOhms`, readable from Python as
+`list_parts()[i]['measured']` — RAM only, so it reads 0.0 after a reboot or in a
+resumed guide and every consumer must fall back to `value:`. The shipped 555
+uses this on all three resistors and the LED so a substituted part changes the
+answer instead of failing the build; its `main.py` computes the expected blink
+rate and duty cycle from the measurements.
 
 ### 1.3 Why hybrid holds up
 

@@ -176,13 +176,16 @@ Three things are queued and specified, in this order:
 2. **The double-confirm question** above.
 3. **Bump `VERSION` at release.** Provisioning is version-gated, so none of the
    project content fixes reach a user's board until it does.
-4. **One deliberate loss to accept or overturn:** the shipped 555's final
-   "is it blinking?" check now reports `unmeasured` instead of passing, because
-   the frequency probe refuses to connect a 3.3 V pin to a node that can swing
-   to your 5 V rail. It is honest, but the marquee step of the flagship project
-   no longer verifies. The fix that would restore it — estimating frequency from
-   sampled taps, which covers the slow end where a 1.4 Hz blink lives — is
-   specified and not built.
+4. ~~**One deliberate loss to accept or overturn:** the shipped 555's final
+   "is it blinking?" check now reports `unmeasured` instead of passing...~~
+   **ANSWERED 2026-08-23** — you asked for the 555 to stop enforcing values and
+   just compute the expected frequency and duty cycle from what was placed, so
+   this one resolved itself. The `oscillates` step is gone (a step that can only
+   ever report `unmeasured` is worse than no step); `main.py` times the blink
+   off ADC0 and prints it beside what the *measured* resistors predict. The
+   sampled-tap frequency estimator that would have restored the old check is
+   therefore **dead scope** — do not build it. Details in the 555's README and
+   `BENCH_NEXT_SESSION.md` §0a.
 
 ## What I deliberately did not do
 

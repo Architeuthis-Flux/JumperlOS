@@ -40,20 +40,31 @@
 #ifdef INCLUDE_PROJECT_555
 const char* PROJECT_555_README_MD = R"(# 555 LED Flasher
 
-An NE555 wired as an astable multivibrator, blinking an LED at about 1.4 Hz.
-The Jumperless makes every connection between the parts; you only push the
-parts into the breadboard.
+An NE555 wired as an astable multivibrator, blinking an LED. The Jumperless
+makes every connection between the parts; you only push the parts into the
+breadboard.
 
 ## Parts you need
 
-| Part | Value | Package | Rows |
-|------|-------|---------|------|
-| U1   | NE555 | DIP-8   | pin 1 at row 35, across the middle gap |
-| R1   | 10k   | axial   | 10 - 40, straddling the middle gap |
-| R2   | 47k   | axial   | 13 - 43, straddling the middle gap |
-| C1   | 10uF  | electrolytic | + at 18, - at 19 |
-| LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 |
-| R3   | 330   | axial   | 16 - 46, straddling the middle gap |
+**The values below are what is in the drawer, not what the project requires.**
+Nothing in the guide fails you for using something else: each resistor step
+measures what you put in and reports it, and `main.py` works out the blink rate
+*your* parts should give. Bring roughly the right order of magnitude and the
+project tells you what you built.
+
+| Part | Suggested | Package | Rows | Anything from |
+|------|-----------|---------|------|---------------|
+| U1   | NE555 | DIP-8   | pin 1 at row 35, across the middle gap | - |
+| R1   | 10k   | axial   | 10 - 40, straddling the middle gap | 1k - 100k |
+| R2   | 47k   | axial   | 13 - 43, straddling the middle gap | 1k - 100k |
+| C1   | 10uF  | electrolytic | + at 18, - at 19 | 1uF - 100uF |
+| LED1 | any   | 2-lead  | anode (long leg) 22, cathode 23 | any colour |
+| R3   | 330   | axial   | 16 - 46, straddling the middle gap | 100R - 2k |
+
+The steps still fail on the two things that are mistakes rather than choices:
+a resistor reading **open** (a leg not seated in the hole) or **short** (both
+legs the same side of the ravine), and an LED drawing **no current**, which is
+what a backwards LED looks like electrically.
 
 Top rail is set to 5 V. Nothing else is pre-wired: opening the project leaves
 the breadboard completely bare, and every connection appears as you confirm
@@ -67,22 +78,45 @@ those rows yourself, the script notices and leaves your connection alone.
 
 ## What it does
 
-R1 charges C1 through R1+R2 and discharges it through R2, so
+C1 charges through R1+R2 and discharges through R2, so
 
-    f = 1.44 / ((R1 + 2*R2) * C1) = 1.44 / (104k * 10uF) = ~1.4 Hz
+    f    = 1.44 / ((R1 + 2*R2) * C1)
+    duty = (R1 + R2) / (R1 + 2*R2)
 
-The LED blinks at that rate, slightly longer on than off: OUT is high for
-0.693*(R1+R2)*C1 = 0.395 s and low for 0.693*R2*C1 = 0.326 s, so the duty
-cycle is ~54.8%.
+With the suggested parts that is 1.44 / (104k * 10uF) = **~1.4 Hz** at a
+**~55%** duty cycle - slightly longer on than off, because the charge path is
+the longer one.
 
-`main.py` counts the edges on OUT and prints a line every 3 seconds
-(counting whole edges in a 3 s window means the printed frequency lands on
-a 1/3 Hz grid - ±0.33 Hz resolution):
+`main.py` does not assume any of that. It asks the board what is actually
+placed, via `list_parts()`:
 
-    freq: 1.38 Hz   cap: 2.91 V
+- **R1, R2** come back with a `measured` field - the ohms the guide's
+  continuity check really read across that resistor, four-wire, during the
+  build. That is the number the prediction uses.
+- **C1** has no `measured` field, because capacitance is not something this
+  hardware can measure. Its `value:` is taken on trust, and the script says so.
 
-and mirrors the frequency to the OLED if one is attached. Hold the
-clickwheel to stop it.
+Then it counts rising edges on OUT and the fraction of samples above 2.5 V, and
+prints both sides every 3 seconds:
+
+    your parts: R1 9.83k  R2 47.2k  C1 10uF   (R measured)
+    they predict: 1.41 Hz, 55% high
+    measured: 1.33 Hz, 54% high   (predicted 1.41 Hz, 55%)   cap 2.91 V
+      the blink implies C1 = 10.6uF
+
+That last line solves the equation backwards for the one component nothing can
+measure. If it lands far from the value on your capacitor, the capacitor is the
+part that is not what the file thinks it is - electrolytics of this size are
+routinely -20/+80% and this is how you see yours. Counting whole edges in a 3 s
+window puts the measured frequency on a 1/3 Hz grid, so treat ±0.33 Hz as the
+resolution, not as disagreement.
+
+The frequency is mirrored to the OLED if one is attached. Hold the clickwheel
+to stop it.
+
+If you run `main.py` straight from the Files browser rather than after a guided
+build, there are no measurements to read - `measured` is RAM-only and does not
+survive a reboot - so it falls back to the file's values and tells you it did.
 
 ## Running it
 
@@ -147,94 +181,157 @@ you to the first thing you have not built yet.
 
 - No blink at all: check the 555's orientation - pin 1 (next to the dot) at
   row 35, and the chip must straddle the middle gap.
-- Blinking way too fast or slow: R1/R2 swapped, or the cap is not 10uF.
+- Blinking at a rate you did not expect: read the script's own two lines before
+  suspecting a fault. If `measured` and `predicted` agree, the circuit is
+  working correctly and the parts are simply not the ones the file suggests. If
+  they disagree and `the blink implies C1 = ...` is far from your cap's marking,
+  believe the implied value.
+- A resistor step says **open**: a leg is not in the hole, or it is in the wrong
+  row. It is not complaining about the value - no value is enforced.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[8] = { 0x043F6084, 0x0F3158A4, 0x72FF45E0, 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 8;
+const uint32_t PROJECT_555_README_MD_HASHES[9] = { 0x6B944773, 0x043F6084, 0x0F3158A4, 0x72FF45E0, 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 9;
 
-const char* PROJECT_555_MAIN_PY = R"===("""555 LED Flasher - companion script for /projects/555/wiring.yaml
+const char* PROJECT_555_MAIN_PY = R"===("""555 LED Flasher - companion for /projects/555/wiring.yaml. See README.md.
 
-Watches the 555's OUT pin, counts the rising edges past a 2.5 V threshold, and
-reports the blink rate every 3 seconds along with the timing cap's voltage.
+Times the blink on OUT and compares it to what the parts actually placed
+predict - resistors come back from list_parts()['measured'], so substituting
+one moves the answer instead of breaking anything.
 
-THE TAPS ARE THIS SCRIPT'S, NOT THE PROJECT'S. wiring.yaml used to ship
-ADC0-37 and ADC1-7 in its `bridges:` section, so opening the project put two
-wires on the board that the circuit does not need and the user never asked
-for. They belong to the measurement, not to the 555, so they are made here at
-start-up and taken back down on the way out - and only the ones this run
-actually created, so a tap you wired yourself survives.
+  ADC0 -> row 37   OUT (U1 pin 3, dip8 anchored at row 35)
+  ADC1 -> row 7    the RC junction - THR/TRIG and C1's + leg
 
-  ADC0 -> row 37   the 555's OUT pin (U1 pin 3, dip8 anchored at row 35)
-  ADC1 -> row 7    the RC timing junction - THR/TRIG and C1's + leg
+Both taps are made here and removed on the way out, and only the ones this run
+created. Runs standalone from the Files browser; _jl_project is optional.
 
-Runs standalone from the Files browser too - the launcher injects
-_jl_project, but nothing here depends on it.
+KEEP THIS LEAN - MicroPython compiles it out of one shared heap that never
+resets between runs, so every KB here is a KB the next script cannot have.
 """
 
 import time
 
-# The launcher injects this global; default so the script also runs standalone.
 _jl_project = globals().get("_jl_project", {})
 
-THRESHOLD = 2.5     # volts - the 555's OUT swings rail to rail
-REPORT_MS = 3000    # print a line this often
+THRESHOLD = 2.5     # volts - OUT swings rail to rail
+REPORT_MS = 3000
 
-OUT_ROW = 37        # U1 pin 3
-CAP_ROW = 7         # THR / TRIG / C1+
-
-# (node, row) pairs this script may need to bridge for its own measurement.
-# The nodes are named as STRINGS on purpose: connect/disconnect/is_connected
-# all take a NodeRef, and the string form works from a plain Files-browser run
-# where the module's bare ADC0/ADC1 constants may not be in scope.
+OUT_ROW = 37
+CAP_ROW = 7
 TAPS = (("ADC0", OUT_ROW), ("ADC1", CAP_ROW))
 
-# Filled in below with only the taps WE made, so the teardown cannot remove a
-# connection that was already on the board when we got here.
+_MUL = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3,
+        "": 1.0, "k": 1e3, "K": 1e3, "M": 1e6}
+
+
+def val(s):
+    """'47k'->47000.0, '10uF'->1e-05, '330'->330.0, else 0.0. '4k7' reads as
+    4k - close enough, and the guide measures resistors anyway."""
+    s = (s or "").strip()
+    n = ""
+    i = 0
+    while i < len(s) and (s[i].isdigit() or s[i] in ".+-"):
+        n += s[i]
+        i += 1
+    if not n:
+        return 0.0
+    try:
+        return float(n) * _MUL.get(s[i:i + 1], 1.0)
+    except Exception:
+        return 0.0
+
+
+def eng(x):
+    for m, suf in ((1e6, "M"), (1e3, "k"), (1, ""),
+                   (1e-3, "m"), (1e-6, "u"), (1e-9, "n")):
+        if abs(x) >= m:
+            return "%.3g%s" % (x / m, suf)
+    return "%.3g" % x
+
+
 made = []
 
 
 def taps_up():
-    """Bridge ADC0/ADC1 to the rows we measure. Idempotent and non-destructive."""
     for node, row in TAPS:
         try:
             if is_connected(node, row):
-                print("tap %s-%d was already there - leaving it alone"
-                      % (str(node), row))
+                print("tap %s-%d was already there - left alone" % (node, row))
                 continue
             connect(node, row)
             made.append((node, row))
         except Exception as e:
-            print("could not tap %s-%d: %s" % (str(node), row, str(e)))
+            print("could not tap %s-%d: %s" % (node, row, str(e)))
 
 
 def taps_down():
-    """Remove exactly the taps taps_up() made. Safe to call twice."""
     while made:
         node, row = made.pop()
         try:
             disconnect(node, row)
         except Exception as e:
-            print("could not un-tap %s-%d: %s" % (str(node), row, str(e)))
+            print("could not un-tap %s-%d: %s" % (node, row, str(e)))
 
 
-print("555 astable running...")
+def expected():
+    """(f_Hz, duty_pct, R1, R2, C1, how) from the parts on the board.
+
+    A resistor's `measured` ohms beats the file's `value:`. C1 has no such
+    reading - capacitance is not measurable here - so it is taken on trust.
+    """
+    p = {}
+    try:
+        for e in list_parts():
+            p[e["name"]] = e
+    except Exception:
+        pass
+
+    real = 0
+
+    def ohms(name):
+        e = p.get(name)
+        if not e:
+            return 0.0
+        m = e.get("measured", 0.0)
+        if m and m > 0:
+            return m
+        return val(e.get("value", ""))
+
+    for n in ("R1", "R2"):
+        e = p.get(n)
+        if e and e.get("measured", 0.0) > 0:
+            real += 1
+    r1, r2 = ohms("R1"), ohms("R2")
+    c1 = val(p.get("C1", {}).get("value", ""))
+    how = ("measured" if real == 2 else
+           "part-measured" if real else "from the project file")
+    if r1 > 0 and r2 > 0 and c1 > 0:
+        span = r1 + 2 * r2
+        return 1.44 / (span * c1), 100.0 * (r1 + r2) / span, r1, r2, c1, how
+    return 0.0, 0.0, r1, r2, c1, how
+
+
+print("555 astable")
 print("Hold the clickwheel to exit.")
 if _jl_project:
-    print("project: " + str(_jl_project.get("dir", "555")) +
-          "  variant: " + str(_jl_project.get("variant", "default")))
+    print("project: " + str(_jl_project.get("dir", "555")))
 
-# EVERYTHING FROM taps_up() ON IS INSIDE THE try, so the `finally` below owns
-# the taps from the instant they exist. The set-up is not instantaneous - it
-# makes two crossbar connections, brings up the OLED and takes a real ADC
-# reading - and a Ctrl-C or a clickwheel hold anywhere in that window would
-# otherwise strand ADC0-37 and ADC1-7 on the board, which is the exact state
-# this script exists to avoid leaving behind.
+# Everything from taps_up() on is inside the try, so `finally` owns the taps
+# from the instant they exist - a Ctrl-C during set-up must not strand them.
 try:
     taps_up()
-    print("measuring: ADC0 on row %d (OUT), ADC1 on row %d (cap)"
-          % (OUT_ROW, CAP_ROW))
+
+    exp_f, exp_d, R1, R2, C1, how = expected()
+    if exp_f > 0:
+        print("your parts: R1 %s  R2 %s  C1 %sF   (R %s)"
+              % (eng(R1), eng(R2), eng(C1), how))
+        print("they predict: %.2f Hz, %.0f%% high" % (exp_f, exp_d))
+        if how != "measured":
+            print("  (no continuity reading for every resistor - run the")
+            print("   guided build to measure them instead of trusting the file)")
+    else:
+        print("no usable R1/R2/C1 values - reporting the measurement only")
 
     try:
         oled_connect()
@@ -242,37 +339,49 @@ try:
         pass
 
     edges = 0
+    high = 0
+    total = 0
     above = adc_get(0) > THRESHOLD
     window_start = time.ticks_ms()
 
     while True:
         out_v = adc_get(0)
+        total += 1
         if out_v > THRESHOLD:
+            high += 1
             if not above:
                 edges += 1     # rising edge
                 above = True
-        elif out_v < THRESHOLD:
+        else:
             above = False
 
         elapsed = time.ticks_diff(time.ticks_ms(), window_start)
         if elapsed >= REPORT_MS:
             freq = (edges * 1000.0) / elapsed
-            cap_v = adc_get(1)
-            print("freq: %.2f Hz   cap: %.2f V" % (freq, cap_v))
+            duty = (100.0 * high / total) if total else 0.0
+            line = "%.2f Hz, %.0f%% high" % (freq, duty)
+            if exp_f > 0:
+                # Side by side, never pass/fail - the bench decides.
+                line += "   (predicted %.2f Hz, %.0f%%)" % (exp_f, exp_d)
+            print("measured: %s   cap %.2f V" % (line, adc_get(1)))
+            if freq > 0.05 and R1 > 0 and R2 > 0:
+                # The unmeasurable part, solved backwards from the blink.
+                print("  the blink implies C1 = %sF" % eng(1.44 / ((R1 + 2 * R2) * freq)))
             try:
                 oled_print("%.2f Hz" % freq)
             except Exception:
                 pass
-            edges = 0
+            edges = high = total = 0
             window_start = time.ticks_ms()
 
-        time.sleep(0.002)   # ~500 Hz sampling: plenty for a ~1.4 Hz blink
+        time.sleep(0.002)   # ~500 Hz: plenty for a ~1 Hz blink, and it is what
+                            # makes the duty-cycle count meaningful
 
 except KeyboardInterrupt:
     pass
 finally:
-    # finally, not just the except arm: a break, an unexpected exception and a
-    # clean fall-through all have to leave the board the way we found it.
+    # finally, not just the except arm: a break, an exception and a clean
+    # fall-through all have to leave the board the way we found it.
     taps_down()
     try:
         oled_clear()
@@ -280,8 +389,8 @@ finally:
         pass
     print("bye")
 )===";
-const uint32_t PROJECT_555_MAIN_PY_HASHES[4] = { 0x2BE6A1DA, 0xFD94A80B, 0x89075267, 0xD488958C };
-const int PROJECT_555_MAIN_PY_HASH_COUNT = 4;
+const uint32_t PROJECT_555_MAIN_PY_HASHES[6] = { 0x7B1AEC22, 0x228EBF07, 0x2BE6A1DA, 0xFD94A80B, 0x89075267, 0xD488958C };
+const int PROJECT_555_MAIN_PY_HASH_COUNT = 6;
 
 const char* PROJECT_555_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges
@@ -289,9 +398,9 @@ meta:
   project: 555
   title: "555 LED Flasher"
   variant: default
-  summary: "NE555 astable blinking an LED at ~1.4 Hz"
+  summary: "NE555 astable blinking an LED - your R and C set the rate"
   script: main.py
-  needs: ["NE555 (DIP-8)", "10k", "47k", "10uF cap", "LED", "330"]
+  needs: ["NE555 (DIP-8)", "~10k", "~47k", "~10uF cap", "LED", "~330"]
 parts:
   - name: "U1"
     type: ic
@@ -338,16 +447,35 @@ parts:
     pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 22}}
 guide:
   title: "555 LED Flasher"
+  # NOTHING HERE JUDGES A COMPONENT VALUE. Every `value:` above is a suggestion
+  # for the parts bin, not a requirement: `enforce: false` on the R steps means
+  # the check measures the resistor, reports what it read, and passes. The two
+  # verdicts that still fail are the ones that are PLACEMENT mistakes rather
+  # than value mistakes - open (a leg not seated) and short (both legs the same
+  # side of the ravine) - plus "no current" on the LED, which is what a
+  # backwards LED looks like from here.
+  #
+  # Whatever the user actually reached for is then the truth the companion
+  # script computes from: every measured resistance lands in that part's
+  # `measured` field, main.py reads it back through list_parts(), and prints
+  # the frequency and duty cycle THOSE parts predict next to the ones the board
+  # observes. Substituting a 22k for the 47k changes the answer instead of
+  # failing the build, which is the whole point of a starter project.
   steps:
-    - {do: note, text: "A 555 blinker. Wheel: turn=prev/next, click=confirm, hold=exit."}
+    - {do: note, text: "A 555 blinker - any R and C work, the script does the math. Turn, click, hold=exit."}
     - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 35."}
-    - {do: place, part: R1, check: continuity, text: "10k resistor: rows 10 and 40, straddling the middle gap."}
-    - {do: place, part: R2, check: continuity, text: "47k resistor: rows 13 and 43, straddling the middle gap."}
-    - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19."}
-    - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23."}
-    - {do: place, part: R3, check: continuity, text: "330 resistor: rows 16 and 46, straddling the middle gap."}
+    - {do: place, part: R1, check: continuity, enforce: false, text: "10k-ish: rows 10 and 40, over the gap. Anything 1k-100k works - it gets measured."}
+    - {do: place, part: R2, check: continuity, enforce: false, text: "47k-ish: rows 13 and 43, over the gap. Larger than R1 gives a more even blink."}
+    - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19. A different value is fine."}
+    - {do: place, part: LED1, check: vf, enforce: false, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23. Any colour."}
+    - {do: place, part: R3, check: continuity, enforce: false, text: "330-ish for the LED: rows 16 and 46, over the gap. 100R to 2k all fine."}
     - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
-    - {do: verify, target: 37, check: oscillates, min: 0.3, max: 30, text: "The LED should be blinking (~1.4 Hz). Checking OUT..."}
+    # No `check: oscillates` here. It drives a 3.3 V GPIO onto the target and
+    # refuses a node that can swing to this project's 5 V rail, so on the
+    # shipped wiring it can only ever report `unmeasured` - a step that cannot
+    # succeed is worse than no step. The blink rate is measured properly by
+    # main.py, off ADC0, where it can also be compared against the parts.
+    - {do: note, text: "Built. Run main.py - it times the blink and checks it against your parts."}
 # NO bridges: and no nets: on purpose. Opening this project must leave the
 # breadboard completely unconnected - every connection here belongs to a part
 # and waits for the guide to commit it. The two ADC taps that used to live here
@@ -359,8 +487,8 @@ guide:
 power:
   topRail: 5.0
 )===";
-const uint32_t PROJECT_555_WIRING_YAML_HASHES[4] = { 0x8E29492C, 0xEEC03F56, 0x2E55BF41, 0xC8CBC62E };
-const int PROJECT_555_WIRING_YAML_HASH_COUNT = 4;
+const uint32_t PROJECT_555_WIRING_YAML_HASHES[5] = { 0x8158E30E, 0x8E29492C, 0xEEC03F56, 0x2E55BF41, 0xC8CBC62E };
+const int PROJECT_555_WIRING_YAML_HASH_COUNT = 5;
 
 #endif // INCLUDE_PROJECT_555
 
@@ -1247,6 +1375,7 @@ def beacon(i2c, kind, w, h):
     scr = None
     frame = dots = splash_at = 0
     last = None
+    stuck = False
     while True:
         nap = 0.02
         if scr is None:
@@ -1256,6 +1385,17 @@ def beacon(i2c, kind, w, h):
                 try:
                     found = i2c.scan()
                 except Exception:
+                    found = []
+                if len(found) > 8:
+                    # Every address "answering" is not a bus full of chips: it
+                    # is SDA unable to rise, so the master reads its own low as
+                    # an ACK from everyone. Almost always a missing pull-up.
+                    if not stuck:
+                        stuck = True
+                        print("\nevery address answered - SDA is stuck low, not %d"
+                              " devices." % len(found))
+                        print("  the panel's own pull-ups should do this; check"
+                              " SDA is really on its row")
                     found = []
                 addr = None
                 for a in ADDRS:
@@ -1351,8 +1491,8 @@ finally:
     pins(False)
     print("bye")
 )===";
-const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[5] = { 0xCB6D158D, 0x6D63CA5E, 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
-const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 5;
+const uint32_t PROJECT_I2CSCRN_MAIN_PY_HASHES[6] = { 0xF166AB80, 0xCB6D158D, 0x6D63CA5E, 0x5883C818, 0xDC3D3F52, 0x79C8D0B3 };
+const int PROJECT_I2CSCRN_MAIN_PY_HASH_COUNT = 6;
 
 const char* PROJECT_I2CSCRN_WIRING_YAML = R"===(version: 2
 sourceOfTruth: bridges

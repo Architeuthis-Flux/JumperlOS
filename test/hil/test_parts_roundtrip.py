@@ -285,6 +285,8 @@ print("c1anode=", by['C1']['pins']['A']['node'])
 print("c1bnode=", by['C1']['pins']['B']['node'])
 print("u1place=", by['U1']['placement'])
 print("r1place=", by['R1']['placement'])
+print("r1meas=", by['R1']['measured'])
+print("keyorder=", 1 if by['R1']['pins'] else 0)
 """)
     vals = parse_kv(out)
     check(vals.get("c1place") == "compact",
@@ -298,6 +300,19 @@ print("r1place=", by['R1']['placement'])
           "list_parts: a part with no placement: reports 'expanded' (the default)")
     check(vals.get("r1place") == "expanded",
           "list_parts: R1 too - the field is per-part, not global")
+    # `measured` rides between `placement` and the pins list in the record.
+    # Two things at once: the key exists at all, and the POSITIONAL SPLIT after
+    # it still lands - the pins dict is the field that would go missing if the
+    # new field and the reader had drifted apart, so a non-empty pins dict here
+    # is the real guard on that seam. A part nothing has measured must read
+    # 0.0, never a stale value: measuredOhms is RAM-only and this state came
+    # off disk.
+    check(vals.get("r1meas") == 0.0,
+          "list_parts: an unmeasured part reports measured = 0.0, not a value "
+          f"parsed out of value: (got {vals.get('r1meas')!r})")
+    check(vals.get("keyorder") == 1,
+          "list_parts: the pins dict still parses after the inserted field - "
+          "the record and its positional reader did not drift")
 
     # --- 2b. The overlays: section survived a parts value that says
     # "overlays:" -------------------------------------------------------------

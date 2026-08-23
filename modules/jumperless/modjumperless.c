@@ -2672,8 +2672,11 @@ static const char* jl_rec_field( const char** cursor, char delim, size_t* len ) 
 }
 
 // list_parts() -> list of dicts:
-//   {name, type, value, row, footprint, placed, placement,
+//   {name, type, value, row, footprint, placed, placement, measured,
 //    pins: {PIN: {node, connect, class}}}
+// `measured` is ohms from the last continuity check on that part, 0.0 when it
+// has not been measured this session (it is RAM-only firmware side) - a script
+// wanting the real part reads `measured or value`.
 static mp_obj_t jl_list_parts_func( void ) {
     mp_obj_t list = mp_obj_new_list( 0, NULL );
     int numParts = jl_get_num_parts( );
@@ -2682,7 +2685,7 @@ static mp_obj_t jl_list_parts_func( void ) {
         const char* rec = jl_get_part_info( i );
         if ( rec == NULL || rec[ 0 ] == '\0' ) continue;
 
-        // name|type|value|row|footprint|placed|placement|PIN,node,connect,class;...
+        // name|type|value|row|footprint|placed|placement|measured|PIN,node,connect,class;...
         const char* cur = rec;
         size_t len;
         const char* name = jl_rec_field( &cur, '|', &len );
@@ -2697,8 +2700,9 @@ static mp_obj_t jl_list_parts_func( void ) {
         const char* placed = jl_rec_field( &cur, '|', &len );
         const char* placement = jl_rec_field( &cur, '|', &len );
         size_t placement_len = len;
+        const char* measured = jl_rec_field( &cur, '|', &len );
 
-        mp_obj_t dict = mp_obj_new_dict( 8 );
+        mp_obj_t dict = mp_obj_new_dict( 9 );
         mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_name ),
                            mp_obj_new_str( name, name_len ) );
         mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_type ),
@@ -2715,6 +2719,10 @@ static mp_obj_t jl_list_parts_func( void ) {
         // below was resolved through (partPinNode is the sole authority).
         mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_placement ),
                            mp_obj_new_str( placement, placement_len ) );
+        // Ohms, or 0.0 for "not measured this session". strtod stops at the
+        // '|' the splitter left in place, so no copy is needed.
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_measured ),
+                           mp_obj_new_float( strtod( measured, NULL ) ) );
 
         mp_obj_t pins = mp_obj_new_dict( 0 );
         while ( *cur != '\0' ) {

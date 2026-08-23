@@ -814,9 +814,17 @@ def list_parts() -> List[Dict]:
     Returns:
         A list of dicts:
         {'name', 'type', 'value', 'row', 'footprint', 'placed', 'placement',
-         'pins': {PIN: {'node', 'connect', 'class'}}}
+         'measured', 'pins': {PIN: {'node', 'connect', 'class'}}}
         'node' is the resolved breadboard node for the leg (-1 if off-board),
         'connect' is the node it bridges to (-1 for none).
+
+        'measured' is ohms: what a guided build's continuity check actually
+        read across this part, or 0.0 if it was never measured. It is the real
+        component instead of the file's nominal 'value', which is what a
+        companion script wants when it computes anything from the circuit -
+        so read `p['measured'] or parse(p['value'])`, in that order. It lives
+        in RAM only, so it is 0.0 after a reboot or in a resumed guide, and
+        the 'value' fallback is not optional.
 
         'placement' is 'expanded', 'compact' or 'custom', and it is the mode
         every 'node' above was resolved through:

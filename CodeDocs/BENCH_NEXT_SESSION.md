@@ -10,6 +10,38 @@ session; that one is the detail when something looks wrong.
 
 ---
 
+## 0a. Today's two (5 min) — start here
+
+Added 2026-08-23, after your two reports. Both are on the board already
+(firmware **5.7.4.2**; the version bump is what re-provisions `/projects`).
+
+- [ ] **`i2cscrn`, end to end.** The root cause was not the wiring and not your
+  panel: `machine.I2C.scan()` probes every address with a **zero-length write**,
+  the RP2 block cannot emit one, so it falls back to bit-banging — and the
+  port's open-drain helpers were both polarity-inverted *and* never took the pad
+  off the I2C peripheral. The bit-bang landed nowhere, the idle peripheral held
+  SDA/SCL on their pull-ups, and every address NAKed. Exactly "the I2C lines are
+  just held high". Proven fixed on hardware (a scan that took 5.6 s of timeouts
+  now takes 16 ms), but **your panel answering is the confirmation I could not
+  make myself** — the board had no I2C device routed while I was on it.
+  - If it still fails: the script now says `every address answered - SDA is
+    stuck low` when that is what is happening, which is the other way this
+    looks. That one means a pull-up, not a fix.
+- [ ] **The 555 with deliberately wrong parts.** Put a **22k where the 47k
+  goes** (or anything 1k–100k). It must **pass**, print
+  `R2: 22.1k measured (value: says 47.0k - not enforced, ...)`, and `main.py`
+  must then predict a *slower* blink that matches what the LED actually does.
+  This is the half of `enforce: false` I could not prove without a real
+  resistor — the check runs *before* the part's bridges exist, so no fixture can
+  fake conduction (the suite records that constraint at phase 12d).
+  - [ ] **Pull the resistor out entirely** → must still **fail** with
+    `open`, and the message must **not** quote a band any more.
+  - [ ] **`measured` reaches Python**: after the build, `list_parts()` should
+    show real ohms on R1/R2/R3. It is RAM-only — reboot and it is 0.0 again and
+    the script says it fell back to the file.
+
+---
+
 ## 0. Two ghost-chasers, 30 seconds
 
 - [ ] **Close the `jumperless` terminal client on port 1.** A stray byte
@@ -106,12 +138,19 @@ four-wire, so the crossbar's own resistance drops out of the number.
 - [ ] **Both legs on the same side** (so the rows short) → `val=short`, and the
   hint asks whether the legs bridge the ravine. This was a silent pass before.
 - [ ] **A 10 k in a 1 k step** → `reads 10.1k, expected 1.00k ±20% — wrong
-  part?`
+  part?` **Use `nand00` or `eeprom` for this one, not the 555** — the 555's
+  resistor steps are `enforce: false` as of 2026-08-23 and will report the
+  10 k and pass. That is the point of §0a; this bullet is the *enforcing*
+  behaviour, which every other project still has.
 - [ ] **The 555 kit, guided, end to end.** Its 47k should now read as a
   resistance instead of the 0.03 mA quantization floor that failed last time,
   and the LED's vf step should route — the fabric that refused three times on
   your last pass now measures. Watch for `val=noroute`; if you see it, that is
-  the one regression I most want to hear about.
+  the one regression I most want to hear about. The final step is a **note**
+  now, not an `oscillates` verify: that check drives a 3.3 V GPIO onto the
+  target and refuses a node that can reach this project's 5 V rail, so it could
+  only ever report `unmeasured`. `main.py` times the blink instead, and can
+  compare it to the parts.
 - [ ] **Spot-check three values against the DMM** (330, 10k, 47k). Claimed:
   ±3 % up to 10 k, ±7 % at 47 k. Tell me if reality is worse — the bands are
   author-owned and easy to widen.

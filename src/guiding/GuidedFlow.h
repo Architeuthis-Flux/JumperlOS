@@ -24,6 +24,19 @@ struct GuideStep {
     GuideOnFail onFail;
     uint16_t timeoutMs;     // default 1500
     bool     probeConfirm;  // STEP_PROBE_WAIT gate (tap n1/n2, or `t <row>`)
+    bool     bandAdvisory;  // author wrote `enforce: false` - measure and REPORT
+                            // the value, do not judge it. open/short still fail
+                            // (those are placement errors, not value errors);
+                            // only the in-band verdict is waived, and the
+                            // measurement still lands in the part's
+                            // measuredOhms for a companion script to use.
+                            //
+                            // Stored INVERTED on purpose: all four GuideStep
+                            // construction sites here memset to zero, and three
+                            // of them are the `auto:` synthesis path. A
+                            // positive `enforce` would default to false at any
+                            // site someone forgets, silently disarming every
+                            // synthesized check. Zero has to mean "enforce".
     char     text[96];      // author prompt (parsed by quote-pair, LAST field)
     char     script[40];    // RUN_SCRIPT path: PARSED AND STORED, NEVER RUN.
                             // No run-step execution shipped on this branch and

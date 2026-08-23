@@ -5729,9 +5729,17 @@ def list_parts() -> List[Dict]:
     Returns:
         A list of dicts:
         {'name', 'type', 'value', 'row', 'footprint', 'placed', 'placement',
-         'pins': {PIN: {'node', 'connect', 'class'}}}
+         'measured', 'pins': {PIN: {'node', 'connect', 'class'}}}
         'node' is the resolved breadboard node for the leg (-1 if off-board),
         'connect' is the node it bridges to (-1 for none).
+
+        'measured' is ohms: what a guided build's continuity check actually
+        read across this part, or 0.0 if it was never measured. It is the real
+        component instead of the file's nominal 'value', which is what a
+        companion script wants when it computes anything from the circuit -
+        so read `p['measured'] or parse(p['value'])`, in that order. It lives
+        in RAM only, so it is 0.0 after a reboot or in a resumed guide, and
+        the 'value' fallback is not optional.
 
         'placement' is 'expanded', 'compact' or 'custom', and it is the mode
         every 'node' above was resolved through:
@@ -6817,8 +6825,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[13] = { 0x84364A5A, 0x3AC5793C, 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 13;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[14] = { 0xCDF87BB7, 0x84364A5A, 0x3AC5793C, 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 14;
 #endif
 
 //==============================================================================

@@ -2181,9 +2181,13 @@ const char* jl_get_part_info( int idx ) {
     // the mode partPinNode() resolved every `node` below through, so a script
     // reading a leg's node without it cannot tell a compact leg sitting in its
     // endpoint hole from an expanded one that merely happens to be there.
+    // `measured` rides after `placement`: the ohms a continuity check actually
+    // resolved for this part this session, 0 when it never ran (it is RAM-only
+    // - see PartDefinition - so a reboot or a resumed guide legitimately reads
+    // 0 and the caller falls back to `value`).
     // jl_list_parts_func() splits this record positionally - keep the two in
     // step, and keep the pins list LAST (it is the only ';'-joined field).
-    int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|%s|",
+    int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|%s|%.6g|",
                         partRecordSafe( p.name, safeName, sizeof( safeName ) ),
                         partRecordSafe( p.typeStr, safeType, sizeof( safeType ) ),
                         partRecordSafe( p.value, safeValue, sizeof( safeValue ) ),
@@ -2192,7 +2196,8 @@ const char* jl_get_part_info( int idx ) {
                         p.placed ? 1 : 0,
                         p.placement == PART_PLACEMENT_COMPACT
                             ? "compact"
-                            : ( p.placement == PART_PLACEMENT_CUSTOM ? "custom" : "expanded" ) );
+                            : ( p.placement == PART_PLACEMENT_CUSTOM ? "custom" : "expanded" ),
+                        (double)p.measuredOhms );
 
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
         if ( pos < 0 || pos > (int)sizeof( partBuffer ) - 48 ) break;

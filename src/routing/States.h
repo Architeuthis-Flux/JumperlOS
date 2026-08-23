@@ -386,6 +386,15 @@ struct ConfigState {
 //     part) a `max:` under 5 ohms, logs "min/max look like legacy mA" and
 //     falls back to the derived band. VF/VOLTAGE/OSCILLATES min/max are
 //     unchanged (volts / volts / Hz).
+//   - `enforce: false` on a CONTINUITY or VF step waives the band verdict
+//     only: the check still runs, still prints what it measured, and still
+//     FAILS on the verdicts that mean a placement mistake rather than a value
+//     mistake - open, short (<5 ohm), and vf's no-current (missing/backwards).
+//     It is for a project whose `value:`s are a suggestion; the reading lands
+//     in the part's measuredOhms (RAM only, list_parts()['measured']) so a
+//     companion script can compute from the components actually placed. On any
+//     other check kind the field is a parse warning and is ignored - there
+//     min/max IS the author's own intent and there is nothing to waive.
 //   - ONE STEP IS ONE `- {...}` FLOW MAP. Block style (`- id: x` on one line,
 //     `  do: place` on the next) is NOT parsed: each field line falls through
 //     to the guide-level key arm, which ends the steps: list, so the step
@@ -442,6 +451,18 @@ struct PartDefinition {
     uint8_t  tol;              // `tol:` percent for the derived continuity
                                // band (invest-measurement.md §2.2). 0 = unset
                                // -> the 15 % default; serialized only when set
+    float    measuredOhms;     // RUNTIME ONLY, 0 = never measured. The last
+                               // resistance a continuity check actually
+                               // resolved for this part (4-wire, R = dV/I), so
+                               // a companion script can compute from the parts
+                               // ON THE BOARD instead of the values in the
+                               // file - list_parts() reports it as `measured`.
+                               // Deliberately NOT serialized: it is a reading,
+                               // not authorship, and staying out of toYAML
+                               // keeps it clear of the parts round-trip
+                               // contract entirely. It therefore does not
+                               // survive a reboot or a resumed guide, and
+                               // every consumer must fall back to `value:`.
     bool     placed;           // runtime: expansion applied (guide progress)
     uint8_t  placement;        // PART_PLACEMENT_* - serialized only when non-default
     PartPin  pins[MAX_PART_PINS];

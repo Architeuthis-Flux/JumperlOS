@@ -609,6 +609,38 @@ guide:
     - {do: place, part: ROHM, check: continuity, min: 20, max: 900, on_fail: warn, timeout_ms: 6000, text: "a real ohm band"}
 """
 
+# `enforce: false` - the value-advisory switch the shipped 555 runs on.
+#
+# WHAT THIS FIXTURE CAN PROVE, AND WHAT IT CANNOT. The half that needs a real
+# resistor - an out-of-band measurement PASSING - is not constructible here for
+# the reason phase 12d already records: the stimulus rule refuses a row that
+# carries a user bridge, and a bridge is the only way to make two rows conduct
+# without a physical part. So RENF reads OPEN, and what is asserted is the
+# other half of the contract: open is a PLACEMENT verdict and must still FAIL
+# even when the band is waived, and its message must stop quoting a band it is
+# not enforcing (quoting one reads as "wrong value" when the truth is "no part
+# here"). The passing half is a bench line in CodeDocs/BENCH_NEXT_SESSION.md.
+ENF_DIR = "/projects/hilenf"
+ENF_PATH = ENF_DIR + "/wiring.yaml"
+ENF_WIRING = """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilenf
+  title: "HIL Enforce"
+parts:
+  - name: "RENF"
+    type: resistor
+    value: "10k"
+    footprint: sip2
+    row: 50
+    pins: {A: {pin: 1}, B: {pin: 2}}
+guide:
+  title: "HIL Enforce"
+  steps:
+    - {do: place, part: RENF, check: continuity, enforce: false, on_fail: warn, timeout_ms: 6000, text: "advisory band, open must still fail"}
+    - {do: verify, target: 5, check: voltage, min: 0.0, max: 1.0, enforce: false, text: "nothing to waive here"}
+"""
+
 
 _csi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]")
 
@@ -2178,6 +2210,55 @@ print("wrote=", 1 if fs_write({LEGACY_PATH!r}, {LEGACY_WIRING!r}) else 0)
         d.close()
     time.sleep(1.0)
 
+    # --- 12j. `enforce: false` waives the BAND and nothing else --------------
+    #
+    # See ENF_WIRING for what this fixture can and cannot reach. Two assertions
+    # that do not need a physical part:
+    #   1. open still FAILS on an advisory step, and its detail no longer
+    #      quotes a band - contrast phase 12h, where the enforcing steps must
+    #      still print "band 8.00k-12.0k" on the same open.
+    #   2. `enforce:` on a check with no derived band (voltage/oscillates/...)
+    #      warns at parse time and is dropped, rather than silently no-opping.
+    jl_exec(f"""
+for d in ("/projects", {ENF_DIR!r}):
+    if not fs_exists(d):
+        try:
+            jfs.mkdir(d)
+        except Exception as e:
+            print("mkdirerr=", e)
+print("wrote=", 1 if fs_write({ENF_PATH!r}, {ENF_WIRING!r}) else 0)
+""", timeout=30)
+    d = GuideDriver()
+    try:
+        d.send(f"z {ENF_PATH} new\r\n".encode())
+        guide_live = True
+        d.expect(r"enforce: only applies to continuity/vf \(ignored on voltage\)",
+                 "enforce: on a bandless check warns at parse time instead of "
+                 "silently doing nothing", timeout=40)
+        d.expect(r"GUIDE step=1/2 id=place_RENF state=WAIT", "enforce fixture step 1")
+        d.send(b"n")
+        d.expect(r"state=RESULT check=continuity val=open ok=0",
+                 "THE NEEDLE: open is a placement verdict and still FAILS with "
+                 "the band waived")
+        m = d.expect(r"RENF: open \([^)]*\)", "the open detail prints")
+        renf = m.group(0) if m else "band"   # a miss must not pass this check
+        check("band" not in renf,
+              "and it no longer quotes a band the step is not enforcing "
+              f"(got: {renf!r})")
+        d.expect(r"check failed - n advances anyway", "warn advance offered")
+        d.send(b"n")
+        # \S+ for the id, like every other phase: the suffix is not the step
+        # index (this one comes back as verify_5), and hardcoding it made the
+        # expect time out and desync the EXIT assertion after it.
+        d.expect(r"GUIDE step=2/2 \S+ state=WAIT",
+                 "the bandless step still parsed and runs")
+        d.send(b"q")
+        d.expect(r"GUIDE .* state=EXIT", "enforce fixture EXIT")
+        guide_live = False
+    finally:
+        d.close()
+    time.sleep(1.0)
+
     # --- 13. Move + snap: the pads' headless twins --------------------------
     #
     # Kevin's control-surface principle says the probe pads are ABSOLUTE - tap
@@ -2904,7 +2985,8 @@ for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
     if fs_exists(p):
         jfs.remove(p)
 runs = 0
-for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR!r}):
+for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR!r},
+           {ENF_DIR!r}):
     if not fs_exists(dd):
         continue
     try:
@@ -2918,7 +3000,8 @@ for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR
                 runs += 1
             except Exception as e:
                 print("rmerr=", e)
-for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR!r}):
+for dd in ({PROJ_DIR!r}, {VFNR_DIR!r}, {STARVE_DIR!r}, {RAIL_DIR!r}, {LEGACY_DIR!r},
+           {ENF_DIR!r}):
     try:
         jfs.rmdir(dd)
     except Exception:
@@ -2927,14 +3010,15 @@ print("runsremoved=", runs)
 print("gone=", 0 if fs_exists({PROJ_DIR!r}) else 1)
 print("gonevfnr=", 0 if fs_exists({VFNR_DIR!r}) else 1)
 print("gonet8=", 0 if (fs_exists({STARVE_DIR!r}) or fs_exists({RAIL_DIR!r})
-                       or fs_exists({LEGACY_DIR!r})) else 1)
+                       or fs_exists({LEGACY_DIR!r})
+                       or fs_exists({ENF_DIR!r})) else 1)
 """, timeout=30)
     vals = parse_kv(out)
     print(f"  info: removed {vals.get('runsremoved')} leftover run file(s)")
     check(vals.get("gone") == 1, f"removed {PROJ_DIR} from the board")
     check(vals.get("gonevfnr") == 1, f"removed {VFNR_DIR} from the board")
     check(vals.get("gonet8") == 1,
-          "removed the task-8 fixture dirs (hilstv / hilrail / hilleg)")
+          "removed the task-8 fixture dirs (hilstv / hilrail / hilleg / hilenf)")
 
     if snapshot is not None:
         check(board_state_restore(snapshot), "board state restored to pre-test snapshot")

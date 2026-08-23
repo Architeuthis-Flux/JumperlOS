@@ -1558,6 +1558,22 @@ void guideCheckBegin(const GuideCheckRun& run) {
             }
             int nDevices = i2cScan(/*sdaRow=*/-1, /*sclRow=*/-1, 26, 27,
                                    /*leaveConnections=*/1, /*internalScan=*/0);
+            // A bus whose SDA cannot rise ACKs EVERYTHING: the master reads its
+            // own low as an ack from every address in turn, so the scan comes
+            // back with ~126 "devices" on a bus that has none. Passing on that
+            // is the worst outcome available here - it certifies wiring that
+            // does not work, and it is the DEFAULT bench case, because the
+            // RP2350's internal pull-up (~50 k) cannot pull a routed
+            // breadboard net up inside a 100 kHz bit time. Real modules bring
+            // their own ~4.7 k and work fine; a bare header does not.
+            // Eight is well above any breadboard bus and far below a flood.
+            if (nDevices > 8) {
+                finishCheck(GUIDE_CHECK_FAIL,
+                            ckHint("every address answered - SDA is stuck low "
+                                   "(no pull-up on the bus?)"),
+                            "%dghost", nDevices);
+                break;
+            }
             bool pass = (nDevices > 0);
             finishCheck(pass ? GUIDE_CHECK_PASS : GUIDE_CHECK_FAIL,
                         pass ? nullptr
@@ -1817,15 +1833,56 @@ static void evaluateContinuity(void) {
     // it the division is noise over noise, and "open" is the true answer for
     // every part a guide step actually places.
     if (fabsf(ck.iPart_mA) < 0.025f) {
-        setDetail("%s: open (%s at %.1fV across the rows; band %s-%s)",
-                  partName, iStr, (double)ck.stimVolts, loStr, hiStr);
+        // Don't quote a band on a step that does not enforce one - naming
+        // "band 8.00k-12.0k" next to an open reads as "your resistor is the
+        // wrong value" when the actual message is "there is no resistor here".
+        if (st.bandAdvisory) {
+            setDetail("%s: open (%s at %.1fV across the rows)", partName, iStr,
+                      (double)ck.stimVolts);
+        } else {
+            setDetail("%s: open (%s at %.1fV across the rows; band %s-%s)",
+                      partName, iStr, (double)ck.stimVolts, loStr, hiStr);
+        }
         finishCheck(GUIDE_CHECK_FAIL,
                     "no conduction - part missing, or a leg not seated?", "open");
         return;
     }
     const float rMeas = vPart / (ck.iPart_mA / 1000.0f);
+    // Hand the reading to the part BEFORE any verdict: a companion script wants
+    // what is on the board whether or not the author cared about the band, and
+    // whether or not this particular resistor turned out to be the wrong one.
+    if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
+        globalState.parts.parts[st.partIdx].measuredOhms = rMeas;
+    }
     char rStr[12];
     formatOhms(rMeas, rStr, sizeof(rStr));
+
+    // `enforce: false` - the measurement IS the step. Only the two PLACEMENT
+    // verdicts still fail: open (already returned above - a leg not seated) and
+    // short (both legs the same side of the ravine). The value is reported and
+    // never judged, so a user who reaches for a 22k when the file says 47k
+    // builds a working circuit and the script computes from what they used.
+    if (st.bandAdvisory) {
+        if (rMeas < 5.0f) {
+            setDetail("%s: %s - reads as a short (%s @ %.1fV)", partName, rStr,
+                      iStr, (double)ck.stimVolts);
+            finishCheck(GUIDE_CHECK_FAIL,
+                        "reads as a short - are the legs bridging the ravine?", "short");
+            return;
+        }
+        if (ck.rNom > 0.0f) {
+            char nomStr[12];
+            formatOhms(ck.rNom, nomStr, sizeof(nomStr));
+            setDetail("%s: %s measured (value: says %s - not enforced, %s @ %.1fV)",
+                      partName, rStr, nomStr, iStr, (double)ck.stimVolts);
+        } else {
+            setDetail("%s: %s measured (%s @ %.1fV)", partName, rStr, iStr,
+                      (double)ck.stimVolts);
+        }
+        finishCheck(GUIDE_CHECK_PASS, nullptr, "%s", rStr);
+        return;
+    }
+
     const bool pass = (rMeas >= ck.bandLo && rMeas <= ck.bandHi);
     setDetail("%s: %s (band %s-%s, %s @ %.1fV)", partName, rStr, loStr, hiStr,
               iStr, (double)ck.stimVolts);
@@ -1876,7 +1933,14 @@ static void evaluateVf(void) {
               (double)ck.bandLo, (double)ck.bandHi);
     const bool conducting = (fabsf(ck.iPart_mA) > 0.5f);
     const bool inBand = (vf >= ck.bandLo && vf <= ck.bandHi);
-    if (conducting && inBand) {
+    // `enforce: false` waives the BAND only. "No current" still fails: on a
+    // diode that verdict means missing-or-backwards, which is a placement
+    // error, and it is the one thing this check exists to catch.
+    if (conducting && st.bandAdvisory) {
+        setDetail("%s vf %.2fV @ %s (measured, not enforced)", partName,
+                  (double)vf, iStr);
+        finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV", (double)vf);
+    } else if (conducting && inBand) {
         finishCheck(GUIDE_CHECK_PASS, nullptr, "%.2fV", (double)vf);
     } else if (!conducting) {
         // Full stimulus across the gap, no current: missing and reversed are

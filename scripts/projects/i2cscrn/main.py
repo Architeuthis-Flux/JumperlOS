@@ -274,6 +274,7 @@ def beacon(i2c, kind, w, h):
     scr = None
     frame = dots = splash_at = 0
     last = None
+    stuck = False
     while True:
         nap = 0.02
         if scr is None:
@@ -283,6 +284,17 @@ def beacon(i2c, kind, w, h):
                 try:
                     found = i2c.scan()
                 except Exception:
+                    found = []
+                if len(found) > 8:
+                    # Every address "answering" is not a bus full of chips: it
+                    # is SDA unable to rise, so the master reads its own low as
+                    # an ACK from everyone. Almost always a missing pull-up.
+                    if not stuck:
+                        stuck = True
+                        print("\nevery address answered - SDA is stuck low, not %d"
+                              " devices." % len(found))
+                        print("  the panel's own pull-ups should do this; check"
+                              " SDA is really on its row")
                     found = []
                 addr = None
                 for a in ADDRS:
