@@ -26,7 +26,7 @@ import time
 
 from jl import (jl_exec, parse_kv, port1_command, check, finish,
                 board_state_capture, board_state_restore,
-                active_context, restore_context)
+                active_context, restore_context, project_run_mode)
 
 SLOT_PATH = "/slots/slot3.yaml"
 
@@ -192,6 +192,14 @@ if orig_slot is None:
 
 slot3_existed, slot3_before = read_device_file(SLOT_PATH)
 print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
+
+# Which run-file scheme is flashed (jl.project_run_mode). Only phase 8 cares:
+# load_project's NAME form creates one, and its name differs between the
+# single-file default and JL_PROJECT_RUN_HISTORY. Everything this suite writes
+# lives in /projects/tmptest, a directory it creates and deletes, so no
+# shipped project's run file is ever in reach.
+RUN_MODE = project_run_mode()
+print(f"  info: firmware run-file mode: {RUN_MODE}")
 
 # The "somewhere that isn't slot 3" the phases below bounce through to force
 # a re-read. Computed here, with orig_slot, so the finally can use it too.
@@ -762,7 +770,7 @@ print("wrote=", 1 if fs_write({TMP_WIRING!r}, {TMP_YAML!r}) else 0)
 
     # CONTRACT CHANGE (task 5): load_project's NAME form now BEGINS A RUN.
     # "load project tmptest" means "open its latest run file, or create
-    # tmptest_1.yaml from the wiring" - which is what stops a script from
+    # its run file from the wiring" - which is what stops a script from
     # adopting a shipped template as its auto-saving context and rewriting it
     # without guide:/meta: (task 4's bench-caught destruction path). The
     # literal-path form below is deliberately still the raw adopting loader.
@@ -809,10 +817,17 @@ print("stale=", 1 if is_connected(55, 42) else 0)
           f"(ACTIVE_SLOT:{slot_after_lp}, expected -1)")
     # The context is the RUN FILE the name form allocated, not the wiring
     # template it was copied from - the template stays read-only.
-    check(path_after_lp is not None and
-          re.match(r"^" + re.escape(TMP_PROJ) + r"/tmptest_\d+\.yaml$", path_after_lp),
-          f"ACTIVE_PATH is the run file the name form allocated (got "
-          f"{path_after_lp!r}, expected {TMP_PROJ}/tmptest_<N>.yaml)")
+    # W3-T3: the run file's NAME depends on JL_PROJECT_RUN_HISTORY - one
+    # tmptest_run.yaml by default, tmptest_<N>.yaml on a numbered build. The
+    # mode is probed, not assumed; what is asserted either way is that the
+    # context is a RUN FILE in the project directory and not the template.
+    _run_re = (r"^" + re.escape(TMP_PROJ) + r"/tmptest_run\.yaml$"
+               if RUN_MODE == "single"
+               else r"^" + re.escape(TMP_PROJ) + r"/tmptest_\d+\.yaml$")
+    _run_human = ("tmptest_run.yaml" if RUN_MODE == "single" else "tmptest_<N>.yaml")
+    check(path_after_lp is not None and re.match(_run_re, path_after_lp),
+          f"ACTIVE_PATH is the run file the name form created (got "
+          f"{path_after_lp!r}, expected {TMP_PROJ}/{_run_human})")
     check(path_after_lp != TMP_WIRING,
           "the shipped wiring template did NOT become the active context")
     time.sleep(2.0)  # give the idle auto-save a chance to misbehave
@@ -848,7 +863,7 @@ finally:
     time.sleep(1.5)
 
     # Every .yaml, not just the wiring: load_project's name form allocated a
-    # tmptest_<N>.yaml run file, and rmdir refuses a directory that still holds
+    # tmptest run file, and rmdir refuses a directory that still holds
     # one. (Run files are user data - the firmware never removes them, so the
     # suite that minted this one takes it back off the bench.)
     out = jl_exec(f"""

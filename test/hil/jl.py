@@ -300,6 +300,146 @@ def restore_context(slot, path):
     return False
 
 
+# ----------------------------------------------------------------------------
+# Run-file protection  (THE INVARIANT: never delete a run file you did not make)
+# ----------------------------------------------------------------------------
+# A project launch opens /projects/<dir>/<dir>_run.yaml as the persistent
+# active context. It is USER DATA - the firmware never auto-deletes one, and
+# it is where the user's circuit lives after they run a project.
+#
+# Under the wave-2 NUMBERED scheme a suite could mint <dir>_2.yaml and delete
+# exactly that, leaving the user's <dir>_1.yaml alone. With ONE well-known
+# filename that safety is gone: the suite's fixture run file IS the user's run
+# file. So the rule, for every suite:
+#
+#   * fixture into a SCRATCH project directory (hiltest / hilguide / slotfiles
+#     / tmptest) whenever the phase does not specifically need a shipped one;
+#   * when a phase must touch a REAL project (555, i2cscrn, nand00, eeprom),
+#     wrap it in run_file_capture()/run_file_restore() so the bytes - or the
+#     ABSENCE - come back exactly;
+#   * only ever purge with purge_numbered_runs(), which matches digits and
+#     therefore cannot eat <dir>_run.yaml.
+#
+# The snapshot is a DEVICE-SIDE copy to "<path>.hilbak", not a host round-trip:
+# byte-exact for any size, and it survives a host-side exception because the
+# restore reads the board's own copy back.
+
+PROJECT_RUN_SUFFIX = "_run"
+
+
+def project_run_mode():
+    """"single" or "history": which run-file scheme the FLASHED firmware uses.
+
+    PROBED, never assumed - the suites run against whatever is on the board,
+    and JL_PROJECT_RUN_HISTORY is a compile-time flag with no runtime read-out.
+    `run=<N>` is the numbered scheme's grammar and a single-file build refuses
+    it BY NAME, so one refused command is the whole discriminator. The project
+    name is deliberately one that cannot exist: neither branch creates, opens
+    or deletes anything."""
+    out = port1_command("z hilmodeprobe run=1", 3.0)
+    return "single" if "needs a JL_PROJECT_RUN_HISTORY build" in out else "history"
+
+
+def project_run_path(pdir):
+    """/projects/<dir> -> /projects/<dir>/<dir>_run.yaml (the single-file
+    mode's one run file; JL_PROJECT_RUN_HISTORY builds use <dir>_<N>.yaml and
+    this path simply never exists on them)."""
+    name = pdir.rstrip("/").rsplit("/", 1)[-1]
+    return f"{pdir.rstrip('/')}/{name}{PROJECT_RUN_SUFFIX}.yaml"
+
+
+def run_file_capture(path):
+    """Snapshot a run file (or its absence) to <path>.hilbak on the device.
+
+    Returns a dict to hand back to run_file_restore(). Raises nothing on a
+    missing file - "it wasn't there" is a state worth restoring too."""
+    out = jl_exec(f"""
+p = {path!r}
+bak = p + ".hilbak"
+if fs_exists(bak):
+    jfs.remove(bak)
+if fs_exists(p):
+    s = jfs.open(p, "rb"); d = jfs.open(bak, "wb")
+    n = 0
+    while True:
+        c = s.read(512)
+        if not c:
+            break
+        d.write(c); n += len(c)
+    s.close(); d.close()
+    print("existed= 1")
+    print("bytes=", n)
+else:
+    print("existed= 0")
+""", timeout=45)
+    vals = parse_kv(out)
+    return {"path": path,
+            "existed": vals.get("existed") == 1,
+            "bytes": vals.get("bytes")}
+
+
+def run_file_restore(snap):
+    """Put a run_file_capture() snapshot back byte-exact, or restore its
+    absence. The caller must have LEFT the run-file context first (a run file
+    that is still active is re-created by the next switch's dirty pre-save).
+    Returns True when the board agrees the file is back the way it was."""
+    if not snap:
+        return False
+    path = snap["path"]
+    want = 1 if snap["existed"] else 0
+    out = jl_exec(f"""
+p = {path!r}
+bak = p + ".hilbak"
+want = {want}
+if want:
+    if fs_exists(bak):
+        s = jfs.open(bak, "rb"); d = jfs.open(p, "wb")
+        while True:
+            c = s.read(512)
+            if not c:
+                break
+            d.write(c)
+        s.close(); d.close()
+        jfs.remove(bak)
+else:
+    if fs_exists(p):
+        jfs.remove(p)
+    if fs_exists(bak):
+        jfs.remove(bak)
+print("ok=", 1 if (1 if fs_exists(p) else 0) == want else 0)
+print("bakgone=", 0 if fs_exists(bak) else 1)
+""", timeout=45)
+    vals = parse_kv(out)
+    return vals.get("ok") == 1 and vals.get("bakgone") == 1
+
+
+def purge_numbered_runs(pdir, dirname):
+    """Delete /projects/<pdir>/<dirname>_<digits>.yaml ONLY.
+
+    Deliberately NOT a startswith(prefix) sweep: `"555_".startswith` matches
+    555_run.yaml, and a suite that deletes THAT deletes the user's circuit.
+    Digits-only keeps the numbered-mode cleanup working without touching the
+    single run file."""
+    out = jl_exec(f"""
+pre = {dirname!r} + "_"
+n = 0
+if fs_exists({pdir!r}):
+    for nm in jfs.listdir({pdir!r}):
+        if not (nm.startswith(pre) and nm.endswith(".yaml")):
+            continue
+        mid = nm[len(pre):-5]
+        if len(mid) == 0 or not mid.isdigit():
+            continue
+        try:
+            jfs.remove({pdir!r} + "/" + nm)
+            n += 1
+        except Exception as e:
+            print("rmerr=", e)
+print("purged=", n)
+""", timeout=30)
+    return parse_kv(out).get("purged")
+
+
 def reboot_board():
     """Reset the board via machine.reset() and wait for it to come back.
 

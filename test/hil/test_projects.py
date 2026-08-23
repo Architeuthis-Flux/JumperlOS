@@ -23,9 +23,29 @@ prepended to the companion script - and then drives the launcher ITSELF:
 6(c)/6(d) call run_app("Projects") for real from two ports at once (port 5
 runs it in a worker thread, port 1 watches the picker and cancels it).
 
+RUN-FILE PROTECTION IS AN INVARIANT OF THIS FILE (W3-T3). The launcher's
+default is now ONE run file per project, /projects/<dir>/<dir>_run.yaml, so
+the suite's fixture run file IS the user's run file - under the old numbered
+scheme a suite could mint <dir>_2.yaml and delete exactly that. The rules,
+enforced throughout:
+
+  * everything that can be fixtured lives in /projects/hiltest, a directory
+    this suite creates and removes;
+  * every phase that touches a REAL project's run file (6(c) parks one in
+    /projects/555; 6(e) drives `z <proj>/wiring.yaml new`, which OVERWRITES
+    <proj>_run.yaml) is covered by a run_file_capture() taken in phase 0 and
+    a run_file_restore() in the teardown - bytes back, or absence back;
+  * cleanup of a real project uses purge_numbered_runs() (digits only), never
+    a startswith("<dir>_") sweep, because that matches <dir>_run.yaml.
+
+The mode itself is PROBED with jl.project_run_mode(), not assumed: the
+numbered scheme still compiles behind JL_PROJECT_RUN_HISTORY, and the phases
+that are specific to one scheme say which and skip with a printed reason on
+the other.
+
 Phase 6(f) (wave 2) covers RUN FILES end to end, which is what replaced the
-temp-slot + keep-prompt flow. A launch now opens or creates
-/projects/<dir>/<dir>_<N>.yaml and leaves it as the persistent active context.
+temp-slot + keep-prompt flow. A launch now opens or creates the project's run
+file and leaves it as the persistent active context.
 Running a project's script IS reachable now - not through the encoder path
 (the launcher moves the MicroPython stream to port 1, out from under a port-5
 caller) but through the headless `z` command driven FROM port 1, which is
@@ -88,7 +108,9 @@ import serial  # pyserial
 
 from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
-                active_context, restore_context, fault_scan)
+                active_context, restore_context, fault_scan,
+                project_run_mode, project_run_path, purge_numbered_runs,
+                run_file_capture, run_file_restore)
 
 SLOT_PATH = "/slots/slot3.yaml"
 PROJ_DIR = "/projects/555"
@@ -296,10 +318,15 @@ def leave_context_to_slot3():
     time.sleep(1.2)
 
 
-def purge_runs(pdir, prefix):
-    """Delete <prefix><digits>.yaml run files from a project directory.
-    Run files are user data the firmware never removes, so every phase that
-    mints one has to take it back off the bench itself."""
+def purge_fixture_runs(pdir, prefix):
+    """Delete EVERY <prefix>*.yaml run file - numbered and <dir>_run.yaml -
+    from a project directory THIS SUITE OWNS.
+
+    Only ever call this on /projects/hiltest. On a shipped project the same
+    sweep would delete <dir>_run.yaml, which is the user's circuit; those use
+    purge_numbered_runs() plus the phase-0 snapshot instead. (This is the
+    ledger's concern g, and with one well-known filename it is no longer a
+    theoretical one.)"""
     out = jl_exec(f"""
 n = 0
 if fs_exists({pdir!r}):
@@ -333,6 +360,25 @@ if orig_slot is None:
 
 slot3_existed, slot3_before = read_device_file(SLOT_PATH)
 print(f"  info: active slot {orig_slot}, slot3.yaml existed: {slot3_existed}")
+
+# WHICH RUN-FILE SCHEME IS FLASHED? Probed, not assumed - see the header.
+RUN_MODE = project_run_mode()
+print(f"  info: firmware run-file mode: {RUN_MODE} "
+      f"({'<dir>_run.yaml, one per project' if RUN_MODE == 'single' else '<dir>_<N>.yaml, JL_PROJECT_RUN_HISTORY'})")
+
+# THE RUN-FILE INVARIANT (header). Snapshot every SHIPPED project's run file
+# before anything runs: 6(c) parks one in /projects/555 and 6(e) drives
+# `z <proj>/wiring.yaml new`, which in single-file mode overwrites the user's
+# own <proj>_run.yaml. The snapshot is a device-side copy to <path>.hilbak and
+# the teardown puts the bytes - or the absence - back. Taken OUTSIDE the try
+# for the same reason the others are: the finally needs it bound.
+REAL_PROJECT_DIRS = (PROJ_DIR, "/projects/i2cscrn", "/projects/nand00",
+                     "/projects/eeprom")
+real_run_snaps = [run_file_capture(project_run_path(d)) for d in REAL_PROJECT_DIRS]
+_held = [s["path"] for s in real_run_snaps if s["existed"]]
+print(f"  info: run-file snapshots taken for {len(real_run_snaps)} shipped "
+      f"project(s); {len(_held)} exist(s) and will be restored byte-exact"
+      + (f": {_held}" if _held else ""))
 
 # Everything that MUTATES the board lives inside this try; phase 7's restore
 # is its finally. Without it an uncaught exception anywhere below (a NameError
@@ -543,8 +589,8 @@ print("w2=", 1 if fs_write({HIL_DIR + "/main.py"!r}, {HIL_MAIN!r}) else 0)
 
     # (a) The launcher's load step, through the binding that now WRAPS it.
     # load_project("<name>") no longer adopts the shipped template: under the
-    # run-file model "load project hiltest" means "open its latest run file, or
-    # create hiltest_1.yaml from the wiring" - which is exactly the destruction
+    # run-file model "load project hiltest" means "open its run file, or create
+    # it from the wiring" - which is exactly the destruction
     # path task 4 caught (load_project("eeprom") adopting the template and the
     # idle auto-save rewriting it without guide:/meta:). The LITERAL-path form
     # is deliberately still raw, and test_slot_files phase 6b is what covers it.
@@ -563,8 +609,11 @@ print("stale555=", 1 if is_connected("ADC1", 7) else 0)
     check(vals.get("stale555") == 0, "the previous wiring's bridges are gone (fresh state)")
 
     lp_slot, lp_path = active_context(1.5)
+    RUN_NAME_RE = (r"^" + re.escape(HIL_DIR) + r"/hiltest_run\.yaml$"
+                   if RUN_MODE == "single"
+                   else r"^" + re.escape(HIL_DIR) + r"/hiltest_\d+\.yaml$")
     check(lp_slot == -1 and lp_path is not None and
-          re.match(r"^" + re.escape(HIL_DIR) + r"/hiltest_\d+\.yaml$", lp_path or ""),
+          re.match(RUN_NAME_RE, lp_path or ""),
           f"load_project('<name>') adopted a RUN FILE, not the template "
           f"(got {lp_slot}, {lp_path!r})")
     check(lp_path != f"{HIL_DIR}/wiring.yaml",
@@ -628,11 +677,18 @@ exec({preamble!r} + src)
     # out byte-identical: initializeProjects() iterates the compiled
     # projectFiles[] canonical paths only and never enumerates /projects, and
     # the forced-refresh backup namer produces wiring_original*.yaml - a
-    # disjoint namespace from <dir>_<N>.yaml. This asserts it over the UNFORCED
-    # pass (the launcher's self-heal), which is the only one with a serial
-    # trigger; the forced refresh stays a bench item, as this file's header
-    # already says.
-    RUN_555 = f"{PROJ_DIR}/555_777.yaml"
+    # disjoint namespace from BOTH run-file spellings. This asserts it over the
+    # UNFORCED pass (the launcher's self-heal), which is the only one with a
+    # serial trigger; the forced refresh stays a bench item, as this file's
+    # header already says.
+    #
+    # The parked file uses the REAL run-file name for the flashed mode, not a
+    # made-up 555_777.yaml: in single-file mode <dir>_run.yaml is the only name
+    # the launcher will ever produce, so it is the only one worth proving
+    # provisioning cannot reach. Overwriting the user's own 555_run.yaml here
+    # is safe because phase 0 snapshotted it and the teardown restores it.
+    RUN_555 = (project_run_path(PROJ_DIR) if RUN_MODE == "single"
+               else f"{PROJ_DIR}/555_777.yaml")
     RUN_555_BODY = ("version: 2\nsourceOfTruth: bridges\n"
                     'runSource: "/projects/555/wiring.yaml"\n'
                     "bridges:\n  - {n1: 31, n2: 32}\n")
@@ -684,9 +740,9 @@ print("whil=", 1 if fs_exists({HIL_DIR + "/wiring.yaml"!r}) else 0)
 
     post_run_hash, post_run_len = device_hash(RUN_555)
     check(post_run_hash == pre_run_hash and post_run_len == pre_run_len,
-          f"the parked RUN FILE survived provisioning byte-identical "
-          f"({post_run_hash}, {post_run_len} bytes) - projectFiles[] cannot "
-          f"reach a <dir>_<N>.yaml")
+          f"the parked RUN FILE {os.path.basename(RUN_555)} survived provisioning "
+          f"byte-identical ({post_run_hash}, {post_run_len} bytes) - "
+          f"projectFiles[] cannot reach a run file")
 
     # And it is not a variant either: listVariantFiles requires a `wiring`
     # prefix, so 555 must still show exactly one wiring - proven through the
@@ -696,8 +752,9 @@ names = [n for n in jfs.listdir({PROJ_DIR!r}) if n.endswith(".yaml")]
 print("yamls=", len(names))
 print("YAMLS|" + ",".join(sorted(names)))
 """, timeout=25)
-    check("555_777.yaml" in out and "wiring.yaml" in out,
-          "the run file and the wiring coexist in /projects/555")
+    check(os.path.basename(RUN_555) in out and "wiring.yaml" in out,
+          f"the run file ({os.path.basename(RUN_555)}) and the wiring coexist "
+          f"in /projects/555")
 
     # Coexistence: hiltest's dir and its other file survived; its wiring did not
     # come back (nothing in projectFiles[] points there).
@@ -1151,15 +1208,23 @@ gc.collect()
         # (vi) the guide: section parses. Drive `z ... new` far enough to see
         # the first step, then quit - no part is confirmed, so nothing is
         # placed. `new` (not a bare launch) so the phase is deterministic
-        # whatever run files a previous suite pass left behind; the run file it
-        # allocates is removed in teardown.
+        # whatever the project's run file already held.
+        #
+        # `new` on a SHIPPED project OVERWRITES <proj>_run.yaml in single-file
+        # mode - that is the whole point of "start fresh" - so this phase is
+        # one of the two that phase 0's run_file_capture() exists for. The
+        # teardown puts the user's bytes back.
         guide_live = False
         d = GuideDriver()
         try:
             d.send(f"z {pdir}/wiring.yaml new\r\n".encode())
             guide_live = True
-            d.expect(r"RUNFILE path=\S+ action=new",
-                     f"{proj}: the launch allocated a run file")
+            m = d.expect(r"RUNFILE path=(\S+) action=new",
+                         f"{proj}: the launch wrote a run file")
+            if RUN_MODE == "single":
+                check(m is not None and m.group(1) == project_run_path(pdir),
+                      f"{proj}: single-file mode wrote {proj}_run.yaml "
+                      f"(got {m.group(1) if m else None!r})")
             m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
                          f"{proj}: guide: section parsed and the runtime started")
             if m:
@@ -1197,9 +1262,14 @@ print("progress=", guide_progress())
     print("  --- 6(f) run files ---")
 
     leave_context_to_slot3()
-    purged = purge_runs(HIL_DIR, "hiltest_")
+    purged = purge_fixture_runs(HIL_DIR, "hiltest_")
     print(f"  info: purged {purged} pre-existing hiltest run file(s) for a "
-          f"deterministic allocator start")
+          f"deterministic start (hiltest is THIS SUITE'S fixture directory - "
+          f"the only one a blanket prefix sweep is allowed on)")
+
+    # What the first launch of a run-less project must produce, per mode.
+    RUN_FIRST = (project_run_path(HIL_DIR) if RUN_MODE == "single"
+                 else f"{HIL_DIR}/hiltest_1.yaml")
 
     # (i) EXIT G: the non-guided happy path, end to end. hiltest ships no
     # guide:, so the launch runs its companion script UNCONDITIONALLY (that is
@@ -1208,10 +1278,11 @@ print("progress=", guide_progress())
     d = GuideDriver()
     try:
         d.send(b"z hiltest new\r\n")
-        m = d.expect(r"RUNFILE path=(\S+) action=new", "z ... new allocated a run file")
+        m = d.expect(r"RUNFILE path=(\S+) action=new", "z ... new wrote a run file")
         run1 = m.group(1) if m else None
-        check(run1 == f"{HIL_DIR}/hiltest_1.yaml",
-              f"first run of a project with no runs is <dir>_1.yaml (got {run1!r})")
+        check(run1 == RUN_FIRST,
+              f"first run of a project with no runs is "
+              f"{os.path.basename(RUN_FIRST)} (got {run1!r})")
         d.expect(r"SCRIPT offer=" + re.escape(f"{HIL_DIR}/main.py"),
                  "the resolved companion script is announced")
         d.expect(r"SCRIPT action=run",
@@ -1220,7 +1291,8 @@ print("progress=", guide_progress())
         d.expect(r"hilrun= " + re.escape(run1 or "x"),
                  '_jl_project["run"] names the run file the script lives in')
         d.expect(r"--- script finished ---", "the script returned")
-        d.expect(r"Run saved to hiltest_1\.yaml \(now your active circuit\)",
+        d.expect(r"Run saved to " + re.escape(os.path.basename(RUN_FIRST)) +
+                 r" \(now your active circuit\)",
                  "EXIT G: the launcher saved the run and said so")
     finally:
         d.close()
@@ -1269,69 +1341,128 @@ print("progress=", guide_progress())
         check(m is not None and m.group(1) == run1,
               f"the relaunch opened {run1}")
         d.expect(r"SCRIPT action=skip", "`noscript` skipped the companion script")
-        d.expect(r"Run saved to hiltest_1\.yaml", "the run was saved anyway")
+        d.expect(r"Run saved to " + re.escape(os.path.basename(RUN_FIRST)),
+                 "the run was saved anyway")
     finally:
         d.close()
     time.sleep(1.0)
 
-    # (iv) ALLOCATOR: monotonic, and gaps are NEVER reused. Two launches give
-    # _1 then _2; deleting _1 and launching again gives _3, not _1 - reusing a
-    # gap would resurrect a stale transcript's idea of which file is which.
-    d = GuideDriver()
-    try:
-        d.send(b"z hiltest new noscript\r\n")
-        m = d.expect(r"RUNFILE path=(\S+) action=new", "second launch allocated a run file")
-        run2 = m.group(1) if m else None
-        check(run2 == f"{HIL_DIR}/hiltest_2.yaml",
-              f"the allocator went _1 -> _2 (got {run2!r})")
-    finally:
-        d.close()
-    time.sleep(1.0)
+    if RUN_MODE == "single":
+        # (iv-single) ONE FILE, REUSED. `new` does not allocate anything - it
+        # REWRITES the same <dir>_run.yaml from the wiring, which is exactly
+        # what "start fresh" has to mean when there is only one name. The
+        # 41-42 bridge (ii) left in the file is the witness: after `new` it is
+        # gone, and the directory still holds exactly ONE run file.
+        d = GuideDriver()
+        try:
+            d.send(b"z hiltest new noscript\r\n")
+            m = d.expect(r"RUNFILE path=(\S+) action=new",
+                         "a second `new` wrote a run file")
+            run2 = m.group(1) if m else None
+            check(run2 == run1,
+                  f"SINGLE FILE: `new` reuses the SAME name, it does not "
+                  f"allocate (got {run2!r}, expected {run1!r})")
+        finally:
+            d.close()
+        time.sleep(1.0)
 
-    leave_context_to_slot3()
-    out = jl_exec(f"""
+        _, after_new = read_device_file(run1)
+        check(re.search(r"n1:\s*41,\s*n2:\s*42", after_new) is None,
+              "OVERWRITE: `new` re-copied the template, so the 41-42 edit that "
+              "was in the run file is gone")
+        check(re.search(r"n1:\s*20,\s*n2:\s*21", after_new) is not None,
+              "OVERWRITE: ...and the wiring's own 20-21 bridge is back")
+
+        out = jl_exec(f"""
+names = [n for n in jfs.listdir({HIL_DIR!r})
+         if n.startswith("hiltest_") and n.endswith(".yaml")]
+print("nrun=", len(names))
+print("RUNS|" + ",".join(sorted(names)))
+""", timeout=25)
+        check(parse_kv(out).get("nrun") == 1,
+              f"NO PILE-UP: three launches left exactly ONE run file in "
+              f"{HIL_DIR} ({out.strip().splitlines()[-1] if out.strip() else out!r})")
+
+        # `run=<N>` is the numbered scheme's grammar. A single-file build must
+        # refuse it BY NAME rather than quietly opening <dir>_run.yaml - a
+        # scripted driver asking for run 2 has a stale assumption and needs to
+        # be told, not humoured.
+        ctx_before_runN = active_context(1.5)
+        d = GuideDriver()
+        try:
+            d.send(b"z hiltest run=2 noscript\r\n")
+            d.expect(r"PROJECT error run=<N> needs a JL_PROJECT_RUN_HISTORY build",
+                     "run=<N> is refused by NAME on a single-file build")
+        finally:
+            d.close()
+        check(active_context(1.5) == ctx_before_runN,
+              "the refused run=<N> changed nothing")
+
+        run3 = run1   # the terminal-state needle below targets the one file
+        print("  info: SKIPPED (JL_PROJECT_RUN_HISTORY only) - the monotonic "
+              "allocator, the no-reuse-after-delete rule and positive run=<N>. "
+              "There is one run file per project on this build, so there is no "
+              "counter to advance; the numbered code still compiles behind the "
+              "flag and those phases run on that build.")
+    else:
+        # (iv) ALLOCATOR: monotonic, and gaps are NEVER reused. Two launches give
+        # _1 then _2; deleting _1 and launching again gives _3, not _1 - reusing a
+        # gap would resurrect a stale transcript's idea of which file is which.
+        d = GuideDriver()
+        try:
+            d.send(b"z hiltest new noscript\r\n")
+            m = d.expect(r"RUNFILE path=(\S+) action=new", "second launch allocated a run file")
+            run2 = m.group(1) if m else None
+            check(run2 == f"{HIL_DIR}/hiltest_2.yaml",
+                  f"the allocator went _1 -> _2 (got {run2!r})")
+        finally:
+            d.close()
+        time.sleep(1.0)
+
+        leave_context_to_slot3()
+        out = jl_exec(f"""
 if fs_exists({run1!r}):
     jfs.remove({run1!r})
 print("gone=", 0 if fs_exists({run1!r}) else 1)
 """, timeout=25)
-    check(parse_kv(out).get("gone") == 1, f"deleted {run1} to open a gap at _1")
+        check(parse_kv(out).get("gone") == 1, f"deleted {run1} to open a gap at _1")
 
-    d = GuideDriver()
-    try:
-        d.send(b"z hiltest new noscript\r\n")
-        m = d.expect(r"RUNFILE path=(\S+) action=new", "third launch allocated a run file")
-        run3 = m.group(1) if m else None
-        check(run3 == f"{HIL_DIR}/hiltest_3.yaml",
-              f"NO REUSE: the gap left by _1 was skipped, next is _3 (got {run3!r})")
-    finally:
-        d.close()
-    time.sleep(1.0)
+        d = GuideDriver()
+        try:
+            d.send(b"z hiltest new noscript\r\n")
+            m = d.expect(r"RUNFILE path=(\S+) action=new", "third launch allocated a run file")
+            run3 = m.group(1) if m else None
+            check(run3 == f"{HIL_DIR}/hiltest_3.yaml",
+                  f"NO REUSE: the gap left by _1 was skipped, next is _3 (got {run3!r})")
+        finally:
+            d.close()
+        time.sleep(1.0)
 
-    # run=<N> opens ONE specific run file - the grammar's determinism knob, so
-    # a scripted driver can name the file it means instead of trusting whatever
-    # "latest" happens to be. _2 is deliberately NOT the latest here (_3 is).
-    d = GuideDriver()
-    try:
-        d.send(b"z hiltest run=2 noscript\r\n")
-        m = d.expect(r"RUNFILE path=(\S+) action=load",
-                     "run=<N> opened a run file")
-        check(m is not None and m.group(1) == f"{HIL_DIR}/hiltest_2.yaml",
-              f"run=2 opened _2, not the latest _3 (got "
-              f"{m.group(1) if m else None!r})")
-    finally:
-        d.close()
-    time.sleep(1.0)
+        # run=<N> opens ONE specific run file - the grammar's determinism knob, so
+        # a scripted driver can name the file it means instead of trusting whatever
+        # "latest" happens to be. _2 is deliberately NOT the latest here (_3 is).
+        d = GuideDriver()
+        try:
+            d.send(b"z hiltest run=2 noscript\r\n")
+            m = d.expect(r"RUNFILE path=(\S+) action=load",
+                         "run=<N> opened a run file")
+            check(m is not None and m.group(1) == f"{HIL_DIR}/hiltest_2.yaml",
+                  f"run=2 opened _2, not the latest _3 (got "
+                  f"{m.group(1) if m else None!r})")
+        finally:
+            d.close()
+        time.sleep(1.0)
 
-    # ...and re-open _3 so the terminal-state needle below targets the file it
-    # names (the needle needs the bad YAML written over the ACTIVE context).
-    d = GuideDriver()
-    try:
-        d.send(b"z hiltest run=3 noscript\r\n")
-        d.expect(r"RUNFILE path=" + re.escape(run3 or "x") + r" action=load",
-                 "back on _3 for the terminal-state needle")
-    finally:
-        d.close()
-    time.sleep(1.0)
+        # ...and re-open _3 so the terminal-state needle below targets the file it
+        # names (the needle needs the bad YAML written over the ACTIVE context).
+        d = GuideDriver()
+        try:
+            d.send(b"z hiltest run=3 noscript\r\n")
+            d.expect(r"RUNFILE path=" + re.escape(run3 or "x") + r" action=load",
+                     "back on _3 for the terminal-state needle")
+        finally:
+            d.close()
+        time.sleep(1.0)
 
     # (v) The `z` grammar. The old `z <path> <slot>` must break VISIBLY rather
     # than silently writing a slot, and an all-digit PROJECT NAME must keep
@@ -1349,12 +1480,23 @@ print("gone=", 0 if fs_exists({run1!r}) else 1)
 
     d = GuideDriver()
     try:
-        # run=9999 cannot exist, so this errors WITHOUT starting 555's guide -
-        # what it proves is that "555" was parsed as the PROJECT (a token-wise
-        # parse), not swallowed as an old-grammar slot argument.
+        # An all-digit token BEFORE any mode word is the PROJECT, not the old
+        # grammar's destination slot - a token-wise parse. Both modes prove it
+        # from an error line that NAMES the resolved directory, and neither
+        # starts 555's guide or writes anything: in single-file mode `run=<N>`
+        # is refused by name (and the message carries `555_run.yaml`), in
+        # numbered mode run=9999 cannot exist. Deliberately an error path -
+        # `z 555` for real would overwrite the user's 555 run file.
         d.send(b"z 555 run=9999\r\n")
-        d.expect(r"PROJECT error no such run file: /projects/555/555_9999\.yaml",
-                 "an all-digit project name is a PROJECT, not a slot")
+        if RUN_MODE == "single":
+            d.expect(r"PROJECT error run=<N> needs a JL_PROJECT_RUN_HISTORY "
+                     r"build - this build keeps ONE run file per project "
+                     r"\(555_run\.yaml\)",
+                     "an all-digit project name is a PROJECT, not a slot "
+                     "(the refusal names 555_run.yaml)")
+        else:
+            d.expect(r"PROJECT error no such run file: /projects/555/555_9999\.yaml",
+                     "an all-digit project name is a PROJECT, not a slot")
     finally:
         d.close()
     check(active_context(1.5) == ctx_before_bad,
@@ -1450,21 +1592,33 @@ finally:
     # --- 7. Restore the bench --------------------------------------------------
     # RUN FILES FIRST, and only after leaving whichever one is active: a run
     # file that is still the context is re-created by the next switch's dirty
-    # pre-save. Run files are user data the firmware never auto-deletes, so
-    # every one this suite minted has to come back off the bench here - the
-    # allocator is monotonic, and a board that accretes them across suite runs
-    # eventually earns the pile-up hint for no reason.
+    # pre-save.
+    #
+    # TWO DIFFERENT JOBS, and conflating them is the hazard this file's header
+    # names:
+    #   * a SHIPPED project's <dir>_run.yaml is the USER'S circuit. It is put
+    #     back byte-exact from phase 0's snapshot (or removed again if it did
+    #     not exist). Numbered leftovers this suite minted go through
+    #     purge_numbered_runs(), which matches digits and therefore cannot
+    #     touch <dir>_run.yaml.
+    #   * /projects/hiltest is this suite's own fixture directory and is
+    #     deleted outright below.
     try:
         leave_context_to_slot3()
         total = 0
-        for _pdir, _prefix in ((PROJ_DIR, "555_"),
-                               (HIL_DIR, "hiltest_"),
-                               ("/projects/i2cscrn", "i2cscrn_"),
-                               ("/projects/nand00", "nand00_"),
-                               ("/projects/eeprom", "eeprom_")):
-            n = purge_runs(_pdir, _prefix)
+        for _pdir in REAL_PROJECT_DIRS:
+            n = purge_numbered_runs(_pdir, _pdir.rsplit("/", 1)[-1])
             total += int(n) if n is not None else 0
-        print(f"  info: removed {total} run file(s) minted by this suite")
+        print(f"  info: removed {total} NUMBERED run file(s) from shipped "
+              f"projects (digits-only sweep - <dir>_run.yaml is never in it)")
+        restored = 0
+        for _snap in real_run_snaps:
+            ok = run_file_restore(_snap)
+            check(ok, f"restored {_snap['path']} to its pre-test state "
+                      f"({'byte-exact, ' + str(_snap['bytes']) + ' bytes' if _snap['existed'] else 'absent'})")
+            restored += 1 if ok else 0
+        print(f"  info: {restored}/{len(real_run_snaps)} shipped-project run "
+              f"files restored to their pre-test state")
     except SystemExit:
         raise
     except Exception as e:  # pragma: no cover

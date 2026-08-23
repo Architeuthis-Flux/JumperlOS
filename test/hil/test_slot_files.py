@@ -26,10 +26,23 @@ What this proves on real hardware:
      of flipping netSlot with the file's bridges still live (the clobber
      vector that had to die in the same commit as the sentinel).
 
-NOT here: the run-file allocator (<dir>_<N>.yaml numbering, open-most-recent,
-no-reuse) and the provisioning-with-run-files-present assertions. Those belong
-to the LAUNCHER task's suite (task 5) because projectBeginRun is what creates
-run files, and it does not exist yet.
+NOT here: the launcher's own run-file policy - which file a launch opens,
+whether it prompts, and the JL_PROJECT_RUN_HISTORY numbering. Those belong to
+test_projects.py, because projectBeginRun is what creates run files. What IS
+here is everything a run file is as a FILE: adoption, the idle auto-save
+landing in it, atomic-on-parse, the boot context, deleting the active one.
+
+RUN-FILE PROTECTION (W3-T3's invariant, stated in every suite that can reach
+one). The default launcher keeps ONE run file per project,
+/projects/<dir>/<dir>_run.yaml, so a suite's fixture run file would BE the
+user's run file if it used a shipped project. This suite therefore fixtures
+entirely into /projects/slotfiles - a directory it creates and removes - and
+its run file is named slotfiles_run.yaml, the exact shape the launcher
+produces, so the template-write-guard and namespace-disjointness assertions
+are about the real name and not a stand-in. It never touches /projects/555 or
+any other shipped project, and the blanket "every .yaml in the fixture dir"
+teardown sweep is safe only because of that. (A guide_flow sweep once took
+Kevin's real 555_1/555_2; the teardown comment below records it.)
 
 Port 1 must be free (close the jumperless client) - this suite drives it.
 """
@@ -48,7 +61,7 @@ from jl import (jl_exec, parse_kv, port1_command, port1_path, port1_paste,
 _csi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]")
 
 TMP_PROJ = "/projects/slotfiles"
-RUN_FILE = "/projects/slotfiles/slotfiles_1.yaml"
+RUN_FILE = "/projects/slotfiles/slotfiles_run.yaml"
 TEMPLATE_FILE = "/projects/slotfiles/wiring.yaml"
 BAD_FILE = "/projects/slotfiles/slotfiles_bad.yaml"
 TRAP_FILE = "/slots/slot_555.yaml"
@@ -769,8 +782,12 @@ print("own=", 1 if is_connected(11, 12) else 0)
     # state went dirty, and the idle auto-save rewrote it - losing the whole
     # guide: section, because toYAML is a wholesale rewrite that never
     # re-emits guide:/meta:. saveActiveSlot now REFUSES to write a
-    # /projects/<dir>/wiring*.yaml. Run files (<dir>_<N>.yaml) do not match
-    # the predicate and are unaffected - phases 1-2 above already proved that.
+    # /projects/<dir>/wiring*.yaml. Run files do not match the predicate -
+    # NEITHER spelling: isTemplatePath tests the BASENAME for a "wiring"
+    # prefix, and both <dir>_run.yaml and <dir>_<N>.yaml begin with the
+    # directory name instead. (The one collision, a project directory actually
+    # called wiring*, is refused outright by projectBeginRun.) Phases 1-2 above
+    # already proved it for the real name, slotfiles_run.yaml.
     out = jl_exec(f"print('wrote=', 1 if fs_write({TEMPLATE_FILE!r}, {TEMPLATE_YAML!r}) else 0)",
                   timeout=25)
     check(parse_kv(out).get("wrote") == 1, f"pushed {TEMPLATE_FILE}")
@@ -1074,11 +1091,16 @@ finally:
     time.sleep(1.5)
 
     # Sweep the WHOLE fixture directory, not just the four files this suite
-    # names: the allocator is monotonic, so a re-run (or a phase that failed
-    # after minting <dir>_2.yaml) leaves a run file behind that the named list
-    # never mentions - and rmdir refuses a directory that still holds one, so
-    # the leftover silently becomes permanent. Same sweep test_projects and
-    # test_parts_roundtrip already do.
+    # names: a re-run, or a phase that failed part-way, leaves a run file
+    # behind that the named list never mentions - and rmdir refuses a
+    # directory that still holds one, so the leftover silently becomes
+    # permanent.
+    #
+    # THE BLANKET SWEEP IS ONLY LEGAL HERE because /projects/slotfiles is a
+    # directory THIS SUITE CREATES. Never point it at a shipped project: with
+    # one run file per project, <dir>_run.yaml is the user's circuit, and a
+    # guide_flow sweep of exactly this shape once took Kevin's real 555_1 and
+    # 555_2. test_projects.py snapshots and restores instead.
     out = jl_exec(f"""
 for p in ({RUN_FILE!r}, {TEMPLATE_FILE!r}, {BAD_FILE!r}, {TRAP_FILE!r}):
     if fs_exists(p):

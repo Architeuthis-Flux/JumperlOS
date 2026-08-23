@@ -9,15 +9,35 @@ MENU_DEBUG) with a 3-step project - note + place sip2 + connect - pushed to
 guide's serial keys (n n n q).
 
 WHAT CHANGED WITH RUN FILES (design-launcher §1, task 5). There is no
-destination slot any more: every launch opens or creates
-/projects/hilguide/hilguide_<N>.yaml and leaves it as the PERSISTENT active
-context, so this suite's workbench is no longer slot 3 - it is whatever run
-file the launch just announced on its `RUNFILE path=... action=new|load` line.
-Every phase therefore CAPTURES that path instead of hardcoding one, because
-the run counter is monotonic and depends on how many phases ran before it.
-Fresh phases say `new`; resume phases say `load` (or nothing) with the
-DIRECTORY name, since a wiring path combined with load is refused - the run
-file's own runSource decides the variant, so the argument would be a lie.
+destination slot any more: every launch opens or creates a run file in
+/projects/hilguide/ and leaves it as the PERSISTENT active context, so this
+suite's workbench is no longer slot 3 - it is whatever run file the launch
+just announced on its `RUNFILE path=... action=new|load` line. Every phase
+therefore CAPTURES that path instead of hardcoding one. Fresh phases say
+`new`; resume phases say `load` (or nothing) with the DIRECTORY name, since a
+wiring path combined with load is refused - the run file's own runSource
+decides the variant, so the argument would be a lie.
+
+WHICH FILE, AND WHY IT BARELY MATTERS HERE (W3-T3). The default is now ONE run
+file per project, /projects/<dir>/<dir>_run.yaml, silently reused; the wave-2
+numbered <dir>_<N>.yaml allocator lives behind JL_PROJECT_RUN_HISTORY. The
+mode is PROBED (jl.project_run_mode) rather than assumed, and because every
+phase reads its path off the RUNFILE line, only ONE thing genuinely inverts:
+phase 5's restart. Numbered: run N+1 is a new file and run N survives.
+Single: "start fresh" REWRITES the one file, which is precisely why the
+interactive launcher puts a prompt in front of it when the build in there is
+unfinished. Both halves are asserted, branched on the probe.
+
+RUN-FILE PROTECTION. Everything this file touches lives in /projects/hilguide,
+/projects/hilvfnr and /projects/hilstv - directories the suite creates and
+removes. It never launches a SHIPPED project, so it never writes a run file
+the user owns. Keep it that way: with one well-known filename, a `z 555 new`
+anywhere in here would overwrite the user's 555 circuit.
+
+The guide runtime now also stamps the step TOTAL into the progress line
+(`guideProgress: {source: ..., step: k, of: n}`) - the launcher's mid-flight
+gate reads `step < of` from the file without loading it. guide_progress_needle()
+below is the one place that shape is spelled out.
 
 Covers:
   1b. exit D: an unopenable source (the project DIRECTORY as the wiring path)
@@ -29,8 +49,10 @@ Covers:
   4. load-latest of a COMPLETED run does NOT relaunch the guide - the
      completion clamp reports `GUIDE already complete (step 3/3)` and the
      built state is untouched
-  5. start-new is the new restart, and it is NON-DESTRUCTIVE: run N+1 is a
-     fresh file and run N still exists on disk WITH its guideProgress
+  5. start-new is the new restart. Numbered mode: NON-DESTRUCTIVE - run N+1
+     is a fresh file and run N still exists on disk WITH its guideProgress.
+     Single-file mode: the one run file is REWRITTEN from the template and
+     exactly one run file is left in the directory
   6. the guided-ness gate on a run with no progress (runSource names a guided
      wiring -> fresh guide), then y-resume: quit mid-guide, `load`, resume at
      the saved step with the committed bridges intact ("rails at 0V")
@@ -181,7 +203,8 @@ import serial  # pyserial
 
 from jl import (jl_exec, parse_kv, port1_command, port1_path, check, finish,
                 board_state_capture, board_state_restore,
-                active_context, restore_context, fault_scan)
+                active_context, restore_context, fault_scan,
+                project_run_mode, project_run_path)
 
 PROJ = "hilguide"
 PROJ_DIR = "/projects/" + PROJ
@@ -559,6 +582,27 @@ else:
     return True, (m.group(1) if m else "")
 
 
+def guide_progress_needle(source, step, total):
+    """The exact one-line flow map toYAML emits for guideProgress.
+
+        guideProgress: {source: "<path>", step: <k>, of: <n>}
+
+    `of:` - the step TOTAL as of the last persist - arrived with W3-T3 and is
+    written by guidePersistProgress, the only code that both knows numSteps
+    and saves the file. The single-run-file launcher needs `step < of`
+    answerable from the FILE ALONE (it decides whether to prompt BEFORE it is
+    allowed to load anything, because the prompt can still be cancelled), and
+    numSteps cannot be recomputed launcher-side: guideParse resolves `part:`
+    names, and synthesizes auto steps, against the LIVE parts table.
+
+    Asserting the total here is therefore not cosmetic - it is the input to
+    the mid-flight gate. step == of is a FINISHED build (silent reopen);
+    step < of is MID-FLIGHT (the one prompt). `of:` is emitted only when
+    non-zero, so a hand-written fixture with no total round-trips unchanged -
+    test_parts_roundtrip's exact-shape needle depends on that."""
+    return f'guideProgress: {{source: "{source}", step: {step}, of: {total}}}'
+
+
 class GuideDriver:
     """One port-1 connection driving one guide session, with ORDERED
     status-line assertions (each expect searches only past the previous
@@ -653,6 +697,25 @@ if orig_slot is None:
 
 print(f"  info: entry context slot={orig_slot} path={orig_path!r}")
 
+# WHICH RUN-FILE SCHEME IS FLASHED? Probed, not assumed (jl.project_run_mode).
+# "single" = ONE /projects/<dir>/<dir>_run.yaml per project, reused; "history"
+# = the wave-2 <dir>_<N>.yaml allocator behind JL_PROJECT_RUN_HISTORY. Every
+# phase below captures the path off the launch's own RUNFILE line, so almost
+# nothing here cares - the exceptions are phase 5's restart semantics, which
+# genuinely invert, and they say so.
+RUN_MODE = project_run_mode()
+print(f"  info: firmware run-file mode: {RUN_MODE}")
+
+# The run-file NAME, per mode - used by the handful of assertions that check
+# the spelling rather than just capturing it off the RUNFILE line.
+if RUN_MODE == "single":
+    RUN_BASENAME_RE = PROJ + r"_run\.yaml"
+    RUN_NAME_HUMAN = "<dir>_run.yaml"
+else:
+    RUN_BASENAME_RE = PROJ + r"_\d+\.yaml"
+    RUN_NAME_HUMAN = "<dir>_<N>.yaml"
+RUN_NAME_RE = r"^" + re.escape(PROJ_DIR) + r"/" + RUN_BASENAME_RE + r"$"
+
 # guide_live: True while a guide session may be blocking on port-1 keys -
 # the finally sends its 'q' ONLY then (a blind 'q' at the main menu would
 # launch the DMX app and strand the bench the other way).
@@ -705,9 +768,8 @@ print("wrote=", 1 if fs_write({WIRING_PATH!r}, {WIRING!r}) else 0)
         d.send(f"z {WIRING_PATH} new\r\n".encode())
         guide_live = True
         run1 = d.expect_runfile("new", "start-new allocated a run file")
-        check(run1 is not None and re.match(
-                  r"^" + re.escape(PROJ_DIR) + r"/" + PROJ + r"_\d+\.yaml$", run1 or ""),
-              f"the run file is named <dir>_<N>.yaml (got {run1!r})")
+        check(run1 is not None and re.match(RUN_NAME_RE, run1 or ""),
+              f"the run file is named {RUN_NAME_HUMAN} (got {run1!r})")
         d.expect(r"GUIDE step=1/3 id=note_1 state=INIT", "INIT status line")
         d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT", "step 1 (note) WAIT")
         d.send(b"n")
@@ -732,7 +794,7 @@ print("wrote=", 1 if fs_write({WIRING_PATH!r}, {WIRING!r}) else 0)
         # the grammar greppable on every path.
         d.expect(r"SCRIPT offer=none", "completed guide reaches the script step")
         d.expect(r"SCRIPT action=skip", "no companion script -> action=skip")
-        d.expect(r"Run saved to " + PROJ + r"_\d+\.yaml \(now your active circuit\)",
+        d.expect(r"Run saved to " + RUN_BASENAME_RE + r" \(now your active circuit\)",
                  "the launcher's closing one-liner names the run file")
     finally:
         d.close()
@@ -775,9 +837,10 @@ print("NETNAME|" + name)
 
     run1_exists, run1_yaml = read_device_file(run1)
     check(run1_exists, f"the run file {run1} exists on the board")
-    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 3}}' in run1_yaml,
-          "the RUN FILE round-trips guideProgress at step 3, bound to the "
-          "CANONICAL wiring (never to itself)")
+    check(guide_progress_needle(WIRING_PATH, 3, 3) in run1_yaml,
+          "the RUN FILE round-trips guideProgress at step 3 OF 3, bound to the "
+          "CANONICAL wiring (never to itself) - step == of, i.e. FINISHED, "
+          "which is what makes the launcher reopen this file silently")
     check(f'runSource: "{WIRING_PATH}"' in run1_yaml,
           "the run file carries runSource: - the variant the path cannot encode")
     check("placed: true" in run1_yaml, "the run file has RG placed: true")
@@ -816,18 +879,32 @@ print("NETNAME|" + name)
     check(parse_kv(out).get("rg") == 1,
           "re-opening the completed run left the built state untouched")
 
-    # --- 5. Start-new IS the restart, and it is NON-DESTRUCTIVE -------------
+    # --- 5. Start-new IS the restart --------------------------------------
     # The old destructive restart (un-place loop + guideSource wipe + re-save)
-    # is deleted. Starting run N+1 leaves run N intact on disk, which is
-    # strictly better than what it replaces - assert exactly that.
+    # is deleted either way. What "start new" costs DEPENDS ON THE MODE, and
+    # that is the whole point of W3-T3, so both halves are asserted:
+    #
+    #   numbered (JL_PROJECT_RUN_HISTORY): run N+1 is a NEW file and run N
+    #     survives on disk WITH its guideProgress - strictly better than the
+    #     destructive restart it replaced;
+    #   single-file (default): there is one name, so "start fresh" REWRITES
+    #     it from the template. The old progress is gone BY DESIGN - which is
+    #     exactly why this is the one path the launcher puts a prompt in front
+    #     of when the build in the file is unfinished. Here it is reached
+    #     through an EXPLICIT `new`, and headless never prompts.
     d = GuideDriver()
     try:
         d.send(f"z {WIRING_PATH} new\r\n".encode())
         guide_live = True
-        run2 = d.expect_runfile("new", "start-new allocated the NEXT run file")
-        check(run2 is not None and run2 != run1,
-              f"start-new is a different file from the previous run "
-              f"({run1!r} -> {run2!r})")
+        run2 = d.expect_runfile("new", "start-new wrote a run file")
+        if RUN_MODE == "single":
+            check(run2 == run1,
+                  f"SINGLE FILE: start-fresh reuses the one name "
+                  f"({run1!r} -> {run2!r})")
+        else:
+            check(run2 is not None and run2 != run1,
+                  f"start-new is a different file from the previous run "
+                  f"({run1!r} -> {run2!r})")
         d.expect(r"GUIDE step=1/3 id=note_1 state=WAIT",
                  "the new run enters at step 1 with no progress", timeout=40)
         d.send(b"q")
@@ -845,11 +922,27 @@ print("conn=", 1 if is_connected(52, 53) else 0)
     check(vals.get("rg") == 0, "the new run has no RG placement bridge 45-50")
     check(vals.get("conn") == 0, "the new run has no connect bridge 52-53")
 
-    prev_exists, prev_yaml = read_device_file(run1)
-    check(prev_exists, f"NON-DESTRUCTIVE RESTART: {run1} still exists on disk")
-    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 3}}' in prev_yaml,
-          "NON-DESTRUCTIVE RESTART: the previous run still holds its "
-          "guideProgress - starting a new run did not clear it")
+    if RUN_MODE == "single":
+        out = jl_exec(f"""
+names = [n for n in jfs.listdir({PROJ_DIR!r})
+         if n.startswith({PROJ + "_"!r}) and n.endswith(".yaml")]
+print("nrun=", len(names))
+print("RUNS|" + ",".join(sorted(names)))
+""", timeout=25)
+        check(parse_kv(out).get("nrun") == 1,
+              f"SINGLE FILE: start-fresh left exactly ONE run file in "
+              f"{PROJ_DIR} - it overwrote, it did not accumulate")
+        print("  info: SKIPPED (JL_PROJECT_RUN_HISTORY only) - the "
+              "non-destructive-restart assertions (run N survives run N+1). "
+              "On a single-file build the overwrite IS the semantics; the "
+              "run_2_yaml checks below are the same assertions read the other "
+              "way round.")
+    else:
+        prev_exists, prev_yaml = read_device_file(run1)
+        check(prev_exists, f"NON-DESTRUCTIVE RESTART: {run1} still exists on disk")
+        check(guide_progress_needle(WIRING_PATH, 3, 3) in prev_yaml,
+              "NON-DESTRUCTIVE RESTART: the previous run still holds its "
+              "guideProgress - starting a new run did not clear it")
 
     _, run2_yaml = read_device_file(run2)
     check("guideProgress:" not in run2_yaml,
@@ -952,8 +1045,9 @@ print("NETNAME|" + name)
           f"RG_A net name is gone after the un-commit (got {net_name!r})")
 
     _, run2_yaml = read_device_file(run2)
-    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 1}}' in run2_yaml,
-          "guideProgress decremented to step 1 after p (in the run file)")
+    check(guide_progress_needle(WIRING_PATH, 1, 3) in run2_yaml,
+          "guideProgress decremented to step 1 of 3 after p (in the run file) "
+          "- step < of, i.e. MID-FLIGHT, which is the only state that prompts")
     check("placed: true" not in run2_yaml, "RG placed: false after the un-commit")
 
     # --- 8. Power fixture: power_on commit + resume re-applies rails --------
@@ -2331,9 +2425,9 @@ print("rcbnode=", rc['pins']['B']['node'])
     time.sleep(1.5)
 
     _, pu_yaml = read_device_file(run_pu)
-    check(f'guideProgress: {{source: "{WIRING_PATH}", step: 1}}' in pu_yaml,
-          "the run file persisted the FIRST UNFINISHED step (1 = step 2), not "
-          "the cursor and not stepIdx + 1")
+    check(guide_progress_needle(WIRING_PATH, 1, 3) in pu_yaml,
+          "the run file persisted the FIRST UNFINISHED step (1 = step 2) of 3, "
+          "not the cursor and not stepIdx + 1")
 
     d = GuideDriver()
     try:
@@ -2376,7 +2470,7 @@ print("rcbnode=", rc['pins']['B']['node'])
         guide_live = False
         d.expect(r"\(nothing was built - no script offer\)",
                  "COMPLETED with zero commits does not offer the companion script")
-        d.expect(r"Run saved to " + PROJ + r"_\d+\.yaml",
+        d.expect(r"Run saved to " + RUN_BASENAME_RE,
                  "the run file is still saved and announced - only the script is "
                  "suppressed")
         time.sleep(0.7)
@@ -2505,7 +2599,10 @@ finally:
 
     # Project tree OFF the board, RUN FILES INCLUDED (test_projects' run_app
     # probe gates on the board holding only ITS two projects, and rmdir refuses
-    # a directory that still holds a <dir>_<N>.yaml).
+    # a directory that still holds a run file). The blanket "every .yaml"
+    # sweep below is only safe because every directory in the list is one THIS
+    # SUITE created - never do it to a shipped project, where <dir>_run.yaml is
+    # the user's circuit.
     out = jl_exec(f"""
 for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
           {REFUSAL_PATH!r}, {CONT_PATH!r}, {COMPACT_PATH!r},
