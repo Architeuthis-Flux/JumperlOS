@@ -101,6 +101,12 @@ Covers:
  12h. the ohm flip's two legacy-mA guards (/projects/hilleg): a band that does
      not bracket `value:`, and a value-less band under 5 ohm, both warn and
      fall back to the derived band - while a real ohm band is honoured.
+ 12i. oscillates on a 5V project (/projects/hilrail, a real 4 Hz slow PWM on
+     the target row): the GPIO edge-counting route is refused because the
+     rails exceed the pin's 3.3V domain, and the high-Z tap fallback that
+     catches it must NOT report an authored band as verified - banded reports
+     SKIPPED val=unmeasured and advances on ONE confirm, unbanded still
+     PASSES val=osc.
  13. move + snap (task 6): `m <row>` and `c` - the headless twins of the probe
      pads - refused BY NAME off a place step, an off-board move refused with
      its reason, then a move to row 44 (placement=custom, in the machine line
@@ -522,6 +528,46 @@ guide:
 RAIL_OK_WIRING = _rail_wiring("HIL Rail OK", "connect: TOP_RAIL, ")
 RAIL_GND_WIRING = _rail_wiring("HIL Rail GND", "connect: GND, ")
 RAIL_FLOAT_WIRING = _rail_wiring("HIL Rail Float", "")
+
+# Phase 12i - oscillates on a 5 V project: the refusal must not waive the band.
+# These live in RAIL_DIR on purpose: it is already created above, already swept
+# by the teardown (which deletes every .yaml named in the list at the bottom),
+# and it already ships `power: topRail: 5.0` - which IS the supply ceiling the
+# oscillates GPIO gate refuses on. No new fixture directory to keep in step.
+#
+# Row 30 is bridged to RP_GPIO_1 (node 131) in the wiring itself, so a slow PWM
+# started on GPIO 1 before the launch reaches the target the moment the project
+# loads. setupPWM routes anything under 10 Hz to setupSlowPWM
+# (Peripherals.cpp:3086, range 0.001-10 Hz), so 4 Hz is a genuine square wave -
+# the shipped 555's own regime - with nothing on the host racing the guide's
+# poll loop.
+RAIL_OSC_BAND_PATH = RAIL_DIR + "/oscband.yaml"
+RAIL_OSC_NOBAND_PATH = RAIL_DIR + "/oscnoband.yaml"
+OSC_TARGET_ROW = 30
+OSC_PWM_PIN = 1
+OSC_PWM_HZ = 4.0
+
+
+def _osc_wiring(title, band):
+    return """version: 2
+sourceOfTruth: bridges
+meta:
+  project: hilrail
+  title: "%s"
+bridges:
+  - {n1: %d, n2: RP_GPIO_%d}
+power:
+  topRail: 5.0
+guide:
+  title: "%s"
+  steps:
+    - {do: power_on, check: rail_sane, timeout_ms: 6000, text: "power up 5V"}
+    - {do: verify, target: %d, check: oscillates, %stimeout_ms: 4000, on_fail: warn, text: "osc on a 5V-railed project"}
+""" % (title, OSC_TARGET_ROW, OSC_PWM_PIN, title, OSC_TARGET_ROW, band)
+
+
+RAIL_OSC_BAND_WIRING = _osc_wiring("HIL Osc Banded", "min: 0.3, max: 30, ")
+RAIL_OSC_NOBAND_WIRING = _osc_wiring("HIL Osc Unbanded", "")
 
 # Phase 12h - the ohm flip's two legacy-mA guards, plus the honoured-ohm case.
 LEGACY_DIR = "/projects/hilleg"
@@ -1835,6 +1881,128 @@ print("wrote=", 1 if fs_write({{p!r}}, {{w!r}}) else 0)
                 "nodes_clear()\ntime.sleep(0.2)\n", timeout=25)
         time.sleep(1.0)
 
+    # --- 12i. oscillates on 5 V: the refusal must not waive the band --------
+    #
+    # H1 review F1. The oscillates check counts edges on a 3.3 V RP2350 GPIO,
+    # so it now refuses to close that route when the project's rails could
+    # swing the target above the pin's domain, and falls back to high-Z taps.
+    # The taps can see THAT a node is swinging but not HOW FAST - and the
+    # fallback's success verdict used to be an unconditional GUIDE_CHECK_PASS
+    # that never read st.min/st.max. So the refusal silently converted "1.4 Hz,
+    # inside 0.3-30" into "both levels seen, PASS": the shipped 555 (5.0 V
+    # rail, min: 0.3, max: 30) would have passed while blinking at 500 Hz.
+    #
+    # A guide that cannot measure something must say so; it may never call it
+    # good. The verdict is keyed on whether a BAND was authored, so:
+    #
+    #   banded   -> GUIDE_CHECK_SKIPPED, val=unmeasured, ok=0 ("unverified")
+    #   unbanded -> GUIDE_CHECK_PASS,    val=osc,        ok=1
+    #
+    # The unbanded half is not decoration: without it "always refuse" would
+    # also pass this phase, and the author who only asked "is it oscillating?"
+    # deserves the answer the taps really can give.
+    #
+    # NOTE the SINGLE 'n' on the banded case. That is the behavioural proof of
+    # SKIPPED over FAIL, and it cannot be read off `ok=` alone: SKIPPED never
+    # measured anything, so GuidedFlow's warn branch prints "(check not run -
+    # continuing)" and goes straight to COMMIT on the confirm that launched the
+    # check, while a measured FAIL sits at WAIT until a SECOND confirm. If the
+    # verdict ever regressed to FAIL, the COMMIT expect below would time out.
+    print("  --- 12i: oscillates, the 5V refusal and the authored band ---")
+
+    # WHEN THE PWM IS STARTED IS LOAD-BEARING, and it cost a red run to learn.
+    # A project load re-applies the file's `config:` (and the refresh's setGPIO
+    # pass re-asserts GPIO direction/PWM from it), so a PWM started BEFORE
+    # `z ... new` is dead by the time the guide is running - measured: row 30
+    # swings 0<->3.28 V before the load and reads a flat 0.03 V span after it.
+    # The power_on step's own COMMIT refresh kills it a second time. So it is
+    # started HERE, after that commit, from the REPL - which is reachable
+    # mid-guide because MpRemoteService is in the guide loop's inner set, the
+    # same door phase 10 uses to drive DAC1. Nothing after this point does a
+    # full refreshConnections: the check is refused at gate 1 before any GPIO
+    # route, and the tap fallback uses fastConnectPath, not a refresh.
+    try:
+        for path, wiring, want_val, want_ok, label in (
+            (RAIL_OSC_BAND_PATH, RAIL_OSC_BAND_WIRING, "unmeasured", "0",
+             "a BANDED oscillates whose frequency could not be measured"),
+            (RAIL_OSC_NOBAND_PATH, RAIL_OSC_NOBAND_WIRING, "osc", "1",
+             "an UNBANDED oscillates - 'is it oscillating' was answered"),
+        ):
+            jl_exec("""
+print("wrote=", 1 if fs_write({p!r}, {w!r}) else 0)
+""".format(p=path, w=wiring), timeout=30)
+            d = GuideDriver()
+            guide_live = False
+            try:
+                d.send(f"z {path} new\r\n".encode())
+                guide_live = True
+                d.expect(r"GUIDE step=1/2 \S+ state=WAIT",
+                         f"12i: {label}: the power_on step", timeout=40)
+                d.send(b"n")
+                d.expect(r"GUIDE step=2/2 \S+ state=WAIT",
+                         "12i: power_on committed (5V live), at the oscillates step",
+                         timeout=45)
+                # jl_pwm_func returns None and RAISES on a bad setup
+                # (modjumperless.c:2380-2386), so "it did not raise" is the
+                # whole success signal.
+                out = jl_exec(f"""
+try:
+    pwm({OSC_PWM_PIN}, {OSC_PWM_HZ}, 0.5)
+    print("pwmok=", 1)
+except Exception as e:
+    print("pwmok=", 0)
+    print("pwmerr=", e)
+""", timeout=30)
+                check(parse_kv(out).get("pwmok") == 1,
+                      f"12i: a {OSC_PWM_HZ} Hz slow PWM is running on GPIO "
+                      f"{OSC_PWM_PIN} -> row {OSC_TARGET_ROW} - the oscillating "
+                      f"source this phase measures against")
+                d.send(b"n")
+                d.expect(r"GUIDE step=2/2 \S+ state=VERIFY check=oscillates",
+                         "12i: the oscillates check launched")
+                # The ceiling refusal happens before any hardware moves, and it
+                # must SAY so - the brief's ruling is that a refusal explains
+                # itself in the check's own voice.
+                d.expect(r"osc: this project drives its rails at 5\.00 V",
+                         "12i: the refusal named the rail voltage and the reason",
+                         timeout=30)
+                m = d.expect(r"GUIDE step=2/2 \S+ state=RESULT check=oscillates "
+                             r"val=(\S+) ok=(\d)",
+                             f"12i: {label}: reported a verdict", timeout=45)
+                got_val = m.group(1) if m else "??"
+                got_ok = m.group(2) if m else "?"
+                check(got_val == want_val and got_ok == want_ok,
+                      f"12i: {label} -> val={want_val} ok={want_ok} "
+                      f"(got val={got_val} ok={got_ok})")
+                if want_val == "unmeasured":
+                    d.expect(r"\(check not run - continuing\)",
+                             "12i: reported as NOT RUN rather than measured-and-failed",
+                             timeout=25)
+                    d.expect(r"GUIDE step=2/2 \S+ state=COMMIT",
+                             "12i: ...and a SINGLE confirm advanced it - the "
+                             "behavioural proof it is SKIPPED, not FAIL",
+                             timeout=25)
+                else:
+                    d.expect(r"GUIDE step=2/2 \S+ state=COMMIT",
+                             "12i: the unbanded PASS committed")
+                d.expect(r"GUIDE .* state=DONE", f"12i: {label}: reaches DONE")
+                d.send(b"q")
+                d.expect(r"GUIDE .* state=EXIT", f"12i: {label}: EXIT")
+                guide_live = False
+            finally:
+                if guide_live:
+                    d.send(b"q")
+                    time.sleep(0.5)
+                d.close()
+            jl_exec(f"import time\npwm_stop({OSC_PWM_PIN})\n"
+                    "dac_set(TOP_RAIL, 0.0)\ndac_set(BOTTOM_RAIL, 0.0)\n"
+                    "nodes_clear()\ntime.sleep(0.2)\n", timeout=25)
+            time.sleep(1.0)
+    finally:
+        # Belt and braces: the per-iteration stop above is the normal path, but
+        # an exception mid-drive must not leave a GPIO toggling on the bench.
+        jl_exec(f"pwm_stop({OSC_PWM_PIN})", timeout=25)
+
     # --- 12h. the ohm flip's two legacy guards ------------------------------
     #
     # §2.3 + §5 item 8. Continuity min/max used to be MILLIAMPS. They are ohms
@@ -2614,7 +2782,8 @@ finally:
 for p in ({WIRING_PATH!r}, {POWER_PATH!r}, {NOPOWER_PATH!r}, {CHECKS_PATH!r},
           {REFUSAL_PATH!r}, {CONT_PATH!r}, {COMPACT_PATH!r},
           {VFNR_PATH!r}, {STARVE_PATH!r}, {LEGACY_PATH!r},
-          {RAIL_OK_PATH!r}, {RAIL_GND_PATH!r}, {RAIL_FLOAT_PATH!r}):
+          {RAIL_OK_PATH!r}, {RAIL_GND_PATH!r}, {RAIL_FLOAT_PATH!r},
+          {RAIL_OSC_BAND_PATH!r}, {RAIL_OSC_NOBAND_PATH!r}):
     if fs_exists(p):
         jfs.remove(p)
 runs = 0
