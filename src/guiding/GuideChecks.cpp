@@ -231,6 +231,15 @@ enum class SenseMode : uint8_t {
 // pins across all placed parts for rail_sane).
 #define CK_MAX_ROWS 32
 
+// rowClass, as stored by collectClassRows and read by rail_sane's gate 2:
+//   1 = power fed from the TOP rail (and the documented default for a power
+//       pin whose feeding supply cannot be named - see railRowClassFor)
+//   2 = ground
+//   3 = power fed from the BOTTOM rail
+#define CK_ROWCLASS_TOP 1
+#define CK_ROWCLASS_GND 2
+#define CK_ROWCLASS_BOT 3
+
 struct CheckState {
     bool active = false;
     GuideCheck check = GuideCheck::NONE;
@@ -244,7 +253,7 @@ struct CheckState {
 
     // rows under test (presence / rail_sane iterate; continuity / vf use A+B)
     int rows[CK_MAX_ROWS];
-    uint8_t rowClass[CK_MAX_ROWS]; // rail_sane: 1 = power, 2 = gnd
+    uint8_t rowClass[CK_MAX_ROWS]; // rail_sane: CK_ROWCLASS_TOP / _GND / _BOT
     int numRows = 0;
     int rowIdx = 0;
 
@@ -297,6 +306,7 @@ struct CheckState {
     // oscillates
     int oscGpioIdx = -1;           // gpioDef index of the ephemeral route; -1 = tap fallback
     int oscTarget = -1;            // remembered for teardown (never deref step there)
+    bool oscPreTapPending = false; // the safety sample, before any GPIO route
     bool oscLastLevel = false, oscHaveLevel = false;
     uint32_t oscEdges = 0;
     unsigned long oscSettleUntilMs = 0;
@@ -307,10 +317,19 @@ struct CheckState {
 
     // rail_sane transient (this check applied power; teardown restores)
     bool railTransient = false;
-    float railMeasured = 0;        // §3: the rail's OWN measured voltage
-    bool railRefPending = false;   // the in-flight tap is the rail's, not a row's
-    int railAdc = -1;              // channel the rail tap landed on - every
-                                   // row is then compared on the SAME one
+    float railMeasured = 0;        // §3: the TOP rail's OWN measured voltage
+    bool railRefPending = false;   // the in-flight tap is a rail's, not a row's
+    int railAdc = -1;              // channel the TOP rail tap landed on - every
+                                   // rowClass 1 row is compared on the SAME one
+    // ...and the same two for the BOTTOM rail. A project may power parts from
+    // either rail (or both), so rowClass 3 rows get their own reference
+    // measurement and their own preferred channel - the same-channel gain
+    // cancellation of §3 is per-rail or it is not cancellation at all.
+    float railMeasuredBot = 0;
+    int railAdcBot = -1;
+    uint8_t railRefWhich = 0;      // which rail the in-flight ref tap is: 0 top, 1 bottom
+    bool railTopRefDone = false;
+    bool railBotRefDone = false;
     float railWorstDelta = 0;
     float railWorstV = 0;
     int railWorstRow = -1;
@@ -347,6 +366,33 @@ static bool nodeHasUserBridge(int node) {
         return true;
     }
     return false;
+}
+
+// A node that SOURCES or SINKS on its own - the two rail outputs, the board
+// ground, the DAC outputs, and the shunt's own terminals.
+//
+// WHY THE STIMULUS CHECKS MUST REFUSE THESE AS rowA/rowB. The chain is
+// DAC0 -> rowA -> [part] -> rowB -> ISENSE_PLUS -> [2 ohm shunt] ->
+// ISENSE_MINUS -> GND. Put a live rail on rowB and that is the rail across
+// 2 ohm to ground; the file's own bench figure for the return path is ~130
+// ohm (see chainComplete), so 5 V lands at ~38 mA and 3.3 V at ~25 mA - both
+// UNDER the 50 mA INA watchdogs, so nothing stops it, and it flows for the
+// ~250-300 ms the zero-stimulus leak gate needs to notice. Pre-power it is
+// worse in a different way: the rail op-amp sinking in parallel with the
+// shunt produces a confident, wrong verdict.
+//
+// nodeHasUserBridge() cannot cover this. In COMPACT placement partPinNode()
+// returns pin.connect verbatim, and expandOnePart SUPPRESSES the leg's bridge
+// for exactly that case (`node == pin.connect`), so a compact part whose last
+// pin is `connect: TOP_RAIL` presents rowB == TOP_RAIL with no bridge on it at
+// all. globalDoNotIntersects catches the rowA side by accident ({TOP_RAIL,DAC0}
+// is in the table) but has no ISENSE_PLUS entry, so the rowB side routes; and
+// "stimulus chain routing failed" is the wrong thing to tell a user about a
+// refusal this check should be making on purpose.
+static bool nodeIsDrivenSource(int node) {
+    return node == TOP_RAIL || node == BOTTOM_RAIL || node == GND ||
+           node == DAC0 || node == DAC1 ||
+           node == ISENSE_PLUS || node == ISENSE_MINUS;
 }
 
 // Any bridge at all touches the node (used for the oscillates GPIO pick -
@@ -504,6 +550,20 @@ static void setDetail(const char* fmt, ...) {
 static void checkTeardown(void) {
     String err;
     bool removed = false;
+    // FIRST, and before the refresh below. A pending one-shot tap request
+    // outlives the check that posted it: serviceOneShotTap() sits at the head
+    // of serviceNetVoltageScan() ungated by the scan's own enable/menu/idle
+    // rules, so the moment this teardown's refreshLocalConnections+waitCore2
+    // releases core1busy/refreshInProgress the scan core closes a real sense
+    // route on a board nobody is measuring. guideCheckAbort() has cancelled it
+    // for the user-abort path since wave 1; the three terminal exits that only
+    // reach finishCheck() - the INA0 watchdog, the INA1 source watchdog and the
+    // overall timeout - can all fire with ck.phase == TAP_WAIT and had no
+    // cancel at all. This is that single choke point, so every exit inherits
+    // it. Guarded on a request actually being in flight (NetVoltageScan.cpp),
+    // so the ordinary pass path - where the tap that produced the value has
+    // already been retired - pays nothing.
+    cancelOneShotTap();
     if (ck.chainLive) {
         // Stimulus dies FIRST, then the routes open. (Presence-abort mid-
         // charge discharges its rows through the still-closed legs here -
@@ -826,14 +886,32 @@ static bool chainBegin(int rowA, int rowB, float stimulusVolts) {
     return true;
 }
 
-// Does this rail_sane run owe a reference tap? Only power-class rows are
-// compared against the measured rail; a GND-only run needs no reference (the
-// breadboard minus rails are hard ground - §3 step 3).
-static bool railSaneNeedsRef(void) {
+// Does this rail_sane run owe a reference tap, and for which rail? Only
+// power-class rows are compared against a measured rail; a GND-only run needs
+// no reference at all (the breadboard minus rails are hard ground - §3 step 3).
+// A mixed-supply project owes BOTH, and they are taken one after the other.
+static bool railSaneNeedsTopRef(void) {
     for (int i = 0; i < ck.numRows; i++) {
-        if (ck.rowClass[i] == 1) return true;
+        if (ck.rowClass[i] == CK_ROWCLASS_TOP) return true;
     }
     return false;
+}
+
+static bool railSaneNeedsBotRef(void) {
+    for (int i = 0; i < ck.numRows; i++) {
+        if (ck.rowClass[i] == CK_ROWCLASS_BOT) return true;
+    }
+    return false;
+}
+
+static bool railSaneNeedsRef(void) {
+    return railSaneNeedsTopRef() || railSaneNeedsBotRef();
+}
+
+// Is another reference tap still owed? Drives the RAIL_REF re-entry.
+static bool railSaneRefOutstanding(void) {
+    return (railSaneNeedsTopRef() && !ck.railTopRefDone) ||
+           (railSaneNeedsBotRef() && !ck.railBotRefDone);
 }
 
 // Give up on Option 1 mid-check and hand the voltage half back to the one-shot
@@ -900,6 +978,24 @@ static void dropSenseLegsToTaps(bool energized) {
     }
 }
 
+// Which rail feeds this power pin? `pin.connect` is the authority and it works
+// in BOTH placement modes: compact returns pin.connect as the node itself,
+// expanded returns the footprint row which applyPartPlacement has already
+// bridged to that same rail, so the tap reads the rail's potential either way.
+//
+// RESIDUAL, DELIBERATE: a power pin that connects to a plain ROW (fed from
+// somewhere the parts table cannot see - a regulator's output, another part)
+// stays class 1 and is compared to the top rail, which is the documented
+// default at the `target:` branch of the RAIL_SANE case. Narrowing that would
+// silently delete coverage from every project that passes today; the bug this
+// fixes is a pin the file EXPLICITLY names the bottom rail for.
+static uint8_t railRowClassFor(const PartDefinition& p, const PartPin& pin, int node) {
+    if (pin.pinClass == 2) return CK_ROWCLASS_GND;
+    (void)p;
+    if (pin.connect == BOTTOM_RAIL || node == BOTTOM_RAIL) return CK_ROWCLASS_BOT;
+    return CK_ROWCLASS_TOP;
+}
+
 // Collect the class-tagged rows of every placed part (rail_sane).
 static void collectClassRows(void) {
     ck.numRows = 0;
@@ -913,11 +1009,95 @@ static void collectClassRows(void) {
             if (node < 1) continue;
             if (ck.numRows < CK_MAX_ROWS) {
                 ck.rows[ck.numRows] = node;
-                ck.rowClass[ck.numRows] = pin.pinClass;
+                ck.rowClass[ck.numRows] = railRowClassFor(p, pin, node);
                 ck.numRows++;
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// oscillates: the GPIO gate
+// ---------------------------------------------------------------------------
+// The frequency half of this check counts edges on an RP2350 GPIO, which means
+// closing a crosspoint from the target node straight onto a 3.3 V pin (the
+// routable bank is GPIO 20-27, taken to L.X4-X11 with NO level shifters).
+// Nothing used to look at what the target sits at first.
+//
+// TWO GATES, and they are gates for different reasons:
+//
+//  1. THE SUPPLY CEILING - deterministic, and the one that actually protects
+//     the shipped content. The 555 project runs `power: topRail: 5.0` and a
+//     CMOS 555 substitute swings near-rail, so its OUT node reaches ~5 V. No
+//     sample can be trusted to catch that (see gate 2), but the project's own
+//     declared rails bound it exactly, for free, before any hardware moves.
+//
+//  2. THE ONE-SHOT TAP - the controller's ruling, kept because it catches what
+//     the rails cannot: a node fed from outside the board.
+//
+// WHY THE TAP ALONE IS NOT ENOUGH, which is a correction to the ruling's
+// letter. A tap is a ~500 us DC dwell (NetVoltageScan: early/late windows
+// eight ring sweeps apart). This check's own band is 0.3-30 Hz, i.e. half
+// cycles of 16 ms to 1.6 s, so a single tap on an oscillating node samples
+// whichever half cycle it happens to land in and reads a clean, stable level
+// there. On the very signal this check exists to measure it is a coin flip:
+// high proves danger, low proves nothing. So the tap is used as a LOWER bound
+// only, and the rails supply the UPPER one. Burst-sampling was considered and
+// rejected - it turns a coin flip into a weighted coin flip; the ceiling is
+// the deterministic half.
+//
+// Either refusal is EXPLAINED and then falls through to the existing high-Z
+// tap fallback, which is safe at 5 V (the sense path is the +/-8 V divider)
+// and still reaches an honest verdict for the 555: taps land on both levels
+// across the window, span > 1 V, val=osc. A refusal, not a silent risk, and
+// not a lost check either.
+static const float kOscGpioMaxV = 3.6f;   // the FT pad's 3.3V domain, with margin
+static const uint32_t kOscPreTapBudgetMs = 300; // room for the safety tap + retries
+
+// The highest magnitude this project can put on a node, from the rails alone.
+// Live power truth AND the script's own values: power_on has normally
+// committed by the time an oscillates step runs, but a re-verify from a
+// browsed-back step can reach here before that.
+static float oscSupplyCeiling(void) {
+    float c = fabsf(globalState.power.topRail);
+    if (fabsf(globalState.power.bottomRail) > c) c = fabsf(globalState.power.bottomRail);
+    if (ck.script != nullptr && ck.script->hasPower) {
+        if (fabsf(ck.script->topRail) > c) c = fabsf(ck.script->topRail);
+        if (fabsf(ck.script->bottomRail) > c) c = fabsf(ck.script->bottomRail);
+    }
+    return c;
+}
+
+// Pick a free routable GPIO and close the edge-counting route onto it.
+// Returns true when ck.oscGpioIdx names a live route. The candidate filter is
+// the probe-power scan's skip list, high end first (users reach for GPIO 1):
+// not MicroPython-owned, no PWM, not the top-OLED pins, no bridge of any kind,
+// config direction INPUT (the refresh's setGPIO pass re-asserts config, so an
+// output-configured pin would drive the net - never pick one).
+static bool oscTryGpioRoute(int target) {
+    ck.oscGpioIdx = -1;
+    for (int i = 7; i >= 0; i--) {
+        int node = gpioDef[i][1];
+        if (globalState.config.gpioPythonOwned[i]) continue;
+        if (globalState.config.gpioPwmEnabled[i]) continue;
+        if (globalState.config.gpioDirection[i] == 0) continue; // output
+        if (jumperlessConfig.top_oled.enabled &&
+            (node == jumperlessConfig.top_oled.gpio_sda ||
+             node == jumperlessConfig.top_oled.gpio_scl)) continue;
+        if (infraOwnsNode(node)) continue;
+        if (nodeHasAnyBridge(node)) continue;
+        ck.oscGpioIdx = i;
+        break;
+    }
+    if (ck.oscGpioIdx < 0) return false;
+    String err;
+    if (!globalState.addEphemeralConnection(target, gpioDef[ck.oscGpioIdx][1],
+                                            err, true, 0)) {
+        ck.oscGpioIdx = -1; // nothing landed; no teardown owed
+        return false;
+    }
+    gpio_set_dir(gpioDef[ck.oscGpioIdx][0], false); // input, belt+braces
+    return true;
 }
 
 void guideCheckBegin(const GuideCheckRun& run) {
@@ -1027,6 +1207,23 @@ void guideCheckBegin(const GuideCheckRun& run) {
                     finishCheck(GUIDE_CHECK_SKIPPED, "check skipped (rows in use)", "skip");
                     break;
                 }
+                // Same supply refusal as continuity/vf: presence charges its
+                // rows from DAC0 through the shunt, so a rail or GND among them
+                // is the same short with the same 25-38 mA under the watchdog.
+                int badSupply = -1;
+                for (int i = 0; i < ck.numRows && badSupply < 0; i++) {
+                    if (nodeIsDrivenSource(ck.rows[i])) badSupply = ck.rows[i];
+                }
+                if (badSupply < 0 && presRowB >= 1 && nodeIsDrivenSource(presRowB)) {
+                    badSupply = presRowB;
+                }
+                if (badSupply >= 0) {
+                    finishCheck(GUIDE_CHECK_SKIPPED,
+                                "can't charge a supply node - rail/GND/DAC/ISENSE "
+                                "holds its own voltage, so presence means nothing there",
+                                "supply@%d", badSupply);
+                    break;
+                }
                 if (nodeHasUserBridge(DAC0) || nodeHasUserBridge(ISENSE_PLUS) ||
                     nodeHasUserBridge(ISENSE_MINUS)) {
                     finishCheck(GUIDE_CHECK_SKIPPED,
@@ -1097,6 +1294,18 @@ void guideCheckBegin(const GuideCheckRun& run) {
             // carries only our own loop current (rowB is isolated).
             if (nodeHasUserBridge(rowA) || nodeHasUserBridge(rowB)) {
                 finishCheck(GUIDE_CHECK_SKIPPED, "check skipped (rows in use)", "skip");
+                break;
+            }
+            // ...and only into rows, never into a supply. Deliberately AFTER
+            // the rows-in-use test: an EXPANDED part's rail pin arrives here as
+            // its own bridged footprint row, which is already "in use", and
+            // that message stays the one a user sees for it.
+            if (nodeIsDrivenSource(rowA) || nodeIsDrivenSource(rowB)) {
+                int bad = nodeIsDrivenSource(rowA) ? rowA : rowB;
+                finishCheck(GUIDE_CHECK_SKIPPED,
+                            "can't stimulate a supply node - rail/GND/DAC/ISENSE "
+                            "drives its own current, so there is nothing to measure",
+                            "supply@%d", bad);
                 break;
             }
             if (nodeHasUserBridge(DAC0) || nodeHasUserBridge(ISENSE_PLUS) ||
@@ -1198,60 +1407,90 @@ void guideCheckBegin(const GuideCheckRun& run) {
             }
             ck.oscTarget = st.target;
             ck.oscWindowMs = (ck.timeoutMs > 500) ? ck.timeoutMs : 500;
-            ck.timeoutMs = ck.oscWindowMs + 1000; // window IS the schedule
-            // Free routable GPIO, the probe-power scan's skip list (high end
-            // first - users reach for GPIO 1): not MicroPython-owned, no PWM,
-            // not the top-OLED pins, no bridge of any kind, config direction
-            // INPUT (the refresh's setGPIO pass re-asserts config, so an
-            // output-configured pin would drive the net - never pick one).
-            for (int i = 7; i >= 0; i--) {
-                int node = gpioDef[i][1];
-                if (globalState.config.gpioPythonOwned[i]) continue;
-                if (globalState.config.gpioPwmEnabled[i]) continue;
-                if (globalState.config.gpioDirection[i] == 0) continue; // output
-                if (jumperlessConfig.top_oled.enabled &&
-                    (node == jumperlessConfig.top_oled.gpio_sda ||
-                     node == jumperlessConfig.top_oled.gpio_scl)) continue;
-                if (infraOwnsNode(node)) continue;
-                if (nodeHasAnyBridge(node)) continue;
-                ck.oscGpioIdx = i;
-                break;
-            }
-            if (ck.oscGpioIdx >= 0) {
-                String err;
-                if (!globalState.addEphemeralConnection(st.target,
-                                                        gpioDef[ck.oscGpioIdx][1],
-                                                        err, true, 0)) {
-                    ck.oscGpioIdx = -1; // nothing landed; no teardown owed
-                    // fall back to taps below
-                } else {
-                    gpio_set_dir(gpioDef[ck.oscGpioIdx][0], false); // input, belt+braces
-                    ck.oscSettleUntilMs = millis() + 20;
-                    ck.phase = CkPhase::OSC_COUNT;
-                    break;
-                }
-            }
-            // Tap fallback (no GPIO free): repeated taps through the window.
-            // A tap sees a DC level (ok) or drift-rejects (the scanner is
-            // DC-only - a moving signal LOOKS floating to it). Both levels
-            // observed across ok taps = oscillating; frequency unmeasurable
-            // this way - reported honestly as "osc".
+            // window IS the schedule, plus room for the safety tap in front
+            ck.timeoutMs = ck.oscWindowMs + 1000 + kOscPreTapBudgetMs;
+            // The GPIO route is decided in the POLL now, behind the two gates
+            // documented at oscTryGpioRoute: a deterministic supply-ceiling
+            // test and one high-Z sample of the target. Both refusals land on
+            // the tap fallback below, which is where the poll takes us if
+            // either says no (or if no GPIO is free at all).
+            ck.oscPreTapPending = true;
             ck.oscWindowStartMs = millis();
             ck.phase = CkPhase::TAP_REQUEST;
             break;
         }
 
         case GuideCheck::I2C_ACK: {
-            // §5.2: reuse i2cScan (Apps.cpp) - author supplies sda/scl via
-            // n1/n2. This is the one documented BLOCKING check (~1-3 s
-            // including its own UI); it manages its own bridges and removes
-            // them (leaveConnections=0), so no teardown is owed here.
+            // ================= THE I2C CHECK'S BRIDGE CONTRACT =================
+            // (rewritten in the H1 wave; the old comment here claimed the
+            // opposite of what the code did, twice over.)
+            //
+            // WHAT IT ROUTES. n1 -> RP_GPIO_26 (SDA) and n2 -> RP_GPIO_27 (SCL),
+            // as ORDINARY EPHEMERAL LEGS through addLeg()/checkTeardown() - the
+            // same funnel every other check uses. Those two nodes are the ones
+            // Wire1 is moved onto below (RP pins 26/27), and they are the SAME
+            // NODES as RP_GPIO_7/RP_GPIO_8 (137/138 - JumperlessDefines.h aliases
+            // both names to one node), which is why a project that already wired
+            // its device to RP_GPIO_7/8 needs nothing added.
+            //
+            // WHAT IT BORROWS. If the pair is ALREADY a bridge (the shipped
+            // i2cscrn and eeprom projects commit exactly 8<->137 / 7<->138 at
+            // their place step), addEphemeralConnection returns true WITHOUT
+            // tracking anything (States.cpp:801) and removeEphemeralConnection
+            // then finds no ephemeral record and removes nothing
+            // (States.cpp:875). So a committed bridge is borrowed for the scan
+            // and survives it, untouched, by construction.
+            //
+            // WHAT IT RESTORES. Only what it actually added. chainLive is set
+            // BEFORE the adds so a half-built pair still tears down.
+            //
+            // WHAT IT DOES NOT DO. It does not touch GPIO pull configuration.
+            // A real bus needs pull-ups: either the project's own
+            // `config: gpio: pulls:` (which is how i2cscrn/eeprom get RP 26/27
+            // pulled up, re-asserted by every refresh's setGPIO pass) or
+            // physical resistors. An author wiring an arbitrary n1/n2 pair owns
+            // that the same way they own the device's power.
+            //
+            // WHY i2cScan IS CALLED WITH sdaRow/sclRow = -1. It is a bus
+            // scanner here and nothing else: -1 rows take its "no bridges of my
+            // own" branch, and leaveConnections=1 skips its removal tail as
+            // well. It used to be called with the real rows and
+            // leaveConnections=0, which made it delete the project's OWN
+            // committed SDA/SCL bridges (and markDirty, so the run file was
+            // rewritten without them) every single time this check ran - while
+            // its add branch was unreachable for external scans, so it had
+            // never added them in the first place. Bridge lifetime belongs to
+            // the check, not to an app helper.
+            //
+            // Still the one documented BLOCKING check (~1-3 s including
+            // i2cScan's own OLED/LED UI).
+            // ===================================================================
             if (st.n1 < 1 || st.n2 < 1) {
                 finishCheck(GUIDE_CHECK_UNSUPPORTED, "i2c needs n1: (SDA) + n2: (SCL)", "norows");
                 break;
             }
-            int nDevices = i2cScan(st.n1, st.n2, 26, 27, /*leaveConnections=*/0,
-                                   /*internalScan=*/0);
+            {
+                const bool haveSda = globalState.hasConnection(st.n1, RP_GPIO_26);
+                const bool haveScl = globalState.hasConnection(st.n2, RP_GPIO_27);
+                ck.chainLive = true;   // BEFORE the adds: teardown always runs
+                if (!addLeg(0, st.n1, RP_GPIO_26) ||
+                    !addLeg(1, st.n2, RP_GPIO_27)) {
+                    finishCheck(GUIDE_CHECK_FAIL,
+                                "could not route n1/n2 to the I2C pins", "setup");
+                    break;
+                }
+                if (!haveSda || !haveScl) {
+                    refreshLocalConnections(0, 0, 0);
+                    waitCore2();
+                    Serial.printf("  i2c: routed %s%s%s to RP 26/27 for the scan "
+                                  "(removed again afterwards)\n\r",
+                                  haveSda ? "" : "SDA",
+                                  (!haveSda && !haveScl) ? " + " : "",
+                                  haveScl ? "" : "SCL");
+                }
+            }
+            int nDevices = i2cScan(/*sdaRow=*/-1, /*sclRow=*/-1, 26, 27,
+                                   /*leaveConnections=*/1, /*internalScan=*/0);
             bool pass = (nDevices > 0);
             finishCheck(pass ? GUIDE_CHECK_PASS : GUIDE_CHECK_FAIL,
                         pass ? nullptr
@@ -1273,8 +1512,14 @@ void guideCheckBegin(const GuideCheckRun& run) {
                 // want the GND band write `check: voltage` with
                 // min: -0.15 / max: 0.15 instead. Mirrored in the States.h
                 // guide: format comment.
+                //
+                // One exception, and it is not a second default: if the target
+                // IS the bottom rail hole row, compare it to the BOTTOM rail.
+                // "VCC-class" was always shorthand for "the rail that feeds
+                // it", and naming BOTTOM_RAIL says which one that is.
                 ck.rows[ck.numRows] = st.target;
-                ck.rowClass[ck.numRows] = 1;
+                ck.rowClass[ck.numRows] = (st.target == BOTTOM_RAIL)
+                                              ? CK_ROWCLASS_BOT : CK_ROWCLASS_TOP;
                 ck.numRows++;
             } else {
                 collectClassRows();
@@ -1327,6 +1572,26 @@ void guideCheckBegin(const GuideCheckRun& run) {
 // measurement, not to this.
 static float railSaneTopTarget(void) {
     return ck.railTransient ? ck.script->topRail : globalState.power.topRail;
+}
+
+// The same for the BOTTOM rail. The power_on transient already APPLIES
+// script->bottomRail (see the setBotRail call in the RAIL_SANE begin case) -
+// it just had nothing that ever measured or referenced it.
+static float railSaneBotTarget(void) {
+    return ck.railTransient ? ck.script->bottomRail : globalState.power.bottomRail;
+}
+
+// The reference measurement and the channel a row of this class is compared on.
+static float railSaneRefFor(uint8_t rowClass) {
+    return (rowClass == CK_ROWCLASS_BOT) ? ck.railMeasuredBot : ck.railMeasured;
+}
+
+static int railSaneRefAdcFor(uint8_t rowClass) {
+    return (rowClass == CK_ROWCLASS_BOT) ? ck.railAdcBot : ck.railAdc;
+}
+
+static float railSaneSetpointFor(uint8_t rowClass) {
+    return (rowClass == CK_ROWCLASS_BOT) ? railSaneBotTarget() : railSaneTopTarget();
 }
 
 // ---------------------------------------------------------------------------
@@ -1909,6 +2174,54 @@ int guideCheckPoll(char* valOut, size_t valLen) {
         }
 
         case GuideCheck::OSCILLATES: {
+            if (ck.oscPreTapPending) {
+                // GATE 1: the supply ceiling, before any hardware moves.
+                const float ceiling = oscSupplyCeiling();
+                if (ceiling > kOscGpioMaxV) {
+                    ck.oscPreTapPending = false;
+                    Serial.printf("  osc: this project drives its rails at "
+                                  "%.2f V - the frequency check drives a 3.3 V "
+                                  "pin and will not connect to a node that can "
+                                  "swing that high. Falling back to high-Z taps "
+                                  "(frequency not measured).\n\r", (double)ceiling);
+                    ck.oscWindowStartMs = millis();
+                    ck.phase = CkPhase::TAP_REQUEST;
+                    break;
+                }
+                // GATE 2: one high-Z sample of the target itself. A high
+                // reading proves danger; a low one proves only that this
+                // instant was low, which is why gate 1 exists.
+                float v, d;
+                int r = tapCycleNode(ck.oscTarget, &v, &d);
+                if (r == 0) break;
+                ck.oscPreTapPending = false;
+                ck.tapHardFails = 0;
+                if (r == 1 && fabsf(v) > kOscGpioMaxV) {
+                    Serial.printf("  osc: target sits at %.2f V - the frequency "
+                                  "check drives a 3.3 V pin and will not connect "
+                                  "to it. Falling back to high-Z taps (frequency "
+                                  "not measured).\n\r", (double)v);
+                    ck.oscWindowStartMs = millis();
+                    ck.phase = CkPhase::TAP_REQUEST;
+                    break;
+                }
+                // r == -1 (drift-rejected: the node is MOVING, which is what
+                // this check wants) or -2 (no sense route) leave the voltage
+                // unknown - the ceiling already bounds it, so take the GPIO.
+                if (oscTryGpioRoute(ck.oscTarget)) {
+                    ck.oscSettleUntilMs = millis() + 20;
+                    ck.phase = CkPhase::OSC_COUNT;
+                    break;
+                }
+                // No GPIO free: the pre-existing tap fallback. Repeated taps
+                // through the window; a tap sees a DC level (ok) or
+                // drift-rejects (the scanner is DC-only - a moving signal
+                // LOOKS floating to it). Both levels observed across ok taps =
+                // oscillating; frequency unmeasurable this way - "osc".
+                ck.oscWindowStartMs = millis();
+                ck.phase = CkPhase::TAP_REQUEST;
+                break;
+            }
             if (ck.oscGpioIdx >= 0) {
                 // GPIO edge counting. Sample once per poll; the guide loop
                 // runs this at multiple kHz, good to a few hundred Hz - the
@@ -1992,49 +2305,68 @@ int guideCheckPoll(char* valOut, size_t valLen) {
             if (ck.phase == CkPhase::RAIL_REF) {
                 // Hand the wheel to the tap sub-machine, which owns
                 // TAP_REQUEST/TAP_WAIT; railRefPending is what says the tap
-                // now in flight is the RAIL's, not a row's.
+                // now in flight is a RAIL's, not a row's, and railRefWhich
+                // says which rail. Top first when both are owed, so the common
+                // single-rail project behaves exactly as it always did.
+                ck.railRefWhich = (railSaneNeedsTopRef() && !ck.railTopRefDone) ? 0 : 1;
                 ck.railRefPending = true;
-                ck.railAdc = -1;
+                if (ck.railRefWhich == 0) ck.railAdc = -1;
+                else                      ck.railAdcBot = -1;
                 ck.phase = CkPhase::TAP_REQUEST;
                 break;
             }
             if (ck.railRefPending) {
+                const bool isBot = (ck.railRefWhich == 1);
+                const int refNode = isBot ? BOTTOM_RAIL : TOP_RAIL;
+                const char* refName = isBot ? "bottom rail" : "rail";
+                const float setpoint = isBot ? railSaneBotTarget()
+                                             : railSaneTopTarget();
                 float v, d;
                 int adcUsed = -1;
-                int r = tapCycleNode(TOP_RAIL, &v, &d, -1, &adcUsed);
+                int r = tapCycleNode(refNode, &v, &d, -1, &adcUsed);
                 if (r == 0) break;
                 if (r == -2 || r == -1) {
                     // The reference tap is an IMPROVEMENT, not a prerequisite:
                     // refusing here would fail a check that used to pass. Fall
                     // back to the setpoint comparison and say so once.
-                    Serial.printf("  rail: could not tap the rail itself "
+                    Serial.printf("  rail: could not tap the %s itself "
                                   "(%s) - comparing rows against the %.2fV "
-                                  "setpoint instead\n\r",
+                                  "setpoint instead\n\r", refName,
                                   (r == -2) ? "no sense route" : "reads floating",
-                                  (double)railSaneTopTarget());
-                    ck.railMeasured = railSaneTopTarget();
-                    ck.railAdc = -1;
+                                  (double)setpoint);
+                    if (isBot) { ck.railMeasuredBot = setpoint; ck.railAdcBot = -1;
+                                 ck.railBotRefDone = true; }
+                    else       { ck.railMeasured = setpoint;    ck.railAdc = -1;
+                                 ck.railTopRefDone = true; }
                     ck.railRefPending = false;
                     ck.tapHardFails = 0;
+                    if (railSaneRefOutstanding()) ck.phase = CkPhase::RAIL_REF;
                     break;
                 }
-                ck.railMeasured = v;
-                ck.railAdc = adcUsed;
+                if (isBot) { ck.railMeasuredBot = v; ck.railAdcBot = adcUsed;
+                             ck.railBotRefDone = true; }
+                else       { ck.railMeasured = v;    ck.railAdc = adcUsed;
+                             ck.railTopRefDone = true; }
                 ck.railRefPending = false;
                 // GATE 1, the board check. 0.25 V + 5 % is wide on purpose:
                 // it is asking "is the supply alive and roughly right", not
-                // "is it calibrated".
-                const float setpoint = railSaneTopTarget();
+                // "is it calibrated". fabsf on both sides, so a negative
+                // bottom-rail setpoint is gated the same way.
                 if (fabsf(v - setpoint) > (0.25f + 0.05f * fabsf(setpoint))) {
-                    setDetail("rail: meas %.2fV, set %.2fV - outside "
-                              "0.25V+5%% of setpoint", (double)v, (double)setpoint);
+                    setDetail("%s: meas %.2fV, set %.2fV - outside "
+                              "0.25V+5%% of setpoint", refName,
+                              (double)v, (double)setpoint);
                     finishCheck(GUIDE_CHECK_FAIL,
-                                "the rail itself is off - check power",
+                                isBot ? "the bottom rail is off - check power"
+                                      : "the rail itself is off - check power",
                                 "rail%.2fV", (double)v);
+                    break;
                 }
+                if (railSaneRefOutstanding()) ck.phase = CkPhase::RAIL_REF;
                 break;
             }
             int row = ck.rows[ck.rowIdx];
+            const uint8_t rowCls = ck.rowClass[ck.rowIdx];
             float v;
             bool have = false;
             // Always tap - the scan's <250ms window is poisoned by
@@ -2043,7 +2375,9 @@ int guideCheckPoll(char* valOut, size_t valLen) {
             // timestamp-fresh != value-fresh deviation as VOLTAGE above).
             {
                 float d;
-                int r = tapCycleNode(row, &v, &d, ck.railAdc);
+                // The preferred channel is PER RAIL: a bottom-rail row read on
+                // the channel the TOP rail happened to land on cancels nothing.
+                int r = tapCycleNode(row, &v, &d, railSaneRefAdcFor(rowCls));
                 if (r == 0) break;
                 if (r == -2) {
                     finishCheck(GUIDE_CHECK_FAIL, "no sense route to the row",
@@ -2059,14 +2393,16 @@ int guideCheckPoll(char* valOut, size_t valLen) {
             }
             if (have) {
                 bool ok;
-                if (ck.rowClass[ck.rowIdx] == 2) {
+                const float refV = railSaneRefFor(rowCls);
+                if (rowCls == CK_ROWCLASS_GND) {
                     ok = (fabsf(v) <= 0.15f); // GND-class: 0 +/- 0.15 V
                 } else {
-                    // GATE 2, the wiring check: relative to the MEASURED rail,
-                    // through the same sense-path class and the same channel.
-                    float tol = 0.03f * fabsf(ck.railMeasured);
+                    // GATE 2, the wiring check: relative to the MEASURED rail
+                    // THAT FEEDS THIS PIN, through the same sense-path class
+                    // and the same channel.
+                    float tol = 0.03f * fabsf(refV);
                     if (tol < 0.15f) tol = 0.15f;
-                    float delta = fabsf(v - ck.railMeasured);
+                    float delta = fabsf(v - refV);
                     ok = (delta <= tol);
                     if (ck.railWorstRow < 0 || delta > fabsf(ck.railWorstDelta)) {
                         ck.railWorstDelta = delta;
@@ -2075,13 +2411,16 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                     }
                 }
                 if (!ok) {
-                    setDetail("rail: meas %.2fV (set %.2fV); row %d reads %.2fV",
-                              (double)ck.railMeasured, (double)railSaneTopTarget(),
+                    setDetail("%s: meas %.2fV (set %.2fV); row %d reads %.2fV",
+                              (rowCls == CK_ROWCLASS_BOT) ? "bottom rail" : "rail",
+                              (double)refV, (double)railSaneSetpointFor(rowCls),
                               row, (double)v);
                     finishCheck(GUIDE_CHECK_FAIL,
-                                (ck.rowClass[ck.rowIdx] == 2)
+                                (rowCls == CK_ROWCLASS_GND)
                                     ? "gnd-class row is off 0V - miswired?"
-                                    : "row is off the rail - miswired?",
+                                    : ((rowCls == CK_ROWCLASS_BOT)
+                                           ? "row is off the BOTTOM rail - miswired?"
+                                           : "row is off the rail - miswired?"),
                                 "%.2fV@%d", (double)v, row);
                     break;
                 }
@@ -2098,10 +2437,29 @@ int guideCheckPoll(char* valOut, size_t valLen) {
                     // disclaimer - it is the measurement, which §4 wants on
                     // pass as well as fail.
                     if (ck.railWorstRow > 0) {
+                        if (ck.railBotRefDone && ck.railTopRefDone) {
+                            // Mixed supply: name both measurements, or the
+                            // line silently attributes a bottom-rail row's
+                            // delta to the top rail.
+                            setDetail("rails: top %.2fV (set %.2fV) bot %.2fV "
+                                      "(set %.2fV); worst row delta %.2fV @%d",
+                                      (double)ck.railMeasured,
+                                      (double)railSaneTopTarget(),
+                                      (double)ck.railMeasuredBot,
+                                      (double)railSaneBotTarget(),
+                                      (double)ck.railWorstDelta, ck.railWorstRow);
+                        } else if (ck.railBotRefDone) {
+                            setDetail("bottom rail: meas %.2fV (set %.2fV); worst "
+                                      "row delta %.2fV @%d",
+                                      (double)ck.railMeasuredBot,
+                                      (double)railSaneBotTarget(),
+                                      (double)ck.railWorstDelta, ck.railWorstRow);
+                        } else {
                         setDetail("rail: meas %.2fV (set %.2fV); worst row "
                                   "delta %.2fV @%d", (double)ck.railMeasured,
                                   (double)railSaneTopTarget(),
                                   (double)ck.railWorstDelta, ck.railWorstRow);
+                        }
                         // §4 wants `4.74V@8` - the POWER row, which is what
                         // the check is really about. Iteration order put the
                         // gnd-class row last and it reported `-0.00V@9`, a
@@ -2148,6 +2506,11 @@ void guideCheckAbort(void) {
     // it whenever its gates reopened - routes closing on a board nobody was
     // measuring. cancelOneShotTap() is a no-op when nothing is pending, so
     // guideCheckBegin's unconditional abort costs the next check nothing.
+    //
+    // REDUNDANT SINCE THE H1 WAVE, KEPT AS DOCUMENTATION: checkTeardown()
+    // above now cancels at the funnel, which is where the timeout and the two
+    // INA watchdogs get theirs. A second call is free (the guard sees nothing
+    // pending) and this comment is where the reason is written down.
     cancelOneShotTap();
 }
 

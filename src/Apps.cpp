@@ -1776,13 +1776,34 @@ void scanBoard( void ) {
 }
 
 int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnections, int internalScan ) {
-    if ( sdaRow < 0 || sclRow < 0 || internalScan == 0 ) {
+    // BRIDGE OWNERSHIP (fixed in the H1 wave - it was inverted, and its
+    // teardown was unconditional).
+    //
+    // The routing branch was gated on `internalScan == 0` skipping the add,
+    // i.e. bridges were only ever added for the INTERNAL scan - the one that
+    // talks to the on-board Wire and needs no breadboard route at all - while
+    // the EXTERNAL scan, which is exactly the one that has to get sdaRow/sclRow
+    // onto RP 26/27, added nothing. Every caller that passes real rows means
+    // the external scan, so the gate is `internalScan != 0` now.
+    //
+    // The removal tail then ran unconditionally on leaveConnections == 0 with
+    // real rows, so it deleted bridges this call had never added - including a
+    // project's own committed SDA/SCL wiring, with markDirty behind it. It now
+    // removes ONLY what it actually added: addConnection() returns true for a
+    // pair that already exists (it just bumps the duplicate count), so "the add
+    // succeeded" is not the same question as "the bridge is mine".
+    bool addedSda = false, addedScl = false;
+    if ( sdaRow < 0 || sclRow < 0 || internalScan != 0 ) {
         Serial.println( "defaulting to \n\n\rGPIO 26 = SDA\n\rGPIO 27 = SCL" );
     } else {
-        addBridgeToState( RP_GPIO_26, sdaRow ); // SDA
-        addBridgeToState( RP_GPIO_27, sclRow ); // SCL
-        refreshConnections( -1, 1 );
-        waitCore2( );
+        addedSda = !globalState.hasConnection( RP_GPIO_26, sdaRow ) &&
+                   addBridgeToState( RP_GPIO_26, sdaRow ); // SDA
+        addedScl = !globalState.hasConnection( RP_GPIO_27, sclRow ) &&
+                   addBridgeToState( RP_GPIO_27, sclRow ); // SCL
+        if ( addedSda || addedScl ) {
+            refreshConnections( -1, 1 );
+            waitCore2( );
+        }
     }
 
     TwoWire* WireScan = &Wire1; // default to Wire1
@@ -1863,14 +1884,27 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
         requestLedShow( -1 );
     }
 
-    if ( leaveConnections == 0 && sdaRow != -1 && sclRow != -1 ) {
-        removeBridgeFromState( RP_GPIO_26, sdaRow );
-        removeBridgeFromState( RP_GPIO_27, sclRow );
+    if ( leaveConnections == 0 && ( addedSda || addedScl ) ) {
+        if ( addedSda )
+            removeBridgeFromState( RP_GPIO_26, sdaRow );
+        if ( addedScl )
+            removeBridgeFromState( RP_GPIO_27, sclRow );
         refreshConnections( -1, 1 );
     }
 
     if ( internalScan == 0 ) {
         WireScan->end( );
+        // Wire1 is SHARED with the top OLED (oled.cpp: connection types 0/1/3
+        // all sit on I2C1). setSDA/setSCL above moved it onto sdaPin/sclPin and
+        // a bare begin() would leave it there, so an OLED on I2C1 goes silent
+        // for everything after this scan. Put its pins back before re-begin.
+        // Connection type 2 is I2C0 (a different peripheral entirely) and is
+        // not ours to touch.
+        if ( jumperlessConfig.top_oled.enabled &&
+             jumperlessConfig.top_oled.connection_type != 2 ) {
+            WireScan->setSDA( jumperlessConfig.top_oled.sda_pin );
+            WireScan->setSCL( jumperlessConfig.top_oled.scl_pin );
+        }
         WireScan->begin( );
     }
     if ( oled.oledConnected == true ) {
