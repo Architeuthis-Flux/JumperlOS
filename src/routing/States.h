@@ -912,9 +912,9 @@ private:
     String getLegacySlotFilename(int slotNum) const;  // Returns old .txt filename
     String getJSONSlotFilename(int slotNum) const;  // Returns old .json filename
     
-    // History helpers
-    void initHistory();
-    void cleanupHistory();
+    // History helpers. The buffer itself is never allocated any more -
+    // STATE_HISTORY_SIZE is 0 and the legacy snapshot code null-checks - so
+    // there is no init/cleanup pair; historyBuffer just stays nullptr.
     int historyIndex(int offset) const;  // Helper for circular buffer indexing
 };
 
