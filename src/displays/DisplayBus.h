@@ -34,6 +34,11 @@ bool displayBusUserClaimed(const DisplayInstance& d);
 bool displayI2cWrite(DisplayInstance& d, uint8_t control,
                      const uint8_t* bytes, uint16_t n);
 
+// One transaction with the payload verbatim (no control byte prepended) -
+// for merged command+data chunks built with 0x80 continuation controls,
+// which is what keeps a soft-bus chunk to ONE start/addr/stop overhead.
+bool displayI2cWriteRaw(DisplayInstance& d, const uint8_t* bytes, uint16_t n);
+
 // Address ping (start + address + stop). Used by the beacon.
 bool displayI2cPing(DisplayInstance& d, uint8_t addr);
 

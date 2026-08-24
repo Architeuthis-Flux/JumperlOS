@@ -144,6 +144,10 @@ void DisplayService::detach() {
 // One poll: diff the parts table against the attached instance.
 void DisplayService::pollParts(uint32_t now) {
     if ((int32_t)(now - nextPartsPollMs) < 0) return;
+    // Attach/detach ROUTES (removePartPlacement/apply/refreshConnections) -
+    // never do that under a modal loop that may itself be mid-routing.
+    // Flushing chunks under modal load is fine; rebuilding the fabric is not.
+    if (jOS.getBlockingService() != nullptr) return;
     nextPartsPollMs = now + DISP_PARTS_POLL_MS;
 
     // Attached part still there, same identity?
@@ -262,6 +266,15 @@ ServiceStatus DisplayService::service() {
     // ALIVE: advance the animation, then push at most ONE bus chunk.
     animate(now);
     if (!inst.dirty && !inst.midFrame) return ServiceStatus::IDLE;
+
+    // Soft-bus pacing: a merged chunk is ~1.3 ms of bit-banged busy-wait, so
+    // it goes out every ~8 ms (not every 2 ms tick) to keep core-0 duty
+    // under ~20% ambient. The hardware path offloads and ticks freely.
+    bool softBus = (inst.sdaPin != 26);
+    if (softBus) {
+        if ((int32_t)(now - inst.nextChunkMs) < 0) return ServiceStatus::IDLE;
+        inst.nextChunkMs = now + 8;
+    }
 
     // Modal load (something BLOCKING owns the loop): halve the chunk so the
     // ambient animation never starves the menu/probe UI.

@@ -76,14 +76,18 @@ static int monoOledFlushChunk(DisplayInstance& d) {
     if (n > left) n = left;
     if (n > frameBytes - d.flushCursor) n = frameBytes - d.flushCursor;
 
+    // ONE merged transaction: three 0x80-continuation position commands,
+    // then a 0x40 data run - so a soft-bus chunk pays a single
+    // start/addr/stop overhead instead of four.
     uint8_t hwCol = (uint8_t)(col + d.desc->quirks.colOffset);
-    uint8_t pos[3] = { (uint8_t)(0xB0 | page),
-                       (uint8_t)(0x00 | (hwCol & 0x0F)),
-                       (uint8_t)(0x10 | (hwCol >> 4)) };
-    for (int i = 0; i < 3; i++) {
-        if (!displayI2cWrite(d, 0x00, &pos[i], 1)) return -1;
-    }
-    if (!displayI2cWrite(d, 0x40, d.fb + d.flushCursor, n)) return -1;
+    uint8_t tx[7 + 64];
+    tx[0] = 0x80; tx[1] = (uint8_t)(0xB0 | page);
+    tx[2] = 0x80; tx[3] = (uint8_t)(0x00 | (hwCol & 0x0F));
+    tx[4] = 0x80; tx[5] = (uint8_t)(0x10 | (hwCol >> 4));
+    tx[6] = 0x40;
+    if (n > 64) n = 64;
+    memcpy(tx + 7, d.fb + d.flushCursor, n);
+    if (!displayI2cWriteRaw(d, tx, (uint16_t)(7 + n))) return -1;
 
     d.flushCursor += n;
     if (d.flushCursor >= frameBytes) {

@@ -19,8 +19,15 @@ MpBackgroundService& mpBackgroundService = MpBackgroundService::getInstance();
 
 ServiceStatus MpBackgroundService::service() {
     if (!isMicroPythonInitialized()) {
-        // Interpreter teardown killed the root pointer with it; the pins were
-        // already released by the deinit path. Just forget the edge.
+        // Interpreter teardown killed the root pointer with it. Release the
+        // surviving claims OURSELVES on the edge rather than trusting every
+        // deinit path to have done it - the script-exit release is the one
+        // that is verified, teardown's is not, and a stuck gpioPythonOwned
+        // bit would stop refreshConnections re-asserting pulls forever.
+        // jl_gpio_release_all_pins is idempotent plain C++.
+        if (wasActive) {
+            jl_gpio_release_all_pins();
+        }
         wasActive = false;
         return ServiceStatus::IDLE;
     }

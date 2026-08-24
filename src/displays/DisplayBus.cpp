@@ -18,9 +18,14 @@
 static const int SOFT_SDA_PIN = 24;
 static const int SOFT_SCL_PIN = 25;
 
-// Half-bit delay: ~10 us -> ~50 kHz, the fabric-reliable rate the i2cscrn
-// README landed on for long crossbar paths.
-static const int SOFT_HALF_BIT_US = 10;
+// Half-bit delay: ~5 us -> ~100 kHz, i2cscrn's own default (its README's
+// 50 kHz fallback is for flaky long paths - drop this to 10 if a bench
+// panel shows garbage). HONEST BUDGET at 100 kHz: a merged 8-byte chunk is
+// one ~14-byte transaction ~= 1.3 ms of core-0 busy-wait - which is why the
+// service paces soft-bus chunks every ~8 ms instead of every 2 ms tick, and
+// why a full 1 KB frame lands in ~1 s ambient. The good numbers need the
+// OLED on internal I2C0 (hardware Wire1 path) or a future PIO-I2C offload.
+static const int SOFT_HALF_BIT_US = 5;
 
 // ---------------------------------------------------------------------------
 // Soft-I2C primitives (open-drain emulation: LOW = drive, HIGH = release)
@@ -167,6 +172,19 @@ bool displayI2cWrite(DisplayInstance& d, uint8_t control,
     softStart(d);
     bool ok = softWriteByte(d, (uint8_t)(d.i2cAddr << 1));
     if (ok) ok = softWriteByte(d, control);
+    for (uint16_t i = 0; ok && i < n; i++) ok = softWriteByte(d, bytes[i]);
+    softStop(d);
+    return ok;
+}
+
+bool displayI2cWriteRaw(DisplayInstance& d, const uint8_t* bytes, uint16_t n) {
+    if (usingHardware(d)) {
+        Wire1.beginTransmission(d.i2cAddr);
+        Wire1.write(bytes, n);
+        return Wire1.endTransmission() == 0;
+    }
+    softStart(d);
+    bool ok = softWriteByte(d, (uint8_t)(d.i2cAddr << 1));
     for (uint16_t i = 0; ok && i < n; i++) ok = softWriteByte(d, bytes[i]);
     softStop(d);
     return ok;

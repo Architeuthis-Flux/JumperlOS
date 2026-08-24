@@ -82,6 +82,7 @@ struct DisplayInstance {
 
     // Liveness / pacing
     uint32_t nextBeaconMs = 0;
+    uint32_t nextChunkMs = 0;           // soft-bus chunk pacing (~8 ms)
     uint32_t animNextMs = 0;
     int animFrame = 0;
     int animDir = 1;
