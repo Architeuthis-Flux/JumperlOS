@@ -4701,7 +4701,7 @@ void startupColors(void) {
 // Fixed capacity sized to its initializer (was LED_COUNT+200 = 500 on V5). Kept
 // at 500 regardless of board so the OG's smaller LED_COUNT doesn't truncate the
 // initializer; the animation only ever indexes up to LED_COUNT (<= 500).
-uint32_t chillinColors[500] = {
+const uint32_t chillinColors[500] = {
     0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
     0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
     0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,

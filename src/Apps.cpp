@@ -3011,6 +3011,7 @@ void DMXSerialApp( void ) {
 
     if ( dmxTx.begin( config.tx_pin, pio0 ) != DmxOutput::SUCCESS ) {
         Serial.println( "ERROR: Failed to initialize DMX transmitter!" );
+        delete[] universe;
         return;
     }
     Serial.println( "✓ DMX transmitter initialized" );

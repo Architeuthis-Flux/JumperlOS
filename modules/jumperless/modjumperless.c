@@ -6017,33 +6017,43 @@ static mp_obj_t jl_overlay_set_func(size_t n_args, const mp_obj_t* args) {
 
     size_t current_pixel = 0;
 
-    for (size_t i = 0; i < len; i++) {
-        mp_obj_t item = items[i];
-        
-        // Check for nested list/tuple (2D array row)
-        if (mp_obj_is_type(item, &mp_type_list) || mp_obj_is_type(item, &mp_type_tuple)) {
-             size_t row_len;
-             mp_obj_t* row_items;
-             mp_obj_get_array(item, &row_len, &row_items);
-             
-             for (size_t j = 0; j < row_len; j++) {
-                 if (current_pixel < required_pixels) {
-                     colors[current_pixel++] = (uint32_t)mp_obj_get_int(row_items[j]);
+    // mp_obj_get_int/mp_obj_get_array raise on a non-int element, and a raise
+    // out of this loop used to leak the malloc'd colors buffer. The whole
+    // conversion runs under its own nlr frame: any raise frees the buffer
+    // first, then propagates unchanged.
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        for (size_t i = 0; i < len; i++) {
+            mp_obj_t item = items[i];
+
+            // Check for nested list/tuple (2D array row)
+            if (mp_obj_is_type(item, &mp_type_list) || mp_obj_is_type(item, &mp_type_tuple)) {
+                 size_t row_len;
+                 mp_obj_t* row_items;
+                 mp_obj_get_array(item, &row_len, &row_items);
+
+                 for (size_t j = 0; j < row_len; j++) {
+                     if (current_pixel < required_pixels) {
+                         colors[current_pixel++] = (uint32_t)mp_obj_get_int(row_items[j]);
+                     }
                  }
-             }
-        } else {
-             // Assume flat list item (int)
-             if (current_pixel < required_pixels) {
-                 colors[current_pixel++] = (uint32_t)mp_obj_get_int(item);
-             }
+            } else {
+                 // Assume flat list item (int)
+                 if (current_pixel < required_pixels) {
+                     colors[current_pixel++] = (uint32_t)mp_obj_get_int(item);
+                 }
+            }
         }
-    }
-    
-    if (current_pixel < required_pixels) {
+
+        if (current_pixel < required_pixels) {
+            mp_raise_ValueError("Color array too small");
+        }
+        nlr_pop();
+    } else {
         free(colors);
-        mp_raise_ValueError("Color array too small");
+        nlr_jump(nlr.ret_val);
     }
-    
+
     int result = jl_overlay_set(name, row, col, width, height, colors);
     free(colors);
     

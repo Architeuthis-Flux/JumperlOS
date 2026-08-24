@@ -12,6 +12,7 @@
 #include "Probing.h"
 #include "JumperlOS.h"
 #include <cstring>
+#include <new>
 #include "FilesystemStuff.h"  // For safe file operations
 #include "externVars.h"       // For pauseCore2ForFlash
 // External objects
@@ -62,7 +63,14 @@ BitmapEditor::~BitmapEditor() {
 
 bool BitmapEditor::loadFile(const String& filepath) {
     this->filepath = filepath;
-    
+
+    // A second load through the same editor object used to leak the previous
+    // buffer - every path below assigns bitmapData without freeing it - and
+    // inherit the previous file's format verdict through a stale hasHeader.
+    delete[] bitmapData;
+    bitmapData = nullptr;
+    hasHeader = false;
+
     if (!safeFileExists(filepath.c_str(), 500)) {
         Jerial.println("File not found: " + filepath);
         return false;
@@ -88,7 +96,7 @@ bool BitmapEditor::loadFile(const String& filepath) {
         dataSize = (width * height + 7) / 8;
         
         // Allocate and clear bitmap data
-        bitmapData = new uint8_t[dataSize];
+        bitmapData = new (std::nothrow) uint8_t[dataSize];
         if (!bitmapData) {
             Jerial.println("Failed to allocate memory for new bitmap");
             return false;
@@ -153,6 +161,15 @@ bool BitmapEditor::loadFile(const String& filepath) {
             height = (pixelCount + width - 1) / width;
         }
         
+        // Raw format means dataSize IS the file size - bound it, or opening a
+        // big file here attempts a same-sized allocation on a ~181KB heap.
+        // 32768 matches ImagesApp's ceiling (256x256 four times over).
+        if (fileSize > 32768) {
+            Jerial.println("File too large for a bitmap (max 32768 bytes)");
+            safeFileClose(file, false);
+            return false;
+        }
+
         dataSize = fileSize;
         Jerial.print("Loaded raw bitmap: ");
         Jerial.print(width);
@@ -161,7 +178,7 @@ bool BitmapEditor::loadFile(const String& filepath) {
     }
     
     // Allocate and read bitmap data
-    bitmapData = new uint8_t[dataSize];
+    bitmapData = new (std::nothrow) uint8_t[dataSize];
     if (!bitmapData) {
         Jerial.println("Failed to allocate memory for bitmap");
         safeFileClose(file, false);
@@ -196,9 +213,11 @@ bool BitmapEditor::newFile(const String& filepath, int w, int h) {
     
     // Calculate data size
     dataSize = (width * height + 7) / 8;
-    
-    // Allocate and clear bitmap data
-    bitmapData = new uint8_t[dataSize];
+
+    // Allocate and clear bitmap data (freeing any bitmap this editor object
+    // already held - newFile used to leak it on re-entry)
+    delete[] bitmapData;
+    bitmapData = new (std::nothrow) uint8_t[dataSize];
     if (!bitmapData) {
         Jerial.println("Failed to allocate memory for new bitmap");
         return false;

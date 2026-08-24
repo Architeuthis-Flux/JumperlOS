@@ -2709,30 +2709,19 @@ void applyStateToHardware() {
 // SlotManager Implementation
 // ============================================================================
 
-SlotManager::SlotManager() 
-    : activeState(globalState), activeSlotNumber(0), historySize(STATE_HISTORY_SIZE), 
+SlotManager::SlotManager()
+    : activeState(globalState), activeSlotNumber(0), historyBuffer(nullptr),
+      historySize(STATE_HISTORY_SIZE),
       historyHead(0), historyCount(0), historyPosition(0),
       previewModeActive(false), previewSlotNumber(-1), originalSlotNumber(-1),
       temporarySlotActive(false), temporarySlotOriginal(-1) {
     // Always initialize to slot 0, sync with netSlot on first use
     netSlot = 0;  // Ensure global is also 0
-    initHistory();
 }
 
 SlotManager& SlotManager::getInstance() {
     static SlotManager instance;
     return instance;
-}
-
-void SlotManager::initHistory() {
-    historyBuffer = new JumperlessState[historySize];
-}
-
-void SlotManager::cleanupHistory() {
-    if (historyBuffer) {
-        delete[] historyBuffer;
-        historyBuffer = nullptr;
-    }
 }
 
 JumperlessState& SlotManager::getActiveState() {
