@@ -45,6 +45,10 @@ int StepViewer::stepCount() const {
     return active ? viewerScript.numSteps : 0;
 }
 
+const GuideScript* StepViewer::armedScript() const {
+    return active ? &viewerScript : nullptr;
+}
+
 // `VIEWER step=` id, the old GUIDE grammar's successor: <type>_<part|node>.
 static void viewerStepId(int idx, char* out, size_t outLen) {
     if (idx < 0 || idx >= viewerScript.numSteps) {

@@ -766,6 +766,7 @@ void SingleCharCommands::initializeCommands( ) {
                      "z runs the companion script (watch SCRIPT offer= then action=);\n"
                      "the menu launcher only announces it (SCRIPT available=).\n"
                      "  z steps [next|prev|<n>|on|off]  browse/arm/disarm the step viewer\n"
+                     "  z check <part> | z check step <k>  run the part's electrical check\n"
                      "Diagnostics (no hardware touched):\n"
                      "  z band <value> [type] [tol]  parsed value + derived continuity band\n"
                      "  z shunt [n]                  n fresh INA0 shunt-register samples",
@@ -854,6 +855,112 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
     // Exact token for the same shadowing reason as `band` below.
     if ( args == "steps" || args.startsWith( "steps " ) ) {
         stepViewer.command( args.substring( 5 ) );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z check <part>` / `z check step <k>` - the on-demand electrical check
+    // (Guides-Simplification A-M6). GuideChecks' polled engine, pumped right
+    // here: a command that blocks for its own bounded duration is a command,
+    // not a mode. Never auto-run; teardown guaranteed (abort on timeout).
+    if ( args == "check" || args.startsWith( "check " ) ) {
+        String rest = args.substring( 5 );
+        rest.trim( );
+        if ( rest.length( ) == 0 ) {
+            Jerial.println( "Usage: z check <partName>  |  z check step <k>" );
+            return CMD_DONT_SHOW_MENU;
+        }
+
+        // One synthesized step for the bare-part form; the step form reads
+        // the viewer's table (and its script's power: for rail_sane).
+        static GuideScript bareScript;   // zeroed each use; hasPower=false
+        GuideStep oneStep;
+        const GuideStep* step = nullptr;
+        const GuideScript* script = nullptr;
+        String label;
+
+        if ( rest.startsWith( "step " ) || rest == "step" ) {
+            const GuideScript* sc = stepViewer.armedScript( );
+            if ( sc == nullptr ) {
+                Jerial.println( "CHECK error viewer not armed (open a project first)" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            int k = ( rest.length( ) > 4 ) ? rest.substring( 4 ).toInt( ) : 0;
+            if ( k < 1 ) k = stepViewer.cursorIndex( ) + 1;
+            if ( k < 1 || k > sc->numSteps ) {
+                Jerial.println( "CHECK error step out of range (1-" +
+                                String( sc->numSteps ) + ")" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            step = &sc->steps[k - 1];
+            script = sc;
+            label = "step_" + String( k );
+        } else {
+            int partIdx = globalState.parts.findByName( rest.c_str( ) );
+            if ( partIdx < 0 ) {
+                Jerial.println( "CHECK error unknown part '" + rest + "'" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            const PartDefinition& p = globalState.parts.parts[partIdx];
+            memset( &oneStep, 0, sizeof( oneStep ) );
+            oneStep.type = GuideStepType::PLACE;
+            oneStep.partIdx = (int8_t)partIdx;
+            oneStep.n1 = oneStep.n2 = oneStep.target = -1;
+            oneStep.timeoutMs = 1500;
+            oneStep.onFail = GuideOnFail::WARN;
+            oneStep.check = guideDefaultCheckForPart( p );
+            if ( oneStep.check == GuideCheck::NONE ) {
+                Jerial.println( "CHECK part=" + String( p.name ) +
+                                " result=unsupported val=nocheck detail=\"no "
+                                "default check for type '" + String( p.typeStr ) + "'\"" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            memset( &bareScript, 0, sizeof( bareScript ) );
+            step = &oneStep;
+            script = &bareScript;
+            label = String( p.name );
+        }
+
+        bool railsLive =
+            ( railHwVolts[0] > -99.0f && fabsf( railHwVolts[0] ) > 0.25f ) ||
+            ( railHwVolts[1] > -99.0f && fabsf( railHwVolts[1] ) > 0.25f );
+        GuideCheckRun run = { step, script, railsLive };
+
+        Jerial.println( "\r\nCHECK start=" + label + " check=" +
+                        String( guideCheckName( step->check ) ) );
+        Jerial.flush( );
+
+        guideCheckBegin( run );
+        char val[24] = "";
+        int outcome = GUIDE_CHECK_RUNNING;
+        // Ceiling: the step's own budget plus a generous engine margin
+        // (I2C_ACK's scan alone runs 1-3 s).
+        unsigned long deadline = millis( ) + step->timeoutMs + 8000;
+        while ( ( outcome = guideCheckPoll( val, sizeof( val ) ) ) ==
+                GUIDE_CHECK_RUNNING ) {
+            jOS.serviceInner( );
+            if ( (long)( millis( ) - deadline ) > 0 ) {
+                guideCheckAbort( );
+                Jerial.println( "CHECK part=" + label +
+                                " result=timeout val=timeout" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            delayMicroseconds( 200 );
+        }
+
+        const char* resultName = ( outcome == GUIDE_CHECK_PASS )      ? "pass"
+                                 : ( outcome == GUIDE_CHECK_FAIL )    ? "fail"
+                                 : ( outcome == GUIDE_CHECK_SKIPPED ) ? "skipped"
+                                                                      : "unsupported";
+        String lineOut = "CHECK part=" + label + " result=" + resultName +
+                         " val=" + String( val[0] ? val : "-" );
+        const char* detail = guideCheckDetail( );
+        if ( detail != nullptr && detail[0] != '\0' )
+            lineOut += " detail=\"" + String( detail ) + "\"";
+        const char* hint = guideCheckHint( );
+        if ( hint != nullptr && hint[0] != '\0' )
+            lineOut += " hint=\"" + String( hint ) + "\"";
+        Jerial.println( lineOut );
+        Jerial.flush( );
         return CMD_DONT_SHOW_MENU;
     }
 

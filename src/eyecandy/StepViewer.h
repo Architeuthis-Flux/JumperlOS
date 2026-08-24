@@ -50,6 +50,10 @@ public:
     // "on" | "off". Prints its own machine lines.
     void command(const String& rest);
 
+    // The armed step table (nullptr when not armed) - `z check step <k>`
+    // reads the step + the script's power: values through this.
+    const struct GuideScript* armedScript() const;
+
 private:
     StepViewer() = default;
     ~StepViewer() = default;
