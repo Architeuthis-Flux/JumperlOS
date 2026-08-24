@@ -228,6 +228,7 @@ void setup( ) {
     extern uint32_t __scratch_x_start__;
     armStackLimit( (uint32_t)&__scratch_x_start__ + 160 );  // > extended FP exception frame
 #endif
+    heapMark("setup() entry");
     flashParkRegisterCore( ); // our side of the flash-write park (see FlashPark.h)
     // Consume any pending crash record NOW, while we still know it belongs to
     // this firmware: the scratch registers survive a reflash, and a record that
@@ -275,9 +276,12 @@ void setup( ) {
                     //    fatFsIsJournal() ? "ON (fast durable saves)" : "OFF (full-snapshot persist)" );
     }
 
+    heapMark("FatFS.begin");
+
     // Initialize multicore synchronization primitives BEFORE Core 2 starts
     // This provides proper mutex-based protection for shared resources
     core_sync_init( );
+    heapMark("boot: before Serial");
     Serial.begin( 115200 );
 
     // Configure Jerial for both input and output
@@ -293,6 +297,7 @@ void setup( ) {
     loadHardwareFromEEPROM( );
 
     loadConfig( );
+    heapMark("loadConfig");
     //delay(2000);
 
     // Reconcile the durable EEPROM store with the just-loaded config. EEPROM
@@ -331,22 +336,26 @@ void setup( ) {
 
     // Initialize the file cache (relies on the arena - no-op if unavailable).
     fileCacheInit( );
+    heapMark("fileCacheInit");
 
     // Initialize the undo log. Must come before any state mutation hooks fire,
     // so nets/probing routines see a valid log from the first edit.
     undoInit( );
+    heapMark("undoInit");
 
     // Check for firmware updates and provision new files if needed
     checkAndHandleFirmwareUpdate( );
 
     // Initialize MicroPython examples at boot so they're ready for USBSer2 REPL access
     initializeMicroPythonExamples( );
+    heapMark("examples provisioning");
 
     configLoaded = 1;
     startupTimers[ 1 ] = millis( );
     delayMicroseconds( 200 );
 
     initNets( );
+    heapMark("initNets");
     backpowered = 0;
 
     // delay(1000);
@@ -380,6 +389,7 @@ void setup( ) {
     // Jerial.setAutoStripTags(true);
     digitalWrite( RESETPIN, LOW );
     initDAC( );
+    heapMark("initDAC");
     // Serial.println("DAC initialized");
     // Serial.flush();
 
@@ -446,6 +456,7 @@ void setup( ) {
     // Serial.flush();
     clearAllNTCC( );
     initINA219( );
+    heapMark("initINA219");
 
     // Auto-detect OLED on the internal I2C0 bus and bring the config in
     // line with what's actually wired up. Must run AFTER initDAC() /
@@ -453,6 +464,7 @@ void setup( ) {
     // whether to call oled.init() based on top_oled.connect_on_boot).
     // Full policy + rationale lives next to the implementation in oled.cpp.
     autoDetectAndConfigureOled( );
+    heapMark("OLED autodetect");
 
     // Serial.println("currentReadingOffset0_mA = " + String(currentReadingOffset0_mA));
     // Serial.println("currentReadingOffset1_mA = " + String(currentReadingOffset1_mA));
@@ -468,8 +480,10 @@ void setup( ) {
     // Serial.flush();
     // delay(100);
     initMenu( );
+    heapMark("initMenu");
     startupTimers[ 6 ] = millis( );
     initADC( );
+    heapMark("initADC");
     startupTimers[ 7 ] = millis( );
     // Serial.println("ADC initialized");
     // Serial.flush();
@@ -579,12 +593,19 @@ void setup( ) {
     // the config (its DMA_IRQ_1 handler runs on this core). If it declines,
     // the START_ONCE path stays and X says why.
     adcRingStart( );
+    heapMark("adcRingStart");
 #if USB_AUDIO_ENABLE
     // Last thing in setup(), once USB and the config are both up: if the saved
     // config wants the USB mic, re-enumerate so the host actually sees it. USB
     // came up before the config was read, so the host already has the base
     // descriptor by now. No-op unless audio is enabled.
     usb_audio_boot_enumerate( );
+    heapMark("usb audio enumerate");
+    // Printed here and not per-stage: most of the stages above run before USB
+    // enumerates, so a live print would have gone nowhere. Also reachable from
+    // the memory menu, which is where you want it after the board has been
+    // used for a while.
+    heapLedgerPrint();
 #endif
     // Serial.println("Service registration complete");
     // Serial.flush();
@@ -843,6 +864,11 @@ menu:
         // Say so if any shared-IRQ registration had to be refused - that feature
         // is running without its interrupt (silent, but not a dead core).
         jlIrqSlotsReport( Serial );
+        // The boot heap ledger is RECORDED here on every boot (heapMark calls
+        // through setup) but printed only from the Memory Usage screen - 18
+        // lines on every boot is noise, and the recording is what matters:
+        // every stage it measures runs before USB enumerates, so the numbers
+        // have to be captured long before anyone can ask for them.
 #if TEST_PSRAM == 1
         while ( 1 ) {
             initBuff( );

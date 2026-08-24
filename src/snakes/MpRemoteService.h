@@ -172,31 +172,9 @@ private:
     // These four buffers (~16.5 KB total) are new[]'d in the constructor, which
     // runs at STATIC-INIT time via the global `mpRemoteService` reference. On the
     // RP2040 (OG) the heap is only ~25 KB after static allocation, so the 8 KB
-    // code buffer was the first allocation to abort() boot. Shrink them on OG;
-    // mpremote/ViperIDE scripts there are small.
-#if defined(OG_JUMPERLESS)
-    static const size_t CODE_BUFFER_SIZE = 1536;
-#else
-    static const size_t CODE_BUFFER_SIZE = 8192;  // 8KB buffer for code
-#endif
-    char* m_code_buffer = nullptr;
-    size_t m_code_len = 0;
-    
-    // Friendly REPL line buffer (separate from raw REPL code buffer)
-    static const size_t LINE_BUFFER_SIZE = 512;  // 512B for single line
-    char* m_line_buffer = nullptr;
-    size_t m_line_len = 0;
-    
-    // Output capture buffers
-#if defined(OG_JUMPERLESS)
-    static const size_t OUTPUT_BUFFER_SIZE = 1024;
-#else
-    static const size_t OUTPUT_BUFFER_SIZE = 4096;
-#endif
-    char* m_stdout_buffer = nullptr;
-    char* m_stderr_buffer = nullptr;
-    size_t m_stdout_len = 0;
-    size_t m_stderr_len = 0;
+    // (Removed 2026-08-23: m_code_buffer / m_line_buffer / m_stdout_buffer /
+    // m_stderr_buffer and their four _len fields. 16,896 bytes allocated by a
+    // static initializer and never read or written - see the constructor.)
     
     // Raw paste mode state
     bool m_raw_paste_supported = true;  // We support raw-paste mode

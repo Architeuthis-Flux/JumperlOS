@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "MpRemoteService.h"
+#include "Debugs.h"
 #include "ArduinoStuff.h"  // For USBSer2
 #include "Python_Proper.h" // For MicroPython execution
 #include "externVars.h"
@@ -63,21 +64,28 @@ MpRemoteService& mpRemoteService = MpRemoteService::getInstance( );
 static MpRemoteService* s_active_capture = nullptr;
 
 MpRemoteService::MpRemoteService( ) {
-    // Allocate buffers
-    m_code_buffer = new char[ CODE_BUFFER_SIZE ];
-    m_stdout_buffer = new char[ OUTPUT_BUFFER_SIZE ];
-    m_stderr_buffer = new char[ OUTPUT_BUFFER_SIZE ];
-    m_line_buffer = new char[ LINE_BUFFER_SIZE ];
+    // NO BUFFERS ALLOCATED HERE ANY MORE. This constructor used to `new` four
+    // of them - 8 KB code + 2x 4 KB output + 512 B line = 16,896 bytes - memset
+    // them, and then never touch them again: nothing in src/, modules/ or the
+    // MicroPython port ever read or wrote any of the four, nor the four _len
+    // fields beside them. The raw-REPL path streams straight through
+    // mp_embed_exec_str and the capture callback; these were left behind by an
+    // earlier design.
+    //
+    // They cost more than their size suggests, because this object is a global
+    // (`mpRemoteService` below) and so they were taken by a STATIC INITIALIZER,
+    // before setup() - claiming the largest contiguous blocks on a completely
+    // empty heap and never giving them back. The knock-on: MicroPython's GC
+    // heap allocator could not fit its configured 64 KB afterwards and silently
+    // dropped to a 48 KB rung, which is a real user-facing loss (it is the heap
+    // every companion script compiles in). Deleting dead code gave the
+    // interpreter 16 KB back.
+    //
+    // The OG build shrinking these to 1536/1024 was a symptom being treated:
+    // the comment in the header records the code buffer as "the first
+    // allocation to abort() boot" there. It was never needed at any size.
+    heapMark("MpRemoteService ctor");
 
-    if ( m_code_buffer )
-        memset( m_code_buffer, 0, CODE_BUFFER_SIZE );
-    if ( m_stdout_buffer )
-        memset( m_stdout_buffer, 0, OUTPUT_BUFFER_SIZE );
-    if ( m_stderr_buffer )
-        memset( m_stderr_buffer, 0, OUTPUT_BUFFER_SIZE );
-    if ( m_line_buffer )
-        memset( m_line_buffer, 0, LINE_BUFFER_SIZE );
-    
     // Register callbacks for script execution begin/complete notifications
     jl_on_script_begin_callback = jl_mp_remote_script_begin_wrapper;
     jl_on_script_complete_callback = jl_mp_remote_script_complete_wrapper;

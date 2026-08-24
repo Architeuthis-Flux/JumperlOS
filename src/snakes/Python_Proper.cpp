@@ -1,4 +1,5 @@
 #include "Python_Proper.h"
+#include "Debugs.h"
 #include "KickGap.h" // would-be watchdog kick from the VM hook (T1.6 measure-only)
 #include "Adafruit_USBD_CDC.h"
 #include "ArduinoStuff.h"
@@ -804,6 +805,7 @@ static bool mpAllocHeap(void) {
     if (!p) continue;  // fragmentation - try the next rung down
     mp_heap = p;
     mp_heap_size = sz;
+    heapMark("MicroPython GC heap");
     if (sz < configured) {
       // Port 1, deliberately: a port-3-only message is invisible in the
       // normal terminal, which is why the original failure took SWD to find.
