@@ -73,9 +73,9 @@
 #endif
 
 // Boot-time Serial chatter (PSRAM arena sizing, undo ring init, heap ledger,
-// file-cache pass-through notice). Off in release (NDEBUG) builds; on in debug
-// builds and when -DDEBUG is set (jumperless_v5_debug env).
-#if defined(DEBUG) || !defined(NDEBUG)
+// file-cache pass-through notice). On only in jumperless_v5_debug (-DDEBUG);
+// PlatformIO release builds do not define NDEBUG on this core, so gate on DEBUG.
+#if defined(DEBUG)
 #define JL_BOOT_VERBOSE 1
 #else
 #define JL_BOOT_VERBOSE 0
