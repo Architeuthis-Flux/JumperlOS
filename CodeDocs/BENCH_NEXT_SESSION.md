@@ -10,6 +10,26 @@ session; that one is the detail when something looks wrong.
 
 ---
 
+## 0. THE RELEASE (2026-08-24) — this outranks everything below
+
+`stable-5.7.5` exists, builds green (v5 + og), and is waiting on your hands:
+**worktree at `/Users/kevinsanto/Documents/GitHub/JumperlOS-stable-5.7.5`**,
+the whole story in its `CodeDocs/STABLE_5.7.5_RELEASE.md`. It is 5.7.4.1 (the
+last pushed tag, pre-guides) plus ten commits: the I2C open-drain fix, the
+encoder double-click fix, the heap work, the CrashLog abort latch, the
+PSRAM-test crash fix, the SharedBuffer ctor fix, and three small memory-safety
+picks. Guides, slots-become-files, and run files all stay here in dev.
+
+- [ ] Flash it: `picotool load -f -x .pio/build/jumperless_v5/firmware.uf2`
+  from the worktree (the classifier wouldn't let the session do it).
+- [ ] `python3 test/hil/run_all.py` **from the worktree** (era-matched
+  harness; app closed).
+- [ ] The 6-line hands-on list in the release doc (double-click, PSRAM test,
+  I2C scan, REPL-then-memory-screen, and a normal-feel pass).
+- [ ] Rule on `4ab0e16` (net-scan hardening + rail_click_adjust): in or out.
+- [ ] Then: merge `stable-5.7.5` → main, push; CI tags 5.7.5.0.
+- [ ] Reflash the dev UF2 afterward and this board comes back to the 555 run.
+
 ## 0a. Today's two (5 min) — start here
 
 Added 2026-08-23, after your two reports. Both are on the board already
