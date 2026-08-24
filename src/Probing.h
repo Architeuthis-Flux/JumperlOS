@@ -111,7 +111,7 @@ public:
     // Callers reach it by applying the compensating swap when
     // probe_revision > 3. The two implementations of that swap are
     // jl_probe_button_* (JumperlessMicroPythonAPI.cpp) and guideProbeButton
-    // (GuidedFlow.cpp); copy one of them, don't invent a third rule.
+    // (partsProbeButton, PartsApp.cpp); copy one of them, don't invent a third rule.
     //
     //@brief Get the current button state (raw, see the note above)
     //@return 0 = neither pressed, 1/2 = the two buttons, revision-dependent

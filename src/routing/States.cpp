@@ -2904,9 +2904,6 @@ bool JumperlessState::fromLegacyNodeFile(const String& nodeFileContent, String& 
  * - GPIO directions and pull resistors match the loaded config
  * - All hardware reflects the state loaded from the file
  */
-// See States.h for the full contract. Latched and cleared by loadSlotFromPath.
-bool slotLoadDeferPowerApply = false;
-
 void applyStatePowerToHardware(void) {
     setRailsAndDACs(0);
 }
@@ -3514,14 +3511,6 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
     strncpy(savedPath, activeSlotPath, sizeof(savedPath) - 1);
     savedPath[sizeof(savedPath) - 1] = '\0';
 
-    // LATCH AND CLEAR (States.h): the deferral belongs to THIS load only. The
-    // parse-failure restore below re-enters this function and the terminal
-    // path calls applyStateToHardware() directly - both must apply power
-    // normally, and both now see a cleared flag. It also means a leaked
-    // set-and-forget can cost at most one load its rails.
-    const bool deferPower = slotLoadDeferPowerApply;
-    slotLoadDeferPowerApply = false;
-
     if (!safeFileExists(path.c_str())) {
         errorMsg = "File not found: " + path;
         return false;   // tracking untouched - prior context still active
@@ -3665,7 +3654,7 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
         // re-assert this context's power: rails + DACs (unless the caller
         // deferred it - the guided launch closes the project-power transient
         // by owning the apply itself; States.h has the whole contract)
-        applyStateToHardware(/*skipPower=*/deferPower);
+        applyStateToHardware();
     }
 
     // ---- ADOPT --------------------------------------------------------

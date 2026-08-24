@@ -9,19 +9,22 @@
 //   listProjects -> project picker
 //   -> <dir>_run.yaml absent? variant picker (only when >1 genuine
 //      wiring*.yaml) -> projectBeginRun copies the wiring into it. No prompt.
-//   -> <dir>_run.yaml present, guided build MID-FLIGHT in it? ONE prompt:
-//      resume / start fresh (overwrites from the template) / cancel.
-//   -> <dir>_run.yaml present otherwise (finished guide, non-guided, plain
-//      state)? SILENTLY reopen it. No prompt. Keeping a run is Slots>save-to.
-//   -> guided?  guideRun on the CANONICAL wiring path (never the run file)
-//      not guided? run main[.variant].py with `_jl_project` injected
+//   -> <dir>_run.yaml present? SILENTLY reopen it. No prompt ever - the
+//      blocking guide and its resume/fresh prompt are GONE (Guides-
+//      Simplification A-M3). Start-fresh is an explicit gesture now: a Files
+//      click on a template wiring, or `z <project> new`.
+//   -> the open is AMBIENT: parts land in the table, PartLabels marks them,
+//      the file's power: applies at load (warn-never-block replaces the 0 V
+//      parking), machine lines announce the context, and the launcher
+//      RETURNS TO IDLE. Interactive opens print `SCRIPT available=` and run
+//      nothing; the headless `z` door still runs main[.variant].py with
+//      `_jl_project` injected (headless stays deterministic).
 //   -> the run file stays the active context when the launcher returns.
 //
 // Flow (JL_PROJECT_RUN_HISTORY = 1 - the wave-2 numbered scheme, kept
 // compiling so the behaviour can come back on a build flag):
-//   ... -> scanRunFiles: runs exist? load-latest / start-new prompt
-//   -> start-new: variant picker -> <dir>_<N+1>.yaml
-//   -> load-latest: open <dir>_<maxN>.yaml, variant resolved from runSource
+//   ... -> scanRunFiles: runs exist? silently load latest
+//   -> none: variant picker -> <dir>_<N+1>.yaml
 //
 // ONE LATCH runs through this file now: Menus::inClickMenu. Core 1 only
 // renders b.print() text while it is 1 (main.cpp:1817) and only renders NETS
@@ -49,10 +52,10 @@
 #include "FileCache.h"        // fileCacheFlushNowAll (context switch)
 #include "FilesystemStuff.h"  // safeFile*, FatFS Dir walk
 #include "Graphics.h"         // b.print (no-op on OG)
-#include "GuidedFlow.h"       // guideRun / GuideRunResult
+#include "GuideScript.h"      // guideParse (step texts for the ambient flow)
 #include "JumperlOS.h"        // jOS.serviceInner()
 #include "Menus.h"            // inClickMenu, yesNoMenu
-#include "Peripherals.h"      // setTopRail / setBotRail / setDac*voltage (rail restore)
+#include "Peripherals.h"
 #include "Python_Proper.h"    // executePythonFileContent, setGlobalStreamWithInterrupt
 #include "RotaryEncoder.h"    // encoder state machine
 #include "States.h"           // SlotManager
@@ -513,7 +516,7 @@ static void flushActiveContextIfDirty(SlotManager& mgr) {
 }
 
 bool projectBeginRun(const String& dir, const String& templatePath,
-                     String& runPathOut, String& err, bool deferPower) {
+                     String& runPathOut, String& err) {
     runPathOut = "";
 
     // Namespace refusal (design §3 / task-4 review Q4). PREFIX, not equality:
@@ -586,9 +589,6 @@ bool projectBeginRun(const String& dir, const String& templatePath,
             continue;
         }
         String lerr;
-        // Re-armed per attempt: loadSlotFromPath latches and clears the flag,
-        // so a second try would otherwise energize what the first deferred.
-        slotLoadDeferPowerApply = deferPower;
         if (mgr.loadSlotFromPath(runPath, lerr)) {
             // Stamp the variant provenance the path itself cannot encode, and
             // persist it right away so a reboot resolves the same script.
@@ -611,50 +611,18 @@ bool projectBeginRun(const String& dir, const String& templatePath,
     return false;
 }
 
-// Open an existing run file as the active context. Same atomicity guarantee,
-// and the same deferPower contract as projectBeginRun above.
-static bool projectOpenRunFile(const String& runPath, String& err,
-                               bool deferPower = false) {
+// Open an existing run file as the active context. Same atomicity guarantee
+// as projectBeginRun above; power applies at load like every other context
+// switch (the deferred-power latch died with the blocking guide).
+static bool projectOpenRunFile(const String& runPath, String& err) {
     SlotManager& mgr = SlotManager::getInstance();
     flushActiveContextIfDirty(mgr);
     fileCacheFlushNowAll("project_open_run");
-    slotLoadDeferPowerApply = deferPower;
     if (mgr.loadSlotFromPath(runPath, err)) {
         return true;
     }
     reportIfNoActiveContext(mgr);
     return false;
-}
-
-// Is a guided build MID-FLIGHT in this run file? The single-file launcher's
-// one prompt hangs off this, and it has to be answerable WITHOUT loading:
-// the prompt offers `cancel`, and a cancel must leave the previous context
-// untouched (the exit table's row B). So it is a header-only text scan -
-// SlotManager::scanGuideProgressFile, which shares its flow-map reader with
-// fromYAML's parse arm.
-//
-// `of:` (the step total, written by the guide runtime alongside the step) is
-// what makes this decidable at all: numSteps cannot be recomputed here,
-// because guideParse resolves `part:` names - and synthesizes auto steps -
-// against the LIVE parts table, which at this moment still holds the previous
-// context. A file that does not carry `of:` therefore reads as "unknown", and
-// unknown means NOT mid-flight: reopen it silently and let the existing
-// resume gates in runOpenedRunFile do exactly what they always did. Both
-// error directions are benign - under-detect resumes (nothing is overwritten,
-// which is the whole risk), over-detect costs one prompt whose default
-// (y/click) is resume - and guideRun's ALREADY_COMPLETE clamp is still the
-// backstop against a file that lies.
-static bool runFileMidFlight(const String& runPath, int& stepOut, int& totalOut) {
-    stepOut = 0;
-    totalOut = 0;
-    String src;
-    if (!SlotManager::scanGuideProgressFile(runPath.c_str(), &src, &stepOut, &totalOut))
-        return false;
-    if (src.length() == 0 || totalOut <= 0)
-        return false;
-    if (stepOut < 0)
-        stepOut = 0;
-    return stepOut < totalOut;
 }
 
 // ============================================================================
@@ -829,25 +797,6 @@ static void waitForButtonRest(unsigned long timeoutMs) {
     encoderDirectionState = NONE;
 }
 
-// yesNoMenu treats ANY non-y/n byte as cancel, and a bare line terminator IS
-// such a byte: the `z ...\r\n` command line leaves its '\n' in the RAW Serial
-// buffer, a MicroPython input() consumes through the '\r' and leaves the '\n',
-// and a stray Enter tapped while a script streamed sits there too. Either one
-// would silently cancel a prompt before anyone saw it (bench-reproduced).
-// Swallow LINE ENDINGS ONLY - a real y/n/other answer already in flight must
-// survive.
-static void drainLineEndings(void) {
-    delay(20);
-    while (Serial.available() > 0) {
-        int p = Serial.peek();
-        if (p == '\r' || p == '\n') {
-            Serial.read();
-            continue;
-        }
-        break;
-    }
-}
-
 // ============================================================================
 // The shared inner flow: run file -> guide -> script
 // ============================================================================
@@ -988,64 +937,26 @@ static void finishRun(const RunContext& rc) {
     Serial.flush();
 }
 
-// The companion script, offered or run. `afterGuide` selects Kevin's OFFER
-// (exit H) over the unconditional run non-guided launches get.
+// The HEADLESS script run (the `z` door - deterministic, no prompts; the
+// interactive open only prints `SCRIPT available=` and runs nothing).
 //
-// TWO machine lines on EVERY path, in this order, so the grammar is greppable
-// whether or not a script exists and whether or not it ran:
+// TWO machine lines on EVERY headless path, in this order, so the grammar is
+// greppable whether or not a script exists and whether or not it ran:
 //   SCRIPT offer=<resolved path>|none
 //   SCRIPT action=run|skip
-// `nothingBuilt` is the guided gate (fix round 1): a build whose every step
-// was skipped reaches DONE and returns COMPLETED - nothing is left unfinished -
-// but no bridge was ever placed, and running the companion script against a
-// circuit nobody assembled is worse than not running it. The run file is still
-// saved and announced (the persistence half of exits G/H is unconditional);
-// only the offer and the run are suppressed, and no SCRIPT lines are printed,
-// so a headless driver can tell this case from `offer=none`.
-static void runOrOfferScript(const RunContext& rc, bool afterGuide,
-                             bool nothingBuilt = false) {
-    if (nothingBuilt) {
-        Serial.println("\r\n  (nothing was built - no script offer)");
-        Serial.flush();
-        finishRun(rc);
-        return;
-    }
-
-    String scriptPath = resolveScriptPath(rc);
-
-    // Announce the resolution BEFORE any prompt: a headless driver watches for
-    // this line and then answers the offer that follows it.
+static void runOrOfferScript(const RunContext& rc, const String& scriptPath) {
     Serial.println("\r\nSCRIPT offer=" +
                    (scriptPath.length() ? scriptPath : String("none")));
     Serial.flush();
 
     bool run = (scriptPath.length() > 0) && !rc.noScript;
-
-    if (run && afterGuide && rc.interactive) {
-        // Kevin's binding addition: the companion script is OPTIONAL after a
-        // guided build. Decline/timeout leaves the run file active and the
-        // rails exactly where the guide left them (a completed 555 keeps
-        // blinking on hardware alone). Encoder/terminal-interactive only -
-        // headless guided-complete runs the script unless `noscript`, because
-        // headless has to be deterministic.
-        waitForButtonRest(1500);
-        notify("Run\nmain.py?",
-               "\n\r  Build complete. Run " + baseNameOfPath(scriptPath) +
-                   "? y/click = run, n/other/timeout(15s) = done",
-               0);
-        drainLineEndings();
-        int r = yesNoMenu(15000, /*startOption=*/1);   // 1 = yes, 0/-1 = done
-        b.clear();
-        requestLedShow(-1);
-        run = (r == 1);
-    }
-
     Serial.println(run ? "SCRIPT action=run" : "SCRIPT action=skip");
     Serial.flush();
 
     if (run) {
         runCompanionScript(rc, scriptPath);
-        // The clickwheel hold that ended the script must not fall through.
+        // The clickwheel hold that interrupted the script must not fall
+        // through into the menu system the moment we return to idle.
         waitForButtonRest(2000);
     } else if (scriptPath.length() == 0) {
         // No script is a legitimate project shape (wiring only) - the circuit
@@ -1055,101 +966,11 @@ static void runOrOfferScript(const RunContext& rc, bool afterGuide,
     finishRun(rc);
 }
 
-// ---------------------------------------------------------------------------
-// The rails across a guided launch (guide-UX design §4, task 7)
-// ---------------------------------------------------------------------------
-//
-// THE POINT: launching a guided project must not disturb the user's bench.
-// The rails they had set stay live until the guide's INIT parks everything at
-// 0 V, and they come back on the way out unless the project's own power_on
-// step took ownership.
-//
-// CAPTURED at the top of each launcher entry, from LIVE globalState.power -
-// the last moment the user's pre-project values still exist, because the very
-// next thing either entry does is load a run file over them.
-static GuideRunPower preGuidePower;
-
-static void captureUserPower(void) {
-    preGuidePower.haveCaptured = true;
-    preGuidePower.topRail    = globalState.power.topRail;
-    preGuidePower.bottomRail = globalState.power.bottomRail;
-    preGuidePower.dac0       = globalState.power.dac0;
-    preGuidePower.dac1       = globalState.power.dac1;
-    preGuidePower.applied    = false;
-}
-
-// save=0 IS DELIBERATE and load-bearing: the destination run file must keep
-// the safe 0 V that guideForcePowerSafe(save=1) wrote into it, so a half-built
-// project re-opened later still comes up unpowered. Live rails and the file
-// diverge on purpose here; the divergence heals the next time the project's
-// own power values are committed.
-static void restoreUserPower(void) {
-    if (!preGuidePower.haveCaptured) return;
-    setTopRail(preGuidePower.topRail, 0, 0);
-    setBotRail(preGuidePower.bottomRail, 0, 0);
-    setDac0voltage(preGuidePower.dac0, 0, 0);
-    setDac1voltage(preGuidePower.dac1, 0, 0);
-}
-
-// The guide + script half, shared by every entry point. `guideSource` is the
-// CANONICAL wiring path (never the run file: the run file loses its `guide:`
-// section on the first save, so a guide parsed from it would work once and
-// never resume). resumeStep < 0 = fresh.
-static void runGuideThenScript(const RunContext& rc, const String& guideSource,
-                               int resumeStep) {
-    if (resumeStep >= 0) {
-        Serial.print("\r\nGUIDE resume file=");
-        Serial.print(rc.runPath);
-        Serial.print(" step=");
-        Serial.println(resumeStep);
-        Serial.flush();
-    }
-
-    int builtSteps = 0;
-    GuideRunResult gr = guideRun(guideSource.c_str(), resumeStep, &preGuidePower,
-                                 &builtSteps);
-    // Only a session that ran can report "nothing was built". The no-session
-    // results below are plain context loads (see the report's §4.1) and keep
-    // their script.
-    bool nothingBuilt = false;
-    switch (gr) {
-        case GuideRunResult::QUIT:
-        case GuideRunResult::COMPLETED:
-            // A SESSION RAN, so the rails ruling governs: power_on applied the
-            // project's values -> they are the correct final state and nothing
-            // is restored; it never ran -> the user's captured bench comes
-            // back. The exit tail has already NAMED whichever it is.
-            if (!preGuidePower.applied) restoreUserPower();
-            // Exit F additionally means: nothing else to do here. The run file
-            // is active with guideProgress at the quit step and resume works
-            // next launch.
-            if (gr == GuideRunResult::QUIT) return;
-            nothingBuilt = (builtSteps < 1);
-            break;
-        case GuideRunResult::PARSE_FAILED:
-            Serial.println("\r\n  guide source missing: " + guideSource +
-                           " - start a new run to rebuild");
-            applyStatePowerToHardware();
-            break;
-        case GuideRunResult::NOTHING_TO_DO:
-        case GuideRunResult::ALREADY_COMPLETE:
-        default:
-            // NO SESSION RAN (parse failure, nothing to build, or a finished
-            // build being re-opened), so nothing ever took the rails over from
-            // the file. This is a plain context load and task 4's guarantee
-            // applies: the run file's own power goes to the hardware, which
-            // the guided load deliberately deferred. Restoring the user's
-            // bench here instead would leave a completed project sitting
-            // unpowered while its script runs - see the report's deviation.
-            applyStatePowerToHardware();
-            break;
-    }
-    runOrOfferScript(rc, /*afterGuide=*/true, nothingBuilt);
-}
-
 // The whole flow once the run file is open and RUNFILE has been printed.
-// `freshWiring` is set on the start-new path (the chosen variant); on the
-// load-latest path the guide source comes from the loaded state instead.
+// AMBIENT: the context is loaded (power applied at load, like every context
+// switch), parts are in the table for PartLabels to mark, the guide source is
+// resolved and STAMPED so the step viewer can browse its texts, machine lines
+// announce everything, and control returns to idle. No session, no capture.
 static void runOpenedRunFile(RunContext& rc, bool fresh) {
     SlotManager& mgr = SlotManager::getInstance();
     JumperlessState& st = mgr.getActiveState();
@@ -1159,46 +980,64 @@ static void runOpenedRunFile(RunContext& rc, bool fresh) {
     // the matrix now that the picker released inClickMenu" redraw.
     refreshConnections(-1);
 
-    // --- the guided-ness decision, made BEFORE any power lands -------------
-    // The launcher's run-file load ran with its rail/DAC apply DEFERRED
-    // (projectBeginRun / projectOpenRunFile's deferPower), because on a guided
-    // launch the project's `power:` must never reach the rails ahead of its
-    // own power_on step. Everything below therefore has to settle guided-ness
-    // first and then either hand the rails to the guide or complete the load.
-    //
-    // On the FRESH path the wiring still carries `guide:`. On the load-latest
-    // path wiringHasGuideSections() cannot help - the run file lost that
-    // section on its first save - so there are two ways in:
-    //   1. guideProgress survived -> RESUME at the saved step;
-    //   2. no progress, but runSource names a wiring that IS guided -> a fresh
-    //      guide on this run file. (Deviation from design §1.4, argued in the
-    //      task-5 report: the strict "guideSource non-empty" gate makes a run
-    //      that was quit before its FIRST commit permanently non-guided, which
-    //      would run main.py against a circuit nobody built.)
+    // --- resolve the guide SOURCE (the canonical wiring, never the run file:
+    // the run file loses its `guide:` section on the first save). On the
+    // FRESH path the wiring still carries `guide:`; on the reopen path the
+    // stamped guideSource survives in the state, with runSource as the
+    // fallback for a run quit before its first save.
     String guideSource;
-    int resumeStep = -1;
     if (fresh) {
         if (wiringHasGuideSections(rc.wiringPath))
             guideSource = rc.wiringPath;
     } else if (st.parts.guideSource[0] != '\0') {
         guideSource = String(st.parts.guideSource);
-        resumeStep = st.parts.guideStep;
-        if (resumeStep < 0)
-            resumeStep = 0;
     } else if (rc.wiringPath.length() > 0 && wiringHasGuideSections(rc.wiringPath)) {
         guideSource = rc.wiringPath;
     }
 
+    // Stamp (or re-stamp) the source + step total so the viewer and the
+    // progress scan agree with what this open resolved. The cursor
+    // (guideStep) is preserved on reopen - it is the user's browse position.
     if (guideSource.length() > 0) {
-        runGuideThenScript(rc, guideSource, resumeStep);
-        return;
+        GuideScript* sc = new (std::nothrow) GuideScript;
+        if (sc != nullptr) {
+            String perr;
+            if (guideParse(guideSource.c_str(), *sc, perr)) {
+                if (perr.length() > 0)
+                    Serial.println("  (guide parse warnings: " + perr + ")");
+                strncpy(st.parts.guideSource, guideSource.c_str(),
+                        sizeof(st.parts.guideSource) - 1);
+                st.parts.guideSource[sizeof(st.parts.guideSource) - 1] = '\0';
+                st.parts.guideTotal = (int16_t)sc->numSteps;
+                if (fresh || st.parts.guideStep < 0 ||
+                    st.parts.guideStep >= sc->numSteps)
+                    st.parts.guideStep = 0;
+                st.markDirty();
+                Serial.print("\r\nVIEWER steps=");
+                Serial.print(sc->numSteps);
+                Serial.print(" cursor=");
+                Serial.println(st.parts.guideStep);
+                Serial.flush();
+            }
+            delete sc;
+        }
     }
 
-    // Not guided: complete the deferred load right here, which is task 4's
-    // apply-power-on-load guarantee arriving a few milliseconds later than it
-    // used to and otherwise unchanged.
-    applyStatePowerToHardware();
-    runOrOfferScript(rc, /*afterGuide=*/false);
+    Serial.print("\r\nPARTS n=");
+    Serial.println(st.parts.numParts);
+    Serial.flush();
+
+    // Scripts: the headless door runs them (deterministic); an interactive
+    // open only ANNOUNCES what is available - running code is a deliberate
+    // second gesture, not a side effect of opening a project.
+    String scriptPath = resolveScriptPath(rc);
+    if (rc.interactive) {
+        Serial.println("SCRIPT available=" +
+                       (scriptPath.length() ? scriptPath : String("none")));
+        Serial.flush();
+        return;
+    }
+    runOrOfferScript(rc, scriptPath);
 }
 
 // Fill rc.meta / rc.wiringPath from the loaded state's runSource. Empty or
@@ -1249,13 +1088,12 @@ static void printRunFileLine(const String& path, const char* action) {
 // ============================================================================
 
 // What the run-file decision came to. REOPEN carries the path to open; FRESH
-// means "copy the (possibly picked) wiring in"; CANCEL means nothing was
-// touched and nothing will be.
-enum class RunFileChoice : uint8_t { CANCEL, REOPEN, FRESH };
+// means "copy the (possibly picked) wiring in". No CANCEL and no prompts any
+// more: with the blocking guide gone there is nothing mid-flight to protect,
+// so an existing run file is ALWAYS silently reopened. Start-fresh is an
+// explicit gesture - a Files click on a template wiring, or `z <dir> new`.
+enum class RunFileChoice : uint8_t { REOPEN, FRESH };
 
-// The run-file decision, prompts included. Split out because it is the ONE
-// place the two compile modes genuinely differ, and burying a 60-line #if in
-// the middle of projectRunInteractive made both halves unreadable.
 static RunFileChoice chooseRunFile(RunContext& rc, const String& dir,
                                    String& reopenPath) {
     reopenPath = "";
@@ -1263,94 +1101,32 @@ static RunFileChoice chooseRunFile(RunContext& rc, const String& dir,
 #if JL_PROJECT_RUN_HISTORY
     int runCount = 0;
     int maxN = projectScanRunFiles(rc.projectPath, dir, runCount);
-
-    // --- the merged load-latest / start-new prompt (design §1.3) ------------
-    // The run scan comes BEFORE the variant picker, deliberately: run files
-    // are not partitioned by variant, so "load latest" must not be offered
-    // after a variant choice it might contradict. Loading resolves its variant
-    // from runSource instead.
     if (maxN < 1)
         return RunFileChoice::FRESH;
-
-    String latest = runFilePath(rc.projectPath, dir, maxN);
+    reopenPath = runFilePath(rc.projectPath, dir, maxN);
     Serial.print("\r\nRUNS n=");
     Serial.print(runCount);
     Serial.print(" latest=");
-    Serial.println(latest);
+    Serial.println(reopenPath);
     Serial.flush();
-
-    notify("Load run " + String(maxN) + "?\nNo = new run",
-           "\n\r  " + dir + ": " + String(runCount) + " previous run" +
-               (runCount == 1 ? "" : "s") + ". y/click Yes = load latest (" +
-               baseNameOfPath(latest) + "), n = start new (" +
-               String(dir) + "_" + String(maxN + 1) + ".yaml), other = cancel",
-           0);
-    drainLineEndings();
-    int r = yesNoMenu(20000, /*startOption=*/1);
-    b.clear();
-    requestLedShow(-1);
-    if (r < 0) {
-        // EXIT B: cancel or timeout at the load/new prompt. Nothing was
-        // touched.
-        Serial.println("  Cancelled.");
-        return RunFileChoice::CANCEL;
-    }
-
     if (runCount >= PROJECT_RUN_PILEUP_HINT) {
         Serial.println("  (" + String(runCount) + " run files in " + rc.projectPath +
                        " - old runs can be deleted from Files)");
     }
-    if (r == 1) {
-        reopenPath = latest;
-        return RunFileChoice::REOPEN;
-    }
-    return RunFileChoice::FRESH;
+    return RunFileChoice::REOPEN;
 #else
-    // SINGLE-FILE MODE. One name, silently reused; the ONLY prompt is the one
-    // that protects an unfinished guided build from being overwritten.
+    // SINGLE-FILE MODE: one name; reuse it when it exists, create otherwise.
     (void)rc;   // no directory scan here - the name is known
     String runPath = projectRunFilePath(dir);
     if (!safeFileExists(runPath.c_str())) {
-        // Nothing to reuse and nothing to protect: create and go, no prompt.
-        // No RUNS line either - there are no runs to count.
+        // No RUNS line - there are no runs to count.
         return RunFileChoice::FRESH;
     }
-
-    // RUNS stays truthful: in this mode there is exactly one, and it is both
-    // the latest and the only.
     Serial.print("\r\nRUNS n=1 latest=");
     Serial.println(runPath);
     Serial.flush();
-
-    int step = 0, total = 0;
-    if (!runFileMidFlight(runPath, step, total)) {
-        // Finished guide, non-guided, or plain state -> SILENTLY reopen.
-        reopenPath = runPath;
-        return RunFileChoice::REOPEN;
-    }
-
-    notify("Resume build?\nNo = start over",
-           "\n\r  " + dir + ": an unfinished guided build is in " +
-               baseNameOfPath(runPath) + " (step " + String(step + 1) + " of " +
-               String(total) + "). y/click Yes = resume, n = start fresh "
-               "(OVERWRITES it from the project wiring), other = cancel",
-           0);
-    drainLineEndings();
-    int r = yesNoMenu(20000, /*startOption=*/1);
-    b.clear();
-    requestLedShow(-1);
-    if (r < 0) {
-        // EXIT B, unchanged: cancel or timeout before anything was touched.
-        Serial.println("  Cancelled.");
-        return RunFileChoice::CANCEL;
-    }
-    if (r == 1) {
-        reopenPath = runPath;
-        return RunFileChoice::REOPEN;
-    }
-    Serial.println("  (starting fresh - " + baseNameOfPath(runPath) +
-                   " is rewritten from the project wiring)");
-    return RunFileChoice::FRESH;
+    reopenPath = runPath;
+    return RunFileChoice::REOPEN;
 #endif
 }
 
@@ -1358,10 +1134,6 @@ static RunFileChoice chooseRunFile(RunContext& rc, const String& dir,
 // wiring*.yaml); the variant picker is then skipped entirely.
 static void projectRunInteractive(const String& dir, const String& forcedWiring,
                                   const ProjectMeta& listedMeta) {
-    // Before anything is loaded: the user's own rails are still live in
-    // globalState.power, and this is the only moment they are.
-    captureUserPower();
-
     RunContext rc;
     rc.dir = dir;
     rc.projectPath = String(PROJECTS_DIR) + "/" + dir;
@@ -1370,23 +1142,18 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
     rc.meta = listedMeta;
     rc.meta.dir = dir;
 
+    // A Files click on a specific wiring IS the start-fresh gesture now that
+    // the resume/fresh prompt is gone: the run file is rewritten from the
+    // clicked template. The menu launcher (no forced wiring) reopens or
+    // creates, silently.
     String runPath;
-    RunFileChoice choice = chooseRunFile(rc, dir, runPath);
-    if (choice == RunFileChoice::CANCEL)
-        return;   // EXIT B: nothing touched, nothing to restore
+    RunFileChoice choice = (forcedWiring.length() > 0)
+                               ? RunFileChoice::FRESH
+                               : chooseRunFile(rc, dir, runPath);
 
     if (choice == RunFileChoice::REOPEN) {
-        // A Files-browser click names a VARIANT, and a reopen does not honour
-        // it - the run file's own runSource decides, exactly as on the
-        // headless load path. Say so rather than ignoring it silently; this
-        // is the one cell of the mode matrix where the door the user came
-        // through has less say than the file they land in.
-        if (forcedWiring.length() > 0) {
-            Serial.println("  (variant taken from runSource; the clicked file was "
-                           "not used - start fresh to change variant)");
-        }
         String err;
-        if (!projectOpenRunFile(runPath, err, /*deferPower=*/true)) {
+        if (!projectOpenRunFile(runPath, err)) {
             // EXIT E: both the load and (for a parse failure) the restore are
             // handled inside loadSlotFromPath. The previous context is still
             // active unless the terminal state was reported above.
@@ -1455,7 +1222,7 @@ static void projectRunInteractive(const String& dir, const String& forcedWiring,
     }
 
     String err;
-    if (!projectBeginRun(dir, wiringPath, runPath, err, /*deferPower=*/true)) {
+    if (!projectBeginRun(dir, wiringPath, runPath, err)) {
         // EXIT D / E: the copy or the load failed (the partial file is already
         // deleted, one retry already spent). Previous context untouched.
         notify("Run file\nfailed", "\n\r  Could not start a run of " + dir + ": " + err,
@@ -1500,11 +1267,6 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
         Serial.println("PROJECT error cannot resolve '" + project + "'");
         return false;
     }
-
-    // Same capture point as the interactive entry, for the same reason - the
-    // headless door (`z`, and load_project's name form via the launcher) must
-    // give the bench back too.
-    captureUserPower();
 
     RunContext rc;
     rc.dir = dir;
@@ -1587,7 +1349,7 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
             return false;
         }
         String err;
-        if (!projectOpenRunFile(runPath, err, /*deferPower=*/true)) {
+        if (!projectOpenRunFile(runPath, err)) {
             Serial.println("PROJECT error load failed: " + err);
             return false;
         }
@@ -1600,7 +1362,7 @@ bool runProjectHeadless(const String& project, ProjectRunMode mode, int runN,
 
     // NEW
     String runPath, err;
-    if (!projectBeginRun(dir, templatePath, runPath, err, /*deferPower=*/true)) {
+    if (!projectBeginRun(dir, templatePath, runPath, err)) {
         Serial.println("PROJECT error " + err);
         return false;
     }

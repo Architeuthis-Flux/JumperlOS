@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Guide verification checks (task 7). Design authority:
 // CodeDocs/DESIGN_GUIDED_PLACEMENT.md §5 - the verify matrix and its honest
-// limits. Seam contract in GuidedFlow.h (begin / poll / abort).
+// limits. Seam contract in GuideScript.h (begin / poll / abort).
 //
 // Shape: one static CheckState driven from guideTick's STEP_VERIFY. Every
 // check is a polled sub-state - nothing here blocks except the documented
@@ -40,7 +40,7 @@
 // Deliberately ABOVE the OG_JUMPERLESS guard: these are pure functions with no
 // hardware in them, the `guideband` debug command runs on either board, and
 // building them in the OG env is what catches signature drift (that env has
-// caught it before - task 2). Contracts are in GuidedFlow.h.
+// caught it before - task 2). Contracts are in GuideScript.h.
 
 static PartValueKind kindFromTypeStr(const char* typeStr) {
     if (typeStr == nullptr) return PartValueKind::NONE;
@@ -1195,7 +1195,7 @@ void guideCheckBegin(const GuideCheckRun& run) {
             // DAC to 0 V) and is the same exposure a vf/continuity check on
             // any part accepts - so it is documented, not blocked. The
             // default-by-type path cannot reach it on its own:
-            // guideDefaultCheckForPart (GuidedFlow.cpp) picks PRESENCE only
+            // guideDefaultCheckForPart (GuideScript.cpp) picks PRESENCE only
             // for typeStr "capacitor" or "ic", so landing here with some
             // other typeStr takes a deliberate author action - an explicit
             // `check: presence` on the step, or a per-part `verify:`

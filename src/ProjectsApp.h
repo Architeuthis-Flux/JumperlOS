@@ -126,20 +126,18 @@ int listProjects(ProjectMeta* out, int maxOut);
 //
 // In single-file mode this is ALSO the fresh-overwrite path: the copy lands on
 // top of an existing <dir>_run.yaml, which is what "start fresh" means. The
-// user consented at the prompt and the old bytes are gone from the first
-// write, so the recovery discipline is the same as create's, no more.
+// user chose fresh explicitly (a Files click on a template wiring, or
+// `z <dir> new`) and the old bytes are gone from the first write, so the
+// recovery discipline is the same as create's, no more.
 //
 // Refuses a project directory named wiring*/slot* (see the namespace invariant
 // above) and, in numbered mode, a project whose run counter has reached
 // PROJECT_RUN_MAX_N.
 //
-// `deferPower` hands the load's rail/DAC apply to the CALLER
-// (slotLoadDeferPowerApply, States.h): the launcher uses it so a guided
-// project's `power:` cannot reach the rails before its power_on step. The
-// caller then owes the context either applyStatePowerToHardware() or a
-// deliberate substitute - the guide's own 0 V, or the pre-guide restore.
+// Power applies at load, like every other context switch (the deferred-power
+// latch died with the blocking guide - warn-never-block replaces it).
 bool projectBeginRun(const String& dir, const String& templatePath,
-                     String& runPathOut, String& err, bool deferPower = false);
+                     String& runPathOut, String& err);
 
 // /projects/<dir>/<dir>_run.yaml - the single-file mode's one run file.
 // Defined in BOTH modes (the Files browser and the docs name it either way);
