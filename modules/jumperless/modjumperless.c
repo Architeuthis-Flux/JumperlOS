@@ -22,6 +22,7 @@
 #include "py/obj.h"
 #include "py/objstr.h"
 #include "py/runtime.h"
+#include "py/stackctrl.h"
 #include "py/stream.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -2756,6 +2757,104 @@ static mp_obj_t jl_guide_progress_func( void ) {
     return mp_obj_new_int( jl_guide_progress( ) );
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_guide_progress_obj, jl_guide_progress_func );
+
+// ---------------------------------------------------------------------------
+// Background callback (Guides-Simplification workstream D)
+// ---------------------------------------------------------------------------
+// The Temporal-Replay badge pattern: a script runs to completion once and
+// registers a callback; MpBackgroundService then ticks it from the main loop
+// forever after. The root-pointer entry is a 2-tuple (callback, its module
+// globals) so the callback's module context survives GC after the script
+// returns. One strike: a callback that raises prints its traceback and is
+// deactivated. The service is NOT in the inner set, so ticks never land
+// while a foreground script/REPL command is executing (the scheduler is the
+// foreground guard), and it pauses in probe mode/menus by construction.
+MP_REGISTER_ROOT_POINTER( mp_obj_t jl_bg_entry );
+
+static uint32_t jl_bg_interval_ms = 50;
+static uint32_t jl_bg_last_tick_ms = 0;
+static uint8_t jl_bg_in_call = 0;
+
+static inline int jl_bg_entry_is_set( void ) {
+    mp_obj_t e = MP_STATE_VM( jl_bg_entry );
+    return !( e == MP_OBJ_NULL || e == mp_const_none );
+}
+
+// C-side probe (MpBackground.cpp, and the pin-release guard on script exit).
+int jl_bg_active( void ) {
+    return jl_bg_entry_is_set( ) ? 1 : 0;
+}
+
+// One tick from MpBackgroundService: interval-gated, re-entrancy-guarded,
+// nlr-protected. Returns 1 when the callback ran.
+int jl_bg_service_tick( uint32_t now_ms ) {
+    if ( jl_bg_in_call || !jl_bg_entry_is_set( ) ) {
+        return 0;
+    }
+    uint32_t interval = jl_bg_interval_ms < 10 ? 10 : jl_bg_interval_ms;
+    if ( jl_bg_last_tick_ms != 0 && ( now_ms - jl_bg_last_tick_ms ) < interval ) {
+        return 0;
+    }
+    jl_bg_last_tick_ms = now_ms;
+    jl_bg_in_call = 1;
+
+    char stack_top;
+    mp_stack_set_top( &stack_top );
+
+    mp_obj_t entry = MP_STATE_VM( jl_bg_entry );
+    mp_obj_t cb = mp_obj_subscr( entry, MP_OBJ_NEW_SMALL_INT( 0 ), MP_OBJ_SENTINEL );
+
+    int invoked = 0;
+    nlr_buf_t nlr;
+    if ( nlr_push( &nlr ) == 0 ) {
+        mp_call_function_1( cb, mp_obj_new_int_from_uint( now_ms ) );
+        nlr_pop( );
+        invoked = 1;
+    } else {
+        mp_printf( &mp_plat_print, "[bg] callback raised; deactivated\n" );
+        mp_obj_print_exception( &mp_plat_print, MP_OBJ_FROM_PTR( nlr.ret_val ) );
+        MP_STATE_VM( jl_bg_entry ) = mp_const_none;
+    }
+    jl_bg_in_call = 0;
+    return invoked;
+}
+
+// bg_start(callback, interval_ms=50)
+static mp_obj_t jl_bg_start_func( size_t n_args, const mp_obj_t* args ) {
+    mp_obj_t cb = args[0];
+    if ( cb == mp_const_none ) {
+        MP_STATE_VM( jl_bg_entry ) = mp_const_none;
+        return mp_const_none;
+    }
+    if ( !mp_obj_is_callable( cb ) ) {
+        mp_raise_TypeError( MP_ERROR_TEXT( "bg_start: callable required" ) );
+    }
+    uint32_t interval = ( n_args > 1 ) ? (uint32_t)mp_obj_get_int( args[1] ) : 50;
+    if ( interval < 10 ) interval = 10;
+
+    mp_obj_t items[2] = {
+        cb,
+        // The registering module's globals, captured so the callback's
+        // context stays a GC root after the script ends.
+        MP_OBJ_FROM_PTR( mp_globals_get( ) ),
+    };
+    MP_STATE_VM( jl_bg_entry ) = mp_obj_new_tuple( 2, items );
+    jl_bg_interval_ms = interval;
+    jl_bg_last_tick_ms = 0;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_bg_start_obj, 1, 2, jl_bg_start_func );
+
+static mp_obj_t jl_bg_stop_func( void ) {
+    MP_STATE_VM( jl_bg_entry ) = mp_const_none;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_bg_stop_obj, jl_bg_stop_func );
+
+static mp_obj_t jl_bg_active_func( void ) {
+    return mp_obj_new_bool( jl_bg_entry_is_set( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_bg_active_obj, jl_bg_active_func );
 
 static mp_obj_t jl_nodes_discard_func( void ) {
     jl_restore_micropython_entry_state( );
@@ -6715,6 +6814,11 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_remove_part ), MP_ROM_PTR( &jl_remove_part_obj ) },
     { MP_ROM_QSTR( MP_QSTR_list_parts ), MP_ROM_PTR( &jl_list_parts_obj ) },
     { MP_ROM_QSTR( MP_QSTR_guide_progress ), MP_ROM_PTR( &jl_guide_progress_obj ) },
+
+    // Background callback (ticked by MpBackgroundService after the script ends)
+    { MP_ROM_QSTR( MP_QSTR_bg_start ), MP_ROM_PTR( &jl_bg_start_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_bg_stop ), MP_ROM_PTR( &jl_bg_stop_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_bg_active ), MP_ROM_PTR( &jl_bg_active_obj ) },
 
     { MP_ROM_QSTR( MP_QSTR_get_state ), MP_ROM_PTR( &jl_get_state_obj ) },
     { MP_ROM_QSTR( MP_QSTR_set_state ), MP_ROM_PTR( &jl_set_state_obj ) },

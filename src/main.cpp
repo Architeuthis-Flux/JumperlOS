@@ -47,6 +47,7 @@ KevinC@ppucc.io
 #include "Graphics.h"
 #include "HelpDocs.h"
 #include "Highlighting.h"
+#include "MpBackground.h"
 #include "PartLabels.h"
 #include "StepViewer.h"
 #include "JumperlOS.h"
@@ -565,6 +566,7 @@ void setup( ) {
 
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
     jOS.registerService( &partLabels );          // NORMAL, 20 ms - ambient part labels (_PARTS_ overlay, auto-hide), tap-to-inspect, pin-class warnings; dormant on OG (ledsPerRow gate)
+    jOS.registerService( &mpBackgroundService ); // NORMAL, 5 ms - background MicroPython callback (bg_start); NOT inner set on purpose - pauses in probe mode/menus/foreground scripts
     jOS.registerService( &portHousekeepingService ); // NORMAL, 10 ms - Arduino DTR/flash detect + UART auto-connect, ENQ port-info reply, net-scan debug (was a 10 ms block in loop(); B6)
     jOS.registerService( &ledDumpService );          // NORMAL, 10 ms, inner set - the terminal LED picture (R! / serial function 5-6), drawn on core 0 now (was loop1 on core 1; T1.10)
 

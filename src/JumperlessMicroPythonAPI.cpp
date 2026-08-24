@@ -1588,8 +1588,16 @@ void jl_exit_micropython_restore_entry_state( void ) {
     // readingGPIO lock spins) — the delayed post-session crash signature.
     machine_pin_irq_deinit( );
 
-    // Release all GPIO pins claimed by MicroPython
-    jl_gpio_release_all_pins( );
+    // Release all GPIO pins claimed by MicroPython - UNLESS a background
+    // callback is active: its driver keeps its bus pins after the setup
+    // script ends (the workstream-D survival rule). MpBackgroundService
+    // releases them on the callback's deactivation transition. IRQs are
+    // still disarmed above either way - a background callback runs
+    // cooperatively in the service tick, never from ISR context.
+    extern int jl_bg_active( void );
+    if ( !jl_bg_active( ) ) {
+        jl_gpio_release_all_pins( );
+    }
 
     // Hold core-1 frames during state modifications to prevent race conditions
     holdCore1Frames( );
