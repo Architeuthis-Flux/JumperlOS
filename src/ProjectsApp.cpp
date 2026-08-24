@@ -53,6 +53,7 @@
 #include "FilesystemStuff.h"  // safeFile*, FatFS Dir walk
 #include "Graphics.h"         // b.print (no-op on OG)
 #include "GuideScript.h"      // guideParse (step texts for the ambient flow)
+#include "StepViewer.h"       // armed after a project open
 #include "JumperlOS.h"        // jOS.serviceInner()
 #include "Menus.h"            // inClickMenu, yesNoMenu
 #include "Peripherals.h"
@@ -995,31 +996,23 @@ static void runOpenedRunFile(RunContext& rc, bool fresh) {
         guideSource = rc.wiringPath;
     }
 
-    // Stamp (or re-stamp) the source + step total so the viewer and the
-    // progress scan agree with what this open resolved. The cursor
-    // (guideStep) is preserved on reopen - it is the user's browse position.
+    // Stamp the source and arm the step viewer. The cursor (guideStep) is
+    // preserved on reopen - it is the user's browse position; fresh runs
+    // start at step 1. The viewer owns the parse (its static holds the
+    // steps), so the stamp happens after a successful arm.
     if (guideSource.length() > 0) {
-        GuideScript* sc = new (std::nothrow) GuideScript;
-        if (sc != nullptr) {
-            String perr;
-            if (guideParse(guideSource.c_str(), *sc, perr)) {
-                if (perr.length() > 0)
-                    Serial.println("  (guide parse warnings: " + perr + ")");
-                strncpy(st.parts.guideSource, guideSource.c_str(),
-                        sizeof(st.parts.guideSource) - 1);
-                st.parts.guideSource[sizeof(st.parts.guideSource) - 1] = '\0';
-                st.parts.guideTotal = (int16_t)sc->numSteps;
-                if (fresh || st.parts.guideStep < 0 ||
-                    st.parts.guideStep >= sc->numSteps)
-                    st.parts.guideStep = 0;
-                st.markDirty();
-                Serial.print("\r\nVIEWER steps=");
-                Serial.print(sc->numSteps);
-                Serial.print(" cursor=");
-                Serial.println(st.parts.guideStep);
-                Serial.flush();
-            }
-            delete sc;
+        int cursor = fresh ? 0 : st.parts.guideStep;
+        int steps = stepViewer.arm(guideSource.c_str(), cursor);
+        if (steps > 0) {
+            strncpy(st.parts.guideSource, guideSource.c_str(),
+                    sizeof(st.parts.guideSource) - 1);
+            st.parts.guideSource[sizeof(st.parts.guideSource) - 1] = '\0';
+            st.markDirty();
+            Serial.print("\r\nVIEWER steps=");
+            Serial.print(steps);
+            Serial.print(" cursor=");
+            Serial.println(stepViewer.cursorIndex());
+            Serial.flush();
         }
     }
 

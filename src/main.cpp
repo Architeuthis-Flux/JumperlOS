@@ -48,6 +48,7 @@ KevinC@ppucc.io
 #include "HelpDocs.h"
 #include "Highlighting.h"
 #include "PartLabels.h"
+#include "StepViewer.h"
 #include "JumperlOS.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
@@ -543,6 +544,7 @@ void setup( ) {
     jOS.registerService( &asyncPassthroughService ); // HIGH - USB CDC1<->UART0 bridging (prevent data loss); inner set (inInnerSet() override - the bridge keeps running inside probe mode / menus)
     jOS.registerService( &menus );                   // HIGH - click-wheel menu; BLOCKING while a menu is open
     jOS.registerService( &slotManager );             // HIGH - states auto-save (idle-gated)
+    jOS.registerService( &stepViewer );              // HIGH - guide-step browser (wheel owns steps while armed; registered BEFORE the probe stack so it sees turns ahead of Highlighting)
 
 
     // Probe stack is gated on the board having resistive probe pads (V5). The OG

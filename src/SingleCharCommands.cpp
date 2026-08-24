@@ -40,6 +40,7 @@
 #include "Probing.h"
 #include "ProjectsApp.h" // z: guided-project runner (headless/HIL entry)
 #include "GuideScript.h" // z band: parsePartValue / guideResistorBand report
+#include "StepViewer.h"  // z steps: the viewer's serial twin
 #include "WaveGen.h"    // X: the wavegen stream line (T3.3)
 #include "AdcRing.h"    // X: the ADC ring line (T2.1)
 #include "Python_Proper.h"
@@ -752,26 +753,20 @@ void SingleCharCommands::initializeCommands( ) {
                      "<project> = a directory name (555) or a wiring path\n"
                      "  (/projects/555/wiring.alt.yaml - picks that variant for a new run).\n"
                      "This build keeps ONE run file per project, /projects/<dir>/<dir>_run.yaml.\n"
-                     "No mode arg = reuse it when it exists (a mid-flight guided build\n"
-                     "  RESUMES - headless never prompts), else create it.\n"
+                     "No mode arg = reuse it when it exists, else create it. No prompts.\n"
                      "  new      rewrite <dir>_run.yaml from the wiring (OVERWRITES it)\n"
                      "  load     force the existing run file (errors when there is none)\n"
                      "  noscript skip the companion script\n"
                      "  run=<N>  refused - JL_PROJECT_RUN_HISTORY grammar\n"
                      "To KEEP a run, `slots` > `save to` while it is the active context.\n"
 #endif
-                     "The run file becomes the ACTIVE CONTEXT and stays it - destination\n"
-                     "slots are gone. Guided projects resume from the run file's own\n"
-                     "guideProgress; there is no prompt on this path.\n"
-                     "Guide keys on this stream: n/space=confirm  p=back/un-commit\n"
-                     "s=skip  v=verify  q=quit  t <row>=probe-tap override\n"
-                     "> / < = browse next/prev (the wheel's twins; the ring wraps\n"
-                     "  through a DONE summary, and browsing never exits)\n"
-                     "m <row> = move the current part's pin 1 there  c = snap it\n"
-                     "  between compact and expanded (the pads' absolute twins)\n"
-                     "On a completed guided build the companion script is OFFERED:\n"
-                     "watch for SCRIPT offer=<path> then SCRIPT action=run|skip.\n"
-                     "Diagnostics (no guide runs; z band touches no hardware at all):\n"
+                     "The run file becomes the ACTIVE CONTEXT and stays it - the open is\n"
+                     "AMBIENT: parts get labeled, the file's power applies at load, the\n"
+                     "step viewer arms (wheel browses steps), and control returns to idle.\n"
+                     "z runs the companion script (watch SCRIPT offer= then action=);\n"
+                     "the menu launcher only announces it (SCRIPT available=).\n"
+                     "  z steps [next|prev|<n>|on|off]  browse/arm/disarm the step viewer\n"
+                     "Diagnostics (no hardware touched):\n"
                      "  z band <value> [type] [tol]  parsed value + derived continuity band\n"
                      "  z shunt [n]                  n fresh INA0 shunt-register samples",
                      cmd_guidedProject, MENU_DEBUG, CAT_APPS, true, SER3_INTERACTIVE );
@@ -852,6 +847,13 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
     args.trim( );
     if ( args.length( ) == 0 ) {
         Jerial.println( USAGE );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z steps ...` - the step viewer's serial twin (every gesture has one).
+    // Exact token for the same shadowing reason as `band` below.
+    if ( args == "steps" || args.startsWith( "steps " ) ) {
+        stepViewer.command( args.substring( 5 ) );
         return CMD_DONT_SHOW_MENU;
     }
 
