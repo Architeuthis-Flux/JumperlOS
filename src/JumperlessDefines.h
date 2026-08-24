@@ -72,6 +72,15 @@
 #define UNDO_ENABLED 1
 #endif
 
+// Boot-time Serial chatter (PSRAM arena sizing, undo ring init, heap ledger,
+// file-cache pass-through notice). Off in release (NDEBUG) builds; on in debug
+// builds and when -DDEBUG is set (jumperless_v5_debug env).
+#if defined(DEBUG) || !defined(NDEBUG)
+#define JL_BOOT_VERBOSE 1
+#else
+#define JL_BOOT_VERBOSE 0
+#endif
+
 #define TERM_SUPPORTS_RGB 0
 #define TERM_SUPPORTS_ANSI_COLORS 1
 
