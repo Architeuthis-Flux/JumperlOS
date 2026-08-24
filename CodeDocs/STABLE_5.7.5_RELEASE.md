@@ -19,7 +19,7 @@ was the alternative; it needed edits in 17 shared files with `States.cpp`
 serialization surgery, and would have shipped slots-become-files (a behavior
 change) inside a "stability" release. Rejected.
 
-## What's on this branch (10 commits past the base)
+## What's on this branch (13 commits + doc/UF2 past the base)
 
 | commit | what | why it qualifies |
 |---|---|---|
@@ -33,10 +33,13 @@ change) inside a "stability" release. Rejected.
 | `08dd34c` | **PSRAM Test menu action lost four `return`s** — on a no-PSRAM board (the shipping config) it null-derefs on the first branch; later branches double-free | user-reachable crash from a diagnostics menu |
 | `228a33a` | **SharedBuffer stops allocating in its constructor** — REPL exit `clear()` was permanently claiming 24 KB whether or not any content ever moved | 24 KB of heap back for every session that enters the REPL |
 | `cb59367` | VERSION → 5.7.5.0 | the release workflow tags from this file |
+| `8abe273` | Probing.h legacy wrapper layer removed — 24 inline shims gone, 71 call lines repointed at the `probing` reference (Kevin's call) | dead API duplication; 10 wrappers had zero callers |
+| `8778d1e` | all 23 lazy-`new` singletons become Meyer's local statics | no malloc at static init; **Used Heap AND Total Heap both read ~9.5 KB lower on the memory screen — that's heap→BSS, not a regression** |
+| `49c6c0c` | census bug sweep: BitmapEditor (re-entry leak, stale hasHeader, unbounded raw-path alloc capped at 32 KB, `new (std::nothrow)` behind the null checks), DMX begin-failure leak, overlay_set raise-path leak (nlr frame), SlotManager's dead `new[0]`, `chillinColors` → const (2 KB .data to flash) | real leaks and a crash-shaped alloc, all user-reachable |
 
-The last three (PSRAM returns, SharedBuffer ctor, plus the census behind them)
-came out of the 2026-08-24 heap hunt; the first seven are ports of dev-branch
-fixes (`(cherry picked from ...)` trailers name the originals).
+The census fixes (PSRAM returns, SharedBuffer ctor, the bug sweep, the
+refactors) came out of the 2026-08-24 heap hunt; the rest are ports of
+dev-branch fixes (`(cherry picked from ...)` trailers name the originals).
 
 ## Deliberately NOT here (all continue in dev)
 
@@ -70,6 +73,9 @@ encoder_ui, infra_paths):
    95,432 (no projects provisioning here).
 
 Hands-on (nobody but Kevin can):
+- **A normal boot at all** — the wrapper removal and the singleton conversion
+  touch boot-path code and are compile-verified only; reaching the banner
+  and a working probe proves them.
 - Two fast clicks anywhere in the menus = two actions (the double-click fix).
 - Diagnostics → PSRAM Test on a no-PSRAM board: prints an error, returns to
   the menu, no crash.
