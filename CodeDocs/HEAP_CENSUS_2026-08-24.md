@@ -43,19 +43,22 @@ tradeoff, Kevin's call).
   ownership guard against eKilo/REPL.
 - toYAML String reserve ~4–24 KB per auto-save; 8–16 KB paste buffers — fine.
 
-## Bugs still open (dev follow-ups, none in the stable release path)
+## Bugs from the census — ALL CLOSED 2026-08-24 (commit 80c7fbf)
 
-1. **BitmapEditor.loadFile**: `dataSize = fileSize` with NO cap in the raw
-   path — a 100 KB file attempts a 100 KB alloc; plus re-entry leaks the
-   previous `bitmapData` block.
-2. **modjumperless.c overlay_set** leaks its colors buffer if
-   `mp_obj_get_int` raises mid-loop (no nlr guard).
-3. **Apps.cpp DMX**: `dmxTx.begin()` failure path returns without freeing the
-   513 B universe buffer.
-4. **oledGui**: 8 undestroyed screens from a script ≈ 25.6 KB; needs a
-   ceiling or auto-destroy on interpreter reset.
-5. `LEDs.cpp chillinColors[500]` is a non-const global — 2 KB of .data RAM
-   that `const` moves to flash.
+1. **BitmapEditor.loadFile** — FIXED: 32768 cap on the raw path, re-entry
+   free of the previous buffer, stale hasHeader reset, and
+   `new (std::nothrow)` so the null checks can actually fire under
+   -fno-exceptions.
+2. **modjumperless.c overlay_set** — FIXED: the conversion loop runs under
+   its own nlr frame; a raise frees the buffer before propagating.
+3. **Apps.cpp DMX** begin()-failure leak — FIXED.
+4. **oledGui screens** — NO CHANGE NEEDED: already handled by design
+   (`oledgui.reset()` calls oledGuiShutdownAll at script start;
+   deinitMicroPythonProper calls oledGuiShutdownTransient, which keeps only
+   the persistent idle page). The census missed the existing hooks.
+5. **chillinColors** — FIXED: `const`, 2 KB of .data moved to flash.
+   Also: SlotManager's dead `new JumperlessState[0]` and its caller-less
+   cleanupHistory() are gone.
 
 ## Pre-setup() attribution — the ~30.6 KB the ledger couldn't see
 
@@ -78,12 +81,27 @@ Arduino String allocates exactly strlen+1 (no rounding on this libc).
 `Type& x = Type::getInstance()` reference globals (JumperlOS.cpp:38-56 has 17
 of them; plus CommandBuffer, ContextManager, MeasureMode, the three Probe
 singletons, MpRemoteService, FileCacheFlushService) each forcing a `new` on
-the empty heap before main(). The MpRemoteService ctor comment already
-diagnosed exactly this pattern when its dead buffers were removed. Converting
-`getInstance()` to a Meyer's function-local static moves all of it to BSS
-with an identical API and zero call-site churn. Together with menuLines and
-the FatFS move, **~12-16 KB of resident heap is recoverable without touching
-any behavior** — the natural next heap batch, Kevin's call on ordering.
+the empty heap before main(). **DONE 2026-08-24** (commit 8a5fef7): all 23
+lazy-new getInstance() bodies are Meyer's local statics now, pointer members
+deleted.
+
+**CORRECTION to this doc's first version, which claimed "~12-16 KB
+recoverable":** total heap is the RAM between BSS-end and the stack, so
+moving an object from heap to BSS shrinks the heap pool by the same bytes —
+**free heap does not grow** (only ~400 B of chunk overhead comes back). What
+the conversion buys is honesty and robustness: Used Heap stops counting
+singletons, no malloc runs at static init, a failed early allocation can't
+skip a singleton. The rows that DO grow free RAM are the ones that move data
+to FLASH (chillinColors, done) or delete allocations outright (MpRemote,
+done earlier). menuLines is **parked**: the census's "nothing mutates it"
+was wrong — Menus.cpp's parser rewrites the array in place (strips markers,
+compacts, and a /menuTree.txt file can overwrite entries), so const char*
+means redesigning the menu parser, a real project rather than a conversion.
+The FatFS-to-setup() and JeoPixel-ctor moves are likewise ordering-only (no
+net recovery) and stay parked, as does the ScriptHistory duplicate-instance
+consolidation. The remaining levers that actually grow free heap are the
+tradeoff ones: the undo ring's 22.8 KB, the MP GC heap size, and the menu
+redesign.
 
 Ledger quirk to know: `heapMark("MpRemoteService ctor")` fires during static
 init (its file-scope reference forces construction), so the ledger's row 0 is
