@@ -32,7 +32,7 @@
 // never be read as fresh by the next one - and guideCheckAbort() calls
 // cancelOneShotTap(), so the abandoned REQUEST doesn't fire later either.
 
-#include "GuidedFlow.h"
+#include "GuideScript.h"
 
 // ---------------------------------------------------------------------------
 // Part values, bands, display formatting - BOTH TARGETS

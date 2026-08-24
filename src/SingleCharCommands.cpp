@@ -39,7 +39,7 @@
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "ProjectsApp.h" // z: guided-project runner (headless/HIL entry)
-#include "GuidedFlow.h"  // z band: parsePartValue / guideResistorBand report
+#include "GuideScript.h" // z band: parsePartValue / guideResistorBand report
 #include "WaveGen.h"    // X: the wavegen stream line (T3.3)
 #include "AdcRing.h"    // X: the ADC ring line (T2.1)
 #include "Python_Proper.h"
