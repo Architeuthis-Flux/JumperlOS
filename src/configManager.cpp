@@ -45,13 +45,9 @@ bool shadowConfigValid = false;
 // ============================================================================
 // ConfigSaveService - Background config save service
 // ============================================================================
-ConfigSaveService* ConfigSaveService::instance = nullptr;
-
 ConfigSaveService& ConfigSaveService::getInstance() {
-    if (!instance) {
-        instance = new ConfigSaveService();
-    }
-    return *instance;
+    static ConfigSaveService inst;
+    return inst;
 }
 
 // Request async config save (non-blocking). The service has a 100 ms period;

@@ -81,9 +81,6 @@ public:
 private:
     Highlighting();
     ~Highlighting() = default;
-    
-    static Highlighting* instance;
-    
     // Helper for voltage adjustment
     void adjustRailVoltage(int rail);  // 0=both, 1=top, 2=bottom
     void adjustDACVoltage(int dac);    // 0=DAC0, 1=DAC1

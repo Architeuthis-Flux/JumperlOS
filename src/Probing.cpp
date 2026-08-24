@@ -80,13 +80,9 @@ extern WaveGen wavegen; // defined in main.cpp
 volatile bool g_probeDoubleTapBail = false;
 
 // Static member initialization
-ProbeButton* ProbeButton::instance = nullptr;
-
-ProbeButton& ProbeButton::getInstance( ) {
-    if ( instance == nullptr ) {
-        instance = new ProbeButton( );
-    }
-    return *instance;
+ProbeButton& ProbeButton::getInstance() {
+    static ProbeButton inst;
+    return inst;
 }
 
 ProbeButton::ProbeButton( ) {
@@ -1407,13 +1403,9 @@ ProbeButton& probeButton = ProbeButton::getInstance( );
 // ============================================================================
 
 // Static member initialization
-Probing* Probing::instance = nullptr;
-
-Probing& Probing::getInstance( ) {
-    if ( instance == nullptr ) {
-        instance = new Probing( );
-    }
-    return *instance;
+Probing& Probing::getInstance() {
+    static Probing inst;
+    return inst;
 }
 
 Probing::Probing( ) {
@@ -1572,14 +1564,9 @@ void Probing::handleProbeButtonActions( ) {
 // ============================================================================
 // ProbeSwitch Service Implementation - LOW priority
 // ============================================================================
-
-ProbeSwitch* ProbeSwitch::instance = nullptr;
-
-ProbeSwitch& ProbeSwitch::getInstance( ) {
-    if ( instance == nullptr ) {
-        instance = new ProbeSwitch( );
-    }
-    return *instance;
+ProbeSwitch& ProbeSwitch::getInstance() {
+    static ProbeSwitch inst;
+    return inst;
 }
 
 /**
@@ -1599,14 +1586,9 @@ ServiceStatus ProbeSwitch::service( ) {
 // ============================================================================
 // ProbePads Service Implementation - LOW priority
 // ============================================================================
-
-ProbePads* ProbePads::instance = nullptr;
-
-ProbePads& ProbePads::getInstance( ) {
-    if ( instance == nullptr ) {
-        instance = new ProbePads( );
-    }
-    return *instance;
+ProbePads& ProbePads::getInstance() {
+    static ProbePads inst;
+    return inst;
 }
 
 /**

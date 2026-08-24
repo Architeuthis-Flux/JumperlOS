@@ -52,14 +52,9 @@ static unsigned long lastCurrentSensePollMs = 0;
 static constexpr unsigned long CURRENT_SENSE_POLL_INTERVAL_MS = 50;
 static constexpr float CURRENT_SENSE_FILTER_ALPHA = 0.55f;
 static constexpr float CURRENT_SENSE_DIRECTION_EPSILON_MA = 0.25f;
-
-Peripherals* Peripherals::instance = nullptr;
-
 Peripherals& Peripherals::getInstance() {
-    if (instance == nullptr) {
-        instance = new Peripherals();
-    }
-    return *instance;
+    static Peripherals inst;
+    return inst;
 }
 
 Peripherals::Peripherals() {

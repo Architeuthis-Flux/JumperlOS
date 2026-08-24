@@ -33,13 +33,9 @@
 // ============================================================================
 
 // Static member initialization
-Highlighting* Highlighting::instance = nullptr;
-
 Highlighting& Highlighting::getInstance() {
-    if (instance == nullptr) {
-        instance = new Highlighting();
-    }
-    return *instance;
+    static Highlighting inst;
+    return inst;
 }
 
 Highlighting::Highlighting() {

@@ -83,9 +83,6 @@ public:
 private:
     MeasureMode();
     ~MeasureMode() = default;
-    
-    static MeasureMode* instance;
-    
     // ========================================================================
     // Measurement State
     // ========================================================================

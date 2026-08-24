@@ -55,8 +55,6 @@ extern "C" {
 }
 
 // Singleton instance
-MpRemoteService* MpRemoteService::instance = nullptr;
-
 // Global reference
 MpRemoteService& mpRemoteService = MpRemoteService::getInstance( );
 
@@ -91,11 +89,9 @@ MpRemoteService::MpRemoteService( ) {
     jl_on_script_complete_callback = jl_mp_remote_script_complete_wrapper;
 }
 
-MpRemoteService& MpRemoteService::getInstance( ) {
-    if ( !instance ) {
-        instance = new MpRemoteService( );
-    }
-    return *instance;
+MpRemoteService& MpRemoteService::getInstance() {
+    static MpRemoteService inst;
+    return inst;
 }
 
 // Non-zero while the VM is executing code via mp_embed_exec_str

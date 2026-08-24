@@ -215,8 +215,6 @@ public:
 private:
     ProbeButton();
     ~ProbeButton() = default;
-    static ProbeButton* instance;
-    
     unsigned long lastCheckTime = 0;
     bool isBlocked = false;
     unsigned long blockStartTime = 0;
@@ -284,7 +282,6 @@ public:
 private:
     ProbeSwitch() = default;
     ~ProbeSwitch() = default;
-    static ProbeSwitch* instance;
 };
 
 /**
@@ -308,7 +305,6 @@ public:
 private:
     ProbePads() = default;
     ~ProbePads() = default;
-    static ProbePads* instance;
     unsigned long lastCheckTime = 0;
 };
 
@@ -474,8 +470,6 @@ public:
 private:
     Probing();
     ~Probing() = default;
-    
-    static Probing* instance;
     int lastProbeReading = 0;
     volatile int simTapNode = -1;            // simulateProbeTap()
     volatile unsigned long simTapUntil = 0;  // millis() deadline; 0 = inactive

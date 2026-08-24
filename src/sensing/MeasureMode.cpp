@@ -28,14 +28,9 @@ extern class oled oled;
 extern volatile unsigned long lastProbeCurrentCheckTime;
 // Singleton Implementation
 // ============================================================================
-
-MeasureMode* MeasureMode::instance = nullptr;
-
 MeasureMode& MeasureMode::getInstance() {
-    if (instance == nullptr) {
-        instance = new MeasureMode();
-    }
-    return *instance;
+    static MeasureMode inst;
+    return inst;
 }
 
 // Global reference for convenience
