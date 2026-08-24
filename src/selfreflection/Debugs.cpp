@@ -864,7 +864,7 @@ void action_psramTest() {
   if ( testSmall == nullptr ) {
       Serial.println( "ERROR: Small pmalloc() failed!" );
       Serial.flush();
-      
+      return;
   }
   
   // Quick write/read test
@@ -877,8 +877,8 @@ void action_psramTest() {
       Serial.println( "  Wrote: 0xDEADBEEF, Read: 0x" + String( testSmall[0], HEX ) );
       Serial.println( "  Wrote: 0xCAFEBABE, Read: 0x" + String( testSmall[1], HEX ) );
       free( testSmall );
-      Serial.flush(); 
-      
+      Serial.flush();
+      return;
   }
   Serial.println( "Small allocation test: PASS" );
   free( testSmall );
@@ -893,7 +893,7 @@ void action_psramTest() {
   if ( psramBlock == nullptr ) {
       Serial.println( "ERROR: Failed to allocate PSRAM test block!" );
       Serial.flush();
-      
+      return;
   }
   Serial.println( "Allocation successful at address: 0x" + String( (uint32_t)psramBlock, HEX ) );
   Serial.flush();
@@ -986,7 +986,7 @@ void action_psramTest() {
       Serial.println( "Warning: Could not allocate SRAM comparison block" );
       free( psramBlock );
       Serial.flush();
-     
+      return;
   }
   
   unsigned long startTime, endTime;
