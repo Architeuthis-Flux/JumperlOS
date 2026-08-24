@@ -431,7 +431,7 @@ void setup( ) {
     // Serial.println("Core2 initialized");
     // Serial.flush();
 
-    // routableBufferPower( 1, 0 );
+    // probing.routableBufferPower( 1, 0 );
 
     // Serial.println("Routable buffer power initialized");
     // Serial.flush();
@@ -489,10 +489,10 @@ void setup( ) {
     // Serial.flush();
 
 #if !defined(OG_JUMPERLESS)
-    // OG has no resistive probe pads (V5-only); getNothingTouched() reads ADC
+    // OG has no resistive probe pads (V5-only); probing.getNothingTouched() reads ADC
     // channel 5 which doesn't exist on the RP2040, causing "All nothing touched
     // samples rejected". Scanning probe is Phase 2 work.
-    getNothingTouched( );
+    probing.getNothingTouched( );
 #endif
 
     startupTimers[ 8 ] = millis( );
@@ -546,7 +546,7 @@ void setup( ) {
     // cap instead of #ifdef so the contract - not a board macro - drives it.
     if ( board::currentBoard( ).caps.hasProbePads ) {
         jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling); inner set
-        jOS.registerService( &probing );          // HIGH - probe reading + probeMode() entry; BLOCKING while a pad menu is open
+        jOS.registerService( &probing );          // HIGH - probe reading + probing.probeMode() entry; BLOCKING while a pad menu is open
         jOS.registerService( &highlighting );     // HIGH - encoder net highlight / voltage adjuster (BLOCKING while it owns the wheel)
         jOS.registerService( &measureModeService ); // HIGH - measure-position readings
         jOS.registerService( &probeSwitch );      // NORMAL - switch position (500 ms self-gated) + infraServiceTick()
@@ -832,16 +832,16 @@ menu:
             oled.init( );
         }
 #endif
-        checkProbeCurrentZero( );
+        probing.checkProbeCurrentZero( );
 
         // Ensure the probe-sense DAC is at the calibrated measure_mode_output_voltage
         // and ROUTABLE_BUFFER_IN<->DACn is wired before the first probe tap.
         // Without this, initDAC()/applyStateToHardware() leave the probe DAC at
         // whatever the slot's saved power.dac0/1 was (often the 3.33V default),
-        // and pad detection in measure mode misreads until probeMode() runs.
+        // and pad detection in measure mode misreads until probing.probeMode() runs.
         // (The auto_connect_probe gate lives in infra's enProbePower(), so this
         // is a no-op when probe auto-connect is disabled.)
-        routableBufferPower( 1, 0 );
+        probing.routableBufferPower( 1, 0 );
         // Boot determinism: the nudge above refreshes immediately UNLESS a
         // rebuild happened to be in flight (then only a sticky retry flag is
         // left for the next ~500ms service tick). Verify the feed actually
@@ -1993,7 +1993,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
         core2busy = false;
     } else if ( checkingButton == 0 && ProbeButton::getInstance( ).getButtonState( ) == 0 ) {
         t[ 14 ] = micros( );
-        probeLEDhandler( );
+        probing.probeLEDhandler( );
         t[ 15 ] = micros( );
         // lastProbeLEDs = showProbeLEDs;
     }

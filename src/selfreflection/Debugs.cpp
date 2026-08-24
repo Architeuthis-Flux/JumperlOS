@@ -3067,7 +3067,7 @@ void action_encoderButtonAnalyzer( void ) {
         // ── Probe button = alternate exit (held ~400ms), polled slowly ──
         if ( ms - lastProbeMs >= 60 ) {
             lastProbeMs = ms;
-            if ( checkProbeButtonState( ) != 0 ) {
+            if ( probing.checkProbeButtonState( ) != 0 ) {
                 if ( probeHeldSince == 0 ) probeHeldSince = ms;
                 else if ( ms - probeHeldSince > 400 ) quit = true;
             } else {

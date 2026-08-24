@@ -461,7 +461,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // or DAC1 feed routes fine but shows no LED delta, no end-to-end
     // proof). Unforced at the end of the test.
     infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC0 (INA1-sensed)
-    routableBufferPower( 1, 0, 1 );
+    probing.routableBufferPower( 1, 0, 1 );
     delay( 150 );
 
     // Baseline: LED off, median of 9 independent conversions. The button
@@ -473,7 +473,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // only in SELECT). Read before parking the sampler (it skips otherwise).
     int tipPosCable = probeSwitchTipSenseNow( );
     probeButtonPausePollingFromCore0( );
-    float curOff = probeCurrentMedian( 9 );
+    float curOff = probing.probeCurrentMedian( 9 );
     probeButtonResumePollingFromCore0( );
 
     // LED full white: in SELECT position the WS2812's supply current flows
@@ -484,11 +484,11 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // when the baseline says SELECT.
     setProbeLEDModeAndSettle( 8 ); // full white
     probeButtonPausePollingFromCore0( );
-    float curOn = probeCurrentMedian( 9 );
+    float curOn = probing.probeCurrentMedian( 9 );
     probeButtonResumePollingFromCore0( );
     float ledDelta = curOn - curOff;
 
-    // Fresh classification - NOT checkSwitchPosition(), whose internal 500ms
+    // Fresh classification - NOT probing.checkSwitchPosition(), whose internal 500ms
     // gate usually hands back a stale cached position.
     //
     // The TIP SENSE decides when it has an opinion (2026-08-16). The old rule
@@ -545,7 +545,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // expected baseline depends on the unattended switch position; the
     // position-specific signal is the LED delta gate below. The window is a
     // claim about the physical shunt current, so judge the RAW reading:
-    // probeCurrentMedian() subtracts probe_current_zero (2.0 default), which
+    // probing.probeCurrentMedian() subtracts probe_current_zero (2.0 default), which
     // parks a healthy measure-position no-load baseline at -2.0 mA - below
     // the corrected window's floor, failing every board whose switch sat in
     // measure during an unattended test.
@@ -583,7 +583,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
 
     // Direct struct write doesn't set configChanged, so this can't trigger a
     // spurious config save; the runtime re-claims its GPIO on the next
-    // routableBufferPower(1) pass.
+    // probing.routableBufferPower(1) pass.
     infraForceCandidate( "probe_power", -1 );
 }
 
@@ -606,7 +606,7 @@ static void runCrossbarTest( SelfTestReport& r ) {
     // corrupt its loopback reading) - pin the function to DAC0 so any claim
     // releases first. Same guard the cable test uses; unforced at the end.
     infraForceCandidate( "probe_power", 0 ); // candidate 0 = DAC0 (INA1-sensed)
-    routableBufferPower( 1, 0, 1 );
+    probing.routableBufferPower( 1, 0, 1 );
 
     const float target = 2.5f;
     const float tol = 0.35f;
@@ -698,7 +698,7 @@ static void runCrossbarTest( SelfTestReport& r ) {
     refreshConnections( -1, 0, 1 );
 
     // Restore the GPIO buffer-power preference; the next
-    // routableBufferPower(1) pass re-claims a pin if enabled.
+    // probing.routableBufferPower(1) pass re-claims a pin if enabled.
     infraForceCandidate( "probe_power", -1 );
 
     if ( rowFails || gpioFails || railFails ) {
@@ -1218,7 +1218,7 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     leaveApp( ); // restore original slot
     setRailsAndDACs( 0 );
     refreshConnections( -1 );
-    routableBufferPower( 1, 0, 1 );
+    probing.routableBufferPower( 1, 0, 1 );
     b.clear( );
 
     paintSelfTestOverlay( r );
@@ -1244,7 +1244,7 @@ static bool selfTestRetryCountdownAborted( int seconds ) {
         Serial.flush( );
         unsigned long t0 = millis( );
         while ( millis( ) - t0 < 1000 ) {
-            if ( checkProbeButtonState( ) != 0 )
+            if ( probing.checkProbeButtonState( ) != 0 )
                 return true;
             if ( encoderButtonState != IDLE || isEncoderButtonPhysicallyPressed( ) )
                 return true;
@@ -1328,7 +1328,7 @@ static void waitForAnyInput( void ) {
     delay( 300 ); // let a button held from earlier be released
 
     while ( true ) {
-        if ( checkProbeButtonState( ) != 0 )
+        if ( probing.checkProbeButtonState( ) != 0 )
             break;
         if ( encoderButtonState != IDLE || isEncoderButtonPhysicallyPressed( ) )
             break;

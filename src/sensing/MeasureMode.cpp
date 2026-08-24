@@ -164,7 +164,7 @@ ServiceStatus MeasureMode::service() {
     } else if (switchPosition != 0) {
         // ANY non-measure switch position releases measure mode. This used to
         // be `switchPosition == 1`, which meant position -1 ("unknown" - what
-        // checkSwitchPosition() holds when it can't sense, and what
+        // probing.checkSwitchPosition() holds when it can't sense, and what
         // jl_set_switch_position() may legally write) latched the measurement
         // on forever: the display kept repainting one row's voltage and
         // service() returned BUSY, starving every other service.

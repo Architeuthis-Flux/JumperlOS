@@ -369,7 +369,7 @@ void MpRemoteService::onScriptExecutionBegin() {
     showLEDmeasurementsInterval = 55000;
     lastReadGPIOIntervalinMpRemoteService = readGPIOInterval;
     readGPIOInterval = 5000;
-    // routableBufferPower( 0, 1, 1 );
+    // probing.routableBufferPower( 0, 1, 1 );
     // refreshConnections( 0, 1, 0 );
     // Example: You could add pre-execution setup here:
     // - Start execution timer
@@ -384,7 +384,7 @@ void MpRemoteService::onScriptExecutionComplete() {
     
     // Serial.println( "[MpRemote] Script execution completed" );
     // Only undo a switch position the SCRIPT wrote. Restoring unconditionally
-    // clobbered a genuine mid-script physical flip, and checkSwitchPosition()
+    // clobbered a genuine mid-script physical flip, and probing.checkSwitchPosition()
     // holds its last value when it can't sense, so that write didn't self-heal.
     const bool scriptMovedSwitch = switchPositionScriptDirty;
     if ( switchPositionScriptDirty ) {
@@ -403,7 +403,7 @@ void MpRemoteService::onScriptExecutionComplete() {
     // churned the crossbar once per typed ViperIDE line.
     onPythonSessionEnd( scriptMovedSwitch );
 
-    // routableBufferPower( 1, 1, 0 );
+    // probing.routableBufferPower( 1, 1, 0 );
     // refreshConnections( 0, 1, 0 );
     // Example: You could add cleanup, logging, or state management here
     // This fires after GC has run but before returning to the REPL prompt

@@ -132,7 +132,6 @@ extern "C" {
 }
 
 // Forward declarations
-int justReadProbe( bool allowDuplicates );
 extern "C" void jl_vfs_mount_root( void );   // VFS mounting
 extern void setupFilesystemAndPaths( void ); // Filesystem setup
 // Pin.irq() lifecycle hooks (machine_pin_jl.c) - must be callable from session
@@ -2119,14 +2118,14 @@ int jl_probe_read_blocking( void ) {
             return -999; // Special return value indicating interrupt
         }
 
-        pad = justReadProbe( false, 1 );
+        pad = probing.justReadProbe( false, 1 );
        // delay( 1 ); // Small delay to prevent busy waiting
     }
     return pad;
 }
 
 int jl_probe_read_nonblocking( void ) {
-    return justReadProbe( true, 1 );
+    return probing.justReadProbe( true, 1 );
 }
 
 // highlightNets function moved to Highlighting.cpp
@@ -2271,12 +2270,12 @@ extern "C" int jl_get_service_index( const char* service_name ) {
 extern "C" int jl_get_switch_position( void ) {
     // int connected = bufferPowerConnected;
     // if (connected == false) {
-    //     routableBufferPower( 1, 0, 1 );
+    //     probing.routableBufferPower( 1, 0, 1 );
     //     // delay( 10 );
     // }   
     int result = Probing::getInstance( ).switchPosition;
     // if (connected == false) {
-    //         routableBufferPower( 0, 0, 1 );
+    //         probing.routableBufferPower( 0, 0, 1 );
     //     }
     return result;
 }
@@ -2284,7 +2283,7 @@ extern "C" int jl_get_switch_position( void ) {
 // Set when a script writes switchPosition, so the raw-REPL exit hook knows
 // whether its snapshot is worth restoring. Without this the hook blindly
 // wrote back a value sampled at script start, undoing a genuine mid-script
-// physical flip - and checkSwitchPosition() legitimately holds its last value
+// physical flip - and probing.checkSwitchPosition() legitimately holds its last value
 // when it can't sense, so the bad write would not self-heal.
 volatile bool switchPositionScriptDirty = false;
 
@@ -2299,12 +2298,12 @@ extern "C" void jl_set_switch_position( int position ) {
 extern "C" int jl_check_switch_position( void ) {
     // int connected = bufferPowerConnected;
     // if (connected == false) {
-    //     routableBufferPower( 1, 0, 0 );
+    //     probing.routableBufferPower( 1, 0, 0 );
     //     delay( 10 );
     // }
     int result = Probing::getInstance( ).checkSwitchPosition( );
     // if (connected == false) {
-    //     routableBufferPower( 0, 0, 0 );
+    //     probing.routableBufferPower( 0, 0, 0 );
        
     // }
     return result;
@@ -2318,10 +2317,10 @@ extern "C" int jl_probe_autoconnect( int enable ) {
     }
     if ( enable ) {
         jumperlessConfig.dacs.auto_connect_probe = 1;
-        routableBufferPower( 1, 0, 1 );
+        probing.routableBufferPower( 1, 0, 1 );
     } else {
         jumperlessConfig.dacs.auto_connect_probe = 0;
-        routableBufferPower( 0, 0, 1 );
+        probing.routableBufferPower( 0, 0, 1 );
     }
     return jumperlessConfig.dacs.auto_connect_probe;
 }

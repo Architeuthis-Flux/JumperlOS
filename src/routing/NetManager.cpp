@@ -1655,7 +1655,7 @@ void listNets(int liveUpdate, Stream *stream)
 
 
 
-      // if (checkProbeButton() != 0) {
+      // if (probing.checkProbeButton() != 0) {
       //   blockProbeButton = 500;
       //   blockProbeButtonTimer = millis();
       //   liveUpdate = 0;
@@ -1699,7 +1699,7 @@ void listNets(int liveUpdate, Stream *stream)
           }
           if (millis() - startTime > 100) {
             // Use state-based check in loop (doesn't consume event)
-            if (checkProbeButtonState() != 0) {
+            if (probing.checkProbeButtonState() != 0) {
               blockProbeButton = 500;
               blockProbeButtonTimer = millis();
               liveUpdate = 0;

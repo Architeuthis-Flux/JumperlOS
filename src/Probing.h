@@ -548,56 +548,6 @@ extern int& probePowerDAC;
 extern int& showProbeCurrent;
 
 
-// Legacy wrapper functions for backward compatibility
-// These call the corresponding methods on the singleton instance
-inline int probeMode(int setOrClear = 1, int firstConnection = -1, bool fromClickMenu = false) {
-    return Probing::getInstance().probeMode(setOrClear, firstConnection, fromClickMenu);
-}
-
-inline float measureMode(int updateSpeed = 150) {
-    return Probing::getInstance().measureMode(updateSpeed);
-}
-
-inline void checkPads(void) {
-    Probing::getInstance().checkPads();
-}
-
-inline int checkProbeButton(void) {
-    return Probing::getInstance().checkProbeButton();
-}
-
-inline int checkProbeButtonState(void) {
-    return Probing::getInstance().checkProbeButtonState();
-}
-
-inline int checkSwitchPosition(void) {
-    return Probing::getInstance().checkSwitchPosition();
-}
-
-inline int justReadProbe(bool allowDuplicates = false, int rawPad = 0) {
-    return Probing::getInstance().justReadProbe(allowDuplicates, rawPad);
-}
-
-inline void routableBufferPower(int offOn, int flash = 0, int force = 0) {
-    Probing::getInstance().routableBufferPower(offOn, flash, force);
-}
-
-inline int getNothingTouched(int samples = 8) {
-    return Probing::getInstance().getNothingTouched(samples);
-}
-
-inline float checkProbeCurrentZero(void) {
-    return Probing::getInstance().checkProbeCurrentZero();
-}
-
-inline void probeLEDhandler(void) {
-    Probing::getInstance().probeLEDhandler();
-}
-
-inline int readProbeRaw(int readNothingTouched = 0, bool allowDuplicates = false) {
-    return Probing::getInstance().readProbeRaw(readNothingTouched, allowDuplicates);
-}
-
 // Pad-decode endpoints for the CURRENT switch position (defined in
 // Probing.cpp): the base probe_min/max pair in SELECT, the
 // probe_min_measure/max_measure pair scaled by the live ADC7 tip voltage in
@@ -624,54 +574,6 @@ void probeGpioPowerHwRelease(int gpioDefIdx);
 //     feed is DAC0 / no feed / ADC busy / touch); *pct = held %.
 int probeSwitchTipSenseNow(void);
 int probeSwitchFeedBlinkNow(int* pct);
-
-inline float checkProbeCurrent(void) {
-    return Probing::getInstance().checkProbeCurrent();
-}
-
-inline float checkProbeCurrentRaw(void) {
-    return Probing::getInstance().checkProbeCurrentRaw();
-}
-
-inline float probeCurrentMedian(int n) {
-    return Probing::getInstance().probeCurrentMedian(n);
-}
-
-inline int delayWithButton(int delayTime = 1000) {
-    return Probing::getInstance().delayWithButton(delayTime);
-}
-
-inline int chooseADC(void) {
-    return Probing::getInstance().chooseADC();
-}
-
-inline int chooseDAC(int justPickOne = 0) {
-    return Probing::getInstance().chooseDAC(justPickOne);
-}
-
-inline int chooseIsense(void) {
-    return Probing::getInstance().chooseIsense();
-}
-
-inline int chooseGPIO(int skipInputOutput = 0) {
-    return Probing::getInstance().chooseGPIO(skipInputOutput);
-}
-
-inline int longShortPress(int pressLength = 500) {
-    return Probing::getInstance().longShortPress(pressLength);
-}
-
-inline float voltageSelect(int fiveOrEight = 8) {
-    return Probing::getInstance().voltageSelect(fiveOrEight);
-}
-
-inline int readProbe(void) {
-    return Probing::getInstance().readProbe();
-}
-
-inline void startProbe(long probeSpeed = 25000) {
-    Probing::getInstance().startProbe(probeSpeed);
-}
 
 // Additional references for backward compatibility
 extern volatile int& inPadMenu;

@@ -545,7 +545,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         while ( returnedMenuPosition == -1 && Serial.available( ) == 0 && arduinoInReset == 0 ) {
             // delayMicroseconds(5000);
             // Use state-based check in loop (doesn't consume event)
-            if ( checkProbeButtonState( ) == 1 ) {
+            if ( probing.checkProbeButtonState( ) == 1 ) {
                 Serial.println( "Probe button pressed" );
                 logoRing.enabled = false;
                 clearColorOverrides( false, true, false ); // restore depth pads
@@ -3002,7 +3002,7 @@ float getActionFloat( int menuPosition, int rail ) {
         }
 
         // Read probe pads for direct voltage selection
-        int probeReading = justReadProbe( true );
+        int probeReading = probing.justReadProbe( true );
 
         // Check if probe is touching the voltage selection area (rows 31-60)
         if ( probeReading >= 31 && probeReading <= 60 ) {
@@ -4533,7 +4533,7 @@ int doMenuAction( int menuPosition, int selection ) {
         // cursor support. fromClickMenu = true: a wheel click with no cursor
         // showing re-shows the cursor here, instead of the probe-button-entry
         // behavior of bailing out to the click menu.
-        probeMode( setOrClear, -1, true );
+        probing.probeMode( setOrClear, -1, true );
 
         // Refresh display after exiting probe mode (negative = clear the
         // probe-mode leftovers out of the buffer before drawing wires)

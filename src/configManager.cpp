@@ -4080,9 +4080,9 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
             // `[dacs] auto_connect_probe = 1` after a 0 left the probe unpowered
             // until reboot ("probe_power off -> (none)" in i@; seen 2026-08-17).
             if (jumperlessConfig.dacs.auto_connect_probe <= 0) {
-                routableBufferPower(0, 0, 1);
+                probing.routableBufferPower(0, 0, 1);
             } else {
-                routableBufferPower(1, 0, 1);
+                probing.routableBufferPower(1, 0, 1);
             }
         }
         else if (strcmp(key, "probe_power_source") == 0) {
@@ -4115,7 +4115,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
         // probe_power_gpio is DEPRECATED AND IGNORED (the feed source is
         // candidate-driven in routing/InfraPaths.cpp) - parse it so old
         // config files round-trip, but with NO side effects. (This used to
-        // call routableBufferPower(1,0,1), force-ENABLING probe power as a
+        // call probing.routableBufferPower(1,0,1), force-ENABLING probe power as a
         // side effect of setting an ignored flag.)
         else if (strcmp(key, "probe_power_gpio") == 0) {
             jumperlessConfig.debug.probe_power_gpio = parseBool(value);

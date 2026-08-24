@@ -301,7 +301,7 @@ void jOSmanager::serviceAll() {
 /**
  * @brief One pass over the inner set (Service::inInnerSet())
  *
- * The modal loops - probeMode(), getMenuSelection() and the other click
+ * The modal loops - probing.probeMode(), getMenuSelection() and the other click
  * menus, the pad menus, the apps' input loops, mp_hal_delay_ms - call this
  * to keep the button state machine, the USB pump, the mpremote REPL, the
  * Arduino UART bridge and the current-sense poll (marching ants) alive while
