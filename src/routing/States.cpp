@@ -11,6 +11,7 @@
 #include "config.h"
 #include "FakeGpio.h"
 #include "GraphicOverlays.h"
+#include "PartLabels.h"     // preview enter/exit recompose the label overlay
 #include "PartPlacement.h"  // parts: section serializer/parser + expansion
 #include <string.h>
 #include <vector>
@@ -4381,6 +4382,11 @@ bool SlotManager::enterPreviewMode(int slotToPreview, String& errorMsg) {
 
     // activeState.power is now the single source of truth
 
+    // The label service is frozen while the menu's BLOCKING loop owns core 0,
+    // but core 1 renders overlays in preview - swap the composed labels
+    // synchronously or the previous state's markers sit over this preview.
+    partLabels.recomposeNow();
+
     return true;
 }
 
@@ -4436,6 +4442,7 @@ bool SlotManager::exitPreview(bool applyPreview, String& errorMsg) {
         // does not, so it has to be done here.
         updateLastActive();
 
+        partLabels.recomposeNow();   // same reason as enterPreviewMode's call
         return true;
     } else {
         // User wants to cancel - restore original slot AND rail voltages
@@ -4455,10 +4462,14 @@ bool SlotManager::exitPreview(bool applyPreview, String& errorMsg) {
         originalSlotNumber = -1;
         previewOriginalPath[0] = '\0';
 
+        bool restored;
         if (slotToRestore == SLOT_FILE_CONTEXT && pathToRestore[0] != '\0') {
-            return loadSlotFromPath(String(pathToRestore), errorMsg);
+            restored = loadSlotFromPath(String(pathToRestore), errorMsg);
+        } else {
+            restored = loadSlot(slotToRestore, errorMsg);
         }
-        return loadSlot(slotToRestore, errorMsg);
+        partLabels.recomposeNow();   // same reason as enterPreviewMode's call
+        return restored;
     }
 }
 

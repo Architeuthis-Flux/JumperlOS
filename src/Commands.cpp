@@ -16,6 +16,7 @@
 #include "NetsToChipConnections.h"
 #include "Peripherals.h"
 #include "PersistentStuff.h"
+#include "PartLabels.h"    // label refresh nudge after net rebuilds
 #include "PartPlacement.h"
 #include "Probing.h"
 #include "RotaryEncoder.h"
@@ -231,6 +232,7 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   // The parts table is the source of truth for {NAME}_{PIN} net names - net
   // merges lose firstNode-keyed names, so re-assert from parts every rebuild.
   partsReassertNetNames(globalState);
+  partLabels.requestRun();   // labels re-fingerprint on the next pass
 
   rebuildChangedNetColorsFromBridges();  // Recompute net colors from bridges after net regeneration
   t[ti++] = millis(); // t[3] = after rebuildChangedNetColorsFromBridges
@@ -403,6 +405,7 @@ unsigned long start2 = millis();
   // Re-assert {NAME}_{PIN} net names from the parts table (merges lose
   // firstNode-keyed names; the parts table is the source of truth).
   partsReassertNetNames(globalState);
+  partLabels.requestRun();   // labels re-fingerprint on the next pass
 
   rebuildChangedNetColorsFromBridges();  // Recompute net colors from bridges after net regeneration
 #if DEBUG_REFRESH

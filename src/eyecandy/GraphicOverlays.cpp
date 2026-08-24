@@ -338,11 +338,14 @@ void __not_in_flash_func(renderGraphicOverlays)() {
 // ============================================================================
 
 // Session-only overlays are never persisted into a slot file: self-test
-// results must clear on reset, and the guided-placement runtime's `_GUIDE_`
+// results must clear on reset, the guided-placement runtime's `_GUIDE_`
 // footprint/target overlays are rebuilt from the parts table every session
-// (persisting them would also survive into slots the guide no longer owns).
+// (persisting them would also survive into slots the guide no longer owns),
+// and PartLabels' `_PARTS_` composition is likewise derived state - letting
+// it into the YAML would break the parts round-trip.
 static bool overlayIsSessionOnly(const char* name) {
     return strcmp(name, "_SELFTEST_") == 0 ||
+           strcmp(name, "_PARTS_") == 0 ||
            strncmp(name, "_GUIDE_", 7) == 0;
 }
 

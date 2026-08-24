@@ -47,6 +47,7 @@ KevinC@ppucc.io
 #include "Graphics.h"
 #include "HelpDocs.h"
 #include "Highlighting.h"
+#include "PartLabels.h"
 #include "JumperlOS.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
@@ -561,6 +562,7 @@ void setup( ) {
     jOS.registerService( &peripherals );     // CRITICAL - current-sense poll (10 ms); inner set
 
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
+    jOS.registerService( &partLabels );          // NORMAL, 20 ms - ambient part labels (_PARTS_ overlay, auto-hide), tap-to-inspect, pin-class warnings; dormant on OG (ledsPerRow gate)
     jOS.registerService( &portHousekeepingService ); // NORMAL, 10 ms - Arduino DTR/flash detect + UART auto-connect, ENQ port-info reply, net-scan debug (was a 10 ms block in loop(); B6)
     jOS.registerService( &ledDumpService );          // NORMAL, 10 ms, inner set - the terminal LED picture (R! / serial function 5-6), drawn on core 0 now (was loop1 on core 1; T1.10)
 
