@@ -326,11 +326,15 @@ void setup( ) {
     if ( jumperlessConfig.hardware.psram_installed && detectedPsram > 0 ) {
         bool ok = psram_arena_init( detectedPsram, jumperlessConfig.hardware.psram_app_size_kb );
         if ( ok ) {
+#if JL_BOOT_VERBOSE
             Serial.printf( "[PSRAM] App arena ready: %u KB free, MP region %u KB\n",
                 (unsigned)( psram_app_free( ) / 1024 ),
                 (unsigned)( psram_mp_size( ) / 1024 ) );
+#endif
         } else {
+#if JL_BOOT_VERBOSE
             Serial.println( "[PSRAM] App arena init failed - continuing without app cache" );
+#endif
         }
     }
 
@@ -601,11 +605,10 @@ void setup( ) {
     // descriptor by now. No-op unless audio is enabled.
     usb_audio_boot_enumerate( );
     heapMark("usb audio enumerate");
-    // Printed here and not per-stage: most of the stages above run before USB
-    // enumerates, so a live print would have gone nowhere. Also reachable from
-    // the memory menu, which is where you want it after the board has been
-    // used for a while.
+    // Printed here (debug builds only) and from the memory menu on demand.
+#if JL_BOOT_VERBOSE
     heapLedgerPrint();
+#endif
 #endif
     // Serial.println("Service registration complete");
     // Serial.flush();

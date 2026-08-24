@@ -1653,6 +1653,7 @@ void undoInit(void) {
 
     g_activeSlot = (netSlot >= 0 && netSlot < NUM_SLOTS) ? netSlot : 0;
 
+#if JL_BOOT_VERBOSE
     Serial.printf("[Undo] init: %u ops + %u txns + %u KB blob shared across %d slots (%s, active=%d)\n",
         (unsigned)g_opCap, (unsigned)g_txnCap, (unsigned)(g_blobCap / 1024),
         NUM_SLOTS, havePsram ? "PSRAM" : "SRAM-only", g_activeSlot);
@@ -1660,18 +1661,20 @@ void undoInit(void) {
         (unsigned)g_persistMaxTxns, (unsigned)g_persistMaxBytes,
         (unsigned)g_persistBufBytes,
         g_persistBuf ? "reserved" : "RESERVE FAILED (per-save alloc)");
+#endif
 
     snapshotInit();
+#if JL_BOOT_VERBOSE
     if (g_snapshots)
         Serial.printf("[Undo] snapshot ring: %u entries\n", (unsigned)g_snapshotCap);
+#endif
 
     // Restore persisted history (every board). If there's nothing to restore,
     // seed the snapshot ring with a fresh boot capture as before.
     bool restored = undoRestore();
 
-    // Boot-time restore summary (always on - this runs once on Core 0 before
-    // Core 1 is spamming Serial, so it's safe even when undo_debug would not
-    // be). For each slot that has reachable history it reports the cursor, the
+    // Boot-time restore summary (debug builds only; memory-menu undo_debug can
+    // still trace live ops). For each slot that has reachable history it reports
     // total reachable txns, and how many are undoable (reachable + strictly
     // older than the cursor). If a slot shows tot>0 but undoable=0 the cursor
     // was restored at the wrong end; if restore=0 the file was rejected.
@@ -1701,11 +1704,13 @@ void undoInit(void) {
                     (unsigned)g_slotCursor[s], (unsigned)reach, (unsigned)undoable);
             }
         }
+#if JL_BOOT_VERBOSE
         Serial.printf("[Undo] restore=%d head=%u tail=%u gid=%u active=%d "
                       "netSlot=%d reachable=%u%s\n",
             (int)restored, (unsigned)g_txnHead, (unsigned)g_txnTail,
             (unsigned)g_globalTxnId, g_activeSlot, netSlot,
             (unsigned)totalReachable, summary);
+#endif
     }
 
     if (g_snapshots && !restored)
@@ -1876,10 +1881,12 @@ bool undoRestore(void) {
     }
     if (ownBuf) undoFree(buf);
 
+#if JL_BOOT_VERBOSE
     if (restored) {
         Serial.printf("[Undo] restored history from %s (%u bytes)\n",
                       UNDO_FILE_PATH, (unsigned)readBytes);
     }
+#endif
     return restored;
 }
 

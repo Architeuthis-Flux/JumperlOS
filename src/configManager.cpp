@@ -2,6 +2,7 @@
 #include "Graphics.h"
 #include "MatrixState.h"
 #include "config.h"
+#include "JumperlessDefines.h"  // JL_BOOT_VERBOSE
 #include "PersistentStuff.h"
 #include "LEDs.h"
 #include "Commands.h"
@@ -1431,8 +1432,10 @@ static bool configFileIsComplete(const char* fileContent) {
     
     for (int i = 0; i < numRequired; i++) {
         if (strstr(fileContent, requiredSections[i]) == NULL) {
+#if JL_BOOT_VERBOSE
             Serial.print("Config missing section: ");
             Serial.println(requiredSections[i]);
+#endif
             return false;
         }
     }
@@ -1462,8 +1465,10 @@ static bool configFileIsComplete(const char* fileContent) {
     
     for (int i = 0; i < numKeys; i++) {
         if (strstr(fileContent, requiredKeys[i]) == NULL) {
+#if JL_BOOT_VERBOSE
             Serial.print("Config missing key: ");
             Serial.println(requiredKeys[i]);
+#endif
             return false;
         }
     }
@@ -1609,7 +1614,9 @@ bool saveConfigIncremental(const char* filename) {
     
     if (!isComplete) {
         if (debugConfigSaveTiming) Serial.println("[ConfigSave] File incomplete, doing full save");
+#if JL_BOOT_VERBOSE
         Serial.println("Config file incomplete, doing full save to add new options");
+#endif
         free(fileContent);
         free(newContent);
         if (saveConfigToFile(filename)) {
@@ -2573,6 +2580,7 @@ bool checkAndHandleFirmwareUpdate(void) {
         
     } else if (wasUpdated) {
         // if (debugFP) {
+#if JL_BOOT_VERBOSE
         changeTerminalColor( 164, true );
         Serial.println("\n\r╔═══════════════════════════════════════╗");
         Serial.println("║  Firmware Update Detected             ║");
@@ -2584,6 +2592,7 @@ bool checkAndHandleFirmwareUpdate(void) {
         Serial.println();
         Serial.flush();
         changeTerminalColor( -1, true );
+#endif
         // Provision new files (will skip existing ones)
         provisionFirmwareFiles(false);
         

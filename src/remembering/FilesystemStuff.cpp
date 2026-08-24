@@ -13,6 +13,7 @@
 #include "USBfs.h"      // usbMountedByHost - refuse firmware writes while a host has the disk mounted
 #include "FileCache.h"  // fileCacheInvalidate + cache-aware wrappers
 #include "config.h"
+#include "JumperlessDefines.h"  // JL_BOOT_VERBOSE
 #include "externVars.h" // For fs_mutex filesystem synchronization
 #include "AsyncPassthrough.h" // For suspendUARTRxIRQ/resumeUARTRxIRQ during flash ops
 #include "micropythonExamples.h"
@@ -185,10 +186,12 @@ void addFilesystemMessage( const String& message, int color = 248 ) {
         fsMessages[ MAX_FS_MESSAGES - 1 ].color = color;
         fsMessages[ MAX_FS_MESSAGES - 1 ].timestamp = millis( );
     }
+#if JL_BOOT_VERBOSE
     changeTerminalColor( color, false );
     Serial.println( message );
     Serial.flush();
     changeTerminalColor( -1, false );
+#endif
     // displayFilesystemMessages();
     
     lastMessageDisplayTime = millis( );
