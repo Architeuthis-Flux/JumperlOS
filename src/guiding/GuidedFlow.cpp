@@ -1062,7 +1062,7 @@ static GuideKey guideReadInput(int& tapRow) {
     }
 
     // Probe tap (deduped): the same path `t <row>` feeds.
-    int probeRow = justReadProbe();
+    int probeRow = probing.justReadProbe();
     if (probeRow >= 1 && probeRow <= 60) {
         tapRow = probeRow;
         return GuideKey::TAP;

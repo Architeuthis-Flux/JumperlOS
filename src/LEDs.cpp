@@ -1043,7 +1043,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
         // Get current button state (LOW is pressed)
         bool buttonIsPressed = (digitalRead(BUTTON_ENC) == LOW);
 
-        int probeButtonIsPressed = (checkProbeButton());
+        int probeButtonIsPressed = (probing.checkProbeButton());
 
 
 
@@ -1089,7 +1089,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
             uint32_t timerColor = 0x203050;
 
             buttonIsPressed = (digitalRead(BUTTON_ENC) == LOW);
-            probeButtonIsPressed = (checkProbeButton());
+            probeButtonIsPressed = (probing.checkProbeButton());
             logoColorOverride = scaleBrightness(color, 100);
 
 
@@ -1157,7 +1157,7 @@ uint32_t colorPicker(uint8_t startHue, uint8_t brightness) {
 
 
 
-        int probeReading = justReadProbe(true);
+        int probeReading = probing.justReadProbe(true);
 
         // if (probeReading != -1){
         //   // Serial.print("probeReading: ");

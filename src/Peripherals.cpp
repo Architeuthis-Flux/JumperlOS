@@ -2498,7 +2498,7 @@ void Peripherals::showMeasurements( int samples, int printOrBB, int oneShot ) {
     int printInterval = 150;
     static unsigned long lastPrintTime = 0;
     // while (Serial.available() == 0 && Serial1.available() == 0 &&
-    //        checkProbeButton() == 0)
+    //        probing.checkProbeButton() == 0)
 
     //   {
 
@@ -2669,7 +2669,7 @@ void Peripherals::showMeasurements( int samples, int printOrBB, int oneShot ) {
     //   return;
     //   }
     // while (millis() - startMillis < printInterval &&
-    //        (Serial.available() == 0 && checkProbeButton() == 0)) {
+    //        (Serial.available() == 0 && probing.checkProbeButton() == 0)) {
 
     //   showLEDmeasurements();
     //   delayMicroseconds(5000);
@@ -3441,7 +3441,7 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
         rotaryEncoderStuff();
         jOS.serviceInner();
         // Read probe pads for direct voltage selection
-        int probeReading = justReadProbe(true);
+        int probeReading = probing.justReadProbe(true);
         
         // Check if probe is touching the voltage selection area (rows 31-60)
         if (probeReading >= 31 && probeReading <= 60) {

@@ -258,7 +258,7 @@ static void probeDacActivate(int dacNum) {
 // DAC0: preferred - 2 crosspoints, same chip K as BUFFER_IN, and the ONLY
 // feed the switch-position sensing can see: INA219 @0x41's 2-ohm shunt
 // (R57) is hardwired in DAC_0's output path, so the probe LED's supply
-// current registers on checkProbeCurrent() only when DAC0 sources the
+// current registers on probing.checkProbeCurrent() only when DAC0 sources the
 // buffer. (A DAC1 feed routes identically but is invisible to INA1 -
 // hardware-observed as the switch never changing position.)
 static int rpDac0(InfraPair out[2]) { out[0] = {ROUTABLE_BUFFER_IN, DAC0}; return 1; }

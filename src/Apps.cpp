@@ -331,7 +331,7 @@ static SwitchCalibStep switchCalibReadPosition( int wantPos, int ledMode, int ro
 
     setProbeLEDModeAndSettle( ledMode ); // latched by core1 like at runtime
     r.detA = probeSwitchTipSenseNow( );
-    (void)checkProbeCurrent( );          // throwaway read: flush the conversion that
+    (void)probing.checkProbeCurrent( );          // throwaway read: flush the conversion that
                                          // straddled the LED/switch change
 
     Serial.printf( "Taking %s readings (DAC0 feed, INA1)...\n\r", wantPos ? "SELECT" : "MEASURE" );
@@ -340,7 +340,7 @@ static SwitchCalibStep switchCalibReadPosition( int wantPos, int ledMode, int ro
     int row = rowStart;
     for ( int i = 0; i < NUM_READINGS; i++ ) {
         delay( 200 );
-        float current = checkProbeCurrent( );
+        float current = probing.checkProbeCurrent( );
         readings[ i ] = current;
         Serial.printf( "Reading %d: %.3f mA\n\r", i + 1, current );
         if ( i % 6 == 0 ) row++;
@@ -419,9 +419,9 @@ void calibrateProbeSwitchThresholds( void ) {
     // for the instant before enterTemporarySlot ran.)
     SlotManager::getInstance( ).enterTemporarySlot( 8 );  // Save current slot, switch to temp slot 8
     refreshConnections( -1, 0 );
-    // routableBufferPower( 1, 1, 1 );
+    // probing.routableBufferPower( 1, 1, 1 );
     //delay( 50 );
-    checkProbeCurrentZero( );
+    probing.checkProbeCurrentZero( );
 
     // The current thresholds ARE signatures through INA1 (its shunt R57 is
     // hardwired in DAC_0's output path), so the INA readings are taken with
@@ -431,14 +431,14 @@ void calibrateProbeSwitchThresholds( void ) {
     // would sit there until reboot.
     infraForceCandidate( "probe_power", 0 );
 
-    routableBufferPower( 1, 1, 1 );
+    probing.routableBufferPower( 1, 1, 1 );
 
     // NOTE: thresholds are calibrated against the zero-corrected current
-    // (checkProbeCurrent(), i.e. raw - probe_current_zero) - the SAME quantity
+    // (probing.checkProbeCurrent(), i.e. raw - probe_current_zero) - the SAME quantity
     // the live detector (checkSwitchPosition) compares. Using the calibrated
     // reading everywhere means a firmware update never invalidates a user's
     // saved thresholds, so they don't have to re-calibrate. (The zero offset
-    // is measured at boot in checkProbeCurrentZero(); as long as calibration is
+    // is measured at boot in probing.checkProbeCurrentZero(); as long as calibration is
     // run after boot, both sides share the same probe_current_zero.)
 
     SwitchCalibStep meas = { -1, 0.0f, 0.0f, -1, false };
@@ -702,7 +702,7 @@ void probeCalibApp( void ) {
     cycleTerminalColor( );
 
     refreshConnections( -1, 0 );
-    routableBufferPower( 1, 1, 1 );
+    probing.routableBufferPower( 1, 1, 1 );
 
     // if (jumperlessConfig.top_oled.connection_type == 2 && oled.isConnected() == false) {
         oled.connect();
@@ -813,7 +813,7 @@ void probeCalibApp( void ) {
     bool firstRead = true;
     Probing::getInstance( ).smoothProbeReading( -1, true );
     // while (probeRead == -1) {
-    //     probeRead = readProbeRaw( 0, true );
+    //     probeRead = probing.readProbeRaw( 0, true );
 
     // }
 
@@ -821,7 +821,7 @@ void probeCalibApp( void ) {
         if ( oledCalibHotplugPoll( ) ) {
             oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rmeasure: hold one pad to converge feeds\n\rhold click = save", true, true );
         }
-        probeRead = readProbeRaw( 0, true );
+        probeRead = probing.readProbeRaw( 0, true );
 
         if ( probeRead != -1 ) {
             lastValidProbeRead = Probing::getInstance( ).smoothProbeReading( probeRead );
@@ -889,7 +889,7 @@ void probeCalibApp( void ) {
         }
         if ( measureOrSelect == 1 && millis( ) >= switchCurrentNextMs ) {
             switchCurrentNextMs = millis( ) + 100; // bound the I2C traffic
-            switchCurrent_mA = checkProbeCurrent( );
+            switchCurrent_mA = probing.checkProbeCurrent( );
         }
 
         // ---- feed convergence -------------------------------------------
@@ -924,7 +924,7 @@ void probeCalibApp( void ) {
                 int samples[ 3 ];
                 int got = 0;
                 for ( int i = 0; i < 3; i++ ) {
-                    int r = readProbeRaw( 0, true );
+                    int r = probing.readProbeRaw( 0, true );
                     if ( r != -1 ) samples[ got++ ] = r;
                     delay( 2 );
                 }
@@ -1415,7 +1415,7 @@ void customApp( void ) {
     Serial.print( probeVoltage, 4 );
     Serial.println( " V\n\r" );
 
-    float probeCurrent = checkProbeCurrent( );
+    float probeCurrent = probing.checkProbeCurrent( );
     Serial.print( "Probe current: " );
     Serial.print( probeCurrent, 2 );
     Serial.println( " mA\n\r" );
@@ -1452,7 +1452,7 @@ void customApp( void ) {
         return;
     }
 
-    int switchPosition = checkSwitchPosition( );
+    int switchPosition = probing.checkSwitchPosition( );
     Serial.print( "Switch position: " );
     Serial.println( switchPosition == 0 ? "Measure" : "Select" );
 
@@ -1467,12 +1467,12 @@ void customApp( void ) {
 
     Serial.println( "Click the probe button to exit\n\n\n\r" );
     // Use state-based button check in loop (doesn't consume events)
-    while ( checkProbeButtonState( ) == 0 ) {
+    while ( probing.checkProbeButtonState( ) == 0 ) {
         if ( digitalRead( BUTTON_ENC ) == 0 || Serial.available( ) > 0 ) {
             leaveApp( );
             return;
         }
-        probeRow = justReadProbe( );
+        probeRow = probing.justReadProbe( );
         if ( probeRow != -1 ) {
             Serial.print( "\r                 \rProbed row: " );
             printNodeOrName( probeRow );
@@ -1873,7 +1873,7 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
         requestLedShow( -3 );
         b.clear( );
         b.print( "No I2C  Found", (uint32_t)0x070003 );
-        delayWithButton( 2000 );
+        probing.delayWithButton( 2000 );
         b.clear( );
         requestLedShow( -1 );
     } else {
@@ -1888,7 +1888,7 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
             b.print( addressToHexString( addressesFound[ 0 ] ), (uint32_t)0x000a05, (uint32_t)0x000000, 1, 1 );
             b.print( addressToHexString( addressesFound[ 1 ] ), (uint32_t)0x000808, (uint32_t)0x000000, 1, 1 );
         }
-        delayWithButton( 2000 );
+        probing.delayWithButton( 2000 );
         requestLedShow( -1 );
     }
 
@@ -2470,7 +2470,7 @@ void calibrateDacs( ) {
         Serial.print( "\t" );
         Serial.println( adcSpread[ 7 ] );
         delay( 10 );
-        // checkProbeCurrentZero( );
+        // probing.checkProbeCurrentZero( );
         saveDacCalibration( );
     }
     setRailsAndDACs( );
@@ -2736,7 +2736,7 @@ if ( yesNo == 1 ) {
     infraSetProbePowerEnabled( wasProbePowerOn );
     refreshConnections( -1 );
     if ( wasProbePowerOn ) {
-        routableBufferPower( 1, 0, 1 ); // forced nudge; unconditional 1 here used to discard the restore above
+        probing.routableBufferPower( 1, 0, 1 ); // forced nudge; unconditional 1 here used to discard the restore above
     }
     // showProbeLEDs = 1;
     refreshConnections( -1 );
