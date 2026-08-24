@@ -122,6 +122,34 @@ jobs:
           echo "og_version=$OG_VERSION" >> "$GITHUB_OUTPUT"
           echo "Staged OG firmware dist/firmware_og_backport.${OG_VERSION}.uf2"
 
+      - name: Checkout dev branch (the nerd build)
+        # The dev branch ships on every release as firmware-dev.uf2 - the
+        # latest (possibly broken) features, for people who flash it manually.
+        # Its VERSION file is used as-is: no bump, no tag, and the binary
+        # self-reports whatever dev's VERSION says. Best-effort throughout:
+        # a missing or broken dev branch must never block a stable release.
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: projects-guided-placement
+          path: devtree
+          submodules: recursive
+
+      - name: Build dev firmware
+        continue-on-error: true
+        run: pio run -d devtree -e jumperless_v5
+
+      - name: Stage dev firmware asset
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ ! -f devtree/.pio/build/jumperless_v5/firmware.uf2 ]; then
+            echo "::warning::dev build produced no firmware.uf2 - release ships without firmware-dev.uf2"
+            exit 1
+          fi
+          cp devtree/.pio/build/jumperless_v5/firmware.uf2 dist/firmware-dev.uf2
+          echo "Staged dev firmware dist/firmware-dev.uf2"
+
       - name: Commit version bump back to main
         if: steps.version.outputs.bumped == 'true'
         env:
@@ -149,6 +177,21 @@ jobs:
             --target "$SHA" \
             --title "$VERSION" \
             --generate-notes
+
+      - name: Attach dev firmware to the release (best effort)
+        # Separate from the create so a missing dev build (see the nerd-build
+        # steps above) costs an asset, never the release. The dev-firmware
+        # workflow re-clobbers this asset on every dev push, so it tracks the
+        # dev branch between releases.
+        if: ${{ hashFiles('dist/firmware-dev.uf2') != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release upload "$VERSION" \
+            "dist/firmware-dev.uf2#Jumperless V5 DEV firmware (unversioned, latest dev branch - flash manually, may be broken)" \
+            --clobber
 
       - name: Mirror firmware onto the JumperlessV5 latest release
         # Skip gracefully when the cross-repo PAT secret isn't configured.
