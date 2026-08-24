@@ -346,8 +346,6 @@ private:
     unsigned long loopCounter;
 
     // Core 1 singleton instance
-    static jOSmanager* core1Instance;
-
     // Sort services by priority (simple bubble sort - small array)
     void sortServicesByPriority();
 
@@ -401,7 +399,6 @@ public:
 private:
     TermSerialService();
     ~TermSerialService() = default;
-    static TermSerialService* instance;
     JerialClass* jerialInstance;
 };
 
@@ -427,7 +424,6 @@ public:
 private:
     RelayedCommandService() = default;
     ~RelayedCommandService() = default;
-    static RelayedCommandService* instance;
 };
 
 /**
@@ -451,7 +447,6 @@ public:
 private:
     AsyncPassthroughService() = default;
     ~AsyncPassthroughService() = default;
-    static AsyncPassthroughService* instance;
 };
 
 /**
@@ -473,7 +468,6 @@ public:
 private:
     TinyUSBService() = default;
     ~TinyUSBService() = default;
-    static TinyUSBService* instance;
 };
 
 /**
@@ -499,7 +493,6 @@ public:
 private:
     PortHousekeepingService() = default;
     ~PortHousekeepingService() = default;
-    static PortHousekeepingService* instance;
 };
 
 /**
@@ -528,7 +521,6 @@ public:
 private:
     LedDumpService() = default;
     ~LedDumpService() = default;
-    static LedDumpService* instance;
 };
 
 /**
@@ -549,7 +541,6 @@ public:
 private:
     USBPeriodicService() = default;
     ~USBPeriodicService() = default;
-    static USBPeriodicService* instance;
 };
 
 /**
@@ -575,7 +566,6 @@ public:
 private:
     OLEDService() : oledDisplay(nullptr) {}
     ~OLEDService() = default;
-    static OLEDService* instance;
     class oled* oledDisplay;
 };
 
@@ -603,7 +593,6 @@ public:
 private:
     OledGuiService() = default;
     ~OledGuiService() = default;
-    static OledGuiService* instance;
 };
 
 /**
@@ -634,8 +623,6 @@ public:
 private:
     LiveCrossbarService() : updatePending(false), extraUpdateNeeded(false), lastUpdateTime(0) {}
     ~LiveCrossbarService() = default;
-    static LiveCrossbarService* instance;
-    
     bool updatePending;
     bool extraUpdateNeeded;  // Allow one extra update after changes stop (to catch late colors)
     unsigned long lastUpdateTime;
@@ -828,9 +815,6 @@ public:
 private:
     ContextManager();
     ~ContextManager() = default;
-    
-    static ContextManager* instance;
-    
     // Context stack
     static const int MAX_STACK_DEPTH = 8;
     ContextEntry stack[MAX_STACK_DEPTH];

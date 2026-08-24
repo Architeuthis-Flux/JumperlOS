@@ -32,8 +32,6 @@
 extern bool debugWaitLoopTiming;
 
 // Static member initialization
-jOSmanager* jOSmanager::core1Instance = nullptr;
-
 // Global references for clean syntax (initialized after singletons)
 Probing& probing = Probing::getInstance();
 Highlighting& highlighting = Highlighting::getInstance();
@@ -79,10 +77,8 @@ jOSmanager::~jOSmanager() {
  * @brief Get the Core 1 singleton instance
  */
 jOSmanager& jOSmanager::getInstance() {
-    if (core1Instance == nullptr) {
-        core1Instance = new jOSmanager(1);
-    }
-    return *core1Instance;
+    static jOSmanager inst( 1 );
+    return inst;
 }
 
 /**
@@ -484,8 +480,6 @@ void jOSmanager::sortServicesByPriority() {
 // ============================================================================
 
 // TermSerialService - Terminal input handling
-TermSerialService* TermSerialService::instance = nullptr;
-
 TermSerialService::TermSerialService() : jerialInstance(nullptr) {}
 
 void TermSerialService::setTermControl(JerialClass* jerial) {
@@ -493,10 +487,8 @@ void TermSerialService::setTermControl(JerialClass* jerial) {
 }
 
 TermSerialService& TermSerialService::getInstance() {
-    if (instance == nullptr) {
-        instance = new TermSerialService();
-    }
-    return *instance;
+    static TermSerialService inst;
+    return inst;
 }
 
 /**
@@ -540,13 +532,9 @@ ServiceStatus TermSerialService::service() {
 }
 
 // RelayedCommandService - Immediate command execution from relay buffer
-RelayedCommandService* RelayedCommandService::instance = nullptr;
-
 RelayedCommandService& RelayedCommandService::getInstance() {
-    if (instance == nullptr) {
-        instance = new RelayedCommandService();
-    }
-    return *instance;
+    static RelayedCommandService inst;
+    return inst;
 }
 
 /**
@@ -599,13 +587,9 @@ ServiceStatus RelayedCommandService::service() {
 }
 
 // AsyncPassthroughService - USB CDC1 <-> UART0 bridging
-AsyncPassthroughService* AsyncPassthroughService::instance = nullptr;
-
 AsyncPassthroughService& AsyncPassthroughService::getInstance() {
-    if (instance == nullptr) {
-        instance = new AsyncPassthroughService();
-    }
-    return *instance;
+    static AsyncPassthroughService inst;
+    return inst;
 }
 
 
@@ -637,13 +621,9 @@ ServiceStatus AsyncPassthroughService::service() {
 }
 
 // TinyUSBService - USB communication
-TinyUSBService* TinyUSBService::instance = nullptr;
-
 TinyUSBService& TinyUSBService::getInstance() {
-    if (instance == nullptr) {
-        instance = new TinyUSBService();
-    }
-    return *instance;
+    static TinyUSBService inst;
+    return inst;
 }
 
 /**
@@ -666,13 +646,9 @@ ServiceStatus TinyUSBService::service() {
 }
 
 // PortHousekeepingService - the former 10 ms block in loop()
-PortHousekeepingService* PortHousekeepingService::instance = nullptr;
-
 PortHousekeepingService& PortHousekeepingService::getInstance() {
-    if (instance == nullptr) {
-        instance = new PortHousekeepingService();
-    }
-    return *instance;
+    static PortHousekeepingService inst;
+    return inst;
 }
 
 /**
@@ -695,13 +671,9 @@ ServiceStatus PortHousekeepingService::service() {
 }
 
 // LedDumpService - the terminal LED picture, drawn from core 0 (T1.10)
-LedDumpService* LedDumpService::instance = nullptr;
-
 LedDumpService& LedDumpService::getInstance() {
-    if (instance == nullptr) {
-        instance = new LedDumpService();
-    }
-    return *instance;
+    static LedDumpService inst;
+    return inst;
 }
 
 /**
@@ -733,13 +705,9 @@ ServiceStatus LedDumpService::service() {
 }
 
 // USBPeriodicService - USB mass storage housekeeping
-USBPeriodicService* USBPeriodicService::instance = nullptr;
-
 USBPeriodicService& USBPeriodicService::getInstance() {
-    if (instance == nullptr) {
-        instance = new USBPeriodicService();
-    }
-    return *instance;
+    static USBPeriodicService inst;
+    return inst;
 }
 
 /**
@@ -761,13 +729,9 @@ ServiceStatus USBPeriodicService::service() {
 }
 
 // OLEDService - OLED display updates
-OLEDService* OLEDService::instance = nullptr;
-
 OLEDService& OLEDService::getInstance() {
-    if (instance == nullptr) {
-        instance = new OLEDService();
-    }
-    return *instance;
+    static OLEDService inst;
+    return inst;
 }
 
 /**
@@ -794,13 +758,9 @@ ServiceStatus OLEDService::service() {
 }
 
 // OledGuiService - retained-screen rendering + live binding refresh
-OledGuiService* OledGuiService::instance = nullptr;
-
 OledGuiService& OledGuiService::getInstance() {
-    if (instance == nullptr) {
-        instance = new OledGuiService();
-    }
-    return *instance;
+    static OledGuiService inst;
+    return inst;
 }
 
 /**
@@ -818,16 +778,12 @@ ServiceStatus OledGuiService::service() {
 }
 
 // LiveCrossbarService - Live crossbar terminal display
-LiveCrossbarService* LiveCrossbarService::instance = nullptr;
-
 // Access probeActive to use faster refresh during probe mode
 extern volatile int probeActive;
 
 LiveCrossbarService& LiveCrossbarService::getInstance() {
-    if (instance == nullptr) {
-        instance = new LiveCrossbarService();
-    }
-    return *instance;
+    static LiveCrossbarService inst;
+    return inst;
 }
 
 /**
@@ -908,8 +864,6 @@ ServiceStatus LiveCrossbarService::service() {
 #include "FileParsing.h"  // For closeAllFiles()
 
 // Static instance pointer
-ContextManager* ContextManager::instance = nullptr;
-
 // Global reference for convenient access
 ContextManager& contextManager = ContextManager::getInstance();
 
@@ -954,10 +908,8 @@ ContextManager::ContextManager()
  * @brief Get the singleton instance
  */
 ContextManager& ContextManager::getInstance() {
-    if (instance == nullptr) {
-        instance = new ContextManager();
-    }
-    return *instance;
+    static ContextManager inst;
+    return inst;
 }
 
 /**

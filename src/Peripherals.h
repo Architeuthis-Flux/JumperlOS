@@ -46,8 +46,6 @@ public:
 private:
     Peripherals();
     ~Peripherals() = default;
-    
-    static Peripherals* instance;
 };
 
 // Backward compatibility

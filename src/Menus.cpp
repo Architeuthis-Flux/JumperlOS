@@ -40,13 +40,9 @@ extern Adafruit_SSD1306 display;
 // ============================================================================
 
 // Static member initialization
-Menus* Menus::instance = nullptr;
-
-Menus& Menus::getInstance( ) {
-    if ( instance == nullptr ) {
-        instance = new Menus( );
-    }
-    return *instance;
+Menus& Menus::getInstance() {
+    static Menus inst;
+    return inst;
 }
 
 Menus::Menus( ) {

@@ -149,8 +149,6 @@ public:
 private:
     MpRemoteService();
     ~MpRemoteService() = default;
-    static MpRemoteService* instance;
-    
     // State machine for raw REPL
     enum class ReplState {
         IDLE,           // Friendly REPL mode - accepting line-based input

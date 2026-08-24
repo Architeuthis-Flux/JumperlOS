@@ -53,8 +53,6 @@ public:
 private:
     Menus();
     ~Menus() = default;
-    
-    static Menus* instance;
 };
 
 // Backward compatibility

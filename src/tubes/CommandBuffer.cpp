@@ -9,13 +9,9 @@
 #include <cstring>
 
 // Singleton instance
-static CommandBuffer* s_instance = nullptr;
-
 CommandBuffer& CommandBuffer::getInstance() {
-    if (s_instance == nullptr) {
-        s_instance = new CommandBuffer();
-    }
-    return *s_instance;
+    static CommandBuffer inst;
+    return inst;
 }
 
 // Global accessor for convenience

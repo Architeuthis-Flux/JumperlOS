@@ -71,7 +71,6 @@ public:
 private:
     ConfigSaveService() = default;
     ~ConfigSaveService() = default;
-    static ConfigSaveService* instance;
 };
 
 // Global service reference (defined in JumperlOS.cpp)
