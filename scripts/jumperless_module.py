@@ -577,7 +577,8 @@ CLICKWHEEL_IDLE = _native.CLICKWHEEL_IDLE
 CLICKWHEEL_PRESSED = _native.CLICKWHEEL_PRESSED
 CLICKWHEEL_HELD = _native.CLICKWHEEL_HELD
 CLICKWHEEL_RELEASED = _native.CLICKWHEEL_RELEASED
-CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED
+CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED  # reserved (4); NEVER returned
+# since 2026-08-22 - the encoder has no double-click gesture. Kept for API compatibility.
 
 # ============================================================================
 # Clickwheel Functions
@@ -599,7 +600,8 @@ CLICKWHEEL_IDLE = _native.CLICKWHEEL_IDLE
 CLICKWHEEL_PRESSED = _native.CLICKWHEEL_PRESSED
 CLICKWHEEL_HELD = _native.CLICKWHEEL_HELD
 CLICKWHEEL_RELEASED = _native.CLICKWHEEL_RELEASED
-CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED
+CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED  # reserved (4); NEVER returned
+# since 2026-08-22 - the encoder has no double-click gesture. Kept for API compatibility.
 
 # ============================================================================
 # Filesystem Functions

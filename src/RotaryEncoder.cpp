@@ -341,8 +341,15 @@ void printRotaryEncoderStatus( void ) {
 unsigned long buttonHoldStart = 0;
 unsigned long buttonHoldLength = 500;
 
-unsigned long doubleClickTimer = 0;
-unsigned long doubleClickLength = 250;
+// (doubleClickTimer / doubleClickLength removed 2026-08-22 — Kevin's standing
+// rule: "double click on the rotary encoder should not be a thing." The wheel's
+// whole vocabulary is turn / click / hold; two fast presses are simply TWO
+// CLICKS. Nothing debounces here in software because nothing needs to: the
+// ENC_PUSH net is hardware-debounced (r7 netlist: SW3 -> R8 51.1K pullup ->
+// R22 1K series -> C27 100nF to GND at the pin; ~100us fall, ~5ms rise, so
+// contact chatter never reaches GPIO11 as a second edge). ENC_A/ENC_B have no
+// such RC — the push is the only pin that got one, which is the tell that it
+// was put there on purpose. See RotaryEncoder.h's state-machine block.
 
 unsigned long buttonDebounceTimer = 0;
 unsigned long buttonDebounceTimer2 = 0;
@@ -394,7 +401,7 @@ volatile bool encoderDirectionConsumed = true;
 static unsigned long buttonEventTimestamp = 0;
 const unsigned long BUTTON_EVENT_MIN_DURATION_US = 10000; // 10ms minimum hold time - ensures Core 1 catches events even when busy
 
-// Diag (task #27, the missed-click question): how many RELEASED/DOUBLECLICKED
+// Diag (task #27, the missed-click question): how many RELEASED
 // events expired UNCONSUMED (auto-clear fired) vs how many the consuming code
 // acknowledged. If clicks are being missed, autoClears advancing while the
 // user clicks is the tell that core 0 isn't polling inside the 10ms window.
@@ -502,7 +509,7 @@ static void rotaryEncoderButtonStuffLocked( void ) {
     // This preserves the PRESSED->RELEASED transition that Core 1 checks for
     // Only update when state actually changes or when not in a held event state
     bool isHoldingEventForCore1 = false;
-    if ( encoderButtonState == RELEASED || encoderButtonState == DOUBLECLICKED ) {
+    if ( encoderButtonState == RELEASED ) {
         // Check if we're still within the minimum hold time
         if ( micros( ) - buttonEventTimestamp < BUTTON_EVENT_MIN_DURATION_US ) {
             isHoldingEventForCore1 = true;
@@ -530,7 +537,7 @@ static void rotaryEncoderButtonStuffLocked( void ) {
     }
 
     // State machine logic - only transitions on actual changes
-    // RELEASED and DOUBLECLICKED states persist until explicitly cleared by consuming code
+    // RELEASED persists until explicitly cleared by consuming code
     // This prevents missing button events in polling loops
 
     // Multi-core protection: Ensure event states persist long enough for Core 1 to detect
@@ -538,9 +545,9 @@ static void rotaryEncoderButtonStuffLocked( void ) {
 
     // Only transition to IDLE if we're not in a persistent event state
     if ( encoderIsPressed == 0 && encoderWasPressed == 0 ) {
-        // Don't auto-clear RELEASED or DOUBLECLICKED states immediately
+        // Don't auto-clear RELEASED immediately
         // Wait for minimum duration OR explicit clear by consuming code
-        if ( encoderButtonState == RELEASED || encoderButtonState == DOUBLECLICKED ) {
+        if ( encoderButtonState == RELEASED ) {
             // Check if enough time has passed since the event was set
             if ( micros( ) - buttonEventTimestamp >= BUTTON_EVENT_MIN_DURATION_US ) {
                 // Time expired - now safe to auto-clear if still not consumed
@@ -548,7 +555,7 @@ static void rotaryEncoderButtonStuffLocked( void ) {
                 lastButtonEncoderState = encoderButtonState; // Update before clearing
                 encoderButtonState = IDLE;
             }
-        } else if ( encoderButtonState != RELEASED && encoderButtonState != DOUBLECLICKED ) {
+        } else {
             // For PRESSED or HELD states, clear immediately when button released
             encoderButtonState = IDLE;
         }
@@ -562,7 +569,6 @@ static void rotaryEncoderButtonStuffLocked( void ) {
         encoderButtonState = RELEASED;
         buttonEventTimestamp = micros( ); // Mark event time for minimum hold duration
         encoderReleased = 1;
-        doubleClickTimer = millis( );
         buttonDebounceTimer2 = micros( );
 
         requestLedShow( 1 );
@@ -587,14 +593,14 @@ static void rotaryEncoderButtonStuffLocked( void ) {
         // suppress the click jiggle (see CLICK_SUPPRESS_AFTER_US / confirm-gate notes).
         lastEncoderClickUs = micros( );
 
-        if ( millis( ) - doubleClickTimer < doubleClickLength ) {
-            encoderButtonState = DOUBLECLICKED;
-            buttonEventTimestamp = micros( ); // Mark event time for minimum hold duration
-
-        } else {
-            encoderButtonState = PRESSED;
-        }
-        doubleClickTimer = millis( );
+        // EVERY press edge is a plain PRESSED — there is no second-press special
+        // case any more (Kevin, 2026-08-22: "double click on the rotary encoder
+        // should not be a thing"). This used to branch to DOUBLECLICKED inside a
+        // 250 ms window, which the dominant consumer idiom
+        // (RELEASED && lastButtonEncoderState == PRESSED) could not match, so the
+        // second of two fast clicks was silently SWALLOWED everywhere. Now both
+        // presses run identical PRESSED -> RELEASED cycles and both are consumed.
+        encoderButtonState = PRESSED;
         // buttonHoldStart = millis();
 
         encoderWasPressed = encoderIsPressed;
@@ -725,7 +731,7 @@ void holdAnimationStuff( void ) {
         } else if ( encoderButtonState == LONG_HELD ) {
             triggerFlash = 3;
         } else {
-            triggerFlash = -1; // IDLE, RELEASED, DOUBLECLICKED — no flash
+            triggerFlash = -1; // IDLE, RELEASED — no flash
         }
         if ( triggerFlash >= 0 ) {
             flashStartTime = millis( );
@@ -804,12 +810,12 @@ void holdAnimationStuff( void ) {
         }
     }
 
-    // Cancel press animation on double-click
-    if ( pressAnimActive && encoderButtonState == DOUBLECLICKED ) {
-        pressAnimActive = false;
-        buttonPressAnimActive = false;
-        requestLedShow( 2 );
-    }
+    // (The "cancel press animation on double-click" branch that stood here is
+    // gone with DOUBLECLICKED itself. It was already redundant with the generic
+    // release cleanup below — DOUBLECLICKED was never in that branch's keep-alive
+    // list, so the animation was cleared there anyway. Two fast clicks now each
+    // start their own white flash, because release 1 clears pressAnimActive
+    // before press 2 re-arms it.)
 
     // ── Start animation on entering HELD ──
     if ( ( encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ) && !holdAnimActive ) {
@@ -929,7 +935,7 @@ void holdAnimationStuff( void ) {
         pressAnimActive = false;
     }
 
-    // Clean up press animation on actual release (RELEASED, IDLE, DOUBLECLICKED).
+    // Clean up press animation on actual release (RELEASED, IDLE).
     // Don't clear during HELD/LONG_HELD — the logo rainbow stays visible there.
     if ( pressAnimActive && encoderButtonState != PRESSED && encoderButtonState != HELD && encoderButtonState != MEDIUM_HELD && encoderButtonState != LONG_HELD ) {
         buttonPressAnimActive = false;
@@ -1347,7 +1353,9 @@ static void rotaryEncoderStuffLocked( void ) {
                 break;
 
             case DOUBLECLICKED:
-                Serial.println( "DOUBLECLICKED" );
+                // NEVER EMITTED (2026-08-22 rule). Kept only so the switch stays
+                // exhaustive; if this ever prints, the state machine regressed.
+                Serial.println( "DOUBLECLICKED (never emitted — bug if seen)" );
                 /// delay(150);
                 break;
 

@@ -4399,7 +4399,8 @@ CLICKWHEEL_IDLE = _native.CLICKWHEEL_IDLE
 CLICKWHEEL_PRESSED = _native.CLICKWHEEL_PRESSED
 CLICKWHEEL_HELD = _native.CLICKWHEEL_HELD
 CLICKWHEEL_RELEASED = _native.CLICKWHEEL_RELEASED
-CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED
+CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED  # reserved (4); NEVER returned
+# since 2026-08-22 - the encoder has no double-click gesture. Kept for API compatibility.
 
 # ============================================================================
 # Clickwheel Functions
@@ -4421,7 +4422,8 @@ CLICKWHEEL_IDLE = _native.CLICKWHEEL_IDLE
 CLICKWHEEL_PRESSED = _native.CLICKWHEEL_PRESSED
 CLICKWHEEL_HELD = _native.CLICKWHEEL_HELD
 CLICKWHEEL_RELEASED = _native.CLICKWHEEL_RELEASED
-CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED
+CLICKWHEEL_DOUBLECLICKED = _native.CLICKWHEEL_DOUBLECLICKED  # reserved (4); NEVER returned
+# since 2026-08-22 - the encoder has no double-click gesture. Kept for API compatibility.
 
 # ============================================================================
 # Filesystem Functions
@@ -4890,8 +4892,8 @@ __all__ = [
 ]
 
 )";
-const uint32_t JUMPERLESS_MODULE_PY_HASHES[6] = { 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
-const int JUMPERLESS_MODULE_PY_HASH_COUNT = 6;
+const uint32_t JUMPERLESS_MODULE_PY_HASHES[7] = { 0x6683E1CA, 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
+const int JUMPERLESS_MODULE_PY_HASH_COUNT = 7;
 #endif
 
 //==============================================================================
@@ -6056,7 +6058,11 @@ def clickwheel_get_button() -> int:
     
     Returns:
         0 (CLICKWHEEL_IDLE), 1 (CLICKWHEEL_PRESSED), 2 (CLICKWHEEL_HELD),
-        3 (CLICKWHEEL_RELEASED), or 4 (CLICKWHEEL_DOUBLECLICKED)
+        or 3 (CLICKWHEEL_RELEASED)
+
+    Never returns 4 (CLICKWHEEL_DOUBLECLICKED): as of 2026-08-22 the encoder
+    has no double-click gesture at all. Two fast presses are two ordinary
+    PRESSED/RELEASED clicks. The constant remains defined for compatibility.
     """
     ...
 
@@ -6506,7 +6512,14 @@ CLICKWHEEL_RELEASED: int
 """Clickwheel button released (3)"""
 
 CLICKWHEEL_DOUBLECLICKED: int
-"""Clickwheel button double-clicked (4)"""
+"""RESERVED (4) - never returned.
+
+The rotary encoder has no double-click gesture (rule of 2026-08-22): its
+vocabulary is turn / click / hold, and two fast presses are simply two clicks.
+clickwheel_get_button() can no longer return this value. The name stays defined
+so existing scripts still import, and so the numbering of the other states is
+unchanged.
+"""
 
 # ============================================================================
 # Probe Pad Constants
@@ -6670,8 +6683,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[7] = { 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 7;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[8] = { 0xE25DA938, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 8;
 #endif
 
 //==============================================================================

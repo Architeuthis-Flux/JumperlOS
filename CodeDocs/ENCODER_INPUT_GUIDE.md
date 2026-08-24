@@ -102,7 +102,10 @@ String label = getActionString(16);
 - Visual feedback showing current character on breadboard LEDs
 - Shows previously entered characters dimmed
 - Displays full string with cursor on OLED and serial
-- Backspace support via double-click or serial backspace
+- Backspace via the `<BS>` character in the set, or the serial backspace key.
+  (There is **no** wheel double-click for it — the encoder has no double-click
+  gesture at all. The commented-out `DOUBLECLICKED` branch that once did this
+  was removed on 2026-08-22 along with the state itself.)
 - Smooth wraparound at start/end of character set
 
 ### Character Set

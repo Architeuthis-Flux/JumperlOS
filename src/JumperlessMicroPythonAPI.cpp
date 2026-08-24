@@ -2351,7 +2351,12 @@ extern "C" int jl_clickwheel_get_direction( int consume ) {
 }
 
 extern "C" int jl_clickwheel_get_button( void ) {
-    // Returns: 0 = IDLE, 1 = PRESSED, 2 = HELD, 3 = RELEASED, 4 = DOUBLECLICKED
+    // Returns: 0 = IDLE, 1 = PRESSED, 2 = HELD, 3 = RELEASED,
+    //          5 = LONG_HELD, 6 = MEDIUM_HELD.
+    // 4 (DOUBLECLICKED) is RESERVED and NEVER returned — the encoder has no
+    // double-click gesture (rule of 2026-08-22, turn/click/hold only). The
+    // CLICKWHEEL_DOUBLECLICKED constant stays defined for API compatibility
+    // and to keep the other ordinals stable; see RotaryEncoder.h.
     return static_cast<int>( encoderButtonState );
 }
 

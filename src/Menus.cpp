@@ -3803,42 +3803,10 @@ String getActionString( int maxLength ) {
             return String( inputString );
         }
 
-        // // Check for backspace (double-click)
-        // if (encoderButtonState == DOUBLECLICKED) {
-        //     encoderButtonState = IDLE;
-        //     lastButtonEncoderState = IDLE;
-
-        //     if (cursorPos > 0) {
-        //         // Get the character we're deleting to maintain charIndex near it
-        //         char deletedChar = inputString[cursorPos - 1];
-
-        //         // Delete last character
-        //         cursorPos--;
-        //         inputString[cursorPos] = '\0';
-
-        //         // Try to find the deleted char in the character set to position there
-        //         for (int i = 0; i < charSetLength; i++) {
-        //             if (characterSet[i] == deletedChar) {
-        //                 charIndex = i;
-        //                 charIndexFloat = (float)i;
-        //                 break;
-        //             }
-        //         }
-
-        //         accelerator.reset(); // Reset acceleration
-        //         firstUpdate = true;
-
-        //         // Update display to show deletion with scrolling
-        //         snprintf(oledDisplay, sizeof(oledDisplay), "%s", inputString);
-        //         oled.clearPrintShow(oledDisplay, 2, true, true, true);
-        //         Serial.print("\r");
-        //         Serial.print(inputString);
-        //         Serial.print("                        \r");
-        //         displayStringOnBreadboard(inputString, cursorPos, 0, highlightColor, cursorColor);
-        //         requestLedShow( 2 );
-        //     }
-        //     continue;
-        // }
+        // (A commented-out DOUBLECLICKED backspace branch lived here. Removed
+        //  2026-08-22 with the encoder double-click itself — the wheel is
+        //  turn/click/hold only. Backspace in this editor is the serial
+        //  backspace key; there is no wheel gesture for it.)
         // rotaryEncoderStuff();
 
         // Check for character confirmation (short press)

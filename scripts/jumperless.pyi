@@ -1155,7 +1155,11 @@ def clickwheel_get_button() -> int:
     
     Returns:
         0 (CLICKWHEEL_IDLE), 1 (CLICKWHEEL_PRESSED), 2 (CLICKWHEEL_HELD),
-        3 (CLICKWHEEL_RELEASED), or 4 (CLICKWHEEL_DOUBLECLICKED)
+        or 3 (CLICKWHEEL_RELEASED)
+
+    Never returns 4 (CLICKWHEEL_DOUBLECLICKED): as of 2026-08-22 the encoder
+    has no double-click gesture at all. Two fast presses are two ordinary
+    PRESSED/RELEASED clicks. The constant remains defined for compatibility.
     """
     ...
 
@@ -1605,7 +1609,14 @@ CLICKWHEEL_RELEASED: int
 """Clickwheel button released (3)"""
 
 CLICKWHEEL_DOUBLECLICKED: int
-"""Clickwheel button double-clicked (4)"""
+"""RESERVED (4) - never returned.
+
+The rotary encoder has no double-click gesture (rule of 2026-08-22): its
+vocabulary is turn / click / hold, and two fast presses are simply two clicks.
+clickwheel_get_button() can no longer return this value. The name stays defined
+so existing scripts still import, and so the numbering of the other states is
+unchanged.
+"""
 
 # ============================================================================
 # Probe Pad Constants

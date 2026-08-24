@@ -4694,7 +4694,9 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "  consume=False: Direction persists until consumed (can read multiple times)\n\n" );
         mp_printf( &mp_plat_print, "  Direction returns: CLICKWHEEL_NONE (0), CLICKWHEEL_UP (1), CLICKWHEEL_DOWN (2)\n" );
         mp_printf( &mp_plat_print, "  Button returns: CLICKWHEEL_IDLE (0), CLICKWHEEL_PRESSED (1), CLICKWHEEL_HELD (2),\n" );
-        mp_printf( &mp_plat_print, "                  CLICKWHEEL_RELEASED (3), CLICKWHEEL_DOUBLECLICKED (4)\n\n" );
+        mp_printf( &mp_plat_print, "                  CLICKWHEEL_RELEASED (3)\n" );
+        mp_printf( &mp_plat_print, "  CLICKWHEEL_DOUBLECLICKED (4) is reserved and NEVER returned - the encoder\n" );
+        mp_printf( &mp_plat_print, "  has no double-click gesture. Two fast presses are two ordinary clicks.\n\n" );
     }
     jl_cycle_term_color( false, 100.0, 1 );
     if ( strcmp( section_upper, "STATUS" ) == 0 || strcmp( section_upper, "ALL" ) == 0 ) {
@@ -6273,6 +6275,9 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_CLICKWHEEL_PRESSED ), MP_ROM_INT( 1 ) },
     { MP_ROM_QSTR( MP_QSTR_CLICKWHEEL_HELD ), MP_ROM_INT( 2 ) },
     { MP_ROM_QSTR( MP_QSTR_CLICKWHEEL_RELEASED ), MP_ROM_INT( 3 ) },
+    // RESERVED, never returned by clickwheel_get_button(): the encoder has no
+    // double-click gesture (rule of 2026-08-22). Kept defined so scripts that
+    // import it still load, and so LONG_HELD/MEDIUM_HELD keep values 5/6.
     { MP_ROM_QSTR( MP_QSTR_CLICKWHEEL_DOUBLECLICKED ), MP_ROM_INT( 4 ) },
 
     // Probe pad constants
