@@ -1,0 +1,79 @@
+name: Dev firmware (nerd build)
+
+# Every push to the dev branch builds jumperless_v5 and replaces the
+# firmware-dev.uf2 asset on the LATEST JumperlOS release, so "the dev build"
+# on the release page always means the tip of the dev branch. No version
+# bump, no tag, no release of its own - the binary self-reports whatever
+# dev's VERSION file says, and people who want it flash it manually knowing
+# it may be broken. The release workflow seeds the same asset at release
+# time; this one just keeps it fresh in between.
+#
+# NOTE: push-triggered workflows run the workflow file from the pushed
+# branch, so this file must exist on the dev branch itself (it lives on
+# main too, for workflow_dispatch and so the two stay reviewable together).
+
+on:
+  push:
+    branches: [projects-guided-placement]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-firmware
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'Architeuthis-Flux/JumperlOS'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build dev firmware
+        run: pio run -e jumperless_v5
+
+      - name: Replace firmware-dev.uf2 on the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .pio/build/jumperless_v5/firmware.uf2 ]; then
+            echo "::error::build did not produce firmware.uf2"
+            exit 1
+          fi
+          mkdir -p dist
+          cp .pio/build/jumperless_v5/firmware.uf2 dist/firmware-dev.uf2
+
+          TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)"
+          if [ -z "$TAG" ]; then
+            echo "::warning::no release exists yet; nothing to attach firmware-dev.uf2 to."
+            exit 0
+          fi
+          gh release upload "$TAG" \
+            "dist/firmware-dev.uf2#Jumperless V5 DEV firmware (unversioned, latest dev branch - flash manually, may be broken)" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "firmware-dev.uf2 on release $TAG now matches $GITHUB_SHA"
