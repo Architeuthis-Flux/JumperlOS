@@ -1,0 +1,87 @@
+# source: generic two-terminal device conventions (no manufacturer-specific
+#   facts) - pin-function facts are common knowledge; facts are not
+#   copyrightable. Never import Fritzing/KiCad/AVR-tester tables
+#   (CC-BY-SA/GPL).
+#
+# Label-only discretes: typeStr drives the Part-ID tester, value: is the
+# default label. axial2 = pin 1 at baseRow (top half), pin 2 at baseRow+30
+# (same column across the ravine). Polarized parts put the positive/anode
+# leg on pin 1.
+
+class: DISCRETE
+
+- id: resistor
+  name: Resistor
+  desc: Fixed resistor, any value
+  subclass: resistor
+  package: axial2
+  led: RES
+  menu: RES
+  value: 10k
+  pins: [1, 2]
+
+- id: capacitor
+  name: Capacitor
+  desc: Ceramic/film capacitor, non-polar
+  subclass: capacitor
+  package: axial2
+  led: CAP
+  menu: CAP
+  value: 100nF
+  pins: [1, 2]
+
+- id: cap_polar
+  name: Polar Cap
+  desc: Electrolytic/tantalum capacitor, + on pin 1
+  subclass: capacitor
+  package: axial2
+  led: CAP+
+  menu: CAP+
+  value: 10uF
+  pins: [+, -]
+
+- id: led
+  name: LED
+  desc: LED, anode on pin 1
+  subclass: led
+  package: axial2
+  value: red
+  pins: [A, K]
+
+- id: inductor
+  name: Inductor
+  desc: Fixed inductor, any value
+  subclass: inductor
+  package: axial2
+  led: COIL
+  menu: COIL
+  value: 100uH
+  pins: [1, 2]
+
+- id: diode
+  name: Diode
+  desc: Rectifier/signal diode, anode on pin 1
+  subclass: diode
+  package: axial2
+  pop: 1
+  value: 1N4148
+  pins: [A, K]
+
+- id: zener
+  name: Zener
+  desc: Zener diode, anode on pin 1
+  subclass: diode
+  package: axial2
+  pop: 2
+  value: 5.1V
+  pins: [A, K]
+
+- id: potentiometer
+  name: Potentiometer
+  desc: Potentiometer, wiper on pin 2
+  subclass: pot
+  package: sip3
+  led: POT
+  menu: POT
+  value: 10k
+  pins: [A, WIPER, B]

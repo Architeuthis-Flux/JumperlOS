@@ -1,0 +1,206 @@
+# source: Texas Instruments CD4000B and Nexperia HEF4000B datasheets -
+#   pin-function facts transcribed by hand from datasheets; facts are not
+#   copyrightable. Never import Fritzing/KiCad/AVR-tester tables
+#   (CC-BY-SA/GPL).
+#
+# 4000-series CMOS logic, DIP-14/16. Supply names follow the CMOS convention
+# (VDD/VSS). 4049/4050 have their supply at pins 1/8 - the explicit power:
+# declaration silences the corner-power check for them.
+#
+# 4067 (16-ch mux) and 4514 (4-to-16 decoder) are DIP-24 parts deliberately
+# NOT seeded: their pin maps were not confidently known at authoring time.
+# Add them from the datasheet when someone actually wants them.
+
+class: LOGIC
+subclass: s4000
+
+- id: 4001
+  desc: Quad 2-input NOR gate
+  package: dip14
+  aliases: [CD4001, HEF4001]
+  pop: 7
+  pins: [1A, 1B, 1Y, 2Y, 2A, 2B, VSS, 3A, 3B, 3Y, 4Y, 4A, 4B, VDD]
+
+- id: 4011
+  desc: Quad 2-input NAND gate
+  package: dip14
+  aliases: [CD4011, HEF4011]
+  pop: 2
+  pins: [1A, 1B, 1Y, 2Y, 2A, 2B, VSS, 3A, 3B, 3Y, 4Y, 4A, 4B, VDD]
+
+- id: 4013
+  desc: Dual D flip-flop with set/reset
+  package: dip14
+  aliases: [CD4013, HEF4013]
+  pop: 4
+  pins: [1Q, 1Q~, 1CLK, 1RST, 1D, 1SET, VSS, 2SET, 2D, 2CLK, 2RST, 2Q~, 2Q, VDD]
+
+- id: 4017
+  desc: Decade counter with 10 decoded outputs
+  package: dip16
+  aliases: [CD4017, HEF4017]
+  pop: 1
+  pins: [Q5, Q1, Q0, Q2, Q6, Q7, Q3, VSS, Q8, Q4, Q9, CO, INH, CLK, RST, VDD]
+
+- id: 4020
+  desc: 14-stage binary ripple counter
+  package: dip16
+  aliases: [CD4020, HEF4020]
+  pins: [Q12, Q13, Q14, Q6, Q5, Q7, Q4, VSS, Q1, CLK, RST, Q9, Q8, Q10, Q11, VDD]
+
+- id: 4023
+  desc: Triple 3-input NAND gate
+  package: dip14
+  aliases: [CD4023, HEF4023]
+  # VERIFY: 4023 pin map from memory - check against TI CD4023B datasheet
+  pins: [1A, 1B, 2A, 2B, 2C, 2Y, VSS, 1C, 1Y, 3Y, 3A, 3B, 3C, VDD]
+
+- id: 4024
+  desc: 7-stage binary ripple counter
+  package: dip14
+  aliases: [CD4024, HEF4024]
+  # VERIFY: 4024 NC positions from memory - check against TI CD4024B datasheet
+  pins: [CLK, RST, Q7, Q6, Q5, Q4, VSS, NC, Q3, NC, Q2, Q1, NC, VDD]
+
+- id: 4026
+  desc: Decade counter with 7-segment display outputs
+  package: dip16
+  aliases: [CD4026, HEF4026]
+  # VERIFY: 4026 pin map from memory - check against TI CD4026B datasheet
+  pins: [CLK, INH, DEI, DEO, CO, f, g, VSS, d, a, e, b, c, UCS, RST, VDD]
+
+- id: 4027
+  desc: Dual JK flip-flop with set/reset
+  package: dip16
+  aliases: [CD4027, HEF4027]
+  pins: [1Q, 1Q~, 1CLK, 1RST, 1K, 1J, 1SET, VSS, 2SET, 2J, 2K, 2RST, 2CLK, 2Q~, 2Q, VDD]
+
+- id: 4028
+  desc: BCD to decimal decoder (1-of-10)
+  package: dip16
+  aliases: [CD4028, HEF4028]
+  # VERIFY: 4028 input pin order from memory - check against TI CD4028B datasheet
+  pins: [Y4, Y2, Y0, Y7, Y9, Y5, Y6, VSS, Y8, A, D, C, B, Y1, Y3, VDD]
+
+- id: 4040
+  desc: 12-stage binary ripple counter
+  package: dip16
+  aliases: [CD4040, HEF4040]
+  pop: 9
+  pins: [Q12, Q6, Q5, Q7, Q4, Q3, Q2, VSS, Q1, CLK, RST, Q9, Q8, Q10, Q11, VDD]
+
+- id: 4046
+  desc: Phase-locked loop with VCO
+  package: dip16
+  aliases: [CD4046, HEF4046]
+  pop: 11
+  pins: [PP, PC1, CIN, VCOOUT, INH, C1A, C1B, VSS, VCOIN, SF, R1, R2, PC2, SIG, ZEN, VDD]
+
+- id: 4049
+  desc: Hex inverting buffer (level-down capable)
+  package: dip16
+  aliases: [CD4049, HEF4049]
+  power: VDD@1 VSS@8
+  pins: [VDD, 1Y, 1A, 2Y, 2A, 3Y, 3A, VSS, 4A, 4Y, 5A, 5Y, NC, 6A, 6Y, NC]
+
+- id: 4050
+  desc: Hex non-inverting buffer (level-down capable)
+  package: dip16
+  aliases: [CD4050, HEF4050]
+  power: VDD@1 VSS@8
+  pins: [VDD, 1Y, 1A, 2Y, 2A, 3Y, 3A, VSS, 4A, 4Y, 5A, 5Y, NC, 6A, 6Y, NC]
+
+- id: 4051
+  desc: 8-channel analog multiplexer/demultiplexer
+  package: dip16
+  aliases: [CD4051, HEF4051, 74HC4051]
+  pop: 5
+  pins: [CH4, CH6, COM, CH7, CH5, INH, VEE, VSS, C, B, A, CH3, CH0, CH1, CH2, VDD]
+
+- id: 4052
+  desc: Dual 4-channel analog multiplexer/demultiplexer
+  package: dip16
+  aliases: [CD4052, HEF4052, 74HC4052]
+  # VERIFY: 4052 X/Y channel order from memory - check against TI CD4052B datasheet
+  pins: [Y0, Y2, YCOM, Y3, Y1, INH, VEE, VSS, B, A, X3, X0, XCOM, X1, X2, VDD]
+
+- id: 4053
+  desc: Triple 2-channel analog multiplexer/demultiplexer
+  package: dip16
+  aliases: [CD4053, HEF4053, 74HC4053]
+  # VERIFY: 4053 pins 12-15 (AX/AY/ACOM/BCOM order) - check against TI CD4053B datasheet
+  pins: [BY, BX, CY, CX, CCOM, INH, VEE, VSS, C, B, A, AX, AY, ACOM, BCOM, VDD]
+
+- id: 4060
+  desc: 14-stage ripple counter with oscillator
+  package: dip16
+  aliases: [CD4060, HEF4060]
+  pop: 8
+  # VERIFY: oscillator pin names (9=CTC, 10=RTC, 11=CLK/RS) - check CD4060B datasheet
+  pins: [Q12, Q13, Q14, Q6, Q5, Q7, Q4, VSS, CTC, RTC, CLK, RST, Q9, Q8, Q10, VDD]
+
+- id: 4066
+  desc: Quad bilateral analog switch
+  package: dip14
+  aliases: [CD4066, HEF4066, 74HC4066]
+  pop: 3
+  pins: [1A, 1B, 2B, 2A, 2C, 3C, VSS, 3A, 3B, 4B, 4A, 4C, 1C, VDD]
+
+- id: 4069
+  desc: Hex inverter
+  package: dip14
+  aliases: [CD4069, HEF4069]
+  pop: 10
+  pins: [1A, 1Y, 2A, 2Y, 3A, 3Y, VSS, 4Y, 4A, 5Y, 5A, 6Y, 6A, VDD]
+
+- id: 4070
+  desc: Quad 2-input XOR gate
+  package: dip14
+  aliases: [CD4070, HEF4070]
+  pins: [1A, 1B, 1Y, 2Y, 2A, 2B, VSS, 3A, 3B, 3Y, 4Y, 4A, 4B, VDD]
+
+- id: 4071
+  desc: Quad 2-input OR gate
+  package: dip14
+  aliases: [CD4071, HEF4071]
+  pins: [1A, 1B, 1Y, 2Y, 2A, 2B, VSS, 3A, 3B, 3Y, 4Y, 4A, 4B, VDD]
+
+- id: 4081
+  desc: Quad 2-input AND gate
+  package: dip14
+  aliases: [CD4081, HEF4081]
+  pins: [1A, 1B, 1Y, 2Y, 2A, 2B, VSS, 3A, 3B, 3Y, 4Y, 4A, 4B, VDD]
+
+- id: 4093
+  desc: Quad 2-input NAND Schmitt trigger
+  package: dip14
+  aliases: [CD4093, HEF4093]
+  pop: 6
+  pins: [1A, 1B, 1Y, 2Y, 2A, 2B, VSS, 3A, 3B, 3Y, 4Y, 4A, 4B, VDD]
+
+- id: 4094
+  desc: 8-bit shift-and-store register, 3-state
+  package: dip16
+  aliases: [CD4094, HEF4094, 74HC4094]
+  pins: [STR, D, CLK, Q1, Q2, Q3, Q4, VSS, QS, QS~, Q8, Q7, Q6, Q5, OE, VDD]
+
+- id: 4510
+  desc: BCD up/down counter with preset
+  package: dip16
+  aliases: [CD4510, HEF4510]
+  # VERIFY: 4510 pin map from memory - check against TI CD4510B datasheet
+  pins: [PE, Q4, P4, P1, CI, Q1, CO, VSS, RST, U/D, Q2, P2, P3, Q3, CLK, VDD]
+
+- id: 4511
+  desc: BCD to 7-segment latch/decoder/driver
+  package: dip16
+  aliases: [CD4511, HEF4511]
+  pop: 12
+  pins: [B, C, LT, BL, LE, D, A, VSS, e, d, c, b, a, g, f, VDD]
+
+- id: 4543
+  desc: BCD to 7-segment latch/driver for LCDs
+  package: dip16
+  aliases: [CD4543, HEF4543]
+  # VERIFY: 4543 output segment order (pins 9-15) - check against TI CD4543B datasheet
+  pins: [LD, C, B, D, A, PH, BL, VSS, g, f, e, d, c, b, a, VDD]
