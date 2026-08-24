@@ -15,11 +15,18 @@
 SharedBuffer* SharedBuffer::instance = nullptr;
 
 /**
- * @brief Private constructor - lazily allocates the body buffer.
+ * @brief Private constructor - does NOT allocate the body buffer.
  *
- * Tries PSRAM first; falls back to malloc on SRAM. If both fail (boot too
- * early, OOM), buffer stays null and write/append fail gracefully via the
- * null-check in setLength().
+ * The ctor used to call ensureBuffer(), which defeated the whole point of
+ * lazy allocation: getInstance() runs from paths that only want to clear()
+ * (the REPL's exit cleanup, the pre-file-manager sweep), and on a no-PSRAM
+ * board each first-touch permanently claimed 24KB of SRAM heap that nothing
+ * was going to use. Every producing/consuming path (write/append/rawBuffer)
+ * calls ensureBuffer() itself, and clear()/data()/setLength() null-check, so
+ * the buffer now exists only once someone actually has content to move.
+ * sharedBufferSize starts at the SRAM capacity so remaining()/printStatus
+ * report a sane bound pre-allocation; ensureBuffer() overwrites it with the
+ * real size (48KB) if the PSRAM path wins.
  */
 SharedBuffer::SharedBuffer()
     : buffer(nullptr)
@@ -29,7 +36,7 @@ SharedBuffer::SharedBuffer()
     , sourceContext(0)
 {
     filename[0] = '\0';
-    ensureBuffer();  // best-effort; retried lazily if it fails here
+    sharedBufferSize = SHARED_BUFFER_SIZE;
 }
 
 /**
