@@ -99,33 +99,29 @@ static bool wire1IsFree(void) {
 
 bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     static const char* claimedReason = "GPIO claimed by your script";
-    if (wire1IsFree()) {
-        d.sdaPin = 26;
-        d.sclPin = 27;
-    } else {
-        d.sdaPin = SOFT_SDA_PIN;
-        d.sclPin = SOFT_SCL_PIN;
-    }
+    // ALWAYS soft-I2C (sweep finding, high): the hardware branch called
+    // Wire1.setSDA(26) on a bus the OLED may have BEGUN on other pins
+    // (connect_on_boot starts Wire1 on 6/7 even with no panel detected, and
+    // oledConnected flipping false never calls Wire1.end()) - arduino-pico
+    // panics on setSDA-while-running with different pins, which manifests
+    // as a USB disconnect (the exact crash oled.cpp:4506 documents). The
+    // reverse direction (our Wire1.begin(26,27), then the user switches
+    // OLED connection type in the menu) breaks oled.cpp's Wire1-exclusivity
+    // assumption the same way. Until a real Wire1 arbitration layer exists,
+    // the ~1s/frame soft-bus ambient rate is the price of never panicking.
+    (void)wire1IsFree;
+    d.sdaPin = SOFT_SDA_PIN;
+    d.sclPin = SOFT_SCL_PIN;
     if (displayBusUserClaimed(d)) {
         if (reasonOut) *reasonOut = claimedReason;
         d.sdaPin = d.sclPin = -1;
         return false;
     }
 
-    bool hw = wire1IsFree();
-    if (hw) {
-        Wire1.setSDA(d.sdaPin);
-        Wire1.setSCL(d.sclPin);
-        Wire1.begin();
-        Wire1.setClock(100000);   // fabric-safe starting rate
-        gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_I2C;
-        gpio_function_map[d.sclPin - 20] = GPIO_FUNC_I2C;
-    } else {
-        sdaRelease(d);
-        sclRelease(d);
-        gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_SIO;
-        gpio_function_map[d.sclPin - 20] = GPIO_FUNC_SIO;
-    }
+    sdaRelease(d);
+    sclRelease(d);
+    gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_SIO;
+    gpio_function_map[d.sclPin - 20] = GPIO_FUNC_SIO;
     // gpioState 6 = "bus role" for the UI/scan, the oled.cpp:4316 precedent.
     // These marks survive Python exits (jl_gpio_claim_pin's do not) and stop
     // refreshConnections re-asserting config pulls under the live bus.

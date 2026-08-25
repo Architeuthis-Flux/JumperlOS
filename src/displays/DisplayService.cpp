@@ -64,12 +64,22 @@ bool DisplayService::routeDataPins(int partIdx) {
     }
     p.pins[sdaIdx].connect = sdaNode;
     p.pins[sclIdx].connect = sclNode;
-    if (applyPartPlacement(st, partIdx, err) < 0) {
-        // Router refusal: put the pins back to unrouted and re-place so the
-        // part's labels stay honest; the poll retries later.
+    err = "";
+    int added = applyPartPlacement(st, partIdx, err);
+    // Refusal detection (sweep finding, medium): applyPartPlacement returns
+    // -1 only for a bad index - addConnection refusals (bridge table full)
+    // come back as err TEXT with a non-negative count. Treating those as
+    // success persisted connect: fields whose bridges never existed, and
+    // the part then read as "already routed" forever.
+    if (added < 0 || err.length() > 0) {
+        // Put the pins back to unrouted and re-place so the part's labels
+        // stay honest; the poll retries later.
         p.pins[sdaIdx].connect = -1;
         p.pins[sclIdx].connect = -1;
-        applyPartPlacement(st, partIdx, err);
+        String err2;
+        applyPartPlacement(st, partIdx, err2);
+        st.markDirty();   // the restore must persist too, or a save between
+                          // attempts writes routed-looking pins with no bridges
         return false;
     }
     st.markDirty();
@@ -84,11 +94,21 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
 
     const char* reason = nullptr;
     if (!displayBusAcquire(inst, &reason)) {
-        Serial.print("\r\nDISPLAY paused: ");
-        Serial.println(reason ? reason : "bus unavailable");
-        inst.state = DispState::YIELDED;
+        // Stay EMPTY (not YIELDED): with the pins never acquired,
+        // displayBusUserClaimed() reads them as -1 and the YIELDED resume
+        // path would detach/re-attach - and re-print this - every 750 ms
+        // poll (sweep finding). One line, then the poll retries quietly.
+        if (!acquireWarned) {
+            acquireWarned = true;
+            Serial.print("\r\nDISPLAY paused: ");
+            Serial.println(reason ? reason : "bus unavailable");
+        }
+        inst.desc = nullptr;
+        inst.partIdx = -1;
+        inst.state = DispState::EMPTY;
         return;
     }
+    acquireWarned = false;
     if (!routeDataPins(partIdx)) {
         // No SDA/SCL pins or router refusal - stay EMPTY-ish and retry at
         // poll cadence rather than half-attaching.

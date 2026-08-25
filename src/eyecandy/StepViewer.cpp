@@ -190,6 +190,12 @@ void StepViewer::showStep(bool announce) {
 
 int StepViewer::arm(const char* sourcePath, int cursorIn) {
     if (sourcePath == nullptr || sourcePath[0] == '\0') return -1;
+    // Disarm FIRST: guideParse memsets the LIVE static step table before it
+    // can fail (file deleted, FS unmounted), and a failed RE-arm used to
+    // leave active=true over a zeroed script - the next wheel turn divided
+    // by numSteps==0 (sweep finding, medium). A clean disarm before the
+    // parse means every failure path lands in a coherent off state.
+    disarm();
     String err;
     if (!guideParse(sourcePath, viewerScript, err)) {
         Serial.println("  (steps unavailable: " + err + ")");
@@ -226,6 +232,13 @@ void StepViewer::disarm() {
 
 ServiceStatus StepViewer::service() {
     if (!active) return ServiceStatus::IDLE;
+
+    // Belt-and-braces against an armed-but-empty table (arm() disarms
+    // before parsing now, but the cursor math below must never see 0).
+    if (viewerScript.numSteps <= 0) {
+        disarm();
+        return ServiceStatus::IDLE;
+    }
 
     // Auto-disarm: board clear zeroes parts.guideSource; a context switch
     // loads a state whose guideSource names another file (or none).
@@ -274,8 +287,13 @@ ServiceStatus StepViewer::service() {
             // First turn while yielded RECLAIMS the panel at the current
             // step; it does not move the cursor (turning past a reading
             // should show you where you were, not step 3 ahead of it).
-            if (gui.idleScreen() == &viewerScreen) gui.showIdle();
-            else gui.activate(&viewerScreen, /*persist=*/true);
+            // Only OUR idle registration is reclaimed: if another
+            // persistent screen took the idle slot since (a MicroPython
+            // stats page), stealing it back would silently evict the
+            // user's page (sweep finding) - the turn falls through to
+            // Highlighting instead.
+            if (gui.idleScreen() != &viewerScreen) return ServiceStatus::IDLE;
+            gui.showIdle();
             showStep(false);
             return ServiceStatus::BUSY;
         }

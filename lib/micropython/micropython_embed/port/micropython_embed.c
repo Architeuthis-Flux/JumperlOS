@@ -68,6 +68,7 @@ const mp_obj_type_t *jl_retain_machine_uart_type = &machine_uart_type;
 
 // Pin.irq() lifecycle hooks (machine_pin_jl.c)
 extern void machine_pin_irq_init(void);
+extern void jl_bg_reset_entry(void);   // modjumperless.c - bg root pointer reset
 extern void machine_pin_irq_deinit(void);
 // machine.Timer lifecycle hook (machine_timer_jl.c): cancels all live hardware
 // alarms so none can fire mp_sched_schedule into a freed/reinitialized heap.
@@ -151,6 +152,12 @@ int mp_embed_init(void *heap, size_t heap_size, void *stack_top) {
     // Zero pin IRQ root pointers + install the shared GPIO IRQ handler.
     // Must run after mp_init() so MP_STATE_PORT is the fresh VM state.
     machine_pin_irq_init();
+    // Same treatment for the background-callback root pointer: mp_init
+    // resets only its own named fields, so across a soft reboot (Ctrl-D
+    // after jumperless.bg_start) jl_bg_entry would otherwise keep a stale
+    // heap address from the PREVIOUS interpreter and the next MpBackground
+    // tick would dereference reinitialized heap (hard fault / nlr park).
+    jl_bg_reset_entry();
     return 0;
 }
 
@@ -411,6 +418,7 @@ void nlr_jump_fail(void *val) {
     delay(1000);
     mp_init();
     machine_pin_irq_init();
+    jl_bg_reset_entry();   // same stale-root hazard as the boot path
     delay(1000);
     // Must never return from NORETURN function - spin forever
     for(;;) { delay(1000); }

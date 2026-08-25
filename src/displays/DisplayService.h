@@ -47,6 +47,7 @@ private:
     uint32_t nextPartsPollMs = 0;
     bool ghostWarned = false;
     bool yieldNoted = false;
+    bool acquireWarned = false;   // one line per acquire-failure episode
 
     void pollParts(uint32_t now);
     void attach(int partIdx, const DisplayDriverDesc* desc);

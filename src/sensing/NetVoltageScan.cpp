@@ -1210,17 +1210,55 @@ static int dueSourceIndex(void) {
 // both ends: hop-matched per Kevin's ruling. This is also the scan's
 // "single ADC when space is tight" mode (Kevin, 2026-08-24): it needs only
 // ONE free chip-K row where a true pair needs two.
-static bool seqPairTap(int pathIdx, int node1, int node2, int adcA) {
-    float v1, v2;
-    if (!senseNodeVoltage(node1, adcA, &v1)) return false;
-    if (!senseNodeVoltage(node2, adcA, &v2)) return false;
-    recordTapVoltage(node1, v1 - scanZeroOffset[adcA]);
-    recordTapVoltage(node2, v2 - scanZeroOffset[adcA]);
+// Split across TWO slot passes (sweep finding: stacking 2-3 full taps in
+// one core2busy window could breach the 25ms waitCore2 contract on a sick
+// PIO handshake - each pass now carries at most ONE tap's worst case).
+// End A is tapped this pass and parked here; the next slot pass taps end B
+// on the SAME channel (~5ms later at the service cadence - still ~1000x
+// tighter than the round-robin's seconds) and lands the dv.
+static int seqPendingPath = -1;
+static int seqPendingNode1 = -1;
+static int seqPendingNode2 = -1;
+static int seqPendingAdc = -1;
+static float seqPendingV1 = 0.0f;
+static uint32_t seqPendingMs = 0;
+
+static void seqPairAbandon(void) { seqPendingPath = -1; }
+
+// Pass 2: complete a parked pair. Returns true when this pass did tap work.
+static bool seqPairComplete(int adcA) {
+    int i = seqPendingPath;
+    seqPendingPath = -1;
+    if (i < 0 || i >= livePathCount()) return false;
+    const pathStruct& p = globalState.connections.paths[i];
+    // The park is only honored while it is fresh, the path still names the
+    // same ends (no rebuild in between), and the same channel is available
+    // (channel offsets must stay common to both ends).
+    if ((millis() - seqPendingMs) > 150) return false;
+    if (adcA != seqPendingAdc) return false;
+    if (!((p.node1 == seqPendingNode1 && p.node2 == seqPendingNode2))) return false;
+    float v2;
+    if (!senseNodeVoltage(seqPendingNode2, adcA, &v2)) return true; // pass spent
+    recordTapVoltage(seqPendingNode2, v2 - scanZeroOffset[adcA]);
     // dv straight from the raw pair: the shared channel's zero offset is
     // common to both ends and cancels in the subtraction.
-    pathPairDv[pathIdx] = v1 - v2;
-    pathPairDvMs[pathIdx] = millis();
+    pathPairDv[i] = seqPendingV1 - v2;
+    pathPairDvMs[i] = millis();
     tapSeqPairOk++;
+    return true;
+}
+
+// Pass 1: tap end A and park. Always consumes the pass.
+static bool seqPairBegin(int pathIdx, int node1, int node2, int adcA) {
+    float v1;
+    if (!senseNodeVoltage(node1, adcA, &v1)) return true; // pass spent; retry next cycle
+    recordTapVoltage(node1, v1 - scanZeroOffset[adcA]);
+    seqPendingPath = pathIdx;
+    seqPendingNode1 = node1;
+    seqPendingNode2 = node2;
+    seqPendingAdc = adcA;
+    seqPendingV1 = v1;
+    seqPendingMs = millis();
     return true;
 }
 
@@ -1235,6 +1273,13 @@ static bool seqPairTap(int pathIdx, int node1, int node2, int adcA) {
 // routable channels for its ~1.2ms dwell, less than the full 0x0F mask a
 // plain tap can acquire.
 static bool pairTapSlot(int adcA) {
+    // A parked sequential pair completes FIRST - it is this pass's whole
+    // tap budget (sweep rule: at most one full tap per core2busy window).
+    if (seqPendingPath >= 0) {
+        if (seqPairComplete(adcA)) return true;
+        // Park went stale/invalid without spending the pass - fall through
+        // to normal selection.
+    }
     int numPaths = livePathCount();
     if (numPaths <= 0) return false;
     for (int tries = 0; tries < numPaths; tries++) {
@@ -1247,8 +1292,8 @@ static bool pairTapSlot(int adcA) {
         bool e2 = pairTapEligible(p.node2);
         if (!e1 && !e2) continue;
         if (e1 && e2) {
-            // Mode 2 = true two-channel pair first (see the strategy legend
-            // at pathPairDv). Mode 1 (default) skips straight to sequential.
+            // Mode 2 = true two-channel pair (see the strategy legend at
+            // pathPairDv). Mode 1 (default) goes straight to sequential.
             if (jumperlessConfig.debug.net_scan_pair_taps == 2) {
                 int adcB = infraAcquireAdc(INFRA_ADC_NVSCAN,
                                            (uint8_t)(0x0F & ~(1u << adcA)), true);
@@ -1268,24 +1313,18 @@ static bool pairTapSlot(int adcA) {
                         pathPairDvMs[i] = millis();
                         return true;
                     }
-                    // Pair refused (asymmetric hops, lane contention) or its
-                    // dwell failed - sequential below still gets a coherent
-                    // dv where single-ended could not.
+                    // Refused/failed: the pair attempt was this pass's
+                    // budget - the path re-enters rotation next cycle.
+                    return true;
                 }
             }
-            // The default path: sequential same-channel pair on adcA
-            // (offsets cancel entirely, ~3ms end to end, one K row).
-            if (seqPairTap(i, p.node1, p.node2, adcA)) return true;
-            // Both pair shapes failed (route/drift) - single-ended below,
-            // so a contended path still gets one node refreshed.
+            // Sequential same-channel pair: end A now, end B next pass
+            // (offsets cancel entirely; one tap per pass).
+            return seqPairBegin(i, p.node1, p.node2, adcA);
         }
-        int node;
-        if (e1 && e2) {
-            pairSwapPhase = !pairSwapPhase;
-            node = pairSwapPhase ? p.node1 : p.node2;
-        } else {
-            node = e1 ? p.node1 : p.node2;
-        }
+        int node = e1 ? p.node1 : p.node2;
+        if (node == GND) continue;   // nodeVoltage[GND] is pinned - a lone
+                                     // GND tap would record nothing
         float volts;
         if (senseNodeVoltage(node, adcA, &volts)) {
             recordTapVoltage(node, volts - scanZeroOffset[adcA]);
@@ -1361,6 +1400,7 @@ void serviceNetVoltageScan(void) {
     if (fingerprint != lastFingerprint) {
         lastFingerprint = fingerprint;
         rebuildScanList();
+        seqPairAbandon();   // a parked half-pair describes the old fabric
         // Routing changed - old samples may describe merged/split nets.
         memset(nodeVoltageMs, 0, sizeof(nodeVoltageMs));
         for (int i = 0; i < MAX_BRIDGES; i++) {

@@ -190,6 +190,14 @@ static int partsTapForRow(const PartDbRecord& rec) {
 
         if (encoderButtonState == HELD ||
             (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
+            // Wait the hold out (the picker's own discipline) so one long
+            // press can't cascade a second cancel into the level above.
+            while (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+                   encoderButtonState == LONG_HELD) {
+                jOS.serviceInner();
+                rotaryEncoderButtonStuff();
+                delayMicroseconds(1000);
+            }
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
             return -1;
@@ -262,15 +270,23 @@ static bool partsCommitPlacement(const PartDbRecord& rec, int tappedRow) {
     tmp.baseRow = (int16_t)baseRow;
 
     // Unique name: NE555, NE555_2, ... (findByName is the serializer's own
-    // identity check, so a name it can't see is free).
+    // identity check, so a name it can't see is free). MAX_PARTS is 16, so
+    // suffixes through _16 always suffice; refuse rather than commit a
+    // silent duplicate if the impossible happens (sweep finding: the old
+    // cap at _9 duplicated the 10th same-record placement).
     if (st.parts.findByName(tmp.name) >= 0) {
         char base[16];
         strncpy(base, tmp.name, sizeof(base) - 1);
         base[sizeof(base) - 1] = '\0';
-        if (strlen(base) > 13) base[13] = '\0';   // room for "_9"
-        for (int suffix = 2; suffix <= 9; suffix++) {
+        if (strlen(base) > 12) base[12] = '\0';   // room for "_16"
+        bool named = false;
+        for (int suffix = 2; suffix <= MAX_PARTS; suffix++) {
             snprintf(tmp.name, sizeof(tmp.name), "%s_%d", base, suffix);
-            if (st.parts.findByName(tmp.name) < 0) break;
+            if (st.parts.findByName(tmp.name) < 0) { named = true; break; }
+        }
+        if (!named) {
+            Serial.println("\r\nPARTDB place refused reason=\"name collision\"");
+            return false;
         }
     }
 
@@ -413,6 +429,12 @@ static bool partsClearAll(void) {
     }
     int n = st.parts.numParts;
     st.parts.numParts = 0;
+    // Guide progress goes with the parts (mirrors parts.clear()'s scope):
+    // a stamped guideSource with an empty table left the StepViewer armed
+    // for vanished parts - dangling emphasis indices (sweep finding).
+    st.parts.guideSource[0] = '\0';
+    st.parts.guideStep = 0;
+    st.parts.guideTotal = 0;
     st.markDirty();
     refreshConnections(-1);
     partLabels.requestRun();

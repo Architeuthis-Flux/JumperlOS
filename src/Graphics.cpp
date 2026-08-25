@@ -2097,24 +2097,27 @@ void renderNetCurrentAnts() {
   static int offsets[MAX_BRIDGES] = {0};
   static unsigned long lastUpdateMs = 0;
   static int resumeSlot = 0; // round-robin start after a budget overrun
-  // Runtime persistence (Kevin, flashy-ants session): a stale tap window
-  // is NOT evidence of zero current, so a path keeps its last known
-  // current until FRESH data replaces it or the fabric is rebuilt (a
-  // rewire clears every hold below - which also kills the stale-index
-  // alias the old 1.5s timed cap existed to bound). The timed hold
-  // dropped ants whenever taps went stale for a moment (same-chip pair
-  // contention, drift retries) - random per-path chop against the net's
-  // other ants. Turning the current OFF still kills ants promptly: taps
-  // keep succeeding and fresh near-zero data drops through the vote.
+  // Runtime persistence (Kevin, flashy-ants session; bounds re-cut after
+  // the bug sweep): a stale tap window is NOT evidence of zero current,
+  // so a path keeps its last known current until fresh data replaces it -
+  // inside two honesty rails the sweep proved necessary:
+  //  - kNetAntsHoldMaxMs: a PULLED component changes no bridges (no
+  //    routingGeneration bump) and its floating rows drift-fail every
+  //    tap forever - an unbounded hold animated phantom current on a
+  //    dead wire indefinitely. 5s covers every real stale window
+  //    (contention, drift retries) while bounding the phantom.
+  //  - post-rebuild capture suppression: routingGeneration bumps BEFORE
+  //    the scanner can invalidate pathCurrentValid (the scan runs after
+  //    the LED frame and its user-input gate blinds it ~100ms+), so the
+  //    frames right after a rewire would re-latch the OLD path's current
+  //    onto the REBUILT path index. Suppressing capture+hold for 400ms
+  //    lets the fingerprint invalidation land; ants return with fresh
+  //    data and a full turn-on vote (wasAnimated/antVote cleared too).
+  static constexpr uint32_t kNetAntsHoldMaxMs = 5000;
   static float holdSigned[MAX_BRIDGES] = {0.0f};
   static uint32_t holdMs[MAX_BRIDGES] = {0};
   static uint32_t holdRoutingGen = 0;
-  if (holdRoutingGen != routingGeneration) {
-    holdRoutingGen = routingGeneration;
-    for (int i = 0; i < MAX_BRIDGES; i++) {
-      holdMs[i] = 0;
-    }
-  }
+  static uint32_t holdSuppressUntilMs = 0;
   // Threshold hysteresis: a path hovering right at the minimum current
   // would otherwise blink its ants on/off as the (smoothed) reading
   // crosses back and forth. Once animating, keep going until the current
@@ -2131,6 +2134,16 @@ void renderNetCurrentAnts() {
   lastVoteGeneration = voteGeneration;
 
   unsigned long nowMs = millis();
+  if (holdRoutingGen != routingGeneration) {
+    holdRoutingGen = routingGeneration;
+    holdSuppressUntilMs = (uint32_t)nowMs + 400;
+    for (int i = 0; i < MAX_BRIDGES; i++) {
+      holdMs[i] = 0;
+      wasAnimated[i] = false;
+      antVote[i] = 0;
+    }
+  }
+  bool holdSuppressed = (int32_t)((uint32_t)nowMs - holdSuppressUntilMs) < 0;
   float deltaSeconds =
       (lastUpdateMs == 0) ? 0.0f : (nowMs - lastUpdateMs) / 1000.0f;
   lastUpdateMs = nowMs;
@@ -2167,13 +2180,18 @@ void renderNetCurrentAnts() {
       continue;
     }
     float signedI;
+    if (holdSuppressed) {
+      continue; // post-rebuild: the scanner hasn't invalidated yet - do not
+                // re-latch the old fabric's currents onto rebuilt indices
+    }
     if (pathCurrentKnown(i)) {
       signedI = pathCurrentSigned_mA(i);
       holdSigned[i] = signedI;
       holdMs[i] = nowMs;
-    } else if (holdMs[i] != 0) {
+    } else if (holdMs[i] != 0 && (uint32_t)nowMs - holdMs[i] < kNetAntsHoldMaxMs) {
       signedI = holdSigned[i]; // stale window - persist the last known value
     } else {
+      holdMs[i] = 0; // hold expired (floating leg never taps fresh again)
       continue;
     }
     float mag = fabsf(signedI);

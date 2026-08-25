@@ -2785,6 +2785,19 @@ int jl_bg_active( void ) {
     return jl_bg_entry_is_set( ) ? 1 : 0;
 }
 
+// Reset the background entry to its boot state. Called from the port's
+// post-mp_init root-pointer zeroing (micropython_embed.c, next to
+// machine_pin_irq_init) - mp_init resets only its own named fields, so
+// without this a soft reboot (Ctrl-D after bg_start) leaves jl_bg_entry
+// holding a STALE HEAP ADDRESS from the previous interpreter; the first
+// MpBackground tick then reads reinitialized heap as an object tuple -
+// hard fault, or nlr_jump_fail parking the firmware (sweep finding, high).
+void jl_bg_reset_entry( void ) {
+    MP_STATE_VM( jl_bg_entry ) = MP_OBJ_NULL;
+    jl_bg_last_tick_ms = 0;
+    jl_bg_in_call = 0;
+}
+
 // One tick from MpBackgroundService: interval-gated, re-entrancy-guarded,
 // nlr-protected. Returns 1 when the callback ran.
 int jl_bg_service_tick( uint32_t now_ms ) {
@@ -2798,6 +2811,12 @@ int jl_bg_service_tick( uint32_t now_ms ) {
     jl_bg_last_tick_ms = now_ms;
     jl_bg_in_call = 1;
 
+    // SAVE/RESTORE the GC stack bound around the tick (mpirq.c:76-100 is
+    // the port precedent). Setting it without restoring left a DEAD frame
+    // address as the permanent scan bound - any later foreground exec whose
+    // C frames sat above it had live mp_obj_t roots invisible to the GC:
+    // heap corruption under memory pressure (sweep finding, high).
+    void* saved_stack_top = MP_STATE_THREAD( stack_top );
     char stack_top;
     mp_stack_set_top( &stack_top );
 
@@ -2815,6 +2834,7 @@ int jl_bg_service_tick( uint32_t now_ms ) {
         mp_obj_print_exception( &mp_plat_print, MP_OBJ_FROM_PTR( nlr.ret_val ) );
         MP_STATE_VM( jl_bg_entry ) = mp_const_none;
     }
+    MP_STATE_THREAD( stack_top ) = saved_stack_top;
     jl_bg_in_call = 0;
     return invoked;
 }

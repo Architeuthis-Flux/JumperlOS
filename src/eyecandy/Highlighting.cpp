@@ -992,6 +992,20 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         }
         clearColorOverrides( 1, 1, 0 );
         brightenedRail = -1;
+        if ( netHighlighted == 1 ) {
+            // GND: rail flag only - the reading falls through to the default
+            // branch below so GND prints its scanned V/mA (with the row
+            // label) like any plain net. The old name-only "GND" case here
+            // was the leftover highlighting path: it flashed a bare "GND"
+            // for the ~140ms until checkForReadingChanges' first repaint.
+            brightenedRail = 1;
+        }
+        // The clickwheel scrolls rows WITHIN one net, so the reading
+        // branches below reprint on a row change too - the header's node
+        // label reads brightenedNode at print time, and a net-only guard
+        // left it stale while the brightening moved along the rows.
+        auto& lastPrintedRowNode = g_readingGuards.lastPrintedRowNode;
+        bool printedRowChanged = ( lastPrintedRowNode != brightenedNode );
         // NOTE: lastPrintedNet is deliberately NOT cleared here anymore.
         // Clearing it every call re-pushed the OLED on every loop while the
         // probe tip was held on a net. Net changes reprint below; value
@@ -1000,17 +1014,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         switch ( netHighlighted ) {
         case 0:
             break;
-        case 1:
-            if ( lastPrintedNet != netHighlighted ) {
-                if ( print == 1 ) {
-                    showNetReading( "GND", "" );
-                }
-                lastPrintedNet = netHighlighted;
-            }
-            brightenedRail = 1;
-            break;
         case 2:
-            if ( lastPrintedNet != netHighlighted ) {
+            if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
                     char value[ 28 ];
@@ -1025,7 +1030,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             brightenedRail = 0;
             break;
         case 3:
-            if ( lastPrintedNet != netHighlighted ) {
+            if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
                     char value[ 28 ];
@@ -1037,7 +1042,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             brightenedRail = 2;
             break;
         case 4:
-            if ( lastPrintedNet != netHighlighted ) {
+            if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
 
                 DACcolorOverride0 = -2;
                 DACcolorOverride1 = 0x000000;
@@ -1051,7 +1056,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             }
             break;
         case 5:
-            if ( lastPrintedNet != netHighlighted ) {
+            if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
 
                 DACcolorOverride0 = 0x000000;
                 DACcolorOverride1 = -2;
@@ -1139,7 +1144,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 int direction = currentSenseState.currentDirection;
 
                 bool shouldPrint = false;
-                if ( !sensePrintInitialized || lastSenseNetPrinted != netHighlighted ) {
+                if ( !sensePrintInitialized || lastSenseNetPrinted != netHighlighted ||
+                     printedRowChanged ) {
                     shouldPrint = true;
                 } else if ( fabsf( current - lastSenseCurrentPrinted ) > 0.05f ||
                             fabsf( voltage - lastSenseVoltagePrinted ) > 0.02f ) {
@@ -1269,7 +1275,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
 
             } else if ( i2cOnNet ) {
 
-                if ( lastPrintedNet != netHighlighted ) {
+                if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
                     if ( print == 1 ) {
                         // Simple I2C label without scanning
                         const char* line = "I2C";
@@ -1291,7 +1297,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
 
             } else if ( pwmOnNet ) {
 
-                if ( lastPrintedNet != netHighlighted ) {
+                if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
                     if ( print == 1 ) {
                         float freq = gpioPWMFrequency[ functionOnNetIndex ];
                         float duty = gpioPWMDutyCycle[ functionOnNetIndex ] * 100.0f;
@@ -1305,7 +1311,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
 
             } else if ( functionOnNetIndex != -1 ) {
 
-                if ( lastPrintedNet != netHighlighted ) {
+                if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
                     if ( print == 1 ) {
                         // Pin-aware function name lookup
                         gpio_function_t fun = gpio_get_function( gpioDef[ functionOnNetIndex ][ 0 ] );
@@ -1344,7 +1350,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
 
             } else if ( ( adc != -1 || gpioInputNumber != -1 || gpioOutputNumber != -1 ) ) {
 
-                if ( lastPrintedNet != netHighlighted ) {
+                if ( lastPrintedNet != netHighlighted || printedRowChanged ) {
 
                     if ( adc != -1 ) {
                         ADCcolorOverride0 = -2;
@@ -1411,10 +1417,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     // held probe tip re-pushed "Net N / row X" every service
                     // loop and stomped the live updater's voltage/current
                     // line whenever the scan current happened to read 0.
-                    auto& lastPrintedRowNode = g_readingGuards.lastPrintedRowNode;
                     if ( print == 1 && ( lastPrintedNet != netHighlighted ||
-                                         lastPrintedRowNode != brightenedNode ) ) {
-                        lastPrintedRowNode = brightenedNode;
+                                         printedRowChanged ) ) {
                         char nameBuffer[ 16 ];
                         const char* baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
 
@@ -1436,6 +1440,12 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             lastPrintedNet = netHighlighted;
         }
             Serial.flush( );
+        }
+        // One row-label latch for every reading branch above. The UART live
+        // stream view deliberately ignores row changes (it has no node
+        // label), so a scroll within a UART net just skips the reprint.
+        if ( print == 1 ) {
+            lastPrintedRowNode = brightenedNode;
         }
     }
     // requestLedShow( 1 );

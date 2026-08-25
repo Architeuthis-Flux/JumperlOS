@@ -238,7 +238,9 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     const char* rowLabel = nullptr;
     if (haveValues && rowNode > 0) {
         snprintf(rowBuf, sizeof(rowBuf), "%s", definesToChar(rowNode, 0));
-        if (rowBuf[0] != '\0') {
+        // A label identical to the name is the net's own namesake pad
+        // (tapping the GND pad renders "GND  GND" otherwise) - drop it.
+        if (rowBuf[0] != '\0' && strcmp(rowBuf, nameText) != 0) {
             rowLabel = rowBuf;
         }
     }

@@ -21,6 +21,10 @@
 #include "Probing.h"
 #include "JsonState.h"   // escapeJson() for the overlay serialiser
 
+// Defined with the serializer below; the mutators above it consult it so
+// session-only overlays never dirty persistent state.
+static bool overlayIsSessionOnly(const char* name);
+
 // Global overlay state
 GraphicOverlayState graphicOverlayState;
 
@@ -130,7 +134,14 @@ int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol
         memcpy(overlays[existing].colors, colors, numPixels * sizeof(uint32_t));
         overlays[existing].enabled = true;
         needsRender = true;
-        globalState.markDirty();
+        // Session-only overlays (_PARTS_/_GUIDE_/_SELFTEST_) are never
+        // serialized, so they must not dirty the persistent state: the
+        // ambient PartLabels service recomposes _PARTS_ on every highlight
+        // edge and bloom/inspect expiry, and marking dirty here made a pure
+        // cosmetic repaint trigger idle auto-saves, false "unsaved edits"
+        // messages, and (worst) USB-eject writing stale RAM state over
+        // host-edited files (sweep finding, medium).
+        if (!overlayIsSessionOnly(name)) globalState.markDirty();
         return existing;
     }
     
@@ -163,8 +174,8 @@ int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol
     
     numOverlays++;
     needsRender = true;
-    
-    globalState.markDirty();
+
+    if (!overlayIsSessionOnly(name)) globalState.markDirty();
 
     return slot;
 }
@@ -183,11 +194,12 @@ bool GraphicOverlayState::removeOverlay(int index) {
     }
     
     if (overlays[index].enabled || overlays[index].name[0] != '\0') {
+        bool sessionOnly = overlayIsSessionOnly(overlays[index].name);
         overlays[index].clear();
         numOverlays--;
         if (numOverlays < 0) numOverlays = 0;
         needsRender = true;
-        globalState.markDirty();
+        if (!sessionOnly) globalState.markDirty();
         return true;
     }
     
