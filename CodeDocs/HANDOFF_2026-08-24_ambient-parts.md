@@ -40,9 +40,17 @@ gateway to ADC0-3; his netlist (rails, GND, DAC, rows 29+59 all K-resident)
 plus stacking duplicates (default stackPaths 2 / slot stackRails 3)
 consumed all 8, and every tier of `buildEphemeralRoute` terminates on a
 free K row. Pre-existing + HIL-documented (6821eec); the ambient project
-open (b1ce6fb) turned it from a corner into the steady state. Confirmed
-independently by a 10-agent workflow (branch diff holds NO gate mechanism)
-and a route-walk agent (algorithm walked against the pasted occupancy).
+open (b1ce6fb) turned it from a corner into the steady state. Decisive
+evidence: Kevin's `i!` paste plus one route-walk agent (algorithm walked
+against the pasted occupancy); a separate 3-tracer + verification workflow
+independently established the branch diff holds no gate mechanism.
+
+Verification honesty: the RESERVATION half had full caller-analysis
+review; the SHARED-ROW FALLBACK half is verified by compiler + reasoning
+only. Its true test is exactly Kevin's saturated circuit: view currents,
+then confirm the circuit still works afterward - a teardown bug there
+would present as "circuit breaks after viewing currents," which would not
+obviously point at f86b243.
 
 Fix (f86b243): **(1)** ephemeral builder two-pass — virgin K rows first,
 then share a row wholly owned by the tapped node's net (pre-closed hops
@@ -96,7 +104,8 @@ uncommitted. Looks bench-pending; Kevin decides.
    showing; tap a net → wheel scrolls it till highlight fades; hold exits.
 3. Parts menu → Logic → 74HC00 → tap row → bloom → app gone.
 4. SSD1306 via Parts → Displays → DISPLAY routed → power → alive.
-5. `python3 test/hil/run_all.py` incl. the new test_ambient_parts.py.
+5. First-ever run of test_ambient_parts.py (expect harness fixes, not
+   firmware verdicts - it has never executed).
 6. Seed-DB `# VERIFY` editorial pass (gates B-M1 freeze).
 
 ## Software remaining
