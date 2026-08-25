@@ -24,6 +24,7 @@
 
 #include "Jerial.h"
 #include "NetVoltageScan.h"
+#include "RouteSafety.h"   // routingGeneration - the ant-hold reset signal
 #include "hardware/gpio.h"
 #include "hardware/structs/io_bank0.h"
 #ifdef DONOTUSE_SERIALWRAPPER
@@ -2085,15 +2086,24 @@ void renderNetCurrentAnts() {
   static int offsets[MAX_BRIDGES] = {0};
   static unsigned long lastUpdateMs = 0;
   static int resumeSlot = 0; // round-robin start after a budget overrun
-  // Scan hiccups (a missed tap ages a node past its freshness window) make
-  // pathCurrentKnown() flicker false for a moment; without a hold the ants
-  // visibly blink out. Keep animating on the last reading briefly.
-  // ponytail: after a netlist change path indices shift, so a held value
-  // can animate a rebuilt path with the old path's current for <=1.5s -
-  // cosmetic, and the scanner invalidates on its own fingerprint change.
-  static constexpr uint32_t kNetAntsHoldMs = 1500;
+  // Runtime persistence (Kevin, flashy-ants session): a stale tap window
+  // is NOT evidence of zero current, so a path keeps its last known
+  // current until FRESH data replaces it or the fabric is rebuilt (a
+  // rewire clears every hold below - which also kills the stale-index
+  // alias the old 1.5s timed cap existed to bound). The timed hold
+  // dropped ants whenever taps went stale for a moment (same-chip pair
+  // contention, drift retries) - random per-path chop against the net's
+  // other ants. Turning the current OFF still kills ants promptly: taps
+  // keep succeeding and fresh near-zero data drops through the vote.
   static float holdSigned[MAX_BRIDGES] = {0.0f};
   static uint32_t holdMs[MAX_BRIDGES] = {0};
+  static uint32_t holdRoutingGen = 0;
+  if (holdRoutingGen != routingGeneration) {
+    holdRoutingGen = routingGeneration;
+    for (int i = 0; i < MAX_BRIDGES; i++) {
+      holdMs[i] = 0;
+    }
+  }
   // Threshold hysteresis: a path hovering right at the minimum current
   // would otherwise blink its ants on/off as the (smoothed) reading
   // crosses back and forth. Once animating, keep going until the current
@@ -2144,8 +2154,8 @@ void renderNetCurrentAnts() {
       signedI = pathCurrentSigned_mA(i);
       holdSigned[i] = signedI;
       holdMs[i] = nowMs;
-    } else if (holdMs[i] != 0 && nowMs - holdMs[i] < kNetAntsHoldMs) {
-      signedI = holdSigned[i]; // scan hiccup - ride it out on the last value
+    } else if (holdMs[i] != 0) {
+      signedI = holdSigned[i]; // stale window - persist the last known value
     } else {
       continue;
     }

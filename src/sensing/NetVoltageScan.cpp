@@ -992,10 +992,14 @@ static void computePathCurrents() {
         }
         pathShown_mA[i] = pathShownOn[i] ? i_mA : 0.0f;
 
+        // Display consumers (OLED reading lines, netCurrent_mA) get the RAW
+        // smoothed current - sub-mA readings are information there (Kevin's
+        // ruling: snapping to 0 belongs to the ANTS only, which keep the
+        // deadband via pathShown_mA/pathCurrentSigned_mA above).
         NetCurrentInfo& info = netCurrentInfo[p.net];
-        if (!info.valid || fabsf(pathShown_mA[i]) > info.current_mA) {
+        if (!info.valid || fabsf(pathCurrent_mA[i]) > info.current_mA) {
             info.valid = true;
-            info.current_mA = fabsf(pathShown_mA[i]);
+            info.current_mA = fabsf(pathCurrent_mA[i]);
             info.voltage = 0.5f * (v1 + v2);
             if (dv >= 0) { // same delta the current came from (pair or nodes)
                 info.fromNode = n1;
