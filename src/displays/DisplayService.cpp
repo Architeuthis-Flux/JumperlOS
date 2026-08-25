@@ -316,8 +316,10 @@ ServiceStatus DisplayService::service() {
         // the same chunk next tick is safe. Bouncing to beacon on the first
         // NACK re-ran init per glitch: the repeated "DISPLAY alive" spam,
         // the garbage frames, and most of the slowness on the first bench.
+        flushRetryTotal++;
         if (++flushFails < 8) return ServiceStatus::BUSY;
         flushFails = 0;
+        lostTotal++;
         inst.state = DispState::ROUTED;
         inst.midFrame = false;
         inst.nextBeaconMs = now + DISP_BEACON_MS;
@@ -327,8 +329,22 @@ ServiceStatus DisplayService::service() {
         return ServiceStatus::BUSY;
     }
     flushFails = 0;
-    if (r == 0) inst.dirty = false;
+    if (r == 0) {
+        inst.dirty = false;
+        framesFlushed++;
+    }
     return ServiceStatus::BUSY;
+}
+
+void DisplayService::printStats(Stream* out) const {
+    if (inst.partIdx < 0) return;
+    static const char* stateNames[] = {"EMPTY", "ROUTED", "ALIVE", "YIELDED"};
+    out->printf("[disp] id=%s state=%s frames:%lu retries:%lu lost:%lu\n",
+                inst.desc ? inst.desc->id : "?",
+                stateNames[(int)inst.state & 3],
+                (unsigned long)framesFlushed,
+                (unsigned long)flushRetryTotal,
+                (unsigned long)lostTotal);
 }
 
 int DisplayService::activeDataNodes(int16_t out[2]) const {

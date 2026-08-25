@@ -45,6 +45,11 @@ public:
     // Cross-core read of two int8 fields - a torn read costs one scan round.
     int activeDataNodes(int16_t out[2]) const;
 
+    // The [disp] line in the i! dump. The chunk-retry fix MASKS bus glitches
+    // by design - this counter is what tells a healthy bus from one that is
+    // quietly retrying its way through every frame.
+    void printStats(Stream* out) const;
+
 private:
     DisplayService() = default;
     ~DisplayService() = default;
@@ -55,6 +60,9 @@ private:
     bool yieldNoted = false;
     bool acquireWarned = false;   // one line per acquire-failure episode
     uint8_t flushFails = 0;       // consecutive chunk errors (8 = panel lost)
+    uint32_t flushRetryTotal = 0; // cumulative chunk retries (glitch health)
+    uint32_t lostTotal = 0;       // beacon bounces after 8-in-a-row failures
+    uint32_t framesFlushed = 0;   // completed frames since boot
 
     void pollParts(uint32_t now);
     void attach(int partIdx, const DisplayDriverDesc* desc);

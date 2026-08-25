@@ -785,6 +785,14 @@ static uint32_t connectionsFingerprint() {
         const pathStruct& p = globalState.connections.paths[i];
         f = f * 31u + (uint32_t)(p.node1 * 3 + p.node2 * 5 + p.net * 7);
     }
+    // The display bus attaching/detaching must rebuild the scan list even
+    // when the netlist itself didn't change: a reload restores the part's
+    // bridges BEFORE the service attaches, so routeDataPins takes its
+    // "already routed" early-return and never touches the fingerprint -
+    // without this term the bus-net exclusion would disarm on every reboot.
+    int16_t bn[2];
+    int nbn = displayService.activeDataNodes(bn);
+    if (nbn == 2) f = f * 131u + (uint32_t)(bn[0] * 11 + bn[1] * 13);
     return f;
 }
 
@@ -1136,6 +1144,7 @@ static void printScanStats(Stream* out) {
     // physically continuous or the flow illusion is broken.
     printAntPathContinuity(out);
     printAntFlipStats(out);
+    displayService.printStats(out);
     out->flush();
 }
 
