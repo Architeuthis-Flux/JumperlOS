@@ -65,9 +65,8 @@ class: DISPLAY
   menu: SSD1306|128x32
   pop: 5
   i2c: [0x3C, 0x3D]
-  # VERIFY: 0.91in modules are usually VCC-GND-SCL-SDA (opposite of the
-  # 0.96in order above) - chosen as canonical here for exactly that reason
-  pins: [VCC, GND, SCL, SDA]
+  # Kevin's bench, 2026-08-25: his 0.91in modules are GND-VCC-SCL-SDA.
+  pins: [GND, VCC, SCL, SDA]
 
 - id: 40rgbx160_spi
   name: 40RGBX160
