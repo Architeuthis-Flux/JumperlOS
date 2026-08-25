@@ -574,7 +574,21 @@ static bool findNodeOnFabric(int node, int* chipOut, int* pinOut, bool* isXOut) 
 
 // Build a raw route from nodeA to nodeB (typically an ADC). Same fallback
 // tiers as the old NetVoltageScan builder, but gated on xStatus/yStatus too.
-static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
+//
+// allowSharedKRow (the 0.0 mA starvation fix, bench 2026-08-24): chip K's 8
+// y-rows are the ONLY gateway to ADC0-3, and a K-heavy netlist + stacking
+// duplicates can consume all of them - every tier below terminates on a K
+// row, so saturation = every tap noroute = every net displays 0.0 mA. The
+// fallback pass may land on a K row whose every closed crosspoint already
+// belongs to nodeA's OWN net (the row IS that net electrically, so joining
+// the high-Z ADC lane to it is lawful - the same insight GuideChecks'
+// chainBegin uses). Virgin rows are always preferred (the caller runs a
+// virgin-only pass first): a shared-row tap reads the net at K's junction
+// rather than at the node's hole, which flattens pair-tap deltas.
+// NetsToChipConnections' duplicate reservation is the complementary half
+// (it keeps rows virgin in the first place).
+static bool buildEphemeralRouteTiered(int nodeA, int nodeB, pathStruct* out,
+                                      bool allowSharedKRow) {
     memset(out, 0, sizeof(*out));
     for (int i = 0; i < 4; i++) {
         out->chip[i] = -1;
@@ -589,6 +603,24 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
     bool isXA, isXB;
     if (!findNodeOnFabric(nodeA, &chipA, &pinA, &isXA)) return false;
     if (!findNodeOnFabric(nodeB, &chipB, &pinB, &isXB)) return false;
+
+    int nodeANet = (nodeA >= 0 && nodeA < 256) ? nodeToNetIndex[nodeA] : -1;
+
+    // A K row is sharable when the router's own ledger says everything on
+    // it - the row claim and every closed lane - is nodeA's net.
+    auto kRowSharedByNet = [&](int y) -> bool {
+        if (!allowSharedKRow || nodeANet <= 0) return false;
+        if (globalState.connections.chipStates[CHIP_K].yStatus[y] != nodeANet)
+            return false;
+        uint16_t bits = lastChipXY[CHIP_K].connected[y];
+        if (bits == 0) return false;   // virgin rows go through yOk
+        for (int x = 0; x < 16; x++) {
+            if (!(bits & (1u << x))) continue;
+            if (globalState.connections.chipStates[CHIP_K].xStatus[x] != nodeANet)
+                return false;
+        }
+        return true;
+    };
 
     // Prefer: nodeB is ADC on chip K (the common sense-tap case)
     int adcChip = -1, adcX = -1;
@@ -614,6 +646,11 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
     auto yOk = [](int chip, int y) -> bool {
         return yRowFreeHW(chip, y) && yStatusFree(chip, y);
     };
+    // Every tier terminates on a chip-K row through THIS gate: virgin, or
+    // (fallback pass only) wholly owned by nodeA's net.
+    auto kRowOk = [&](int y) -> bool {
+        return yOk(CHIP_K, y) || kRowSharedByNet(y);
+    };
 
     int nHops = 0;
     int chipKY = -1;
@@ -625,7 +662,7 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
         int chip = otherChip;
         int pin = otherPin;
         int laneK = laneToChip(chip, CHIP_K);
-        if (laneK >= 0 && laneOk(chip, laneK) && yOk(CHIP_K, chip)) {
+        if (laneK >= 0 && laneOk(chip, laneK) && kRowOk(chip)) {
             out->chip[0] = chip;
             out->x[0] = laneK;
             out->y[0] = pin;
@@ -644,7 +681,7 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
                     continue;
                 for (int d = 0; d < 8; d++) {
                     int dLaneK = laneToChip(d, CHIP_K);
-                    if (dLaneK >= 0 && yOk(CHIP_K, d) && laneOk(d, dLaneK)) {
+                    if (dLaneK >= 0 && kRowOk(d) && laneOk(d, dLaneK)) {
                         out->chip[0] = chip;
                         out->x[0] = laneVia;
                         out->y[0] = pin;
@@ -664,7 +701,7 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
                 if (n == chip) continue;
                 int nLaneK = laneToChip(n, CHIP_K);
                 if (nLaneK < 0 || !yOk(n, 0) || !laneOk(n, nLaneK) ||
-                    !yOk(CHIP_K, n))
+                    !kRowOk(n))
                     continue;
                 for (int xc = 0; xc < 16 && chipKY < 0; xc++) {
                     if (globalState.connections.chipStates[chip].xMap[xc] != n)
@@ -703,7 +740,7 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
     if (adcChip == CHIP_K && otherIsX && otherChip == CHIP_K) {
         for (int d = 0; d < 8; d++) {
             int dLaneK = laneToChip(d, CHIP_K);
-            if (dLaneK >= 0 && yOk(CHIP_K, d) && laneOk(d, dLaneK)) {
+            if (dLaneK >= 0 && kRowOk(d) && laneOk(d, dLaneK)) {
                 out->chip[0] = CHIP_K;
                 out->x[0] = otherPin;
                 out->y[0] = d;
@@ -723,7 +760,7 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
             int laneK = laneToChip(c, CHIP_K);
             if (laneSrc >= 0 && laneK >= 0 && yOk(otherChip, c) &&
                 laneOk(c, laneSrc) && yOk(c, 0) && laneOk(c, laneK) &&
-                yOk(CHIP_K, c)) {
+                kRowOk(c)) {
                 out->chip[0] = otherChip;
                 out->x[0] = otherPin;
                 out->y[0] = c;
@@ -744,6 +781,43 @@ static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
 
     // Generic same-chip or refuse — non-ADC pairs not needed yet for scanner
     return false;
+}
+
+static bool buildEphemeralRoute(int nodeA, int nodeB, pathStruct* out) {
+    // Pass 1: virgin K rows only (the historical behavior - taps land on
+    // their own copper, pair deltas stay honest). Pass 2 only when the
+    // fabric is saturated: share a K row wholly owned by nodeA's net.
+    bool ok = buildEphemeralRouteTiered(nodeA, nodeB, out, false);
+    if (!ok) ok = buildEphemeralRouteTiered(nodeA, nodeB, out, true);
+    if (!ok) return false;
+
+    // A shared-row route may include a crosspoint the net's REAL wiring
+    // already closed (e.g. joining onto K row y via the node's own lane).
+    // Drop those hops: they need no send, and - load-bearing - teardown
+    // (fastDisconnectPath / the error unwind) must NEVER open a crosspoint
+    // the user's circuit owns. Pass-1 routes only use virgin lanes, so the
+    // filter is inert there. The ADC hop can never be pre-closed (its lane
+    // is required column-free), so at least one hop always survives.
+    int nodeANet = (nodeA >= 0 && nodeA < 256) ? nodeToNetIndex[nodeA] : -1;
+    int w = 0;
+    for (int h = 0; h < 4; h++) {
+        int c = out->chip[h], x = out->x[h], y = out->y[h];
+        if (c < 0 || x < 0 || y < 0) continue;
+        bool preClosed = (lastChipXY[c].connected[y] & (1u << x)) != 0 &&
+                         nodeANet > 0 &&
+                         globalState.connections.chipStates[c].xStatus[x] == nodeANet;
+        if (preClosed) continue;
+        out->chip[w] = (int8_t)c;
+        out->x[w] = (int8_t)x;
+        out->y[w] = (int8_t)y;
+        w++;
+    }
+    for (; w < 4; w++) {
+        out->chip[w] = -1;
+        out->x[w] = -1;
+        out->y[w] = -1;
+    }
+    return true;
 }
 
 static void claimPathLanes(const pathStruct& p, int net) {
