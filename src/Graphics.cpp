@@ -1956,7 +1956,18 @@ static constexpr int kNetAntsVoteFrames = 3;
 
 // This is a cosmetic background job in the tight core 2 loop: hard cap on
 // time spent per call, checked between paths.
-static constexpr unsigned long kNetAntsBudgetUs = 250;
+//
+// SIZING (flashy-ants session, the fast-then-slow chop): a path's pixel
+// pass costs ~20-50us, so ~9 simultaneously animated paths (a real bench
+// board at high current) overran the old 250us cap most frames - and an
+// overrun frame simply DOESN'T DRAW the remaining paths, which then lurch
+// ahead when their turn rotates back in. Perceived as ants surging fast
+// then slow, per path, unsynchronized. 1200us covers ~2x the realistic
+// worst case; the rotation below stays as the safety valve for
+// pathological path counts only. antBudgetOverrunTotal counts real
+// overruns (printed in the [ants] flips line) so the sizing stays honest.
+static constexpr unsigned long kNetAntsBudgetUs = 1200;
+static volatile uint32_t antBudgetOverrunTotal = 0;
 
 // Geometry of one path's drawn wire as an ordered pixel sequence in
 // post-reversal wireStatus space (position 0 = the outer tip of the
@@ -2123,6 +2134,12 @@ void renderNetCurrentAnts() {
   float deltaSeconds =
       (lastUpdateMs == 0) ? 0.0f : (nowMs - lastUpdateMs) / 1000.0f;
   lastUpdateMs = nowMs;
+  // A stalled frame (flash save, OLED write, tap burst) must not teleport
+  // the ants: cap the phase advance at 100ms worth. Losing a little time
+  // reads as a hiccup; a multi-step jump reads as a speed surge.
+  if (deltaSeconds > 0.1f) {
+    deltaSeconds = 0.1f;
+  }
 
   // Collect the paths that get ants this frame and advance their phases
   // (cheap arithmetic; the pixel pass below is the budgeted part).
@@ -2235,6 +2252,7 @@ void renderNetCurrentAnts() {
       // ponytail: the resume rotation temporarily bypasses strongest-first
       // claiming; only matters in sustained-overrun frames the budget
       // makes rare.
+      antBudgetOverrunTotal = antBudgetOverrunTotal + 1;
       resumeSlot = (resumeSlot + s) % count;
       return;
     }
@@ -2409,7 +2427,9 @@ void printAntFlipStats(Stream *out) {
 #else
   uint32_t now = millis();
   float seconds = (antFlipResetMs == 0) ? 0.0f : (now - antFlipResetMs) / 1000.0f;
-  out->printf("[ants] flips:%lu in %.1fs", (unsigned long)antFlipTotal, seconds);
+  out->printf("[ants] flips:%lu overruns:%lu in %.1fs",
+              (unsigned long)antFlipTotal,
+              (unsigned long)antBudgetOverrunTotal, seconds);
   int pathLimit = (numberOfPaths < MAX_BRIDGES) ? numberOfPaths : MAX_BRIDGES;
   for (int i = 0; i < pathLimit; i++) {
     if (antFlipCount[i] != 0) {
@@ -2419,6 +2439,7 @@ void printAntFlipStats(Stream *out) {
   out->println();
   memset(antFlipCount, 0, sizeof(antFlipCount));
   antFlipTotal = 0;
+  antBudgetOverrunTotal = 0;
   antFlipResetMs = now;
 #endif // OG_JUMPERLESS
 }
