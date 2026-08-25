@@ -28,6 +28,23 @@ smoother":
   `overruns:` counter in the [ants] line. Bench: overruns:0, flips ~0,
   "smoother".
 
+## BUG SWEEP (23:15): 17 confirmed findings, 15 fixed in 11b5a20
+
+A 33-agent adversarial sweep (6 dimensions -> dedup -> refute-biased
+verification) over the whole branch. 10 findings refuted; 17 confirmed;
+15 fixed (see 11b5a20's message for the full list - highs: bg-tick GC
+bound, bg root pointer across soft reboot, ant hold re-latch after
+rebuild, the Wire1 setSDA panic class -> DisplayService is ALWAYS
+soft-I2C until real Wire1 arbitration exists). ALL BENCH-PENDING - the
+bg fixes especially want a Ctrl-D-after-bg_start test and a
+place/rewire/pull-component pass on the ants.
+
+Two confirmed-but-accepted (not fixed):
+- One cosmetic stale ant frame when waitCore2 times out mid-frame during
+  a refresh (rare, self-healing next frame).
+- Dropped-duplicate lane-claim leak in couldntFindPath (verifier rated
+  it plausible-only; would shrink the reserved K rows if real).
+
 Watch-items left open from the session data:
 - Path 28→GND read 19 mA vs ~10 on its siblings all night - if the
   meter disagrees, check that path's crosspoint-count assumption (2xp).
