@@ -52,11 +52,28 @@ static bool monoOledInit(DisplayInstance& d) {
     }
     d.flushCursor = 0;
     d.midFrame = false;
+    d.shadowValid = false;   // GDDRAM is unknown after (re)init - the next
+                             // frame flushes fully, deltas resume after
     return true;
+}
+
+// One chunk's span at `cursor`: at most chunkBytes, never crossing a page.
+static inline uint16_t chunkSpan(const DisplayInstance& d, uint16_t cursor) {
+    const uint16_t w = d.desc->w;
+    uint16_t n = d.chunkBytes;
+    uint16_t left = w - (cursor % w);
+    if (n > left) n = left;
+    if (n > d.desc->fbBytes - cursor) n = (uint16_t)(d.desc->fbBytes - cursor);
+    return n;
 }
 
 // Chunked page-mode flush: position (page + column) then stream bytes, at
 // most d.chunkBytes per call. The frame is fb in MONO_VLSB page order.
+// DELTA FLUSH: chunks matching the shadow (what the panel already holds)
+// are skipped, so a frame costs only its changed bytes. On a ~250 kHz soft
+// bus that is the anti-tearing lever - a full-frame sweep takes ~250 ms and
+// shears moving content, while the animation's real per-frame delta is a
+// handful of chunks that land in tens of ms.
 static int monoOledFlushChunk(DisplayInstance& d) {
     if (d.fb == nullptr || d.desc == nullptr) return 0;
     const uint16_t w = d.desc->w;
@@ -65,17 +82,23 @@ static int monoOledFlushChunk(DisplayInstance& d) {
         d.flushCursor = 0;
         d.midFrame = true;
     }
+    if (d.shadow != nullptr && d.shadowValid) {
+        while (d.flushCursor < frameBytes) {
+            uint16_t span = chunkSpan(d, d.flushCursor);
+            if (memcmp(d.fb + d.flushCursor, d.shadow + d.flushCursor, span) != 0)
+                break;
+            d.flushCursor += span;
+        }
+    }
     if (d.flushCursor >= frameBytes) {
         d.midFrame = false;
+        if (d.shadow != nullptr) d.shadowValid = true;
         return 0;
     }
 
     uint16_t page = d.flushCursor / w;
     uint16_t col = d.flushCursor % w;
-    uint16_t left = w - col;                  // never cross a page per chunk
-    uint16_t n = d.chunkBytes;
-    if (n > left) n = left;
-    if (n > frameBytes - d.flushCursor) n = frameBytes - d.flushCursor;
+    uint16_t n = chunkSpan(d, d.flushCursor);
 
     // ONE merged transaction: three 0x80-continuation position commands,
     // then a 0x40 data run - so a soft-bus chunk pays a single
@@ -90,9 +113,11 @@ static int monoOledFlushChunk(DisplayInstance& d) {
     memcpy(tx + 7, d.fb + d.flushCursor, n);
     if (!displayI2cWriteRaw(d, tx, (uint16_t)(7 + n))) return -1;
 
+    if (d.shadow != nullptr) memcpy(d.shadow + d.flushCursor, d.fb + d.flushCursor, n);
     d.flushCursor += n;
     if (d.flushCursor >= frameBytes) {
         d.midFrame = false;
+        if (d.shadow != nullptr) d.shadowValid = true;
         return 0;
     }
     return 1;

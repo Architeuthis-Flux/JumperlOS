@@ -14,6 +14,7 @@
 #include "Graphics.h"       // b.print - LED matrix text
 #include "JumperlOS.h"      // jOS.serviceInner()
 #include "Menus.h"          // inClickMenu
+#include "NetManager.h"     // findNodeInNet - power-route conflict guard
 #include "PartDb.h"
 #include "PartLabels.h"     // bloom nudge after a placement
 #include "PartPlacement.h"  // applyPartPlacement, partGeometryOk
@@ -39,6 +40,8 @@ int partsProbeButton(void) {
 // FileManager's click-menu palette (the runPicker look).
 static const uint32_t PARTS_HEADER_COLOR = 0x001008;
 static const uint32_t PARTS_ITEM_COLOR = 0x100810;
+static const uint32_t PARTS_TAP_DONE_COLOR = 0x000C04;   // rows already tapped
+static const uint32_t PARTS_TAP_FLASH_COLOR = 0x0A2A08;  // the just-accepted tap
 
 // One shared scratch list for both picker levels. 96 covers the largest
 // class with headroom (111 records TOTAL in the seed DB); a class that ever
@@ -167,6 +170,11 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
         snprintf(lineBuf, sizeof(lineBuf), "TAP ROW");
     }
     b.print(lineBuf, PARTS_ITEM_COLOR, 0xFFFFFF, 0, 1, 1);
+    // Rows already tapped for this part stay marked (Kevin's ruling: every
+    // accepted tap needs breadboard LED confirmation).
+    for (int u = 0; u < nUsed; u++) {
+        b.lightUpNode(usedRows[u], PARTS_TAP_DONE_COLOR);
+    }
     requestLedShow(2);
     if (oled.oledConnected) {
         char text[96];
@@ -230,7 +238,13 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
                 digits[nDigits] = '\0';
             } else if ((c == '\r' || c == '\n') && nDigits > 0) {
                 int row = atoi(digits);
-                if (row >= 1 && row <= 60) return row;
+                if (row >= 1 && row <= 60) {
+                    b.lightUpNode(row, PARTS_TAP_FLASH_COLOR);
+                    requestLedShow(2);
+                    delay(180);   // the confirmation flash lands before the
+                                  // next prompt repaints
+                    return row;
+                }
                 Serial.println("  row must be 1-60");
                 nDigits = 0;
                 digits[0] = '\0';
@@ -253,7 +267,12 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
             for (int u = 0; u < nUsed; u++) {
                 if (usedRows[u] == reading) { used = true; break; }
             }
-            if (!used) return reading;
+            if (!used) {
+                b.lightUpNode(reading, PARTS_TAP_FLASH_COLOR);
+                requestLedShow(2);
+                delay(180);   // visible confirmation before the next prompt
+                return reading;
+            }
             // A held probe re-emits its row every 500 ms - nudge once per
             // distinct offending row, not per emission.
             if (reading != lastNudgedRow) {
@@ -335,6 +354,37 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
         tmp.baseRow = (int16_t)baseRow;
         for (int j = 0; j < nRows && j < tmp.numPins; j++) {
             tmp.pins[j].offset = (int8_t)(rows[j] - baseRow);
+        }
+    }
+
+    // Power routes at placement (Kevin's ruling, 2026-08-25 - supersedes the
+    // design-phase "the user wires power" contract): a power-class pin
+    // bridges to the rail on its half, a gnd-class pin to GND. Rails still
+    // obey the user, so nothing is hot until the rails are. A row whose net
+    // already holds the OPPOSING special node is left unrouted - bridging it
+    // would short rail to GND through our own bridge; PartLabels' warning
+    // (VCC_TO_GND / GND_TO_HOT) tells the user instead.
+    auto rowNetHas = [](int row, int specialNode) {
+        int netNum = findNodeInNet(row);
+        if (netNum <= 0 || netNum >= MAX_NETS) return false;
+        const netStruct& net = globalState.connections.nets[netNum];
+        if (net.number != netNum) return false;
+        for (int n = 0; n < MAX_NODES && net.nodes[n] != 0; n++) {
+            if (net.nodes[n] == specialNode) return true;
+        }
+        return false;
+    };
+    for (int j = 0; j < tmp.numPins && j < MAX_PART_PINS; j++) {
+        PartPin& pin = tmp.pins[j];
+        if (pin.connect >= 0) continue;   // an explicit DB binding wins
+        int node = partPinNode(tmp, pin);
+        if (node < 1 || node > 60) continue;
+        if (pin.pinClass == 1) {
+            if (rowNetHas(node, GND)) continue;
+            pin.connect = (node <= 30) ? TOP_RAIL : BOTTOM_RAIL;
+        } else if (pin.pinClass == 2) {
+            if (rowNetHas(node, TOP_RAIL) || rowNetHas(node, BOTTOM_RAIL)) continue;
+            pin.connect = GND;
         }
     }
 

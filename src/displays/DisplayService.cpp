@@ -120,7 +120,10 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
     }
 
     inst.fb = new (std::nothrow) uint8_t[desc->fbBytes];
-    if (inst.fb == nullptr) {
+    inst.shadow = new (std::nothrow) uint8_t[desc->fbBytes];
+    if (inst.fb == nullptr || inst.shadow == nullptr) {
+        delete[] inst.fb;      inst.fb = nullptr;
+        delete[] inst.shadow;  inst.shadow = nullptr;
         displayBusRelease(inst);
         inst.desc = nullptr;
         inst.partIdx = -1;
@@ -128,6 +131,7 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
         return;
     }
     memset(inst.fb, 0, desc->fbBytes);
+    inst.shadowValid = false;
     // Soft chunk 16: the 7-byte position header is fixed, so 8 data bytes
     // spent >half the bus time on overhead; 16 lands ~1 ms per chunk at the
     // 250 kHz half-bit and cuts a 512-byte frame to 32 transactions.
@@ -143,7 +147,7 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
     Serial.print(inst.sdaPin);
     Serial.print(" scl=GP");
     Serial.print(inst.sclPin);
-    Serial.println(" (wire power to wake it)");
+    Serial.println(" (power rides the rails - beacon waiting)");
     Serial.flush();
 }
 
@@ -152,6 +156,11 @@ void DisplayService::detach() {
         delete[] inst.fb;
         inst.fb = nullptr;
     }
+    if (inst.shadow != nullptr) {
+        delete[] inst.shadow;
+        inst.shadow = nullptr;
+    }
+    inst.shadowValid = false;
     displayBusRelease(inst);
     // The part's bridges (if it still exists) are its own data now; a part
     // that left the table already took them down via removePartPlacement.

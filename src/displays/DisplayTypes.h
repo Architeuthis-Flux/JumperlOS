@@ -72,6 +72,12 @@ struct DisplayInstance {
 
     // Render
     uint8_t* fb = nullptr;              // heap on attach (fbBytes), freed on detach
+    uint8_t* shadow = nullptr;          // what the PANEL currently holds - the
+                                        // flush skips chunks that match, so a
+                                        // frame costs only its changed bytes
+                                        // (the anti-tearing lever on a slow bus)
+    bool shadowValid = false;           // false after init/re-init: panel GDDRAM
+                                        // is unknown, next frame flushes fully
     uint16_t flushCursor = 0;           // byte position within the current frame
     uint8_t chunkBytes = 16;            // per-tick flush budget (service-paced:
                                         // soft bus small, hardware larger,
