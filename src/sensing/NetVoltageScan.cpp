@@ -89,6 +89,10 @@ static const int kMaxScanNodes = 128;
 static int scanNodes[kMaxScanNodes];
 static int scanNodeCount = 0;
 static int scanIndex = 0;
+// Consecutive non-busy failures on the CURRENT round-robin node (one
+// immediate retry before advancing - the ant-coherence rule; see the
+// round-robin tap slot).
+static uint8_t nodeRetryCount = 0;
 static bool adcNodePresent[5]; // ADC0..ADC4 bridged into a net by the user
 static uint32_t lastFingerprint = 0;
 static unsigned long lastScanUs = 0;
@@ -163,6 +167,8 @@ static uint32_t tapFailDrift = 0;
 static uint32_t tapFailRingStale = 0; // ring couldn't serve a FRESH window
 static uint32_t tapOk = 0;
 static uint32_t tapPairOk = 0; // of tapOk, taps that read a path's both ends
+static uint32_t tapSeqPairOk = 0;  // sequential same-channel pairs (fallback)
+static uint32_t tapPairAsym = 0;   // pairs refused for unequal route hops
 
 // Pairwise differential taps (debug.net_scan_pair_taps): a path's two ends
 // read from the SAME ring sweeps in one dwell. The aligned delta lands
@@ -369,6 +375,23 @@ static bool pairSenseTap(int node1, int node2, int adcA, int adcB,
         noteRouteFail(node2, adcB, rc2);
         fastDisconnectPath(&h1);
         tapFailNoRoute++;
+        return false;
+    }
+    // Hop matching (Kevin's ruling, flashy-ants session): dv only cancels
+    // route-dependent systematics when both ends take routes of the same
+    // SHAPE. A 2-hop GND route paired with a 4-hop bounced row route keeps
+    // the asymmetry in every sample - refuse it here and let the caller's
+    // sequential same-channel fallback tap both ends through their natural
+    // routes on ONE channel instead.
+    int hops1 = 0, hops2 = 0;
+    for (int h = 0; h < 4; h++) {
+        if (h1.path.chip[h] >= 0 && h1.path.x[h] >= 0 && h1.path.y[h] >= 0) hops1++;
+        if (h2.path.chip[h] >= 0 && h2.path.x[h] >= 0 && h2.path.y[h] >= 0) hops2++;
+    }
+    if (hops1 != hops2) {
+        fastDisconnectPath(&h2);
+        fastDisconnectPath(&h1);
+        tapPairAsym++;
         return false;
     }
     waitServicingEncoder(80); // CH446Q settle, both routes closed
@@ -721,13 +744,16 @@ static bool isScannable(int node) {
 }
 
 // A path endpoint the pair tap may close a sense route onto: any scannable
-// user node, plus the rails/DACs (measured sources now - a momentary high-Z
-// tap, same as every user node gets). GND stays excluded - it is the zero
-// reference and gets no stubs while in use; ADC endpoints measure
-// themselves through adcReadings[].
+// user node, the rails/DACs (measured sources), and - flashy-ants session,
+// 2026-08-24 - GND itself. Kevin's ruling: the ADCs are high-impedance, so
+// a momentary sense stub onto a live ground costs nothing, and the
+// GND-ended paths were EXACTLY the flip fingerprint (every flipping path
+// was single-ended; every pair-tapped path was rock solid across four i!
+// captures). The measured ground potential rides in pathPairDv only;
+// nodeVoltage[GND] stays pinned at 0 (recordTapVoltage skips GND). ADC
+// endpoints still measure themselves through adcReadings[].
 static bool pairTapEligible(int node) {
     if (node <= 0 || node >= NODE_VOLTAGE_MAX) return false;
-    if (node == GND) return false;
     if (node >= ADC0 && node <= ADC4) return false;
     if (node == ADC7_PROBE) return false;
     return true;
@@ -786,6 +812,7 @@ static void rebuildScanList() {
         }
     }
     if (scanIndex >= scanNodeCount) scanIndex = 0;
+    nodeRetryCount = 0;   // new scan list: no retry debt carries over
 }
 
 // The commanded voltage for source k (kSourceNodes order). What
@@ -836,6 +863,11 @@ static inline bool voltageFresh(int node, uint32_t ms);
 // per-node EMA. Smoothing matches on both branches: alpha 0.3 while the
 // previous value is fresh, seed otherwise.
 static void recordTapVoltage(int node, float volts) {
+    // GND stays PINNED at 0 (fillKnownSources re-asserts it every pass): a
+    // pair tap may MEASURE ground now (see pairTapEligible), but its value
+    // rides in pathPairDv only - writing it here would wobble the zero
+    // reference every non-pair consumer leans on.
+    if (node == GND) return;
     uint32_t ms = millis();
     for (int k = 0; k < 4; k++) {
         if (node != kSourceNodes[k]) continue;
@@ -996,9 +1028,9 @@ static void printSenseRoute(int node, int adc, Stream* out) {
 // needs these whether or not the user has the current display on.
 void printTapCounters(Stream* out) {
     if (!out) out = &Serial;
-    out->printf("[nvscan] taps ok:%lu (pair:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
-                tapOk, tapPairOk, tapFailNoRoute, tapFailAdcBusy, tapFailDrift, tapFailRingStale,
-                tapOneShot);
+    out->printf("[nvscan] taps ok:%lu (pair:%lu seqpair:%lu asym:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
+                tapOk, tapPairOk, tapSeqPairOk, tapPairAsym, tapFailNoRoute, tapFailAdcBusy,
+                tapFailDrift, tapFailRingStale, tapOneShot);
 }
 
 static void printScanStats(Stream* out) {
@@ -1154,15 +1186,40 @@ static int dueSourceIndex(void) {
     return best;
 }
 
+// Sequential same-channel pair: both ends tapped back-to-back on ONE ADC,
+// a few ms apart (each dwell ~1.2ms) - versus SECONDS apart in the plain
+// round-robin, which is what made the single-ended paths' ants flip while
+// every true-pair path sat rock solid (the four-capture i! fingerprint).
+// Channel offsets cancel in dv by construction (same ADC), and a same-chip
+// pair - whose two routes contend for the chip's one SF lane, so a true
+// two-channel pair cannot route - naturally gets the same route SHAPE for
+// both ends: hop-matched per Kevin's ruling. This is also the scan's
+// "single ADC when space is tight" mode (Kevin, 2026-08-24): it needs only
+// ONE free chip-K row where a true pair needs two.
+static bool seqPairTap(int pathIdx, int node1, int node2, int adcA) {
+    float v1, v2;
+    if (!senseNodeVoltage(node1, adcA, &v1)) return false;
+    if (!senseNodeVoltage(node2, adcA, &v2)) return false;
+    recordTapVoltage(node1, v1 - scanZeroOffset[adcA]);
+    recordTapVoltage(node2, v2 - scanZeroOffset[adcA]);
+    // dv straight from the raw pair: the shared channel's zero offset is
+    // common to both ends and cancels in the subtraction.
+    pathPairDv[pathIdx] = v1 - v2;
+    pathPairDvMs[pathIdx] = millis();
+    tapSeqPairOk++;
+    return true;
+}
+
 // One pair-tap slot: the next path with a tappable end gets its tap - both
-// ends at once on two channels when a second one is free, else the one
-// tappable end single-ended (so the slot still gathers something). Returns
-// false when no path qualifies and the caller should fall back to the
-// plain node round-robin. adcA is already acquired by the caller; the
-// second channel is freed with it by the caller's infraReleaseAdc (which
-// releases every channel this user owns). Pair taps still run serially,
-// one path per tap - a pair holds 2 of the 4 routable channels for its
-// ~1.2ms dwell, less than the full 0x0F mask a plain tap can acquire.
+// ends at once on two channels when a second one is free, else a sequential
+// same-channel pair, else the one tappable end single-ended (so the slot
+// still gathers something). Returns false when no path qualifies and the
+// caller should fall back to the plain node round-robin. adcA is already
+// acquired by the caller; the second channel is freed with it by the
+// caller's infraReleaseAdc (which releases every channel this user owns).
+// Pair taps still run serially, one path per tap - a pair holds 2 of the 4
+// routable channels for its ~1.2ms dwell, less than the full 0x0F mask a
+// plain tap can acquire.
 static bool pairTapSlot(int adcA) {
     int numPaths = livePathCount();
     if (numPaths <= 0) return false;
@@ -1194,10 +1251,16 @@ static bool pairTapSlot(int adcA) {
                     pathPairDvMs[i] = millis();
                     return true;
                 }
-                // Pair tap failed (route/drift/ring) - single-ended below,
-                // so a lane-contended path still gets its nodes refreshed.
+                // Pair tap refused (asymmetric hops, lane contention) or
+                // its dwell failed - the sequential same-channel pair below
+                // still gets a coherent dv where single-ended could not.
             }
-            // No second channel free right now - single-ended below.
+            // No second channel, or the true pair didn't take: sequential
+            // same-channel pair on adcA (offset-cancelling, ~3ms end to
+            // end, needs only one free K row).
+            if (seqPairTap(i, p.node1, p.node2, adcA)) return true;
+            // Both pair shapes failed (route/drift) - single-ended below,
+            // so a contended path still gets one node refreshed.
         }
         int node;
         if (e1 && e2) {
@@ -1341,17 +1404,29 @@ void serviceNetVoltageScan(void) {
                 // channel/route wasn't available).
             } else if (scanNodeCount > 0) {
                 int node = scanNodes[scanIndex];
-                // Advance round-robin unless the ADC was busy (retry then)
                 uint32_t busyBefore = tapFailAdcBusy;
                 float volts;
                 bool ok = senseNodeVoltage(node, adc, &volts);
-                if (ok || tapFailAdcBusy == busyBefore) {
-                    scanIndex = (scanIndex + 1) % scanNodeCount;
-                }
                 if (ok) {
                     // Smoothing lives in recordTapVoltage: shot-to-shot ADC
                     // noise is +/-20mV, whole milliamps over a 30-ohm path.
                     recordTapVoltage(node, volts - scanZeroOffset[adc]);
+                    nodeRetryCount = 0;
+                    scanIndex = (scanIndex + 1) % scanNodeCount;
+                } else if (tapFailAdcBusy != busyBefore) {
+                    // Channel contention, not the node's fault: retry next
+                    // pass without burning a retry.
+                } else if (++nodeRetryCount >= 2) {
+                    // Ant coherence (flashy-ants session, fix 3): a failed
+                    // tap used to wait a FULL round-robin cycle for its next
+                    // try, leaving its paths stale while siblings refreshed
+                    // - per-path ant churn desync was the visible result.
+                    // One immediate retry bounds the age spread; a node that
+                    // fails twice running (a genuinely floating leg
+                    // drift-fails forever, by design) yields so it cannot
+                    // starve the rest of its net.
+                    nodeRetryCount = 0;
+                    scanIndex = (scanIndex + 1) % scanNodeCount;
                 }
             }
         }
