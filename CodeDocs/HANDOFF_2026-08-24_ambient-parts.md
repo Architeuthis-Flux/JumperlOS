@@ -1,5 +1,43 @@
 # Handoff — 2026-08-24: ambient parts, the 0.0 mA hunt, and the repo diet
 
+## LATE-NIGHT UPDATE (22:30): the current-ants arc, BENCH-VERIFIED ✔
+
+Kevin drove a live A/B session (multimeter in series) through four more
+commits, each layer pinned by its own counter, ending with "yes it's
+smoother":
+
+- **f86b243 CONFIRMED on hardware** — taps ok climbed (69k+), noroute
+  residual ~1%, currents back everywhere.
+- **cb6ac6f pair coherence**: the four-capture `i!` fingerprint showed
+  every flipping ant was single-ended and every pair-tapped path rock
+  solid → GND became pair-eligible (nodeVoltage[GND] stays pinned;
+  measured ground rides pathPairDv only), hop-asymmetric pairs refused
+  (Kevin's ruling: dv only cancels what is common to both routes),
+  seqPairTap = both ends back-to-back on ONE channel as universal
+  fallback, retry-priority in the round robin.
+- **d4a41cc selectable strategy**: debug.net_scan_pair_taps 0=off /
+  1=SEQ (default, "how we had it originally") / 2=true pair. A/B result:
+  both modes match the multimeter within ~1%; seq is quieter (flips:0
+  vs path9:6) → seq stays default.
+- **3b073e7**: ants persist through stale windows (hold cleared by
+  routingGeneration, not a timer); sub-mA snapping is ANTS-ONLY now -
+  netCurrentInfo carries the raw EMA (OLED shows 0.3 mA, not 0.0).
+- **b0a64dc**: the residual fast-then-slow chop was the RENDER BUDGET -
+  ~9 animated paths overran 250us/frame and skipped paths lurched on
+  rotation return. Budget → 1200us, deltaSeconds clamped to 100ms,
+  `overruns:` counter in the [ants] line. Bench: overruns:0, flips ~0,
+  "smoother".
+
+Watch-items left open from the session data:
+- Path 28→GND read 19 mA vs ~10 on its siblings all night - if the
+  meter disagrees, check that path's crosspoint-count assumption (2xp).
+- One capture showed net-7 paths' ant geometry flap (staple → rows,
+  ceded:10) - likely the i! continuity print tearing on core 1's
+  mid-frame filledPaths rewrite; if visual chop ever returns, add a
+  `relocations:` counter to convict/acquit real geometry relocation.
+- HIL: zero-load displayed-mA assertions need a tolerance now (raw EMA,
+  not deadband-gated 0.0).
+
 Branch: **dev** (the old projects-guided-placement, renamed per Kevin's
 cleanup ruling). Every commit builds green V5+OG. Plan of record:
 `~/.claude/plans/jumperlos-codedocs-guidessimplification-velvet-bird.md`;
