@@ -54,6 +54,13 @@ Watch-items left open from the session data:
   `relocations:` counter to convict/acquit real geometry relocation.
 - HIL: zero-load displayed-mA assertions need a tolerance now (raw EMA,
   not deadband-gated 0.0).
+- HIL blind spot (from the tap-registration fix d1b335d/3bc6b10): the
+  probe_tap sim injects into the Probing CACHE continuously (fills in
+  whenever the real read is <=0), so wait-for-N-stable-reads code that
+  can NEVER fire against the real once-per-500ms contract passes under
+  sim - and partsTapForRow's direct justReadProbe calls bypass the sim
+  entirely (its serial twin `<row> + enter` is its only HIL path). Any
+  future probe-listen test needs a hardware pass before it counts.
 
 Branch: **dev** (the old projects-guided-placement, renamed per Kevin's
 cleanup ruling). Every commit builds green V5+OG. Plan of record:
