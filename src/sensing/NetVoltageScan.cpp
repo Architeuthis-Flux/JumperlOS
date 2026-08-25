@@ -170,16 +170,23 @@ static uint32_t tapPairOk = 0; // of tapOk, taps that read a path's both ends
 static uint32_t tapSeqPairOk = 0;  // sequential same-channel pairs (fallback)
 static uint32_t tapPairAsym = 0;   // pairs refused for unequal route hops
 
-// Pairwise differential taps (debug.net_scan_pair_taps): a path's two ends
-// read from the SAME ring sweeps in one dwell. The aligned delta lands
-// here, per path; computePathCurrents prefers it over subtracting two
-// round-robin node samples taken up to a full scan cycle apart.
-// KNOWN LIMITATION: a differential read cancels common-mode/bias but turns
-// per-channel GAIN mismatch into an error proportional to V (1% @ 3V =
-// 30mV - the size of the problem being fixed). Mitigated by alternating
-// which node rides which channel each pass (pairSwapPhase), so the
-// mismatch averages out of the EMAs to first order; per-channel
-// adcSpread/adcZero calibration still applies underneath.
+// Pairwise differential taps. debug.net_scan_pair_taps selects the
+// STRATEGY (Kevin's A/B ask, flashy-ants session - flip it live with
+// `~ debug.net_scan_pair_taps = N`, no reboot):
+//   0 = off (plain round-robin only)
+//   1 = SEQUENTIAL pair, the DEFAULT: both ends back-to-back on ONE
+//       channel (~3ms apart). One route at a time on one ADC - "how we
+//       had it originally" - channel offsets/gain cancel in dv entirely
+//       (same channel), only the 3ms of drift between dwells survives.
+//   2 = TRUE pair: both ends in one dwell on two channels, hop-matched
+//       routes only (falls back to sequential when refused). Zero time
+//       skew, but per-channel GAIN mismatch turns into an error
+//       proportional to V (1% @ 3V = 30mV); mitigated by alternating
+//       which node rides which channel (pairSwapPhase) so it averages
+//       out of the EMAs to first order.
+// Either way the aligned delta lands here, per path; computePathCurrents
+// prefers it over subtracting two round-robin node samples taken up to a
+// full scan cycle apart.
 static float pathPairDv[MAX_BRIDGES];
 static uint32_t pathPairDvMs[MAX_BRIDGES];
 static int pairPathIndex = 0;
@@ -1028,8 +1035,11 @@ static void printSenseRoute(int node, int adc, Stream* out) {
 // needs these whether or not the user has the current display on.
 void printTapCounters(Stream* out) {
     if (!out) out = &Serial;
-    out->printf("[nvscan] taps ok:%lu (pair:%lu seqpair:%lu asym:%lu) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
-                tapOk, tapPairOk, tapSeqPairOk, tapPairAsym, tapFailNoRoute, tapFailAdcBusy,
+    int m = jumperlessConfig.debug.net_scan_pair_taps;
+    out->printf("[nvscan] taps ok:%lu (pair:%lu seqpair:%lu asym:%lu mode:%s) noroute:%lu adcbusy:%lu drift:%lu ringstale:%lu oneshot:%lu\n",
+                tapOk, tapPairOk, tapSeqPairOk, tapPairAsym,
+                m == 2 ? "pair" : (m == 1 ? "seq" : "off"),
+                tapFailNoRoute, tapFailAdcBusy,
                 tapFailDrift, tapFailRingStale, tapOneShot);
 }
 
@@ -1233,31 +1243,34 @@ static bool pairTapSlot(int adcA) {
         bool e2 = pairTapEligible(p.node2);
         if (!e1 && !e2) continue;
         if (e1 && e2) {
-            int adcB = infraAcquireAdc(INFRA_ADC_NVSCAN,
-                                       (uint8_t)(0x0F & ~(1u << adcA)), true);
-            if (adcB >= 0) {
-                // Alternate which node rides which channel each pass so a
-                // per-channel gain mismatch averages out of the EMAs.
-                pairSwapPhase = !pairSwapPhase;
-                int a1 = pairSwapPhase ? adcB : adcA;
-                int a2 = pairSwapPhase ? adcA : adcB;
-                float v1, v2;
-                if (pairSenseTap(p.node1, p.node2, a1, a2, &v1, &v2)) {
-                    v1 -= scanZeroOffset[a1];
-                    v2 -= scanZeroOffset[a2];
-                    recordTapVoltage(p.node1, v1);
-                    recordTapVoltage(p.node2, v2);
-                    pathPairDv[i] = v1 - v2;
-                    pathPairDvMs[i] = millis();
-                    return true;
+            // Mode 2 = true two-channel pair first (see the strategy legend
+            // at pathPairDv). Mode 1 (default) skips straight to sequential.
+            if (jumperlessConfig.debug.net_scan_pair_taps == 2) {
+                int adcB = infraAcquireAdc(INFRA_ADC_NVSCAN,
+                                           (uint8_t)(0x0F & ~(1u << adcA)), true);
+                if (adcB >= 0) {
+                    // Alternate which node rides which channel each pass so
+                    // a per-channel gain mismatch averages out of the EMAs.
+                    pairSwapPhase = !pairSwapPhase;
+                    int a1 = pairSwapPhase ? adcB : adcA;
+                    int a2 = pairSwapPhase ? adcA : adcB;
+                    float v1, v2;
+                    if (pairSenseTap(p.node1, p.node2, a1, a2, &v1, &v2)) {
+                        v1 -= scanZeroOffset[a1];
+                        v2 -= scanZeroOffset[a2];
+                        recordTapVoltage(p.node1, v1);
+                        recordTapVoltage(p.node2, v2);
+                        pathPairDv[i] = v1 - v2;
+                        pathPairDvMs[i] = millis();
+                        return true;
+                    }
+                    // Pair refused (asymmetric hops, lane contention) or its
+                    // dwell failed - sequential below still gets a coherent
+                    // dv where single-ended could not.
                 }
-                // Pair tap refused (asymmetric hops, lane contention) or
-                // its dwell failed - the sequential same-channel pair below
-                // still gets a coherent dv where single-ended could not.
             }
-            // No second channel, or the true pair didn't take: sequential
-            // same-channel pair on adcA (offset-cancelling, ~3ms end to
-            // end, needs only one free K row).
+            // The default path: sequential same-channel pair on adcA
+            // (offsets cancel entirely, ~3ms end to end, one K row).
             if (seqPairTap(i, p.node1, p.node2, adcA)) return true;
             // Both pair shapes failed (route/drift) - single-ended below,
             // so a contended path still gets one node refreshed.
