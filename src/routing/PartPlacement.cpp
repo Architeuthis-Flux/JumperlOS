@@ -455,6 +455,9 @@ void serializeParts(const JumperlessState& st, String& out) {
         // every pre-wave-2 file. Parser half is in parsePartLine.
         if (p.tol > 0)            out += "    tol: " + String((int)p.tol) + "\n";
         if (p.partId[0] != '\0')  out += "    part_id: \"" + String(p.partId) + "\"\n";
+        // Driver binding override - emitted only when Detect-Driver (or a
+        // hand edit) set one; the partId->record fallthrough needs no line.
+        if (p.driverKey[0] != '\0') out += "    driver: \"" + String(p.driverKey) + "\"\n";
         const char* fpName = (p.footprint == 1) ? "dip" : (p.footprint == 2) ? "axial" : "sip";
         out += "    footprint: " + String(fpName) + String(p.pinCount) + "\n";
         out += "    row: " + String(p.baseRow) + "\n";
@@ -754,6 +757,14 @@ static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, b
     } else if (key == "part_id") {
         String v = parseScalar(rest);
         strncpy(p.partId, v.c_str(), sizeof(p.partId) - 1);
+        inPins = false;
+    } else if (key == "driver") {
+        // Matched half of the serializer's emit-only-when-set `driver:` line
+        // (same commit - round-trip law). Content is a display driver key
+        // ("ssd1306"...); consumers go through partdbResolveDriver, so an
+        // unknown key here just resolves to no driver rather than erroring.
+        String v = parseScalar(rest);
+        strncpy(p.driverKey, v.c_str(), sizeof(p.driverKey) - 1);
         inPins = false;
     } else if (key == "footprint") {
         String v = parseScalar(rest);

@@ -55,6 +55,20 @@ class: DISPLAY
   i2c: [0x3C, 0x3D]
   pins: [GND, VCC, SCL, SDA]
 
+- id: ssd1306_32_i2c
+  name: SSD1306 128x32
+  desc: 0.91in OLED 128x32 I2C
+  subclass: oled
+  package: sip4
+  driver: ssd1306_32
+  led: OLED32
+  menu: SSD1306|128x32
+  pop: 5
+  i2c: [0x3C, 0x3D]
+  # VERIFY: 0.91in modules are usually VCC-GND-SCL-SDA (opposite of the
+  # 0.96in order above) - chosen as canonical here for exactly that reason
+  pins: [VCC, GND, SCL, SDA]
+
 - id: 40rgbx160_spi
   name: 40RGBX160
   desc: 40RGBX160 bar display, SPI

@@ -228,7 +228,12 @@ const uint16_t* partdbSubclassSlice(uint8_t partClass, uint8_t subClass,
 struct PartDefinition;
 void partdbInstantiate(const PartDbRecord& r, PartDefinition& out);
 
-// partdbResolveDriver lands with B-M5 (driverKey precedence over partId;
-// displayResolveForPart in DisplayDrivers.cpp is the temporary bridge).
+// The ONE display-driver binding authority (B-M5, plan reconciliation 1).
+// Precedence: the part's own driverKey when set (Detect-Driver confirm /
+// hand edit), else partId -> record (id OR alias, case-fold) -> the
+// record's driverKey. NULL when the part binds no driver. Consumers pass
+// the returned key to the display layer's own registry (findDisplayDriver)
+// - this function stays partdb-pure and never sees driver descriptors.
+const char* partdbResolveDriver(const PartDefinition& p);
 
 #endif  // PARTDB_H

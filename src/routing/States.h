@@ -439,7 +439,14 @@ struct PartPin {
 struct PartDefinition {
     char     name[16];
     char     typeStr[12];      // part-ID hook: resistor|capacitor|diode|led|bjt|fet|ic
-    char     partId[16];       // part-ID hook: future /partdb reference
+    char     partId[16];       // partdb record id (partdbFindByName resolves it)
+    char     driverKey[16];    // display driver binding OVERRIDE (B-M5).
+                               // Normally empty: partdbResolveDriver() falls
+                               // through partId -> record -> record driverKey.
+                               // Detect-Driver confirm (B-M8) writes it for
+                               // custom/misdetected panels. Serialized as
+                               // `driver:` ONLY when set - parser+serializer
+                               // land together (round-trip law).
     int16_t  baseRow;          // breadboard row of pin 1 (1-60)
     uint8_t  footprint;        // 0=SIP 1=DIP 2=axial2
     uint8_t  pinCount;         // PHYSICAL pin count from the footprint (dip8 -> 8)

@@ -11,7 +11,8 @@
 #include <string.h>
 
 #include "DisplayBus.h"
-#include "States.h"        // PartDefinition (partId)
+#include "PartDb.h"        // partdbResolveDriver - the binding authority
+#include "States.h"        // PartDefinition
 
 // ---------------------------------------------------------------------------
 // Mono-OLED family (SSD1306/1309/1315 + SH1106)
@@ -164,18 +165,13 @@ const DisplayDriverDesc* findDisplayDriver(const char* key) {
 }
 
 const DisplayDriverDesc* displayResolveForPart(const PartDefinition& p) {
-    if (p.partId[0] == '\0') return nullptr;
-    // Exact driverKey match first, then the model-name prefixes the seed DB
-    // uses ("SSD1306_I2C", "ssd1315_i2c", "SH1106..." all reach a family).
-    const DisplayDriverDesc* d = findDisplayDriver(p.partId);
-    if (d != nullptr) return d;
-    char low[17];
-    int i = 0;
-    for (; p.partId[i] != '\0' && i < 16; i++) low[i] = (char)tolower((unsigned char)p.partId[i]);
-    low[i] = '\0';
-    if (strncmp(low, "ssd130", 6) == 0 || strncmp(low, "ssd131", 6) == 0) {
-        return findDisplayDriver(strstr(low, "32") != nullptr ? "ssd1306_32" : "ssd1306");
-    }
-    if (strncmp(low, "sh1106", 6) == 0) return findDisplayDriver("sh1106");
-    return nullptr;
+    // B-M5: partdbResolveDriver is the ONE binding authority (part.driverKey
+    // override, else partId -> record -> record driverKey - id or alias,
+    // case-fold). This replaced the temporary partId-prefix sniffing; a key
+    // the C registry doesn't implement yet (st7789, 40rgbx160...) resolves
+    // here and simply finds no descriptor - the part still places and
+    // labels, it just doesn't animate until its driver lands.
+    const char* key = partdbResolveDriver(p);
+    if (key == nullptr) return nullptr;
+    return findDisplayDriver(key);
 }

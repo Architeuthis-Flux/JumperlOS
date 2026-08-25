@@ -145,6 +145,20 @@ const uint16_t* partdbSubclassSlice(uint8_t partClass, uint8_t subClass,
   return (rg.count > 0) ? &partdb_byClass[rg.start] : 0;
 }
 
+const char* partdbResolveDriver(const PartDefinition& p) {
+  if (p.driverKey[0] != '\0') {
+    return p.driverKey;
+  }
+  if (p.partId[0] == '\0') {
+    return 0;
+  }
+  const PartDbRecord* r = partdbFindByName(p.partId);
+  if (r == 0 || r->driverKey == 0 || r->driverKey[0] == '\0') {
+    return 0;
+  }
+  return r->driverKey;
+}
+
 void partdbInstantiate(const PartDbRecord& r, PartDefinition& out) {
   memset(&out, 0, sizeof(out));
 
