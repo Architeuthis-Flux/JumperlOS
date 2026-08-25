@@ -6,7 +6,9 @@
 
 #include "PartDb.h"
 
-#include "States.h"  // MAX_PART_PINS (24 V5 / 16 OG)
+#include <string.h>  // memset/strncpy (partdbInstantiate)
+
+#include "States.h"  // MAX_PART_PINS (24 V5 / 16 OG), PartDefinition
 
 #include "PartDbData.h"
 
@@ -141,4 +143,51 @@ const uint16_t* partdbSubclassSlice(uint8_t partClass, uint8_t subClass,
     *countOut = rg.count;
   }
   return (rg.count > 0) ? &partdb_byClass[rg.start] : 0;
+}
+
+void partdbInstantiate(const PartDbRecord& r, PartDefinition& out) {
+  memset(&out, 0, sizeof(out));
+
+  // Name = the record id uppercased with '-' -> '_' (net names are
+  // {NAME}_{PIN}, alphabet [A-Z0-9_] - makePinNetName's contract). The
+  // caller dedupes against the live parts table (this function cannot see
+  // it and must stay state-free).
+  int i = 0;
+  for (; r.id[i] != '\0' && i < (int)sizeof(out.name) - 1; i++) {
+    char c = r.id[i];
+    if (c >= 'a' && c <= 'z') {
+      c = (char)(c - 'a' + 'A');
+    }
+    if (c == '-') {
+      c = '_';
+    }
+    out.name[i] = c;
+  }
+  out.name[i] = '\0';
+
+  strncpy(out.partId, r.id, sizeof(out.partId) - 1);
+  strncpy(out.typeStr, partdb_typeStrs[r.typeStrIdx], sizeof(out.typeStr) - 1);
+  if (r.defaultValue != 0) {
+    strncpy(out.value, r.defaultValue, sizeof(out.value) - 1);
+  }
+
+  const PartDbPinout& po = partdb_pinouts[r.pinoutIdx];
+  out.footprint = po.footprint;
+  out.pinCount = po.pinCount;
+  out.baseRow = -1;   // geometry is the caller's job (tap-to-place)
+  out.placed = false;
+
+  int n = po.numPins;
+  if (n > MAX_PART_PINS) {
+    n = MAX_PART_PINS;   // partdbPlaceableHere gates this before any placement
+  }
+  out.numPins = (uint8_t)n;
+  for (int j = 0; j < n; j++) {
+    const PartDbPin& sp = po.pins[j];
+    strncpy(out.pins[j].name, sp.name, sizeof(out.pins[j].name) - 1);
+    out.pins[j].pinNumber = sp.pinNumber;
+    out.pins[j].offset = sp.offset;
+    out.pins[j].connect = -1;   // NEVER wired, NEVER powered - the user does that
+    out.pins[j].pinClass = sp.pinClass;
+  }
 }

@@ -19,7 +19,9 @@
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
-#include "ProjectsApp.h"  // projectsAppLauncher - the "Guides" apps[] row
+#include "PartsApp.h"     // partsAppLauncher - the "Parts" apps[] row
+#include "ProjectsApp.h"  // projectsAppLauncher (Guides menu row retired;
+                          // projects stay reachable via `z` + Files browser)
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
@@ -102,7 +104,7 @@ struct app apps[ NUM_APPS ] = {
     // Name-matched by runApp(-1, name) with the TOP-LEVEL menu line's own text
     // (menuTree.h "Guides" -> Menus.cpp getActionCategory -> APPSACTION), so
     // this string and that one move together or the row goes dead.
-    { "Guides", 25, 1, projectsAppLauncher },
+    { "Parts", 25, 1, partsAppLauncher },
     // others can remain uninitialized (works=0)
 };
 
@@ -812,12 +814,20 @@ void probeCalibApp( void ) {
     int probeRead = -1;
     bool firstRead = true;
     Probing::getInstance( ).smoothProbeReading( -1, true );
+    unsigned long lastEncoderActivityMs = 0;
+    unsigned long lastProbeCalibUiMs = 0;
+    int lastLedPadRaw = -1;
     // while (probeRead == -1) {
     //     probeRead = probing.readProbeRaw( 0, true );
 
     // }
 
     while ( done == false ) {
+        jOS.serviceInner( ); // pump encoder/USB while this modal loop runs
+        const bool encoderMoved = ( encoderPosition != lastEncoderPosition );
+        if ( encoderMoved )
+            lastEncoderActivityMs = millis( );
+
         if ( oledCalibHotplugPoll( ) ) {
             oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rmeasure: hold one pad to converge feeds\n\rhold click = save", true, true );
         }
@@ -887,7 +897,8 @@ void probeCalibApp( void ) {
             switchCurrentNextMs = millis( ) + 120; // let the LED load settle
             lastReading = -1;
         }
-        if ( measureOrSelect == 1 && millis( ) >= switchCurrentNextMs ) {
+        if ( measureOrSelect == 1 && millis( ) >= switchCurrentNextMs &&
+             millis( ) - lastEncoderActivityMs > 120 ) {
             switchCurrentNextMs = millis( ) + 100; // bound the I2C traffic
             switchCurrent_mA = probing.checkProbeCurrent( );
         }
@@ -1020,7 +1031,7 @@ void probeCalibApp( void ) {
             }
         }
 
-        if ( encoderPosition != lastEncoderPosition || reading != lastReading ) {
+        if ( encoderMoved ) {
             lastEncoderPosition = encoderPosition;
             if ( measureOrSelect == 0 ) {
                 // Both measure endpoints move TOGETHER: convergence has already
@@ -1040,6 +1051,14 @@ void probeCalibApp( void ) {
                     jumperlessConfig.calibration.probe_max = 15;
                 }
             }
+        }
+
+        const bool readingChanged = ( reading != lastReading );
+        const bool padMoved = ( probeRead != -1 && lastValidProbeRead != lastLedPadRaw );
+        const bool refreshUi = encoderMoved ||
+            ( readingChanged && millis( ) - lastProbeCalibUiMs >= 50 );
+        if ( refreshUi ) {
+            lastProbeCalibUiMs = millis( );
             char debugOutput[100];
             if (measureOrSelect == 0) {
                 snprintf(debugOutput, sizeof(debugOutput), "MEASURE %s\n\rread: %d\n\rnode: %s\n\rD%d G%d",
@@ -1057,11 +1076,11 @@ void probeCalibApp( void ) {
             }
             if (firstRead == false) {
                 if (oled.isConnected()) {
-                    oled.showMultiLineSmallText(debugOutput, true, true);
+                    // clear=false: full framebuffer wipe on every encoder detent
+                    // was blocking the loop for tens of ms over I2C/SPI.
+                    oled.showMultiLineSmallText(debugOutput, padMoved, true);
                 }
             }
-
-
 
             // \r first (return to column 0), then content, then EL (\033[K) to
             // wipe leftover chars from a longer previous line. Spaces-before-\r
@@ -1092,20 +1111,25 @@ void probeCalibApp( void ) {
                                    (double)jumperlessConfig.calibration.probe_switch_threshold_high );
                 }
             }
-            Serial.flush( );
+            if ( encoderMoved )
+                Serial.flush( );
         }
 
         // if ( reading == -1 )
         //     continue;
 
-        if ( reading != lastReading && reading != -1 ) {
+        if ( reading != -1 && ( encoderMoved || padMoved ) ) {
+            if ( padMoved )
+                lastLedPadRaw = lastValidProbeRead;
 
             // Serial.println( "reading: " + String( reading ) );
             // Serial.flush( );
             uint32_t modeColor = measureOrSelect == 0 ? 0x200010 : 0x001030;
             uint32_t modeLogoColor = measureOrSelect == 0 ? 0xa00060 : 0x3080f0;
-            clearLEDsExceptRails( );
-            clearColorOverrides( true, true, true );
+            if ( padMoved || encoderMoved ) {
+                clearLEDsExceptRails( );
+                clearColorOverrides( true, true, true );
+            }
             if ( nodeSelected >= LOGO_PAD_TOP ) {
                 // Serial.print( "Node selected: " );
                 // Serial.println( nodeSelected );
@@ -1116,7 +1140,7 @@ void probeCalibApp( void ) {
 
                     setLogoOverride( ADC_0, modeLogoColor );
                     setLogoOverride( ADC_1, modeLogoColor );
-                    break;
+                    break;\
                 case DAC_PAD:
                     setLogoOverride( DAC_0, modeLogoColor );
                     setLogoOverride( DAC_1, modeLogoColor );
@@ -1143,7 +1167,7 @@ void probeCalibApp( void ) {
                 requestLedShow( 2 );
             }
 
-            if ( nodeSelected != nodeSelectedWithOldMapping && measureOrSelect == 1 ) {
+            if ( padMoved && nodeSelected != nodeSelectedWithOldMapping && measureOrSelect == 1 ) {
                 b.lightUpNode( nodeSelectedWithOldMapping, 0x050205 );
             }
             if ( measureOrSelect == 0 ) {
@@ -1151,6 +1175,7 @@ void probeCalibApp( void ) {
             } else {
                 b.lightUpNode( nodeSelected, modeColor );
             }
+            requestLedShow( 2 );
         }
         lastReading = reading;
         lastNodeSelected = nodeSelected;

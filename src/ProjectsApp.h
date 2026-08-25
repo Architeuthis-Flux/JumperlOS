@@ -179,7 +179,9 @@ bool projectOpenLatestOrNew(const String& project, String& runPathOut);
 // project with the clicked file as the chosen variant (design-slots §3).
 void projectRunFromTemplate(const String& wiringPath);
 
-// The app entry point (apps[] row "Guides" / top-level menu line "Guides").
+// The interactive launcher. No menu row anymore (the "Guides" top-level row
+// became "Parts" at the 2026-08-24 bench pass); projects are reached via `z`
+// and the Files browser, which drive the flows below directly.
 void projectsAppLauncher(void);
 
 #endif // PROJECTS_APP_H

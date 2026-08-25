@@ -4018,23 +4018,23 @@ actionCategories getActionCategory( void ) {
         return APPSACTION;  // Python = same as Files (click-menu file browser)
 
     } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
-                    "Guides" ) != -1 ) {
-        // Guides = the launcher app row, promoted to a childless TOP-LEVEL
-        // entry (menuTree.h). Selecting one walks off the end of its empty
-        // submenu range and lands in doMenuAction, exactly the way Files and
-        // History do. The APPSACTION arm's appNameIdx then falls back to
+                    "Parts" ) != -1 ) {
+        // Parts = the picker app row, a childless TOP-LEVEL entry
+        // (menuTree.h). Selecting it walks off the end of its empty submenu
+        // range and lands in doMenuAction, exactly the way Files and History
+        // do. The APPSACTION arm's appNameIdx then falls back to
         // previousMenuPositions[0] for single-level entries, so this yields
-        // runApp(-1, "Guides"), which name-matches the apps[] row
-        // { "Guides", 25, 1, projectsAppLauncher }. This string and that row
+        // runApp(-1, "Parts"), which name-matches the apps[] row
+        // { "Parts", 25, 1, partsAppLauncher }. This string and that row
         // are ONE unit - rename either and the top-level row goes dead
         // silently, because the menu line's own text IS runApp's name arg.
         //
         // Order-safe: none of the keywords tested above this one - Slots,
         // Rails, Show, Output, Arduino, Probe, Connect, Display, Apps,
         // Routing, OLED, Calib, History, Files, Python - is a substring of
-        // "Guides", so no earlier arm can claim the row. (Was "Projects"
-        // through wave 2; the same check held there for "Probe" - Pro-b vs
-        // Pro-j.)
+        // "Parts", so no earlier arm can claim the row. (The row was
+        // "Projects" through wave 2 and "Guides" through the first ambient
+        // slice.)
         return APPSACTION;
 
     } else {

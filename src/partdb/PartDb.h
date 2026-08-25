@@ -220,8 +220,15 @@ const uint16_t* partdbClassSlice(uint8_t partClass, uint16_t* countOut);
 const uint16_t* partdbSubclassSlice(uint8_t partClass, uint8_t subClass,
                                     uint16_t* countOut);
 
-// partdbInstantiate / partdbResolveDriver land with B-M3 (instantiation
-// writes a PartDefinition with connect = -1 on every pin - never wired,
-// never powered; the user does that).
+// DB record -> PartDefinition (B-M3). connect = -1 on EVERY pin - a placed
+// part is pure geometry + labels, never wired, never powered; the user does
+// that. baseRow = -1 and placed = false: geometry (tap-to-place, anchor
+// mapping, partGeometryOk) is the caller's job, as is deduping the name
+// against the live parts table. State-free: reads only the rodata tables.
+struct PartDefinition;
+void partdbInstantiate(const PartDbRecord& r, PartDefinition& out);
+
+// partdbResolveDriver lands with B-M5 (driverKey precedence over partId;
+// displayResolveForPart in DisplayDrivers.cpp is the temporary bridge).
 
 #endif  // PARTDB_H
