@@ -18,14 +18,16 @@
 static const int SOFT_SDA_PIN = 24;
 static const int SOFT_SCL_PIN = 25;
 
-// Half-bit delay: ~5 us -> ~100 kHz, i2cscrn's own default (its README's
-// 50 kHz fallback is for flaky long paths - drop this to 10 if a bench
-// panel shows garbage). HONEST BUDGET at 100 kHz: a merged 8-byte chunk is
-// one ~14-byte transaction ~= 1.3 ms of core-0 busy-wait - which is why the
-// service paces soft-bus chunks every ~8 ms instead of every 2 ms tick, and
-// why a full 1 KB frame lands in ~1 s ambient. The good numbers need the
-// OLED on internal I2C0 (hardware Wire1 path) or a future PIO-I2C offload.
-static const int SOFT_HALF_BIT_US = 5;
+// Half-bit delay: ~2 us -> ~250 kHz nominal (SSD1306 is specced to 400 kHz).
+// Safe at this speed ONLY because sclReleaseWait polls SCL actually high
+// before counting the high phase - through the crossbar fabric the RC rise
+// is real, and the wait self-paces to whatever the path can do (a slow bus
+// gets a slower clock, not corrupt bits). Drop to 5 if a bench panel still
+// shows garbage. HONEST BUDGET at ~250 kHz with HAL overhead: ~40 us/byte,
+// so a merged 16-byte chunk (23 bytes on the wire) ~= 1 ms of core-0
+// busy-wait per ~8 ms slot -> a 512-byte frame in ~250 ms ambient. The good
+// numbers still need a hardware bus or a future PIO-I2C offload.
+static const int SOFT_HALF_BIT_US = 2;
 
 // ---------------------------------------------------------------------------
 // Soft-I2C primitives (open-drain emulation: LOW = drive, HIGH = release)
@@ -50,10 +52,21 @@ static inline bool sdaRead(const DisplayInstance& d) {
     return digitalRead(d.sdaPin) != 0;
 }
 
+// Release SCL and wait for it to ACTUALLY rise (bounded ~50 us) before the
+// high-phase delay. This is both clock-stretch honesty and what makes the
+// 2 us half-bit safe through the fabric's RC: the clock self-paces to the
+// path instead of clipping the high phase short.
+static inline void sclReleaseWait(const DisplayInstance& d) {
+    sclRelease(d);
+    for (int i = 0; i < 50 && digitalRead(d.sclPin) == 0; i++) {
+        delayMicroseconds(1);
+    }
+    delayMicroseconds(SOFT_HALF_BIT_US);
+}
+
 static void softStart(const DisplayInstance& d) {
     sdaRelease(d);
-    sclRelease(d);
-    delayMicroseconds(SOFT_HALF_BIT_US);
+    sclReleaseWait(d);   // START needs SCL truly high before SDA falls
     sdaLow(d);
     delayMicroseconds(SOFT_HALF_BIT_US);
     sclLow(d);
@@ -62,8 +75,7 @@ static void softStart(const DisplayInstance& d) {
 static void softStop(const DisplayInstance& d) {
     sdaLow(d);
     delayMicroseconds(SOFT_HALF_BIT_US);
-    sclRelease(d);
-    delayMicroseconds(SOFT_HALF_BIT_US);
+    sclReleaseWait(d);
     sdaRelease(d);
     delayMicroseconds(SOFT_HALF_BIT_US);
 }
@@ -73,15 +85,13 @@ static bool softWriteByte(const DisplayInstance& d, uint8_t b) {
     for (int i = 7; i >= 0; i--) {
         if ((b >> i) & 1) sdaRelease(d); else sdaLow(d);
         delayMicroseconds(SOFT_HALF_BIT_US);
-        sclRelease(d);
-        delayMicroseconds(SOFT_HALF_BIT_US);
+        sclReleaseWait(d);
         sclLow(d);
     }
     // ACK bit
     sdaRelease(d);
     delayMicroseconds(SOFT_HALF_BIT_US);
-    sclRelease(d);
-    delayMicroseconds(SOFT_HALF_BIT_US);
+    sclReleaseWait(d);
     bool ack = !sdaRead(d);
     sclLow(d);
     return ack;

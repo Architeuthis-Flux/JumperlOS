@@ -39,6 +39,12 @@ public:
     // slice 1 proves the framework with 1).
     const DisplayInstance& instance() const { return inst; }
 
+    // The routed bus nodes (131-138) while this service owns a live bus, for
+    // core 1's net-voltage scan to EXCLUDE: a sense tap closes crosspoints on
+    // the net mid-I2C-transaction, and one corrupted bit costs a re-init.
+    // Cross-core read of two int8 fields - a torn read costs one scan round.
+    int activeDataNodes(int16_t out[2]) const;
+
 private:
     DisplayService() = default;
     ~DisplayService() = default;
@@ -48,6 +54,7 @@ private:
     bool ghostWarned = false;
     bool yieldNoted = false;
     bool acquireWarned = false;   // one line per acquire-failure episode
+    uint8_t flushFails = 0;       // consecutive chunk errors (8 = panel lost)
 
     void pollParts(uint32_t now);
     void attach(int partIdx, const DisplayDriverDesc* desc);

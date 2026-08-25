@@ -128,7 +128,10 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
         return;
     }
     memset(inst.fb, 0, desc->fbBytes);
-    inst.chunkBytes = (inst.sdaPin == 26) ? 32 : 8;   // hw vs soft budget
+    // Soft chunk 16: the 7-byte position header is fixed, so 8 data bytes
+    // spent >half the bus time on overhead; 16 lands ~1 ms per chunk at the
+    // 250 kHz half-bit and cuts a 512-byte frame to 32 transactions.
+    inst.chunkBytes = (inst.sdaPin == 26) ? 32 : 16;  // hw vs soft budget
     inst.state = DispState::ROUTED;
     inst.nextBeaconMs = 0;
     ghostWarned = false;
@@ -159,6 +162,7 @@ void DisplayService::detach() {
     inst.dirty = false;
     inst.userOwnsContent = false;
     yieldNoted = false;
+    flushFails = 0;
 }
 
 // One poll: diff the parts table against the attached instance.
@@ -306,13 +310,31 @@ ServiceStatus DisplayService::service() {
     inst.chunkBytes = saved;
 
     if (r < 0) {
-        // Bus error: the panel went away (or the fabric was rebuilt under
-        // us). Back to the beacon; init re-runs on the next answer.
+        // ONE bus error is a glitch, not a lost panel - a probe tip on the
+        // bus rows, a scan tap, a marginal edge. The cursor didn't advance
+        // and every chunk re-positions (page + column), so just retrying
+        // the same chunk next tick is safe. Bouncing to beacon on the first
+        // NACK re-ran init per glitch: the repeated "DISPLAY alive" spam,
+        // the garbage frames, and most of the slowness on the first bench.
+        if (++flushFails < 8) return ServiceStatus::BUSY;
+        flushFails = 0;
         inst.state = DispState::ROUTED;
         inst.midFrame = false;
         inst.nextBeaconMs = now + DISP_BEACON_MS;
+        Serial.print("\r\nDISPLAY lost id=");
+        Serial.print(inst.desc->id);
+        Serial.println(" (8 bus errors - re-beaconing)");
         return ServiceStatus::BUSY;
     }
+    flushFails = 0;
     if (r == 0) inst.dirty = false;
     return ServiceStatus::BUSY;
+}
+
+int DisplayService::activeDataNodes(int16_t out[2]) const {
+    if (inst.partIdx < 0 || inst.sdaPin < 20) return 0;
+    if (inst.state != DispState::ROUTED && inst.state != DispState::ALIVE) return 0;
+    out[0] = nodeForRpPin(inst.sdaPin);
+    out[1] = nodeForRpPin(inst.sclPin);
+    return 2;
 }

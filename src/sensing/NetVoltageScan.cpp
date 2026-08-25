@@ -37,6 +37,7 @@
 #include "externVars.h" // core-1 frame hold / core2busy / lastUserInputMs
 #include "USBAudio.h"   // usbAudioOwnsAdc
 #include "AdcRing.h"    // T2.1: taps read fresh sweeps off the ring
+#include "DisplayService.h" // activeDataNodes() - live bus nets are unscannable
 #include "WaveGen.h"
 #include "config.h"
 #include "hardware/adc.h"
@@ -793,10 +794,25 @@ static void rebuildScanList() {
     for (int i = 0; i < 5; i++) adcNodePresent[i] = false;
     for (int i = 0; i < 4; i++) sourceInUse[i] = false;
 
+    // A live breadboard-display bus is off-limits: a sense tap closes
+    // crosspoints on the SDA/SCL net mid-I2C-transaction, and one corrupted
+    // bit costs the panel a re-init. The "voltage" of a 250 kHz digital line
+    // is meaningless to this scan anyway. Cross-core read; a torn value
+    // costs one round (the fingerprint rebuilds this list constantly).
+    int16_t busNodes[2];
+    int numBusNodes = displayService.activeDataNodes(busNodes);
+
     for (int i = 1; i < MAX_NETS; i++) {
         netStruct& net = globalState.connections.nets[i];
         if (net.number <= 0 || net.specialFunction == EMPTY_NET) continue;
         if (net.virtual_net) continue;
+        bool busNet = false;
+        for (int n = 0; n < MAX_NODES && numBusNodes > 0; n++) {
+            int node = net.nodes[n];
+            if (node <= 0) break;
+            if (node == busNodes[0] || node == busNodes[1]) { busNet = true; break; }
+        }
+        if (busNet) continue;
         for (int n = 0; n < MAX_NODES; n++) {
             int node = net.nodes[n];
             if (node <= 0) break;
