@@ -54,6 +54,17 @@ Watch-items left open from the session data:
   `relocations:` counter to convict/acquit real geometry relocation.
 - HIL: zero-load displayed-mA assertions need a tolerance now (raw EMA,
   not deadband-gated 0.0).
+- 2026-08-25 (9d69436) power auto-routing adds 2 bridges per placed part
+  into GND + rail nets - EXACTLY the K-resident nets that caused the
+  0.0 mA starvation. If currents go quiet after placing several parts,
+  i! noroute climbing convicts it. Also: partsCommitPlacement's
+  applyPartPlacement check only catches < 0 - err-TEXT refusals (bridge
+  table full) still pass silently, the same defect class the sweep fixed
+  in routeDataPins; more reachable now that placement adds power bridges.
+- Residual display tearing lever if delta flush isn't enough: burst
+  pacing - the 8 ms/chunk pacing dominates (bus busy ~1 ms of it), so
+  3-4 chunks per window while a frame is mid-flight lands frames 3x
+  faster.
 - 2026-08-25 bench arc (9bd9f79): per-signal tap placement for SIP/axial
   (DB pin order is now only the PROMPT sequence for those packages) and
   semantic highlight readouts ("SSD1306 SDA", FUNCSEL-verified GPIO I2C
