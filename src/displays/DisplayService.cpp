@@ -300,22 +300,31 @@ ServiceStatus DisplayService::service() {
     animate(now);
     if (!inst.dirty && !inst.midFrame) return ServiceStatus::IDLE;
 
-    // Soft-bus pacing: a merged chunk is ~1.3 ms of bit-banged busy-wait, so
-    // it goes out every ~8 ms (not every 2 ms tick) to keep core-0 duty
-    // under ~20% ambient. The hardware path offloads and ticks freely.
+    // Soft-bus pacing: visits every ~4 ms, and each visit BURSTS chunks
+    // back-to-back under a time budget. One-chunk-per-8 ms was the real
+    // frame-time bottleneck (bus busy ~1 ms of every window) - the tearing
+    // Kevin still saw after delta flush was pacing, not wire speed. A delta
+    // frame now lands inside a single visit; worst-case duty stays bounded
+    // (~1.5 ms per 4 ms mid-frame, half that under a modal load).
     bool softBus = (inst.sdaPin != 26);
     if (softBus) {
         if ((int32_t)(now - inst.nextChunkMs) < 0) return ServiceStatus::IDLE;
-        inst.nextChunkMs = now + 8;
+        inst.nextChunkMs = now + 4;
     }
 
-    // Modal load (something BLOCKING owns the loop): halve the chunk so the
-    // ambient animation never starves the menu/probe UI.
+    // Modal load (something BLOCKING owns the loop): halve the chunk and the
+    // burst so the ambient animation never starves the menu/probe UI.
+    bool modal = jOS.getBlockingService() != nullptr;
     uint8_t budget = inst.chunkBytes;
-    if (jOS.getBlockingService() != nullptr && budget > 4) budget /= 2;
+    if (modal && budget > 4) budget /= 2;
     uint8_t saved = inst.chunkBytes;
     inst.chunkBytes = budget;
-    int r = inst.desc->ops->flushChunk(inst);
+    uint32_t burstUs = modal ? 700 : 1500;
+    uint32_t burstStart = micros();
+    int r;
+    do {
+        r = inst.desc->ops->flushChunk(inst);
+    } while (r == 1 && (uint32_t)(micros() - burstStart) < burstUs);
     inst.chunkBytes = saved;
 
     if (r < 0) {

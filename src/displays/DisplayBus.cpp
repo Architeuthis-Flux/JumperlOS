@@ -18,38 +18,43 @@
 static const int SOFT_SDA_PIN = 24;
 static const int SOFT_SCL_PIN = 25;
 
-// Half-bit delay: ~2 us -> ~250 kHz nominal (SSD1306 is specced to 400 kHz).
-// Safe at this speed ONLY because sclReleaseWait polls SCL actually high
-// before counting the high phase - through the crossbar fabric the RC rise
-// is real, and the wait self-paces to whatever the path can do (a slow bus
-// gets a slower clock, not corrupt bits). Drop to 5 if a bench panel still
-// shows garbage. HONEST BUDGET at ~250 kHz with HAL overhead: ~40 us/byte,
-// so a merged 16-byte chunk (23 bytes on the wire) ~= 1 ms of core-0
-// busy-wait per ~8 ms slot -> a 512-byte frame in ~250 ms ambient. The good
-// numbers still need a hardware bus or a future PIO-I2C offload.
+// Half-bit delay: ~2 us -> ~250 kHz true rate now that the bit ops are
+// single-cycle SIO toggles (SSD1306 is specced to 400 kHz). Safe at this
+// speed ONLY because sclReleaseWait polls SCL actually high before counting
+// the high phase - through the crossbar fabric the RC rise is real, and the
+// wait self-paces to whatever the path can do (a slow bus gets a slower
+// clock, not corrupt bits). Drop to 5 if a bench panel shows garbage.
+// HONEST BUDGET: ~37 us/byte -> a 16-byte chunk (23 on the wire) ~= 0.9 ms;
+// the service BURSTS chunks under a time budget every 4 ms, so a delta
+// frame lands in one visit and even a full 512-byte sweep takes ~50 ms.
+// Better still needs a hardware bus or a future PIO-I2C offload.
 static const int SOFT_HALF_BIT_US = 2;
 
 // ---------------------------------------------------------------------------
 // Soft-I2C primitives (open-drain emulation: LOW = drive, HIGH = release)
+//
+// Raw SIO direction toggles, not pinMode/digitalWrite: the HAL calls cost
+// 1-2 us PER BIT, which quietly halved the real clock rate. The pins are
+// configured once at acquire (SIO function, pull-up, output latch LOW) and
+// after that a bit is one single-cycle OE set/clear - drive low = output
+// (latched 0), release = input (pull-up floats it high).
 // ---------------------------------------------------------------------------
 
 static inline void sdaLow(const DisplayInstance& d) {
-    pinMode(d.sdaPin, OUTPUT);
-    digitalWrite(d.sdaPin, LOW);
+    gpio_set_dir(d.sdaPin, GPIO_OUT);
 }
 static inline void sdaRelease(const DisplayInstance& d) {
-    pinMode(d.sdaPin, INPUT_PULLUP);   // internal pull is a courtesy only -
+    gpio_set_dir(d.sdaPin, GPIO_IN);   // internal pull is a courtesy only -
                                        // a real bus needs external ~4.7k
 }
 static inline void sclLow(const DisplayInstance& d) {
-    pinMode(d.sclPin, OUTPUT);
-    digitalWrite(d.sclPin, LOW);
+    gpio_set_dir(d.sclPin, GPIO_OUT);
 }
 static inline void sclRelease(const DisplayInstance& d) {
-    pinMode(d.sclPin, INPUT_PULLUP);
+    gpio_set_dir(d.sclPin, GPIO_IN);
 }
 static inline bool sdaRead(const DisplayInstance& d) {
-    return digitalRead(d.sdaPin) != 0;
+    return gpio_get(d.sdaPin);
 }
 
 // Release SCL and wait for it to ACTUALLY rise (bounded ~50 us) before the
@@ -58,7 +63,7 @@ static inline bool sdaRead(const DisplayInstance& d) {
 // path instead of clipping the high phase short.
 static inline void sclReleaseWait(const DisplayInstance& d) {
     sclRelease(d);
-    for (int i = 0; i < 50 && digitalRead(d.sclPin) == 0; i++) {
+    for (int i = 0; i < 50 && !gpio_get(d.sclPin); i++) {
         delayMicroseconds(1);
     }
     delayMicroseconds(SOFT_HALF_BIT_US);
@@ -128,6 +133,14 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
         return false;
     }
 
+    // One-time pin setup for the raw-SIO bit ops: SIO function + pull-up via
+    // pinMode, then latch the output value LOW - from here on a bit is a
+    // single-cycle direction toggle (OUT drives the latched 0, IN releases
+    // to the pull-up).
+    pinMode(d.sdaPin, INPUT_PULLUP);
+    pinMode(d.sclPin, INPUT_PULLUP);
+    gpio_put(d.sdaPin, 0);
+    gpio_put(d.sclPin, 0);
     sdaRelease(d);
     sclRelease(d);
     gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_SIO;
