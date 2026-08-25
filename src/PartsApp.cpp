@@ -336,6 +336,20 @@ static const struct {
 static const int kNumPartClasses =
     sizeof(kPartClasses) / sizeof(kPartClasses[0]);
 
+// Does the class hold at least one placeable record? Deliberately does NOT
+// touch the s_* arrays: the class-level menu build calls this while those
+// arrays hold the CLASS labels, and the fill version below would clobber
+// them with record names (the first Parts open would have listed
+// "MPU6050 / BME280 / ..." as the classes).
+static bool partsClassHasPlaceable(uint8_t cls) {
+    uint16_t count = 0;
+    const uint16_t* slice = partdbClassSlice(cls, &count);
+    for (uint16_t i = 0; i < count; i++) {
+        if (partdbPlaceableHere(partdb_records[slice[i]])) return true;
+    }
+    return false;
+}
+
 // Fill s_* with the class's placeable records; returns the count.
 static int partsBuildClassList(uint8_t cls) {
     uint16_t count = 0;
@@ -367,7 +381,7 @@ void partsAppLauncher(void) {
         int nClasses = 0;
         static uint8_t classOf[PARTDB_NUM_CLASSES];
         for (int i = 0; i < kNumPartClasses; i++) {
-            if (partsBuildClassList(kPartClasses[i].cls) <= 0) continue;
+            if (!partsClassHasPlaceable(kPartClasses[i].cls)) continue;
             s_led[nClasses] = kPartClasses[i].led;
             s_title[nClasses] = kPartClasses[i].title;
             s_desc[nClasses] = kPartClasses[i].desc;
