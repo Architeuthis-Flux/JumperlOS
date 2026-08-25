@@ -85,8 +85,7 @@ private:
     // --- tap-to-inspect listen state (MeasureMode's pattern) ---
     int lastSwitchPosition = -2;
     unsigned long switchStableTime = 0;
-    int stableReadingCount = 0;
-    int lastReading = -1;
+    unsigned long lastPositiveMs = 0;
     int lastInspectNode = -1;
 
     bool overlayAddWarned = false;

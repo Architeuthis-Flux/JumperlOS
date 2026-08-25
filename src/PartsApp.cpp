@@ -146,10 +146,7 @@ static int partsPicker(const char* levelTag, const char* header, int count,
 // Tap-to-place
 // ============================================================================
 
-// Wait for a probe tap on a breadboard row. Fresh-tap discipline
-// (PartLabels' listen pattern): the reading must first DECAY (probe at
-// rest) before a run of stable identical readings counts - a stale reading
-// from before the prompt can never place a part. Returns the row (1-60),
+// Wait for a probe tap on a breadboard row. Returns the row (1-60),
 // -1 on cancel-back (click, hold, or probe REMOVE), -2 on exit-app.
 // Serial twin: digits + enter = the row; any other byte = exit.
 static int partsTapForRow(const PartDbRecord& rec) {
@@ -173,9 +170,6 @@ static int partsTapForRow(const PartDbRecord& rec) {
     lastButtonEncoderState = IDLE;
     encoderDirectionState = NONE;
 
-    bool probeRested = false;
-    int lastReading = -1;
-    int stableCount = 0;
     char digits[4] = {0};
     int nDigits = 0;
     unsigned long lastShowRequest = millis();
@@ -224,21 +218,13 @@ static int partsTapForRow(const PartDbRecord& rec) {
         // Direct synchronous read - the Probing SERVICE is not in the inner
         // set, so its cached getLastProbeReading() goes stale inside a modal
         // loop; justReadProbe(true) is what the menus' own pickers poll
-        // (Menus.cpp:3027, the voltage-select precedent).
+        // (Menus.cpp:3027, the voltage-select precedent). ONE accepted
+        // reading IS the event - the contract debounces internally (a new
+        // row needs two consecutive decodes; repeats of a held row are
+        // rate-limited to one per 500 ms with -1 between, so any
+        // wait-for-N-stable-reads scheme here can never fire).
         int reading = probing.justReadProbe(true);
-        if (!probeRested) {
-            // A touch that predates the prompt must not place a part -
-            // require the probe at rest before listening.
-            if (reading <= 0) probeRested = true;
-        } else if (reading >= 1 && reading <= 60) {
-            if (reading == lastReading) stableCount++;
-            else { lastReading = reading; stableCount = 1; }
-            // ~25 ms of the same row at this loop's ~1 kHz cadence.
-            if (stableCount >= 25) return reading;
-        } else {
-            stableCount = 0;
-            lastReading = -1;
-        }
+        if (reading >= 1 && reading <= 60) return reading;
         delayMicroseconds(1000);
     }
 }

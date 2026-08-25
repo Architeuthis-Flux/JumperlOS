@@ -56,7 +56,9 @@ static const unsigned long LBL_INSPECT_MS = 4000;
 // Tap listen thresholds - MeasureMode's numbers, on the select side of the
 // switch (MeasureMode owns position 0; inspect listens on position 1).
 static const unsigned long LBL_SWITCH_DEBOUNCE_MS = 300;
-static const int LBL_STABLE_READINGS = 5;
+// Longer than justReadProbe's 500 ms duplicate window: quiet past this means
+// the probe really lifted, not that a held row is being rate-limited.
+static const unsigned long LBL_LIFT_MS = 700;
 
 enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT };
 
@@ -151,30 +153,23 @@ void PartLabels::listenForInspectTap(unsigned long now) {
     // Inspect listens in SELECT mode only (position 1) - MeasureMode owns the
     // measure side, so there is no tap-precedence collision by construction.
     if (switchPosition != 1 || (now - switchStableTime) < LBL_SWITCH_DEBOUNCE_MS) {
-        stableReadingCount = 0;
         lastInspectNode = -1;
         return;
     }
 
-    int reading = probing.getLastProbeReading();
-    if (reading > 0) {
-        if (reading == lastReading) {
-            stableReadingCount++;
-        } else {
-            lastReading = reading;
-            stableReadingCount = 1;
-        }
-    } else if (stableReadingCount > 0) {
-        stableReadingCount--;
-        if (stableReadingCount == 0) {
-            lastReading = -1;
+    // ONE positive cached reading IS the tap (Highlighting's consumption
+    // pattern, the working precedent): the Probing service refreshes this
+    // cache from justReadProbe, whose contract emits a held row once per
+    // 500 ms with -1 between - a wait-for-N-stable-reads scheme on this
+    // cache can never reach its threshold.
+    int node = probing.getLastProbeReading();
+    if (node < 1 || node > 60) {
+        if (lastInspectNode != -1 && (now - lastPositiveMs) > LBL_LIFT_MS)
             lastInspectNode = -1;   // probe lifted: next tap announces again
-        }
+        return;
     }
-    if (stableReadingCount < LBL_STABLE_READINGS) return;
-
-    int node = lastReading;
-    if (node < 1 || node > 60 || node == lastInspectNode) return;
+    lastPositiveMs = now;
+    if (node == lastInspectNode) return;
 
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
         const PartDefinition& p = globalState.parts.parts[i];
