@@ -1,5 +1,17 @@
 # Guided Placement Subsystem — Design (2026-08-20, as-built through wave 2)
 
+> **SUPERSEDED IN PART (2026-08-24, Guides Simplification):** the **blocking
+> guide runner this doc designs is GONE** — GuidedFlow.cpp was deleted and
+> opening a project is now ambient (labels via the PartLabels service, step
+> text via the non-blocking StepViewer, checks on demand via `z check`).
+> What SURVIVES of this doc, unchanged and load-bearing: the parts data
+> model + placement geometry (§1, partPinNode as the sole authority), the
+> run-file persistence model (§7), GuideChecks' measurement machinery (§5),
+> and the LED-channel rules (§4.1 clear-first). The guide-session ring
+> (§3.2/3.3) and the blocking runtime shape (§0 "Runtime shape") are
+> historical. Current design of record: CodeDocs/guidesSimplification.md's
+> STATUS section + the plan file it names.
+
 Companion to the approved plan (projects + guided placement branch). Sibling docs:
 DESIGN_PROJECTS_SUBSYSTEM.md, DESIGN_SLOT_FILES.md, DESIGN_PART_ID_FOLLOWUP.md.
 Where this doc and the approved plan disagree, the plan wins (it post-dates and

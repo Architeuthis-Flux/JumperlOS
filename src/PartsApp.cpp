@@ -367,6 +367,63 @@ static int partsBuildClassList(uint8_t cls) {
     return n;
 }
 
+// B-M4 slice: clear every part off the table (their bridges come down via
+// removePartPlacement - the invariant path), CONNECT-confirmed. Returns
+// true when parts were cleared.
+static bool partsClearAll(void) {
+    JumperlessState& st = globalState;
+    if (st.parts.numParts <= 0) return false;
+
+    if (oled.oledConnected) {
+        char text[96];
+        snprintf(text, sizeof(text), "Clear %d part%s?\nCONNECT = yes\nclick = no",
+                 st.parts.numParts, st.parts.numParts == 1 ? "" : "s");
+        oled.resetMultiLineSmallText();
+        oled.showMultiLineSmallText(text);
+    }
+    Serial.print("\r\nPARTS clear confirm n=");
+    Serial.println(st.parts.numParts);
+    Serial.flush();
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    while (true) {
+        jOS.serviceInner();
+        rotaryEncoderButtonStuff();
+        int bPress = partsProbeButton();
+        if (bPress == 1) break;        // CONNECT = yes
+        if (bPress == 2) return false; // REMOVE = no
+        if (encoderButtonState == HELD ||
+            (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            return false;
+        }
+        if (Serial.available() > 0) {
+            char c = (char)Serial.read();
+            if (c != 'y' && c != 'Y') return false;
+            break;                     // serial twin: y = yes
+        }
+        delayMicroseconds(1000);
+    }
+
+    String err;
+    for (int i = st.parts.numParts - 1; i >= 0; i--) {
+        if (st.parts.parts[i].placed) removePartPlacement(st, i, err);
+    }
+    int n = st.parts.numParts;
+    st.parts.numParts = 0;
+    st.markDirty();
+    refreshConnections(-1);
+    partLabels.requestRun();
+    Serial.print("\r\nPARTS cleared n=");
+    Serial.println(n);
+    Serial.flush();
+    if (oled.oledConnected)
+        oled.clearPrintShow("Parts\ncleared", 2, true, true, true);
+    return true;
+}
+
 void partsAppLauncher(void) {
     // Own the render mode for the whole session (menus render one item at a
     // time; core 1 suppresses net paint while inClickMenu). runPicker's
@@ -377,9 +434,10 @@ void partsAppLauncher(void) {
 
     int classIdx = 0;
     while (true) {
-        // Class level: only classes that actually hold placeable records.
+        // Class level: only classes that actually hold placeable records,
+        // plus a trailing Clear row while any part is on the table.
         int nClasses = 0;
-        static uint8_t classOf[PARTDB_NUM_CLASSES];
+        static uint8_t classOf[PARTDB_NUM_CLASSES + 1];
         for (int i = 0; i < kNumPartClasses; i++) {
             if (!partsClassHasPlaceable(kPartClasses[i].cls)) continue;
             s_led[nClasses] = kPartClasses[i].led;
@@ -388,9 +446,22 @@ void partsAppLauncher(void) {
             classOf[nClasses] = kPartClasses[i].cls;
             nClasses++;
         }
+        int clearIdx = -1;
+        if (globalState.parts.numParts > 0) {
+            clearIdx = nClasses;
+            s_led[nClasses] = "Clear";
+            s_title[nClasses] = "Clear parts";
+            s_desc[nClasses] = "remove every part";
+            classOf[nClasses] = 0xFF;
+            nClasses++;
+        }
         int pick = partsPicker("class", "Parts", nClasses, classIdx);
         if (pick < 0) break;   // hold or serial byte at the top level = exit
         classIdx = pick;
+        if (pick == clearIdx) {
+            if (partsClearAll()) break;   // cleared: exit, board is ambient
+            continue;                     // declined: back to the class list
+        }
         uint8_t cls = classOf[pick];
         const char* clsTitle = s_title[pick];
 
