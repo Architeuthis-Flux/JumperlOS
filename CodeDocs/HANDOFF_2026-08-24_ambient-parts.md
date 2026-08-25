@@ -54,6 +54,14 @@ Watch-items left open from the session data:
   `relocations:` counter to convict/acquit real geometry relocation.
 - HIL: zero-load displayed-mA assertions need a tolerance now (raw EMA,
   not deadband-gated 0.0).
+- 2026-08-25 bench arc (9bd9f79): per-signal tap placement for SIP/axial
+  (DB pin order is now only the PROMPT sequence for those packages) and
+  semantic highlight readouts ("SSD1306 SDA", FUNCSEL-verified GPIO I2C
+  roles). test_ambient_parts.py (never run) is now stale twice over: the
+  per-signal flow and the new `PARTPICK sig=<name> row=<n>` lines (which
+  also lack the \r\n prefix the other machine lines carry - unify when
+  A-M7 lands). OPEN QUESTION for Kevin: does the 5 s post-place label
+  bloom stay, or should the board go dark the moment the app exits?
 - HIL blind spot (from the tap-registration fix d1b335d/3bc6b10): the
   probe_tap sim injects into the Probing CACHE continuously (fills in
   whenever the real read is <=0), so wait-for-N-stable-reads code that
