@@ -149,21 +149,44 @@ static int partsPicker(const char* levelTag, const char* header, int count,
 // Wait for a probe tap on a breadboard row. Returns the row (1-60),
 // -1 on cancel-back (click, hold, or probe REMOVE), -2 on exit-app.
 // Serial twin: digits + enter = the row; any other byte = exit.
-static int partsTapForRow(const PartDbRecord& rec) {
+//
+// signal == nullptr is the DIP anchor flow ("tap row for pin 1"). A signal
+// name means the per-signal flow (Kevin's ruling: SIP modules and passives
+// have no standard header order, so the user taps every signal by name);
+// usedRows are this part's already-tapped rows, refused with a nudge.
+static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
+                          int step = 0, int total = 0,
+                          const int* usedRows = nullptr, int nUsed = 0) {
     b.clear();
     b.print(rec.ledName, PARTS_HEADER_COLOR, 0xFFFFFF, 0, 0, 1);
-    b.print("TAP ROW", PARTS_ITEM_COLOR, 0xFFFFFF, 0, 1, 1);
+    char lineBuf[16];
+    if (signal != nullptr) {
+        if (strlen(signal) <= 3) snprintf(lineBuf, sizeof(lineBuf), "TAP %s", signal);
+        else snprintf(lineBuf, sizeof(lineBuf), "%.7s", signal);
+    } else {
+        snprintf(lineBuf, sizeof(lineBuf), "TAP ROW");
+    }
+    b.print(lineBuf, PARTS_ITEM_COLOR, 0xFFFFFF, 0, 1, 1);
     requestLedShow(2);
     if (oled.oledConnected) {
         char text[96];
-        snprintf(text, sizeof(text), "%s\nTap row for pin 1\n(click = back)",
-                 rec.displayName);
+        if (signal != nullptr) {
+            snprintf(text, sizeof(text), "%s\nTap %s (%d/%d)\n(click = back)",
+                     rec.displayName, signal, step, total);
+        } else {
+            snprintf(text, sizeof(text), "%s\nTap row for pin 1\n(click = back)",
+                     rec.displayName);
+        }
         oled.resetMultiLineSmallText();
         oled.showMultiLineSmallText(text);
     }
     Serial.print("\r\nPARTPICK tap part=");
     Serial.print(rec.id);
-    Serial.println(" (tap row for pin 1; type row + enter; click = back)");
+    if (signal != nullptr) {
+        Serial.print(" sig=");
+        Serial.print(signal);
+    }
+    Serial.println(" (tap the row; type row + enter; click = back)");
     Serial.flush();
 
     encoderButtonState = IDLE;
@@ -172,6 +195,7 @@ static int partsTapForRow(const PartDbRecord& rec) {
 
     char digits[4] = {0};
     int nDigits = 0;
+    int lastNudgedRow = -1;
     unsigned long lastShowRequest = millis();
 
     while (true) {
@@ -224,18 +248,42 @@ static int partsTapForRow(const PartDbRecord& rec) {
         // rate-limited to one per 500 ms with -1 between, so any
         // wait-for-N-stable-reads scheme here can never fire).
         int reading = probing.justReadProbe(true);
-        if (reading >= 1 && reading <= 60) return reading;
+        if (reading >= 1 && reading <= 60) {
+            bool used = false;
+            for (int u = 0; u < nUsed; u++) {
+                if (usedRows[u] == reading) { used = true; break; }
+            }
+            if (!used) return reading;
+            // A held probe re-emits its row every 500 ms - nudge once per
+            // distinct offending row, not per emission.
+            if (reading != lastNudgedRow) {
+                lastNudgedRow = reading;
+                Serial.print("  row ");
+                Serial.print(reading);
+                Serial.println(" is already one of this part's pins");
+            }
+        }
         delayMicroseconds(1000);
     }
 }
 
-// DB record + tapped row -> a placed part in the live state. The tap means
-// "pin 1 goes HERE", and the anchor mapping absorbs the half the footprint
-// can't anchor on: a DIP tapped on the top half anchors one column lower
-// (+30 = same column, bottom half - States.h geometry: DIP baseRow must be
-// 31-60); an axial tapped on the bottom half anchors its column's top hole
-// (-30). SIP anchors where you tap.
-static bool partsCommitPlacement(const PartDbRecord& rec, int tappedRow) {
+// DB record + tapped rows -> a placed part in the live state.
+//
+// nRows == 1 is the DIP anchor flow: the tap means "pin 1 goes HERE" and the
+// anchor mapping absorbs the half the footprint can't anchor on (a DIP tapped
+// on the top half anchors one column lower; +30 = same column, bottom half -
+// States.h geometry: DIP baseRow must be 31-60).
+//
+// nRows == numPins is the per-signal flow (Kevin's ruling: SIP modules and
+// passives have no standard header order, so the taps ARE the truth):
+//   SIP    -> baseRow = the lowest tapped row, every pin gets offset =
+//             tappedRow - baseRow (the PartPin field that wins over footprint
+//             math). Any distinct same-half rows are legal - a module on fly
+//             wires places as honestly as one plugged straight in.
+//   axial2 -> the two taps must share a column across the center line (the
+//             only legal axial shape); whichever signal was tapped on the top
+//             half becomes footprint pin 1, so polarity follows the taps.
+static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int nRows) {
     JumperlessState& st = globalState;
     if (st.parts.numParts >= MAX_PARTS) {
         Serial.print("\r\nPARTDB place refused reason=\"parts table full (");
@@ -246,14 +294,49 @@ static bool partsCommitPlacement(const PartDbRecord& rec, int tappedRow) {
         return false;
     }
 
-    int baseRow = tappedRow;
     const PartDbPinout& po = *partdbPinoutOf(rec);
-    if (po.footprint == PARTDB_FOOT_DIP && tappedRow <= 30) baseRow = tappedRow + 30;
-    if (po.footprint == PARTDB_FOOT_AXIAL2 && tappedRow > 30) baseRow = tappedRow - 30;
-
     static PartDefinition tmp;   // ~600 B - keep it off the core-0 stack
     partdbInstantiate(rec, tmp);
-    tmp.baseRow = (int16_t)baseRow;
+
+    if (nRows == 1) {
+        int baseRow = rows[0];
+        if (po.footprint == PARTDB_FOOT_DIP && baseRow <= 30) baseRow += 30;
+        tmp.baseRow = (int16_t)baseRow;
+    } else if (po.footprint == PARTDB_FOOT_AXIAL2 && nRows == 2) {
+        int top = (rows[0] <= 30) ? rows[0] : rows[1];
+        int bottom = (rows[0] <= 30) ? rows[1] : rows[0];
+        if (top > 30 || bottom <= 30 || bottom != top + 30) {
+            Serial.println("\r\nPARTDB place refused reason=\"an axial part's "
+                           "ends must share a column (one top, one bottom)\"");
+            if (oled.oledConnected)
+                oled.clearPrintShow("Ends must\nshare a column", 2, true, true, true);
+            return false;
+        }
+        tmp.baseRow = (int16_t)top;
+        for (int j = 0; j < tmp.numPins && j < 2; j++) {
+            tmp.pins[j].pinNumber = (rows[j] <= 30) ? 1 : 2;
+        }
+    } else {
+        // SIP per-signal: all taps in one half (offsets are same-side).
+        bool topHalf = rows[0] <= 30;
+        for (int j = 1; j < nRows; j++) {
+            if ((rows[j] <= 30) != topHalf) {
+                Serial.println("\r\nPARTDB place refused reason=\"all pins "
+                               "must be in the same half of the board\"");
+                if (oled.oledConnected)
+                    oled.clearPrintShow("Pins must\nshare a half", 2, true, true, true);
+                return false;
+            }
+        }
+        int baseRow = rows[0];
+        for (int j = 1; j < nRows; j++) {
+            if (rows[j] < baseRow) baseRow = rows[j];
+        }
+        tmp.baseRow = (int16_t)baseRow;
+        for (int j = 0; j < nRows && j < tmp.numPins; j++) {
+            tmp.pins[j].offset = (int8_t)(rows[j] - baseRow);
+        }
+    }
 
     // Unique name: NE555, NE555_2, ... (findByName is the serializer's own
     // identity check, so a name it can't see is free). MAX_PARTS is 16, so
@@ -307,11 +390,12 @@ static bool partsCommitPlacement(const PartDbRecord& rec, int tappedRow) {
     Serial.print("\r\nPARTDB place ok=");
     Serial.print(st.parts.parts[idx].name);
     Serial.print(" row=");
-    Serial.println(baseRow);
+    Serial.println(tmp.baseRow);
     Serial.flush();
     if (oled.oledConnected) {
         char text[64];
-        snprintf(text, sizeof(text), "%s\nrow %d", st.parts.parts[idx].name, baseRow);
+        snprintf(text, sizeof(text), "%s\nrow %d", st.parts.parts[idx].name,
+                 (int)tmp.baseRow);
         oled.clearPrintShow(text, 2, true, true, true);
         delay(800);
     }
@@ -483,10 +567,36 @@ void partsAppLauncher(void) {
             partIdx = p;
             const PartDbRecord& rec = partdb_records[s_rec[p]];
 
-            int row = partsTapForRow(rec);
-            if (row == -2) goto done;
-            if (row == -1) continue;   // back to the part list
-            if (partsCommitPlacement(rec, row)) {
+            // DIP crosses the center line - one orientation, one anchor tap.
+            // Everything else (SIP modules, passives) has no standard header
+            // order, so every listed signal is tapped by name and the taps
+            // are the geometry (Kevin's ruling, 2026-08-25).
+            const PartDbPinout& po = *partdbPinoutOf(rec);
+            int rows[MAX_PART_PINS];
+            int nRows = 0;
+            if (po.footprint == PARTDB_FOOT_DIP) {
+                int row = partsTapForRow(rec);
+                if (row == -2) goto done;
+                if (row == -1) continue;   // back to the part list
+                rows[nRows++] = row;
+            } else {
+                int nSignals = po.numPins;
+                if (nSignals > MAX_PART_PINS) nSignals = MAX_PART_PINS;
+                bool cancelled = false;
+                for (int s = 0; s < nSignals; s++) {
+                    int row = partsTapForRow(rec, po.pins[s].name, s + 1,
+                                             nSignals, rows, nRows);
+                    if (row == -2) goto done;
+                    if (row == -1) { cancelled = true; break; }
+                    rows[nRows++] = row;
+                    Serial.print("PARTPICK sig=");
+                    Serial.print(po.pins[s].name);
+                    Serial.print(" row=");
+                    Serial.println(row);
+                }
+                if (cancelled) continue;   // back to the part list
+            }
+            if (partsCommitPlacement(rec, rows, nRows)) {
                 // Placed: the app's job is over - exit and let the ambient
                 // services own it (labels bloom, DisplayService routes a
                 // display's data pins the moment it polls).

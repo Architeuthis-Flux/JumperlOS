@@ -25,8 +25,50 @@
 #include "Undo.h"
 #include "Menus.h"
 #include "ReadingDisplay.h"
+#include "PartPlacement.h"   // partPinNode - semantic labels for part-pin nets
 #include <Arduino.h>
 #include <cmath>
+
+// ---------------------------------------------------------------------------
+// Semantic readout names (Kevin's ruling, 2026-08-25: show meaning, not
+// numbers). A placed part's pin on the net wins ("SSD1306 SDA"); else a GPIO
+// whose RP2350 FUNCSEL really is I2C reports its bus role straight from the
+// pin function register (even GPIO = SDA, odd = SCL - the silicon's fixed
+// map). Returns false when neither applies - the caller keeps its numeric
+// name. userGpioIdx is the gpioDef index (-1 when not a GPIO readout).
+// (netHasNode is PartLabels' netContainsNode shape - that one is file-local.)
+static bool netHasNode(int netNum, int node) {
+    if (netNum <= 0 || netNum >= MAX_NETS) return false;
+    if (globalState.connections.nets[netNum].number != netNum) return false;
+    for (int n = 0; n < MAX_NODES && globalState.connections.nets[netNum].nodes[n] != 0; n++) {
+        if (globalState.connections.nets[netNum].nodes[n] == node) return true;
+    }
+    return false;
+}
+static bool netSemanticName(int netNum, int userGpioIdx, char* out, size_t outLen) {
+    if (netNum > 0 && netNum < MAX_NETS) {
+        for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+            const PartDefinition& p = globalState.parts.parts[i];
+            if (!p.placed) continue;
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                if (node < 1 || node > 60) continue;
+                if (!netHasNode(netNum, node)) continue;
+                snprintf(out, outLen, "%s %s", p.name, p.pins[j].name);
+                return true;
+            }
+        }
+    }
+    if (userGpioIdx >= 0) {
+        int rpPin = gpioDef[userGpioIdx][0];
+        if (gpio_get_function((uint)rpPin) == GPIO_FUNC_I2C) {
+            snprintf(out, outLen, "GPIO %d %s", userGpioIdx + 1,
+                     (rpPin & 1) ? "SCL" : "SDA");
+            return true;
+        }
+    }
+    return false;
+}
 
 // ============================================================================
 // Highlighting Class Implementation
@@ -1388,7 +1430,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                                 : ( gpioInputState == 2 ) ? "FLOATING"
                                                           : "?";
                             char name[ 16 ];
-                            snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
+                            if ( !netSemanticName( netHighlighted, gpioInputNumber, name, sizeof( name ) ) )
+                                snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
                             showNetReading( name, stateString );
                         }
                         specialPrint = 1;
@@ -1403,7 +1446,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         if ( print == 1 ) {
                             int gpioOutputState = gpio_get_out_level( gpioDef[ gpioOutputNumber ][ 0 ] );
                             char name[ 16 ];
-                            snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
+                            if ( !netSemanticName( netHighlighted, gpioOutputNumber, name, sizeof( name ) ) )
+                                snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
                             showNetReading( name, gpioOutputState ? "HIGH" : "LOW" );
                         }
                         specialPrint = 1;
@@ -1420,7 +1464,11 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     if ( print == 1 && ( lastPrintedNet != netHighlighted ||
                                          printedRowChanged ) ) {
                         char nameBuffer[ 16 ];
-                        const char* baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
+                        const char* baseName;
+                        if ( netSemanticName( netHighlighted, -1, nameBuffer, sizeof( nameBuffer ) ) )
+                            baseName = nameBuffer;   // a placed part's pin label
+                        else
+                            baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
 
                         // Row shows in the sink's header (right side); the
                         // value lines are the SCANNED node voltage (plain
@@ -1551,7 +1599,8 @@ int Highlighting::checkForReadingChanges( void ) {
                 : ( currentGpioInputState == 2 ) ? "FLOATING"
                                                  : "?";
             char name[ 16 ];
-            snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
+            if ( !netSemanticName( showReadingNet, gpioInputNumber, name, sizeof( name ) ) )
+                snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
             showNetReading( name, stateString );
 
             displayUpdated = true;
@@ -1569,7 +1618,8 @@ int Highlighting::checkForReadingChanges( void ) {
             prevGpioOutputState = currentGpioOutputState;
 
             char name[ 16 ];
-            snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
+            if ( !netSemanticName( showReadingNet, gpioOutputNumber, name, sizeof( name ) ) )
+                snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
             showNetReading( name, currentGpioOutputState ? "HIGH" : "LOW" );
 
             displayUpdated = true;
