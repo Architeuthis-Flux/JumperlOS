@@ -40,7 +40,12 @@ public:
     ServiceStatus service() override;
     const char* getName() const override { return "PartLabels"; }
     ServicePriority getPriority() const override { return ServicePriority::NORMAL; }
-    uint32_t periodUs() const override { return 20000; }   // 50 Hz listen cadence
+    // 200 Hz: the inspect listener reads the Probing service's cache, which
+    // holds an accepted row for ONE ~10 ms refresh window per 500 ms held -
+    // a consumer must sample faster than that window or it misses taps
+    // (20 ms here made tap-to-inspect a coin flip). The tick body is a few
+    // compares; the heavy recompose work stays fingerprint-gated.
+    uint32_t periodUs() const override { return 5000; }
 
     // Synchronous recompose + post, for callers that change state while this
     // service can't run (SlotManager preview enter/exit inside the menu loop).
