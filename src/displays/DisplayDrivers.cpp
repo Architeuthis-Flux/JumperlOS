@@ -45,15 +45,56 @@ static const uint8_t sh1106_64_init[] = {
     0xA4, 0xA6, 0xAF,
 };
 
+// Zero the controller's WHOLE RAM (all 8 pages of a 64-row part - a 128x32
+// panel's hidden half included). Power-on GDDRAM is noise; the old code let
+// the first full frame paint over it, which flashed garbage on attach and
+// would show the hidden half's noise on the first pageFlip. ~1 KB at the
+// wire's ~37 us/byte is a one-time ~40 ms inside the beacon's init.
+static bool monoOledClearRam(DisplayInstance& d) {
+    const uint16_t w = d.desc->w;
+    uint8_t tx[7 + 64];
+    memset(tx + 7, 0, 64);
+    for (uint8_t page = 0; page < 8; page++) {
+        for (uint16_t col = 0; col < w; col += 64) {
+            uint8_t hwCol = (uint8_t)(col + d.desc->quirks.colOffset);
+            tx[0] = 0x80; tx[1] = (uint8_t)(0xB0 | page);
+            tx[2] = 0x80; tx[3] = (uint8_t)(0x00 | (hwCol & 0x0F));
+            tx[4] = 0x80; tx[5] = (uint8_t)(0x10 | (hwCol >> 4));
+            tx[6] = 0x40;
+            uint16_t n = (uint16_t)((w - col) < 64 ? (w - col) : 64);
+            if (!displayI2cWriteRaw(d, tx, (uint16_t)(7 + n))) return false;
+        }
+    }
+    return true;
+}
+
 static bool monoOledInit(DisplayInstance& d) {
-    for (uint16_t i = 0; i < d.desc->initLen; i++) {
+    // Hold the final display-on (0xAF, every family sequence's last byte)
+    // until AFTER the RAM clear - otherwise the panel lights up showing
+    // power-on noise (or, on a re-init, the stale previous frame) and blanks
+    // progressively as the clear sweeps (verify-workflow finding).
+    for (uint16_t i = 0; i + 1 < d.desc->initLen; i++) {
         uint8_t c = d.desc->initSeq[i];
         if (!displayI2cWrite(d, 0x00, &c, 1)) return false;
     }
+    if (!monoOledClearRam(d)) return false;
+    uint8_t lastCmd = d.desc->initSeq[d.desc->initLen - 1];
+    if (!displayI2cWrite(d, 0x00, &lastCmd, 1)) return false;
     d.flushCursor = 0;
     d.midFrame = false;
-    d.shadowValid = false;   // GDDRAM is unknown after (re)init - the next
-                             // frame flushes fully, deltas resume after
+    // RAM is all-zero now: the shadow can say so, and the first frame is a
+    // pure delta (only lit pixels transmit).
+    if (d.shadow != nullptr) {
+        uint16_t shadowBytes = d.desc->quirks.pageFlip ? (uint16_t)(d.desc->fbBytes * 2)
+                                                       : d.desc->fbBytes;
+        memset(d.shadow, 0, shadowBytes);
+        d.shadowValidMask = d.desc->quirks.pageFlip ? 0b11 : 0b01;
+    } else {
+        d.shadowValidMask = 0;
+    }
+    // initSeq's 0x40 shows RAM line 0 (half 0) - so writing starts on the
+    // hidden half 1 and the first completed frame flips to it.
+    d.backHalf = d.desc->quirks.pageFlip ? 1 : 0;
     return true;
 }
 
@@ -78,21 +119,38 @@ static int monoOledFlushChunk(DisplayInstance& d) {
     if (d.fb == nullptr || d.desc == nullptr) return 0;
     const uint16_t w = d.desc->w;
     const uint16_t frameBytes = d.desc->fbBytes;
+    const bool flip = d.desc->quirks.pageFlip;
+    // pageFlip: everything writes into the HIDDEN half (backHalf) - its page
+    // window in RAM and its own image in the shadow. The shown half is never
+    // touched mid-frame, which is what makes the flip tear-free.
+    const uint8_t pageBase = flip ? (uint8_t)(d.backHalf * (d.desc->h / 8)) : 0;
+    const uint16_t shadowOff = (flip && d.backHalf) ? frameBytes : 0;
     if (!d.midFrame) {
         d.flushCursor = 0;
         d.midFrame = true;
     }
-    if (d.shadow != nullptr && d.shadowValid) {
+    if (d.shadow != nullptr && (d.shadowValidMask & (1u << d.backHalf))) {
         while (d.flushCursor < frameBytes) {
             uint16_t span = chunkSpan(d, d.flushCursor);
-            if (memcmp(d.fb + d.flushCursor, d.shadow + d.flushCursor, span) != 0)
+            if (memcmp(d.fb + d.flushCursor, d.shadow + shadowOff + d.flushCursor, span) != 0)
                 break;
             d.flushCursor += span;
         }
     }
     if (d.flushCursor >= frameBytes) {
+        if (flip) {
+            // The atomic reveal: one display-start-line command maps the
+            // just-written half onto the panel. On NACK, return -1 WITHOUT
+            // toggling - the retry skips every (already-matching) chunk and
+            // lands back here to resend the flip.
+            uint8_t flipCmd = (uint8_t)(0x40 | (d.backHalf ? 32 : 0));
+            if (!displayI2cWrite(d, 0x00, &flipCmd, 1)) return -1;
+            d.shadowValidMask |= (uint8_t)(1u << d.backHalf);
+            d.backHalf ^= 1;
+        } else if (d.shadow != nullptr) {
+            d.shadowValidMask |= 0b01;
+        }
         d.midFrame = false;
-        if (d.shadow != nullptr) d.shadowValid = true;
         return 0;
     }
 
@@ -105,7 +163,7 @@ static int monoOledFlushChunk(DisplayInstance& d) {
     // start/addr/stop overhead instead of four.
     uint8_t hwCol = (uint8_t)(col + d.desc->quirks.colOffset);
     uint8_t tx[7 + 64];
-    tx[0] = 0x80; tx[1] = (uint8_t)(0xB0 | page);
+    tx[0] = 0x80; tx[1] = (uint8_t)(0xB0 | (page + pageBase));
     tx[2] = 0x80; tx[3] = (uint8_t)(0x00 | (hwCol & 0x0F));
     tx[4] = 0x80; tx[5] = (uint8_t)(0x10 | (hwCol >> 4));
     tx[6] = 0x40;
@@ -113,13 +171,12 @@ static int monoOledFlushChunk(DisplayInstance& d) {
     memcpy(tx + 7, d.fb + d.flushCursor, n);
     if (!displayI2cWriteRaw(d, tx, (uint16_t)(7 + n))) return -1;
 
-    if (d.shadow != nullptr) memcpy(d.shadow + d.flushCursor, d.fb + d.flushCursor, n);
+    if (d.shadow != nullptr)
+        memcpy(d.shadow + shadowOff + d.flushCursor, d.fb + d.flushCursor, n);
     d.flushCursor += n;
-    if (d.flushCursor >= frameBytes) {
-        d.midFrame = false;
-        if (d.shadow != nullptr) d.shadowValid = true;
-        return 0;
-    }
+    // Frame-end bookkeeping (including the pageFlip reveal) lives at the top
+    // of the next call - one completion path, not two. The burst loop keeps
+    // calling while we return 1, so the flip still lands in the same visit.
     return 1;
 }
 
@@ -161,14 +218,17 @@ static const DisplayOps monoOledOps = {
 // ---------------------------------------------------------------------------
 
 static const DisplayDriverDesc displayDrivers[] = {
+    // quirks = { colOffset, pagedAddressing, pageFlip }. pageFlip only where
+    // the panel shows HALF the controller's RAM (128x32 on a 64-row part) -
+    // the 64-row panels use all of it and flush progressively instead.
     { "ssd1306", DispBus::I2C_SOFT, 128, 64, ssd1306_64_init,
-      sizeof(ssd1306_64_init), &monoOledOps, { 0, true }, { 0x3C, 0x3D, 0 },
+      sizeof(ssd1306_64_init), &monoOledOps, { 0, true, false }, { 0x3C, 0x3D, 0 },
       1024, true },
     { "ssd1306_32", DispBus::I2C_SOFT, 128, 32, ssd1306_32_init,
-      sizeof(ssd1306_32_init), &monoOledOps, { 0, true }, { 0x3C, 0x3D, 0 },
+      sizeof(ssd1306_32_init), &monoOledOps, { 0, true, true }, { 0x3C, 0x3D, 0 },
       512, true },
     { "sh1106", DispBus::I2C_SOFT, 128, 64, sh1106_64_init,
-      sizeof(sh1106_64_init), &monoOledOps, { 2, true }, { 0x3C, 0x3D, 0 },
+      sizeof(sh1106_64_init), &monoOledOps, { 2, true, false }, { 0x3C, 0x3D, 0 },
       1024, true },
 };
 static const int numDisplayDrivers = sizeof(displayDrivers) / sizeof(displayDrivers[0]);

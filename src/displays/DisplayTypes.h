@@ -48,6 +48,11 @@ struct DisplayDriverDesc {
     struct {
         uint8_t colOffset;       // SH1106: 2 (132-wide RAM)
         bool pagedAddressing;    // SH1106: per-page pointer writes, no 0x20
+        bool pageFlip;           // panel shows HALF the controller's RAM
+                                 // (128x32 on a 64-row SSD1306): frames render
+                                 // into the hidden half and a 1-byte display-
+                                 // start-line command flips atomically -
+                                 // tear-free at ANY bus speed
     } quirks;
     uint8_t i2cAddrs[3];     // 0-terminated candidate list
     uint16_t fbBytes;        // mono framebuffer size (w*h/8)
@@ -74,10 +79,14 @@ struct DisplayInstance {
     uint8_t* fb = nullptr;              // heap on attach (fbBytes), freed on detach
     uint8_t* shadow = nullptr;          // what the PANEL currently holds - the
                                         // flush skips chunks that match, so a
-                                        // frame costs only its changed bytes
-                                        // (the anti-tearing lever on a slow bus)
-    bool shadowValid = false;           // false after init/re-init: panel GDDRAM
-                                        // is unknown, next frame flushes fully
+                                        // frame costs only its changed bytes.
+                                        // pageFlip panels: 2x fbBytes, one
+                                        // image per RAM half
+    uint8_t shadowValidMask = 0;        // bit per half; cleared on (re)init -
+                                        // GDDRAM unknown, next frame flushes
+                                        // fully. Non-flip drivers use bit 0.
+    uint8_t backHalf = 0;               // pageFlip: the RAM half being WRITTEN
+                                        // (the panel shows the other one)
     uint16_t flushCursor = 0;           // byte position within the current frame
     uint8_t chunkBytes = 16;            // per-tick flush budget (service-paced:
                                         // soft bus small, hardware larger,

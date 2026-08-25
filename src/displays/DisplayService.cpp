@@ -120,7 +120,10 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
     }
 
     inst.fb = new (std::nothrow) uint8_t[desc->fbBytes];
-    inst.shadow = new (std::nothrow) uint8_t[desc->fbBytes];
+    // pageFlip panels keep one shadow image per RAM half.
+    uint16_t shadowBytes = desc->quirks.pageFlip ? (uint16_t)(desc->fbBytes * 2)
+                                                 : desc->fbBytes;
+    inst.shadow = new (std::nothrow) uint8_t[shadowBytes];
     if (inst.fb == nullptr || inst.shadow == nullptr) {
         delete[] inst.fb;      inst.fb = nullptr;
         delete[] inst.shadow;  inst.shadow = nullptr;
@@ -131,7 +134,7 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
         return;
     }
     memset(inst.fb, 0, desc->fbBytes);
-    inst.shadowValid = false;
+    inst.shadowValidMask = 0;
     // Soft chunk 16: the 7-byte position header is fixed, so 8 data bytes
     // spent >half the bus time on overhead; 16 lands ~1 ms per chunk at the
     // 250 kHz half-bit and cuts a 512-byte frame to 32 transactions.
@@ -160,7 +163,8 @@ void DisplayService::detach() {
         delete[] inst.shadow;
         inst.shadow = nullptr;
     }
-    inst.shadowValid = false;
+    inst.shadowValidMask = 0;
+    inst.backHalf = 0;
     displayBusRelease(inst);
     // The part's bridges (if it still exists) are its own data now; a part
     // that left the table already took them down via removePartPlacement.
@@ -266,6 +270,11 @@ ServiceStatus DisplayService::service() {
 
     if (inst.state == DispState::ROUTED) {
         if ((int32_t)(now - inst.nextBeaconMs) < 0) return ServiceStatus::IDLE;
+        // Bring-up waits out modal interactions: init's full-RAM clear is a
+        // ~45 ms burst in ONE service call - fine ambient, hostile inside a
+        // menu/probe loop that pumps inner-set services (verify-workflow
+        // finding). The panel comes alive the moment the interaction ends.
+        if (jOS.getBlockingService() != nullptr) return ServiceStatus::IDLE;
         inst.nextBeaconMs = now + DISP_BEACON_MS;
         for (int a = 0; inst.desc->i2cAddrs[a] != 0 && a < 3; a++) {
             if (displayI2cPing(inst, inst.desc->i2cAddrs[a])) {
@@ -281,6 +290,7 @@ ServiceStatus DisplayService::service() {
                 }
                 inst.i2cAddr = inst.desc->i2cAddrs[a];
                 if (inst.desc->ops->init(inst)) {
+                    initFails = 0;
                     inst.state = DispState::ALIVE;
                     inst.animNextMs = 0;
                     inst.userOwnsContent = false;
@@ -289,6 +299,19 @@ ServiceStatus DisplayService::service() {
                     Serial.print(" addr=0x");
                     Serial.println(inst.i2cAddr, HEX);
                     Serial.flush();
+                } else {
+                    // A panel that pings but won't init: unstick the bus (a
+                    // failed clear can wedge it too), and after 5 strikes say
+                    // so once and back the beacon off to 2 s - the old path
+                    // retried the full ~45 ms init every 300 ms forever,
+                    // silently (verify-workflow finding).
+                    displayBusUnstick(inst);
+                    if (++initFails == 5) {
+                        Serial.print("\r\nDISPLAY init failing id=");
+                        Serial.print(inst.desc->id);
+                        Serial.println(" - retrying slowly (check power/wiring)");
+                    }
+                    if (initFails >= 5) inst.nextBeaconMs = now + 2000;
                 }
                 return ServiceStatus::BUSY;
             }
@@ -335,6 +358,12 @@ ServiceStatus DisplayService::service() {
         // NACK re-ran init per glitch: the repeated "DISPLAY alive" spam,
         // the garbage frames, and most of the slowness on the first bench.
         flushRetryTotal++;
+        // Clear the wedge BEFORE the retry: an interrupted byte can leave
+        // the panel driving SDA low, where every subsequent START fails too
+        // - that was the lost->alive cycling (8 straight errors, "fixed" by
+        // the beacon's pings accidentally clocking the slave free, one black
+        // re-init later). Nine clocks + STOP makes the very next retry real.
+        displayBusUnstick(inst);
         if (++flushFails < 8) return ServiceStatus::BUSY;
         flushFails = 0;
         lostTotal++;

@@ -26,6 +26,11 @@
 bool displayBusAcquire(DisplayInstance& d, const char** reasonOut);
 void displayBusRelease(DisplayInstance& d);
 
+// Wedged-slave recovery (9 clocks + STOP): call before retrying a failed
+// transfer - an interrupted byte can leave the panel driving SDA low, where
+// no retry can even form a START.
+void displayBusUnstick(const DisplayInstance& d);
+
 // True when a user script has claimed one of this instance's pins
 // (gpioPythonOwned) - the YIELDED trigger.
 bool displayBusUserClaimed(const DisplayInstance& d);

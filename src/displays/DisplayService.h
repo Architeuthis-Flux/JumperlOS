@@ -60,6 +60,7 @@ private:
     bool yieldNoted = false;
     bool acquireWarned = false;   // one line per acquire-failure episode
     uint8_t flushFails = 0;       // consecutive chunk errors (8 = panel lost)
+    uint8_t initFails = 0;        // consecutive init failures (5 = slow beacon)
     uint32_t flushRetryTotal = 0; // cumulative chunk retries (glitch health)
     uint32_t lostTotal = 0;       // beacon bounces after 8-in-a-row failures
     uint32_t framesFlushed = 0;   // completed frames since boot

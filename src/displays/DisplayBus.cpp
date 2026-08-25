@@ -18,61 +18,57 @@
 static const int SOFT_SDA_PIN = 24;
 static const int SOFT_SCL_PIN = 25;
 
-// Half-bit delay: ~2 us -> ~250 kHz true rate now that the bit ops are
-// single-cycle SIO toggles (SSD1306 is specced to 400 kHz). Safe at this
-// speed ONLY because sclReleaseWait polls SCL actually high before counting
-// the high phase - through the crossbar fabric the RC rise is real, and the
-// wait self-paces to whatever the path can do (a slow bus gets a slower
-// clock, not corrupt bits). Drop to 5 if a bench panel shows garbage.
+// Half-bit delay: ~2 us -> ~250 kHz, and with push-pull drive the edges are
+// nanoseconds - the fabric's pull-up RC rise time (the old marginal-bit
+// source) is out of the timing entirely, so this rate is CLEAN, not
+// borderline (SSD1306 is specced to 400 kHz; headroom exists if wanted).
 // HONEST BUDGET: ~37 us/byte -> a 16-byte chunk (23 on the wire) ~= 0.9 ms;
 // the service BURSTS chunks under a time budget every 4 ms, so a delta
 // frame lands in one visit and even a full 512-byte sweep takes ~50 ms.
-// Better still needs a hardware bus or a future PIO-I2C offload.
 static const int SOFT_HALF_BIT_US = 2;
 
 // ---------------------------------------------------------------------------
-// Soft-I2C primitives (open-drain emulation: LOW = drive, HIGH = release)
+// Soft-I2C primitives - PUSH-PULL where the protocol allows it.
 //
-// Raw SIO direction toggles, not pinMode/digitalWrite: the HAL calls cost
-// 1-2 us PER BIT, which quietly halved the real clock rate. The pins are
-// configured once at acquire (SIO function, pull-up, output latch LOW) and
-// after that a bit is one single-cycle OE set/clear - drive low = output
-// (latched 0), release = input (pull-up floats it high).
+// This bus has exactly one master (us) and a slave that never drives SDA
+// except during ACK and never stretches SCL (SSD1306-family, write-only use).
+// So SCL is driven BOTH ways and SDA is driven both ways for data bits -
+// the pull-up + fabric RC rise time (the source of the marginal bits that
+// wedged the panel mid-byte) is out of the timing entirely. SDA goes
+// open-drain (input + pull-up) only for the ACK window, and it is driven
+// HIGH first so the pad releases from a solid rail. Bit ops are raw SIO
+// (pinMode/digitalWrite cost 1-2 us per bit through the HAL).
 // ---------------------------------------------------------------------------
 
 static inline void sdaLow(const DisplayInstance& d) {
+    gpio_put(d.sdaPin, 0);
+    gpio_set_dir(d.sdaPin, GPIO_OUT);
+}
+static inline void sdaHigh(const DisplayInstance& d) {
+    gpio_put(d.sdaPin, 1);
     gpio_set_dir(d.sdaPin, GPIO_OUT);
 }
 static inline void sdaRelease(const DisplayInstance& d) {
-    gpio_set_dir(d.sdaPin, GPIO_IN);   // internal pull is a courtesy only -
-                                       // a real bus needs external ~4.7k
+    gpio_set_dir(d.sdaPin, GPIO_IN);   // ACK window only - internal pull-up
+                                       // plus whatever the module carries
 }
 static inline void sclLow(const DisplayInstance& d) {
+    gpio_put(d.sclPin, 0);
     gpio_set_dir(d.sclPin, GPIO_OUT);
 }
-static inline void sclRelease(const DisplayInstance& d) {
-    gpio_set_dir(d.sclPin, GPIO_IN);
+static inline void sclHigh(const DisplayInstance& d) {
+    gpio_put(d.sclPin, 1);
+    gpio_set_dir(d.sclPin, GPIO_OUT);
 }
 static inline bool sdaRead(const DisplayInstance& d) {
     return gpio_get(d.sdaPin);
 }
 
-// Release SCL and wait for it to ACTUALLY rise (bounded ~50 us) before the
-// high-phase delay. This is both clock-stretch honesty and what makes the
-// 2 us half-bit safe through the fabric's RC: the clock self-paces to the
-// path instead of clipping the high phase short.
-static inline void sclReleaseWait(const DisplayInstance& d) {
-    sclRelease(d);
-    for (int i = 0; i < 50 && !gpio_get(d.sclPin); i++) {
-        delayMicroseconds(1);
-    }
-    delayMicroseconds(SOFT_HALF_BIT_US);
-}
-
 static void softStart(const DisplayInstance& d) {
-    sdaRelease(d);
-    sclReleaseWait(d);   // START needs SCL truly high before SDA falls
-    sdaLow(d);
+    sdaHigh(d);
+    sclHigh(d);
+    delayMicroseconds(SOFT_HALF_BIT_US);
+    sdaLow(d);           // SDA falls while SCL high = START
     delayMicroseconds(SOFT_HALF_BIT_US);
     sclLow(d);
 }
@@ -80,26 +76,50 @@ static void softStart(const DisplayInstance& d) {
 static void softStop(const DisplayInstance& d) {
     sdaLow(d);
     delayMicroseconds(SOFT_HALF_BIT_US);
-    sclReleaseWait(d);
-    sdaRelease(d);
+    sclHigh(d);
+    delayMicroseconds(SOFT_HALF_BIT_US);
+    sdaHigh(d);          // SDA rises while SCL high = STOP
     delayMicroseconds(SOFT_HALF_BIT_US);
 }
 
-// One byte out, ACK back. Clock stretching honored with a bounded wait.
+// One byte out, ACK back. Data bits are push-pull both ways; SDA opens up
+// (input + pull-up) only for the ACK window, released FROM the high rail.
 static bool softWriteByte(const DisplayInstance& d, uint8_t b) {
     for (int i = 7; i >= 0; i--) {
-        if ((b >> i) & 1) sdaRelease(d); else sdaLow(d);
+        if ((b >> i) & 1) sdaHigh(d); else sdaLow(d);
         delayMicroseconds(SOFT_HALF_BIT_US);
-        sclReleaseWait(d);
+        sclHigh(d);
+        delayMicroseconds(SOFT_HALF_BIT_US);
         sclLow(d);
     }
-    // ACK bit
+    // ACK bit: hand SDA to the slave from a solid high.
+    sdaHigh(d);
     sdaRelease(d);
     delayMicroseconds(SOFT_HALF_BIT_US);
-    sclReleaseWait(d);
+    sclHigh(d);
+    delayMicroseconds(SOFT_HALF_BIT_US);
     bool ack = !sdaRead(d);
     sclLow(d);
     return ack;
+}
+
+// The textbook wedged-slave recovery: an interrupted transfer can leave the
+// panel mid-byte DRIVING SDA low, where no retry can even form a START (the
+// exact lost->alive cycling from Kevin's log - the beacon's pings were doing
+// this unstick by accident, 300 ms and one black re-init later). Nine clocks
+// with SDA released let the slave finish whatever byte it thinks it is in,
+// then a STOP resets its protocol state.
+void displayBusUnstick(const DisplayInstance& d) {
+    if (d.sdaPin < 0) return;
+    sdaHigh(d);
+    sdaRelease(d);
+    for (int i = 0; i < 9; i++) {
+        sclLow(d);
+        delayMicroseconds(SOFT_HALF_BIT_US);
+        sclHigh(d);
+        delayMicroseconds(SOFT_HALF_BIT_US);
+    }
+    softStop(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,15 +154,12 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     }
 
     // One-time pin setup for the raw-SIO bit ops: SIO function + pull-up via
-    // pinMode, then latch the output value LOW - from here on a bit is a
-    // single-cycle direction toggle (OUT drives the latched 0, IN releases
-    // to the pull-up).
+    // pinMode (the pull covers SDA's ACK window), then idle the bus at the
+    // driven-high rail - push-pull from here on.
     pinMode(d.sdaPin, INPUT_PULLUP);
     pinMode(d.sclPin, INPUT_PULLUP);
-    gpio_put(d.sdaPin, 0);
-    gpio_put(d.sclPin, 0);
-    sdaRelease(d);
-    sclRelease(d);
+    sdaHigh(d);
+    sclHigh(d);
     gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_SIO;
     gpio_function_map[d.sclPin - 20] = GPIO_FUNC_SIO;
     // gpioState 6 = "bus role" for the UI/scan, the oled.cpp:4316 precedent.
