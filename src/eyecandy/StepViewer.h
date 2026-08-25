@@ -5,22 +5,28 @@
 #include <Arduino.h>
 #include "JumperlOS.h"
 
-// Non-blocking guide-step viewer (Guides-Simplification A-M4).
+// Non-blocking guide-step viewer (Guides-Simplification A-M4; grip rules
+// re-cut after the first bench pass, 2026-08-24).
 //
 // The old blocking guide ORDERED the user through its steps; the viewer just
 // lets them BROWSE the step texts on the OLED while everything stays ambient.
-// While armed, the wheel scrolls steps (that is its browse job here - row
-// scroll comes back the moment the viewer is off), the current step's rows
-// glow through PartLabels' emphasis, and the cursor persists as
-// parts.guideStep via the ordinary idle auto-save. Nothing is captured
-// beyond wheel TURNS: clicks still open the menu, every OLED consumer still
-// wins the panel (the retained screen is the idle screen and yields via
-// notePanelTakenByOther), and there is no ordering, no checks, no gates.
 //
-// Off-ramps: `z steps off`, board clear (parts.clear() zeroes guideSource,
-// which auto-disarms), or any context switch away from the armed project.
-// Serial twins (every gesture has one): `z steps`, `z steps next|prev|<n>`,
-// `z steps on|off`.
+// Bench law (the first flash was "a mess"): the viewer may only consume the
+// wheel when the wheel has NO OTHER JOB and its own screen is the panel
+// content - so what the wheel does is always what the OLED shows. Concretely
+// it takes a turn only when no menu is up, nothing is BLOCKING, probe mode
+// is off, and no net is highlighted (a probe tap hands the wheel to net
+// scroll until the highlight times out). While armed but yielded (a reading
+// or toast took the panel), the FIRST turn reclaims the screen without
+// moving the cursor; turns after that scroll. Wheel turns are silent on
+// serial - `VIEWER` machine lines come from `z steps` commands and
+// state transitions only, never per-detent.
+//
+// Off-ramps: click-and-HOLD while the steps screen is showing (the physical
+// exit - runPicker's HELD-cancels vocabulary), `z steps off`, board clear
+// (parts.clear() zeroes guideSource, which auto-disarms), or any context
+// switch away from the armed project. Serial twins: `z steps`,
+// `z steps next|prev|<n>`, `z steps on|off`.
 class StepViewer : public Service {
 public:
     static StepViewer& getInstance();
@@ -61,6 +67,11 @@ private:
     bool active = false;
     int cursor = 0;
     char armedSource[96] = {0};
+    // Hold-to-exit edge latch: set when a HELD exit fires, cleared when the
+    // button returns to rest (arm() also resets it). Without it the encoder
+    // state machine's re-promotion (buttonHoldStart is unchanged while the
+    // user keeps holding) would re-trigger the exit path every pass.
+    bool holdLatch = false;
 
     void showStep(bool announce);
     void applyEmphasis();

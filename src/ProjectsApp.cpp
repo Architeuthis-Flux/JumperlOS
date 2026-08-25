@@ -53,6 +53,7 @@
 #include "FilesystemStuff.h"  // safeFile*, FatFS Dir walk
 #include "Graphics.h"         // b.print (no-op on OG)
 #include "GuideScript.h"      // guideParse (step texts for the ambient flow)
+#include "OledGui.h"          // showIdle - post-open panel handoff to the viewer
 #include "StepViewer.h"       // armed after a project open
 #include "JumperlOS.h"        // jOS.serviceInner()
 #include "Menus.h"            // inClickMenu, yesNoMenu
@@ -1028,6 +1029,13 @@ static void runOpenedRunFile(RunContext& rc, bool fresh) {
         Serial.println("SCRIPT available=" +
                        (scriptPath.length() ? scriptPath : String("none")));
         Serial.flush();
+        // Panel handoff: the open path's toasts made the viewer's retained
+        // screen yield (notePanelTakenByOther), and nothing else calls
+        // showJogo32h until a menu/probe exit - the first bench flash never
+        // showed a step at all. This open is the LAST OLED writer on every
+        // interactive caller (all four call sites return straight after), so
+        // reclaiming here sticks and the steps are what you see post-open.
+        if (stepViewer.isArmed()) OledGui::getInstance().showIdle();
         return;
     }
     runOrOfferScript(rc, scriptPath);
