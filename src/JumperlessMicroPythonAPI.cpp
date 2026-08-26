@@ -3775,7 +3775,12 @@ int jl_overlay_set(const char* name, int startRow, int startCol,
  */
 int jl_overlay_clear(const char* name) {
     if (!name) return 0;
-    return graphicOverlayState.removeOverlay(name) ? 1 : 0;
+    if (!graphicOverlayState.removeOverlay(name)) return 0;
+    // Clear-first NETS render: the -2 the removal itself posts is a menu
+    // flush, and a GFX-owned context (fx menu, staged graphics) never
+    // consumes its clear - the removed pixels stay latched on the strip.
+    requestLedShow(-1);
+    return 1;
 }
 
 /**
@@ -3783,6 +3788,7 @@ int jl_overlay_clear(const char* name) {
  */
 void jl_overlay_clear_all(void) {
     graphicOverlayState.clearAll();
+    requestLedShow(-1);   // see jl_overlay_clear
 }
 
 /**

@@ -1020,6 +1020,10 @@ void GraphicOverlayState::debugMenu(void) {
                         delay(80);
                     }
                     graphicOverlayState.removeOverlay("ball");
+                    // clear-first NETS render: the -2 the removal posts is a
+                    // menu flush whose clear the GFX-owned context never
+                    // consumes - without this the last frame stays latched
+                    requestLedShow( -1 );
                     Jerial.println( "✓ Ball stopped" );
                     Jerial.flush();
                     break;
@@ -1045,6 +1049,7 @@ void GraphicOverlayState::debugMenu(void) {
                         delay(30);
                     }
                     graphicOverlayState.removeOverlay("wave");
+                    requestLedShow( -1 );   // see the ball exit above
                     Jerial.println( "✓ Wave stopped" );
                     Jerial.flush();
                     break;
@@ -1057,6 +1062,7 @@ void GraphicOverlayState::debugMenu(void) {
                 case 'C':
                     graphicOverlayState.clearAll();
                     selectedOverlay = -1;
+                    requestLedShow( -1 );   // see the ball exit above
                     Jerial.println( "✓ All overlays cleared" );
                     Jerial.flush();
                     break;
