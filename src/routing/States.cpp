@@ -3339,6 +3339,19 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
             // flusher mirrors every save to /.bak/<path>, so try that
             // copy before giving up.
             String bakPath = "/.bak" + filename;
+            bool recovered = false;
+#if !USE_FILE_CACHE
+            // Nothing writes these mirrors any more (the ABA flusher lives
+            // behind USE_FILE_CACHE, currently 0), so any /.bak content on an
+            // upgraded unit is however old the cache was when it was disabled
+            // - silently restoring it would hand the user a months-stale
+            // board (sweep finding). Fail honestly instead.
+            if (safeFileExists(bakPath.c_str())) {
+                Serial.println("  A stale /.bak mirror exists but is NOT being used "
+                               "(mirrors are no longer written) - delete /.bak if you like");
+                Serial.flush();
+            }
+#else
             Serial.print("  Canonical parse failed, trying mirror at ");
             Serial.println(bakPath);
             Serial.flush();
@@ -3349,7 +3362,6 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
             size_t bakRead = 0;
             extern bool safeFileReadAllRaw(const char* path, char* buffer, size_t buffer_size,
                                            size_t* bytes_read, uint32_t timeout_ms);
-            bool recovered = false;
             if (bakBuf && safeFileExists(bakPath.c_str()) &&
                 safeFileReadAllRaw(bakPath.c_str(), bakBuf, MAX_SLOT_YAML, &bakRead, 2000) &&
                 bakRead > 0) {
@@ -3370,6 +3382,7 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
                 errorMsg = "Failed to parse YAML slot " + String(slotNum) + " (no usable mirror): " + errorMsg;
             }
             if (bakBuf) free(bakBuf);
+#endif  // USE_FILE_CACHE
             if (!recovered) {
                 Serial.println("  Parse failed: " + errorMsg);
                 Serial.flush();
