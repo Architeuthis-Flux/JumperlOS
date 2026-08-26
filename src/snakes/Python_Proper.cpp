@@ -561,6 +561,11 @@ extern "C" void mp_hal_stdout_tx_strn_cooked(const char *str, size_t len) {
 
 // HAL functions are now implemented in lib/micropython/port/mphalport.c
 
+// Non-zero while the VM is executing code via mp_embed_exec_str
+// (lib/micropython/port/micropython_embed.c). Same global MpRemoteService
+// gates on; read here to know when USBSer2 has no other consumer.
+extern "C" volatile int jl_vm_exec_depth;
+
 // Static helper function to check a stream for interrupts
 // CRITICAL: Pass expected_interrupt_char for the stream being checked, not global keyboard_interrupt_char
 // This allows Serial (Ctrl+Q=17) and USBSer2 (Ctrl+C=3) to have different interrupt characters
@@ -576,7 +581,42 @@ static inline bool check_stream_for_interrupt(Stream* stream, uint32_t current_t
   
   int available = stream->available();
   if (available == 0) return false;
-  
+
+  // ONE STRAY HEAD BYTE USED TO MASK EVERY Ctrl-C BEHIND IT.
+  //
+  // peek() only ever sees byte 0, so a FIFO whose head is a normal byte hides
+  // the interrupt character queued right behind it. That is exactly the state
+  // port 5 is in while a terminal script runs: MpRemoteService::service()
+  // returns at its own `jl_vm_exec_depth > 0` guard (MpRemoteService.cpp:121)
+  // WITHOUT reading a byte, so nothing on the board drains USBSer2 either. The
+  // guard's comment promises "Ctrl-C on USBSer2 still works while deferred" -
+  // it did not, and this is what makes it true.
+  //
+  // Measured on the bench (5.7.6): with a project script blocked in input() on
+  // port 1, sending a bare 0x03 on port 5 raises KeyboardInterrupt correctly,
+  // but jumperless.py's real opener - b"\r\x03\x03", a leading 0x0D - does
+  // nothing at all. Worse, that CR is never consumed by anyone, so it poisons
+  // every LATER attempt too: the raw REPL answers nothing until the script
+  // ends, which is why rebooting looked like the only cure.
+  //
+  // Skipping leading CR/LF is safe HERE AND ONLY HERE, because this window is
+  // the one moment USBSer2 provably has no other consumer: the VM is inside
+  // mp_embed_exec_str, MicroPython's stdin is some other stream, and the raw
+  // REPL service is gated off. CR/LF only, deliberately: they are the "wake the
+  // REPL up" framing every host prepends, and never a payload byte. Draining
+  // anything wider would eat type-ahead a host legitimately parked.
+  if (stream == (Stream *)&USBSer2 && jl_vm_exec_depth > 0 &&
+      global_mp_stream != &USBSer2 &&
+      mp_stdin_locked_stream_ptr != (void *)&USBSer2) {
+    int guard = 0;
+    while (guard++ < 64) {
+      int head = stream->peek();
+      if (head != '\r' && head != '\n') break;
+      stream->read();
+      if (stream->available() == 0) return false;
+    }
+  }
+
   // CRITICAL: Do not consume non-control bytes here.
   // stdin/readline is the sole consumer for normal input characters.
   int c = stream->peek();

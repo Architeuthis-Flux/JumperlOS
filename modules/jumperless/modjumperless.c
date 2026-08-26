@@ -1832,7 +1832,6 @@ static mp_obj_t jl_dac_set_func( size_t n_args, const mp_obj_t* args ) {
     float voltage = mp_obj_get_float( args[ 1 ] );
     int save = ( n_args > 2 ) ? mp_obj_is_true( args[ 2 ] ) ? 1 : 0 : 1; // Default save=True
 
-    printf( "jl_dac_set: channel: %d, voltage: %f, save: %d\n", channel, voltage, save );
     jl_dac_set( channel, voltage, save );
     return mp_const_none;
 }

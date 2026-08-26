@@ -117,6 +117,14 @@ ServiceStatus MpRemoteService::service( ) {
     //     Serial REPL, apps, boot.py) is still running.
     // Ctrl-C on USBSer2 still works while deferred: mp_hal_check_interrupt()
     // peeks the stream directly and is called throughout script execution.
+    // THAT ONLY HOLDS BECAUSE check_stream_for_interrupt() skips leading CR/LF
+    // on USBSer2 while jl_vm_exec_depth > 0 (Python_Proper.cpp, the "one stray
+    // head byte" block). peek() sees byte 0 and nothing else, and the early
+    // return below means NOBODY drains this FIFO while a script runs - so
+    // before that skip existed, one leading 0x0D (jumperless.py opens every
+    // session with "\r\x03\x03") hid the Ctrl-C forever and the raw REPL stayed
+    // silent until the script ended. Do not delete that skip as redundant; it
+    // is what makes the sentence above true.
     static bool s_in_service = false;
     if ( s_in_service || jl_vm_exec_depth > 0 ) {
         return m_in_raw_repl ? ServiceStatus::BUSY : ServiceStatus::IDLE;
