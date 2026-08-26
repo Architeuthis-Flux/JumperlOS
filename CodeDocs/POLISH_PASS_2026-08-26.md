@@ -156,3 +156,8 @@ bench-side, not firmware:
 **Decision: the dev build stays on the board.** Every suite that passed on
 5.7.6 still passes; three real firmware bug clusters are fixed; the
 remaining failures reproduce identically or worse on 5.7.6.
+
+(Precision note: the `FAIL test_guide_flow.py` row is a phantom — the file
+was deleted with the blocking guide runner and the runner still lists it, so
+its "failure" is `No such file or directory`. Every real guide phase lives
+inside test_projects.py. True post-fix score: 7 of 10 existing files pass.)
