@@ -4798,7 +4798,11 @@ void jl_help_section( const char* section ) {
 
     // Convert section to uppercase for comparison
     char section_upper[ 32 ];
-    strcpy( section_upper, section );
+    // Bounded: a section name >= 32 chars smashed the core-0 stack (sweep
+    // finding, high). Truncated compares are fine - every real section name
+    // is short, and a too-long one simply matches nothing.
+    strncpy( section_upper, section, sizeof( section_upper ) - 1 );
+    section_upper[ sizeof( section_upper ) - 1 ] = '\0';
     for ( int i = 0; section_upper[ i ]; i++ ) {
         section_upper[ i ] = toupper( section_upper[ i ] );
     }

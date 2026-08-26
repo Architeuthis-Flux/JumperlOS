@@ -207,9 +207,19 @@ bool GraphicOverlayState::removeOverlay(int index) {
 }
 
 void GraphicOverlayState::clearAll() {
+    bool hadPersistent = false;
+    for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
+        if (overlays[i].enabled && !overlayIsSessionOnly(overlays[i].name)) {
+            hadPersistent = true;
+            break;
+        }
+    }
     clear();
     needsRender = true;
-    globalState.markDirty();
+    // Session-only overlays never belonged in the slot file, so wiping them
+    // is not a change worth persisting (sweep finding: the Snake app's
+    // per-frame clearAll() dirtied the state ~30x/second).
+    if (hadPersistent) globalState.markDirty();
 }
 
 int GraphicOverlayState::findByName(const char* name) const {
@@ -358,6 +368,7 @@ void __not_in_flash_func(renderGraphicOverlays)() {
 static bool overlayIsSessionOnly(const char* name) {
     return strcmp(name, "_SELFTEST_") == 0 ||
            strcmp(name, "_PARTS_") == 0 ||
+           strcmp(name, "_DIRECT_PIXELS_") == 0 ||   // scratch surface (sweep)
            strncmp(name, "_GUIDE_", 7) == 0;
 }
 

@@ -20,6 +20,7 @@
 #include "PartPlacement.h"  // applyPartPlacement, partGeometryOk
 #include "Probing.h"        // probeButton, probing.getLastProbeReading
 #include "RotaryEncoder.h"  // encoder state machine, rotaryDivider
+#include "Undo.h"           // UndoIngestGuard - placements are not undoable (yet)
 #include "States.h"         // globalState
 #include "config.h"         // jumperlessConfig.hardware.probe_revision
 #include "oled.h"
@@ -205,6 +206,11 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
     int nDigits = 0;
     int lastNudgedRow = -1;
     unsigned long lastShowRequest = millis();
+    // A probe RESTING on a row re-emits it every 500 ms - without a deadtime
+    // the prompt would accept that parked row the instant it opens (sweep
+    // finding, high). Human reaction to a fresh prompt is >400 ms anyway;
+    // the serial twin (typed rows) is deliberate and skips this.
+    unsigned long openMs = millis();
 
     while (true) {
         jOS.serviceInner();
@@ -238,7 +244,17 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
                 digits[nDigits] = '\0';
             } else if ((c == '\r' || c == '\n') && nDigits > 0) {
                 int row = atoi(digits);
-                if (row >= 1 && row <= 60) {
+                bool rowUsed = false;
+                for (int u = 0; u < nUsed; u++) {
+                    if (usedRows[u] == row) { rowUsed = true; break; }
+                }
+                if (rowUsed) {
+                    Serial.print("  row ");
+                    Serial.print(row);
+                    Serial.println(" is already one of this part's pins");
+                    nDigits = 0;
+                    digits[0] = '\0';
+                } else if (row >= 1 && row <= 60) {
                     b.lightUpNode(row, PARTS_TAP_FLASH_COLOR);
                     requestLedShow(2);
                     delay(180);   // the confirmation flash lands before the
@@ -262,7 +278,7 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
         // rate-limited to one per 500 ms with -1 between, so any
         // wait-for-N-stable-reads scheme here can never fire).
         int reading = probing.justReadProbe(true);
-        if (reading >= 1 && reading <= 60) {
+        if (reading >= 1 && reading <= 60 && millis() - openMs >= 400) {
             bool used = false;
             for (int u = 0; u < nUsed; u++) {
                 if (usedRows[u] == reading) { used = true; break; }
@@ -379,11 +395,24 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
         if (pin.connect >= 0) continue;   // an explicit DB binding wins
         int node = partPinNode(tmp, pin);
         if (node < 1 || node > 60) continue;
+        // A row whose net ALREADY holds any power node is left alone: the
+        // user wired it (adopting it would delete their wire when the part
+        // is removed - sweep finding), it conflicts (our bridge would short
+        // rail to GND or rail to rail), or it's a duplicate. Either way the
+        // right auto-route is none; PartLabels' warnings judge the result.
+        bool rowPowered = rowNetHas(node, GND) || rowNetHas(node, TOP_RAIL) ||
+                          rowNetHas(node, BOTTOM_RAIL);
         if (pin.pinClass == 1) {
-            if (rowNetHas(node, GND)) continue;
+            // Rails only for pins the DB marks role VCC (sweep finding,
+            // confirmed): pinClass alone also covers regulator OUTPUTS
+            // (LM317/L7805/AMS1117 VOUT) and 405x VEE - bridging those ties
+            // VIN to VOUT through the rail or feeds VEE positive. A power-
+            // class pin with role NONE stays unrouted; the user wires it.
+            if (j >= po.numPins || po.pins[j].role != PARTDB_ROLE_VCC) continue;
+            if (rowPowered) continue;
             pin.connect = (node <= 30) ? TOP_RAIL : BOTTOM_RAIL;
         } else if (pin.pinClass == 2) {
-            if (rowNetHas(node, TOP_RAIL) || rowNetHas(node, BOTTOM_RAIL)) continue;
+            if (rowPowered) continue;
             pin.connect = GND;
         }
     }
@@ -427,10 +456,22 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
     int idx = st.parts.numParts;
     st.parts.parts[idx] = tmp;
     st.parts.numParts++;
+    // Placements are NOT undoable for now (sweep finding: the bridges landed
+    // in the undo stream but the parts-table halves didn't, so undo/redo
+    // desynced the two and undone power bridges resurrected on reboot).
+    // Suppress recording; a labeled parts-aware transaction is future work.
+    UndoIngestGuard undoGuard;
     String err;
-    if (applyPartPlacement(st, idx, err) < 0) {
-        st.parts.numParts--;   // roll the append back - nothing was applied
-        Serial.println("\r\nPARTDB place refused reason=\"" + err + "\"");
+    int added = applyPartPlacement(st, idx, err);
+    // err TEXT with a non-negative count = addConnection refusals (bridge
+    // table full) - the same defect class the sweep fixed in routeDataPins:
+    // treating those as success committed a part whose bridges never existed.
+    // More reachable now that placement adds power bridges.
+    if (added < 0 || err.length() > 0) {
+        String reason = err;   // removePartPlacement reuses err - keep the message
+        if (added >= 0) removePartPlacement(st, idx, err);
+        st.parts.numParts--;   // roll the append back
+        Serial.println("\r\nPARTDB place refused reason=\"" + reason + "\"");
         return false;
     }
     st.markDirty();
@@ -543,6 +584,10 @@ static bool partsClearAll(void) {
         delayMicroseconds(1000);
     }
 
+    // Same non-undoable contract as placement (see partsCommitPlacement):
+    // undoing half of a clear resurrected bridges for parts that no longer
+    // existed in the table.
+    UndoIngestGuard undoGuard;
     String err;
     for (int i = st.parts.numParts - 1; i >= 0; i--) {
         if (st.parts.parts[i].placed) removePartPlacement(st, i, err);
@@ -639,7 +684,7 @@ void partsAppLauncher(void) {
                     if (row == -2) goto done;
                     if (row == -1) { cancelled = true; break; }
                     rows[nRows++] = row;
-                    Serial.print("PARTPICK sig=");
+                    Serial.print("\r\nPARTPICK sig=");
                     Serial.print(po.pins[s].name);
                     Serial.print(" row=");
                     Serial.println(row);

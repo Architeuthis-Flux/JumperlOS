@@ -310,6 +310,12 @@ void jOSmanager::serviceAll() {
 void jOSmanager::serviceInner() {
     // Would-be watchdog kick from inside the modal loops (measure-only stage).
     kickGapStamp( 0, KICK_INNER );
+    // Being called AT ALL means a synchronous modal loop is pumping us -
+    // getBlockingService() is nullptr in that context (the loop never
+    // RETURNED BLOCKING, it just... blocks), so services that soften their
+    // work under modal load need this depth, not the latch (sweep finding:
+    // all three of DisplayService's modal gates were dead).
+    innerDepth++;
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
             continue;
@@ -331,6 +337,7 @@ void jOSmanager::serviceInner() {
         // (status ignored - we're in a blocking context already)
         runService(svc, now);
     }
+    innerDepth--;
 
     // (Peripherals and MpRemote are in the inner set, so the loop above ran
     // them; the explicit second pollCurrentSense() / MpRemote call that used

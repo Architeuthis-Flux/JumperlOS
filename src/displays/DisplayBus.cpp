@@ -10,6 +10,7 @@
 #include "States.h"        // globalState.config.gpioPythonOwned
 #include "config.h"        // jumperlessConfig.top_oled.connection_type
 #include "oled.h"          // oled.oledConnected (is Wire1 owned?)
+#include "boards/board.h"  // caps.breadboardDisplays
 
 // Soft-I2C pin choice: RP 24/25 (nodes 135/136) - deliberately the pair that
 // can NEVER be hardware I2C1 ((24,25) maps to i2c0, the internal DAC/INA
@@ -134,6 +135,13 @@ static bool wire1IsFree(void) {
 
 bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     static const char* claimedReason = "GPIO claimed by your script";
+    // Belt for future non-service callers (detect-driver, MP surface): on
+    // boards without breadboard displays these pins are OTHER hardware
+    // (OG: GPIO 24 = CH446Q RESET, GPIO 25 = the LED strip's data).
+    if (!board::currentBoard().caps.breadboardDisplays) {
+        if (reasonOut) *reasonOut = "no breadboard displays on this board";
+        return false;
+    }
     // ALWAYS soft-I2C (sweep finding, high): the hardware branch called
     // Wire1.setSDA(26) on a bus the OLED may have BEGUN on other pins
     // (connect_on_boot starts Wire1 on 6/7 even with no panel detected, and
@@ -172,6 +180,12 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
 
 void displayBusRelease(DisplayInstance& d) {
     if (d.sdaPin < 0) return;
+    if (displayBusUserClaimed(d)) {
+        // The USER's script owns these pins now (YIELDED detach) - resetting
+        // modes/marks would stomp its live configuration. Just forget them.
+        d.sdaPin = d.sclPin = -1;
+        return;
+    }
     gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_NULL;
     gpio_function_map[d.sclPin - 20] = GPIO_FUNC_NULL;
     gpioState[d.sdaPin - 20] = 0;
@@ -186,7 +200,10 @@ void displayBusRelease(DisplayInstance& d) {
 bool displayBusUserClaimed(const DisplayInstance& d) {
     if (d.sdaPin < 20 || d.sclPin < 20) return false;
     return globalState.config.gpioPythonOwned[d.sdaPin - 20] ||
-           globalState.config.gpioPythonOwned[d.sclPin - 20];
+           globalState.config.gpioPythonOwned[d.sclPin - 20] ||
+           globalState.config.gpioPwmEnabled[d.sdaPin - 20] ||   // PWM on our
+           globalState.config.gpioPwmEnabled[d.sclPin - 20];      // pins is a
+                                              // claim too (sweep finding)
 }
 
 // ---------------------------------------------------------------------------

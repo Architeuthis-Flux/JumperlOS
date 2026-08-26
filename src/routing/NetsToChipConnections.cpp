@@ -4606,8 +4606,12 @@ void couldntFindPath(int forcePrint) {
         Serial.println("\n\r");
       }
 
-      unconnectablePaths[numberOfUnconnectablePaths][0] = globalState.connections.paths[i].node1;
-      unconnectablePaths[numberOfUnconnectablePaths][1] = globalState.connections.paths[i].node2;
+      // The table is [10][2] - validateAllPaths guards this write and this
+      // copy did not, so an 11th unroutable path wrote past it (sweep).
+      if (numberOfUnconnectablePaths < 10) {
+        unconnectablePaths[numberOfUnconnectablePaths][0] = globalState.connections.paths[i].node1;
+        unconnectablePaths[numberOfUnconnectablePaths][1] = globalState.connections.paths[i].node2;
+      }
       numberOfUnconnectablePaths++;
       globalState.connections.paths[i].skip = true;
     } else if (foundNegative == 1 && globalState.connections.paths[i].duplicate == 1) {

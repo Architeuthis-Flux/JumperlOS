@@ -580,7 +580,9 @@ void combineNets(int foundNode1Net, int foundNode2Net) {
         addNodeToNet(foundNode1Net, globalState.connections.nets[foundNode2Net].nodes[i]);
         }
 
-      for (int i = 0; i < MAX_BRIDGES; i++) {
+      for (int i = 0; i < MAX_NODES; i++) {   // the per-net table is
+        // bridges[MAX_NODES][2] - reading to MAX_BRIDGES walked past it and
+        // a full table's specialFunction=-1 read as a live bridge (sweep)
         if (globalState.connections.nets[foundNode2Net].bridges[i][0] == 0) {
           break;
           }
@@ -698,7 +700,7 @@ int shiftNets(
   globalState.connections.nets[lastNet].visible = 0;
   globalState.connections.nets[lastNet].specialFunction = -1;
 
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < MAX_DNI; i++) {   // was 6 of the 8 entries (sweep)
     // globalState.connections.nets[lastNet].intersections[i] = 0;
     globalState.connections.nets[lastNet].doNotIntersectNodes[i] = 0;
     }
@@ -710,7 +712,7 @@ int shiftNets(
     globalState.connections.nets[lastNet].nodes[j] = 0;
     }
 
-  for (int j = 0; j < MAX_BRIDGES; j++) {
+  for (int j = 0; j < MAX_NODES; j++) {   // table is [MAX_NODES][2] (sweep)
     if (globalState.connections.nets[lastNet].bridges[j][0] == 0) {
       break;
       }
@@ -785,6 +787,12 @@ void addBridgeToNet(uint16_t netToAddBridge, int16_t node1,
                     int16_t node2) // just add those nodes to the net
   {
   int newBridgeIndex = findFirstUnusedBridgeIndex(netToAddBridge);
+  if (newBridgeIndex < 0 || newBridgeIndex >= MAX_NODES) {
+    Serial.print("net ");
+    Serial.print(netToAddBridge);
+    Serial.println(" bridge table full - connection listed but not tracked per-net");
+    return;
+  }
   globalState.connections.nets[netToAddBridge].bridges[newBridgeIndex][0] = node1;
   globalState.connections.nets[netToAddBridge].bridges[newBridgeIndex][1] = node2;
   }
@@ -940,6 +948,12 @@ void addNodeToNet(int netToAddNode, int node) {
       }
     }
 
+  if (newNodeIndex < 0 || newNodeIndex >= MAX_NODES) {
+    Serial.print("net ");
+    Serial.print(netToAddNode);
+    Serial.println(" is full - node not added (too many rows in one net)");
+    return;
+  }
   globalState.connections.nets[netToAddNode].nodes[newNodeIndex] = node;
   updateCurrentSenseNetName(netToAddNode);
   }
@@ -961,7 +975,12 @@ int findFirstUnusedNetIndex() // search for a free globalState.connections.nets[
   }
 
 int findFirstUnusedBridgeIndex(int netNumber) {
-  for (int i = 0; i < MAX_BRIDGES; i++) {
+  // The per-net table is bridges[MAX_NODES][2] - scanning to MAX_BRIDGES
+  // (72/128) read PAST it, and the 0x7f fallback wrote even further: on a
+  // 25+-bridge GND bus the overflow landed in the net's DNI safety list and
+  // marched into the neighbor net's name pointer on every rebuild (sweep
+  // finding, high). Full table = refuse, never write out of bounds.
+  for (int i = 0; i < MAX_NODES; i++) {
     if (globalState.connections.nets[netNumber].bridges[i][0] == 0) {
       // if(debugNM) Serial.print("found unused bridge ");
       // if(debugNM) Serial.println(i);

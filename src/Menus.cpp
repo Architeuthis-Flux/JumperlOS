@@ -2986,7 +2986,10 @@ float getActionFloat( int menuPosition, int rail ) {
             requestLedShow( -1 );
             // Long-press is a "leave the rails wherever the slider was last"
             // exit. The hardware/state still got mutated during the drag,
-            // so we still need to record one undo step.
+            // so we still need to record one undo step. NAN tells the
+            // action handler NOT to re-apply (a cancel used to drive both
+            // rails to the stale/zero analogVoltage and persist it - sweep).
+            currentAction.analogVoltage = NAN;
             railCommitEdit();
             return roundedCurrentChoice; // Return current choice without applying
         }
@@ -3019,6 +3022,7 @@ float getActionFloat( int menuPosition, int rail ) {
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
             requestLedShow( -1 );
+            currentAction.analogVoltage = NAN;   // cancel = do not re-apply
             railCommitEdit();
             return roundedCurrentChoice;
         }
@@ -4237,6 +4241,14 @@ int doMenuAction( int menuPosition, int selection ) {
     } else if ( currentCategory == RAILSACTION ) { //! Rails
 
         //  Serial.print( "Rails Action\n\r" );
+        // A cancelled slider leaves analogVoltage NAN: the drag already moved
+        // the rails and railCommitEdit() recorded it, so there is nothing to
+        // apply. Re-applying drove BOTH rails to 0.00V and persisted that over
+        // the user's saved voltage (sweep finding, high).
+        if ( isnan( currentAction.analogVoltage ) ) {
+            requestLedShow( -1 );
+            currentAction.analogVoltage = 0.0f;   // leave the struct sane
+        } else {
         requestLedShow( 1 );
         waitCore2( );
 
@@ -4269,6 +4281,7 @@ int doMenuAction( int menuPosition, int selection ) {
         }
         }
         requestLedShow( -1 );
+        }   // end of the "slider was confirmed" apply block
 
         // NO markDirty() HERE, DELIBERATELY (w3-5 fix round 2).
         //
@@ -4762,8 +4775,12 @@ int doMenuAction( int menuPosition, int selection ) {
         // Note: Integer input (action 7) is now handled in getMenuSelection()
         // following the same pattern as getActionFloat (action 3)
 
-        // Apply integer input value to config based on menu context
-        if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Width" ) != -1 ) {
+        // Apply integer input value to config based on menu context.
+        // previousMenuPositions[2] is -1 when this action is reached from a
+        // depth-1 row (OLED > Connect): menuLines[-1] is an out-of-bounds
+        // String read (sweep finding, medium).
+        if ( currentAction.previousMenuPositions[ 2 ] >= 0 &&
+             menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Width" ) != -1 ) {
             jumperlessConfig.top_oled.width = currentAction.integerValue;
             oled.displayWidth = currentAction.integerValue;
             configChanged = true;

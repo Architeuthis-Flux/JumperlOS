@@ -3724,14 +3724,13 @@ void Probing::probeTick( ProbeSession& s ) {
 
                 } else if ( s.setOrClear == 0 ) {
 
-                    char node1Name[ 12 ];
-
-                    char node2Name[ 12 ];
-                    strcpy( node2Name, "   " );
-                    char bothNames[ 25 ];
-                    strcpy( bothNames, node1Name );
-                    strcat( bothNames, " - " );
-                    strcat( bothNames, node2Name );
+                    // 24 covers the longest short name + " cleared" + NUL
+                    // ("NANO_3V3 cleared" = 17) - the old [12] was a stack
+                    // smash on every named-node clear, and the bothNames
+                    // block read it uninitialized (sweep findings).
+                    char node1Name[ 24 ];
+                    snprintf( node1Name, sizeof( node1Name ), "%s",
+                              definesToChar( nodesToConnect[ 0 ] ) );
 
                     // int numChars = strlen(node1Name);
                     // for (int i = 0; i < SPACE_FROM_LEFT - numChars; i++) {
@@ -3820,7 +3819,8 @@ void Probing::probeTick( ProbeSession& s ) {
                         Serial.println( );
                         Serial.flush( );
 
-                        sprintf( node1Name, "%s cleared", definesToChar( nodesToConnect[ 0 ] ) );
+                        snprintf( node1Name, sizeof( node1Name ), "%s cleared",
+                                  definesToChar( nodesToConnect[ 0 ] ) );
 
                         oled.clearPrintShow( node1Name, 2, true, true, true );
 
@@ -5468,7 +5468,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         //}
 
         if ( outIn == 2 ) {
-            chooseGPIOinputOutput( gpioChosen );
+            chooseGPIOinputOutput( gpioChosen + 1 );
         } else if ( outIn == 1 ) {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {

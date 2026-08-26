@@ -11,6 +11,7 @@
 #include "DisplayDrivers.h"
 #include "PartPlacement.h"     // applyPartPlacement / removePartPlacement / partPinNode
 #include "States.h"            // globalState
+#include "Undo.h"              // UndoIngestGuard - route churn is not a user action
 #include "boards/board.h"
 
 // The Jumperless startup animation, already in flash (Images.h data via the
@@ -57,6 +58,13 @@ bool DisplayService::routeDataPins(int partIdx) {
         return true;   // already routed (a reload restored our bridges)
     }
 
+    // Our remove/reapply churn is service plumbing, not user actions - without
+    // this guard every route wrote phantom transactions into the undo history
+    // and one undo press after placing a display disconnected it (sweep
+    // finding, high; the routableBufferPower precedent).
+    UndoIngestGuard undoGuard;
+    int16_t priorSda = p.pins[sdaIdx].connect;
+    int16_t priorScl = p.pins[sclIdx].connect;
     String err;
     bool wasPlaced = p.placed;
     if (wasPlaced) {
@@ -78,8 +86,10 @@ bool DisplayService::routeDataPins(int partIdx) {
         p.pins[sclIdx].connect = -1;
         String err2;
         applyPartPlacement(st, partIdx, err2);
-        st.markDirty();   // the restore must persist too, or a save between
-                          // attempts writes routed-looking pins with no bridges
+        // Only dirty when the persisted fields actually changed - the 750 ms
+        // retry loop was rewriting the slot file forever on a standing
+        // refusal (sweep finding, medium).
+        if (priorSda != -1 || priorScl != -1) st.markDirty();
         return false;
     }
     st.markDirty();
@@ -109,16 +119,10 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
         return;
     }
     acquireWarned = false;
-    if (!routeDataPins(partIdx)) {
-        // No SDA/SCL pins or router refusal - stay EMPTY-ish and retry at
-        // poll cadence rather than half-attaching.
-        displayBusRelease(inst);
-        inst.desc = nullptr;
-        inst.partIdx = -1;
-        inst.state = DispState::EMPTY;
-        return;
-    }
 
+    // Allocate BEFORE routing (sweep finding, low): the OOM retry used to
+    // rebuild the whole fabric every 750 ms just to fail the alloc again -
+    // and did it in complete silence.
     inst.fb = new (std::nothrow) uint8_t[desc->fbBytes];
     // pageFlip panels keep one shadow image per RAM half.
     uint16_t shadowBytes = desc->quirks.pageFlip ? (uint16_t)(desc->fbBytes * 2)
@@ -131,10 +135,38 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
         inst.desc = nullptr;
         inst.partIdx = -1;
         inst.state = DispState::EMPTY;
+        if (!allocWarned) {
+            allocWarned = true;
+            Serial.println("\r\nDISPLAY paused: not enough free memory for a framebuffer");
+        }
         return;
     }
+    allocWarned = false;
+
+    if (!routeDataPins(partIdx)) {
+        // No SDA/SCL pins or router refusal - stay EMPTY-ish; the poll
+        // retries, backing off to 5 s after 5 straight refusals (a standing
+        // refusal used to thrash remove/reapply every 750 ms forever).
+        delete[] inst.fb;      inst.fb = nullptr;
+        delete[] inst.shadow;  inst.shadow = nullptr;
+        displayBusRelease(inst);
+        inst.desc = nullptr;
+        inst.partIdx = -1;
+        inst.state = DispState::EMPTY;
+        if (++routeFails == 5) {
+            Serial.println("\r\nDISPLAY routing keeps failing - retrying slowly "
+                           "(bridge table full?)");
+        }
+        if (routeFails >= 5) nextPartsPollMs = millis() + 5000;
+        return;
+    }
+    routeFails = 0;
     memset(inst.fb, 0, desc->fbBytes);
     inst.shadowValidMask = 0;
+    // Identity for pollParts: parts-table compaction can slide a DIFFERENT
+    // part into our index with the same driver (sweep finding, medium).
+    strncpy(attachedName, globalState.parts.parts[partIdx].name, sizeof(attachedName) - 1);
+    attachedName[sizeof(attachedName) - 1] = '\0';
     // Soft chunk 16: the 7-byte position header is fixed, so 8 data bytes
     // spent >half the bus time on overhead; 16 lands ~1 ms per chunk at the
     // 250 kHz half-bit and cuts a 512-byte frame to 32 transactions.
@@ -176,6 +208,11 @@ void DisplayService::detach() {
     inst.userOwnsContent = false;
     yieldNoted = false;
     flushFails = 0;
+    initFails = 0;
+    routeFails = 0;
+    acquireWarned = false;
+    allocWarned = false;
+    attachedName[0] = '\0';
 }
 
 // One poll: diff the parts table against the attached instance.
@@ -184,13 +221,17 @@ void DisplayService::pollParts(uint32_t now) {
     // Attach/detach ROUTES (removePartPlacement/apply/refreshConnections) -
     // never do that under a modal loop that may itself be mid-routing.
     // Flushing chunks under modal load is fine; rebuilding the fabric is not.
-    if (jOS.getBlockingService() != nullptr) return;
+    if (jOS.inModalContext()) return;
     nextPartsPollMs = now + DISP_PARTS_POLL_MS;
 
     // Attached part still there, same identity?
     if (inst.partIdx >= 0) {
         bool gone = inst.partIdx >= globalState.parts.numParts ||
-                    displayResolveForPart(globalState.parts.parts[inst.partIdx]) != inst.desc;
+                    displayResolveForPart(globalState.parts.parts[inst.partIdx]) != inst.desc ||
+                    strncmp(globalState.parts.parts[inst.partIdx].name, attachedName,
+                            sizeof(attachedName)) != 0;   // table compaction can
+                                                          // slide a same-driver
+                                                          // part into our index
         if (gone) detach();
         else if (inst.state == DispState::YIELDED && !displayBusUserClaimed(inst)) {
             // The user's script released our pins: resume via a fresh attach.
@@ -250,6 +291,11 @@ void DisplayService::animate(uint32_t now) {
 // ---------------------------------------------------------------------------
 
 ServiceStatus DisplayService::service() {
+    // V5 only: routeDataPins/nodeForRpPin encode the V5 node map (131-138)
+    // and the soft-bus pins are V5's routable GPIO block - on OG the service
+    // stays dormant (release finding: it registered unconditionally and
+    // would have written bogus connect nodes for a placed display part).
+    if (!board::currentBoard().caps.breadboardDisplays) return ServiceStatus::IDLE;
     uint32_t now = millis();
     pollParts(now);
     if (inst.state == DispState::EMPTY) return ServiceStatus::IDLE;
@@ -274,7 +320,7 @@ ServiceStatus DisplayService::service() {
         // ~45 ms burst in ONE service call - fine ambient, hostile inside a
         // menu/probe loop that pumps inner-set services (verify-workflow
         // finding). The panel comes alive the moment the interaction ends.
-        if (jOS.getBlockingService() != nullptr) return ServiceStatus::IDLE;
+        if (jOS.inModalContext()) return ServiceStatus::IDLE;
         inst.nextBeaconMs = now + DISP_BEACON_MS;
         for (int a = 0; inst.desc->i2cAddrs[a] != 0 && a < 3; a++) {
             if (displayI2cPing(inst, inst.desc->i2cAddrs[a])) {
@@ -284,8 +330,10 @@ ServiceStatus DisplayService::service() {
                     if (!ghostWarned) {
                         ghostWarned = true;
                         Serial.println("\r\nDISPLAY every address answers - SDA "
-                                       "is stuck low (add ~4.7k pull-ups)");
+                                       "held low (wedged device or short)");
                     }
+                    displayBusUnstick(inst);   // give a wedged device its 9
+                                               // clocks before the next beacon
                     return ServiceStatus::BUSY;
                 }
                 inst.i2cAddr = inst.desc->i2cAddrs[a];
@@ -337,7 +385,7 @@ ServiceStatus DisplayService::service() {
 
     // Modal load (something BLOCKING owns the loop): halve the chunk and the
     // burst so the ambient animation never starves the menu/probe UI.
-    bool modal = jOS.getBlockingService() != nullptr;
+    bool modal = jOS.inModalContext();
     uint8_t budget = inst.chunkBytes;
     if (modal && budget > 4) budget /= 2;
     uint8_t saved = inst.chunkBytes;
@@ -395,8 +443,9 @@ void DisplayService::printStats(Stream* out) const {
 }
 
 int DisplayService::activeDataNodes(int16_t out[2]) const {
+    // YIELDED counts too (sweep finding): the pins are then driven by the
+    // USER's script - the scan must keep off that bus just the same.
     if (inst.partIdx < 0 || inst.sdaPin < 20) return 0;
-    if (inst.state != DispState::ROUTED && inst.state != DispState::ALIVE) return 0;
     out[0] = nodeForRpPin(inst.sdaPin);
     out[1] = nodeForRpPin(inst.sclPin);
     return 2;

@@ -46,7 +46,12 @@ static bool netHasNode(int netNum, int node) {
     return false;
 }
 static bool netSemanticName(int netNum, int userGpioIdx, char* out, size_t outLen) {
-    if (netNum > 0 && netNum < MAX_NETS) {
+    // Special-function nets (GND, rails, DACs) keep their authoritative
+    // names - probing GND must say GND, not the first placed part's power
+    // pin (sweep finding). Same predicate partsReassertNetNames uses.
+    if (netNum > 0 && netNum < MAX_NETS &&
+        globalState.connections.nets[netNum].number == netNum &&
+        globalState.connections.nets[netNum].specialFunction <= 0) {
         for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
             const PartDefinition& p = globalState.parts.parts[i];
             if (!p.placed) continue;
@@ -54,7 +59,14 @@ static bool netSemanticName(int netNum, int userGpioIdx, char* out, size_t outLe
                 int node = partPinNode(p, p.pins[j]);
                 if (node < 1 || node > 60) continue;
                 if (!netHasNode(netNum, node)) continue;
-                snprintf(out, outLen, "%s %s", p.name, p.pins[j].name);
+                // Truncate the part NAME, never the pin suffix - in a 16-byte
+                // caller buffer "SSD1306_2 SDA" must not lose the "SDA"
+                // (sweep finding).
+                const char* pinName = p.pins[j].name;
+                int pinLen = (int)strlen(pinName);
+                int nameBudget = (int)outLen - 1 - pinLen - 1;   // NUL + space
+                if (nameBudget < 1) nameBudget = 1;
+                snprintf(out, outLen, "%.*s %s", nameBudget, p.name, pinName);
                 return true;
             }
         }

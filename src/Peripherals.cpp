@@ -787,6 +787,16 @@ void setGPIO( void ) {
             continue;
         }
 
+        // Skip bus-role pins (gpioState 6: the display service's soft-I2C, the
+        // oled.cpp precedent). Re-asserting config dir/pulls here put a
+        // PULLDOWN on a live bus's ACK window and re-stamped state 4, which
+        // then sent core 1's readGPIO down the pull-twiddling float path mid-
+        // transaction (sweep finding, high - the mark existed exactly to
+        // prevent this and nothing honored it).
+        if ( gpioState[ i ] == 6 ) {
+            continue;
+        }
+
         // Set direction
         if ( globalState.config.gpioDirection[ i ] == 0 ) {
             gpio_set_dir( gpio_pin, true ); // Set as output
@@ -1306,7 +1316,9 @@ void __not_in_flash_func(readGPIO)( ) {
         }
 
         if ( gpioNet[ i ] == -1 ) {
-            gpioState[ i ] = 4;
+            if ( gpioState[ i ] != 6 ) {   // bus-role marks survive the
+                gpioState[ i ] = 4;        // acquire-to-route window (sweep)
+            }
             // continue;
         } else if ( gpioNet[ i ] == -2 ) {
             // gpioState[i] = 6;

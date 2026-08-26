@@ -1333,7 +1333,10 @@ bool undoDeserialize(const uint8_t* buf, size_t len) {
             finalizeTxn();
             unsigned idx = 0, blen = 0;
             if (sscanf(s + 1, "%u %u", &idx, &blen) != 2) continue;
-            if (p + blen > end) break;  // truncated body
+            // Subtraction cannot wrap; `p + blen > end` did, so a corrupt or
+            // hostile length (e.g. 4294967295) passed the check and turned
+            // into a ~4GB memcpy at every boot (sweep finding, medium).
+            if (blen > (size_t)(end - p)) break;  // truncated / bogus body
             const uint8_t* body = (const uint8_t*)p;
             p += blen;
             if (p < end && *p == '\r') p++;
