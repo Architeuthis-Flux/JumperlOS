@@ -164,6 +164,14 @@ int bbDirtyCount = 0;
 unsigned long lastShowTime = 0;
 #define SHOW_INTERVAL 100
 
+// Set by show() when a strip was skipped because its DMA was still busy, so the
+// caller can tell "frame is on the wire" from "frame was dropped" (core2stuff
+// re-posts the LED request instead of completing it - main.cpp). Published ONLY
+// from the core that runs core2stuff, which is also its only reader: menu and
+// graphics code on the other core calls show() too (Menus.cpp, Graphics.cpp)
+// and would otherwise overwrite the verdict inside that window.
+volatile bool ledShowFrameDropped = false;
+
 // FOLLOW-UP (deep refactor): the per-strip dirty flags (bbDirty/topDirty and the
 // unused markBBDirty/markTopDirty/markAllDirty) are written on every setPixelColor
 // but ignored here (the `if (bbDirty)` guards are commented out), so both strips are
@@ -179,11 +187,15 @@ void __not_in_flash_func(ledClass::show)(void) {
   // With async DMA, show() returns immediately but transfer continues in background
   // If DMA is busy, DROP THE FRAME instead of spin-waiting to avoid deadlocks
   // The double-buffering in the driver will queue the next frame automatically
+  bool dropped = false;
+
   if (splitLEDs == 1 ){//&& topDirty) {
     // Only update if DMA is not busy - otherwise drop this frame
     if (!topleds.isDMABusy() && !bbleds.isDMABusy()) {
       topleds.show();
       topDirty = false;
+    } else {
+      dropped = true;
     }
     // If busy, leave topDirty=true so we try again next time
   }
@@ -193,9 +205,15 @@ void __not_in_flash_func(ledClass::show)(void) {
     if (!bbleds.isDMABusy()) {
       bbleds.show();
       bbDirty = false;
+    } else {
+      dropped = true;
     }
     // If busy, leave bbDirty=true so we try again next time
   //}
+
+  if (get_core_num() == 1) {
+    ledShowFrameDropped = dropped;
+  }
 }
 
 void __not_in_flash_func(ledClass::showBBBlocking)(void) {
@@ -207,6 +225,10 @@ void __not_in_flash_func(ledClass::showBBBlocking)(void) {
   // SIMPLIFIED: Bypass DMA entirely and use reliable blocking PIO method
   // This is the same method used when DMA is unavailable - guaranteed to work
   
+  if (get_core_num() == 1) {
+    ledShowFrameDropped = false;   // this path never drops a frame
+  }
+
   if (splitLEDs == 1 ){//&& topDirty) {
     topleds.showBlocking();  // Force blocking PIO transfer
     topDirty = false;
@@ -2464,6 +2486,16 @@ void lightUpNet(int netNumber, int node, int onOff, int brightness2,
 
         if (globalState.connections.nets[netNumber].nodes[j] <= NANO_A7) {
 
+          // Core 0 can rewrite this node field while we render, so the guard
+          // above and the map lookups below are not guaranteed to read the same
+          // value. Index nodesToPixelMap from ONE bounded read.
+          const int nodeIdx = globalState.connections.nets[netNumber].nodes[j];
+          if (nodeIdx < 0 ||
+              nodeIdx >= (int)(sizeof(nodesToPixelMap) / sizeof(nodesToPixelMap[0]))) {
+            continue;
+            }
+          const int nodePixel = nodesToPixelMap[nodeIdx];
+
           if (globalState.connections.nets[netNumber].nodes[j] == node || node == -1) {
             if (onOff == 1) {
 
@@ -2617,7 +2649,7 @@ void lightUpNet(int netNumber, int node, int onOff, int brightness2,
                 // globalState.connections.nets[netNumber].rawColor = color;
                 // globalState.connections.nets[netNumber].color = unpackRgb(color);
 
-                if (probeHighlight - 1 != (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]])) {
+                if (probeHighlight - 1 != (nodePixel)) {
                   // Serial.print("nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]] = ");
                   // Serial.println(nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]);
                   if (globalState.connections.nets[netNumber].nodes[j] >= NANO_D0) {
@@ -2643,34 +2675,34 @@ void lightUpNet(int netNumber, int node, int onOff, int brightness2,
                     // special-LED offset. Using +320 here writes off the 111-LED
                     // strip so the LED never lit; map straight through instead.
                     leds.setPixelColor(
-                        nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]],
+                        nodePixel,
                         color);
 #else
                     leds.setPixelColor(
-                        (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]) + 320, color);
+                        (nodePixel) + 320, color);
 #endif
 
                     } else {
 #if defined(OG_JUMPERLESS)
                     // OG: 1 LED per row. nodesToPixelMap[node] is the OG pixel index.
                     leds.setPixelColor(
-                        nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]],
+                        nodePixel,
                         color);
 #else
                     leds.setPixelColor(
-                        (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]) * 5 + 0,
+                        (nodePixel) * 5 + 0,
                         color);
                     leds.setPixelColor(
-                        (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]) * 5 + 1,
+                        (nodePixel) * 5 + 1,
                         color);
                     leds.setPixelColor(
-                        (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]) * 5 + 2,
+                        (nodePixel) * 5 + 2,
                         color);
                     leds.setPixelColor(
-                        (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]) * 5 + 3,
+                        (nodePixel) * 5 + 3,
                         color);
                     leds.setPixelColor(
-                        (nodesToPixelMap[globalState.connections.nets[netNumber].nodes[j]]) * 5 + 4,
+                        (nodePixel) * 5 + 4,
                         color);
 #endif
 
