@@ -287,26 +287,12 @@ void JeoPixel::show(void) {
   interrupts();
 #endif
 
-  // Save EOD time for latch on next call.
-  //
-  // CRITICAL (RP2040 DMA path): rp2040Show() returns at transfer *start*, not
-  // end. Stamping micros() here meant canShow()'s 300us latch check had
-  // already elapsed by the time the multi-ms transfer finished, so a show()
-  // issued the instant DMA went idle streamed new data with ~zero latch-low
-  // gap — the strip never latched and appended the new frame to the old one
-  // (shifted/garbled pixels). Project endTime to the end of the stream
-  // instead: numBytes * 10us per byte at 800 kHz (8 bits x 1.25us), 20us at
-  // 400 kHz. canShow() then measures the 300us latch from the last bit on
-  // the wire. (Its rollover guard clamps endTime to now if we're called
-  // while still mid-stream, which only ever lengthens the latch.)
+  // Latch: DMA path arms endTime in canShow() the first time the TX FIFO
+  // goes idle (rp2040Show returns at transfer *start*). Projecting
+  // numBytes*10us from here was 5% short on RP2350 and expired while the
+  // joined FIFO still held leftover bytes — next show() shifted the frame.
 #if defined(ARDUINO_ARCH_RP2040)
-  if (use_dma && dma_channel >= 0) {
-#ifdef NEO_KHZ400
-    endTime = micros() + numBytes * (is800KHz ? 10 : 20);
-#else
-    endTime = micros() + numBytes * 10;
-#endif
-  } else {
+  if (!(use_dma && dma_channel >= 0)) {
     endTime = micros(); // blocking PIO path really did just finish
   }
 #else

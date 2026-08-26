@@ -276,36 +276,19 @@ void __not_in_flash_func(JeoPixel::rp2040Show)(uint8_t *pixels, uint32_t numByte
         dma_buffer[i] = ((uint32_t)pixels[i]) << 24;
       }
       
-      // CRITICAL: Full memory barrier to ensure all writes complete before DMA starts
-      __dmb(); // Data Memory Barrier - ensure buffer written to RAM
-      
-      // Additional barrier before starting DMA to prevent reordering
-      __dsb(); // Data Synchronization Barrier - all memory ops complete
-      
-      // RP2350 FIX: Pre-fill PIO FIFO with first 4 words before starting DMA
-      // This prevents initial FIFO underrun which causes LED data shifting
-      // The PIO TX FIFO is 4 words deep - fill it completely before DMA starts
-      // This gives DMA time to ramp up while PIO is busy processing first pixels
-      uint32_t prefill_count = (numBytes < 4) ? numBytes : 4;
-      for (uint32_t i = 0; i < prefill_count; i++) {
-        // Use non-blocking put - FIFO should be empty here
-        if (!pio_sm_is_tx_fifo_full(pio, pio_sm)) {
-          pio_sm_put(pio, pio_sm, dma_buffer[i]);
-        }
+      __dmb();
+      __dsb();
+
+      // DMA the whole buffer from index 0. Do not prefill + offset: the
+      // ws2812 program stalls with the pin LOW (extra reset — harmless),
+      // but a fixed +4 skip while leftover FIFO words remain prefixes
+      // those leftovers onto the new frame (one-pixel shift flicker).
+      if (numBytes > 0) {
+        dma_channel_transfer_from_buffer_now(dma_channel, dma_buffer, numBytes);
+        __dsb();
+        dma_awaiting_latch = true;
       }
-      
-      // Start DMA transfer from AFTER the pre-filled words
-      // This prevents DMA from overwriting the pre-filled data
-      uint32_t remaining_bytes = (numBytes > prefill_count) ? (numBytes - prefill_count) : 0;
-      
-      if (remaining_bytes > 0) {
-        uint32_t *dma_source = dma_buffer + prefill_count;
-        dma_channel_transfer_from_buffer_now(dma_channel, dma_source, remaining_bytes);
-        
-        // Final barrier to ensure DMA controller has latched the transfer request
-        __dsb(); // Ensures DMA is committed before releasing lock
-      }
-      
+
       restore_interrupts(interrupts);
       
       // ASYNC MODE: Return immediately - DMA runs in background
