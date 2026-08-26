@@ -21,6 +21,10 @@
 #include "Probing.h"
 #include "JsonState.h"   // escapeJson() for the overlay serialiser
 
+// Defined with the serializer below; the mutators above it consult it so
+// session-only overlays never dirty persistent state.
+static bool overlayIsSessionOnly(const char* name);
+
 // Global overlay state
 GraphicOverlayState graphicOverlayState;
 
@@ -130,7 +134,14 @@ int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol
         memcpy(overlays[existing].colors, colors, numPixels * sizeof(uint32_t));
         overlays[existing].enabled = true;
         needsRender = true;
-        globalState.markDirty();
+        // Session-only overlays (_PARTS_/_GUIDE_/_SELFTEST_) are never
+        // serialized, so they must not dirty the persistent state: the
+        // ambient PartLabels service recomposes _PARTS_ on every highlight
+        // edge and bloom/inspect expiry, and marking dirty here made a pure
+        // cosmetic repaint trigger idle auto-saves, false "unsaved edits"
+        // messages, and (worst) USB-eject writing stale RAM state over
+        // host-edited files (sweep finding, medium).
+        if (!overlayIsSessionOnly(name)) globalState.markDirty();
         return existing;
     }
     
@@ -163,8 +174,8 @@ int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol
     
     numOverlays++;
     needsRender = true;
-    
-    globalState.markDirty();
+
+    if (!overlayIsSessionOnly(name)) globalState.markDirty();
 
     return slot;
 }
@@ -183,11 +194,12 @@ bool GraphicOverlayState::removeOverlay(int index) {
     }
     
     if (overlays[index].enabled || overlays[index].name[0] != '\0') {
+        bool sessionOnly = overlayIsSessionOnly(overlays[index].name);
         overlays[index].clear();
         numOverlays--;
         if (numOverlays < 0) numOverlays = 0;
         needsRender = true;
-        globalState.markDirty();
+        if (!sessionOnly) globalState.markDirty();
         return true;
     }
     
@@ -195,9 +207,19 @@ bool GraphicOverlayState::removeOverlay(int index) {
 }
 
 void GraphicOverlayState::clearAll() {
+    bool hadPersistent = false;
+    for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
+        if (overlays[i].enabled && !overlayIsSessionOnly(overlays[i].name)) {
+            hadPersistent = true;
+            break;
+        }
+    }
     clear();
     needsRender = true;
-    globalState.markDirty();
+    // Session-only overlays never belonged in the slot file, so wiping them
+    // is not a change worth persisting (sweep finding: the Snake app's
+    // per-frame clearAll() dirtied the state ~30x/second).
+    if (hadPersistent) globalState.markDirty();
 }
 
 int GraphicOverlayState::findByName(const char* name) const {
@@ -337,24 +359,35 @@ void __not_in_flash_func(renderGraphicOverlays)() {
 // YAML Serialization
 // ============================================================================
 
+// Session-only overlays are never persisted into a slot file: self-test
+// results must clear on reset, the guided-placement runtime's `_GUIDE_`
+// footprint/target overlays are rebuilt from the parts table every session
+// (persisting them would also survive into slots the guide no longer owns),
+// and PartLabels' `_PARTS_` composition is likewise derived state - letting
+// it into the YAML would break the parts round-trip.
+static bool overlayIsSessionOnly(const char* name) {
+    return strcmp(name, "_SELFTEST_") == 0 ||
+           strcmp(name, "_PARTS_") == 0 ||
+           strcmp(name, "_DIRECT_PIXELS_") == 0 ||   // scratch surface (sweep)
+           strncmp(name, "_GUIDE_", 7) == 0;
+}
+
 void serializeOverlaysToYAML(String& output, int withANSI ) {
-    // Self-test results are session-only (must clear on reset) - never
-    // persist them into a slot file.
     int persistable = 0;
     for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
         const GraphicOverlay& overlay = graphicOverlayState.overlays[i];
-        if (overlay.enabled && strcmp(overlay.name, "_SELFTEST_") != 0) persistable++;
+        if (overlay.enabled && !overlayIsSessionOnly(overlay.name)) persistable++;
     }
     if (persistable == 0) {
         return;
     }
-    
+
     output += "\noverlays:\n";
-    
+
     for (int i = 0; i < MAX_GRAPHIC_OVERLAYS; i++) {
         const GraphicOverlay& overlay = graphicOverlayState.overlays[i];
         if (!overlay.enabled) continue;
-        if (strcmp(overlay.name, "_SELFTEST_") == 0) continue;
+        if (overlayIsSessionOnly(overlay.name)) continue;
 
         output += "  - name: \"";
         output += overlay.name;
@@ -404,51 +437,100 @@ void serializeOverlaysToYAML(String& output, int withANSI ) {
     }
 }
 
+// Start of the `overlays:` SECTION, or nullptr. The header only counts on an
+// UN-INDENTED line - the same recognition rule deserializeParts and fromYAML
+// use. A bare strstr(text, "overlays:") matched the substring ANYWHERE: a pin
+// named `overlays`, a value string containing the word, or a file that simply
+// writes some other section first would hijack the scan and every field
+// lookup below would then read out of the wrong region.
+static const char* findOverlaysSection(const char* yaml) {
+    for (const char* p = yaml; ; ) {
+        const char* hit = strstr(p, "overlays:");
+        if (!hit) return nullptr;
+        if (hit == yaml || *(hit - 1) == '\n') return hit;  // column 0 only
+        p = hit + 1;
+    }
+}
+
+// End of the section: the first UN-INDENTED line after the header. Blank and
+// comment lines do NOT end it (deserializeParts skips those before its
+// !indented break, and the serializer emits a blank line between sections).
+// Returns a pointer to the terminator, never past the NUL.
+static const char* findSectionEnd(const char* sectionStart) {
+    const char* line = strchr(sectionStart, '\n');
+    while (line != nullptr) {
+        const char* next = line + 1;
+        if (*next == '\0') return next;
+        if (*next == ' ' || *next == '\t') {         // indented: still ours
+            line = strchr(next, '\n');
+            continue;
+        }
+        if (*next == '\r' || *next == '\n') {        // blank line: tolerated
+            line = strchr(next, '\n');
+            continue;
+        }
+        if (*next == '#') {                          // comment: tolerated
+            line = strchr(next, '\n');
+            continue;
+        }
+        return next;                                 // next top-level section
+    }
+    return sectionStart + strlen(sectionStart);
+}
+
 bool deserializeOverlaysFromYAML(const char* yamlContent, String& errorMsg) {
     graphicOverlayState.clearAll();
-    
-    const char* overlaysSection = strstr(yamlContent, "overlays:");
+
+    const char* overlaysSection = findOverlaysSection(yamlContent);
     if (!overlaysSection) {
         return true;  // No overlays is fine
     }
-    
+
+    // EVERY scan below is bounded by sectionEnd: strstr walks to the NUL, so
+    // an unbounded lookup could pull a `row:` or a `colors:` out of whatever
+    // section follows. Tolerance semantics are otherwise unchanged - a
+    // malformed entry is skipped, missing fields keep their defaults, and the
+    // function still always returns true.
+    const char* sectionEnd = findSectionEnd(overlaysSection);
     const char* pos = overlaysSection;
-    
-    while ((pos = strstr(pos, "- name:")) != nullptr) {
+
+    while (pos < sectionEnd && (pos = strstr(pos, "- name:")) != nullptr) {
+        if (pos >= sectionEnd) break;
         char name[32] = {0};
         int startRow = 0, startCol = 0, width = 1, height = 1;
         uint32_t colors[MAX_OVERLAY_PIXELS] = {0};
         int numColors = 0;
-        
+
+        // Find extent of this overlay entry (next "- name:" in the section,
+        // else the section end)
+        const char* nextEntry = strstr(pos + 7, "- name:");
+        const char* entryEnd = (nextEntry && nextEntry < sectionEnd) ? nextEntry : sectionEnd;
+
         // Parse name
         const char* nameStart = strstr(pos, "\"");
-        if (nameStart) {
+        if (nameStart && nameStart < entryEnd) {
             nameStart++;
             const char* nameEnd = strchr(nameStart, '\"');
-            if (nameEnd) {
+            if (nameEnd && nameEnd < entryEnd) {
                 int len = nameEnd - nameStart;
                 if (len > 31) len = 31;
                 strncpy(name, nameStart, len);
             }
         }
-        
-        // Find extent of this overlay entry (next "- name:" or end of overlays section)
-        const char* nextEntry = strstr(pos + 7, "- name:");
-        const char* entryEnd = nextEntry ? nextEntry : overlaysSection + strlen(overlaysSection);
 
         // Parse row/col/width/height (must be within this overlay)
         const char* rowPos = strstr(pos, "row:");
         if (rowPos && rowPos < entryEnd) startRow = atoi(rowPos + 4);
-        
+
         const char* colPos = strstr(pos, "col:");
         if (colPos && colPos < entryEnd) startCol = atoi(colPos + 4);
-        
+
         const char* widthPos = strstr(pos, "width:");
         if (widthPos && widthPos < entryEnd) width = atoi(widthPos + 6);
-        
+
         const char* heightPos = strstr(pos, "height:");
         if (heightPos && heightPos < entryEnd) height = atoi(heightPos + 7);
-        
+
         // Parse colors
         const char* colorsPos = strstr(pos, "colors:");
         if (colorsPos && colorsPos < entryEnd) {
@@ -465,14 +547,14 @@ bool deserializeOverlaysFromYAML(const char* yamlContent, String& errorMsg) {
                 }
             }
         }
-        
+
         if (name[0] != '\0' && width > 0 && height > 0) {
             graphicOverlayState.addOverlay(name, startRow, startCol, width, height, colors);
         }
-        
+
         pos++;
     }
-    
+
     return true;
 }
 

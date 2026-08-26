@@ -46,7 +46,11 @@ KevinC@ppucc.io
 #include "GraphicOverlays.h"
 #include "Graphics.h"
 #include "HelpDocs.h"
+#include "DisplayService.h"
 #include "Highlighting.h"
+#include "MpBackground.h"
+#include "PartLabels.h"
+#include "StepViewer.h"
 #include "JumperlOS.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
@@ -354,6 +358,10 @@ void setup( ) {
     initializeMicroPythonExamples( );
     heapMark("examples provisioning");
 
+    // Same, for the built-in /projects/<dir>/ trees the Guides launcher lists
+    initializeProjects( );
+    heapMark("projects provisioning");
+
     configLoaded = 1;
     startupTimers[ 1 ] = millis( );
     delayMicroseconds( 200 );
@@ -542,6 +550,7 @@ void setup( ) {
     jOS.registerService( &asyncPassthroughService ); // HIGH - USB CDC1<->UART0 bridging (prevent data loss); inner set (inInnerSet() override - the bridge keeps running inside probe mode / menus)
     jOS.registerService( &menus );                   // HIGH - click-wheel menu; BLOCKING while a menu is open
     jOS.registerService( &slotManager );             // HIGH - states auto-save (idle-gated)
+    jOS.registerService( &stepViewer );              // HIGH - guide-step browser (wheel owns steps while armed; registered BEFORE the probe stack so it sees turns ahead of Highlighting)
 
 
     // Probe stack is gated on the board having resistive probe pads (V5). The OG
@@ -561,6 +570,9 @@ void setup( ) {
     jOS.registerService( &peripherals );     // CRITICAL - current-sense poll (10 ms); inner set
 
     jOS.registerService( &oledGuiService );      // NORMAL - retained OLED screen render + live bindings (inert until a screen is active)
+    jOS.registerService( &partLabels );          // NORMAL, 20 ms - ambient part labels (_PARTS_ overlay, auto-hide), tap-to-inspect, pin-class warnings; dormant on OG (ledsPerRow gate)
+    jOS.registerService( &mpBackgroundService ); // NORMAL, 5 ms - background MicroPython callback (bg_start); NOT inner set on purpose - pauses in probe mode/menus/foreground scripts
+    jOS.registerService( &displayService );      // NORMAL, 2 ms, inner set - breadboard display driving (beacon/init/animate, one bus chunk per tick; the animation surviving menus IS the point)
     jOS.registerService( &portHousekeepingService ); // NORMAL, 10 ms - Arduino DTR/flash detect + UART auto-connect, ENQ port-info reply, net-scan debug (was a 10 ms block in loop(); B6)
     jOS.registerService( &ledDumpService );          // NORMAL, 10 ms, inner set - the terminal LED picture (R! / serial function 5-6), drawn on core 0 now (was loop1 on core 1; T1.10)
 
@@ -818,6 +830,12 @@ menu:
             firstStart = false;
         }
         firstLoop = 2;
+
+        // Decide which context to come up in BEFORE the first loadfile: pass.
+        // Config is loaded by now (setup() waits on configLoaded), and this
+        // only seeds netSlot / activeSlotPath - loadfile: below does the
+        // actual load, so numbered and file contexts share one load path.
+        seedBootContext( );
 
         goto loadfile;
     }
@@ -1409,9 +1427,31 @@ loadfile:
         }
     }
     startupTimers[ 12 ] = millis( );
-    // Load YAML state from slot file into globalState
+    // Load YAML state from the active context into globalState. Branch on the
+    // sentinel EXACTLY - never on `< 0`: netSlot == -1 and netSlot == NUM_SLOTS
+    // are live defcon sentinels set by Graphics::attractMode, and they must
+    // keep failing through to clearActiveSlot() the way they always have.
+    //
+    // On the very first pass this is what executes the boot seed: seedBootContext()
+    // has already put either a number or (-2 + activeSlotPath) in place.
     String loadError;
-    if ( !mgr.loadSlot( netSlot, loadError ) ) {
+    bool loadOk;
+    if ( netSlot == SLOT_FILE_CONTEXT ) {
+        String ctxPath = String( mgr.getActiveSlotPath( ) );
+        loadOk = mgr.loadSlotFromPath( ctxPath, loadError );
+        if ( !loadOk ) {
+            // The boot context's file vanished or won't open. Fall back to
+            // slot 0 AND rewrite last_active.txt, so the failure doesn't
+            // recur on every boot from here on.
+            Serial.println( "Active slot file unavailable (" + ctxPath + "): " + loadError );
+            Serial.println( "Falling back to slot 0" );
+            netSlot = 0;
+            loadOk = mgr.loadSlot( 0, loadError );  // rewrites last_active via updateLastActive
+        }
+    } else {
+        loadOk = mgr.loadSlot( netSlot, loadError );
+    }
+    if ( !loadOk ) {
         if ( debugFP ) {
             Serial.print( "Warning: Failed to load slot " );
             Serial.print( netSlot );
@@ -1553,12 +1593,11 @@ void loop1( ) {
 
         supplySense = readAdcVoltage( 6, 4 );
 
-        if ( printPowerSupplySense == 1 ) {
-            Serial.print( "supplySense = " );
-            Serial.println( supplySense );
-
-            Serial.flush( );
-        }
+        // NO Serial FROM CORE 1 (sweep finding): USB CDC writes from this
+        // core are the codebase's own documented board-wedge class. The
+        // reading lives in the supplySense global; a core-0 debug path can
+        // print it.
+        // if ( printPowerSupplySense == 1 ) { ... }
 
         powerSupplySenseTimer = millis( );
     }
@@ -1799,6 +1838,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     // Check the frame hold before long-running showNets() to allow quick exit for flash ops
                     if ( core1FramesHeld( ) ) {
                         ledFrameAbortsPause++;
+                        // The request was already TAKEN: completing it keeps
+                        // the ledShowIdle gate honest, and re-posting means
+                        // the dropped frame renders once the hold releases
+                        // (sweep finding - taken-but-never-completed wedged
+                        // the whole gated pipeline).
+                        if ( taken ) {
+                            core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                            core1req::post( core1req::REQ_SHOW_LEDS, taken );
+                        }
                         core2busy = false;
                         core_sync_release( );
                         return;
@@ -1861,6 +1909,10 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 // and never hit it).
                 if ( core1FramesHeld( ) ) {
                     ledFrameAbortsPause++;
+                    if ( taken ) {   // see the showNets() abort above
+                        core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                        core1req::post( core1req::REQ_SHOW_LEDS, taken );
+                    }
                     core_sync_release( );
                     return;
                 }

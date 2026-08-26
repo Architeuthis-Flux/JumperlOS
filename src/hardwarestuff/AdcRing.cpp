@@ -267,8 +267,9 @@ int __not_in_flash_func(adcRingMeanWindow)(int ch, uint32_t endSweep, int n) {
 #endif
 }
 
-int __not_in_flash_func(adcRingMeanAfter)(int ch, uint32_t after, int n, uint32_t timeoutUs) {
+int __not_in_flash_func(adcRingMeanAfterStrict)(int ch, uint32_t after, int n, uint32_t timeoutUs, bool* fresh) {
 #if ADC_RING_BUILD
+    if (fresh) *fresh = false;
     if (!s_active || ch < 0 || ch > 7) return 0;
     if (n < 1) n = 1;
     if (n > (int)ADC_RING_SWEEPS - 64) n = (int)ADC_RING_SWEEPS - 64;
@@ -283,17 +284,32 @@ int __not_in_flash_func(adcRingMeanAfter)(int ch, uint32_t after, int n, uint32_
         if ((int32_t)(newestEndFor(ch, total) - need) >= 0) break;
         if ((time_us_32() - t0) > timeoutUs || s_generation != gen || !s_active) {
             s_stalls++;
-            return adcRingMeanNewest(ch, n);   // best available
+            return adcRingMeanNewest(ch, n);   // best available, NOT fresh
         }
         tight_loop_contents();
     }
     uint32_t dt = time_us_32() - t0;
     if (dt > s_maxWaitUs) s_maxWaitUs = dt;
     s_reads++;
-    return sumWindow(ch, need, n) / n;
+    int mean = sumWindow(ch, need, n) / n;
+    // Validity checks AFTER the sum, mirroring adcRingMeanNewest's torn-read
+    // pattern: a generation bump / stop means a resync restarted the sweep
+    // phase (the window's channel mapping can't be trusted), and the DMA
+    // lapping past the window start means samples were overwritten mid-sum.
+    if (s_generation == gen && s_active &&
+        (adcRingSweeps() - (need - (uint32_t)n)) < ADC_RING_SWEEPS) {
+        if (fresh) *fresh = true;
+    }
+    return mean;
 #else
-    (void)ch; (void)after; (void)n; (void)timeoutUs; return 0;
+    (void)ch; (void)after; (void)n; (void)timeoutUs;
+    if (fresh) *fresh = false;
+    return 0;
 #endif
+}
+
+int __not_in_flash_func(adcRingMeanAfter)(int ch, uint32_t after, int n, uint32_t timeoutUs) {
+    return adcRingMeanAfterStrict(ch, after, n, timeoutUs, NULL);
 }
 
 void adcRingService(void) {

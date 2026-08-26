@@ -114,6 +114,7 @@ const BoardTopology v5BoardTopology = {
         /* hasBreadboardText      */ true,
         /* hasPsram               */ true,
         /* hasStartupAnimation    */ true,
+        /* breadboardDisplays     */ true,
         /* spiDac                 */ false,
         /* ledsPerRow             */ 5,
         /* ledCount               */ 445,

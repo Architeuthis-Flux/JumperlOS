@@ -7,6 +7,9 @@ mp_sched_item_t sched_queue[(8)];
 struct _mp_vfs_mount_t *vfs_cur;
 struct _mp_vfs_mount_t *vfs_mount_table;
 void *machine_pin_irq_obj[30];
+mp_obj_t jl_bg_entry;   // background-callback (cb, globals) tuple - modjumperless.c
+                        // (this file is checked-in codegen output; port additions
+                        // land here by hand, the machine_pin_irq_obj precedent)
 void *rp2_dma_irq_obj[16];
 void *rp2_pio_irq_obj[3];
 void *rp2_state_machine_irq_obj[3 * 4];

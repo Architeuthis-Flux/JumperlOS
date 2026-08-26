@@ -1,0 +1,36 @@
+version: 2
+sourceOfTruth: bridges
+meta:
+  project: i2cscrn
+  title: "Type to Screen"
+  variant: default
+  summary: "An SSD1306 on the breadboard, echoing whatever you type"
+  script: main.py
+  needs: ["SSD1306 I2C module (4-pin: GND VCC SCL SDA)"]
+parts:
+  - name: "DISP"
+    type: ic
+    value: "SSD1306"
+    footprint: sip4
+    row: 5
+    pins:
+      GND: {pin: 1, connect: GND,       class: gnd}
+      VCC: {pin: 2, connect: TOP_RAIL,  class: power}
+      SCL: {pin: 3, connect: RP_GPIO_8, class: signal}
+      SDA: {pin: 4, connect: RP_GPIO_7, class: signal}
+guide:
+  title: "Type to Screen"
+  steps:
+    - {do: note, text: "An SSD1306 the Jumperless talks to. Turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: DISP, check: presence, on_fail: warn, text: "Header in rows 5-8: GND 5, VCC 6, SCL 7, SDA 8. Check the silkscreen order."}
+    # 5-8 is the DEFAULT, not a requirement: main.py asks where each signal
+    # actually is (tap the hole, or type the row) and re-routes to match. The
+    # guide places it here so there is something concrete to build against.
+    - {do: power_on, check: rail_sane, text: "Confirm to power the display (3.3V on the top rail)."}
+    - {do: verify, target: 8, n1: 8, n2: 7, check: i2c, text: "Scanning the bus - the panel should answer (0x3C on nearly every module)."}
+    - {do: note, text: "Wired. Run main.py: it asks where each signal is, offers a driver list, then waits for the panel."}
+power:
+  topRail: 3.3
+config:
+  gpio:
+    pulls: [0,0,0,0,0,0,1,1,0,0]

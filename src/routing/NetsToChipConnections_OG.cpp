@@ -4631,8 +4631,10 @@ void couldntFindPath(int forcePrint) {
                 printNodeOrName(path[i].node2);
                 Serial.print("\n\r");
       }
+            if (numberOfUnconnectablePaths < 10) {   // table is [10][2] (sweep)
             unconnectablePaths[numberOfUnconnectablePaths][0] = path[i].node1;
             unconnectablePaths[numberOfUnconnectablePaths][1] = path[i].node2;
+            }
       numberOfUnconnectablePaths++;
             //path[i].skip = true;
     }
@@ -5483,8 +5485,10 @@ int checkForOverlappingPaths() {
 
               // Add to unconnectable paths for LED animation
               if (numberOfUnconnectablePaths < 10) {
+                if (numberOfUnconnectablePaths < 10) {   // table is [10][2] (sweep)
                 unconnectablePaths[numberOfUnconnectablePaths][0] = globalState.connections.paths[i].node1;
                 unconnectablePaths[numberOfUnconnectablePaths][1] = globalState.connections.paths[i].node2;
+                }
                 numberOfUnconnectablePaths++;
                 if (debugNTCC3) {
                   Serial.print("Added to unconnectable paths: ");
@@ -5595,8 +5599,10 @@ int checkForOverlappingPaths() {
               
               // Add to unconnectable paths for LED animation
               if (numberOfUnconnectablePaths < 10) {
+                if (numberOfUnconnectablePaths < 10) {   // table is [10][2] (sweep)
                 unconnectablePaths[numberOfUnconnectablePaths][0] = globalState.connections.paths[i].node1;
                 unconnectablePaths[numberOfUnconnectablePaths][1] = globalState.connections.paths[i].node2;
+                }
                 numberOfUnconnectablePaths++;
                 if (debugNTCC3) {
                   Serial.print("Added to unconnectable paths: ");

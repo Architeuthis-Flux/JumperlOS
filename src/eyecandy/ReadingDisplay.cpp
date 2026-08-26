@@ -216,7 +216,8 @@ void resetLastShown(void) {
     // keeps repainting in place.
 }
 
-void show(const char* name, int rowNode, const char* value, const char* value2) {
+void show(const char* name, int rowNode, const char* value, const char* value2,
+          const char* hint) {
     // Copy the name first: definesToChar() below returns a pointer into ONE
     // shared static buffer for values it can't map, so a caller that passed a
     // definesToChar() result as `name` would see it replaced by the row label.
@@ -226,6 +227,9 @@ void show(const char* name, int rowNode, const char* value, const char* value2) 
     bool haveV1 = (value != nullptr && value[0] != '\0');
     bool haveV2 = (value2 != nullptr && value2[0] != '\0');
     bool haveValues = (haveV1 || haveV2);
+    // The hint only makes sense next to a reading; a name-only screen has no
+    // bottom row to tag it onto.
+    bool haveHint = haveValues && (hint != nullptr && hint[0] != '\0');
 
     // Row label for the header's right side (row number / node name). Only
     // meaningful next to a reading - a name-only screen renders large and
@@ -234,7 +238,9 @@ void show(const char* name, int rowNode, const char* value, const char* value2) 
     const char* rowLabel = nullptr;
     if (haveValues && rowNode > 0) {
         snprintf(rowBuf, sizeof(rowBuf), "%s", definesToChar(rowNode, 0));
-        if (rowBuf[0] != '\0') {
+        // A label identical to the name is the net's own namesake pad
+        // (tapping the GND pad renders "GND  GND" otherwise) - drop it.
+        if (rowBuf[0] != '\0' && strcmp(rowBuf, nameText) != 0) {
             rowLabel = rowBuf;
         }
     }
@@ -247,6 +253,12 @@ void show(const char* name, int rowNode, const char* value, const char* value2) 
     appendField(line, len, "  ", rowLabel);
     appendField(line, len, "  ", value);
     appendField(line, len, "  ", value2);
+    // The hint is part of the composed line, so it keys the dedupe (an OLED
+    // arriving or the config flag flipping mid-highlight must repaint) and
+    // rides the serial live line, where "adjust?" reads as "click the wheel".
+    if (haveHint) {
+        appendField(line, len, "  ", hint);
+    }
 
     // A stale pin (someone scrolled since our last paint) bypasses the
     // dedupe: the reading is buried in scrollback, so resurface it below the
@@ -311,6 +323,15 @@ void show(const char* name, int rowNode, const char* value, const char* value2) 
         rows[n].segCount = 1;
         rows[n].align = OLED_ALIGN_CENTER;
         n++;
+    }
+    // The hint tags the bottom value row, right-aligned in the 5pt label
+    // font - the same idiom as the header's row label. The reading on that
+    // row goes flush-left when the hint is present: centered, a wide value
+    // ("10.0 mA") ran into the right-anchored tag.
+    if (haveHint && n > 1) {
+        rows[n - 1].segs[1] = {hint, labelFont, OLED_ALIGN_RIGHT};
+        rows[n - 1].segCount = 2;
+        rows[n - 1].align = OLED_ALIGN_LEFT;
     }
     // Top-anchored: header hugs the top edge, readings fill the remaining
     // height. rowGap 1 keeps the three-row stack inside 32px so the bottom

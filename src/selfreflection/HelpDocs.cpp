@@ -1260,7 +1260,22 @@ Jerial.println(probe_art);
         Jerial.print("  /          ");
         changeTerminalColor(HELP_DESC_COLOR, false);
         Jerial.println("- File Manager (browse/edit files)");
-        
+
+        changeTerminalColor(HELP_COMMAND_COLOR, false);
+        Jerial.print("  Guides     ");
+        changeTerminalColor(HELP_DESC_COLOR, false);
+        Jerial.println("- Guided circuit builds from /projects");
+        changeTerminalColor(HELP_DESC_COLOR, false);
+        Jerial.println("               A TOP-LEVEL clickwheel row, before Apps. Pick a");
+        Jerial.println("               project and the board walks you through placing");
+        Jerial.println("               each part - lighting the holes, naming the nets,");
+        Jerial.println("               and measuring each step before it commits.");
+        Jerial.println("               A launch opens /projects/<dir>/<dir>_run.yaml (a");
+        Jerial.println("               RUN FILE) as your active circuit and keeps it -");
+        Jerial.println("               destination slots and the keep-prompt are gone.");
+        Jerial.println("               ONE run file per project, reused. To keep a run,");
+        Jerial.println("               use slots > save to while it is active.");
+
         changeTerminalColor(HELP_NOTE_COLOR, true);
         Jerial.println("\n App Examples:");
         changeTerminalColor(HELP_DESC_COLOR, true);
@@ -1268,7 +1283,34 @@ Jerial.println(probe_art);
         Jerial.println("  Use scope app to visualize signals on ADC pins");
         Jerial.println("  Run calibrate app if voltages seem off");
         Jerial.println("  Use / to browse and edit files directly");
-        
+        Jerial.println("  Open Guides and build the 555 blinker start to finish");
+
+        changeTerminalColor(HELP_NOTE_COLOR, true);
+        Jerial.println("\n While a guided build is running:");
+        changeTerminalColor(HELP_DESC_COLOR, true);
+        Jerial.println("  wheel TURN browses the steps and never exits - the ring wraps");
+        Jerial.println("    through a DONE summary of what is built/skipped/outstanding.");
+        Jerial.println("  wheel CLICK confirms (instantly).  HOLD (or q) quits.");
+        Jerial.println("  The wheel NEVER moves a part - moving is a direct gesture:");
+        Jerial.println("  probe: CONNECT confirms, REMOVE un-commits, a tap on the part's");
+        Jerial.println("    lit footprint snaps it, a tap on a free hole moves pin 1 there.");
+        Jerial.println("  serial twins: n/space p s v q, > < to browse, m <row> to move,");
+        Jerial.println("    c to snap, t <row> to fake a probe tap.");
+        Jerial.println("  Finish a build and it OFFERS to run the project's main.py.");
+
+        changeTerminalColor(HELP_NOTE_COLOR, true);
+        Jerial.println("\n Scripted entry to a guided build (skips the pickers):");
+        changeTerminalColor(HELP_COMMAND_COLOR, false);
+        Jerial.println("  z 555            load the latest run, else start a new one");
+        Jerial.println("  z 555 new        force a fresh run file");
+        Jerial.println("  z 555 load       force the latest run file");
+        Jerial.println("  z 555 run=2      open a specific one");
+        Jerial.println("  z 555 noscript   stop at the wiring, skip main.py");
+        changeTerminalColor(HELP_DESC_COLOR, false);
+        Jerial.println("  A bare number after the project is the OLD destination-slot");
+        Jerial.println("  grammar and is now a usage error, on purpose.");
+        Jerial.println("  Type 'z?' for the full grammar and the guide's keys.");
+
     } else if (strcmp(category, "scripts") == 0) {
         changeTerminalColor(HELP_DESC_COLOR, true);
         Jerial.println("Python script management and examples:\n");

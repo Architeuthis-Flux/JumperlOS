@@ -1,0 +1,168 @@
+# source: Solomon Systech (SSD1306/09/15), Sinowealth (SH1106), Sitronix
+#   (ST7789), Ilitek (ILI9341), Hitachi (HD44780), Japan Display (LS027B7DH01,
+#   LPM009M360A), Worldsemi (WS2812), generic breakout-board silkscreens -
+#   pin-function facts transcribed by hand from datasheets and module
+#   headers; facts are not copyrightable. Never import Fritzing/KiCad/
+#   AVR-tester tables (CC-BY-SA/GPL).
+#
+# Displays are breakout modules on SIP headers (pin 1..N left-to-right,
+# screen toward you). Two dedup axes: many records share one pinout AND
+# many records share one driver (driver: = agent C descriptor key). Pin
+# names are the module silkscreen; =ROLE gives the machine meaning where
+# the silkscreen lies (SPI boards silk-screened SCL/SDA).
+
+class: DISPLAY
+
+- id: ssd1306_i2c
+  name: SSD1306
+  desc: 0.96in OLED 128x64 I2C
+  subclass: oled
+  package: sip4
+  driver: ssd1306
+  pop: 1
+  i2c: [0x3C, 0x3D]
+  # VERIFY: board variants - many modules are VCC-GND order; GND-VCC-SCL-SDA
+  # chosen as canonical
+  pins: [GND, VCC, SCL, SDA]
+
+- id: sh1106_i2c
+  name: SH1106
+  desc: 1.3in OLED 128x64 I2C
+  subclass: oled
+  package: sip4
+  driver: sh1106
+  pop: 2
+  i2c: [0x3C, 0x3D]
+  pins: [GND, VCC, SCL, SDA]
+
+- id: ssd1315_i2c
+  name: SSD1315
+  desc: 0.96in OLED 128x64 I2C (1306 clone)
+  subclass: oled
+  package: sip4
+  driver: ssd1306
+  pop: 3
+  i2c: [0x3C, 0x3D]
+  pins: [GND, VCC, SCL, SDA]
+
+- id: ssd1309_i2c
+  name: SSD1309
+  desc: 1.54in OLED 128x64 I2C
+  subclass: oled
+  package: sip4
+  driver: ssd1306
+  pop: 4
+  i2c: [0x3C, 0x3D]
+  pins: [GND, VCC, SCL, SDA]
+
+- id: ssd1306_32_i2c
+  name: SSD1306 128x32
+  desc: 0.91in OLED 128x32 I2C
+  subclass: oled
+  package: sip4
+  driver: ssd1306_32
+  led: OLED32
+  menu: SSD1306|128x32
+  pop: 5
+  i2c: [0x3C, 0x3D]
+  # Kevin's bench, 2026-08-25: his 0.91in modules are GND-VCC-SCL-SDA.
+  pins: [GND, VCC, SCL, SDA]
+
+- id: 40rgbx160_spi
+  name: 40RGBX160
+  desc: 40RGBX160 bar display, SPI
+  subclass: lcd
+  package: sip8
+  driver: 40rgbx160
+  led: 40RGBX
+  menu: 40RGBX|160
+  pop: 1
+  # VERIFY: characterize on bench (C-M4) - header order is a placeholder
+  pins: [GND, VCC, SCK, MOSI, CS, DC, RST, BL]
+
+- id: st7789_spi
+  name: ST7789
+  desc: IPS TFT 240x240 SPI
+  subclass: lcd
+  package: sip7
+  driver: st7789
+  pop: 2
+  pins: [GND, VCC, SCL=SCK, SDA=MOSI, RES=RST, DC, BL]
+
+- id: hd44780
+  name: HD44780 1602
+  desc: Character LCD 16x2 parallel
+  subclass: lcd
+  package: sip16
+  driver: hd44780
+  led: HD44780
+  aliases: [1602, LCD1602]
+  pop: 3
+  pins: [VSS, VDD, V0, RS, RW, E, D0, D1, D2, D3, D4, D5, D6, D7, A, K]
+
+- id: ili9341_spi
+  name: ILI9341
+  desc: TFT 320x240 SPI
+  subclass: lcd
+  package: sip9
+  driver: ili9341
+  pop: 4
+  # VERIFY: common 2.4in breakout order VCC GND CS RESET DC SDI SCK LED SDO
+  pins: [VCC, GND, CS, RESET=RST, DC, SDI=MOSI, SCK, LED=BL, SDO=MISO]
+
+- id: jdi_ls027b7dh01
+  name: JDI LS027B7DH01
+  desc: 2.7in Sharp/JDI memory LCD 400x240 SPI
+  subclass: mip
+  package: sip10
+  driver: jdi_mip
+  led: LS027B7
+  menu: LS027B7|DH01
+  pop: 1
+  # VERIFY: 10-pin breakout order (lib/JDI_MIP_Display breakout v1.0)
+  pins: [VCC, GND, SCLK=SCK, SI=MOSI, SCS=CS, EXTCOMIN, DISP, EXTMODE, FRONTLIGHT, GND]
+
+- id: lpm009m360a
+  name: LPM009M360A
+  desc: 0.9in JDI MIP color 72x144 SPI
+  subclass: mip
+  package: sip10
+  driver: jdi_mip
+  led: LPM009M
+  menu: LPM009M|360A
+  pop: 2
+  # VERIFY: same breakout as LS027B7DH01 (FRONTLIGHT unused on this panel)
+  pins: [VCC, GND, SCLK=SCK, SI=MOSI, SCS=CS, EXTCOMIN, DISP, EXTMODE, FRONTLIGHT, GND]
+
+- id: ws2812
+  name: WS2812
+  desc: Addressable RGB LED, single-wire
+  subclass: led_addr
+  package: sip3
+  driver: ws2812
+  aliases: [SK6812, NEOPIXEL]
+  pop: 1
+  # VERIFY: strip/breakout order varies (5V/DIN/GND is also common)
+  pins: [DIN, VCC, GND]
+
+- id: sk9822
+  name: SK9822
+  desc: Addressable RGB LED, clocked (APA102)
+  subclass: led_addr
+  package: sip4
+  driver: sk9822
+  aliases: [APA102]
+  pop: 2
+  # VERIFY: strip input order varies (GND/DIN/CLK/5V assumed)
+  pins: [GND, DIN, CLK, VCC]
+
+- id: matrix_1088as
+  name: 1088AS 8x8
+  desc: 8x8 LED matrix, direct row/column drive
+  subclass: led_direct
+  package: dip16
+  led: 1088AS
+  power: none
+  pop: 1
+  # VERIFY: the famously scrambled 1088AS row/column map - confirm on datasheet
+  pins: [R5, R7, C2, C3, R8, C5, R6, R3, R1, C4, C6, R4, C1, R2, C7, C8]

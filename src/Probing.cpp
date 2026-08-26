@@ -251,6 +251,12 @@ static uint32_t         s_dblCandidateDeadline = 0;
 static const uint8_t    kDblConfirmSamples  = 28;  // pressed samples needed... (~16ms at the merged
                                                    // program's 1.74kHz; 5 = ~3ms still let a release
                                                    // scratch through - phantoms survived round 2)
+// The sample COUNT is only meaningful at the PIO cadence. On the CPU button
+// path (~4ms/sample) 28 samples cannot fit in a 60ms window at all, so
+// double-tap undo/redo was unreachable there (sweep finding). What actually
+// matters is contact TIME: confirm on either enough samples OR ~16ms of
+// accumulated same-button contact, whichever the active cadence reaches.
+static const uint32_t   kDblConfirmMinMs    = 16;
 static const uint32_t   kDblConfirmWindowMs = 60;  // ...within this window, released samples tolerated
                                                    // (25 would make the window the binding constraint
                                                    // at the higher sample count)
@@ -528,7 +534,10 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             s_dblCandidateDeadline = 0;
             dblCandExpired++;
         } else if ( newState == (int)s_dblCandidateBtn ) {
-            if ( ++s_dblConfirmCount >= kDblConfirmSamples ) {
+            if ( s_dblConfirmCount < 255 ) s_dblConfirmCount++;
+            bool longEnough =
+                ( (uint32_t)now - ( s_dblCandidateDeadline - kDblConfirmWindowMs ) ) >= kDblConfirmMinMs;
+            if ( s_dblConfirmCount >= kDblConfirmSamples || longEnough ) {
                 int btn = (int)s_dblCandidateBtn;
                 s_dblCandidateBtn = 0;
                 s_dblConfirmCount = 0;
@@ -3724,14 +3733,13 @@ void Probing::probeTick( ProbeSession& s ) {
 
                 } else if ( s.setOrClear == 0 ) {
 
-                    char node1Name[ 12 ];
-
-                    char node2Name[ 12 ];
-                    strcpy( node2Name, "   " );
-                    char bothNames[ 25 ];
-                    strcpy( bothNames, node1Name );
-                    strcat( bothNames, " - " );
-                    strcat( bothNames, node2Name );
+                    // 24 covers the longest short name + " cleared" + NUL
+                    // ("NANO_3V3 cleared" = 17) - the old [12] was a stack
+                    // smash on every named-node clear, and the bothNames
+                    // block read it uninitialized (sweep findings).
+                    char node1Name[ 24 ];
+                    snprintf( node1Name, sizeof( node1Name ), "%s",
+                              definesToChar( nodesToConnect[ 0 ] ) );
 
                     // int numChars = strlen(node1Name);
                     // for (int i = 0; i < SPACE_FROM_LEFT - numChars; i++) {
@@ -3820,7 +3828,8 @@ void Probing::probeTick( ProbeSession& s ) {
                         Serial.println( );
                         Serial.flush( );
 
-                        sprintf( node1Name, "%s cleared", definesToChar( nodesToConnect[ 0 ] ) );
+                        snprintf( node1Name, sizeof( node1Name ), "%s cleared",
+                                  definesToChar( nodesToConnect[ 0 ] ) );
 
                         oled.clearPrintShow( node1Name, 2, true, true, true );
 
@@ -5468,7 +5477,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         //}
 
         if ( outIn == 2 ) {
-            chooseGPIOinputOutput( gpioChosen );
+            chooseGPIOinputOutput( gpioChosen + 1 );
         } else if ( outIn == 1 ) {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {

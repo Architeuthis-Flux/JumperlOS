@@ -24,6 +24,7 @@
 
 #include "Jerial.h"
 #include "NetVoltageScan.h"
+#include "RouteSafety.h"   // routingGeneration - the ant-hold reset signal
 #include "hardware/gpio.h"
 #include "hardware/structs/io_bank0.h"
 #ifdef DONOTUSE_SERIALWRAPPER
@@ -1945,12 +1946,28 @@ if (isBrightenedNode) {
 static constexpr float kNetAntsMinCurrent_mA = 0.25f;
 static constexpr uint8_t kNetAntsAlphaMin = 45;  // barely-there at threshold
 static constexpr float kNetAntsAlphaScale = 26.0f; // ~8mA saturates to 255
+// Consecutive scanner compute ticks (~20Hz) that must agree before a path's
+// ants turn on OR off. Counted on compute ticks, not LED frames: the render
+// loop sees each 50ms compute pass many times, so frame-counting would let
+// one noisy pass through. 3 ticks ~= 150ms - debounce, not sluggishness.
+static constexpr int kNetAntsVoteFrames = 3;
 
 #if !defined(OG_JUMPERLESS)
 
 // This is a cosmetic background job in the tight core 2 loop: hard cap on
 // time spent per call, checked between paths.
-static constexpr unsigned long kNetAntsBudgetUs = 250;
+//
+// SIZING (flashy-ants session, the fast-then-slow chop): a path's pixel
+// pass costs ~20-50us, so ~9 simultaneously animated paths (a real bench
+// board at high current) overran the old 250us cap most frames - and an
+// overrun frame simply DOESN'T DRAW the remaining paths, which then lurch
+// ahead when their turn rotates back in. Perceived as ants surging fast
+// then slow, per path, unsynchronized. 1200us covers ~2x the realistic
+// worst case; the rotation below stays as the safety valve for
+// pathological path counts only. antBudgetOverrunTotal counts real
+// overruns (printed in the [ants] flips line) so the sizing stays honest.
+static constexpr unsigned long kNetAntsBudgetUs = 1200;
+static volatile uint32_t antBudgetOverrunTotal = 0;
 
 // Geometry of one path's drawn wire as an ordered pixel sequence in
 // post-reversal wireStatus space (position 0 = the outer tip of the
@@ -2045,6 +2062,15 @@ static void antPathPixel(const AntPathGeom &g, int pos, int *row, int *col) {
   *col = (r <= 30) ? v : 4 - v;
 }
 
+// Ant on/off flip tally - the sparkle users report IS this counter moving
+// on a path that carries no current. Incremented on core 2 whenever a
+// path's ants turn on or off; printed (and reset) with the 'i!' scan stats
+// on core 0, so each print reads as flips-since-last-print. Torn reads are
+// cosmetic, same contract as the rest of the stats print.
+static uint32_t antFlipCount[MAX_BRIDGES] = {0};
+static volatile uint32_t antFlipTotal = 0;
+static uint32_t antFlipResetMs = 0;
+
 #endif // !OG_JUMPERLESS
 
 void renderNetCurrentAnts() {
@@ -2071,25 +2097,62 @@ void renderNetCurrentAnts() {
   static int offsets[MAX_BRIDGES] = {0};
   static unsigned long lastUpdateMs = 0;
   static int resumeSlot = 0; // round-robin start after a budget overrun
-  // Scan hiccups (a missed tap ages a node past its freshness window) make
-  // pathCurrentKnown() flicker false for a moment; without a hold the ants
-  // visibly blink out. Keep animating on the last reading briefly.
-  // ponytail: after a netlist change path indices shift, so a held value
-  // can animate a rebuilt path with the old path's current for <=1.5s -
-  // cosmetic, and the scanner invalidates on its own fingerprint change.
-  static constexpr uint32_t kNetAntsHoldMs = 1500;
+  // Runtime persistence (Kevin, flashy-ants session; bounds re-cut after
+  // the bug sweep): a stale tap window is NOT evidence of zero current,
+  // so a path keeps its last known current until fresh data replaces it -
+  // inside two honesty rails the sweep proved necessary:
+  //  - kNetAntsHoldMaxMs: a PULLED component changes no bridges (no
+  //    routingGeneration bump) and its floating rows drift-fail every
+  //    tap forever - an unbounded hold animated phantom current on a
+  //    dead wire indefinitely. 5s covers every real stale window
+  //    (contention, drift retries) while bounding the phantom.
+  //  - post-rebuild capture suppression: routingGeneration bumps BEFORE
+  //    the scanner can invalidate pathCurrentValid (the scan runs after
+  //    the LED frame and its user-input gate blinds it ~100ms+), so the
+  //    frames right after a rewire would re-latch the OLD path's current
+  //    onto the REBUILT path index. Suppressing capture+hold for 400ms
+  //    lets the fingerprint invalidation land; ants return with fresh
+  //    data and a full turn-on vote (wasAnimated/antVote cleared too).
+  static constexpr uint32_t kNetAntsHoldMaxMs = 5000;
   static float holdSigned[MAX_BRIDGES] = {0.0f};
   static uint32_t holdMs[MAX_BRIDGES] = {0};
+  static uint32_t holdRoutingGen = 0;
+  static uint32_t holdSuppressUntilMs = 0;
   // Threshold hysteresis: a path hovering right at the minimum current
   // would otherwise blink its ants on/off as the (smoothed) reading
   // crosses back and forth. Once animating, keep going until the current
   // drops well below the entry threshold.
   static bool wasAnimated[MAX_BRIDGES] = {false};
+  // On top of the hysteresis, an N-of-M vote: a state flip needs
+  // kNetAntsVoteFrames consecutive scanner compute ticks agreeing, so a
+  // single noisy sample can never blink the ants. Votes advance only when
+  // the scanner has actually recomputed since our last frame.
+  static int8_t antVote[MAX_BRIDGES] = {0};
+  static uint32_t lastVoteGeneration = 0;
+  uint32_t voteGeneration = netScanComputeGeneration();
+  bool voteTick = (voteGeneration != lastVoteGeneration);
+  lastVoteGeneration = voteGeneration;
 
   unsigned long nowMs = millis();
+  if (holdRoutingGen != routingGeneration) {
+    holdRoutingGen = routingGeneration;
+    holdSuppressUntilMs = (uint32_t)nowMs + 400;
+    for (int i = 0; i < MAX_BRIDGES; i++) {
+      holdMs[i] = 0;
+      wasAnimated[i] = false;
+      antVote[i] = 0;
+    }
+  }
+  bool holdSuppressed = (int32_t)((uint32_t)nowMs - holdSuppressUntilMs) < 0;
   float deltaSeconds =
       (lastUpdateMs == 0) ? 0.0f : (nowMs - lastUpdateMs) / 1000.0f;
   lastUpdateMs = nowMs;
+  // A stalled frame (flash save, OLED write, tap burst) must not teleport
+  // the ants: cap the phase advance at 100ms worth. Losing a little time
+  // reads as a hiccup; a multi-step jump reads as a speed surge.
+  if (deltaSeconds > 0.1f) {
+    deltaSeconds = 0.1f;
+  }
 
   // Collect the paths that get ants this frame and advance their phases
   // (cheap arithmetic; the pixel pass below is the budgeted part).
@@ -2117,23 +2180,39 @@ void renderNetCurrentAnts() {
       continue;
     }
     float signedI;
+    if (holdSuppressed) {
+      continue; // post-rebuild: the scanner hasn't invalidated yet - do not
+                // re-latch the old fabric's currents onto rebuilt indices
+    }
     if (pathCurrentKnown(i)) {
       signedI = pathCurrentSigned_mA(i);
       holdSigned[i] = signedI;
       holdMs[i] = nowMs;
-    } else if (holdMs[i] != 0 && nowMs - holdMs[i] < kNetAntsHoldMs) {
-      signedI = holdSigned[i]; // scan hiccup - ride it out on the last value
+    } else if (holdMs[i] != 0 && (uint32_t)nowMs - holdMs[i] < kNetAntsHoldMaxMs) {
+      signedI = holdSigned[i]; // stale window - persist the last known value
     } else {
+      holdMs[i] = 0; // hold expired (floating leg never taps fresh again)
       continue;
     }
     float mag = fabsf(signedI);
     float enterThreshold =
         wasAnimated[i] ? kNetAntsMinCurrent_mA * 0.6f : kNetAntsMinCurrent_mA;
-    if (mag < enterThreshold) {
-      wasAnimated[i] = false;
+    bool wantOn = (mag >= enterThreshold);
+    if (voteTick) {
+      if (wantOn != wasAnimated[i]) {
+        if (++antVote[i] >= kNetAntsVoteFrames) {
+          wasAnimated[i] = wantOn;
+          antVote[i] = 0;
+          antFlipCount[i]++;
+          antFlipTotal = antFlipTotal + 1;
+        }
+      } else {
+        antVote[i] = 0; // agreement breaks the dissent streak
+      }
+    }
+    if (!wasAnimated[i]) {
       continue;
     }
-    wasAnimated[i] = true;
 
     // Advance this path's ant phase; speed follows current magnitude.
     float stepsPerSecond =
@@ -2191,6 +2270,7 @@ void renderNetCurrentAnts() {
       // ponytail: the resume rotation temporarily bypasses strongest-first
       // claiming; only matters in sustained-overrun frames the budget
       // makes rare.
+      antBudgetOverrunTotal = antBudgetOverrunTotal + 1;
       resumeSlot = (resumeSlot + s) % count;
       return;
     }
@@ -2353,6 +2433,32 @@ void printAntPathContinuity(Stream *out) {
     }
     out->println();
   }
+#endif // OG_JUMPERLESS
+}
+
+// The flip tally above, as flips-since-last-print (printing resets it), so
+// two 'i!' captures a minute apart read directly as flips/min. Zero on a
+// steady board; a moving total on a zero-current path is the sparkle.
+void printAntFlipStats(Stream *out) {
+#if defined(OG_JUMPERLESS)
+  out->println("[ants] net current ants are V5-only");
+#else
+  uint32_t now = millis();
+  float seconds = (antFlipResetMs == 0) ? 0.0f : (now - antFlipResetMs) / 1000.0f;
+  out->printf("[ants] flips:%lu overruns:%lu in %.1fs",
+              (unsigned long)antFlipTotal,
+              (unsigned long)antBudgetOverrunTotal, seconds);
+  int pathLimit = (numberOfPaths < MAX_BRIDGES) ? numberOfPaths : MAX_BRIDGES;
+  for (int i = 0; i < pathLimit; i++) {
+    if (antFlipCount[i] != 0) {
+      out->printf("  path%d:%lu", i, (unsigned long)antFlipCount[i]);
+    }
+  }
+  out->println();
+  memset(antFlipCount, 0, sizeof(antFlipCount));
+  antFlipTotal = 0;
+  antBudgetOverrunTotal = 0;
+  antFlipResetMs = now;
 #endif // OG_JUMPERLESS
 }
 
@@ -4658,13 +4764,27 @@ done:
 
 int attractMode(void) {
 
+  // Entering the wheel cycle from a FILE context starts at the ends of the
+  // 0-7 ring rather than trying to ++/-- a sentinel. The file context is LEFT
+  // by wheel-cycling - its content was already auto-saved to its own file, and
+  // loadfile:'s dirty pre-save flushes anything newer. The ways back IN are
+  // the Files browser, the Guides launcher, and boot; there is deliberately
+  // no phantom "file" position in the ring this wave.
+  //
+  // NOTE: netSlot = -1 and netSlot = NUM_SLOTS below stay reserved defcon
+  // sentinels. -2 must never collide with them, which is exactly what the
+  // explicit SLOT_FILE_CONTEXT check (instead of a `< 0` test) guarantees.
   if (encoderDirectionState == DOWN) {
     // attractMode = 0;
     defconDisplay = -1;
-    netSlot++;
-    if (netSlot >= NUM_SLOTS) {
-      netSlot = -1;
-      defconDisplay = 0;
+    if (netSlot == SLOT_FILE_CONTEXT) {
+      netSlot = 0;
+    } else {
+      netSlot++;
+      if (netSlot >= NUM_SLOTS) {
+        netSlot = -1;
+        defconDisplay = 0;
+      }
     }
     // Jerial.print("netSlot = ");
     // Jerial.println(netSlot);
@@ -4676,10 +4796,14 @@ int attractMode(void) {
   } else if (encoderDirectionState == UP) {
     // attractMode = 0;
     defconDisplay = -1;
-    netSlot--;
-    if (netSlot <= -1) {
-      netSlot = NUM_SLOTS;
-      defconDisplay = 0;
+    if (netSlot == SLOT_FILE_CONTEXT) {
+      netSlot = NUM_SLOTS - 1;
+    } else {
+      netSlot--;
+      if (netSlot <= -1) {
+        netSlot = NUM_SLOTS;
+        defconDisplay = 0;
+      }
     }
     // Jerial.print("netSlot = ");
     // Jerial.println(netSlot);

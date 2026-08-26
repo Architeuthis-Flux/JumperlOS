@@ -38,6 +38,9 @@
 #include "IrqSlots.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "ProjectsApp.h" // z: guided-project runner (headless/HIL entry)
+#include "GuideScript.h" // z band: parsePartValue / guideResistorBand report
+#include "StepViewer.h"  // z steps: the viewer's serial twin
 #include "WaveGen.h"    // X: the wavegen stream line (T3.3)
 #include "AdcRing.h"    // X: the ADC ring line (T2.1)
 #include "Python_Proper.h"
@@ -110,7 +113,16 @@ bool SingleCharCommands::registerCommand( const Command& cmd ) {
     // Check if command already exists
     int existingIndex = findCommandIndex( cmd.trigger );
     if ( existingIndex >= 0 ) {
-        // Update existing command
+        // Silent overwrite shipped two shadowed commands ('^' and '_'): the
+        // menu advertised one thing and the key did another (sweep finding).
+        // Say so at boot so the next collision cannot hide.
+        Serial.print( "[cmd] trigger '" );
+        Serial.print( cmd.trigger );
+        Serial.print( "' re-registered: \"" );
+        Serial.print( commands[ existingIndex ].shortDesc );
+        Serial.print( "\" -> \"" );
+        Serial.print( cmd.shortDesc );
+        Serial.println( "\"" );
         commands[ existingIndex ] = cmd;
         return true;
     }
@@ -527,8 +539,10 @@ void SingleCharCommands::initializeCommands( ) {
                      "Read voltage from ADC. Usage: v[0-4] or vi for current.",
                      cmd_readADC, MENU_STANDARD, CAT_HARDWARE );
 
-    registerCommand( '^', "set DAC voltage",
-                     "Set DAC output voltage. Usage: ^ followed by voltage.",
+    // ':' not '^' - '^' is undo (the later registration silently won, so this
+    // command was unreachable while the menu still advertised it).
+    registerCommand( ':', "set DAC voltage",
+                     "Set DAC output voltage. Usage: : followed by voltage.",
                      cmd_setDAC, MENU_DEBUG, CAT_HARDWARE, true, SER3_INTERACTIVE );
 
     registerCommand( 'M', "toggle USB audio mic (M01/Ms/M?)",
@@ -569,7 +583,8 @@ void SingleCharCommands::initializeCommands( ) {
                      "Reapply the last change that was undone.",
                      cmd_redo, MENU_STANDARD, CAT_DEBUG, true, SER3_MODIFIES_STATE );
 
-    registerCommand( '_', "history status",
+    // ',' not '_' - '_' is the micros-per-byte dump (same shadowing bug).
+    registerCommand( ',', "history status",
                      "Print the undo log status (size, position, recent labels).",
                      cmd_historyStatus, MENU_DEBUG, CAT_DEBUG );
 
@@ -733,6 +748,41 @@ void SingleCharCommands::initializeCommands( ) {
     registerCommand( 'j', "Test overlay",
                      "Test overlay.",
                      cmd_testOverlay, MENU_DEBUG, CAT_ADVANCED, true, SER3_IRRELEVANT );
+
+    registerCommand( 'z', "run project (z <project>[ new|load])",
+                     "Run a project headless - guided or not - the HIL / scripted entry.\n"
+#if JL_PROJECT_RUN_HISTORY
+                     "Usage: z <project>[ new|load|run=<N>][ noscript]\n"
+                     "<project> = a directory name (555) or a wiring path\n"
+                     "  (/projects/555/wiring.alt.yaml - picks that variant for a new run).\n"
+                     "No mode arg = load the latest run when one exists, else start new.\n"
+                     "  new      force a fresh /projects/<dir>/<dir>_<N+1>.yaml\n"
+                     "  load     force the latest run file (errors when there is none)\n"
+                     "  run=<N>  open that specific run file\n"
+                     "  noscript skip the companion script\n"
+#else
+                     "Usage: z <project>[ new|load][ noscript]\n"
+                     "<project> = a directory name (555) or a wiring path\n"
+                     "  (/projects/555/wiring.alt.yaml - picks that variant for a new run).\n"
+                     "This build keeps ONE run file per project, /projects/<dir>/<dir>_run.yaml.\n"
+                     "No mode arg = reuse it when it exists, else create it. No prompts.\n"
+                     "  new      rewrite <dir>_run.yaml from the wiring (OVERWRITES it)\n"
+                     "  load     force the existing run file (errors when there is none)\n"
+                     "  noscript skip the companion script\n"
+                     "  run=<N>  refused - JL_PROJECT_RUN_HISTORY grammar\n"
+                     "To KEEP a run, `slots` > `save to` while it is the active context.\n"
+#endif
+                     "The run file becomes the ACTIVE CONTEXT and stays it - the open is\n"
+                     "AMBIENT: parts get labeled, the file's power applies at load, the\n"
+                     "step viewer arms (wheel browses steps), and control returns to idle.\n"
+                     "z runs the companion script (watch SCRIPT offer= then action=);\n"
+                     "the menu launcher only announces it (SCRIPT available=).\n"
+                     "  z steps [next|prev|<n>|on|off]  browse/arm/disarm the step viewer\n"
+                     "  z check <part> | z check step <k>  run the part's electrical check\n"
+                     "Diagnostics (no hardware touched):\n"
+                     "  z band <value> [type] [tol]  parsed value + derived continuity band\n"
+                     "  z shunt [n]                  n fresh INA0 shunt-register samples",
+                     cmd_guidedProject, MENU_DEBUG, CAT_APPS, true, SER3_INTERACTIVE );
 }
 
 
@@ -762,6 +812,317 @@ CommandResult cmd_showSwitchPosition( char c, const String& line ) {
 
 CommandResult cmd_testOverlay( char c, const String& line ) {
     graphicOverlayState.debugMenu();
+    return CMD_DONT_SHOW_MENU;
+}
+
+// z <project>[ new|load|run=<N>][ noscript]: the project runner's headless
+// entry (design-launcher §5.1). Destination slots are GONE - a launch opens or
+// creates the project's run file and leaves it as the active context, so there
+// is nothing left for a slot argument to mean. Which file: /projects/<dir>/
+// <dir>_run.yaml by default (ONE per project, reused), or <dir>_<N>.yaml under
+// JL_PROJECT_RUN_HISTORY - which is also the only build where `run=<N>` means
+// anything, so the other one refuses it by name.
+//
+// <project> is a project directory name ("555") or a wiring path
+// ("/projects/555/wiring.alt.yaml", which selects that variant for a NEW run).
+// No mode arg = load latest when runs exist, else new: the launcher's own
+// defaults but WITHOUT the interactive prompt, because headless has to be
+// deterministic.
+//
+// LOUD-FAIL on the old grammar. A stale `z <path> 3` must break visibly, not
+// silently into a slot write, so a bare all-digit token ANYWHERE after the
+// project is a usage error. Note the token-wise parse: `z 555` is a perfectly
+// good all-digit PROJECT name and must keep working - only a digit token that
+// FOLLOWS the project is the old destination slot.
+static bool zTokenIsRunEquals( const String& tok, int& nOut ) {
+    if ( !tok.startsWith( "run=" ) ) return false;
+    String num = tok.substring( 4 );
+    if ( num.length( ) == 0 || num.length( ) > 4 ) return false;
+    for ( unsigned int i = 0; i < num.length( ); i++ ) {
+        if ( num.charAt( i ) < '0' || num.charAt( i ) > '9' ) return false;
+    }
+    nOut = num.toInt( );
+    return nOut >= 1;
+}
+
+CommandResult cmd_guidedProject( char c, const String& line ) {
+    static const char* USAGE =
+#if JL_PROJECT_RUN_HISTORY
+        "Usage: z <project>[ new|load|run=<N>][ noscript]  "
+        "(destination slots are gone - runs live in the project folder)";
+#else
+        "Usage: z <project>[ new|load][ noscript]  "
+        "(destination slots are gone - the run lives in the project folder as "
+        "<dir>_run.yaml)";
+#endif
+
+    String args = ( line.length( ) > 1 ) ? line.substring( 1 ) : String( "" );
+    args.trim( );
+    if ( args.length( ) == 0 ) {
+        Jerial.println( USAGE );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z steps ...` - the step viewer's serial twin (every gesture has one).
+    // Exact token for the same shadowing reason as `band` below.
+    if ( args == "steps" || args.startsWith( "steps " ) ) {
+        stepViewer.command( args.substring( 5 ) );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z check <part>` / `z check step <k>` - the on-demand electrical check
+    // (Guides-Simplification A-M6). GuideChecks' polled engine, pumped right
+    // here: a command that blocks for its own bounded duration is a command,
+    // not a mode. Never auto-run; teardown guaranteed (abort on timeout).
+    if ( args == "check" || args.startsWith( "check " ) ) {
+        String rest = args.substring( 5 );
+        rest.trim( );
+        if ( rest.length( ) == 0 ) {
+            Jerial.println( "Usage: z check <partName>  |  z check step <k>" );
+            return CMD_DONT_SHOW_MENU;
+        }
+
+        // One synthesized step for the bare-part form; the step form reads
+        // the viewer's table (and its script's power: for rail_sane).
+        static GuideScript bareScript;   // zeroed each use; hasPower=false
+        GuideStep oneStep;
+        const GuideStep* step = nullptr;
+        const GuideScript* script = nullptr;
+        String label;
+
+        if ( rest.startsWith( "step " ) || rest == "step" ) {
+            const GuideScript* sc = stepViewer.armedScript( );
+            if ( sc == nullptr ) {
+                Jerial.println( "CHECK error viewer not armed (open a project first)" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            int k = ( rest.length( ) > 4 ) ? rest.substring( 4 ).toInt( ) : 0;
+            if ( k < 1 ) k = stepViewer.cursorIndex( ) + 1;
+            if ( k < 1 || k > sc->numSteps ) {
+                Jerial.println( "CHECK error step out of range (1-" +
+                                String( sc->numSteps ) + ")" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            step = &sc->steps[k - 1];
+            script = sc;
+            label = "step_" + String( k );
+        } else {
+            int partIdx = globalState.parts.findByName( rest.c_str( ) );
+            if ( partIdx < 0 ) {
+                Jerial.println( "CHECK error unknown part '" + rest + "'" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            const PartDefinition& p = globalState.parts.parts[partIdx];
+            memset( &oneStep, 0, sizeof( oneStep ) );
+            oneStep.type = GuideStepType::PLACE;
+            oneStep.partIdx = (int8_t)partIdx;
+            oneStep.n1 = oneStep.n2 = oneStep.target = -1;
+            oneStep.timeoutMs = 1500;
+            oneStep.onFail = GuideOnFail::WARN;
+            oneStep.check = guideDefaultCheckForPart( p );
+            if ( oneStep.check == GuideCheck::NONE ) {
+                Jerial.println( "CHECK part=" + String( p.name ) +
+                                " result=unsupported val=nocheck detail=\"no "
+                                "default check for type '" + String( p.typeStr ) + "'\"" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            memset( &bareScript, 0, sizeof( bareScript ) );
+            step = &oneStep;
+            script = &bareScript;
+            label = String( p.name );
+        }
+
+        bool railsLive =
+            ( railHwVolts[0] > -99.0f && fabsf( railHwVolts[0] ) > 0.25f ) ||
+            ( railHwVolts[1] > -99.0f && fabsf( railHwVolts[1] ) > 0.25f );
+        GuideCheckRun run = { step, script, railsLive };
+
+        Jerial.println( "\r\nCHECK start=" + label + " check=" +
+                        String( guideCheckName( step->check ) ) );
+        Jerial.flush( );
+
+        guideCheckBegin( run );
+        char val[24] = "";
+        int outcome = GUIDE_CHECK_RUNNING;
+        // Ceiling: the step's own budget plus a generous engine margin
+        // (I2C_ACK's scan alone runs 1-3 s).
+        unsigned long deadline = millis( ) + step->timeoutMs + 8000;
+        while ( ( outcome = guideCheckPoll( val, sizeof( val ) ) ) ==
+                GUIDE_CHECK_RUNNING ) {
+            jOS.serviceInner( );
+            if ( (long)( millis( ) - deadline ) > 0 ) {
+                guideCheckAbort( );
+                Jerial.println( "CHECK part=" + label +
+                                " result=timeout val=timeout" );
+                return CMD_DONT_SHOW_MENU;
+            }
+            delayMicroseconds( 200 );
+        }
+
+        const char* resultName = ( outcome == GUIDE_CHECK_PASS )      ? "pass"
+                                 : ( outcome == GUIDE_CHECK_FAIL )    ? "fail"
+                                 : ( outcome == GUIDE_CHECK_SKIPPED ) ? "skipped"
+                                                                      : "unsupported";
+        String lineOut = "CHECK part=" + label + " result=" + resultName +
+                         " val=" + String( val[0] ? val : "-" );
+        const char* detail = guideCheckDetail( );
+        if ( detail != nullptr && detail[0] != '\0' )
+            lineOut += " detail=\"" + String( detail ) + "\"";
+        const char* hint = guideCheckHint( );
+        if ( hint != nullptr && hint[0] != '\0' )
+            lineOut += " hint=\"" + String( hint ) + "\"";
+        Jerial.println( lineOut );
+        Jerial.flush( );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z band <value> [type] [tol]` - the value parser and continuity band
+    // derivation, off-bench (invest-measurement.md §5 item 1). It runs no
+    // guide and touches no hardware: pure functions in, one machine-parseable
+    // GUIDEBAND line out, so the band table can be regression-tested without
+    // a part in a hole. Lives on `z` rather than a new single char because
+    // this harness is single-char-plus-args and the band IS guide machinery.
+    // Exact token, not a prefix: `args.startsWith("band")` would shadow any
+    // project whose directory name begins with it, and the launcher must stay
+    // able to open every project on the board.
+    if ( args == "band" || args.startsWith( "band " ) ) {
+        String rest = args.substring( 4 );
+        rest.trim( );
+        Stream* target = Jerial.getResponseTarget( );
+        if ( target == nullptr ) target = &Jerial;
+        if ( rest.length( ) == 0 ) {
+            target->println( "Usage: z band <value> [type] [tolPercent]   "
+                             "e.g. 'z band 47k resistor'" );
+            return CMD_DONT_SHOW_MENU;
+        }
+        String v, t, tolTok;
+        int p = 0;
+        for ( int f = 0; f < 3 && p < (int)rest.length( ); f++ ) {
+            int sp = rest.indexOf( ' ', p );
+            String tok = ( sp < 0 ) ? rest.substring( p ) : rest.substring( p, sp );
+            p = ( sp < 0 ) ? rest.length( ) : sp + 1;
+            tok.trim( );
+            if ( tok.length( ) == 0 ) { f--; continue; }
+            if ( f == 0 ) v = tok;
+            else if ( f == 1 ) t = tok;
+            else tolTok = tok;
+        }
+        if ( t.length( ) == 0 ) t = "resistor";
+        guideBandReport( v.c_str( ), t.c_str( ),
+                         ( tolTok.length( ) > 0 ) ? (int)tolTok.toInt( ) : 0, target );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // `z shunt [n]` - n fresh samples of INA0's shunt-voltage register, the
+    // register the continuity measurement now rides on. Prints the spread in
+    // LSBs (10 uV each, 5 uA across R1), which is the honest answer to "can
+    // this thing see 70 uA" - the question the old current register got
+    // wrong. Read-only: it watches the Peripherals poll's field, it does not
+    // touch the chip.
+    if ( args == "shunt" || args.startsWith( "shunt " ) ) {   // exact token, see above
+        Stream* target = Jerial.getResponseTarget( );
+        if ( target == nullptr ) target = &Jerial;
+        String rest = args.substring( 5 );
+        rest.trim( );
+        int want = ( rest.length( ) > 0 ) ? (int)rest.toInt( ) : 32;
+        if ( want < 2 ) want = 2;
+        if ( want > 64 ) want = 64;
+        float lo = 1e9f, hi = -1e9f, sum = 0;
+        int got = 0;
+        unsigned long lastStamp = currentSenseState.lastUpdatedMs;
+        unsigned long deadline = millis( ) + (unsigned long)want * 120u + 1000u;
+        // Bail fast when the INA has nothing to say (ISENSE not routed), so
+        // the caller gets an answer instead of the full sampling deadline.
+        unsigned long graceUntil = millis( ) + 400;
+        while ( got < want && (long)( millis( ) - deadline ) < 0 ) {
+            jOS.serviceInner( );
+            if ( !currentSenseState.active ) {
+                if ( got == 0 && (long)( millis( ) - graceUntil ) > 0 ) break;
+                continue;
+            }
+            if ( currentSenseState.lastUpdatedMs == lastStamp ) continue;
+            lastStamp = currentSenseState.lastUpdatedMs;
+            float mv = currentSenseState.shuntVoltage_mV;
+            if ( mv < lo ) lo = mv;
+            if ( mv > hi ) hi = mv;
+            sum += mv;
+            got++;
+        }
+        if ( got == 0 ) {
+            target->println( "SHUNT n=0 active=0 (ISENSE_PLUS/MINUS not both routed)" );
+            return CMD_DONT_SHOW_MENU;
+        }
+        // 10 uV per LSB is a hardware constant of the INA219 shunt register.
+        target->printf( "SHUNT n=%d mean_mV=%.4f min_mV=%.4f max_mV=%.4f "
+                        "spread_lsb=%.1f mean_mA=%.4f\n\r",
+                        got, (double)( sum / got ), (double)lo, (double)hi,
+                        (double)( ( hi - lo ) / 0.010f ), (double)( sum / got / 2.0f ) );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    String project;
+    ProjectRunMode mode = ProjectRunMode::DEFAULT;
+    int runN = 0;
+    bool noScript = false;
+    bool modeSeen = false;
+
+    int pos = 0;
+    while ( pos < (int)args.length( ) ) {
+        int sp = args.indexOf( ' ', pos );
+        String tok = ( sp < 0 ) ? args.substring( pos ) : args.substring( pos, sp );
+        pos = ( sp < 0 ) ? args.length( ) : sp + 1;
+        tok.trim( );
+        if ( tok.length( ) == 0 ) continue;
+
+        if ( project.length( ) == 0 ) {
+            project = tok;
+            continue;
+        }
+
+        int n = 0;
+        if ( tok == "noscript" ) {
+            noScript = true;
+        } else if ( tok == "new" || tok == "load" || zTokenIsRunEquals( tok, n ) ) {
+            if ( modeSeen ) {
+                Jerial.println( USAGE );
+                return CMD_DONT_SHOW_MENU;
+            }
+            modeSeen = true;
+            if ( tok == "new" ) {
+                mode = ProjectRunMode::NEW;
+            } else if ( tok == "load" ) {
+                mode = ProjectRunMode::LOAD;
+            } else {
+                mode = ProjectRunMode::RUN_N;
+                runN = n;
+            }
+        } else {
+            // Includes the old grammar's bare destination slot.
+            Jerial.println( USAGE );
+            return CMD_DONT_SHOW_MENU;
+        }
+    }
+
+    if ( project.length( ) == 0 ) {
+        Jerial.println( USAGE );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    // Contradictory input: a wiring PATH names a variant, but load/run=<N>
+    // opens an existing run file whose own runSource decides the variant. The
+    // argument would be silently ignored, so refuse instead.
+    if ( project.indexOf( '/' ) >= 0 &&
+         ( mode == ProjectRunMode::LOAD || mode == ProjectRunMode::RUN_N ) ) {
+        Jerial.println( USAGE );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    if ( project.indexOf( '/' ) >= 0 && !safeFileExists( project.c_str( ) ) ) {
+        Jerial.println( "PROJECT error file not found: " + project );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    runProjectHeadless( project, mode, runN, noScript );
     return CMD_DONT_SHOW_MENU;
 }
 
@@ -885,7 +1246,9 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
     delay( 6 );
     refreshPaths( );
     clearAllNTCC( );
-    clearNodeFile( netSlot, 0 );
+    // Clear the ACTIVE context, whatever backs it. Passing netSlot here would
+    // hand -2 to saveSlot from a file context.
+    clearActiveContext( );
     refreshConnections( -1, 1, 1 );
     digitalWrite( RESETPIN, LOW );
     target->println( "Cleared all connections" );
@@ -935,7 +1298,10 @@ CommandResult cmd_loadNodeFile( char c, const String& line ) {
 
     // savePreformattedNodeFile handles parsing to RAM, marking dirty, and refresh
     // No need to call refreshConnections again - that would do the work twice!
-    savePreformattedNodeFile( serSource, netSlot, rotaryEncoderMode, line );
+    // -1, not netSlot: FileParsing's "no Slot N prefix" branch resolves -1 to
+    // the ACTIVE context and persists it path-aware. Forwarding netSlot would
+    // hand -2 down from a file context.
+    savePreformattedNodeFile( serSource, -1, rotaryEncoderMode, line );
 
     // Validation happens inside savePreformattedNodeFile via refreshLocalConnections
     // which calls the same validation logic. Don't duplicate the work here.
@@ -997,6 +1363,11 @@ CommandResult cmd_cycleSlots( char c, const String& line ) {
             return CMD_DONT_SHOW_MENU;
         }
         netSlot = requestedSlot;
+    } else if ( netSlot == SLOT_FILE_CONTEXT ) {
+        // Bare '<' from a file context goes to slot 0 rather than trying to
+        // "increment" a sentinel. Leaving the file context is fine: the dirty
+        // pre-save in loadfile: flushes it to its own file first.
+        netSlot = 0;
     } else if ( netSlot == 7 ) {
         netSlot = 0;
     } else {
@@ -1287,7 +1658,16 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
         bool isActiveSlot = ( currentActiveSlot == slotNum );
 
         if ( isActiveSlot ) {
-            // ========== ACTIVE SLOT: Parse directly and apply to hardware ==========
+            // ========== ACTIVE CONTEXT: Parse directly and apply to hardware ==========
+            // Covers a numbered slot AND a file context: slotNum defaulted to
+            // getActiveSlot() above, so from a file context both sides of the
+            // isActiveSlot test are SLOT_FILE_CONTEXT and we land here. The
+            // only difference is that persistence and the reapply-reload go
+            // through the path instead of the number.
+            const bool intoFile = ( slotNum == SLOT_FILE_CONTEXT );
+            const String ctxPath = String( mgr.getActiveSlotPath( ) );
+            const String ctxLabel = intoFile ? ctxPath : ( "slot " + String( slotNum ) );
+
             // Only clear connections, not power settings to prevent LED flicker
             // When we avoid clearing power, the LEDs won't blink to 0V between updates
             mgr.getActiveState( ).connections.clear( );
@@ -1296,11 +1676,13 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
 
             // Parse directly into active state
             if ( parseWokwiDiagram( jsonContent, mgr.getActiveState( ), slotNum, errorMsg, fromApp ) ) {
-                if ( mgr.saveSlot( slotNum, errorMsg ) ) {
+                bool saved = intoFile ? mgr.saveActiveSlot( errorMsg )
+                                      : mgr.saveSlot( slotNum, errorMsg );
+                if ( saved ) {
                     if ( !fromApp ) {
-                        Jerial.println( "  ✓ Saved and applied to slot " + String( slotNum ) );
+                        Jerial.println( "  ✓ Saved and applied to " + ctxLabel );
                     } else if ( debugFP ) {
-                        Jerial.println( "  ✓ Saved and applied to slot " + String( slotNum ) + " (app mode)" );
+                        Jerial.println( "  ✓ Saved and applied to " + ctxLabel + " (app mode)" );
                     }
                     success = true;
 
@@ -1308,7 +1690,9 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                     if ( !fromApp || debugFP ) {
                         Jerial.println( "  ↻ Applying to hardware..." );
                     }
-                    if ( mgr.loadSlot( slotNum, errorMsg ) ) {
+                    bool applied = intoFile ? mgr.loadSlotFromPath( ctxPath, errorMsg )
+                                            : mgr.loadSlot( slotNum, errorMsg );
+                    if ( applied ) {
                         if ( !fromApp || debugFP ) {
                             Jerial.println( "  ✓ Applied to hardware" );
                         }
@@ -1663,9 +2047,19 @@ CommandResult cmd_queryActiveSlot( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
 
-    // Output in a format easy for the app to parse
+    // Output in a format easy for the app to parse.
+    //
+    // ACTIVE_SLOT is 0-7 or 99 for a numbered slot and -1 for a file context.
+    // -1, not the internal -2: -1 already means "no numbered slot" to every
+    // existing integer parser, so nothing downstream has to learn a new value.
+    //
+    // ACTIVE_PATH ALWAYS follows - numbered slots report their canonical
+    // /slots/slotN.yaml too. The path line is the new truth; the int line is
+    // back-compat. (There is deliberately no ACTIVE_CONTEXT: line.)
     target->print( "ACTIVE_SLOT:" );
-    target->println( activeSlot );
+    target->println( activeSlot == SLOT_FILE_CONTEXT ? -1 : activeSlot );
+    target->print( "ACTIVE_PATH:" );
+    target->println( mgr.getActiveSlotPath( ) );
     target->flush( );
 
     return CMD_DONT_SHOW_MENU;
@@ -3627,7 +4021,9 @@ CommandResult cmd_testStates( char c, const String& line ) {
 
             Jerial.println( "\n\r─── Current State ───" );
             Jerial.println( "Connections: " + String( state.connections.numBridges ) );
-            Jerial.println( "Active Slot: " + String( mgr.getActiveSlot( ) ) );
+            Jerial.println( mgr.isPathContext( )
+                                ? ( "Active File: " + String( mgr.getActiveSlotPath( ) ) )
+                                : ( "Active Slot: " + String( mgr.getActiveSlot( ) ) ) );
 
             if ( state.connections.numBridges > 0 ) {
                 Jerial.println( "\n\rConnections in state:" );
@@ -3721,6 +4117,27 @@ CommandResult cmd_printYAML( char c, const String& line ) {
         if ( yamlArg[ 0 ] == '0' ) showANSI = 0;
         else if ( yamlArg[ 0 ] == '2' ) showANSI = 2;
         else if ( yamlArg[ 0 ] == '1' ) showANSI = 1;
+    }
+
+    // Hardware-truth advisory, not a rewrite. Y's body IS the save format -
+    // S pastes it back and slot files are written by the same toYAML() - so it
+    // must keep printing globalState.power verbatim. But a save=0 rail write
+    // (the guide's exit restore) deliberately moves the rails without touching
+    // that state, and a dump silently reading 0 V over live rails is the same
+    // "rails aren't setting" false-bug the other readouts just stopped
+    // telling. Name the divergence instead of hiding it.
+    {
+        float hwTop = getDacHardwareVoltage( 2 );
+        float hwBot = getDacHardwareVoltage( 3 );
+        if ( fabsf( hwTop - globalState.power.topRail ) > 0.02f ||
+             fabsf( hwBot - globalState.power.bottomRail ) > 0.02f ) {
+            target->print( "  (rails are physically at top=" );
+            target->print( hwTop, 2 );
+            target->print( "V bot=" );
+            target->print( hwBot, 2 );
+            target->println( "V - the power: below is this context's SAVED" );
+            target->println( "   state, which is what S pastes back)" );
+        }
     }
 
     String yamlOutput;

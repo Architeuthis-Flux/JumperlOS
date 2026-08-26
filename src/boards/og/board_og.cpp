@@ -111,6 +111,7 @@ const BoardTopology ogBoardTopology = {
         /* hasBreadboardText      */ false,
         /* hasPsram               */ false,
         /* hasStartupAnimation    */ false,
+        /* breadboardDisplays     */ false,
         /* spiDac                 */ true,
         /* ledsPerRow             */ 1,
         /* ledCount               */ 111,

@@ -1700,12 +1700,18 @@ void printColorName(int hue) {
 void previewSlotColors(int slot, bool showVoltages) {
   // NEW: Preview a slot using SlotManager - just loads into globalState
   // No state copying needed! Just track which slot to return to
-  if (slot == -1) {
-    slot = netSlot;
-  }
-  
   SlotManager& mgr = SlotManager::getInstance();
   String errorMsg;
+
+  // slot < 0 means "preview the current one". From a FILE context there is
+  // nothing to preview - you are already looking at it, and enterPreviewMode
+  // only takes numbered slots - so this is a no-op rather than a failed load.
+  if (slot < 0) {
+    if (mgr.isPathContext()) {
+      return;
+    }
+    slot = netSlot;
+  }
   
   // Enter preview mode - loads slot directly into globalState
   if (!mgr.enterPreviewMode(slot, errorMsg)) {
@@ -4119,7 +4125,14 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
             // color = scaleBrightness(color, brightness2);
             if (j % 2 == 0) { //only the top and bottom rails 
               int powerRail = j / 2;
-              float currentRailVoltage = (powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail;
+              // Hardware truth, not the persisted value: a save=0 rail write (the
+              // guide's exit restore) moves the rail without touching
+              // globalState.power. Read railHwVolts DIRECTLY rather than through
+              // getDacHardwareVoltage() - this renderer is __not_in_flash_func and
+              // must keep drawing while flash is busy.
+              float currentRailVoltage = (railHwVolts[powerRail] > -99.0f)
+                  ? railHwVolts[powerRail]
+                  : ((powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
 
               if (currentRailVoltage < 0.0) { //flipped when the voltage is negative
                 if ((i == 24 - (abs((int)(currentRailVoltage * 5)))) && (abs((int)currentRailVoltage) <= 5.0)) {
@@ -4183,7 +4196,14 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
             // Serial.println(brightness2);
             if (j % 2 == 0) { //only the top and bottom rails 
               int powerRail = j / 2;
-              float currentRailVoltage = (powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail;
+              // Hardware truth, not the persisted value: a save=0 rail write (the
+              // guide's exit restore) moves the rail without touching
+              // globalState.power. Read railHwVolts DIRECTLY rather than through
+              // getDacHardwareVoltage() - this renderer is __not_in_flash_func and
+              // must keep drawing while flash is busy.
+              float currentRailVoltage = (railHwVolts[powerRail] > -99.0f)
+                  ? railHwVolts[powerRail]
+                  : ((powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
 
               if (currentRailVoltage < -0.1) { //flipped when the voltage is negative
                 if ((i == 25 - (abs((int)(currentRailVoltage * 5)))) && (abs((int)currentRailVoltage) < 5.0)) {

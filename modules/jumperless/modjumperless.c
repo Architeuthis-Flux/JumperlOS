@@ -22,6 +22,7 @@
 #include "py/obj.h"
 #include "py/objstr.h"
 #include "py/runtime.h"
+#include "py/stackctrl.h"
 #include "py/stream.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -110,6 +111,18 @@ void jl_init_micropython_local_copy( void );
 void jl_send_raw( int chip, int x, int y, int setOrClear );
 void jl_send_raw_str( const char* chip_str, int x, int y, int setOrClear );
 int jl_switch_slot( int slot );
+
+// Projects + parts layer (guided placement). A project wiring.yaml IS a slot
+// YAML, so load_project() rides the same loader the Files browser uses.
+int jl_load_slot_path( const char* path );
+int jl_project_begin_run( const char* name );
+int jl_place_part( const char* name, int row, const char* pins_json,
+                   const char* footprint, const char* type, const char* value );
+int jl_remove_part( const char* name );
+int jl_get_num_parts( void );
+const char* jl_get_part_info( int idx );
+int jl_guide_progress( void );
+
 void jl_restore_micropython_entry_state( void );
 int jl_has_unsaved_changes( void );
 const char* jl_get_state( void );
@@ -2598,6 +2611,277 @@ static mp_obj_t jl_switch_slot_func( mp_obj_t slot_obj ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_switch_slot_obj, jl_switch_slot_func );
 
+// ---------------------------------------------------------------------------
+// Projects + parts (guided placement)
+// ---------------------------------------------------------------------------
+
+// load_project("555")                        -> begin/re-open a RUN of 555
+// load_project("/projects/555/wiring.yaml")   -> load that literal path
+//
+// The two forms mean different things now that projects run out of per-run
+// state files. The NAME form is "load project 555", which under the run-file
+// model means open /projects/555/555_run.yaml (or create it from the shipped
+// wiring when there is no run yet) - so a script can no longer adopt the
+// SHIPPED TEMPLATE as its auto-saving context and silently rewrite it without
+// guide:/meta:. ONE run file per project, reused.
+//
+// Anything containing '/' is still taken verbatim through the raw adopting
+// loader: that is the documented "load this exact file" door (a run file, a
+// slot file, a hand-written YAML), and it is deliberately left raw - the
+// template write-guard in SlotManager is what protects it.
+// Returns True on success.
+static mp_obj_t jl_load_project_func( mp_obj_t name_obj ) {
+    const char* arg = mp_obj_str_get_str( name_obj );
+
+    if ( strchr( arg, '/' ) != NULL ) {
+        return mp_obj_new_bool( jl_load_slot_path( arg ) == 0 );
+    }
+    return mp_obj_new_bool( jl_project_begin_run( arg ) == 0 );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_load_project_obj, jl_load_project_func );
+
+// place_part(name, row, pins_json [, footprint] [, type] [, value]) -> 0 / -1
+// pins_json: {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
+static mp_obj_t jl_place_part_func( size_t n_args, const mp_obj_t* args ) {
+    const char* name = mp_obj_str_get_str( args[ 0 ] );
+    int row = mp_obj_get_int( args[ 1 ] );
+    const char* pins = mp_obj_str_get_str( args[ 2 ] );
+    const char* footprint = ( n_args > 3 ) ? mp_obj_str_get_str( args[ 3 ] ) : "";
+    const char* type = ( n_args > 4 ) ? mp_obj_str_get_str( args[ 4 ] ) : "";
+    const char* value = ( n_args > 5 ) ? mp_obj_str_get_str( args[ 5 ] ) : "";
+
+    return mp_obj_new_int( jl_place_part( name, row, pins, footprint, type, value ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_place_part_obj, 3, 6, jl_place_part_func );
+
+// remove_part(name) -> 0 / -1
+static mp_obj_t jl_remove_part_func( mp_obj_t name_obj ) {
+    return mp_obj_new_int( jl_remove_part( mp_obj_str_get_str( name_obj ) ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_remove_part_obj, jl_remove_part_func );
+
+// Field of a '|'/','-delimited record: returns the start, sets *len and
+// advances *cursor past the delimiter (same hand-rolled split style
+// get_path_info uses - there is no JSON/CSV library on board).
+static const char* jl_rec_field( const char** cursor, char delim, size_t* len ) {
+    const char* start = *cursor;
+    const char* end = start;
+    while ( *end != '\0' && *end != delim ) end++;
+    *len = (size_t)( end - start );
+    *cursor = ( *end == '\0' ) ? end : end + 1;
+    return start;
+}
+
+// list_parts() -> list of dicts:
+//   {name, type, value, row, footprint, placed, placement, measured,
+//    pins: {PIN: {node, connect, class}}}
+// `measured` is ohms from the last continuity check on that part, 0.0 when it
+// has not been measured this session (it is RAM-only firmware side) - a script
+// wanting the real part reads `measured or value`.
+static mp_obj_t jl_list_parts_func( void ) {
+    mp_obj_t list = mp_obj_new_list( 0, NULL );
+    int numParts = jl_get_num_parts( );
+
+    for ( int i = 0; i < numParts; i++ ) {
+        const char* rec = jl_get_part_info( i );
+        if ( rec == NULL || rec[ 0 ] == '\0' ) continue;
+
+        // name|type|value|row|footprint|placed|placement|measured|PIN,node,connect,class;...
+        const char* cur = rec;
+        size_t len;
+        const char* name = jl_rec_field( &cur, '|', &len );
+        size_t name_len = len;
+        const char* type = jl_rec_field( &cur, '|', &len );
+        size_t type_len = len;
+        const char* value = jl_rec_field( &cur, '|', &len );
+        size_t value_len = len;
+        const char* row = jl_rec_field( &cur, '|', &len );
+        const char* footprint = jl_rec_field( &cur, '|', &len );
+        size_t fp_len = len;
+        const char* placed = jl_rec_field( &cur, '|', &len );
+        const char* placement = jl_rec_field( &cur, '|', &len );
+        size_t placement_len = len;
+        const char* measured = jl_rec_field( &cur, '|', &len );
+
+        mp_obj_t dict = mp_obj_new_dict( 9 );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_name ),
+                           mp_obj_new_str( name, name_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_type ),
+                           mp_obj_new_str( type, type_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_value ),
+                           mp_obj_new_str( value, value_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_row ),
+                           mp_obj_new_int( atoi( row ) ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_footprint ),
+                           mp_obj_new_str( footprint, fp_len ) );
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_placed ),
+                           mp_obj_new_bool( atoi( placed ) != 0 ) );
+        // "expanded" | "compact" | "custom" - the mode every pin's `node`
+        // below was resolved through (partPinNode is the sole authority).
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_placement ),
+                           mp_obj_new_str( placement, placement_len ) );
+        // Ohms, or 0.0 for "not measured this session". strtod stops at the
+        // '|' the splitter left in place, so no copy is needed.
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_measured ),
+                           mp_obj_new_float( strtod( measured, NULL ) ) );
+
+        mp_obj_t pins = mp_obj_new_dict( 0 );
+        while ( *cur != '\0' ) {
+            const char* pin_name = jl_rec_field( &cur, ',', &len );
+            size_t pin_name_len = len;
+            const char* node = jl_rec_field( &cur, ',', &len );
+            const char* connect = jl_rec_field( &cur, ',', &len );
+            const char* pin_class = jl_rec_field( &cur, ';', &len );
+            size_t class_len = len;
+
+            mp_obj_t pin_dict = mp_obj_new_dict( 3 );
+            mp_obj_dict_store( pin_dict, MP_OBJ_NEW_QSTR( MP_QSTR_node ),
+                               mp_obj_new_int( atoi( node ) ) );
+            mp_obj_dict_store( pin_dict, MP_OBJ_NEW_QSTR( MP_QSTR_connect ),
+                               mp_obj_new_int( atoi( connect ) ) );
+            mp_obj_dict_store( pin_dict, MP_OBJ_NEW_QSTR( MP_QSTR_class ),
+                               mp_obj_new_str( pin_class, class_len ) );
+            mp_obj_dict_store( pins, mp_obj_new_str( pin_name, pin_name_len ), pin_dict );
+        }
+        mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_pins ), pins );
+
+        mp_obj_list_append( list, dict );
+    }
+
+    return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_list_parts_obj, jl_list_parts_func );
+
+// guide_progress() -> guided-placement step, or -1 when no guide is loaded
+static mp_obj_t jl_guide_progress_func( void ) {
+    return mp_obj_new_int( jl_guide_progress( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_guide_progress_obj, jl_guide_progress_func );
+
+// ---------------------------------------------------------------------------
+// Background callback (Guides-Simplification workstream D)
+// ---------------------------------------------------------------------------
+// The Temporal-Replay badge pattern: a script runs to completion once and
+// registers a callback; MpBackgroundService then ticks it from the main loop
+// forever after. The root-pointer entry is a 2-tuple (callback, its module
+// globals) so the callback's module context survives GC after the script
+// returns. One strike: a callback that raises prints its traceback and is
+// deactivated. The service is NOT in the inner set, so ticks never land
+// while a foreground script/REPL command is executing (the scheduler is the
+// foreground guard), and it pauses in probe mode/menus by construction.
+MP_REGISTER_ROOT_POINTER( mp_obj_t jl_bg_entry );
+
+static uint32_t jl_bg_interval_ms = 50;
+static uint32_t jl_bg_last_tick_ms = 0;
+static uint8_t jl_bg_in_call = 0;
+
+static inline int jl_bg_entry_is_set( void ) {
+    mp_obj_t e = MP_STATE_VM( jl_bg_entry );
+    return !( e == MP_OBJ_NULL || e == mp_const_none );
+}
+
+// C-side probe (MpBackground.cpp, and the pin-release guard on script exit).
+int jl_bg_active( void ) {
+    return jl_bg_entry_is_set( ) ? 1 : 0;
+}
+
+// Reset the background entry to its boot state. Called from the port's
+// post-mp_init root-pointer zeroing (micropython_embed.c, next to
+// machine_pin_irq_init) - mp_init resets only its own named fields, so
+// without this a soft reboot (Ctrl-D after bg_start) leaves jl_bg_entry
+// holding a STALE HEAP ADDRESS from the previous interpreter; the first
+// MpBackground tick then reads reinitialized heap as an object tuple -
+// hard fault, or nlr_jump_fail parking the firmware (sweep finding, high).
+void jl_bg_reset_entry( void ) {
+    MP_STATE_VM( jl_bg_entry ) = MP_OBJ_NULL;
+    jl_bg_last_tick_ms = 0;
+    jl_bg_in_call = 0;
+}
+
+// One tick from MpBackgroundService: interval-gated, re-entrancy-guarded,
+// nlr-protected. Returns 1 when the callback ran.
+int jl_bg_service_tick( uint32_t now_ms ) {
+    if ( jl_bg_in_call || !jl_bg_entry_is_set( ) ) {
+        return 0;
+    }
+    uint32_t interval = jl_bg_interval_ms < 10 ? 10 : jl_bg_interval_ms;
+    if ( jl_bg_last_tick_ms != 0 && ( now_ms - jl_bg_last_tick_ms ) < interval ) {
+        return 0;
+    }
+    jl_bg_last_tick_ms = now_ms;
+    jl_bg_in_call = 1;
+
+    // SAVE/RESTORE the GC stack bound around the tick (mpirq.c:76-100 is
+    // the port precedent). Setting it without restoring left a DEAD frame
+    // address as the permanent scan bound - any later foreground exec whose
+    // C frames sat above it had live mp_obj_t roots invisible to the GC:
+    // heap corruption under memory pressure (sweep finding, high).
+    void* saved_stack_top = MP_STATE_THREAD( stack_top );
+    char stack_top;
+    mp_stack_set_top( &stack_top );
+
+    mp_obj_t entry = MP_STATE_VM( jl_bg_entry );
+    mp_obj_t cb = mp_obj_subscr( entry, MP_OBJ_NEW_SMALL_INT( 0 ), MP_OBJ_SENTINEL );
+
+    int invoked = 0;
+    nlr_buf_t nlr;
+    // The VM is about to run on THIS C stack: raise the same depth counter
+    // mp_embed_exec_str uses, or MpRemoteService will happily start a nested
+    // raw-REPL execution on top of us (sweep finding, medium).
+    extern volatile int jl_vm_exec_depth;
+    jl_vm_exec_depth++;
+    if ( nlr_push( &nlr ) == 0 ) {
+        mp_call_function_1( cb, mp_obj_new_int_from_uint( now_ms ) );
+        nlr_pop( );
+        invoked = 1;
+    } else {
+        mp_printf( &mp_plat_print, "[bg] callback raised; deactivated\n" );
+        mp_obj_print_exception( &mp_plat_print, MP_OBJ_FROM_PTR( nlr.ret_val ) );
+        MP_STATE_VM( jl_bg_entry ) = mp_const_none;
+    }
+    jl_vm_exec_depth--;
+    MP_STATE_THREAD( stack_top ) = saved_stack_top;
+    jl_bg_in_call = 0;
+    return invoked;
+}
+
+// bg_start(callback, interval_ms=50)
+static mp_obj_t jl_bg_start_func( size_t n_args, const mp_obj_t* args ) {
+    mp_obj_t cb = args[0];
+    if ( cb == mp_const_none ) {
+        MP_STATE_VM( jl_bg_entry ) = mp_const_none;
+        return mp_const_none;
+    }
+    if ( !mp_obj_is_callable( cb ) ) {
+        mp_raise_TypeError( MP_ERROR_TEXT( "bg_start: callable required" ) );
+    }
+    uint32_t interval = ( n_args > 1 ) ? (uint32_t)mp_obj_get_int( args[1] ) : 50;
+    if ( interval < 10 ) interval = 10;
+
+    mp_obj_t items[2] = {
+        cb,
+        // The registering module's globals, captured so the callback's
+        // context stays a GC root after the script ends.
+        MP_OBJ_FROM_PTR( mp_globals_get( ) ),
+    };
+    MP_STATE_VM( jl_bg_entry ) = mp_obj_new_tuple( 2, items );
+    jl_bg_interval_ms = interval;
+    jl_bg_last_tick_ms = 0;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_bg_start_obj, 1, 2, jl_bg_start_func );
+
+static mp_obj_t jl_bg_stop_func( void ) {
+    MP_STATE_VM( jl_bg_entry ) = mp_const_none;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_bg_stop_obj, jl_bg_stop_func );
+
+static mp_obj_t jl_bg_active_func( void ) {
+    return mp_obj_new_bool( jl_bg_entry_is_set( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_bg_active_obj, jl_bg_active_func );
+
 static mp_obj_t jl_nodes_discard_func( void ) {
     jl_restore_micropython_entry_state( );
     return mp_const_none;
@@ -4520,7 +4804,11 @@ void jl_help_section( const char* section ) {
 
     // Convert section to uppercase for comparison
     char section_upper[ 32 ];
-    strcpy( section_upper, section );
+    // Bounded: a section name >= 32 chars smashed the core-0 stack (sweep
+    // finding, high). Truncated compares are fine - every real section name
+    // is short, and a too-long one simply matches nothing.
+    strncpy( section_upper, section, sizeof( section_upper ) - 1 );
+    section_upper[ sizeof( section_upper ) - 1 ] = '\0';
     for ( int i = 0; section_upper[ i ]; i++ ) {
         section_upper[ i ] = toupper( section_upper[ i ] );
     }
@@ -4638,6 +4926,17 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "   nodes_has_changes()              - Check for unsaved changes\n" );
         mp_printf( &mp_plat_print, "   switch_slot(slot)                - Switch to different slot (0-7)\n" );
         mp_printf( &mp_plat_print, "   CURRENT_SLOT                     - Get current slot number\n\n" );
+        mp_printf( &mp_plat_print, "  Projects and parts (guided placement):\n" );
+        mp_printf( &mp_plat_print, "   load_project(\"555\")              - Begin/reopen a RUN of 555: /projects/555/555_run.yaml\n" );
+        mp_printf( &mp_plat_print, "        a NAME opens the project's one run file; anything with a '/' is a literal path\n" );
+        mp_printf( &mp_plat_print, "   place_part(name, row, pins_json) - Place a part, expand its pins to bridges (0 = ok)\n" );
+        mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value)\n" );
+        mp_printf( &mp_plat_print, "        pins_json: {\"A\": {\"pin\": 1, \"connect\": \"GND\"}, \"B\": {\"pin\": 2, \"connect\": 7}}\n" );
+        mp_printf( &mp_plat_print, "        pin/offset place the leg, connect is a row or node name, class: signal|power|gnd|nc\n" );
+        mp_printf( &mp_plat_print, "        footprint \"dip8\"/\"sip2\" (default: a SIP strip sized from the pins listed)\n" );
+        mp_printf( &mp_plat_print, "   remove_part(name)                - Remove a part: bridges, net names and entry (0 = ok)\n" );
+        mp_printf( &mp_plat_print, "   list_parts()                     - Parts as dicts (name/type/value/row/footprint/placed/placement/pins)\n" );
+        mp_printf( &mp_plat_print, "   guide_progress()                 - Guided-placement step, -1 when no guide is loaded\n\n" );
         mp_printf( &mp_plat_print, "  Context (controls persistence):\n" );
         mp_printf( &mp_plat_print, "   context_toggle()                 - Toggle global/python mode\n" );
         mp_printf( &mp_plat_print, "   context_get()                    - Get current mode name\n\n" );
@@ -6538,6 +6837,19 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_nodes_discard ), MP_ROM_PTR( &jl_nodes_discard_obj ) },
     { MP_ROM_QSTR( MP_QSTR_nodes_has_changes ), MP_ROM_PTR( &jl_nodes_has_changes_obj ) },
     { MP_ROM_QSTR( MP_QSTR_switch_slot ), MP_ROM_PTR( &jl_switch_slot_obj ) },
+
+    // Projects + parts (guided placement)
+    { MP_ROM_QSTR( MP_QSTR_load_project ), MP_ROM_PTR( &jl_load_project_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_place_part ), MP_ROM_PTR( &jl_place_part_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_remove_part ), MP_ROM_PTR( &jl_remove_part_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_list_parts ), MP_ROM_PTR( &jl_list_parts_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_guide_progress ), MP_ROM_PTR( &jl_guide_progress_obj ) },
+
+    // Background callback (ticked by MpBackgroundService after the script ends)
+    { MP_ROM_QSTR( MP_QSTR_bg_start ), MP_ROM_PTR( &jl_bg_start_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_bg_stop ), MP_ROM_PTR( &jl_bg_stop_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_bg_active ), MP_ROM_PTR( &jl_bg_active_obj ) },
+
     { MP_ROM_QSTR( MP_QSTR_get_state ), MP_ROM_PTR( &jl_get_state_obj ) },
     { MP_ROM_QSTR( MP_QSTR_set_state ), MP_ROM_PTR( &jl_set_state_obj ) },
     { MP_ROM_QSTR( MP_QSTR_nodes_clear ), MP_ROM_PTR( &jl_nodes_clear_obj ) },

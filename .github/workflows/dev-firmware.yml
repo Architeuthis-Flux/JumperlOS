@@ -14,7 +14,7 @@ name: Dev firmware (nerd build)
 
 on:
   push:
-    branches: [projects-guided-placement]
+    branches: [dev]   # the old projects-guided-placement, renamed 2026-08-24
   workflow_dispatch:
 
 permissions:

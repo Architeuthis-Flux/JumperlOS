@@ -4,6 +4,32 @@
 //Jumperless config
 #include "JumperlessDefines.h"
 
+// ---------------------------------------------------------------------------
+// Compile-time behaviour flags (not user-settable; -D on the build line)
+// ---------------------------------------------------------------------------
+//
+// JL_PROJECT_RUN_HISTORY - how many run files a project keeps.
+//
+//   0 (DEFAULT)  ONE run file per project, /projects/<dir>/<dir>_run.yaml,
+//                silently reused. A prompt appears only when a guided build
+//                is MID-FLIGHT in it (resume / start fresh, which overwrites
+//                from the template). Kevin's ruling: the numbered files
+//                "make way too many files", and keeping a run is what
+//                `slots` > `save to` is for.
+//
+//   1            The wave-2 numbered scheme: /projects/<dir>/<dir>_<N>.yaml,
+//                N = max+1 per launch, a load-latest / start-new prompt,
+//                `z ... run=<N>`, and the >=20-file pile-up hint. Kept
+//                COMPILING - not deleted - so the history behaviour can come
+//                back on a build flag.
+//
+// Both modes share the same create/validate/recover, resume, runSource and
+// terminal-state machinery; only the NAME and the prompt policy differ.
+// ProjectsApp.h carries the naming/namespace invariants for both.
+#ifndef JL_PROJECT_RUN_HISTORY
+#define JL_PROJECT_RUN_HISTORY 0
+#endif
+
 
 // extern int hwRevision;
 // extern int probeRevision;
@@ -92,6 +118,11 @@ struct config {
         // Candidate indices for infraForceCandidate stay 0=DAC0 / 1=GPIO
         // regardless of this order.
         int probe_power_source = 0;
+        // Click the wheel while a rail/DAC is highlighted to adjust its
+        // voltage. 0 = off, 1 = only when an OLED is connected (default -
+        // the OLED shows the "adjust?" prompt that makes the click
+        // discoverable), 2 = always (LED-matrix adjuster UI only).
+        int rail_click_adjust = 1;
     } dacs;
 
     struct debug {
@@ -144,6 +175,12 @@ struct config {
         // Print net voltage scan stats once a second: every scanned node's
         // voltage and every routed path's estimated current.
         bool net_voltage_scan = false;
+        // Net scan pair taps (2026-08-20, experiment gate): tap BOTH ends
+        // of a routed path at once on two ADC channels and read them from
+        // the same ring sweeps, so each path's voltage delta is measured
+        // temporally aligned instead of up to a scan cycle apart.
+        // 1 = pair taps (default), 0 = sequential single-node taps (A/B).
+        int net_scan_pair_taps = 1;
     } debug;
 
     struct routing {
@@ -152,6 +189,19 @@ struct config {
         int stack_dacs = 0;
         int rail_priority = 1;
     } routing;
+
+    // Which context the board comes up in. Deliberately NOT where the active
+    // context itself is remembered - that lives in /slots/last_active.txt,
+    // because config saves are full-file rewrites behind a diff gate and
+    // writing config on every slot switch would churn flash and the diff cache.
+    struct slots {
+        // 0 = always boot into boot_slot (the old fixed behavior)
+        // 1 = boot into the LAST-ACTIVE slot file, whatever it is
+        //     (/slots/last_active.txt) - default
+        int boot_mode = 1;
+        // Used when boot_mode == 0. 0-7.
+        int boot_slot = 0;
+    } slots;
 
             // USB CDC settings for flow control behavior
             struct usb_cdc {

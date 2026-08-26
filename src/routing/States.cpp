@@ -11,6 +11,8 @@
 #include "config.h"
 #include "FakeGpio.h"
 #include "GraphicOverlays.h"
+#include "PartLabels.h"     // preview enter/exit recompose the label overlay
+#include "PartPlacement.h"  // parts: section serializer/parser + expansion
 #include <string.h>
 #include <vector>
 #include <FatFS.h>
@@ -556,6 +558,8 @@ void JumperlessState::clear() {
     power.setDefaults();
     display.clear();
     config.setDefaults();
+    parts.clear();             // parts table + guideProgress scalars
+    runSource[0] = '\0';       // per-run project origin (see States.h)
     clearAllCustomNetNames();  // Reset all custom net names to defaults
     dirty = false;
     lastModifiedTime = 0;
@@ -977,6 +981,39 @@ int JumperlessState::getEphemeralConnectionCount() const {
 }
 
 // Power management
+// A SETTER THAT WROTE THE SAME VALUE DID NOT MODIFY THE STATE (w3-t5).
+//
+// markDirty() used to fire unconditionally here and in setRailVoltage below,
+// which made every LOAD leave the state dirty: loadSlot/loadSlotFromPath end
+// in applyStateToHardware() -> setRailsAndDACs(0), which re-asserts the state's
+// OWN just-parsed topRail/bottomRail/dac0/dac1 with save=1. Four no-op writes,
+// four dirty marks, and ~1 s later the idle auto-save rewrote the file that had
+// just been read - a wholesale toYAML rewrite of a context nobody had touched.
+//
+// That is what broke T4's atomicity contract. The parse-failure restore arm in
+// loadSlotFromPath re-loads the prior context through exactly this tail, so
+// EVERY failed load dirtied the prior context and wrote its file, when the
+// contract says a failed load writes nothing. It is also what turned the
+// core-2 net-colour race into a file-visible bug (see serializeNets): the
+// spurious save fires within milliseconds of the net rebuild, often before
+// core 2's next assignNetColors pass has re-filled nets[].color.
+//
+// The undo record was already gated on `prev != voltage`; the dirty mark now
+// matches it. Float-exact comparison is right for the same reason it is right
+// for the undo gate - the re-assert hands back the identical float it parsed.
+// It never CLEARS an existing mark, so nothing already dirty can be lost.
+//
+// THE LIMIT OF THIS GATE, and it is a real one: it can only judge what THIS
+// FUNCTION can see. A caller that writes power.* ITSELF and only then calls
+// the setter arrives with prev == voltage, and the change - which is real -
+// looks like a no-op from in here. Three callers do exactly that, and each
+// owns its own markDirty() as a result: the encoder rail slider
+// (Menus.cpp:2941 railCommitEdit, gated on the rails actually moving), the
+// menu's OUTPUT>Voltage action (Menus.cpp, gated on a power field actually
+// being written) and JsonStateParser::parsePowerSection (JsonState.cpp:668).
+// If you add a fourth pre-writer, it must mark for itself - do not "fix" it by
+// weakening this gate, which is what keeps every load from rewriting its own
+// file.
 void JumperlessState::setDacVoltage(int dacNum, float voltage) {
     float prev = (dacNum == 0) ? power.dac0 : power.dac1;
     if (dacNum == 0) {
@@ -984,7 +1021,9 @@ void JumperlessState::setDacVoltage(int dacNum, float voltage) {
     } else if (dacNum == 1) {
         power.dac1 = voltage;
     }
-    markDirty();
+    if (prev != voltage) {
+        markDirty();
+    }
 
     if (!g_undoApplying && prev != voltage) {
         undoRecordDacSet(dacNum, prev, voltage);
@@ -1002,7 +1041,11 @@ void JumperlessState::setRailVoltage(bool isTopRail, float voltage) {
     } else {
         power.bottomRail = voltage;
     }
-    markDirty();
+    // Same no-op gate as setDacVoltage above - see the comment there for why
+    // an unconditional markDirty() here made every load rewrite its own file.
+    if (prev != voltage) {
+        markDirty();
+    }
 
     // Rails reuse the DAC undo op with extended channel encoding:
     //   2 = top rail, 3 = bottom rail. The apply/revert path in Undo.cpp
@@ -1232,32 +1275,160 @@ size_t JumperlessState::estimateRAMUsage() const {
 // YAML Serialization
 // ============================================================================
 
+// THE guideProgress FLOW-MAP READER. One function, two callers - fromYAML's
+// parse arm and SlotManager::scanGuideProgressFile (the launcher's load-free
+// mid-flight probe) - so the "ONE shape only" contract in States.h cannot
+// drift between them.
+//
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5, skipped: 0x4}
+//
+// `of:` and `skipped:` are optional; 0 out means "the file does not say". For
+// `skipped:` that ambiguity is load-bearing, so it gets its own presence flag
+// (skippedKnownOut) - an ABSENT skip set is not an EMPTY one, and only the
+// absent case makes resume refuse to re-energize rails. Any out param may be
+// null. Returns true when the line at least named a source.
+static bool parseGuideProgressLine(const String& line, String* sourceOut,
+                                   int* stepOut, int* totalOut,
+                                   uint64_t* skippedOut = nullptr,
+                                   bool* skippedKnownOut = nullptr) {
+    if (sourceOut != nullptr) *sourceOut = "";
+    if (stepOut != nullptr) *stepOut = 0;
+    if (totalOut != nullptr) *totalOut = 0;
+    if (skippedOut != nullptr) *skippedOut = 0;
+    if (skippedKnownOut != nullptr) *skippedKnownOut = false;
+
+    int q1 = line.indexOf('"');
+    int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
+    bool haveSource = (q1 >= 0 && q2 > q1);
+    if (haveSource && sourceOut != nullptr) {
+        *sourceOut = line.substring(q1 + 1, q2);
+    }
+
+    // Search for the scalar keys AFTER the quoted source, so a path
+    // containing "step:" or "of:" cannot be mistaken for one.
+    int from = (q2 > 0) ? q2 : 0;
+
+    int stepIdx = line.indexOf("step:", from);
+    if (stepIdx >= 0 && stepOut != nullptr) {
+        // Stop at the next key as well as at '}': "3, of: 5".toInt() happens
+        // to give 3, but relying on that is how a third key breaks this.
+        int endIdx = line.indexOf(',', stepIdx);
+        int brace = line.indexOf('}', stepIdx);
+        if (endIdx < 0 || (brace >= 0 && brace < endIdx)) endIdx = brace;
+        if (endIdx < 0) endIdx = (int)line.length();
+        String val = line.substring(stepIdx + 5, endIdx);
+        val.trim();
+        *stepOut = val.toInt();
+    }
+
+    int ofIdx = line.indexOf("of:", from);
+    if (ofIdx >= 0 && totalOut != nullptr) {
+        int endIdx = line.indexOf(',', ofIdx);
+        int brace = line.indexOf('}', ofIdx);
+        if (endIdx < 0 || (brace >= 0 && brace < endIdx)) endIdx = brace;
+        if (endIdx < 0) endIdx = (int)line.length();
+        String val = line.substring(ofIdx + 3, endIdx);
+        val.trim();
+        int total = val.toInt();
+        *totalOut = (total > 0) ? total : 0;
+    }
+
+    // `skipped:` - the skip-set bitmask, hex ("0x4"). String::toInt() is
+    // decimal only, so this one goes through strtoull with base 0 (which
+    // accepts the 0x prefix, and a bare decimal from a hand-edited file).
+    // Presence is reported separately: absent != empty (see the header note).
+    int skIdx = line.indexOf("skipped:", from);
+    if (skIdx >= 0) {
+        int endIdx = line.indexOf(',', skIdx);
+        int brace = line.indexOf('}', skIdx);
+        if (endIdx < 0 || (brace >= 0 && brace < endIdx)) endIdx = brace;
+        if (endIdx < 0) endIdx = (int)line.length();
+        String val = line.substring(skIdx + 8, endIdx);
+        val.trim();
+        if (val.length() > 0) {
+            if (skippedOut != nullptr) {
+                *skippedOut = (uint64_t)strtoull(val.c_str(), nullptr, 0);
+            }
+            if (skippedKnownOut != nullptr) *skippedKnownOut = true;
+        }
+    }
+    return haveSource;
+}
+
 bool JumperlessState::toYAML(String& output, int showANSI) const {
     output = "";
     
     // Pre-allocate buffer to avoid repeated reallocations during concatenation
-    // Estimate: ~50 bytes per bridge + ~500 bytes overhead = ~3KB typical
-    output.reserve(connections.numBridges * 50 + 500);
+    // Estimate: ~50 bytes per bridge + ~450 per part (header lines + pins)
+    // + ~500 bytes overhead = ~3KB typical
+    output.reserve(connections.numBridges * 50 + parts.numParts * 450 + 500);
     
     // Header
     output += "version: " + String(version) + "\n";
-    output += "sourceOfTruth: " + String(config.sourceOfTruth == BRIDGES_PRIMARY ? "bridges" : "nets") + "\n\n";
-    
+    output += "sourceOfTruth: " + String(config.sourceOfTruth == BRIDGES_PRIMARY ? "bridges" : "nets") + "\n";
+
+    // guideProgress scalar - ONE flow-map line, the only shape the parser
+    // accepts (see the parts format comment in States.h). Emitted only while
+    // a guide is bound to this slot.
+    if (parts.guideSource[0] != '\0') {
+        output += "guideProgress: {source: \"" + String(parts.guideSource) +
+                  "\", step: " + String(parts.guideStep);
+        // `of:` (the step total) only when it is KNOWN. Same rule as
+        // runSource: emit nothing rather than a zero, so a hand-written or
+        // pre-`of:` file round-trips byte-identically instead of growing a
+        // meaningless "of: 0".
+        if (parts.guideTotal > 0) {
+            output += ", of: " + String(parts.guideTotal);
+        }
+        // `skipped:` on the SAME rule, and for the same reason: emit it only
+        // when this state actually KNOWS the skip set, so a hand-written file
+        // (or one predating the key) round-trips byte-identically instead of
+        // acquiring a "skipped: 0x0" that would be read back as an
+        // authoritative "nothing was skipped". Writing a speculative zero here
+        // is exactly how the silent-rail-energize bug would come back: an idle
+        // auto-save would launder "unknown" into "known-empty".
+        if (parts.guideSkippedKnown) {
+            char maskBuf[24];
+            snprintf(maskBuf, sizeof(maskBuf), "0x%llx",
+                     (unsigned long long)parts.guideSkipped);
+            output += ", skipped: " + String(maskBuf);
+        }
+        output += "}\n";
+    }
+
+    // runSource scalar - ONE flow line, matched with the parser below.
+    // Emitted only when non-empty (see States.h: an unemitted-but-parsed
+    // scalar is destroyed by the idle auto-save).
+    if (runSource[0] != '\0') {
+        output += "runSource: \"" + String(runSource) + "\"\n";
+    }
+    output += "\n";
+
     // Bridges section
     serializeBridges(output);
-    
+
     // Nets section (optional, for colors/names)
     serializeNets(output);
-    
+
     // Power section
     serializePower(output);
-    
+
     // Config section
     serializeConfig(output);
-    
+
+    // Parts section. The old "MUST stay before overlays:" note is retired:
+    // deserializeOverlaysFromYAML used to strstr forward from the FIRST
+    // "overlays:" substring anywhere with no section-end bound, so parts
+    // emitted after it were eaten as garbage overlays. It now anchors on an
+    // un-indented `overlays:` line and stops at the next un-indented header,
+    // so the two sections are order-independent. Still load-bearing for
+    // persistence, though: toYAML is a wholesale rewrite - a section not
+    // emitted here is destroyed by the SlotManager idle auto-save.
+    serializeParts(*this, output);
+
     // Graphic overlays section
     serializeOverlaysToYAML(output, showANSI);
-    
+
     return true;
 }
 
@@ -1289,44 +1460,104 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         if (lineEnd == -1) lineEnd = input.length();
         
         String line = input.substring(lineStart, lineEnd);
+        // INDENT-HARDENING (see the parts format comment in States.h):
+        // capture whether the raw line was indented BEFORE trimming. Top-
+        // level section headers are only recognized on un-indented lines -
+        // the serializer never indents them - so a nested key like `config:`
+        // inside a contained section can't hijack the section state. The one
+        // exception is `fakeGpio:`, which the serializer nests under config.
+        bool indented = (line.length() > 0 &&
+                         (line.charAt(0) == ' ' || line.charAt(0) == '\t'));
         line.trim();
-        
+
         // Skip empty lines and comments
         if (line.length() == 0 || line.startsWith("#")) {
             lineStart = lineEnd + 1;
             continue;
         }
-        
+
         // Check for section headers
-        if (line.startsWith("version:")) {
+        if (!indented && line.startsWith("version:")) {
             int colonIdx = line.indexOf(':');
             String val = line.substring(colonIdx + 1);
             val.trim();
             version = val.toInt();
         }
-        else if (line.startsWith("sourceOfTruth:")) {
+        else if (!indented && line.startsWith("sourceOfTruth:")) {
             int colonIdx = line.indexOf(':');
             String val = line.substring(colonIdx + 1);
             val.trim();
             config.sourceOfTruth = (val == "nets") ? NETS_PRIMARY : BRIDGES_PRIMARY;
         }
-        else if (line.startsWith("bridges:")) {
+        else if (!indented && line.startsWith("guideProgress:")) {
+            // ONE shape only (matched with toYAML - see States.h):
+            //   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5, skipped: 0x4}
+            // `of:` and `skipped:` are OPTIONAL (0 = unknown): a hand-written
+            // file, or one written before the field existed, simply has none.
+            // For `skipped:` the ABSENCE is carried through as its own flag,
+            // because an unknown skip set and an empty one must not resume the
+            // same way. The reader is SHARED with the launcher's load-free
+            // probe.
+            String gsrc;
+            int gstep = 0, gtotal = 0;
+            uint64_t gskip = 0;
+            bool gskipKnown = false;
+            if (parseGuideProgressLine(line, &gsrc, &gstep, &gtotal,
+                                       &gskip, &gskipKnown)) {
+                strncpy(parts.guideSource, gsrc.c_str(), sizeof(parts.guideSource) - 1);
+                parts.guideSource[sizeof(parts.guideSource) - 1] = '\0';
+            }
+            parts.guideStep = (int16_t)gstep;
+            parts.guideTotal = (int16_t)gtotal;
+            parts.guideSkipped = gskip;
+            parts.guideSkippedKnown = gskipKnown;
+        }
+        else if (!indented && line.startsWith("runSource:")) {
+            // ONE shape only (matched with toYAML above):
+            //   runSource: "/projects/555/wiring.yaml"
+            int q1 = line.indexOf('"');
+            int q2 = (q1 >= 0) ? line.indexOf('"', q1 + 1) : -1;
+            if (q1 >= 0 && q2 > q1) {
+                String src = line.substring(q1 + 1, q2);
+                strncpy(runSource, src.c_str(), sizeof(runSource) - 1);
+                runSource[sizeof(runSource) - 1] = '\0';
+            }
+        }
+        else if (!indented && line.startsWith("bridges:")) {
             currentSection = "bridges";
         }
-        else if (line.startsWith("nets:")) {
+        else if (!indented && line.startsWith("nets:")) {
             currentSection = "nets";
         }
-        else if (line.startsWith("power:")) {
+        else if (!indented && line.startsWith("power:")) {
             currentSection = "power";
         }
-        else if (line.startsWith("config:")) {
+        else if (!indented && line.startsWith("config:")) {
             currentSection = "config";
         }
-        else if (line.startsWith("fakeGpio:")) {
+        else if ((!indented || currentSection == "config") && line.startsWith("fakeGpio:")) {
+            // The serializer nests fakeGpio under config ("  fakeGpio:") -
+            // recognize it there too, or every existing fakeGpio entry would
+            // be silently dropped (and destroyed by the next auto-save).
             currentSection = "fakeGpio";
         }
-        else if (line.startsWith("overlays:")) {
+        else if (!indented && line.startsWith("overlays:")) {
             currentSection = "overlays";
+        }
+        else if (!indented && (line.startsWith("meta:") ||
+                               line.startsWith("parts:") ||
+                               line.startsWith("guide:"))) {
+            // Contained sections. parts: is parsed whole in a post-loop pass
+            // (deserializeParts, next to the overlays pass). meta:/guide: are
+            // swallowed entirely and NOT round-tripped - the launcher and the
+            // guide runtime re-read the project file themselves.
+            currentSection = "contained";
+        }
+        else if (!indented && line.endsWith(":") && line.indexOf(' ') == -1) {
+            // Unknown top-level section header - contain it so its indented
+            // content can't corrupt the section before it (future sections
+            // parse as ignored on older firmware).
+            currentSection = "ignored";
         }
         // Parse section content
         else if (line.startsWith("- {") || line.startsWith("-{")) {
@@ -1381,6 +1612,17 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         lineStart = lineEnd + 1;
     }
     
+    // Parse the parts: section whole in a single pass (multi-line list items
+    // need their own scanner - same pattern as the overlays pass below)
+    {
+        String partsError;
+        deserializeParts(*this, input.c_str(), partsError);
+        if (partsError.length() > 0 && jumperlessConfig.debug.show_node_errors) {
+            Serial.print("parts: parse warnings: ");
+            Serial.println(partsError);
+        }
+    }
+
     // Parse graphic overlays from the entire YAML content
     String overlayError;
     deserializeOverlaysFromYAML(input.c_str(), overlayError);
@@ -1739,7 +1981,37 @@ void JumperlessState::serializeNets(String& output) const {
             // Use the net's assigned color
             rgbColor netRgb = state.connections.nets[i].color;
             netColor = packRgb(netRgb.r, netRgb.g, netRgb.b);
-            colorName = colorValueToName(netColor);
+
+            // ZERO MEANS "NOT COMPUTED YET", NOT BLACK (w3-t5).
+            //
+            // nets[].color is filled in by assignNetColors(), which runs on
+            // CORE 2 as part of drawWires(). Core 0 zeroes it every time the
+            // net table is rebuilt (clear()/syncNetsFromBridges on any load or
+            // any connect), so between that rebuild and core 2's next render
+            // pass every auto color reads 0x000000 - and a save landing in
+            // that window used to persist `color: black` over the user's
+            // colors. Measured at ~6 ms after a failed load's restore, which
+            // is why it looked like a failed-load bug; a plain connect() hits
+            // the same window.
+            //
+            // An auto color is never legitimately zero (assignNetColors emits
+            // full-value HSV hues and the non-zero rail colors), and a
+            // deliberately black USER color short-circuits above via
+            // customColors. So zero here can only mean "core 2 has not caught
+            // up yet". netColors[] is the other half of the same assignment
+            // (assignNetColors writes both together) and still holds the last
+            // rendered color for this index, which is what the next pass will
+            // recompute; fall back to it, and if even that is unset, emit no
+            // color: field at all rather than a false one. Colors are
+            // recomputed on load and re-emitted on the next save either way.
+            if (netColor == 0) {
+                extern rgbColor netColors[MAX_NETS];
+                rgbColor cached = netColors[i];
+                netColor = packRgb(cached.r, cached.g, cached.b);
+            }
+            if (netColor != 0) {
+                colorName = colorValueToName(netColor);
+            }
         }
         
         // Check if net is animated (check if any of its nodes are in the animation order)
@@ -1757,8 +2029,10 @@ void JumperlessState::serializeNets(String& output) const {
         output += "  - {num: " + String(state.connections.nets[i].number);
         output += ", nodes: " + nodesList;
         
-        // Only print color if not animated
-        if (!animated) {
+        // Only print color if not animated - and only if we HAVE one (the
+        // zero-means-not-computed-yet case above deliberately leaves it empty
+        // rather than emitting a false `black`).
+        if (!animated && colorName.length() > 0) {
             output += ", color: " + colorName;
         }
         
@@ -2630,11 +2904,19 @@ bool JumperlessState::fromLegacyNodeFile(const String& nodeFileContent, String& 
  * - GPIO directions and pull resistors match the loaded config
  * - All hardware reflects the state loaded from the file
  */
-void applyStateToHardware() {
+void applyStatePowerToHardware(void) {
+    setRailsAndDACs(0);
+}
+
+void applyStateToHardware(bool skipPower) {
     // Apply power settings (DACs and rails)
     // Note: Pass save=0 to avoid updating globalState (it's already loaded)
     //       and saveEEPROM=0 to avoid writing to EEPROM
-    setRailsAndDACs(0);  // This applies topRail, bottomRail, dac0, dac1 from globalState
+    // skipPower is the guided-launch transient close: the GPIO half still
+    // runs, only the rails/DACs wait for the caller's explicit apply.
+    if (!skipPower) {
+        setRailsAndDACs(0);  // applies topRail, bottomRail, dac0, dac1 from globalState
+    }
 
 
 
@@ -2714,9 +2996,16 @@ SlotManager::SlotManager()
       historySize(STATE_HISTORY_SIZE),
       historyHead(0), historyCount(0), historyPosition(0),
       previewModeActive(false), previewSlotNumber(-1), originalSlotNumber(-1),
-      temporarySlotActive(false), temporarySlotOriginal(-1) {
-    // Always initialize to slot 0, sync with netSlot on first use
+      temporarySlotActive(false), temporarySlotOriginal(-1),
+      restoringContext(false) {
+    // Always initialize to slot 0, sync with netSlot on first use.
+    // This is the PRE-BOOT default only - seedBootContext() (main.cpp, called
+    // once configLoaded is true) decides the real boot context.
     netSlot = 0;  // Ensure global is also 0
+    strncpy(activeSlotPath, "/slots/slot0.yaml", sizeof(activeSlotPath) - 1);
+    activeSlotPath[sizeof(activeSlotPath) - 1] = '\0';
+    previewOriginalPath[0] = '\0';
+    temporarySlotOriginalPath[0] = '\0';
 }
 
 SlotManager& SlotManager::getInstance() {
@@ -2748,54 +3037,245 @@ String SlotManager::getJSONSlotFilename(int slotNum) const {
     return "/slots/slot" + String(slotNum) + ".json";
 }
 
-// Helper function to extract slot number from filename
-// Returns -1 if not a slot file
-static int extractSlotNumberFromFilename(const char* filename) {
-    if (!filename) return -1;
-    
-    String fname(filename);
-    
-    // Special case for Python slot
-    if (fname == "/slots/slotPython.yaml") {
-        return 99;
+// THE canonical-slot-file matcher. This single strict function replaces the
+// two loose extractors that used to live here (extractSlotNumberFromFilename
+// and extractSlotNumberFromPath, design-slots.md §3).
+//
+// What the loose ones did wrong: they matched any BASENAME starting "slot" and
+// ending ".yaml" and toInt()'d whatever sat between, so "slot_555.yaml" became
+// "_555".toInt() == 0 -> slot 0 adopted -> the idle auto-save wrote a project
+// file's content over the user's /slots/slot0.yaml. That trap is what this
+// wave retires.
+//
+// Requirements, all three necessary:
+//   - FULL-path match, not basename: /projects/foo/slot3.yaml is a file
+//     context, not slot 3.
+//   - Every character of the number is a digit.
+//   - Round-trip checked: String(numStr.toInt()) == numStr, which kills
+//     "slot007", "slot_555", "slot3b", "slot+3", "slot ".
+int SlotManager::slotNumberForCanonicalPath(const String& path) {
+    if (path == "/slots/slotPython.yaml") return 99;
+    if (!path.startsWith("/slots/slot") || !path.endsWith(".yaml")) return -1;
+
+    // Exactly the span between the "/slots/slot" prefix and the ".yaml" suffix.
+    const int numStart = 11;                       // strlen("/slots/slot")
+    const int numEnd = (int)path.length() - 5;     // strlen(".yaml")
+    if (numEnd <= numStart) return -1;
+
+    String numStr = path.substring(numStart, numEnd);
+    for (unsigned int i = 0; i < numStr.length(); i++) {
+        if (!isDigit(numStr.charAt(i))) return -1;
     }
-    
-    // Check if filename matches pattern "/slots/slotN.yaml"
-    if (!fname.startsWith("/slots/slot") || !fname.endsWith(".yaml")) {
-        return -1;
-    }
-    
-    // Extract number between "slot" and ".yaml"
-    int slotStart = fname.indexOf("slot") + 4;
-    int yamlStart = fname.indexOf(".yaml");
-    if (slotStart < 4 || yamlStart <= slotStart) {
-        return -1;
-    }
-    
-    String numStr = fname.substring(slotStart, yamlStart);
-    int slotNum = numStr.toInt();
-    
-    // Validate it's a valid slot number (0-7 for normal slots, 99 for Python)
-    if (slotNum < 0 || (slotNum >= NUM_SLOTS && slotNum != 99)) {
-        return -1;
-    }
-    
-    return slotNum;
+    long slotNum = numStr.toInt();
+    if (String(slotNum) != numStr) return -1;      // no leading zeros / overflow
+    if (slotNum < 0 || slotNum >= NUM_SLOTS) return -1;  // 99 handled above
+    return (int)slotNum;
 }
 
-// Extract slot number from any path by parsing the filename (e.g. slot3.yaml -> 3)
-static int extractSlotNumberFromPath(const String& path) {
-    int lastSlash = path.lastIndexOf('/');
-    String fname = (lastSlash >= 0) ? path.substring(lastSlash + 1) : path;
-    if (fname.equalsIgnoreCase("slotPython.yaml")) return 99;
-    if (!fname.startsWith("slot") || !fname.endsWith(".yaml")) return -1;
-    int slotStart = 4;
-    int yamlStart = fname.indexOf(".yaml");
-    if (yamlStart <= slotStart) return -1;
-    String numStr = fname.substring(slotStart, yamlStart);
-    int slotNum = numStr.toInt();
-    if (slotNum < 0 || (slotNum >= NUM_SLOTS && slotNum != 99)) return -1;
-    return slotNum;
+/**
+ * Is this path a shipped PROJECT TEMPLATE?
+ *
+ * True for /projects/<dir>/wiring*.yaml - the same family listVariantFiles
+ * matches (basename startsWith "wiring", endsWith ".yaml"), so it covers
+ * wiring.yaml, wiring_v2.yaml and the wiring_original*.yaml backups too.
+ *
+ * Per-run project files are named <dir>_run.yaml (or <dir>_<N>.yaml under
+ * JL_PROJECT_RUN_HISTORY) and deliberately do NOT match - both begin with the
+ * project's DIRECTORY name, so neither can start with "wiring" unless the
+ * directory does, which projectBeginRun refuses. Nothing about the run flow is
+ * affected.
+ */
+bool SlotManager::isTemplatePath(const char* path) {
+    if (!path || path[0] == '\0') return false;
+    String p(path);
+    if (!p.startsWith("/projects/")) return false;
+    int lastSlash = p.lastIndexOf('/');
+    if (lastSlash < 0) return false;
+    String base = p.substring(lastSlash + 1);
+    return base.startsWith("wiring") && base.endsWith(".yaml");
+}
+
+/**
+ * Load-free `guideProgress:` probe - see the declaration in States.h for why
+ * the launcher cannot just load the file and look.
+ *
+ * Streamed line by line (the guideParse / readProjectMeta idiom: a whole-file
+ * String is what killed the heap on the bench), and it STOPS at the first
+ * bulk section header, because toYAML emits guideProgress in the header
+ * block, above bridges:/nets:/parts:.
+ */
+bool SlotManager::scanGuideProgressFile(const char* path, String* sourceOut,
+                                        int* stepOut, int* totalOut) {
+    if (sourceOut != nullptr) *sourceOut = "";
+    if (stepOut != nullptr) *stepOut = 0;
+    if (totalOut != nullptr) *totalOut = 0;
+    if (path == nullptr || path[0] == '\0') return false;
+
+    File f = safeFileOpen(path, "r");
+    if (!f) return false;
+
+    bool found = false;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.replace("\r", "");
+        bool indented = (line.length() > 0 &&
+                         (line.charAt(0) == ' ' || line.charAt(0) == '\t'));
+        if (indented) continue;
+        line.trim();
+        if (line.length() == 0 || line.startsWith("#")) continue;
+        if (line.startsWith("guideProgress:")) {
+            parseGuideProgressLine(line, sourceOut, stepOut, totalOut);
+            found = true;
+            break;
+        }
+        // The header block is over - nothing below here can be guideProgress.
+        if (line.startsWith("bridges:") || line.startsWith("nets:") ||
+            line.startsWith("parts:")) {
+            break;
+        }
+    }
+    safeFileClose(f, false);
+    return found;
+}
+
+void SlotManager::setActivePathFromSlot(int slotNum) {
+    String fn = getSlotFilename(slotNum);
+    strncpy(activeSlotPath, fn.c_str(), sizeof(activeSlotPath) - 1);
+    activeSlotPath[sizeof(activeSlotPath) - 1] = '\0';
+}
+
+// Where "last active" lives. Deliberately NOT config.txt: config saves are
+// full-file rewrites behind a diff gate, and writing config on every slot
+// switch would churn flash and the diff cache. One tiny file, one line, the
+// active path.
+const char* LAST_ACTIVE_PATH = "/slots/last_active.txt";
+
+// What /slots/last_active.txt is known to contain. Dedups the write, which
+// runs on every load and save. Seeded by seedBootContext() from the value it
+// reads at boot, so the first updateLastActive() after boot does not rewrite
+// the file with the value it just read. Semantics are "what the FILE holds",
+// not "what the context is", so seeding with the read value stays correct on
+// the fallback paths too (those differ, so they still rewrite).
+static char g_lastActiveWritten[128] = {0};
+
+/**
+ * Decide what context the board boots into. Called once from main.cpp's
+ * firstLoop == 1 block, AFTER configLoaded and BEFORE the first `loadfile:`
+ * pass - it only sets up netSlot / activeSlotPath; loadfile: does the actual
+ * load, so there is exactly one load path.
+ *
+ * netSlot = 0 (RotaryEncoder.cpp) stays the pre-config default, which is also
+ * the fresh-board and missing-file answer - i.e. a board that has never
+ * switched slots boots exactly the way it always did.
+ */
+void seedBootContext(void) {
+    SlotManager& mgr = SlotManager::getInstance();
+
+    // boot_mode 0: pin a fixed slot. The escape hatch for the old "always
+    // load slot 0" behavior.
+    if (jumperlessConfig.slots.boot_mode == 0) {
+        int s = jumperlessConfig.slots.boot_slot;
+        if (s < 0 || s >= NUM_SLOTS) s = 0;
+        netSlot = s;
+        mgr.setActiveSlot(s);
+        return;
+    }
+
+    // boot_mode 1 (default): boot into the last-active slot FILE.
+    String path;
+    if (safeFileExists(LAST_ACTIVE_PATH)) {
+        File f = safeFileOpen(LAST_ACTIVE_PATH, "r", 2000);
+        if (f) {
+            path = f.readString();
+            safeFileClose(f, false);
+            path.trim();
+            // Seed the dedup cache with what the file actually holds, so the
+            // first updateLastActive() of the session does not rewrite it with
+            // the value just read. The fallback paths below deliberately DO
+            // differ from it, so they still rewrite as intended.
+            strncpy(g_lastActiveWritten, path.c_str(), sizeof(g_lastActiveWritten) - 1);
+            g_lastActiveWritten[sizeof(g_lastActiveWritten) - 1] = '\0';
+        }
+    }
+
+    if (path.length() == 0) {
+        netSlot = 0;              // no memory yet - old behavior exactly
+        mgr.setActiveSlot(0);
+        return;
+    }
+
+    int n = SlotManager::slotNumberForCanonicalPath(path);
+    if (n >= 0) {
+        netSlot = n;
+        mgr.setActiveSlot(n);
+        return;
+    }
+
+    // A file context. Only seed it if the file is actually still there;
+    // otherwise fall back to slot 0 and rewrite last_active.txt so a deleted
+    // run file doesn't cost a failed load on every boot from here on. (A file
+    // that EXISTS but fails to load is handled in loadfile:, which is where
+    // the load happens.)
+    if (safeFileExists(path.c_str())) {
+        netSlot = SLOT_FILE_CONTEXT;
+        mgr.adoptBootPath(path);
+    } else {
+        Serial.println("Last-active slot file is gone (" + path + ") - booting slot 0");
+        netSlot = 0;
+        mgr.setActiveSlot(0);     // setActiveSlot -> updateLastActive rewrites the file
+    }
+}
+
+/**
+ * Point tracking at a path WITHOUT loading it - the boot seed's one use.
+ * loadfile: performs the actual load on the first pass.
+ */
+void SlotManager::adoptBootPath(const String& path) {
+    activeSlotNumber = SLOT_FILE_CONTEXT;
+    netSlot = SLOT_FILE_CONTEXT;
+    strncpy(activeSlotPath, path.c_str(), sizeof(activeSlotPath) - 1);
+    activeSlotPath[sizeof(activeSlotPath) - 1] = '\0';
+}
+
+void SlotManager::updateLastActive() {
+    // SELF-GATING - one choke point, so no caller has to remember the rules:
+    //   - never mid-preview (a wheel detent through the Slots menu must not
+    //     stamp a slot the user only glanced at; power loss mid-preview would
+    //     then boot into it)
+    //   - never mid-temp-slot (a calibration app's scratch slot is not a
+    //     context anyone wants to boot into)
+    //   - never slot 99 (isolated MicroPython) or temp slot 8
+    //   - never an empty path
+    if (previewModeActive || temporarySlotActive) return;
+    if (activeSlotNumber == 99 || activeSlotNumber == 8) return;
+    if (activeSlotNumber < 0 && activeSlotNumber != SLOT_FILE_CONTEXT) return;
+    if (activeSlotPath[0] == '\0') return;
+    // A project TEMPLATE is read-only (see saveStateToActivePath) - a board
+    // must never boot into a context it cannot save.
+    if (isTemplatePath(activeSlotPath)) return;
+
+    // Skip the write when nothing changed - this runs on every load and save.
+    if (strncmp(g_lastActiveWritten, activeSlotPath, sizeof(g_lastActiveWritten)) == 0) return;
+
+    if (!safeMkdir("/slots", 2000)) return;
+    if (safeFileWriteAll(LAST_ACTIVE_PATH, activeSlotPath, strlen(activeSlotPath), 2000)) {
+        strncpy(g_lastActiveWritten, activeSlotPath, sizeof(g_lastActiveWritten) - 1);
+        g_lastActiveWritten[sizeof(g_lastActiveWritten) - 1] = '\0';
+    }
+}
+
+String SlotManager::activeContextLabel7() const {
+    // Numbered slots keep the name the whole UI already uses.
+    if (activeSlotNumber == 99) return String("Python");
+    if (activeSlotNumber >= 0) return String("Slot ") + String(activeSlotNumber);
+    if (activeSlotPath[0] == '\0') return String("-");
+
+    String p(activeSlotPath);
+    int lastSlash = p.lastIndexOf('/');
+    String base = (lastSlash >= 0) ? p.substring(lastSlash + 1) : p;
+    if (base.endsWith(".yaml")) base = base.substring(0, base.length() - 5);
+    if (base.length() > 7) base = base.substring(0, 7);
+    return base;
 }
 
 bool SlotManager::slotExists(int slotNum) const {
@@ -2859,6 +3339,19 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
             // flusher mirrors every save to /.bak/<path>, so try that
             // copy before giving up.
             String bakPath = "/.bak" + filename;
+            bool recovered = false;
+#if !USE_FILE_CACHE
+            // Nothing writes these mirrors any more (the ABA flusher lives
+            // behind USE_FILE_CACHE, currently 0), so any /.bak content on an
+            // upgraded unit is however old the cache was when it was disabled
+            // - silently restoring it would hand the user a months-stale
+            // board (sweep finding). Fail honestly instead.
+            if (safeFileExists(bakPath.c_str())) {
+                Serial.println("  A stale /.bak mirror exists but is NOT being used "
+                               "(mirrors are no longer written) - delete /.bak if you like");
+                Serial.flush();
+            }
+#else
             Serial.print("  Canonical parse failed, trying mirror at ");
             Serial.println(bakPath);
             Serial.flush();
@@ -2869,7 +3362,6 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
             size_t bakRead = 0;
             extern bool safeFileReadAllRaw(const char* path, char* buffer, size_t buffer_size,
                                            size_t* bytes_read, uint32_t timeout_ms);
-            bool recovered = false;
             if (bakBuf && safeFileExists(bakPath.c_str()) &&
                 safeFileReadAllRaw(bakPath.c_str(), bakBuf, MAX_SLOT_YAML, &bakRead, 2000) &&
                 bakRead > 0) {
@@ -2890,6 +3382,7 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
                 errorMsg = "Failed to parse YAML slot " + String(slotNum) + " (no usable mirror): " + errorMsg;
             }
             if (bakBuf) free(bakBuf);
+#endif  // USE_FILE_CACHE
             if (!recovered) {
                 Serial.println("  Parse failed: " + errorMsg);
                 Serial.flush();
@@ -2899,7 +3392,20 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
         
         // Serial.println("  ✓ Loaded " + String(activeState.connections.numBridges) + " connections");
         // Serial.flush();
-        
+
+        // Re-expand placed parts into bridges BEFORE routing (idempotent -
+        // exact duplicates are skipped, so a slot whose expansion bridges
+        // already live in bridges: loads clean). Net names re-assert inside
+        // refreshConnections' reconcile pass (partsReassertNetNames).
+        if (activeState.parts.numParts > 0) {
+            String partsErr;
+            expandPartsToBridges(activeState, partsErr);
+            if (partsErr.length() > 0 && jumperlessConfig.debug.show_node_errors) {
+                Serial.print("parts expansion warnings: ");
+                Serial.println(partsErr);
+            }
+        }
+
         // Populate FakeGPIO slot structs BEFORE routing so the router can expand
         // FAKE_GP_OUT_x/FAKE_GP_IN_x virtual nodes to real voltage sources/ADCs.
         // Without this, the router sees inactive slots and can't find chip positions.
@@ -2928,51 +3434,268 @@ bool SlotManager::loadSlot(int slotNum, String& errorMsg) {
         
         activeSlotNumber = slotNum;
         netSlot = slotNum;  // Sync global slot tracker
+        setActivePathFromSlot(slotNum);
+        updateLastActive();
         return true;
     }
-    
+
     // Slot file doesn't exist - start with empty state
     // Serial.println("  File doesn't exist, using empty slot");
     // Serial.flush();
-    
+
     activeState.clear();
     activeSlotNumber = slotNum;
     netSlot = slotNum;  // Sync global slot tracker
-    
+    setActivePathFromSlot(slotNum);
+
+    // POWER RE-ASSERT (design addition #3). The file-exists branch above ends
+    // in applyStateToHardware(); this one used to just swap the trackers and
+    // return, so switching to an empty slot left the PREVIOUS context's rail
+    // and DAC voltages energized. activeState.clear() has just reset power to
+    // defaults, so push those to hardware too - "loading a context always
+    // asserts that context's power" must have no exceptions, and
+    // boot-last-active depends on it.
+    if (!previewModeActive) {
+        applyStateToHardware();
+    }
+
+    updateLastActive();
+
     // DON'T create the file yet - only create when something is saved
     // This prevents crashes from creating large objects on the stack
-    
+
     return true;
 }
 
+/**
+ * Load a slot YAML from an arbitrary path and ADOPT it as the active context.
+ *
+ * This is the heart of the "slots become files" rework. What used to happen:
+ * an unrecognized path left activeSlotNumber pointing at the PREVIOUS slot,
+ * so the next idle auto-save wrote the loaded file's content over that slot.
+ * Now the context follows the file, and the auto-save writes back to the file
+ * itself (saveActiveSlot -> saveStateToActivePath).
+ *
+ * ATOMIC ON FAILURE - the contract the launcher's exit table is written
+ * against. Tracking (activeSlotNumber / netSlot / activeSlotPath) is adopted
+ * ONLY on a successful open AND parse. There are TWO failure modes, not one:
+ *
+ *   - Open failure (missing file, open refused): nothing happened at all.
+ *     The read is kept strictly BEFORE fromYAML (which clear()s the state),
+ *     and that ordering IS the atomicity for this case.
+ *
+ *   - Parse/validate failure: fromYAML has ALREADY replaced globalState by
+ *     the time it returns false, so "leave the trackers alone" is NOT enough -
+ *     it would leave foreign remnants in RAM under the PRIOR context's number,
+ *     and the next dirty auto-save would write them into that numbered slot
+ *     with no -2 sentinel to trip the loud saveSlot guard. So the prior
+ *     context is RE-LOADED from its own file here, and a false return again
+ *     means "nothing happened".
+ *
+ *     (An earlier version of this contract claimed fromYAML never returns
+ *     false. It does: fromYAML ends in `return validate(errorMsg)`, and
+ *     PowerState::validate rejects any rail/DAC outside +/-8 V. Host-editing
+ *     a run file over MSC, or clicking a hand-written YAML in the Files
+ *     browser, reaches it.)
+ *
+ *   - EXCEPTION, double failure: if that restoring re-load ALSO fails, the
+ *     manager enters the NO-ACTIVE-CONTEXT state: activeSlotNumber ==
+ *     netSlot == -1, empty path, cleared state, and the board cleared to
+ *     match (nothing routed, nothing powered beyond defaults). Nothing can be
+ *     auto-saved from there (saveActiveSlot returns "No active slot to
+ *     save"), which is the point - it is the only terminal state that cannot
+ *     write foreign content into anyone's file.
+ *
+ *     This is NOT limited to "the prior file vanished meanwhile". For a FILE
+ *     context it is DETERMINISTIC whenever the caller passed the active path
+ *     itself: USBfs's MSC-eject reload calls
+ *     loadSlotFromPath(getActiveSlotPath()), so savedPath == path and the
+ *     restore re-reads the same bad file. A host writing an invalid YAML over
+ *     the active run file therefore lands in the terminal state every time.
+ *     Numbered contexts are rescued by loadSlot's /.bak mirror; arbitrary
+ *     paths have no mirror. A reboot recovers via the boot slot-0 fallback.
+ */
 bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
+    // Captured BEFORE anything is touched, so the parse-failure path can put
+    // the prior context back. Same (number, path) pair pattern the preview,
+    // temp-slot, printSlotInfo and Wokwi dances use.
+    const int savedSlot = activeSlotNumber;
+    char savedPath[128];
+    strncpy(savedPath, activeSlotPath, sizeof(savedPath) - 1);
+    savedPath[sizeof(savedPath) - 1] = '\0';
+
     if (!safeFileExists(path.c_str())) {
         errorMsg = "File not found: " + path;
-        return false;
+        return false;   // tracking untouched - prior context still active
     }
     File file = safeFileOpen(path.c_str(), "r");
     if (!file) {
         errorMsg = "Failed to open: " + path;
-        return false;
+        return false;   // tracking untouched - prior context still active
     }
     String content = file.readString();
     safeFileClose(file, false);
+
+    // Big-event flush of the OUTGOING context before its state is replaced -
+    // the loadSlot precedent (:2921). Switching away must not drop the
+    // previous context's pending writes. Only after the read succeeded, so a
+    // failed open costs nothing.
+    if (path != String(activeSlotPath)) {
+        fileCacheFlushNowAll("slot_switch");
+    }
+
     if (!activeState.fromYAML(content, errorMsg)) {
         errorMsg = "Failed to parse YAML: " + errorMsg;
+        Serial.println("Load failed for " + path + ": " + errorMsg);
+
+        // globalState is ALREADY clobbered (fromYAML clear()s before parsing),
+        // so restoring the prior context means genuinely re-loading it. Reuse
+        // the public loaders rather than duplicating their tails (parts
+        // expansion, fakeGpio, refresh, power re-assert, updateLastActive) -
+        // `restoringContext` bounds the recursion to depth 1, so a restore
+        // whose own file is also bad cannot re-enter this logic.
+        bool restored = false;
+        if (!restoringContext) {
+            restoringContext = true;
+            String restoreErr;
+            if (savedSlot >= 0) {
+                restored = loadSlot(savedSlot, restoreErr);
+            } else if (savedSlot == SLOT_FILE_CONTEXT && savedPath[0] != '\0') {
+                restored = loadSlotFromPath(String(savedPath), restoreErr);
+            }
+            restoringContext = false;
+        }
+
+        // A FAILED LOAD WRITES NOTHING (T4's atomicity contract, w3-t5).
+        //
+        // The no-op gate on the power setters removed the four spurious dirty
+        // marks the restore's own applyStateToHardware() used to leave behind,
+        // but the contract has to hold for prior contexts that re-dirty for
+        // OTHER reasons on the way back in - a parts-bearing slot re-expands
+        // through expandPartsToBridges -> addConnection, and fromYAML's
+        // board-portability sanitizer can drop bridges and mark dirty too.
+        // Whatever the reason, at this point RAM was just re-loaded from the
+        // prior context's own file, so RAM is a SUBSET of that file - never a
+        // superset. (Not "identical": the sanitizer case above means RAM can
+        // hold LESS than the file, which is exactly why it marked dirty.) Its
+        // rewrite is therefore deferred to the user's next real edit, the same
+        // deferral the /.bak mirror heal below gets, and for the same reason:
+        // "a failed load writes nothing" outranks "tidy the file up now".
+        //
+        // NUANCE, deliberate: if the restore came back through loadSlot's
+        // /.bak mirror rescue, that path marks dirty ON PURPOSE so the next
+        // save rewrites the damaged canonical. Clearing here defers that heal
+        // to the user's next real edit rather than performing it as a
+        // side-effect of a failed load - which is what "a failed load writes
+        // nothing" requires. The mirror stays intact either way.
+        if (restored) {
+            activeState.clearDirty();
+        }
+
+        if (!restored) {
+            // Double failure (or there was no prior context to restore).
+            // Terminal state: NO ACTIVE CONTEXT.
+            //
+            // WHEN THIS HAPPENS. For a numbered prior context it is genuinely
+            // rare - loadSlot has a /.bak mirror rescue, and a missing slot
+            // file is a legitimate empty slot that restores fine. For a FILE
+            // prior context it is DETERMINISTIC in one important case: the
+            // USBfs eject reload calls loadSlotFromPath(getActiveSlotPath()),
+            // so savedPath == path and the restore re-reads the SAME bad file,
+            // guaranteeing the second failure. A host writing an invalid YAML
+            // over the active run file over MSC - an explicitly endorsed flow
+            // in this design - lands here every time. Arbitrary paths have no
+            // mirror to fall back to. Nothing is written and a reboot recovers
+            // through the boot slot-0 fallback, so this is a safe stop, not
+            // data loss - but it is a normal outcome, not an exotic one.
+            //
+            // netSlot is set to -1, NOT 0. deleteSlot's historical -1/0 split
+            // is exactly what must not be copied here: with netSlot == 0 and
+            // activeSlotNumber == -1 the next service() pass would
+            // syncFromGlobalNetSlot() to 0 and write this cleared/foreign
+            // state straight over /slots/slot0.yaml. Keeping the pair EQUAL at
+            // -1 means the sync is a no-op and saveActiveSlot refuses. -1 is
+            // also an already-live netSlot value here (attractMode's defcon
+            // position; main.cpp's loadfile: fails it through to
+            // clearActiveSlot), so this lands on handled ground.
+            //
+            // updateLastActive() self-gates on -1, so last_active.txt still
+            // names the saved context; if that file really is gone, boot's
+            // existing fallback rewrites it.
+            activeState.clear();
+            activeSlotNumber = -1;
+            netSlot = -1;
+            activeSlotPath[0] = '\0';
+
+            // THE INVARIANT: terminal state means NOTHING ROUTED and NOTHING
+            // POWERED BEYOND DEFAULTS. Clearing RAM alone would leave the
+            // crossbar still holding the vanished context's bridges and the
+            // rails still energized at its voltages while the state reads
+            // empty - the same RAM/hardware divergence that made the original
+            // parse-failure bug dangerous. The common parse-failure path gets
+            // this for free from the restoring loader; the terminal path has
+            // to do it itself. (clear() has just reset power to defaults:
+            // rails 0 V, DAC1 0 V, DAC0 at the probe feed voltage.)
+            extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
+            refreshConnections(-1, 1, 1);
+            if (!previewModeActive) {
+                applyStateToHardware();
+            }
+
+            Serial.println("Prior context could not be restored - no active "
+                           "context; board cleared and nothing will be "
+                           "auto-saved until a slot or file is loaded.");
+            Serial.flush();
+        }
         return false;
+    }
+    // Re-expand placed parts into bridges before routing (idempotent - see
+    // the identical hook in loadSlot).
+    if (activeState.parts.numParts > 0) {
+        String partsErr;
+        expandPartsToBridges(activeState, partsErr);
+        if (partsErr.length() > 0 && jumperlessConfig.debug.show_node_errors) {
+            Serial.print("parts expansion warnings: ");
+            Serial.println(partsErr);
+        }
     }
     initializeFakeGpioFromLoadedState();
     extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
     refreshConnections(-1, 1, 1);
     finalizeFakeGpioAfterRouting();
     if (!previewModeActive) {
+        // re-assert this context's power: rails + DACs (unless the caller
+        // deferred it - the guided launch closes the project-power transient
+        // by owning the apply itself; States.h has the whole contract)
         applyStateToHardware();
     }
-    int slotNum = extractSlotNumberFromPath(path);
-    if (slotNum >= 0) {
-        activeSlotNumber = slotNum;
-        netSlot = slotNum;
+
+    // ---- ADOPT --------------------------------------------------------
+    // The old "leave tracking alone unless the name looks like a slot file"
+    // guard is GONE. A canonical /slots/slotN.yaml keeps its number; anything
+    // else becomes SLOT_FILE_CONTEXT with the path as its only identity.
+    int slotNum = slotNumberForCanonicalPath(path);
+    activeSlotNumber = (slotNum >= 0) ? slotNum : SLOT_FILE_CONTEXT;
+    netSlot = activeSlotNumber;                    // the load-bearing invariant
+    strncpy(activeSlotPath, path.c_str(), sizeof(activeSlotPath) - 1);
+    activeSlotPath[sizeof(activeSlotPath) - 1] = '\0';
+
+    // Tell the app a file context is now active. Numbered slots announce
+    // themselves through cmd_cycleSlots' SLOT_CHANGED; entering a file
+    // context has no other announcement point.
+    // The WIRE value for "a file context" is -1, not -2: -1 already means
+    // "no numbered slot" to every existing integer parser, and -2 is an
+    // internal sentinel that never leaves the firmware.
+    // Suppressed while restoring: a failed load of X must not announce a
+    // spurious context change for the prior context it just put back.
+    if (activeSlotNumber == SLOT_FILE_CONTEXT && !restoringContext) {
+        Jerial.println("SLOT_CHANGED:-1");
+        Jerial.print("ACTIVE_PATH:");
+        Jerial.println(activeSlotPath);
+        Jerial.flush();
     }
+
+    updateLastActive();
     return true;
 }
 
@@ -2980,12 +3703,26 @@ bool SlotManager::loadSlotFromPath(const String& path, String& errorMsg) {
 static bool slotsDirectoryExists = false;
 
 bool SlotManager::saveSlot(int slotNum, String& errorMsg, bool skipValidation) {
+    // LOUD FAILURE GUARD - the safety net the whole path-context design leans
+    // on. Because netSlot == activeSlotNumber holds in both worlds, ANY call
+    // site that still forwards the raw slot number while a file context is
+    // active arrives here as -2. Turning that into a visible error (instead of
+    // letting it fall through to the generic "Invalid slot number") is what
+    // converts a missed conversion from a silent slot clobber into a bug
+    // report. If you see this, the fix is saveActiveSlot(), never a cast.
+    if (slotNum == SLOT_FILE_CONTEXT) {
+        errorMsg = "BUG: saveSlot(-2) - use saveActiveSlot";
+        Serial.println("BUG: saveSlot(-2) - use saveActiveSlot");
+        Serial.flush();
+        return false;
+    }
+
     // Allow slot 99 (Python slot) in addition to 0-7
     if (slotNum < 0 || (slotNum >= NUM_SLOTS && slotNum != 99)) {
         errorMsg = "Invalid slot number: " + String(slotNum);
         return false;
     }
-    
+
     // Cache /slots directory existence check (avoid FS call on every save)
     if (!slotsDirectoryExists) {
         if (!safeMkdir("/slots")) {
@@ -3021,8 +3758,16 @@ bool SlotManager::saveSlot(int slotNum, String& errorMsg, bool skipValidation) {
         return false;
     }
     
+    // saveSlot MOVES the active context to slotNum (that has always been its
+    // behavior). The path has to move with it or the two identities disagree -
+    // an explicit `W 3` or a Menus save-to-slot issued while a run file was
+    // active would otherwise leave activeSlotPath pointing at the run file
+    // while the number says 3, and the next auto-save would write slot 3's
+    // content into the run file.
     activeSlotNumber = slotNum;
     netSlot = slotNum;  // Sync global slot tracker
+    setActivePathFromSlot(slotNum);
+    updateLastActive();
     activeState.clearDirty();  // Mark as saved
 
     // Persist undo history alongside the slot. This is an instant PSRAM
@@ -3033,12 +3778,101 @@ bool SlotManager::saveSlot(int slotNum, String& errorMsg, bool skipValidation) {
     return true;
 }
 
-bool SlotManager::saveActiveSlot(String& errorMsg, bool skipValidation) {
-    if (activeSlotNumber < 0) {
-        errorMsg = "No active slot to save";
+/**
+ * Write the active state to an arbitrary path. Generalized writeSlotFile:
+ * same validate -> toYAML -> safeFileWriteAll sequence, no /slots assumption
+ * and no slot-tracking side effects.
+ */
+bool SlotManager::writeStateToPath(const char* path, String& errorMsg, bool skipValidation) {
+    if (!path || path[0] == '\0') {
+        errorMsg = "writeStateToPath: empty path";
         return false;
     }
-    return saveSlot(activeSlotNumber, errorMsg, skipValidation);
+
+    // TEMPLATE PROTECTION (design-slots.md §3) - enforced HERE, at the single
+    // door every state-write goes through, rather than only in
+    // saveStateToActivePath. A shipped /projects/<dir>/wiring*.yaml is a
+    // TEMPLATE, not a workspace, and must never be written with serialized
+    // state by anyone.
+    //
+    // This is not hypothetical - it was caught on the bench. Adoption made
+    // `load_project("eeprom")` point the context at the template, the state
+    // went dirty, and the idle auto-save wrote globalState back over it. The
+    // damage is worse than a normal overwrite because toYAML is a WHOLESALE
+    // REWRITE and the `guide:` / `meta:` sections are swallowed on parse and
+    // never re-emitted: three shipped templates came back with their entire
+    // guide sections gone.
+    //
+    // No legitimate caller writes STATE to a template path - provisioning
+    // installs templates by copying bytes through safeFileWriteAll, not
+    // through this API - so putting the refusal at the bottom costs nothing
+    // and closes the last door. The launcher's per-run files - <dir>_run.yaml,
+    // or <dir>_<N>.yaml under JL_PROJECT_RUN_HISTORY - deliberately do not
+    // match the predicate.
+    if (isTemplatePath(path)) {
+        errorMsg = "Refusing to write over project template " + String(path);
+        Serial.print("REFUSED: not writing over project template ");
+        Serial.println(path);
+        Serial.flush();
+        return false;
+    }
+
+    if (!skipValidation) {
+        if (!activeState.validate(errorMsg)) {
+            errorMsg = "Cannot save invalid state: " + errorMsg;
+            return false;
+        }
+    }
+
+    String yamlContent;
+    if (!activeState.toYAML(yamlContent)) {
+        errorMsg = "Failed to serialize state to YAML";
+        return false;
+    }
+
+    if (!safeFileWriteAll(path, yamlContent.c_str(), yamlContent.length(), 2000)) {
+        errorMsg = "Failed to write file: " + String(path);
+        return false;
+    }
+    return true;
+}
+
+/** saveActiveSlot's SLOT_FILE_CONTEXT branch: write back to the active file. */
+bool SlotManager::saveStateToActivePath(String& errorMsg, bool skipValidation) {
+    if (activeSlotPath[0] == '\0') {
+        errorMsg = "No active slot file to save";
+        return false;
+    }
+
+    // The template refusal lives inside writeStateToPath (the single door),
+    // so a template context simply fails to save here - loudly, and WITHOUT
+    // clearing dirty, so nothing is silently lost.
+    if (!writeStateToPath(activeSlotPath, errorMsg, skipValidation)) {
+        return false;
+    }
+    activeState.clearDirty();
+    // Same undo-history companion every saveSlot does. Per design §1-Undo the
+    // file-context bucket's transactions are skipped inside undoPersistHistory
+    // itself, so this is a cheap no-op when only file-context history exists.
+    undoPersistHistory();
+    return true;
+}
+
+/**
+ * THE single save dispatch point for "persist whatever context is active"
+ * (design-slots.md §3). Every converted call site routes through here; the
+ * saveSlot(-2) guard above catches the ones that didn't.
+ */
+bool SlotManager::saveActiveSlot(String& errorMsg, bool skipValidation) {
+    if (activeSlotNumber >= 0) {
+        return saveSlot(activeSlotNumber, errorMsg, skipValidation);
+    }
+    if (activeSlotNumber == SLOT_FILE_CONTEXT && activeSlotPath[0] != '\0') {
+        return saveStateToActivePath(errorMsg, skipValidation);
+    }
+    // -1 ("no active slot", e.g. right after deleteSlot) is unchanged.
+    errorMsg = "No active slot to save";
+    return false;
 }
 
 bool SlotManager::deleteSlot(int slotNum, String& errorMsg) {
@@ -3067,8 +3901,9 @@ bool SlotManager::deleteSlot(int slotNum, String& errorMsg) {
         activeState.clear();
         activeSlotNumber = -1;
         netSlot = 0;  // Reset to slot 0
+        activeSlotPath[0] = '\0';  // don't leave a path pointing at a dead file
     }
-    
+
     return true;
 }
 
@@ -3079,6 +3914,13 @@ void SlotManager::clearActiveSlot() {
 void SlotManager::setActiveSlot(int slotNum) {
     activeSlotNumber = slotNum;
     netSlot = slotNum;  // Keep global slot tracker in sync
+    // Every caller passes an explicit 0-7 (Menus SLOTSACTION, FileParsing's
+    // paste-into-slot-N, ProjectsApp) or 99 (MicroPython isolated entry), so
+    // the canonical filename is always the right path here. The pairing is
+    // mandatory: leaving a stale path behind is the number/path disagreement
+    // that lets an auto-save write into the wrong file.
+    setActivePathFromSlot(slotNum);
+    updateLastActive();
 }
 
 void SlotManager::syncFromGlobalNetSlot() {
@@ -3118,13 +3960,20 @@ bool SlotManager::enterTemporarySlot(int tempSlot, bool saveCurrentFirst) {
         saveActiveSlot(errorMsg);
     }
     
-    // Remember where we came from
+    // Remember where we came from - number AND path. temporarySlotOriginal
+    // may be SLOT_FILE_CONTEXT now (an app launched from a project run file),
+    // in which case the path is the only way back.
     temporarySlotOriginal = activeSlotNumber;
-    
+    strncpy(temporarySlotOriginalPath, activeSlotPath, sizeof(temporarySlotOriginalPath) - 1);
+    temporarySlotOriginalPath[sizeof(temporarySlotOriginalPath) - 1] = '\0';
+
     // Switch to the temporary slot - fast, just updates slot tracking
     netSlot = tempSlot;
     activeSlotNumber = tempSlot;
-    
+    setActivePathFromSlot(tempSlot);
+    // (no updateLastActive: temp 8 / 99 must never become the boot context -
+    // updateLastActive() gates on temporarySlotActive too, belt and braces)
+
     // Clear the active state for fresh start (fast - no file I/O)
     // Skip loading temp slot since apps will set up their own connections anyway
     clearActiveSlot();
@@ -3138,31 +3987,49 @@ bool SlotManager::exitTemporarySlot(bool refreshHardware) {
         return false;
     }
     
-    // Restore slot tracking
+    // Restore slot tracking - number AND path together.
     netSlot = temporarySlotOriginal;
     activeSlotNumber = temporarySlotOriginal;
-    
-    // Load the original slot data from file
-    // This is necessary to restore the user's connections
+    strncpy(activeSlotPath, temporarySlotOriginalPath, sizeof(activeSlotPath) - 1);
+    activeSlotPath[sizeof(activeSlotPath) - 1] = '\0';
+
+    // Reload the original context's data from ITS OWN PATH. This used to read
+    // getSlotFilename(temporarySlotOriginal), which for a run file would have
+    // been "/slots/slot-2.yaml"; going through the remembered path is what
+    // lets a calibration app launched from /projects/555/555_1.yaml come back
+    // to that run file.
     String content;
     String errorMsg;
-    String filename = getSlotFilename(temporarySlotOriginal);
-    
-    if (safeFileExists(filename.c_str())) {
-        if (readSlotFile(temporarySlotOriginal, content, errorMsg)) {
+
+    if (activeSlotPath[0] != '\0' && safeFileExists(activeSlotPath)) {
+        File f = safeFileOpen(activeSlotPath, "r", 5000);
+        if (f) {
+            content = f.readString();
+            safeFileClose(f, false);
             activeState.fromYAML(content, errorMsg);
         }
     }
-    
+
     temporarySlotActive = false;
     temporarySlotOriginal = -1;
-    
+    temporarySlotOriginalPath[0] = '\0';
+
+    // POWER RE-ASSERT (design addition #3). This path used to end at
+    // refreshConnections(), which restores BRIDGES but not rails/DACs - so
+    // exiting a calibration app left whatever voltages the app had set (often
+    // 0 V, or a calibration ramp's last value) while the restored slot's
+    // power: said otherwise. Every other context-load path asserts power;
+    // this one now does too.
+    if (!previewModeActive) {
+        applyStateToHardware();
+    }
+
     // Refresh hardware connections (caller can skip if they'll do it manually)
     if (refreshHardware) {
         extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
         refreshConnections(-1, 0, 1);
     }
-    
+
     return true;
 }
 
@@ -3314,7 +4181,8 @@ bool SlotManager::migrateOldSlotFile(int slotNum, String& errorMsg) {
     
     activeSlotNumber = slotNum;
     netSlot = slotNum;  // Sync global slot tracker
-    
+    setActivePathFromSlot(slotNum);
+
     Serial.println("✓ Migrated legacy slot " + String(slotNum) + " to new format");
     return true;
 }
@@ -3375,22 +4243,40 @@ void SlotManager::printSlotInfo(int slotNum) {
     String errorMsg;
     // JumperlessState is non-copyable (~50KB), so we can't stash a copy of the
     // active state. Instead: if inspecting a different slot, persist any unsaved
-    // edits, load the target in place to print it, then reload the original slot
-    // from disk. No struct copy.
+    // edits, load the target in place to print it, then reload the original
+    // CONTEXT from disk. No struct copy.
+    //
+    // The save/restore dance is captured as a (number, path) PAIR: savedSlot
+    // may be SLOT_FILE_CONTEXT, in which case restoring by number is
+    // impossible and the path is the only way back.
     int savedSlot = activeSlotNumber;
+    char savedPath[128];
+    strncpy(savedPath, activeSlotPath, sizeof(savedPath) - 1);
+    savedPath[sizeof(savedPath) - 1] = '\0';
     bool switched = (slotNum != savedSlot);
+
+    // Restore helper: by path when the saved context was a file, by number
+    // otherwise. Used on both the error and the success exit.
+    auto restoreSaved = [&]() {
+        String e;
+        if (savedSlot == SLOT_FILE_CONTEXT && savedPath[0] != '\0') {
+            loadSlotFromPath(String(savedPath), e);
+        } else if (savedSlot >= 0) {
+            loadSlot(savedSlot, e);
+        }
+    };
 
     if (switched) {
         if (activeState.isDirty()) {
-            saveSlot(savedSlot, errorMsg);  // so the reload below restores edits
+            saveActiveSlot(errorMsg);  // path-aware; so the reload restores edits
         }
         if (!loadSlot(slotNum, errorMsg)) {
             Serial.println("Error loading slot: " + errorMsg);
-            loadSlot(savedSlot, errorMsg);  // best-effort restore
+            restoreSaved();  // best-effort restore
             return;
         }
     }
-    
+
     Serial.println("Connections: " + String(activeState.connections.numBridges));
     Serial.println("Power:");
     Serial.println("  Top Rail:    " + String(activeState.power.topRail, 2) + "V");
@@ -3400,9 +4286,9 @@ void SlotManager::printSlotInfo(int slotNum) {
     Serial.println("Custom Colors: " + String(activeState.display.numCustomColors));
     Serial.println("RAM Usage: ~" + String(activeState.estimateRAMUsage()) + " bytes");
     
-    // Restore the original active slot from disk (no struct copy).
+    // Restore the original active context from disk (no struct copy).
     if (switched) {
-        loadSlot(savedSlot, errorMsg);
+        restoreSaved();
     }
 }
 
@@ -3413,6 +4299,11 @@ void SlotManager::listSlots() {
             String marker = (i == activeSlotNumber) ? " [ACTIVE]" : "";
             Serial.println("Slot " + String(i) + marker);
         }
+    }
+    // A file context isn't in the 0-7 list at all - name it explicitly so
+    // "which slot am I on" has an honest answer.
+    if (isPathContext()) {
+        Serial.println("Active file: " + String(activeSlotPath));
     }
     Serial.println("=======================\n");
 }
@@ -3436,20 +4327,51 @@ bool SlotManager::enterPreviewMode(int slotToPreview, String& errorMsg) {
         return false;
     }
     
-    // Remember which slot we're currently on (to return to it later)
+    // Remember which context we're currently on (to return to it later) -
+    // number AND path, because originalSlotNumber may be SLOT_FILE_CONTEXT.
+    const bool wasAlreadyPreviewing = previewModeActive;
+    const int prevPreviewSlotNumber = previewSlotNumber;
     if (!previewModeActive) {
         originalSlotNumber = activeSlotNumber;
+        strncpy(previewOriginalPath, activeSlotPath, sizeof(previewOriginalPath) - 1);
+        previewOriginalPath[sizeof(previewOriginalPath) - 1] = '\0';
         // Save original rail voltage settings
         originalRailVoltages[0] = activeState.power.topRail;
         originalRailVoltages[1] = activeState.power.bottomRail;
     }
-    
+
     String filename = getSlotFilename(slotToPreview);
-    
+
+    // ORDERING TRAP (design-slots.md §2). previewModeActive is raised BEFORE
+    // the internal loadSlot, not after it. Two things gate on that flag inside
+    // loadSlot, and both were being checked while it was still false:
+    //
+    //   1. updateLastActive() - so every wheel detent through the Slots
+    //      preview menu (Menus -> previewSlotColors -> enterPreviewMode)
+    //      stamped the merely-GLANCED-AT slot into last_active.txt. Power loss
+    //      mid-preview would then boot a slot the user never chose.
+    //   2. applyStateToHardware() - so a preview, which is documented as
+    //      "loads into globalState WITHOUT applying to hardware", was in fact
+    //      applying the previewed slot's rails and DACs. Raising the flag
+    //      first makes preview match its own contract; exitPreview's cancel
+    //      path restores rails either way, and its apply path calls
+    //      applyStateToHardware() explicitly.
+    previewModeActive = true;
+    previewSlotNumber = slotToPreview;
+
     // Check if slot file exists
     if (safeFileExists(filename.c_str())) {
         // Slot exists - load it normally
         if (!loadSlot(slotToPreview, errorMsg)) {
+            // Unwind exactly what we changed, so a failed preview neither
+            // leaves the manager stuck in preview mode nor discards an
+            // in-progress preview's original-context bookkeeping.
+            previewModeActive = wasAlreadyPreviewing;
+            previewSlotNumber = wasAlreadyPreviewing ? prevPreviewSlotNumber : -1;
+            if (!wasAlreadyPreviewing) {
+                originalSlotNumber = -1;
+                previewOriginalPath[0] = '\0';
+            }
             return false;
         }
     } else {
@@ -3457,14 +4379,16 @@ bool SlotManager::enterPreviewMode(int slotToPreview, String& errorMsg) {
         activeState.clear();
         activeSlotNumber = slotToPreview;
         netSlot = slotToPreview;
+        setActivePathFromSlot(slotToPreview);
     }
-    
+
     // activeState.power is now the single source of truth
-    
-    // Mark that we're in preview mode
-    previewModeActive = true;
-    previewSlotNumber = slotToPreview;
-    
+
+    // The label service is frozen while the menu's BLOCKING loop owns core 0,
+    // but core 1 renders overlays in preview - swap the composed labels
+    // synchronously or the previous state's markers sit over this preview.
+    partLabels.recomposeNow();
+
     return true;
 }
 
@@ -3476,6 +4400,7 @@ void SlotManager::clearPreviewMode() {
         previewModeActive = false;
         previewSlotNumber = -1;
         originalSlotNumber = -1;
+        previewOriginalPath[0] = '\0';
     }
 }
 
@@ -3495,19 +4420,31 @@ bool SlotManager::exitPreview(bool applyPreview, String& errorMsg) {
                 previewModeActive = false;
                 previewSlotNumber = -1;
                 originalSlotNumber = -1;
+                previewOriginalPath[0] = '\0';
                 return false;
             }
         }
-        
+
         // Exit preview mode and apply the previewed state to hardware
         previewModeActive = false;
         previewSlotNumber = -1;
         originalSlotNumber = -1;
-        
+        previewOriginalPath[0] = '\0';
+
         // Now apply the previewed state to hardware (power, GPIO, etc.)
         applyStateToHardware();
-        
-        // activeSlotNumber and netSlot are already set to the previewed slot
+
+        // activeSlotNumber and netSlot are already set to the previewed slot -
+        // but nothing has told last_active.txt yet. The internal saveSlot
+        // above ran while previewModeActive was still true, so its
+        // updateLastActive() was gated off by design. Without this call the
+        // context becomes the previewed slot while the BOOT context still
+        // points at the pre-preview one. Menus' caller happens to follow with
+        // setActiveSlot (which updates it); LEDs' previewSlotColors caller
+        // does not, so it has to be done here.
+        updateLastActive();
+
+        partLabels.recomposeNow();   // same reason as enterPreviewMode's call
         return true;
     } else {
         // User wants to cancel - restore original slot AND rail voltages
@@ -3518,11 +4455,23 @@ bool SlotManager::exitPreview(bool applyPreview, String& errorMsg) {
         activeState.power.topRail = originalRailVoltages[0];
         activeState.power.bottomRail = originalRailVoltages[1];
         
-        // Load the original slot back
+        // Load the original context back - by PATH when it was a file
+        // context (loadSlot(-2) would just fail), by number otherwise.
         int slotToRestore = originalSlotNumber;
+        char pathToRestore[128];
+        strncpy(pathToRestore, previewOriginalPath, sizeof(pathToRestore) - 1);
+        pathToRestore[sizeof(pathToRestore) - 1] = '\0';
         originalSlotNumber = -1;
-        
-        return loadSlot(slotToRestore, errorMsg);
+        previewOriginalPath[0] = '\0';
+
+        bool restored;
+        if (slotToRestore == SLOT_FILE_CONTEXT && pathToRestore[0] != '\0') {
+            restored = loadSlotFromPath(String(pathToRestore), errorMsg);
+        } else {
+            restored = loadSlot(slotToRestore, errorMsg);
+        }
+        partLabels.recomposeNow();   // same reason as enterPreviewMode's call
+        return restored;
     }
 }
 
@@ -3564,9 +4513,11 @@ void restoreStateBackup(bool autoSave) {
         }
         
         if (autoSave) {
+            // Path-aware: from a file context saveSlot(netSlot) would be
+            // saveSlot(-2) and hit the BUG guard.
             SlotManager& mgr = SlotManager::getInstance();
             String err;
-            mgr.saveSlot(netSlot, err);
+            mgr.saveActiveSlot(err);
         }
     }
 }
@@ -3733,7 +4684,13 @@ ServiceStatus SlotManager::service() {
     
     // Get editor state once at the start (used by multiple sections below)
     const char* currentlyEditing = hasEditorOpen ? ekilo_get_currently_editing_file() : nullptr;
-    int editingSlotNumber = extractSlotNumberFromFilename(currentlyEditing);
+    // Same strict matcher everything else uses. This caller only ever wants
+    // canonical slot files (editing /slots/slot3.yaml previews slot 3), so
+    // behavior is unchanged - it just no longer has its own loose copy.
+    // Guard the nullptr: currentlyEditing is null whenever no editor is open.
+    int editingSlotNumber = currentlyEditing
+                                ? slotNumberForCanonicalPath(String(currentlyEditing))
+                                : -1;
     
     // ============================================================================
     // PREVIEW MODE MANAGEMENT: Only run if editor is open or already in preview mode
@@ -3824,7 +4781,21 @@ ServiceStatus SlotManager::service() {
     //     shutdown) already call fileCacheFlushNowAll() which invokes
     //     saveSlot synchronously through this same path - those bypass
     //     the gate.
-    if (hasDirtyState && systemIdleForFlush() && !refreshLocalInProgress && !core1busy) {
+    // A read-only template context can never be auto-saved (see
+    // saveStateToActivePath). Skip the ATTEMPT here rather than letting it
+    // fail every idle pass: the dirty flag deliberately stays set, so an
+    // unguarded attempt would print its refusal ~every 750 ms forever. The
+    // per-call loud refusal still fires for user-initiated saves.
+    bool activeIsReadOnlyTemplate = isPathContext() && isTemplatePath(activeSlotPath);
+    if (hasDirtyState && activeIsReadOnlyTemplate) {
+        static unsigned long lastTemplateNote = 0;
+        if (millis() - lastTemplateNote > 10000) {
+            lastTemplateNote = millis();
+            Serial.print("(unsaved edits: ");
+            Serial.print(activeSlotPath);
+            Serial.println(" is a project template and is not written back)");
+        }
+    } else if (hasDirtyState && systemIdleForFlush() && !refreshLocalInProgress && !core1busy) {
             slowReason = "auto-save";
             unsigned long saveStart = micros();
 
@@ -3838,9 +4809,15 @@ ServiceStatus SlotManager::service() {
             // Ensure we're using the current slot (sync with netSlot)
             syncFromGlobalNetSlot();
             
-            // saveSlot will handle core synchronization and clearDirty
+            // saveActiveSlot handles core synchronization and clearDirty, and
+            // dispatches on the context's identity: numbered slot -> saveSlot,
+            // file context -> write back to activeSlotPath. THIS is the call
+            // that makes an arbitrary slot file persist its own edits instead
+            // of writing them into whatever number happened to be tracked.
             // Skip validation on auto-save (state is validated when connections are added/removed)
-            if (saveSlot(activeSlotNumber, errorMsg, true)) {
+            static unsigned long lastAutoSaveFailPrint = 0;
+            if (saveActiveSlot(errorMsg, true)) {
+                lastAutoSaveFailPrint = 0;   // next failure prints immediately
                 unsigned long saveTime = micros() - saveStart;
                 if (debugWaitLoopTiming) {
                 if (saveTime > 100000) {
@@ -3853,11 +4830,27 @@ ServiceStatus SlotManager::service() {
                     Serial.printf("DEBUG: Auto-save completed\n");
                 }
             } else {
-                // Don't clear dirty on failure - retry on next loop
-                Serial.print("✗ Auto-save failed (slot ");
-                Serial.print(activeSlotNumber);
-                Serial.print("): ");
-                Serial.println(errorMsg);
+                // Don't clear dirty on failure - retry on next loop.
+                //
+                // THROTTLED, for the same reason the template branch above is:
+                // the dirty flag deliberately survives a failure, so a context
+                // that cannot be saved re-attempts on every idle pass. The
+                // no-active-context terminal state is exactly that - once the
+                // user mutates, saveActiveSlot returns "No active slot to
+                // save" forever - and an unthrottled print would bury the
+                // console. The timestamp resets on any successful save, so a
+                // genuinely new failure still prints immediately.
+                if (millis() - lastAutoSaveFailPrint > 10000) {
+                    lastAutoSaveFailPrint = millis();
+                    Serial.print("✗ Auto-save failed (");
+                    Serial.print(activeSlotNumber < 0 && !isPathContext()
+                                     ? String("no active context")
+                                     : (isPathContext()
+                                            ? String(activeSlotPath)
+                                            : ("slot " + String(activeSlotNumber))));
+                    Serial.print("): ");
+                    Serial.println(errorMsg);
+                }
                 lastStatus = ServiceStatus::ERROR;
             }
     } else if (hasDirtyState && usbMountedByHost) {

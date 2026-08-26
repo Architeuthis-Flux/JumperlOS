@@ -1,0 +1,97 @@
+{
+  "555/README.md": [
+    "0x6B944773",
+    "0x043F6084",
+    "0x0F3158A4",
+    "0x72FF45E0",
+    "0x561E244A",
+    "0x7F9D3D88",
+    "0xE846A64A",
+    "0x52517D68",
+    "0x4E203A59"
+  ],
+  "555/main.py": [
+    "0x7B1AEC22",
+    "0x228EBF07",
+    "0x2BE6A1DA",
+    "0xFD94A80B",
+    "0x89075267",
+    "0xD488958C"
+  ],
+  "555/wiring.yaml": [
+    "0x8158E30E",
+    "0x8E29492C",
+    "0xEEC03F56",
+    "0x2E55BF41",
+    "0xC8CBC62E"
+  ],
+  "eeprom/README.md": [
+    "0xF79BAFCE",
+    "0x60313AF8",
+    "0x8CCB4F44",
+    "0x69A73992",
+    "0x97332DFC",
+    "0xAF82DCE7",
+    "0x965FF7AE",
+    "0x35314190",
+    "0xF2E7D49B"
+  ],
+  "eeprom/main.py": [
+    "0x1E5C7C14",
+    "0x5E61C1F1",
+    "0x0D73F0A3",
+    "0x70FDD4AE",
+    "0x9B89537B"
+  ],
+  "eeprom/wiring.yaml": [
+    "0x82F38CF1",
+    "0x77CA786A"
+  ],
+  "i2cscrn/README.md": [
+    "0x6AF0D1BF",
+    "0x6392E24F",
+    "0xBCF87B83",
+    "0x185ED360",
+    "0x08C60795",
+    "0x5D79CA91",
+    "0xF62F698B",
+    "0x9006DDCB",
+    "0x4A5A7256",
+    "0xBFC48EF5"
+  ],
+  "i2cscrn/main.py": [
+    "0x024D8AA9",
+    "0x59E93C91",
+    "0xE21C8E8E",
+    "0x6E22A6DD",
+    "0xBEFB8273",
+    "0xF166AB80",
+    "0xCB6D158D",
+    "0x6D63CA5E",
+    "0x5883C818",
+    "0xDC3D3F52",
+    "0x79C8D0B3"
+  ],
+  "i2cscrn/wiring.yaml": [
+    "0xB48355B8",
+    "0xBEE331D0"
+  ],
+  "nand00/README.md": [
+    "0x3D3A125D",
+    "0x1B3E29C7",
+    "0xA7C19863",
+    "0x94003C75",
+    "0x59A4BE23",
+    "0x36273393",
+    "0x6F684328",
+    "0x66A8E629"
+  ],
+  "nand00/main.py": [
+    "0x2EBF9FB3",
+    "0xF896AD16"
+  ],
+  "nand00/wiring.yaml": [
+    "0x8BE41985",
+    "0x30DA945C"
+  ]
+}

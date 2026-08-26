@@ -9,14 +9,23 @@
 // Breadboard Coordinate System (10x30)
 // ============================================================================
 //
-// The breadboard is treated as a single 10-row × 30-column matrix:
+// The breadboard is treated as a single 10-row × 30-column matrix that runs
+// VISUAL TOP -> BOTTOM (verified 2026-08 for the guided-placement work; the
+// old "(E, D, C, B, A)" note here was the wrong lettering guess):
 //
-//   Row 1 = Physical row A (top half, furthest from gap) or E?
-//   Let's stick to the map:
-//   Row 1-5 = Top half (E, D, C, B, A)
-//   Row 6-10 = Bottom half (F, G, H, I, J)
-//
+//   Row 1  = top outer edge (A, furthest from the center gap)
+//   Row 5  = gap-adjacent top row (E)
+//   Row 6  = gap-adjacent bottom row (F)
+//   Row 10 = bottom outer edge (J)
 //   Columns 1-30 = Breadboard columns 1-30
+//
+// Evidence (three independent sources agree; details in the task-6 guided-
+// placement report): printChar's font-bit -> pixel mapping plus text being
+// readable on the bench pins pixel offset 0 as the physically UPPER hole in
+// both halves (screenMap's row-1 block is exactly the offset-0 pixels); the
+// wire renderer's "position 0 = outer tip" staple geometry mirrors bottom
+// columns consistently with that; and Jumperless-docs 09.5 documents
+// "Row 1-5: Top half (A-E) ... y=5 (Row 5/E)".
 //
 // ============================================================================
 

@@ -1,0 +1,121 @@
+# source: Texas Instruments (NE555, LM358, LM324, LM386, LM311, LM393,
+#   TL07x, TL431, LM317), ON Semi (NE5532), ST (L7805), AMS (AMS1117)
+#   datasheets - pin-function facts transcribed by hand from datasheets;
+#   facts are not copyrightable. Never import Fritzing/KiCad/AVR-tester
+#   tables (CC-BY-SA/GPL).
+#
+# Analog ICs. TO-92/TO-220 regulators are sip3, pin 1..3 = left-to-right
+# with the flat face/label toward you and the legs down.
+#
+# CONVENTION: dual/quad op-amp and comparator supply pins are named V+ / V-
+# on every record (even where a single-supply datasheet says VCC/GND), so
+# the identical DIP-8 and DIP-14 layouts collapse to one shared pinout.
+# V- derives gnd-class (single-supply breadboard use ties it to GND);
+# V+ derives power-class.
+
+class: ANALOG
+
+- id: 555
+  name: 555
+  desc: Timer, astable/monostable
+  subclass: clock
+  package: dip8
+  aliases: [NE555, LM555, TLC555]
+  pop: 1
+  pins: [GND, TRIG, OUT, RESET, CTRL, THRES, DISCH, VCC]
+
+- id: 556
+  name: 556
+  desc: Dual 555 timer
+  subclass: clock
+  package: dip14
+  aliases: [NE556]
+  pop: 2
+  pins: [1DISCH, 1THRES, 1CTRL, 1RESET, 1OUT, 1TRIG, GND, 2TRIG, 2OUT, 2RESET, 2CTRL, 2THRES, 2DISCH, VCC]
+
+- id: LM358
+  desc: Dual op-amp, single-supply
+  subclass: opamp
+  package: dip8
+  pop: 1
+  pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+
+- id: LM324
+  desc: Quad op-amp, single-supply
+  subclass: opamp
+  package: dip14
+  pop: 3
+  pins: [1OUT, 1IN-, 1IN+, V+, 2IN+, 2IN-, 2OUT, 3OUT, 3IN-, 3IN+, V-, 4IN+, 4IN-, 4OUT]
+
+- id: TL072
+  desc: Dual JFET op-amp, low noise
+  subclass: opamp
+  package: dip8
+  pop: 2
+  pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+
+- id: TL074
+  desc: Quad JFET op-amp, low noise
+  subclass: opamp
+  package: dip14
+  pop: 5
+  pins: [1OUT, 1IN-, 1IN+, V+, 2IN+, 2IN-, 2OUT, 3OUT, 3IN-, 3IN+, V-, 4IN+, 4IN-, 4OUT]
+
+- id: NE5532
+  desc: Dual audio op-amp, low noise
+  subclass: opamp
+  package: dip8
+  pop: 4
+  pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+
+- id: LM386
+  desc: Audio power amplifier, 0.5W
+  subclass: audio
+  package: dip8
+  pop: 1
+  pins: [GAIN1, IN-, IN+, GND, OUT, VS, BYPASS, GAIN8]
+
+- id: LM311
+  desc: Single comparator, open-collector out
+  subclass: opamp
+  package: dip8
+  pop: 7
+  pins: [GND, IN+, IN-, V-, BAL, BAL/STRB, OUT, V+]
+
+- id: LM393
+  desc: Dual comparator, open-collector out
+  subclass: opamp
+  package: dip8
+  pop: 6
+  pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+
+- id: TL431
+  desc: Programmable shunt voltage reference
+  subclass: power
+  package: sip3
+  pop: 4
+  # VERIFY: TO-92 (LP) order REF/ANODE/CATHODE, flat face toward you
+  pins: [REF, ANODE, CATHODE]
+
+- id: LM317
+  desc: Adjustable positive regulator, 1.2-37V
+  subclass: power
+  package: sip3
+  pop: 1
+  pins: [ADJ, VOUT, VIN]
+
+- id: L7805
+  desc: Fixed 5V positive regulator, 1A
+  subclass: power
+  package: sip3
+  aliases: [7805, LM7805]
+  pop: 2
+  pins: [VIN, GND, VOUT]
+
+- id: AMS1117
+  desc: 1A LDO regulator (SOT-223 on adapter)
+  subclass: power
+  package: sip3
+  pop: 3
+  # VERIFY: adapter-board pin order GND/VOUT/VIN (SOT-223 tab = VOUT)
+  pins: [GND, VOUT, VIN]

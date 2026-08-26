@@ -105,8 +105,15 @@ ServiceStatus MeasureMode::service() {
             }
         }
         
-        // Only consider probe reading "stable" if we've seen the same value multiple times
-        bool probeReadingStable = (stableReadingCount >= STABLE_READINGS_REQUIRED);
+        // ONE positive cached reading IS the tap (the arc's contract, now
+        // shared with Highlighting and PartLabels): justReadProbe already
+        // requires two consecutive decodes before reporting a new row, and it
+        // re-emits a HELD row only once per 500 ms with -1 in between - so
+        // this counter only ever reached 5 because this service happens to be
+        // periodUs=0 and samples the 10 ms cache window many times per pass.
+        // Any scheduling change would have silently killed measure-mode taps
+        // (sweep finding). The counter still runs the probe-lifted bookkeeping.
+        bool probeReadingStable = (stableReadingCount >= 1);
         int stableProbeReading = probeReadingStable ? lastProbeReading : -1;
         
         // Validate that the reading is a measurable node (not special function pad)

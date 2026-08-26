@@ -138,6 +138,19 @@ struct CurrentSenseState {
 
 extern CurrentSenseState currentSenseState;
 
+// INA0's shunt-voltage register as a current, through the 2 ohm R1
+// (invest-measurement.md 1.4). 10 uV/LSB fixed = 5 uA/LSB, six times finer
+// than the calibrated current register's 30.5 uA/LSB - which is why the
+// guide's continuity/vf measurement reads THIS and not current_mA. The field
+// is refreshed by the Peripherals poll at CURRENT_SENSE_POLL_INTERVAL_MS
+// (50 ms - the figure the guide check's sample counts and its 1400 ms timeout
+// floor are built on); a reader averages it across lastUpdatedMs ticks, which
+// only advance when the read actually landed. Never write INA0 config to
+// "improve" it.
+static inline float inaShuntCurrent_mA(void) {
+    return currentSenseState.shuntVoltage_mV / 2.0f; // 2 ohm shunt R1
+}
+
 struct gpio_function_name_struct {
     gpio_function_t function;
     char name[10];
@@ -213,8 +226,19 @@ void setBotRail(float value, int save = 1, int saveEEPROM = 1);
 void dacTriangle(void);
 
 float getDacVoltage(int dac);
-// Last voltage actually written to DAC 0/1 (save=0 writes included); falls back to state.
+// Last voltage actually written to DAC 0/1 or to a RAIL (channels 2/3) -
+// save=0 writes included; falls back to state until the first write.
+// READOUTS ONLY: persistence still reads globalState.power, which a save=0
+// write deliberately leaves alone (the guide's rail restore is the one that
+// matters - it hands the user's bench back without writing it into someone
+// else's project file).
 float getDacHardwareVoltage(int dac);
+
+// The rail half of the above, exposed for the LED renderer only. lightUpRail()
+// is __not_in_flash_func - it must keep drawing while flash is busy - so it
+// cannot call the flash-resident accessor above and reads this directly.
+// [0] = top, [1] = bottom, -100 = never written.
+extern float railHwVolts[2];
 // True while a user write has parked DAC 0/1 outside the probe-power window (see setDac0voltage).
 bool dacUserClaimed(int dac);
 void setDacByNumber(int dac, float voltage = 0.0, int save = 1, int saveEEPROM = 0, bool checkProbePower = false);

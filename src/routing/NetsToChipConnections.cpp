@@ -541,6 +541,45 @@ void validateTransactionConsistency(void) {
 #endif
 }
 
+// ============================================================================
+// Chip-K y-row reservation for sense taps (bench 2026-08-24)
+// ============================================================================
+// Chip K's 8 y-rows are the only gateway from the crossbar fabric to ADC0-3.
+// The net-voltage scan plans ephemeral sense-tap routes that must terminate on
+// a free K y-row. A K-heavy netlist (rails, GND, DAC, rows 29/59) plus
+// path-stacking DUPLICATES consumed all 8 K y-rows, so every tap failed
+// "noroute" and every net displayed 0.0 mA (hardware diag showed K y4/y5 as
+// bit-identical duplicates of y2/y1). DUPLICATE paths are a pure resistance
+// optimization - never connectivity - so they must not consume one of the
+// LAST TWO virgin K y-rows. Primary paths keep unconditional access
+// (connectivity first). The other half of this fix is buildEphemeralRoute's
+// same-net-row fallback in RouteSafety.cpp.
+//
+// routingDuplicatePathNow is set per-iteration by the three routing loops
+// (commitPaths / resolveAltPaths / resolveUncommittedHops) from
+// paths[i].duplicate, and cleared when each loop ends. It never leaks into
+// ephemeral tap planning: RouteSafety.cpp does not call freeOrSameNetY() or
+// setChipYStatusSafe().
+static bool routingDuplicatePathNow = false;
+
+static int virginChipKYRowCount(void) {
+  int count = 0;
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[CHIP_K].yStatus[y] == -1) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// True when a duplicate path may not take this row: the row is virgin on chip
+// K and 2 or fewer virgin K rows remain (the candidate row included).
+static bool reservedKRowForSenseTaps(int chip, int y) {
+  return routingDuplicatePathNow && chip == CHIP_K &&
+         globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
+         virginChipKYRowCount() <= 2;
+}
+
 // Helper function to track direct Y status assignments
 void setChipYStatus(int chip, int y, int net, const char *location) {
   if (debugNTCC6 && globalState.connections.chipStates[chip].yStatus[y] != -1 && globalState.connections.chipStates[chip].yStatus[y] != net) {
@@ -727,6 +766,13 @@ bool setChipYStatusSafe(int chip, int y, int net, const char *location) {
     DEBUG_NTCC6_PRINT(" net=");
     DEBUG_NTCC6_PRINTLN(net);
     return false; // Invalid parameters, assignment failed
+  }
+
+  // Belt-and-braces for the sense-tap reservation: every K-capable write is
+  // vetted by freeOrSameNetY() in the same iteration, but refuse here too so
+  // no unvetted path can consume a reserved virgin K row.
+  if (reservedKRowForSenseTaps(chip, y)) {
+    return false;
   }
 
   // Check for overlap conflicts before assignment
@@ -2285,6 +2331,9 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
       continue;
     }
 
+    // K y-row reservation: mark whether this iteration routes a duplicate
+    routingDuplicatePathNow = (globalState.connections.paths[i].duplicate == 1);
+
     // Try path first without stacking, then with stacking if needed (only if
     // allowStacking is 2)
     bool pathCommitted = false;
@@ -2848,6 +2897,7 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
       // }
     } // end stacking attempt loop
   }
+  routingDuplicatePathNow = false;
   // duplicateSFnets();
   //    printPathsCompact();
   //     printChipStatus();
@@ -3042,9 +3092,12 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
     if (noOrOnlyDuplicates == 0 && globalState.connections.paths[i].duplicate == 1) {
       continue;
     }
-    
+
+    // K y-row reservation: mark whether this iteration routes a duplicate
+    routingDuplicatePathNow = (globalState.connections.paths[i].duplicate == 1);
+
     // Debug output removed for production
-    
+
     if (globalState.connections.paths[i].altPathNeeded == true) {
       //   Serial.print("\n\n\rPATH: ");
       //   Serial.println(i);
@@ -4417,6 +4470,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
       }
     }
   }
+  routingDuplicatePathNow = false;
 }
 
 bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
@@ -4449,6 +4503,12 @@ bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
   // Serial.print(", ");
   // Serial.print(allowStacking);
   // Serial.print(" = ");
+  // Duplicates may not take one of the last two virgin chip-K y-rows - those
+  // are reserved for ephemeral sense-tap routes (see reservedKRowForSenseTaps).
+  // Stacking onto an already-same-net row is unaffected.
+  if (reservedKRowForSenseTaps(chip, y)) {
+    return false;
+  }
   if (globalState.connections.chipStates[chip].yStatus[y] == -1 ||
       (globalState.connections.chipStates[chip].yStatus[y] == net && allowStacking == 1)) {
     // Serial.println("true");
@@ -4546,10 +4606,27 @@ void couldntFindPath(int forcePrint) {
         Serial.println("\n\r");
       }
 
-      unconnectablePaths[numberOfUnconnectablePaths][0] = globalState.connections.paths[i].node1;
-      unconnectablePaths[numberOfUnconnectablePaths][1] = globalState.connections.paths[i].node2;
+      // The table is [10][2] - validateAllPaths guards this write and this
+      // copy did not, so an 11th unroutable path wrote past it (sweep).
+      if (numberOfUnconnectablePaths < 10) {
+        unconnectablePaths[numberOfUnconnectablePaths][0] = globalState.connections.paths[i].node1;
+        unconnectablePaths[numberOfUnconnectablePaths][1] = globalState.connections.paths[i].node2;
+      }
       numberOfUnconnectablePaths++;
       globalState.connections.paths[i].skip = true;
+    } else if (foundNegative == 1 && globalState.connections.paths[i].duplicate == 1) {
+      // A duplicate that couldn't finish routing (e.g. refused a reserved
+      // chip-K y-row for sense taps) is silently dropped. Wipe its
+      // coordinates: a half-committed hop keeps x set with y == -2, and
+      // sendPath() only filters -1, so an unwiped -2 would be encoded as a
+      // phantom crosspoint (y=-2 -> y6) and could short its net onto an
+      // occupied K row. altPathNeeded is cleared so incremental passes don't
+      // retry a path we intentionally dropped.
+      for (int j = 0; j < 4; j++) {
+        globalState.connections.paths[i].x[j] = -1;
+        globalState.connections.paths[i].y[j] = -1;
+      }
+      globalState.connections.paths[i].altPathNeeded = false;
     }
   }
   if (debugNTCC2 == true || forcePrint == 1 || debugNTCC5 == true) {
@@ -4598,6 +4675,9 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
     if (noOrOnlyDuplicates == 0 && globalState.connections.paths[i].duplicate == 1) {
       continue;
     }
+
+    // K y-row reservation: mark whether this iteration routes a duplicate
+    routingDuplicatePathNow = (globalState.connections.paths[i].duplicate == 1);
 
     // Check if this path needs resolution
     bool hasUnresolvedY = false;
@@ -5111,6 +5191,7 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
       }
     }
   }
+  routingDuplicatePathNow = false;
 
   // Debug: Show final path states
   if (debugNTCC2) {

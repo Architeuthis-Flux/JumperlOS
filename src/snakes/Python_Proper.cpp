@@ -722,8 +722,11 @@ extern "C" void mp_hal_check_interrupt(void) {
       millis() >= clickwheel_interrupt_ignore_until) {
     // Single-fire via the flag, NOT a direct sched call. Two independent
     // consumers read mp_interrupt_requested: the top-of-function check above
-    // (~:645) schedules exactly once and clears the flag on the NEXT call to
-    // this function - that's the normal-script delivery path. But the C
+    // (~:645) CONSUMES it on the next entry to this function - schedule and
+    // clear happen together, in that one visit, so it can only fire once no
+    // matter how many ticks pass before it runs. That's the normal-script
+    // delivery path. (The flag is set here, at the bottom of the current
+    // visit; the consumer is above us and has already run.) But the C
     // blocking loops (jl_probe_read_blocking / jl_probe_button_blocking in
     // JumperlessMicroPythonAPI.cpp) poll this flag directly and clear it
     // themselves when they see it true; they never check mp_pending_exception,
@@ -4542,7 +4545,16 @@ bool initMicroPythonQuiet(bool preserve_interrupt_char) {
   // Restore original stream
   global_mp_stream = original_stream;
   global_mp_stream_ptr = (void *)original_stream;
-  
+
+  // Mount the VFS and set sys.path exactly like the loud init does (sweep
+  // finding): a quiet init left the interpreter with no filesystem and no
+  // import path, and that broken interpreter PERSISTED into every later REPL
+  // or ViperIDE session - imports and file APIs failed until a full teardown.
+  // Ordering matters: the stream is restored above, because
+  // setupFilesystemAndPaths prints through it.
+  jl_vfs_mount_root();
+  setupFilesystemAndPaths();
+
   // Import all jumperless functions and constants globally (silently)
   // This ensures everything is available for single commands without prefix
   mp_embed_exec_str(

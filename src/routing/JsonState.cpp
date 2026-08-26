@@ -615,6 +615,23 @@ bool JsonStateParser::parseNetsSection(const String& json, const PowerState& old
                         // If power section kept it same as old (meaning user didn't change power section, or omitted it)
                         // Then we respect this net section change.
                         if (fabs(currentVal - oldVal) < 0.001f) {
+                            // KNOWN NARROW GAP, left as-is deliberately (w3-5
+                            // fix round 2). This is a pointer PRE-WRITE into
+                            // globalState.power with no setter call after it,
+                            // so nothing marks the state dirty on its own
+                            // account. It is covered on every normal path -
+                            // a FULL apply has already dirtied via
+                            // clearAllConnections() before parseNetsSection
+                            // runs, and a net entry with >= 2 valid nodes
+                            // dirties through its own addBridgeToState().
+                            // What is NOT covered: a PARTIAL/section apply
+                            // (`L nets` / set_state(..., clear_first=False))
+                            // carrying a special-net entry with exactly ONE
+                            // valid node plus a voltage override - no
+                            // addBridgeToState, no full-apply mark, so the
+                            // override reaches RAM and not the file. Degenerate
+                            // input through one specific door; recorded rather
+                            // than fixed so the safety claim stays honest.
                             *currentValPtr = voltage;
                         }
                         // Else: Power section ALSO changed it. We prioritize Power section (keep currentVal).
@@ -657,7 +674,16 @@ bool JsonStateParser::parsePowerSection(const String& json) {
     
 
     setRailsAndDACs(0); // Apply without saving to EEPROM
-    
+
+    // PERSIST IT (w3-5). The four assignments above are a PRE-WRITE: by the
+    // time setRailsAndDACs(0) re-reads globalState.power and calls the setters,
+    // prev == voltage on all four, so the setters' no-op dirty gate correctly
+    // sees no change and marks nothing. applyJSONState() only dirties the state
+    // incidentally, through clearAllConnections(), and only when the payload
+    // carries a "nets" section - so a POWER-ONLY J paste / MicroPython JSON
+    // apply would reach hardware and RAM and never be written to the file.
+    globalState.markDirty();
+
     // Serial.printf("Top Rail: %f, Bottom Rail: %f, DAC0: %f, DAC1: %f\n", getDacVoltage(2), getDacVoltage(3), getDacVoltage(0), getDacVoltage(1));
     return true;
 }

@@ -88,6 +88,9 @@ struct BoardCaps {
   bool hasPsram;                // OG false (RP2040)
   bool hasStartupAnimation;     // V5 plays the boot logo animation; OG skips it
                                 // (no compressed frames built, 111-LED strip)
+  bool breadboardDisplays;      // DisplayService (soft-I2C panels on routed
+                                // GPIOs): V5 only - the service hardcodes the
+                                // V5 node map (RP 20-27 -> nodes 131-138)
   bool spiDac;                  // OG MCP4822 over SPI; V5 MCP4728 over I2C
   uint8_t ledsPerRow;           // V5 = 5, OG = 1
   uint16_t ledCount;            // total addressable pixels: V5 = 445, OG = 111

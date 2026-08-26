@@ -215,7 +215,24 @@ static bool pollCurrentSenseMeasurement() {
 
     currentSenseState.current_mA = current_mA;
     currentSenseState.busVoltage_V = busVoltage;
-    currentSenseState.shuntVoltage_mV = 0.0f;
+
+    // SHUNT VOLTAGE: the fine current source (invest-measurement.md 0(a)/1.7).
+    // The current register's LSB is fixed by setMaxCurrentShunt(1, 2.0) at
+    // 30.5 uA/bit, so a 47k part at 3.3 V (~70 uA) is TWO counts - which is
+    // exactly the bench's val=0.03mA. The shunt-voltage register's LSB is a
+    // hardware constant 10 uV, i.e. 5 uA across the 2 ohm R1: six times finer,
+    // and available without touching calibration. THE CONFIG STAYS UNTOUCHED -
+    // this poll owns the chip's cadence and its CNVR flag; consumers only read
+    // the field (see inaShuntCurrent_mA in Peripherals.h).
+    //
+    // Same failed-read discipline as the current read above: getShuntVoltage()
+    // returns 0 on an I2C error, and a fake 0 mV reads downstream as a
+    // confident "no current". Hold the previous value instead.
+    float shunt_mV = INA0.getShuntVoltage_mV();
+    bool shuntOk = ( INA0.getLastError() == 0 );
+    if ( shuntOk ) {
+        currentSenseState.shuntVoltage_mV = shunt_mV;
+    }
 
     int direction = 0;
     if ( current_mA > CURRENT_SENSE_DIRECTION_EPSILON_MA ) {
@@ -226,7 +243,16 @@ static bool pollCurrentSenseMeasurement() {
     currentSenseState.currentDirection = direction;
 
     currentSenseState.active = true;
-    currentSenseState.lastUpdatedMs = now;
+    // The stamp is what makes a sample FRESH to a consumer (the guide check's
+    // inaAccumulateFresh averages one reading per new stamp). Holding the
+    // previous shuntVoltage_mV on an I2C error is only half the fix: stamping
+    // anyway would hand that held value out as a new sample and let it be
+    // averaged twice. Advance the stamp only when the shunt read really
+    // landed. current_mA already returned early on ITS error, so a stamped
+    // tick means both halves are good.
+    if ( shuntOk ) {
+        currentSenseState.lastUpdatedMs = now;
+    }
 
     return true;
 }
@@ -761,6 +787,16 @@ void setGPIO( void ) {
             continue;
         }
 
+        // Skip bus-role pins (gpioState 6: the display service's soft-I2C, the
+        // oled.cpp precedent). Re-asserting config dir/pulls here put a
+        // PULLDOWN on a live bus's ACK window and re-stamped state 4, which
+        // then sent core 1's readGPIO down the pull-twiddling float path mid-
+        // transaction (sweep finding, high - the mark existed exactly to
+        // prevent this and nothing honored it).
+        if ( gpioState[ i ] == 6 ) {
+            continue;
+        }
+
         // Set direction
         if ( globalState.config.gpioDirection[ i ] == 0 ) {
             gpio_set_dir( gpio_pin, true ); // Set as output
@@ -1280,7 +1316,9 @@ void __not_in_flash_func(readGPIO)( ) {
         }
 
         if ( gpioNet[ i ] == -1 ) {
-            gpioState[ i ] = 4;
+            if ( gpioState[ i ] != 6 ) {   // bus-role marks survive the
+                gpioState[ i ] = 4;        // acquire-to-route window (sweep)
+            }
             // continue;
         } else if ( gpioNet[ i ] == -2 ) {
             // gpioState[i] = 6;
@@ -1383,6 +1421,20 @@ void setRailsAndDACs( int saveEEPROM ) {
     setDac1voltage( globalState.power.dac1, 1, saveEEPROM );
     // delay(10);
 }
+// The voltage most recently WRITTEN to each rail, whether or not the write was
+// persisted - the exact twin of s_dacHwVolts below, and for the same reason.
+// Until now "the rails only ever move through the state" was true, so every
+// rail readout could read globalState.power. The guide's exit restore broke
+// that: it puts the user's pre-guide rails back with save=0 on purpose (the
+// project's run file must keep the safe 0 V it was left at), which left every
+// readout on the board reporting 0 V over rails that were physically live -
+// the "rails aren't setting" false-bug class.
+//
+// PERSISTENCE NEVER READS THIS. What gets saved is globalState.power,
+// untouched; this array feeds READOUTS only (dac_get 2/3, the rail net
+// reading, the rail LED dots).  -100 = never written.
+float railHwVolts[ 2 ] = { -100.0f, -100.0f };   // [0] = top, [1] = bottom
+
 void setTopRail( float value, int save, int saveEEPROM ) {
 
     int dacValue = ( value * 4095 / dacSpread[ 2 ] ) + dacZero[ 2 ];
@@ -1402,7 +1454,9 @@ void setTopRail( float value, int save, int saveEEPROM ) {
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
     (void)wrote;
-    
+
+    railHwVolts[ 0 ] = value;   // hardware truth, persisted or not
+
     // Update globalState for YAML persistence (single source of truth)
     // ONLY update when save == 1 to avoid spurious dirty marks
     if ( save ) {
@@ -1432,6 +1486,9 @@ void setBotRail( float value, int save, int saveEEPROM ) {
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
     (void)wrote;
+
+    railHwVolts[ 1 ] = value;   // hardware truth, persisted or not
+
     if ( save ) {
         // Update globalState for YAML persistence (single source of truth)
         globalState.setRailVoltage(false, value);  // false = bottom rail
@@ -1468,6 +1525,14 @@ bool dacUserClaimed( int dac ) {
 float getDacHardwareVoltage( int dac ) {
     if ( dac == 0 || dac == 1 ) {
         return ( s_dacHwVolts[ dac ] > -99.0f ) ? s_dacHwVolts[ dac ] : getDacVoltage( dac );
+    }
+    // Channels 2/3 are the rails, and they now answer the same way (see
+    // railHwVolts). Before the guide's save=0 restore existed, rails only ever
+    // moved through the state, so this fell through to globalState.power - and
+    // still does until the first rail write of the session.
+    if ( dac == 2 || dac == 3 ) {
+        int r = dac - 2;
+        return ( railHwVolts[ r ] > -99.0f ) ? railHwVolts[ r ] : getDacVoltage( dac );
     }
     return getDacVoltage( dac );
 }

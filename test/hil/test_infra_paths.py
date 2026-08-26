@@ -83,16 +83,29 @@ check(feed_source(d) is not None, "feed survives nodes_clear() (re-added by eval
 out = jl_exec("connect(12, 17)\nprint('ok')", timeout=25)
 time.sleep(6)  # dirty-state autosave
 out = jl_exec("""
+# Streamed with a 14-byte overlap window (one less than the longest
+# needle, "ROUTABLE_BUFFER") so a match straddling a chunk boundary is
+# still seen, and the device never holds the whole file as one string.
+# The old `data += chunk` shape here is the same one that produced this
+# suite's recurring MemoryError - see jl.device_text().
 f = jfs.open("/slots/slot0.yaml", "r")
-data = ""
+buf = ""
+bufin = 0
+usernet = 0
 while True:
     chunk = jfs.read(f, 512)
     if not chunk:
         break
-    data += chunk
+    buf += chunk
+    if "BUF_IN" in buf or "ROUTABLE_BUFFER" in buf:
+        bufin = 1
+    if "12, 17" in buf or "12,17" in buf:
+        usernet = 1
+    if len(buf) > 14:
+        buf = buf[-14:]
 jfs.close(f)
-print("has_bufin=", 1 if ("BUF_IN" in data or "ROUTABLE_BUFFER" in data) else 0)
-print("has_user_net=", 1 if "12, 17" in data or "12,17" in data else 0)
+print("has_bufin=", bufin)
+print("has_user_net=", usernet)
 disconnect(12, -1)
 print("done")
 """, timeout=30)

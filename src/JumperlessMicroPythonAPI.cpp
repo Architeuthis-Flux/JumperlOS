@@ -31,6 +31,8 @@
 #include "FilesystemStuff.h" // For safe file operations
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
+#include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
+#include "ProjectsApp.h" // projectOpenLatestOrNew (load_project's name form)
 #include "WaveGen.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
 
@@ -166,6 +168,7 @@ extern Stream* mp_interrupt_check_stream;
 
 PythonConnectionContext connectionContext = PYTHON_CONTEXT_GLOBAL; // Default to global mode
 static int pythonEntrySlot = -1;                                   // Track which slot was active when entering Python
+static char pythonEntryPath[128] = "";                             // ...and its path (pythonEntrySlot may be SLOT_FILE_CONTEXT)
 
 // C-compatible wrapper functions for MicroPython
 extern "C" {
@@ -358,16 +361,13 @@ void jl_dac_set( int channel, float voltage, int save ) {
 float jl_dac_get( int channel ) {
     float voltage = 0.0f;
 
-    // DAC 0/1 report the voltage actually on the pin, including save=False
-    // writes; the rails only ever move through the state.
-    if ( channel == 0 ) {
-        voltage = getDacHardwareVoltage( 0 );
-    } else if ( channel == 1 ) {
-        voltage = getDacHardwareVoltage( 1 );
-    } else if ( channel == 2 ) {
-        voltage = globalState.power.topRail;
-    } else if ( channel == 3 ) {
-        voltage = globalState.power.bottomRail;
+    // Every channel reports the voltage actually on the pin, including
+    // save=False writes. The rails used to read globalState.power on the old
+    // "the rails only ever move through the state" assumption; the guide's
+    // save=0 exit restore ended that, and dac_get() reporting 0 V over a live
+    // rail is exactly the false-bug this whole readout path exists to avoid.
+    if ( channel >= 0 && channel <= 3 ) {
+        voltage = getDacHardwareVoltage( channel );
     }
 
     return voltage;
@@ -1410,14 +1410,22 @@ int jl_nodes_is_connected( int node1, int node2 ) {
 }
 
 int jl_nodes_save( int slot ) {
-    int target_slot = ( slot == -1 ) ? netSlot : slot; // Use current slot if -1
+    // -1 means "the ACTIVE CONTEXT". Resolve that through saveStateToSlot's
+    // negative convention (which dispatches to saveActiveSlot) rather than by
+    // substituting netSlot - from a file context netSlot is SLOT_FILE_CONTEXT
+    // and forwarding it would trip the saveSlot(-2) BUG guard.
+    SlotManager& saveMgr = SlotManager::getInstance( );
+    const bool toActive = ( slot < 0 );
+    // Reported back to Python: the real slot number for a numbered context,
+    // -2 for "saved to the active file" (documented in the API).
+    int target_slot = toActive ? saveMgr.getActiveSlot( ) : slot;
 
     // Hold core-1 frames while saving to prevent race conditions
     holdCore1Frames( );
     delayMicroseconds( 50 );
 
     // Save globalState to YAML
-    saveStateToSlot( target_slot );
+    saveStateToSlot( toActive ? -1 : slot );
 
     // Release BEFORE refreshConnections since it internally calls waitCore2
     releaseCore1Frames( );
@@ -1429,8 +1437,13 @@ int jl_nodes_save( int slot ) {
 }
 
 void jl_init_micropython_local_copy( void ) {
-    // Store which slot was active when entering Python
+    // Store which CONTEXT was active when entering Python - number AND path.
+    // pythonEntrySlot may be SLOT_FILE_CONTEXT (a script launched from a
+    // project run file), and restoring by number alone can't get back there.
     pythonEntrySlot = netSlot;
+    strncpy( pythonEntryPath, SlotManager::getInstance( ).getActiveSlotPath( ),
+             sizeof( pythonEntryPath ) - 1 );
+    pythonEntryPath[ sizeof( pythonEntryPath ) - 1 ] = '\0';
 
     if ( connectionContext == PYTHON_CONTEXT_ISOLATED ) {
         // ISOLATED MODE: Save current state to backup and switch to Python slot
@@ -1575,8 +1588,16 @@ void jl_exit_micropython_restore_entry_state( void ) {
     // readingGPIO lock spins) — the delayed post-session crash signature.
     machine_pin_irq_deinit( );
 
-    // Release all GPIO pins claimed by MicroPython
-    jl_gpio_release_all_pins( );
+    // Release all GPIO pins claimed by MicroPython - UNLESS a background
+    // callback is active: its driver keeps its bus pins after the setup
+    // script ends (the workstream-D survival rule). MpBackgroundService
+    // releases them on the callback's deactivation transition. IRQs are
+    // still disarmed above either way - a background callback runs
+    // cooperatively in the service tick, never from ISR context.
+    extern int jl_bg_active( void );
+    if ( !jl_bg_active( ) ) {
+        jl_gpio_release_all_pins( );
+    }
 
     // Hold core-1 frames during state modifications to prevent race conditions
     holdCore1Frames( );
@@ -1590,13 +1611,43 @@ void jl_exit_micropython_restore_entry_state( void ) {
         // Save current Python state to Python slot
         mgr.saveSlot( PYTHON_SLOT_NUMBER, errorMsg );
 
-        // Restore the entry state (discards Python changes from global state)
-        restoreAndSaveStateBackup( );
-
-        // Restore the original slot number
-        if ( pythonEntrySlot >= 0 && pythonEntrySlot < NUM_SLOTS ) {
+        // Restore the ENTRY CONTEXT'S TRACKING FIRST, then restore the state.
+        // Ordering bug fixed here: restoreAndSaveStateBackup() ends in a save
+        // of the active context, and the active context was still slot 99 at
+        // this point - so the restored ENTRY state was written straight over
+        // slotPython.yaml, silently undoing the save two lines above. Moving
+        // the tracking restore ahead of it makes that save land on the entry
+        // context (where the same content already lives), which is what the
+        // "restore the entry state" intent always meant.
+        //
+        // The old guard `>= 0 && < NUM_SLOTS` also excluded SLOT_FILE_CONTEXT,
+        // so a script entered from a run file never restored its context at all.
+        bool trackingRestored = false;
+        if ( pythonEntrySlot == SLOT_FILE_CONTEXT && pythonEntryPath[ 0 ] != '\0' ) {
+            // No pre-emptive `netSlot = SLOT_FILE_CONTEXT` here: loadSlotFromPath
+            // sets it itself on success, and on failure setting it early would
+            // leave netSlot == -2 paired with activeSlotNumber == 99 - a broken
+            // pairing that the restore below would then act on.
+            trackingRestored = mgr.loadSlotFromPath( String( pythonEntryPath ), errorMsg );
+        } else if ( pythonEntrySlot >= 0 && pythonEntrySlot < NUM_SLOTS ) {
             netSlot = pythonEntrySlot;
             mgr.setActiveSlot( pythonEntrySlot );
+            trackingRestored = true;
+        }
+
+        // Restore the entry state. WITH the save only when tracking actually
+        // came back - if the entry run file was deleted while the script ran,
+        // the active context is still slot 99 (or no context at all), and
+        // saving here would write the entry state over slotPython.yaml: the
+        // very bug the reordering above just fixed, one level down. Restore
+        // without saving in that case; the state is correct in RAM and the
+        // next legitimate save lands wherever the user goes next.
+        if ( trackingRestored ) {
+            restoreAndSaveStateBackup( );
+        } else {
+            Serial.println( "python exit: entry context could not be restored - "
+                            "restoring state without saving" );
+            restoreStateBackup( false );
         }
     } else {
         // GLOBAL MODE: Changes persist, just clear the backup
@@ -1695,30 +1746,487 @@ void jl_send_raw_str( const char* chip_str, int x, int y, int setOrClear ) {
 }
 
 int jl_switch_slot( int slot ) {
-    // Validate slot number
+    // Validate slot number. -2 (SLOT_FILE_CONTEXT) is rejected here as a
+    // TARGET by the same test - you can't "switch to" a file context by
+    // number, only by path.
     if ( slot < 0 || slot >= NUM_SLOTS ) {
         return -1; // Invalid slot number
     }
 
     // Save current slot if different
     if ( netSlot != slot ) {
-        // Hold core-1 frames briefly while changing slot number
-        holdCore1Frames( );
-        delayMicroseconds( 50 );
-
         int old_slot = netSlot;
-        netSlot = slot;
 
-        // Release BEFORE refreshConnections since it internally calls waitCore2
-        releaseCore1Frames( );
+        SlotManager& mgr = SlotManager::getInstance( );
 
-        // Refresh connections for the new slot
-        refreshConnections( -1 );
+        // FLUSH THE OUTGOING CONTEXT'S UNSAVED EDITS FIRST.
+        //
+        // This is a call-site responsibility, not something loadSlot does for
+        // us. loadSlot's internal fileCacheFlushNowAll("slot_switch") drains
+        // dirty CACHE ENTRIES and SPIFTL metadata (FileCache.cpp) - it never
+        // serializes a dirty in-RAM JumperlessState. The real dirty pre-save
+        // lives at each call site: `loadfile:` (main.cpp) and the FileManager
+        // click path (FilesystemStuff.cpp) both do it, and switch_slot goes
+        // through neither. Without this, switch_slot() from a file context
+        // with unsaved edits silently DISCARDS them - better than the pre-fix
+        // behavior (which wrote them into the destination slot) but still
+        // silent data loss, in a wave whose thesis is "the file IS the
+        // persistence".
+        //
+        // Kept at the call site rather than inside loadSlotFromPath/loadSlot
+        // on purpose: forcing a save inside the API is exactly what the boot
+        // firstLoop guard exists to prevent. A dirty TEMPLATE context hits the
+        // loud template refusal here and its edits are dropped - that is the
+        // guard working as designed, not a case to special-case.
+        if ( mgr.getActiveState( ).isDirty( ) ) {
+            String saveErr;
+            if ( !mgr.saveActiveSlot( saveErr ) ) {
+                Serial.print( "switch_slot: could not save the outgoing context: " );
+                Serial.println( saveErr );
+            }
+        }
+
+        // ACTUALLY LOAD THE SLOT. This used to flip netSlot and call
+        // refreshConnections() WITHOUT loading slot `slot`'s file - so the
+        // outgoing context's bridges stayed in globalState under the new
+        // number, and the next idle auto-save wrote them into slot `slot`.
+        // Harmless-looking before this wave (both were numbered slots and the
+        // user "meant" the switch); a live clobber vector the moment a file
+        // context can be the outgoing one, because the run file's content
+        // would land in /slots/slotN.yaml. loadSlot() refreshes hardware
+        // itself, so the old hold/refresh dance around a bare assignment is
+        // gone with it.
+        String err;
+        if ( !mgr.loadSlot( slot, err ) ) {
+            Serial.print( "switch_slot: failed to load slot " );
+            Serial.print( slot );
+            Serial.print( ": " );
+            Serial.println( err );
+            return -1;
+        }
 
         return old_slot; // Return the previous slot number
     }
 
     return slot; // Already in this slot
+}
+
+// =============================================================================
+// Projects + parts layer (guided placement)
+// =============================================================================
+// Backing C functions for load_project() / place_part() / remove_part() /
+// list_parts() / guide_progress(). The parts primitives themselves live in
+// routing/PartPlacement.cpp - everything here is a thin wrapper so the pins
+// grammar, the DIP/SIP geometry and the {NAME}_{PIN} naming have exactly one
+// implementation (design: CodeDocs/DESIGN_GUIDED_PLACEMENT.md 8,
+// CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md 1).
+
+// Load any slot YAML by path - a project wiring.yaml IS a slot YAML. This is
+// the FileManager call path (FilesystemStuff.cpp:1290), NOT jl_switch_slot's:
+//  - no holdCore1Frames dance: that exists only to flip netSlot, and
+//    loadSlotFromPath deliberately leaves slot tracking alone for a
+//    non-slot*.yaml name (States.cpp:3078, the slot-clobber guard).
+//  - no refreshConnections() here: loadSlotFromPath already re-expands placed
+//    parts, calls refreshConnections(-1, 1, 1) and applies state to hardware
+//    (States.cpp:3062-3076). A second refresh would just re-route the same
+//    state.
+// Returns 0 on success, -1 on failure (the reason is printed to the stream).
+int jl_load_slot_path( const char* path ) {
+    if ( path == nullptr || path[ 0 ] == '\0' ) {
+        Serial.println( "load_project: empty path" );
+        return -1;
+    }
+
+    String err;
+    if ( !SlotManager::getInstance( ).loadSlotFromPath( String( path ), err ) ) {
+        Serial.print( "load_project failed: " );
+        Serial.println( err );
+        return -1;
+    }
+
+    return 0;
+}
+
+// load_project("<name>") - the NAME form. Under the run-file model "load
+// project 555" means "begin (or re-open) a run of 555", so the name form
+// routes through the launcher: it opens /projects/<name>/<name>_run.yaml, or
+// creates it from the shipped wiring when the project has no run file yet.
+// LOAD ONLY - no guide, no companion script, and never a prompt (a mid-flight
+// guided build is simply reopened; resuming it is `z`'s / the launcher's job).
+// Under JL_PROJECT_RUN_HISTORY the same door opens <name>_<maxN>.yaml or
+// creates <name>_1.yaml instead.
+//
+// This is what closes the bench-caught destruction path: load_project("eeprom")
+// used to adopt the SHIPPED TEMPLATE as the auto-saving active context, and the
+// first idle flush rewrote it without its guide:/meta: sections.
+//
+// The LITERAL-PATH form deliberately does NOT come through here - it stays a
+// raw loadSlotFromPath adopt (jl_load_slot_path above), which is exactly why
+// SlotManager's template write-guard is still load-bearing and still tested.
+// Returns 0 on success, -1 on failure (the reason is printed).
+int jl_project_begin_run( const char* name ) {
+    if ( name == nullptr || name[ 0 ] == '\0' ) {
+        Serial.println( "load_project: empty project name" );
+        return -1;
+    }
+    String runPath;
+    return projectOpenLatestOrNew( String( name ), runPath ) ? 0 : -1;
+}
+
+// Scratch part assembled by jl_place_part. static, not a stack local: a
+// PartDefinition is ~500 B and the OG's stacks are tiny - the same argument
+// deserializeParts makes for its static `cur` (PartPlacement.cpp). The REPL
+// is single-threaded, so there is no second builder.
+static PartDefinition placeScratch;
+
+// Charset guard for every user string that reaches serializeParts RAW.
+// Strings that arrive through the YAML path are pre-filtered by the line
+// scanner; API strings are not, and the serializer emits them verbatim:
+//   `- name: "<raw>"` / `value: "<raw>"` -> an embedded '"' truncates the
+//      field at the next load (parseScalar takes the quote pair)
+//   `type: <raw>` / `<PINNAME>: {...}`   -> emitted unquoted, and an embedded
+//      '\n' writes an UN-INDENTED line into the parts: section, where
+//      deserializeParts hits `if (!indented) break;` and silently DROPS every
+//      part after it. Same data-erasure class the States.h header calls
+//      load-bearing.
+// REJECT rather than sanitize: makePinNetName may quietly transform (net
+// names are cosmetic), but a part the caller asked for must not come back as
+// a different part.
+static bool partStringSafe( const char* s, const char* what ) {
+    for ( const char* c = s; c != nullptr && *c != '\0'; c++ ) {
+        unsigned char ch = (unsigned char)*c;
+        if ( ch < 0x20 || ch > 0x7E || ch == '"' ) {
+            Serial.print( "place_part: " );
+            Serial.print( what );
+            Serial.println( " may only contain printable ASCII (no '\"', no control characters)" );
+            return false;
+        }
+    }
+    return true;
+}
+
+// place_part(name, row, pins_json[, footprint][, type][, value])
+// pins_json: {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
+//   pin:     1-based PHYSICAL pin placed by the footprint math
+//   offset:  same-side offset from row (wins over pin: when >= 0)
+//   connect: row 1-60 or any node name parseNodeName() resolves (GND, TOP_RAIL...)
+//   class:   signal|power|gnd|nc
+// footprint "" (default) infers sipN from the highest pin/offset listed, so a
+// 2-leg part just works; pass "dip8" for real DIP geometry (row MUST be
+// 31-60, pin 1's bottom-half hole) or "axial2" to straddle the ravine
+// (row MUST be 1-30; pin 2 lands at row+30).
+// Returns 0 on success, -1 on failure (reason printed).
+int jl_place_part( const char* name, int row, const char* pins_json,
+                   const char* footprint, const char* type, const char* value ) {
+    if ( name == nullptr || name[ 0 ] == '\0' || strlen( name ) > 15 ) {
+        Serial.println( "place_part: name must be 1-15 characters" );
+        return -1;
+    }
+    // Guard BEFORE anything is appended: these three are serialized raw.
+    if ( !partStringSafe( name, "name" ) ) return -1;
+    if ( !partStringSafe( type, "type" ) ) return -1;
+    if ( !partStringSafe( value, "value" ) ) return -1;
+    if ( globalState.parts.findByName( name ) >= 0 ) {
+        Serial.print( "place_part: a part named " );
+        Serial.print( name );
+        Serial.println( " already exists (remove_part it first)" );
+        return -1;
+    }
+    if ( globalState.parts.numParts >= MAX_PARTS ) {
+        Serial.print( "place_part: parts table full (max " );
+        Serial.print( MAX_PARTS );
+        Serial.println( ")" );
+        return -1;
+    }
+
+    PartDefinition& p = placeScratch;
+    memset( &p, 0, sizeof( p ) );
+    strncpy( p.name, name, sizeof( p.name ) - 1 );
+    if ( type != nullptr ) strncpy( p.typeStr, type, sizeof( p.typeStr ) - 1 );
+    if ( value != nullptr ) strncpy( p.value, value, sizeof( p.value ) - 1 );
+    p.baseRow = (int16_t)row;
+
+    // Footprint: explicit dipN/sipN, else inferred below from the pins.
+    bool inferFootprint = ( footprint == nullptr || footprint[ 0 ] == '\0' );
+    if ( !inferFootprint ) {
+        String fp = String( footprint );
+        fp.toLowerCase( );
+        if ( fp.startsWith( "dip" ) ) {
+            p.footprint = 1;
+            p.pinCount = (uint8_t)fp.substring( 3 ).toInt( );
+        } else if ( fp.startsWith( "sip" ) ) {
+            p.footprint = 0;
+            p.pinCount = (uint8_t)fp.substring( 3 ).toInt( );
+        } else if ( fp.startsWith( "axial" ) ) {
+            // axial2 only - the same matched copy of PartPlacement.cpp's
+            // parsePartLine footprint branch this whole function mirrors.
+            p.footprint = 2;
+            p.pinCount = (uint8_t)fp.substring( 5 ).toInt( );
+        } else {
+            Serial.print( "place_part: unknown footprint " );
+            Serial.println( footprint );
+            return -1;
+        }
+    }
+
+    String err;
+    int added = parsePartPinsSpec( p, pins_json, err );
+    if ( err.length( ) > 0 ) {
+        Serial.print( "place_part: " );
+        Serial.println( err );
+    }
+    if ( added <= 0 ) {
+        Serial.println( "place_part: no usable pins parsed" );
+        return -1;
+    }
+
+    // Pin names are emitted UNQUOTED as `      <NAME>: {...}`. A ':' is
+    // already impossible (parseInlinePins cuts the name at the first colon),
+    // but a control character or a leading '#' / '-' still corrupts the
+    // section on reload:
+    //   '#' makes the whole line a comment and the pin vanishes;
+    //   '-' is the parts LIST marker - a pin named "- X" serializes as
+    //       `      - X: {...}`, which deserializeParts' `startsWith("- ")`
+    //       test reads as a NEW part entry, so every pin after it is
+    //       misattributed to a phantom part. Same data-corruption class as
+    //       the '#' case, one character away.
+    // parsePinEntry (PartPlacement.cpp) applies the SAME leading-char rule
+    // and runs first on this path - parsePartPinsSpec above already dropped
+    // such a pin, and a part left with no pins returns -1 up there. This
+    // loop is the deliberate second copy: the two predicates must stay in
+    // step (the same rule this function's commitPart-parity note states),
+    // and it also covers any pin that reaches p.pins by another route.
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        if ( !partStringSafe( p.pins[ j ].name, "pin name" ) ) return -1;
+        if ( p.pins[ j ].name[ 0 ] == '#' || p.pins[ j ].name[ 0 ] == '-' ) {
+            Serial.println( "place_part: a pin name may not start with '#' or '-'" );
+            return -1;
+        }
+    }
+
+    if ( inferFootprint ) {
+        // A strip of legs: the highest 1-based pin (or offset+1) listed.
+        int high = 1;
+        for ( int j = 0; j < p.numPins; j++ ) {
+            if ( p.pins[ j ].pinNumber > high ) high = p.pins[ j ].pinNumber;
+            if ( p.pins[ j ].offset + 1 > high ) high = p.pins[ j ].offset + 1;
+        }
+        p.footprint = 0;
+        p.pinCount = (uint8_t)high;
+    }
+
+    // The SAME predicate commitPart() applies on parse - now literally the
+    // same function (partGeometryOk, PartPlacement.cpp) instead of a hand
+    // copy that had to be kept in step. An entry that passes here but would
+    // fail there gets auto-saved into the slot YAML and then silently DROPPED
+    // on the next load - the erasure bug commit 352bb23 fixed. Sharing the
+    // predicate makes that drift impossible rather than merely discouraged,
+    // and it is how the wave-2 `offset:` gap (an offset pin that lands
+    // off-board) becomes an API refusal too, in one edit.
+    {
+        char reason[ 128 ];
+        if ( !partGeometryOk( p, reason, sizeof( reason ) ) ) {
+            Serial.print( "place_part: " );
+            Serial.println( reason );
+            return -1;
+        }
+    }
+
+    // Hold core-1 frames while the state changes, release BEFORE the refresh
+    // (refreshConnections calls waitCore2 internally) - the jl_nodes_clear
+    // pattern.
+    holdCore1Frames( );
+    delayMicroseconds( 50 );
+
+    globalState.parts.parts[ globalState.parts.numParts++ ] = p;
+    int idx = globalState.parts.numParts - 1;
+    String applyErr;
+    int bridges = applyPartPlacement( globalState, idx, applyErr );
+    if ( bridges < 0 ) {
+        // Unwind the append: a failed placement must never leave a half-placed
+        // entry in the table (the next auto-save would persist it).
+        // Unreachable today - applyPartPlacement only returns -1 for a bad
+        // index, and idx is valid by construction - but it stays safe if
+        // applyPartPlacement grows failure modes.
+        globalState.parts.numParts--;
+    }
+
+    releaseCore1Frames( );
+
+    if ( applyErr.length( ) > 0 ) {
+        Serial.print( "place_part warnings: " );
+        Serial.println( applyErr );
+    }
+
+    // Refresh either way: the failure path unwound the table above, and a
+    // rebuild resyncs the fabric with whatever did land. The refresh also
+    // re-asserts {NAME}_{PIN} net names for us (partsReassertNetNames runs
+    // inside every rebuild).
+    refreshConnections( -1, 1, 0 );
+    return ( bridges < 0 ) ? -1 : 0;
+}
+
+// remove_part(name): pull the expansion bridges, drop the {NAME}_{PIN} net
+// names the part owned, and remove the entry from the table.
+// Returns 0 on success, -1 when there is no such part.
+int jl_remove_part( const char* name ) {
+    if ( name == nullptr || name[ 0 ] == '\0' ) {
+        Serial.println( "remove_part: empty name" );
+        return -1;
+    }
+    int idx = globalState.parts.findByName( name );
+    if ( idx < 0 ) {
+        Serial.print( "remove_part: no part named " );
+        Serial.println( name );
+        return -1;
+    }
+
+    // Capture the auto names BEFORE the entry disappears: removePartPlacement
+    // only pulls bridges, and nothing else drops a net name that
+    // partsReassertNetNames asserted (part names are unique, so no surviving
+    // part can own these).
+    static char autoNames[ MAX_PART_PINS ][ 32 ];
+    int numAuto = 0;
+    {
+        const PartDefinition& p = globalState.parts.parts[ idx ];
+        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+            makePinNetName( p, p.pins[ j ], autoNames[ numAuto++ ] );
+        }
+    }
+
+    holdCore1Frames( );
+    delayMicroseconds( 50 );
+
+    String err;
+    removePartPlacement( globalState, idx, err );
+    // Drop the entry itself (placed=false alone would leave it in the YAML).
+    for ( int i = idx; i < globalState.parts.numParts - 1; i++ ) {
+        globalState.parts.parts[ i ] = globalState.parts.parts[ i + 1 ];
+    }
+    globalState.parts.numParts--;
+    globalState.markDirty( );
+
+    releaseCore1Frames( );
+
+    if ( err.length( ) > 0 ) {
+        Serial.print( "remove_part warnings: " );
+        Serial.println( err );
+    }
+
+    refreshConnections( -1, 1, 0 );
+
+    // Now that the nets are rebuilt, clear any surviving auto names.
+    bool cleared = false;
+    for ( int a = 0; a < numAuto; a++ ) {
+        for ( int n = 1; n < MAX_NETS; n++ ) {
+            const char* nm = globalState.display.getNetName( n );
+            if ( nm != nullptr && strcmp( nm, autoNames[ a ] ) == 0 ) {
+                globalState.display.removeNetName( n );
+                cleared = true;
+            }
+        }
+    }
+    if ( cleared ) {
+        globalState.markDirty( );
+    }
+
+    return 0;
+}
+
+int jl_get_num_parts( void ) {
+    return globalState.parts.numParts;
+}
+
+// One part as a delimited record for the MicroPython dict builder - the same
+// static-buffer shape jl_get_path_info() uses (no JSON library on board):
+//   name|type|value|row|footprint|placed|PIN,node,connect,class;PIN,node,...
+// footprint is the "dip8"/"sip2"/"axial2" spelling serializeParts emits, node is the
+// resolved board node (-1 when the leg would leave the board) and connect is
+// -1 when the leg only occupies a hole. Empty string for a bad index.
+// The record this builds is split by literal delimiters on the MicroPython
+// side (jl_rec_field in modules/jumperless/modjumperless.c: '|' between the
+// part fields, ';' between pin records, ',' inside one). None of those can
+// appear IN a user string or list_parts() silently misaligns - every field
+// after the stray byte shifts by one and a part comes back wearing another
+// field's value. The strings that reach here are not all API-guarded: a part
+// loaded from a hand-written slot YAML never passed partStringSafe.
+//
+// SUBSTITUTE rather than escape: the reader is a hand-rolled splitter with no
+// un-escaping pass (there is no CSV/JSON library on board), so an escape
+// would just move the problem. The cost is that a name containing a
+// delimiter comes back through list_parts() with '_' in its place and no
+// longer string-matches the stored part - visible, not silent, and only for
+// names the format never intended.
+static const char* partRecordSafe( const char* s, char* out, size_t outLen ) {
+    size_t i = 0;
+    if ( s != nullptr ) {
+        for ( ; s[ i ] != '\0' && i + 1 < outLen; i++ ) {
+            char c = s[ i ];
+            out[ i ] = ( c == '|' || c == ';' || c == ',' ) ? '_' : c;
+        }
+    }
+    out[ i ] = '\0';
+    return out;
+}
+
+const char* jl_get_part_info( int idx ) {
+#if defined( OG_JUMPERLESS )
+    static char partBuffer[ 640 ]; // RP2040: scarce SRAM, MAX_PART_PINS is 16
+#else
+    static char partBuffer[ 1024 ];
+#endif
+    partBuffer[ 0 ] = '\0';
+
+    if ( idx < 0 || idx >= globalState.parts.numParts ) {
+        return partBuffer;
+    }
+
+    // Sized for the longest field this can hold (PartDefinition::name[16]).
+    char safeName[ 16 ], safeType[ 16 ], safeValue[ 16 ];
+    const PartDefinition& p = globalState.parts.parts[ idx ];
+    // The `placement` field rides between `placed` and the pins list. It is
+    // the mode partPinNode() resolved every `node` below through, so a script
+    // reading a leg's node without it cannot tell a compact leg sitting in its
+    // endpoint hole from an expanded one that merely happens to be there.
+    // `measured` rides after `placement`: the ohms a continuity check actually
+    // resolved for this part this session, 0 when it never ran (it is RAM-only
+    // - see PartDefinition - so a reboot or a resumed guide legitimately reads
+    // 0 and the caller falls back to `value`).
+    // jl_list_parts_func() splits this record positionally - keep the two in
+    // step, and keep the pins list LAST (it is the only ';'-joined field).
+    int pos = snprintf( partBuffer, sizeof( partBuffer ), "%s|%s|%s|%d|%s%u|%d|%s|%.6g|",
+                        partRecordSafe( p.name, safeName, sizeof( safeName ) ),
+                        partRecordSafe( p.typeStr, safeType, sizeof( safeType ) ),
+                        partRecordSafe( p.value, safeValue, sizeof( safeValue ) ),
+                        (int)p.baseRow,
+                        p.footprint == 1 ? "dip" : ( p.footprint == 2 ? "axial" : "sip" ), (unsigned)p.pinCount,
+                        p.placed ? 1 : 0,
+                        p.placement == PART_PLACEMENT_COMPACT
+                            ? "compact"
+                            : ( p.placement == PART_PLACEMENT_CUSTOM ? "custom" : "expanded" ),
+                        (double)p.measuredOhms );
+
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        if ( pos < 0 || pos > (int)sizeof( partBuffer ) - 48 ) break;
+        const PartPin& pin = p.pins[ j ];
+        char safePin[ 12 ];   // PartPin::name[12]
+        pos += snprintf( partBuffer + pos, sizeof( partBuffer ) - pos, "%s%s,%d,%d,%s",
+                         ( j == 0 ) ? "" : ";",
+                         partRecordSafe( pin.name, safePin, sizeof( safePin ) ),
+                         partPinNode( p, pin ),
+                         (int)pin.connect, partPinClassName( pin.pinClass ) );
+    }
+
+    return partBuffer;
+}
+
+// guide_progress(): the guideProgress step of the loaded state, or -1 when no
+// guide source is set. A project stopped at step 0 legitimately returns 0.
+int jl_guide_progress( void ) {
+    if ( globalState.parts.guideSource[ 0 ] == '\0' ) {
+        return -1;
+    }
+    return (int)globalState.parts.guideStep;
 }
 
 // OLED Functions
@@ -3162,6 +3670,11 @@ int jl_set_state(const char* jsonState, int clearFirst, int fromWokwi) {
             safeFileClose(f, false);
         }
 
+        // May be SLOT_FILE_CONTEXT. parseWokwiDiagram only carries the number
+        // for its messages - it parses into the state object it is handed and
+        // never saves - and persistence here is the SlotManager idle auto-save,
+        // which is path-aware (service() -> saveActiveSlot). So a file context
+        // needs no special case: the diagram lands in the active file.
         int activeSlot = SlotManager::getInstance().getActiveSlot();
         bool success = parseWokwiDiagram(json, globalState, activeSlot, errorMsg);
 

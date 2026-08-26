@@ -2468,13 +2468,16 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
     return optionSelected;
 }
 
-int yesNoMenu( unsigned long timeout ) {
+int yesNoMenu( unsigned long timeout, int startOption ) {
     inClickMenu = 1;
 
     rotaryDivider = 8; // one option step per physical detent (8 counts)
     // delayMicroseconds(3000);
     int optionSelected = -1;
-    int highlightedOption = 0;
+    // Which option a bare CLICK answers. 0 = No (the historical default and
+    // what every pre-existing caller passes); 1 = Yes, for prompts whose
+    // wording promises "click = yes".
+    int highlightedOption = ( startOption == 1 ) ? 1 : 0;
     int changed = 0;
     uint32_t selectColor = 0x1a001a;
     uint32_t yesColor = 0x001004;
@@ -2486,14 +2489,23 @@ int yesNoMenu( unsigned long timeout ) {
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
 
-    // Display initial state immediately before entering loop
+    // Display initial state immediately before entering loop. Mirrors the
+    // in-loop redraw below so startOption == 1 really SHOWS Yes selected -
+    // a hardcoded "No" here would make the prompt lie about what a click does.
     Serial.print( "\r                      \r" );
     menuTransitionBeginDraw( );
     b.clear( 1 );
-    Serial.print( "No" );
-    b.print( ">", noColorBright, 0x0, 4, 1, -1 );
-    b.print( "Yes", yesColor, 0x0, 1, 1, -2 );
-    b.print( "No", noColorBright, 0x0, 5, 1, -1 );
+    if ( highlightedOption == 1 ) {
+        Serial.print( "Yes" );
+        b.print( ">", yesColorBright, 0x0, 0, 1, -2 );
+        b.print( "Yes", yesColorBright, 0x0, 1, 1, -2 );
+        b.print( "No", noColor, 0x0, 5, 1, -1 );
+    } else {
+        Serial.print( "No" );
+        b.print( ">", noColorBright, 0x0, 4, 1, -1 );
+        b.print( "Yes", yesColor, 0x0, 1, 1, -2 );
+        b.print( "No", noColorBright, 0x0, 5, 1, -1 );
+    }
     menuTransitionArm( );
     delay( 100 );
     requestLedShow( 2 );
@@ -2908,16 +2920,30 @@ float getActionFloat( int menuPosition, int rail ) {
     // below leave prev==voltage so setRailVoltage's recording guard
     // skips it). At loop exit we record ONE undo entry capturing the
     // (initial -> final) jump - so a rail drag becomes a single undo
-    // step. railRecordUndo() is a small lambda below the loop.
+    // step. railCommitEdit() is a small lambda below the loop.
+    //
+    // IT ALSO OWNS THE DIRTY MARK, and must (w3-5). The pre-write above is
+    // exactly the shape that hides an edit from setRailVoltage: by the time
+    // setTopRail() -> setRailVoltage() runs, power.topRail ALREADY holds the
+    // new value, so prev == voltage and the setter's guards - undo AND, since
+    // w3-5's no-op gate, markDirty - both correctly conclude "nothing changed".
+    // Nothing else in this file persists the drag (there is no other
+    // markDirty/saveActiveSlot in Menus.cpp, and setTopRail's saveEEPROM arm is
+    // dead code), so without the mark here a rail set from the encoder/probe
+    // menu is lost on the next slot switch or reboot. Same change detection as
+    // the undo record, so an untouched slider still dirties nothing.
     float undoInitialTopRail = globalState.power.topRail;
     float undoInitialBotRail = globalState.power.bottomRail;
-    auto railRecordUndo = [&]() {
+    auto railCommitEdit = [&]() {
         if ( rail < 0 || rail > 2 ) return;  // not a rail context
         bool changedTop = ( rail == 0 || rail == 1 ) &&
                           undoInitialTopRail != globalState.power.topRail;
         bool changedBot = ( rail == 0 || rail == 2 ) &&
                           undoInitialBotRail != globalState.power.bottomRail;
         if ( !changedTop && !changedBot ) return;
+
+        // The rails really moved - this is a user edit and must persist.
+        globalState.markDirty();
         // Bundle both rail changes into a single transaction so the user gets
         // ONE undo step for "rails to 2.7V" rather than two (one per rail) when
         // rail==0. The label is derived from the recorded ops by undoEndTxn (a
@@ -2960,8 +2986,11 @@ float getActionFloat( int menuPosition, int rail ) {
             requestLedShow( -1 );
             // Long-press is a "leave the rails wherever the slider was last"
             // exit. The hardware/state still got mutated during the drag,
-            // so we still need to record one undo step.
-            railRecordUndo();
+            // so we still need to record one undo step. NAN tells the
+            // action handler NOT to re-apply (a cancel used to drive both
+            // rails to the stale/zero analogVoltage and persist it - sweep).
+            currentAction.analogVoltage = NAN;
+            railCommitEdit();
             return roundedCurrentChoice; // Return current choice without applying
         }
 
@@ -2985,7 +3014,7 @@ float getActionFloat( int menuPosition, int rail ) {
                 selectNodeAction( );
             }
 
-            railRecordUndo();
+            railCommitEdit();
             return roundedCurrentChoice;
         }
 
@@ -2993,7 +3022,8 @@ float getActionFloat( int menuPosition, int rail ) {
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
             requestLedShow( -1 );
-            railRecordUndo();
+            currentAction.analogVoltage = NAN;   // cancel = do not re-apply
+            railCommitEdit();
             return roundedCurrentChoice;
         }
 
@@ -3991,6 +4021,26 @@ actionCategories getActionCategory( void ) {
                     "Python" ) != -1 ) {
         return APPSACTION;  // Python = same as Files (click-menu file browser)
 
+    } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
+                    "Parts" ) != -1 ) {
+        // Parts = the picker app row, a childless TOP-LEVEL entry
+        // (menuTree.h). Selecting it walks off the end of its empty submenu
+        // range and lands in doMenuAction, exactly the way Files and History
+        // do. The APPSACTION arm's appNameIdx then falls back to
+        // previousMenuPositions[0] for single-level entries, so this yields
+        // runApp(-1, "Parts"), which name-matches the apps[] row
+        // { "Parts", 25, 1, partsAppLauncher }. This string and that row
+        // are ONE unit - rename either and the top-level row goes dead
+        // silently, because the menu line's own text IS runApp's name arg.
+        //
+        // Order-safe: none of the keywords tested above this one - Slots,
+        // Rails, Show, Output, Arduino, Probe, Connect, Display, Apps,
+        // Routing, OLED, Calib, History, Files, Python - is a substring of
+        // "Parts", so no earlier arm can claim the row. (The row was
+        // "Projects" through wave 2 and "Guides" through the first ambient
+        // slice.)
+        return APPSACTION;
+
     } else {
         return NOCATEGORY;
     }
@@ -4191,6 +4241,14 @@ int doMenuAction( int menuPosition, int selection ) {
     } else if ( currentCategory == RAILSACTION ) { //! Rails
 
         //  Serial.print( "Rails Action\n\r" );
+        // A cancelled slider leaves analogVoltage NAN: the drag already moved
+        // the rails and railCommitEdit() recorded it, so there is nothing to
+        // apply. Re-applying drove BOTH rails to 0.00V and persisted that over
+        // the user's saved voltage (sweep finding, high).
+        if ( isnan( currentAction.analogVoltage ) ) {
+            requestLedShow( -1 );
+            currentAction.analogVoltage = 0.0f;   // leave the struct sane
+        } else {
         requestLedShow( 1 );
         waitCore2( );
 
@@ -4223,9 +4281,33 @@ int doMenuAction( int menuPosition, int selection ) {
         }
         }
         requestLedShow( -1 );
+        }   // end of the "slider was confirmed" apply block
 
-        // State is marked dirty by setRailVoltage() - will auto-save before next reload
-        // No need for configChanged - voltages are in state, not config
+        // NO markDirty() HERE, DELIBERATELY (w3-5 fix round 2).
+        //
+        // The old comment here said "State is marked dirty by setRailVoltage()",
+        // which stopped being true when the setter gained its no-op gate. Fix
+        // round 1 replaced it with an unconditional mark, and that was wrong in
+        // the other direction: this branch is reached from
+        // `getActionFloat(); return doMenuAction();` (:1490-1495), which runs
+        // doMenuAction() after EVERY exit from the slider - confirm, long-press
+        // cancel and serial cancel alike. Short-pressing without turning
+        // anything would therefore have dirtied the state and made the next
+        // idle flush rewrite the slot file: one more no-change rewrite, which
+        // is the exact class of bug this task exists to remove.
+        //
+        // Both cases are already covered without a mark here:
+        //   * the slider PRE-WROTE globalState.power, so the setters above see
+        //     prev == voltage and stay quiet - and railCommitEdit() (:2941) has
+        //     already marked, but only when the rails actually moved. It is the
+        //     single owner of that decision and it runs on all three exits.
+        //   * a future Rails menu entry that reaches RAILSACTION WITHOUT the
+        //     slider (a preset voltage, actions[] != 3) does no pre-write, so
+        //     setTopRail/setBotRail arrive with prev != voltage and the setter's
+        //     own mark fires normally.
+        // The pre-write is the only thing that can hide a change from the
+        // setter, and the only pre-writer is the slider. So: nothing to do here.
+        // (No configChanged either - voltages live in state, not config.)
 
     } else if ( currentCategory == SLOTSACTION ) { //! Slots
 
@@ -4235,7 +4317,17 @@ int doMenuAction( int menuPosition, int selection ) {
              -1 ) {
 
             if ( currentAction.from[ 0 ] >= 0 && currentAction.from[ 0 ] < NUM_SLOTS ) {
-                saveCurrentSlotToSlot( netSlot, currentAction.from[ 0 ] );
+                // Save the ACTIVE STATE to the chosen destination. This used
+                // to be saveCurrentSlotToSlot(netSlot, dest), which LOADED
+                // netSlot first and then saved it - a reload that was always
+                // redundant (the active state IS the source) and that fails
+                // outright with netSlot == -2. saveSlot(dest) also moves the
+                // context to dest, number and path together.
+                String errorMsg;
+                if ( !SlotManager::getInstance( ).saveSlot( currentAction.from[ 0 ], errorMsg ) ) {
+                    Serial.println( "Error saving to slot " +
+                                    String( currentAction.from[ 0 ] ) + ": " + errorMsg );
+                }
                 netSlot = currentAction.from[ 0 ];
             }
 
@@ -4337,6 +4429,17 @@ int doMenuAction( int menuPosition, int selection ) {
 
             printActionStruct( );
 
+            // Did the loop below actually PRE-WRITE a power field? Only then is
+            // there an edit the setters cannot see (w3-5 fix round 2). This
+            // branch is reached from `selectNodeAction(); ... doMenuAction();`
+            // (:1444/:1477) with the return value unchecked, and
+            // selectNodeAction() returns -1 on cancel (:2673) - so a cancelled
+            // node pick lands here with every from[]/to[] still -1, the loop
+            // body never runs, and an unconditional mark (which is what fix
+            // round 1 left here) would dirty the state for a visit that changed
+            // nothing at all.
+            bool wroteAPowerField = false;
+
             for ( int i = 0; i < 10; i++ ) {
                 if ( currentAction.from[ i ] != -1 && currentAction.to[ i ] != -1 ) {
                     switch ( currentAction.from[ i ] ) {
@@ -4344,11 +4447,13 @@ int doMenuAction( int menuPosition, int selection ) {
                         addBridgeToState( DAC0, currentAction.to[ i ] );
                         // setDac0_5Vvoltage(currentAction.analogVoltage);
                         globalState.power.dac0 = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         break;
                     case 1:
 
                         addBridgeToState( DAC1, currentAction.to[ i ] );
                         globalState.power.dac1 = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         // setDac1_8Vvoltage(currentAction.analogVoltage);
                         break;
                         // break;
@@ -4356,10 +4461,12 @@ int doMenuAction( int menuPosition, int selection ) {
                     case 2:
                         addBridgeToState( TOP_RAIL, currentAction.to[ i ] );
                         globalState.power.topRail = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         break;
                     case 3:
                         addBridgeToState( BOTTOM_RAIL, currentAction.to[ i ] );
                         globalState.power.bottomRail = currentAction.analogVoltage;
+                        wroteAPowerField = true;
                         break;
 
                     default:
@@ -4369,6 +4476,19 @@ int doMenuAction( int menuPosition, int selection ) {
             }
             refreshConnections( );
             setRailsAndDACs( );
+            // THIRD instance of the pre-write shape (w3-5 sweep, not in the
+            // review's list): the cases above assign globalState.power.dac0 /
+            // dac1 / topRail / bottomRail DIRECTLY, so setRailsAndDACs() - which
+            // re-reads those same fields - hands every setter prev == voltage
+            // and marks nothing. Before this, the dirty flag arrived incidentally
+            // from the addBridgeToState() next to each assignment, which is both
+            // fragile (it is persisting a VOLTAGE on the strength of a BRIDGE
+            // add) and lossy when that add is refused (isConnectionAllowed, or
+            // MAX_BRIDGES). Mark it for the reason it is actually true - the
+            // user set a voltage - and ONLY when one was actually set.
+            if ( wroteAPowerField ) {
+                globalState.markDirty();
+            }
 
         } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf(
                         "UART" ) != -1 ) {
@@ -4655,8 +4775,12 @@ int doMenuAction( int menuPosition, int selection ) {
         // Note: Integer input (action 7) is now handled in getMenuSelection()
         // following the same pattern as getActionFloat (action 3)
 
-        // Apply integer input value to config based on menu context
-        if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Width" ) != -1 ) {
+        // Apply integer input value to config based on menu context.
+        // previousMenuPositions[2] is -1 when this action is reached from a
+        // depth-1 row (OLED > Connect): menuLines[-1] is an out-of-bounds
+        // String read (sweep finding, medium).
+        if ( currentAction.previousMenuPositions[ 2 ] >= 0 &&
+             menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Width" ) != -1 ) {
             jumperlessConfig.top_oled.width = currentAction.integerValue;
             oled.displayWidth = currentAction.integerValue;
             configChanged = true;

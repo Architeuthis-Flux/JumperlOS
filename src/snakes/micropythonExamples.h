@@ -4019,6 +4019,15 @@ switch_slot = _native.switch_slot
 CURRENT_SLOT = _native.CURRENT_SLOT
 
 # ============================================================================
+# Projects and Parts (guided placement)
+# ============================================================================
+load_project = _native.load_project
+place_part = _native.place_part
+remove_part = _native.remove_part
+list_parts = _native.list_parts
+guide_progress = _native.guide_progress
+
+# ============================================================================
 # Context Control
 # ============================================================================
 context_toggle = _native.context_toggle
@@ -4746,6 +4755,9 @@ __all__ = [
     
     # Slot Management
     'switch_slot', 'CURRENT_SLOT',
+
+    # Projects and Parts (guided placement)
+    'load_project', 'place_part', 'remove_part', 'list_parts', 'guide_progress',
     
     # Context Control
     'context_toggle', 'context_get',
@@ -4892,8 +4904,8 @@ __all__ = [
 ]
 
 )";
-const uint32_t JUMPERLESS_MODULE_PY_HASHES[7] = { 0x6683E1CA, 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
-const int JUMPERLESS_MODULE_PY_HASH_COUNT = 7;
+const uint32_t JUMPERLESS_MODULE_PY_HASHES[9] = { 0xE087762F, 0xF6FF4A6F, 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A, 0x6683E1CA };
+const int JUMPERLESS_MODULE_PY_HASH_COUNT = 9;
 #endif
 
 //==============================================================================
@@ -5624,6 +5636,136 @@ def switch_slot(slot: int) -> int:
 
 CURRENT_SLOT: int
 """Current active slot number"""
+
+# ============================================================================
+# Projects and Parts (guided placement)
+# ============================================================================
+
+def load_project(name_or_path: str) -> bool:
+    """Load a project, or any slot YAML, into the live state
+
+    THE TWO FORMS MEAN DIFFERENT THINGS.
+
+    A NAME ("555") begins or re-opens a RUN of that project: it opens
+    /projects/555/555_run.yaml, or creates it as a copy of the project's wiring
+    when there is no run yet, and makes it the active context. There is ONE run
+    file per project and it is reused - a later `new` overwrites it rather than
+    piling up numbered files. Load only - the guide and the companion script
+    are `z`'s job.
+    This is deliberately NOT the shipped /projects/555/wiring.yaml: that file
+    is a read-only TEMPLATE, and adopting it as an auto-saving context is what
+    used to rewrite projects without their guide:/meta: sections.
+
+    A PATH (anything containing '/') is loaded literally through the same
+    adopting loader the Files browser uses: bridges, nets, power and any
+    `parts:` section are applied and routed immediately, and that file becomes
+    the active context. Use this for a run file, a slot file, or a
+    hand-written YAML. A project template loads this way too, but stays
+    read-only - saves to it are refused.
+
+    Args:
+        name_or_path: "555" -> begin/re-open a run of project 555.
+                      Anything containing '/' is used as a literal path.
+
+    Returns:
+        True on success, False otherwise (the reason is printed)
+
+    Example:
+        load_project("555")                         # run file, active context
+        load_project("/projects/555/555_run.yaml")  # that file, literally
+        load_project("/slots/slot3.yaml")           # any slot YAML
+    """
+    ...
+
+def place_part(name: str, row: int, pins_json: str, footprint: str = "",
+               type: str = "", value: str = "") -> int:
+    """Place a part and expand its pins into bridges
+
+    Args:
+        name: Part name, 1-15 characters, unique (remove_part first to replace)
+        row: Breadboard row of pin 1. Plain SIP is legal on either half
+             (1-60); a DIP's pin 1 (the dot/notch) MUST be on the bottom half
+             (31-60) - real chips sit that way; axial2's pin 1 MUST be on the
+             top half (1-30) so pin 2 (row+30) lands across the ravine.
+        pins_json: Pins map, e.g.
+            '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'
+            pin:     1-based physical pin, placed by the footprint geometry
+            offset:  same-side offset from row (wins over pin: when >= 0)
+            connect: row 1-60 or a node name (GND, TOP_RAIL, DAC0, ...);
+                     omit it to let the leg occupy the hole with no bridge
+            class:   "signal" (default), "power", "gnd" or "nc"
+        footprint: "dip8" / "sip2" / "axial2" - default "" infers a SIP strip
+                   sized from the highest pin/offset listed. axial2 is always
+                   exactly 2 pins: pin 1 = row, pin 2 = row+30 (the default
+                   footprint for 2-leg parts like resistors/diodes, straddling
+                   the ravine; radial parts like caps/LEDs use sip2 instead).
+        type: Optional part type (resistor|capacitor|diode|led|bjt|fet|ic)
+        value: Optional value string ("10k", "NE555")
+
+    Returns:
+        0 on success, -1 on failure (the reason is printed)
+
+    Example:
+        place_part("U9", 5, '{"A": {"pin": 1, "connect": "GND"}, '
+                            '"B": {"pin": 2, "connect": 7}}')
+        place_part("U1", 35, '{"GND": {"pin": 1, "connect": "GND"}}',
+                   "dip8", "ic", "NE555")
+        place_part("R1", 10, '{"A": {"pin": 1, "connect": "TOP_RAIL"}, '
+                             '"B": {"pin": 2, "connect": 6}}', "axial2")
+    """
+    ...
+
+def remove_part(name: str) -> int:
+    """Remove a part: its expansion bridges, its {NAME}_{PIN} net names and its entry
+
+    Returns:
+        0 on success, -1 when there is no part with that name
+    """
+    ...
+
+def list_parts() -> List[Dict]:
+    """List the parts in the loaded state
+
+    Returns:
+        A list of dicts:
+        {'name', 'type', 'value', 'row', 'footprint', 'placed', 'placement',
+         'measured', 'pins': {PIN: {'node', 'connect', 'class'}}}
+        'node' is the resolved breadboard node for the leg (-1 if off-board),
+        'connect' is the node it bridges to (-1 for none).
+
+        'measured' is ohms: what a guided build's continuity check actually
+        read across this part, or 0.0 if it was never measured. It is the real
+        component instead of the file's nominal 'value', which is what a
+        companion script wants when it computes anything from the circuit -
+        so read `p['measured'] or parse(p['value'])`, in that order. It lives
+        in RAM only, so it is 0.0 after a reboot or in a resumed guide, and
+        the 'value' fallback is not optional.
+
+        'placement' is 'expanded', 'compact' or 'custom', and it is the mode
+        every 'node' above was resolved through:
+          expanded  legs sit at the footprint rows and a bridge runs to each
+                    'connect' endpoint (the default)
+          compact   a leg whose 'connect' is a real hole row (1-60 or a rail)
+                    sits IN that hole, so 'node' == 'connect' and no bridge
+                    exists for it - the breadboard-native shape
+          custom    expanded geometry at a row the user moved the part to
+        Without it a compact leg is indistinguishable from an expanded one
+        that happens to have landed on the same row.
+
+    Example:
+        for p in list_parts():
+            print(p['name'], p['footprint'], p['placement'],
+                  'placed' if p['placed'] else 'pending')
+    """
+    ...
+
+def guide_progress() -> int:
+    """Guided-placement progress of the loaded state
+
+    Returns:
+        The saved guide step, or -1 when no guide source is loaded
+    """
+    ...
 
 # ============================================================================
 # Context Control
@@ -6683,8 +6825,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[8] = { 0xE25DA938, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 8;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[15] = { 0xCDF87BB7, 0x84364A5A, 0x3AC5793C, 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37, 0xE25DA938 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 15;
 #endif
 
 //==============================================================================

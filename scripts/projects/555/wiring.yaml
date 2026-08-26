@@ -1,0 +1,94 @@
+version: 2
+sourceOfTruth: bridges
+meta:
+  project: 555
+  title: "555 LED Flasher"
+  variant: default
+  summary: "NE555 astable blinking an LED - your R and C set the rate"
+  script: main.py
+  needs: ["NE555 (DIP-8)", "~10k", "~47k", "~10uF cap", "LED", "~330"]
+parts:
+  - name: "U1"
+    type: ic
+    value: "NE555"
+    footprint: dip8
+    row: 35
+    pins:
+      GND:   {pin: 1, connect: GND,      class: gnd}
+      TRIG:  {pin: 2, connect: 7,        class: signal}
+      OUT:   {pin: 3,                    class: signal}
+      RESET: {pin: 4, connect: TOP_RAIL, class: power}
+      CTRL:  {pin: 5,                    class: nc}
+      THR:   {pin: 6,                    class: signal}
+      DIS:   {pin: 7,                    class: signal}
+      VCC:   {pin: 8, connect: TOP_RAIL, class: power}
+  - name: "R1"
+    type: resistor
+    value: "10k"
+    footprint: axial2
+    row: 10
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 6}}
+  - name: "R2"
+    type: resistor
+    value: "47k"
+    footprint: axial2
+    row: 13
+    pins: {A: {pin: 1, connect: 6}, B: {pin: 2, connect: 7}}
+  - name: "C1"
+    type: capacitor
+    value: "10uF"
+    footprint: sip2
+    row: 18
+    pins: {PLUS: {pin: 1, connect: 7}, MINUS: {pin: 2, connect: GND}}
+  - name: "LED1"
+    type: led
+    footprint: sip2
+    row: 22
+    pins: {A: {pin: 1}, K: {pin: 2, connect: GND}}
+  - name: "R3"
+    type: resistor
+    value: "330"
+    footprint: axial2
+    row: 16
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 22}}
+guide:
+  title: "555 LED Flasher"
+  # NOTHING HERE JUDGES A COMPONENT VALUE. Every `value:` above is a suggestion
+  # for the parts bin, not a requirement: `enforce: false` on the R steps means
+  # the check measures the resistor, reports what it read, and passes. The two
+  # verdicts that still fail are the ones that are PLACEMENT mistakes rather
+  # than value mistakes - open (a leg not seated) and short (both legs the same
+  # side of the ravine) - plus "no current" on the LED, which is what a
+  # backwards LED looks like from here.
+  #
+  # Whatever the user actually reached for is then the truth the companion
+  # script computes from: every measured resistance lands in that part's
+  # `measured` field, main.py reads it back through list_parts(), and prints
+  # the frequency and duty cycle THOSE parts predict next to the ones the board
+  # observes. Substituting a 22k for the 47k changes the answer instead of
+  # failing the build, which is the whole point of a starter project.
+  steps:
+    - {do: note, text: "A 555 blinker - any R and C work, the script does the math. Turn, click, hold=exit."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "555 across the middle gap, pin 1 (the dot) at row 35."}
+    - {do: place, part: R1, check: continuity, enforce: false, text: "10k-ish: rows 10 and 40, over the gap. Anything 1k-100k works - it gets measured."}
+    - {do: place, part: R2, check: continuity, enforce: false, text: "47k-ish: rows 13 and 43, over the gap. Larger than R1 gives a more even blink."}
+    - {do: place, part: C1, check: presence, text: "10uF cap: + (long leg) row 18, - row 19. A different value is fine."}
+    - {do: place, part: LED1, check: vf, enforce: false, on_fail: retry, text: "LED: long leg (anode) row 22, short leg row 23. Any colour."}
+    - {do: place, part: R3, check: continuity, enforce: false, text: "330-ish for the LED: rows 16 and 46, over the gap. 100R to 2k all fine."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power up (5V)."}
+    # No `check: oscillates` here. It drives a 3.3 V GPIO onto the target and
+    # refuses a node that can swing to this project's 5 V rail, so on the
+    # shipped wiring it can only ever report `unmeasured` - a step that cannot
+    # succeed is worse than no step. The blink rate is measured properly by
+    # main.py, off ADC0, where it can also be compared against the parts.
+    - {do: note, text: "Built. Run main.py - it times the blink and checks it against your parts."}
+# NO bridges: and no nets: on purpose. Opening this project must leave the
+# breadboard completely unconnected - every connection here belongs to a part
+# and waits for the guide to commit it. The two ADC taps that used to live here
+# (ADC0-37 on OUT, ADC1-7 on the timing cap) showed up as two wires nobody
+# asked for the moment the project opened; main.py makes them itself now, and
+# takes them back down when it exits. The `nets:` entry that named node 7
+# "TIMING" went with them - it could only ever attach because the ADC1 tap put
+# node 7 in a net at load time.
+power:
+  topRail: 5.0

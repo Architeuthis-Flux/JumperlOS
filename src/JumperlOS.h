@@ -317,6 +317,15 @@ public:
      * @return Pointer to blocking service, or nullptr if none
      */
     Service* getBlockingService() const { return blockingService; }
+
+    /**
+     * @brief True while ANY modal context owns the loop: a service that
+     * returned BLOCKING, or a synchronous modal loop currently pumping
+     * serviceInner() (probe mode, click/pad menus, pickers). Services that
+     * halve budgets / defer heavy work under modal load must use THIS -
+     * getBlockingService() alone is nullptr inside the synchronous loops.
+     */
+    bool inModalContext() const { return innerDepth > 0 || blockingService != nullptr; }
     
     /**
      * @brief Check if any service is currently blocking
@@ -340,6 +349,7 @@ private:
     uint8_t serviceCount;
     uint8_t coreId;
     Service* blockingService;
+    uint8_t innerDepth = 0;   // nested serviceInner() dispatch depth (modal loops)
 
     // serviceAll() passes since boot (diagnostics; the old per-band loop
     // divisors that hung off it are gone - periods replaced them).

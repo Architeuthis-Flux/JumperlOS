@@ -10,6 +10,7 @@
 #include "MatrixState.h"
 #include "LEDs.h"
 #include "CH446Q.h"
+#include "RotaryEncoder.h"   // NUM_SLOTS, SLOT_FILE_CONTEXT, extern netSlot
 #include <YAMLDuino.h>
 
 
@@ -55,6 +56,22 @@ config:
 #ifndef STATE_HISTORY_SIZE
 #define STATE_HISTORY_SIZE 0
 #endif
+
+// Parts layer capacity (guided placement / projects branch)
+#if defined(OG_JUMPERLESS)
+  #define MAX_PARTS 6
+  #define MAX_PART_PINS 16
+#else
+  #define MAX_PARTS 16
+  #define MAX_PART_PINS 24
+#endif
+
+// PartDefinition::placement - how a part's legs sit on the board (guide-UX
+// design §2.1). EXPANDED is the default and the only value the pre-wave-2
+// format could express, so it is the one the serializer omits.
+#define PART_PLACEMENT_EXPANDED 0   // legs at the footprint rows + routed bridges
+#define PART_PLACEMENT_COMPACT  1   // legs go straight into their connect: holes
+#define PART_PLACEMENT_CUSTOM   2   // expanded-shaped, but the user moved row:
 
 // Forward declarations
 class JumperlessState;
@@ -234,10 +251,289 @@ struct ConfigState {
     void setDefaults();
 };
 
+// ============================================================================
+// Parts layer (guided placement / projects branch)
+// ============================================================================
+// Slot-YAML `parts:` section (design: CodeDocs/DESIGN_GUIDED_PLACEMENT.md
+// §1-§2/§6; serializer/parser live in routing/PartPlacement.cpp):
+//
+//   parts:
+//     - name: "U1"          # required
+//       type: ic            # optional: resistor|capacitor|diode|led|bjt|fet|ic
+//       value: "NE555"      # optional
+//       part_id: ""         # optional part-ID hook (future /partdb reference)
+//       footprint: dip8     # dipN | sipN | axial2 (N = PHYSICAL pin count;
+//                           # axial2 is always exactly 2 pins)
+//       row: 35             # breadboard row of pin 1 - DIP requires 31-60
+//                           # (bottom half only, pin 1's dot/notch), axial2
+//                           # requires 1-30 (top half; pin 2 = row+30), SIP
+//                           # is legal on either half
+//       placed: false       # runtime flag; always serialized
+//       placement: compact  # expanded (default, OMITTED) | compact | custom
+//       pins:
+//         GND:  {pin: 1, connect: GND, class: gnd}
+//         TRIG: {pin: 2, connect: 7, class: signal}
+//         A:    {offset: 0, connect: 45}
+//
+// PLACEMENT MODES (guide-UX design §2, PartPlacement.cpp partPinNode()):
+// `expanded` (0, the default) puts every leg at its footprint row and lets
+// expandOnePart() route a bridge from there to the pin's `connect:` node.
+// `compact` (1) is how you would breadboard it by hand - a leg whose
+// `connect:` is a PHYSICAL HOLE ROW (1-60, TOP_RAIL, BOTTOM_RAIL) goes
+// straight into that hole and emits NO bridge, because the leg itself is the
+// connection. Per-pin, not all-or-nothing: a leg whose endpoint is
+// fabric-only (GND=100 has no holes; DAC/ADC/GPIO likewise), `class: nc`, or
+// absent keeps its footprint row and its bridge. ICs never compact (their
+// legs ARE the footprint) - a hand-written `placement: compact` on a DIP is
+// normalized back to expanded on parse, with a warning. `custom` (2) is
+// expanded geometry from a row: the user moved by hand; the marker exists so
+// a future re-provision does not snap it back. Unknown values parse as
+// expanded with a warning. Emitted only when non-default (the verify/color
+// precedent), so pre-wave-2 files are byte-identical after a rewrite - and
+// note the converse: an OLDER firmware opening a new file DROPS `placement:`
+// silently (unknown keys are skipped by design), so the part comes back
+// expanded.
+//
+// PIN FORMS PARSED: both the nested block form above (one `NAME: {...}` per
+// line under `pins:`) and the inline one-line form
+// `pins: {A: {pin: 1, connect: 7}, B: {pin: 2}}`. Part entries themselves
+// parse in block form only (`- name: ...`). `pin:` is the 1-based physical
+// pin number placed by the DIP/SIP footprint math; `offset:` places the pin
+// at baseRow+offset on the same side and WINS over `pin:` when >= 0.
+// `offset:` IS EXPANDED-MODE GEOMETRY ONLY - it names a footprint row, so a
+// compact-eligible pin ignores it (the leg goes to `connect:` instead) and it
+// is what a non-eligible pin falls back to. It also predates `axial2`, which
+// makes most historical uses obsolete: the old way to straddle the ravine was
+// a sip2 with `{offset: 0}` / `{offset: 30}` (which does not even parse -
+// offsets may not cross the ravine), so a 2-leg part should now declare
+// `footprint: axial2` and plain `pin: 1` / `pin: 2`. Offsets are still the
+// right tool for a leg that sits at a fixed distance from pin 1 on a strip
+// with gaps. An offset that lands off-board (or on the far half) now REJECTS
+// THE WHOLE PART, exactly like an oversized DIP/SIP span - see partGeometryOk
+// in PartPlacement.cpp; before wave 2 such a part was accepted and then
+// placed partially, which is the same silent-partial-loss class.
+// `connect:` is node-only - a row number 1-60 or any node name resolvable by
+// parseNodeName(), the exact helper `bridges:` parsing uses. `class:` is
+// signal|power|gnd|nc (default signal). Unknown keys inside a part entry are
+// skipped without error; malformed part entries are skipped with a warning,
+// like bridges. A pin name may not begin with '-' or '#': pin names are
+// emitted UNQUOTED as `      <NAME>: {...}`, so "- X" would reload as a
+// parts-LIST entry (every following pin misattributed to a phantom part) and
+// "#X" as a comment. parsePinEntry refuses it on every path (YAML and
+// place_part alike, with a parse warning); jl_place_part carries a matched
+// second copy so the two predicates cannot drift.
+// (Section-keyword names like `overlays` used to be dangerous too, because
+// the overlays pass strstr-scanned the whole file; it now matches only an
+// UN-INDENTED `overlays:` line and stops at the next un-indented header, so
+// a part/pin/value carrying the word is harmless.)
+//
+// guideProgress round-trips as ONE top-level flow-map line - the only shape
+// parsed and the only shape emitted (keep serializer and parser matched):
+//   guideProgress: {source: "/projects/555/wiring.yaml", step: 3, of: 5, skipped: 0x4}
+// Emitted only while guideSource is non-empty. `meta:` and `guide:` sections
+// are swallowed on parse and NOT round-tripped - the launcher and the guide
+// runtime re-read the project file themselves.
+//
+// `of:` is the STEP TOTAL the guide had when it last persisted progress, and
+// it is emitted only when non-zero (the runSource rule: an unemitted scalar
+// would be destroyed by the next idle auto-save, so serializer and parser
+// land in the same commit - they do). It exists because the SINGLE-RUN-FILE
+// launcher has to answer "is a guided build MID-FLIGHT in this file?" from
+// the FILE ALONE, before anything is loaded: numSteps cannot be recomputed
+// launcher-side, since guideParse resolves `part:` names (and synthesizes
+// auto steps) against the LIVE parts table, which at that moment still holds
+// the previous context. step < of means unfinished. A file with no `of:`
+// (hand-written, or written before this field existed) reads as total 0 =
+// "unknown", and the launcher then treats it as NOT mid-flight - it reopens
+// silently and the existing resume gates do the right thing anyway.
+// SlotManager::scanGuideProgressFile() is the load-free reader; it lives
+// beside the parse arm in States.cpp so the two cannot drift.
+//
+// `skipped:` is the SKIP SET as a hex bitmask, bit i = step i was deliberately
+// skipped. It exists because `step:` is guideFirstUnfinished, which treats a
+// skipped step as finished - so a skip always lands strictly BELOW the resume
+// cursor and the resume loop cannot otherwise tell it from a commit. That
+// mattered most for `power_on`: promoting a skipped one to committed made INIT
+// re-energize the rails under the banner promising 0 V. Emitted only when the
+// writer actually KNOWS the skip set (the guide runtime persisting a live
+// session), never speculatively - so a hand-written file, or one written
+// before this key existed, round-trips byte-identically and reads back as
+// "skip set unknown" rather than as a false "nothing was skipped". An unknown
+// skip set is the one case in which resume REFUSES to re-apply power. Older
+// firmware reading a new file ignores the key: parseGuideProgressLine only
+// looks up the keys it knows, and the `,`/`}`-bounded value scan for `step:`
+// and `of:` is unaffected by a trailing key.
+//
+// `guide:` FORMAT NOTES (parsed by guiding/GuidedFlow.cpp, documented in
+// CodeDocs/DESIGN_GUIDED_PLACEMENT.md §2/§5 - listed here because this is
+// the file the section shares):
+//   - a rail_sane step with an explicit `target:` is checked as VCC-class,
+//     i.e. "within 0.2 V of the top rail". The format cannot say which class
+//     a single named row is, so one band has to be the default and VCC is
+//     the useful one; GND-class rows are what the classless form finds by
+//     itself from the parts' own `class: gnd` pins. For an explicit "this
+//     row should be at 0 V" check, use `check: voltage` with
+//     min: -0.15 / max: 0.15.
+//   - CONTINUITY `min:`/`max:` ARE OHMS (wave 2). They used to be milliamps,
+//     because the check compared a raw INA current against an authored
+//     current band; it now measures RESISTANCE four-wire (the sense legs ride
+//     the stimulus chain, the shunt sits on the ground side) and divides, so
+//     an authored bound names ohms. `value:` + the optional per-part `tol:`
+//     (percent) derive the band on their own - tol_author (default 15) +
+//     tol_meas (5 / 10 / 25 by decade) - and explicit min/max still WIN when
+//     they are given. Two guards catch a file still carrying the old numbers:
+//     a band that does not BRACKET the parsed `value:`, or (for a value-less
+//     part) a `max:` under 5 ohms, logs "min/max look like legacy mA" and
+//     falls back to the derived band. VF/VOLTAGE/OSCILLATES min/max are
+//     unchanged (volts / volts / Hz).
+//   - `enforce: false` on a CONTINUITY or VF step waives the band verdict
+//     only: the check still runs, still prints what it measured, and still
+//     FAILS on the verdicts that mean a placement mistake rather than a value
+//     mistake - open, short (<5 ohm), and vf's no-current (missing/backwards).
+//     It is for a project whose `value:`s are a suggestion; the reading lands
+//     in the part's measuredOhms (RAM only, list_parts()['measured']) so a
+//     companion script can compute from the components actually placed. On any
+//     other check kind the field is a parse warning and is ignored - there
+//     min/max IS the author's own intent and there is nothing to waive.
+//   - ONE STEP IS ONE `- {...}` FLOW MAP. Block style (`- id: x` on one line,
+//     `  do: place` on the next) is NOT parsed: each field line falls through
+//     to the guide-level key arm, which ends the steps: list, so the step
+//     AFTER it is dropped. That used to happen in silence - two authored
+//     steps parsing as one - and now prints "guide step spans lines -
+//     unsupported, next step may be lost". A flow map that merely WRAPS
+//     (`- {do: place, part: U1,` / `   text: "..."}`) is fine: guideParse
+//     joins continuation lines until the braces balance, bounded at 4 lines /
+//     512 chars so an unclosed brace cannot swallow the file. `text:` must
+//     still be the LAST field of the joined line.
+//   - a `do: connect` step's `n1:`/`n2:` are LITERAL rows and do NOT
+//     re-derive when a part moves. A part's OWN wiring does re-derive for
+//     free (bridges are never stored per part - expandOnePart recomputes
+//     partPinNode against `pin.connect` every time it applies), so route
+//     part wiring through the parts' `pin.connect` fields wherever you can
+//     and keep `connect:` steps for board-to-board jumpers. When a move
+//     vacates a row a later `connect:` step names, the guide prints
+//     `(note: step k targets row NN, which <part> just left)` - it cannot
+//     fix the step, only tell you the file has gone stale.
+//
+// fromYAML INDENT-HARDENING: top-level section headers are recognized on
+// UN-indented lines only (the serializer never indents them), so a nested
+// key like `config:` inside a contained section can't hijack the section
+// state. Exception: `fakeGpio:` is also recognized while inside `config:` -
+// the serializer nests it there ("  fakeGpio:"). An unrecognized un-indented
+// `something:` header opens an ignored/contained section instead of
+// corrupting the one before it.
+//
+// ROUND-TRIP IS LOAD-BEARING: toYAML is a wholesale rewrite; any section the
+// serializer doesn't emit is silently destroyed by the SlotManager idle
+// auto-save. serializeParts() must re-emit every field deserializeParts()
+// accepts.
+
+struct PartPin {
+    char    name[12];
+    int8_t  pinNumber;   // 1-based physical pin; -1 = positioned by offset
+    int8_t  offset;      // same-side offset from baseRow; -1 = use pinNumber + footprint
+    int16_t connect;     // target node; -1 = none (leg occupies the hole, no bridge)
+    uint8_t pinClass;    // 0=signal 1=power 2=gnd 3=nc
+};
+
+struct PartDefinition {
+    char     name[16];
+    char     typeStr[12];      // part-ID hook: resistor|capacitor|diode|led|bjt|fet|ic
+    char     partId[16];       // partdb record id (partdbFindByName resolves it)
+    char     driverKey[16];    // display driver binding OVERRIDE (B-M5).
+                               // Normally empty: partdbResolveDriver() falls
+                               // through partId -> record -> record driverKey.
+                               // Detect-Driver confirm (B-M8) writes it for
+                               // custom/misdetected panels. Serialized as
+                               // `driver:` ONLY when set - parser+serializer
+                               // land together (round-trip law).
+    int16_t  baseRow;          // breadboard row of pin 1 (1-60)
+    uint8_t  footprint;        // 0=SIP 1=DIP 2=axial2
+    uint8_t  pinCount;         // PHYSICAL pin count from the footprint (dip8 -> 8)
+    uint8_t  numPins;          // entries used in pins[] (only listed pins are stored;
+                               // pinCount is the footprint's N for the geometry math)
+    uint8_t  defaultVerify;    // GuideCheck (raw uint8 until the guide runtime lands)
+    uint32_t outlineColor;     // 0 = per-class defaults
+    char     value[12];        // "10k" etc.
+    uint8_t  tol;              // `tol:` percent for the derived continuity
+                               // band (invest-measurement.md §2.2). 0 = unset
+                               // -> the 15 % default; serialized only when set
+    float    measuredOhms;     // RUNTIME ONLY, 0 = never measured. The last
+                               // resistance a continuity check actually
+                               // resolved for this part (4-wire, R = dV/I), so
+                               // a companion script can compute from the parts
+                               // ON THE BOARD instead of the values in the
+                               // file - list_parts() reports it as `measured`.
+                               // Deliberately NOT serialized: it is a reading,
+                               // not authorship, and staying out of toYAML
+                               // keeps it clear of the parts round-trip
+                               // contract entirely. It therefore does not
+                               // survive a reboot or a resumed guide, and
+                               // every consumer must fall back to `value:`.
+    bool     placed;           // runtime: expansion applied (guide progress)
+    uint8_t  placement;        // PART_PLACEMENT_* - serialized only when non-default
+    PartPin  pins[MAX_PART_PINS];
+    // Geometry for 1-based PHYSICAL pin k, `row:` = pin 1's ACTUAL hole
+    // (bench verdict, wave 2 - photo-confirmed real chips sit dot/notch at
+    // bottom-left; this flipped the original top-anchored mapping, which was
+    // mirrored):
+    //   SIP  -> baseRow+(k-1), legal on either half.
+    //   DIP  -> baseRow MUST be on the bottom half (31-60) - a top-anchored
+    //           baseRow is no longer a valid DIP anchor at all (returns -1
+    //           for every pin, not just the far side). k<=N/2: baseRow+(k-1)
+    //           (bottom, left->right); k>N/2: (baseRow-30)+(N-k) (top,
+    //           right->left). Example: dip8 at row 35 -> pins 1-4 =
+    //           35,36,37,38; pins 5-8 = 8,7,6,5.
+    //   axial2 -> baseRow MUST be on the top half (1-30); pin 1 = baseRow,
+    //           pin 2 = baseRow+30 (same column, straddling the ravine -
+    //           the default footprint for 2-leg parts like resistors/diodes,
+    //           convention only, not enforced).
+    // Returns -1 when the pin would leave the board or the anchor is on the
+    // wrong half. Per-pin `offset` overrides are applied by PartPlacement.cpp
+    // (offset wins when >= 0). Full geometry + the wave-2 bench story:
+    // CodeDocs/DESIGN_GUIDED_PLACEMENT.md.
+    //
+    // This is FOOTPRINT geometry only. The node a leg actually occupies is
+    // partPinNode(p, pin) (PartPlacement.h) - the single exported geometry
+    // authority, which consults `placement` first and falls through to here.
+    // Every consumer (bridge expansion, removal, LED overlays, check row
+    // resolution, net naming, list_parts) goes through partPinNode so compact
+    // rows propagate by construction; nothing may re-derive geometry itself.
+    int nodeForPin(int k) const;
+};
+
+struct PartsState {                 // member of JumperlessState
+    PartDefinition parts[MAX_PARTS];
+    int8_t numParts;
+    // guideProgress scalars (round-tripped in slot YAML; step TEXT is always
+    // re-read from guideSource by the guide runtime, never stored here)
+    char    guideSource[96];
+    int16_t guideStep;
+    // Step TOTAL as of the last persist (`of:` in the flow map, 0 = unknown).
+    // Written by the guide runtime, read by the launcher's mid-flight gate -
+    // see the guideProgress format note above.
+    int16_t guideTotal;
+    // The SKIP SET (`skipped:` in the flow map): bit i set = step i was
+    // deliberately skipped. `guideStep` alone cannot express this - it is
+    // guideFirstUnfinished, which counts a skip as finished, so a skipped step
+    // always sits strictly BELOW the resume cursor and used to be promoted to
+    // committed by INIT. MAX_GUIDE_STEPS is 48 on V5 / 24 on OG, so 64 bits
+    // covers the whole table.
+    uint64_t guideSkipped;
+    // Is `guideSkipped` AUTHORITATIVE? False means the file did not carry a
+    // `skipped:` key, which is NOT the same as "no steps were skipped": it is
+    // a hand-written file, or one written before this field existed. The
+    // distinction is load-bearing - INIT refuses to re-energize rails from an
+    // unknown skip set (see the resume loop in guiding/GuidedFlow.cpp).
+    bool    guideSkippedKnown;
+    void clear();
+    int findByName(const char* n) const;   // -1 when absent
+};
+
 /**
  * @brief Complete Jumperless state for a single slot
  * This is the main state container that gets saved/loaded
- * 
+ *
  * WARNING: This class contains MASSIVE arrays (tens of KB) and must NEVER be copied!
  * Always use references (&) or pointers (*) when passing this object around.
  * Copy constructor and copy assignment operator are deleted to enforce this.
@@ -248,7 +544,22 @@ public:
     PowerState power;
     DisplayState display;
     ConfigState config;
-    
+    PartsState parts;      // guided-placement parts table (+ guideProgress scalars)
+
+    // Where this state's circuit came from, when it is a per-run project file.
+    // Round-trips as ONE un-indented top-level flow-scalar line, emitted only
+    // while non-empty:
+    //     runSource: "/projects/555/wiring.yaml"
+    // The launcher writes it when it allocates a run file; nothing else reads
+    // it yet. It lives here rather than in PartsState because it describes the
+    // whole context, not the parts table.
+    //
+    // ROUND-TRIP IS LOAD-BEARING (same rule as parts/guideProgress): toYAML is
+    // a wholesale rewrite, so a scalar that is PARSED but not EMITTED is
+    // destroyed by the very next SlotManager idle auto-save. Serializer and
+    // parser must land in the same commit, always.
+    char runSource[96];
+
     // Metadata
     int version;  // State format version for future compatibility
     
@@ -414,16 +725,103 @@ public:
     JumperlessState& getActiveState();
     const JumperlessState& getActiveState() const;
     int getActiveSlot() const { return activeSlotNumber; }
-    
+
+    // ---- Path-based active context (design-slots.md §0) --------------------
+    // The active context's identity is ALWAYS a path. Numbered slots 0-7 (and
+    // Python 99) carry their canonical /slots/slotN.yaml here AND keep their
+    // number; anything else sets activeSlotNumber == netSlot ==
+    // SLOT_FILE_CONTEXT and this path is the only identity.
+    /** Full path of the active context. Never null; "" only before the first load. */
+    const char* getActiveSlotPath() const { return activeSlotPath; }
+    /** True when the active context is a file, not a numbered slot. */
+    bool isPathContext() const { return activeSlotNumber == SLOT_FILE_CONTEXT; }
+    /** Display name for the active context, <= 7 chars (OLED row / LED matrix). */
+    String activeContextLabel7() const;
+    /**
+     * Strict canonical-slot-file matcher. Returns N only for an EXACT
+     * "/slots/slot<N>.yaml" (N in 0..NUM_SLOTS-1, digits only, round-trip
+     * checked) or 99 for "/slots/slotPython.yaml"; -1 for everything else.
+     * Deliberately full-path, not basename: a user's /projects/foo/slot3.yaml
+     * is a file context, not slot 3. This retires the "slot_555.yaml".toInt()
+     * == 0 trap that let a project file adopt slot 0 and get clobbered.
+     */
+    static int slotNumberForCanonicalPath(const String& path);
+    /**
+     * True for a shipped project TEMPLATE: /projects/<dir>/wiring*.yaml.
+     * Such a path is READ-ONLY as an active context - saveActiveSlot refuses
+     * to write it and it can never become the boot context. Per-run project
+     * files are <dir>_run.yaml (or <dir>_<N>.yaml under
+     * JL_PROJECT_RUN_HISTORY) and deliberately do not match.
+     */
+    static bool isTemplatePath(const char* path);
+    /**
+     * Read a slot/run file's `guideProgress:` line WITHOUT loading it.
+     *
+     * The single-run-file launcher has to decide "is a guided build
+     * mid-flight in here?" BEFORE it touches the active context, because the
+     * prompt it may raise can still be cancelled - and a cancel must leave
+     * the previous context untouched (the launcher's exit table, row B). A
+     * load would already have replaced it.
+     *
+     * Returns true when an un-indented `guideProgress:` line was found; the
+     * out params (any of them may be null) then carry source / step / total,
+     * with total 0 meaning "the file does not say". Scanning stops at the
+     * first `bridges:`/`nets:`/`parts:` header, so this never walks the bulk
+     * of a slot file: guideProgress is emitted in toYAML's header block.
+     */
+    static bool scanGuideProgressFile(const char* path, String* sourceOut,
+                                      int* stepOut, int* totalOut);
+
     // Slot management
     bool loadSlot(int slotNum, String& errorMsg);
-    /** Load slot state from an arbitrary YAML file path (e.g. /slots/slot3.yaml or any path). */
+    /**
+     * Load slot state from an arbitrary YAML file path and ADOPT it as the
+     * active context: activeSlotNumber/netSlot become
+     * slotNumberForCanonicalPath(path), falling back to SLOT_FILE_CONTEXT,
+     * and activeSlotPath becomes `path`.
+     *
+     * ATOMIC ON FAILURE (contract the launcher's exit table leans on):
+     * tracking is adopted ONLY on a successful open AND parse. Callers may
+     * treat a false return as "nothing happened to the context".
+     *
+     *   - Open failure: nothing happened; every tracker untouched.
+     *   - Parse/validate failure: fromYAML has already replaced globalState
+     *     by the time it returns false, so the prior context is RE-LOADED
+     *     from its own file. Trackers end where they started.
+     *     (fromYAML CAN return false: it ends in `return validate()`, and
+     *     PowerState::validate rejects any rail/DAC outside +/-8 V.)
+     *   - EXCEPTION, double failure: if that restoring re-load also fails,
+     *     the manager enters the NO-ACTIVE-CONTEXT state - activeSlotNumber
+     *     == netSlot == -1, empty path, cleared state, board cleared to match
+     *     (nothing routed, nothing powered beyond defaults) - where nothing
+     *     can be auto-saved. For a FILE context this is DETERMINISTIC when
+     *     the caller passed the active path itself (USBfs's MSC-eject reload
+     *     does), because the restore re-reads the same bad file; numbered
+     *     contexts get loadSlot's /.bak mirror rescue, arbitrary paths do
+     *     not. See the full note on the definition.
+     */
     bool loadSlotFromPath(const String& path, String& errorMsg);
     bool saveSlot(int slotNum, String& errorMsg, bool skipValidation = false);  // skipValidation for faster auto-saves
+    /** Path-aware save of the active context. THE dispatch point (design §3). */
     bool saveActiveSlot(String& errorMsg, bool skipValidation = false);
+    /** Serialize the active state to an arbitrary path (generalized writeSlotFile). */
+    bool writeStateToPath(const char* path, String& errorMsg, bool skipValidation = false);
     bool slotExists(int slotNum) const;
     bool deleteSlot(int slotNum, String& errorMsg);
     void clearActiveSlot();
+    /**
+     * Remember the active context as the boot context (/slots/last_active.txt).
+     * Self-gating: a no-op while temp-slot or preview mode is active, and for
+     * slot 99 / temp slot 8 - a calibration app or an isolated MicroPython
+     * session must never become what the board boots into.
+     */
+    void updateLastActive();
+    /**
+     * Point tracking at a path WITHOUT loading it - the boot seed's one use.
+     * main.cpp's loadfile: does the actual load on the first pass, so there is
+     * exactly one load path.
+     */
+    void adoptBootPath(const String& path);
     
     // Preview mode - loads slot into globalState without applying to hardware
     // Just tracks which slot we should return to when done
@@ -477,17 +875,38 @@ private:
     // State storage - reference to globalState (no duplication!)
     JumperlessState& activeState;
     int activeSlotNumber;
-    
+    // Path identity of the active context. Fixed array, NOT String: the
+    // auto-save path runs from service() on every idle flush and must not
+    // churn the heap. INVARIANT: every `activeSlotNumber = ...` in this class
+    // is paired with an activeSlotPath assignment - a number/path disagreement
+    // is the silent-clobber vector this design exists to close.
+    char activeSlotPath[128];
+
     // Preview mode state
     bool previewModeActive;
     int previewSlotNumber;       // Which slot we're previewing
     int originalSlotNumber;      // Which slot to return to when done
+    char previewOriginalPath[128];  // ...and its path (originalSlotNumber may be -2)
     float originalRailVoltages[2]; // Save rail voltages (topRail, bottomRail) during preview
-    
+
     // Temporary slot mode state (for apps using a working slot)
     bool temporarySlotActive;
     int temporarySlotOriginal;   // Which slot to return to when exiting temp mode
-    
+    char temporarySlotOriginalPath[128];  // ...and its path (may be a run file)
+
+    // Depth-1 re-entrancy guard for loadSlotFromPath's parse-failure restore.
+    // The restore re-loads the PRIOR context through the public loaders (so it
+    // inherits parts expansion, fakeGpio, refresh and the power re-assert
+    // instead of duplicating them); this flag is what stops a restore whose
+    // own file is also bad from re-entering the restore logic forever.
+    bool restoringContext;
+
+    // Internal: write the active state to activeSlotPath (saveActiveSlot's
+    // SLOT_FILE_CONTEXT branch).
+    bool saveStateToActivePath(String& errorMsg, bool skipValidation);
+    // Internal: set activeSlotPath from a slot number's canonical filename.
+    void setActivePathFromSlot(int slotNum);
+
     // History buffer (circular buffer for undo/redo)
     JumperlessState* historyBuffer;
     int historySize;
@@ -544,7 +963,22 @@ void clearAllCustomNetNames(void);                     // Reset all names to def
 // Hardware Application Function
 // ============================================================================
 
-void applyStateToHardware(void);  // Apply globalState settings to hardware (DACs, GPIO, etc.)
+// Apply globalState settings to hardware (DACs, GPIO, etc.). `skipPower`
+// applies the GPIO half only.
+void applyStateToHardware(bool skipPower = false);
+
+// Apply ONLY the active state's power (rails + both DACs) to hardware.
+// (The old slotLoadDeferPowerApply deferred-power latch is GONE with the
+// blocking guide: every load applies its file's power - task 4's
+// apply-power-on-load guarantee, uniformly. Warn-never-block replaces the
+// 0 V parking; see PartLabels.)
+void applyStatePowerToHardware(void);
+
+// Decide what context the board boots into (config [slots].boot_mode +
+// /slots/last_active.txt). Call once after configLoaded and BEFORE the first
+// `loadfile:` pass - it only seeds netSlot / activeSlotPath; loadfile: loads.
+void seedBootContext(void);
+extern const char* LAST_ACTIVE_PATH;   // "/slots/last_active.txt"
 
 // ============================================================================
 // State Backup/Restore Functions (for MicroPython entry/exit, undo, etc.)

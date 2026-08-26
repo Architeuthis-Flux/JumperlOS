@@ -97,6 +97,15 @@ private:
     // store the path and exit the file manager so the script runs with a clean terminal
     String pendingScriptPath;
     bool shouldExitForScript = false;
+
+    // Deferred PROJECT run: clicking /projects/<dir>/wiring*.yaml no longer
+    // adopts the shipped template as the active context - it starts (or
+    // re-opens) a run of that project, which means pickers, prompts, possibly
+    // a whole guided build and a companion script. Same deferral the .py path
+    // uses: store the path, leave the file manager, run it afterwards with a
+    // clean terminal and no FILE_MANAGER context on the stack.
+    String pendingProjectPath;
+    bool shouldExitForProject = false;
     int originalCursorRow;
     int originalCursorCol;
     int startRow;
@@ -203,6 +212,8 @@ public:
     bool getShouldExitForREPL() const { return shouldExitForREPL; }
     bool getShouldExitForScript() const { return shouldExitForScript; }
     String getPendingScriptPath() const { return pendingScriptPath; }
+    bool getShouldExitForProject() const { return shouldExitForProject; }
+    String getPendingProjectPath() const { return pendingProjectPath; }
     
     // Interactive input helpers
     String promptForFilename(const String& prompt);
@@ -256,6 +267,14 @@ void initializeMicroPythonExamples(bool forceInitialization = false);
 
 // Verify MicroPython examples exist
 bool verifyMicroPythonExamples();
+
+// Install the built-in projects into /projects/<dir>/ (the examples system's
+// sibling; see CodeDocs/DESIGN_PROJECTS_SUBSYSTEM.md section 1). Unforced:
+// create missing directories/files only. Forced (firmware update): 3-way
+// FNV-1a check that updates untouched old defaults in place and parks the new
+// default beside a user-edited file as *_original*. Never deletes anything,
+// so hand-made projects on the board are left alone.
+void initializeProjects(bool forceInitialization = false);
 
 // Display configuration functions
 int getConfiguredDisplayLines();

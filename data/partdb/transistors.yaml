@@ -1,0 +1,81 @@
+# source: ON Semi (2N3904, 2N3906, PN2222A, 2N7000, BS170), Nexperia
+#   (BC547, BC557), Infineon (IRLZ44N), ST (TIP120) datasheets -
+#   pin-function facts transcribed by hand from datasheets; facts are not
+#   copyrightable. Never import Fritzing/KiCad/AVR-tester tables
+#   (CC-BY-SA/GPL).
+#
+# CONVENTION: pin 1..3 = left-to-right with the FLAT FACE (TO-92) or the
+# LABEL (TO-220) toward you and the legs pointing DOWN. The pin order IS
+# the value of these records - the American EBC vs European CBE vs the
+# 2N7000/BS170 mirror is exactly the mistake this database exists to catch.
+
+class: TRANSISTOR
+
+- id: 2N3904
+  desc: NPN 40V 200mA (EBC)
+  subclass: bjt
+  package: sip3
+  pop: 1
+  pins: [E, B, C]
+
+- id: 2N3906
+  desc: PNP 40V 200mA (EBC)
+  subclass: bjt
+  package: sip3
+  pop: 2
+  pins: [E, B, C]
+
+- id: 2N2222
+  desc: NPN 40V 800mA (EBC, TO-92 PN2222A)
+  subclass: bjt
+  package: sip3
+  aliases: [PN2222]
+  pop: 3
+  pins: [E, B, C]
+
+- id: BC547
+  desc: NPN 45V 100mA (CBE - reversed!)
+  subclass: bjt
+  package: sip3
+  aliases: [BC548, BC549]
+  pop: 4
+  pins: [C, B, E]
+
+- id: BC557
+  desc: PNP 45V 100mA (CBE - reversed!)
+  subclass: bjt
+  package: sip3
+  aliases: [BC556, BC558]
+  pop: 5
+  pins: [C, B, E]
+
+- id: TIP120
+  desc: NPN Darlington 60V 5A (BCE, TO-220)
+  subclass: bjt
+  package: sip3
+  pop: 6
+  pins: [B, C, E]
+
+- id: 2N7000
+  desc: N-MOSFET 60V 200mA (SGD)
+  subclass: mosfet
+  package: sip3
+  pop: 1
+  # VERIFY: datasheet says S-G-D flat-face-forward (the task brief wrote
+  # "SDG" - inconsistent with its own BS170 note; confirm against ON Semi)
+  pins: [S, G, D]
+
+- id: IRLZ44N
+  desc: N-MOSFET logic-level 55V 47A (GDS, TO-220)
+  subclass: mosfet
+  package: sip3
+  pop: 2
+  pins: [G, D, S]
+
+- id: BS170
+  desc: N-MOSFET 60V 500mA (DGS - mirror of 2N7000!)
+  subclass: mosfet
+  package: sip3
+  pop: 3
+  # VERIFY: BS170 is D-G-S, the reverse of the 2N7000 - confirm on datasheet
+  pins: [D, G, S]

@@ -130,9 +130,15 @@ static void usbSer3_sendAllStatus(Stream* out) {
 
     out->print("{\"version\":\"");
     out->print(firmwareVersion);
+    // "slot" is -1 for a file context (never the internal -2), and
+    // "slot_path" is ALWAYS emitted - numbered slots report their canonical
+    // /slots/slotN.yaml. Numbered flows are byte-identical apart from the new
+    // field; the app must tolerate slot: -1.
     out->print("\",\"slot\":");
-    out->print(mgr.getActiveSlot());
-    out->print(",\r\n");
+    out->print(mgr.isPathContext() ? -1 : mgr.getActiveSlot());
+    out->print(",\"slot_path\":\"");
+    out->print(mgr.getActiveSlotPath());
+    out->print("\",\r\n");
 
     out->print("\"adc\":{");
     for (int i = 0; i < 5; i++) {

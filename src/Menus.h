@@ -167,7 +167,20 @@ int findSubMenu(int level, int index);
 
 void showLoss(void);
 
-int yesNoMenu(unsigned long timeout = 4000);
+/**
+ * Yes/No prompt on the wheel, the LED matrix and the serial stream at once:
+ * click = the highlighted option, turn to change it, hold = cancel, 'y'/'n'
+ * answer directly and ANY other byte cancels. Returns 1 = yes, 0 = no,
+ * -1 = cancel or timeout.
+ *
+ * startOption picks which option is highlighted when the prompt opens, i.e.
+ * what a bare CLICK answers. It defaults to 0 (No), which is what every
+ * pre-existing caller got; pass 1 for a prompt whose wording promises
+ * "click = yes" (the project launcher's load-latest and run-script offers -
+ * Kevin's control-surface principle: wheel, probe buttons and serial keys must
+ * all reach the same answer, and the text must be true for all three).
+ */
+int yesNoMenu(unsigned long timeout = 4000, int startOption = 0);
 
 
 

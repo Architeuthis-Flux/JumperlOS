@@ -74,6 +74,26 @@ void markChipXYSuspect(int chip);
 void clearChipXYSuspect(void);
 bool anyChipXYSuspect(void);
 
+// Fabric snapshot for tap route-failure diagnostics (invest-vf-noroute.md
+// §6 - "the one print that settles it on the bench"). Read-only, NO Serial
+// I/O, so the scan core may call it. Every mask uses the SAME laneOk/yOk
+// predicates buildEphemeralRoute gates on (hardware bits AND the net status
+// claims), so what it reports is what the router actually saw:
+//   *kFreeYMask  bit y set = chip K's y row y is usable (every tap route in
+//                every tier terminates on one of these)
+//   *kXBusyMask  bit x set = chip K's x column x is unusable - x8-x11 are
+//                ADC0-3, and laneOk(CHIP_K, adcX) is the router's FIRST gate
+//   *chip        the chip `node` lives on (-1 if it isn't on the fabric)
+//   *xBusyMask   bit x set = that chip's escape lane x is unusable
+//   *bounceOkMask bit n (n = chip A..H) set = chip n still satisfies all four
+//                of the last tier's outer guards, i.e. a route could bounce
+//                off its y0 and leave over its K lane. 0 = the bounce tier
+//                had no candidate at all - genuine fabric starvation.
+// Any out pointer may be null.
+void fastPathFailSnapshot(int node, uint16_t* kFreeYMask, uint16_t* kXBusyMask,
+                          int* chip, uint16_t* xBusyMask,
+                          uint8_t* bounceOkMask = nullptr);
+
 // Assert-based synthetic cases + lastChipXY audit. Returns 0 if all pass.
 int routeSafetySelfCheck(Stream* out = &Serial);
 void auditLastChipXY(Stream* out = &Serial);

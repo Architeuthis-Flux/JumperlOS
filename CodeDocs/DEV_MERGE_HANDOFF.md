@@ -267,9 +267,104 @@ future feature that asks gets the same treatment.
 
 ---
 
-## In flight — nothing (2026-08-19, end of session)
+## In flight — tasks #31 + the current-sense hardening (2026-08-20, uncommitted)
 
-The working tree is clean. The double-tap fix that sat here became **row 74**
+The working tree holds BOTH TODO81926 items, implemented and HIL-verified but
+awaiting Kevin's hands before commit (the standing rule):
+
+**Part 1 — rail/DAC click-to-adjust (#31).** The dormant path is live again:
+`dacs.rail_click_adjust` (0 = off, 1 = only with an OLED, **default**, 2 =
+always; moved to `[dacs]` from `[display]` on Kevin's round-2 call) gates one
+predicate (`clickAdjustEnabled()`, Highlighting.cpp) used at
+all three touch points — `shouldPersistHighlight()` (rails + DAC nets persist,
+which also selects the long timeout the prompt needs), `wantsToHandleButtonPress()`
+(Menus defers the click), and a new `adjust?` prompt rendered by
+`ReadingDisplay::show()`'s new `hint` parameter (right-aligned 5pt tag on the
+bottom value row, which goes flush-left when the hint is present - centered it
+overlapped; both were Kevin's round-2 findings, along with the half-the-time
+click: rails were keyed on the volatile `brightenedNode`, now NET-based
+(highlightedNet 2/3) at all three touch points like the DACs always were).
+Downstream was already complete (`handleEncoderButtonPress` → `VoltageAdjuster`).
+**Needs Kevin**: probe-highlight a rail → prompt → click → adjust → confirm →
+survives reboot; ditto DACs; no-OLED board unchanged on flag=1; re-entrancy
+feel (the adjuster pumps `serviceInner` which re-runs `Highlighting::service`).
+
+**Part 2 — current-sense hardening (the "sparkling" report), staged 0–7, all
+landed.** Stage 0 metric: ant on/off flip counter, printed + reset by `i!`
+(`[ants] flips:N in Ss`). Stage 1: `adcRingMeanAfterStrict()` — taps now FAIL
+on a stale/torn/resynced ring window instead of eating history (`ringstale:`
+on the taps line). Stage 2: the TDM's 80 µs settle actually runs (committed
+commented-out in its first commit). Stage 3: `computePathCurrents` — no more
+pre-EMA deadband cliff; EMA seeded per routing epoch (no full-amplitude sample
+after pauses); deadband AFTER smoothing, per path (35 mV scaled by the folded
+conductance), with 1.25×/0.75× hysteresis → `pathShown_mA[]` is what ants,
+readouts and the `i!` path lines consume (raw EMA prints as `(ema …)`).
+Stage 4: ants flip only after 3 consecutive scanner compute ticks agree
+(counted on `netScanComputeGeneration()`, not LED frames). Stage 5: one
+~580 µs dwell sliced from ring history — early/late 8-sweep windows out of the
+same hold. Stage 6: in-use rails/DACs are TAPPED through the same sense path
+~1/s (`sources:` line shows `set…/meas…`); `fillKnownSources` prefers the
+measurement — this reverses `isKnownSourceNode`'s exclusion deliberately (a
+momentary high-Z tap, same as every user node). Stage 7: pairwise differential
+taps (`debug.net_scan_pair_taps`, default ON) — both path ends closed at once
+on two pool ADCs, both read from the SAME ring sweeps, channel assignment
+alternating per pass to average gain mismatch; `pair:` tap count and per-path
+`pair` markers in `i!`.
+
+**Bench numbers (this session's board).** Baseline (Stage 0 firmware):
+INA-agreement FAIL 6.71 vs 4.27 mA (that's task #32), zero-load FAIL — a
+**solid** −5.44 mA phantom on TOP_RAIL→20 (row 20 measured 4.78 V vs the
+5.00 V *setpoint*: a 220 mV systematic, exactly the plan's mechanism #1 —
+too big to sparkle, it was solid-on), flips 0/min. After: `sources:
+101=set5.00V/meas4.79V …`, taps `ok:10669 (pair:10459) noroute:0 ringstale:0`,
+the phantom path at `+0.00 mA (ema -0.26) pair`, flips 0, and **the
+INA-agreement check PASSES (4.4 vs 4.27 mA)** — the aligned pair taps +
+measured sources moved #32's symptom without the planned bisect (leave #32
+open until Kevin agrees the number holds).
+
+**Test change**: `test_net_currents.py`'s zero-load check now filters to the
+TOP_RAIL net's paths (node 101), per its own docstring — the report also
+contains the probe buffer feed (GPIO8→ROUTABLE_BUFFER_IN, nodes 138/139),
+which really does carry ~1.4 mA at all times; the scan reporting it is
+correct, and it was among the baseline offenders for the wrong reason.
+
+**Also measured autonomously**: the menu-exit ant-flash (mechanism #4) is now
+an instrumented PASS, not an eyeball item — SWD click → menu open over the
+no-load rail wire, 8 s hold (voltages age past the 5 s window), long-hold
+quit, 5 s rebuild: `[ants] flips:0`, zero path still `+0.00 mA`. `X` on this
+build: ring `overruns 0 resyncs 0 stalls 0` (max wait 422 µs over 7.9M
+reads), `frame hold: core0 0 core1 0`, ch446q `pio timeouts 0`. The first
+run_all's encoder_ui FAIL was the documented stale per-build `jl_input.py`
+ADDR table (rows 71–72); after `refresh_jl_input_addrs.sh`, run_all is
+**PASS 7/7 — the suite's first full pass on record** (every prior row says
+"6/7, standing tolerated phantom"; both the phantom and the harness flake
+are gone on this build).
+
+**Follow-on plans (2026-08-20, `DEV_PLANS_82026.md`)**: (1) Kevin's "do we
+need the OLED I2C speed switch?" — assessment: only until a panel proves out
+at 1 MHz (no panel has ever been driven at 1 MHz by this firmware; ping and
+clkDuring must move together or the detector lies again; nothing ACKs on the
+bench to verify today), plus a finding: `setClock`→`i2c_set_baudrate` is NOT
+arbiter-wrapped and the ping sites in Menus.cpp:4841 / Apps.cpp:1245 /
+init() are not wavegen-gated. (2) Crosspoint-R: `measure_crosspoint_r.py`
+(new HIL tool) measured the real per-crosspoint resistance against INA0
+across rows 34–60 + Nano D0–D9: **mean 41.8 Ω vs the 40 Ω model constant
+(σ 2.6, per-route structure down to ~36 Ω on some Nano routes)** — the
+scan's +3 % INA residual is the model constant, and a per-board ~42 Ω
+calibration (planned SelfTest phase) centers it. (3) Preloaded-projects
+outline + the five decisions it needs.
+
+**Needs Kevin (Part 2)**: clickwheel feel (Stages 2/5/7 lengthened dwells),
+the 5-minute no-flicker eyeball watch on a no-load rail wire, the ISENSE
+loop's steady march, and **Stage 2's own check, which has zero functional
+verification on record**: two FakeGpio inputs at 0 V / 3.3 V, confirm no
+cross-channel leakage (the reinstated 80 µs TDM settle is the one stage
+nothing else exercises). A/B knob if anything regresses:
+`` `[debug] net_scan_pair_taps = 0`` isolates Stage 7.
+
+---
+
+The double-tap fix that sat here became **row 74**
 (`ac24c8a`) after Kevin's hands passed it both ways — and on the way it grew
 the ghost-press fix (the row-74 entry has the full story). The knob table that
 lived here, updated to what shipped, in case tuning resumes:
@@ -283,6 +378,359 @@ lived here, updated to what shipped, in case tuning resumes:
 The repro/diagnosis tooling if button reports return: `probe_button_trace = 1`
 (over SWD or the debug menu) + a raw port-1 capture. A `0 -> N` press edge with
 no `N -> 0` before it means someone cleared state mid-hold.
+
+---
+
+## Branch `projects-guided-placement` — TODO81926 item 3, built (2026-08-20/21)
+
+Not on `dev`. Base `74aa794`, ten tasks, each one reviewed before the next was
+dispatched. What Kevin asked for was "a preloaded folder called projects"; what
+it turned into is a **guided build**: the board knows what the circuit is
+supposed to be, walks you through placing it part by part, lights the holes,
+names the nets as they land, and **measures** each step before it commits it.
+
+The five decisions Plan 3 was waiting on all got answered by building:
+projects are **directories under `/projects/<dir>/`** (`wiring.yaml` +
+`main.py` + `README.md`), they are **provisioned** (compiled into the
+firmware, hash-checked onto the flash, user edits preserved), the menu entry
+is **one `apps[]` row**, the USB-to-screen path is **real MicroPython I2C**,
+and v1 scope is **four starter projects**.
+
+| Task | Commits | What | Verified how |
+|---|---|---|---|
+| 1 | `c747406` | `generate_micropython_examples.py` drift fix (output `src/snakes/`, source `scripts/ex/`) | both boards build |
+| 2 | `a95b0ab`…`352bb23` | **The parts layer.** `parts:` + `guideProgress:` in slot YAML, serializer/parser pair, `{NAME}_{PIN}` net naming re-asserted after every rebuild, indent-hardened section headers, `meta:`/`guide:`/unknown sections contained | `test_parts_roundtrip` (new) |
+| 3 | `d6c114c` | FileManager guard opens to `/projects/*.yaml`; the **555 reference project** authored against task 2's as-built parser | `test_projects` (new) |
+| 4 | `c6a51a4`, `9791259` | **Python bindings**: `load_project` / `place_part` / `remove_part` / `list_parts` / `guide_progress` (+ 10 hand-added QSTRs — see `Building_Native_Module.md`) | roundtrip suite phases 7–8 |
+| 5 | `68c6410`, `273b4e6` | **The launcher**: one Apps line, one `apps[]` row, the `/projects` picker, run-in-temp-slot-8 with an offer to keep | headless two-port drive of `run_app("Projects")` |
+| 6 | `4a58e73`…`6137d9a` | **The guide runtime**: manual-advance session machine, streamed parser, `_GUIDE_` LED overlay channel, destination-slot/resume, and the **`z` command** (headless entry) | `test_guide_flow` (new) |
+| 7 | `5538f21`, `191ae79`, `5de186a` | **The one-shot tap API** (cross-core node/pair voltage taps serviced inside `serviceNetVoltageScan`) and **GuideChecks** — the verify matrix live as a polled sub-state with guaranteed teardown | guide-flow suite to 114 checks |
+| 8 | `80a91db`, `406c2d4` | **Provisioning**: `scripts/generate_projects.py`, `projectFiles[]`, `initializeProjects()`, launcher self-heal | 3-way hash check (repo FNV == header == device) |
+| 9 | `0bf1618`, `f196284`, `7847482`, `4f14b19`, `8f22028` | **Three more projects** — i2cscrn (SSD1306 over real `machine.I2C`), nand00 (74HC00 truth table *measured*), eeprom (24Cxx dumper) | per-project leg-by-leg footprint math + device compile |
+| 10 | this task | Polish: deferred fixes, suite registration, docs | below |
+
+**Suites** (`test/hil/`, all now registered in `run_all.py`):
+`test_parts_roundtrip` 140, `test_projects` 180, `test_guide_flow` 114.
+
+### The three things worth knowing if you touch this
+
+1. **`toYAML` is a wholesale rewrite, so a section the serializer forgets is
+   destroyed by the next idle auto-save.** That is not theoretical — task 2's
+   review caught a well-formed `dip28` being dropped by a bounds check and
+   then *erased* on the following save. `serializeParts` and
+   `deserializeParts` must stay matched, and `place_part`'s validation must
+   stay identical to `commitPart`'s.
+2. **Timestamp-fresh is not value-fresh.** The design said checks could reuse
+   `nodeVoltage[]` under 250 ms old. They can't: the scan smooths through an
+   EMA and is input-paused while the guide runs, so a "fresh" sample served
+   0.77 V for a row held at 2.5 V. Every check taps. See
+   `DESIGN_GUIDED_PLACEMENT.md` §5.1.
+3. **Presence checking is honest about what it can't see.** A bare row and a
+   correctly-seated IC pin look identical to this hardware, so `presence` on
+   `type: ic` reports *unverifiable* rather than warning; real verification
+   waits for `power_on`.
+
+### Follow-ups and known deferred minors
+
+- **`do: run` parses but does not execute.** The guide grammar accepts a run
+  step and stores its path; nothing runs it. The runtime prints a skip line and
+  advances, no bundled project uses it, and execution is deferred — so the
+  format is forward-compatible but the feature is not shipped.
+- **Downgrade path: old firmware silently eats `parts:` / `guideProgress:`.**
+  A slot file written by this branch loads fine on pre-branch firmware — the
+  unknown sections are ignored — but because `toYAML` is a **wholesale
+  rewrite**, the first idle auto-save on that old build re-emits the file
+  without them, permanently. Nothing on this side can prevent it (the old
+  serializer is what drops them). Downgrading with parts-bearing slots means
+  copying them off the board first.
+- **Part-ID is designed, not built** — `CodeDocs/DESIGN_PART_ID_FOLLOWUP.md`
+  (Kelvin-via-ISENSE topology, honest accuracy bands, the four hooks already
+  in the format: `part_id`, `type`, `value`, `verify`).
+- **Three of the four projects are V5-only** (the OG has no nodes for RP pins
+  26/27). Disclosed in their READMEs.
+- **`fs_read()` silently truncates at 4095 bytes** (1023 on OG) — a
+  pre-existing static-buffer cap, found here, worked around in the HIL by
+  reading through `jfs.open().read()`. Not this branch's to fix, but it will
+  bite the next person who reads a big file from MicroPython.
+- **`resume-prompt n = restart`** is spec-mandated but collides with the
+  destructive-action vocabulary elsewhere. UX call for Kevin.
+- **`PROJECTS_MAX` is 12 and truncates before sorting** — a 13th project
+  directory hides whichever one FatFS returns last, not whichever sorts last.
+- **Serial-vs-Jerial error streams** and the REPL syntax-highlighter keyword
+  list are repo-wide gaps this branch inherited, not new debt.
+- **`scripts/` vs `pythonStuff/` divergence** is dev-tooling debt, separate
+  from firmware.
+
+### Needs Kevin's hands
+
+The whole point of this branch is a bench experience, and **nothing on the
+bench checklist has been done** — the suites prove the format, the parsers,
+the provisioning and the state machine, not what it feels like to build a 555
+with it. The consolidated, ordered bench script is committed at
+`CodeDocs/PROJECTS_BENCH_CHECKLIST.md`.
+
+> Kevin then **did** the bench pass and wrote `>>>` notes through that file.
+> Wave 2 is the answer to those notes. The checklist has since been rewritten
+> for wave 2; the annotated wave-1 copy is preserved at commit `6dfaf7c`.
+
+## Branch `projects-guided-placement` — WAVE 2, the bench notes answered (2026-08-21/22)
+
+Base `6dfaf7c` (the annotated checklist). Nine tasks, each reviewed before the
+next was dispatched. Kevin's notes asked for six things, and every one of them
+is code now:
+
+| Kevin's note | What it became |
+|---|---|
+| "our 555 pinout is mirrored — pin 1 should be on the bottom (35)" | the **DIP anchor flip** + the new `axial2` footprint, so 2-leg parts straddle the ravine the way real ones do |
+| "allow the user to change the location, and skip parts and come back" | **move/snap**, three placement modes, and skip-and-return through a browsable DONE view. *(Shipped with an `ADJUST` mode too — **wave 3 removed it**; see the wave-3 section.)* |
+| "they snap to compact (on the actual rows) and then you can drag them to expanded, each part independently" | **`placement: expanded\|compact\|custom`**, per part, per pin |
+| "when we spin the clickwheel to the end it should loop until we hold to exit" | the **browse ring**: a wheel TURN can never reach EXIT |
+| "instead of saving it to a slot… make a new file for each run of the project. 555_1.yaml… ask load/new" | **run files**, and slots-become-files underneath them |
+| "we should use our adc based current sensing" / "show the measured value" | the **measurement rework**: ground-side shunt, four-wire R in ohms, the value on the OLED |
+| "put projects in the top level of the clickwheel menu" | done |
+| "just set the rails to where they were, not 0V" | rail capture/restore across a guide session |
+| "always load the last active slot file" | `[slots] boot_mode = 1`, `/slots/last_active.txt` |
+
+| Task | What landed |
+|---|---|
+| 1 | Clickwheel-hold interrupt is **single-fire via the flag** (the direct `mp_sched_keyboard_interrupt()` call is deleted, because the C blocking loops poll the flag directly and a scheduled exception never reaches them); `categoryRanges[16]` + a guard |
+| 2 | vf `noroute` investigated and mitigated: sequential-same-ADC taps, an ADC hint, the Option-0 fallback, chip-D name-table fix, and the diagnostics that proved a **single** tap can starve |
+| 3 | The **geometry flip**: DIP pin 1 anchors the bottom half, `axial2` arrives, the four project wirings are re-authored, and a partial part is now **rejected whole** with an unconditional print |
+| 4 | **Slots become files** — `CodeDocs/DESIGN_SLOT_FILES.md`. Path-based active context, `last_active.txt`, `[slots]` config, the strict matcher, the template write-guard, the atomic-on-parse-failure contract and the `-1/-1` terminal state |
+| 5 | **The launcher rework** — run files, the merged load/new prompt, Projects at the top level, the new `z` grammar, the script offer. GSLOTS, the keep-flow and the temp-slot borrow are deleted |
+| 6 | **Placement modes + move plumbing** — the `placement` byte, mode-aware `partPinNode`, `guideMovePart`/`guideSnapPart`, tap precedence, `m`/`c`, and one shared `partGeometryOk` |
+| 7 | **Guide session UX** — ADJUST, the pended confirm, browse/wrap/DONE, first-unfinished resume, rails capture/restore, `railHwVolts` hardware truth, and the measured value on the panel. **ADJUST and the pended confirm are GONE as of wave 3** (Kevin: *"honestly this whole thing is confusing"*) — this row is the wave-2 record, not current capability |
+| 8 | **The measurement rework** — ground-side shunt, Option-1 sense routing, two-point correction, honest ohm bands, `rail_sane` measuring the rail, the INA1 source watchdog |
+| 9 | Eleven parked items, the checklist rewrite, this documentation, and the full `run_all` pass |
+
+**Suites**: `test_slot_files` 72 (new in wave 2), `test_parts_roundtrip` 179,
+`test_projects` 233, `test_guide_flow` **377** (355 at Task 9's run of record;
++4 from the apostrophe needle; +18 from phase 13c, the two-part compact-share
+fixture the final review's F1 fix added). `run_all` **11/11** was re-proven
+end-to-end as the wave's closing verification on the final flashed build —
+guide_flow's 377 includes phase 13c, which can only pass with the F1 fix in
+flash, so the closing pass also proves build identity. **These are the "hold or
+grow" baselines for whatever comes next.**
+(`test_encoder_ui` SKIPs on any freshly built firmware until its `jl_input.py`
+ADDR table is regenerated; `run_all` counts a clean skip as a pass.)
+
+### The two things left that need a uf2 flashed
+
+Everything else on `PROJECTS_BENCH_CHECKLIST.md` runs on the build that is on
+the board. These two cannot:
+
+1. **The forced-refresh / version-bump items (checklist §5).**
+   `checkAndHandleFirmwareUpdate()` only fires across a `VERSION` change, so
+   proving that a user's edit to `/projects/555/wiring.yaml` survives — arriving
+   as `wiring_original.yaml` — and that the variant picker still offers exactly
+   one variant, needs a **bumped build flashed twice**. It reflashes the board
+   and mutates `/projects`, which is why it is the LAST section of the
+   checklist.
+2. **The OG smoke test (checklist §4).** Needs the `jumperless_og` uf2 on an OG
+   board: guided flows must run with terminal/OLED guidance and **no LED
+   painting**, and every check must report `val=unsupported ok=0` and
+   warn-continue. Three of the four projects are V5-only (no nodes for RP pins
+   26/27) — use the 555.
+
+### Downgrade notes for wave 2
+
+Same mechanism as wave 1's `parts:` note above, three more fields:
+
+- **`placement:` is dropped silently by old firmware.** Unknown keys are skipped
+  by design, and the next auto-save rewrites the file without the byte. The part
+  comes back **expanded**: its legs move from the endpoint holes back to the
+  footprint rows and the routed bridges reappear. Nothing is lost except the
+  mode (`row:` survives — it is an old field), and the circuit stays
+  **electrically equivalent**, because expanded and compact are two ways to make
+  the same connections. Stated at the `placement:` doc block in `States.h`.
+- **`runSource:` is dropped the same way.** A run file that loses it falls back
+  to the project's default `wiring.yaml` for both its guide source and its
+  variant script, with one printed line. Harmless for single-variant projects,
+  which is all four shipped ones.
+- **`[slots]` is inert on old firmware**, and `/slots/last_active.txt` is an
+  unreferenced file. Old boot is the hardcoded `netSlot 0`. **No hazard** —
+  configManager's parser skips unknown sections and the incremental saver even
+  preserves unknown lines.
+- **Behaviour change, not a downgrade issue, but it belongs in the release
+  notes:** a file whose out-of-bounds `offset:` (or over-`pinCount` `pin:`) pin
+  used to place *partially* now has the **whole part dropped**, with an
+  unconditional print naming the pin. That is deliberate — a partial part is
+  never right, and silence plus a wholesale-rewrite auto-save is exactly how
+  parts vanish — but a user with such a file will see a part disappear that
+  previously half-worked.
+
+### Deferred past wave 2, on purpose
+
+- **`jl_switch_slot`'s return-value ambiguity.** It returns the *previous* slot
+  on success and `-1` on error, and the binding raises on `-1` — so from the
+  `-1/-1` terminal state the switch **works and then raises**. Agreed future
+  shape: `-2` = failure, `-1` = legal "no previous slot", binding raises only on
+  `-2`. Not fixed in-wave because it changes a published Python contract and no
+  wave-2 path calls it. Full detail: `DESIGN_SLOT_FILES.md` §8.
+- **ADC-scan current as the PRIMARY current source, pending task #32.** The
+  guide's checks read INA0; the scan estimate is a **diagnostic-only**
+  crosscheck (log-only at I ≥ 2 mA, >25 % disagreement names #32 in the
+  message). Making the scan primary waits on #32 closing.
+- **Out-of-order resume re-walks.** `guideProgress` is one scalar, so commits
+  made beyond the first unfinished step come back flagged unfinished. Safe
+  (`expandOnePart` and CONNECT's commit are both `hasConnection`-guarded, so no
+  bridge is duplicated) but it makes the user re-confirm work that is already
+  built. The fix is a `committed[]` bitmap in the YAML.
+- **No authored-row memory for `custom`.** `m 44` → custom, `c` → compact, `c`
+  → expanded leaves the part at row 44 marked *expanded*: the "deliberately
+  positioned" marker is gone even though the row is not. Needs a second byte to
+  remember the pre-compact mode. Likewise "moved back to the authored row" stays
+  `custom`, because no authored row is stored anywhere and capturing it would
+  mean parsing a second file mid-session.
+- **No `--port` pass-through in the HIL harness.** `jumperless.py` caches the
+  REPL port and then trusts the cache blindly for as long as that device node
+  exists, so a re-detect (one interrupted run is enough) can silently land every
+  later `jl_exec` on a *different* dev board on the same bench — the symptoms
+  read as a firmware fault (`NameError: name 'jfs' isn't defined`, then raw-REPL
+  timeouts) and are not one. Worked around in the checklist §0 by pinning the
+  cached port by hand; the proper close is a `--port` pass-through in
+  `test/hil/jl.py`, or a probe that rejects a device with no `jfs`. Neither was
+  in any wave-2 task's scope.
+  **Wave-3 status: STILL OPEN, and W3-T1/T5's harness work did NOT close it.**
+  What those tasks did (`e299cb3`, `2fec6bd`) was the *fault-witness* half —
+  every raw `serial.Serial` port-1 reader now scans what it drains through
+  `fault_scan`, including its own connect banner, so a post-fault `[crashlog]`
+  can no longer be swallowed by whichever reader happens to attach first. That
+  is a different problem from port PINNING. Keep pinning by hand per §0.
+- **`unconnectablePaths[]` has an unguarded push site** in
+  `NetsToChipConnections.cpp` (~:4549 writes without the `< 10` bound its two
+  siblings have). `routeRefused()` clamps its *read* to 10 entries so it cannot
+  follow the overflow, but the write itself is a real, pre-existing buffer
+  overrun. Found in wave 2, out of scope for it.
+- **The RING path's gain residual.** The two-point correction cancels channel
+  offset, not channel gain (~1–2 % of each node's voltage, under 2 % of R at a
+  real 330 Ω part — inside `tol_meas`, no verdict changes). The known fix is a
+  second ring dwell with the channels swapped; disclosed in `ringReadPair`'s
+  header.
+- **Four rungs of the sense-fallback ladder are inspection-only.** Every one of
+  them needs the router or the ring to fail in a way no authored fixture
+  produces on a near-empty board.
+
+---
+
+## Branch `projects-guided-placement` — WAVE 3, the second bench pass (2026-08-22)
+
+Base `4545073` — Kevin's `>>>` notes written through
+`CodeDocs/PROJECTS_BENCH_CHECKLIST.md` on the wave-2 build. Seven findings,
+five tasks, each reviewed before the next was dispatched.
+
+| Kevin's note | What it became |
+|---|---|
+| "deleting the active run file HardFaults" (crashlog + transcript pasted inline) | **W3-T1.** The behaviour the design promises already worked on the flashed build — proven five ways on hardware, no behaviour change needed. What shipped is the **instrument**: an abort/assert latch in `CrashLog.cpp` that records the *caller* of `abort()` in a reset-retained word and names it on the next boot. The caller is still unknown; the latch is armed for the next time |
+| "run files pile up… make overwrite-same-file the compile-time default" | **W3-T3.** ONE run file per project, `<dir>_run.yaml`, silently reused. The wave-2 numbered allocator lives on behind `JL_PROJECT_RUN_HISTORY`. A mid-flight guided build gets ONE prompt (resume / start over / cancel); everything else reopens silently |
+| "'Projects' is too long and splits at the S — rename it Guides" | **W3-T4.** The top-level row, the `apps[]` entry, the picker header, the banner and the help lines all say **Guides**. `/projects`, `PROJECTS n=`, `RUNFILE`, `RUNS`, `SCRIPT`, `GUIDE` deliberately unchanged |
+| "dragging a part leaves stale footprint LEDs behind" | **W3-T2.** Every guide LED show is clear-first |
+| "the 555 pre-wires 2 unnecessary ADC taps" | **W3-T4.** `bridges:` (and the `nets:` entry that depended on it) removed; `main.py` makes its own taps and takes them down on the way out, leaving alone any it did not make |
+| "honestly this whole thing is confusing, we need to streamline this interface" | **W3-T2.** **ADJUST is dead** and so is the pended confirm — a click is instant again |
+| "i2cscrn should generalize — tap-to-assign, driver/size list, clear the data lines on exit, blast the startup animation while wiring" | **W3-T4.** All four, in the script. Every probe gesture has a typed twin |
+| *(found on the way, nobody asked)* | **W3-T5.** Every load left the state dirty and the idle auto-save rewrote the file it had just read; and `nets[].color` could be persisted as `black` from a cross-core race. Both fixed at the root |
+| *(found on the way, nobody asked)* | **W3-T4 part 3b.** Companion scripts past ~6 KB never ran, and said nothing about it |
+
+| Task | What landed |
+|---|---|
+| **T1** | The abort/assert latch (`CrashLog.cpp`), `test_slot_files` phase 6c, and the fault-witness rule for raw port-1 readers |
+| **T5** | `setRailVoltage`/`setDacVoltage` no longer mark dirty on a no-op write; `loadSlotFromPath` clears dirty after a successful restore; `serializeNets` treats colour 0 as "not computed yet"; three pre-write menu sites mark their own edits, gated so a cancel does not |
+| **T2** | ADJUST and the pended confirm removed; the drag LED trail fixed (clear-first) |
+| **T3** | `<dir>_run.yaml`, the mid-flight prompt, `guideProgress`'s new `of:` field, and the suite invariant that a test may never delete a run file it did not create |
+| **T4** | The `Guides` rename; the 555's taps; the i2cscrn generalization; the companion-script runner fix; these docs |
+
+**Suites** on the closing build: `test_slot_files` 92, `test_parts_roundtrip`
+179, `test_projects` **264** (239 at T3's close), `test_guide_flow` 386.
+`run_all` 11/11. **These are the "hold or grow" baselines now.**
+
+### The companion-script runner bug (W3-T4 part 3b) — read this one
+
+`runCompanionScript` built the script buffer as `content = f.readString();
+content = preamble + content`, which needs **two** full-size Strings alive at
+once. The Arduino heap on this board settles around **19 KB free**, so the peak
+was ~2x the script. When the allocation failed, Arduino's `operator+` returned
+an invalidated String, the assignment left `content` **empty**, and
+`executePythonFileContent`'s `!*src` guard returned false **without printing
+anything** — the terminal showed `Running … ` followed straight by
+`--- script finished ---`. The emptiness check sat *before* the concatenation,
+so nothing caught it.
+
+Measured on the bench, through a no-guide scratch project: **4.5 KB ran,
+6.4 KB ran, 6.6 KB was silent**, 12 KB and 19 KB were silent. Treat that as a
+heap-state-dependent bracket, not a threshold. **The shipped `eeprom`
+companion script is 6441 bytes** — it ran that day, and 6561 did not. It has
+been one bad heap day from silently doing nothing since it shipped, and its
+end-to-end checklist item had never been ticked.
+
+Fixed by never bringing the source into RAM: the runner now execs a ~250-byte
+`_jl_project = {…}` + `execfile("<path>")` and MicroPython's lexer streams the
+file off the filesystem. Every failure branch prints. A single reserved buffer
+was tried first and was **not enough** — a 12.5 KB reserve still failed with
+25 KB free, because that heap has no contiguous block that size.
+
+**Still finite, one level up:** MicroPython's *compiler* also needs heap. ~12 KB
+of source compiles on a fresh 39 KB heap and raises `MemoryError` on the ~25 KB
+left deep in a long session. That is why `test_projects` resets the board once
+before it drives the i2cscrn script, and why companion scripts should stay lean.
+
+### Downgrade notes for wave 3
+
+- **`guideProgress:` grew an `of:` field** — `{source: …, step: k, of: n}`. Old
+  firmware's `step:` extraction stops on the digits, so it keeps step and
+  source and re-emits without the total; a wave-3 launcher then reads that file
+  as "total unknown" and reopens it silently instead of prompting. Emitted only
+  when non-zero, so a hand-written or pre-`of:` file round-trips unchanged.
+- **`<dir>_run.yaml` on old firmware** is an ordinary YAML: the numbered scanner
+  never matches it, so an old build simply does not see it as a run and starts
+  allocating `<dir>_1.yaml` beside it. Nothing is lost; open it from Files.
+- **Numbered run files left on a board flashed forward** are inert leftovers.
+  Single-file mode never scans for one, opens one or deletes one. Remove them
+  from the Files browser.
+- **The `Guides` rename is a firmware-side string only.** Nothing on disk, in a
+  config, or in any machine line changed, so a downgrade just shows `Projects`
+  again.
+
+### Deferred past wave 3, on purpose
+
+- **The colour-ownership deep fix.** W3-T5 stopped the *false* value reaching
+  the file, but `nets[].color` is still written by core 2 and read by core 0
+  with no handshake — and the §3c fallback added a **second** unsynchronized
+  cross-core read, `netColors[]` (`States.cpp:1891-1893`). Assigning colours at
+  rebuild time on core 0 is the fix and it must cover **both arrays**. Capped:
+  the emitted value is never read back on load, so the worst case is a cosmetic
+  stale or torn colour, self-corrected on the next save.
+- **The stale-voltage-on-cancel bug — PRE-EXISTING, and Kevin decides.**
+  `getActionFloat`'s cancel exits never set `currentAction.analogVoltage` (only
+  the confirm branch does, `Menus.cpp:3003`), so RAILSACTION afterwards runs
+  with whatever was left over — `0.0` from `clearAction()` or a value from an
+  earlier action in the same session. If that is what happens, a long-press
+  cancel does not abandon the drag: it snaps the rail to a stale voltage **and
+  persists it**. Surfaced by W3-T5's re-review while tracing something else; it
+  predates all of this work. It is item 4 of the encoder-menu bench card in the
+  checklist — one minute with the wheel decides whether it is real.
+- **`jl_switch_slot`'s return-value ambiguity** — unchanged from wave 2.
+  `-2` = failure, `-1` = legal "no previous slot", binding raises only on `-2`.
+  Still not fixed because it changes a published Python contract and no wave-3
+  path calls it either. `DESIGN_SLOT_FILES.md` §8.
+- **`--port` pass-through** — still open; see the wave-2 entry above for why
+  W3-T1/T5's fault-witness work is a *different* problem.
+- **Provisioning is version-gated, and it will bite whoever edits
+  `scripts/projects/**` next.** The forced pass that walks the hash history runs
+  only on a FIRMWARE VERSION CHANGE (`configManager.cpp:2558`); the unforced
+  pass skips any file that already exists. So rebuilding at the same version
+  leaves the OLD file on the bench board and `test_projects`' three-way hash
+  check fails on it. The workaround is mechanical — delete the changed files
+  from the board and let the boot/launcher self-heal put them back — and a
+  release that bumps the version resolves it for users automatically. Hit in
+  W3-T2 (concern 1) and again in W3-T4.
+- **Bursty typed input into a running companion script is unreliable** — a
+  whole line-block pasted at once comes back with characters dropped and
+  duplicated; answer-then-wait is reliable. Seen while building the i2cscrn
+  drive, worked around there, not investigated. Suspect the interaction between
+  `select.poll(sys.stdin)` and the CDC reader.
+- **The interactive prompts still have no automated witness** — the mid-flight
+  resume prompt (T3), the probe half of i2cscrn's tap-to-assign, the drag-trail
+  visual, and the rail-menu items. All are on the wave-3 bench card.
 
 ---
 

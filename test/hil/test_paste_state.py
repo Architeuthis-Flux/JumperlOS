@@ -18,19 +18,29 @@ import time
 
 import serial  # pyserial
 
-from jl import jl_exec, port1_path, port1_command, check, finish
+from jl import (jl_exec, port1_path, port1_command, check, finish,
+                fault_scan)
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
-def _collect(ser, secs):
+def _collect(ser, secs, where="the paste driver"):
+    """Drain `ser` for `secs`, de-ANSI, and scan for a fault announcement.
+
+    THIS IS A RAW PORT-1 READER. jl.py's fault_scan only sees bytes jl.py
+    itself read, so a suite that opens its own serial connection has to carry
+    its own witness or the board can HardFault under it silently. The connect
+    banner in particular: the firmware prints a post-fault [crashlog] exactly
+    ONCE, to the first terminal that attaches after the reboot, so whichever
+    reader gets there first is the only one that can ever see it.
+    """
     deadline = time.time() + secs
     buf = b""
     while time.time() < deadline:
         chunk = ser.read(4096)
         if chunk:
             buf += chunk
-    return _ANSI.sub("", buf.decode(errors="replace"))
+    return fault_scan(_ANSI.sub("", buf.decode(errors="replace")), where)
 
 
 def _paste_command(cmd, payload, settle=3.5):
@@ -38,7 +48,7 @@ def _paste_command(cmd, payload, settle=3.5):
     with serial.Serial(port1_path(), 115200, timeout=0.05) as ser:
         ser.write(b"\r\n")
         ser.flush()
-        _collect(ser, 1.5)  # connection-init banner
+        _collect(ser, 1.5, "the paste driver's connect banner")
         ser.reset_input_buffer()
         ser.write(cmd.encode() + b"\r\n")
         ser.flush()

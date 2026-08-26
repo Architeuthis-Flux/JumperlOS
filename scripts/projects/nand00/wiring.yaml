@@ -1,0 +1,53 @@
+version: 2
+sourceOfTruth: bridges
+meta:
+  project: nand00
+  title: "Logic Gates 101"
+  variant: default
+  summary: "A 74HC00 NAND gate driven and read back by the Jumperless"
+  script: main.py
+  needs: ["74HC00 (DIP-14)", "LED", "330"]
+parts:
+  - name: "U1"
+    type: ic
+    value: "74HC00"
+    footprint: dip14
+    row: 35
+    pins:
+      A1:  {pin: 1,  connect: RP_GPIO_1, class: signal}
+      B1:  {pin: 2,  connect: RP_GPIO_2, class: signal}
+      Y1:  {pin: 3,  connect: RP_GPIO_3, class: signal}
+      A2:  {pin: 4,  connect: GND,       class: signal}
+      B2:  {pin: 5,  connect: GND,       class: signal}
+      Y2:  {pin: 6,                      class: nc}
+      GND: {pin: 7,  connect: GND,       class: gnd}
+      Y3:  {pin: 8,                      class: nc}
+      A3:  {pin: 9,  connect: GND,       class: signal}
+      B3:  {pin: 10, connect: GND,       class: signal}
+      Y4:  {pin: 11,                     class: nc}
+      A4:  {pin: 12, connect: GND,       class: signal}
+      B4:  {pin: 13, connect: GND,       class: signal}
+      VCC: {pin: 14, connect: TOP_RAIL,  class: power}
+  - name: "LED1"
+    type: led
+    footprint: sip2
+    row: 18
+    pins: {A: {pin: 1}, K: {pin: 2, connect: GND}}
+  - name: "R1"
+    type: resistor
+    value: "330"
+    footprint: axial2
+    row: 15
+    pins: {A: {pin: 1, connect: 37}, B: {pin: 2, connect: 18}}
+guide:
+  title: "Logic Gates 101"
+  steps:
+    - {do: note, text: "One NAND gate, wired to three GPIOs. Turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "74HC00 across the middle gap, pin 1 (the notch end) at row 35."}
+    - {do: place, part: LED1, check: vf, min: 1.4, max: 2.6, on_fail: retry, text: "LED: long leg (anode) row 18, short leg row 19."}
+    - {do: place, part: R1, check: continuity, text: "330 resistor: rows 15 and 45, straddling the middle gap."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power the gate up (3.3V)."}
+    - {do: verify, target: 37, check: voltage, min: 2.2, max: 3.6, text: "Both inputs are low, so NAND out must be high - the LED should be lit."}
+    - {do: note, text: "Built. Run main.py for the truth table and the type-your-own-inputs mode."}
+power:
+  topRail: 3.3

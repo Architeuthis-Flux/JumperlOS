@@ -1,0 +1,51 @@
+version: 2
+sourceOfTruth: bridges
+meta:
+  project: eeprom
+  title: "EEPROM Dumper"
+  variant: default
+  summary: "Hex-dump a 24Cxx I2C EEPROM, with write protect held by the board"
+  script: main.py
+  needs: ["24C02 or 24C16 (DIP-8)", "4.7k", "4.7k"]
+parts:
+  - name: "U1"
+    type: ic
+    value: "24C02"
+    footprint: dip8
+    row: 35
+    pins:
+      A0:  {pin: 1, connect: GND,       class: signal}
+      A1:  {pin: 2, connect: GND,       class: signal}
+      A2:  {pin: 3, connect: GND,       class: signal}
+      GND: {pin: 4, connect: GND,       class: gnd}
+      SDA: {pin: 5, connect: RP_GPIO_7, class: signal}
+      SCL: {pin: 6, connect: RP_GPIO_8, class: signal}
+      WP:  {pin: 7, connect: TOP_RAIL,  class: signal}
+      VCC: {pin: 8, connect: TOP_RAIL,  class: power}
+  - name: "R1"
+    type: resistor
+    value: "4.7k"
+    footprint: axial2
+    row: 12
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 8}}
+  - name: "R2"
+    type: resistor
+    value: "4.7k"
+    footprint: axial2
+    row: 15
+    pins: {A: {pin: 1, connect: TOP_RAIL}, B: {pin: 2, connect: 7}}
+guide:
+  title: "EEPROM Dumper"
+  steps:
+    - {do: note, text: "A 24Cxx EEPROM on the I2C pins. Turn=prev/next, click=confirm, hold=exit."}
+    - {do: place, part: U1, check: presence, on_fail: warn, text: "24Cxx across the middle gap, pin 1 (the dot) at row 35."}
+    - {do: place, part: R1, check: continuity, text: "4.7k SDA pull-up: rows 12 and 42, straddling the middle gap."}
+    - {do: place, part: R2, check: continuity, text: "4.7k SCL pull-up: rows 15 and 45, straddling the middle gap."}
+    - {do: power_on, check: rail_sane, text: "Confirm to power the chip up (3.3V). WP is held high - reads only."}
+    - {do: verify, target: 8, n1: 8, n2: 7, check: i2c, text: "Scanning the bus - a 24Cxx with A0-A2 grounded answers at 0x50."}
+    - {do: note, text: "Built. Run main.py to hex-dump it."}
+power:
+  topRail: 3.3
+config:
+  gpio:
+    pulls: [0,0,0,0,0,0,1,1,0,0]

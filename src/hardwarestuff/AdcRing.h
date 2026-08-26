@@ -66,6 +66,14 @@ int      adcRingMeanWindow(int ch, uint32_t endSweep, int n);
 // fresh burst starting "now" when `after` = adcRingSweeps() at the call.
 // On timeout returns the newest n (and counts a stall).
 int      adcRingMeanAfter(int ch, uint32_t after, int n, uint32_t timeoutUs);
+// Same, but the caller learns whether the mean really is that fresh burst.
+// *fresh comes back false on timeout, engine stop, a generation bump (a
+// resync restarted the sweep phase mid-read), or the DMA lapping the window
+// while it was summed - all cases where the returned mean is best-available
+// history, not the n sweeps after `after`. Callers that feed downstream
+// decisions (the net scan's taps) fail the read instead of trusting it;
+// adcRingMeanAfter() is this with fresh ignored.
+int      adcRingMeanAfterStrict(int ch, uint32_t after, int n, uint32_t timeoutUs, bool* fresh);
 
 // Housekeeping: resync after an ADC FIFO overrun (called from a service on
 // either core; single-entry).

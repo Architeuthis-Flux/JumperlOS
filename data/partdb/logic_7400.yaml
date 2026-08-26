@@ -1,0 +1,221 @@
+# source: Texas Instruments SN74xx/SN74HCxx and Nexperia 74HCxx datasheets -
+#   pin-function facts transcribed by hand from datasheets; facts are not
+#   copyrightable. Never import Fritzing/KiCad/AVR-tester tables
+#   (CC-BY-SA/GPL).
+#
+# 7400-series TTL/CMOS logic, DIP-14/16/20. pins: is positional (entry i =
+# physical pin i+1). Corner-power (GND at N/2, VCC at N) is validated for
+# dip14/dip16; the 7490 declares power: because its supply really is
+# mid-package. Aliases cover the HC/LS/HCT families.
+
+class: LOGIC
+subclass: s7400
+
+- id: 7400
+  desc: Quad 2-input NAND gate
+  package: dip14
+  aliases: [74HC00, 74LS00, 74HCT00]
+  pop: 1
+  pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+
+- id: 7402
+  desc: Quad 2-input NOR gate
+  package: dip14
+  aliases: [74HC02, 74LS02, 74HCT02]
+  pins: [1Y, 1A, 1B, 2Y, 2A, 2B, GND, 3A, 3B, 3Y, 4A, 4B, 4Y, VCC]
+
+- id: 7404
+  desc: Hex inverter
+  package: dip14
+  aliases: [74HC04, 74LS04, 74HCT04]
+  pop: 2
+  pins: [1A, 1Y, 2A, 2Y, 3A, 3Y, GND, 4Y, 4A, 5Y, 5A, 6Y, 6A, VCC]
+
+- id: 7408
+  desc: Quad 2-input AND gate
+  package: dip14
+  aliases: [74HC08, 74LS08, 74HCT08]
+  pop: 4
+  pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+
+- id: 7410
+  desc: Triple 3-input NAND gate
+  package: dip14
+  aliases: [74HC10, 74LS10, 74HCT10]
+  pins: [1A, 1B, 2A, 2B, 2C, 2Y, GND, 3Y, 3A, 3B, 3C, 1C, 1Y, VCC]
+
+- id: 7414
+  desc: Hex Schmitt-trigger inverter
+  package: dip14
+  aliases: [74HC14, 74LS14, 74HCT14]
+  pop: 13
+  pins: [1A, 1Y, 2A, 2Y, 3A, 3Y, GND, 4Y, 4A, 5Y, 5A, 6Y, 6A, VCC]
+
+- id: 7420
+  desc: Dual 4-input NAND gate
+  package: dip14
+  aliases: [74HC20, 74LS20, 74HCT20]
+  pins: [1A, 1B, NC, 1C, 1D, 1Y, GND, 2Y, 2A, 2B, NC, 2C, 2D, VCC]
+
+- id: 7432
+  desc: Quad 2-input OR gate
+  package: dip14
+  aliases: [74HC32, 74LS32, 74HCT32]
+  pop: 5
+  pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+
+- id: 7442
+  desc: BCD to decimal decoder (1-of-10)
+  package: dip16
+  aliases: [74HC42, 74LS42, 74HCT42]
+  pins: [O0, O1, O2, O3, O4, O5, O6, GND, O7, O8, O9, D, C, B, A, VCC]
+
+- id: 7447
+  desc: BCD to 7-segment decoder/driver, active-low
+  package: dip16
+  aliases: [74LS47, 74HCT47]
+  pins: [B, C, LT, BI/RBO, RBI, D, A, GND, e, d, c, b, a, g, f, VCC]
+
+- id: 7474
+  desc: Dual D flip-flop with preset and clear
+  package: dip14
+  aliases: [74HC74, 74LS74, 74HCT74]
+  pop: 7
+  pins: [1CLR, 1D, 1CLK, 1PRE, 1Q, 1Q~, GND, 2Q~, 2Q, 2PRE, 2CLK, 2D, 2CLR, VCC]
+
+- id: 7486
+  desc: Quad 2-input XOR gate
+  package: dip14
+  aliases: [74HC86, 74LS86, 74HCT86]
+  pop: 9
+  pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+
+- id: 7490
+  desc: Decade counter (divide-by-2 and divide-by-5)
+  package: dip14
+  aliases: [74LS90, 74HC90]
+  power: VCC@5 GND@10
+  pins: [CKB, R01, R02, NC, VCC, R91, R92, QC, QB, GND, QD, QA, NC, CKA]
+
+- id: 74107
+  desc: Dual JK flip-flop with clear
+  package: dip14
+  aliases: [74HC107, 74LS107]
+  # VERIFY: 74107 pin map from memory - check against TI SN74LS107A datasheet
+  pins: [1J, 1Q~, 1Q, 1K, 2Q, 2Q~, GND, 2J, 2CLK, 2CLR, 2K, 1CLK, 1CLR, VCC]
+
+- id: 74123
+  desc: Dual retriggerable monostable multivibrator
+  package: dip16
+  aliases: [74HC123, 74LS123, 74HCT123]
+  pins: [1A, 1B, 1CLR, 1Q~, 2Q, 2CEXT, 2RCEXT, GND, 2A, 2B, 2CLR, 2Q~, 1Q, 1CEXT, 1RCEXT, VCC]
+
+- id: 74125
+  desc: Quad 3-state buffer, active-low enable
+  package: dip14
+  aliases: [74HC125, 74LS125, 74HCT125]
+  pins: [1OE, 1A, 1Y, 2OE, 2A, 2Y, GND, 3Y, 3A, 3OE, 4Y, 4A, 4OE, VCC]
+
+- id: 74138
+  desc: 3-to-8 line decoder/demultiplexer
+  package: dip16
+  aliases: [74HC138, 74LS138, 74HCT138]
+  pop: 6
+  pins: [A, B, C, G2A, G2B, G1, Y7, GND, Y6, Y5, Y4, Y3, Y2, Y1, Y0, VCC]
+
+- id: 74139
+  desc: Dual 2-to-4 line decoder/demultiplexer
+  package: dip16
+  aliases: [74HC139, 74LS139, 74HCT139]
+  pins: [1G, 1A, 1B, 1Y0, 1Y1, 1Y2, 1Y3, GND, 2Y3, 2Y2, 2Y1, 2Y0, 2B, 2A, 2G, VCC]
+
+- id: 74151
+  desc: 8-input multiplexer with strobe
+  package: dip16
+  aliases: [74HC151, 74LS151, 74HCT151]
+  pins: [D3, D2, D1, D0, Y, W, G, GND, C, B, A, D7, D6, D5, D4, VCC]
+
+- id: 74153
+  desc: Dual 4-input multiplexer
+  package: dip16
+  aliases: [74HC153, 74LS153, 74HCT153]
+  pins: [1G, B, 1C3, 1C2, 1C1, 1C0, 1Y, GND, 2Y, 2C0, 2C1, 2C2, 2C3, A, 2G, VCC]
+
+- id: 74157
+  desc: Quad 2-input multiplexer
+  package: dip16
+  aliases: [74HC157, 74LS157, 74HCT157]
+  pins: [SEL, 1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3B, 3A, 4Y, 4B, 4A, EN, VCC]
+
+- id: 74161
+  desc: 4-bit synchronous binary counter, async clear
+  package: dip16
+  aliases: [74HC161, 74LS161, 74HCT161]
+  pop: 10
+  pins: [CLR, CLK, A, B, C, D, ENP, GND, LOAD, ENT, QD, QC, QB, QA, RCO, VCC]
+
+- id: 74164
+  desc: 8-bit serial-in parallel-out shift register
+  package: dip14
+  aliases: [74HC164, 74LS164, 74HCT164]
+  pop: 12
+  pins: [A, B, QA, QB, QC, QD, GND, CLK, CLR, QE, QF, QG, QH, VCC]
+
+- id: 74165
+  desc: 8-bit parallel-in serial-out shift register
+  package: dip16
+  aliases: [74HC165, 74LS165, 74HCT165]
+  pop: 11
+  pins: [SH/LD, CLK, E, F, G, H, QH~, GND, QH, SER, A, B, C, D, CLKINH, VCC]
+
+- id: 74174
+  desc: Hex D flip-flop with common clock and clear
+  package: dip16
+  aliases: [74HC174, 74LS174, 74HCT174]
+  pins: [CLR, 1Q, 1D, 2D, 2Q, 3D, 3Q, GND, CLK, 4Q, 4D, 5Q, 5D, 6D, 6Q, VCC]
+
+- id: 74193
+  desc: 4-bit up/down binary counter, dual clock
+  package: dip16
+  aliases: [74HC193, 74LS193, 74HCT193]
+  pins: [B, QB, QA, DOWN, UP, QC, QD, GND, D, C, LOAD, CO, BO, CLR, A, VCC]
+
+- id: 74240
+  desc: Octal inverting 3-state buffer/driver
+  package: dip20
+  aliases: [74HC240, 74LS240, 74HCT240]
+  pins: [1OE, 1A1, 2Y4, 1A2, 2Y3, 1A3, 2Y2, 1A4, 2Y1, GND, 2A1, 1Y4, 2A2, 1Y3, 2A3, 1Y2, 2A4, 1Y1, 2OE, VCC]
+
+- id: 74245
+  desc: Octal bus transceiver, 3-state
+  package: dip20
+  aliases: [74HC245, 74LS245, 74HCT245]
+  pop: 8
+  pins: [DIR, A1, A2, A3, A4, A5, A6, A7, A8, GND, B8, B7, B6, B5, B4, B3, B2, B1, OE, VCC]
+
+- id: 74273
+  desc: Octal D flip-flop with clear
+  package: dip20
+  aliases: [74HC273, 74LS273, 74HCT273]
+  pins: [CLR, 1Q, 1D, 2D, 2Q, 3Q, 3D, 4D, 4Q, GND, CLK, 5Q, 5D, 6D, 6Q, 7Q, 7D, 8D, 8Q, VCC]
+
+- id: 74373
+  desc: Octal transparent latch, 3-state
+  package: dip20
+  aliases: [74HC373, 74LS373, 74HCT373]
+  pop: 14
+  pins: [OE, 1Q, 1D, 2D, 2Q, 3Q, 3D, 4D, 4Q, GND, LE, 5Q, 5D, 6D, 6Q, 7Q, 7D, 8D, 8Q, VCC]
+
+- id: 74374
+  desc: Octal D flip-flop, 3-state
+  package: dip20
+  aliases: [74HC374, 74LS374, 74HCT374]
+  pop: 15
+  pins: [OE, 1Q, 1D, 2D, 2Q, 3Q, 3D, 4D, 4Q, GND, CLK, 5Q, 5D, 6D, 6Q, 7Q, 7D, 8D, 8Q, VCC]
+
+- id: 74595
+  desc: 8-bit shift register with output latch
+  package: dip16
+  aliases: [74HC595, 74HCT595, 595]
+  pop: 3
+  pins: [QB, QC, QD, QE, QF, QG, QH, GND, QH', SRCLR, SRCLK, RCLK, OE, SER, QA, VCC]

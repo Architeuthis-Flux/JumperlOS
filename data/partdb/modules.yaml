@@ -1,0 +1,88 @@
+# source: InvenSense (MPU-6050 register map), Bosch (BME280, BMP280),
+#   Texas Instruments (ADS1115), NXP (PCF8574), Maxim/ADI (DS3231),
+#   Microchip (AT24C32), common breakout-board silkscreens - pin-function
+#   facts transcribed by hand from datasheets and module headers; facts are
+#   not copyrightable. Never import Fritzing/KiCad/AVR-tester tables
+#   (CC-BY-SA/GPL).
+#
+# I2C breakout modules on SIP headers (pin 1..N left-to-right, components
+# toward you). i2c: lists the ACK addresses ('lo-hi' = contiguous range);
+# whoami: is reg=value[&mask], read-only, only ever read from declared
+# registers. DS3231 (0x68, no WHO_AM_I) vs MPU6050 (0x68, WHO_AM_I) is the
+# auto-detect disambiguation pair.
+
+class: MODULE
+
+- id: mpu6050
+  name: MPU6050
+  desc: 6-axis accel+gyro I2C
+  subclass: sensor
+  package: sip8
+  aliases: [GY-521]
+  pop: 1
+  i2c: [0x68, 0x69]
+  whoami: 0x75=0x68&0x7E
+  pins: [VCC, GND, SCL, SDA, XDA, XCL, AD0=ADDR, INT]
+
+- id: bme280
+  name: BME280
+  desc: Temp/humidity/pressure sensor I2C
+  subclass: sensor
+  package: sip6
+  pop: 2
+  i2c: [0x76, 0x77]
+  whoami: 0xD0=0x60
+  # VERIFY: 6-pin GY-BME280 breakout order (4-pin VIN GND SCL SDA also common)
+  pins: [VCC, GND, SCL, SDA, CSB, SDO]
+
+- id: bmp280
+  name: BMP280
+  desc: Temp/pressure sensor I2C
+  subclass: sensor
+  package: sip6
+  pop: 3
+  i2c: [0x76, 0x77]
+  whoami: 0xD0=0x58
+  # VERIFY: same GY- breakout header as the BME280
+  pins: [VCC, GND, SCL, SDA, CSB, SDO]
+
+- id: ads1115
+  name: ADS1115
+  desc: 16-bit 4-channel I2C ADC
+  subclass: io
+  package: sip10
+  pop: 2
+  i2c: [0x48-0x4B]
+  pins: [VDD, GND, SCL, SDA, ADDR, ALRT, A0, A1, A2, A3]
+
+- id: pcf8574
+  name: PCF8574
+  desc: 8-bit I2C IO expander
+  subclass: io
+  package: sip13
+  pop: 1
+  i2c: [0x20-0x27]
+  # VERIFY: generic expander-board header (PCF8574A variant is 0x38-0x3F -
+  # NOT aliased here on purpose)
+  pins: [VCC, GND, SDA, SCL, INT, P0, P1, P2, P3, P4, P5, P6, P7]
+
+- id: ds3231
+  name: DS3231
+  desc: RTC I2C, 0x68 without WHO_AM_I
+  subclass: other
+  package: sip6
+  aliases: [ZS-042]
+  pop: 1
+  i2c: [0x68]
+  # VERIFY: ZS-042 module header order 32K SQW SCL SDA VCC GND
+  pins: [32K, SQW, SCL, SDA, VCC, GND]
+
+- id: at24c32
+  name: AT24C32
+  desc: 32Kbit I2C EEPROM
+  subclass: memory
+  package: sip4
+  pop: 1
+  i2c: [0x50-0x57]
+  # VERIFY: standalone module header order
+  pins: [GND, VCC, SDA, SCL]

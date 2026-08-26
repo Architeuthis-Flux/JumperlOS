@@ -19,6 +19,9 @@
 #include "Peripherals.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "PartsApp.h"     // partsAppLauncher - the "Parts" apps[] row
+#include "ProjectsApp.h"  // projectsAppLauncher (Guides menu row retired;
+                          // projects stay reachable via `z` + Files browser)
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
@@ -98,6 +101,10 @@ struct app apps[ NUM_APPS ] = {
     { "Xbar   Test", 22, 1, crossbarTestApp },
     { "Tip    Voltage", 23, 1, tipVoltageTestApp },
     { "PSRAM  Test", 24, 1, psramTestApp },
+    // Name-matched by runApp(-1, name) with the TOP-LEVEL menu line's own text
+    // (menuTree.h "Guides" -> Menus.cpp getActionCategory -> APPSACTION), so
+    // this string and that one move together or the row goes dead.
+    { "Parts", 25, 1, partsAppLauncher },
     // others can remain uninitialized (works=0)
 };
 
@@ -408,8 +415,10 @@ void calibrateProbeSwitchThresholds( void ) {
     Serial.println( "This will automatically set the switch position detection thresholds\n\r" );
     Serial.println( "(any serial key aborts without saving)\n\r" );
 
-    int tempSlot = 8;
-    netSlot = tempSlot;
+    // (No manual `netSlot = 8` here: enterTemporarySlot sets netSlot,
+    // activeSlotNumber AND activeSlotPath together. Assigning netSlot first
+    // used to be harmless; with the path companion it would desync the pair
+    // for the instant before enterTemporarySlot ran.)
     SlotManager::getInstance( ).enterTemporarySlot( 8 );  // Save current slot, switch to temp slot 8
     refreshConnections( -1, 0 );
     // probing.routableBufferPower( 1, 1, 1 );
@@ -805,12 +814,20 @@ void probeCalibApp( void ) {
     int probeRead = -1;
     bool firstRead = true;
     Probing::getInstance( ).smoothProbeReading( -1, true );
+    unsigned long lastEncoderActivityMs = 0;
+    unsigned long lastProbeCalibUiMs = 0;
+    int lastLedPadRaw = -1;
     // while (probeRead == -1) {
     //     probeRead = probing.readProbeRaw( 0, true );
 
     // }
 
     while ( done == false ) {
+        jOS.serviceInner( ); // pump encoder/USB while this modal loop runs
+        const bool encoderMoved = ( encoderPosition != lastEncoderPosition );
+        if ( encoderMoved )
+            lastEncoderActivityMs = millis( );
+
         if ( oledCalibHotplugPoll( ) ) {
             oled.showMultiLineSmallText( "Tap pads + rotate wheel to align both switch positions\n\rmeasure: hold one pad to converge feeds\n\rhold click = save", true, true );
         }
@@ -880,7 +897,8 @@ void probeCalibApp( void ) {
             switchCurrentNextMs = millis( ) + 120; // let the LED load settle
             lastReading = -1;
         }
-        if ( measureOrSelect == 1 && millis( ) >= switchCurrentNextMs ) {
+        if ( measureOrSelect == 1 && millis( ) >= switchCurrentNextMs &&
+             millis( ) - lastEncoderActivityMs > 120 ) {
             switchCurrentNextMs = millis( ) + 100; // bound the I2C traffic
             switchCurrent_mA = probing.checkProbeCurrent( );
         }
@@ -1013,7 +1031,7 @@ void probeCalibApp( void ) {
             }
         }
 
-        if ( encoderPosition != lastEncoderPosition || reading != lastReading ) {
+        if ( encoderMoved ) {
             lastEncoderPosition = encoderPosition;
             if ( measureOrSelect == 0 ) {
                 // Both measure endpoints move TOGETHER: convergence has already
@@ -1033,6 +1051,14 @@ void probeCalibApp( void ) {
                     jumperlessConfig.calibration.probe_max = 15;
                 }
             }
+        }
+
+        const bool readingChanged = ( reading != lastReading );
+        const bool padMoved = ( probeRead != -1 && lastValidProbeRead != lastLedPadRaw );
+        const bool refreshUi = encoderMoved ||
+            ( readingChanged && millis( ) - lastProbeCalibUiMs >= 50 );
+        if ( refreshUi ) {
+            lastProbeCalibUiMs = millis( );
             char debugOutput[100];
             if (measureOrSelect == 0) {
                 snprintf(debugOutput, sizeof(debugOutput), "MEASURE %s\n\rread: %d\n\rnode: %s\n\rD%d G%d",
@@ -1050,11 +1076,11 @@ void probeCalibApp( void ) {
             }
             if (firstRead == false) {
                 if (oled.isConnected()) {
-                    oled.showMultiLineSmallText(debugOutput, true, true);
+                    // clear=false: full framebuffer wipe on every encoder detent
+                    // was blocking the loop for tens of ms over I2C/SPI.
+                    oled.showMultiLineSmallText(debugOutput, padMoved, true);
                 }
             }
-
-
 
             // \r first (return to column 0), then content, then EL (\033[K) to
             // wipe leftover chars from a longer previous line. Spaces-before-\r
@@ -1085,20 +1111,25 @@ void probeCalibApp( void ) {
                                    (double)jumperlessConfig.calibration.probe_switch_threshold_high );
                 }
             }
-            Serial.flush( );
+            if ( encoderMoved )
+                Serial.flush( );
         }
 
         // if ( reading == -1 )
         //     continue;
 
-        if ( reading != lastReading && reading != -1 ) {
+        if ( reading != -1 && ( encoderMoved || padMoved ) ) {
+            if ( padMoved )
+                lastLedPadRaw = lastValidProbeRead;
 
             // Serial.println( "reading: " + String( reading ) );
             // Serial.flush( );
             uint32_t modeColor = measureOrSelect == 0 ? 0x200010 : 0x001030;
             uint32_t modeLogoColor = measureOrSelect == 0 ? 0xa00060 : 0x3080f0;
-            clearLEDsExceptRails( );
-            clearColorOverrides( true, true, true );
+            if ( padMoved || encoderMoved ) {
+                clearLEDsExceptRails( );
+                clearColorOverrides( true, true, true );
+            }
             if ( nodeSelected >= LOGO_PAD_TOP ) {
                 // Serial.print( "Node selected: " );
                 // Serial.println( nodeSelected );
@@ -1109,7 +1140,7 @@ void probeCalibApp( void ) {
 
                     setLogoOverride( ADC_0, modeLogoColor );
                     setLogoOverride( ADC_1, modeLogoColor );
-                    break;
+                    break;\
                 case DAC_PAD:
                     setLogoOverride( DAC_0, modeLogoColor );
                     setLogoOverride( DAC_1, modeLogoColor );
@@ -1136,7 +1167,7 @@ void probeCalibApp( void ) {
                 requestLedShow( 2 );
             }
 
-            if ( nodeSelected != nodeSelectedWithOldMapping && measureOrSelect == 1 ) {
+            if ( padMoved && nodeSelected != nodeSelectedWithOldMapping && measureOrSelect == 1 ) {
                 b.lightUpNode( nodeSelectedWithOldMapping, 0x050205 );
             }
             if ( measureOrSelect == 0 ) {
@@ -1144,6 +1175,7 @@ void probeCalibApp( void ) {
             } else {
                 b.lightUpNode( nodeSelected, modeColor );
             }
+            requestLedShow( 2 );
         }
         lastReading = reading;
         lastNodeSelected = nodeSelected;
@@ -1545,6 +1577,9 @@ void customApp( void ) {
     sendXYraw( CHIP_K, 4, 0, 0 );
     sendXYraw( CHIP_K, 15, 0, 0 );
     sendXYraw( CHIP_A, 9, 1, 0 );
+    // Every early exit above calls leaveApp(); running to completion did not,
+    // so the demo left the device stuck in temp slot 8 (sweep finding).
+    leaveApp( );
 }
 
 void xlsxGui( void ) {
@@ -1769,13 +1804,42 @@ void scanBoard( void ) {
 }
 
 int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnections, int internalScan ) {
-    if ( sdaRow < 0 || sclRow < 0 || internalScan == 0 ) {
+    // BRIDGE OWNERSHIP (fixed in the H1 wave - it was inverted, and its
+    // teardown was unconditional).
+    //
+    // The routing branch was gated on `internalScan == 0` skipping the add,
+    // i.e. bridges were only ever added for the INTERNAL scan - the one that
+    // talks to the on-board Wire and needs no breadboard route at all - while
+    // the EXTERNAL scan, which is exactly the one that has to get sdaRow/sclRow
+    // onto RP 26/27, added nothing. Every caller that passes real rows means
+    // the external scan, so the gate is `internalScan != 0` now.
+    //
+    // The removal tail then ran unconditionally on leaveConnections == 0 with
+    // real rows, so it deleted bridges this call had never added - including a
+    // project's own committed SDA/SCL wiring, with markDirty behind it. It now
+    // removes ONLY what it actually added: addConnection() returns true for a
+    // pair that already exists (it just bumps the duplicate count), so "the add
+    // succeeded" is not the same question as "the bridge is mine".
+    //
+    // The "defaulting to GPIO 26/27" line belongs ONLY to an external scan
+    // that was given no rows: for the internal bus those pins are not in the
+    // path at all and the message is simply false there (the old gate never
+    // printed it for an internal scan, because the old gate sent that case
+    // down the ADD branch instead - the bug).
+    bool addedSda = false, addedScl = false;
+    if ( internalScan != 0 ) {
+        // On-board Wire: nothing to route, nothing to say about RP 26/27.
+    } else if ( sdaRow < 0 || sclRow < 0 ) {
         Serial.println( "defaulting to \n\n\rGPIO 26 = SDA\n\rGPIO 27 = SCL" );
     } else {
-        addBridgeToState( RP_GPIO_26, sdaRow ); // SDA
-        addBridgeToState( RP_GPIO_27, sclRow ); // SCL
-        refreshConnections( -1, 1 );
-        waitCore2( );
+        addedSda = !globalState.hasConnection( RP_GPIO_26, sdaRow ) &&
+                   addBridgeToState( RP_GPIO_26, sdaRow ); // SDA
+        addedScl = !globalState.hasConnection( RP_GPIO_27, sclRow ) &&
+                   addBridgeToState( RP_GPIO_27, sclRow ); // SCL
+        if ( addedSda || addedScl ) {
+            refreshConnections( -1, 1 );
+            waitCore2( );
+        }
     }
 
     TwoWire* WireScan = &Wire1; // default to Wire1
@@ -1856,14 +1920,27 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
         requestLedShow( -1 );
     }
 
-    if ( leaveConnections == 0 && sdaRow != -1 && sclRow != -1 ) {
-        removeBridgeFromState( RP_GPIO_26, sdaRow );
-        removeBridgeFromState( RP_GPIO_27, sclRow );
+    if ( leaveConnections == 0 && ( addedSda || addedScl ) ) {
+        if ( addedSda )
+            removeBridgeFromState( RP_GPIO_26, sdaRow );
+        if ( addedScl )
+            removeBridgeFromState( RP_GPIO_27, sclRow );
         refreshConnections( -1, 1 );
     }
 
     if ( internalScan == 0 ) {
         WireScan->end( );
+        // Wire1 is SHARED with the top OLED (oled.cpp: connection types 0/1/3
+        // all sit on I2C1). setSDA/setSCL above moved it onto sdaPin/sclPin and
+        // a bare begin() would leave it there, so an OLED on I2C1 goes silent
+        // for everything after this scan. Put its pins back before re-begin.
+        // Connection type 2 is I2C0 (a different peripheral entirely) and is
+        // not ours to touch.
+        if ( jumperlessConfig.top_oled.enabled &&
+             jumperlessConfig.top_oled.connection_type != 2 ) {
+            WireScan->setSDA( jumperlessConfig.top_oled.sda_pin );
+            WireScan->setSCL( jumperlessConfig.top_oled.scl_pin );
+        }
         WireScan->begin( );
     }
     if ( oled.oledConnected == true ) {

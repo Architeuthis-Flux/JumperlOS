@@ -71,6 +71,38 @@ static bool _displayIsDynamic = false;  // Track if _displayPtr was dynamically 
 // last OLED frame or wavegen_start() had set.
 static constexpr uint32_t kOledI2CClockHz = 400000;
 
+// A REAL addressed ping through the hardware I2C block. A zero-length
+// beginTransmission/endTransmission is NOT that on this core: arduino-pico
+// special-cases 0-length writes into _probe() (Wire.cpp:422 "Special-case
+// 0-len writes which are used for I2C probing"), a bit-banged GPIO probe
+// that seizes SDA/SCL into SIO and hand-wiggles the address. Its inter-edge
+// delay is (1e6/clock)/2 us, INTEGER - at I2C0's 1 MHz bus clock that is
+// ZERO, the wiggle runs at raw GPIO toggle speed, and no SSD1306 (a 400 kHz
+// part) can ever ACK it. Result: the probe reported "absent" forever on the
+// internal bus while real frames through the I2C block displayed fine - the
+// panel worked, the detector lied, and everything gated on oledConnected
+// (the health check, the reinit path, the rail-adjust prompt) stayed off.
+// Sending ONE byte takes the hardware path (i2c_write_blocking_until):
+// 0 = ACKed, 4 = NACK, 5 = timeout. The byte is an SSD1306 control byte
+// 0x00 ("command stream follows") with no command after it - the panel
+// executes nothing. ~30 us on the wire. Two side benefits over the
+// bit-bang: the write is covered by the I2C0 arbiter's wrap (the arbiter's
+// own header calls the 0-len probe out as NOT covered), and the clock dance
+// below pings at the panel's rated 400 kHz instead of the shared bus's
+// 1 MHz - the same clkDuring/clkAfter switch the SSD1306 driver does per
+// frame, so the DAC and INA219s get their rate back.
+static int oledI2cPing(TwoWire& wire, uint8_t address) {
+    const bool sharedBus = (&wire == &Wire); // I2C0 = DAC/INA bus at 1 MHz
+    wire.setClock(kOledI2CClockHz);
+    wire.beginTransmission(address);
+    wire.write((uint8_t)0x00);
+    int err = wire.endTransmission();
+    if (sharedBus) {
+        wire.setClock(I2C0_BUS_CLOCK_HZ);
+    }
+    return err;
+}
+
 // Function to get display reference - avoids macro conflicts with display() method name
 // Declared in oled.h for use by other files
 Adafruit_SSD1306& getDisplay() { return *_displayPtr; }
@@ -97,8 +129,14 @@ bool initDisplayForConnectionType(int connectionType) {
         needWire = 1;  // I2C1 (Wire1) for types 0, 1, 3
     }
 
-    // Already using the correctly-clocked dynamic instance on the right Wire.
-    if (_displayIsDynamic && _displayPtr != nullptr && _currentDisplayWire == needWire) {
+    // Already using the correctly-clocked dynamic instance on the right Wire
+    // AND the right geometry. Without the size check, changing width/height at
+    // runtime left an object built for the OLD geometry while displayWidth/
+    // displayHeight (and every buffer sized from them - the hold stash memcpy
+    // into a 512-byte framebuffer) followed the NEW config (sweep finding).
+    if (_displayIsDynamic && _displayPtr != nullptr && _currentDisplayWire == needWire &&
+        _displayPtr->width() == jumperlessConfig.top_oled.width &&
+        _displayPtr->height() == jumperlessConfig.top_oled.height) {
         return false;
     }
 
@@ -712,9 +750,8 @@ bool oled::checkConnection( bool force  ) {
             wireNum = (jumperlessConfig.top_oled.connection_type == 2) ? 0 : 1;
         }
         TwoWire& wire = (wireNum == 0) ? Wire : Wire1;
-        
-        wire.beginTransmission( address );
-        int error = wire.endTransmission( );
+
+        int error = oledI2cPing( wire, address );
         if ( error != 0 ) {
             #if OLED_DEBUG
             Serial.printf("[OLED] checkConnection: I2C error=%d on Wire%d addr=0x%02X\n", error, wireNum, address);
@@ -2302,8 +2339,7 @@ bool oled::show( int waitToFinish ) {
         static int consecutiveWriteFailures = 0;
         constexpr int kWriteFailureThreshold = 3;
         TwoWire& wire = ( _currentDisplayWire == 0 ) ? Wire : Wire1;
-        wire.beginTransmission( address );
-        int err = wire.endTransmission( );
+        int err = oledI2cPing( wire, address );
         if ( err != 0 ) {
             consecutiveWriteFailures++;
             #if OLED_DEBUG
@@ -4354,8 +4390,9 @@ bool probeOledOnInternalI2C0(uint8_t address) {
 
     bool found = false;
     for (int attempt = 0; attempt < 2; ++attempt) {
-        Wire.beginTransmission(address);
-        int err = Wire.endTransmission();
+        // One-byte ping, NOT zero-length - see oledI2cPing() on why a 0-len
+        // "probe" can never see an ACK on the 1 MHz internal bus.
+        int err = oledI2cPing(Wire, address);
         if (err == 0) {
             found = true;
             break;
