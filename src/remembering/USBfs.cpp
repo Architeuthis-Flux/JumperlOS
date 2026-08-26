@@ -733,6 +733,22 @@ void usbUnplugCallback(uint32_t cbData) {
         Serial.println("◆ USB: Full filesystem access restored to device");
     }
     
+    // Dirty in-RAM state must be saved BEFORE the reload overwrites it - the
+    // device-side disableUSBMassStorage() path does this, the host-eject path
+    // did not, so wiring done while the drive was mounted vanished on eject
+    // (sweep finding, medium). Writes are legal again at this point. Same
+    // last-writer-wins caveat as the device-side path.
+    if (SlotManager::getInstance().getActiveState().isDirty()) {
+        Serial.println("◆ Saving pending changes...");
+        String saveErr;
+        if (SlotManager::getInstance().saveActiveSlot(saveErr)) {
+            Serial.println("✓ Pending changes saved");
+        } else {
+            Serial.print("⚠ Warning: Could not save pending changes: ");
+            Serial.println(saveErr);
+        }
+    }
+
     // Reload active slot to pick up any external changes made during USB mode
     // Reload the ACTIVE CONTEXT - by path when it's a file. The old
     // `if (netSlot >= 0)` guard silently skipped the reload for a file
@@ -877,6 +893,22 @@ bool disableUSBMassStorage(void) {
         }
     }
     
+    // Dirty in-RAM state must be saved BEFORE the reload overwrites it - the
+    // device-side disableUSBMassStorage() path does this, the host-eject path
+    // did not, so wiring done while the drive was mounted vanished on eject
+    // (sweep finding, medium). Writes are legal again at this point. Same
+    // last-writer-wins caveat as the device-side path.
+    if (SlotManager::getInstance().getActiveState().isDirty()) {
+        Serial.println("◆ Saving pending changes...");
+        String saveErr;
+        if (SlotManager::getInstance().saveActiveSlot(saveErr)) {
+            Serial.println("✓ Pending changes saved");
+        } else {
+            Serial.print("⚠ Warning: Could not save pending changes: ");
+            Serial.println(saveErr);
+        }
+    }
+
     // Reload active slot to pick up any external changes made during USB mode
     // Reload the ACTIVE CONTEXT - by path when it's a file. The old
     // `if (netSlot >= 0)` guard silently skipped the reload for a file

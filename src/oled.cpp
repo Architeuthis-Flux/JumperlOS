@@ -129,8 +129,14 @@ bool initDisplayForConnectionType(int connectionType) {
         needWire = 1;  // I2C1 (Wire1) for types 0, 1, 3
     }
 
-    // Already using the correctly-clocked dynamic instance on the right Wire.
-    if (_displayIsDynamic && _displayPtr != nullptr && _currentDisplayWire == needWire) {
+    // Already using the correctly-clocked dynamic instance on the right Wire
+    // AND the right geometry. Without the size check, changing width/height at
+    // runtime left an object built for the OLD geometry while displayWidth/
+    // displayHeight (and every buffer sized from them - the hold stash memcpy
+    // into a 512-byte framebuffer) followed the NEW config (sweep finding).
+    if (_displayIsDynamic && _displayPtr != nullptr && _currentDisplayWire == needWire &&
+        _displayPtr->width() == jumperlessConfig.top_oled.width &&
+        _displayPtr->height() == jumperlessConfig.top_oled.height) {
         return false;
     }
 

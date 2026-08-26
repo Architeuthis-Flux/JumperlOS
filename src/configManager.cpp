@@ -11,6 +11,18 @@
 #include "Peripherals.h"
 #include "FilesystemStuff.h"
 #include "oled.h"
+
+// display_type is a `const char*` in the config struct, but both parse sites
+// were handed a pointer to the PARSER'S stack buffer - which is dead the
+// moment the line is consumed, so every later read (echo, save) dereferenced
+// freed stack (sweep finding, medium). Map onto static literals instead.
+static const char* oledDisplayTypeLiteral(const char* v) {
+    if (v == nullptr) return "SSD1306";
+    if (strcasecmp(v, "SH1106") == 0) return "SH1106";
+    if (strcasecmp(v, "SSD1309") == 0) return "SSD1309";
+    if (strcasecmp(v, "SSD1315") == 0) return "SSD1315";
+    return "SSD1306";
+}
 #include "ArduinoStuff.h"
 #include "Apps.h"
 #include "Jerial.h" // TermControl is now part of Jerial
@@ -752,7 +764,7 @@ void updateConfigFromFile(const char* filename) {
         } else if (strcmp(section, "top_oled") == 0) {
             if (strcmp(key, "enabled") == 0) jumperlessConfig.top_oled.enabled = parseBool(value);
             else if (strcmp(key, "i2c_address") == 0) jumperlessConfig.top_oled.i2c_address = parseInt(value);
-            else if (strcmp(key, "display_type") == 0) jumperlessConfig.top_oled.display_type = value; // Store string directly
+            else if (strcmp(key, "display_type") == 0) jumperlessConfig.top_oled.display_type = oledDisplayTypeLiteral(value);
             else if (strcmp(key, "width") == 0) jumperlessConfig.top_oled.width = parseInt(value);
             else if (strcmp(key, "height") == 0) jumperlessConfig.top_oled.height = parseInt(value);
             else if (strcmp(key, "rotation") == 0) jumperlessConfig.top_oled.rotation = parseInt(value);
@@ -1161,6 +1173,7 @@ bool saveConfigToFile(const char* filename) {
     file.print("i2c_address = "); file.print(jumperlessConfig.top_oled.i2c_address); file.println(";");
     file.print("width = "); file.print(jumperlessConfig.top_oled.width); file.println(";");
     file.print("height = "); file.print(jumperlessConfig.top_oled.height); file.println(";");
+    file.print("rotation = "); file.print(jumperlessConfig.top_oled.rotation); file.println(";");
     file.print("connection_type = "); file.print(getConnectionTypeString(jumperlessConfig.top_oled.connection_type)); file.println(";");
     file.print("sda_pin = "); file.print(jumperlessConfig.top_oled.sda_pin); file.println(";");
     file.print("scl_pin = "); file.print(jumperlessConfig.top_oled.scl_pin); file.println(";");
@@ -1382,6 +1395,7 @@ bool configHasChanges() {
     if (jumperlessConfig.top_oled.i2c_address != lastSavedConfig.top_oled.i2c_address) return true;
     if (jumperlessConfig.top_oled.width != lastSavedConfig.top_oled.width) return true;
     if (jumperlessConfig.top_oled.height != lastSavedConfig.top_oled.height) return true;
+    if (jumperlessConfig.top_oled.rotation != lastSavedConfig.top_oled.rotation) return true;
     if (jumperlessConfig.top_oled.connection_type != lastSavedConfig.top_oled.connection_type) return true;
     if (jumperlessConfig.top_oled.sda_pin != lastSavedConfig.top_oled.sda_pin) return true;
     if (jumperlessConfig.top_oled.scl_pin != lastSavedConfig.top_oled.scl_pin) return true;
@@ -2103,6 +2117,9 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "height") == 0) {
                     snprintf(newLine, sizeof(newLine), "height = %d;", jumperlessConfig.top_oled.height);
+                    updated = true;
+                } else if (strcmp(key, "rotation") == 0) {
+                    snprintf(newLine, sizeof(newLine), "rotation = %d;", jumperlessConfig.top_oled.rotation);
                     updated = true;
                 } else if (strcmp(key, "connection_type") == 0) {
                     snprintf(newLine, sizeof(newLine), "connection_type = %s;", getConnectionTypeString(jumperlessConfig.top_oled.connection_type));
@@ -4290,7 +4307,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
     else if (strcmp(section, "top_oled") == 0) {
         if (strcmp(key, "enabled") == 0) jumperlessConfig.top_oled.enabled = parseBool(value);
         if (strcmp(key, "i2c_address") == 0) jumperlessConfig.top_oled.i2c_address = parseHex(value);
-        else if (strcmp(key, "display_type") == 0) jumperlessConfig.top_oled.display_type = value; // Store string directly
+        else if (strcmp(key, "display_type") == 0) jumperlessConfig.top_oled.display_type = oledDisplayTypeLiteral(value);
         else if (strcmp(key, "width") == 0) jumperlessConfig.top_oled.width = parseInt(value);
         else if (strcmp(key, "height") == 0) jumperlessConfig.top_oled.height = parseInt(value);
         else if (strcmp(key, "rotation") == 0) jumperlessConfig.top_oled.rotation = parseInt(value);
@@ -4299,17 +4316,30 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
             // Single helper handles disconnect, pin update, save, and reinit.
             applyOledConnectionType(connType, /*reinitDisplay=*/true, /*persist=*/true);
         }
-        else if (strcmp(key, "sda_pin") == 0) {
-            oled.disconnect();
-            jumperlessConfig.top_oled.sda_pin = parseInt(value);
-            delay(50);
-            oled.init();
-        }
-        else if (strcmp(key, "scl_pin") == 0) {
-            oled.disconnect();
-            jumperlessConfig.top_oled.scl_pin = parseInt(value);
-            delay(50);
-            oled.init();
+        else if (strcmp(key, "sda_pin") == 0 || strcmp(key, "scl_pin") == 0) {
+            // arduino-pico PANICS on setSDA/setSCL of a RUNNING Wire with
+            // different pins, and oled.init() does exactly that - so end the
+            // bus first (the teardownOldOledBus discipline) and reject pins
+            // the silicon can't mux (SDA even / SCL odd) instead of crashing
+            // (sweep finding, high).
+            int newPin = parseInt(value);
+            bool wantSda = (strcmp(key, "sda_pin") == 0);
+            if (newPin < 0 || newPin > 29 || ((newPin % 2 == 0) != wantSda)) {
+                Serial.print("  refused: ");
+                Serial.print(key);
+                Serial.print(" must be an ");
+                Serial.print(wantSda ? "EVEN" : "ODD");
+                Serial.println(" GPIO 0-29 (RP2350 I2C pin mux)");
+            } else {
+                oled.disconnect();
+                if (jumperlessConfig.top_oled.connection_type == 2) Wire.end();
+                else Wire1.end();
+                delay(50);
+                if (wantSda) jumperlessConfig.top_oled.sda_pin = newPin;
+                else jumperlessConfig.top_oled.scl_pin = newPin;
+                delay(50);
+                oled.init();
+            }
         }
         else if (strcmp(key, "gpio_sda") == 0) jumperlessConfig.top_oled.gpio_sda = parseInt(value);
         else if (strcmp(key, "gpio_scl") == 0) jumperlessConfig.top_oled.gpio_scl = parseInt(value);

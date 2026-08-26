@@ -1577,6 +1577,9 @@ void customApp( void ) {
     sendXYraw( CHIP_K, 4, 0, 0 );
     sendXYraw( CHIP_K, 15, 0, 0 );
     sendXYraw( CHIP_A, 9, 1, 0 );
+    // Every early exit above calls leaveApp(); running to completion did not,
+    // so the demo left the device stuck in temp slot 8 (sweep finding).
+    leaveApp( );
 }
 
 void xlsxGui( void ) {

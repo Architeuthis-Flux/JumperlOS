@@ -1266,9 +1266,18 @@ static inline void bridge_usb_to_uart( uint8_t itf ) {
     uint8_t buf[ 64 ];  // Smaller buffer to process in chunks (less blocking)
     uint8_t forward_buf[ 64 ];
     
-    // Only process one small chunk per call to avoid hogging CPU
+    // Only process one small chunk per call to avoid hogging CPU.
+    // BACKPRESSURE (sweep finding, high): read at most what the TX staging
+    // ring can actually hold. tx_ring_push_byte drops on a full ring, so a
+    // host writing faster than the UART drains used to lose bytes SILENTLY
+    // mid-upload; leaving them in the CDC FIFO instead makes USB NAK and the
+    // host wait, which is what every other serial bridge does.
     if ( tud_cdc_n_available( itf ) ) {
-        size_t rd = tud_cdc_n_read( itf, buf, sizeof( buf ) );
+        uint16_t ringFree = (uint16_t)( ( uartToSendTail - uartToSendHead - 1 ) & UART_TOSEND_MASK );
+        if ( ringFree == 0 ) return;          // drain first, read next pass
+        size_t room = sizeof( buf );
+        if ( ringFree < room ) room = ringFree;
+        size_t rd = tud_cdc_n_read( itf, buf, room );
         if ( rd > 0 ) {
             
            

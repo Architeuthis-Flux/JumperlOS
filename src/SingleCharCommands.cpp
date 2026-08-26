@@ -113,7 +113,16 @@ bool SingleCharCommands::registerCommand( const Command& cmd ) {
     // Check if command already exists
     int existingIndex = findCommandIndex( cmd.trigger );
     if ( existingIndex >= 0 ) {
-        // Update existing command
+        // Silent overwrite shipped two shadowed commands ('^' and '_'): the
+        // menu advertised one thing and the key did another (sweep finding).
+        // Say so at boot so the next collision cannot hide.
+        Serial.print( "[cmd] trigger '" );
+        Serial.print( cmd.trigger );
+        Serial.print( "' re-registered: \"" );
+        Serial.print( commands[ existingIndex ].shortDesc );
+        Serial.print( "\" -> \"" );
+        Serial.print( cmd.shortDesc );
+        Serial.println( "\"" );
         commands[ existingIndex ] = cmd;
         return true;
     }
@@ -530,8 +539,10 @@ void SingleCharCommands::initializeCommands( ) {
                      "Read voltage from ADC. Usage: v[0-4] or vi for current.",
                      cmd_readADC, MENU_STANDARD, CAT_HARDWARE );
 
-    registerCommand( '^', "set DAC voltage",
-                     "Set DAC output voltage. Usage: ^ followed by voltage.",
+    // ':' not '^' - '^' is undo (the later registration silently won, so this
+    // command was unreachable while the menu still advertised it).
+    registerCommand( ':', "set DAC voltage",
+                     "Set DAC output voltage. Usage: : followed by voltage.",
                      cmd_setDAC, MENU_DEBUG, CAT_HARDWARE, true, SER3_INTERACTIVE );
 
     registerCommand( 'M', "toggle USB audio mic (M01/Ms/M?)",
@@ -572,7 +583,8 @@ void SingleCharCommands::initializeCommands( ) {
                      "Reapply the last change that was undone.",
                      cmd_redo, MENU_STANDARD, CAT_DEBUG, true, SER3_MODIFIES_STATE );
 
-    registerCommand( '_', "history status",
+    // ',' not '_' - '_' is the micros-per-byte dump (same shadowing bug).
+    registerCommand( ',', "history status",
                      "Print the undo log status (size, position, recent labels).",
                      cmd_historyStatus, MENU_DEBUG, CAT_DEBUG );
 

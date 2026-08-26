@@ -1590,12 +1590,11 @@ void loop1( ) {
 
         supplySense = readAdcVoltage( 6, 4 );
 
-        if ( printPowerSupplySense == 1 ) {
-            Serial.print( "supplySense = " );
-            Serial.println( supplySense );
-
-            Serial.flush( );
-        }
+        // NO Serial FROM CORE 1 (sweep finding): USB CDC writes from this
+        // core are the codebase's own documented board-wedge class. The
+        // reading lives in the supplySense global; a core-0 debug path can
+        // print it.
+        // if ( printPowerSupplySense == 1 ) { ... }
 
         powerSupplySenseTimer = millis( );
     }
@@ -1836,6 +1835,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     // Check the frame hold before long-running showNets() to allow quick exit for flash ops
                     if ( core1FramesHeld( ) ) {
                         ledFrameAbortsPause++;
+                        // The request was already TAKEN: completing it keeps
+                        // the ledShowIdle gate honest, and re-posting means
+                        // the dropped frame renders once the hold releases
+                        // (sweep finding - taken-but-never-completed wedged
+                        // the whole gated pipeline).
+                        if ( taken ) {
+                            core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                            core1req::post( core1req::REQ_SHOW_LEDS, taken );
+                        }
                         core2busy = false;
                         core_sync_release( );
                         return;
@@ -1898,6 +1906,10 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 // and never hit it).
                 if ( core1FramesHeld( ) ) {
                     ledFrameAbortsPause++;
+                    if ( taken ) {   // see the showNets() abort above
+                        core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                        core1req::post( core1req::REQ_SHOW_LEDS, taken );
+                    }
                     core_sync_release( );
                     return;
                 }

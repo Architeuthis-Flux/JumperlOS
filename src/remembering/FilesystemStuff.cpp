@@ -4598,6 +4598,14 @@ bool safeMkdir( const char* path, uint32_t timeout_ms ) {
     if ( !path )
         return false;
 
+    // USB MSC guard (sweep finding): the host caches the FAT while mounted, so
+    // a firmware mkdir behind its back corrupts the host's view of the disk.
+    // safeFileWriteAll already refuses; these raw paths did not.
+    if ( usbMountedByHost ) {
+        Serial.println( "[FS] mkdir refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
+
     AsyncPassthrough::suspendUARTRxIRQ( );
 
     // Pause Core2 for directory creation (flash write)
@@ -4630,6 +4638,14 @@ bool safeFileDeleteRaw( const char* path, uint32_t timeout_ms ) {
     if ( !path )
         return false;
 
+    // USB MSC guard (sweep finding): the host caches the FAT while mounted, so
+    // a firmware delete behind its back corrupts the host's view of the disk.
+    // safeFileWriteAll already refuses; these raw paths did not.
+    if ( usbMountedByHost ) {
+        Serial.println( "[FS] delete refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
+
     AsyncPassthrough::suspendUARTRxIRQ( );
 
     // Pause Core2 for file deletion (flash write)
@@ -4659,6 +4675,14 @@ bool safeFileDelete( const char* path, uint32_t timeout_ms ) {
 bool safeFileRenameRaw( const char* pathFrom, const char* pathTo, uint32_t timeout_ms ) {
     if ( !pathFrom || !pathTo )
         return false;
+
+    // USB MSC guard (sweep finding): the host caches the FAT while mounted, so
+    // a firmware rename behind its back corrupts the host's view of the disk.
+    // safeFileWriteAll already refuses; these raw paths did not.
+    if ( usbMountedByHost ) {
+        Serial.println( "[FS] rename refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
 
     AsyncPassthrough::suspendUARTRxIRQ( );
 

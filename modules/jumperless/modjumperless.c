@@ -2825,6 +2825,11 @@ int jl_bg_service_tick( uint32_t now_ms ) {
 
     int invoked = 0;
     nlr_buf_t nlr;
+    // The VM is about to run on THIS C stack: raise the same depth counter
+    // mp_embed_exec_str uses, or MpRemoteService will happily start a nested
+    // raw-REPL execution on top of us (sweep finding, medium).
+    extern volatile int jl_vm_exec_depth;
+    jl_vm_exec_depth++;
     if ( nlr_push( &nlr ) == 0 ) {
         mp_call_function_1( cb, mp_obj_new_int_from_uint( now_ms ) );
         nlr_pop( );
@@ -2834,6 +2839,7 @@ int jl_bg_service_tick( uint32_t now_ms ) {
         mp_obj_print_exception( &mp_plat_print, MP_OBJ_FROM_PTR( nlr.ret_val ) );
         MP_STATE_VM( jl_bg_entry ) = mp_const_none;
     }
+    jl_vm_exec_depth--;
     MP_STATE_THREAD( stack_top ) = saved_stack_top;
     jl_bg_in_call = 0;
     return invoked;
