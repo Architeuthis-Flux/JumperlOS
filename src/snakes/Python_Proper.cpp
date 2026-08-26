@@ -4545,7 +4545,16 @@ bool initMicroPythonQuiet(bool preserve_interrupt_char) {
   // Restore original stream
   global_mp_stream = original_stream;
   global_mp_stream_ptr = (void *)original_stream;
-  
+
+  // Mount the VFS and set sys.path exactly like the loud init does (sweep
+  // finding): a quiet init left the interpreter with no filesystem and no
+  // import path, and that broken interpreter PERSISTED into every later REPL
+  // or ViperIDE session - imports and file APIs failed until a full teardown.
+  // Ordering matters: the stream is restored above, because
+  // setupFilesystemAndPaths prints through it.
+  jl_vfs_mount_root();
+  setupFilesystemAndPaths();
+
   // Import all jumperless functions and constants globally (silently)
   // This ensures everything is available for single commands without prefix
   mp_embed_exec_str(

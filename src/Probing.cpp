@@ -251,6 +251,12 @@ static uint32_t         s_dblCandidateDeadline = 0;
 static const uint8_t    kDblConfirmSamples  = 28;  // pressed samples needed... (~16ms at the merged
                                                    // program's 1.74kHz; 5 = ~3ms still let a release
                                                    // scratch through - phantoms survived round 2)
+// The sample COUNT is only meaningful at the PIO cadence. On the CPU button
+// path (~4ms/sample) 28 samples cannot fit in a 60ms window at all, so
+// double-tap undo/redo was unreachable there (sweep finding). What actually
+// matters is contact TIME: confirm on either enough samples OR ~16ms of
+// accumulated same-button contact, whichever the active cadence reaches.
+static const uint32_t   kDblConfirmMinMs    = 16;
 static const uint32_t   kDblConfirmWindowMs = 60;  // ...within this window, released samples tolerated
                                                    // (25 would make the window the binding constraint
                                                    // at the higher sample count)
@@ -528,7 +534,10 @@ void __not_in_flash_func( ProbeButton::processSample )( uint8_t newStateRaw ) {
             s_dblCandidateDeadline = 0;
             dblCandExpired++;
         } else if ( newState == (int)s_dblCandidateBtn ) {
-            if ( ++s_dblConfirmCount >= kDblConfirmSamples ) {
+            if ( s_dblConfirmCount < 255 ) s_dblConfirmCount++;
+            bool longEnough =
+                ( (uint32_t)now - ( s_dblCandidateDeadline - kDblConfirmWindowMs ) ) >= kDblConfirmMinMs;
+            if ( s_dblConfirmCount >= kDblConfirmSamples || longEnough ) {
                 int btn = (int)s_dblCandidateBtn;
                 s_dblCandidateBtn = 0;
                 s_dblConfirmCount = 0;
