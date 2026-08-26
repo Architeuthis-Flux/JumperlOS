@@ -880,9 +880,10 @@ void checkForConfigChangesUSBSer1( int print ) {
         USBSer1.begin(
             baudRateUSBSer1,
             makeSerialConfig( numbitsUSBSer1, paritytypeUSBSer1, stopbitsUSBSer1 ) );
-        Serial1.begin(
-            baudRateUSBSer1,
-            makeSerialConfig( numbitsUSBSer1, paritytypeUSBSer1, stopbitsUSBSer1 ) );
+        // No Serial1.begin() here: uart0 belongs to AsyncPassthrough's DMA bridge
+        // (see initSecondSerial). Starting Arduino's Serial1 re-inits uart0 and
+        // installs an exclusive UART0_IRQ that steals passthrough bytes until
+        // reboot. AsyncPassthrough tracks the host's line coding itself.
         microsPerByteSerial1 =
             ( 1000000 / baudRateUSBSer1 + 1 ) *
             ( numbitsUSBSer1 + stopbitsUSBSer1 + ( paritytypeUSBSer1 == 0 ? 0 : 1 ) );

@@ -286,7 +286,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         Jerial.println( );
         // shownMenuItems += printMenuLine(showExtraMenu, 1, "\n\r");
         //  Jerial.print("\t$ = calibrate DACs\n\r");
-        shownMenuItems += printMenuLine( showExtraMenu, 3, "\t^ = set DAC 1 voltage\n\r" );
+        shownMenuItems += printMenuLine( showExtraMenu, 3, "\t: = set DAC 1 voltage\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 1, "\tv = get ADC reading\n\r" );
         // Jerial.println();
 
@@ -1306,6 +1306,11 @@ CommandResult cmd_loadNodeFile( char c, const String& line ) {
     // Validation happens inside savePreformattedNodeFile via refreshLocalConnections
     // which calls the same validation logic. Don't duplicate the work here.
 
+    // The net table was rebuilt from scratch, so any surviving highlight index
+    // (brightenedNet et al) now points at a net that no longer exists. The other
+    // two clearHighlighting() sites are both skipped by CMD_DONT_SHOW_MENU.
+    clearHighlighting( );
+
     input = ' ';
     probeActive = 0;
 
@@ -1838,6 +1843,12 @@ static String getCommandArgs( const String& line, unsigned int timeoutMs = 50 ) 
 // ---------------------------------------------------------------------------
 static const unsigned long PASTE_QUIET_MS = 500;
 static const unsigned long PASTE_IDLE_MS = 30000;
+// The heap is ~171 KB with no PSRAM, so an accidental paste (a few hundred KB of
+// diagram.json into L) must not be allowed to grow `out` until every other
+// allocation starts failing. Past the cap we keep draining the stream but stop
+// appending, so the block still ends on its own terminator instead of spilling
+// the remainder into the menu dispatcher.
+static const unsigned int PASTE_MAX_BYTES = 32768;
 
 static bool readPastedBlock( String& out ) {
     out = "";
@@ -1848,25 +1859,33 @@ static bool readPastedBlock( String& out ) {
     bool prevWasCR = false;       // to fold "\r\n" into one line end
     bool pendingEmpty = false;    // an empty line completed after content - the
                                   // terminator unless more bytes follow it
+    bool overflow = false;        // hit PASTE_MAX_BYTES, or String failed to grow
     unsigned long emptyAtMs = 0;
     unsigned long lastByteMs = millis( );
+
+    auto append = [ & ]( const char* s, unsigned int n ) {
+        if ( overflow ) return;
+        if ( out.length( ) + n > PASTE_MAX_BYTES || !out.concat( s, n ) ) {
+            overflow = true;
+        }
+    };
 
     auto completeLine = [ & ]( ) {
         lineBuf.trim( );
         if ( lineBuf.length( ) == 0 ) {
             if ( gotContent ) {
-                if ( pendingEmpty ) out += "\n"; // a run of blank lines: keep the earlier one
+                if ( pendingEmpty ) append( "\n", 1 ); // a run of blank lines: keep the earlier one
                 pendingEmpty = true;
                 emptyAtMs = millis( );
             }
             return; // leading blank lines are skipped
         }
         if ( pendingEmpty ) {
-            out += "\n"; // that blank line was inside the paste, not the end
+            append( "\n", 1 ); // that blank line was inside the paste, not the end
             pendingEmpty = false;
         }
-        out += lineBuf;
-        out += "\n";
+        append( lineBuf.c_str( ), lineBuf.length( ) );
+        append( "\n", 1 );
         gotContent = true;
         lineBuf = "";
     };
@@ -1890,7 +1909,12 @@ static bool readPastedBlock( String& out ) {
                 continue;
             }
             prevWasCR = false;
-            lineBuf += ch;
+            if ( !overflow ) {
+                if ( out.length( ) + lineBuf.length( ) >= PASTE_MAX_BYTES ||
+                     !lineBuf.concat( ch ) ) {
+                    overflow = true;
+                }
+            }
         }
 
         unsigned long now = millis( );
@@ -1908,10 +1932,13 @@ static bool readPastedBlock( String& out ) {
     // and no Enter) is still content.
     lineBuf.trim( );
     if ( lineBuf.length( ) > 0 ) {
-        if ( pendingEmpty ) out += "\n";
-        out += lineBuf;
-        out += "\n";
+        if ( pendingEmpty ) append( "\n", 1 );
+        append( lineBuf.c_str( ), lineBuf.length( ) );
+        append( "\n", 1 );
         gotContent = true;
+    }
+    if ( overflow ) {
+        Jerial.println( "\n\r◇ Warning: paste too large (>32KB), truncating" );
     }
     return gotContent;
 }
@@ -2764,18 +2791,18 @@ CommandResult cmd_setDAC( char c, const String& line ) {
     // probePowerDAC is defined in Probing.h as int&
     extern bool configChanged;
 
-    char f[ 8 ] = { ' ' };
-    int index = 0;
-    float f1 = 0.0;
-    unsigned long timer = millis( );
-    while ( Jerial.available( ) == 0 && millis( ) - timer < 1000 ) {
-    }
-    while ( index < 8 ) {
-        f[ index ] = Jerial.read( );
-        index++;
+    String arg = getCommandArgs( line, 1000 );
+    if ( arg.length( ) == 0 ) {
+        Jerial.println( "Usage: :3.3  (sets DAC 1 voltage to 3.3V)" );
+        Jerial.flush( );
+        return CMD_DONT_SHOW_MENU;
     }
 
-    f1 = atof( f );
+    char f[ 16 ];
+    strncpy( f, arg.c_str( ), sizeof( f ) - 1 );
+    f[ sizeof( f ) - 1 ] = '\0';
+
+    float f1 = atof( f );
     // The non-probe DAC is always DAC1 now: DAC0 is the probe feed (the
     // only path INA1's switch sensing can see) and never the user's here.
     setDac1voltage( f1, 1, 1 );

@@ -782,7 +782,7 @@ static void usbSer3_dispatchVerb(Stream* out, const String& verb) {
         Jerial.clearCurrentResponseTarget();
     } else if (head == "histstatus") {
         Jerial.setCurrentResponseTarget(out);
-        cmd_historyStatus('_', "_");
+        cmd_historyStatus(',', ",");
         Jerial.clearCurrentResponseTarget();
     } else if (head == "ver" || head == "version") {
         Jerial.setCurrentResponseTarget(out);
@@ -894,16 +894,30 @@ static uint32_t usbSer3_parseInterval(String s) {
     return us < 1 ? 1 : us;
 }
 
+// A buffered capture owns core 0 for its whole duration and cannot poll USBSer3
+// from inside the timed wait (tud_cdc_n_available lives in flash and takes the
+// USB mutex, which is exactly the jitter this path exists to avoid), so cap the
+// total wall time it can hold the board.
+static const uint32_t USBSER3_CAPTURE_MAX_US = 10000000UL;   // 10 s
+// Below this slot width a poll between samples is a measurable fraction of the
+// interval, so only slow captures - the ones worth aborting - are abortable.
+static const uint32_t USBSER3_CAPTURE_POLL_MIN_US = 1000;
+
 // Precise buffered GPIO state capture: one gpio_get_all() per sample into a
 // preallocated buffer at exact micros() spacing, no serial in the loop. RAM
 // resident so it neither stalls on XIP misses nor fights Core 1 for the cache.
-static void __not_in_flash_func(usbSer3_captureGpioLoop)(uint32_t* buf, uint32_t n, uint32_t intervalUs) {
+// Returns the number of samples actually written.
+static uint32_t __not_in_flash_func(usbSer3_captureGpioLoop)(uint32_t* buf, uint32_t n, uint32_t intervalUs) {
+    bool pollable = (intervalUs >= USBSER3_CAPTURE_POLL_MIN_US);
     uint32_t start = micros();
-    for (uint32_t i = 0; i < n; i++) {
+    uint32_t i = 0;
+    for (; i < n; i++) {
         uint32_t due = start + i * intervalUs;
         while ((int32_t)(due - micros()) > 0) { /* busy wait for precise timing */ }
         buf[i] = gpio_get_all();
+        if (pollable && USBSer3.available() > 0) { i++; break; }  // host sent a byte -> stop
     }
+    return i;
 }
 
 // Returns true if it handled the capture; false (malloc failure) lets the
@@ -912,6 +926,11 @@ static bool usbSer3_captureGpioBuffered(uint32_t intervalUs, long count, const S
     long n = count;
     if (n <= 0) n = 1000;            // continuous unsupported in buffered mode
     if (n > 8192) n = 8192;
+    if (intervalUs > USBSER3_CAPTURE_MAX_US) intervalUs = USBSER3_CAPTURE_MAX_US;
+    if ((uint32_t)n > USBSER3_CAPTURE_MAX_US / intervalUs) {
+        n = (long)(USBSER3_CAPTURE_MAX_US / intervalUs);
+        if (n < 1) n = 1;
+    }
     uint32_t* buf = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
     if (!buf) { return false; }      // caller falls back to streamed
 
@@ -919,7 +938,7 @@ static bool usbSer3_captureGpioBuffered(uint32_t intervalUs, long count, const S
                    (unsigned long)intervalUs, n);
     USBSer3.flush();
 
-    usbSer3_captureGpioLoop(buf, (uint32_t)n, intervalUs);
+    n = (long)usbSer3_captureGpioLoop(buf, (uint32_t)n, intervalUs);
 
     // Dump as 8 hex chars (32-bit GPIO0-31 word) per sample, chunked.
     USBSer3.print("caps{");
