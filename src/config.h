@@ -30,417 +30,466 @@
 #define JL_PROJECT_RUN_HISTORY 0
 #endif
 
+// ===========================================================================
+// THE SINGLE-SITE CONFIG OPTION LIST
+// ===========================================================================
+//
+// Adding a config option = adding ONE X() line to the right JL_CFG_<section>
+// list below. That one line generates:
+//   - the struct field (with its default) in `struct config`
+//   - the parse / save / print / diff / help / TUI descriptor entry
+//     (the second expansion lives in configManager.cpp)
+//
+// X(section, key, TYPE, default, min, max, step, enumTable, applyHook, flags,
+//   "one-sentence description")
+//
+//   TYPE      BOOL / INT / VINT (volatile int) / FLOAT / HEX / FONT /
+//             STR16 / STR33
+//   min/max   numeric bounds for the TUI editor; 0,0 = unconstrained
+//   step      TUI spinner increment (0 = 1 for ints / 0.01 for floats)
+//   enumTable a StringIntEntry[] from configManager.h (names for values),
+//             or nullptr. BOOLs implicitly use boolTable.
+//   applyHook HOOK_* id (configManager.h) run on live changes, or HOOK_NONE
+//   flags     JLC_* bits (configManager.h): JLC_CAL survives resets and
+//             migration, JLC_BOOT_ONLY takes effect next boot, JLC_LEDS
+//             refreshes the LEDs after a change, JLC_HIDDEN keeps it out of
+//             the ~ printout and the TUI, JLC_SHOW_* cross-lists a debug
+//             flag into another TUI category.
+//
+// Renamed/moved keys keep working through jlConfigAliases in configManager.cpp
+// (old `[section] key` names remap on parse). Removed keys parse as no-ops.
+// ===========================================================================
 
-// extern int hwRevision;
-// extern int probeRevision;
+#if defined(OG_JUMPERLESS)
+// OG has 1 LED per breadboard row; "wires" mode paints the 5-LEDs-per-row
+// fill, which garbles the single-pixel strip. Default to lines so a freshly
+// flashed OG renders correctly (the lines_wires parser also forces this).
+#define JL_DEFAULT_LINES_WIRES 0
+#else
+#define JL_DEFAULT_LINES_WIRES 1
+#endif
 
+// --- [firmware] ------------------------------------------------------------
+// Update tracking only - hidden from ~ and the TUI, written on every save.
+#define JL_CFG_FIRMWARE(X) \
+  X(firmware, last_version, STR16, "", 0, 0, 0, nullptr, HOOK_NONE, JLC_HIDDEN, \
+    "Last firmware version that ran on this board (drives update detection).")
+
+// --- [hardware] ------------------------------------------------------------
+// Board identity + memory layout. Preserved across `reset` like calibration.
+#define JL_CFG_HARDWARE(X) \
+  X(hardware, generation, INT, 5, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Jumperless hardware generation (5 = Jumperless V5).") \
+  X(hardware, revision, INT, 5, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Board revision, set at the factory and mirrored in EEPROM.") \
+  X(hardware, probe_revision, INT, 5, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Probe hardware revision.") \
+  X(hardware, psram_installed, BOOL, false, 0, 0, 0, nullptr, HOOK_PSRAM, JLC_NONE, \
+    "Whether the 8MB PSRAM chip is installed (enables the app arena and a bigger MicroPython heap).") \
+  X(hardware, psram_app_size_kb, INT, 2048, 0, 8192, 256, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "KiB of PSRAM reserved for the app arena (file cache, undo log, scratch); the rest goes to MicroPython.")
+
+// --- [probe] ---------------------------------------------------------------
+// Everything about the probe: behavior knobs plus its calibration (flagged
+// JLC_CAL so it survives resets and firmware-update migration).
+//
+// pad_max/pad_min: SELECT-feed pad decode endpoints. pad_max_measure /
+// pad_max_measure_gpio: MEASURE-position endpoints per power feed - DAC0 is a
+// stiff ~2-crosspoint feed, a routable GPIO is ~170-185 ohm through 4
+// crosspoints and droops under the pad ladder. The ratiometric decode
+// (endpoints x live ADC7 / 3.3V) cancels the drive VOLTAGE but not the source
+// impedance, so each feed carries its own max. pad_min_measure is shared.
+//
+// droop_v0 / droop_ohms: GPIO-powered measure buffer droop-current model
+// I = (V0 - ADC7) / R. droop_ohms == 0 means the droop calibration never ran
+// (the model falls back to an empirical 30-ohm constant) - this is also the
+// migration sentinel that triggers the switch-calibration prompt.
+#define JL_CFG_PROBE(X) \
+  X(probe, auto_connect, INT, 1, -1, 1, 1, autoConnectTable, HOOK_PROBE_AUTOCONNECT, JLC_NONE, \
+    "Power the probe's measure buffer automatically: on, off until reboot, or off persistently.") \
+  X(probe, power_source, INT, 0, 0, 1, 1, probePowerSourceTable, HOOK_PROBE_POWER_SOURCE, JLC_NONE, \
+    "Which feed the probe buffer tries first: DAC0 (current-sensed, 2 crosspoints) or a routable GPIO (keeps DAC0 free).") \
+  X(probe, use_pio_button, BOOL, true, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Sample the probe button with a PIO state machine (~75x faster than CPU bit-banging; auto-falls back).") \
+  X(probe, led_on_button_pin, BOOL, true, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Drive the probe's WS2812 LED on the button pin (GPIO 9) so a flaky GPIO2-side cable contact stops mattering.") \
+  X(probe, led_refresh_us, INT, 0, 0, 1000000, 50, nullptr, HOOK_LED_REFRESH_US, JLC_NONE, \
+    "Minimum microseconds between idle probe LED re-sends; 0 = legacy constant re-send (scope experiment knob).") \
+  X(probe, pad_max, INT, 4055, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "Highest raw probe ADC reading in SELECT position (top pad decode endpoint).") \
+  X(probe, pad_min, INT, 10, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "Lowest raw probe ADC reading in SELECT position (bottom pad decode endpoint).") \
+  X(probe, pad_max_measure, INT, 4055, 0, 4200, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "MEASURE-position top pad endpoint with the DAC0 power feed.") \
+  X(probe, pad_max_measure_gpio, INT, 4055, 0, 4200, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "MEASURE-position top pad endpoint with a routable-GPIO power feed (droops more than DAC0).") \
+  X(probe, pad_min_measure, INT, 10, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "MEASURE-position bottom pad endpoint (shared by both power feeds).") \
+  X(probe, switch_threshold_high, FLOAT, 1.2f, 0.0f, 10.0f, 0.05f, nullptr, HOOK_NONE, JLC_CAL, \
+    "Buffer current (mA) above which the switch reads as SELECT (hysteresis top).") \
+  X(probe, switch_threshold_low, FLOAT, 0.90f, 0.0f, 10.0f, 0.05f, nullptr, HOOK_NONE, JLC_CAL, \
+    "Buffer current (mA) below which the switch reads as MEASURE (hysteresis bottom).") \
+  X(probe, switch_select_max_ma, FLOAT, 0.0f, 0.0f, 50.0f, 0.25f, nullptr, HOOK_NONE, JLC_CAL, \
+    "Upper bound of the SELECT current signature under a DAC0 feed; above it the buffer is loaded, not in SELECT. 0 = disabled.") \
+  X(probe, switch_blink_hold_pct, INT, 50, 1, 99, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "GPIO-feed switch detector: ADC7 held percentage during the feed blink at or above this classifies SELECT.") \
+  X(probe, measure_voltage, FLOAT, 3.30f, 3.0f, 3.6f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "MEASURE-mode tip drive voltage; servoed by the self test so the tip sits at 3.30V - nothing else should move it.") \
+  X(probe, current_zero, FLOAT, 2.0f, 0.0f, 10.0f, 0.05f, nullptr, HOOK_NONE, JLC_CAL, \
+    "INA current reading (mA) with the probe unloaded, subtracted from switch-position measurements.") \
+  X(probe, min_valid_reading, INT, 85, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
+    "Raw probe ADC readings below this count as no touch (pad decode gate).") \
+  X(probe, droop_v0, FLOAT, 3.35f, 3.0f, 3.6f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "GPIO-powered buffer: unloaded ADC7 tip voltage that maps to zero droop current.") \
+  X(probe, droop_ohms, FLOAT, 0.0f, 0.0f, 500.0f, 0.5f, nullptr, HOOK_NONE, JLC_CAL, \
+    "GPIO feed source resistance for the droop current model; 0 = never calibrated (empirical 30-ohm fallback).") \
+  X(probe, pad_ohms, FLOAT, 5.0f, 0.0f, 100.0f, 0.5f, nullptr, HOOK_NONE, JLC_CAL, \
+    "The GPIO pad's own share of the droop resistance at the 12mA drive the feed claims.")
+
+// --- [clickwheel] ----------------------------------------------------------
+// Rotary encoder behavior + the menu frame-transition eye candy (live-tunable
+// from the Menu FX tuner, persisted here).
+#define JL_CFG_CLICKWHEEL(X) \
+  X(clickwheel, encoder_pio, INT, -1, -1, 2, 1, encoderPioTable, HOOK_ENCODER_PIO, JLC_BOOT_ONLY, \
+    "Which PIO block the encoder's quadrature sampler tries first; auto = PIO2 then PIO1, keeping PIO0 for user programs.") \
+  X(clickwheel, rail_click_adjust, INT, 1, 0, 2, 1, railClickAdjustTable, HOOK_NONE, JLC_NONE, \
+    "Click the wheel on a highlighted rail/DAC to adjust its voltage: off, only with an OLED, or always.") \
+  X(clickwheel, fx_type, INT, 8, 0, 9, 1, menuFxTypeTable, HOOK_MENU_FX, JLC_NONE, \
+    "Menu frame transition style on the breadboard LEDs (glow, sparkle, dither, wipe...).") \
+  X(clickwheel, fx_duration_ms, INT, 160, 0, 1000, 15, nullptr, HOOK_MENU_FX, JLC_NONE, \
+    "How long a menu frame transition runs, in milliseconds.") \
+  X(clickwheel, fx_tint, HEX, 0x000000, 0, 0xFFFFFF, 0, nullptr, HOOK_MENU_FX, JLC_NONE, \
+    "Sparkle speckle color as 0xRRGGBB; 0 = random hues.") \
+  X(clickwheel, fx_density, INT, 128, 0, 255, 16, nullptr, HOOK_MENU_FX, JLC_NONE, \
+    "Sparkle speckle amount (0-255).")
+
+// --- [measurement] ---------------------------------------------------------
+// The net voltage/current scan and how its results are shown.
+#define JL_CFG_MEASUREMENT(X) \
+  X(measurement, net_currents, INT, 1, 0, 1, 1, nullptr, HOOK_NONE, JLC_LEDS, \
+    "Scan node voltages in the background and show per-connection current as marching ants on the LEDs (V5 only).") \
+  X(measurement, current_flow, INT, 0, 0, 1, 1, currentFlowTable, HOOK_NONE, JLC_LEDS, \
+    "Direction the current ants march: conventional (+ to -) or electron (- to +); reported values stay conventional.") \
+  X(measurement, show_probe_current, INT, 0, 0, 2, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Print the probe's measured current while probing (0 = off).") \
+  X(measurement, crosspoint_resistance, FLOAT, 40.0f, 0.0f, 200.0f, 0.5f, nullptr, HOOK_NONE, JLC_CAL, \
+    "On-resistance of one CH446Q crosspoint (ohms), used to turn node voltage deltas into per-connection currents.")
+
+// --- [terminal] ------------------------------------------------------------
+// How the serial terminal behaves.
+#define JL_CFG_TERMINAL(X) \
+  X(terminal, colors, BOOL, true, 0, 0, 0, nullptr, HOOK_TERM_COLORS, JLC_NONE, \
+    "ANSI colors in terminal output; turn off for dumb terminals or logs.") \
+  X(terminal, line_buffering, BOOL, true, 0, 0, 0, nullptr, HOOK_LINE_BUFFERING, JLC_NONE, \
+    "Buffer typed serial input into lines with editing/history instead of acting on every keystroke.")
+
+// --- [undo] ----------------------------------------------------------------
+// The connection-history undo log (clickwheel scrub / u command).
+#define JL_CFG_UNDO(X) \
+  X(undo, persist, BOOL, true, 0, 0, 0, nullptr, HOOK_UNDO, JLC_NONE, \
+    "Save undo history to /undo_history.txt so it survives a power cycle.") \
+  X(undo, max_saved_actions, INT, 256, 1, 256, 16, nullptr, HOOK_UNDO, JLC_NONE, \
+    "How many undo transactions the persisted history keeps (RAM ring is unaffected).")
+
+// --- [dacs] ----------------------------------------------------------------
+// DAC output limits. Voltage values live in activeState.power, not here.
+#define JL_CFG_DACS(X) \
+  X(dacs, limit_max, FLOAT, 8.00f, 0.0f, 10.0f, 0.25f, nullptr, HOOK_NONE, JLC_NONE, \
+    "Highest voltage the DACs and rails can be set to.") \
+  X(dacs, limit_min, FLOAT, -8.00f, -10.0f, 0.0f, 0.25f, nullptr, HOOK_NONE, JLC_NONE, \
+    "Lowest voltage the DACs and rails can be set to.")
+
+// --- [debug] ---------------------------------------------------------------
+// Debug print gates. Single source of truth for the flags that other TUI
+// categories cross-list (JLC_SHOW_*).
+#define JL_CFG_DEBUG(X) \
+  X(debug, file_parsing, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Print node-file parsing steps.") \
+  X(debug, net_manager, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Print net manager decisions (which nodes join which nets).") \
+  X(debug, nets_to_chips, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Print net-to-crossbar-chip routing results.") \
+  X(debug, nets_to_chips_alt, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Print the alternate (verbose path-search) view of chip routing.") \
+  X(debug, probing, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_PROBE, \
+    "Print probe pad decoding and touch events.") \
+  X(debug, arduino, INT, 0, 0, 3, 1, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Arduino/UART passthrough debug verbosity (0 = off).") \
+  X(debug, show_node_errors, BOOL, true, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Warn when a node file references a node that doesn't exist.") \
+  X(debug, probe_switch_stats, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_PROBE, \
+    "Print one line per switch-position evaluation: sensing source, current, thresholds, verdict.") \
+  X(debug, probe_switch_agree, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_PROBE, \
+    "Use the experimental agreement classifier for the probe switch (tip sense must agree with the feed detector).") \
+  X(debug, net_voltage_scan, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_MEASURE, \
+    "Print net voltage scan stats once a second: node voltages and per-path currents.") \
+  X(debug, net_scan_pair_taps, INT, 1, 0, 1, 1, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_MEASURE, \
+    "Tap both ends of a routed path at once on two ADCs (1, default) or sequentially (0).")
+
+// --- [routing] -------------------------------------------------------------
+#define JL_CFG_ROUTING(X) \
+  X(routing, stack_paths, INT, 2, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many parallel crosspoint paths to stack per connection (lowers resistance).") \
+  X(routing, stack_rails, INT, 3, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many parallel paths to stack for rail connections.") \
+  X(routing, stack_dacs, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many extra parallel paths to stack for DAC connections.")
+
+// --- [slots] ---------------------------------------------------------------
+// Which context the board comes up in. Deliberately NOT where the active
+// slot itself is remembered - that lives in /slots/last_active.txt, because
+// config saves are full-file rewrites behind a diff gate and writing config
+// on every slot switch would churn flash and the diff cache.
+#define JL_CFG_SLOTS(X) \
+  X(slots, boot_mode, INT, 1, 0, 1, 1, bootModeTable, HOOK_NONE, JLC_NONE, \
+    "Boot into the last-active slot (default) or always into boot_slot.") \
+  X(slots, boot_slot, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Slot number used when boot_mode is fixed_slot.")
+
+// --- [calibration] ---------------------------------------------------------
+// DAC / rail / ADC transfer curves, written by the DAC calibration ($ / the
+// Calib DACs app). Probe calibration lives in [probe]. All JLC_CAL.
+#define JL_CFG_CALIBRATION(X) \
+  X(calibration, top_rail_zero, INT, 1650, 0, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
+    "Top rail DAC code that outputs 0V.") \
+  X(calibration, top_rail_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "Top rail full-scale voltage spread.") \
+  X(calibration, bottom_rail_zero, INT, 1650, 0, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
+    "Bottom rail DAC code that outputs 0V.") \
+  X(calibration, bottom_rail_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "Bottom rail full-scale voltage spread.") \
+  X(calibration, dac_0_zero, INT, 1650, 0, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
+    "DAC 0 code that outputs 0V.") \
+  X(calibration, dac_0_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "DAC 0 full-scale voltage spread.") \
+  X(calibration, dac_1_zero, INT, 1650, 0, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
+    "DAC 1 code that outputs 0V.") \
+  X(calibration, dac_1_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "DAC 1 full-scale voltage spread.") \
+  X(calibration, adc_0_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 0 zero offset.") \
+  X(calibration, adc_0_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 0 full-scale spread.") \
+  X(calibration, adc_1_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 1 zero offset.") \
+  X(calibration, adc_1_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 1 full-scale spread.") \
+  X(calibration, adc_2_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 2 zero offset.") \
+  X(calibration, adc_2_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 2 full-scale spread.") \
+  X(calibration, adc_3_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 3 zero offset.") \
+  X(calibration, adc_3_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 3 full-scale spread.") \
+  X(calibration, adc_4_zero, FLOAT, 0.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 4 (5V-tolerant divider) zero offset.") \
+  X(calibration, adc_4_spread, FLOAT, 5.0f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 4 full-scale spread.") \
+  X(calibration, adc_7_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 7 (probe tip) zero offset.") \
+  X(calibration, adc_7_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+    "ADC 7 (probe tip) full-scale spread.")
+
+// --- [logo_pads] -----------------------------------------------------------
+// Each probe pad carries TWO bindings: the NODE it stands for when tapped in
+// connect/clear mode (any special node except the rails - those have their
+// own pads - or "choose" for the on-board picker), and the ACTION an idle
+// tap runs when the probe is parked in SELECT (gpio toggle/high/low, DAC
+// nudges).
+#define JL_CFG_LOGO_PADS(X) \
+  X(logo_pads, top_guy, INT, 0, 0, 0, 0, padNodeTable, HOOK_NONE, JLC_LEDS, \
+    "Node the top logo pad stands for in connect/clear mode (or 'choose' for the on-board picker).") \
+  X(logo_pads, bottom_guy, INT, 1, 0, 0, 0, padNodeTable, HOOK_NONE, JLC_LEDS, \
+    "Node the bottom logo pad stands for in connect/clear mode.") \
+  X(logo_pads, building_pad_top, INT, 25, 0, 0, 0, padNodeTable, HOOK_NONE, JLC_LEDS, \
+    "Node the top building pad stands for in connect/clear mode (default current sense +).") \
+  X(logo_pads, building_pad_bottom, INT, 26, 0, 0, 0, padNodeTable, HOOK_NONE, JLC_LEDS, \
+    "Node the bottom building pad stands for in connect/clear mode (default current sense -).") \
+  X(logo_pads, top_guy_idle, INT, 0, 0, 0, 0, padActionTable, HOOK_NONE, JLC_NONE, \
+    "Action an idle tap on the top logo pad runs (probe parked, switch in SELECT).") \
+  X(logo_pads, bottom_guy_idle, INT, 0, 0, 0, 0, padActionTable, HOOK_NONE, JLC_NONE, \
+    "Action an idle tap on the bottom logo pad runs.") \
+  X(logo_pads, building_pad_top_idle, INT, 0, 0, 0, 0, padActionTable, HOOK_NONE, JLC_NONE, \
+    "Action an idle tap on the top building pad runs.") \
+  X(logo_pads, building_pad_bottom_idle, INT, 0, 0, 0, 0, padActionTable, HOOK_NONE, JLC_NONE, \
+    "Action an idle tap on the bottom building pad runs.")
+
+// --- [display] -------------------------------------------------------------
+// Breadboard LED rendering.
+#define JL_CFG_DISPLAY(X) \
+  X(display, lines_wires, VINT, JL_DEFAULT_LINES_WIRES, 0, 1, 1, linesWiresTable, HOOK_LINES_WIRES, JLC_LEDS, \
+    "Draw nets as full 5-LED wires or single-LED lines (OG hardware forces lines).") \
+  X(display, menu_brightness, INT, -10, -100, 100, 5, nullptr, HOOK_NONE, JLC_LEDS, \
+    "Brightness offset for the LED menu overlay.") \
+  X(display, led_brightness, INT, 10, 0, 255, 5, nullptr, HOOK_NONE, JLC_LEDS, \
+    "Base brightness for net LEDs.") \
+  X(display, rail_brightness, INT, 55, 0, 255, 5, nullptr, HOOK_NONE, JLC_LEDS, \
+    "Brightness for the power rail LEDs.") \
+  X(display, special_net_brightness, INT, 20, 0, 255, 5, nullptr, HOOK_NONE, JLC_LEDS, \
+    "Brightness for special nets (GND, rails, DACs) drawn on the breadboard.") \
+  X(display, net_color_mode, INT, 0, 0, 5, 1, netColorModeTable, HOOK_NONE, JLC_LEDS, \
+    "How net colors are assigned: rainbow order, shuffled, or set from serial.")
+
+// --- [serial_1] ------------------------------------------------------------
+#define JL_CFG_SERIAL_1(X) \
+  X(serial_1, function, INT, 1, 0, 6, 1, uartFunctionTable, HOOK_SERIAL_FUNCTION, JLC_NONE, \
+    "What UART 1 does: passthrough to the Arduino header, main control, MicroPython, OLED, or LEDs.") \
+  X(serial_1, baud_rate, INT, 115200, 0, 0, 0, nullptr, HOOK_SERIAL_FUNCTION, JLC_NONE, \
+    "UART 1 baud rate.") \
+  X(serial_1, print_passthrough, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Echo UART 1 passthrough traffic to the main terminal.") \
+  X(serial_1, connect_on_boot, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Route UART 1 to the Arduino header rows at boot.") \
+  X(serial_1, lock_connection, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Keep the UART 1 routing locked so net edits can't disconnect it.") \
+  X(serial_1, autoconnect_flashing, INT, 1, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Automatically route UART 1 when an Arduino flash is detected.") \
+  X(serial_1, async_passthrough, BOOL, true, 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Run UART 1 passthrough on the async engine (recommended).") \
+  X(serial_1, tag_parsing, INT, 1, 0, 2, 1, tagParsingTable, HOOK_NONE, JLC_NONE, \
+    "Parse [tag] commands arriving over UART 1: off, parse + pass through, or parse + strip.") \
+  X(serial_1, flash_reset_type, INT, 1, 0, 3, 1, flashTypeTable, HOOK_NONE, JLC_NONE, \
+    "Reset dance used when flashing the connected target (AVR, ESP32, RP2040, or none).")
+
+// --- [serial_2] ------------------------------------------------------------
+#define JL_CFG_SERIAL_2(X) \
+  X(serial_2, function, INT, 3, 0, 6, 1, uartFunctionTable, HOOK_SERIAL_FUNCTION, JLC_NONE, \
+    "What UART 2 does (default MicroPython REPL).") \
+  X(serial_2, baud_rate, INT, 115200, 0, 0, 0, nullptr, HOOK_SERIAL_FUNCTION, JLC_NONE, \
+    "UART 2 baud rate.") \
+  X(serial_2, print_passthrough, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Echo UART 2 passthrough traffic to the main terminal.") \
+  X(serial_2, connect_on_boot, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Route UART 2 to its rows at boot.") \
+  X(serial_2, lock_connection, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Keep the UART 2 routing locked so net edits can't disconnect it.")
+
+// --- [top_oled] ------------------------------------------------------------
+#define JL_CFG_TOP_OLED(X) \
+  X(top_oled, enabled, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Whether an OLED is attached and should be driven.") \
+  X(top_oled, i2c_address, HEX, 0x3C, 0, 0x7F, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "The OLED's I2C address (usually 0x3C).") \
+  X(top_oled, width, INT, 128, 0, 256, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "OLED width in pixels.") \
+  X(top_oled, height, INT, 32, 0, 128, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "OLED height in pixels.") \
+  X(top_oled, rotation, INT, 0, 0, 3, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Display rotation in 90-degree steps.") \
+  X(top_oled, connection_type, INT, 0, 0, 3, 1, connectionTypeTable, HOOK_OLED_CONNECTION, JLC_NONE, \
+    "How the OLED is wired: crossbar GPIO 7/8, hardwired RP6/RP7, internal I2C0, or custom pins.") \
+  X(top_oled, sda_pin, INT, 26, 0, 29, 1, nullptr, HOOK_OLED_PIN, JLC_NONE, \
+    "SDA hardware pin (validated against the I2C pin map before applying).") \
+  X(top_oled, scl_pin, INT, 27, 0, 29, 1, nullptr, HOOK_OLED_PIN, JLC_NONE, \
+    "SCL hardware pin (validated against the I2C pin map before applying).") \
+  X(top_oled, gpio_sda, INT, RP_GPIO_7, 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Node define for the SDA routable GPIO (crossbar connection types).") \
+  X(top_oled, gpio_scl, INT, RP_GPIO_8, 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Node define for the SCL routable GPIO (crossbar connection types).") \
+  X(top_oled, sda_row, INT, NANO_D2, 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Breadboard row the OLED's SDA plugs into (-1 for hardwired types).") \
+  X(top_oled, scl_row, INT, NANO_D3, 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Breadboard row the OLED's SCL plugs into (-1 for hardwired types).") \
+  X(top_oled, connect_on_boot, INT, 1, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Connect and initialize the OLED at boot.") \
+  X(top_oled, lock_connection, INT, 0, 0, 1, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "Keep the OLED's crossbar routing locked so net edits can't disconnect it.") \
+  X(top_oled, show_in_terminal, INT, 0, 0, 5, 1, oledMirrorTable, HOOK_SERIAL_FUNCTION, JLC_NONE, \
+    "Mirror the OLED into a terminal: off, port_1 (main), port_3, port_5, port_7, or uart.") \
+  X(top_oled, font, FONT, 0, 0, 10, 1, nullptr, HOOK_OLED_FONT, JLC_NONE, \
+    "OLED font family (by name, from the built-in font list).") \
+  X(top_oled, startup_message, STR33, "", 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Text or images/*.bin path shown on the OLED at boot.")
+
+// --- [usb_cdc] -------------------------------------------------------------
+#define JL_CFG_USB_CDC(X) \
+  X(usb_cdc, ignore_dtr, BOOL, false, 0, 0, 0, nullptr, HOOK_USB_CDC_DTR, JLC_NONE, \
+    "Ignore the DTR line so hosts that never assert it (some industrial software) can still talk.")
+
+// --- [usb_audio] -----------------------------------------------------------
+// USB Audio Class microphone. The USB spec gives no way to add an interface
+// without re-enumerating (~2s CDC port drop), so enabled=true restores the
+// mic at BOOT, before the host enumerates - set it once and every power-on
+// comes up with the audio device already present.
+#define JL_CFG_USB_AUDIO(X) \
+  X(usb_audio, enabled, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Advertise the USB microphone from boot (changing it live re-enumerates and drops CDC ports for ~2s).") \
+  X(usb_audio, left, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "ADC channel streamed to the left audio channel.") \
+  X(usb_audio, right, INT, 1, 0, 7, 1, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "ADC channel streamed to the right audio channel.") \
+  X(usb_audio, rate, INT, 16000, 8000, 48000, 1000, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Sample rate in Hz.") \
+  X(usb_audio, full_scale, FLOAT, 8.0f, 0.0f, 10.0f, 0.5f, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "Volts mapped to full-scale PCM.") \
+  X(usb_audio, dc_block, BOOL, true, 0, 0, 0, nullptr, HOOK_NONE, JLC_BOOT_ONLY, \
+    "High-pass the stream to remove DC offset.")
+
+// Every section list, in file/print order. [config] (the firmware_version
+// stamp) is virtual - printed from the running firmware, parsed only for the
+// version check - so it is not in this list.
+#define JL_CONFIG_ALL_OPTIONS(X) \
+  JL_CFG_FIRMWARE(X) \
+  JL_CFG_HARDWARE(X) \
+  JL_CFG_PROBE(X) \
+  JL_CFG_CLICKWHEEL(X) \
+  JL_CFG_MEASUREMENT(X) \
+  JL_CFG_TERMINAL(X) \
+  JL_CFG_UNDO(X) \
+  JL_CFG_DACS(X) \
+  JL_CFG_DEBUG(X) \
+  JL_CFG_ROUTING(X) \
+  JL_CFG_SLOTS(X) \
+  JL_CFG_CALIBRATION(X) \
+  JL_CFG_LOGO_PADS(X) \
+  JL_CFG_DISPLAY(X) \
+  JL_CFG_SERIAL_1(X) \
+  JL_CFG_SERIAL_2(X) \
+  JL_CFG_TOP_OLED(X) \
+  JL_CFG_USB_CDC(X) \
+  JL_CFG_USB_AUDIO(X)
+
+// ---------------------------------------------------------------------------
+// Struct generation. One field per X() line, initialized to its default.
+// ---------------------------------------------------------------------------
+typedef char jl_conf_str16[16];
+typedef char jl_conf_str33[33];
+
+#define JL_CT_BOOL   bool
+#define JL_CT_INT    int
+#define JL_CT_VINT   volatile int
+#define JL_CT_FLOAT  float
+#define JL_CT_HEX    int
+#define JL_CT_FONT   int
+#define JL_CT_STR16  jl_conf_str16
+#define JL_CT_STR33  jl_conf_str33
+
+#define JL_XFIELD(sect, key, type, def, minv, maxv, step, table, hook, flags, desc) \
+    JL_CT_##type key = def;
 
 extern struct config jumperlessConfig;
-// Forward declarations of nested structs
-struct firmware;
-struct hardware;
-struct dacs;
-struct debug;
-struct routing;
-struct calibration;
-struct logo_pads;
-struct display_settings;
-struct serial_1;
-struct serial_2;
-struct top_oled;
 
 struct config {
-    struct firmware {
-        char last_version[16] = "";  // Last firmware version that was run
-        bool files_provisioned = false;  // Whether files have been provisioned for this version
-    } firmware;
-
-    struct hardware {
-        int generation = 5;
-        int revision = 5;
-        int probe_revision = 5;
-        int psram_installed = 0;
-        // KiB of PSRAM reserved for the app arena (file cache, undo log,
-        // SharedBuffer, scratch). Remainder goes to the MicroPython GC heap.
-        // Default 2048 (2MB app / 6MB MicroPython).
-        int psram_app_size_kb = 2048;
-        // Use a PIO state machine (shared with the probe LED's WS2812 SM)
-        // to do the active-drive/release/sample sequence for probe button
-        // reads, instead of the CPU bit-banging the IO pads. PIO path is
-        // ~75x faster, keeps PROBE_LED_PIN in PIO mode the whole time
-        // (no SIO/PIO function switching), and eliminates the line-cut
-        // race that caused WS2812 shifting artifacts. Falls back to the
-        // CPU path automatically if PIO program memory can't be claimed.
-        bool use_pio_probe_button = true;
-        // Drive the probe's WS2812 data (and the shared button sampling)
-        // on BUTTON_PIN (GPIO 9) instead of PROBE_LED_PIN (GPIO 2). The
-        // two pins land on the same TRRS plug ring, and the most common
-        // cable failure is the GPIO2-side jack contact going flaky - with
-        // everything on GPIO9 that contact stops mattering entirely.
-        bool probe_led_on_button_pin = true;
-        // EXPERIMENT KNOB (2026-08-16). Minimum interval between two probe
-        // LED frames when nothing requested a new colour, in microseconds.
-        // 0 = legacy: core 1 re-sends the frame on every idle pass (~350 us).
-        // With probe_led_on_button_pin the LED data and the button sampler
-        // share GPIO 9, and every sampler pulse is a valid WS2811 data bit
-        // that shifts the LED's registers - the constant re-send is what
-        // hides that. Raising this exposes the corruption in proportion; it
-        // exists so the effect can be measured on a scope, not as a setting
-        // to leave on. With the LED on its own pin (probe_led_on_button_pin
-        // = 0) frames are event-driven regardless of this value.
-        int probe_led_refresh_us = 0;
-        // Which PIO block the encoder's quadrature sampler (1 instruction +
-        // 1 SM) tries FIRST. -1 = auto: PIO2 (its home in the task #30
-        // layout), then PIO1, PIO0 last - PIO0 stays for user programs.
-        // 0/1/2 = try that block first, falling through to the auto order
-        // when it can't reach GPIO 12/13 (base 16) or has no room. Applied
-        // at boot (core 1 waits on configLoaded before the claim).
-        int encoder_pio = -1;
-    } hardware;
-
-    struct dacs {
-        // Voltage values moved to activeState.power (topRail, bottomRail, dac0, dac1)
-        bool set_dacs_on_boot = true;
-        bool set_rails_on_boot = true;
-        int probe_power_dac = 0;   // legacy: parsed/written for file compat, NOT applied
-        float limit_max = 8.00;
-        float limit_min = -8.00;
-        int auto_connect_probe = 1; //-1 = off (persistent), 0 = off (until reboot), 1 = on
-        // Which candidate the probe buffer's power feed tries FIRST. The feed
-        // (routing/InfraPaths.cpp "probe_power") always falls through to the
-        // other candidate when the preferred one is claimed:
-        //   0 = DAC0 first (2 crosspoints on chip K; INA1's shunt sits in
-        //       DAC0's path so its current is directly sensed), then a
-        //       routable GPIO 8..1
-        //   1 = GPIO first (4 crosspoints via L->K, ~170 ohm; keeps DAC0
-        //       free for the user; sensed via ADC7 droop / tip probing),
-        //       then DAC0
-        // Candidate indices for infraForceCandidate stay 0=DAC0 / 1=GPIO
-        // regardless of this order.
-        int probe_power_source = 0;
-        // Click the wheel while a rail/DAC is highlighted to adjust its
-        // voltage. 0 = off, 1 = only when an OLED is connected (default -
-        // the OLED shows the "adjust?" prompt that makes the click
-        // discoverable), 2 = always (LED-matrix adjuster UI only).
-        int rail_click_adjust = 1;
-    } dacs;
-
-    struct debug {
-        bool file_parsing = false;
-        bool net_manager = false;
-        bool nets_to_chips = false;
-        bool nets_to_chips_alt = false;
-        bool leds = false;
-        bool probing = false;
-        bool oled = false;
-        bool logo_pads = false;
-        int  arduino = 0;
-        bool  usb_mass_storage = false;
-        int  show_probe_current = 0;  // moved out of EEPROM - config is source of truth
-        bool show_node_errors = true;
-        // Power the probe's measure-mode buffer from an unused routable
-        // GPIO driven HIGH instead of DAC0, keeping the DAC free. Switch-
-        // position sensing then reads the load current as ADC7 voltage
-        // droop against a continuously-tracked unloaded peak V0 (persisted
-        // as calibration.probe_droop_v0); the DAC bridge swap survives only
-        // as a fallback while no GPIO is claimed.
-        // DEPRECATED AND IGNORED: probe power is arbitrated by
-        // routing/InfraPaths (DAC0 -> GPIO8..GPIO1, relocating when the
-        // user claims a resource). The key is still parsed so existing
-        // config.txt files load cleanly, but it no longer selects anything -
-        // boards that ran the old GPIO-power firmware have true persisted
-        // here, which must not silently keep the 4-crosspoint GPIO feed.
-        // Use the infraForceCandidate test hook for debugging.
-        bool probe_power_gpio = false;
-        // Print one line per switch-position evaluation: sensing source
-        // (ADC7 droop / DAC swap / INA), estimated current, droop anchor,
-        // thresholds, and the resulting position.
-        bool probe_switch_stats = false;
-        // Switch-position classifier selection (2026-08-16, experiment gate).
-        //   0 = the legacy classifier decides (INA current thresholds under a
-        //       DAC0 feed, ADC7 droop-mA under a GPIO feed); the new
-        //       detectors below are computed and logged as "shadow" under
-        //       probe_switch_stats but change nothing.
-        //   1 = the agreement classifier decides: detector A (tip-side digital
-        //       sense on PROBE_PIN: MEASURE holds the pin high through the
-        //       probe LED supply cap, SELECT leaves the needle floating) must
-        //       agree with the per-feed detector B (DAC0: INA current with a
-        //       select_max ceiling; GPIO: feed-side blink - ADC7 collapses in
-        //       MEASURE, is held by that same cap in SELECT). Disagreement
-        //       holds the last position; 4 in a row adopt A.
-        // Promote to 1 only after the hands-on matrix (both positions x tip
-        // free / pads / GND / 3.3V / 5V rows / buttons / no probe) shows the
-        // shadow verdict right in every cell.
-        bool probe_switch_agree = false;
-        // Print net voltage scan stats once a second: every scanned node's
-        // voltage and every routed path's estimated current.
-        bool net_voltage_scan = false;
-        // Net scan pair taps (2026-08-20, experiment gate): tap BOTH ends
-        // of a routed path at once on two ADC channels and read them from
-        // the same ring sweeps, so each path's voltage delta is measured
-        // temporally aligned instead of up to a scan cycle apart.
-        // 1 = pair taps (default), 0 = sequential single-node taps (A/B).
-        int net_scan_pair_taps = 1;
-    } debug;
-
-    struct routing {
-        int stack_paths = 2;
-        int stack_rails = 3;
-        int stack_dacs = 0;
-        int rail_priority = 1;
-    } routing;
-
-    // Which context the board comes up in. Deliberately NOT where the active
-    // context itself is remembered - that lives in /slots/last_active.txt,
-    // because config saves are full-file rewrites behind a diff gate and
-    // writing config on every slot switch would churn flash and the diff cache.
-    struct slots {
-        // 0 = always boot into boot_slot (the old fixed behavior)
-        // 1 = boot into the LAST-ACTIVE slot file, whatever it is
-        //     (/slots/last_active.txt) - default
-        int boot_mode = 1;
-        // Used when boot_mode == 0. 0-7.
-        int boot_slot = 0;
-    } slots;
-
-            // USB CDC settings for flow control behavior
-            struct usb_cdc {
-                // When true, ignore DTR line state - allows communication with hosts
-                // that don't set DTR (some industrial software, custom applications)
-                // Default: false (normal behavior - require DTR for connection)
-                bool ignore_dtr = false;
-            } usb_cdc;
-
-            // USB Audio Class microphone.
-            //
-            // The USB spec gives no way to add or remove an interface without
-            // re-enumerating, so switching the mic on at runtime necessarily
-            // drops every CDC port for ~2s. These settings are how you avoid
-            // ever paying that cost interactively:
-            //
-            //   enabled = true   restore the mic at BOOT, before the host has
-            //                    enumerated anything, so there is nothing to
-            //                    drop. Set it once, and every power-on comes up
-            //                    with the audio device already present.
-            //
-            // Everything else here just persists the last configuration so the
-            // mic comes back on the same channels at the same rate.
-            struct usb_audio {
-                bool  enabled     = false;   // advertise the mic from boot
-                int   left        = 0;       // ADC channel -> left
-                int   right       = 1;       // ADC channel -> right
-                int   rate        = 16000;   // Hz
-                float full_scale  = 8.0f;    // volts at full-scale PCM
-                bool  dc_block    = true;
-            } usb_audio;
-
-    struct calibration {
-        int top_rail_zero = 1650;
-        float top_rail_spread = 21.5;
-        int bottom_rail_zero = 1650;
-        float bottom_rail_spread = 21.5;
-        int dac_0_zero = 1650;
-        float dac_0_spread = 21.5;
-        int dac_1_zero = 1650;
-        float dac_1_spread = 21.5;
-        float adc_0_zero = 9.0;
-        float adc_0_spread = 18.28;
-        float adc_1_zero = 9.0;
-        float adc_1_spread = 18.28;
-        float adc_2_zero = 9.0;
-        float adc_2_spread = 18.28;
-        float adc_3_zero = 9.0;
-        float adc_3_spread = 18.28;
-        float adc_4_zero = 0.0;
-        float adc_4_spread = 5.0;
-        float adc_7_zero = 9.0;
-        float adc_7_spread = 18.28;
-        int probe_max = 4055;
-        int probe_min = 10;
-        // MEASURE-position pad decode endpoints, stored in the 3.3V frame
-        // (seeded from probe_min/probe_max, individually adjustable). The
-        // base pair is calibrated with the SELECT feed (PROBE_PIN at ~3.3V)
-        // driving the tip; in MEASURE the buffer drives it instead (DAC at
-        // measure_mode_output_voltage, or the drooped GPIO level under
-        // debug.probe_power_gpio), and the resistive pad ladder scales every
-        // reading with that voltage - so the decode multiplies these
-        // endpoints by (live ADC7 tip voltage / 3.3V) at runtime.
-        // MEASURE-position pad endpoints. The tip is driven by whichever
-        // source InfraPaths picked, and the two sources are not
-        // interchangeable: DAC0 is a stiff ~2-crosspoint feed, a routable
-        // GPIO is ~170-185 ohm through 4 crosspoints and droops under the
-        // pad ladder. The ratiometric decode (endpoints x live ADC7 / 3.3)
-        // cancels the DRIVE VOLTAGE exactly - hardware-confirmed 2026-08-16,
-        // moving measure_mode_output_voltage does not move a decoded row -
-        // but it does NOT cancel the source impedance, so each feed carries
-        // its own max. probe_min_measure is shared (the calibration solves
-        // one degree of freedom per feed, at the tapped row).
-        int probe_max_measure = 4055;       // feed = DAC0
-        int probe_max_measure_gpio = 4055;  // feed = a routable GPIO
-        int probe_min_measure = 10;
-        // Hysteresis thresholds to prevent oscillation between modes
-        // Switch to SELECT mode when current > high threshold
-        // Switch to MEASURE mode when current < low threshold
-        float probe_switch_threshold_high = 1.2;  // mA - switch to SELECT
-        float probe_switch_threshold_low = 0.90;   // mA - switch to MEASURE
-        float probe_switch_threshold = 0.40;       // DEPRECATED - kept for backward compatibility
-        // Upper bound of the SELECT current signature under a DAC0 feed (mA,
-        // zero-corrected). Above it the buffer is LOADED - a tip touch on a
-        // low-impedance net in measure position pulls many mA through the
-        // same shunt the select-LED signature rides on - and the classifier
-        // must not read it as SELECT. 0 = disabled (legacy behavior). The
-        // switch calibration app sets it to select_median + max(1 mA, range).
-        float probe_switch_select_max_ma = 0.0f;
-        // GPIO-feed detector: ADC7 during a ~20us feed-side blink as a
-        // percentage of the pre-blink reading. MEASURE collapses to ~0%
-        // (nothing else drives BUFFER_IN); SELECT is held by the probe LED
-        // supply cap through the cable at ~R_feed/(R_feed+R_cable) ~ 78%.
-        // Readings at or above this hold percentage classify SELECT.
-        int probe_switch_blink_hold_pct = 50;
-        // The measure-mode tip drive. FIXED, not a calibration knob: the
-        // decode is ratiometric so this cancels out of row alignment
-        // entirely. The tip-voltage self test servos it so the TIP sits at
-        // 3.30V (the DAC setting lands slightly above, compensating the
-        // buffer). Nothing else should move it.
-        float measure_mode_output_voltage = 3.30;
-        float probe_current_zero = 2.0;
-        int minimum_probe_reading = 85;
-        // GPIO-powered measure buffer: ADC7 tip voltage (volts) that maps to
-        // zero droop-current. Persisted so boot works before both switch
-        // positions have been visited; seeded from hardware (~3.35V MEASURE
-        // unloaded at 12mA GPIO drive). Runtime peak-tracker may raise it.
-        float probe_droop_v0 = 3.35f;
-        // GPIO-powered buffer feed: total source resistance for the droop
-        // current model I = (V0 - ADC7) / R. 0 = uncalibrated - the model
-        // then falls back to the empirical 30-ohm constant measured on this
-        // feed at 12mA drive (crosspoint_resistance's 40-ohm figure is from
-        // the net scan's small-signal regime and does not transfer). Set by
-        // the INA-referenced phase of the tip-voltage calibration.
-        float probe_droop_ohms = 0.0f;
-        // The GPIO pad's own share of that resistance at the 12mA drive the
-        // claim uses (~5 ohms; was ~15 at the default 4mA drive).
-        float probe_pad_ohms = 5.0f;
-        // On-resistance of one CH446Q crosspoint, used by the net voltage
-        // scan to turn node voltage deltas into per-connection currents.
-        // A single 2-crosspoint path measures ~80 ohms, so ~40 each.
-        float crosspoint_resistance = 40.0;
-    } calibration;
-
-    struct logo_pads {
-        int top_guy = 0; // 0 = uart tx, 1 = uart rx, others as I think of them
-        int bottom_guy = 1;
-        int building_pad_top = 25;   // default to current sense +
-        int building_pad_bottom = 26; // default to current sense -
-        int repeat_ms = 100;
-    } logo_pads;
-
-    struct display {
-#if defined(OG_JUMPERLESS)
-        // OG has 1 LED per breadboard row; "wires" mode paints the 5-LEDs-per-row
-        // fill, which garbles the single-pixel strip. Default to lines so a freshly
-        // flashed OG renders correctly (parseLinesWires() also forces this on load).
-        volatile int lines_wires = 0;
-#else
-        volatile int lines_wires = 1;
-#endif
-        int menu_brightness = -10;
-        int led_brightness = 10;
-        int rail_brightness = 55;
-        int special_net_brightness = 20;
-        int net_color_mode = 0;
-        // Scan node voltages in the background and show per-connection
-        // current as faint voltage-colored marching ants (V5 only).
-        int net_currents = 1;
-        // Direction the current ants march: 0 = conventional (+ to -),
-        // 1 = electron (- to +). Only flips the LED animation; reported
-        // current values stay conventional-signed.
-        int current_flow = 0;
-        int dump_leds = -1;
-        int dump_format = 0;
-        int terminal_line_buffering = 1;
-    } display;
-
-    
-        struct serial_1 {
-            int function = 1; 
-            int baud_rate = 115200;
-            int print_passthrough = 0;
-            int connect_on_boot = 0;
-            int lock_connection = 0;
-            int autoconnect_flashing = 1;
-            bool async_passthrough = true;
-            int tag_parsing = 1; // 0 = disabled, 1 = passthrough + tag parsing, 2 = parsing + strip tags
-            int flash_reset_type = 1; // 0 = no reset, 1 = AVR, 2 = ESP32
-        } serial_1;
-
-        
-        struct serial_2 {
-            int function = 3; // 0 = off 3 = USB MSC enabled
-            int baud_rate = 115200;
-            int print_passthrough = 0;
-            int connect_on_boot = 0;
-            int lock_connection = 0;
-            int autoconnect_flashing = 0;
-        } serial_2;
-
-        struct top_oled {
-            int enabled = 0;
-            int i2c_address = 0x3C;
-            const char* display_type = "SSD1306";
-           
-            int width = 128;
-            int height = 32;
-            int rotation = 0; // 0 = 0 degrees, 1 = 90 degrees, 2 = 180 degrees, 3 = 270 degrees
-
-            int connection_type = 0; // 0 = GPIO 7/8, 1 = RP6/RP7, 2 = internal I2C0, 3 = custom (use sda_pin and scl_pin to set the pins)
-            int sda_pin = 26;//the actual hardware pin number
-            int scl_pin = 27;//the actual hardware pin number
-            int gpio_sda = RP_GPIO_7; //the define number for the hardware pin
-            int gpio_scl = RP_GPIO_8; //the define number for the hardware pin
-            int sda_row = NANO_D2; //the row number
-            int scl_row = NANO_D3; //the row number
-            int connect_on_boot = 1;
-            int lock_connection = 0;
-            int autoconnect_check_interval = -1;
-            int font = 0;
-            int show_in_terminal = 0;
-            char startup_message[33] = ""; // Startup message for OLED (max 32 chars + null terminator)
-        } top_oled;
-
-
-    
+    struct firmware    { JL_CFG_FIRMWARE(JL_XFIELD) }    firmware;
+    struct hardware    { JL_CFG_HARDWARE(JL_XFIELD) }    hardware;
+    struct probe       { JL_CFG_PROBE(JL_XFIELD) }       probe;
+    struct clickwheel  { JL_CFG_CLICKWHEEL(JL_XFIELD) }  clickwheel;
+    struct measurement { JL_CFG_MEASUREMENT(JL_XFIELD) } measurement;
+    struct terminal    { JL_CFG_TERMINAL(JL_XFIELD) }    terminal;
+    struct undo        { JL_CFG_UNDO(JL_XFIELD) }        undo;
+    struct dacs        { JL_CFG_DACS(JL_XFIELD) }        dacs;
+    struct debug       { JL_CFG_DEBUG(JL_XFIELD) }       debug;
+    struct routing     { JL_CFG_ROUTING(JL_XFIELD) }     routing;
+    struct slots       { JL_CFG_SLOTS(JL_XFIELD) }       slots;
+    struct calibration { JL_CFG_CALIBRATION(JL_XFIELD) } calibration;
+    struct logo_pads   { JL_CFG_LOGO_PADS(JL_XFIELD) }   logo_pads;
+    struct display     { JL_CFG_DISPLAY(JL_XFIELD) }     display;
+    struct serial_1    { JL_CFG_SERIAL_1(JL_XFIELD) }    serial_1;
+    struct serial_2    { JL_CFG_SERIAL_2(JL_XFIELD) }    serial_2;
+    struct top_oled    { JL_CFG_TOP_OLED(JL_XFIELD) }    top_oled;
+    struct usb_cdc     { JL_CFG_USB_CDC(JL_XFIELD) }     usb_cdc;
+    struct usb_audio   { JL_CFG_USB_AUDIO(JL_XFIELD) }   usb_audio;
 };
 
 #endif // CONFIG_H
-
-/*
- if (EEPROM.read(FIRSTSTARTUPADDRESS) != 0xAA || forceDefaults == 1) {
-   EEPROM.write(FIRSTSTARTUPADDRESS, 0xAA);
-   
-   EEPROM.write(REVISIONADDRESS, REV);
-
-   EEPROM.write(DEBUG_FILEPARSINGADDRESS, 0);
-   EEPROM.write(TIME_FILEPARSINGADDRESS, 0);
-   EEPROM.write(DEBUG_NETMANAGERADDRESS, 0);
-   EEPROM.write(TIME_NETMANAGERADDRESS, 0);
-   EEPROM.write(DEBUG_NETTOCHIPCONNECTIONSADDRESS, 0);
-   EEPROM.write(DEBUG_NETTOCHIPCONNECTIONSALTADDRESS, 0);
-   EEPROM.write(DEBUG_LEDSADDRESS, 0);
-   EEPROM.write(LEDBRIGHTNESSADDRESS, DEFAULTBRIGHTNESS);
-   EEPROM.write(RAILBRIGHTNESSADDRESS, DEFAULTRAILBRIGHTNESS);
-   EEPROM.write(SPECIALBRIGHTNESSADDRESS, DEFAULTSPECIALNETBRIGHTNESS);
-   EEPROM.write(PROBESWAPADDRESS, 0);
-   EEPROM.write(ROTARYENCODER_MODE_ADDRESS, 0);
-   EEPROM.write(DISPLAYMODE_ADDRESS, 1);
-   EEPROM.write(NETCOLORMODE_ADDRESS, 0);
-   EEPROM.write(MENUBRIGHTNESS_ADDRESS, 100);
-   EEPROM.write(PATH_DUPLICATE_ADDRESS, 2);
-   EEPROM.write(DAC_DUPLICATE_ADDRESS, 0);
-   EEPROM.write(POWER_DUPLICATE_ADDRESS, 2);
-   EEPROM.write(DAC_PRIORITY_ADDRESS, 1);
-   EEPROM.write(POWER_PRIORITY_ADDRESS, 1);
-   EEPROM.write(SHOW_PROBE_CURRENT_ADDRESS, 0);
-
-   saveVoltages(0.0f, 0.0f, 3.33f, 0.0f);
-
-*/
