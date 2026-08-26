@@ -512,6 +512,7 @@ String SyntaxHighlighting::processConnections(const String& connections) {
 // Python syntax highlighting with full Jumperless support
 String SyntaxHighlighting::highlightPythonCode(const String& code) {
   String result = "";
+  result.reserve(code.length() * 2 + 32);
   int i = 0;
   
   while (i < code.length()) {

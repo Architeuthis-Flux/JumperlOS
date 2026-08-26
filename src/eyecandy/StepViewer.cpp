@@ -281,8 +281,6 @@ ServiceStatus StepViewer::service() {
     if (highlightedNet > 0) return ServiceStatus::IDLE;
 
     if (encoderDirectionState == UP || encoderDirectionState == DOWN) {
-        bool up = (encoderDirectionState == UP);
-        encoderDirectionState = NONE;
         if (!showing) {
             // First turn while yielded RECLAIMS the panel at the current
             // step; it does not move the cursor (turning past a reading
@@ -291,12 +289,17 @@ ServiceStatus StepViewer::service() {
             // persistent screen took the idle slot since (a MicroPython
             // stats page), stealing it back would silently evict the
             // user's page (sweep finding) - the turn falls through to
-            // Highlighting instead.
+            // Highlighting instead - so test BEFORE the ack, since
+            // Highlighting is registered behind us and must still see the
+            // detent we are declining.
             if (gui.idleScreen() != &viewerScreen) return ServiceStatus::IDLE;
+            encoderDirectionState = NONE;
             gui.showIdle();
             showStep(false);
             return ServiceStatus::BUSY;
         }
+        bool up = (encoderDirectionState == UP);
+        encoderDirectionState = NONE;
         if (up) cursor = (cursor + 1) % viewerScript.numSteps;
         else cursor = (cursor - 1 + viewerScript.numSteps) % viewerScript.numSteps;
         showStep(false);   // wheel turns are silent on serial (bench law)

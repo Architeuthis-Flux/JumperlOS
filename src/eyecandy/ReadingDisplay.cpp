@@ -81,6 +81,50 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
     }
 }
 
+// findBestFitPointSize re-measures the string at every point size from 12
+// down - up to seven full glyph walks - and show() reaches it on every repaint
+// that gets past the dedupe, including the ~10 Hz live-value refreshes where a
+// settled reading dithers between a handful of strings. Keyed on the exact
+// text so the cached answer is always the one the search would have returned;
+// the family is part of the key, and the width/size bounds are literals at the
+// single call site.
+constexpr int FIT_CACHE_ENTRIES = 4;
+constexpr size_t FIT_CACHE_TEXT = 24;
+
+struct FitCacheEntry {
+    char text[FIT_CACHE_TEXT];
+    FontFamily family;
+    int16_t font;
+    bool valid;
+};
+FitCacheEntry fitCache[FIT_CACHE_ENTRIES] = {};
+int fitCacheNext = 0;
+
+int16_t bestFitFontFor(FontFamily family, const char* text) {
+    if (text != nullptr) {
+        for (int i = 0; i < FIT_CACHE_ENTRIES; i++) {
+            if (fitCache[i].valid && fitCache[i].family == family &&
+                strcmp(fitCache[i].text, text) == 0) {
+                return fitCache[i].font;
+            }
+        }
+    }
+    uint8_t pt = FontManager::findBestFitPointSize(family, text, 120, 12, 6);
+    int16_t font = (int16_t)FontManager::getFontForPointSize(family, pt);
+    // Only a key we can hold WHOLE goes in: a truncated copy would match the
+    // wrong string later and hand back a font measured for something else.
+    if (text != nullptr && strlen(text) < FIT_CACHE_TEXT) {
+        FitCacheEntry& e = fitCache[fitCacheNext];
+        fitCacheNext = (fitCacheNext + 1) % FIT_CACHE_ENTRIES;
+        strncpy(e.text, text, FIT_CACHE_TEXT - 1);
+        e.text[FIT_CACHE_TEXT - 1] = '\0';
+        e.family = family;
+        e.font = font;
+        e.valid = true;
+    }
+    return font;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -158,6 +202,23 @@ void emitLiveSerialLine(const char* line) {
         // flag below is what forces the serial side to re-pin.
         pinReserved = false;
         serialNeedsRepin = true;
+        return;
+    }
+    // Never start a write the CDC FIFO cannot take. Adafruit_USBD_CDC::write()
+    // loops in yield() until a CONNECTED host drains, with no timeout, and
+    // this runs BEFORE the OLED write - so a terminal that stopped reading
+    // wedges the panel too. The reading is live: drop this frame's serial
+    // repaint and the next value puts it back ~40 ms later. Deliberately does
+    // NOT set serialNeedsRepin - that bypasses the OLED dedupe below, which
+    // would repaint a 12 ms I2C frame every pass for as long as the host
+    // stayed stalled.
+    size_t needed = strlen(line) + 16;  // DECSC + CUU + CR + EL + DECRC
+    if (!pinStillValid()) {
+        // plus the re-pin's two CRLFs and Jerial's input-line redraw (its
+        // visible columns and an allowance for the prompt/highlight escapes)
+        needed += 4 + (size_t)Jerial.getInputLineColumns() + 32;
+    }
+    if ((size_t)Serial.availableForWrite() < needed) {
         return;
     }
     if (!pinStillValid()) {
@@ -283,8 +344,7 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     // Single value / name-only rows render as big as actually FITS: a fixed
     // 12pt overflowed the panel on long words ("FLOATING").
     auto bestFitFont = [&](const char* text) -> int16_t {
-        uint8_t pt = FontManager::findBestFitPointSize(fam, text, 120, 12, 6);
-        return (int16_t)FontManager::getFontForPointSize(fam, pt);
+        return bestFitFontFor(fam, text);
     };
 
     int16_t nameFont = haveValues ? labelFont : bestFitFont(nameText);

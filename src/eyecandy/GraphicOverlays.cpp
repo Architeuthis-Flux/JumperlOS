@@ -233,14 +233,14 @@ int GraphicOverlayState::findByName(const char* name) const {
     return -1;
 }
 
-void GraphicOverlayState::setPixel(int row, int col, uint32_t color) {
+void GraphicOverlayState::setPixel(int row, int col, uint32_t color, const char* overlayName) {
     if (row < 1 || row > 10 || col < 1 || col > 30) {
         return;
     }
     
 
     // Find or create a "direct" overlay for single pixel control
-    const char* directName = "_DIRECT_PIXELS_";
+    const char* directName = overlayName ? overlayName : "_DIRECT_PIXELS_";
     int idx = findByName(directName);
     
     if (idx < 0) {
@@ -369,6 +369,7 @@ static bool overlayIsSessionOnly(const char* name) {
     return strcmp(name, "_SELFTEST_") == 0 ||
            strcmp(name, "_PARTS_") == 0 ||
            strcmp(name, "_DIRECT_PIXELS_") == 0 ||   // scratch surface (sweep)
+           strcmp(name, "_SNAKE_") == 0 ||           // Snake's own draw layer
            strncmp(name, "_GUIDE_", 7) == 0;
 }
 
@@ -548,7 +549,10 @@ bool deserializeOverlaysFromYAML(const char* yamlContent, String& errorMsg) {
             }
         }
 
-        if (name[0] != '\0' && width > 0 && height > 0) {
+        // A session-only name in a slot file is stale (the serializer refuses
+        // to write them). Loading it back would resurrect scratch state the
+        // next save then silently drops again - load and save must agree.
+        if (name[0] != '\0' && width > 0 && height > 0 && !overlayIsSessionOnly(name)) {
             graphicOverlayState.addOverlay(name, startRow, startCol, width, height, colors);
         }
 
@@ -605,6 +609,10 @@ void serializeOverlaysToJSON(String& output) {
 // Snake game - runnable as app or from overlay debug menu
 // Exit: 'q' on serial, or hold clickwheel (encoder button HELD)
 // ---------------------------------------------------------------------------
+// Snake draws into its own session-only layer (see overlayIsSessionOnly), so
+// the game never touches - or dirties - the user's persistent overlays.
+static const char* const SNAKE_OVERLAY = "_SNAKE_";
+
 void runSnakeGame(void) {
     Jerial.println( "▶ Snake - WASD/Arrows, encoder turn left/right, probe (connect=right/remove=left), hold clickwheel or q to quit" );
     oled.showMultiLineSmallText("WASD / Arrows / encoder to turn\nq or hold clickwheel to quit");
@@ -680,13 +688,15 @@ void runSnakeGame(void) {
             foodY = random(1, 11);
         }
 
-        graphicOverlayState.clearAll();
+        // Only our own layer is wiped between frames; the user's persistent
+        // overlays are not ours to clear.
+        graphicOverlayState.removeOverlay(SNAKE_OVERLAY);
         for (int i = 0; i < snakeLen; i++) {
             uint8_t segmentHue = (int)(baseHue + (((float)i / (float)snakeLen) * 255.0)) % 255;
             uint32_t segmentColor = HsvToRaw({segmentHue, 255, 100});
-            graphicOverlayState.setPixel(snakeY[i], snakeX[i], segmentColor);
+            graphicOverlayState.setPixel(snakeY[i], snakeX[i], segmentColor, SNAKE_OVERLAY);
         }
-        graphicOverlayState.setPixel(foodY, foodX, foodColor);
+        graphicOverlayState.setPixel(foodY, foodX, foodColor, SNAKE_OVERLAY);
 
         // Encoder: use raw position delta for left/right turn, with cooldown
         unsigned long now = millis();
@@ -770,7 +780,9 @@ snake_exit:
     rotaryDivider = lastRotaryDivider;
     pushLineBufferingToApp(); // resync app to the user's config on exit
     if (encoderButtonState == HELD) encoderButtonState = IDLE;
-    graphicOverlayState.clearAll();
+    graphicOverlayState.removeOverlay(SNAKE_OVERLAY);
+    // The steps screen (if armed) or the logo - never the stale "WASD" text.
+    oled.showJogo32h();
     Jerial.println( "✓ Snake ended" );
     Jerial.flush();
 }

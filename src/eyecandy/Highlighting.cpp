@@ -365,7 +365,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 currentHighlightedNode = 0;
             }
             currentHighlightedNode++;
-            if ( highlightedNet >= 0 && highlightedNet < numberOfNets && globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) {
+            if ( highlightedNet >= 0 && highlightedNet < numberOfNets && ( currentHighlightedNode >= MAX_NODES || globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) ) {
                 currentHighlightedNode = 0;
                 highlightedNet++;
                 if ( highlightedNet > numberOfNets - 1 ) {
@@ -433,7 +433,12 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     currentHighlightedNode = 0;
                 }
                 currentHighlightedNode = MAX_NODES - 1;
-                while ( highlightedNet >= 0 && highlightedNet < numberOfNets && globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) {
+                // Every iteration must leave currentHighlightedNode inside
+                // [0, MAX_NODES-1] - it is the index the loop test and the
+                // reads below it dereference - and the walk needs a bound of
+                // its own, since an all-empty net table would cycle forever.
+                int rescanLimit = numberOfNets * MAX_NODES;
+                while ( rescanLimit-- > 0 && highlightedNet >= 0 && highlightedNet < numberOfNets && globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) {
                     currentHighlightedNode--;
                     if ( currentHighlightedNode < 0 ) {
                         highlightedNet--;
@@ -441,6 +446,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                             highlightedNet = numberOfNets - 1;
                             brightenedNet = numberOfNets - 1;
                             currentHighlightedNode = 0;
+                        } else {
+                            currentHighlightedNode = MAX_NODES - 1;
                         }
                     }
                 }
@@ -1060,6 +1067,12 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         // left it stale while the brightening moved along the rows.
         auto& lastPrintedRowNode = g_readingGuards.lastPrintedRowNode;
         bool printedRowChanged = ( lastPrintedRowNode != brightenedNode );
+        // Snapshot of the reprint gate the default branch's reading branches
+        // all test, taken before any of them moves lastPrintedNet - the
+        // trailing flush at the end of the switch is out of their scope and
+        // has to be gated on the same thing they are.
+        bool defaultBranchPrints = ( print == 1 &&
+                                     ( lastPrintedNet != netHighlighted || printedRowChanged ) );
         // NOTE: lastPrintedNet is deliberately NOT cleared here anymore.
         // Clearing it every call re-pushed the OLED on every loop while the
         // probe tip was held on a net. Net changes reprint below; value
@@ -1499,7 +1512,9 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             }
             lastPrintedNet = netHighlighted;
         }
-            Serial.flush( );
+            if ( defaultBranchPrints ) {
+                Serial.flush( );
+            }
         }
         // One row-label latch for every reading branch above. The UART live
         // stream view deliberately ignores row changes (it has no node
@@ -2113,9 +2128,15 @@ void Highlighting::adjustRailVoltage(int rail) {
         saveVoltages(globalState.power.topRail, globalState.power.bottomRail,
                      globalState.power.dac0, globalState.power.dac1);
         
-        // Re-highlight the rail to show updated voltage
+        // Re-highlight the rail to show updated voltage. clearHighlighting()
+        // zeroes highlightedNet/brightenedNode, so the identity has to be
+        // latched across it or the re-highlight highlights nothing.
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     } else {
         // User cancelled - restore original values in globalState
         globalState.power.topRail = origTopRail;
@@ -2123,8 +2144,12 @@ void Highlighting::adjustRailVoltage(int rail) {
         
         // Hardware was already restored by VoltageAdjuster callback
         // Re-highlight to refresh display
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     }
     
     requestLedShow( 1 );
@@ -2174,9 +2199,15 @@ void Highlighting::adjustDACVoltage(int dac) {
         saveVoltages(globalState.power.topRail, globalState.power.bottomRail,
                      globalState.power.dac0, globalState.power.dac1);
         
-        // Re-highlight the DAC to show updated voltage
+        // Re-highlight the DAC to show updated voltage. clearHighlighting()
+        // zeroes highlightedNet/brightenedNode, so the identity has to be
+        // latched across it or the re-highlight highlights nothing.
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     } else {
         // User cancelled - restore the ORIGINAL value in state AND hardware.
         // (The long-press cancel in VoltageAdjuster does not call the
@@ -2190,8 +2221,12 @@ void Highlighting::adjustDACVoltage(int dac) {
         else          setDac1voltage(origDac1, 0, 0, true);
         
         // Re-highlight to refresh display
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     }
     
     requestLedShow( 1 );

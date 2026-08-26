@@ -151,12 +151,21 @@ bool loadAndDisplayImage(const char* filename) {
         return false;
     }
     
-    bitmapData = new uint8_t[bitmapSize];
+    // Both draw paths below walk width x height rows out of this buffer, and a
+    // file whose size isn't one of the guessed dimensions (or whose header
+    // width isn't byte-aligned) is shorter than that. Size the allocation to
+    // what the renderer touches and zero the tail, so short files show blank
+    // rows instead of reading off the end of the heap.
+    size_t drawBytes = (size_t)((width + 7) / 8) * (size_t)height;
+    size_t allocSize = (drawBytes > bitmapSize) ? drawBytes : bitmapSize;
+
+    bitmapData = new uint8_t[allocSize];
     if (!bitmapData) {
         Jerial.println("Failed to allocate memory");
         safeFileClose(file, false);
         return false;
     }
+    memset(bitmapData, 0, allocSize);
     
     // Read bitmap data
     size_t bytesRead = file.readBytes((char*)bitmapData, bitmapSize);

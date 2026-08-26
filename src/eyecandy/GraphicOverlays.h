@@ -116,8 +116,10 @@ struct GraphicOverlayState {
      * @param row Breadboard row (1-10)
      * @param col Column (1-30)
      * @param color RGB color (0 = transparent)
+     * @param overlayName Overlay to draw into, created if it doesn't exist yet
      */
-    void setPixel(int row, int col, uint32_t color);
+    void setPixel(int row, int col, uint32_t color,
+                  const char* overlayName = "_DIRECT_PIXELS_");
     
     /**
      * @brief Shift overlay position by delta
