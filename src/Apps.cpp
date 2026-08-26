@@ -20,8 +20,10 @@
 #include "PersistentStuff.h"
 #include "Probing.h"
 #include "PartsApp.h"     // partsAppLauncher - the "Parts" apps[] row
-#include "ProjectsApp.h"  // projectsAppLauncher (Guides menu row retired;
-                          // projects stay reachable via `z` + Files browser)
+#include "ProjectsApp.h"  // projectsAppLauncher - the "Guides" apps[] row.
+                          // The Guides MENU row is retired; the apps[] row is
+                          // not - it is what run_app("Guides") name-matches,
+                          // and the launcher's only caller.
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
 #include "SelfTest.h"
@@ -102,9 +104,24 @@ struct app apps[ NUM_APPS ] = {
     { "Tip    Voltage", 23, 1, tipVoltageTestApp },
     { "PSRAM  Test", 24, 1, psramTestApp },
     // Name-matched by runApp(-1, name) with the TOP-LEVEL menu line's own text
-    // (menuTree.h "Guides" -> Menus.cpp getActionCategory -> APPSACTION), so
+    // (menuTree.h "Parts" -> Menus.cpp getActionCategory -> APPSACTION), so
     // this string and that one move together or the row goes dead.
     { "Parts", 25, 1, partsAppLauncher },
+    // NAME-DISPATCH ONLY, and deliberately WITHOUT a menuTree.h row: the
+    // 2026-08-24 bench ruling retired "Guides" as a MENU-level concept and
+    // that stands - the Apps submenu is a hand-written list in menuTree.h, so
+    // a row here surfaces nowhere on the clickwheel. It exists because
+    // projectsAppLauncher() is otherwise UNREACHABLE (nothing else in the
+    // firmware calls it), and it is the only trigger for two things:
+    //   * the launcher's initializeProjects() self-heal, which puts a deleted
+    //     built-in project file back from projectFiles[];
+    //   * the /projects picker itself (`PROJECTS n=<count>` + the "Cancelled."
+    //     exit), which test/hil/test_projects.py phases 6(c)/6(d) drive
+    //     through run_app("Guides").
+    // Commit 2a3b1e5 removed the old { "Guides", 25, ... } row as part of the
+    // menu rename and severed both. DO NOT delete this row while editing menu
+    // rows - it is not part of that unit.
+    { "Guides", 26, 1, projectsAppLauncher },
     // others can remain uninitialized (works=0)
 };
 
@@ -182,6 +199,7 @@ void runApp( int index, char* name ) {
                                appName.equalsIgnoreCase( "python" ) ||
                                appName.equalsIgnoreCase( "files" );
 
+    bool pushedContext = false;
     if ( !appPushesOwnContext ) {
         // Push generic app context for cleanup tracking
         ContextEntry ctx( ContextType::APP_GENERIC );
@@ -189,14 +207,14 @@ void runApp( int index, char* name ) {
             // Generic cleanup - close any open files
             closeAllFiles( );
         };
-        ContextManager::getInstance( ).pushContext( ctx );
+        pushedContext = ContextManager::getInstance( ).pushContext( ctx );
     }
 
     // Direct dispatch (no giant switch)
     apps[ index ].action( );
 
     // Pop context if we pushed one
-    if ( !appPushesOwnContext ) {
+    if ( pushedContext ) {
         ContextManager::getInstance( ).popContext( );
     }
 }
@@ -1728,7 +1746,16 @@ void bounceStartup( void ) {
         if ( digitalRead( BUTTON_ENC ) == 0 || Serial.available( ) > 0 )
             break;
     }
+    // Let the button come back up BEFORE core 1 resumes: its state machine is
+    // frozen while we hold frames, so a still-held button would look like a
+    // fresh press on resume and the release would re-open the click menu.
+    unsigned long releaseWait = millis( );
+    while ( digitalRead( BUTTON_ENC ) == 0 && millis( ) - releaseWait < 1000 ) {
+        delay( 1 );
+    }
     releaseCore1Frames( );
+    delay( 50 );
+    encoderButtonState = IDLE;
     requestLedShow( -1 );
     waitCore2( );
 }
@@ -3590,13 +3617,13 @@ void DMXSerialApp( void ) {
             case 'a':
             case 'A':
                 // Adjust DMX address (decrement)
-                if ( config.dmx_address >= 1 ) {
+                if ( config.dmx_address > 1 ) {
                     config.dmx_address--;
                     Serial.print( "\n\n✓ DMX Address: " );
                     Serial.print( config.dmx_address );
                     Serial.println( "\n" );
                 } else {
-                    Serial.println( "\n\n⚠️  Already at minimum address (0)\n" );
+                    Serial.println( "\n\n⚠️  Already at minimum address (1)\n" );
                 }
                 if ( manualMode ) {
                     lastDisplayTime = 0; // Force immediate dashboard update

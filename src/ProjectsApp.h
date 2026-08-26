@@ -179,9 +179,17 @@ bool projectOpenLatestOrNew(const String& project, String& runPathOut);
 // project with the clicked file as the chosen variant (design-slots §3).
 void projectRunFromTemplate(const String& wiringPath);
 
-// The interactive launcher. No menu row anymore (the "Guides" top-level row
-// became "Parts" at the 2026-08-24 bench pass); projects are reached via `z`
-// and the Files browser, which drive the flows below directly.
+// The interactive launcher: initializeProjects() self-heal -> listProjects ->
+// the picker -> projectRunInteractive.
+//
+// No MENU row (the "Guides" top-level row became "Parts" at the 2026-08-24
+// bench pass), but it KEEPS its apps[] row - { "Guides", 26, 1,
+// projectsAppLauncher } in Apps.cpp - because that row is pure name dispatch
+// for runApp(-1, "Guides") / MicroPython run_app("Guides") and surfaces
+// nowhere on the clickwheel (the Apps submenu is a hand-written menuTree.h
+// list). Without it this function has no caller at all: the self-heal never
+// runs and the picker is unreachable. Projects are ALSO reached via `z` and
+// the Files browser, which drive the flows above directly and bypass both.
 void projectsAppLauncher(void);
 
 #endif // PROJECTS_APP_H

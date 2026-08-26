@@ -1020,6 +1020,7 @@ bool ContextManager::popContext() {
     // latches by age; this clears even a freshly-latched one on the exit
     // edge as a belt-and-suspenders guard.
     switch (current.type) {
+        case ContextType::APP_GENERIC:
         case ContextType::PYTHON_REPL:
         case ContextType::MAIN_MENU:
         case ContextType::CLICKWHEEL_MENU:
