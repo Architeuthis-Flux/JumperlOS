@@ -1455,6 +1455,11 @@ void sortPathsByNet(
         break;
         // continue;
       } else {
+        // paths[] is [MAX_BRIDGES], but the per-net entries can total more than
+        // that: combineNets lists one merged bridge under both surviving nets.
+        if (pathIndex >= MAX_BRIDGES) {
+          break;
+        }
         int node1 = globalState.connections.nets[j].bridges[k][0];
         int node2 = globalState.connections.nets[j].bridges[k][1];
         
@@ -1964,7 +1969,7 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
       // Serial.println(globalState.connections.nets[n].nodes[i]);
     }
 
-    for (int i = 0; i < MAX_BRIDGES; i++) {
+    for (int i = 0; i < MAX_NODES; i++) {
       if (globalState.connections.nets[n].bridges[i][0] == 0) {
         break;
       }

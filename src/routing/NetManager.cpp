@@ -767,6 +767,11 @@ int findNodeInNet(int node) {
 void createNewNet() // add those nodes to a new net
   {
   int newNetNumber = findFirstUnusedNetIndex();
+  if (newNetNumber < 0 || newNetNumber >= MAX_NETS) {
+    Serial.println("all nets used - connection not added (too many nets)");
+    globalState.connections.paths[newBridgeIndex].net = -1;
+    return;
+  }
   globalState.connections.nets[newNetNumber].number = newNetNumber;
 
   // Always use default name - custom names are looked up from DisplayState by net number
@@ -949,9 +954,11 @@ void addNodeToNet(int netToAddNode, int node) {
     }
 
   if (newNodeIndex < 0 || newNodeIndex >= MAX_NODES) {
-    Serial.print("net ");
-    Serial.print(netToAddNode);
-    Serial.println(" is full - node not added (too many rows in one net)");
+    if (debugNM) {
+      Serial.print("net ");
+      Serial.print(netToAddNode);
+      Serial.println(" is full - node not added (too many rows in one net)");
+    }
     return;
   }
   globalState.connections.nets[netToAddNode].nodes[newNodeIndex] = node;
@@ -1016,12 +1023,12 @@ int checkDoNotIntersectsByNet(int netToCheck1, int netToCheck2) // If you're sea
 // net with both nodes, so its skipped
   {
 
-  for (int i = 0; i <= MAX_DNI; i++) {
+  for (int i = 0; i < MAX_DNI; i++) {
     if (globalState.connections.nets[netToCheck1].doNotIntersectNodes[i] == 0) {
       break;
       }
 
-    for (int j = 0; j <= MAX_NODES;
+    for (int j = 0; j < MAX_NODES;
          j++) {
 
       if (debugNM) Serial.print
@@ -1053,12 +1060,12 @@ int checkDoNotIntersectsByNet(int netToCheck1, int netToCheck2) // If you're sea
     // if(debugNM) Serial.println (" ");
     }
 
-  for (int i = 0; i <= MAX_DNI; i++) {
+  for (int i = 0; i < MAX_DNI; i++) {
     if (globalState.connections.nets[netToCheck2].doNotIntersectNodes[i] == 0) {
       break;
       }
 
-    for (int j = 0; j <= MAX_NODES; j++) {
+    for (int j = 0; j < MAX_NODES; j++) {
       if (globalState.connections.nets[netToCheck1].nodes[j] == 0) {
         break;
         }
@@ -1125,7 +1132,7 @@ void assignTermColor(int startIndex) {
 #ifdef TERM_COLOR_NETS
 
 
-  for (int i = startIndex; i < 6; i++) {
+  for (int i = (startIndex < 1 ? 1 : startIndex); i < 6; i++) {
     globalState.connections.nets[i].termColor = railTermColors[i - 1];
     // changeTerminalColor(globalState.connections.nets[i].termColor);
     // Serial.print("globalState.connections.nets[");

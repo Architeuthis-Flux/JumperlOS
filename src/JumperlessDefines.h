@@ -186,7 +186,7 @@ extern int probeRev;
 // hold a second copy of the state (the slot-load / migration / preview paths in
 // States.cpp copy it). Shrinking MAX_BRIDGES/MAX_NODES on OG cuts globalState
 // AND every copy of it, both to free heap and to keep state copies survivable.
-// MAX_NETS stays 60 (netNameConstants[] is initialized with 60 entries).
+// MAX_NETS stays 60 (netNameConstants[] must carry one initializer per net).
 #if defined(OG_JUMPERLESS)
 #define MAX_BRIDGES 72
 #define MAX_NODES 24 //this is the max number of nodes that can be connected to a net
