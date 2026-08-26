@@ -3558,7 +3558,6 @@ void Probing::probeTick( ProbeSession& s ) {
                 if ( s.setOrClear == 1 ) {
                     // probeConnectHighlight = nodesToConnect[node1or2];
                     brightenNet( probeHighlight, 5 );
-                    oled.clearPrintShow( bothNames, 2, true, true, true );
                 }
 
                 // oled.clearPrintShow(bothNames, 2, 0, 5, true, true, true);
@@ -3587,6 +3586,12 @@ void Probing::probeTick( ProbeSession& s ) {
                     s.flashRow = nodesToConnect[ node1or2 ] - 1;
                     s.flashPhase = 1;
                     s.flashNextAtUs = micros( ) + 40000;
+                }
+
+                // Must stay after the flash is armed - the OLED write is ~12 ms
+                // of blocking I2C and rides inside the first 40 ms dwell.
+                if ( s.setOrClear == 1 ) {
+                    oled.clearPrintShow( bothNames, 2, true, true, true );
                 }
 
                 node1or2++;
@@ -4446,6 +4451,11 @@ int Probing::attachPadsToSettings( int pad ) {
                 //     }
                 if ( gpioChosen >= RP_GPIO_1 && gpioChosen <= RP_GPIO_8 ) {
                     gpioChosen = gpioChosen - RP_GPIO_1 + 1;
+                }
+                // chooseGPIO returns -1 on cancel/timeout; everything below
+                // indexes gpioState[]/sfOptionColors[] at gpioChosen - 1.
+                if ( gpioChosen < 1 || gpioChosen > 8 ) {
+                    break;
                 }
 
                 // Serial.print( "gpioChosen: " );
@@ -7117,7 +7127,13 @@ void Probing::checkPads( void ) {
     padNoTouch = 0;
 
     // probeReading = probeRowMap[map(probeReading, 30, 4050, 101, 0)];
-    probeReading = probeRowMap[ map( probeReading, mapMin, mapMax, 101, 0 ) ];
+    int padIdx = map( probeReading, mapMin, mapMax, 101, 0 );
+    if ( padIdx <= 0 ||
+         padIdx >= (int)( sizeof( probeRowMap ) / sizeof( probeRowMap[ 0 ] ) ) ) {
+        checkingPads = 0;
+        return;
+    }
+    probeReading = probeRowMap[ padIdx ];
     // stopProbe();
 
     if ( probeReading != lastPadTouched ) {

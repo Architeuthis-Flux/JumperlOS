@@ -543,8 +543,14 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
             // Use state-based check in loop (doesn't consume event)
             if ( probing.checkProbeButtonState( ) == 1 ) {
                 Serial.println( "Probe button pressed" );
+                // Same teardown, same order, as the end-of-session block below:
+                // leaving inClickMenu at 1 pins Menus::service() at BLOCKING.
+                inClickMenu = 0;
                 logoRing.enabled = false;
                 clearColorOverrides( false, true, false ); // restore depth pads
+                menuTransitionCancel( );
+                b.clear( );
+                requestLedShow( -1 );
                 return -3;
             }
             // oled.showJogo32h();
@@ -561,12 +567,15 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
             // This early return bypasses the end-of-session cleanup below,
             // so it must do its own buffer wipe + negative show (clear
             // before drawing wires) or the menu text stays on the
-            // breadboard underneath the redrawn nets.
-            b.clear( );
-            requestLedShow( -1 );
+            // breadboard underneath the redrawn nets. Same order as that
+            // block: menuTransitionCancel() before b.clear(), or a linger
+            // frame can restomp the cleared buffer.
             inClickMenu = 0;
             logoRing.enabled = false;
             clearColorOverrides( false, true, false ); // restore depth pads
+            menuTransitionCancel( );
+            b.clear( );
+            requestLedShow( -1 );
 
             oled.showJogo32h( );
 
@@ -976,6 +985,7 @@ int getMenuSelection( void ) {
     const unsigned long HOLD_BACK_REPEAT_MS = 800;
     bool holdBackArmed = true;
     unsigned long holdBackLastStepMs = 0;
+    unsigned long lastPressShowMs = 0;
 
     clearAction( );
 
@@ -1016,9 +1026,12 @@ int getMenuSelection( void ) {
 
         // Keep the logo refreshing while the button is held so the center LED
         // animates its V (white -> black -> active color) press indicator,
-        // including the per-step replays during hold-to-back.
+        // including the per-step replays during hold-to-back. Paced to one
+        // frame per 16 ms: unthrottled this posted at the loop rate (~1-2 kHz)
+        // for as long as the button was down. The V is animated by
+        // holdAnimationStuff(), not by this request, so the visual is the same.
         if ( encoderButtonState == PRESSED || logoRing.holdStepLengthMs > 0 ) {
-            requestLedShow( 2 );
+            menuShowKeepalive( lastPressShowMs, 16 );
         }
 
         if ( Serial.getWriteError( ) ) {
@@ -1043,7 +1056,6 @@ int getMenuSelection( void ) {
             b.clear( );
             return -2;
         }
-        delayMicroseconds( 400 );
 
         // One probe-button read per pass: getButtonPress() CONSUMES the press
         // whatever its value, so checking "== 2" here used to EAT a remove
@@ -1170,8 +1182,7 @@ int getMenuSelection( void ) {
 
                         return doMenuAction( );
                     } else {
-                        encoderButtonState = RELEASED;
-                        lastButtonEncoderState = PRESSED;
+                        synthesizeEncoderClick( );
                         // menuPosition++;
                         break;
                     }
@@ -1179,6 +1190,11 @@ int getMenuSelection( void ) {
                     // break;
                 }
             }
+
+            // Breadboard first: the LED request goes out before the ~12 ms
+            // blocking SSD1306 write below, not after it. Nothing in the
+            // Serial/OLED block feeds renderMenuLine.
+            renderMenuLine( menuPosition, menuLevel, stayOnTopLevel, stayOnTopIndex );
 
             delayMicroseconds( 100 );
             Serial.print( " " );
@@ -1227,8 +1243,6 @@ int getMenuSelection( void ) {
             }
 
             /// Serial.print(menuLines[menuPosition]);
-
-            renderMenuLine( menuPosition, menuLevel, stayOnTopLevel, stayOnTopIndex );
 
             if ( menuLevel != lastMenuLevel ) {
                 // Serial.println();
@@ -1370,8 +1384,7 @@ int getMenuSelection( void ) {
 
                             return doMenuAction( );
                         } else {
-                            encoderButtonState = RELEASED;
-                            lastButtonEncoderState = PRESSED;
+                            synthesizeEncoderClick( );
                             // menuPosition++;
                             break;
                         }
@@ -1619,8 +1632,7 @@ int getMenuSelection( void ) {
                         // menuLevel++;
                         // Serial.print("subselection: ");
                         // Serial.println(subSelection);
-                        encoderButtonState = RELEASED;
-                        lastButtonEncoderState = PRESSED;
+                        synthesizeEncoderClick( );
                     }
                     lastMenuPosition = menuPosition;
 
@@ -1634,6 +1646,11 @@ int getMenuSelection( void ) {
 
             // b.print(menuPosition);
         }
+
+        // Loop pacing goes AFTER the dispatch above, not before it: run first
+        // and every pass pays it before looking at the button/detent, so an
+        // event that was already pending on entry waits out the whole delay.
+        delayMicroseconds( 400 );
 
         delayMicroseconds( 80 );
 
@@ -4776,30 +4793,37 @@ int doMenuAction( int menuPosition, int selection ) {
         // following the same pattern as getActionFloat (action 3)
 
         // Apply integer input value to config based on menu context.
-        // previousMenuPositions[2] is -1 when this action is reached from a
-        // depth-1 row (OLED > Connect): menuLines[-1] is an out-of-bounds
-        // String read (sweep finding, medium).
-        if ( currentAction.previousMenuPositions[ 2 ] >= 0 &&
-             menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Width" ) != -1 ) {
-            jumperlessConfig.top_oled.width = currentAction.integerValue;
-            oled.displayWidth = currentAction.integerValue;
-            configChanged = true;
-            // Reinitialize display with new dimensions - init() now properly handles this
-            oled.init( );
-            // saveConfig();
-        } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Height" ) != -1 ) {
-            jumperlessConfig.top_oled.height = currentAction.integerValue;
-            oled.displayHeight = currentAction.integerValue;
-            configChanged = true;
-            // Reinitialize display with new dimensions - init() now properly handles this
-            oled.init( );
-            //  saveConfig();
-        } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Rotation" ) != -1 ) {
-            jumperlessConfig.top_oled.rotation = currentAction.integerValue;
-            configChanged = true;
-            // Apply rotation immediately without full reinit
-            getDisplay( ).setRotation( jumperlessConfig.top_oled.rotation );
-            // saveConfig();
+        // previousMenuPositions[2] only names a row on a 3-deep-or-more path
+        // (OLED > Display Size > Width). Reached from a depth-1 row
+        // (OLED > Connect) it is -1, and clearAction() only runs once per menu
+        // session so it can also hold a STALE index from an earlier Width /
+        // Height visit — populateAction() rewrites [0..previousMenuIndex-1]
+        // and never clears the tail. The depth test has to gate the WHOLE
+        // chain: guarding only the first arm just routes menuLines[-1] into
+        // the next one.
+        if ( currentAction.previousMenuIndex > 2 &&
+             currentAction.previousMenuPositions[ 2 ] >= 0 ) {
+            if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Width" ) != -1 ) {
+                jumperlessConfig.top_oled.width = currentAction.integerValue;
+                oled.displayWidth = currentAction.integerValue;
+                configChanged = true;
+                // Reinitialize display with new dimensions - init() now properly handles this
+                oled.init( );
+                // saveConfig();
+            } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Height" ) != -1 ) {
+                jumperlessConfig.top_oled.height = currentAction.integerValue;
+                oled.displayHeight = currentAction.integerValue;
+                configChanged = true;
+                // Reinitialize display with new dimensions - init() now properly handles this
+                oled.init( );
+                //  saveConfig();
+            } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Rotation" ) != -1 ) {
+                jumperlessConfig.top_oled.rotation = currentAction.integerValue;
+                configChanged = true;
+                // Apply rotation immediately without full reinit
+                getDisplay( ).setRotation( jumperlessConfig.top_oled.rotation );
+                // saveConfig();
+            }
         }
 
         // Apply text input value to config based on menu context (action 8)
