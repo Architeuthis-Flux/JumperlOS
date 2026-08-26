@@ -1895,7 +1895,7 @@ if (isBrightenedNode) {
   // BUT: minus net should always flow in opposite direction to plus net to show divergence/convergence
   
   int baseDirection = (direction > 0) ? 1 : -1;
-  if (jumperlessConfig.display.current_flow == 1) {
+  if (jumperlessConfig.measurement.current_flow == 1) {
     baseDirection = -baseDirection; // electron flow: everything reverses
   }
   
@@ -2082,7 +2082,7 @@ void renderNetCurrentAnts() {
   if (jumperlessConfig.display.lines_wires != 1) {
     return; // wireStatus only populated in wire-display mode
   }
-  if (!jumperlessConfig.display.net_currents) {
+  if (!jumperlessConfig.measurement.net_currents) {
     return;
   }
   if (inClickMenu != 0 || inPadMenu != 0) {
@@ -2256,7 +2256,7 @@ void renderNetCurrentAnts() {
     animatedMag[b + 1] = magA;
   }
 
-  int flowSign = (jumperlessConfig.display.current_flow == 1) ? -1 : 1;
+  int flowSign = (jumperlessConfig.measurement.current_flow == 1) ? -1 : 1;
   uint8_t claimed[61] = {0}; // per-row column bitmask
 
   unsigned long t0 = micros();

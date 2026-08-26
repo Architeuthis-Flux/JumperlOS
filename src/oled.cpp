@@ -572,6 +572,44 @@ void oled::displayBitmap( int x, int y, const unsigned char* bitmap, int width, 
     getDisplay().drawBitmap( x, y, bitmap, width, height, 1 );
 }
 
+// Shared-I2C0 reinit window (#38). show() and oledPeriodic already refuse to
+// touch Wire while wavegen holds it, but init() is the one path that MUST talk
+// to it - and it is a whole sequence, not a transaction: initI2C()'s
+// Wire.setSDA()/setSCL()/setClock()/begin() reprogram the I2C block, the
+// connection ping and the SSD1306 command stream ride on top. The I2C0 arbiter
+// only wraps whole SDK transactions, so it cannot cover the register writes in
+// between, and on the legacy fallback wavegen's per-sample loop is on core 1
+// with no lock at all. So instead of skipping (there is nothing to skip to) or
+// refusing (Kevin: the wave "kinda takes up the whole i2c bus" - mitigate, do
+// not forbid), quiesce wavegen for the whole init and let it resume after: one
+// gap in the waveform instead of a bus collision. Only for connection_type 2 -
+// on I2C1 the OLED owns the bus alone and nothing has to yield.
+extern "C" int wavegenBusWindowEnter( uint32_t maxMs );   // 0 = nothing to quiesce, 1 = quiesced, 2 = core-1 loop did not park in time
+extern "C" void wavegenBusWindowExit( void );
+
+namespace {
+struct OledSharedBusWindow {
+    bool held;
+    explicit OledSharedBusWindow( int targetWire ) : held( false ) {
+        if ( targetWire != 0 )
+            return;   // I2C1: OLED-exclusive, no one to wait for
+        int st = wavegenBusWindowEnter( 2000 );
+        if ( st == 0 )
+            return;   // no wave running (the common case): silent
+        held = true;
+        Serial.println( st == 2
+            ? "  wave did not park in time - OLED reinit on the shared I2C0 bus may glitch it"
+            : "  wave paused - OLED reinit owns the shared I2C0 bus" );
+    }
+    ~OledSharedBusWindow( ) {
+        if ( held )
+            wavegenBusWindowExit( );
+    }
+    OledSharedBusWindow( const OledSharedBusWindow& ) = delete;
+    OledSharedBusWindow& operator=( const OledSharedBusWindow& ) = delete;
+};
+}   // namespace
+
 // Initialization
 int oled::init( ) {
     #if OLED_DEBUG
@@ -596,7 +634,11 @@ int oled::init( ) {
     // Type 3 = custom (via crossbar, NOT hardwired) - uses I2C1 (Wire1)
     int connType = jumperlessConfig.top_oled.connection_type;
     oledUsingHardwiredPins = ( connType == 1 || connType == 2 );
-    
+
+    // Hold the shared bus for everything below (see OledSharedBusWindow): the
+    // whole init is one window, released on every return path.
+    OledSharedBusWindow busWindow( connType == 2 ? 0 : 1 );
+
     #if OLED_DEBUG
     Serial.printf("[OLED] init(): addr=0x%02X, connType=%d, hardwired=%d\n", address, connType, oledUsingHardwiredPins);
     #endif
@@ -3628,6 +3670,19 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
         return;
     }
 
+    // [top_oled] show_in_terminal picks the mirror target: 1..4 = the four
+    // USB CDC ports as they enumerate on the host (JLV5port1/3/5/7), 5 = the
+    // hardware UART. port_1 keeps the historical Jerial path (fans out to
+    // the main terminal plus any registered endpoints).
+    Stream* mirror = (Stream*)&Jerial;
+    switch ( jumperlessConfig.top_oled.show_in_terminal ) {
+        case 2: mirror = (Stream*)&USBSer1; break;  // port_3
+        case 3: mirror = (Stream*)&USBSer2; break;  // port_5
+        case 4: mirror = (Stream*)&USBSer3; break;  // port_7
+        case 5: mirror = (Stream*)&Serial1; break;  // uart
+        default: break;                             // port_1 / on
+    }
+
     // Skip manual positioning if windowing system is active
     // extern struct config jumperlessConfig;
     // bool useWindowing = jumperlessConfig.windowing.enabled &&
@@ -3635,20 +3690,20 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
 
     // if (!useWindowing) {
     // Legacy positioning for non-windowing mode
-    saveCursorPosition( &Jerial );
-    Jerial.printf( "\033[%d;%dH", y_pos - 1, x_pos + 1 );
-    Jerial.printf( "\033[0K" );
-    Jerial.printf( "\033[1B" );
-    Jerial.printf( "\033[0K" );
+    saveCursorPosition( mirror );
+    mirror->printf( "\033[%d;%dH", y_pos - 1, x_pos + 1 );
+    mirror->printf( "\033[0K" );
+    mirror->printf( "\033[1B" );
+    mirror->printf( "\033[0K" );
     // }
     // Windowing mode: WindowManager handles all positioning
 
     if ( border == 1 ) {
-        Jerial.println( "╭────────────────────────────────────────────────────────────────╮" );
+        mirror->println( "╭────────────────────────────────────────────────────────────────╮" );
     } else if ( border == 2 ) {
-        Jerial.println( "▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖" );
+        mirror->println( "▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖" );
     } else {
-        Jerial.println( "                                                                  " );
+        mirror->println( "                                                                  " );
     }
 
     // Quarter block characters for different pixel combinations
@@ -3673,14 +3728,14 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
 
     // Process framebuffer in 2x2 blocks to create 64x16 output
     for ( int blockRow = 0; blockRow < displayHeight / 2; blockRow++ ) {
-        Jerial.printf( "\033[%dC", x_pos );
-        Jerial.printf( "\033[0K" );
+        mirror->printf( "\033[%dC", x_pos );
+        mirror->printf( "\033[0K" );
         if ( border == 1 ) {
-            Jerial.print( "│" ); // Left border
+            mirror->print( "│" ); // Left border
         } else if ( border == 2 ) {
-            Jerial.print( "▐" ); // Left border
+            mirror->print( "▐" ); // Left border
         } else {
-            Jerial.print( " " ); // Left border
+            mirror->print( " " ); // Left border
         }
 
         for ( int blockCol = 0; blockCol < displayWidth / 2; blockCol++ ) {
@@ -3709,30 +3764,30 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
             }
 
             // Print the appropriate quarter block character
-            Jerial.print( quarterBlocks[ pixelMask ] );
+            mirror->print( quarterBlocks[ pixelMask ] );
         }
 
         if ( border == 1 ) {
-            Jerial.println( "│" ); // Right border and newline
+            mirror->println( "│" ); // Right border and newline
         } else if ( border == 2 ) {
-            Jerial.println( "▌" ); // Right border and newline
+            mirror->println( "▌" ); // Right border and newline
         } else {
-            Jerial.println( " " ); // Right border and newline
+            mirror->println( " " ); // Right border and newline
         }
     }
-    Jerial.printf( "\033[%dC", x_pos );
-    Jerial.printf( "\033[0K" );
+    mirror->printf( "\033[%dC", x_pos );
+    mirror->printf( "\033[0K" );
     if ( border == 1 ) {
-        Jerial.println( "╰────────────────────────────────────────────────────────────────╯" );
+        mirror->println( "╰────────────────────────────────────────────────────────────────╯" );
     } else if ( border == 2 ) {
-        Jerial.println( "▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘" );
+        mirror->println( "▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘" );
     } else {
-        Jerial.println( "                                                                  " );
+        mirror->println( "                                                                  " );
     }
     // if (!useWindowing) {
     // Legacy cursor restoration for non-windowing mode
-    Jerial.printf( "\033[%dB", y_pos - ( displayHeight / 2 ) + 2 );
-    Jerial.printf( "\033[50B" );
+    mirror->printf( "\033[%dB", y_pos - ( displayHeight / 2 ) + 2 );
+    mirror->printf( "\033[50B" );
     // }
     // Windowing mode: WindowManager handles all cursor management
     dumpingToSerial = false;

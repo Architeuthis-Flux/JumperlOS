@@ -574,12 +574,12 @@ void calibrateProbeSwitchThresholds( void ) {
         float higherAvg = max( measureAvg, selectAvg );
 
         // Set thresholds with hysteresis
-        jumperlessConfig.calibration.probe_switch_threshold_low = midpoint - buffer;
-        jumperlessConfig.calibration.probe_switch_threshold_high = midpoint + buffer;
+        jumperlessConfig.probe.switch_threshold_low = midpoint - buffer;
+        jumperlessConfig.probe.switch_threshold_high = midpoint + buffer;
         // SELECT ceiling for the agreement classifier: anything above the
         // select signature by more than the whole measure/select gap (at
         // least 1 mA) is a touch loading the buffer, not the switch.
-        jumperlessConfig.calibration.probe_switch_select_max_ma =
+        jumperlessConfig.probe.switch_select_max_ma =
             higherAvg + ( range > 1.0f ? range : 1.0f );
 
         // GPIO-feed numbers. Unloaded tip in MEASURE seeds the droop model's
@@ -588,10 +588,10 @@ void calibrateProbeSwitchThresholds( void ) {
         // but the margin is thin, or they don't, put the threshold at their
         // midpoint so the detector is calibrated to THIS probe.
         if ( meas.gpioOk && meas.adc7Median >= 3.0f && meas.adc7Median <= 3.6f ) {
-            jumperlessConfig.calibration.probe_droop_v0 = meas.adc7Median;
+            jumperlessConfig.probe.droop_v0 = meas.adc7Median;
         }
         if ( meas.blinkPct >= 0 && sel.blinkPct >= 0 && sel.blinkPct > meas.blinkPct + 20 ) {
-            jumperlessConfig.calibration.probe_switch_blink_hold_pct =
+            jumperlessConfig.probe.switch_blink_hold_pct =
                 ( meas.blinkPct + sel.blinkPct ) / 2;
         }
 
@@ -603,21 +603,21 @@ void calibrateProbeSwitchThresholds( void ) {
         Serial.printf( "Midpoint: %.3f mA\n\r", midpoint );
         Serial.printf( "Range: %.3f mA\n\r", range );
         Serial.printf( "\nLow threshold:  %.3f mA (switch to MEASURE)\n\r",
-                       jumperlessConfig.calibration.probe_switch_threshold_low );
+                       jumperlessConfig.probe.switch_threshold_low );
         Serial.printf( "High threshold: %.3f mA (switch to SELECT)\n\r",
-                       jumperlessConfig.calibration.probe_switch_threshold_high );
+                       jumperlessConfig.probe.switch_threshold_high );
         Serial.printf( "Select ceiling: %.3f mA (above = loaded by a touch)\n\r",
-                       jumperlessConfig.calibration.probe_switch_select_max_ma );
+                       jumperlessConfig.probe.switch_select_max_ma );
         if ( meas.gpioOk || sel.gpioOk ) {
             Serial.printf( "GPIO feed: tip %.3f V unloaded / %.3f V select, blink held %d%% / %d%% -> hold threshold %d%%\n\r",
                            meas.adc7Median, sel.adc7Median, meas.blinkPct, sel.blinkPct,
-                           jumperlessConfig.calibration.probe_switch_blink_hold_pct );
+                           jumperlessConfig.probe.switch_blink_hold_pct );
         }
         Serial.println( "\n\rSaving configuration..." );
 
         char oledBuffer[ 64 ] = "Calibration Done!\n\n\r";
-        snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "Low:  %.2f mA\n", jumperlessConfig.calibration.probe_switch_threshold_low );
-        snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "High: %.2f mA", jumperlessConfig.calibration.probe_switch_threshold_high );
+        snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "Low:  %.2f mA\n", jumperlessConfig.probe.switch_threshold_low );
+        snprintf( oledBuffer + strlen( oledBuffer ), sizeof( oledBuffer ) - strlen( oledBuffer ), "High: %.2f mA", jumperlessConfig.probe.switch_threshold_high );
         oled.showMultiLineSmallText( oledBuffer, true, true );
 
         // Show success on breadboard
@@ -644,8 +644,8 @@ done:
 
 
 void testSwitchThresholds( void ) {
-    float thresholdLow = jumperlessConfig.calibration.probe_switch_threshold_low;
-    float thresholdHigh = jumperlessConfig.calibration.probe_switch_threshold_high;
+    float thresholdLow = jumperlessConfig.probe.switch_threshold_low;
+    float thresholdHigh = jumperlessConfig.probe.switch_threshold_high;
 
 
 
@@ -751,13 +751,13 @@ void probeCalibApp( void ) {
     int reading = -1;
     int lastReading = -1;
 
-    int probeMax = jumperlessConfig.calibration.probe_max;
+    int probeMax = jumperlessConfig.probe.pad_max;
     // Measure-position endpoint (3.3V frame; the decode scales it by the
     // live ADC7 tip voltage). The old app nudged measure_mode_output_voltage
     // to align measure-mode rows - the ratiometric decode now cancels a
     // drive-voltage change (and under debug.probe_power_gpio the DAC isn't
     // even driving the tip), so the knob adjusts probe_max_measure directly.
-    int probeMaxMeasure = jumperlessConfig.calibration.probe_max_measure;
+    int probeMaxMeasure = jumperlessConfig.probe.pad_max_measure;
 
     // MEASURE has two calibrations because the tip is driven by two very
     // different sources (dacs.probe_power_source picks which one the runtime
@@ -786,7 +786,7 @@ void probeCalibApp( void ) {
     bool converged = false;
     bool gpioFeedAvailable = true;
     unsigned long convNextMs = 0;
-    int probeMaxMeasureGpio = jumperlessConfig.calibration.probe_max_measure_gpio;
+    int probeMaxMeasureGpio = jumperlessConfig.probe.pad_max_measure_gpio;
     // Switch (probe LED supply) current, zero-corrected. Only meaningful
     // while the feed is DAC0 - INA1's shunt R57 sits in DAC0's output path
     // and is blind to a GPIO feed - so it is sampled in SELECT, where this
@@ -878,11 +878,11 @@ void probeCalibApp( void ) {
             if ( checkSwitch == 0 ) {
                 lastSwitchPosition = 0;
                 measureOrSelect = 0;
-                probeMaxMeasure = jumperlessConfig.calibration.probe_max_measure;
+                probeMaxMeasure = jumperlessConfig.probe.pad_max_measure;
             } else {
                 lastSwitchPosition = 1;
                 measureOrSelect = 1;
-                probeMax = jumperlessConfig.calibration.probe_max;
+                probeMax = jumperlessConfig.probe.pad_max;
             }
             resetEncoderPosition = true;
         }
@@ -989,7 +989,7 @@ void probeCalibApp( void ) {
                             // cMin/mMin quantises to 0.9 or 1.0 - a 10% error
                             // straight into the solved endpoint. cMax is ~4000,
                             // where the same rounding is negligible.
-                            int usedMax = jumperlessConfig.calibration.probe_max_measure_gpio;
+                            int usedMax = jumperlessConfig.probe.pad_max_measure_gpio;
                             float scale = ( usedMax > 0 ) ? ( (float)cMax / (float)usedMax ) : 1.0f;
                             if ( scale < 0.5f || scale > 1.5f ) scale = 1.0f;
                             float wantMaxScaled =
@@ -997,12 +997,12 @@ void probeCalibApp( void ) {
                             int wantMax = (int)( wantMaxScaled / scale + 0.5f );
                             // Damp: move a third of the way each alternation so
                             // one noisy pair cannot throw the endpoint.
-                            int cur = jumperlessConfig.calibration.probe_max_measure_gpio;
+                            int cur = jumperlessConfig.probe.pad_max_measure_gpio;
                             int next = cur + ( wantMax - cur ) / 3;
                             if ( next == cur && wantMax != cur ) next = cur + ( wantMax > cur ? 1 : -1 );
                             if ( next < 15 ) next = 15;
                             if ( next > 4095 ) next = 4095;
-                            jumperlessConfig.calibration.probe_max_measure_gpio = next;
+                            jumperlessConfig.probe.pad_max_measure_gpio = next;
                             probeMaxMeasureGpio = next;
                         }
                         if ( convRowDac == convRowGpio ) {
@@ -1012,8 +1012,8 @@ void probeCalibApp( void ) {
                                 Serial.printf( "\n\rfeeds converged on row %d: DAC max %d / GPIO max %d\n\r"
                                                "now turn the wheel to align the row (moves both)\n\r",
                                                convRowDac,
-                                               jumperlessConfig.calibration.probe_max_measure,
-                                               jumperlessConfig.calibration.probe_max_measure_gpio );
+                                               jumperlessConfig.probe.pad_max_measure,
+                                               jumperlessConfig.probe.pad_max_measure_gpio );
                                 // Leave the runtime's own preference live now
                                 // that the endpoints agree.
                                 probeCalibForceFeed( -1 );
@@ -1036,7 +1036,7 @@ void probeCalibApp( void ) {
         int mapMin, mapMax;
         probeMapRange( &mapMin, &mapMax );
         int rowProbed = map( lastValidProbeRead, mapMin, mapMax, 101, 0 );
-        int rowProbedWithOldMapping = map( lastValidProbeRead, jumperlessConfig.calibration.probe_min, probeMax, 101, 0 );
+        int rowProbedWithOldMapping = map( lastValidProbeRead, jumperlessConfig.probe.pad_min, probeMax, 101, 0 );
 
         nodeSelected = probeRowMap[ rowProbed ];
         nodeSelectedWithOldMapping = probeRowMapByPad[ rowProbedWithOldMapping ];
@@ -1061,12 +1061,12 @@ void probeCalibApp( void ) {
                 int newGpio = probeMaxMeasureGpio - deltaMax;
                 if ( newDac < 15 ) newDac = 15;
                 if ( newGpio < 15 ) newGpio = 15;
-                jumperlessConfig.calibration.probe_max_measure = newDac;
-                jumperlessConfig.calibration.probe_max_measure_gpio = newGpio;
+                jumperlessConfig.probe.pad_max_measure = newDac;
+                jumperlessConfig.probe.pad_max_measure_gpio = newGpio;
             } else {
-                jumperlessConfig.calibration.probe_max = probeMax - encoderPosition;
-                if ( jumperlessConfig.calibration.probe_max < 15 ) {
-                    jumperlessConfig.calibration.probe_max = 15;
+                jumperlessConfig.probe.pad_max = probeMax - encoderPosition;
+                if ( jumperlessConfig.probe.pad_max < 15 ) {
+                    jumperlessConfig.probe.pad_max = 15;
                 }
             }
         }
@@ -1083,13 +1083,13 @@ void probeCalibApp( void ) {
                            converged ? "ok" : ( gpioFeedAvailable ? "conv.." : "1feed" ),
                            rowProbed,
                            definesToChar( nodeSelected ),
-                           jumperlessConfig.calibration.probe_max_measure,
-                           jumperlessConfig.calibration.probe_max_measure_gpio );
+                           jumperlessConfig.probe.pad_max_measure,
+                           jumperlessConfig.probe.pad_max_measure_gpio );
             } else {
                 snprintf(debugOutput, sizeof(debugOutput), "SELECT   raw: %d\n\rread: %d\n\rnode: %s\n\rmax: %d sw:%.2fmA",
                            lastValidProbeRead, rowProbed,
                            definesToChar( nodeSelected ),  
-                           jumperlessConfig.calibration.probe_max,
+                           jumperlessConfig.probe.pad_max,
                            isnan( switchCurrent_mA ) ? 0.0 : (double)switchCurrent_mA );
             }
             if (firstRead == false) {
@@ -1106,8 +1106,8 @@ void probeCalibApp( void ) {
             if ( measureOrSelect == 0 ) {
                 Serial.printf( "\rraw: %d enc: %d reading: %d maxD: %d maxG: %d node: %s measure %s\033[K",
                                lastValidProbeRead, encoderPosition, rowProbed,
-                               jumperlessConfig.calibration.probe_max_measure,
-                               jumperlessConfig.calibration.probe_max_measure_gpio,
+                               jumperlessConfig.probe.pad_max_measure,
+                               jumperlessConfig.probe.pad_max_measure_gpio,
                                definesToChar( nodeSelected ),
                                converged ? "(converged - wheel moves both)"
                                          : ( gpioFeedAvailable
@@ -1117,16 +1117,16 @@ void probeCalibApp( void ) {
                 if ( isnan( switchCurrent_mA ) ) {
                     Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s select sw: --  \033[K",
                                    lastValidProbeRead, encoderPosition, rowProbed,
-                                   jumperlessConfig.calibration.probe_max,
+                                   jumperlessConfig.probe.pad_max,
                                    definesToChar( nodeSelected ) );
                 } else {
                     Serial.printf( "\rraw: %d enc: %d reading: %d max: %d node: %s select sw: %.2f mA (thr %.2f/%.2f)\033[K",
                                    lastValidProbeRead, encoderPosition, rowProbed,
-                                   jumperlessConfig.calibration.probe_max,
+                                   jumperlessConfig.probe.pad_max,
                                    definesToChar( nodeSelected ),
                                    (double)switchCurrent_mA,
-                                   (double)jumperlessConfig.calibration.probe_switch_threshold_low,
-                                   (double)jumperlessConfig.calibration.probe_switch_threshold_high );
+                                   (double)jumperlessConfig.probe.switch_threshold_low,
+                                   (double)jumperlessConfig.probe.switch_threshold_high );
                 }
             }
             if ( encoderMoved )
@@ -1306,24 +1306,24 @@ void probeCalibApp( void ) {
 
             Serial.println( "\n\n\r" );
             Serial.printf( "measure (DAC0 feed): probe_max_measure      = %d\n\r",
-                           jumperlessConfig.calibration.probe_max_measure );
+                           jumperlessConfig.probe.pad_max_measure );
             Serial.printf( "measure (GPIO feed): probe_max_measure_gpio = %d%s\n\r",
-                           jumperlessConfig.calibration.probe_max_measure_gpio,
+                           jumperlessConfig.probe.pad_max_measure_gpio,
                            gpioFeedAvailable ? ( converged ? "  (converged)" : "  (NOT converged)" )
                                              : "  (no free GPIO - unchanged)" );
             Serial.printf( "select:              probe_max              = %d\n\r",
-                           jumperlessConfig.calibration.probe_max );
+                           jumperlessConfig.probe.pad_max );
             if ( !isnan( switchCurrent_mA ) ) {
                 Serial.printf( "select switch current (DAC0 feed, INA1): %.2f mA   thresholds %.2f / %.2f\n\r",
                                (double)switchCurrent_mA,
-                               (double)jumperlessConfig.calibration.probe_switch_threshold_low,
-                               (double)jumperlessConfig.calibration.probe_switch_threshold_high );
-                if ( switchCurrent_mA <= jumperlessConfig.calibration.probe_switch_threshold_high ) {
+                               (double)jumperlessConfig.probe.switch_threshold_low,
+                               (double)jumperlessConfig.probe.switch_threshold_high );
+                if ( switchCurrent_mA <= jumperlessConfig.probe.switch_threshold_high ) {
                     Serial.println( "  NOTE: that is not above the SELECT threshold - run Switch Calib." );
                 }
             }
             Serial.printf( "tip drive (fixed):   measure_mode_output_voltage = %.3f V\n\r",
-                           (double)jumperlessConfig.calibration.measure_mode_output_voltage );
+                           (double)jumperlessConfig.probe.measure_voltage );
             Serial.println( "Saving config..." );
 
             saveConfig( );
@@ -2890,11 +2890,7 @@ static inline uint16_t rgbToJdi( uint8_t r, uint8_t g, uint8_t b ) {
 
 void jdiMIPdisplay( void ) {
     // Allocate JDI display object (5.1KB) - freed on exit
-    jdi_display = new ( std::nothrow ) JDI_MIP_Display( );
-    if ( jdi_display == nullptr ) {
-        Serial.println( "Failed to allocate JDI display (5.1KB)" );
-        return;
-    }
+    jdi_display = new JDI_MIP_Display( );
 
     jdi_display->begin( );
     jdi_display->displayOn( );
@@ -3099,11 +3095,7 @@ void DMXSerialApp( void ) {
     // DMX universe buffer (513 bytes: 1 start code + 512 channels)
     // Allocate on heap to reduce stack pressure
     constexpr uint16_t UNIVERSE_SIZE = 513;
-    uint8_t* universe = new ( std::nothrow ) uint8_t[ UNIVERSE_SIZE ];
-    if ( universe == nullptr ) {
-        Serial.println( "ERROR: Failed to allocate DMX universe buffer (513 bytes)" );
-        return;
-    }
+    uint8_t* universe = new uint8_t[ UNIVERSE_SIZE ];
     memset( universe, 0, UNIVERSE_SIZE );
     universe[ 0 ] = 0x00; // DMX512 start code
 

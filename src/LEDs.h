@@ -92,8 +92,6 @@ extern volatile uint8_t LEDbrightnessSpecial;
 extern JeoPixel probeLEDs;
 extern uint8_t probeLEDstateMachine;
 
-extern volatile int hideNets;
-
 extern volatile uint32_t logoColorOverride;
 
 extern volatile uint32_t logoColorOverrideTop;

@@ -131,7 +131,7 @@ ServiceStatus ProbeButton::service( ) {
     //    Flipping it back resumes polling.
     // -------------------------------------------------------------------
     static bool s_lastPIOFlag = false;
-    bool currentFlag = jumperlessConfig.hardware.use_pio_probe_button;
+    bool currentFlag = jumperlessConfig.probe.use_pio_button;
     if ( currentFlag != s_lastPIOFlag ) {
         if ( g_pioProbeState == PIOProbeState::READY ) {
             extern void probeButtonPausePolling( void );
@@ -152,7 +152,7 @@ ServiceStatus ProbeButton::service( ) {
         extern bool setProbeLedMerged( bool );
         if ( g_pioProbeState == PIOProbeState::READY &&
              g_probeMergedWanted && !g_probeMergedActive &&
-             jumperlessConfig.hardware.probe_led_on_button_pin ) {
+             jumperlessConfig.probe.led_on_button_pin ) {
             setProbeLedMerged( true );
         }
     }
@@ -200,7 +200,7 @@ ServiceStatus ProbeButton::service( ) {
     //    All press/release/double-tap state is already up to date.
     //    Nothing for us to do here except the deferred drain above.
     // -------------------------------------------------------------------
-    if ( jumperlessConfig.hardware.use_pio_probe_button &&
+    if ( jumperlessConfig.probe.use_pio_button &&
          g_pioProbeState == PIOProbeState::READY ) {
         return lastStatus;
     }
@@ -1291,13 +1291,13 @@ int ProbeButton::checkProbeButtonHardware( void ) {
     // has already claimed its SM. If init fails (no PIO instruction
     // memory etc.) we permanently fall through to the CPU path.
     // ============================================================
-    if ( jumperlessConfig.hardware.use_pio_probe_button && initProbeButtonPIO( ) ) {
+    if ( jumperlessConfig.probe.use_pio_button && initProbeButtonPIO( ) ) {
         // C5 (task #26): once the legacy PIO path is up, apply the merged
         // program if it's wanted (default). Runs once; setProbeLedMerged is
         // a no-op when the mode already matches. Only meaningful when the
         // LED shares the button pin - a separate-pin LED keeps the swap path.
         if ( g_probeMergedWanted && !g_probeMergedActive &&
-             jumperlessConfig.hardware.probe_led_on_button_pin ) {
+             jumperlessConfig.probe.led_on_button_pin ) {
             extern bool setProbeLedMerged( bool );
             setProbeLedMerged( true );
         }
@@ -1730,37 +1730,72 @@ int ( &logoBottomSetting )[ 2 ] = Probing::getInstance( ).logoBottomSetting;
 int ( &buildingTopSetting )[ 2 ] = Probing::getInstance( ).buildingTopSetting;
 int ( &buildingBottomSetting )[ 2 ] = Probing::getInstance( ).buildingBottomSetting;
 
+// Map a [logo_pads] connect-mode config value (padNodeTable in
+// configManager.h - legacy arbitraryFunctionTable numbering plus 60+ for
+// nodes that never had a number) onto the actual routable node. This used to
+// honor only uart_tx/uart_rx/isense± and silently fall back to the default
+// for EVERYTHING else, which is why a pad configured as gpio_6 still
+// connected UART_TX. Returns -1 for off, -2 for "open the on-board chooser".
 static int resolveLogoPadAssignment( int configValue, int defaultNode ) {
     switch ( configValue ) {
-    case -1:
-        return -1;
-    case 0:
-        return RP_UART_TX;
-    case 1:
-        return RP_UART_RX;
-    case 25:
-        return ISENSE_PLUS;
-    case 26:
-        return ISENSE_MINUS;
-    default:
-        return defaultNode;
+    case -1: return -1;
+    case -2: return -2;              // "choose": caller opens the picker
+    case 0:  return RP_UART_TX;
+    case 1:  return RP_UART_RX;
+    case 2:  return ADC0;
+    case 3:  return ADC1;
+    case 4:  return ADC2;
+    case 5:  return ADC3;
+    case 6:  return ADC4;
+    case 7:  return ADC4;            // legacy "adc_5" - no routable ADC5
+    case 9:  return RP_GPIO_1;
+    case 10: return RP_GPIO_2;
+    case 11: return RP_GPIO_3;
+    case 12: return RP_GPIO_4;
+    case 13: return RP_GPIO_5;
+    case 14: return RP_GPIO_6;
+    case 15: return RP_GPIO_7;
+    case 16: return RP_GPIO_8;
+    case 25: return ISENSE_PLUS;
+    case 26: return ISENSE_MINUS;
+    case 60: return DAC0;
+    case 61: return DAC1;
+    case 62: return GND;
+    case 63: return ROUTABLE_BUFFER_IN;
+    case 64: return ROUTABLE_BUFFER_OUT;
+    default: return defaultNode;
     }
 }
 
+// Reverse map for the on-board chooser's write-back. Full coverage now: the
+// chooser can pick ADC/DAC/GPIO nodes, and this used to throw those picks
+// away (kept the previous config value), so the choice never persisted.
 static int nodeToLogoPadConfig( int node, int fallbackConfig ) {
     switch ( node ) {
-    case RP_UART_TX:
-        return 0;
-    case RP_UART_RX:
-        return 1;
-    case ISENSE_PLUS:
-        return 25;
-    case ISENSE_MINUS:
-        return 26;
-    case -1:
-        return -1;
-    default:
-        return fallbackConfig;
+    case -1:           return -1;
+    case RP_UART_TX:   return 0;
+    case RP_UART_RX:   return 1;
+    case ADC0:         return 2;
+    case ADC1:         return 3;
+    case ADC2:         return 4;
+    case ADC3:         return 5;
+    case ADC4:         return 6;
+    case RP_GPIO_1:    return 9;
+    case RP_GPIO_2:    return 10;
+    case RP_GPIO_3:    return 11;
+    case RP_GPIO_4:    return 12;
+    case RP_GPIO_5:    return 13;
+    case RP_GPIO_6:    return 14;
+    case RP_GPIO_7:    return 15;
+    case RP_GPIO_8:    return 16;
+    case ISENSE_PLUS:  return 25;
+    case ISENSE_MINUS: return 26;
+    case DAC0:         return 60;
+    case DAC1:         return 61;
+    case GND:          return 62;
+    case ROUTABLE_BUFFER_IN:  return 63;
+    case ROUTABLE_BUFFER_OUT: return 64;
+    default:           return fallbackConfig;
     }
 }
 
@@ -4086,50 +4121,6 @@ int Probing::probeMode( int setOrClear, int firstConnection, bool fromClickMenu 
     return probeExitTail( s );
 }
 
-float Probing::measureMode( int updateSpeed ) {
-    // NOTE: measureModeActive LED indicator is handled by MeasureMode service
-    // Wait for button release (use state-based check, doesn't consume event)
-    // while ( checkProbeButtonState( ) != 0 ) {
-    //     delay( 1 );
-    // }
-    //   removeBridgeFromNodeFile(ROUTABLE_BUFFER_IN, -1, netSlot, 1);
-    // removeBridgeFromNodeFile(ROUTABLE_BUFFER_OUT, -1, netSlot, 1);
-    //   addBridgeToNodeFile(ROUTABLE_BUFFER_OUT, ADC3, netSlot, 1);
-
-    // refreshLocalConnections();
-    float measurement = 0.0;
-    // Loop until button pressed (use state-based check, doesn't consume event)
-    while ( checkProbeButtonState( ) == 0 ) {
-        measurement = ( readAdc( 7, 16 ) * ( 16.0 / 4090 ) ) - 8.0;
-        if ( measurement > -0.05 && measurement < 0.05 ) {
-            measurement = 0.0;
-            delay( 1 );
-        }
-        uint32_t measColor = scaleBrightness(
-            logoColors8vSelect[ map( (long)( measurement * 10 ), -80, 80, 0, 59 ) ], -50 );
-        // Serial.println(map((long)(measurement*10), -80, 80, 0, 59));
-        char measChar[ 10 ] = "         ";
-        // b.print("        ", (uint32_t)0x000000,(uint32_t)0xffffff);
-        b.clear( 0 );
-        sprintf( measChar, "% .1f V", measurement );
-
-        b.print( measChar, (uint32_t)measColor, (uint32_t)0xfffffe );
-
-        Serial.print( "                        \r" );
-        Serial.print( measChar );
-
-        delay( updateSpeed );
-    }
-    // removeBridgeFromNodeFile(ROUTABLE_BUFFER_OUT, -1, netSlot, 1);
-
-    // addBridgeToNodeFile(ROUTABLE_BUFFER_IN, RP_GPIO_23, netSlot, 1);
-
-    // refreshLocalConnections(-1);
-    // delay(20);
-    showProbeLEDs = 3;
-    return measurement;
-}
-
 unsigned long blinkTimer = 0;
 
 int Probing::selectSFprobeMenu( int function ) {
@@ -4224,6 +4215,7 @@ int Probing::selectSFprobeMenu( int function ) {
             // waitForBlockingDisplay();  // Wait for Core 2 to finish displaying
 
             function = resolveLogoPadAssignment( jumperlessConfig.logo_pads.top_guy, RP_UART_TX );
+            if ( function == -2 ) function = chooseIsense( );  // "choose"
             clearColorOverrides( 1, 1, 0 );
             setLogoOverride( LOGO_TOP, -2 );
 
@@ -4257,16 +4249,25 @@ int Probing::selectSFprobeMenu( int function ) {
             waitForBlockingDisplay( ); // Wait for Core 2 to finish displaying
 
             function = resolveLogoPadAssignment( jumperlessConfig.logo_pads.bottom_guy, RP_UART_RX );
+            if ( function == -2 ) function = chooseIsense( );  // "choose"
             clearColorOverrides( 1, 1, 0 );
             setLogoOverride( LOGO_BOTTOM, -2 );
 
             break;
         }
             // }
-        case BUILDING_PAD_TOP:
+        case BUILDING_PAD_TOP: {
+            // Honor the configured node; "choose" (-2) opens the picker
+            // (which was the only behavior before - config was ignored here).
+            function = resolveLogoPadAssignment(
+                jumperlessConfig.logo_pads.building_pad_top, ISENSE_PLUS );
+            if ( function == -2 ) function = chooseIsense( );
+            break;
+        }
         case BUILDING_PAD_BOTTOM: {
-            // Both building pads now use the same chooser function
-            function = chooseIsense( );
+            function = resolveLogoPadAssignment(
+                jumperlessConfig.logo_pads.building_pad_bottom, ISENSE_MINUS );
+            if ( function == -2 ) function = chooseIsense( );
             break;
         }
         }
@@ -5846,7 +5847,7 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
     // SELECT->MEASURE needs two consecutive below-low readings (see below).
     static bool s_pendingMeasureFlip = false;
 
-    if ( jumperlessConfig.dacs.auto_connect_probe <= 0 ) {
+    if ( jumperlessConfig.probe.auto_connect <= 0 ) {
         switchPosition = 1;
         return switchPosition;
     }
@@ -5987,12 +5988,12 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
     if ( gpioPowerNode > 0 ) {
         detB = probeSwitchFeedBlink( &blinkPct );
     } else {
-        float selMax = jumperlessConfig.calibration.probe_switch_select_max_ma;
+        float selMax = jumperlessConfig.probe.switch_select_max_ma;
         if ( selMax > 0.0f && current_mA > selMax ) {
             detB = 2; // LOADED: a touch, not the switch
-        } else if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+        } else if ( current_mA > jumperlessConfig.probe.switch_threshold_high ) {
             detB = 1; // SELECT signature
-        } else if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+        } else if ( current_mA < jumperlessConfig.probe.switch_threshold_low ) {
             detB = 0; // MEASURE signature
         }
     }
@@ -6001,7 +6002,7 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
     // both feeds - a held pad in measure position loads either.)
     if ( detB == 1 ) {
         int padSense = readAdc( 5, 4 );
-        if ( padSense >= jumperlessConfig.calibration.minimum_probe_reading ) {
+        if ( padSense >= jumperlessConfig.probe.min_valid_reading ) {
             detB = -1;
         }
     }
@@ -6066,14 +6067,14 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
             // low reading, light the select-idle pattern and read again next
             // check - current appearing means SELECT with a dark LED;
             // still-low means genuinely MEASURE.
-            if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+            if ( current_mA > jumperlessConfig.probe.switch_threshold_high ) {
                 int padSense = readAdc( 5, 4 ); // same touch veto as MEASURE->SELECT
-                if ( padSense < jumperlessConfig.calibration.minimum_probe_reading && !aSaysMeasure ) {
+                if ( padSense < jumperlessConfig.probe.min_valid_reading && !aSaysMeasure ) {
                     switchPosition = 1;
                     changed = true;
                 }
                 s_pendingMeasureFlip = false;
-            } else if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+            } else if ( current_mA < jumperlessConfig.probe.switch_threshold_low ) {
                 if ( !s_pendingMeasureFlip ) {
                     s_pendingMeasureFlip = true;
                     if ( showProbeLEDs == 0 ) {
@@ -6100,9 +6101,9 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
             // looks exactly like the switch flipping to SELECT. The pad-sense
             // ADC knows the difference: while the tip is parked on a pad the
             // elevated current is touch load, not the LED, so hold MEASURE.
-            if ( current_mA > jumperlessConfig.calibration.probe_switch_threshold_high ) {
+            if ( current_mA > jumperlessConfig.probe.switch_threshold_high ) {
                 int padSense = readAdc( 5, 4 );
-                if ( padSense >= jumperlessConfig.calibration.minimum_probe_reading ) {
+                if ( padSense >= jumperlessConfig.probe.min_valid_reading ) {
                     // tip is on a pad - don't classify from a loaded rail
                 } else if ( aSaysMeasure ) {
                     // tip sense still sees the LED supply cap: a load on the
@@ -6123,7 +6124,7 @@ int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = sele
             // wiggle) - the select-idle LED's draw IS the signature this
             // classifier reads. So: re-send the LED pattern and require the
             // low reading to survive the NEXT check too.
-            if ( current_mA < jumperlessConfig.calibration.probe_switch_threshold_low ) {
+            if ( current_mA < jumperlessConfig.probe.switch_threshold_low ) {
                 if ( !s_pendingMeasureFlip ) {
                     s_pendingMeasureFlip = true;
                     if ( showProbeLEDs == 0 ) {
@@ -6226,7 +6227,7 @@ float Probing::checkProbeCurrent( void ) {
     // Serial.print("current (before zero) = ");
     // Serial.println(current);
     // Serial.flush();
-    current = current - jumperlessConfig.calibration.probe_current_zero;
+    current = current - jumperlessConfig.probe.current_zero;
 
     // Serial.print("current (after zero) = ");
     // Serial.println(current);
@@ -6307,7 +6308,7 @@ float Probing::probeCurrentMedian( int n ) {
                        n, INA1.getLastError( ), wavegen.isRunning( ) ? "RUNNING" : "idle" );
         return checkProbeCurrent( );
     }
-    return medianInPlace( samples, good ) - jumperlessConfig.calibration.probe_current_zero;
+    return medianInPlace( samples, good ) - jumperlessConfig.probe.current_zero;
 #endif
 }
 
@@ -6323,7 +6324,7 @@ float Probing::checkProbeCurrentZero( void ) {
         delayMicroseconds( 100 );
     }
     currentReadingOffset0_mA = INA0.getCurrent_mA( );
-    jumperlessConfig.calibration.probe_current_zero = 0.0f;
+    jumperlessConfig.probe.current_zero = 0.0f;
     showProbeLEDs = 4;
     return 0.0f;
 #else
@@ -6426,12 +6427,12 @@ float Probing::checkProbeCurrentZero( void ) {
         // ones up to six (one boot in twelve had six of eight elevated).
         medianInPlace( zeroSamples, goodSamples ); // std::sort in place - we want the order, not the median
         current = zeroSamples[ goodSamples >= 4 ? 1 : 0 ]; // 2nd lowest (the lowest if fewer than 4 samples)
-        jumperlessConfig.calibration.probe_current_zero = current;
+        jumperlessConfig.probe.current_zero = current;
     } else {
         // Every read failed - bus problem, not a measurement. Keep the
         // previous zero instead of storing garbage.
         Serial.println( "\n\rWARNING: probe current zero calibration failed (I2C errors), keeping previous value" );
-        current = jumperlessConfig.calibration.probe_current_zero;
+        current = jumperlessConfig.probe.current_zero;
     }
 
     // Also refresh INA0's current offset here (this runs later than startup
@@ -6530,7 +6531,7 @@ static const float kGpioDroopV0Track = 0.08f;
 static const float kGpioDroopUnloadedMax_mA = 0.50f;
 
 static void seedGpioDroopV0FromConfig( void ) {
-    float v0 = jumperlessConfig.calibration.probe_droop_v0;
+    float v0 = jumperlessConfig.probe.droop_v0;
     if ( v0 < 3.0f || v0 > 3.6f )
         v0 = 3.35f;
     s_gpioDroopV0 = v0;
@@ -6707,8 +6708,8 @@ static void printProbeSwitchStats( const char* src, float mA, float adc7V,
         Serial.printf( "  ADC7 %.3fV  V0 %.3fV", (double)adc7V, (double)s_gpioDroopV0 );
     }
     Serial.printf( "  thr lo/hi %.2f/%.2f",
-                   (double)jumperlessConfig.calibration.probe_switch_threshold_low,
-                   (double)jumperlessConfig.calibration.probe_switch_threshold_high );
+                   (double)jumperlessConfig.probe.switch_threshold_low,
+                   (double)jumperlessConfig.probe.switch_threshold_high );
     // A: tipSense H (pin held high = measure) / L (select) / - (skipped)
     // B: M / S / L(oaded) / - ; blink% for the GPIO feed
     // shadow: what the agreement classifier says (M/S/hold); "*" = it decides
@@ -6779,7 +6780,7 @@ static int probeSwitchFeedBlink( int* pctOut ) {
     return -1;
 #else
     if ( s_gpioPowerIdx < 0 ) return -1;
-    if ( lastReadRaw >= jumperlessConfig.calibration.minimum_probe_reading ) return -1;
+    if ( lastReadRaw >= jumperlessConfig.probe.min_valid_reading ) return -1;
     if ( !adcTryAcquire( ) ) return -1;
     int pin = gpioDef[ s_gpioPowerIdx ][ 0 ];
     // ADC7 sits behind the +/-8V scale/offset network (U7B): 0 V on the tip
@@ -6803,7 +6804,7 @@ static int probeSwitchFeedBlink( int* pctOut ) {
     // held (the LED supply cap on BUFFER_IN) = SELECT; collapsed = MEASURE.
     // Hardware (2026-08-16, GPIO_8 feed): SELECT holds at ~99%, MEASURE
     // collapses to ~0% - the 50% default sits in the middle of a wide gap.
-    return ( pct >= jumperlessConfig.calibration.probe_switch_blink_hold_pct ) ? 1 : 0;
+    return ( pct >= jumperlessConfig.probe.switch_blink_hold_pct ) ? 1 : 0;
 #endif
 }
 
@@ -6822,7 +6823,7 @@ int probeSwitchFeedBlinkNow( int* pct ) { return probeSwitchFeedBlink( pct ); }
 // ---------------------------------------------------------------------------
 void Probing::checkSwitchPositionFast( void ) {
     if ( !jumperlessConfig.debug.probe_switch_agree ) return;
-    if ( jumperlessConfig.dacs.auto_connect_probe <= 0 ) return;
+    if ( jumperlessConfig.probe.auto_connect <= 0 ) return;
     static unsigned long s_lastMs = 0;
     static int s_pending = -1;
     static int s_pendingCount = 0;
@@ -6981,7 +6982,7 @@ int Probing::getNothingTouched( int samples ) {
         mapFrom = nothingTouchedReading;
         // Serial.print("mapFrom: ");
         // Serial.println(mapFrom);
-        jumperlessConfig.calibration.probe_min = mapFrom;
+        jumperlessConfig.probe.pad_min = mapFrom;
 
         if ( loops > 5 ) {
             break;
@@ -7011,8 +7012,8 @@ void probeMapRange( int* mapMin, int* mapMax ) {
     // checkProbeCurrentRaw() stub returns 0mA which parks switchPosition at
     // 0 - so without this guard the measure path below would read a
     // nonexistent ADC channel. OG always decodes with the base pair.
-    *mapMin = jumperlessConfig.calibration.probe_min;
-    *mapMax = jumperlessConfig.calibration.probe_max;
+    *mapMin = jumperlessConfig.probe.pad_min;
+    *mapMax = jumperlessConfig.probe.pad_max;
     return;
 #endif
     static float cachedScale = 1.0f;
@@ -7020,8 +7021,8 @@ void probeMapRange( int* mapMin, int* mapMax ) {
     static bool inMeasure = false;
     if ( switchPosition != 0 ) { // select (or unknown): the calibrated frame
         inMeasure = false;
-        *mapMin = jumperlessConfig.calibration.probe_min;
-        *mapMax = jumperlessConfig.calibration.probe_max;
+        *mapMin = jumperlessConfig.probe.pad_min;
+        *mapMax = jumperlessConfig.probe.pad_max;
         return;
     }
     if ( !inMeasure ) {
@@ -7031,7 +7032,7 @@ void probeMapRange( int* mapMin, int* mapMax ) {
         inMeasure = true;
         lastScaleRead = 0;
     }
-    int mMin = jumperlessConfig.calibration.probe_min_measure;
+    int mMin = jumperlessConfig.probe.pad_min_measure;
     // Per-feed top endpoint. The ratiometric scale below cancels the tip
     // DRIVE VOLTAGE exactly (hardware-confirmed: moving
     // measure_mode_output_voltage does not move a decoded row), but it does
@@ -7040,12 +7041,12 @@ void probeMapRange( int* mapMin, int* mapMax ) {
     // under the pad ladder's load. So each feed carries its own max, and the
     // calibration app converges the two against the same physical pad.
     int mMax = ( s_gpioPowerIdx >= 0 )
-                   ? jumperlessConfig.calibration.probe_max_measure_gpio
-                   : jumperlessConfig.calibration.probe_max_measure;
+                   ? jumperlessConfig.probe.pad_max_measure_gpio
+                   : jumperlessConfig.probe.pad_max_measure;
     if ( mMin <= 0 )
-        mMin = jumperlessConfig.calibration.probe_min;
+        mMin = jumperlessConfig.probe.pad_min;
     if ( mMax <= 0 )
-        mMax = jumperlessConfig.calibration.probe_max;
+        mMax = jumperlessConfig.probe.pad_max;
     // The scale must be read (nearly) simultaneously with the pad decode:
     // the decode is ratiometric (pad reading = tip voltage x ladder ratio,
     // scale = tip voltage / 3.3), so the tip voltage cancels EXACTLY - but
@@ -7081,6 +7082,42 @@ unsigned long padNoTouch = 0;
 int lastPadTouchedTime = 0;
 int samePadCount = 0;
 
+// GPIO/DAC primitives shared with the MicroPython bridge - the idle pad
+// actions go through the same single source of truth Python uses.
+extern "C" {
+void jl_gpio_set( int pin, int value );
+int jl_gpio_get( int pin );
+void jl_dac_set( int channel, float voltage, int save );
+float jl_dac_get( int channel );
+}
+
+// Run a [logo_pads] *_idle action (padActionTable in configManager.h):
+// 1..8 = gpio toggle, 9..16 = gpio high, 17..24 = gpio low,
+// 25..28 = DAC 0/1 nudge up/down by 0.25V (clamped to the [dacs] limits).
+static void runPadIdleAction( int action ) {
+    char toast[ 32 ] = { 0 };
+    if ( action >= 1 && action <= 24 ) {
+        int gpio = ( ( action - 1 ) % 8 ) + 1;   // 1..8
+        int mode = ( action - 1 ) / 8;           // 0 toggle, 1 high, 2 low
+        int value = ( mode == 0 ) ? !jl_gpio_get( gpio ) : ( mode == 1 ? 1 : 0 );
+        jl_gpio_set( gpio, value );
+        snprintf( toast, sizeof( toast ), "GPIO %d\n%s", gpio, value ? "HIGH" : "LOW" );
+        Serial.printf( "\r\npad: GPIO %d -> %s\r\n", gpio, value ? "HIGH" : "LOW" );
+    } else if ( action >= 25 && action <= 28 ) {
+        int dac = ( action - 25 ) / 2;           // 0 or 1
+        float delta = ( ( action - 25 ) & 1 ) ? -0.25f : 0.25f;
+        float v = jl_dac_get( dac ) + delta;
+        if ( v > jumperlessConfig.dacs.limit_max ) v = jumperlessConfig.dacs.limit_max;
+        if ( v < jumperlessConfig.dacs.limit_min ) v = jumperlessConfig.dacs.limit_min;
+        jl_dac_set( dac, v, 1 );
+        snprintf( toast, sizeof( toast ), "DAC %d\n%.2f V", dac, (double)v );
+        Serial.printf( "\r\npad: DAC %d -> %.2f V\r\n", dac, (double)v );
+    } else {
+        return;
+    }
+    oled.clearPrintShow( toast, 2, 1200 );
+}
+
 void Probing::checkPads( void ) {
     // startProbe();
     checkingPads = 1;
@@ -7110,6 +7147,9 @@ void Probing::checkPads( void ) {
         }
     }
     if ( numberOfGoodReadings == 0 ) {
+        // Nothing touched: clear the edge tracker so the NEXT touch of the
+        // same pad counts as a new touch (idle actions re-arm on release).
+        lastPadTouched = 0;
         checkingPads = 0;
         return;
     }
@@ -7120,6 +7160,7 @@ void Probing::checkPads( void ) {
 
     // lastReadRaw = -1;
     if ( probeReading <= mapMin ) {
+        lastPadTouched = 0;  // released - re-arm the idle-action edge
         checkingPads = 0;
         return;
     }
@@ -7143,6 +7184,27 @@ void Probing::checkPads( void ) {
         samePadCount++;
     }
     lastPadTouched = probeReading;
+
+    // Idle-mode pad ACTIONS ([logo_pads] *_idle): fire exactly once per
+    // touch, after the reading has settled for 2 consecutive 20Hz polls
+    // (~100ms), only while the probe is parked in SELECT (measure-mode taps
+    // keep measuring the pad's node) and no pad menu is up. Connect/clear
+    // sessions never get here at all - ProbePads is a LOW service that the
+    // modal probe loop's inner set doesn't run. Release re-arms via the
+    // lastPadTouched resets above.
+    if ( samePadCount == 2 && inPadMenu == 0 && switchPosition == 1 ) {
+        int idleAction = 0;
+        switch ( probeReading ) {
+        case LOGO_PAD_TOP:        idleAction = logoTopSetting[ 1 ]; break;
+        case LOGO_PAD_BOTTOM:     idleAction = logoBottomSetting[ 1 ]; break;
+        case BUILDING_PAD_TOP:    idleAction = buildingTopSetting[ 1 ]; break;
+        case BUILDING_PAD_BOTTOM: idleAction = buildingBottomSetting[ 1 ]; break;
+        default: break;
+        }
+        if ( idleAction > 0 ) {
+            runPadIdleAction( idleAction );
+        }
+    }
     // Serial.print("probeReading: ");
     // Serial.println(probeReading);
     // Serial.flush();
@@ -7471,7 +7533,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // the ONE place every probe path - idle service, pad check, probe mode,
     // measure mode - decodes a touch, which is why the hook lives here and not
     // in the callers.
-    if ( average >= jumperlessConfig.calibration.minimum_probe_reading ) {
+    if ( average >= jumperlessConfig.probe.min_valid_reading ) {
         usb_audio_probe_activity( );
     }
 #endif
@@ -7485,7 +7547,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // outside measure position - re-arms.
     static bool measureTouchLatched = false;
     if ( switchPosition != 0 ||
-         average < jumperlessConfig.calibration.minimum_probe_reading ) {
+         average < jumperlessConfig.probe.min_valid_reading ) {
         measureTouchLatched = false;
     }
 
@@ -7504,7 +7566,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     //   //lastReadRaw = 4096;
     // }
 
-    if ( maxVariance <= 6 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) ) {
+    if ( maxVariance <= 6 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= jumperlessConfig.probe.min_valid_reading ) ) {
 
         // MEASURE position: contact engagement slews the pad reading over
         // several ms (the tip feeds the ladder through the crossbar - ~150
@@ -7558,7 +7620,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
 
     } else {
 
-        if ( allowDuplicates && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) &&
+        if ( allowDuplicates && ( average >= jumperlessConfig.probe.min_valid_reading ) &&
              maxVariance <= 6 &&
              abs( average - lastReadRaw ) <= 10 ) {
             if ( probeReadingIsPhantom( average, mapMin ) ) {
@@ -7568,7 +7630,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
             return average;
         }
 
-        if ( ( abs( average - lastReadRaw ) < 2 ) && allowDuplicates && ( average >= jumperlessConfig.calibration.minimum_probe_reading ) ) {
+        if ( ( abs( average - lastReadRaw ) < 2 ) && allowDuplicates && ( average >= jumperlessConfig.probe.min_valid_reading ) ) {
             if ( probeReadingIsPhantom( average, mapMin ) ) {
                 return -1;
             }
@@ -7591,11 +7653,17 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
 }
 
 int convertPadsToRows( int pad ) {
+    // Config-driven (it used to hardcode the defaults - with TOP/BOTTOM
+    // swapped relative to the connect path, no less - so measure-mode taps
+    // ignored the user's pad bindings entirely). "off"/"choose" fall back to
+    // the pad's default node so a measure tap always measures SOMETHING.
     int row = pad;
-    if ( pad == LOGO_PAD_BOTTOM ) {
-        row = RP_UART_TX;
-    } else if ( pad == LOGO_PAD_TOP ) {
-        row = RP_UART_RX;
+    if ( pad == LOGO_PAD_TOP ) {
+        row = resolveLogoPadAssignment( jumperlessConfig.logo_pads.top_guy, RP_UART_TX );
+        if ( row < 0 ) row = RP_UART_TX;
+    } else if ( pad == LOGO_PAD_BOTTOM ) {
+        row = resolveLogoPadAssignment( jumperlessConfig.logo_pads.bottom_guy, RP_UART_RX );
+        if ( row < 0 ) row = RP_UART_RX;
     } else if ( pad == GPIO_PAD ) {
         row = GPIO_PAD;
     } else if ( pad == DAC_PAD ) {
@@ -7603,9 +7671,11 @@ int convertPadsToRows( int pad ) {
     } else if ( pad == ADC_PAD ) {
         row = ADC_PAD;
     } else if ( pad == BUILDING_PAD_TOP ) {
-        row = ISENSE_PLUS;
+        row = resolveLogoPadAssignment( jumperlessConfig.logo_pads.building_pad_top, ISENSE_PLUS );
+        if ( row < 0 ) row = ISENSE_PLUS;
     } else if ( pad == BUILDING_PAD_BOTTOM ) {
-        row = ISENSE_MINUS;
+        row = resolveLogoPadAssignment( jumperlessConfig.logo_pads.building_pad_bottom, ISENSE_MINUS );
+        if ( row < 0 ) row = ISENSE_MINUS;
     }
     return row;
 }
@@ -7955,8 +8025,8 @@ void Probing::probeLEDhandler( void ) {
         static uint32_t s_lastFrameUs = 0;
         bool requested = ( showProbeLEDs != 0 );
         if ( !requested ) {
-            if ( !jumperlessConfig.hardware.probe_led_on_button_pin ) return;
-            uint32_t minUs = (uint32_t)jumperlessConfig.hardware.probe_led_refresh_us;
+            if ( !jumperlessConfig.probe.led_on_button_pin ) return;
+            uint32_t minUs = (uint32_t)jumperlessConfig.probe.led_refresh_us;
             if ( minUs > 0 && (uint32_t)( micros( ) - s_lastFrameUs ) < minUs ) return;
         } else {
             probeLedRequestCount++;

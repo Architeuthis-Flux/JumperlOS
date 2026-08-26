@@ -13,7 +13,7 @@
 #include "hardware/structs/sio.h" // sio_hw->cpuid for single-owner core check
 #include "pico/mutex.h"
 #include "pico/stdlib.h"
-#include "config.h"              // jumperlessConfig.hardware.encoder_pio (sampler block preference)
+#include "config.h"              // jumperlessConfig.clickwheel.encoder_pio (sampler block preference)
 #include "PioRegistry.h"         // sampler placement lands in X's PIO panel
 #include "encoder_sampler.pio.h" // the 1-instruction quadrature sampler (C7)
 #include "hardware/dma.h"
@@ -156,7 +156,7 @@ static void encSamplerInit( void ) {
     int nCand = 0;
     {
         PIO all[] = { pio0, pio1, pio2 };
-        int pref = jumperlessConfig.hardware.encoder_pio;
+        int pref = jumperlessConfig.clickwheel.encoder_pio;
         if ( pref >= 0 && pref <= 2 ) cand[ nCand++ ] = all[ pref ];
     }
     cand[ nCand++ ] = pio2;

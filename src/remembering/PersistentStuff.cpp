@@ -59,16 +59,16 @@ static void applyStoreToConfig(void) {
   jumperlessConfig.calibration.adc_3_zero = g_store.adc_3_zero; jumperlessConfig.calibration.adc_3_spread = g_store.adc_3_spread;
   jumperlessConfig.calibration.adc_4_zero = g_store.adc_4_zero; jumperlessConfig.calibration.adc_4_spread = g_store.adc_4_spread;
   jumperlessConfig.calibration.adc_7_zero = g_store.adc_7_zero; jumperlessConfig.calibration.adc_7_spread = g_store.adc_7_spread;
-  jumperlessConfig.calibration.probe_max  = g_store.probe_max;
-  jumperlessConfig.calibration.probe_min  = g_store.probe_min;
-  jumperlessConfig.calibration.probe_switch_threshold_high = g_store.probe_switch_threshold_high;
-  jumperlessConfig.calibration.probe_switch_threshold_low  = g_store.probe_switch_threshold_low;
-  jumperlessConfig.calibration.measure_mode_output_voltage = g_store.measure_mode_output_voltage;
+  jumperlessConfig.probe.pad_max  = g_store.probe_max;
+  jumperlessConfig.probe.pad_min  = g_store.probe_min;
+  jumperlessConfig.probe.switch_threshold_high = g_store.probe_switch_threshold_high;
+  jumperlessConfig.probe.switch_threshold_low  = g_store.probe_switch_threshold_low;
+  jumperlessConfig.probe.measure_voltage = g_store.measure_mode_output_voltage;
   // Store-wins runs after loadConfig(), so keep this band in sync with the
   // clamp there (configManager.cpp) or it is bypassed.
-  if (jumperlessConfig.calibration.measure_mode_output_voltage < 3.0f ||
-      jumperlessConfig.calibration.measure_mode_output_voltage > 3.6f) {
-    jumperlessConfig.calibration.measure_mode_output_voltage = 3.33f;
+  if (jumperlessConfig.probe.measure_voltage < 3.0f ||
+      jumperlessConfig.probe.measure_voltage > 3.6f) {
+    jumperlessConfig.probe.measure_voltage = 3.33f;
   }
 }
 
@@ -96,11 +96,11 @@ static void fillStoreFromConfig(void) {
   g_store.adc_3_zero = jumperlessConfig.calibration.adc_3_zero; g_store.adc_3_spread = jumperlessConfig.calibration.adc_3_spread;
   g_store.adc_4_zero = jumperlessConfig.calibration.adc_4_zero; g_store.adc_4_spread = jumperlessConfig.calibration.adc_4_spread;
   g_store.adc_7_zero = jumperlessConfig.calibration.adc_7_zero; g_store.adc_7_spread = jumperlessConfig.calibration.adc_7_spread;
-  g_store.probe_max = jumperlessConfig.calibration.probe_max;
-  g_store.probe_min = jumperlessConfig.calibration.probe_min;
-  g_store.probe_switch_threshold_high = jumperlessConfig.calibration.probe_switch_threshold_high;
-  g_store.probe_switch_threshold_low  = jumperlessConfig.calibration.probe_switch_threshold_low;
-  g_store.measure_mode_output_voltage = jumperlessConfig.calibration.measure_mode_output_voltage;
+  g_store.probe_max = jumperlessConfig.probe.pad_max;
+  g_store.probe_min = jumperlessConfig.probe.pad_min;
+  g_store.probe_switch_threshold_high = jumperlessConfig.probe.switch_threshold_high;
+  g_store.probe_switch_threshold_low  = jumperlessConfig.probe.switch_threshold_low;
+  g_store.measure_mode_output_voltage = jumperlessConfig.probe.measure_voltage;
 }
 
 bool eepromStoreLoadAndApplyIdentity(void) {
@@ -256,9 +256,9 @@ void debugFlagSet(int flag) {
     case 2:  debugNM    = !jumperlessConfig.debug.net_manager;        jumperlessConfig.debug.net_manager       = debugNM;    break;
     case 3:  debugNTCC  = !jumperlessConfig.debug.nets_to_chips;      jumperlessConfig.debug.nets_to_chips     = debugNTCC;  break;
     case 4:  debugNTCC2 = !jumperlessConfig.debug.nets_to_chips_alt;  jumperlessConfig.debug.nets_to_chips_alt = debugNTCC2; break;
-    case 5:  debugLEDs  = !jumperlessConfig.debug.leds;               jumperlessConfig.debug.leds              = debugLEDs;  break;
-    case 7:  showProbeCurrent = jumperlessConfig.debug.show_probe_current ? 0 : 1;
-             jumperlessConfig.debug.show_probe_current = showProbeCurrent; break;
+    case 5:  debugLEDs  = !debugLEDs;  break;  // runtime only (LED debug prints are compiled out; dropped from config.txt)
+    case 7:  showProbeCurrent = jumperlessConfig.measurement.show_probe_current ? 0 : 1;
+             jumperlessConfig.measurement.show_probe_current = showProbeCurrent; break;
     case 8:
       if (jumperlessConfig.serial_1.print_passthrough == 0)      jumperlessConfig.serial_1.print_passthrough = 2;
       else if (jumperlessConfig.serial_1.print_passthrough == 1) jumperlessConfig.serial_1.print_passthrough = 0;
@@ -279,9 +279,8 @@ void debugFlagSet(int flag) {
       jumperlessConfig.debug.net_manager       = false;
       jumperlessConfig.debug.nets_to_chips     = false;
       jumperlessConfig.debug.nets_to_chips_alt = false;
-      jumperlessConfig.debug.leds              = false;
       jumperlessConfig.debug.arduino           = 0;
-      jumperlessConfig.debug.show_probe_current = 0;
+      jumperlessConfig.measurement.show_probe_current = 0;
       saveConfig();
       Serial.println("All debug flags disabled (saved to config.txt)");
       break;
@@ -297,8 +296,7 @@ void debugFlagSet(int flag) {
       jumperlessConfig.debug.net_manager       = true;
       jumperlessConfig.debug.nets_to_chips     = true;
       jumperlessConfig.debug.nets_to_chips_alt = true;
-      jumperlessConfig.debug.leds              = true;
-      jumperlessConfig.debug.show_probe_current = 1;
+      jumperlessConfig.measurement.show_probe_current = 1;
       saveConfig();
       Serial.println("All debug flags enabled (saved to config.txt)");
       break;
@@ -354,12 +352,17 @@ void saveLogoBindings(void) {
   }
 
 void readLogoBindings(void) {
-  // Load from config.txt (called from readSettingsFromConfig). The [1] slot is
-  // a runtime-only companion value that was never meaningfully persisted.
+  // Load from config.txt (called from readSettingsFromConfig).
+  // [0] = the connect-mode node binding, [1] = the idle-mode tap action
+  // ([logo_pads] *_idle - dispatched by Probing::checkPads).
   logoTopSetting[0]        = jumperlessConfig.logo_pads.top_guy;
   logoBottomSetting[0]     = jumperlessConfig.logo_pads.bottom_guy;
   buildingTopSetting[0]    = jumperlessConfig.logo_pads.building_pad_top;
   buildingBottomSetting[0] = jumperlessConfig.logo_pads.building_pad_bottom;
+  logoTopSetting[1]        = jumperlessConfig.logo_pads.top_guy_idle;
+  logoBottomSetting[1]     = jumperlessConfig.logo_pads.bottom_guy_idle;
+  buildingTopSetting[1]    = jumperlessConfig.logo_pads.building_pad_top_idle;
+  buildingBottomSetting[1] = jumperlessConfig.logo_pads.building_pad_bottom_idle;
   }
 
 void saveLEDbrightness(int forceDefaults) {
@@ -564,6 +567,11 @@ void updateGPIOConfigFromState(void) {
 // gone too.)
 
 void readSettingsFromConfig() {
+  // Terminal colors + menu FX: push the persisted [terminal]/[clickwheel]
+  // options into their runtime homes (also called by the live-change hooks).
+  disableTerminalColors = !jumperlessConfig.terminal.colors;
+  configApplyMenuFx();
+
   // Debug flags
   debugFP = jumperlessConfig.debug.file_parsing;
   //debugFPtime = jumperlessConfig.debug_flags.file_parsing_time;
@@ -571,11 +579,11 @@ void readSettingsFromConfig() {
   //debugNMtime = jumperlessConfig.debug_flags.net_manager_time;
   debugNTCC = jumperlessConfig.debug.nets_to_chips;
   debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
-  debugLEDs = jumperlessConfig.debug.leds;
+  // debugLEDs is runtime-only now (its consumers are compiled out).
   debugProbing = jumperlessConfig.debug.probing ? 1 : 0;
   // Sync Arduino debug level to global
   debugArduino = jumperlessConfig.debug.arduino;
-  showProbeCurrent = jumperlessConfig.debug.show_probe_current;
+  showProbeCurrent = jumperlessConfig.measurement.show_probe_current;
 
   // Logo / building pad bindings (config is the source of truth now)
   readLogoBindings();
@@ -599,11 +607,8 @@ void readSettingsFromConfig() {
   if (LEDbrightnessSpecial < 100) LEDbrightnessSpecial = 100;
 #endif
 
-  // // Routing settings
-  // pathDuplicates = jumperlessConfig.routing.stack_paths;
-  // powerDuplicates = jumperlessConfig.routing.stack_rails;  // powerDuplicates is used for rail stacking
-  // dacDuplicates = jumperlessConfig.routing.stack_dacs;    // dacDuplicates is used for DAC stacking
-  // dacPriority = jumperlessConfig.routing.rail_priority;
+  // Routing stacking counts are read directly from jumperlessConfig.routing
+  // by the routing code; no runtime mirrors needed here.
 
   // DAC calibration
   dacSpread[0] = jumperlessConfig.calibration.dac_0_spread;

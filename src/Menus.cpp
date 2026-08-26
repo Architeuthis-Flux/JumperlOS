@@ -4683,12 +4683,7 @@ int doMenuAction( int menuPosition, int selection ) {
                 jumperlessConfig.routing.stack_rails = currentAction.from[ 0 ];
 
                 if ( currentAction.fromAscii[ 0 ][ 0 ] == 'M' || currentAction.fromAscii[ 0 ][ 0 ] == 'm' ) {
-
-                    jumperlessConfig.routing.rail_priority = 2;
                     jumperlessConfig.routing.stack_rails = 7;
-
-                } else {
-                    jumperlessConfig.routing.rail_priority = 1;
                 }
 
             } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Paths" ) != -1 ) {
@@ -4716,9 +4711,6 @@ int doMenuAction( int menuPosition, int selection ) {
         }
         Serial.print( "\n\rDuplicate Rails: " );
         Serial.println( jumperlessConfig.routing.stack_rails );
-
-        Serial.print( "Rail Priority: " );
-        Serial.println( jumperlessConfig.routing.rail_priority );
 
         Serial.print( "Duplicate DACs: " );
         Serial.print( jumperlessConfig.routing.stack_dacs );

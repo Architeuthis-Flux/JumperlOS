@@ -222,8 +222,8 @@ void PowerState::setDefaults() {
     // same gate infra's enProbePower() applies), so leave both DACs at
     // their non-probe defaults.
     extern volatile bool configLoaded;
-    if (configLoaded && jumperlessConfig.dacs.auto_connect_probe > 0) {
-        dac0 = jumperlessConfig.calibration.measure_mode_output_voltage;
+    if (configLoaded && jumperlessConfig.probe.auto_connect > 0) {
+        dac0 = jumperlessConfig.probe.measure_voltage;
     }
 }
 

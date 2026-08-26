@@ -2830,16 +2830,16 @@ extern "C" int jl_check_switch_position( void ) {
 // enable: 1 = on, 0 = off (temporary, until reboot), -1 = query current state
 extern "C" int jl_probe_autoconnect( int enable ) {
     if ( enable == -1 ) {
-        return jumperlessConfig.dacs.auto_connect_probe;
+        return jumperlessConfig.probe.auto_connect;
     }
     if ( enable ) {
-        jumperlessConfig.dacs.auto_connect_probe = 1;
+        jumperlessConfig.probe.auto_connect = 1;
         probing.routableBufferPower( 1, 0, 1 );
     } else {
-        jumperlessConfig.dacs.auto_connect_probe = 0;
+        jumperlessConfig.probe.auto_connect = 0;
         probing.routableBufferPower( 0, 0, 1 );
     }
-    return jumperlessConfig.dacs.auto_connect_probe;
+    return jumperlessConfig.probe.auto_connect;
 }
 
 // Clickwheel (Rotary Encoder) Functions

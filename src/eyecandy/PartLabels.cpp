@@ -26,6 +26,7 @@
 #include "Highlighting.h"      // highlighting (net highlight/brighten state)
 #include "NetManager.h"        // findNodeInNet
 #include "PartPlacement.h"     // partPinNode
+#include "partdb/PartDb.h"     // partdbResolveDriver - overvolt warn is display-only
 #include "Peripherals.h"       // railHwVolts, getDacHardwareVoltage
 #include "Probing.h"           // probing, switchPosition
 #include "ReadingDisplay.h"
@@ -60,13 +61,14 @@ static const unsigned long LBL_SWITCH_DEBOUNCE_MS = 300;
 // the probe really lifted, not that a held row is being rate-limited.
 static const unsigned long LBL_LIFT_MS = 700;
 
-enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT };
+enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT };
 
 static const char* warnReasonName(uint8_t r) {
     switch (r) {
         case WARN_VCC_TO_GND: return "vcc_to_gnd";
         case WARN_GND_TO_HOT: return "gnd_to_hot";
         case WARN_SELF_SHORT: return "self_short";
+        case WARN_POWER_OVERVOLT: return "power_overvolt";
         default:              return "none";
     }
 }
@@ -246,6 +248,21 @@ void PartLabels::evaluateWarnings() {
                 if (shorted) {
                     newMask |= (1u << i); newReason[i] = WARN_SELF_SHORT; newPin[i] = (int8_t)j;
                     break;
+                }
+                // 3.3V panels riding a hot rail: at 4V the bench panel NACKed
+                // at random byte offsets until the display cycled lost/alive.
+                // Only display-driver parts get this - plenty of logic is
+                // happy at 5V, but every panel we drive is a 3.3V part.
+                if (partdbResolveDriver(p) != nullptr) {
+                    float v = 0.0f;
+                    if (netContainsNode(netNum, TOP_RAIL))         v = top;
+                    else if (netContainsNode(netNum, BOTTOM_RAIL)) v = bot;
+                    else if (netContainsNode(netNum, DAC0))        v = d0;
+                    else if (netContainsNode(netNum, DAC1))        v = d1;
+                    if (v > 3.6f) {
+                        newMask |= (1u << i); newReason[i] = WARN_POWER_OVERVOLT; newPin[i] = (int8_t)j;
+                        break;
+                    }
                 }
             } else if (pin.pinClass == 2) {   // gnd-class pin
                 bool hot = (netContainsNode(netNum, TOP_RAIL) && fabsf(top) > 0.25f) ||

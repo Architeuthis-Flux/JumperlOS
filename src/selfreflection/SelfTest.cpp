@@ -510,12 +510,12 @@ static void runProbeCableTest( SelfTestReport& r ) {
     } else if ( tipPosCable >= 0 ) {
         selectPos = ( tipPosCable == 1 ); // tip sense knows
     } else {
-        selectPos = ( curOff > jumperlessConfig.calibration.probe_switch_threshold_high );
+        selectPos = ( curOff > jumperlessConfig.probe.switch_threshold_high );
     }
 
     Serial.printf( "    LED off: %.3f mA, LED white: %.3f mA, delta: %.3f mA (zero offset %.3f)  tip sense: %s\n\r",
                    (double)curOff, (double)curOn, (double)ledDelta,
-                   (double)jumperlessConfig.calibration.probe_current_zero,
+                   (double)jumperlessConfig.probe.current_zero,
                    tipPosCable == 0 ? "H (measure)" : ( tipPosCable == 1 ? "L (select)" : "-" ) );
     Serial.printf( "    inferred switch position: %s (from %s)%s\n\r",
                    selectPos ? "select" : "measure",
@@ -537,8 +537,8 @@ static void runProbeCableTest( SelfTestReport& r ) {
     }
     int tipRaw = (int)medianInPlace( tipSamples, 9 );
     Serial.printf( "    idle raw reading (median of 9x8): %d/4095 (probe_min:%d probe_max:%d)\n\r",
-                   tipRaw, jumperlessConfig.calibration.probe_min,
-                   jumperlessConfig.calibration.probe_max );
+                   tipRaw, jumperlessConfig.probe.pad_min,
+                   jumperlessConfig.probe.pad_max );
 
     bool shortOk = ( fwd == 2 && rev == 2 );
     // ponytail: the absolute window stays wide (-1.5..8 mA) because the
@@ -549,7 +549,7 @@ static void runProbeCableTest( SelfTestReport& r ) {
     // parks a healthy measure-position no-load baseline at -2.0 mA - below
     // the corrected window's floor, failing every board whose switch sat in
     // measure during an unattended test.
-    float curOffRaw = curOff + jumperlessConfig.calibration.probe_current_zero;
+    float curOffRaw = curOff + jumperlessConfig.probe.current_zero;
     bool curOk = ( curOffRaw > -1.5f && curOffRaw < 8.0f );
     bool tipOk = ( tipRaw < 4090 ); // pegged high = tip divider shorted to supply
     // In SELECT position a healthy cable MUST show the LED current step.
@@ -915,7 +915,7 @@ static void runTipVoltageTest( SelfTestReport& r ) {
         }
     }
 
-    float set = jumperlessConfig.calibration.measure_mode_output_voltage;
+    float set = jumperlessConfig.probe.measure_voltage;
     if ( set < 2.8f || set > 5.0f )
         set = 3.33f;
 
@@ -1006,12 +1006,12 @@ static void runTipVoltageTest( SelfTestReport& r ) {
                           (double)v0, (double)vL, (double)i_mA,
                           (double)droopOhmsMeasured );
             if ( droopOhmsMeasured >= 10.0f && droopOhmsMeasured <= 400.0f ) {
-                jumperlessConfig.calibration.probe_droop_ohms = droopOhmsMeasured;
+                jumperlessConfig.probe.droop_ohms = droopOhmsMeasured;
                 // V0 is the UNLOADED tip: only trust it when the tip sense
                 // said MEASURE (or could not tell) - in SELECT the LED chip
                 // sits on BUFFER_IN and this reads its idle level instead.
                 if ( v0 >= 3.0f && v0 <= 3.6f && tipPosAtStart != 1 ) {
-                    jumperlessConfig.calibration.probe_droop_v0 = v0;
+                    jumperlessConfig.probe.droop_v0 = v0;
                 } else if ( tipPosAtStart == 1 ) {
                     Serial.println( "  (tip sense: SELECT - V0 not stored, the tip was not unloaded)" );
                 }
@@ -1045,7 +1045,7 @@ static void runTipVoltageTest( SelfTestReport& r ) {
         // stays ~4040 raw regardless of the servo result (a 3.33->3.18V servo
         // dragged probe_max 4055->3867 and shifted the pad->row map). probe_max
         // belongs to the Probe Pads calibration alone.
-        jumperlessConfig.calibration.measure_mode_output_voltage = set;
+        jumperlessConfig.probe.measure_voltage = set;
         saveConfig( ); // synchronous: first-start restarts right after this
         r.status[ SELFTEST_TIP_VOLTAGE ] = SELFTEST_PASS;
     } else {

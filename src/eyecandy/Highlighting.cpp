@@ -985,7 +985,7 @@ static void uartRefreshLiveView( bool tx, bool rx, const char* txSnapshot,
 // persistent highlight, the button-press claim, and the prompt - so an
 // OLED-less board on the default setting behaves exactly as before.
 static bool clickAdjustEnabled( void ) {
-    int flag = jumperlessConfig.dacs.rail_click_adjust;
+    int flag = jumperlessConfig.clickwheel.rail_click_adjust;
     return flag == 2 || ( flag == 1 && oledConnected );
 }
 

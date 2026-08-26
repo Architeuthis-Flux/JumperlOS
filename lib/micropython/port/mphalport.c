@@ -236,17 +236,15 @@ extern int arduino_serial_available(void *stream);
 // sys_stdio_mphal.c provides the canonical sys.stdin/stdout/stderr objects.
 // It needs these three HAL functions from the port:
 //   mp_hal_stdin_rx_chr()  — already implemented above
-//   mp_hal_stdout_tx_strn_cooked()  — implemented here
+//   mp_hal_stdout_tx_strn_cooked()  — Python_Proper.cpp (the Jumperless
+//     implementation: UART response capture, mid-print interrupt checks,
+//     OLED copy). Do NOT re-add a stub here: both definitions are strong
+//     and -Wl,--allow-multiple-definition hands the win to whichever
+//     object links first — a stub here silently shadowed the real one
+//     for months (pending finding #17).
 //   mp_hal_stdio_poll()  — implemented here
 
 #include "py/stream.h"
-
-// Send string of given length to stdout, converting \n to \r\n.
-void mp_hal_stdout_tx_strn_cooked(const char *str, size_t len) {
-    // For our USB CDC stream, raw output is fine — the terminal handles \n.
-    // If a host needs \r\n, the stream adapter or terminal emulator handles it.
-    mp_hal_stdout_tx_strn(str, len);
-}
 
 // Poll stdin/stdout for readability/writability.
 // Called by sys_stdio_mphal.c's ioctl handler for select.poll() support.

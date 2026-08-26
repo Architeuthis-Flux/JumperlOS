@@ -65,7 +65,6 @@
 #include "WaveGen.h"
 #include "KickGap.h" // would-be watchdog kick from the LEGACY stream loop (T1.6 measure-only)
 #include <math.h>
-#include <new>  // For std::nothrow
 #include "hardware/dma.h"
 #include "hardware/i2c.h"
 #include "hardware/clocks.h"
@@ -88,6 +87,35 @@ static uint32_t __attribute__((aligned(2048))) s_addrRing[512];
 #define WG_BITS_PER_SAMPLE 40.0f
 // IC_DATA_CMD bits
 #define WG_DC_STOP I2C_IC_DATA_CMD_STOP_BITS
+
+// ---------------------------------------------------------------------------
+// The BUS WINDOW (#38). The I2C0 arbiter below pauses the stream per foreign
+// TRANSACTION, which is the right unit for a REPL dac_set(). It is the wrong
+// unit for an OLED (re)init on the shared bus: that is a whole SEQUENCE, and
+// most of it is not a transaction the arbiter can see at all - initI2C()'s
+// Wire.setSDA()/setSCL()/setClock()/begin() reprogram the I2C block itself,
+// and TwoWire's 0-length probe bit-bangs SDA/SCL as GPIO. Any of those landing
+// between two DMA bursts corrupts the stream or wedges the block, and on the
+// legacy fallback the per-sample loop is on CORE 1 with no lock at all
+// (pending #25). So oled::init() opens a window instead: BOTH wavegen paths
+// are quiesced for the whole init - the DMA stream drained to a sample
+// boundary and held there, the core-1 loop parked off the bus - and the wave
+// resumes when the window closes. One gap in the waveform instead of a race.
+//
+// The hold is bounded: the window carries a deadline, and past it the
+// monitor's existing force-release fires as usual, so a window that is never
+// closed cannot stop the wave forever.
+static volatile bool     s_busWindow = false;
+static volatile uint32_t s_busWindowDeadlineUs = 0;
+static volatile bool     s_busWindowPaused = false;  // the window took the DMA pause, so it owns the resume
+// Core 0 asks (s_legacyYieldReq), core 1 answers (s_legacyParked). The legacy
+// loop's transactions are one sample each, so any loop boundary is a STOP -
+// parking there always leaves the bus idle. Invariant: s_legacyParked == true
+// means core 1 is NOT inside the streaming loop, because re-entering it costs
+// a pass through the top-of-function check that re-parks while the request
+// stands.
+static volatile bool s_legacyYieldReq = false;
+static volatile bool s_legacyParked = false;
 
 /*!
  *    @brief  Constructor
@@ -174,11 +202,7 @@ bool WaveGen::begin(uint8_t i2c_address, TwoWire *wire) {
 
     // Allocate waveform table buffer
     if (!_waveform_table_allocated) {
-        _waveform_table = new (std::nothrow) uint16_t[MAX_WAVEFORM_TABLE_SIZE];
-        if (_waveform_table == nullptr) {
-            Serial.println("WaveGen: Failed to allocate waveform table");
-            return false;
-        }
+        _waveform_table = new uint16_t[MAX_WAVEFORM_TABLE_SIZE];
         _waveform_table_allocated = true;
         memset((void*)_waveform_table, 0, MAX_WAVEFORM_TABLE_SIZE * sizeof(uint16_t));
     }
@@ -348,6 +372,12 @@ void WaveGen::_serviceLegacy() {
     // BLOCKING streaming loop for core2: keep the I2C transaction open and
     // write samples continuously. Only exit when stopped or params change.
 
+    // A bus window is open (an OLED reinit on the shared I2C0 bus): park here,
+    // off the bus, and say so. Clearing the flag only once the request is gone
+    // keeps the invariant core 0 waits on - see s_legacyParked above.
+    if (s_legacyYieldReq) { s_legacyParked = true; return; }
+    s_legacyParked = false;
+
     // If params changed, rebuild tables and restart streaming
     if (_params_changed) {
         _updateTableSize();
@@ -366,7 +396,7 @@ void WaveGen::_serviceLegacy() {
     // Per-sample repeated-START streaming to keep bus flow continuous and avoid
     // long buffered drains. Each sample is its own short transaction.
 
-    while (_running && !_params_changed && samples_sent_this_call < samples_to_send) {
+    while (_running && !_params_changed && !s_legacyYieldReq && samples_sent_this_call < samples_to_send) {
         // Would-be watchdog kick from the core-1 stream loop (measure-only
         // stage, KickGap.h): a >= 1 kHz stream holds core 1 here for its whole
         // duration - the site the T1.6 numbers said an enable needs.
@@ -401,6 +431,10 @@ void WaveGen::_serviceLegacy() {
             _indices_since_stats = 0;
         }
     }
+
+    // Left the loop because a window opened: the last sample ended with a
+    // STOP, so the bus is idle - tell core 0 it can have it.
+    if (s_legacyYieldReq) s_legacyParked = true;
 
     // Periodic frequency estimate
     uint32_t now = micros();
@@ -727,8 +761,7 @@ void WaveGen::_dmaClaim() {
 #endif
     if (_dac.getWire() != &Wire) { _dmaFallbackReason = 1; return; }   // the image is I2C0's
     if (!_imageAllocated) {
-        _image = new (std::nothrow) uint16_t[MAX_WAVEFORM_TABLE_SIZE * 3];
-        if (_image == nullptr) { _dmaFallbackReason = 4; return; }
+        _image = new uint16_t[MAX_WAVEFORM_TABLE_SIZE * 3];
         _imageAllocated = true;
     }
     int a = dma_claim_unused_channel(false);
@@ -826,6 +859,58 @@ void WaveGen::busResume() {
 extern WaveGen wavegen;
 extern "C" bool wavegenBusPause(void) { return wavegen.busPause(); }
 extern "C" void wavegenBusResume(void) { wavegen.busResume(); }
+
+// The bus window's entry points (oled.cpp): quiesce EVERY wavegen path on
+// I2C0 for the duration of a foreign SEQUENCE the arbiter cannot see - see
+// s_busWindow at the top of this file. maxMs bounds the hold.
+//
+// Returns 0 = nothing to quiesce (no wave running, or an outer window is
+//             already open and owns the bus) - do NOT call the exit;
+//         1 = quiesced, the caller owns the window and must call the exit;
+//         2 = the same, but the core-1 legacy loop did not park inside the
+//             budget: the caller proceeds anyway (Wire's own 15 ms timeout
+//             with reset_with_timeout bounds a collision) and should say so.
+//
+// Callers are core 0 (every OLED init path is, and so is every wavegen
+// start/stop), so a wave cannot appear while a window is open.
+extern "C" int wavegenBusWindowEnter(uint32_t maxMs) {
+    if (s_busWindow) return 0;             // an outer window already owns it
+    if (!wavegen.isRunning()) return 0;    // nothing on the bus to quiesce
+    if (maxMs == 0 || maxMs > 5000) maxMs = 2000;
+    // Deadline before the flag: core 1's monitor reads both unlocked.
+    s_busWindowDeadlineUs = time_us_32() + maxMs * 1000u;
+    __dmb();
+    s_busWindow = true;
+
+    // 1. The DMA stream: pacing off, in-flight burst drained, bus idle. Same
+    //    call the arbiter makes per transaction; a pause already held by the
+    //    arbiter returns false and stays held, which is equally fine.
+    s_busWindowPaused = wavegen.busPause();
+
+    // 2. The legacy per-sample loop (OG always, V5 when the DMA claim failed):
+    //    it is core 1's, so ask and wait - bounded. Never from core 1 itself:
+    //    that IS the loop, and it would be waiting on itself.
+    int status = 1;
+    if (wavegen.isCoreLoopStreaming() && get_core_num() != 1) {
+        s_legacyYieldReq = true;
+        __sev();
+        uint32_t t0 = time_us_32();
+        while (!s_legacyParked && (time_us_32() - t0) < 20000) { tight_loop_contents(); }
+        if (!s_legacyParked) status = 2;
+    }
+    return status;
+}
+
+extern "C" void wavegenBusWindowExit(void) {
+    if (!s_busWindow) return;
+    s_legacyYieldReq = false;   // core 1 clears s_legacyParked when it streams again
+    __sev();
+    if (s_busWindowPaused) {
+        s_busWindowPaused = false;
+        wavegen.busResume();
+    }
+    s_busWindow = false;
+}
 
 void WaveGen::_dmaBuildImage() {
     uint32_t N = _plan.N;
@@ -1010,8 +1095,12 @@ void WaveGen::_dmaMonitor() {
     uint32_t now = time_us_32();
     // A pause the arbiter held for a repeated-START pair whose second half
     // never came (a Wire error path): release it - the stream must not stay
-    // paused forever.
-    if (_busPaused && (now - _busPauseStartUs) > 100000) {
+    // paused forever. A bus window holds the pause deliberately and for much
+    // longer than one transaction (an OLED reinit is hundreds of ms), so it
+    // gets its own deadline instead of the 100 ms one - after which this
+    // releases anyway, and the window is bounded rather than open-ended.
+    if (_busPaused && (now - _busPauseStartUs) > 100000 &&
+        (!s_busWindow || (int32_t)(now - s_busWindowDeadlineUs) > 0)) {
         i2c0ArbiterForceRelease();
         busResume();
         _busForcedResumes++;

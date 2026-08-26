@@ -961,7 +961,7 @@ static void computePathCurrents() {
     for (int i = 0; i < MAX_NETS; i++) netCurrentInfo[i].valid = false;
 
     int numPaths = livePathCount();
-    float rXpoint = jumperlessConfig.calibration.crosspoint_resistance;
+    float rXpoint = jumperlessConfig.measurement.crosspoint_resistance;
     if (rXpoint < 1.0f) rXpoint = 1.0f;
     uint32_t ms = millis();
 
@@ -1174,7 +1174,7 @@ bool nodeVoltageValid(int node) {
 }
 
 void printNetVoltageScanStats(Stream* out) {
-    if (!jumperlessConfig.display.net_currents) {
+    if (!jumperlessConfig.measurement.net_currents) {
         out->println("[nvscan] net current scan is off ('i' to enable)");
         return;
     }
@@ -1389,7 +1389,7 @@ void serviceNetVoltageScan(void) {
     serviceOneShotTap();
 
     static bool wasEnabled = false;
-    if (!jumperlessConfig.display.net_currents) {
+    if (!jumperlessConfig.measurement.net_currents) {
         if (wasEnabled) {
             // Leave nothing stale behind for the display consumers.
             memset(nodeVoltageMs, 0, sizeof(nodeVoltageMs));
@@ -1559,7 +1559,7 @@ void serviceNetVoltageScan(void) {
 // dry-runs (planFastPath) are read-only.
 void serviceNetVoltageScanDebug(void) {
     if (!jumperlessConfig.debug.net_voltage_scan) return;
-    if (!jumperlessConfig.display.net_currents) return;
+    if (!jumperlessConfig.measurement.net_currents) return;
     static unsigned long lastDebugPrintMs = 0;
     if (millis() - lastDebugPrintMs < 1000) return;
     lastDebugPrintMs = millis();

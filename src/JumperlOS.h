@@ -274,12 +274,13 @@ public:
     /**
      * @brief Execute services needed during MicroPython REPL execution
      *
-     * = serviceInner() (it used to be a hand-rolled subset: the USB pump +
-     * Peripherals; the inner set is that plus ProbeButton, MpRemote (its own
-     * reentrancy guard defers USBSer2 while a script runs) and
-     * AsyncPassthrough). No caller in src/ today - mp_hal_delay_ms in
-     * Python_Proper.cpp calls serviceInner() directly; kept as a named entry
-     * point for the MicroPython side.
+     * Same inner-set pass as serviceInner(), but NOT counted as a UI-modal
+     * context: mp_hal_delay_ms pumps the inner set every 50 ms for a whole
+     * script's lifetime, which made every running script read as "modal" and
+     * engaged DisplayService's three modal gates (a panel placed during a long
+     * script never came alive). THIS is the entry the MicroPython delay hook
+     * must use; serviceInner() means "a blocking UI interaction owns the
+     * loop".
      */
     void servicePython();
     
@@ -326,7 +327,32 @@ public:
      * getBlockingService() alone is nullptr inside the synchronous loops.
      */
     bool inModalContext() const { return innerDepth > 0 || blockingService != nullptr; }
-    
+
+    /**
+     * @brief True while a UI-MODAL context owns the loop: a blocking service,
+     * a synchronous modal UI loop pumping serviceInner() (probe mode,
+     * click/pad menus, pickers, the apps' input loops), or an explicit
+     * enterUiModal() bracket.
+     *
+     * This is inModalContext() MINUS the script pump. Every serviceInner()
+     * caller in src/ is a blocking user interaction except the MicroPython
+     * delay hook, which pumps the same set every 50 ms for a whole script -
+     * so the entry point is the discriminator: serviceInner() = UI modal,
+     * servicePython() = a script/ambient pump. Services that defer heavy work
+     * because a HUMAN is waiting on the loop want THIS; inModalContext() is
+     * still the raw "someone else owns the loop" depth.
+     */
+    bool isUiModal() const { return uiModalDepth > 0 || blockingService != nullptr; }
+
+    /**
+     * @brief Declare/undeclare a UI-modal bracket by hand, for a modal loop
+     * that does NOT pump serviceInner() (or one opened from inside a script,
+     * where the entry point can't tell). Push/pop, must be balanced.
+     */
+    void enterUiModal() { if (uiModalDepth < 255) uiModalDepth++; }
+    void exitUiModal()  { if (uiModalDepth > 0)   uiModalDepth--; }
+
+
     /**
      * @brief Check if any service is currently blocking
      */
@@ -349,7 +375,9 @@ private:
     uint8_t serviceCount;
     uint8_t coreId;
     Service* blockingService;
-    uint8_t innerDepth = 0;   // nested serviceInner() dispatch depth (modal loops)
+    uint8_t innerDepth = 0;   // nested inner-set dispatch depth (any pumper)
+    uint8_t uiModalDepth = 0; // ...of which a HUMAN is waiting on: serviceInner()
+                              // and explicit enterUiModal(), never servicePython()
 
     // serviceAll() passes since boot (diagnostics; the old per-band loop
     // divisors that hung off it are gone - periods replaced them).
@@ -358,6 +386,13 @@ private:
     // Core 1 singleton instance
     // Sort services by priority (simple bubble sort - small array)
     void sortServicesByPriority();
+
+    /**
+     * @brief The one inner-set pass behind serviceInner() and servicePython().
+     * @param uiModal count this pass as a UI-modal context (a human is waiting
+     *        on the loop) as well as inner-dispatch depth.
+     */
+    void serviceInnerPass(bool uiModal);
 
     /**
      * @brief The due-or-pending gate. Captures (and, only if set, clears)

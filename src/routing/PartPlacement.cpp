@@ -719,6 +719,38 @@ static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool&
         Serial.println("); it will be lost on the next save.");
         return;
     }
+    // NAMES ARE IDENTITY, so they have to be unique on the LOAD path too.
+    // jl_remove_part() resolves by name, findByName is the serializer's own
+    // lookup, and the display service binds its panel by name - but slot files
+    // are hand-editable text whose default names are non-unique by
+    // construction (partdbInstantiate names every SSD1306 record "SSD1306").
+    // Both CREATE paths already uniquify (PartsApp.cpp) or refuse
+    // (jl_place_part); this was the hole. Same scheme as PartsApp: NE555,
+    // NE555_2, ... capped at MAX_PARTS, base truncated to leave room for "_16".
+    if (st.parts.findByName(p.name) >= 0) {
+        char base[16];
+        strncpy(base, p.name, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
+        if (strlen(base) > 12) base[12] = '\0';
+        bool named = false;
+        for (int suffix = 2; suffix <= MAX_PARTS; suffix++) {
+            snprintf(p.name, sizeof(p.name), "%s_%d", base, suffix);
+            if (st.parts.findByName(p.name) < 0) { named = true; break; }
+        }
+        if (!named) {
+            // Unreachable while MAX_PARTS suffixes cover MAX_PARTS entries;
+            // dropping beats committing a silent duplicate.
+            Serial.print("Dropping part '"); Serial.print(base);
+            Serial.println("' - duplicate name and no free suffix.");
+            err += "part " + String(base) + ": duplicate name (dropped); ";
+            return;
+        }
+        Serial.print("part '"); Serial.print(base);
+        Serial.print("': duplicate name - renamed to ");
+        Serial.print(p.name); Serial.println(".");
+        err += "part " + String(base) + ": duplicate name - renamed to " +
+               String(p.name) + "; ";
+    }
     st.parts.parts[st.parts.numParts++] = p;
 }
 

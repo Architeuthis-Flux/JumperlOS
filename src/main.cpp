@@ -377,13 +377,14 @@ void setup( ) {
         dumpLED = 1;
     }
 
+    // A UART in OLED mode gets the mirror via Jerial's endpoint fan-out, so
+    // just turn the mirror ON (port_1 = the Jerial path). The old 2/3 values
+    // predate show_in_terminal being a real port selector.
     if ( jumperlessConfig.serial_1.function == 4 ||
-         jumperlessConfig.serial_1.function == 6 ) {
-        jumperlessConfig.top_oled.show_in_terminal = 2;
-    }
-    if ( jumperlessConfig.serial_2.function == 4 ||
+         jumperlessConfig.serial_1.function == 6 ||
+         jumperlessConfig.serial_2.function == 4 ||
          jumperlessConfig.serial_2.function == 6 ) {
-        jumperlessConfig.top_oled.show_in_terminal = 3;
+        jumperlessConfig.top_oled.show_in_terminal = 1;
     }
 
     // Jerial.addOutputStream(JerialEndpoint::USB_SER2);  // Output to Serial1
@@ -407,7 +408,7 @@ void setup( ) {
     // When probe_led_on_button_pin is set, GPIO9 belongs to probeLEDs (claimed
     // in initLEDs() on core1, possibly concurrently with this code) - touching
     // it here would clobber its PIO funcsel.
-    if ( jumperlessConfig.hardware.probe_led_on_button_pin ) {
+    if ( jumperlessConfig.probe.led_on_button_pin ) {
         pinMode( PROBE_LED_PIN, INPUT_PULLDOWN );
     } else {
         pinMode( BUTTON_PIN, INPUT_PULLDOWN );
@@ -826,6 +827,23 @@ menu:
             // probeCalibApp();
             firstStart = false;
         }
+
+        // Migration sentinel: probe.droop_ohms == 0 means the probe switch /
+        // droop calibration has never run on this board (it predates the
+        // pad/switch calibration apps). Run it once after the update - it's
+        // quick and self-guided; skipping it leaves the switch classifier on
+        // the empirical fallback constants.
+        if ( probeCalibrationNeeded == true && firstStart == false ) {
+            probeCalibrationNeeded = false;
+            changeTerminalColor( 213, true );
+            Serial.println( "\n\rThis firmware update added probe switch/droop "
+                            "calibration that this board has never run." );
+            Serial.println( "Starting Switch Calib now (also reachable later: "
+                            "clickwheel menu > Calibration > Switch Thresh)." );
+            changeTerminalColor( -1, true );
+            delay( 1500 );
+            calibrateProbeSwitchThresholds( );
+        }
         firstLoop = 2;
 
         // Decide which context to come up in BEFORE the first loadfile: pass.
@@ -865,7 +883,7 @@ menu:
         // left for the next ~500ms service tick). Verify the feed actually
         // routed and force one synchronous rebuild if not - the probe must be
         // powered and parked before the user's first tap, every boot.
-        if ( jumperlessConfig.dacs.auto_connect_probe > 0 &&
+        if ( jumperlessConfig.probe.auto_connect > 0 &&
              infraProbePowerSource( ) < 0 ) {
             refreshLocalConnections( 0, 1, 0 );
         }
@@ -988,7 +1006,7 @@ dontshowmenu:
 
     // Calculate whether to use line buffering (variables declared at function scope)
     hasRelayedData = ( Jerial.getRelayStream( ) && Jerial.getRelayStream( )->available( ) > 0 );
-    useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasRelayedData;
+    useLineBuffering = ( jumperlessConfig.terminal.line_buffering == 1 ) || hasRelayedData;
 
     // DEBUG DISABLED: Heartbeat markers removed to minimize USB pressure
     static uint32_t heartbeatCounter = 0;
@@ -1006,7 +1024,7 @@ dontshowmenu:
 
         // Recalculate useLineBuffering each iteration
         hasRelayedData = ( Jerial.getRelayStream( ) && Jerial.getRelayStream( )->available( ) > 0 );
-        useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasRelayedData;
+        useLineBuffering = ( jumperlessConfig.terminal.line_buffering == 1 ) || hasRelayedData;
 
         unsigned long loopStart = micros( );
 
@@ -1830,7 +1848,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             if ( rails != 2 && rails != 3 &&
                  ( inClickMenu == 0 || SlotManager::getInstance( ).isPreviewMode( ) ||
                    g_historyScrubActive ) &&
-                 inPadMenu == 0 && hideNets == 0 ) {
+                 inPadMenu == 0 ) {
                 needsLedShow = true;
 
                 // Skip defcon display when previewing slots - always show nets

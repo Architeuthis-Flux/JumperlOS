@@ -78,10 +78,10 @@ debugFlags:
   bool temp_debugNM = jumperlessConfig.debug.net_manager;
   bool temp_debugNTCC = jumperlessConfig.debug.nets_to_chips;
   bool temp_debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
-  bool temp_debugLEDs = jumperlessConfig.debug.leds;
+  bool temp_debugLEDs = debugLEDs;  // runtime-only (dropped from config.txt)
   bool temp_debugWaitLoopTiming = debugWaitLoopTiming;
   bool temp_debugUSB = debugUSB;
-  int temp_showProbeCurrent = jumperlessConfig.debug.show_probe_current;
+  int temp_showProbeCurrent = jumperlessConfig.measurement.show_probe_current;
   int temp_passthrough = jumperlessConfig.serial_1.print_passthrough;
   bool temp_asyncPassthrough = jumperlessConfig.serial_1.async_passthrough;
   bool temp_debugFakeGpio = getDebugFakeGpio();
@@ -95,17 +95,17 @@ debugFlags:
   bool temp_spiftlTiming = (spiftl_timing_debug != 0);
   // Probe button reader: persistent hardware path selector + ephemeral
   // verbose trace. Both toggled from this menu.
-  bool temp_usePIOProbeButton = jumperlessConfig.hardware.use_pio_probe_button;
+  bool temp_usePIOProbeButton = jumperlessConfig.probe.use_pio_button;
   bool temp_probeButtonTrace  = (probe_button_trace != 0);
   // Track originals for diffing on commit (config-backed flags from config).
   bool orig_debugFP = jumperlessConfig.debug.file_parsing;
   bool orig_debugNM = jumperlessConfig.debug.net_manager;
   bool orig_debugNTCC = jumperlessConfig.debug.nets_to_chips;
   bool orig_debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
-  bool orig_debugLEDs = jumperlessConfig.debug.leds;
+  bool orig_debugLEDs = debugLEDs;
   bool orig_debugWaitLoopTiming = debugWaitLoopTiming;
   bool orig_debugUSB = debugUSB;
-  int orig_showProbeCurrent = jumperlessConfig.debug.show_probe_current;
+  int orig_showProbeCurrent = jumperlessConfig.measurement.show_probe_current;
   int orig_passthrough = jumperlessConfig.serial_1.print_passthrough;
   bool orig_asyncPassthrough = jumperlessConfig.serial_1.async_passthrough;
   bool orig_debugFakeGpio = getDebugFakeGpio();
@@ -220,7 +220,7 @@ debugFlags:
         // selector deliberately doesn't (see note in the bulk-off branch).
         probe_button_trace = temp_probeButtonTrace ? 1 : 0;
         if (temp_usePIOProbeButton != orig_usePIOProbeButton) {
-          jumperlessConfig.hardware.use_pio_probe_button = temp_usePIOProbeButton;
+          jumperlessConfig.probe.use_pio_button = temp_usePIOProbeButton;
         }
       } else {
         // Commit individual diffs using debugFlagSet only for changed items
@@ -264,7 +264,7 @@ debugFlags:
         if (temp_spiftlTiming != orig_spiftlTiming) spiftl_timing_debug = temp_spiftlTiming ? 1 : 0;
         // Probe button path (persisted) + trace (runtime-only).
         if (temp_usePIOProbeButton != orig_usePIOProbeButton) {
-          jumperlessConfig.hardware.use_pio_probe_button = temp_usePIOProbeButton;
+          jumperlessConfig.probe.use_pio_button = temp_usePIOProbeButton;
         }
         if (temp_probeButtonTrace != orig_probeButtonTrace) {
           probe_button_trace = temp_probeButtonTrace ? 1 : 0;
@@ -3237,8 +3237,25 @@ void action_menuTransitionTuner( void ) {
         delay( 2 );
     }
 
+    // Disarm the synthesized click. Every lap primes RELEASED/PRESSED to pop
+    // clickMenu() open; quitting between the prime and the consume leaves the
+    // pair armed, and the MAIN loop then "sees" a click and reopens the
+    // breadboard menu on top of whatever prints next (bench-observed as a
+    // stray \">Rails\" + the main menu stomping the tuner panel).
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
     requestLedShow( 1 ); // back to nets
-    Serial.print( "\033[0m" );
-    Serial.println( "\r\nMenu FX tuner exited." );
+
+    // Persist what the user dialed in: the tuner mutates menuTransitionConfig
+    // directly, so copy it back into [clickwheel] fx_* and save (debounced).
+    configCaptureMenuFx( );
+    requestConfigSave( );
+
+    // Leave a CLEAN screen behind - the menu echo lines the live breadboard
+    // menu printed below the panel would otherwise sit under whatever prints
+    // next (usually the main menu).
+    Serial.print( "\033[0m\033[2J\033[H" );
+    Serial.println( "Menu FX tuner exited." );
     Serial.flush( );
 }

@@ -102,7 +102,6 @@ void GraphicOverlayState::clear() {
         overlays[i].clear();
     }
     numOverlays = 0;
-    needsRender = false;
 }
 
 int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol,
@@ -133,7 +132,6 @@ int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol
         overlays[existing].height = height;
         memcpy(overlays[existing].colors, colors, numPixels * sizeof(uint32_t));
         overlays[existing].enabled = true;
-        needsRender = true;
         // Session-only overlays (_PARTS_/_GUIDE_/_SELFTEST_) are never
         // serialized, so they must not dirty the persistent state: the
         // ambient PartLabels service recomposes _PARTS_ on every highlight
@@ -173,7 +171,6 @@ int GraphicOverlayState::addOverlay(const char* name, int startRow, int startCol
     overlays[slot].enabled = true;
     
     numOverlays++;
-    needsRender = true;
 
     if (!overlayIsSessionOnly(name)) globalState.markDirty();
 
@@ -198,7 +195,6 @@ bool GraphicOverlayState::removeOverlay(int index) {
         overlays[index].clear();
         numOverlays--;
         if (numOverlays < 0) numOverlays = 0;
-        needsRender = true;
         if (!sessionOnly) globalState.markDirty();
         return true;
     }
@@ -215,7 +211,6 @@ void GraphicOverlayState::clearAll() {
         }
     }
     clear();
-    needsRender = true;
     // Session-only overlays never belonged in the slot file, so wiping them
     // is not a change worth persisting (sweep finding: the Snake app's
     // per-frame clearAll() dirtied the state ~30x/second).
@@ -254,7 +249,6 @@ void GraphicOverlayState::setPixel(int row, int col, uint32_t color, const char*
     int pixelIdx = (row - 1) * 30 + (col - 1);
     if (pixelIdx >= 0 && pixelIdx < MAX_OVERLAY_PIXELS) {
         overlays[idx].colors[pixelIdx] = color;
-        needsRender = true;
     }
 }
 
@@ -276,7 +270,6 @@ bool GraphicOverlayState::shiftOverlay(const char* name, int deltaRow, int delta
     
     overlays[idx].startRow = newRow;
     overlays[idx].startCol = newCol;
-    needsRender = true;
     
     return true;
 }
@@ -300,7 +293,6 @@ bool GraphicOverlayState::placeOverlay(const char* name, int newRow, int newCol)
     
     overlays[idx].startRow = newRow;
     overlays[idx].startCol = newCol;
-    needsRender = true;
     
     return true;
 }

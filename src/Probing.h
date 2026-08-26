@@ -424,7 +424,6 @@ public:
     void probeTick(ProbeSession& s);
     int probeExitTail(ProbeSession& s);
     void probeEmitBanner(ProbeSession& s);
-    float measureMode(int updateSpeed = 150);
     void checkPads(void);
     int delayWithButton(int delayTime = 1000);
     

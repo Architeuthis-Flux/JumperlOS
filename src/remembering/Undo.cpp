@@ -1112,6 +1112,12 @@ size_t undoSerialize(uint8_t* buf, size_t cap) {
     size_t maxTxns  = g_persistMaxTxns  ? g_persistMaxTxns  : UNDO_PERSIST_MAX_TXNS;
     size_t maxBytes = g_persistMaxBytes ? g_persistMaxBytes : UNDO_PERSIST_MAX_BYTES;
     if (maxTxns > UNDO_PERSIST_MAX_TXNS) maxTxns = UNDO_PERSIST_MAX_TXNS;
+    // [undo] max_saved_actions caps the persisted slice below the
+    // PSRAM/SRAM budget picked in undoInit (the RAM ring is unaffected).
+    {
+        int cfgMax = jumperlessConfig.undo.max_saved_actions;
+        if (cfgMax >= 1 && (size_t)cfgMax < maxTxns) maxTxns = (size_t)cfgMax;
+    }
     {
         size_t pos = g_txnHead;
         while (pos != g_txnTail && nKept < maxTxns) {
@@ -1786,6 +1792,13 @@ void undoShutdown(void) {
 void undoPersistHistory(void) {
     if (!g_ops || !g_txns) return;
     if (!g_historyDirty) return;        // nothing new to write
+    // [undo] persist = false: keep the RAM ring but never touch flash, and
+    // drop any stale file so the next boot doesn't restore ghost history.
+    if (!jumperlessConfig.undo.persist) {
+        if (safeFileExists(UNDO_FILE_PATH)) safeFileDelete(UNDO_FILE_PATH);
+        g_historyDirty = false;
+        return;
+    }
     size_t bufBytes = g_persistBufBytes ? g_persistBufBytes : UNDO_PERSIST_BUF_BYTES;
 
     // Prefer the buffer reserved at boot (g_persistBuf) so a save never depends

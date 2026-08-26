@@ -71,7 +71,6 @@ struct GraphicOverlay {
 struct GraphicOverlayState {
     GraphicOverlay overlays[MAX_GRAPHIC_OVERLAYS];
     int numOverlays;
-    bool needsRender;
     
     void clear();
     

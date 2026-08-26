@@ -274,9 +274,11 @@ extern "C" void mp_hal_delay_ms(mp_uint_t ms) {
     }
     
     // Run essential services every 50ms during Python delays
-    // This keeps current sense measurements and marching ants animation running
+    // This keeps current sense measurements and marching ants animation running.
+    // servicePython, not serviceInner: a sleeping script is not modal UI, and
+    // the display-service modal gates key on the distinction (isUiModal).
     if (current - last_service_time >= 50) {
-      jOS.serviceInner();
+      jOS.servicePython();
       last_service_time = current;
     }
     
@@ -500,11 +502,9 @@ extern "C" void mp_hal_stdout_tx_strn_cooked(const char *str, size_t len) {
         Serial.println();
     }
     
-    // If OLED copy is enabled, send to OLEDOut stream
-    if (oled_copy_print_enabled && oled.isConnected()) {
-        OLEDOut.write((const uint8_t*)str, len);
-    }
-    
+    // OLED copy happens per-character further down (with newline handling);
+    // a whole-buffer write here double-printed every line to the panel.
+
     // Basic output to global stream (regular MicroPython output)
     if (global_mp_stream) {
         // DEFENSE-IN-DEPTH: When a Serial REPL script is executing (lock is set),
@@ -4969,7 +4969,7 @@ bool executeSinglePythonCommand(const char* command, char* result_buffer, size_t
     // if (response_target != nullptr) {
     //   global_mp_stream = response_target;
     // }
-if (jumperlessConfig.display.terminal_line_buffering == 0) {
+if (jumperlessConfig.terminal.line_buffering == 0) {
   SyntaxHighlighting highlighter(&Jerial);
   Jerial.print("\r                                                                \r");
   highlighter.displayPythonWithHighlighting(parsed_command, &Jerial);

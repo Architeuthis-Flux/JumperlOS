@@ -237,7 +237,7 @@ static void parkDacAtMeasureTarget(int dacNum) {
     // stays false: the voltage-claim nudge must never re-enter evaluation.
     // Clamp to the tip-drive sanity band (configManager also validates on
     // load): parking above 3.3V logic clips the pad ladder's high end.
-    float target = jumperlessConfig.calibration.measure_mode_output_voltage;
+    float target = jumperlessConfig.probe.measure_voltage;
     if (target < 3.0f || target > 3.6f) target = 3.33f;
     // THE PARK IS A SYSTEM RE-ASSERT, NEVER A USER EDIT - so it writes the
     // state field DIRECTLY and calls the setter with save=0. It must not go
@@ -355,7 +355,7 @@ static const InfraCandidate s_probePowerCandidates[] = {
 };
 
 bool infraProbePowerGpioFirst(void) {
-    return jumperlessConfig.dacs.probe_power_source == 1;
+    return jumperlessConfig.probe.power_source == 1;
 }
 
 static int ordProbePower(int walk) {
@@ -367,7 +367,7 @@ static int ordProbePower(int walk) {
 static bool ovProbePower(void) { return nonInfraBridgeTouches(ROUTABLE_BUFFER_IN); }
 
 static bool enProbePower(void) {
-    return s_probePowerOn && jumperlessConfig.dacs.auto_connect_probe > 0;
+    return s_probePowerOn && jumperlessConfig.probe.auto_connect > 0;
 }
 
 #else // OG_JUMPERLESS: no routable buffer
@@ -643,7 +643,7 @@ bool infraProbePowerWanted(void) {
 static void pairPathStats(int a, int b, int* paths, int* dups, int* xp);
 
 float infraProbeDroopOhms(void) {
-    float calibrated = jumperlessConfig.calibration.probe_droop_ohms;
+    float calibrated = jumperlessConfig.probe.droop_ohms;
     if (calibrated > 0.0f) return calibrated;
 
     // Uncalibrated fallback - two answers, because two consumers:
@@ -670,8 +670,8 @@ float infraProbeDroopOhms(void) {
         if (routedXp > 0) xp = routedXp;
     }
 #endif
-    return jumperlessConfig.calibration.probe_pad_ohms +
-           (float)xp * jumperlessConfig.calibration.crosspoint_resistance;
+    return jumperlessConfig.probe.pad_ohms +
+           (float)xp * jumperlessConfig.measurement.crosspoint_resistance;
 }
 
 // ===========================================================================
@@ -685,9 +685,8 @@ void infraNudge(void) {
         refreshLocalConnections(0, 1, 0);
     }
     // else: the in-flight rebuild already ran its evaluation - the sticky
-    // flag makes infraServiceTick retry once it finishes. (The
-    // refreshLocalPending re-run is commented out in Commands.cpp, so we
-    // cannot rely on it.)
+    // flag makes infraServiceTick retry once it finishes. (Commands.cpp
+    // queues no re-run of its own, so we cannot rely on one.)
 }
 
 void infraServiceTick(void) {

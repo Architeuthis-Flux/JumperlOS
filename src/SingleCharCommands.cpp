@@ -2020,8 +2020,6 @@ CommandResult cmd_showBridgeArray( char c, const String& line ) {
     target->println( jumperlessConfig.routing.stack_dacs );
     target->print( "railsDuplicates: " );
     target->println( jumperlessConfig.routing.stack_rails );
-    target->print( "railPriority: " );
-    target->println( jumperlessConfig.routing.rail_priority );
     couldntFindPath( 1 );
     target->print( "\n\rBridge Array\n\r" );
     printBridgeArray( target );
@@ -2101,12 +2099,12 @@ CommandResult cmd_toggleLineBuffering( char c, const String& line ) {
     if ( arg.length( ) > 0 && ( arg[ 0 ] == '0' || arg[ 0 ] == '1' ) ) {
         target = ( arg[ 0 ] == '1' );
     } else {
-        target = ( jumperlessConfig.display.terminal_line_buffering == 0 );
+        target = ( jumperlessConfig.terminal.line_buffering == 0 );
     }
     setTerminalLineBuffering( target );
     if (millis() > 10000) {
         Jerial.print( "Line buffering " );
-        Jerial.println( jumperlessConfig.display.terminal_line_buffering ? "enabled" : "disabled" );
+        Jerial.println( jumperlessConfig.terminal.line_buffering ? "enabled" : "disabled" );
         configChanged = true;
         
     }
@@ -2123,7 +2121,7 @@ CommandResult cmd_toggleLineBufferingQuiet( char c, const String& line ) {
     } else if ( c == '\x0F' ) {
         acknowledgeAppLineBuffering( false );
     } else {
-        setTerminalLineBuffering( jumperlessConfig.display.terminal_line_buffering == 0 );
+        setTerminalLineBuffering( jumperlessConfig.terminal.line_buffering == 0 );
     }
     return CMD_DONT_SHOW_MENU;
 }
@@ -3176,7 +3174,7 @@ CommandResult cmd_netCurrents( char c, const String& line ) {
             infraPrintStatus( target );
             target->printf( "[infra] droop ohms: %.1f (%s)\n\r",
                             (double)infraProbeDroopOhms( ),
-                            jumperlessConfig.calibration.probe_droop_ohms > 0.0f
+                            jumperlessConfig.probe.droop_ohms > 0.0f
                                 ? "calibrated" : "computed" );
             // The feed's set-once proof: DAC0 (A) writes must not move across
             // rebuilds that don't change its voltage.
@@ -3186,7 +3184,7 @@ CommandResult cmd_netCurrents( char c, const String& line ) {
         }
     }
 
-    bool enable = !jumperlessConfig.display.net_currents;
+    bool enable = !jumperlessConfig.measurement.net_currents;
     // Applies immediately and persists to /config.txt
     updateConfigValue( "display", "net_currents", enable ? "1" : "0" );
     target->printf( "\rnet current scan %s\n\r", enable ? "on" : "off" );
@@ -3451,7 +3449,7 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                         (double)probeZeroDiag.sampleMin_mA, (double)probeZeroDiag.sampleMax_mA,
                         (unsigned long)probeZeroDiag.ledOffAckMs, probeZeroDiag.xbarIdleBeforeSampling ? "yes" : "NO",
                         (unsigned long)( probeZeroDiag.atMs / 1000 ), (unsigned long)probeZeroDiag.runs,
-                        (double)jumperlessConfig.calibration.probe_current_zero );
+                        (double)jumperlessConfig.probe.current_zero );
     }
     // Probe LED / button line: frames vs colour requests (shows >> requests
     // is the shared-GPIO9 constant re-send), button samples decoded.
@@ -3756,6 +3754,9 @@ CommandResult cmd_toggleTerminalColors( char c, const String& line ) {
     } else {
         disableTerminalColors = !disableTerminalColors;
     }
+    // Persist through [terminal] colors (the runtime flag is the inverse).
+    jumperlessConfig.terminal.colors = !disableTerminalColors;
+    configChanged = true;
     if ( disableTerminalColors ) {
         Jerial.println( "Terminal colors disabled" );
     } else {

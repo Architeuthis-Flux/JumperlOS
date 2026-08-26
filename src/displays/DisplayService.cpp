@@ -7,8 +7,10 @@
 #include <string.h>
 
 #include "Commands.h"          // refreshConnections
+#include "CoreMailbox.h"       // fabric-send fence for the soft-I2C chunks
 #include "DisplayBus.h"
 #include "DisplayDrivers.h"
+#include "Peripherals.h"       // railTruth - the overvolt hint in the lost verdict
 #include "PartPlacement.h"     // applyPartPlacement / removePartPlacement / partPinNode
 #include "States.h"            // globalState
 #include "Undo.h"              // UndoIngestGuard - route churn is not a user action
@@ -32,6 +34,25 @@ DisplayService& displayService = DisplayService::getInstance();
 
 // Node for a routable RP pin (20-27 -> 131-138).
 static inline int16_t nodeForRpPin(int pin) { return (int16_t)(131 + (pin - 20)); }
+
+// Are this part's SDA/SCL pins still wired to OUR bus nodes? Name identity
+// alone cannot see a slot LOAD: deserializeParts rebuilds the parts table and
+// the bridge table wholesale without telling anyone, so a same-named panel
+// from another slot can slide in with connect: -1 and no bridges behind it -
+// and the service would keep flushing a bus that isn't there, because
+// routeDataPins() is reachable only from attach(). Same predicate as
+// routeDataPins' already-routed early return.
+static bool dataPinsRouted(const PartDefinition& p, int sdaPin, int sclPin) {
+    if (sdaPin < 20 || sclPin < 20) return true;   // not acquired yet
+    int16_t sdaNode = nodeForRpPin(sdaPin);
+    int16_t sclNode = nodeForRpPin(sclPin);
+    bool sdaOk = false, sclOk = false;
+    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+        if (strcasecmp(p.pins[j].name, "SDA") == 0)      sdaOk = (p.pins[j].connect == sdaNode);
+        else if (strcasecmp(p.pins[j].name, "SCL") == 0) sclOk = (p.pins[j].connect == sclNode);
+    }
+    return sdaOk && sclOk;
+}
 
 // ---------------------------------------------------------------------------
 // Attach / detach
@@ -100,6 +121,11 @@ bool DisplayService::routeDataPins(int partIdx) {
 void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
     inst.desc = desc;
     inst.partIdx = (int8_t)partIdx;
+    // Identity for pollParts, stamped WITH the index it describes: the parts
+    // table is keyed by name, and writing the name only after routeDataPins()
+    // left a window where partIdx was published against an empty name.
+    strncpy(attachedName, globalState.parts.parts[partIdx].name, sizeof(attachedName) - 1);
+    attachedName[sizeof(attachedName) - 1] = '\0';
     inst.i2cAddr = desc->i2cAddrs[0];
 
     const char* reason = nullptr;
@@ -120,28 +146,13 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
     }
     acquireWarned = false;
 
-    // Allocate BEFORE routing (sweep finding, low): the OOM retry used to
-    // rebuild the whole fabric every 750 ms just to fail the alloc again -
-    // and did it in complete silence.
-    inst.fb = new (std::nothrow) uint8_t[desc->fbBytes];
+    // Allocate BEFORE routing (sweep finding, low): the retry used to rebuild
+    // the whole fabric every 750 ms just to fail the alloc again.
+    inst.fb = new uint8_t[desc->fbBytes];
     // pageFlip panels keep one shadow image per RAM half.
     uint16_t shadowBytes = desc->quirks.pageFlip ? (uint16_t)(desc->fbBytes * 2)
                                                  : desc->fbBytes;
-    inst.shadow = new (std::nothrow) uint8_t[shadowBytes];
-    if (inst.fb == nullptr || inst.shadow == nullptr) {
-        delete[] inst.fb;      inst.fb = nullptr;
-        delete[] inst.shadow;  inst.shadow = nullptr;
-        displayBusRelease(inst);
-        inst.desc = nullptr;
-        inst.partIdx = -1;
-        inst.state = DispState::EMPTY;
-        if (!allocWarned) {
-            allocWarned = true;
-            Serial.println("\r\nDISPLAY paused: not enough free memory for a framebuffer");
-        }
-        return;
-    }
-    allocWarned = false;
+    inst.shadow = new uint8_t[shadowBytes];
 
     if (!routeDataPins(partIdx)) {
         // No SDA/SCL pins or router refusal - stay EMPTY-ish; the poll
@@ -163,10 +174,6 @@ void DisplayService::attach(int partIdx, const DisplayDriverDesc* desc) {
     routeFails = 0;
     memset(inst.fb, 0, desc->fbBytes);
     inst.shadowValidMask = 0;
-    // Identity for pollParts: parts-table compaction can slide a DIFFERENT
-    // part into our index with the same driver (sweep finding, medium).
-    strncpy(attachedName, globalState.parts.parts[partIdx].name, sizeof(attachedName) - 1);
-    attachedName[sizeof(attachedName) - 1] = '\0';
     // Soft chunk 16: the 7-byte position header is fixed, so 8 data bytes
     // spent >half the bus time on overhead; 16 lands ~1 ms per chunk at the
     // 250 kHz half-bit and cuts a 512-byte frame to 32 transactions.
@@ -211,7 +218,6 @@ void DisplayService::detach() {
     initFails = 0;
     routeFails = 0;
     acquireWarned = false;
-    allocWarned = false;
     attachedName[0] = '\0';
 }
 
@@ -219,19 +225,32 @@ void DisplayService::detach() {
 void DisplayService::pollParts(uint32_t now) {
     if ((int32_t)(now - nextPartsPollMs) < 0) return;
     // Attach/detach ROUTES (removePartPlacement/apply/refreshConnections) -
-    // never do that under a modal loop that may itself be mid-routing.
+    // never do that under a modal UI loop that may itself be mid-routing.
     // Flushing chunks under modal load is fine; rebuilding the fabric is not.
-    if (jOS.inModalContext()) return;
+    // isUiModal(), not inModalContext(): the latter is also true for a whole
+    // script's lifetime (mp_hal_delay_ms pumps the inner set), which left a
+    // panel placed mid-script unattached and dark until the script ended.
+    if (jOS.isUiModal()) return;
     nextPartsPollMs = now + DISP_PARTS_POLL_MS;
 
     // Attached part still there, same identity?
     if (inst.partIdx >= 0) {
-        bool gone = inst.partIdx >= globalState.parts.numParts ||
-                    displayResolveForPart(globalState.parts.parts[inst.partIdx]) != inst.desc ||
-                    strncmp(globalState.parts.parts[inst.partIdx].name, attachedName,
-                            sizeof(attachedName)) != 0;   // table compaction can
-                                                          // slide a same-driver
-                                                          // part into our index
+        // Identity is the NAME, not the index (Kevin's rule; both create paths
+        // and now the load path keep names unique). The index is just where it
+        // happened to sit: jl_remove_part's compaction slides a same-driver
+        // part into it, so look the name up and RE-BIND rather than detach.
+        int idx = globalState.parts.findByName(attachedName);
+        bool gone = (idx < 0);
+        if (!gone) {
+            inst.partIdx = (int8_t)idx;
+            const PartDefinition& p = globalState.parts.parts[idx];
+            // placed:false is a part attach()'s own scan would never have
+            // picked up, and a slot load can restore one that way with no
+            // bridges behind it.
+            gone = !p.placed ||
+                   displayResolveForPart(p) != inst.desc ||
+                   !dataPinsRouted(p, inst.sdaPin, inst.sclPin);
+        }
         if (gone) detach();
         else if (inst.state == DispState::YIELDED && !displayBusUserClaimed(inst)) {
             // The user's script released our pins: resume via a fresh attach.
@@ -319,8 +338,9 @@ ServiceStatus DisplayService::service() {
         // Bring-up waits out modal interactions: init's full-RAM clear is a
         // ~45 ms burst in ONE service call - fine ambient, hostile inside a
         // menu/probe loop that pumps inner-set services (verify-workflow
-        // finding). The panel comes alive the moment the interaction ends.
-        if (jOS.inModalContext()) return ServiceStatus::IDLE;
+        // finding). The panel comes alive the moment the interaction ends -
+        // and a sleeping script is not an interaction, hence isUiModal().
+        if (jOS.isUiModal()) return ServiceStatus::IDLE;
         inst.nextBeaconMs = now + DISP_BEACON_MS;
         for (int a = 0; inst.desc->i2cAddrs[a] != 0 && a < 3; a++) {
             if (displayI2cPing(inst, inst.desc->i2cAddrs[a])) {
@@ -383,9 +403,33 @@ ServiceStatus DisplayService::service() {
         inst.nextChunkMs = now + 4;
     }
 
-    // Modal load (something BLOCKING owns the loop): halve the chunk and the
-    // burst so the ambient animation never starves the menu/probe UI.
-    bool modal = jOS.inModalContext();
+    // FABRIC FENCE: the bus routes through crossbar lanes, and a pending
+    // crosspoint send (measure mode fires two per row hop - remove + add of
+    // the ephemeral ADC path) can re-assert or move those lanes mid-byte.
+    // Bit-banging into a moving fabric was the measure-mode lost/alive
+    // cycling: 8 corrupted chunks per row change, verdict "lost", beacon,
+    // re-init, repeat. Defer the burst while a send is pending - the soft
+    // bus revisits in ~4 ms. Bounded: legacy wavegen playback can park a
+    // REQ_SEND pending indefinitely, so after 250 ms of continuous fencing
+    // proceed anyway (the generation check below still forgives strikes).
+    static unsigned long fenceSinceMs = 0;
+    bool fabricBusy = !core1req::idle(core1req::REQ_SEND) ||
+                      !core1req::idle(core1req::REQ_BYPASS);
+    if (fabricBusy) {
+        if (fenceSinceMs == 0) fenceSinceMs = now;
+        if (now - fenceSinceMs < 250) return ServiceStatus::BUSY;
+    } else {
+        fenceSinceMs = 0;
+    }
+    uint32_t sendGenBefore, bypassGenBefore;
+    core1req::snapshot(core1req::REQ_SEND, nullptr, nullptr, &sendGenBefore);
+    core1req::snapshot(core1req::REQ_BYPASS, nullptr, nullptr, &bypassGenBefore);
+
+    // Modal load (a human is waiting on the loop): halve the chunk and the
+    // burst so the ambient animation never starves the menu/probe UI. A
+    // running script is NOT that - halving there just made every panel
+    // refresh twice as slow for the whole script.
+    bool modal = jOS.isUiModal();
     uint8_t budget = inst.chunkBytes;
     if (modal && budget > 4) budget /= 2;
     uint8_t saved = inst.chunkBytes;
@@ -406,6 +450,15 @@ ServiceStatus DisplayService::service() {
         // NACK re-ran init per glitch: the repeated "DISPLAY alive" spam,
         // the garbage frames, and most of the slowness on the first bench.
         flushRetryTotal++;
+        // A fabric send completed under this burst: the error is the
+        // fabric's doing, not the panel's - unstick and retry, no strike.
+        uint32_t sendGenAfter, bypassGenAfter;
+        core1req::snapshot(core1req::REQ_SEND, nullptr, nullptr, &sendGenAfter);
+        core1req::snapshot(core1req::REQ_BYPASS, nullptr, nullptr, &bypassGenAfter);
+        if (sendGenAfter != sendGenBefore || bypassGenAfter != bypassGenBefore) {
+            displayBusUnstick(inst);
+            return ServiceStatus::BUSY;
+        }
         // Clear the wedge BEFORE the retry: an interrupted byte can leave
         // the panel driving SDA low, where every subsequent START fails too
         // - that was the lost->alive cycling (8 straight errors, "fixed" by
@@ -420,7 +473,20 @@ ServiceStatus DisplayService::service() {
         inst.nextBeaconMs = now + DISP_BEACON_MS;
         Serial.print("\r\nDISPLAY lost id=");
         Serial.print(inst.desc->id);
-        Serial.println(" (8 bus errors - re-beaconing)");
+        Serial.print(" (8 bus errors - re-beaconing)");
+        // The bench signature of an overdriven panel is exactly this loss
+        // loop: random-byte NACKs, clean lines, rails at 4V. Say so.
+        // (railHwVolts seeds at -100 before the first write - fall back to
+        // the state's setpoint, the PartLabels railTruth idiom.)
+        float vTop = (railHwVolts[0] > -99.0f) ? railHwVolts[0] : globalState.power.topRail;
+        float vBot = (railHwVolts[1] > -99.0f) ? railHwVolts[1] : globalState.power.bottomRail;
+        float vHot = (vTop > vBot) ? vTop : vBot;
+        if (vHot > 3.6f) {
+            Serial.print(" - a rail is at ");
+            Serial.print(vHot, 2);
+            Serial.print("V; this panel wants 3.3V");
+        }
+        Serial.println();
         return ServiceStatus::BUSY;
     }
     flushFails = 0;
