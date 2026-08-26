@@ -32,6 +32,7 @@
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
+#include "Undo.h"                  // UndoIngestGuard - placements are not undoable
 #include "ProjectsApp.h" // projectOpenLatestOrNew (load_project's name form)
 #include "WaveGen.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
@@ -2038,6 +2039,10 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     holdCore1Frames( );
     delayMicroseconds( 50 );
 
+    // Placements are NOT undoable (the PartsApp contract): the bridge halves
+    // land in the undo stream but the parts-table halves cannot, so recording
+    // them desyncs the two and undone power bridges resurrect on reboot.
+    UndoIngestGuard undoGuard;
     globalState.parts.parts[ globalState.parts.numParts++ ] = p;
     int idx = globalState.parts.numParts - 1;
     String applyErr;
@@ -2097,6 +2102,10 @@ int jl_remove_part( const char* name ) {
     holdCore1Frames( );
     delayMicroseconds( 50 );
 
+    // Mirror of place_part: the per-bridge removals would be recorded while the
+    // table compaction below cannot be, so an undo would re-add bridges for a
+    // part that no longer exists.
+    UndoIngestGuard undoGuard;
     String err;
     removePartPlacement( globalState, idx, err );
     // Drop the entry itself (placed=false alone would leave it in the YAML).
@@ -3505,6 +3514,13 @@ void jl_fs_flush( void* file_handle ) {
 
 // Directory operations - all require mutex for thread safety
 // Returns 0 on success, negative errno on failure
+//
+// USB MSC guard (same chokepoint rule as jl_fs_open_file above): while a host
+// has the disk mounted it caches the FAT, so any firmware mutation behind its
+// back corrupts the host's view. These raw FatFS paths bypass the safe*
+// wrappers entirely, so each one has to refuse for itself.
+extern bool usbMountedByHost; // USBfs.h
+
 int jl_fs_mkdir( const char* path ) {
     if ( !path )
         return -EIO; // Invalid argument
@@ -3542,6 +3558,12 @@ int jl_fs_mkdir( const char* path ) {
     // Directory doesn't exist - try to create it
     // CRITICAL: Pause Core2 during flash write (directory creation modifies flash)
     fs_mutex_release( ); // Release before pausing Core2
+
+    // Guard the WRITE only: the exists() check above is a read, so an
+    // "ensure directory" call still reports -EEXIST while mounted.
+    if ( usbMountedByHost )
+        return -EROFS; // read-only while the USB host holds the disk
+
     bool was_paused = pauseCore2ForFlash( 100 );
     fs_mutex_acquire( ); // Reacquire after pause
     
@@ -3566,6 +3588,9 @@ int jl_fs_rmdir( const char* path ) {
     if ( !path )
         return 0;
 
+    if ( usbMountedByHost )
+        return 0; // read-only while the USB host holds the disk
+
     AsyncPassthrough::suspendUARTRxIRQ( );
     bool was_paused = pauseCore2ForFlash( 100 );
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
@@ -3581,6 +3606,9 @@ int jl_fs_remove( const char* path ) {
     if ( !path )
         return 0;
 
+    if ( usbMountedByHost )
+        return 0; // read-only while the USB host holds the disk
+
     AsyncPassthrough::suspendUARTRxIRQ( );
     bool was_paused = pauseCore2ForFlash( 100 );
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
@@ -3595,6 +3623,9 @@ int jl_fs_remove( const char* path ) {
 int jl_fs_rename( const char* pathFrom, const char* pathTo ) {
     if ( !pathFrom || !pathTo )
         return 0;
+
+    if ( usbMountedByHost )
+        return 0; // read-only while the USB host holds the disk
 
     AsyncPassthrough::suspendUARTRxIRQ( );
     bool was_paused = pauseCore2ForFlash( 100 );

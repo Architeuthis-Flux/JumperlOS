@@ -738,7 +738,13 @@ void usbUnplugCallback(uint32_t cbData) {
     // did not, so wiring done while the drive was mounted vanished on eject
     // (sweep finding, medium). Writes are legal again at this point. Same
     // last-writer-wins caveat as the device-side path.
-    if (SlotManager::getInstance().getActiveState().isDirty()) {
+    // ponytail: same re-entrancy skip as the remount above - if we were reached
+    // from a tud_task pump inside a firmware FS operation, the remount was
+    // skipped, so FatFS's FAT window / free-cluster hints are known-stale and
+    // fs_mutex (recursive per-core) would not block a nested write. Leave the
+    // state dirty for the deferred auto-save instead of committing through it.
+    if (!fs_mutex_held_by_this_core() &&
+        SlotManager::getInstance().getActiveState().isDirty()) {
         Serial.println("◆ Saving pending changes...");
         String saveErr;
         if (SlotManager::getInstance().saveActiveSlot(saveErr)) {
