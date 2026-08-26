@@ -23,6 +23,25 @@ static const char* oledDisplayTypeLiteral(const char* v) {
     if (strcasecmp(v, "SSD1315") == 0) return "SSD1315";
     return "SSD1306";
 }
+
+// Which I2C port a pin can serve, and in which role - a mirror of the
+// gpioI2Cmap table initI2C() consults (src/Peripherals.cpp), so keep the two
+// in sync. role 0 = SDA, 1 = SCL. Returns the port (0 or 1), or -1 if the pin
+// cannot serve that role at all.
+static int oledI2CPortForPin(int pin, int role) {
+    static const int i2cPinPorts[14][3] = {
+        {  0, 0, 0 }, {  1, 1, 0 }, {  4, 0, 0 }, {  5, 1, 0 },
+        {  6, 0, 1 }, {  7, 1, 1 }, { 20, 0, 0 }, { 21, 1, 0 },
+        { 22, 0, 1 }, { 23, 1, 1 }, { 24, 0, 0 }, { 25, 1, 0 },
+        { 26, 0, 1 }, { 27, 1, 1 }
+    };
+    for (int i = 0; i < 14; i++) {
+        if (i2cPinPorts[i][0] == pin && i2cPinPorts[i][1] == role) {
+            return i2cPinPorts[i][2];
+        }
+    }
+    return -1;
+}
 #include "ArduinoStuff.h"
 #include "Apps.h"
 #include "Jerial.h" // TermControl is now part of Jerial
@@ -957,7 +976,12 @@ void updateConfigFromFile(const char* filename) {
         jumperlessConfig.serial_1 = savedConfig.serial_1;
         jumperlessConfig.serial_2 = savedConfig.serial_2;
         jumperlessConfig.top_oled = savedConfig.top_oled;
-        
+        // KEEP THIS LIST COMPLETE (same rule as the firmware-bump restore
+        // above): any section missing here is reset to defaults and then
+        // written through by the saveConfig() below.
+        jumperlessConfig.usb_cdc = savedConfig.usb_cdc;
+        jumperlessConfig.usb_audio = savedConfig.usb_audio;
+
         // Save the updated config with preserved user settings + any new defaults
         if (debugConfigSaveTiming) Serial.println("[ConfigSave] TRIGGER: major version diff reset");
         saveConfig();
@@ -1171,6 +1195,7 @@ bool saveConfigToFile(const char* filename) {
     file.println("[top_oled]");
     file.print("enabled = "); file.print(jumperlessConfig.top_oled.enabled); file.println(";");
     file.print("i2c_address = "); file.print(jumperlessConfig.top_oled.i2c_address); file.println(";");
+    file.print("display_type = "); file.print(jumperlessConfig.top_oled.display_type); file.println(";");
     file.print("width = "); file.print(jumperlessConfig.top_oled.width); file.println(";");
     file.print("height = "); file.print(jumperlessConfig.top_oled.height); file.println(";");
     file.print("rotation = "); file.print(jumperlessConfig.top_oled.rotation); file.println(";");
@@ -1393,6 +1418,7 @@ bool configHasChanges() {
     // Top OLED section
     if (jumperlessConfig.top_oled.enabled != lastSavedConfig.top_oled.enabled) return true;
     if (jumperlessConfig.top_oled.i2c_address != lastSavedConfig.top_oled.i2c_address) return true;
+    if (strcmp(jumperlessConfig.top_oled.display_type, lastSavedConfig.top_oled.display_type) != 0) return true;
     if (jumperlessConfig.top_oled.width != lastSavedConfig.top_oled.width) return true;
     if (jumperlessConfig.top_oled.height != lastSavedConfig.top_oled.height) return true;
     if (jumperlessConfig.top_oled.rotation != lastSavedConfig.top_oled.rotation) return true;
@@ -1488,7 +1514,9 @@ static bool configFileIsComplete(const char* fileContent) {
         "probe_led_refresh_us",
         "encoder_pio",
         "dc_block",
-        "async_passthrough"
+        "async_passthrough",
+        "rotation",
+        "display_type"
     };
     const int numKeys = sizeof(requiredKeys) / sizeof(requiredKeys[0]);
     
@@ -2111,6 +2139,9 @@ bool saveConfigIncremental(const char* filename) {
                     updated = true;
                 } else if (strcmp(key, "i2c_address") == 0) {
                     snprintf(newLine, sizeof(newLine), "i2c_address = %d;", jumperlessConfig.top_oled.i2c_address);
+                    updated = true;
+                } else if (strcmp(key, "display_type") == 0) {
+                    snprintf(newLine, sizeof(newLine), "display_type = %s;", jumperlessConfig.top_oled.display_type);
                     updated = true;
                 } else if (strcmp(key, "width") == 0) {
                     snprintf(newLine, sizeof(newLine), "width = %d;", jumperlessConfig.top_oled.width);
@@ -4081,7 +4112,7 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
     else if (strcmp(section, "top_oled") == 0) {
         if (strcmp(key, "enabled") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.enabled);
         else if (strcmp(key, "i2c_address") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.i2c_address);
-        else if (strcmp(key, "display_type") == 0) sprintf(oldValue, "%s", jumperlessConfig.top_oled.display_type);
+        else if (strcmp(key, "display_type") == 0) snprintf(oldValue, sizeof(oldValue), "%s", jumperlessConfig.top_oled.display_type);
         else if (strcmp(key, "width") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.width);
         else if (strcmp(key, "height") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.height);
         else if (strcmp(key, "rotation") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.rotation);
@@ -4320,16 +4351,24 @@ void updateConfigValue(const char* section, const char* key, const char* value) 
             // arduino-pico PANICS on setSDA/setSCL of a RUNNING Wire with
             // different pins, and oled.init() does exactly that - so end the
             // bus first (the teardownOldOledBus discipline) and reject pins
-            // the silicon can't mux (SDA even / SCL odd) instead of crashing
-            // (sweep finding, high).
+            // initI2C() cannot program instead of crashing. Each pin is legal
+            // for exactly ONE port in one role, so both pins have to resolve
+            // to the SAME port that gpioI2Cmap picks - parity alone let a
+            // wrong-port pin straight through to the panic.
             int newPin = parseInt(value);
             bool wantSda = (strcmp(key, "sda_pin") == 0);
-            if (newPin < 0 || newPin > 29 || ((newPin % 2 == 0) != wantSda)) {
-                Serial.print("  refused: ");
-                Serial.print(key);
-                Serial.print(" must be an ");
-                Serial.print(wantSda ? "EVEN" : "ODD");
-                Serial.println(" GPIO 0-29 (RP2350 I2C pin mux)");
+            int newSda = wantSda ? newPin : jumperlessConfig.top_oled.sda_pin;
+            int newScl = wantSda ? jumperlessConfig.top_oled.scl_pin : newPin;
+            int sdaPort = oledI2CPortForPin(newSda, 0);
+            int sclPort = oledI2CPortForPin(newScl, 1);
+            if (sdaPort < 0 || sclPort < 0 || sdaPort != sclPort) {
+                Serial.print("  refused: sda ");
+                Serial.print(newSda);
+                Serial.print(" / scl ");
+                Serial.print(newScl);
+                Serial.println(" is not a legal pair on one I2C port");
+                Serial.println("  I2C0: sda 0/4/20/24 with scl 1/5/21/25   I2C1: sda 6/22/26 with scl 7/23/27");
+                return; // refused - don't save or echo a change that didn't happen
             } else {
                 oled.disconnect();
                 if (jumperlessConfig.top_oled.connection_type == 2) Wire.end();

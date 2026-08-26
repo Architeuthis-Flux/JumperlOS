@@ -64,6 +64,12 @@ static void applyStoreToConfig(void) {
   jumperlessConfig.calibration.probe_switch_threshold_high = g_store.probe_switch_threshold_high;
   jumperlessConfig.calibration.probe_switch_threshold_low  = g_store.probe_switch_threshold_low;
   jumperlessConfig.calibration.measure_mode_output_voltage = g_store.measure_mode_output_voltage;
+  // Store-wins runs after loadConfig(), so keep this band in sync with the
+  // clamp there (configManager.cpp) or it is bypassed.
+  if (jumperlessConfig.calibration.measure_mode_output_voltage < 3.0f ||
+      jumperlessConfig.calibration.measure_mode_output_voltage > 3.6f) {
+    jumperlessConfig.calibration.measure_mode_output_voltage = 3.33f;
+  }
 }
 
 // Copy FROM jumperlessConfig INTO the in-RAM store struct (no flash yet).
@@ -662,6 +668,12 @@ void readSettingsFromConfig() {
     // 0 = output low, 1 = output high, 2 = input, 3 = input pullup, 4 = input pulldown
 
     int gpio_pin = gpioDef[i][0];
+
+    // Skip bus-role pins (gpioState 6), same contract as setGPIO().
+    if (gpioState[i] == 6) {
+      continue;
+      }
+
     // if (i == 8) {
     //   gpio_pin = 0; // UART TX
     //   } else if (i == 9) {

@@ -989,6 +989,12 @@ int gpioReadWithFloating(
                     pulldownState ); // set the pullups and pulldowns back to
                                      // whatever they were
 
+    // The float checks above leave the input buffer disabled (that's the E9
+    // discharge dance, not a resting state) and a disabled buffer always reads
+    // 0 — every later plain gpio_get() on this pad (bus keeper, state-6 bus
+    // reads, MicroPython) would be stuck low until something re-enabled it.
+    gpio_set_input_enabled( pin, true );
+
     if ( dir == 1 ) {
         /// gpio_set_dir(pin, true); //set the pin back to whatever it was
     }
@@ -1579,13 +1585,18 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
                                     &wrote ) == false ) {
         // delay(3000);
         //Serial.println( "Failed to set DAC0 value" );
+#if !defined(OG_JUMPERLESS)
+        // OG has no MCP4728 at all (initDAC returns before begin()), so every
+        // write "fails" there — counting them would just print forever.
         failedToSetDac0++;
         if ( failedToSetDac0 > 10 ) {
             Serial.println( "Failed to set DAC0 value" );
             failedToSetDac0 = 0;
         }
+#endif
+    } else {
+        failedToSetDac0 = 0;
     }
-    failedToSetDac0 = 0;
     // delay(10);
     digitalWrite( LDAC, LOW );
     (void)wrote;
@@ -1828,7 +1839,8 @@ void initINA219( void ) {
     INA1.setBusVoltageRange( 16 );
 
 
-    while ( INA0.getConversionFlag() == false ) {
+    uint32_t start0 = millis();
+    while ( INA0.getConversionFlag() == false && (millis() - start0 < 100) ) {
         tight_loop_contents();
     }
 
@@ -1836,7 +1848,8 @@ void initINA219( void ) {
     // delay(1000);
     currentReadingOffset0_mA = INA0.getCurrent_mA();
 
-    while ( INA1.getConversionFlag() == false ) {
+    uint32_t start1 = millis();
+    while ( INA1.getConversionFlag() == false && (millis() - start1 < 100) ) {
         tight_loop_contents();
     }
     // delay(1000);
@@ -2893,6 +2906,21 @@ int __not_in_flash_func(readAdcHeld)( int channel, int samples ) {
     return adcReading;
 }
 
+#if defined(OG_JUMPERLESS)
+// The PWM family resolves gpio_pin 1-8 through gpioDef to physical pins 20-27 -
+// the V5 routable-GPIO bank, which does NOT exist on the OG. There those pins
+// are the crosspoint chip selects for chips I-L (20-23), RESETPIN (24), the
+// WS2812 breadboard-LED data line (25) and the RP2040 ADC inputs (26-27), so
+// muxing one to GPIO_FUNC_PWM (or gpio_put()ing it from the slow-PWM timer
+// callback) corrupts routing, the LED strip or the ADCs. Same bank initGPIO()
+// and setGPIO() already refuse to touch.
+// ponytail: drop this once the OG routable-GPIO map (Phase 2) lands.
+static int pwmUnavailableOnOG( void ) {
+    Serial.println( "PWM isn't available on the Jumperless OG" );
+    return -1;
+}
+#endif
+
 // Slow PWM Functions (for frequencies below 10Hz)
 // Hardware timer callback for slow PWM
 bool __not_in_flash_func( slowPWMTimerCallback )( repeating_timer_t* rt ) {
@@ -2920,6 +2948,9 @@ bool __not_in_flash_func( slowPWMTimerCallback )( repeating_timer_t* rt ) {
 
 // Setup slow PWM using hardware timer
 int setupSlowPWM( int gpio_pin, float frequency, float duty_cycle ) {
+#if defined(OG_JUMPERLESS)
+    return pwmUnavailableOnOG( );
+#endif
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3047,6 +3078,9 @@ int setSlowPWMFrequency( int gpio_pin, float frequency ) {
 
 // Stop slow PWM
 int stopSlowPWM( int gpio_pin ) {
+#if defined(OG_JUMPERLESS)
+    return pwmUnavailableOnOG( );
+#endif
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3079,6 +3113,9 @@ int stopSlowPWM( int gpio_pin ) {
 
 // PWM Functions
 int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
+#if defined(OG_JUMPERLESS)
+    return pwmUnavailableOnOG( );
+#endif
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3205,6 +3242,9 @@ int setPWMFrequency( int gpio_pin, float frequency ) {
 }
 
 int stopPWM( int gpio_pin ) {
+#if defined(OG_JUMPERLESS)
+    return pwmUnavailableOnOG( );
+#endif
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
