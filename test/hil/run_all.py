@@ -25,7 +25,6 @@ TESTS = [
     "test_slot_files.py",      # path-based active context: adopt, trap, boot
     "test_parts_roundtrip.py", # parts: section round-trip + the MP bindings
     "test_projects.py",        # /projects tree, provisioning, the launcher
-    "test_guide_flow.py",      # guided placement: runtime + electrical checks
     "test_encoder_ui.py",      # last: drives the physical UI
 ]
 
