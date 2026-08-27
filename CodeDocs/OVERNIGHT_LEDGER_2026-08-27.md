@@ -490,3 +490,30 @@ Placement of multi-pin displays stays the Parts menu's job.
 Bench note: at 5V the INA1 standing load is ~3.3mA (V/1.5k) — an earlier
 sweep briefly misread that as conduction; thresholds on INA1 must be
 DELTAS against V/1500, never absolutes.
+
+### The 15:19 round — adae6df/5d525fd + 19a9eaf
+
+The 15:19 scan was the first COMPLETE arc: junction maps → "asking harder"
+fallback → clamps named → **0x3C answered** → LED21 placed across the gap
+(pin: 2, not offset: 30 — offsets may never cross the ravine, any
+footprint) → Q17 re-assembled by the walk's diode→BJT upgrade at Vbe 0.59V.
+The junction-map cluster finder's blind spot got its fix the same hour: a
+module's decoupling charges slower than the 50k pull settles, so pairs
+against VDD read clamped both ways and drop out — the finder now falls
+back to full identifies when the map can't name both rails.
+
+Then Kevin's three asks (19a9eaf): a found I2C module now PLACES on
+CONNECT — address → partdb record (partdbCandidatesForI2cAddr), measured
+rows → offset pins, DisplayService picks it up and the panel comes alive
+exactly like a hand placement (his manual SSD1306 placement went ALIVE at
+0x3C through the driver minutes earlier — the scan now does that whole
+sequence itself). The probe bails after six consecutive timeouts (a wedged
+ordering burned 15ms × 112 addresses; a healthy bus NACKs in ~0.2ms). And
+partdb grew the led_direct family: led_7seg_ca / led_7seg_cc, dip10,
+5161AS/BS pinout — placeable today, driven when the GPIO_PARALLEL bus
+lands (C-M3+). 14-seg waits for a real part number: a wrong pinout in the
+database is worse than a gap.
+
+Phantom cleanup: Q10/D17/Q44 removed over port5 — the stale D17 had been
+shadowing the real 2N3906 ("it reads the transistor as a diode"). Board
+ends the day with LED21, Q17, SSD1306_I2C — all real, all scan-verified.
