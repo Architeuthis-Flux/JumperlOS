@@ -167,6 +167,44 @@ static int rovingNode(ScanSession& s) {
     return (s.gpioIdx >= 0) ? gpioDef[s.gpioIdx][1] : -1;
 }
 
+// Claim one free routable GPIO into the session (the oscTryGpioRoute
+// filter), saving its config for restoreRovingGpio. False = none free.
+static bool claimRovingGpio(ScanSession& s) {
+    s.gpioIdx = -1;
+    for (int gi = 7; gi >= 0; gi--) {  // high end first, like oscTryGpioRoute
+        int node = gpioDef[gi][1];
+        if (globalState.config.gpioPythonOwned[gi]) continue;
+        if (globalState.config.gpioPwmEnabled[gi]) continue;
+        if (jumperlessConfig.top_oled.enabled &&
+            (node == jumperlessConfig.top_oled.gpio_sda ||
+             node == jumperlessConfig.top_oled.gpio_scl)) continue;
+        if (infraOwnsNode(node)) continue;
+        if (nodeHasAnyBridgePM(node)) continue;
+        s.gpioIdx = gi;
+        break;
+    }
+    if (s.gpioIdx < 0) return false;
+    s.savedDir = globalState.config.gpioDirection[s.gpioIdx];
+    s.savedPull = globalState.config.gpioPulls[s.gpioIdx];
+    s.savedFloat = globalState.config.gpioReadFloating[s.gpioIdx];
+    s.savedState = gpioState[s.gpioIdx];
+    globalState.config.gpioReadFloating[s.gpioIdx] = 0;
+    gpioReadFloating[s.gpioIdx] = 0;
+    gpio_set_input_enabled(gpioDef[s.gpioIdx][0], false);
+    return true;
+}
+
+static void restoreRovingGpio(ScanSession& s) {
+    if (s.gpioIdx < 0) return;
+    gpio_set_input_enabled(gpioDef[s.gpioIdx][0], true);
+    globalState.config.gpioDirection[s.gpioIdx] = s.savedDir;
+    globalState.config.gpioPulls[s.gpioIdx] = s.savedPull;
+    globalState.config.gpioReadFloating[s.gpioIdx] = s.savedFloat;
+    gpioReadFloating[s.gpioIdx] = s.savedFloat;
+    gpioState[s.gpioIdx] = s.savedState;
+    s.gpioIdx = -1;
+}
+
 // ---------------------------------------------------------------------------
 // session
 // ---------------------------------------------------------------------------
@@ -244,29 +282,10 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     // One roving GPIO for pulls and gate duty (3-row sessions).
     s.gpioIdx = -1;
     if (nRows == 3) {
-        for (int gi = 7; gi >= 0; gi--) {  // high end first, like oscTryGpioRoute
-            int node = gpioDef[gi][1];
-            if (globalState.config.gpioPythonOwned[gi]) continue;
-            if (globalState.config.gpioPwmEnabled[gi]) continue;
-            if (jumperlessConfig.top_oled.enabled &&
-                (node == jumperlessConfig.top_oled.gpio_sda ||
-                 node == jumperlessConfig.top_oled.gpio_scl)) continue;
-            if (infraOwnsNode(node)) continue;
-            if (nodeHasAnyBridgePM(node)) continue;
-            s.gpioIdx = gi;
-            break;
-        }
-        if (s.gpioIdx < 0) {
+        if (!claimRovingGpio(s)) {
             infraReleaseAdc(INFRA_ADC_SCAN);
             return -5;
         }
-        s.savedDir = globalState.config.gpioDirection[s.gpioIdx];
-        s.savedPull = globalState.config.gpioPulls[s.gpioIdx];
-        s.savedFloat = globalState.config.gpioReadFloating[s.gpioIdx];
-        s.savedState = gpioState[s.gpioIdx];
-        globalState.config.gpioReadFloating[s.gpioIdx] = 0;
-        gpioReadFloating[s.gpioIdx] = 0;
-        gpio_set_input_enabled(gpioDef[s.gpioIdx][0], false);
     }
 
     s.active = true;
@@ -298,15 +317,7 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
 }
 
 void partScanEnd(ScanSession& s) {
-    if (s.gpioIdx >= 0) {
-        gpio_set_input_enabled(gpioDef[s.gpioIdx][0], true);
-        globalState.config.gpioDirection[s.gpioIdx] = s.savedDir;
-        globalState.config.gpioPulls[s.gpioIdx] = s.savedPull;
-        globalState.config.gpioReadFloating[s.gpioIdx] = s.savedFloat;
-        gpioReadFloating[s.gpioIdx] = s.savedFloat;
-        gpioState[s.gpioIdx] = s.savedState;
-        s.gpioIdx = -1;
-    }
+    restoreRovingGpio(s);
     setDac0voltage(s.dac0Restore, 0, 0, false);
     if (s.nEph > 0) {
         String err;
@@ -561,7 +572,13 @@ bool partScanHfe(ScanSession& s, int eIdx, int bIdx, int cIdx, bool pnp,
     rovingIn(s, pnp ? -1 : 1);
     setDac0voltage(1.2f, 0, 0, false);
     delay(8);
+    // Two settled reads, keep the larger: this is steady DC, and a read
+    // that lands stale-low (a conversion straddling the fixture settling)
+    // once flipped an E/C orientation vote on the bench (hFE 509 with the
+    // roles swapped). A stale read only ever under-reports here.
     float i = inaSettledMa();
+    float i2 = inaSettledMa();
+    if (i2 > i) i = i2;
     float vBase = readAdcVoltage(s.adcCh[bIdx], 8);
     rovingIn(s, 0);
     setDac0voltage(0.0f, 0, 0, false);
@@ -599,4 +616,166 @@ bool partScanFetProbe(ScanSession& s, int gIdx, int dIdx, int sIdx,
     legsClear(s);
     if (id_mA) *id_mA = i;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// whole-board census (the Auto scan's first pass)
+// ---------------------------------------------------------------------------
+
+int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
+                   bool (*abortCheck)(void)) {
+    if (rowFlags == nullptr) return -2;
+    if (rp2040.cpuid() != 0) return -2;
+    static ScanSession s;   // a claims-only session: no DUT rows, just legs
+    if (s.active) return -2;
+    for (int i = 0; i <= 60; i++) rowFlags[i] = 0;
+
+    int ch = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);
+    if (ch < 0) {
+        infraReleaseAdc(INFRA_ADC_SCAN);
+        return -2;
+    }
+    if (!claimRovingGpio(s)) {
+        infraReleaseAdc(INFRA_ADC_SCAN);
+        return -2;
+    }
+    s.nEph = 0;
+    s.nLift = 0;
+
+    int found = 0;
+    for (int row = 1; row <= 60; row++) {
+        if (row == 29 || row == 30 || row == 59 || row == 60) {
+            rowFlags[row] = 3;
+            continue;
+        }
+        if (nodeHasAnyBridgePM(row)) {
+            rowFlags[row] = 2;   // the user's wiring; their part, their net
+            continue;
+        }
+        if (abortCheck != nullptr && abortCheck()) break;
+
+        legAdd(s, row, ADC0 + ch);
+        legAdd(s, row, rovingNode(s));
+        if (!legsBuild(s)) {
+            rowFlags[row] = 4;
+            continue;
+        }
+        rovingOut(s, true);      // charge the row hard
+        delay(2);
+        rovingIn(s, 0);          // release (buffer off - a pure open)
+        float v0 = readAdcVoltage(ch, 1);   // FIRST ring sample, ~20-40us out
+        delay(6);
+        float v1 = readAdcVoltage(ch, 4);
+        legsClear(s);
+        if (v0dbg) v0dbg[row] = v0;
+        if (v1dbg) v1dbg[row] = v1;
+        // Bench truth (this board, 2026-08-26): EVERY row bleeds through its
+        // own sense leg with tau ~200us, so nothing "holds charge" for long.
+        // What separates a part is (a) the instant charge-share - a junction
+        // or load eats the charge within nanoseconds, so the first sample
+        // after release is already low, where an empty row still reads
+        // ~85-90% of the drive - or (b) a pin that HOLDS the row somewhere
+        // 6ms later (TTL inputs sat at 1.63V, driven outputs at 0.3-0.4V;
+        // empties are at ~0.00 by then).
+        if (v0 < 2.2f || v1 > 0.12f) {
+            rowFlags[row] = 1;
+            found++;
+        }
+    }
+
+    restoreRovingGpio(s);
+    infraReleaseAdc(INFRA_ADC_SCAN);
+    refreshLocalConnections(1, 0, 0);
+    waitCore2();
+    return found;
+}
+
+int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
+    if (rowFlags == nullptr) return -2;
+    if (rp2040.cpuid() != 0) return -2;
+    static ScanSession s;
+    if (s.active) return -2;
+    int ch = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);  // parity with census claims
+    if (ch < 0) {
+        infraReleaseAdc(INFRA_ADC_SCAN);
+        return -2;
+    }
+    s.nEph = 0;
+    s.nLift = 0;
+    s.gpioIdx = -1;
+
+    // Bench truth: with the ISE legs routed the shunt reads a CONSTANT
+    // standing current (2.39mA here - the GuideChecks ledger's board-
+    // internal sink), and the 1V stimulus shifts every EMPTY pair by an
+    // equally constant amount (-0.77mA +-10uA on this board). Absolute
+    // thresholds are hopeless against an artifact that big; the pair
+    // population is its own calibration - sweep everything, take the
+    // per-direction MEDIAN as the empty line, flag what deviates. The
+    // 2N3906's junction pairs sat 2.2mA off the line.
+    setDac0voltage(0.0f, 0, 0, false);
+    (void)inaSettledMa();   // settle the poll pipeline before the loop
+
+    int newHits = 0;
+    {
+        static float di[2][58];
+        static int16_t pairA[58];
+        int nPairs = 0;
+        for (int half = 0; half < 2; half++) {
+            int lo = half ? 31 : 1, hi = half ? 57 : 27;
+            for (int a = lo; a <= hi && nPairs < 58; a++) {
+                int b = a + 1;
+                if (rowFlags[a] != 0 || rowFlags[b] != 0) continue;
+                if (abortCheck != nullptr && abortCheck()) goto sweepJudge;
+                pairA[nPairs] = (int16_t)a;
+                di[0][nPairs] = di[1][nPairs] = 1.0e9f;  // no-reading sentinel
+                for (int dir = 0; dir < 2; dir++) {
+                    int src = dir ? b : a, snk = dir ? a : b;
+                    setDac0voltage(0.0f, 0, 0, false);
+                    legAdd(s, DAC0, src);
+                    legAdd(s, snk, ISENSE_PLUS);
+                    legAdd(s, ISENSE_MINUS, GND);
+                    if (!legsBuild(s)) continue;
+                    setDac0voltage(1.0f, 0, 0, false);
+                    delay(3);
+                    // settled: the first read re-syncs the conversion
+                    // pipeline, the second is trustworthy - single reads
+                    // both missed a real junction and invented one (stale)
+                    (void)inaFreshMa();
+                    di[dir][nPairs] = inaFreshMa();
+                    setDac0voltage(0.0f, 0, 0, false);
+                    legsClear(s);
+                }
+                nPairs++;
+            }
+        }
+sweepJudge:
+        if (nPairs >= 5) {
+            for (int dir = 0; dir < 2; dir++) {
+                float sorted[58];
+                int n = 0;
+                for (int i = 0; i < nPairs; i++)
+                    if (di[dir][i] < 1.0e8f) sorted[n++] = di[dir][i];
+                if (n < 5) continue;
+                for (int x = 1; x < n; x++)
+                    for (int y = x; y > 0 && sorted[y] < sorted[y - 1]; y--) {
+                        float t = sorted[y]; sorted[y] = sorted[y - 1]; sorted[y - 1] = t;
+                    }
+                float median = sorted[n / 2];
+                for (int i = 0; i < nPairs; i++) {
+                    if (di[dir][i] > 1.0e8f) continue;
+                    if (fabsf(di[dir][i] - median) > 0.35f) {
+                        int a = pairA[i], b = a + 1;
+                        if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
+                        if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
+                    }
+                }
+            }
+        }
+    }
+sweepDone:
+    setDac0voltage(0.0f, 0, 0, false);
+    infraReleaseAdc(INFRA_ADC_SCAN);
+    refreshLocalConnections(1, 0, 0);
+    waitCore2();
+    return newHits;
 }

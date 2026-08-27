@@ -111,6 +111,7 @@ struct app apps[ NUM_APPS ] = {
     // \31Part") - same name-coupling rule as "Parts" above.
     { "Place Part", 27, 1, partsAppLauncher },
     { "Test Part", 28, 1, partsTestLauncher },
+    { "Auto Scan", 29, 1, partsAutoLauncher },
     // NAME-DISPATCH ONLY, and deliberately WITHOUT a menuTree.h row: the
     // 2026-08-24 bench ruling retired "Guides" as a MENU-level concept and
     // that stands - the Apps submenu is a hand-written list in menuTree.h, so

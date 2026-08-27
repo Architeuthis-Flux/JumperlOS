@@ -244,9 +244,24 @@ PartResult identifyThreeLead(int rowA, int rowB, int rowC) {
 
     if (nFwd == 6) {
         // Every ordered pair conducts: a resistor mesh, i.e. a pot (its two
-        // half-tracks put resistance between every pin pair). Kelvin-measure
-        // the three pairs; the wiper is the pin whose two halves sum to the
-        // end-to-end track: R(a,c) ~= R(a,w) + R(w,c).
+        // half-tracks put resistance between every pin pair). Guard first:
+        // a real resistor mesh conducts SYMMETRICALLY (v[a][b] ~ v[b][a]);
+        // three pins of an IC can also pairwise-conduct through its innards
+        // but asymmetrically - and the Kelvin sweeps below cost ~15s, which
+        // an Auto-scan span must never spend on a chip (bench: the 7400's
+        // pin trios ground the whole scan otherwise).
+        bool symmetric = true;
+        for (int a = 0; a < 3 && symmetric; a++)
+            for (int b = a + 1; b < 3; b++)
+                if (fabsf(v[a][b] - v[b][a]) > 0.40f) { symmetric = false; break; }
+        if (!symmetric) {
+            r.type = PartType::UNKNOWN;
+            r.degraded = true;
+            partScanEnd(s);
+            return r;
+        }
+        // Kelvin-measure the three pairs; the wiper is the pin whose two
+        // halves sum to the end-to-end track: R(a,c) ~= R(a,w) + R(w,c).
         float rp[3];  // rp[0]=R(0,1), rp[1]=R(0,2), rp[2]=R(1,2)
         float lin;
         bool ok = partScanResistance(s, 0, 1, &rp[0], &lin) &&
@@ -321,10 +336,20 @@ PartResult identifyThreeLead(int rowA, int rowB, int rowC) {
         // sanity: the two junctions must block in reverse
         bool revOk = pnp ? (v[base][p1] > KMAP_FWD_MAX && v[base][p2] > KMAP_FWD_MAX)
                          : (v[p1][base] > KMAP_FWD_MAX && v[p2][base] > KMAP_FWD_MAX);
-        // E/C by gain asymmetry: run both orientations, the real one wins
+        // E/C by gain asymmetry: run both orientations, the real one wins.
+        // A weak vote (under 2x either way) gets one full re-run and the
+        // sums decide - the true asymmetry is ~20x, so anything near 1x is
+        // a measurement wobble, not the part.
         float i1 = 0, vb1 = 0, vbe1 = 0, i2 = 0, vb2 = 0, vbe2 = 0;
         partScanHfe(s, p1, base, p2, pnp, &i1, &vb1, &vbe1);
         partScanHfe(s, p2, base, p1, pnp, &i2, &vb2, &vbe2);
+        if (i1 < 2.0f * i2 && i2 < 2.0f * i1) {
+            float j1 = 0, j2 = 0, vbx, vbex;
+            partScanHfe(s, p1, base, p2, pnp, &j1, &vbx, &vbex);
+            partScanHfe(s, p2, base, p1, pnp, &j2, &vbx, &vbex);
+            i1 += j1;
+            i2 += j2;
+        }
         bool firstWins = i1 >= i2;
         int e = firstWins ? p1 : p2;
         int c = firstWins ? p2 : p1;

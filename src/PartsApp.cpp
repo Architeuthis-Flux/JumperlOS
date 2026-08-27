@@ -22,6 +22,7 @@
 #include "RotaryEncoder.h"  // encoder state machine, rotaryDivider
 #include "LEDs.h"           // HsvToRaw - per-signal tap rainbow
 #include "sensing/PartClassify.h"  // tap-time electrical identification
+#include "sensing/PartMeasure.h"   // partScanCensus (Auto Scan)
 #include "eyecandy/ReadingDisplay.h"  // measured values on the OLED
 #include "displays/DisplayService.h"   // display liveness (Parts > Test)
 #include "guiding/GuideScript.h"      // formatOhms
@@ -1263,6 +1264,272 @@ void partsTestLauncher(void) {
         if (partsWaitForPress() == -2) break;
     }
 
+    inClickMenu = 0;
+    rotaryDivider = lastDivider;
+    b.clear();
+    requestLedShow(-1);
+    Serial.println();
+    oled.showJogo32h();
+}
+
+// ============================================================================
+// Auto Scan - sweep the whole board and say what's on it
+// ============================================================================
+// Menu: Parts > Auto. Census-pokes every free row (charge-share, ~2s),
+// clusters the hits into spans, then identifies the 2-3 leg spans with the
+// same machinery placement uses. Wired rows belong to the user's netlist
+// and are left alone; anything bigger than 3 legs is reported as presence
+// (the phase-2 vector runner will name chips). Abortable at every step -
+// probe button, encoder, or any serial byte.
+
+static bool partsAutoAborted = false;
+static bool partsAutoAbortCheck(void) {
+    if (partsAutoAborted) return true;
+    jOS.serviceInner();
+    rotaryEncoderButtonStuff();
+    if (encoderButtonState == HELD ||
+        (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
+        partsAutoAborted = true;
+    } else if (partsProbeButton() != 0) {
+        partsAutoAborted = true;
+    } else if (Serial.available() > 0) {
+        (void)Serial.read();
+        partsAutoAborted = true;
+    }
+    return partsAutoAborted;
+}
+
+// The placed part (if any) with a pin on this row, for "already yours" tags.
+static const char* partsPlacedPartOnRow(int row) {
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++)
+            if (partPinNode(p, p.pins[j]) == row) return p.name;
+    }
+    return nullptr;
+}
+
+void partsAutoLauncher(void) {
+    inClickMenu = 1;
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 8;
+    partsAutoAborted = false;
+
+    b.clear();
+    b.print("SCAN", PARTS_HEADER_COLOR, 0xFFFFFF, 0, 0, 1);
+    requestLedShow(2);
+    if (oled.oledConnected) {
+        oled.resetMultiLineSmallText();
+        oled.showMultiLineSmallText("scanning the board...\n(any press stops)");
+    }
+    Serial.println("\r\nPARTSCAN auto begin");
+    unsigned long scanT0 = millis();
+
+    static uint8_t flags[61];
+    static float v0[61], v1[61];
+    int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck);
+    if (found < 0) {
+        Serial.println("PARTSCAN auto busy - try again in a moment");
+        if (oled.oledConnected)
+            oled.clearPrintShow("scan busy\ntry again", 2, true, true, true);
+        delay(900);
+        goto adone;
+    }
+    if (partsAutoAborted) {
+        Serial.println("PARTSCAN auto aborted");
+        goto adone;
+    }
+    {
+        // second pass: isolated junction parts are invisible to the poke
+        // (they pre-charge through their own junctions) - sweep adjacent
+        // free pairs at 1V and see what conducts
+        if (oled.oledConnected) {
+            oled.resetMultiLineSmallText();
+            oled.showMultiLineSmallText("scanning pairs...\n(any press stops)");
+        }
+        int pairHits = partScanPairSweep(flags, partsAutoAbortCheck);
+        if (pairHits > 0) found += pairHits;
+    }
+    if (partsAutoAborted) {
+        Serial.println("PARTSCAN auto aborted");
+        goto adone;
+    }
+
+    {
+        // the census, row by row, for the curious (and for tuning)
+        Serial.print("PARTSCAN census hits=");
+        Serial.println(found);
+        for (int r = 1; r <= 60; r++) {
+            if (flags[r] != 1 && flags[r] != 5) continue;
+            Serial.print(flags[r] == 1 ? "  row " : "  row+ ");
+            Serial.print(r);
+            Serial.print(" v0=");
+            Serial.print(v0[r], 2);
+            Serial.print(" v1=");
+            Serial.println(v1[r], 2);
+        }
+
+        // cluster hits into spans per half; a 1-row gap stays inside the
+        // span (a PNP base row can hold its charge while E and C slump)
+        int spanStart[12], spanEnd[12];
+        int nSpans = 0;
+        for (int half = 0; half < 2; half++) {
+            int lo = half ? 31 : 1, hi = half ? 58 : 28;
+            int cur = -1, last = -1;
+            uint8_t curKind = 0;
+            for (int r = lo; r <= hi + 1; r++) {
+                bool hit = (r <= hi) && (flags[r] == 1 || flags[r] == 5);
+                // two different parts can abut on neighboring rows - a
+                // hold-signature cluster (active pins, flag 1) and a
+                // pair-conduction cluster (passive junctions, flag 5) are
+                // different animals, so a kind change closes the span
+                // (bench: the 7400 at 11-16 and the 2N3906 at 17-19)
+                if (hit && cur >= 0 && flags[r] != curKind) {
+                    if (nSpans < 12) {
+                        spanStart[nSpans] = cur;
+                        spanEnd[nSpans] = last;
+                        nSpans++;
+                    }
+                    cur = -1;
+                }
+                if (hit) {
+                    if (cur < 0) { cur = r; curKind = flags[r]; }
+                    last = r;
+                } else if (cur >= 0 && r > last + 1) {
+                    // gap of 2+ (or the end): close the span
+                    if (nSpans < 12) {
+                        spanStart[nSpans] = cur;
+                        spanEnd[nSpans] = last;
+                        nSpans++;
+                    }
+                    cur = -1;
+                }
+            }
+        }
+
+        Serial.print("PARTSCAN spans=");
+        Serial.println(nSpans);
+        int shown = 0;
+        char summary[96] = "";
+        size_t sumLen = 0;
+        for (int sp = 0; sp < nSpans && !partsAutoAborted; sp++) {
+            int a = spanStart[sp], z = spanEnd[sp];
+            int width = z - a + 1;
+            const char* owner = nullptr;
+            for (int r = a; r <= z && owner == nullptr; r++)
+                owner = partsPlacedPartOnRow(r);
+
+            char line[64] = "";
+            if (width == 1) {
+                // a lone hit: one leg of something bigger, or noise - say so
+                snprintf(line, sizeof(line), "row %d: one leg of something?", a);
+            } else if (width <= 3 && owner == nullptr) {
+                Serial.print("  checking rows ");
+                Serial.print(a);
+                Serial.print("-");
+                Serial.print(z);
+                Serial.println("...");
+                Serial.flush();
+                if (oled.oledConnected) {
+                    char t[48];
+                    snprintf(t, sizeof(t), "rows %d-%d:\nchecking...", a, z);
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText(t);
+                }
+                if (partsAutoAbortCheck()) break;
+                PartResult res = (width == 3) ? identifyThreeLead(a, a + 1, z)
+                                              : identifyTwoLead(a, z);
+                if (width == 2 && (res.type == PartType::DIODE ||
+                                   res.type == PartType::ZENER)) {
+                    // two junction-legs might be a transistor missing its
+                    // quiet third pin - try a free neighbor on either side
+                    int half2Lo = (a <= 28) ? 1 : 31;
+                    int half2Hi = (a <= 28) ? 28 : 58;
+                    int extra = (z + 1 <= half2Hi && flags[z + 1] == 0) ? z + 1
+                                : (a - 1 >= half2Lo && flags[a - 1] == 0) ? a - 1
+                                                                          : -1;
+                    if (extra > 0 && !partsAutoAbortCheck()) {
+                        PartResult res3 = (extra > z) ? identifyThreeLead(a, z, extra)
+                                                      : identifyThreeLead(extra, a, z);
+                        if (res3.status == 0 &&
+                            (res3.type == PartType::BJT_PNP ||
+                             res3.type == PartType::BJT_NPN ||
+                             res3.type == PartType::NFET ||
+                             res3.type == PartType::PFET)) {
+                            res = res3;
+                            z = (extra > z) ? extra : z;
+                            a = (extra < a) ? extra : a;
+                        }
+                    }
+                }
+                if (res.status == 0 && res.type != PartType::EMPTY &&
+                    res.type != PartType::UNKNOWN) {
+                    char detail[24] = "";
+                    if (res.type == PartType::RESISTOR || res.type == PartType::POT)
+                        formatOhms(res.value, detail, sizeof(detail));
+                    else if (res.value != 0.0f)
+                        snprintf(detail, sizeof(detail), "%.2fV", (double)res.value);
+                    snprintf(line, sizeof(line), "rows %d-%d: %s %s", a, z,
+                             partTypeName(res.type), detail);
+                    // paint the span - BJTs get the standing role colors
+                    if (res.type == PartType::BJT_PNP || res.type == PartType::BJT_NPN) {
+                        for (int t = 0; t < res.nRows; t++) {
+                            uint32_t c = (res.roles[t] == PinRole::E)   ? PARTS_ROLE_E_COLOR
+                                         : (res.roles[t] == PinRole::B) ? PARTS_ROLE_B_COLOR
+                                                                        : PARTS_ROLE_C_COLOR;
+                            int pr = nodeToPrintRow((int)res.rows[t]);
+                            if (pr >= 0) b.printRawRow(0b00011111, pr, c, 0xffffff);
+                        }
+                    } else {
+                        for (int r = a; r <= z; r++) {
+                            int pr = nodeToPrintRow(r);
+                            if (pr >= 0) b.printRawRow(0b00011111, pr, partsTapHue(sp, nSpans, false), 0xffffff);
+                        }
+                    }
+                    requestLedShow(2);
+                } else {
+                    snprintf(line, sizeof(line), "rows %d-%d: something (unclear)", a, z);
+                }
+            } else if (owner != nullptr) {
+                snprintf(line, sizeof(line), "rows %d-%d: %s (placed)", a, z, owner);
+            } else {
+                snprintf(line, sizeof(line), "rows %d-%d: %d legs (a chip?)", a, z, width);
+                for (int r = a; r <= z; r++) {
+                    int pr = nodeToPrintRow(r);
+                    if (pr >= 0) b.printRawRow(0b00011111, pr, partsTapHue(sp, nSpans, false), 0xffffff);
+                }
+                requestLedShow(2);
+            }
+            Serial.print("\r\n  ");
+            Serial.println(line);
+            if (shown < 2 && sumLen + strlen(line) + 2 < sizeof(summary)) {
+                sumLen += (size_t)snprintf(summary + sumLen, sizeof(summary) - sumLen,
+                                           "%s%s", shown ? "\n" : "", line);
+                shown++;
+            }
+        }
+
+        if (partsAutoAborted) {
+            Serial.println("PARTSCAN auto aborted");
+        } else {
+            Serial.print("PARTSCAN auto done in ");
+            Serial.print((millis() - scanT0) / 1000);
+            Serial.println("s (add parts via Parts > Place)");
+            if (oled.oledConnected) {
+                if (nSpans == 0) {
+                    oled.clearPrintShow("board looks\nempty", 2, true, true, true);
+                } else {
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText(summary);
+                }
+            }
+            partsWaitForPress();
+        }
+    }
+
+adone:
+    partsAutoAborted = false;
     inClickMenu = 0;
     rotaryDivider = lastDivider;
     b.clear();

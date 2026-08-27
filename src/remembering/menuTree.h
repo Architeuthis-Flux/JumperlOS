@@ -99,6 +99,7 @@ String menuLines[150] = {
   "Parts",
   "-Place  \31Part",
   "-Test   \31Part",
+  "-Auto   \31Scan",
 
   "Apps",
   "-Bounce \31Startup",

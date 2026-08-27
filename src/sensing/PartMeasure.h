@@ -105,4 +105,27 @@ bool partScanFetProbe(ScanSession& s, int gIdx, int dIdx, int sIdx,
 // Ground every session row briefly (GND legs, no pads), then remove.
 void partScanDischarge(ScanSession& s);
 
+// Whole-board row census (the Auto scan's first pass): every free row gets
+// a charge-share poke - drive it hard for a moment, release, and watch
+// whether the charge stays (empty row, ~tens of pF, holds for many ms) or
+// slumps into something (a part leg shares it with the rest of the part
+// instantly). rowFlags[1..60]: 0 = empty, 1 = something there, 2 = has
+// user wiring (skipped - its part is the user's business), 3 = not
+// pokeable (rows 29/30/59/60), 4 = fabric refused the poke legs.
+// abortCheck (may be nullptr) is polled between rows; poked rows are left
+// charged (harmless - they leak back to the lane bias).
+// v0/v1 (may be nullptr, [61]) get the raw release/settled voltages for
+// tuning. Returns the number of rows flagged 1, or -2 = machinery busy.
+int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
+                   bool (*abortCheck)(void));
+
+// The census's second pass: an isolated junction part (a lone transistor,
+// a diode) is INVISIBLE to the single-row poke - the drive pre-charges the
+// whole part through its own junctions, so nothing shares at release
+// (bench, 2N3906). This sweeps every adjacent free pair (both rows flagged
+// 0) with 1.0V through the shunt, both directions (~70ms per check): a
+// junction or a resistor conducts, and both rows get flagged 5. Returns
+// rows newly flagged, or -2 busy.
+int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void));
+
 #endif // PART_MEASURE_H
