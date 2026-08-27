@@ -497,6 +497,16 @@ ServiceStatus DisplayService::service() {
     return ServiceStatus::BUSY;
 }
 
+int DisplayService::aliveStateFor(const char* partName, uint32_t* frames) const {
+    if (frames) *frames = 0;
+    if (partName == nullptr || attachedName[0] == '\0' ||
+        strcmp(attachedName, partName) != 0) {
+        return -1;
+    }
+    if (frames) *frames = framesFlushed;
+    return (inst.state == DispState::ALIVE) ? 1 : 0;
+}
+
 void DisplayService::printStats(Stream* out) const {
     if (inst.partIdx < 0) return;
     static const char* stateNames[] = {"EMPTY", "ROUTED", "ALIVE", "YIELDED"};

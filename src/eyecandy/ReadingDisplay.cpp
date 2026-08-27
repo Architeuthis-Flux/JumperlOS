@@ -90,26 +90,30 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
 // single call site.
 constexpr int FIT_CACHE_ENTRIES = 4;
 constexpr size_t FIT_CACHE_TEXT = 24;
+// maxPt rides the cache key: the same string fit under different caps
+// resolves to different fonts.
 
 struct FitCacheEntry {
     char text[FIT_CACHE_TEXT];
     FontFamily family;
     int16_t font;
+    uint8_t maxPt;
     bool valid;
 };
 FitCacheEntry fitCache[FIT_CACHE_ENTRIES] = {};
 int fitCacheNext = 0;
 
-int16_t bestFitFontFor(FontFamily family, const char* text) {
+int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 12) {
     if (text != nullptr) {
         for (int i = 0; i < FIT_CACHE_ENTRIES; i++) {
             if (fitCache[i].valid && fitCache[i].family == family &&
+                fitCache[i].maxPt == maxPt &&
                 strcmp(fitCache[i].text, text) == 0) {
                 return fitCache[i].font;
             }
         }
     }
-    uint8_t pt = FontManager::findBestFitPointSize(family, text, 120, 12, 6);
+    uint8_t pt = FontManager::findBestFitPointSize(family, text, 120, maxPt, 6);
     int16_t font = (int16_t)FontManager::getFontForPointSize(family, pt);
     // Only a key we can hold WHOLE goes in: a truncated copy would match the
     // wrong string later and hand back a font measured for something else.
@@ -120,6 +124,7 @@ int16_t bestFitFontFor(FontFamily family, const char* text) {
         e.text[FIT_CACHE_TEXT - 1] = '\0';
         e.family = family;
         e.font = font;
+        e.maxPt = maxPt;
         e.valid = true;
     }
     return font;
@@ -305,6 +310,18 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
             rowLabel = rowBuf;
         }
     }
+    // The header is 5pt Andale Mono (fixed width, ~21 chars across 128px)
+    // and shares its row with the right-aligned label - a long part name
+    // ("SSD1306_32_I_2") used to run under it and clip. Truncate the name
+    // to what actually fits beside the label.
+    if (haveValues) {
+        size_t maxName = 21;
+        if (rowLabel != nullptr) {
+            size_t labelLen = strlen(rowLabel) + 1;  // plus a breathing space
+            maxName = (labelLen < 20) ? (21 - labelLen) : 1;
+        }
+        if (strlen(nameBuf) > maxName) nameBuf[maxName] = '\0';
+    }
 
     // One composed line drives both the dedupe check and the serial output.
     char line[LINE_CAP];
@@ -338,22 +355,16 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     // because most families have no readable sub-8pt cut and three
     // family-sized rows don't fit 32px.
     FontFamily fam = mapConfigValueToFontFamily(jumperlessConfig.top_oled.font);
-    int16_t medFont = (int16_t)FontManager::getFontForPointSize(fam, 8);
     int16_t labelFont = 12;  // Andale Mono 5pt
 
-    // Single value / name-only rows render as big as actually FITS: a fixed
-    // 12pt overflowed the panel on long words ("FLOATING").
-    auto bestFitFont = [&](const char* text) -> int16_t {
-        return bestFitFontFor(fam, text);
-    };
-
-    int16_t nameFont = haveValues ? labelFont : bestFitFont(nameText);
-    int16_t valueFont;
-    if (haveV1 && haveV2) {
-        valueFont = medFont;
-    } else {
-        valueFont = bestFitFont(haveV1 ? value : value2);
-    }
+    // EVERY value row renders as big as actually FITS: a fixed 12pt
+    // overflowed the panel on long words ("FLOATING"), and the old fixed
+    // 8pt two-value case clipped long readings ("PNP hFE 353") at the
+    // sides. Two stacked rows cap at 8pt so three rows still fit 32px.
+    int16_t nameFont = haveValues ? labelFont : bestFitFontFor(fam, nameText);
+    uint8_t valueCap = (haveV1 && haveV2) ? 8 : 12;
+    int16_t v1Font = haveV1 ? bestFitFontFor(fam, value, valueCap) : 0;
+    int16_t v2Font = haveV2 ? bestFitFontFor(fam, value2, valueCap) : 0;
 
     OledTextRow rows[3] = {};
     int n = 0;
@@ -373,13 +384,13 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     }
     n++;
     if (haveV1) {
-        rows[n].segs[0] = {value, valueFont, OLED_ALIGN_INHERIT};
+        rows[n].segs[0] = {value, v1Font, OLED_ALIGN_INHERIT};
         rows[n].segCount = 1;
         rows[n].align = OLED_ALIGN_CENTER;
         n++;
     }
     if (haveV2) {
-        rows[n].segs[0] = {value2, valueFont, OLED_ALIGN_INHERIT};
+        rows[n].segs[0] = {value2, v2Font, OLED_ALIGN_INHERIT};
         rows[n].segCount = 1;
         rows[n].align = OLED_ALIGN_CENTER;
         n++;

@@ -23,6 +23,7 @@
 #include "LEDs.h"           // HsvToRaw - per-signal tap rainbow
 #include "sensing/PartClassify.h"  // tap-time electrical identification
 #include "eyecandy/ReadingDisplay.h"  // measured values on the OLED
+#include "displays/DisplayService.h"   // display liveness (Parts > Test)
 #include "guiding/GuideScript.h"      // formatOhms
 #include "Undo.h"           // UndoIngestGuard - placements are not undoable (yet)
 #include "States.h"         // globalState
@@ -385,7 +386,8 @@ static int partsIdentifyAndOrder(const PartDbRecord& rec, const PartDbPinout& po
     bool polar = (rec.partClass == PARTDB_CLASS_TRANSISTOR) ||
                  (rec.partClass == PARTDB_CLASS_DISCRETE &&
                   (rec.subClass == PARTDB_SUB_DISCRETE_LED ||
-                   rec.subClass == PARTDB_SUB_DISCRETE_DIODE));
+                   rec.subClass == PARTDB_SUB_DISCRETE_DIODE ||
+                   rec.subClass == PARTDB_SUB_DISCRETE_POT));
     if (!polar) return 2;              // any order IS the order
     if (res.status != 0) return 0;
 
@@ -790,8 +792,9 @@ void partsAppLauncher(void) {
             if (nSignals > MAX_PART_PINS) nSignals = MAX_PART_PINS;
             bool canIdentify =
                 (rec.partClass == PARTDB_CLASS_TRANSISTOR && nSignals == 3) ||
-                (rec.partClass == PARTDB_CLASS_DISCRETE && nSignals == 2 &&
-                 rec.subClass != PARTDB_SUB_DISCRETE_POT);
+                (rec.partClass == PARTDB_CLASS_DISCRETE && nSignals == 2) ||
+                (rec.partClass == PARTDB_CLASS_DISCRETE && nSignals == 3 &&
+                 rec.subClass == PARTDB_SUB_DISCRETE_POT);
             if (po.footprint == PARTDB_FOOT_DIP) {
                 int row = partsTapForRow(rec);
                 if (row == -2) goto done;
@@ -892,6 +895,36 @@ done:
     oled.showJogo32h();
 }
 
+// Hold the current OLED content until the user presses something: probe
+// button or encoder click/hold continue, a serial byte exits the whole app
+// (the picker convention). Returns 0 = continue, -2 = exit.
+static int partsWaitForPress(void) {
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    while (true) {
+        jOS.serviceInner();
+        rotaryEncoderButtonStuff();
+        if (encoderButtonState == HELD ||
+            (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
+            while (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+                   encoderButtonState == LONG_HELD) {
+                jOS.serviceInner();
+                rotaryEncoderButtonStuff();
+                delayMicroseconds(1000);
+            }
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            return 0;
+        }
+        if (partsProbeButton() != 0) return 0;
+        if (Serial.available() > 0) {
+            (void)Serial.read();
+            return -2;
+        }
+        delayMicroseconds(1000);
+    }
+}
+
 // ============================================================================
 // Test Part - re-measure a placed part in place
 // ============================================================================
@@ -934,21 +967,103 @@ void partsTestLauncher(void) {
         pick = sel;
         PartDefinition& p = globalState.parts.parts[s_rec[sel]];
 
-        // the part's electrical footprint: every pin that resolves to a row
+        // Display parts: the ambient service IS the test - it beacons,
+        // inits and flushes frames to this exact panel all day.
+        if (partdbResolveDriver(p) != nullptr) {
+            uint32_t frames = 0;
+            int alive = DisplayService::getInstance().aliveStateFor(p.name, &frames);
+            Serial.print("\r\nPARTID test part=");
+            Serial.print(p.name);
+            Serial.print(" display=");
+            Serial.println(alive == 1 ? "alive" : (alive == 0 ? "quiet" : "unbound"));
+            char l1[24], l2[24];
+            if (alive == 1) {
+                snprintf(l1, sizeof(l1), "alive");
+                snprintf(l2, sizeof(l2), "%lu frames", (unsigned long)frames);
+            } else if (alive == 0) {
+                snprintf(l1, sizeof(l1), "not answering");
+                snprintf(l2, sizeof(l2), "check power");
+            } else {
+                snprintf(l1, sizeof(l1), "not bound");
+                snprintf(l2, sizeof(l2), "another display?");
+            }
+            ReadingDisplay::show(p.name, p.baseRow, l1, l2);
+            if (partsWaitForPress() == -2) break;
+            continue;
+        }
+
+        // the part's electrical footprint: every pin that resolves to a row,
+        // with the power pins remembered for the DIP presence test
         int rows[3];
         int nRows = 0;
         bool tooMany = false;
+        int gndRow = -1, vccRow = -1, sigRow = -1;
         for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
             if (p.pins[j].pinClass == 3) continue;   // nc
             int node = partPinNode(p, p.pins[j]);
             if (node < 1 || node > 60) continue;
-            if (nRows >= 3) { tooMany = true; break; }
+            if (p.pins[j].pinClass == 2 && gndRow < 0) gndRow = node;
+            if (p.pins[j].pinClass == 1 && vccRow < 0) vccRow = node;
+            if (p.pins[j].pinClass == 0 && sigRow < 0) sigRow = node;
+            if (nRows >= 3) { tooMany = true; continue; }  // keep scanning for gnd/vcc
             rows[nRows++] = node;
         }
         if (tooMany || nRows < 2) {
-            Serial.println("\r\nPARTID test unsupported (2-3 leg parts for now)");
+            // DIP logic/analog: an unpowered chip's ESD network is a diode
+            // from the GND pin toward everything and from everything toward
+            // VCC. Real logic needs the phase-2 vector runner; this answers
+            // "is a chip actually seated here" - through the same session,
+            // so its power wires get briefly lifted and restored too.
+            if (p.footprint == 1 && gndRow >= 1 && vccRow >= 1 &&
+                gndRow != vccRow && sigRow != gndRow && sigRow != vccRow) {
+                if (oled.oledConnected) {
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText("testing...");
+                }
+                PartResult res = (sigRow >= 1)
+                                     ? identifyThreeLead(gndRow, sigRow, vccRow)
+                                     : identifyTwoLead(gndRow, vccRow);
+                Serial.print("\r\nPARTID test part=");
+                Serial.print(p.name);
+                Serial.print(" esd_gnd_sig=");
+                Serial.print(res.jmap[0][1], 2);
+                Serial.print(" esd_gnd_vcc=");
+                Serial.print(res.jmap[0][2], 2);
+                Serial.print(" esd_sig_vcc=");
+                Serial.print(res.jmap[1][2], 2);
+                if (res.status != 0) { Serial.print(" status="); Serial.print((int)res.status); }
+                if (res.lifted > 0) { Serial.print(" lifted="); Serial.print((int)res.lifted); }
+                Serial.println();
+                char l1[24], l2[24] = "";
+                if (res.status != 0) {
+                    snprintf(l1, sizeof(l1), (res.status == -3) ? "too wired" : "busy");
+                    snprintf(l2, sizeof(l2), (res.status == -3) ? "to test" : "try again");
+                } else {
+                    float vf = 9.9f;
+                    if (res.nRows == 3) {
+                        if (res.jmap[0][1] < 1.1f && res.jmap[0][1] < vf) vf = res.jmap[0][1];
+                        if (res.jmap[0][2] < 1.1f && res.jmap[0][2] < vf) vf = res.jmap[0][2];
+                        if (res.jmap[1][2] < 1.1f && res.jmap[1][2] < vf) vf = res.jmap[1][2];
+                    } else if (res.type == PartType::DIODE || res.type == PartType::ZENER) {
+                        vf = res.value;
+                    }
+                    if (vf < 1.1f) {
+                        snprintf(l1, sizeof(l1), "chip present");
+                        snprintf(l2, sizeof(l2), "ESD %.2fV", (double)vf);
+                        Serial.println("  protection diodes answer - a chip is seated (logic itself needs the vector runner)");
+                    } else {
+                        snprintf(l1, sizeof(l1), "no ESD reply");
+                        snprintf(l2, sizeof(l2), "seated?");
+                        Serial.println("  no protection-diode response on the probed pins - is the chip seated?");
+                    }
+                }
+                ReadingDisplay::show(p.name, p.baseRow, l1, l2[0] ? l2 : nullptr);
+                if (partsWaitForPress() == -2) break;
+                continue;
+            }
+            Serial.println("\r\nPARTID test unsupported for this part yet");
             if (oled.oledConnected)
-                oled.clearPrintShow("2-3 leg\nparts only", 2, true, true, true);
+                oled.clearPrintShow("can't test\nthis one yet", 2, true, true, true);
             delay(900);
             continue;
         }
@@ -1017,6 +1132,15 @@ void partsTestLauncher(void) {
                     p.measuredOhms = res.value;
                     break;
                 }
+                case PartType::POT: {
+                    char ohms[12];
+                    formatOhms(res.value, ohms, sizeof(ohms));
+                    snprintf(line1, sizeof(line1), "pot %s", ohms);
+                    snprintf(line2, sizeof(line2), "wiper %.0f%%",
+                             (double)(res.value2 * 100.0f));
+                    p.measuredOhms = res.value;
+                    break;
+                }
                 case PartType::CAPACITOR:
                     snprintf(line1, sizeof(line1), "capacitor");
                     break;
@@ -1062,7 +1186,8 @@ void partsTestLauncher(void) {
         }
         ReadingDisplay::show(p.name, p.baseRow, line1[0] ? line1 : nullptr,
                              line2[0] ? line2 : nullptr);
-        delay(1400);
+        // the reading stays up until the user says they've read it
+        if (partsWaitForPress() == -2) break;
     }
 
     inClickMenu = 0;

@@ -50,6 +50,12 @@ public:
     // quietly retrying its way through every frame.
     void printStats(Stream* out) const;
 
+    // Test-surface query (Parts > Test): is the display bound to this part
+    // name answering? 1 = ALIVE (panel acks, frames flushing; *frames = how
+    // many so far), 0 = tracked but not answering (beacon / yielded),
+    // -1 = this part is not the attached display.
+    int aliveStateFor(const char* partName, uint32_t* frames = nullptr) const;
+
 private:
     DisplayService() = default;
     ~DisplayService() = default;

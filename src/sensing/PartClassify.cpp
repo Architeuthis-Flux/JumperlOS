@@ -29,6 +29,7 @@ const char* partTypeName(PartType t) {
         case PartType::BJT_PNP: return "BJT_PNP";
         case PartType::NFET: return "NFET";
         case PartType::PFET: return "PFET";
+        case PartType::POT: return "POT";
         default: return "UNKNOWN";
     }
 }
@@ -43,6 +44,7 @@ const char* pinRoleName(PinRole r) {
         case PinRole::G: return "G";
         case PinRole::D: return "D";
         case PinRole::S: return "S";
+        case PinRole::W: return "WIPER";
         case PinRole::LEAD: return "LEAD";
         default: return "-";
     }
@@ -239,6 +241,53 @@ PartResult identifyThreeLead(int rowA, int rowB, int rowC) {
                 fwd[a][b] = true;
                 nFwd++;
             }
+
+    if (nFwd == 6) {
+        // Every ordered pair conducts: a resistor mesh, i.e. a pot (its two
+        // half-tracks put resistance between every pin pair). Kelvin-measure
+        // the three pairs; the wiper is the pin whose two halves sum to the
+        // end-to-end track: R(a,c) ~= R(a,w) + R(w,c).
+        float rp[3];  // rp[0]=R(0,1), rp[1]=R(0,2), rp[2]=R(1,2)
+        float lin;
+        bool ok = partScanResistance(s, 0, 1, &rp[0], &lin) &&
+                  partScanResistance(s, 0, 2, &rp[1], &lin) &&
+                  partScanResistance(s, 1, 2, &rp[2], &lin);
+        if (ok) {
+            // candidate wiper w: the pair NOT containing w is the track
+            const int trackOf[3] = { 2, 1, 0 };  // w=0 -> R(1,2), w=1 -> R(0,2), w=2 -> R(0,1)
+            const int haloA[3] = { 0, 0, 1 };    // the two half-track pairs per w
+            const int haloB[3] = { 1, 2, 2 };
+            int wiper = -1;
+            for (int w = 0; w < 3; w++) {
+                float track = rp[trackOf[w]];
+                float sum = rp[haloA[w]] + rp[haloB[w]];
+                if (track > 10.0f && sum > 0.0f &&
+                    sum > 0.75f * track && sum < 1.25f * track) {
+                    wiper = w;
+                    break;
+                }
+            }
+            if (wiper >= 0) {
+                r.type = PartType::POT;
+                r.roles[wiper] = PinRole::W;
+                bool first = true;
+                for (int i = 0; i < 3; i++) {
+                    if (i == wiper) continue;
+                    r.roles[i] = first ? PinRole::A : PinRole::B;
+                    first = false;
+                }
+                r.value = rp[trackOf[wiper]];         // end-to-end track ohms
+                r.value2 = rp[haloA[wiper]] / rp[trackOf[wiper]];  // wiper position 0..1
+                r.confidence = 0.85f;
+                partScanEnd(s);
+                return r;
+            }
+        }
+        r.type = PartType::UNKNOWN;
+        r.degraded = true;
+        partScanEnd(s);
+        return r;
+    }
 
     if (nFwd == 0) {
         // No junction anywhere. All six pairs cleanly blocked = nothing

@@ -15,10 +15,10 @@
 
 enum class PartType : uint8_t {
     EMPTY = 0, UNKNOWN, SHORT_CIRCUIT, RESISTOR, CAPACITOR,
-    DIODE, LED, ZENER, BJT_NPN, BJT_PNP, NFET, PFET,
+    DIODE, LED, ZENER, BJT_NPN, BJT_PNP, NFET, PFET, POT,
 };
 
-enum class PinRole : uint8_t { NONE = 0, A, K, B, C, E, G, D, S, LEAD };
+enum class PinRole : uint8_t { NONE = 0, A, K, B, C, E, G, D, S, W, LEAD };
 
 struct PartResult {
     PartType type = PartType::UNKNOWN;
