@@ -349,3 +349,82 @@ App-side confirmation is Kevin's — port1 was his app's all shift.
   port frees up.
 - The `row=17 reason=` garble in his paste = the known async-PARTWARN
   interleave, still on the deferred list.
+
+---
+
+## The afternoon shift (12:53 round) — 5dc1f9d
+
+Five asks from Kevin's 12:53 paste, all landed and flashed.
+
+**The panel spaces its own columns.** `OLED_ALIGN_JUSTIFY` (oled.h/oled.cpp
+`clearPrintShowRich`) spreads a row's flowing segments from the left pad to
+the right margin using measured pixel widths. The part card's pin columns
+are now segments instead of one fixed 21-char line — that line was 8px of
+left pad plus 21 monospace chars on a 128px panel, which is why "C 19" hung
+off the right edge. Focus bars became bars-or-spaces: an unfocused cell
+wears spaces where the `|`s go, so moving focus no longer shifts the layout
+by two characters (Kevin's exact ask).
+
+**Rail/DAC part pins keep their names.** `showSpecialPinReading`
+(Highlighting.cpp, beside `showGpioPinReading`) paints "Q17 E" over "Top
+Rail 3.80 V". Two things it does deliberately differently from the GPIO
+twin: it matches the pin by `brightenedNode`, never first-pin-on-net (a rail
+carries many parts' pins — the wrong name is worse than none), and it is
+hooked at all SIX paint sites (rails + DACs, one-shot and live) because the
+live updater re-arms `highlightedNet` through `highlightNets` and would
+otherwise stomp the name back within a cycle.
+
+**The sweep tries three layouts.** `partScanPairSweep` now runs adjacent
+(n,n+1), across the center channel (n,n+30) and one-apart (n,n+2); each
+pass only sweeps what the last left unexplained, so a mostly-found board
+pays almost nothing. Drive went **1.0V → 3.0V**: the LED Kevin watched the
+scan miss on 21/51 measures **Vf 1.96V** (bench-confirmed post-flash via
+`part_identify(21,51)` — red, lifted 2 wires), so it could not physically
+conduct at 1V. The higher drive also drops the deviation floor 0.35 → 0.15mA,
+putting ~10k resistors back in range (they moved only ~0.1mA at 1V — under
+the old threshold, silently unseen). Cross-gap hits return as explicit PAIRS
+and are identified BEFORE span forming, then claimed via `crossUsed`: their
+rows sit in different halves and would otherwise decay into two width-1
+"noise" spans, one per half. A width-3 span whose middle row never hit now
+asks the two-lead question first (that shape belongs to the one-apart
+arrangement, not to a BJT). A pass with <5 pairs says so rather than
+silently judging nothing.
+
+**The scan senses I2C.** Bench-proven before a line was written: SoftI2C
+over the crossbar on rows 3/4 ACKed **0x3C** first try and lit every pixel
+of Kevin's SSD1306. `partsFindClusterPower` reads the supply pins out of
+clamp **orientation** — GND is every clamp's common ANODE, Vdd every clamp's
+common CATHODE, signal pins are mixed. Forward-drop magnitude cannot separate
+them (measured 0.78 / 0.86 / 0.91 V all overlap); orientation can, every time.
+Then `partsProbeClusterI2C` follows the design doc §9 exactly: ground first,
+supply LAST, INA1 watchdog bails over 20mA, both SDA/SCL orderings tried,
+full teardown on every exit. It borrows I2C1 on pins **22/23**, never 26/27
+— pin 27 is the live probe-power pad (BUF_IN/GP_8 on this board) — and
+refuses outright when the panel owns Wire1. Findings are named from the
+doc's `i2c_addr` table (first page, in rodata): "I2C 0x3C on 3/4 —
+SSD1306/SH1106 display". Hooked into BOTH chip verdicts: the wide-span walk
+and the small clamp star, which is where Kevin's 4-pin module actually lands
+("rows 1-3: a chip?" in his 12:28 trace).
+
+**PARTSEL stopped scrolling the terminal** (6dad4b5, earlier the same round):
+it rides a pinned status row above the live reading, repainted in place.
+
+### Delivery changed today
+
+SWD stayed benched, but BOOTSEL no longer needs Kevin's hands: **open port5
+(CDC 2) at 1200 baud and close it**, then `picotool load -x`. That's the
+touch `secondSerialHandler` already watched for. PICOBOOT only — no `/rp2350`
+drive mounts, so picotool is the tool, not a UF2 copy. Board came back with
+all 10 nets intact. (`machine.bootloader()` over the MP REPL does NOT work —
+it just resets.)
+
+### Still Kevin's, from this round
+
+- The three-arrangement sweep end to end: does the 21/51 LED now show up as
+  a finding, and does CONNECT place it? The physics is confirmed, the whole
+  Auto Scan pass is not.
+- The I2C interrogation against his module in situ (it needs the scan's
+  wide/star verdict to fire).
+- The justified card at 4 pins, and whether the spacing feels right.
+- His message tail was cut off twice today ("And the…" at 11:37, "it" at
+  12:28) — whatever those were never arrived.
