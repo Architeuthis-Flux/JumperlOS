@@ -605,6 +605,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             highlightTimer = millis( );
             int net = -1;
             int row = scrolledRow;
+            bool specialNet = false;
             if ( pj < 0 ) {
                 brightenedNet = -1;
                 brightenedNode = -1;
@@ -620,9 +621,27 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 brightenedNet = ( net > 0 ) ? net : -1;
                 brightenedNode = ( net > 0 ) ? row : -1;
                 brightenedAmount = 80;
+                // A pin wired to anything beyond the breadboard - a GPIO,
+                // ADC, DAC, rail, nano pin - hands the panel to the live
+                // net display: it knows how to show that thing (GPIO
+                // HIGH/LOW with click-to-toggle feedback, ADC volts...)
+                // and now says the pin's name too (showGpioPinReading).
+                if ( net > 0 && net < MAX_NETS &&
+                     globalState.connections.nets[ net ].number == net ) {
+                    if ( net <= 5 ) specialNet = true;
+                    for ( int n = 0; n < MAX_NODES && !specialNet; n++ ) {
+                        int nd = globalState.connections.nets[ net ].nodes[ n ];
+                        if ( nd == 0 ) break;
+                        if ( nd > 60 ) specialNet = true;
+                    }
+                }
             }
             requestLedShow( -1 );
-            partsShowPartCard( p, pj );
+            if ( specialNet ) {
+                highlightNets( 0, net, print );   // the live card, part-named
+            } else {
+                partsShowPartCard( p, pj );
+            }
             if ( print ) {
                 Serial.print( "\r\nPARTSEL part=" );
                 Serial.print( p.name );
@@ -1181,6 +1200,50 @@ static void showNetReading( const char* name, const char* value,
     ReadingDisplay::show( name, brightenedNode, value, value2, hint );
 }
 
+// A GPIO on a part pin's net shows BOTH identities (Kevin's ask, 2026-08-27):
+// "7400 4Y" as the headline with "GPIO 3 out" + HIGH/LOW on the value lines.
+// netSemanticName can't name these nets - they are special-function, and its
+// authority gate is right for GND/rails - so the part scan runs here without
+// it: this is only ever called from inside a GPIO display branch.
+static void showGpioPinReading( int netNum, int gpioIdx, bool isOutput,
+                                const char* stateString ) {
+    char gpioLabel[ 16 ];
+    snprintf( gpioLabel, sizeof( gpioLabel ), "GPIO %d %s", gpioIdx + 1,
+              isOutput ? "out" : "in" );
+    char pinName[ 16 ] = "";
+    if ( netNum > 0 && netNum < MAX_NETS &&
+         globalState.connections.nets[ netNum ].number == netNum ) {
+        for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
+            const PartDefinition& p = globalState.parts.parts[ i ];
+            if ( !p.placed ) continue;
+            bool found = false;
+            for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+                int node = partPinNode( p, p.pins[ j ] );
+                if ( node < 1 || node > 60 ) continue;
+                if ( !netHasNode( netNum, node ) ) continue;
+                const char* pn = p.pins[ j ].name;
+                int pinLen = (int)strlen( pn );
+                int nameBudget = (int)sizeof( pinName ) - 1 - pinLen - 1;
+                if ( nameBudget < 1 ) nameBudget = 1;
+                snprintf( pinName, sizeof( pinName ), "%.*s %s", nameBudget,
+                          p.name, pn );
+                found = true;
+                break;
+            }
+            if ( found ) break;
+        }
+    }
+    if ( pinName[ 0 ] != '\0' ) {
+        showNetReading( pinName, gpioLabel, stateString );
+    } else {
+        char name[ 16 ];
+        if ( netSemanticName( netNum, gpioIdx, name, sizeof( name ) ) )
+            showNetReading( name, stateString );   // the I2C "GPIO N SCL" form
+        else
+            showNetReading( gpioLabel, stateString );
+    }
+}
+
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
     // Serial.print("justReadProbe = ");
     // Serial.println(probeReading);
@@ -1650,10 +1713,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                                 : ( gpioInputState == 1 ) ? "HIGH"
                                 : ( gpioInputState == 2 ) ? "FLOATING"
                                                           : "?";
-                            char name[ 16 ];
-                            if ( !netSemanticName( netHighlighted, gpioInputNumber, name, sizeof( name ) ) )
-                                snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
-                            showNetReading( name, stateString );
+                            showGpioPinReading( netHighlighted, gpioInputNumber,
+                                                false, stateString );
                         }
                         specialPrint = 1;
                     }
@@ -1666,10 +1727,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         logoOverriden = true;
                         if ( print == 1 ) {
                             int gpioOutputState = gpio_get_out_level( gpioDef[ gpioOutputNumber ][ 0 ] );
-                            char name[ 16 ];
-                            if ( !netSemanticName( netHighlighted, gpioOutputNumber, name, sizeof( name ) ) )
-                                snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
-                            showNetReading( name, gpioOutputState ? "HIGH" : "LOW" );
+                            showGpioPinReading( netHighlighted, gpioOutputNumber,
+                                                true, gpioOutputState ? "HIGH" : "LOW" );
                         }
                         specialPrint = 1;
                     }
@@ -1749,11 +1808,13 @@ int Highlighting::checkForReadingChanges( void ) {
     // NOTE: removed the 50ms early-exit so checkForReadingChanges() evaluates
     // the UART snapshot and other sensors every time it's called by the service loop.
 
-    // While a PART has focus, the part card owns the panel - the live net
-    // reading must not repaint "Net N" over it (Kevin's bench, 2026-08-27:
-    // the card lasted seconds before a net reading stomped it). The latch
-    // drops so the reading doesn't resume stale when the focus ends.
-    if ( partLabels.partHighlightActive( ) ) {
+    // While a PART has focus AND the card owns the panel (highlightedNet
+    // parked), the live net reading must not repaint "Net N" over it
+    // (Kevin's bench, 2026-08-27: the card lasted seconds before a net
+    // reading stomped it). A part-pin focus that deliberately handed the
+    // panel to a special net - a GPIO pin wants its live HIGH/LOW and the
+    // click-to-toggle feedback - sets highlightedNet and passes through.
+    if ( partLabels.partHighlightActive( ) && highlightedNet <= 0 ) {
         showReadingNet = -1;
         lastMeasuredNet = -1;
         return -1;
@@ -1831,10 +1892,7 @@ int Highlighting::checkForReadingChanges( void ) {
                 : ( currentGpioInputState == 1 ) ? "HIGH"
                 : ( currentGpioInputState == 2 ) ? "FLOATING"
                                                  : "?";
-            char name[ 16 ];
-            if ( !netSemanticName( showReadingNet, gpioInputNumber, name, sizeof( name ) ) )
-                snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
-            showNetReading( name, stateString );
+            showGpioPinReading( showReadingNet, gpioInputNumber, false, stateString );
 
             displayUpdated = true;
         }
@@ -1850,10 +1908,8 @@ int Highlighting::checkForReadingChanges( void ) {
         if ( currentGpioOutputState != prevGpioOutputState ) {
             prevGpioOutputState = currentGpioOutputState;
 
-            char name[ 16 ];
-            if ( !netSemanticName( showReadingNet, gpioOutputNumber, name, sizeof( name ) ) )
-                snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
-            showNetReading( name, currentGpioOutputState ? "HIGH" : "LOW" );
+            showGpioPinReading( showReadingNet, gpioOutputNumber, true,
+                                currentGpioOutputState ? "HIGH" : "LOW" );
 
             displayUpdated = true;
         }

@@ -1342,51 +1342,73 @@ void partsShowPartCard(const PartDefinition& p, int focusPin) {
     char testLine[26] = "";
     PartLabels::partTestSummary(p, testLine, sizeof(testLine));
 
-    // pins line: every pin with its row for small parts, a summary for DIPs
-    char pinsLine[28] = "";
-    {
-        int used = 0;
-        if (p.numPins <= 3) {
-            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
-                int node = partPinNode(p, p.pins[j]);
-                char label[8];
-                partsCardPinLabel(p, p.pins[j], label, sizeof(label));
-                used += snprintf(pinsLine + used, sizeof(pinsLine) - used,
-                                 "%s%s%s - %d%s", j ? "  " : "",
-                                 (j == focusPin) ? "[" : "", label, node,
-                                 (j == focusPin) ? "]" : "");
-                if (used >= (int)sizeof(pinsLine)) break;
+    // Pin columns (Kevin's spec, 11:37): labels on one line, rows on the
+    // next, spread left/center/right, the focused pin fenced in |bars|
+    // that line up between the two lines. Monospace makes the alignment
+    // exact: each column's label/number cell pair is built to the SAME
+    // width and placed at the SAME offset. ~21 chars of Andale Mono 5pt
+    // fit 128 px (the old one-line form leaked off the panel).
+    const int LW = 21;
+    char l1[LW + 1], l2[LW + 1];
+    memset(l1, ' ', LW); l1[LW] = '\0';
+    memset(l2, ' ', LW); l2[LW] = '\0';
+    if (p.numPins <= 3) {
+        int nCols = p.numPins;
+        for (int j = 0; j < nCols && j < MAX_PART_PINS; j++) {
+            int node = partPinNode(p, p.pins[j]);
+            char label[8], num[8], c1[12], c2[12];
+            partsCardPinLabel(p, p.pins[j], label, sizeof(label));
+            snprintf(num, sizeof(num), "%d", node);
+            int w = (int)strlen(label);
+            if ((int)strlen(num) > w) w = (int)strlen(num);
+            if (j == focusPin) {
+                snprintf(c1, sizeof(c1), "|%-*s|", w, label);
+                snprintf(c2, sizeof(c2), "|%-*s|", w, num);
+            } else {
+                snprintf(c1, sizeof(c1), "%-*s", w, label);
+                snprintf(c2, sizeof(c2), "%-*s", w, num);
             }
-        } else if (focusPin >= 0 && focusPin < p.numPins) {
-            char label[8];
-            partsCardPinLabel(p, p.pins[focusPin], label, sizeof(label));
-            snprintf(pinsLine, sizeof(pinsLine), "[%s - %d]  %d pins",
-                     label, partPinNode(p, p.pins[focusPin]), (int)p.numPins);
-        } else {
-            int lo = 61, hi = 0;
-            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
-                int node = partPinNode(p, p.pins[j]);
-                if (node < 1 || node > 60) continue;
-                if (node < lo) lo = node;
-                if (node > hi) hi = node;
-            }
-            snprintf(pinsLine, sizeof(pinsLine), "%d pins  rows %d-%d",
-                     (int)p.numPins, lo, hi);
+            int len = (int)strlen(c1);   // == strlen(c2) by construction
+            int start;
+            if (j == 0) start = 0;                            // left
+            else if (j == nCols - 1) start = LW - len;        // right
+            else start = (LW - len) / 2;                      // center
+            if (start < 0) start = 0;
+            if (start + len > LW) len = LW - start;
+            memcpy(l1 + start, c1, len);
+            memcpy(l2 + start, c2, len);
         }
+    } else if (focusPin >= 0 && focusPin < p.numPins) {
+        char label[8];
+        partsCardPinLabel(p, p.pins[focusPin], label, sizeof(label));
+        snprintf(l1, sizeof(l1), "|%s|%*s%d pins", label,
+                 (int)(LW - strlen(label) - 8), "", (int)p.numPins);
+        snprintf(l2, sizeof(l2), "|%d|", partPinNode(p, p.pins[focusPin]));
+    } else {
+        int lo = 61, hi = 0;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            int node = partPinNode(p, p.pins[j]);
+            if (node < 1 || node > 60) continue;
+            if (node < lo) lo = node;
+            if (node > hi) hi = node;
+        }
+        snprintf(l1, sizeof(l1), "%d pins", (int)p.numPins);
+        snprintf(l2, sizeof(l2), "rows %d-%d", lo, hi);
     }
 
     const int16_t f = 12;  // Andale Mono 5pt - four rows fit 32px
     OledTextRow rows[4] = {};
     rows[0].segs[0] = {p.name, f, OLED_ALIGN_INHERIT};
-    rows[0].segCount = 1;
+    rows[0].segs[1] = {typeLine, f, OLED_ALIGN_RIGHT};
+    rows[0].segCount = 2;
     rows[0].align = OLED_ALIGN_LEFT;
-    rows[1].segs[0] = {typeLine, f, OLED_ALIGN_INHERIT};
+    rows[1].segs[0] = {l1, f, OLED_ALIGN_INHERIT};
     rows[1].segCount = 1;
     rows[1].align = OLED_ALIGN_LEFT;
-    rows[2].segs[0] = {testLine, f, OLED_ALIGN_INHERIT};
+    rows[2].segs[0] = {l2, f, OLED_ALIGN_INHERIT};
     rows[2].segCount = 1;
     rows[2].align = OLED_ALIGN_LEFT;
-    rows[3].segs[0] = {pinsLine, f, OLED_ALIGN_INHERIT};
+    rows[3].segs[0] = {testLine, f, OLED_ALIGN_INHERIT};
     rows[3].segCount = 1;
     rows[3].align = OLED_ALIGN_LEFT;
     for (int i = 0; i < 4; i++) rows[i].fixedH = 7;
@@ -1749,6 +1771,23 @@ static void partsScanViz(int row, int state) {
     requestLedShow(2);
 }
 
+// The hidden-graph star test: one extra junction sharing this diode's anode
+// means a chip's clamp network, never a discrete diode (a discrete has
+// exactly one isolated edge). Queries up to nCand candidate rows, first hit
+// wins. ~0.6s per query - callers keep nCand small.
+static bool partsDiodeIsChipClamp(int anodeRow, const int* cands, int nCand) {
+    for (int q = 0; q < nCand && !partsAutoAbortCheck(); q++) {
+        int c = cands[q];
+        PartResult er = (c < anodeRow) ? identifyTwoLead(c, anodeRow)
+                                       : identifyTwoLead(anodeRow, c);
+        if (er.status == 0 &&
+            (er.type == PartType::DIODE || er.type == PartType::ZENER ||
+             er.type == PartType::LED || er.type == PartType::SHORT_CIRCUIT))
+            return true;
+    }
+    return false;
+}
+
 // The placed part (if any) with a pin on this row, for "already yours" tags.
 static const char* partsPlacedPartOnRow(int row) {
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
@@ -2038,7 +2077,78 @@ void partsAutoLauncher(void) {
                         }
                     }
                 }
-                if (res.status == 0 && res.type != PartType::EMPTY &&
+                // A 2-row DIODE verdict is only PROVISIONAL: a chip's clamp
+                // diode between a pin and its GND pin reads exactly like one
+                // (bench, 2026-08-27: a loose 7400's substrate diode scanned
+                // as "DIODE 0.65V"). Hidden-graph learning by edge-detecting
+                // queries: a discrete diode is one isolated edge; a chip is
+                // a STAR - many pins clamp to one common pin. So query
+                // neighbor rows (same half +-3, and the DIP counterparts in
+                // the other half) against the diode's ANODE; the FIRST extra
+                // junction sharing that terminal proves multi-pin structure
+                // and the verdict becomes "a chip". (The group-testing
+                // refinement - gang candidates into one INA measurement -
+                // waits until scans need to be faster.)
+                int chipStarRow = -1;
+                if (res.status == 0 && res.nRows == 2 &&
+                    (res.type == PartType::DIODE || res.type == PartType::ZENER)) {
+                    int anodeRow = (res.roles[0] == PinRole::A) ? (int)res.rows[0]
+                                                                : (int)res.rows[1];
+                    int candList[6];
+                    int nCand = 0;
+                    auto addCand = [&](int c) {
+                        if (nCand >= 6 || c < 1 || c > 60) return;
+                        if (c == 29 || c == 30 || c == 59 || c == 60) return;
+                        if (c >= a && c <= z) return;
+                        if (flags[c] == 2 || flags[c] == 3 || flags[c] == 4) return;
+                        for (int q = 0; q < nCand; q++)
+                            if (candList[q] == c) return;
+                        candList[nCand++] = c;
+                    };
+                    for (int d = 1; d <= 3; d++) {
+                        addCand(a - d);
+                        addCand(z + d);
+                    }
+                    addCand((a <= 28) ? a + 30 : a - 30);   // the DIP's other side
+                    addCand((z <= 28) ? z + 30 : z - 30);
+                    if (nCand > 0) {
+                        Serial.print("  a diode, or a chip's clamp? testing ");
+                        Serial.print(nCand);
+                        Serial.println(" neighbor rows against its anode...");
+                        Serial.flush();
+                    }
+                    for (int q = 0; q < nCand && !partsAutoAbortCheck(); q++) {
+                        int c = candList[q];
+                        PartResult er = (c < anodeRow) ? identifyTwoLead(c, anodeRow)
+                                                       : identifyTwoLead(anodeRow, c);
+                        if (er.status == 0 &&
+                            (er.type == PartType::DIODE ||
+                             er.type == PartType::ZENER ||
+                             er.type == PartType::LED ||
+                             er.type == PartType::SHORT_CIRCUIT)) {
+                            chipStarRow = c;   // a second edge on the anode:
+                            break;             // no discrete diode has one
+                        }
+                    }
+                    if (chipStarRow > 0) {
+                        int lo = (a < chipStarRow) ? a : chipStarRow;
+                        int hi = (z > chipStarRow) ? z : chipStarRow;
+                        snprintf(line, sizeof(line),
+                                 "rows %d-%d: a chip? (several pins clamp to row %d)",
+                                 lo, hi, anodeRow);
+                        for (int r = a; r <= z; r++) {
+                            int pr = nodeToPrintRow(r);
+                            if (pr >= 0)
+                                b.printRawRow(0b00011111, pr,
+                                              partsTapHue(sp, nSpans, false), 0xffffff);
+                        }
+                        requestLedShow(2);
+                    }
+                }
+
+                if (chipStarRow > 0) {
+                    // reported above - never as a discrete diode
+                } else if (res.status == 0 && res.type != PartType::EMPTY &&
                     res.type != PartType::UNKNOWN) {
                     char detail[24] = "";
                     if (res.type == PartType::RESISTOR || res.type == PartType::POT)
@@ -2119,6 +2229,24 @@ void partsAutoLauncher(void) {
                              pres.type == PartType::LED ||
                              pres.type == PartType::CAPACITOR ||
                              pres.type == PartType::SHORT_CIRCUIT);
+                        if (discrete && (pres.type == PartType::DIODE ||
+                                         pres.type == PartType::ZENER)) {
+                            // the same clamp trap as the 2-row span: a
+                            // "diode" inside a chip-wide span is probably
+                            // the chip's clamp - the star test referees
+                            // against the span's other hit rows
+                            int anode2 = (pres.roles[0] == PinRole::A)
+                                             ? (int)pres.rows[0]
+                                             : (int)pres.rows[1];
+                            int cands[4];
+                            int nc = 0;
+                            for (int rr = a; rr <= z && nc < 4; rr++) {
+                                if (rr == r || rr == r + 1 || consumed[rr]) continue;
+                                if (flags[rr] == 1 || flags[rr] == 5) cands[nc++] = rr;
+                            }
+                            if (nc > 0 && partsDiodeIsChipClamp(anode2, cands, nc))
+                                discrete = false;   // stays pooled with the chip
+                        }
                         if (discrete) {
                             consumed[r] = consumed[r + 1] = true;
                             nSplit++;
