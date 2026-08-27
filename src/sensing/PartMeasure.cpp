@@ -665,6 +665,28 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
     s.ephAddFailed = false;
     s.nLift = 0;
 
+    // Prime the measurement lane: the FIRST poke reads its ring sample off
+    // a cold ADC lane and lands marginally low - row 1 census-flagged 3/3
+    // scans on this bench (v0 2.0-2.1 against the 2.2 threshold) while a
+    // real 2-lead identify read it EMPTY. One discarded poke of the first
+    // pokeable row settles the lane for everyone after it.
+    for (int row = 1; row <= 60; row++) {
+        if (row == 29 || row == 30 || row == 59 || row == 60) continue;
+        if (nodeHasAnyBridgePM(row)) continue;
+        legAdd(s, row, ADC0 + ch);
+        legAdd(s, row, rovingNode(s));
+        if (legsBuild(s)) {
+            rovingOut(s, true);
+            delay(2);
+            rovingIn(s, 0);
+            (void)readAdcVoltage(ch, 1);
+            delay(6);
+            (void)readAdcVoltage(ch, 4);
+            legsClear(s);
+        }
+        break;
+    }
+
     int found = 0;
     for (int row = 1; row <= 60; row++) {
         if (row == 29 || row == 30 || row == 59 || row == 60) {

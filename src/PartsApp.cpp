@@ -1581,6 +1581,7 @@ void partsAutoLauncher(void) {
                 owner = partsPlacedPartOnRow(r);
 
             char line[64] = "";
+            bool noiseLine = false;   // terminal-only; never eats an OLED slot
             if (owner != nullptr) {
                 // already the user's - name the record, over its claimed rows
                 // (the census span can be narrower: wired legs never hit)
@@ -1598,8 +1599,33 @@ void partsAutoLauncher(void) {
                 snprintf(line, sizeof(line), "rows %d-%d: %s (placed)", plo,
                          phi, owner);
             } else if (width == 1) {
-                // a lone hit: one leg of something bigger, or noise - say so
-                snprintf(line, sizeof(line), "row %d: one leg of something?", a);
+                // a lone hit: INTERROGATE before crying part. A marginal
+                // census row, or a chip pin conducting through the sweep's
+                // flagged-neighbor allowance, reads EMPTY on a real 2-lead
+                // identify (bench: rows 1 and 39, 3/3 scans each, both
+                // artifacts) - those say noise, and only on the terminal.
+                int loH = (a <= 28) ? 1 : 31, hiH = (a <= 28) ? 28 : 58;
+                int nb = (a + 1 <= hiH && flags[a + 1] == 0) ? a + 1
+                         : (a - 1 >= loH && flags[a - 1] == 0) ? a - 1 : -1;
+                if (partsAutoAbortCheck()) break;
+                PartResult r1;
+                r1.status = -1;
+                if (nb > 0) {
+                    Serial.print("  checking row ");
+                    Serial.print(a);
+                    Serial.println("...");
+                    Serial.flush();
+                    r1 = (nb > a) ? identifyTwoLead(a, nb)
+                                  : identifyTwoLead(nb, a);
+                }
+                if (r1.status == 0 && r1.type == PartType::EMPTY) {
+                    snprintf(line, sizeof(line),
+                             "row %d: noise (nothing conducts)", a);
+                    noiseLine = true;
+                } else {
+                    snprintf(line, sizeof(line),
+                             "row %d: one leg of something?", a);
+                }
             } else if (width <= 3) {
                 Serial.print("  checking rows ");
                 Serial.print(a);
@@ -1695,7 +1721,8 @@ void partsAutoLauncher(void) {
             }
             Serial.print("\r\n  ");
             Serial.println(line);
-            if (shown < 2 && sumLen + strlen(line) + 2 < sizeof(summary)) {
+            if (!noiseLine && shown < 2 &&
+                sumLen + strlen(line) + 2 < sizeof(summary)) {
                 sumLen += (size_t)snprintf(summary + sumLen, sizeof(summary) - sumLen,
                                            "%s%s", shown ? "\n" : "", line);
                 shown++;
