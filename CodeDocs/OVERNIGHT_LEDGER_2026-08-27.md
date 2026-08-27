@@ -257,3 +257,95 @@ not unattended.
   to run — it pushes remote branch deletions).
 - `/slots/slot2.yaml` now exists on the device (seeded canonical empty-slot
   file during the canary fix — harmless, matches slot 2's live state).
+
+---
+
+# Morning shift (Kevin's 09:09 bench notes)
+
+Kevin woke, drove the bench, and left four items. The board had been
+reorganized overnight-his-side: `/slots` now holds only `slot0.yaml`
+(2N3906 @17-19, LED @21/51, five bridges), `power_source = gpio_first`
+(his workaround), and the 2N3906 is physically flipped BACK — identify
+now reads E,B,C exactly where the record says.
+
+## 1. Part testing failed under DAC0 probe power — fixed, bench-verified
+
+Not interference: `partScanBegin` and `partScanPairSweep` each carried a
+hard `if (infraProbePowerSource() == DAC0) return -2;`. Kevin's ruling
+("just disconnect the probe power entirely when doing part testing")
+replaced both refusals with a park: `infraSetProbePowerEnabled(false)`
+at session start, restored at every exit, riding the refreshes the
+session already makes (infraEvaluate runs at every rebuild head — zero
+added refreshes). Verified under `dac0_first` on the bench: identify
+clean (BJT hFE 457, LED Vf 2.17) where the same calls refused before;
+feed restored after every session; bridges byte-identical; part_id
+39/39. Config restored to his `gpio_first` — DAC0 works again whenever
+he wants to flip back.
+
+## 2+3. The overlay/highlight rework — the part is now a first-class thing
+
+The "weird partial overlays" were PartLabels' `_PARTS_` layer: warned
+pins painted a standing FULL 5-cell column (looks exactly like routing)
+and pin markers were all class-blue (85% of DB pins are class signal).
+
+- Role colors everywhere: pin NAME keys the palette (E/A/S red, B/G/W
+  yellow, C/K/D blue — the result cards' warm-to-cool read), fallback
+  to class colors, pin-1 marker kept.
+- Warnings: edge+inward pair PULSING at 400ms — pointed, and
+  unmistakably not a net. No more full column.
+- clearTransients(): `x` and every parts-app exit retire the standing
+  paint (warn mute until the warning changes or re-fires, inspect
+  windows dropped, part highlight cleared). Blooms deliberately stay —
+  placement exits INTO its bloom. `x` also gained the clearHighlighting
+  stale-net guard cmd_loadNodeFile always had.
+- Encoder scroll: a placed part is a stop BEFORE the wiring test (zero
+  wires needed). First landing from either end = WHOLE part (all pins
+  role-lit bright, OLED card: name / pin assignments / cached test
+  data); further detents walk that half-span's pins in travel order,
+  then the row scan resumes past it. A focused wired pin gets the
+  full net treatment; an unwired one paints its whole row in role
+  color through the overlay. Select-tap = just the pin (Kevin's spec).
+- Cached test data: PartDefinition grew lastTestType/Value/Value2
+  (RAM-only, measuredOhms rules) — written by Test Part and the
+  place-flow identify, shown on the whole-part card. Auto Scan does
+  not populate it yet (parity is a one-liner if wanted).
+- Timeout interplay: part focus stamps highlightTimer and rides the
+  persistent 15s class (a stale 1.8s timer from a previous net stop
+  was killing the card mid-read — caught pre-flash).
+
+Bench (SWD encoder injection + port7 :leds/:oled): UP walk = 2, 6, 10,
+17 PART(whole), E, B, C, 21 PART(whole), A, 25, 30... 51 PART(whole),
+K, 53, 56, GND; DOWN mirrors. LED snapshot at pin-C focus: 0018a8
+bright pair at row 19 edge, full row in dim 00062a (unwired row light),
+E/B dim red/yellow dots. scrollPartIdx/scrollPartPin watched live at
+0x2000eb45/44.
+
+## 4. The netlist flood / app lockup — root-caused, fixed
+
+Not "printing too fast" in general: listNets' live-update loop reprints
+the ENTIRE colored listing whenever any GPIO reading flips — and net 6
+held a floating GPIO input, which flips constantly. Hundreds of full
+reprints per second until the app's renderer choked; then Adafruit CDC
+write() (spins while port open + FIFO full, never drops) hung core 0.
+Closing the wedged terminal is what freed it — DTR drop releases the
+write. Fix: 200ms sticky-changed reprint holdoff (~5/s cap, no lost
+updates) + availableForWrite drain guards before the first burst and
+every reprint (1s stalled = abandon live mode, zero goodbye bytes).
+App-side confirmation is Kevin's — port1 was his app's all shift.
+
+## Still Kevin's / open
+
+- Whole-part OLED card typography + LED feel — his eyes, his call.
+- Select-tap pin highlight — needs the physical probe.
+- The netlist fix against the actual app — needs his port1.
+- Warn pulse visual — no active warning on the bench post-reboot
+  (pinsUnverified is RAM-only and cleared by the flash).
+- Auto Scan under DAC0 (sweep park) — mechanism identical to the
+  verified identify park; not driven end-to-end (menu nav over SWD
+  not worth the risk with his app attached).
+- test_parts_roundtrip and test_infra_paths need port1 (the app held
+  it all shift) — infra_paths is the most relevant unrun coverage for
+  the park, it drives probe_power_source both ways. Run both when the
+  port frees up.
+- The `row=17 reason=` garble in his paste = the known async-PARTWARN
+  interleave, still on the deferred list.
