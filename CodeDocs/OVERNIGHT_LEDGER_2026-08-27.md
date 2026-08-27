@@ -428,3 +428,27 @@ it just resets.)
 - The justified card at 4 pins, and whether the spacing feels right.
 - His message tail was cut off twice today ("And the…" at 11:37, "it" at
   12:28) — whatever those were never arrived.
+
+### Post-flash review round — c04f8c2
+
+The advisor pass caught two bugs that would have fired on Kevin's first
+scan over his module, both fixed and re-flashed:
+
+- **LED skipped the clamp-star guard** at both sites. A clamp's forward
+  drop is a measurement, and Vdd→SCL on his module reads "LED 2.23V" — so
+  the walk would have split the SSD1306 into a phantom discrete LED,
+  starved the interrogation below its legsLeft threshold, and offered the
+  phantom for placement. LED now joins DIODE/ZENER in both guards.
+- **The I2C probe's Wire1 teardown re-claimed pin 27** on connection-type-2
+  boards (Kevin's): config still carries default sda/scl 26/27, and the
+  restore skipped i2cScan's `connection_type != 2` guard — so every probe
+  would have ended by putting I2C function + pullup on the probe-power pad.
+  Now it matches i2cScan's guard and leaves Wire1 ended when the panel
+  isn't on it.
+
+Bench state after re-flash: 10 nets incl. probe power (BUF_IN–GP_8), Q17
+placed (the rest of the parts were already gone before 12:53 — Kevin's own
+removals; his scan trace confirms nothing said "already yours"). The
+cross-gap LED identifies as red, Vf 1.96V — physically impossible at the
+old 1V sweep drive, comfortably inside the new 3V. PICOBOOT caveat: port7
+can enumerate silent after picotool; one `machine.reset()` cures it.
