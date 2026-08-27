@@ -1274,7 +1274,14 @@ static bool showSpecialPinReading( const char* srcLabel, const char* volts,
             if ( nameBudget < 1 ) nameBudget = 1;
             snprintf( pinName, sizeof( pinName ), "%.*s %s", nameBudget,
                       p.name, pn );
-            showNetReading( pinName, srcLabel, volts, hint );
+            // One combined line, not two: "Top Rail" and the volts as
+            // separate value rows each auto-fit to a huge font that
+            // shouted over the pin's name (Kevin, 13:52: "that bit
+            // connected to the top rail is messing with the display,
+            // make it smaller"). The longer single string fits small.
+            char detail[ 28 ];
+            snprintf( detail, sizeof( detail ), "%s %s", srcLabel, volts );
+            showNetReading( pinName, detail, nullptr, hint );
             return true;
         }
     }

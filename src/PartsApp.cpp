@@ -34,6 +34,7 @@
 #include "oled.h"
 #include "Peripherals.h"    // INA1 (the power-up watchdog), setDac0voltage
 #include <Wire.h>           // Wire1 - the chip-cluster I2C interrogation
+#include "hardware/gpio.h"  // pad reads + function bookkeeping for the probe
 
 // The canonical part removal (bridges, net names, undo guard, refresh) -
 // commit's replace-on-identity reuses it. Lives in JumperlessMicroPythonAPI.
@@ -1893,6 +1894,12 @@ struct ClusterPower {
 };
 static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out) {
     if (nRows < 3 || nRows > 6) return false;
+    // Say what's coming: N*(N-1)/2 identify sessions at ~0.6s each is
+    // seconds of silence, and silence at the bench reads as a freeze.
+    Serial.print("  reading the cluster's clamps (");
+    Serial.print(nRows * (nRows - 1) / 2);
+    Serial.println(" pair checks, a few seconds)...");
+    Serial.flush();
     int8_t anodeCount[6] = {0}, cathodeCount[6] = {0}, seen[6] = {0};
     for (int i = 0; i < nRows; i++) {
         for (int j = i + 1; j < nRows; j++) {
@@ -1989,6 +1996,13 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
         Serial.print(draw, 1);
         Serial.println(" mA - backing off, that isn't a supply pin");
     } else {
+        // The GPIO service manages the routable pads: without the same
+        // gpioState/gpio_function_map bookkeeping initI2C does, it
+        // reasserts SIO on pins 22/23 mid-transaction and wedges the bus.
+        uint8_t gsSda = gpioState[2], gsScl = gpioState[3];
+        gpio_function_t gfSda = gpio_function_map[2], gfScl = gpio_function_map[3];
+        gpioState[2] = gpioState[3] = 6;
+        gpio_function_map[2] = gpio_function_map[3] = GPIO_FUNC_I2C;
         for (int order = 0; order < 2 && !found; order++) {
             int sdaRow = order ? cp.sig[1] : cp.sig[0];
             int sclRow = order ? cp.sig[0] : cp.sig[1];
@@ -2000,17 +2014,32 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
             Wire1.setSCL(23);
             Wire1.begin();
             Wire1.setClock(100000);
-            for (int addr = 1; addr < 127 && !partsAutoAbortCheck(); addr++) {
-                Wire1.beginTransmission((uint8_t)addr);
-                if (Wire1.endTransmission() != 0) continue;
-                const char* known = partsI2CAddressName((uint8_t)addr);
-                snprintf(out, outLen, "I2C 0x%02X on %d/%d%s%s", addr,
-                         sdaRow, sclRow, known ? " - " : "",
-                         known ? known : "");
-                Serial.print("  it answers: ");
-                Serial.println(out);
-                found = true;
-                break;
+            // Bound every transaction like initI2C does (15ms + bus
+            // recovery). The Earle core's default is ~1 SECOND per try -
+            // a wedged bus made the 126-address sweep read as a 4-minute
+            // freeze on the bench (Kevin, 13:52).
+            Wire1.setTimeout(15, true);
+            gpio_set_pulls(22, true, false);
+            gpio_set_pulls(23, true, false);
+            delay(2);
+            // A dead line never ACKs: an unpowered or misrouted part's
+            // clamps drag SDA/SCL low. Say so and skip the whole sweep.
+            if (!gpio_get(22) || !gpio_get(23)) {
+                Serial.println("  bus line held low - not I2C (or unpowered)");
+            } else {
+                for (int addr = 0x08; addr <= 0x77 && !partsAutoAbortCheck();
+                     addr++) {
+                    Wire1.beginTransmission((uint8_t)addr);
+                    if (Wire1.endTransmission() != 0) continue;
+                    const char* known = partsI2CAddressName((uint8_t)addr);
+                    snprintf(out, outLen, "I2C 0x%02X on %d/%d%s%s", addr,
+                             sdaRow, sclRow, known ? " - " : "",
+                             known ? known : "");
+                    Serial.print("  it answers: ");
+                    Serial.println(out);
+                    found = true;
+                    break;
+                }
             }
             Wire1.end();
             // Put the bus back the way i2cScan does - but ONLY when the
@@ -2031,6 +2060,11 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
             if (!found && order == 0)
                 Serial.println("  no answer that way round - swapping SDA/SCL...");
         }
+        // hand the pads back to the GPIO service exactly as they were
+        gpioState[2] = gsSda;
+        gpioState[3] = gsScl;
+        gpio_function_map[2] = gfSda;
+        gpio_function_map[3] = gfScl;
     }
     setDac0voltage(0.0f, 0, 0, false);
     if (bVdd) removeBridgeFromState(DAC0, cp.vddRow, false);
