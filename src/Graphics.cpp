@@ -2678,56 +2678,63 @@ void initRowAnimations() {
     }
   }
 
+  // The four tail animations, in the keeper loop's currentIndex-1 idiom.
+  // The old blocks stamped .index into slot N and then wrote every data
+  // field into slot N+1 (no -1 after the increment), so slot 33 held only
+  // a zeroed dummy: warningNet rendered DARK, brightenedNet rendered the
+  // warning animation, and the probe-connect animation sat orphaned in
+  // slot 37 above numberOfRowAnimations (RAM-pass work-list item).
+
   //! warning row animation
   rowAnimations[currentIndex].index = currentIndex;
   currentIndex++;
-  rowAnimations[currentIndex].net = 0;
-  rowAnimations[currentIndex].currentFrame = 0;
-  rowAnimations[currentIndex].numberOfFrames = 10;
-  rowAnimations[currentIndex].type = 3; // warning row
-  rowAnimations[currentIndex].direction = 1;
-  rowAnimations[currentIndex].frameInterval = 100;
-  for (int j = 0; j < rowAnimations[currentIndex].numberOfFrames; j++) {
-    rowAnimations[currentIndex].frames[j] = warningRowFrames[j];
+  rowAnimations[currentIndex - 1].net = 0;
+  rowAnimations[currentIndex - 1].currentFrame = 0;
+  rowAnimations[currentIndex - 1].numberOfFrames = 10;
+  rowAnimations[currentIndex - 1].type = 3; // warning row
+  rowAnimations[currentIndex - 1].direction = 1;
+  rowAnimations[currentIndex - 1].frameInterval = 100;
+  for (int j = 0; j < rowAnimations[currentIndex - 1].numberOfFrames; j++) {
+    rowAnimations[currentIndex - 1].frames[j] = warningRowFrames[j];
   }
 
   //! highlighted net animation
   rowAnimations[currentIndex].index = currentIndex;
   currentIndex++;
-  rowAnimations[currentIndex].net = 0;
-  rowAnimations[currentIndex].currentFrame = 0;
-  rowAnimations[currentIndex].numberOfFrames = 15;
-  rowAnimations[currentIndex].type = 4; // highlighted net
-  rowAnimations[currentIndex].direction = 0;
-  rowAnimations[currentIndex].frameInterval = 120;
-  for (int j = 0; j < rowAnimations[currentIndex].numberOfFrames; j++) {
-    rowAnimations[currentIndex].frames[j] = highlightedRowFrames[j % 10];
+  rowAnimations[currentIndex - 1].net = 0;
+  rowAnimations[currentIndex - 1].currentFrame = 0;
+  rowAnimations[currentIndex - 1].numberOfFrames = 15;
+  rowAnimations[currentIndex - 1].type = 4; // highlighted net
+  rowAnimations[currentIndex - 1].direction = 0;
+  rowAnimations[currentIndex - 1].frameInterval = 120;
+  for (int j = 0; j < rowAnimations[currentIndex - 1].numberOfFrames; j++) {
+    rowAnimations[currentIndex - 1].frames[j] = highlightedRowFrames[j % 10];
   }
 
   //! highlighted row animation
   rowAnimations[currentIndex].index = currentIndex;
   currentIndex++;
-  rowAnimations[currentIndex].net = 0;
-  rowAnimations[currentIndex].currentFrame = 0;
-  rowAnimations[currentIndex].numberOfFrames = 15;
-  rowAnimations[currentIndex].type = 6; // highlighted row
-  rowAnimations[currentIndex].direction = 0;
-  rowAnimations[currentIndex].frameInterval = 40;
-  for (int j = 0; j < rowAnimations[currentIndex].numberOfFrames; j++) {
-    rowAnimations[currentIndex].frames[j] = highlightedRowFrames[j % 10];
+  rowAnimations[currentIndex - 1].net = 0;
+  rowAnimations[currentIndex - 1].currentFrame = 0;
+  rowAnimations[currentIndex - 1].numberOfFrames = 15;
+  rowAnimations[currentIndex - 1].type = 6; // highlighted row
+  rowAnimations[currentIndex - 1].direction = 0;
+  rowAnimations[currentIndex - 1].frameInterval = 40;
+  for (int j = 0; j < rowAnimations[currentIndex - 1].numberOfFrames; j++) {
+    rowAnimations[currentIndex - 1].frames[j] = highlightedRowFrames[j % 10];
   }
 
   //! probe connect highlight row animation
   rowAnimations[currentIndex].index = currentIndex;
   currentIndex++;
-  rowAnimations[currentIndex].net = 0;
-  rowAnimations[currentIndex].currentFrame = 0;
-  rowAnimations[currentIndex].numberOfFrames = 15;
-  rowAnimations[currentIndex].type = 5; // probe connect highlight row
-  rowAnimations[currentIndex].direction = 0;
-  rowAnimations[currentIndex].frameInterval = 30;
-  for (int j = 0; j < rowAnimations[currentIndex].numberOfFrames; j++) {
-    rowAnimations[currentIndex].frames[j] = highlightedRowFrames[j % 10];
+  rowAnimations[currentIndex - 1].net = 0;
+  rowAnimations[currentIndex - 1].currentFrame = 0;
+  rowAnimations[currentIndex - 1].numberOfFrames = 15;
+  rowAnimations[currentIndex - 1].type = 5; // probe connect highlight row
+  rowAnimations[currentIndex - 1].direction = 0;
+  rowAnimations[currentIndex - 1].frameInterval = 30;
+  for (int j = 0; j < rowAnimations[currentIndex - 1].numberOfFrames; j++) {
+    rowAnimations[currentIndex - 1].frames[j] = highlightedRowFrames[j % 10];
   }
 
   numberOfRowAnimations = currentIndex;
@@ -2791,9 +2798,14 @@ void __not_in_flash_func(assignRowAnimations)(void) {
         // Jerial.print("numberOfNets = ");
         // Jerial.println(numberOfNets);
 
-        // Revert: always clear out-of-range nets; they will be reassigned on refresh
+        // Revert: always clear out-of-range nets; they will be reassigned on
+        // refresh. Clear the stale assignment BEFORE dropping the net - the
+        // old order wrote assignedAnimations[-1] (one word before the array)
+        // on every out-of-range net (review finding); and the net itself can
+        // exceed MAX_NETS here, so bound it.
+        if (gpioNet[i] > 0 && gpioNet[i] < MAX_NETS)
+          assignedAnimations[gpioNet[i]] = -1;
         gpioNet[i] = -1;
-        assignedAnimations[gpioNet[i]] = -1;
 
         continue;
       }
@@ -2801,7 +2813,7 @@ void __not_in_flash_func(assignRowAnimations)(void) {
         // Assign animation from gpioReading for all input/output modes (not only bus keeper).
         // gpioReading: 0=low, 1=high, 2/3=float. Reuse keeper high/low animations for any mode.
         int keeperAnimationIndex = 13 + (i * 2);
-        if (keeperAnimationIndex + 1 < 50) {
+        if (keeperAnimationIndex + 1 < ROW_ANIMATION_COUNT) {
           if (gpioReading[i] == 1) {
             assignedAnimations[gpioNet[i]] = keeperAnimationIndex;
             rowAnimations[keeperAnimationIndex].net = gpioNet[i];
@@ -2842,7 +2854,7 @@ void __not_in_flash_func(assignRowAnimations)(void) {
     if (gpioNet[fakeIdx] > 0) {
       int fakeSlot = fakeIdx - 10;
       int idleAnimBase = 3 + (fakeSlot % 10);
-      if (idleAnimBase < 50) {
+      if (idleAnimBase < ROW_ANIMATION_COUNT) {
         // Assign a base idle animation for all fake GPIO nets so they pass
         // the assignedAnimations != -1 check in showRowAnimation().
         // For INPUTS, the voltage-based color override in showRowAnimation()
