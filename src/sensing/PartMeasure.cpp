@@ -882,19 +882,20 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
     int newHits = 0;
     if (nGapPairsOut != nullptr) *nGapPairsOut = 0;
     {
-        // Three arrangements cover the common breadboard layouts (Kevin,
+        // Two arrangements cover the layouts seen on real boards (Kevin,
         // 12:53: "we're only scanning adjacent pairs still, so we miss the
-        // LED on 21-51"): legs side by side (n,n+1), legs straddling the
-        // center channel (n,n+30 - same column, other half), and legs one
-        // row apart (n,n+2). A later arrangement only sweeps pairs an
-        // earlier one left unexplained, so a mostly-found board pays
-        // almost nothing extra. Arbitrary wider spans wait for the
-        // group-testing pooled-query refinement.
-        static const int kGap[3] = {1, 30, 2};
+        // LED on 21-51"): legs side by side (n,n+1) and legs straddling
+        // the center channel (n,n+30 - same column, other half). The later
+        // arrangement only sweeps pairs the first left unexplained, so a
+        // mostly-found board pays almost nothing extra. A one-apart pass
+        // (n,n+2) ran here for one bench round and was cut for time
+        // (Kevin, 14:00: "insane long") - skip-one and wider spans wait
+        // for the group-testing pooled-query refinement.
+        static const int kGap[2] = {1, 30};
         static float di[2][58];
         static int16_t pairA[58];
         bool aborted = false;
-        for (int gi = 0; gi < 3 && !aborted; gi++) {
+        for (int gi = 0; gi < 2 && !aborted; gi++) {
             int gap = kGap[gi];
             int nPairs = 0;
             for (int half = 0; half < 2 && nPairs < 58; half++) {

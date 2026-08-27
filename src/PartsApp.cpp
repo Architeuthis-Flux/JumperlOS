@@ -1825,6 +1825,14 @@ static bool partsPlaceScanResult(const PartResult& res) {
     char name[16];
     snprintf(name, sizeof(name), "%s%d", pfx, baseRow);
 
+    // Footprint: same-half 2-leads infer sipN fine, but a CROSS-GAP pair
+    // (the LED on 21/51) is the axial2 footprint - legs exactly 30 apart.
+    // Inference built a sipN as wide as the whole span and the geometry
+    // check rightly refused it ("sip31 does not fit the top half", 14:00).
+    const char* footprint = "";
+    if (res.nRows == 2 && (int)res.rows[idx[1]] - baseRow == 30)
+        footprint = "axial2";
+
     char pins[160];
     int u = snprintf(pins, sizeof(pins), "{");
     for (int k = 0; k < res.nRows; k++) {
@@ -1839,7 +1847,7 @@ static bool partsPlaceScanResult(const PartResult& res) {
     }
     snprintf(pins + u, sizeof(pins) - u, "}");
 
-    if (jl_place_part(name, baseRow, pins, "", typeStr, value, name) != 0)
+    if (jl_place_part(name, baseRow, pins, footprint, typeStr, value, name) != 0)
         return false;
     int pi = globalState.parts.findByName(name);
     if (pi >= 0) {   // the scan's measurement IS this part's cached test
@@ -1858,19 +1866,62 @@ static bool partsPlaceScanResult(const PartResult& res) {
 
 // The hidden-graph star test: one extra junction sharing this diode's anode
 // means a chip's clamp network, never a discrete diode (a discrete has
-// exactly one isolated edge). Queries up to nCand candidate rows, first hit
-// wins. ~0.6s per query - callers keep nCand small.
-static bool partsDiodeIsChipClamp(int anodeRow, const int* cands, int nCand) {
-    for (int q = 0; q < nCand && !partsAutoAbortCheck(); q++) {
-        int c = cands[q];
-        PartResult er = (c < anodeRow) ? identifyTwoLead(c, anodeRow)
-                                       : identifyTwoLead(anodeRow, c);
-        if (er.status == 0 &&
-            (er.type == PartType::DIODE || er.type == PartType::ZENER ||
-             er.type == PartType::LED || er.type == PartType::SHORT_CIRCUIT))
-            return true;
+// exactly one isolated edge). Edge PRESENCE is the whole question, so this
+// reads junction-map triples (anchor + two candidates per ~2s session)
+// instead of a full identify per candidate (~3-4s each - the star tests
+// were a big slice of the 170s scan). ANY conduction counts as an edge:
+// one-way (a clamp), both ways low (a short, or a pull-up network - both
+// prove multi-pin structure). Returns the first edge row, or -1.
+// Junction-map reading thresholds: v[i][j] = volts at row i (50k pull-up)
+// with row j grounded - a forward junction clamps it low, blocked reads
+// the pull-up.
+static const float kJmFwd = 2.5f;   // below = clamped through a junction
+static const float kJmBlk = 2.9f;   // above = blocked (pull-up wins)
+static int partsStarEdgeRow(int anchorRow, const int* cands, int nCand) {
+    for (int q = 0; q < nCand && !partsAutoAbortCheck(); q += 2) {
+        int c1 = cands[q];
+        int c2 = (q + 1 < nCand) ? cands[q + 1] : -1;
+        if (c2 < 0) {
+            // odd tail: a lone candidate still needs a 3rd session row -
+            // reuse the previous candidate (its answer is already known,
+            // its rows are legal, and the map just measures it again)
+            c2 = (q > 0) ? cands[q - 1] : -1;
+        }
+        if (c2 < 0) {
+            // single-candidate call: one typed identify is all we can do
+            PartResult er = (c1 < anchorRow) ? identifyTwoLead(c1, anchorRow)
+                                             : identifyTwoLead(anchorRow, c1);
+            if (er.status == 0 &&
+                (er.type == PartType::DIODE || er.type == PartType::ZENER ||
+                 er.type == PartType::LED || er.type == PartType::SHORT_CIRCUIT))
+                return c1;
+            return -1;
+        }
+        int rows3[3] = {anchorRow, c1, c2};
+        ScanSession s;
+        if (partScanBegin(s, rows3, 3) != 0) continue;
+        float v[3][3];
+        partScanJunctionMap(s, v);
+        partScanEnd(s);
+        // candidate index 1 then 2, vs the anchor at index 0
+        if (v[1][0] < kJmFwd || v[0][1] < kJmFwd) return c1;
+        if (q + 1 < nCand && (v[2][0] < kJmFwd || v[0][2] < kJmFwd)) return c2;
     }
-    return false;
+    return -1;
+}
+static bool partsDiodeIsChipClamp(int anodeRow, const int* cands, int nCand) {
+    return partsStarEdgeRow(anodeRow, cands, nCand) > 0;
+}
+
+// A real silicon BJT's Vbe at identify's test current sits in a narrow
+// band; the fakes don't. Bench, 14:00: a 7400's pin trios passed the hFE
+// test TWICE - "NPN 0.90V" and "NPN 0.44V", both placed as phantom
+// transistors - while the real 2N3906 measured 0.59-0.61V every run.
+// (A Darlington's ~1.2V lands outside and reads chip-ish too; that is
+// the right side to err on for an auto scan.)
+static bool partsBjtVbePlausible(const PartResult& r) {
+    if (r.type != PartType::BJT_PNP && r.type != PartType::BJT_NPN) return true;
+    return r.value >= 0.50f && r.value <= 0.80f;
 }
 
 // ---------------------------------------------------------------------------
@@ -1885,7 +1936,12 @@ static bool partsDiodeIsChipClamp(int anodeRow, const int* cands, int nCand) {
 //   (2,1) K,A   (3,1) K,A   (4,1) K,A     row 1 anode every time  -> GND
 //   (3,2) A,K   (4,2) A,K                 row 2 cathode every time-> Vdd
 //   (3,4) EMPTY                           two signal pins: nothing
-// Costs one identifyTwoLead per pair (~0.6s), so only small clusters.
+// Orientation needs junction PRESENCE and DIRECTION, nothing more - so this
+// reads partScanJunctionMap triples (one session covers three pairs in
+// ~2s) instead of full identifyTwoLead classifications (~3-4s EACH pair;
+// six of them were most of the "insane long time" on Kevin's 170s scan).
+// In the map, v[i][j] = volts at row i (pulled up) with row j grounded:
+// a forward junction i->j clamps it LOW, blocked reads the ~3.2V pull-up.
 struct ClusterPower {
     int gndRow = -1;
     int vddRow = -1;
@@ -1894,28 +1950,35 @@ struct ClusterPower {
 };
 static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out) {
     if (nRows < 3 || nRows > 6) return false;
-    // Say what's coming: N*(N-1)/2 identify sessions at ~0.6s each is
-    // seconds of silence, and silence at the bench reads as a freeze.
-    Serial.print("  reading the cluster's clamps (");
-    Serial.print(nRows * (nRows - 1) / 2);
-    Serial.println(" pair checks, a few seconds)...");
+    Serial.println("  reading the cluster's clamps...");
     Serial.flush();
     int8_t anodeCount[6] = {0}, cathodeCount[6] = {0}, seen[6] = {0};
-    for (int i = 0; i < nRows; i++) {
-        for (int j = i + 1; j < nRows; j++) {
-            if (partsAutoAbortCheck()) return false;
-            PartResult r = identifyTwoLead(rows[i], rows[j]);
-            if (r.status != 0 || r.nRows != 2) continue;
-            if (r.type != PartType::DIODE && r.type != PartType::ZENER &&
-                r.type != PartType::LED)
-                continue;
-            for (int t = 0; t < 2; t++) {
-                int which = ((int)r.rows[t] == rows[i]) ? i
-                            : ((int)r.rows[t] == rows[j]) ? j : -1;
-                if (which < 0) continue;
-                seen[which]++;
-                if (r.roles[t] == PinRole::A) anodeCount[which]++;
-                else if (r.roles[t] == PinRole::K) cathodeCount[which]++;
+    // Triples anchored on rows[0]: {0,1,2}, {0,3,4}, {0,5,1}. Every row
+    // pairs with the anchor and one neighbor - at least two junctions of
+    // stats per row, which is what the perfect-orientation test needs.
+    // (The uncovered signal<->signal pairs read EMPTY and prove nothing.)
+    for (int base = 1; base < nRows; base += 2) {
+        if (partsAutoAbortCheck()) return false;
+        int third = (base + 1 < nRows) ? base + 1 : 1;
+        if (third == base) break;   // nRows == 2 can't happen (guard above)
+        int idx3[3] = {0, base, third};
+        int rows3[3] = {rows[0], rows[base], rows[third]};
+        ScanSession s;
+        if (partScanBegin(s, rows3, 3) != 0) return false;
+        float v[3][3];
+        partScanJunctionMap(s, v);
+        partScanEnd(s);
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                if (i == j) continue;
+                // clean one-way junction only: both-low is resistive and
+                // both-high is empty - neither says who is power
+                if (v[i][j] < kJmFwd && v[j][i] > kJmBlk) {
+                    seen[idx3[i]]++;
+                    seen[idx3[j]]++;
+                    anodeCount[idx3[i]]++;
+                    cathodeCount[idx3[j]]++;
+                }
             }
         }
     }
@@ -2219,8 +2282,8 @@ void partsAutoLauncher(void) {
     {
         // second pass: isolated junction parts are invisible to the poke
         // (they pre-charge through their own junctions) - sweep free pairs
-        // in the common layouts (adjacent, across the middle, one apart)
-        // and see what conducts
+        // in the common layouts (adjacent, across the middle) and see
+        // what conducts
         if (oled.oledConnected) {
             oled.resetMultiLineSmallText();
             oled.showMultiLineSmallText("scanning pairs...\n(any press stops)");
@@ -2474,7 +2537,8 @@ void partsAutoLauncher(void) {
                             (res3.type == PartType::BJT_PNP ||
                              res3.type == PartType::BJT_NPN ||
                              res3.type == PartType::NFET ||
-                             res3.type == PartType::PFET)) {
+                             res3.type == PartType::PFET) &&
+                            partsBjtVbePlausible(res3)) {
                             res = res3;
                             if (extra > z) annexedRow = extra;  // the next
                             // span must not report this row a second time
@@ -2524,19 +2588,8 @@ void partsAutoLauncher(void) {
                         Serial.println(" neighbor rows against its anode...");
                         Serial.flush();
                     }
-                    for (int q = 0; q < nCand && !partsAutoAbortCheck(); q++) {
-                        int c = candList[q];
-                        PartResult er = (c < anodeRow) ? identifyTwoLead(c, anodeRow)
-                                                       : identifyTwoLead(anodeRow, c);
-                        if (er.status == 0 &&
-                            (er.type == PartType::DIODE ||
-                             er.type == PartType::ZENER ||
-                             er.type == PartType::LED ||
-                             er.type == PartType::SHORT_CIRCUIT)) {
-                            chipStarRow = c;   // a second edge on the anode:
-                            break;             // no discrete diode has one
-                        }
-                    }
+                    // a second edge on the anode: no discrete diode has one
+                    chipStarRow = partsStarEdgeRow(anodeRow, candList, nCand);
                     if (chipStarRow > 0) {
                         int lo = (a < chipStarRow) ? a : chipStarRow;
                         int hi = (z > chipStarRow) ? z : chipStarRow;
@@ -2582,6 +2635,23 @@ void partsAutoLauncher(void) {
 
                 if (chipStarRow > 0) {
                     // reported above - never as a discrete diode
+                } else if (res.status == 0 && !partsBjtVbePlausible(res)) {
+                    // it PASSED the hFE test with an impossible Vbe: chip
+                    // pins can fake transistor action (a TTL input IS a
+                    // multi-emitter transistor), but they can't fake the
+                    // junction physics. Say what it probably is, offer
+                    // nothing for placement.
+                    snprintf(line, sizeof(line),
+                             "rows %d-%d: transistor-ish, but Vbe %.2fV is"
+                             " wrong - a chip's pins?",
+                             a, z, (double)res.value);
+                    for (int r = a; r <= z; r++) {
+                        int pr = nodeToPrintRow(r);
+                        if (pr >= 0)
+                            b.printRawRow(0b00011111, pr,
+                                          partsTapHue(sp, nSpans, false), 0xffffff);
+                    }
+                    requestLedShow(2);
                 } else if (res.status == 0 && res.type != PartType::EMPTY &&
                     res.type != PartType::UNKNOWN) {
                     char detail[24] = "";
@@ -2690,10 +2760,55 @@ void partsAutoLauncher(void) {
                             if (nc > 0 && partsDiodeIsChipClamp(anode2, cands, nc))
                                 discrete = false;   // stays pooled with the chip
                         }
+                        if (discrete && (pres.type == PartType::DIODE ||
+                                         pres.type == PartType::ZENER)) {
+                            // a junction pair that survived the clamp star
+                            // may still be two legs of a TRANSISTOR (bench,
+                            // 14:00: a PNP's E-B split off as "D17" when
+                            // its record was missing) - the ≤3-row branch
+                            // asks the three-lead question here, so the
+                            // walk must too. The third leg is the pair's
+                            // NEIGHBOR (r+2 first, then r-1, the ≤3
+                            // branch's shape) - the span's first hit can
+                            // be a different part entirely (bench: span
+                            // 16-19 put the 7400's row 16 ahead of the
+                            // PNP's own collector on 19). Vbe referees.
+                            int tryRows[2] = {(r + 2 <= z) ? r + 2 : -1,
+                                              (r - 1 >= a) ? r - 1 : -1};
+                            for (int ti = 0; ti < 2; ti++) {
+                                int extra = tryRows[ti];
+                                if (extra < 0 || consumed[extra]) continue;
+                                if (flags[extra] != 1 && flags[extra] != 5)
+                                    continue;
+                                if (partsAutoAbortCheck()) break;
+                                PartResult r3 =
+                                    (extra > r + 1) ? identifyThreeLead(r, r + 1, extra)
+                                    : identifyThreeLead(extra, r, r + 1);
+                                if (r3.status == 0 &&
+                                    (r3.type == PartType::BJT_PNP ||
+                                     r3.type == PartType::BJT_NPN ||
+                                     r3.type == PartType::NFET ||
+                                     r3.type == PartType::PFET) &&
+                                    partsBjtVbePlausible(r3)) {
+                                    pres = r3;
+                                    break;
+                                }
+                            }
+                        }
                         if (discrete) {
+                            int splitLo = r, splitHi = r + 1;
                             consumed[r] = consumed[r + 1] = true;
-                            nSplit++;
                             legsLeft -= 2;
+                            for (int t = 0; t < pres.nRows; t++) {
+                                int pr2 = (int)pres.rows[t];
+                                if (pr2 >= 1 && pr2 <= 60 && !consumed[pr2]) {
+                                    consumed[pr2] = true;
+                                    legsLeft--;
+                                }
+                                if (pr2 < splitLo) splitLo = pr2;
+                                if (pr2 > splitHi) splitHi = pr2;
+                            }
+                            nSplit++;
                             if (nAddable < 8 && pres.type != PartType::SHORT_CIRCUIT)
                                 addable[nAddable++] = pres;   // actable finding
                             char detail[24] = "";
@@ -2703,9 +2818,9 @@ void partsAutoLauncher(void) {
                                 snprintf(detail, sizeof(detail), "%.2fV",
                                          (double)pres.value);
                             Serial.print("\r\n  rows ");
-                            Serial.print(r);
+                            Serial.print(splitLo);
                             Serial.print("-");
-                            Serial.print(r + 1);
+                            Serial.print(splitHi);
                             Serial.print(": ");
                             Serial.print(partTypeName(pres.type));
                             Serial.print(" ");
@@ -2804,7 +2919,11 @@ void partsAutoLauncher(void) {
                     oled.showMultiLineSmallText(summary);
                 }
             }
-            partsWaitForPress();
+            // With findings, the confirm below IS the wait - the extra
+            // press between "done" and the add prompt was pure friction
+            // (Kevin, 14:00: it took long "even to give me the add to the
+            // board prompt"). With nothing to add, hold the summary.
+            if (nAddable == 0 || partsAutoAborted) partsWaitForPress();
 
             // Act on the findings (Kevin's ask): one CONNECT press places
             // every identified discrete as a real record - highlightable,

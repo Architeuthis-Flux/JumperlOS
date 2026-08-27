@@ -140,11 +140,11 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 // The census's second pass: an isolated junction part (a lone transistor,
 // a diode) is INVISIBLE to the single-row poke - the drive pre-charges the
 // whole part through its own junctions, so nothing shares at release
-// (bench, 2N3906). This sweeps free pairs in three arrangements - adjacent
-// (n,n+1), across the center channel (n,n+30 - the same column on the
-// other half), and one row apart (n,n+2) - at 3.0V through the shunt,
-// both directions (~70ms per check): a junction, an LED, or a resistor
-// (up to ~19k) conducts, and both rows get flagged 5. User wiring on the
+// (bench, 2N3906). This sweeps free pairs in two arrangements - adjacent
+// (n,n+1) and across the center channel (n,n+30 - the same column on the
+// other half) - at 3.0V through the shunt, both directions (~70ms per
+// check): a junction, an LED, or a resistor (up to ~19k) conducts, and
+// both rows get flagged 5. User wiring on the
 // measurement path (DAC0 / the ISENSE pair) is briefly LIFTED like an
 // identify session does it, and restored on every exit (bench: the standing
 // UART_TX->ISENSE_MINUS wire would otherwise sideline the sweep forever).
