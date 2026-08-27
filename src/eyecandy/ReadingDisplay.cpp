@@ -103,7 +103,7 @@ struct FitCacheEntry {
 FitCacheEntry fitCache[FIT_CACHE_ENTRIES] = {};
 int fitCacheNext = 0;
 
-int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 12) {
+int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 10) {
     if (text != nullptr) {
         for (int i = 0; i < FIT_CACHE_ENTRIES; i++) {
             if (fitCache[i].valid && fitCache[i].family == family &&
@@ -113,7 +113,7 @@ int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 12) 
             }
         }
     }
-    uint8_t pt = FontManager::findBestFitPointSize(family, text, 120, maxPt, 6);
+    uint8_t pt = FontManager::findBestFitPointSize(family, text, 128, maxPt, 6);
     int16_t font = (int16_t)FontManager::getFontForPointSize(family, pt);
     // Only a key we can hold WHOLE goes in: a truncated copy would match the
     // wrong string later and hand back a font measured for something else.
@@ -167,9 +167,20 @@ int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 12) 
 // jOS.serviceInner(), which dispatches only the inner set - so no
 // reading can repaint mid-takeover - and announce themselves through
 // resetLastShown(), which now only drops the OLED dedupe.
+//
+// The pin optionally carries a STATUS row directly above the reading (the
+// part scroll's PARTSEL trace lives there). It joins on the first
+// emitLiveStatusLine() - the pin grows from two rows to three - and leaves
+// only on a full re-pin: once anything scrolls the terminal, the next
+// reading pins the plain two-row shape again and the next status paint
+// re-grows it. clearLiveStatusLine() blanks the row's CONTENT but keeps the
+// geometry, so the reading's "two rows up" never has to move.
 
 namespace {
 bool pinReserved = false;
+// The pin is three rows tall (status + reading + spacer) instead of two.
+// Pure geometry: the status row may be blank (clearLiveStatusLine).
+bool statusRowReserved = false;
 // s_port1LineFeeds as of our last paint. While it still matches, nothing has
 // scrolled the terminal and the pinned rows are exactly where we left them.
 uint32_t pinLineFeedSnapshot = 0;
@@ -206,6 +217,7 @@ void emitLiveSerialLine(const char* line) {
         // on every pass for as long as the typed line stayed long. The separate
         // flag below is what forces the serial side to re-pin.
         pinReserved = false;
+        statusRowReserved = false;
         serialNeedsRepin = true;
         return;
     }
@@ -239,6 +251,10 @@ void emitLiveSerialLine(const char* line) {
         // and leaves the cursor where the user actually is, mid-word.
         Jerial.redrawInputLine();
         pinReserved = true;
+        // A fresh pin is the plain two-row shape: whatever status row the old
+        // pin carried is in the scrollback with it. The next status paint
+        // grows this pin back to three rows.
+        statusRowReserved = false;
     }
     serialNeedsRepin = false;
     pinCursorToLiveRow();
@@ -251,11 +267,88 @@ void emitLiveSerialLine(const char* line) {
     pinLineFeedSnapshot = s_port1LineFeeds;
 }
 
+void emitLiveStatusLine(const char* line) {
+    if (Jerial.getInputLineColumns() >= kMaxInputColsForPin) {
+        // Same bail as the reading: past this width the cursor math below
+        // lands on the wrong rows once the typed line wraps.
+        pinReserved = false;
+        statusRowReserved = false;
+        serialNeedsRepin = true;
+        return;
+    }
+    // Same FIFO guard as the reading: never start a write a stalled host
+    // can't drain. A dropped status paint just waits for the next detent.
+    bool fresh = !pinStillValid();
+    bool grow = !fresh && !statusRowReserved;
+    size_t needed = strlen(line) + 48;  // escapes for three row erases
+    if (fresh || grow) {
+        needed += (fresh ? 6 : 2) + (size_t)Jerial.getInputLineColumns() + 32;
+    }
+    if ((size_t)Serial.availableForWrite() < needed) {
+        return;
+    }
+    if (fresh) {
+        // Three fresh rows: status, reading, spacer. Same CRLF + input-line
+        // repaint dance as the reading's two-row re-pin above.
+        Serial.print("\n\r\n\r\n\r");
+        Jerial.redrawInputLine();
+    } else if (grow) {
+        // Grow a live two-row pin by ONE newline instead of re-pinning three
+        // fresh rows: the old reading text lands exactly where the status row
+        // goes (erased by the paint below), the old spacer becomes the
+        // reading row, and the old input-line text becomes the spacer - which
+        // is why the paint below erases all three rows, not just its own.
+        Serial.print("\n\r");
+        Jerial.redrawInputLine();
+    }
+    pinReserved = true;
+    statusRowReserved = true;
+    Serial.print("\x1b" "7");            // DECSC
+    Serial.print("\x1b[3A\r\x1b[2K");    // CUU 3 to the status row, erase it
+    // Clamp to one 80-column terminal row. Autowrap scrolls WITHOUT a
+    // linefeed - the counter's documented blind spot - so a wrapping status
+    // line would silently shift every pinned row.
+    size_t len = strlen(line);
+    if (len > 78) len = 78;
+    Serial.write((const uint8_t*)line, len);
+    Serial.print("\x1b[B\r\x1b[2K");     // reading row: blanked so a stop with
+                                         // no reading (whole part, unwired
+                                         // pin) never pairs with a stale one
+    Serial.print("\x1b[B\r\x1b[2K");     // spacer (old input text after a grow)
+    Serial.print("\x1b" "8");            // DECRC
+    Serial.flush();
+    // The reading row was just blanked, so the next show() must repaint even
+    // if its text is unchanged.
+    serialNeedsRepin = true;
+    pinLineFeedSnapshot = s_port1LineFeeds;
+}
+
+void clearLiveStatusLine(void) {
+    if (!pinReserved || !statusRowReserved) {
+        return;
+    }
+    if (s_port1LineFeeds != pinLineFeedSnapshot) {
+        return;  // scrolled since our paint: that row is somebody else's now
+    }
+    if ((size_t)Serial.availableForWrite() < 16) {
+        return;  // stale text over a wedged host beats a blocked panel
+    }
+    // Blank the CONTENT, keep the geometry: statusRowReserved stays true so
+    // the reading's "two rows up" holds and the next status paint rewrites
+    // this row in place instead of growing the pin again.
+    Serial.print("\x1b" "7");
+    Serial.print("\x1b[3A\r\x1b[2K");
+    Serial.print("\x1b" "8");
+    Serial.flush();
+}
+
 void clearLiveSerialLine(void) {
     if (!pinReserved) {
         return;
     }
     pinReserved = false;
+    bool hadStatusRow = statusRowReserved;
+    statusRowReserved = false;
     if (s_port1LineFeeds != pinLineFeedSnapshot) {
         // The terminal scrolled since our last paint: the reading is already
         // somewhere in the scrollback and "two rows above the cursor" is one
@@ -265,6 +358,9 @@ void clearLiveSerialLine(void) {
     // Wipe on the way out: the value is live, and one left frozen on screen
     // reads as current when it no longer is.
     pinCursorToLiveRow();
+    if (hadStatusRow) {
+        Serial.print("\x1b[A\r\x1b[2K");  // the status row rides out with it
+    }
     Serial.print("\x1b" "8");
     Serial.flush();
 }

@@ -308,6 +308,10 @@ void Highlighting::clearHighlighting( int updateLEDs) {
     // Whatever is on the panel is no longer ours to dedupe against (a menu,
     // toast or script may paint over it), so force the next reading to draw.
     ReadingDisplay::resetLastShown( );
+    // The PARTSEL trace belongs to the selection that just ended: blank it so
+    // it can't hover over whatever reading comes next. (Content only - the
+    // pin keeps its shape, and the next part stop rewrites the row in place.)
+    ReadingDisplay::clearLiveStatusLine( );
 
     // Reset timers
     highlightTimer = 0;
@@ -637,30 +641,34 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 }
             }
             requestLedShow( -1 );
+            if ( print ) {
+                // PARTSEL rides the pinned status row and repaints in place -
+                // the old raw "\r\n...\n" print scrolled the terminal on
+                // every detent AND knocked the reading pin loose, so one pass
+                // through a part left a screenful of stale selections behind.
+                // Emitted BEFORE the card/reading below: the status paint
+                // blanks the reading row, and the reading that belongs to
+                // THIS stop repaints right after (a whole-part or unwired-pin
+                // stop has none, and its row correctly stays blank).
+                char status[ 128 ];
+                size_t sl = (size_t)snprintf( status, sizeof( status ), "PARTSEL part=%s row=%d", p.name, row );
+                if ( sl >= sizeof( status ) ) sl = sizeof( status ) - 1;
+                if ( pj < 0 ) {
+                    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS && sl < sizeof( status ) - 1; j++ ) {
+                        sl += (size_t)snprintf( status + sl, sizeof( status ) - sl, "%s%s", j ? " " : " pins=", p.pins[ j ].name );
+                        if ( sl >= sizeof( status ) ) sl = sizeof( status ) - 1;
+                    }
+                } else if ( net > 0 ) {
+                    snprintf( status + sl, sizeof( status ) - sl, " pin=%s net=%d", p.pins[ pj ].name, net );
+                } else {
+                    snprintf( status + sl, sizeof( status ) - sl, " pin=%s net=none", p.pins[ pj ].name );
+                }
+                ReadingDisplay::emitLiveStatusLine( status );
+            }
             if ( specialNet ) {
                 highlightNets( 0, net, print );   // the live card, part-named
             } else {
                 partsShowPartCard( p, pj );
-            }
-            if ( print ) {
-                Serial.print( "\r\nPARTSEL part=" );
-                Serial.print( p.name );
-                Serial.print( " row=" );
-                Serial.print( row );
-                if ( pj < 0 ) {
-                    Serial.print( " pins=" );
-                    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
-                        if ( j ) Serial.print( ' ' );
-                        Serial.print( p.pins[ j ].name );
-                    }
-                } else {
-                    Serial.print( " pin=" );
-                    Serial.print( p.pins[ pj ].name );
-                    Serial.print( " net=" );
-                    if ( net > 0 ) Serial.print( net );
-                    else Serial.print( "none" );
-                }
-                Serial.println( );
             }
         };
 
