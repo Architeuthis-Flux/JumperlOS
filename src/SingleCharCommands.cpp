@@ -28,6 +28,7 @@
 #include "Menus.h"
 #include "NetManager.h"
 #include "NetVoltageScan.h"
+#include "PartLabels.h"   // partLabels.clearTransients - x retires part overlays
 #include "NetsToChipConnections.h"
 #include "InfraPaths.h"
 #include "RouteSafety.h"
@@ -1267,6 +1268,12 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
     // Clear the ACTIVE context, whatever backs it. Passing netSlot here would
     // hand -2 to saveSlot from a file context.
     clearActiveContext( );
+    // The net table is about to be rebuilt from nothing - a surviving
+    // highlight index would point at a net that no longer exists (the
+    // same hazard cmd_loadNodeFile guards against). Standing part
+    // overlays retire with the board (Kevin's ruling, 2026-08-27).
+    clearHighlighting( );
+    partLabels.clearTransients( );
     refreshConnections( -1, 1, 1 );
     digitalWrite( RESETPIN, LOW );
     target->println( "Cleared all connections" );

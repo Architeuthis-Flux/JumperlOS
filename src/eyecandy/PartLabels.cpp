@@ -30,6 +30,8 @@
 #include "Peripherals.h"       // railHwVolts, getDacHardwareVoltage
 #include "Probing.h"           // probing, switchPosition
 #include "ReadingDisplay.h"
+#include "guiding/GuideScript.h"     // formatOhms
+#include "sensing/PartClassify.h"    // PartType (the cached-test summary)
 #include "boards/board.h"      // currentBoard().caps.ledsPerRow (OG gate)
 
 PartLabels& PartLabels::getInstance() {
@@ -90,6 +92,26 @@ static uint32_t pinClassColor(uint8_t pinClass) {
         case 3: return LBL_COLOR_NC;
         default: return LBL_COLOR_SIGNAL;
     }
+}
+
+// The dot color for one pin: ROLE first (identification writes the role as
+// the pin NAME - E/B/C, A/K, G/D/S, W - single letters by construction), in
+// the standing card palette (PartsApp's ruling: warm = current enters, cool
+// = current leaves, so E/A/S red, B/G/W yellow, C/K/D blue). Everything
+// else falls back to pin-class, with pin 1 keeping its marker color. This
+// replaces the every-dot-is-signal-blue read Kevin called out (2026-08-27).
+static uint32_t pinDotColor(const PartPin& pin) {
+    const char* n = pin.name;
+    if (n[0] != '\0' && n[1] == '\0') {
+        switch (n[0]) {
+            case 'E': case 'A': case 'S': return 0x2A0000;  // PARTS_ROLE_E/A
+            case 'B': case 'G': case 'W': return 0x201400;  // PARTS_ROLE_B
+            case 'C': case 'K': case 'D': return 0x00062A;  // PARTS_ROLE_C/K
+            default: break;
+        }
+    }
+    if (pin.pinClass == 0 && pin.pinNumber == 1) return LBL_COLOR_PIN1;
+    return pinClassColor(pin.pinClass);
 }
 
 // ~4x brightness, per-channel clamped (the guide's pulse brighten).
@@ -182,6 +204,10 @@ void PartLabels::listenForInspectTap(unsigned long now) {
 
             lastInspectNode = node;
             inspectUntilMs[i] = now + LBL_INSPECT_MS;
+            // A select tap highlights JUST this pin - never the whole-part
+            // landing the encoder scroll does (Kevin's spec, 2026-08-27).
+            // An unwired pin's row lights through the overlay this way.
+            setPartHighlight(i, j, LBL_INSPECT_MS);
 
             char line2[24];
             snprintf(line2, sizeof(line2), "pin %d %s", pin.pinNumber, pinClassName(pin.pinClass));
@@ -310,6 +336,14 @@ void PartLabels::evaluateWarnings() {
         }
     }
 
+    // A muted warning un-mutes the moment it clears or changes reason - the
+    // mute retires THIS standing complaint, not the part's right to warn.
+    for (int i = 0; i < MAX_PARTS; i++) {
+        if (!((warnMutedMask >> i) & 1)) continue;
+        bool isOn = (newMask >> i) & 1;
+        if (!isOn || newReason[i] != warnMutedReason[i]) warnMutedMask &= ~(1u << i);
+    }
+
     warnActiveMask = newMask;
     memcpy(warnReason, newReason, sizeof(warnReason));
     memcpy(warnPin, newPin, sizeof(warnPin));
@@ -355,7 +389,12 @@ uint32_t PartLabels::computeVisMask(unsigned long now) {
         highlightVisMask = computeHighlightVisMask();
     }
 
-    uint32_t mask = highlightVisMask | warnActiveMask;
+    // Muted warnings (clearTransients) don't FORCE standing visibility -
+    // they still paint their pulse pair when the part shows for other
+    // reasons. An expired part highlight drops here.
+    if (hlPart >= 0 && now > hlUntilMs) { hlPart = -1; hlPin = -1; }
+    uint32_t mask = highlightVisMask | (warnActiveMask & ~warnMutedMask);
+    if (hlPart >= 0) mask |= (1u << hlPart);
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
         if (now < bloomUntilMs[i] || now < inspectUntilMs[i]) mask |= (1u << i);
     }
@@ -380,25 +419,53 @@ void PartLabels::compose(uint32_t visMask) {
     memset(lblScratch, 0, sizeof(lblScratch));
     bool any = false;
 
+    // Warn pulse phase: the pair blinks so it can never be mistaken for
+    // routing (Kevin, 2026-08-27: the standing full column "looks like
+    // routing"). refresh() folds this phase into the fingerprint while a
+    // warned part is visible, so the blink actually repaints.
+    bool pulseOn = ((millis() / 400) & 1) != 0;
+
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
         if (!((visMask >> i) & 1)) continue;
         const PartDefinition& p = globalState.parts.parts[i];
         bool warned = (warnActiveMask >> i) & 1;
+        bool focused = (i == hlPart);
         for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
             const PartPin& pin = p.pins[j];
             int node = partPinNode(p, pin);
             if (node < 1 || node > 60) continue;
             int col = (node - 1) % 30;              // 0-based
             bool topHalf = (node <= 30);
+            int edgeRow = topHalf ? 0 : 9;
+            int inward = topHalf ? 1 : 8;
+            uint32_t c = pinDotColor(pin);
             if (warned && j == warnPin[i]) {
-                // The contradicted pin: full 5-cell column, warning color.
-                int rowBase = topHalf ? 0 : 5;
-                for (int r = 0; r < 5; r++) lblScratch[(rowBase + r) * 30 + col] = LBL_COLOR_WARN;
+                // The contradicted pin: edge + inward pair, warning color,
+                // PULSING - pointed, and unmistakably not a net.
+                uint32_t wc = pulseOn ? lblBrighten(LBL_COLOR_WARN) : LBL_COLOR_WARN;
+                lblScratch[edgeRow * 30 + col] = wc;
+                lblScratch[inward * 30 + col] = wc;
+            } else if (focused && hlPin < 0) {
+                // Whole-part highlight: every pin wears its role pair, bright.
+                lblScratch[edgeRow * 30 + col] = lblBrighten(c);
+                lblScratch[inward * 30 + col] = lblBrighten(c);
+            } else if (focused && j == hlPin) {
+                // The focused pin. An unwired row has no net to light up, so
+                // the overlay paints its whole column in the role color -
+                // "the highlighted node lights up the whole row" holds with
+                // no wires at all. Wired rows get the net machinery's row
+                // gradient; the overlay adds only the bright role pair.
+                if (validNetForNode(node) < 0) {
+                    int rowBase = topHalf ? 0 : 5;
+                    for (int r = 0; r < 5; r++)
+                        lblScratch[(rowBase + r) * 30 + col] = c;
+                }
+                lblScratch[edgeRow * 30 + col] = lblBrighten(c);
+                lblScratch[inward * 30 + col] = lblBrighten(c);
             } else {
-                // Ordinary marker: the outer-edge cell only (row 1 / row 10).
-                int edgeRow = topHalf ? 0 : 9;
-                lblScratch[edgeRow * 30 + col] =
-                    (pin.pinNumber == 1) ? LBL_COLOR_PIN1 : pinClassColor(pin.pinClass);
+                // Ordinary marker: the outer-edge cell only (row 1 / row 10),
+                // role-colored (a highlighted part's other pins land here).
+                lblScratch[edgeRow * 30 + col] = c;
             }
             any = true;
         }
@@ -416,8 +483,7 @@ void PartLabels::compose(uint32_t visMask) {
             const PartDefinition& p = globalState.parts.parts[i];
             for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
                 if (partPinNode(p, p.pins[j]) == node) {
-                    base = (p.pins[j].pinNumber == 1) ? LBL_COLOR_PIN1
-                                                      : pinClassColor(p.pins[j].pinClass);
+                    base = pinDotColor(p.pins[j]);
                     break;
                 }
             }
@@ -524,6 +590,10 @@ bool PartLabels::refresh(bool force) {
     fp = fnv1a(fp, pw);
     fp = fnv1a(fp, visMask);
     fp = fnv1a(fp, warnActiveMask);
+    fp = fnv1a(fp, warnMutedMask);
+    fp = fnv1a(fp, ((uint32_t)(uint8_t)hlPart << 8) | (uint32_t)(uint8_t)hlPin);
+    // the warn pulse repaints only while a warned part is actually visible
+    if (warnActiveMask & visMask) fp = fnv1a(fp, (uint32_t)((now / 400) & 1));
     fp = fnv1a(fp, (uint32_t)emphasisCount);
     for (int e = 0; e < emphasisCount; e++) fp = fnv1a(fp, (uint32_t)(uint16_t)emphasisNodes[e]);
     fp = fnv1a(fp, slotManager.isPreviewMode() ? 1u : 0u);
@@ -539,6 +609,84 @@ bool PartLabels::refresh(bool force) {
 void PartLabels::recomposeNow() {
     if (board::currentBoard().caps.ledsPerRow < 5) return;
     refresh(true);
+}
+
+void PartLabels::setPartHighlight(int partIdx, int pinIdx, unsigned long holdMs) {
+    if (partIdx < 0 || partIdx >= globalState.parts.numParts || partIdx >= MAX_PARTS) {
+        clearPartHighlight();
+        return;
+    }
+    const PartDefinition& p = globalState.parts.parts[partIdx];
+    if (pinIdx >= p.numPins || pinIdx >= MAX_PART_PINS) pinIdx = -1;
+    hlPart = (int8_t)partIdx;
+    hlPin = (int8_t)pinIdx;
+    hlUntilMs = millis() + holdMs;
+    if (board::currentBoard().caps.ledsPerRow >= 5) refresh(true);
+}
+
+void PartLabels::clearPartHighlight() {
+    if (hlPart < 0) return;
+    hlPart = -1;
+    hlPin = -1;
+    hlUntilMs = 0;
+    if (board::currentBoard().caps.ledsPerRow >= 5) refresh(true);
+}
+
+void PartLabels::clearTransients() {
+    // Blooms stay: a just-placed part's 5 s flash is the ambient handoff
+    // the placement flow exits INTO - it self-expires and was never the
+    // standing-overlay complaint.
+    for (int i = 0; i < MAX_PARTS; i++) inspectUntilMs[i] = 0;
+    // mute what's currently complaining; evaluateWarnings un-mutes on change
+    warnMutedMask = warnActiveMask;
+    memcpy(warnMutedReason, warnReason, sizeof(warnMutedReason));
+    hlPart = -1;
+    hlPin = -1;
+    hlUntilMs = 0;
+    if (board::currentBoard().caps.ledsPerRow >= 5) refresh(true);
+}
+
+bool PartLabels::partTestSummary(const PartDefinition& p, char* buf, size_t len) {
+    if (buf == nullptr || len == 0) return false;
+    buf[0] = '\0';
+    char ohms[12];
+    switch ((PartType)p.lastTestType) {
+        case PartType::BJT_NPN:
+        case PartType::BJT_PNP:
+            snprintf(buf, len, "hFE %.0f  %.2fV",
+                     (double)p.lastTestValue2, (double)p.lastTestValue);
+            return true;
+        case PartType::LED:
+        case PartType::DIODE:
+            snprintf(buf, len, "Vf %.2fV", (double)p.lastTestValue);
+            return true;
+        case PartType::ZENER:
+            snprintf(buf, len, "Vf %.2fV Vz %.1fV",
+                     (double)p.lastTestValue, (double)p.lastTestValue2);
+            return true;
+        case PartType::RESISTOR:
+            formatOhms(p.lastTestValue, ohms, sizeof(ohms));
+            snprintf(buf, len, "%s measured", ohms);
+            return true;
+        case PartType::POT:
+            formatOhms(p.lastTestValue, ohms, sizeof(ohms));
+            snprintf(buf, len, "pot %s", ohms);
+            return true;
+        case PartType::NFET:
+        case PartType::PFET:
+            snprintf(buf, len, "%cFET %.2fV",
+                     ((PartType)p.lastTestType == PartType::NFET) ? 'N' : 'P',
+                     (double)p.lastTestValue);
+            return true;
+        default:
+            break;
+    }
+    if (p.measuredOhms > 0.0f) {
+        formatOhms(p.measuredOhms, ohms, sizeof(ohms));
+        snprintf(buf, len, "%s measured", ohms);
+        return true;
+    }
+    return false;
 }
 
 void PartLabels::setEmphasis(const int16_t* nodes, int count) {

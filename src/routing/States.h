@@ -477,6 +477,14 @@ struct PartDefinition {
                                // order on the sorted taps. PartLabels paints
                                // the warn column off this. Cleared by any
                                // later successful verify; never serialized.
+    uint8_t  lastTestType;     // RUNTIME ONLY (measuredOhms rules): the last
+                               // electrical identification of THIS part -
+                               // a PartType numeric, 0 = never tested. The
+                               // part-highlight card shows it as cached
+                               // test data. Never serialized: a reading,
+                               // not authorship.
+    float    lastTestValue;    // Vf / Vbe / ohms   (PartResult.value)
+    float    lastTestValue2;   // hFE / Vz / wiper  (PartResult.value2)
     bool     placed;           // runtime: expansion applied (guide progress)
     uint8_t  placement;        // PART_PLACEMENT_* - serialized only when non-default
     PartPin  pins[MAX_PART_PINS];

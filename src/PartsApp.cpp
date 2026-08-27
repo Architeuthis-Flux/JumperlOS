@@ -852,6 +852,9 @@ void partsAppLauncher(void) {
             int nRows = 0;
             uint8_t unverified = 0;
             float measOhms = 0.0f;
+            uint8_t testType = 0;      // identify result, cached onto the
+            float testValue = 0.0f;    // placed record after commit (the
+            float testValue2 = 0.0f;   // part-highlight card's test data)
             int nSignals = po.numPins;
             if (nSignals > MAX_PART_PINS) nSignals = MAX_PART_PINS;
             bool canIdentify =
@@ -886,6 +889,12 @@ void partsAppLauncher(void) {
                         }
                 }
                 if (res.type == PartType::RESISTOR) measOhms = res.value;
+                if (res.status == 0 && res.type != PartType::EMPTY &&
+                    res.type != PartType::UNKNOWN) {
+                    testType = (uint8_t)res.type;
+                    testValue = res.value;
+                    testValue2 = res.value2;
+                }
                 // say what was measured - accepted or not, the user hears it
                 Serial.print("\r\nPARTID type=");
                 Serial.print(partTypeName(res.type));
@@ -941,6 +950,23 @@ void partsAppLauncher(void) {
                 if (cancelled) continue;   // back to the part list
             }
             if (partsCommitPlacement(rec, rows, nRows, unverified, measOhms)) {
+                // Cache the identify reading onto the placed record (found
+                // by its first tapped row - commit may have replaced an
+                // older record) for the part-highlight card's test line.
+                if (testType != 0) {
+                    for (int i2 = 0; i2 < globalState.parts.numParts && i2 < MAX_PARTS; i2++) {
+                        PartDefinition& pp = globalState.parts.parts[i2];
+                        if (!pp.placed) continue;
+                        bool owns = false;
+                        for (int j2 = 0; j2 < pp.numPins && j2 < MAX_PART_PINS; j2++)
+                            if (partPinNode(pp, pp.pins[j2]) == rows[0]) { owns = true; break; }
+                        if (!owns) continue;
+                        pp.lastTestType = testType;
+                        pp.lastTestValue = testValue;
+                        pp.lastTestValue2 = testValue2;
+                        break;
+                    }
+                }
                 // Placed: the app's job is over - exit and let the ambient
                 // services own it (labels bloom, DisplayService routes a
                 // display's data pins the moment it polls).
@@ -953,6 +979,7 @@ done:
     inClickMenu = 0;
     rotaryDivider = lastDivider;
     b.clear();
+    partLabels.clearTransients();   // standing overlays retire on app exit
     requestLedShow(-1);
     Serial.println();
     // The steps screen (if armed) or the logo - never a stale picker frame.
@@ -1349,6 +1376,14 @@ void partsTestLauncher(void) {
                     break;
             }
             // a clean identification whose roles sit exactly where the
+            // cache the reading for the part-highlight card's test line
+            // (RAM-only, measuredOhms rules)
+            if (res.status == 0 && res.type != PartType::EMPTY &&
+                res.type != PartType::UNKNOWN) {
+                p.lastTestType = (uint8_t)res.type;
+                p.lastTestValue = res.value;
+                p.lastTestValue2 = res.value2;
+            }
             // placement put them = the pins are verified
             if (res.status == 0 && !res.degraded && res.confidence >= 0.8f) {
                 bool rolesMatch = true;
@@ -1389,6 +1424,7 @@ void partsTestLauncher(void) {
     inClickMenu = 0;
     rotaryDivider = lastDivider;
     b.clear();
+    partLabels.clearTransients();   // standing overlays retire on app exit
     requestLedShow(-1);
     Serial.println();
     oled.showJogo32h();
@@ -1752,6 +1788,7 @@ adone:
     inClickMenu = 0;
     rotaryDivider = lastDivider;
     b.clear();
+    partLabels.clearTransients();   // standing overlays retire on app exit
     requestLedShow(-1);
     Serial.println();
     oled.showJogo32h();
