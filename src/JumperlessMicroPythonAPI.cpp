@@ -2274,6 +2274,14 @@ int jl_guide_progress( void ) {
 // (~0.5-3s) - the rows must hold an isolated part, nothing else wired.
 const char* jl_part_identify( int row1, int row2, int row3 ) {
     static char idBuffer[ 384 ];
+#if defined( OG_JUMPERLESS )
+    // V5-only (DESIGN_PART_ID_FOLLOWUP): the OG has neither the INA1 shunt
+    // nor the same ISENSE fabric - refuse honestly instead of measuring noise.
+    (void)row1; (void)row2; (void)row3;
+    snprintf( idBuffer, sizeof( idBuffer ),
+              "type=UNKNOWN conf=0.00 value=0 value2=0 degraded=0 status=-2 rows= roles=" );
+    return idBuffer;
+#else
     PartResult res = ( row3 > 0 ) ? identifyThreeLead( row1, row2, row3 )
                                   : identifyTwoLead( row1, row2 );
     int pos = snprintf( idBuffer, sizeof( idBuffer ),
@@ -2308,6 +2316,7 @@ const char* jl_part_identify( int row1, int row2, int row3 ) {
         }
     }
     return idBuffer;
+#endif // OG_JUMPERLESS
 }
 
 // OLED Functions
