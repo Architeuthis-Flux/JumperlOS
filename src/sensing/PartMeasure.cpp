@@ -245,21 +245,23 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     s.active = true;
 
     // Gross-voltage sanity through momentary sense legs: a rail reaching a
-    // DUT row through the part itself. (0..2.6V is indistinguishable from
-    // the floating lane bias here - the wiring gate above is what actually
-    // guarantees cold rows.)
-    for (int i = 0; i < nRows; i++) legAdd(s, s.rows[i], ADC0 + s.adcCh[i]);
-    if (!legsBuild(s)) {
-        partScanEnd(s);
-        return -7;
-    }
-    delay(3);
+    // DUT row through the part itself. One row at a time - all three rows
+    // of a sip3 share a chip, and even three simultaneous ADC legs can
+    // exhaust its lanes (bench: refused on chip-D rows). (0..2.6V is
+    // indistinguishable from the floating lane bias here - the wiring gate
+    // above is what actually guarantees cold rows.)
     bool powered = false;
     for (int i = 0; i < nRows; i++) {
+        legAdd(s, s.rows[i], ADC0 + s.adcCh[i]);
+        if (!legsBuild(s)) {
+            partScanEnd(s);
+            return -7;
+        }
+        delay(3);
         float v = readAdcVoltage(s.adcCh[i], 8);
         if (v > 2.9f || v < -0.5f) powered = true;
+        legsClear(s);
     }
-    legsClear(s);
     if (powered) {
         partScanEnd(s);
         return -4;

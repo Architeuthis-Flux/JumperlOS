@@ -15,9 +15,6 @@
 // junction-map decision bands (volts at the pulled-up candidate anode)
 static const float KMAP_FWD_MAX = 1.10f;   // below = forward junction
 static const float KMAP_BLOCKED_MIN = 3.05f;  // above = no conduction
-// floating-row signature on the diagonal (ADC bias ~2.31V behind ~440k)
-static const float KFLOAT_MIN = 1.70f;
-static const float KFLOAT_MAX = 2.75f;
 
 const char* partTypeName(PartType t) {
     switch (t) {
@@ -242,12 +239,16 @@ PartResult identifyThreeLead(int rowA, int rowB, int rowC) {
             }
 
     if (nFwd == 0) {
-        // no junction anywhere: empty rows read the floating bias
-        bool allFloat = true;
-        for (int i = 0; i < 3; i++)
-            if (v[i][i] < KFLOAT_MIN || v[i][i] > KFLOAT_MAX) allFloat = false;
-        r.type = allFloat ? PartType::EMPTY : PartType::UNKNOWN;
-        r.confidence = allFloat ? 0.7f : 0.2f;
+        // No junction anywhere. All six pairs cleanly blocked = nothing
+        // conducting between any pins - empty rows or a fully open part
+        // (bench: the float-bias diagonal can't tell them apart; a
+        // discharged row recovers toward the lane bias far too slowly).
+        bool allBlocked = true;
+        for (int a = 0; a < 3; a++)
+            for (int b = 0; b < 3; b++)
+                if (a != b && v[a][b] < KMAP_BLOCKED_MIN) allBlocked = false;
+        r.type = allBlocked ? PartType::EMPTY : PartType::UNKNOWN;
+        r.confidence = allBlocked ? 0.6f : 0.2f;
         partScanEnd(s);
         return r;
     }
