@@ -2013,11 +2013,19 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
                 break;
             }
             Wire1.end();
-            if (jumperlessConfig.top_oled.enabled) {
+            // Put the bus back the way i2cScan does - but ONLY when the
+            // panel actually lives on Wire1. Connection type 2 is I2C0,
+            // and its config still carries the default sda/scl 26/27: a
+            // bare begin() on those would claim pin 27 for I2C, and pin 27
+            // is the probe-power pad (BUF_IN <- GP_8). That is the exact
+            // hazard this probe borrows 22/23 to avoid - don't hand it
+            // back on the teardown path.
+            if (jumperlessConfig.top_oled.enabled &&
+                jumperlessConfig.top_oled.connection_type != 2) {
                 Wire1.setSDA(jumperlessConfig.top_oled.sda_pin);
                 Wire1.setSCL(jumperlessConfig.top_oled.scl_pin);
+                Wire1.begin();
             }
-            Wire1.begin();
             if (bSda) removeBridgeFromState(RP_GPIO_3, sdaRow, false);
             if (bScl) removeBridgeFromState(RP_GPIO_4, sclRow, false);
             if (!found && order == 0)
@@ -2455,7 +2463,8 @@ void partsAutoLauncher(void) {
                 // waits until scans need to be faster.)
                 int chipStarRow = -1;
                 if (res.status == 0 && res.nRows == 2 &&
-                    (res.type == PartType::DIODE || res.type == PartType::ZENER)) {
+                    (res.type == PartType::DIODE || res.type == PartType::ZENER ||
+                     res.type == PartType::LED)) {
                     int anodeRow = (res.roles[0] == PinRole::A) ? (int)res.rows[0]
                                                                 : (int)res.rows[1];
                     int candList[6];
@@ -2623,11 +2632,18 @@ void partsAutoLauncher(void) {
                              pres.type == PartType::CAPACITOR ||
                              pres.type == PartType::SHORT_CIRCUIT);
                         if (discrete && (pres.type == PartType::DIODE ||
-                                         pres.type == PartType::ZENER)) {
+                                         pres.type == PartType::ZENER ||
+                                         pres.type == PartType::LED)) {
                             // the same clamp trap as the 2-row span: a
                             // "diode" inside a chip-wide span is probably
                             // the chip's clamp - the star test referees
-                            // against the span's other hit rows
+                            // against the span's other hit rows. LED counts:
+                            // a clamp's forward drop is a MEASUREMENT, and a
+                            // high one reads as an LED (bench: Kevin's
+                            // SSD1306 module scans Vdd->SCL as "LED 2.23V").
+                            // Letting LED skip this split his whole module
+                            // into a phantom discrete and starved the chip
+                            // interrogation of the legs it needs.
                             int anode2 = (pres.roles[0] == PinRole::A)
                                              ? (int)pres.rows[0]
                                              : (int)pres.rows[1];
