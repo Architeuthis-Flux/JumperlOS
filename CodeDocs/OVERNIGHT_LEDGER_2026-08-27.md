@@ -452,3 +452,41 @@ removals; his scan trace confirms nothing said "already yours"). The
 cross-gap LED identifies as red, Vf 1.96V — physically impossible at the
 old 1V sweep drive, comfortably inside the new 3V. PICOBOOT caveat: port7
 can enumerate silent after picotool; one `machine.reset()` cures it.
+
+### The 14:00 round — 99d5c83 + 28c797a
+
+Kevin's 170s scan with three phantom parts, and "why isn't it finding the
+7-seg on 23-29/53-59?" — both answered.
+
+**The phantoms**: the 7400's pin trios passed the hFE test twice (Vbe 0.90
+and 0.44 — both impossible for real silicon; the true 2N3906 reads
+0.59-0.61) → a Vbe plausibility window [0.50, 0.80] now gates every BJT
+acceptance. The phantom D17 was the real PNP's E-B junction, split because
+its record was gone — Kevin's 13:52 placement was eaten by my 13:57
+touch-flash (deferred-save trap). New discipline: `nodes_save()` over port5
+BEFORE every touch. The walk also gained the diode→BJT upgrade (third leg
+from the pair's neighbors, r+2 then r-1 — the span's first hit can be a
+different part).
+
+**The 170s**: most of it was full identifyTwoLead sessions asked questions
+they were overqualified for. Cluster power and star tests now read
+partScanJunctionMap triples (~2s covers three pairs); the speculative
+gap-2 sweep pass is cut; the done→confirm double-press is gone. The
+cross-gap LED also places now (a 30-apart pair IS the axial2 footprint —
+inference built "sip31" and geometry refused it).
+
+**The 7-seg**: bench-mapped before coding. Common-ANODE, common on row 59,
+dp cathode on row 29, segments 23/24/28/53/55/56/58 light from 59 at Vf
+~2.2V — and rows 29/30/59/60 were refused by the whole measurement layer,
+so the part's only conducting partner was unmeasurable. All my earlier
+sweeps drove segments HIGH (common-cathode assumption) — polarity, not
+voltage, hid it. Bench also proved ADC0/DAC0/GND all route to x-pin rows
+fine → partScanBegin accepts them now, the sweep gained an evidence-gated
+edge stage (six columns beside each x-pin row, mirror window when an edge
+row shows hits), and the launcher groups pairs sharing one edge row:
+"rows 23,24,28,53,55,56,58 all light from row 59 - a 7-seg display?".
+Placement of multi-pin displays stays the Parts menu's job.
+
+Bench note: at 5V the INA1 standing load is ~3.3mA (V/1.5k) — an earlier
+sweep briefly misread that as conduction; thresholds on INA1 must be
+DELTAS against V/1500, never absolutes.
