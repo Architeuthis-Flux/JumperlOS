@@ -1332,10 +1332,24 @@ void listNets(int liveUpdate, Stream *stream)
     //   lineCount+=2;
     //   }
 
+    // Never start a listing into a wedged port: Adafruit CDC write() spins
+    // FOREVER while the port is open and its FIFO stays full, so a host
+    // that stopped draining (a choked terminal renderer) would hang core 0
+    // on the first burst. Draining hosts pass this instantly.
+    {
+      unsigned long drainStart = millis();
+      while (stream->availableForWrite() < 120 && millis() - drainStart < 500) {
+        delay(5);
+      }
+      if (stream->availableForWrite() < 120) return;
+    }
+
     stream->print("\n\rIndex\tName\t\tVoltage\t    Nodes\t\n\r");
 
-
-
+    // live-update reprint holdoff - a floating GPIO input flips its reading
+    // constantly, and reprinting the whole colored listing on every flip
+    // flooded the app terminal until its renderer choked (bench, 2026-08-27)
+    unsigned long lastReprintMs = millis();
 
     do {
 
@@ -1699,7 +1713,10 @@ void listNets(int liveUpdate, Stream *stream)
 
         unsigned long startTime = millis();
         //stream->print("\033[2J\033[H");
-        while (stream->available() == 0 && liveUpdate == 1 && changed == 0) {
+        // `changed` is sticky: the loop holds until the reprint holdoff
+        // expires, so no update is lost - just rate-capped (~5/s)
+        while (stream->available() == 0 && liveUpdate == 1 &&
+               (changed == 0 || millis() - lastReprintMs < 200)) {
           //stream->println("waiting for serial");
           for (int i = 0; i < 10; i++) {
             if (lastGPIO[i] != gpioReading[i]) {
@@ -1774,11 +1791,22 @@ void listNets(int liveUpdate, Stream *stream)
         //delay(10);
         // for (int i = 0; i < lineCount; i++) {
         if (liveUpdate == 1) {
+          // The host must still be DRAINING before another full reprint -
+          // a wedged terminal leaves the FIFO full and the next write
+          // blocks core 0 indefinitely. Stalled for a second: abandon
+          // live mode with no goodbye bytes (even 2 would block).
+          unsigned long drainStart = millis();
+          while (stream->availableForWrite() < 120 &&
+                 millis() - drainStart < 1000) {
+            delay(5);
+          }
+          if (stream->availableForWrite() < 120) return;
           stream->printf("\033[%dA", lineCount - 1);
           //stream->print("   ffdflkj;ldfkj ");
           stream->printf("\033[J");
           stream->flush();
           lineCount = 0;
+          lastReprintMs = millis();
           }
         } else {
         break;
