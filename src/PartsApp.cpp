@@ -1730,6 +1730,11 @@ void partsTestLauncher(void) {
 // probe button, encoder, or any serial byte.
 
 static bool partsAutoAborted = false;
+// WHY it stopped rides along: a stray keystroke into the terminal reads
+// as an abort (any serial byte = stop), and without the cause a scan that
+// quit mid-board looks like a crash (bench, 14:31: a lone 's' ended the
+// run right before the module interrogation).
+static const char* partsAutoAbortCause = nullptr;
 static bool partsAutoAbortCheck(void) {
     if (partsAutoAborted) return true;
     jOS.serviceInner();
@@ -1737,13 +1742,21 @@ static bool partsAutoAbortCheck(void) {
     if (encoderButtonState == HELD ||
         (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
         partsAutoAborted = true;
+        partsAutoAbortCause = "the wheel";
     } else if (partsProbeButton() != 0) {
         partsAutoAborted = true;
+        partsAutoAbortCause = "the probe";
     } else if (Serial.available() > 0) {
         (void)Serial.read();
         partsAutoAborted = true;
+        partsAutoAbortCause = "serial input";
     }
     return partsAutoAborted;
+}
+static void partsPrintAborted(void) {
+    Serial.print("PARTSCAN auto aborted (");
+    Serial.print(partsAutoAbortCause != nullptr ? partsAutoAbortCause : "?");
+    Serial.println(")");
 }
 
 // Live scan visualization (Kevin's ask: clear the SCAN text, show what the
@@ -1752,21 +1765,32 @@ static bool partsAutoAbortCheck(void) {
 // straight into the LED buffer - inClickMenu=1 keeps the net render off it.
 // s_scanVizFlags points at the launcher's census flags for pair-done paints.
 static const uint8_t* s_scanVizFlags = nullptr;
-static const uint32_t PARTS_SCANVIZ_CURSOR = 0x181818;  // the probing row
-static const uint32_t PARTS_SCANVIZ_PAIR   = 0x101024;  // the swept pair
-static const uint32_t PARTS_SCANVIZ_HIT    = 0x0A2008;  // something conducts
+static const uint32_t PARTS_SCANVIZ_HIT = 0x0A2008;  // something conducts
+
+// The moving cursors wear the ROW's hue, so the census drags a rainbow
+// down the board and the pair sweep shimmers where it works (Kevin,
+// 14:31: "vary the LED color on the auto scan"). Hits keep the one warm
+// green - found-vs-empty must stay readable at a glance, so only MOTION
+// gets the rainbow, never results.
+static uint32_t partsScanVizHue(int row, uint8_t val) {
+    hsvColor h;
+    h.h = (uint8_t)(((row - 1) * 255) / 60);
+    h.s = 220;
+    h.v = val;
+    return HsvToRaw(h);
+}
 
 static void partsScanViz(int row, int state) {
     int pr = nodeToPrintRow(row);
     if (pr < 0) return;
     switch (state) {
-        case 0: b.printRawRow(0b00011111, pr, PARTS_SCANVIZ_CURSOR, 0xffffff); break;
+        case 0: b.printRawRow(0b00011111, pr, partsScanVizHue(row, 48), 0xffffff); break;
         case 1: b.printRawRow(0b00011111, pr, PARTS_SCANVIZ_HIT, 0xffffff); break;
         case 2: b.printRawRow(0b00011111, pr, 0x000000, 0xffffff); break;
         case 3: {   // pair cursor: this row and the next
-            b.printRawRow(0b00011111, pr, PARTS_SCANVIZ_PAIR, 0xffffff);
+            b.printRawRow(0b00011111, pr, partsScanVizHue(row, 36), 0xffffff);
             int pr2 = nodeToPrintRow(row + 1);
-            if (pr2 >= 0) b.printRawRow(0b00011111, pr2, PARTS_SCANVIZ_PAIR, 0xffffff);
+            if (pr2 >= 0) b.printRawRow(0b00011111, pr2, partsScanVizHue(row + 1, 36), 0xffffff);
             break;
         }
         case 4: {   // pair done: both rows back to what the flags say
@@ -2175,6 +2199,7 @@ void partsAutoLauncher(void) {
     int lastDivider = rotaryDivider;
     rotaryDivider = 8;
     partsAutoAborted = false;
+    partsAutoAbortCause = nullptr;
 
     // No SCAN banner - the board itself shows what the scan is doing
     // (Kevin's ask): the cursor row sweeps, hits stay lit, empties go dark.
@@ -2253,7 +2278,7 @@ void partsAutoLauncher(void) {
         goto adone;
     }
     if (partsAutoAborted) {
-        Serial.println("PARTSCAN auto aborted");
+        partsPrintAborted();
         goto adone;
     }
     {
@@ -2298,7 +2323,7 @@ void partsAutoLauncher(void) {
                            " or too wired) - lone junction parts won't be seen");
     }
     if (partsAutoAborted) {
-        Serial.println("PARTSCAN auto aborted");
+        partsPrintAborted();
         goto adone;
     }
 
@@ -2987,7 +3012,7 @@ void partsAutoLauncher(void) {
         }
 
         if (partsAutoAborted) {
-            Serial.println("PARTSCAN auto aborted");
+            partsPrintAborted();
         } else {
             Serial.print("PARTSCAN auto done in ");
             Serial.print((millis() - scanT0) / 1000);
@@ -3085,6 +3110,7 @@ adone:
         refreshConnections(-1, 0, 0);
     }
     partsAutoAborted = false;
+    partsAutoAbortCause = nullptr;
     inClickMenu = 0;
     rotaryDivider = lastDivider;
     b.clear();
