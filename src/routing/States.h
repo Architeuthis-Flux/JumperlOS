@@ -470,6 +470,13 @@ struct PartDefinition {
                                // contract entirely. It therefore does not
                                // survive a reboot or a resumed guide, and
                                // every consumer must fall back to `value:`.
+    uint8_t  pinsUnverified;   // RUNTIME ONLY (measuredOhms rules): set when
+                               // a tap-time electrical identification was
+                               // attempted and could NOT confirm which leg is
+                               // which, so the placement assumed the DB pin
+                               // order on the sorted taps. PartLabels paints
+                               // the warn column off this. Cleared by any
+                               // later successful verify; never serialized.
     bool     placed;           // runtime: expansion applied (guide progress)
     uint8_t  placement;        // PART_PLACEMENT_* - serialized only when non-default
     PartPin  pins[MAX_PART_PINS];

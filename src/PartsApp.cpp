@@ -20,6 +20,8 @@
 #include "PartPlacement.h"  // applyPartPlacement, partGeometryOk
 #include "Probing.h"        // probeButton, probing.getLastProbeReading
 #include "RotaryEncoder.h"  // encoder state machine, rotaryDivider
+#include "LEDs.h"           // HsvToRaw - per-signal tap rainbow
+#include "sensing/PartClassify.h"  // tap-time electrical identification
 #include "Undo.h"           // UndoIngestGuard - placements are not undoable (yet)
 #include "States.h"         // globalState
 #include "config.h"         // jumperlessConfig.hardware.probe_revision
@@ -43,6 +45,19 @@ static const uint32_t PARTS_HEADER_COLOR = 0x001008;
 static const uint32_t PARTS_ITEM_COLOR = 0x100810;
 static const uint32_t PARTS_TAP_DONE_COLOR = 0x000C04;   // rows already tapped
 static const uint32_t PARTS_TAP_FLASH_COLOR = 0x0A2A08;  // the just-accepted tap
+static const uint32_t PARTS_TAP_IGNORED_COLOR = 0x200404; // tap on an already-used row
+
+// Every prompted signal gets its own hue - even undefined ones default to a
+// rainbow (Kevin's ruling). Dim like the rest of the palette: these sit next
+// to live net colors.
+static uint32_t partsTapHue(int idx, int total, bool bright) {
+    if (total < 1) total = 1;
+    hsvColor h;
+    h.h = (uint8_t)((idx * 255) / total);
+    h.s = 235;
+    h.v = bright ? 90 : 26;
+    return HsvToRaw(h);
+}
 
 // One shared scratch list for both picker levels. 96 covers the largest
 // class with headroom (111 records TOTAL in the seed DB); a class that ever
@@ -171,10 +186,12 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
         snprintf(lineBuf, sizeof(lineBuf), "TAP ROW");
     }
     b.print(lineBuf, PARTS_ITEM_COLOR, 0xFFFFFF, 0, 1, 1);
-    // Rows already tapped for this part stay marked (Kevin's ruling: every
-    // accepted tap needs breadboard LED confirmation).
+    // Rows already tapped for this part stay marked, each signal in its own
+    // hue (Kevin's ruling: every accepted tap needs breadboard confirmation,
+    // and the pins get a rainbow even when their names are undefined).
     for (int u = 0; u < nUsed; u++) {
-        b.lightUpNode(usedRows[u], PARTS_TAP_DONE_COLOR);
+        b.lightUpNode(usedRows[u], (total > 0) ? partsTapHue(u, total, false)
+                                               : PARTS_TAP_DONE_COLOR);
     }
     requestLedShow(2);
     if (oled.oledConnected) {
@@ -206,11 +223,19 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
     int nDigits = 0;
     int lastNudgedRow = -1;
     unsigned long lastShowRequest = millis();
-    // A probe RESTING on a row re-emits it every 500 ms - without a deadtime
-    // the prompt would accept that parked row the instant it opens (sweep
-    // finding, high). Human reaction to a fresh prompt is >400 ms anyway;
-    // the serial twin (typed rows) is deliberate and skips this.
+    // Accept on a lift-then-touch TRANSITION, not a wall clock (fixcheck #2:
+    // a parked probe re-emits its row every 500 ms forever, so NO deadtime
+    // can outwait it - it self-accepted the prompt 100 ms late instead).
+    // 700 ms without an emission means the tip really left the board (longer
+    // than justReadProbe's duplicate window - PartLabels' LBL_LIFT_MS
+    // reasoning), and a prompt that OPENS with the probe in the air arms
+    // almost immediately. Once armed, a fresh tap is accepted on its FIRST
+    // emission - fast taps are not swallowed anymore. The serial twin
+    // (typed rows) is deliberate and skips the gate.
     unsigned long openMs = millis();
+    unsigned long lastEmitMs = 0;   // 0 = no emission seen since open
+    bool armed = false;
+    bool liftHinted = false;
 
     while (true) {
         jOS.serviceInner();
@@ -278,28 +303,110 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
         // rate-limited to one per 500 ms with -1 between, so any
         // wait-for-N-stable-reads scheme here can never fire).
         int reading = probing.justReadProbe(true);
-        if (reading >= 1 && reading <= 60 && millis() - openMs >= 400) {
+        if (reading >= 1 && reading <= 60) {
+            bool wasArmed = armed;
+            lastEmitMs = millis();
+            armed = false;             // the next accept needs another lift
             bool used = false;
             for (int u = 0; u < nUsed; u++) {
                 if (usedRows[u] == reading) { used = true; break; }
             }
-            if (!used) {
-                b.lightUpNode(reading, PARTS_TAP_FLASH_COLOR);
+            if (wasArmed && !used) {
+                uint32_t flash = (total > 0) ? partsTapHue(step - 1, total, true)
+                                             : PARTS_TAP_FLASH_COLOR;
+                b.lightUpNode(reading, flash);
                 requestLedShow(2);
                 delay(180);   // visible confirmation before the next prompt
                 return reading;
             }
-            // A held probe re-emits its row every 500 ms - nudge once per
-            // distinct offending row, not per emission.
-            if (reading != lastNudgedRow) {
-                lastNudgedRow = reading;
-                Serial.print("  row ");
-                Serial.print(reading);
-                Serial.println(" is already one of this part's pins");
+            if (used) {
+                // A held probe re-emits its row every 500 ms - flash and
+                // nudge once per distinct offending row, not per emission.
+                if (reading != lastNudgedRow) {
+                    lastNudgedRow = reading;
+                    b.lightUpNode(reading, PARTS_TAP_IGNORED_COLOR);
+                    requestLedShow(2);
+                    Serial.print("  row ");
+                    Serial.print(reading);
+                    Serial.println(" is already one of this part's pins");
+                }
+            } else if (!liftHinted) {
+                // The probe was already resting here when the prompt opened -
+                // that emission is not a tap. Say so once instead of silence.
+                liftHinted = true;
+                Serial.println("  (lift the probe, then tap the row you want)");
+            }
+        }
+        if (!armed) {
+            if (lastEmitMs == 0) {
+                if (millis() - openMs >= 80) armed = true;    // opened in the air
+            } else if (millis() - lastEmitMs >= 700) {
+                armed = true;                                  // really lifted
             }
         }
         delayMicroseconds(1000);
     }
+}
+
+// Any-order tap collection: N taps, any rows, each confirmed in its own
+// hue. Returns N, or -1 (back) / -2 (exit) straight from the prompt.
+static int partsTapAnyRows(const PartDbRecord& rec, int* rowsOut, int nWanted) {
+    int n = 0;
+    while (n < nWanted) {
+        int row = partsTapForRow(rec, "any leg", n + 1, nWanted, rowsOut, n);
+        if (row < 0) return row;
+        rowsOut[n++] = row;
+        Serial.print("\r\nPARTPICK tap#");
+        Serial.print(n);
+        Serial.print(" row=");
+        Serial.println(row);
+    }
+    return n;
+}
+
+// Tap-time electrical identification (Kevin's ask: "tap any 3 pins on a
+// transistor and our part detection should figure it out"). Runs the
+// PartClassify session on the tapped rows and permutes rows[] into DB pin
+// order by matching identified roles (E/B/C, A/K, S/G/D) against the DB
+// pin names. Returns:
+//   2 = nonpolar part, tap order is already fine (res still carries the
+//       measured value - a resistor's ohms, a cap's detect)
+//   1 = identified and mapped; rows[] is now in DB pin order
+//   0 = could not verify (refused rows, unexpected type, no role match) -
+//       caller places sorted-taps-as-DB-order and warns
+static int partsIdentifyAndOrder(const PartDbRecord& rec, const PartDbPinout& po,
+                                 int* rows, int nRows, PartResult* resOut) {
+    PartResult res = (nRows == 3) ? identifyThreeLead(rows[0], rows[1], rows[2])
+                                  : identifyTwoLead(rows[0], rows[1]);
+    if (resOut) *resOut = res;
+
+    bool polar = (rec.partClass == PARTDB_CLASS_TRANSISTOR) ||
+                 (rec.partClass == PARTDB_CLASS_DISCRETE &&
+                  (rec.subClass == PARTDB_SUB_DISCRETE_LED ||
+                   rec.subClass == PARTDB_SUB_DISCRETE_DIODE));
+    if (!polar) return 2;              // any order IS the order
+    if (res.status != 0) return 0;
+
+    // roles -> DB pin names, each tapped row spent exactly once
+    int mapped[MAX_PART_PINS];
+    bool spent[3] = { false, false, false };
+    int nPins = po.numPins;
+    if (nPins > nRows) return 0;
+    for (int j = 0; j < nPins; j++) {
+        int found = -1;
+        for (int t = 0; t < res.nRows && t < 3; t++) {
+            if (spent[t]) continue;
+            if (strcmp(pinRoleName(res.roles[t]), po.pins[j].name) == 0) {
+                found = t;
+                break;
+            }
+        }
+        if (found < 0) return 0;
+        spent[found] = true;
+        mapped[j] = rows[found];
+    }
+    for (int j = 0; j < nPins; j++) rows[j] = mapped[j];
+    return 1;
 }
 
 // DB record + tapped rows -> a placed part in the live state.
@@ -318,7 +425,8 @@ static int partsTapForRow(const PartDbRecord& rec, const char* signal = nullptr,
 //   axial2 -> the two taps must share a column across the center line (the
 //             only legal axial shape); whichever signal was tapped on the top
 //             half becomes footprint pin 1, so polarity follows the taps.
-static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int nRows) {
+static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int nRows,
+                                 uint8_t pinsUnverified = 0, float measuredOhms = 0.0f) {
     JumperlessState& st = globalState;
     if (st.parts.numParts >= MAX_PARTS) {
         Serial.print("\r\nPARTDB place refused reason=\"parts table full (");
@@ -332,6 +440,9 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
     const PartDbPinout& po = *partdbPinoutOf(rec);
     static PartDefinition tmp;   // ~600 B - keep it off the core-0 stack
     partdbInstantiate(rec, tmp);
+    // static scratch: both RAM-only fields set EVERY pass, never inherited
+    tmp.pinsUnverified = pinsUnverified;
+    tmp.measuredOhms = measuredOhms;
 
     if (nRows == 1) {
         int baseRow = rows[0];
@@ -663,20 +774,85 @@ void partsAppLauncher(void) {
             const PartDbRecord& rec = partdb_records[s_rec[p]];
 
             // DIP crosses the center line - one orientation, one anchor tap.
-            // Everything else (SIP modules, passives) has no standard header
-            // order, so every listed signal is tapped by name and the taps
-            // are the geometry (Kevin's ruling, 2026-08-25).
+            // Transistors and 2-lead discretes take ANY-ORDER taps and the
+            // electrical identification sorts out which leg is which
+            // (Kevin's ask, 2026-08-26). Everything else (SIP modules, pots)
+            // taps every signal by name and the taps are the geometry
+            // (Kevin's ruling, 2026-08-25).
             const PartDbPinout& po = *partdbPinoutOf(rec);
             int rows[MAX_PART_PINS];
             int nRows = 0;
+            uint8_t unverified = 0;
+            float measOhms = 0.0f;
+            int nSignals = po.numPins;
+            if (nSignals > MAX_PART_PINS) nSignals = MAX_PART_PINS;
+            bool canIdentify =
+                (rec.partClass == PARTDB_CLASS_TRANSISTOR && nSignals == 3) ||
+                (rec.partClass == PARTDB_CLASS_DISCRETE && nSignals == 2 &&
+                 rec.subClass != PARTDB_SUB_DISCRETE_POT);
             if (po.footprint == PARTDB_FOOT_DIP) {
                 int row = partsTapForRow(rec);
                 if (row == -2) goto done;
                 if (row == -1) continue;   // back to the part list
                 rows[nRows++] = row;
+            } else if (canIdentify) {
+                int got = partsTapAnyRows(rec, rows, nSignals);
+                if (got == -2) goto done;
+                if (got == -1) continue;
+                nRows = nSignals;
+                if (oled.oledConnected) {
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText("checking the part...");
+                }
+                PartResult res;
+                int idOk = partsIdentifyAndOrder(rec, po, rows, nRows, &res);
+                if (idOk == 0) {
+                    // Couldn't confirm which leg is which: place anyway with
+                    // the sorted taps as the DB pin order, wear the warning
+                    // (Kevin's ruling: place with warning, never refuse).
+                    unverified = 1;
+                    for (int a = 1; a < nRows; a++)       // tiny insertion sort
+                        for (int b2 = a; b2 > 0 && rows[b2] < rows[b2 - 1]; b2--) {
+                            int t = rows[b2]; rows[b2] = rows[b2 - 1]; rows[b2 - 1] = t;
+                        }
+                }
+                if (res.type == PartType::RESISTOR) measOhms = res.value;
+                // say what was measured - accepted or not, the user hears it
+                Serial.print("\r\nPARTID type=");
+                Serial.print(partTypeName(res.type));
+                Serial.print(" conf=");
+                Serial.print(res.confidence, 2);
+                if (res.value != 0.0f) {
+                    Serial.print(" value=");
+                    Serial.print(res.value, 3);
+                }
+                if (res.value2 != 0.0f) {
+                    Serial.print(" value2=");
+                    Serial.print(res.value2, 1);
+                }
+                if (res.status != 0) {
+                    Serial.print(" status=");
+                    Serial.print((int)res.status);
+                }
+                Serial.println(unverified ? " pins=assumed" : " pins=verified");
+                if (oled.oledConnected) {
+                    char toast[64];
+                    if (idOk == 1) {
+                        snprintf(toast, sizeof(toast), "%s ok\n%s",
+                                 partTypeName(res.type),
+                                 (res.type == PartType::LED)
+                                     ? partLedColorGuess(res.value) : "pins mapped");
+                    } else if (idOk == 2 && res.type == PartType::RESISTOR) {
+                        snprintf(toast, sizeof(toast), "%.0f ohm", (double)res.value);
+                    } else if (idOk == 2) {
+                        snprintf(toast, sizeof(toast), "placed");
+                    } else {
+                        snprintf(toast, sizeof(toast), "couldn't\nverify pins");
+                    }
+                    oled.clearPrintShow(toast, 2, true, true, true);
+                    delay(700);
+                }
             } else {
-                int nSignals = po.numPins;
-                if (nSignals > MAX_PART_PINS) nSignals = MAX_PART_PINS;
                 bool cancelled = false;
                 for (int s = 0; s < nSignals; s++) {
                     int row = partsTapForRow(rec, po.pins[s].name, s + 1,
@@ -691,7 +867,7 @@ void partsAppLauncher(void) {
                 }
                 if (cancelled) continue;   // back to the part list
             }
-            if (partsCommitPlacement(rec, rows, nRows)) {
+            if (partsCommitPlacement(rec, rows, nRows, unverified, measOhms)) {
                 // Placed: the app's job is over - exit and let the ambient
                 // services own it (labels bloom, DisplayService routes a
                 // display's data pins the moment it polls).

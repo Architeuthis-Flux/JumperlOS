@@ -61,7 +61,7 @@ static const unsigned long LBL_SWITCH_DEBOUNCE_MS = 300;
 // the probe really lifted, not that a held row is being rate-limited.
 static const unsigned long LBL_LIFT_MS = 700;
 
-enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT };
+enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT, WARN_PINS_UNVERIFIED };
 
 static const char* warnReasonName(uint8_t r) {
     switch (r) {
@@ -69,6 +69,7 @@ static const char* warnReasonName(uint8_t r) {
         case WARN_GND_TO_HOT: return "gnd_to_hot";
         case WARN_SELF_SHORT: return "self_short";
         case WARN_POWER_OVERVOLT: return "power_overvolt";
+        case WARN_PINS_UNVERIFIED: return "pins_unverified";
         default:              return "none";
     }
 }
@@ -221,6 +222,14 @@ void PartLabels::evaluateWarnings() {
 
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
         const PartDefinition& p = globalState.parts.parts[i];
+        // Placement couldn't electrically confirm which leg is which: the
+        // part wears the warn column until a later verify clears the flag
+        // (RAM-only, PartsApp sets it on the assumed-order fallback).
+        if (p.pinsUnverified && p.placed) {
+            newMask |= (1u << i);
+            newReason[i] = WARN_PINS_UNVERIFIED;
+            newPin[i] = 0;
+        }
         // Two passes so self_short doesn't depend on pin-list order: first
         // resolve every power/gnd pin's net, then judge.
         int pinNet[MAX_PART_PINS];
