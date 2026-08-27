@@ -724,7 +724,13 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
             int lo = half ? 31 : 1, hi = half ? 57 : 27;
             for (int a = lo; a <= hi && nPairs < 58; a++) {
                 int b = a + 1;
-                if (rowFlags[a] != 0 || rowFlags[b] != 0) continue;
+                // at least one row still unexplained, neither wired/refused:
+                // a part can straddle a census hit (a BJT's base HOLDS, its
+                // E and C don't - the base flag must not veto the junctions)
+                bool aFree = (rowFlags[a] == 0), bFree = (rowFlags[b] == 0);
+                bool aOk = aFree || rowFlags[a] == 1 || rowFlags[a] == 5;
+                bool bOk = bFree || rowFlags[b] == 1 || rowFlags[b] == 5;
+                if (!(aOk && bOk) || (!aFree && !bFree)) continue;
                 if (abortCheck != nullptr && abortCheck()) goto sweepJudge;
                 pairA[nPairs] = (int16_t)a;
                 di[0][nPairs] = di[1][nPairs] = 1.0e9f;  // no-reading sentinel

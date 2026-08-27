@@ -1909,6 +1909,9 @@ int jl_project_begin_run( const char* name ) {
 // is single-threaded, so there is no second builder.
 static PartDefinition placeScratch;
 
+int jl_remove_part( const char* name );  // defined below; place_part's
+                                         // replace-on-identity calls it
+
 // Charset guard for every user string that reaches serializeParts RAW.
 // Strings that arrive through the YAML path are pre-filtered by the line
 // scanner; API strings are not, and the serializer emits them verbatim:
@@ -1947,7 +1950,8 @@ static bool partStringSafe( const char* s, const char* what ) {
 // (row MUST be 1-30; pin 2 lands at row+30).
 // Returns 0 on success, -1 on failure (reason printed).
 int jl_place_part( const char* name, int row, const char* pins_json,
-                   const char* footprint, const char* type, const char* value ) {
+                   const char* footprint, const char* type, const char* value,
+                   const char* part_id ) {
     if ( name == nullptr || name[ 0 ] == '\0' || strlen( name ) > 15 ) {
         Serial.println( "place_part: name must be 1-15 characters" );
         return -1;
@@ -1955,6 +1959,7 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     // Guard BEFORE anything is appended: these three are serialized raw.
     if ( !partStringSafe( name, "name" ) ) return -1;
     if ( !partStringSafe( type, "type" ) ) return -1;
+    if ( part_id != nullptr && !partStringSafe( part_id, "part_id" ) ) return -1;
     if ( !partStringSafe( value, "value" ) ) return -1;
     if ( globalState.parts.findByName( name ) >= 0 ) {
         Serial.print( "place_part: a part named " );
@@ -1974,6 +1979,7 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     strncpy( p.name, name, sizeof( p.name ) - 1 );
     if ( type != nullptr ) strncpy( p.typeStr, type, sizeof( p.typeStr ) - 1 );
     if ( value != nullptr ) strncpy( p.value, value, sizeof( p.value ) - 1 );
+    if ( part_id != nullptr ) strncpy( p.partId, part_id, sizeof( p.partId ) - 1 );
     p.baseRow = (int16_t)row;
 
     // Footprint: explicit dipN/sipN, else inferred below from the pins.
@@ -2059,6 +2065,28 @@ int jl_place_part( const char* name, int row, const char* pins_json,
             Serial.print( "place_part: " );
             Serial.println( reason );
             return -1;
+        }
+    }
+
+    // Re-placing the same identity in the same spot is an UPDATE, not a
+    // clone (the PartsApp commit applies the same rule): every existing
+    // placed part with the same part_id + baseRow + footprint comes out
+    // first through the full removal discipline.
+    if ( p.partId[ 0 ] != '\0' ) {
+        for ( int i = 0; i < globalState.parts.numParts; ) {
+            const PartDefinition& q = globalState.parts.parts[ i ];
+            if ( q.placed && q.baseRow == p.baseRow &&
+                 q.footprint == p.footprint &&
+                 strcmp( q.partId, p.partId ) == 0 ) {
+                Serial.print( "place_part: replacing " );
+                Serial.println( q.name );
+                char victim[ 16 ];
+                strncpy( victim, q.name, sizeof( victim ) - 1 );
+                victim[ sizeof( victim ) - 1 ] = '\0';
+                jl_remove_part( victim );
+                continue;   // same index now holds the next part
+            }
+            i++;
         }
     }
 

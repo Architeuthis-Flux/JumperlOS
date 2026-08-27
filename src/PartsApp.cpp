@@ -31,6 +31,10 @@
 #include "config.h"         // jumperlessConfig.hardware.probe_revision
 #include "oled.h"
 
+// The canonical part removal (bridges, net names, undo guard, refresh) -
+// commit's replace-on-identity reuses it. Lives in JumperlessMicroPythonAPI.
+extern "C" int jl_remove_part(const char* name);
+
 int partsProbeButton(void) {
     int bPress = probeButton.getButtonPress(true);
     if (jumperlessConfig.hardware.probe_revision > 3) {
@@ -536,6 +540,32 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
             if (rowPowered) continue;
             pin.connect = GND;
         }
+    }
+
+    // Re-placing the same part in the same spot is an UPDATE, not a clone:
+    // the bench accumulated 2N3906/_2/_3 at rows 17-19 and a stale 74153
+    // shadowing the 7400. Every existing placed part with the same identity
+    // (part_id + baseRow + footprint) comes out first, through the full
+    // removal discipline (bridges, net names, undo guard).
+    {
+        bool removedAny = false;
+        for (int i = 0; i < st.parts.numParts;) {
+            const PartDefinition& q = st.parts.parts[i];
+            if (q.placed && q.baseRow == tmp.baseRow &&
+                q.footprint == tmp.footprint &&
+                strcmp(q.partId, tmp.partId) == 0 && tmp.partId[0] != '\0') {
+                Serial.print("\r\nPARTDB replacing ");
+                Serial.println(q.name);
+                char victim[16];
+                strncpy(victim, q.name, sizeof(victim) - 1);
+                victim[sizeof(victim) - 1] = '\0';
+                jl_remove_part(victim);
+                removedAny = true;
+                continue;   // same index now holds the next part
+            }
+            i++;
+        }
+        (void)removedAny;
     }
 
     // Unique name: NE555, NE555_2, ... (findByName is the serializer's own
@@ -1377,15 +1407,20 @@ void partsAutoLauncher(void) {
         for (int half = 0; half < 2; half++) {
             int lo = half ? 31 : 1, hi = half ? 58 : 28;
             int cur = -1, last = -1;
-            uint8_t curKind = 0;
+            const char* curOwner = nullptr;
             for (int r = lo; r <= hi + 1; r++) {
                 bool hit = (r <= hi) && (flags[r] == 1 || flags[r] == 5);
-                // two different parts can abut on neighboring rows - a
-                // hold-signature cluster (active pins, flag 1) and a
-                // pair-conduction cluster (passive junctions, flag 5) are
-                // different animals, so a kind change closes the span
-                // (bench: the 7400 at 11-16 and the 2N3906 at 17-19)
-                if (hit && cur >= 0 && flags[r] != curKind) {
+                const char* owner = hit ? partsPlacedPartOnRow(r) : nullptr;
+                // two parts can abut on neighboring rows (bench: the 7400 at
+                // 11-16, the 2N3906 at 17-19) - a placed-ownership change is
+                // the split (signature kinds mix WITHIN one part: a BJT's
+                // base holds while its E and C only pair-conduct)
+                bool ownerChanged =
+                    hit && cur >= 0 &&
+                    (owner != curOwner &&
+                     (owner == nullptr || curOwner == nullptr ||
+                      strcmp(owner, curOwner) != 0));
+                if (ownerChanged) {
                     if (nSpans < 12) {
                         spanStart[nSpans] = cur;
                         spanEnd[nSpans] = last;
@@ -1394,7 +1429,7 @@ void partsAutoLauncher(void) {
                     cur = -1;
                 }
                 if (hit) {
-                    if (cur < 0) { cur = r; curKind = flags[r]; }
+                    if (cur < 0) { cur = r; curOwner = owner; }
                     last = r;
                 } else if (cur >= 0 && r > last + 1) {
                     // gap of 2+ (or the end): close the span

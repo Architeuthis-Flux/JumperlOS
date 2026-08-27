@@ -117,7 +117,8 @@ int jl_switch_slot( int slot );
 int jl_load_slot_path( const char* path );
 int jl_project_begin_run( const char* name );
 int jl_place_part( const char* name, int row, const char* pins_json,
-                   const char* footprint, const char* type, const char* value );
+                   const char* footprint, const char* type, const char* value,
+                   const char* part_id );
 int jl_remove_part( const char* name );
 int jl_get_num_parts( void );
 const char* jl_get_part_info( int idx );
@@ -2649,10 +2650,11 @@ static mp_obj_t jl_place_part_func( size_t n_args, const mp_obj_t* args ) {
     const char* footprint = ( n_args > 3 ) ? mp_obj_str_get_str( args[ 3 ] ) : "";
     const char* type = ( n_args > 4 ) ? mp_obj_str_get_str( args[ 4 ] ) : "";
     const char* value = ( n_args > 5 ) ? mp_obj_str_get_str( args[ 5 ] ) : "";
+    const char* part_id = ( n_args > 6 ) ? mp_obj_str_get_str( args[ 6 ] ) : "";
 
-    return mp_obj_new_int( jl_place_part( name, row, pins, footprint, type, value ) );
+    return mp_obj_new_int( jl_place_part( name, row, pins, footprint, type, value, part_id ) );
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_place_part_obj, 3, 6, jl_place_part_func );
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_place_part_obj, 3, 7, jl_place_part_func );
 
 // remove_part(name) -> 0 / -1
 static mp_obj_t jl_remove_part_func( mp_obj_t name_obj ) {
