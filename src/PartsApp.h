@@ -17,6 +17,7 @@
 // is up, a typed row number + enter places without the probe; any other
 // serial byte cancels out of the app (the runPicker convention).
 void partsAppLauncher(void);
+void partsTestLauncher(void);
 
 // Probe-button polarity: the probe_revision>3 swap lives in exactly TWO
 // sanctioned implementations - the MicroPython wrappers (jl_probe_button_*,

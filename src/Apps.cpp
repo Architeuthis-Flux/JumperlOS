@@ -107,6 +107,10 @@ struct app apps[ NUM_APPS ] = {
     // (menuTree.h "Parts" -> Menus.cpp getActionCategory -> APPSACTION), so
     // this string and that one move together or the row goes dead.
     { "Parts", 25, 1, partsAppLauncher },
+    // The Parts submenu children (menuTree.h "-Place \31Part" / "-Test
+    // \31Part") - same name-coupling rule as "Parts" above.
+    { "Place Part", 27, 1, partsAppLauncher },
+    { "Test Part", 28, 1, partsTestLauncher },
     // NAME-DISPATCH ONLY, and deliberately WITHOUT a menuTree.h row: the
     // 2026-08-24 bench ruling retired "Guides" as a MENU-level concept and
     // that stands - the Apps submenu is a hand-written list in menuTree.h, so

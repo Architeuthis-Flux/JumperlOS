@@ -92,9 +92,13 @@ String menuLines[150] = {
   // 2026-08-24 bench pass ("let's remove guides as a menu item and work on
   // parts") - projects stay reachable via `z` and the Files browser. This
   // string and the apps[] row { "Parts", ... } are ONE unit with the
-  // getActionCategory branch: the menu line's own text IS runApp's name arg.
-  // 5 glyphs, renders whole on the LED half-row.
+  // getActionCategory branch: "Parts" -> APPSACTION with the CHILD line as
+  // runApp's name arg (previousMenuPositions[1] - the 2-deep dispatch shape).
+  // The child text and the apps[] row name are ONE unit after
+  // normalizeSpaces ("-Place  \31Part" -> "Place Part").
   "Parts",
+  "-Place  \31Part",
+  "-Test   \31Part",
 
   "Apps",
   "-Bounce \31Startup",

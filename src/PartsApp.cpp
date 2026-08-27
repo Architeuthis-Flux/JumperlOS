@@ -22,6 +22,8 @@
 #include "RotaryEncoder.h"  // encoder state machine, rotaryDivider
 #include "LEDs.h"           // HsvToRaw - per-signal tap rainbow
 #include "sensing/PartClassify.h"  // tap-time electrical identification
+#include "eyecandy/ReadingDisplay.h"  // measured values on the OLED
+#include "guiding/GuideScript.h"      // formatOhms
 #include "Undo.h"           // UndoIngestGuard - placements are not undoable (yet)
 #include "States.h"         // globalState
 #include "config.h"         // jumperlessConfig.hardware.probe_revision
@@ -883,5 +885,180 @@ done:
     requestLedShow(-1);
     Serial.println();
     // The steps screen (if armed) or the logo - never a stale picker frame.
+    oled.showJogo32h();
+}
+
+// ============================================================================
+// Test Part - re-measure a placed part in place
+// ============================================================================
+// Menu: Parts > Test. Picks a placed part, runs the PartClassify session on
+// its pin rows, and reports what the part electrically IS right now - hFE,
+// Vbe, Vf (with an LED color guess), ohms. A clean identification that
+// matches the placement clears the pins_unverified warning; wiring on the
+// part's rows refuses gently (never energize user wiring). 2-3 leg parts
+// only for now - DIPs and modules need the vector runner (phase 2).
+void partsTestLauncher(void) {
+    if (globalState.parts.numParts <= 0) {
+        Serial.println("\r\nPARTID test n=0 (no parts placed)");
+        if (oled.oledConnected)
+            oled.clearPrintShow("no parts\nplaced", 2, true, true, true);
+        delay(900);
+        return;
+    }
+
+    inClickMenu = 1;
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 8;
+
+    int pick = 0;
+    while (true) {
+        int n = 0;
+        for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS &&
+                        n < PARTS_LIST_MAX; i++) {
+            const PartDefinition& p = globalState.parts.parts[i];
+            if (!p.placed) continue;
+            s_led[n] = p.name;
+            s_title[n] = p.name;
+            s_desc[n] = p.typeStr[0] ? p.typeStr : "part";
+            s_rec[n] = (uint16_t)i;
+            n++;
+        }
+        if (n == 0) break;
+        int sel = partsPicker("test", "Test", n, pick);
+        if (sel == -1) break;        // hold = leave
+        if (sel == -2) break;        // serial byte = leave
+        pick = sel;
+        PartDefinition& p = globalState.parts.parts[s_rec[sel]];
+
+        // the part's electrical footprint: every pin that resolves to a row
+        int rows[3];
+        int nRows = 0;
+        bool tooMany = false;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            if (p.pins[j].pinClass == 3) continue;   // nc
+            int node = partPinNode(p, p.pins[j]);
+            if (node < 1 || node > 60) continue;
+            if (nRows >= 3) { tooMany = true; break; }
+            rows[nRows++] = node;
+        }
+        if (tooMany || nRows < 2) {
+            Serial.println("\r\nPARTID test unsupported (2-3 leg parts for now)");
+            if (oled.oledConnected)
+                oled.clearPrintShow("2-3 leg\nparts only", 2, true, true, true);
+            delay(900);
+            continue;
+        }
+
+        if (oled.oledConnected) {
+            oled.resetMultiLineSmallText();
+            oled.showMultiLineSmallText("testing...");
+        }
+        PartResult res = (nRows == 3)
+                             ? identifyThreeLead(rows[0], rows[1], rows[2])
+                             : identifyTwoLead(rows[0], rows[1]);
+
+        // terminal: the same machine grammar as placement
+        Serial.print("\r\nPARTID test part=");
+        Serial.print(p.name);
+        Serial.print(" type=");
+        Serial.print(partTypeName(res.type));
+        Serial.print(" conf=");
+        Serial.print(res.confidence, 2);
+        if (res.value != 0.0f) { Serial.print(" value=");  Serial.print(res.value, 3); }
+        if (res.value2 != 0.0f) { Serial.print(" value2="); Serial.print(res.value2, 1); }
+        if (res.status != 0) { Serial.print(" status="); Serial.print((int)res.status); }
+        Serial.println();
+
+        char line1[24] = "";
+        char line2[24] = "";
+        if (res.status == -3 || res.status == -6) {
+            snprintf(line1, sizeof(line1), "wired in");
+            snprintf(line2, sizeof(line2), "can't test");
+            Serial.println("  the part's rows carry wiring - a part is only testable in isolation");
+        } else if (res.status != 0) {
+            snprintf(line1, sizeof(line1), "busy");
+            Serial.println("  measurement machinery is busy - try again in a moment");
+        } else {
+            switch (res.type) {
+                case PartType::BJT_PNP:
+                case PartType::BJT_NPN:
+                    snprintf(line1, sizeof(line1), "%s hFE %.0f",
+                             (res.type == PartType::BJT_PNP) ? "PNP" : "NPN",
+                             (double)res.value2);
+                    snprintf(line2, sizeof(line2), "Vbe %.2fV", (double)res.value);
+                    break;
+                case PartType::LED:
+                    snprintf(line1, sizeof(line1), "LED %.10s", partLedColorGuess(res.value));
+                    snprintf(line2, sizeof(line2), "Vf %.2fV", (double)res.value);
+                    break;
+                case PartType::DIODE:
+                    snprintf(line1, sizeof(line1), "diode");
+                    snprintf(line2, sizeof(line2), "Vf %.2fV", (double)res.value);
+                    break;
+                case PartType::ZENER:
+                    snprintf(line1, sizeof(line1), "zener");
+                    snprintf(line2, sizeof(line2), "Vz %.1fV", (double)res.value2);
+                    break;
+                case PartType::RESISTOR: {
+                    char ohms[12];
+                    formatOhms(res.value, ohms, sizeof(ohms));
+                    snprintf(line1, sizeof(line1), "%s", ohms);
+                    snprintf(line2, sizeof(line2), "measured");
+                    p.measuredOhms = res.value;
+                    break;
+                }
+                case PartType::CAPACITOR:
+                    snprintf(line1, sizeof(line1), "capacitor");
+                    break;
+                case PartType::NFET:
+                case PartType::PFET:
+                    snprintf(line1, sizeof(line1), "%cFET",
+                             (res.type == PartType::NFET) ? 'N' : 'P');
+                    snprintf(line2, sizeof(line2), "Vf(body) %.2fV", (double)res.value);
+                    break;
+                case PartType::EMPTY:
+                    snprintf(line1, sizeof(line1), "nothing");
+                    snprintf(line2, sizeof(line2), "conducting");
+                    break;
+                default:
+                    snprintf(line1, sizeof(line1), "unclear");
+                    break;
+            }
+            // a clean identification whose roles sit exactly where the
+            // placement put them = the pins are verified
+            if (res.status == 0 && !res.degraded && res.confidence >= 0.8f) {
+                bool rolesMatch = true;
+                for (int t = 0; t < res.nRows; t++) {
+                    const char* roleName = pinRoleName(res.roles[t]);
+                    if (strcmp(roleName, "LEAD") == 0) continue;  // nonpolar
+                    bool found = false;
+                    for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                        if (partPinNode(p, p.pins[j]) == (int)res.rows[t] &&
+                            strcmp(p.pins[j].name, roleName) == 0) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) { rolesMatch = false; break; }
+                }
+                if (rolesMatch && p.pinsUnverified) {
+                    p.pinsUnverified = 0;
+                    partLabels.requestRun();
+                    Serial.println("  pins verified - warning cleared");
+                } else if (!rolesMatch) {
+                    Serial.println("  measured roles don't sit where this part was placed - check its legs");
+                }
+            }
+        }
+        ReadingDisplay::show(p.name, p.baseRow, line1[0] ? line1 : nullptr,
+                             line2[0] ? line2 : nullptr);
+        delay(1400);
+    }
+
+    inClickMenu = 0;
+    rotaryDivider = lastDivider;
+    b.clear();
+    requestLedShow(-1);
+    Serial.println();
     oled.showJogo32h();
 }
