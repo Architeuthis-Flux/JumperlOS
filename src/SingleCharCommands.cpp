@@ -1850,8 +1850,9 @@ static String getCommandArgs( const String& line, unsigned int timeoutMs = 50 ) 
 // paste as one 1-second-timeout blob (blank lines invisible) and Enter finished
 // it. The jumperless app now sends '\n' per Enter, which exposed the design.
 //
-// Rules: '\n', '\r' and "\r\n" all end a line (each line is trimmed, as before -
-// the parsers do not depend on indentation). Blank lines BEFORE any content are
+// Rules: '\n', '\r' and "\r\n" all end a line (trailing whitespace is trimmed;
+// LEADING whitespace is kept - the parts:/overlays: scanners are
+// indent-hardened, so indentation is content). Blank lines BEFORE any content are
 // skipped (a char-mode "S<CR><LF>" leaves its line end in the FIFO); blank lines
 // INSIDE the paste are kept. The block ends when an empty line is followed by
 // PASTE_QUIET_MS of silence - a paste burst never pauses that long, even
@@ -1889,7 +1890,16 @@ static bool readPastedBlock( String& out ) {
     };
 
     auto completeLine = [ & ]( ) {
-        lineBuf.trim( );
+        // Trailing whitespace only - LEADING whitespace is content now: the
+        // parts:/overlays: scanners are indent-hardened (States.cpp), so the
+        // old full trim() flattened every pasted parts: section into
+        // invisibility (bench: an S paste of a Y snapshot restored bridges
+        // and power but silently dropped all 8 placed parts). The header
+        // comment's "the parsers do not depend on indentation" stopped being
+        // true when the parts: section arrived.
+        while ( lineBuf.length( ) > 0 &&
+                isspace( (unsigned char)lineBuf.charAt( lineBuf.length( ) - 1 ) ) )
+            lineBuf.remove( lineBuf.length( ) - 1 );
         if ( lineBuf.length( ) == 0 ) {
             if ( gotContent ) {
                 if ( pendingEmpty ) append( "\n", 1 ); // a run of blank lines: keep the earlier one
@@ -1947,8 +1957,10 @@ static bool readPastedBlock( String& out ) {
     }
 
     // A last line without a terminator (paste that does not end in a newline
-    // and no Enter) is still content.
-    lineBuf.trim( );
+    // and no Enter) is still content. Trailing trim only, as in completeLine.
+    while ( lineBuf.length( ) > 0 &&
+            isspace( (unsigned char)lineBuf.charAt( lineBuf.length( ) - 1 ) ) )
+        lineBuf.remove( lineBuf.length( ) - 1 );
     if ( lineBuf.length( ) > 0 ) {
         if ( pendingEmpty ) append( "\n", 1 );
         append( lineBuf.c_str( ), lineBuf.length( ) );

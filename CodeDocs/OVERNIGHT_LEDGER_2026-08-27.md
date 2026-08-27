@@ -1,0 +1,228 @@
+# Overnight ledger — 2026-08-27, 01:32–morning (autonomous shift)
+
+Kevin's brief at 01:32: "I actually flipped the transistor for testing. I'm
+going to bed, so spend the next 7 hours scanning for bugs and continuing our
+tasks." The transistor-flip confession closes the E/C mystery for good: the
+firmware measured the flipped part correctly all along.
+
+## The bench
+
+The debug probe was back on the bus at 01:35 (both cores examined). Solo all
+night — every peer agent offline — which made tonight the first clean shot at
+two standing watch-items: the full HIL suite with no bench contention, and
+the USB-drop theory (SWD contention vs firmware). **Zero spontaneous USB
+drops all night** under heavy serial + repeated SWD flashing: consistent with
+the contention theory, still not proof.
+
+## Flashed and hardware-verified
+
+The full working tree (RAM pass + encoder detent work + the part-ID stack)
+went onto the board at 01:40, then twice more as fixes landed. Verified on
+hardware, in order:
+
+- **Slot 3 integrity across flash**: bridge set byte-identical before/after.
+- **Ownership clustering + placed-span naming** (321a876 + tonight): the
+  placed-state Auto Scan reports `rows 10-17: 74153 (placed)`,
+  `rows 17-19: 2N3906 (placed)`, `rows 40-47: 74153 (placed)` in 10s.
+  Census hit-set identical across builds (also clears the halved CH446Q DMA
+  buffer as a scan-path suspect). Two bugs found and fixed on the way:
+  - a lone census hit on an owned row said "one leg of something?" instead
+    of naming the part (the 2N3906 with E and C user-wired shows only its
+    base to the census — the record fills in the rest now);
+  - span naming now prints the record's claimed in-half row range, not just
+    the census-visible slice.
+- **Discovery mode** (2N3906 records + row 17/19 wires removed in software):
+  first run reported `rows 18-19: DIODE 0.76V` — the *stale 74153 record*
+  claims row 17 (its 2Y pin) and ownership clustering handed the emitter row
+  to the chip's span; the DIODE→BJT upgrade then looked only at strictly
+  EMPTY neighbors and went the wrong way (row 20). Fixed: a
+  **pair-conducting (flag 5) neighbor outranks an empty one, ownership
+  notwithstanding** — conduction into the span is electrical evidence, a
+  record is just data, and the hFE test referees. Verified:
+  `rows 17-19: BJT_PNP 0.64V`.
+- **The S-paste parts loss** (found because the discovery restore FAILED):
+  `board_state_restore` brought back bridges but dropped ALL EIGHT placed
+  parts, deterministically. Root cause: `readPastedBlock` trims every line
+  under a comment claiming "the parsers do not depend on indentation" — a
+  claim that died when the indent-hardened `parts:`/`overlays:` scanners
+  arrived. The same bytes restore perfectly through the file loader. Fixed
+  (trailing-only trim); capture→paste→verify round-trip now preserves all 8
+  parts. This hole sat under every HIL suite's "leave the bench as we found
+  it" promise.
+- **test_part_id.py: PASS (39 checks)** on the new build.
+- **run_all.py full suite**: 7/10 passed on the first complete
+  contention-free run. The two failing files were both test-side:
+  - `test_slot_files` (4 checks): /config.txt now serializes `boot_mode` as
+    a NAMED enum (`last_active`) — the test parsed digits only; and the
+    no-write canary tried to arm inside `/slots/slot2.yaml`, which doesn't
+    exist on a bench where slot 2 was never used (empty slots have no file
+    since slots became files). Test fixed (named-enum parser + seed via
+    `nodes_save()`): **PASS (96 checks)** on rerun.
+  - `test_projects` (22/277 in-suite): rerun standalone (see below).
+  - `test_encoder_ui`: SKIP (needs an OpenOCD :4444 session; the jl_input.py
+    ADDR table was regenerated for tonight's build — `inClickMenu` is a
+    direct global now, no pointer-cell deref).
+
+## The review pass (two Opus reviewers, all findings triaged)
+
+Reviewer A (part-ID stack) — all nine addressed:
+1. **partScanBegin's -2/-5 exits destroyed lifted user wiring** (HIGH): the
+   lift lands on the fabric before the ADC/GPIO claims; those two failure
+   returns skipped the restore and markDirty had already queued the deletion
+   for auto-save. Both now exit through the partScanEnd funnel.
+2. **partScanPairSweep drove DAC0 with no guards** and left the hardware at
+   0V while state claimed the user's voltage. It now refuses when the probe
+   is fed from DAC0 or user wiring touches DAC0/ISENSE (census-only scan,
+   printed), and restores DAC0 to state on exit.
+3. **Span-close off-by-one**: a span whose last hit is row 28/58 was never
+   closed — a part on 26/27/28 scanned clean and was reported as nothing.
+4. **partsCommitPlacement removed the old part before validating the new**:
+   geometry now validates first (it is pure), and the replace victim is kept
+   for resurrection if applyPartPlacement refuses (bridge table full).
+5. **legAdd failures were ignored** — an incomplete fixture measured a real
+   diode as EMPTY. A sticky per-session flag turns any staging failure into
+   a clean legsBuild false.
+6. DIODE→BJT annexation could double-report the annexed row (skip recorded).
+7. Fragmented placed parts printed identical lines repeatedly (deduped).
+8. OG part_identify stub emits the same token set as V5 (`lifted=` added).
+9. place_part help text taught the 7th arg (part_id) and replace-on-update.
+
+Reviewer B (RAM pass + encoder) — encoder work verified clean (native
+detent-anchor check mirrors the firmware token-for-token; PASS). RAM-pass
+findings, all addressed:
+1. **The UART overflow witness could never fire on RP2350**: trans_count
+   0xFFFFFFFF arms ENDLESS mode (the count never decrements), so the delta
+   was identically zero. Rewritten on the write-pointer delta (correct on
+   both RP2350 and RP2040).
+2. **CH446Q mid-list flush released the mailbox requester after word 512**
+   with the rest of the list unsent, and stamped a bogus short latency
+   (xbarLatSendDone latches). A partial-flush flag suppresses completion;
+   only the final kick completes.
+3. **The 2 KB undo-blob cap can't hold a parts-bearing board** (~4.7 KB on
+   this bench) — clear-all undo silently restored nothing. Cap now 8 KB.
+4. **A failed blob append still recorded the op with offset 0**, and undo
+   then magic+CRC-validated whatever stale blob sat at offset 0 — silently
+   replacing the user's board with an older one. size==0 now refuses, loudly.
+5. z-check's heap script is aborted out of GuideChecks before free (the
+   calloc move made a dangling ck.script possible; nothing dereferenced it
+   yet).
+6. Two stale `< 50` guards → ROW_ANIMATION_COUNT.
+7. **assignedAnimations[-1] out-of-bounds write** on every out-of-range GPIO
+   net (pre-existing; order inverted + bounds added).
+8. *(informational)* encoderNetHighlight's divider default change also slows
+   the terminal net-list live view — consistent with intent.
+
+Plus the RAM doc's work-listed **rowAnimations off-by-one**: all four tail
+blocks stamped `.index` into slot N and wrote the animation into N+1 —
+warningNet rendered a zeroed dummy (DARK) and brightenedNet rendered the
+warning animation. Fixed to the keeper loop's idiom; layout now matches the
+comment (33 warning, 34 hl-net, 35 hl-row, 36 probe). NOT yet
+hardware-verified (needs a warning-condition trigger; morning item).
+
+## Continued build-out
+
+- **The diode/LED/zener result card** (Parts > Test), the BJT card's idiom:
+  type + name / rows / A K roles / Vf (+ color guess or Vz), board painted
+  in the standing A/K colors — **A red, K blue** (current in at red, out at
+  blue, the same warm-to-cool read as E→C). Auto-scan discoveries paint the
+  same colors. Needs-bench: no discrete diode on the board tonight (the
+  2N7000/diode drawer is Kevin's).
+
+## The stale-file incident (and the harness fix it bought)
+
+After the review-fix flash the board rebooted into a DEGRADED slot 3 (7
+bridges / 7 parts: 2N3906_3 gone, the transistor's wires gone, 116-109
+gone). Root cause: `board_state_restore` heals the LIVE state only - the
+slot file catches up on a later auto-save. The in-suite test_projects chaos
+(old-protocol keystrokes leaking into i2cscrn's script, a forced save)
+wrote a degraded slot3.yaml mid-run; every later suite captured-and-restored
+that degraded FILE while verifying the (good) live state; the reboot then
+materialized the stale file. Recovered from /slots/slot3.backup.yaml
+(byte-identical fingerprint after). jl.py's board_state_restore now runs
+`nodes_save()` after a verified restore so the file converges with the
+bench - the class is closed for every suite at once.
+
+## The sweep lifts now (second pass on a review fix)
+
+The first cut of the pair-sweep guard REFUSED when user wiring touched
+DAC0/ISENSE - and the very first placed-state scan on that build printed
+"pair sweep skipped": Kevin's standing UART_TX->ISENSE_MINUS wire would
+have sidelined the sweep on this bench forever. Second cut: the sweep
+briefly LIFTS measurement-path wiring exactly like an identify session
+(Kevin's ruling), restores it on every exit including the ADC-refusal
+bail. Verified: sweep runs, bridge set byte-identical after, scan 10s.
+
+## The suite catches up with the ambient guide (b1ce6fb)
+
+test_projects' 22 in-suite failures were all one thing: its guide phases
+spoke the `GUIDE step=/state=` protocol the blocking-guide removal (08-24)
+retired, and the suite could never run to a verdict before tonight to say
+so. Ported: phase (vi) asserts `VIEWER steps=<n>` + `noscript` + no
+placement side effects; the CRITICAL i2c teardown needle now drives the
+SAME i2cScan path through `z check step 4` (GuideChecks survived whole)
+with DISP committed through the run-file door. Two real traps found on the
+way: `port1_command`'s quiet-drain bailed inside the i2c sweep's silences
+(widened), and the `<3` leave SCHEDULES a deferred save of the outgoing
+context that landed after the test's fs_write twice - the injection now
+re-reads and retries once. test_ambient_parts (the retired guide_flow's
+salvage, a self-described skeleton) runs 7/9: its z-check needle was
+unmatchable ("CHECK result=" never occurs; fixed to "result=") and two
+checks are racy by construction (PARTWARN vs port1_command's input reset;
+a hardcoded cursor 1/) - it stays OUT of run_all until those are fixed.
+
+## An honest loss
+
+Kevin's /projects/i2cscrn/i2cscrn_run.yaml (959 bytes - his saved circuit
+from yesterday's i2cscrn session) was overwritten at ~03:28 by my FIRST
+hand-reproduction of the i2c needle: I drove `z i2cscrn new` bare, without
+the run_file_capture() discipline the suite itself uses. The suite runs
+before and after all restored his bytes; the hand-drive didn't. No backup
+survives (the .hilbak copies are deleted on restore). The file now holds a
+fresh template launch. Lesson recorded: hand-driving a `new` on a shipped
+project gets the same capture/restore wrapper the suites use, no
+exceptions.
+
+## Watch-items from the final scans
+
+- Row 1 reports "one leg of something?" twice (census v0 2.03-2.11, just
+  under the 2.2 threshold, v1 ~0 = instant discharge). Either something
+  really touches row 1 or the first-scanned row settles differently -
+  worth one glance at the physical row 1 and, if empty, a settle tweak.
+- Row 39 pair-flagged once (v1 = -0.00, adjacent to the chip block at 40)
+  - single occurrence, graceful "one leg of something?" output, watch.
+
+## The closing sweep (03:57)
+
+**run_all.py: PASS, 10/10 files** - the first fully-green complete sweep
+this harness has ever produced, on the final overnight build:
+micropython_fs, routing, net_currents, config, stress, paste_state,
+slot_files (96), parts_roundtrip (181), projects (275), encoder_ui (5).
+Also green tonight on the same build: part_id (39), ambient_parts 7/9
+(stays out of run_all until its two racy checks are fixed). The encoder
+suite had never run handless before: jl_input's inClickMenu had to become
+Menus::getInstance()'s MEMBER (instance + 0x34 via gdb) - the bare global
+of the same name is a separate legacy variable the menu system never
+consults. Clear-all undo bench-verified (12 bridges cleared, undone
+byte-identically - it restored NOTHING before the blob fix). Final bench:
+NB 12 / NP 8, bridge set byte-identical to the canonical state, and
+slot3.yaml CONVERGED on disk (4665 bytes) - the new save-after-restore
+doing exactly its job. Zero spontaneous USB drops the whole night.
+
+## Not done / morning list
+
+- `identify_part()` no-args autodetect front door (needs the scan logic
+  factored out of the UI launcher — too big for a night edit).
+- Capacitance value (ring τ fit), curve tracer, I2C module probe (needs a
+  module on the bench), pot identify + FET branch still needs-bench.
+- Hardware-verify: warning/highlight animation slots, the pair-sweep skip
+  print, the undo clear-all blob on a parts board, partScanBegin -2/-5 lift
+  restoration (needs an ADC-exhausted fixture), CH446Q partial flush (needs
+  a >512-word send).
+- Kevin's duplicate records (2N3906_2/_3, the stale 74153 overlapping the
+  7400, SSD1306_32_I_2) are still his data — replace-on-identity prevents
+  new ones; a glance and a few removes clears the museum.
+- Stray repo-root files left alone: `end` (empty, Aug 25 — looks like a
+  shell-redirect accident, delete at will), `finish-git-cleanup.sh` (Kevin's
+  to run — it pushes remote branch deletions).
+- `/slots/slot2.yaml` now exists on the device (seeded canonical empty-slot
+  file during the canary fix — harmless, matches slot 2's live state).

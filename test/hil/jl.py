@@ -656,6 +656,13 @@ def board_state_restore(yaml):
         for d in diffs:
             print(f"    - {d}")
         return False
+    # Converge the active context's FILE with the restored live state. The
+    # paste heals RAM only; the slot/run file catches up on some later
+    # auto-save - and if the next thing is a reboot (or a flash), the stale
+    # file BECOMES the bench (2026-08-27: a mid-suite degraded slot3.yaml
+    # survived two suites' verified restores and materialized on the next
+    # flash, silently dropping a part and five of the user's bridges).
+    jl_exec("nodes_save()", timeout=20)
     return True
 
 

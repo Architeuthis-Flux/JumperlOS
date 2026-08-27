@@ -24,6 +24,11 @@ TESTS = [
     "test_paste_state.py",     # Y->S / J->L paste round-trips on port 1
     "test_slot_files.py",      # path-based active context: adopt, trap, boot
     "test_parts_roundtrip.py", # parts: section round-trip + the MP bindings
+    # test_ambient_parts.py (the retired guide_flow's salvage) stays OUT
+    # until its two racy skeleton checks are fixed: the PARTWARN assertion
+    # depends on an async line surviving port1_command's own input reset,
+    # and the bare `z steps` check hardcodes cursor 1/ while the cursor
+    # deliberately persists. 7/9 green on the bench 2026-08-27.
     "test_projects.py",        # /projects tree, provisioning, the launcher
     "test_encoder_ui.py",      # last: drives the physical UI
 ]
@@ -34,12 +39,13 @@ TESTS = [
 # starts from a normal bench - but it must not run between two suites that
 # share state, hence its position here rather than later in the list.
 #
-# ORDER MATTERS for the three project/guide suites: test_projects.py's
-# launcher phase asserts the picker lists exactly the two projects IT
-# authored, and test_guide_flow.py pushes a third (/projects/hilguide) that
-# it removes in its own finally. Running guide_flow BEFORE projects is fine;
-# running it in the middle of projects is not - so they stay adjacent and in
-# this order. All three hold port 1 for their drives, like test_paste_state.
+# ORDER MATTERS for the project/guide suites: test_projects.py's launcher
+# phase asserts the picker lists exactly the projects IT authored, and
+# test_ambient_parts.py pushes /projects/ambtest (removed in its own
+# finally) - so ambient runs BEFORE projects, never in the middle of it.
+# (test_guide_flow.py retired with the blocking guide runner, b1ce6fb; its
+# salvage is test_ambient_parts.py.) Both hold port 1 for their drives,
+# like test_paste_state.
 
 # ---------------------------------------------------------------------------
 # Deliberate resets  (W3-T7)
@@ -55,17 +61,17 @@ TESTS = [
 # the bench (W3-T7): running the shipped 12.3 KB i2cscrn script through the
 # launcher took the heap from ~29 KB largest block to ~6 KB, and deleting every
 # global that script left behind gave back 11% of it. Nothing short of a reset
-# fixes that, and test_guide_flow - the longest suite, and the one W3-T2 saw
-# MemoryError coming out of - would otherwise run its whole length on a 6 KB
-# largest block.
+# fixes that. (test_guide_flow, the suite W3-T2 saw the MemoryError coming
+# out of, has since retired - but anything running after projects would
+# otherwise inherit the 6 KB largest block, and MP work after this suite is
+# a legitimate future shape.)
 #
 # The value is the reason it exists; keep them together.
 RESET_AFTER = {
     "test_projects.py":
         "it runs the 12.3 KB i2cscrn script through the launcher, which leaves "
         "the largest contiguous block at ~6 KB (from ~29 KB). MicroPython "
-        "cannot compact, so only a reset restores it - and test_guide_flow "
-        "runs next.",
+        "cannot compact, so only a reset restores it for whatever runs next.",
 }
 
 here = os.path.dirname(os.path.abspath(__file__))

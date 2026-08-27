@@ -105,7 +105,9 @@ try:
     # not the electrical verdict.
     resp = port1_command("z check U1", collect_seconds=25)
     check("CHECK start=" in resp, "z check announces (CHECK start=)")
-    check("CHECK result=" in resp, "z check concludes (CHECK result=)")
+    # the concluding line is "CHECK part=<label> result=..." - the label sits
+    # between the two words (the skeleton's needle never matched anything)
+    check("result=" in resp, "z check concludes (CHECK ... result=)")
 
 finally:
     port1_command("z steps off")
