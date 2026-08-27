@@ -235,8 +235,6 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
         for (int j = 0; j < i; j++)
             if (rows[j] == r) return -1;
     }
-    if (infraProbePowerSource() == DAC0) return -2;
-
     // Never energize user wiring - by briefly REMOVING it (Kevin's ruling:
     // "if the part is wired in, just briefly unwire it to test"). Every
     // user bridge touching a DUT row, or the measurement path (ISENSE pair
@@ -272,6 +270,17 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
             (void)err;
         }
     }
+
+    // Park the probe power feed for the whole session, whatever its source
+    // (a DAC0 feed shares the sweep's stimulus source; any feed keeps the
+    // tip energized against a DUT row). This used to REFUSE under a DAC0
+    // feed - which read as "part testing is broken" until the user switched
+    // the source to GPIO. The teardown costs nothing: infraEvaluate runs at
+    // the head of the very next refresh (the lift's, or the first leg
+    // build), and partScanEnd's one restore refresh re-adds the feed.
+    s.probePowerParked = true;
+    s.probePowerRestore = infraProbePowerWanted();
+    infraSetProbePowerEnabled(false);
 
     s.nRows = nRows;
     for (int i = 0; i < nRows; i++) s.rows[i] = rows[i];
@@ -348,10 +357,17 @@ void partScanEnd(ScanSession& s) {
     }
     s.ephAddFailed = false;
     // put the briefly-lifted user wiring back, duplicate stacking and all,
-    // so the one refresh below re-routes the user's world in one pass
+    // so the one refresh below re-routes the user's world in one pass -
+    // the parked probe power feed re-adds in the same pass (infraEvaluate
+    // at the refresh head reads the restored flag)
+    bool unParking = s.probePowerParked;
+    if (unParking) {
+        infraSetProbePowerEnabled(s.probePowerRestore);
+        s.probePowerParked = false;
+    }
     for (int i = 0; i < s.nLift; i++)
         addBridgeToState(s.liftA[i], s.liftB[i], s.liftDup[i], false);
-    if (s.active || s.nRows > 0 || s.nLift > 0) {
+    if (s.active || s.nRows > 0 || s.nLift > 0 || unParking) {
         refreshLocalConnections(1, 0, 0);  // plain redraw, never -1 (blanks)
         waitCore2();
     }
@@ -740,13 +756,16 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
     if (rp2040.cpuid() != 0) return -2;
     static ScanSession s;
     if (s.active) return -2;
-    // The sweep owns DAC0 and the shunt for ~100 measurements. It must not
-    // steal the probe's power feed (infra - can't be lifted), and a user net
-    // touching the measurement path must not be merged into every swept
-    // pair - so it gets the SAME brief-unwire treatment an identify session
-    // gives it (Kevin's ruling; bench: the standing UART_TX->ISENSE_MINUS
-    // wire would otherwise disable the sweep on this board forever).
-    if (infraProbePowerSource() == DAC0) return -2;
+    // The sweep owns DAC0 and the shunt for ~100 measurements. The probe
+    // power feed is PARKED for the duration (any source - a DAC0 feed
+    // shares the stimulus source outright; the old refusal here read as
+    // "the sweep never runs" under a DAC0 feed), and a user net touching
+    // the measurement path gets the SAME brief-unwire treatment an
+    // identify session gives it (Kevin's ruling; bench: the standing
+    // UART_TX->ISENSE_MINUS wire would otherwise disable the sweep on
+    // this board forever). Both go back at every exit below.
+    bool ppRestore = infraProbePowerWanted();
+    infraSetProbePowerEnabled(false);
     s.nLift = 0;
     {
         const int liftCap = (int)(sizeof(s.liftA) / sizeof(s.liftA[0]));
@@ -759,7 +778,12 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
             if (!touches) continue;
             if (globalState.isEphemeralConnection(n1, n2)) continue;
             if (infraIsBridge(n1, n2)) continue;
-            if (s.nLift >= liftCap) return -2;  // too wired to briefly unwire
+            if (s.nLift >= liftCap) {   // too wired to briefly unwire
+                // no lift has landed and no refresh ran since the park -
+                // the feed is physically untouched, the flag goes back
+                infraSetProbePowerEnabled(ppRestore);
+                return -2;
+            }
             s.liftA[s.nLift] = (int16_t)n1;
             s.liftB[s.nLift] = (int16_t)n2;
             s.liftDup[s.nLift] = globalState.connections.bridges[i][2];
@@ -774,10 +798,12 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
     int ch = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);  // parity with census claims
     if (ch < 0) {
         infraReleaseAdc(INFRA_ADC_SCAN);
-        // the lift already landed - put it back before bailing
+        // the lift (and the feed teardown, if a lift refresh ran) already
+        // landed - put both back before bailing, one refresh
+        infraSetProbePowerEnabled(ppRestore);
         for (int i = 0; i < s.nLift; i++)
             addBridgeToState(s.liftA[i], s.liftB[i], s.liftDup[i], false);
-        if (s.nLift > 0) refreshQuiet();
+        refreshQuiet();
         s.nLift = 0;
         return -2;
     }
@@ -865,8 +891,9 @@ sweepDone:
     // the UI still showed their voltage)
     setDac0voltage(globalState.power.dac0, 0, 0, false);
     infraReleaseAdc(INFRA_ADC_SCAN);
-    // the briefly-unwired measurement-path wiring goes back, duplicate
-    // stacking and all, and the one refresh below re-routes it
+    // the briefly-unwired measurement-path wiring and the parked probe
+    // power feed go back, duplicate stacking and all, one refresh
+    infraSetProbePowerEnabled(ppRestore);
     for (int i = 0; i < s.nLift; i++)
         addBridgeToState(s.liftA[i], s.liftB[i], s.liftDup[i], false);
     s.nLift = 0;

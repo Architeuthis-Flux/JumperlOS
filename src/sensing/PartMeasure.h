@@ -50,13 +50,21 @@ struct ScanSession {
     uint8_t nLift = 0;
     float dac0Restore = 0.0f;
     float iLimit_mA = 10.0f;
+    // the probe power feed (DAC0/GPIO -> BUFFER_IN) is parked for the whole
+    // session - Kevin's ruling supersedes the old DAC0-feed refusal: "just
+    // disconnect the probe power entirely when doing part testing, connect
+    // it back when it's finished"
+    bool probePowerParked = false;
+    bool probePowerRestore = false;
 };
 
 // Begin/end. rows are breadboard rows (1-60, not 29/30/59/60). User wiring
 // on the DUT rows or the measurement path (ISENSE pair / DAC0) is briefly
 // LIFTED for the session and restored by partScanEnd - s.nLift says how
-// many wires that took. Returns 0 ok, -1 bad args, -2 machinery busy (ADC
-// pool / DAC0 feeding the probe / not core 0), -3 too wired to briefly
+// many wires that took; the probe power feed is parked the same way (any
+// source - it shares DAC0 and energizes the tip) and restored at end.
+// Returns 0 ok, -1 bad args, -2 machinery busy (ADC
+// pool / not core 0), -3 too wired to briefly
 // unwire (more than the lift list holds), -4 a row reads powered, -5 no
 // free routable GPIO, -7 the fabric refused a leg.
 int  partScanBegin(ScanSession& s, const int* rows, int nRows,

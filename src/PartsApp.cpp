@@ -1494,8 +1494,8 @@ void partsAutoLauncher(void) {
         else if (pairHits < 0)
             // no silent caps: without the sweep, isolated junction parts
             // (a lone transistor, a diode) are invisible to this scan
-            Serial.println("PARTSCAN pair sweep skipped (DAC0/ISENSE in use)"
-                           " - lone junction parts won't be seen");
+            Serial.println("PARTSCAN pair sweep skipped (measure path busy"
+                           " or too wired) - lone junction parts won't be seen");
     }
     if (partsAutoAborted) {
         Serial.println("PARTSCAN auto aborted");
