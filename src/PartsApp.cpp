@@ -1865,8 +1865,17 @@ static bool partsPlaceScanResult(const PartResult& res) {
         if (nm == nullptr || nm[0] == '\0' || strcmp(nm, "LEAD") == 0 ||
             strcmp(nm, "NONE") == 0)
             nm = fallback;
-        u += snprintf(pins + u, sizeof(pins) - u, "%s\"%s\": {\"offset\": %d}",
-                      k ? ", " : "", nm, (int)res.rows[idx[k]] - baseRow);
+        if (footprint[0] != '\0') {
+            // axial2: an `offset:` pin may NEVER cross the ravine (the
+            // geometry authority's rule, partPinFootprintNode) - the far
+            // leg must ride the footprint's own math as `pin: 2` (bench,
+            // 14:43: offset 30 was refused and the LED never placed)
+            u += snprintf(pins + u, sizeof(pins) - u, "%s\"%s\": {\"pin\": %d}",
+                          k ? ", " : "", nm, k + 1);
+        } else {
+            u += snprintf(pins + u, sizeof(pins) - u, "%s\"%s\": {\"offset\": %d}",
+                          k ? ", " : "", nm, (int)res.rows[idx[k]] - baseRow);
+        }
         if (u >= (int)sizeof(pins)) return false;
     }
     snprintf(pins + u, sizeof(pins) - u, "}");
@@ -2010,13 +2019,56 @@ static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out)
     // VDD: cathode in every junction it joined. A row that is both (a
     // 2-row cluster, one lone diode) proves nothing and is refused below.
     int gi = -1, vi = -1;
-    for (int i = 0; i < nRows; i++) {
-        if (seen[i] < 2) continue;
-        if (anodeCount[i] == seen[i] && (gi < 0 || seen[i] > seen[gi])) gi = i;
-    }
-    for (int i = 0; i < nRows; i++) {
-        if (i == gi || seen[i] < 2) continue;
-        if (cathodeCount[i] == seen[i] && (vi < 0 || seen[i] > seen[vi])) vi = i;
+    auto pick = [&]() -> bool {
+        gi = -1;
+        vi = -1;
+        for (int i = 0; i < nRows; i++) {
+            if (seen[i] < 2) continue;
+            if (anodeCount[i] == seen[i] && (gi < 0 || seen[i] > seen[gi])) gi = i;
+        }
+        for (int i = 0; i < nRows; i++) {
+            if (i == gi || seen[i] < 2) continue;
+            if (cathodeCount[i] == seen[i] && (vi < 0 || seen[i] > seen[vi])) vi = i;
+        }
+        return gi >= 0 && vi >= 0;
+    };
+    if (!pick()) {
+        // The quick look has a blind spot: a module's bulk capacitance
+        // charges slower than the map's 50k pull can settle, so every
+        // pair against VDD reads clamped BOTH ways and drops out (bench,
+        // 14:43: the SSD1306's supply hid behind its own decoupling and
+        // the 0x3C probe never fired). Ask harder with full identifies -
+        // their hard drives charge the caps and the classifier owns
+        // settling. Slower, but only clusters the map couldn't read pay,
+        // and pick() exits the moment both rails are known.
+        Serial.println("  clamps unclear at a glance - asking harder...");
+        Serial.flush();
+        for (int i = 0; i < 6; i++) {
+            anodeCount[i] = 0;
+            cathodeCount[i] = 0;
+            seen[i] = 0;
+        }
+        bool done = false;
+        for (int i = 0; i < nRows && !done; i++) {
+            for (int j = i + 1; j < nRows && !done; j++) {
+                if (partsAutoAbortCheck()) return false;
+                PartResult r = identifyTwoLead(rows[i], rows[j]);
+                if (r.status != 0 || r.nRows != 2) continue;
+                if (r.type != PartType::DIODE && r.type != PartType::ZENER &&
+                    r.type != PartType::LED)
+                    continue;
+                for (int t = 0; t < 2; t++) {
+                    int which = ((int)r.rows[t] == rows[i]) ? i
+                                : ((int)r.rows[t] == rows[j]) ? j : -1;
+                    if (which < 0) continue;
+                    seen[which]++;
+                    if (r.roles[t] == PinRole::A) anodeCount[which]++;
+                    else if (r.roles[t] == PinRole::K) cathodeCount[which]++;
+                }
+                done = pick();
+            }
+        }
+        (void)pick();
     }
     if (gi < 0 || vi < 0) return false;
     out->gndRow = rows[gi];
