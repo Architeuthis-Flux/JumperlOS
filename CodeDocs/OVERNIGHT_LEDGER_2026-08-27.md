@@ -208,6 +208,37 @@ NB 12 / NP 8, bridge set byte-identical to the canonical state, and
 slot3.yaml CONVERGED on disk (4665 bytes) - the new save-after-restore
 doing exactly its job. Zero spontaneous USB drops the whole night.
 
+## The context-flip watch-item, resolved (04:30)
+
+The evening ledger's suspect ("the breadboard display's beacon path
+auto-opening its project") is INNOCENT: the beacon/attach/pollParts code
+contains no context-switching call at all, and a sweep of every
+loadSlotFromPath caller in the tree finds only user/serial gestures (the
+`>` context command, the launcher and Files flows, MP load_project, and
+the last_active boot). The firmware has no unattended path that moves its
+own context. What actually happened yesterday evening: the old-protocol
+test_projects i2cscrn drives ADOPT the run context ("now your active
+circuit") and bench contention kept killing the suites before their
+restores ran - two flips, externally driven. And "slot 3's file rewritten
+to a DISP-only state" is the live/file divergence class witnessed
+first-hand tonight (the stale-file incident) - a foreign context's state
+auto-saved into slot3.yaml. Both halves of that class are now closed: the
+S-paste parts flattening (firmware) and the restore-converge (harness).
+An unattended board does not move its own context; last night's board was
+not unattended.
+
+## Verified after the closing sweep (04:10-04:30)
+
+- Rows 1/39 census artifacts: both identify EMPTY, both 3/3 persistent -
+  fixed (census lane prime + lone-hit interrogation, commit 6), 3/3 clean
+  scans after, 14s, part_id 39/39 again.
+- rowAnimations slot layout read off the RUNNING target over SWD
+  (gdb offsets + openocd read_memory, no halt): numberOfRowAnimations=37,
+  slots 33/34/35/36 = types 3/4/6/5 with matching indices, slot 37 empty.
+  Commit 2's "LED-visible behavior unverified" narrows to "the renderer
+  consumes what the verified slots hold" - and its consumers are the
+  hardcoded 33/34 that now point at real animations.
+
 ## Not done / morning list
 
 - `identify_part()` no-args autodetect front door (needs the scan logic
