@@ -1252,6 +1252,35 @@ static void showGpioPinReading( int netNum, int gpioIdx, bool isOutput,
     }
 }
 
+// The rail/DAC twin of showGpioPinReading (Kevin, 12:53: "when we highlight
+// the E pin, it's just showing the rail thing, we need the same thing as
+// the gpio"). One deliberate difference: the pin is matched by the
+// brightened NODE, never first-pin-on-net - a rail net carries many parts'
+// pins at once and the wrong part's name on the panel is worse than none.
+// Returns false (nothing painted) when no placed pin sits on that node, so
+// the caller falls back to the plain rail card with its mA readout.
+static bool showSpecialPinReading( const char* srcLabel, const char* volts,
+                                   const char* hint ) {
+    if ( brightenedNode < 1 || brightenedNode > 60 ) return false;
+    for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
+        const PartDefinition& p = globalState.parts.parts[ i ];
+        if ( !p.placed ) continue;
+        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+            if ( partPinNode( p, p.pins[ j ] ) != brightenedNode ) continue;
+            const char* pn = p.pins[ j ].name;
+            int pinLen = (int)strlen( pn );
+            char pinName[ 16 ];
+            int nameBudget = (int)sizeof( pinName ) - 1 - pinLen - 1;
+            if ( nameBudget < 1 ) nameBudget = 1;
+            snprintf( pinName, sizeof( pinName ), "%.*s %s", nameBudget,
+                      p.name, pn );
+            showNetReading( pinName, srcLabel, volts, hint );
+            return true;
+        }
+    }
+    return false;
+}
+
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
     // Serial.print("justReadProbe = ");
     // Serial.println(probeReading);
@@ -1358,7 +1387,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     // touching globalState.power.
                     snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 2 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    if ( !showSpecialPinReading( "Top Rail", value, adjustHintText( ) ) )
+                        showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
             }
             brightenedRail = 0;
@@ -1370,7 +1400,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 3 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    if ( !showSpecialPinReading( "Bottom Rail", value, adjustHintText( ) ) )
+                        showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
             }
             brightenedRail = 2;
@@ -1384,7 +1415,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 0 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    if ( !showSpecialPinReading( "DAC 0", value, adjustHintText( ) ) )
+                        showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -1398,7 +1430,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 1 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    if ( !showSpecialPinReading( "DAC 1", value, adjustHintText( ) ) )
+                        showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -1990,7 +2023,8 @@ int Highlighting::checkForReadingChanges( void ) {
             snprintf( name, sizeof( name ), "DAC %d", dacNum );
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentDacVoltage );
             char curBuf[ 16 ];
-            showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+            if ( !showSpecialPinReading( name, valueString, adjustHintText( ) ) )
+                showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
 
             displayUpdated = true;
         }
@@ -2013,7 +2047,8 @@ int Highlighting::checkForReadingChanges( void ) {
 
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentRailVoltage );
             char curBuf[ 16 ];
-            showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+            if ( !showSpecialPinReading( top ? "Top Rail" : "Bottom Rail", valueString, adjustHintText( ) ) )
+                showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
 
             displayUpdated = true;
         }

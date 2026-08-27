@@ -140,16 +140,24 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 // The census's second pass: an isolated junction part (a lone transistor,
 // a diode) is INVISIBLE to the single-row poke - the drive pre-charges the
 // whole part through its own junctions, so nothing shares at release
-// (bench, 2N3906). This sweeps every adjacent free pair (both rows flagged
-// 0) with 1.0V through the shunt, both directions (~70ms per check): a
-// junction or a resistor conducts, and both rows get flagged 5. User wiring
-// on the measurement path (DAC0 / the ISENSE pair) is briefly LIFTED like an
+// (bench, 2N3906). This sweeps free pairs in three arrangements - adjacent
+// (n,n+1), across the center channel (n,n+30 - the same column on the
+// other half), and one row apart (n,n+2) - at 3.0V through the shunt,
+// both directions (~70ms per check): a junction, an LED, or a resistor
+// (up to ~19k) conducts, and both rows get flagged 5. User wiring on the
+// measurement path (DAC0 / the ISENSE pair) is briefly LIFTED like an
 // identify session does it, and restored on every exit (bench: the standing
 // UART_TX->ISENSE_MINUS wire would otherwise sideline the sweep forever).
+// Conducting CROSS-GAP pairs also land in gapPairsOut ([2i]=top row,
+// [2i+1]=its +30 partner, up to gapPairsCap pairs): their rows live in
+// different halves and can never form one span, so the launcher must treat
+// each pair as its own finding.
 // Returns rows newly flagged, or -2 = busy / probe fed from DAC0 (infra,
 // can't be lifted) / more path wiring than the lift list holds - then the
 // scan stays census-only and the launcher says so.
 int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
-                      void (*progress)(int row, int state) = nullptr);
+                      void (*progress)(int row, int state) = nullptr,
+                      int16_t* gapPairsOut = nullptr,
+                      int* nGapPairsOut = nullptr, int gapPairsCap = 0);
 
 #endif // PART_MEASURE_H

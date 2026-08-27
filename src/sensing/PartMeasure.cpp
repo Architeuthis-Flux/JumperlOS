@@ -795,7 +795,9 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 }
 
 int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
-                      void (*progress)(int row, int state)) {
+                      void (*progress)(int row, int state),
+                      int16_t* gapPairsOut, int* nGapPairsOut,
+                      int gapPairsCap) {
     if (rowFlags == nullptr) return -2;
     if (rp2040.cpuid() != 0) return -2;
     static ScanSession s;
@@ -860,58 +862,99 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
 
     // Bench truth: with the ISE legs routed the shunt reads a CONSTANT
     // standing current (2.39mA here - the GuideChecks ledger's board-
-    // internal sink), and the 1V stimulus shifts every EMPTY pair by an
-    // equally constant amount (-0.77mA +-10uA on this board). Absolute
-    // thresholds are hopeless against an artifact that big; the pair
-    // population is its own calibration - sweep everything, take the
+    // internal sink), and the stimulus shifts every EMPTY pair by an
+    // equally constant amount (-0.77mA +-10uA at 1V on this board).
+    // Absolute thresholds are hopeless against an artifact that big; the
+    // pair population is its own calibration - sweep everything, take the
     // per-direction MEDIAN as the empty line, flag what deviates. The
     // 2N3906's junction pairs sat 2.2mA off the line.
+    //
+    // Drive is 3.0V (was 1.0V): an LED's 1.8-3.1V forward knee never
+    // conducted at 1V - the exact cross-gap LED this sweep now looks for
+    // was invisible to it. 3V through the ~130R loop caps a dead short at
+    // ~23mA for 3ms, which identify's own servo already does deliberately.
+    // The higher drive also drops the deviation floor to 0.15mA, so
+    // resistors up to ~19k make the line (10k deviated only ~0.1mA at 1V,
+    // under the old 0.35 threshold - silently unseen).
     setDac0voltage(0.0f, 0, 0, false);
     (void)inaSettledMa();   // settle the poll pipeline before the loop
 
     int newHits = 0;
+    if (nGapPairsOut != nullptr) *nGapPairsOut = 0;
     {
+        // Three arrangements cover the common breadboard layouts (Kevin,
+        // 12:53: "we're only scanning adjacent pairs still, so we miss the
+        // LED on 21-51"): legs side by side (n,n+1), legs straddling the
+        // center channel (n,n+30 - same column, other half), and legs one
+        // row apart (n,n+2). A later arrangement only sweeps pairs an
+        // earlier one left unexplained, so a mostly-found board pays
+        // almost nothing extra. Arbitrary wider spans wait for the
+        // group-testing pooled-query refinement.
+        static const int kGap[3] = {1, 30, 2};
         static float di[2][58];
         static int16_t pairA[58];
-        int nPairs = 0;
-        for (int half = 0; half < 2; half++) {
-            int lo = half ? 31 : 1, hi = half ? 57 : 27;
-            for (int a = lo; a <= hi && nPairs < 58; a++) {
-                int b = a + 1;
-                // at least one row still unexplained, neither wired/refused:
-                // a part can straddle a census hit (a BJT's base HOLDS, its
-                // E and C don't - the base flag must not veto the junctions)
-                bool aFree = (rowFlags[a] == 0), bFree = (rowFlags[b] == 0);
-                bool aOk = aFree || rowFlags[a] == 1 || rowFlags[a] == 5;
-                bool bOk = bFree || rowFlags[b] == 1 || rowFlags[b] == 5;
-                if (!(aOk && bOk) || (!aFree && !bFree)) continue;
-                if (abortCheck != nullptr && abortCheck()) goto sweepJudge;
-                if (progress != nullptr) progress(a, 3);   // pair cursor
-                pairA[nPairs] = (int16_t)a;
-                di[0][nPairs] = di[1][nPairs] = 1.0e9f;  // no-reading sentinel
-                for (int dir = 0; dir < 2; dir++) {
-                    int src = dir ? b : a, snk = dir ? a : b;
-                    setDac0voltage(0.0f, 0, 0, false);
-                    legAdd(s, DAC0, src);
-                    legAdd(s, snk, ISENSE_PLUS);
-                    legAdd(s, ISENSE_MINUS, GND);
-                    if (!legsBuild(s)) continue;
-                    setDac0voltage(1.0f, 0, 0, false);
-                    delay(3);
-                    // settled: the first read re-syncs the conversion
-                    // pipeline, the second is trustworthy - single reads
-                    // both missed a real junction and invented one (stale)
-                    (void)inaFreshMa();
-                    di[dir][nPairs] = inaFreshMa();
-                    setDac0voltage(0.0f, 0, 0, false);
-                    legsClear(s);
+        bool aborted = false;
+        for (int gi = 0; gi < 3 && !aborted; gi++) {
+            int gap = kGap[gi];
+            int nPairs = 0;
+            for (int half = 0; half < 2 && nPairs < 58; half++) {
+                int lo, hi;
+                if (gap == 30) {
+                    if (half == 1) break;   // one pass spans both halves
+                    lo = 1; hi = 28;        // b = a+30 covers 31..58
+                } else {
+                    lo = half ? 31 : 1;
+                    hi = (half ? 58 : 28) - gap;
                 }
-                if (progress != nullptr) progress(a, 4);   // pair painted from flags
-                nPairs++;
+                for (int a = lo; a <= hi && nPairs < 58; a++) {
+                    int b = a + gap;
+                    // at least one row still unexplained, neither wired /
+                    // refused: a part can straddle a census hit (a BJT's
+                    // base HOLDS, its E and C don't - the base flag must
+                    // not veto the junctions)
+                    bool aFree = (rowFlags[a] == 0), bFree = (rowFlags[b] == 0);
+                    bool aOk = aFree || rowFlags[a] == 1 || rowFlags[a] == 5;
+                    bool bOk = bFree || rowFlags[b] == 1 || rowFlags[b] == 5;
+                    if (!(aOk && bOk) || (!aFree && !bFree)) continue;
+                    if (abortCheck != nullptr && abortCheck()) {
+                        aborted = true;
+                        break;
+                    }
+                    if (progress != nullptr) progress(a, 3);   // pair cursor
+                    pairA[nPairs] = (int16_t)a;
+                    di[0][nPairs] = di[1][nPairs] = 1.0e9f;  // no-reading sentinel
+                    for (int dir = 0; dir < 2; dir++) {
+                        int src = dir ? b : a, snk = dir ? a : b;
+                        setDac0voltage(0.0f, 0, 0, false);
+                        legAdd(s, DAC0, src);
+                        legAdd(s, snk, ISENSE_PLUS);
+                        legAdd(s, ISENSE_MINUS, GND);
+                        if (!legsBuild(s)) continue;
+                        setDac0voltage(3.0f, 0, 0, false);
+                        delay(3);
+                        // settled: the first read re-syncs the conversion
+                        // pipeline, the second is trustworthy - single reads
+                        // both missed a real junction and invented one (stale)
+                        (void)inaFreshMa();
+                        di[dir][nPairs] = inaFreshMa();
+                        setDac0voltage(0.0f, 0, 0, false);
+                        legsClear(s);
+                    }
+                    if (progress != nullptr) progress(a, 4);   // painted from flags
+                    nPairs++;
+                }
             }
-        }
-sweepJudge:
-        if (nPairs >= 5) {
+            if (nPairs > 0 && nPairs < 5) {
+                // no silent caps: a nearly-full board can leave an
+                // arrangement without enough pairs to self-calibrate
+                Serial.print("PARTSCAN sweep gap-");
+                Serial.print(gap);
+                Serial.print(": only ");
+                Serial.print(nPairs);
+                Serial.println(" pairs - too few to judge, skipped");
+                continue;
+            }
+            if (nPairs < 5) continue;
             for (int dir = 0; dir < 2; dir++) {
                 float sorted[58];
                 int n = 0;
@@ -925,13 +968,28 @@ sweepJudge:
                 float median = sorted[n / 2];
                 for (int i = 0; i < nPairs; i++) {
                     if (di[dir][i] > 1.0e8f) continue;
-                    if (fabsf(di[dir][i] - median) > 0.35f) {
-                        int a = pairA[i], b = a + 1;
+                    if (fabsf(di[dir][i] - median) > 0.15f) {
+                        int a = pairA[i], b = a + gap;
                         if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
                         if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
                         if (progress != nullptr) {
                             progress(a, 1);
                             progress(b, 1);
+                        }
+                        // a cross-gap pair is its own finding: the two rows
+                        // land in different halves and can never form one
+                        // span - the launcher identifies them as a pair
+                        if (gap == 30 && gapPairsOut != nullptr &&
+                            nGapPairsOut != nullptr &&
+                            *nGapPairsOut < gapPairsCap) {
+                            bool dup = false;
+                            for (int q = 0; q < *nGapPairsOut; q++)
+                                if (gapPairsOut[2 * q] == a) dup = true;
+                            if (!dup) {
+                                gapPairsOut[2 * *nGapPairsOut] = (int16_t)a;
+                                gapPairsOut[2 * *nGapPairsOut + 1] = (int16_t)b;
+                                (*nGapPairsOut)++;
+                            }
                         }
                     }
                 }

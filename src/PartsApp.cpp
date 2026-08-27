@@ -32,6 +32,8 @@
 #include "States.h"         // globalState
 #include "config.h"         // jumperlessConfig.hardware.probe_revision
 #include "oled.h"
+#include "Peripherals.h"    // INA1 (the power-up watchdog), setDac0voltage
+#include <Wire.h>           // Wire1 - the chip-cluster I2C interrogation
 
 // The canonical part removal (bridges, net names, undo guard, refresh) -
 // commit's replace-on-identity reuses it. Lives in JumperlessMicroPythonAPI.
@@ -1344,47 +1346,40 @@ void partsShowPartCard(const PartDefinition& p, int focusPin) {
     char testLine[26] = "";
     PartLabels::partTestSummary(p, testLine, sizeof(testLine));
 
-    // Pin columns (Kevin's spec, 11:37): labels on one line, rows on the
-    // next, spread left/center/right, the focused pin fenced in |bars|
-    // that line up between the two lines. Monospace makes the alignment
-    // exact: each column's label/number cell pair is built to the SAME
-    // width and placed at the SAME offset. ~21 chars of Andale Mono 5pt
-    // fit 128 px (the old one-line form leaked off the panel).
-    const int LW = 21;
-    char l1[LW + 1], l2[LW + 1];
-    memset(l1, ' ', LW); l1[LW] = '\0';
-    memset(l2, ' ', LW); l2[LW] = '\0';
-    if (p.numPins <= 3) {
-        int nCols = p.numPins;
-        for (int j = 0; j < nCols && j < MAX_PART_PINS; j++) {
+    // Pin columns (Kevin's spec, 11:37 + 12:53): labels on one line, rows
+    // on the next, the focused pin fenced in |bars| that line up between
+    // the two lines. Each column's label/number cell pair is built to the
+    // SAME character width (monospace font -> same pixels -> the bars
+    // align), an UNFOCUSED cell wears spaces where the bars would be so
+    // focus never shifts the layout, and the columns are spread by the
+    // panel itself (OLED_ALIGN_JUSTIFY works from measured pixel widths -
+    // the fixed 21-char form leaked "C 19" off the right edge).
+    const int16_t f = 12;  // Andale Mono 5pt - four rows fit 32px
+    char cellL[4][12], cellN[4][12];
+    int nCols = 0;
+    char l1[24] = "", l2[24] = "";
+    bool columnForm = (p.numPins >= 1 && p.numPins <= 4);
+    if (columnForm) {
+        for (int j = 0; j < p.numPins && j < 4; j++) {
             int node = partPinNode(p, p.pins[j]);
-            char label[8], num[8], c1[12], c2[12];
+            char label[8], num[8];
             partsCardPinLabel(p, p.pins[j], label, sizeof(label));
             snprintf(num, sizeof(num), "%d", node);
             int w = (int)strlen(label);
             if ((int)strlen(num) > w) w = (int)strlen(num);
             if (j == focusPin) {
-                snprintf(c1, sizeof(c1), "|%-*s|", w, label);
-                snprintf(c2, sizeof(c2), "|%-*s|", w, num);
+                snprintf(cellL[j], sizeof(cellL[j]), "|%-*s|", w, label);
+                snprintf(cellN[j], sizeof(cellN[j]), "|%-*s|", w, num);
             } else {
-                snprintf(c1, sizeof(c1), "%-*s", w, label);
-                snprintf(c2, sizeof(c2), "%-*s", w, num);
+                snprintf(cellL[j], sizeof(cellL[j]), " %-*s ", w, label);
+                snprintf(cellN[j], sizeof(cellN[j]), " %-*s ", w, num);
             }
-            int len = (int)strlen(c1);   // == strlen(c2) by construction
-            int start;
-            if (j == 0) start = 0;                            // left
-            else if (j == nCols - 1) start = LW - len;        // right
-            else start = (LW - len) / 2;                      // center
-            if (start < 0) start = 0;
-            if (start + len > LW) len = LW - start;
-            memcpy(l1 + start, c1, len);
-            memcpy(l2 + start, c2, len);
+            nCols++;
         }
     } else if (focusPin >= 0 && focusPin < p.numPins) {
         char label[8];
         partsCardPinLabel(p, p.pins[focusPin], label, sizeof(label));
-        snprintf(l1, sizeof(l1), "|%s|%*s%d pins", label,
-                 (int)(LW - strlen(label) - 8), "", (int)p.numPins);
+        snprintf(l1, sizeof(l1), "|%s|", label);
         snprintf(l2, sizeof(l2), "|%d|", partPinNode(p, p.pins[focusPin]));
     } else {
         int lo = 61, hi = 0;
@@ -1398,18 +1393,34 @@ void partsShowPartCard(const PartDefinition& p, int focusPin) {
         snprintf(l2, sizeof(l2), "rows %d-%d", lo, hi);
     }
 
-    const int16_t f = 12;  // Andale Mono 5pt - four rows fit 32px
+    char pinCount[12] = "";
     OledTextRow rows[4] = {};
     rows[0].segs[0] = {p.name, f, OLED_ALIGN_INHERIT};
     rows[0].segs[1] = {typeLine, f, OLED_ALIGN_RIGHT};
     rows[0].segCount = 2;
     rows[0].align = OLED_ALIGN_LEFT;
-    rows[1].segs[0] = {l1, f, OLED_ALIGN_INHERIT};
-    rows[1].segCount = 1;
-    rows[1].align = OLED_ALIGN_LEFT;
-    rows[2].segs[0] = {l2, f, OLED_ALIGN_INHERIT};
-    rows[2].segCount = 1;
-    rows[2].align = OLED_ALIGN_LEFT;
+    if (columnForm) {
+        for (int j = 0; j < nCols; j++) {
+            rows[1].segs[j] = {cellL[j], f, OLED_ALIGN_INHERIT};
+            rows[2].segs[j] = {cellN[j], f, OLED_ALIGN_INHERIT};
+        }
+        rows[1].segCount = (uint8_t)nCols;
+        rows[2].segCount = (uint8_t)nCols;
+        rows[1].align = OLED_ALIGN_JUSTIFY;
+        rows[2].align = OLED_ALIGN_JUSTIFY;
+    } else {
+        rows[1].segs[0] = {l1, f, OLED_ALIGN_INHERIT};
+        rows[1].segCount = 1;
+        rows[1].align = OLED_ALIGN_LEFT;
+        if (focusPin >= 0 && focusPin < p.numPins) {
+            snprintf(pinCount, sizeof(pinCount), "%d pins", (int)p.numPins);
+            rows[1].segs[1] = {pinCount, f, OLED_ALIGN_RIGHT};
+            rows[1].segCount = 2;
+        }
+        rows[2].segs[0] = {l2, f, OLED_ALIGN_INHERIT};
+        rows[2].segCount = 1;
+        rows[2].align = OLED_ALIGN_LEFT;
+    }
     rows[3].segs[0] = {testLine, f, OLED_ALIGN_INHERIT};
     rows[3].segCount = 1;
     rows[3].align = OLED_ALIGN_LEFT;
@@ -1861,6 +1872,169 @@ static bool partsDiodeIsChipClamp(int anodeRow, const int* cands, int nCand) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Chip clusters: who is power, and does it talk I2C?
+// ---------------------------------------------------------------------------
+// The star test proves a cluster is multi-pin, but "a chip?" is a shrug. A
+// powered chip's protection diodes point ONE way: every pin clamps to GND
+// (GND is the common ANODE) and up to VDD (VDD is the common CATHODE), so
+// the two supply rows are the ones whose junction ORIENTATION never varies
+// while signal pins read anode one way and cathode the other. Bench truth
+// on Kevin's SSD1306 module (GND 1, Vdd 2, SCL 3, SDA 4, 2026-08-27):
+//   (2,1) K,A   (3,1) K,A   (4,1) K,A     row 1 anode every time  -> GND
+//   (3,2) A,K   (4,2) A,K                 row 2 cathode every time-> Vdd
+//   (3,4) EMPTY                           two signal pins: nothing
+// Costs one identifyTwoLead per pair (~0.6s), so only small clusters.
+struct ClusterPower {
+    int gndRow = -1;
+    int vddRow = -1;
+    int sig[6] = {0};
+    int nSig = 0;
+};
+static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out) {
+    if (nRows < 3 || nRows > 6) return false;
+    int8_t anodeCount[6] = {0}, cathodeCount[6] = {0}, seen[6] = {0};
+    for (int i = 0; i < nRows; i++) {
+        for (int j = i + 1; j < nRows; j++) {
+            if (partsAutoAbortCheck()) return false;
+            PartResult r = identifyTwoLead(rows[i], rows[j]);
+            if (r.status != 0 || r.nRows != 2) continue;
+            if (r.type != PartType::DIODE && r.type != PartType::ZENER &&
+                r.type != PartType::LED)
+                continue;
+            for (int t = 0; t < 2; t++) {
+                int which = ((int)r.rows[t] == rows[i]) ? i
+                            : ((int)r.rows[t] == rows[j]) ? j : -1;
+                if (which < 0) continue;
+                seen[which]++;
+                if (r.roles[t] == PinRole::A) anodeCount[which]++;
+                else if (r.roles[t] == PinRole::K) cathodeCount[which]++;
+            }
+        }
+    }
+    // GND: anode in every junction it joined, and it joined the most.
+    // VDD: cathode in every junction it joined. A row that is both (a
+    // 2-row cluster, one lone diode) proves nothing and is refused below.
+    int gi = -1, vi = -1;
+    for (int i = 0; i < nRows; i++) {
+        if (seen[i] < 2) continue;
+        if (anodeCount[i] == seen[i] && (gi < 0 || seen[i] > seen[gi])) gi = i;
+    }
+    for (int i = 0; i < nRows; i++) {
+        if (i == gi || seen[i] < 2) continue;
+        if (cathodeCount[i] == seen[i] && (vi < 0 || seen[i] > seen[vi])) vi = i;
+    }
+    if (gi < 0 || vi < 0) return false;
+    out->gndRow = rows[gi];
+    out->vddRow = rows[vi];
+    out->nSig = 0;
+    for (int i = 0; i < nRows && out->nSig < 6; i++)
+        if (i != gi && i != vi) out->sig[out->nSig++] = rows[i];
+    return true;
+}
+
+// The few addresses worth naming (DESIGN_PART_ID_FOLLOWUP.md 9 wants a
+// /partdb/i2c_addr.txt; this is that table's first page, in rodata).
+static const char* partsI2CAddressName(uint8_t addr) {
+    switch (addr) {
+        case 0x3C: case 0x3D: return "SSD1306/SH1106 display";
+        case 0x40: case 0x41: return "INA219 / PCA9685";
+        case 0x48: return "ADS1115 / LM75";
+        case 0x50: case 0x57: return "24Cxx EEPROM";
+        case 0x68: return "MPU6050 / DS3231";
+        case 0x76: case 0x77: return "BMP/BME280";
+        default: return nullptr;
+    }
+}
+
+// Power a suspected chip cluster and ask its signal pins whether they speak
+// I2C (Kevin, 12:53: "Can we sense I2C data lines"). Bench-proven on the
+// SSD1306 module over the crossbar before this landed. Discipline, straight
+// from the doc: power pins connected LAST, current-limited first power-up,
+// INA watchdog, everything torn back down on every exit.
+static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLen) {
+    if (cp.nSig < 2) return false;
+    // Wire1 is the panel's bus on connection types 0/1/3 - re-pointing it
+    // at breadboard rows would take the display down mid-scan. Kevin's r7
+    // is type 2 (the panel is on I2C0), which is why this can run at all.
+    if (jumperlessConfig.top_oled.enabled &&
+        jumperlessConfig.top_oled.connection_type != 2) {
+        Serial.println("  (I2C probe skipped - the display owns that bus)");
+        return false;
+    }
+    Serial.print("  powering rows ");
+    Serial.print(cp.vddRow);
+    Serial.print("/+ ");
+    Serial.print(cp.gndRow);
+    Serial.println("/- to ask if it speaks I2C...");
+    Serial.flush();
+
+    bool ppRestore = infraProbePowerWanted();
+    infraSetProbePowerEnabled(false);
+    float dac0Restore = globalState.power.dac0;
+    bool found = false;
+    // GND first, then the two bus legs, and the supply LAST (doc 9).
+    bool bGnd = addBridgeToState(GND, cp.gndRow);
+    refreshConnections(-1, 0, 0);
+    setDac0voltage(0.0f, 0, 0, false);
+    bool bVdd = addBridgeToState(DAC0, cp.vddRow);
+    refreshConnections(-1, 0, 0);
+    setDac0voltage(3.3f, 0, 0, false);
+    delay(30);
+    float draw = INA1.getCurrent_mA() - currentReadingOffset1_mA;
+    if (draw > 20.0f) {
+        // the supply row was a bad guess (or the part is shorted): a
+        // 3.3V hard drive into a clamp is ~65mA through the fabric
+        Serial.print("  it draws ");
+        Serial.print(draw, 1);
+        Serial.println(" mA - backing off, that isn't a supply pin");
+    } else {
+        for (int order = 0; order < 2 && !found; order++) {
+            int sdaRow = order ? cp.sig[1] : cp.sig[0];
+            int sclRow = order ? cp.sig[0] : cp.sig[1];
+            bool bSda = addBridgeToState(RP_GPIO_3, sdaRow);   // pin 22, I2C1 SDA
+            bool bScl = addBridgeToState(RP_GPIO_4, sclRow);   // pin 23, I2C1 SCL
+            refreshConnections(-1, 0, 0);
+            Wire1.end();
+            Wire1.setSDA(22);
+            Wire1.setSCL(23);
+            Wire1.begin();
+            Wire1.setClock(100000);
+            for (int addr = 1; addr < 127 && !partsAutoAbortCheck(); addr++) {
+                Wire1.beginTransmission((uint8_t)addr);
+                if (Wire1.endTransmission() != 0) continue;
+                const char* known = partsI2CAddressName((uint8_t)addr);
+                snprintf(out, outLen, "I2C 0x%02X on %d/%d%s%s", addr,
+                         sdaRow, sclRow, known ? " - " : "",
+                         known ? known : "");
+                Serial.print("  it answers: ");
+                Serial.println(out);
+                found = true;
+                break;
+            }
+            Wire1.end();
+            if (jumperlessConfig.top_oled.enabled) {
+                Wire1.setSDA(jumperlessConfig.top_oled.sda_pin);
+                Wire1.setSCL(jumperlessConfig.top_oled.scl_pin);
+            }
+            Wire1.begin();
+            if (bSda) removeBridgeFromState(RP_GPIO_3, sdaRow, false);
+            if (bScl) removeBridgeFromState(RP_GPIO_4, sclRow, false);
+            if (!found && order == 0)
+                Serial.println("  no answer that way round - swapping SDA/SCL...");
+        }
+    }
+    setDac0voltage(0.0f, 0, 0, false);
+    if (bVdd) removeBridgeFromState(DAC0, cp.vddRow, false);
+    if (bGnd) removeBridgeFromState(GND, cp.gndRow, false);
+    setDac0voltage(dac0Restore, 0, 0, false);
+    infraSetProbePowerEnabled(ppRestore);
+    refreshConnections(-1, 0, 0);
+    if (!found)
+        Serial.println("  no I2C answer - it isn't an I2C part (or needs 5V)");
+    return found;
+}
+
 // The placed part (if any) with a pin on this row, for "already yours" tags.
 static const char* partsPlacedPartOnRow(int row) {
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
@@ -1927,6 +2101,15 @@ void partsAutoLauncher(void) {
     // collect here and a CONNECT press at the end places them as records
     static PartResult addable[8];
     int nAddable = 0;
+    // pairs that conducted ACROSS the center channel (n <-> n+30): their
+    // rows live in different halves and can never form one span, so they
+    // arrive from the sweep as explicit pairs and get identified as such
+    static int16_t gapPairs[2 * 12];
+    int nGapPairs = 0;
+    // rows a cross-gap finding claimed - the span former skips them so
+    // they can't decay into two width-1 "noise" spans, one per half
+    static bool crossUsed[61];
+    memset(crossUsed, 0, sizeof(crossUsed));
     {
         for (int i = 0; i < globalState.connections.numBridges && i < MAX_BRIDGES; i++) {
             int n1 = globalState.connections.bridges[i][0];
@@ -1993,13 +2176,15 @@ void partsAutoLauncher(void) {
     }
     {
         // second pass: isolated junction parts are invisible to the poke
-        // (they pre-charge through their own junctions) - sweep adjacent
-        // free pairs at 1V and see what conducts
+        // (they pre-charge through their own junctions) - sweep free pairs
+        // in the common layouts (adjacent, across the middle, one apart)
+        // and see what conducts
         if (oled.oledConnected) {
             oled.resetMultiLineSmallText();
             oled.showMultiLineSmallText("scanning pairs...\n(any press stops)");
         }
-        int pairHits = partScanPairSweep(flags, partsAutoAbortCheck, partsScanViz);
+        int pairHits = partScanPairSweep(flags, partsAutoAbortCheck,
+                                         partsScanViz, gapPairs, &nGapPairs, 12);
         if (pairHits > 0) found += pairHits;
         else if (pairHits < 0)
             // no silent caps: without the sweep, isolated junction parts
@@ -2026,6 +2211,62 @@ void partsAutoLauncher(void) {
             Serial.println(v1[r], 2);
         }
 
+        // cross-gap findings FIRST: a pair conducting across the center
+        // channel (the LED plugged 21 -> 51) is one part in two halves.
+        // Identified here and claimed via crossUsed, so the span former
+        // below can't decay it into two width-1 "noise" spans. A pair
+        // whose ends sit against other horizontal evidence stays with the
+        // span logic - that shape is a chip's, not a discrete's.
+        for (int gp = 0; gp < nGapPairs && !partsAutoAborted; gp++) {
+            int ga = gapPairs[2 * gp], gb = gapPairs[2 * gp + 1];
+            if (ga < 1 || gb > 60) continue;
+            if (flags[ga] != 5 || flags[gb] != 5) continue;
+            bool lonely = true;
+            for (int d = -1; d <= 1 && lonely; d += 2) {
+                int n1 = ga + d, n2 = gb + d;
+                if (n1 >= 1 && n1 <= 28 && (flags[n1] == 1 || flags[n1] == 5))
+                    lonely = false;
+                if (n2 >= 31 && n2 <= 58 && (flags[n2] == 1 || flags[n2] == 5))
+                    lonely = false;
+            }
+            if (!lonely) continue;
+            Serial.print("  checking rows ");
+            Serial.print(ga);
+            Serial.print("-");
+            Serial.print(gb);
+            Serial.println(" (across the middle)...");
+            Serial.flush();
+            if (partsAutoAbortCheck()) break;
+            PartResult gres = identifyTwoLead(ga, gb);
+            if (gres.status == 0 && gres.type != PartType::EMPTY &&
+                gres.type != PartType::UNKNOWN) {
+                char detail[24] = "";
+                if (gres.type == PartType::RESISTOR || gres.type == PartType::POT)
+                    formatOhms(gres.value, detail, sizeof(detail));
+                else if (gres.value != 0.0f)
+                    snprintf(detail, sizeof(detail), "%.2fV", (double)gres.value);
+                Serial.print("  rows ");
+                Serial.print(ga);
+                Serial.print("-");
+                Serial.print(gb);
+                Serial.print(": ");
+                Serial.print(partTypeName(gres.type));
+                Serial.print(" ");
+                Serial.println(detail);
+                crossUsed[ga] = crossUsed[gb] = true;
+                if (nAddable < 8 && gres.type != PartType::SHORT_CIRCUIT)
+                    addable[nAddable++] = gres;
+                for (int t = 0; t < gres.nRows; t++) {
+                    uint32_t c = (gres.roles[t] == PinRole::A)   ? PARTS_ROLE_A_COLOR
+                                 : (gres.roles[t] == PinRole::K) ? PARTS_ROLE_K_COLOR
+                                                                 : PARTS_ROLE_C_COLOR;
+                    int pr = nodeToPrintRow((int)gres.rows[t]);
+                    if (pr >= 0) b.printRawRow(0b00011111, pr, c, 0xffffff);
+                }
+                requestLedShow(2);
+            }
+        }
+
         // cluster hits into spans per half; a 1-row gap stays inside the
         // span (a PNP base row can hold its charge while E and C slump)
         int spanStart[12], spanEnd[12];
@@ -2035,7 +2276,8 @@ void partsAutoLauncher(void) {
             int cur = -1, last = -1;
             const char* curOwner = nullptr;
             for (int r = lo; r <= hi + 1; r++) {
-                bool hit = (r <= hi) && (flags[r] == 1 || flags[r] == 5);
+                bool hit = (r <= hi) && (flags[r] == 1 || flags[r] == 5) &&
+                           !crossUsed[r];
                 const char* owner = hit ? partsPlacedPartOnRow(r) : nullptr;
                 // two parts can abut on neighboring rows (bench: the 7400 at
                 // 11-16, the 2N3906 at 17-19) - a placed-ownership change is
@@ -2150,8 +2392,21 @@ void partsAutoLauncher(void) {
                     oled.showMultiLineSmallText(t);
                 }
                 if (partsAutoAbortCheck()) break;
-                PartResult res = (width == 3) ? identifyThreeLead(a, a + 1, z)
-                                              : identifyTwoLead(a, z);
+                PartResult res;
+                if (width == 3 && flags[a + 1] != 1 && flags[a + 1] != 5) {
+                    // the middle row never hit: this span exists because the
+                    // sweep's one-apart arrangement flagged (a, a+2) - a
+                    // skip-one two-lead layout. Identify the two real legs;
+                    // only if that comes up empty ask the three-lead
+                    // question (a BJT whose base row held nothing).
+                    res = identifyTwoLead(a, z);
+                    if (res.status != 0 || res.type == PartType::EMPTY ||
+                        res.type == PartType::UNKNOWN)
+                        res = identifyThreeLead(a, a + 1, z);
+                } else {
+                    res = (width == 3) ? identifyThreeLead(a, a + 1, z)
+                                       : identifyTwoLead(a, z);
+                }
                 if (width == 2 && (res.type == PartType::DIODE ||
                                    res.type == PartType::ZENER)) {
                     // two junction-legs might be a transistor missing its
@@ -2245,6 +2500,33 @@ void partsAutoLauncher(void) {
                         snprintf(line, sizeof(line),
                                  "rows %d-%d: a chip? (several pins clamp to row %d)",
                                  lo, hi, anodeRow);
+                        // A small clamp star is exactly the shape of a
+                        // 4-pin I2C module (bench: Kevin's SSD1306 on rows
+                        // 1-4 landed here, not in the wide-span walk), so
+                        // it gets the same power-up-and-ask treatment.
+                        int cl[6];
+                        int nCl = 0;
+                        for (int r = lo; r <= hi && nCl < 6; r++)
+                            if (flags[r] == 1 || flags[r] == 5) cl[nCl++] = r;
+                        for (int d = 1; d <= 2 && nCl < 6; d++) {
+                            int nxt = hi + d;
+                            if (nxt <= ((hi <= 28) ? 28 : 58) &&
+                                (flags[nxt] == 1 || flags[nxt] == 5))
+                                cl[nCl++] = nxt;
+                        }
+                        ClusterPower cp;
+                        char i2cLine[64] = "";
+                        if (nCl >= 3 && !partsAutoAbortCheck() &&
+                            partsFindClusterPower(cl, nCl, &cp)) {
+                            Serial.print("  its clamps say row ");
+                            Serial.print(cp.gndRow);
+                            Serial.print(" is ground and row ");
+                            Serial.print(cp.vddRow);
+                            Serial.println(" is the supply");
+                            if (partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine)))
+                                snprintf(line, sizeof(line), "rows %d-%d: %s",
+                                         lo, cl[nCl - 1], i2cLine);
+                        }
                         for (int r = a; r <= z; r++) {
                             int pr = nodeToPrintRow(r);
                             if (pr >= 0)
@@ -2397,9 +2679,33 @@ void partsAutoLauncher(void) {
                         if (width > 8 && nSplit == 0) break;
                     }
                 }
+                // Still a chip after the walk? Then ask it what it IS.
+                // Its clamp diodes name the supply pins, and a powered
+                // module answers on the bus - a real identity beats "a
+                // chip?" (Kevin, 12:53: "Can we sense I2C data lines").
+                char i2cLine[64] = "";
+                if (!poweredSpan && legsLeft >= 3 && width <= 6 &&
+                    !partsAutoAbortCheck()) {
+                    int cl[6];
+                    int nCl = 0;
+                    for (int r = a; r <= z && nCl < 6; r++)
+                        if ((flags[r] == 1 || flags[r] == 5) && !consumed[r])
+                            cl[nCl++] = r;
+                    ClusterPower cp;
+                    if (nCl >= 3 && partsFindClusterPower(cl, nCl, &cp)) {
+                        Serial.print("  its clamps say row ");
+                        Serial.print(cp.gndRow);
+                        Serial.print(" is ground and row ");
+                        Serial.print(cp.vddRow);
+                        Serial.println(" is the supply");
+                        partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine));
+                    }
+                }
                 if (poweredSpan) {
                     snprintf(line, sizeof(line),
                              "rows %d-%d read POWERED - not a part", a, z);
+                } else if (i2cLine[0] != '\0') {
+                    snprintf(line, sizeof(line), "rows %d-%d: %s", a, z, i2cLine);
                 } else if (nSplit > 0 && legsLeft <= 0) {
                     snprintf(line, sizeof(line), "rows %d-%d: %d separate parts",
                              a, z, nSplit);

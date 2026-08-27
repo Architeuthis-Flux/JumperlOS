@@ -1702,8 +1702,19 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
         int baseline = y + rowH[r];
 
         // Flowing (INHERIT) segments pack together and the group is placed
-        // using the row's alignment.
-        int flowX = anchorX( row.align, flowW[r] );
+        // using the row's alignment. A JUSTIFY row spreads them instead:
+        // first flush left, last flush right, middles evenly interpolated
+        // (the part card's pin columns - the even spacing survives any mix
+        // of cell widths because it works from measured pixels).
+        bool justify = ( row.align == OLED_ALIGN_JUSTIFY );
+        int flowCount = 0;
+        if ( justify ) {
+            for ( int s = 0; s < n; s++ )
+                if ( row.segs[s].text && row.segs[s].text[0] &&
+                     row.segs[s].align == OLED_ALIGN_INHERIT )
+                    flowCount++;
+        }
+        int flowX = anchorX( justify ? OLED_ALIGN_LEFT : row.align, flowW[r] );
 
         int flowDrawn = 0;
         for ( int s = 0; s < n; s++ ) {
@@ -1716,7 +1727,20 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
             currentFontFamily = fontList[fi].family;
 
             int x;
-            if ( row.segs[s].align == OLED_ALIGN_INHERIT ) {
+            if ( justify && row.segs[s].align == OLED_ALIGN_INHERIT ) {
+                // Match the LEFT pad and RIGHT margin the anchored rows use,
+                // so justified columns line up with LEFT/RIGHT rows above.
+                int xL = LEFT_JUSTIFY_TOP;
+                int xR = displayWidth - 5;
+                if ( flowCount <= 1 ) {
+                    x = ( displayWidth - segW[r][s] ) / 2;
+                } else {
+                    x = xL + flowDrawn * ( xR - xL - segW[r][s] ) /
+                                 ( flowCount - 1 );
+                }
+                if ( x < 0 ) x = 0;
+                flowDrawn++;
+            } else if ( row.segs[s].align == OLED_ALIGN_INHERIT ) {
                 if ( flowDrawn > 0 ) flowX += gap;
                 x = flowX;
                 flowX += segW[r][s];
