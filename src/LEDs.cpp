@@ -2575,33 +2575,30 @@ uint32_t dimLogoColor(uint32_t color, int brightness) {
 // ============================================================================
 // LOGO COLOR PALETTE ARRAYS
 // ============================================================================
-uint32_t logoColors[LOGO_COLOR_LENGTH + 11] = {
-    0x800058, 0x750053, 0x700068, 0x650063, 0x600078, 0x550073, 0x500088,
-    0x450083, 0x400098, 0x350093, 0x3000A8, 0x2500A3, 0x2000B8, 0x1500B3,
-    0x1000C8, 0x0502C3, 0x0204D8, 0x0007E3, 0x0010E8, 0x0015F3, 0x0020F8,
-    0x0025FA, 0x0030FF, 0x0035E0, 0x0240BF, 0x0545A0, 0x10509F, 0x15558F,
-    0x20607F, 0x25656F, 0x30705F, 0x35754F, 0x40803F, 0x45722F, 0x506518,
-    0x55481A, 0x603A2A, 0x653332, 0x702538, 0x751948, 0x791052, 0x7E0562,
-  };
-
-// Original palettes
-uint32_t logoColorsCold[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsHot[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsPink[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsGreen[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsYellow[LOGO_COLOR_LENGTH + 1];
-
-// New palettes
-uint32_t logoColorsOrange[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsTurquoise[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsChartreuse[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsPurple[LOGO_COLOR_LENGTH + 1];
-uint32_t logoColorsWhite[LOGO_COLOR_LENGTH + 1];
-
-uint32_t logoColors8vSelect[LOGO_COLOR_LENGTH + 11];
-
 // Master array holding all palettes - use LogoPalette enum to index
 uint32_t logoColorsAll[LOGO_PALETTE_COUNT][LOGO_COLOR_LENGTH + 11];
+
+// Stored REVERSED relative to logoColorsAll[PALETTE_8V_SELECT] (which OG
+// doesn't have anyway); Probing's rail readouts index it directly.
+uint32_t logoColors8vSelect[LOGO_COLOR_LENGTH + 11];
+
+// The named palettes below used to be standalone arrays duplicating rows of
+// logoColorsAll (~2.7 KB of .bss). Only rainbow + cold/hot/pink are ever read
+// (logoSwirl's probe modes); the other seven were generated and never read on
+// either board, so they only exist as master rows now. On V5 the live names
+// alias their master rows; on the OG - whose master is a single rainbow row -
+// cold/hot/pink keep real storage and rainbow aliases row 0 (setupSwirlColors
+// fills it on both boards before the first render).
+#if defined(OG_JUMPERLESS)
+static uint32_t logoColorsCold[LOGO_COLOR_LENGTH + 1];
+static uint32_t logoColorsHot[LOGO_COLOR_LENGTH + 1];
+static uint32_t logoColorsPink[LOGO_COLOR_LENGTH + 1];
+#else
+static uint32_t* const logoColorsCold = logoColorsAll[PALETTE_COLD];
+static uint32_t* const logoColorsHot  = logoColorsAll[PALETTE_HOT];
+static uint32_t* const logoColorsPink = logoColorsAll[PALETTE_PINK];
+#endif
+static uint32_t* const logoColors = logoColorsAll[PALETTE_RAINBOW];
 
 uint8_t eightSelectHues[LOGO_COLOR_LENGTH + 11] = {
     195, 191, 187, 183, 179, 175, 171, 168, 166, 164, 162, 160, 158, 156, 153,
@@ -2625,8 +2622,12 @@ void generateLogoPalette(uint32_t* dest, uint8_t baseHue, int paletteIndex, floa
     tempRGB = HsvToRgb(hsv);
     
     uint32_t color = packRgb(tempRGB.r / 8, tempRGB.g / 8, tempRGB.b / 8);
-    dest[i] = color;
-    dest[LOGO_COLOR_LENGTH - i] = color;
+    // dest may be null (palette lives only in logoColorsAll) or alias the
+    // logoColorsAll row itself (V5's cold/hot/pink) - both are fine.
+    if (dest != nullptr) {
+      dest[i] = color;
+      dest[LOGO_COLOR_LENGTH - i] = color;
+    }
     
     if (paletteIndex >= 0 && paletteIndex < LOGO_PALETTE_COUNT) {
       logoColorsAll[paletteIndex][i] = color;
@@ -2670,8 +2671,10 @@ static void generateWhitePalette(uint32_t* dest, int paletteIndex) {
     tempRGB = HsvToRgb(hsv);
     
     uint32_t color = packRgb(tempRGB.r / 8, tempRGB.g / 8, tempRGB.b / 8);
-    dest[i] = color;
-    dest[LOGO_COLOR_LENGTH - i] = color;
+    if (dest != nullptr) {
+      dest[i] = color;
+      dest[LOGO_COLOR_LENGTH - i] = color;
+    }
     
     if (paletteIndex >= 0 && paletteIndex < LOGO_PALETTE_COUNT) {
       logoColorsAll[paletteIndex][i] = color;
@@ -2697,15 +2700,18 @@ void setupSwirlColors(void) {
   generateLogoPalette(logoColorsCold,       HUE_COLD,       PALETTE_COLD);
   generateLogoPalette(logoColorsHot,        HUE_HOT,        PALETTE_HOT);
   generateLogoPalette(logoColorsPink,       HUE_PINK,       PALETTE_PINK);
-  generateLogoPalette(logoColorsYellow,     HUE_YELLOW,     PALETTE_YELLOW);
-  generateLogoPalette(logoColorsGreen,      HUE_GREEN,      PALETTE_GREEN);
-  generateLogoPalette(logoColorsOrange,     HUE_ORANGE,     PALETTE_ORANGE);
-  generateLogoPalette(logoColorsTurquoise,  HUE_TURQUOISE,  PALETTE_TURQUOISE);
-  generateLogoPalette(logoColorsChartreuse, HUE_CHARTREUSE, PALETTE_CHARTREUSE);
-  generateLogoPalette(logoColorsPurple,     HUE_PURPLE,     PALETTE_PURPLE);
+  // These palettes are only ever read through logoColorsAll (V5); no
+  // standalone copies. On the OG the guarded master write is skipped and
+  // they simply don't exist - nothing there reads them.
+  generateLogoPalette(nullptr,              HUE_YELLOW,     PALETTE_YELLOW);
+  generateLogoPalette(nullptr,              HUE_GREEN,      PALETTE_GREEN);
+  generateLogoPalette(nullptr,              HUE_ORANGE,     PALETTE_ORANGE);
+  generateLogoPalette(nullptr,              HUE_TURQUOISE,  PALETTE_TURQUOISE);
+  generateLogoPalette(nullptr,              HUE_CHARTREUSE, PALETTE_CHARTREUSE);
+  generateLogoPalette(nullptr,              HUE_PURPLE,     PALETTE_PURPLE);
   
   // White palette uses special low-saturation generation
-  generateWhitePalette(logoColorsWhite, PALETTE_WHITE);
+  generateWhitePalette(nullptr, PALETTE_WHITE);
 
   // Generate the rainbow palette (full spectrum)
   for (int i = 0; i <= LOGO_COLOR_LENGTH + 10; i++) {
@@ -2716,9 +2722,9 @@ void setupSwirlColors(void) {
     rgbColor connectRGB = HsvToRgb(connectHSV);
     logoColorsRGB[i] = connectRGB;
 
-    logoColors[i] = packRgb(logoColorsRGB[i].r / 8, logoColorsRGB[i].g / 8,
-                            logoColorsRGB[i].b / 8);
-    logoColorsAll[PALETTE_RAINBOW][i] = logoColors[i];
+    // logoColors is an alias of this row on both boards (see definitions above)
+    logoColorsAll[PALETTE_RAINBOW][i] = packRgb(
+        logoColorsRGB[i].r / 8, logoColorsRGB[i].g / 8, logoColorsRGB[i].b / 8);
     
     // Generate 8V select palette (special reversed hue sequence)
     connectHSV.h = eightSelectHues[i];

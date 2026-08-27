@@ -172,7 +172,7 @@ static bool chipHadConnections[12] = {false};
 #define CH446Q_CS_FIRST_GPIO 28
 #define CH446Q_CS_PIN_MASK (0xFFFull << CH446Q_CS_FIRST_GPIO)
 
-#define CH446Q_DMA_MAX_WORDS 1024   // 128 paths x 4 hops = 512 + the chip-K safety clears; max seen 73 per send. (Was 2048: 5 KB of SRAM given back for the heap, 2026-08-18 - a full collect flushes and continues anyway.)
+#define CH446Q_DMA_MAX_WORDS 512   // max seen 73 per send; a full collect flushes mid-list and continues (wire order preserved, see the cap-hit branch in sendXYrawUnchecked), so even the theoretical 128-paths-x-4-hops + safety-clears storm just costs one extra flush. (2048 -> 1024 on 2026-08-18, -> 512 in the RAM reclamation pass: 2.5 KB more for the heap.)
 static uint32_t dmaWords[CH446Q_DMA_MAX_WORDS];  // PIO TX words (address byte << 24 | cs mask | LAST)
 static uint8_t  dmaCs[CH446Q_DMA_MAX_WORDS];     // chip per word (the legacy ISR's strobe list)
 static volatile uint32_t dmaCount = 0;   // words in the send in flight
@@ -223,7 +223,19 @@ void ch446qDmaStats(uint32_t* sends, uint32_t* words, uint32_t* stalls, uint32_t
 // The end of a list send, whichever path did it: complete the mailbox request
 // the caller registered (if any) and stamp the latency probe. Called from the
 // ISR (DMA path) or from sendPaths() (CPU path / nothing to send).
+static volatile bool dmaPartialFlush = false;  // a cap-hit mid-list kick: the
+                                               // buffer empties but the SEND
+                                               // is not over - suppress the
+                                               // completion side effects
+
 static void __not_in_flash_func(ch446qSendComplete)(void) {
+  if (dmaPartialFlush) return;  // the rest of the list is still to come -
+                                // releasing the mailbox requester here let
+                                // core 0 read "crossbar matches the netlist"
+                                // with half the crosspoints unsent (review
+                                // finding), and xbarLatSendDone latches, so
+                                // an early stamp also recorded a bogus
+                                // short latency
   int slot = reqSlotPending;
   if (slot >= 0) {
     reqSlotPending = -1;
@@ -1657,10 +1669,13 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
     // token, possibly held by a core-0 caller.)
     if (dmaCount >= CH446Q_DMA_MAX_WORDS) {
       dmaCollect = false;
+      dmaPartialFlush = true;   // this kick only EMPTIES the buffer - the
+                                // completion belongs to the final kick
       ch446qDmaKick();
       unsigned long t0 = micros();
       while (dmaActive && micros() - t0 < 300000) { tight_loop_contents(); }
       if (dmaActive) ch446qDmaAbort();
+      dmaPartialFlush = false;
       dmaCount = 0;
       dmaCollect = true;
     }

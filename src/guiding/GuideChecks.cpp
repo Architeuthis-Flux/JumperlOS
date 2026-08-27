@@ -2701,6 +2701,10 @@ void guideCheckAbort(void) {
     cancelOneShotTap();
 }
 
+bool guideCheckUsesScript(const GuideScript* script) {
+    return ck.active && ck.script == script;
+}
+
 #else // OG_JUMPERLESS ---------------------------------------------------------
 
 // The OG has no NVSCAN fabric, no INA sense chain on the crossbar, and no
@@ -2721,5 +2725,7 @@ const char* guideCheckHint(void) {
 const char* guideCheckDetail(void) { return ""; }
 
 void guideCheckAbort(void) {}
+
+bool guideCheckUsesScript(const GuideScript*) { return false; }
 
 #endif // OG_JUMPERLESS

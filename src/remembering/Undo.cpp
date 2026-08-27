@@ -361,7 +361,12 @@ bool blobAppendCurrentState(uint32_t* outOffset, uint32_t* outSize) {
 // log even if the caller forgot to set g_undoApplying. The caller (undoUndo /
 // undoRedo) pushes the result to hardware via undoCommitToHardware().
 bool blobRestoreState(uint32_t offset, uint32_t size) {
-    (void)size;
+    // size 0 = the op was recorded WITHOUT a blob (the append failed at
+    // record time). Offset 0 is also a real arena slot, so validating
+    // whatever header happens to sit there passed magic+CRC on a STALE
+    // earlier blob and silently replaced the user's board with an older
+    // one (review finding). No blob, no restore - fail loudly instead.
+    if (size == 0) return false;
     if (!g_blobs || (size_t)offset + sizeof(BlobHeader) > g_blobCap) return false;
     BlobHeader* hdr = (BlobHeader*)(g_blobs + offset);
     if (hdr->magic != BLOB_MAGIC) {
@@ -529,6 +534,13 @@ void revertOp(const UndoOp& op) {
             if (!blobRestoreState(op.blob.blobOffset, op.blob.blobSize)) {
                 UNDBG("revert CLEAR_ALL: blob restore failed at off=%u",
                       (unsigned)op.blob.blobOffset);
+                // the user pressed undo and nothing came back - say so
+                // (blobSize 0 = the board was too big to snapshot when the
+                // clear-all was recorded)
+                Serial.println(op.blob.blobSize == 0
+                    ? "\r\n[Undo] clear-all can't be undone: the board was too"
+                      " large to snapshot when it was cleared"
+                    : "\r\n[Undo] clear-all restore failed (snapshot damaged)");
             }
             break;
         case UNDO_OP_GPIO_SET:
@@ -1635,9 +1647,18 @@ void undoInit(void) {
         g_txnCap = 4096;
         g_blobCap = 256 * 1024;
     } else {
-        g_opCap = 512;
-        g_txnCap = 128;
-        g_blobCap = 4 * 1024;
+        // Ops/txns halved in the RAM reclamation pass (was 512/128): history
+        // is shallower, and every ring is a power of two as the wrap math
+        // requires. Blobs are 8 KB, NOT the pass's 2 KB: a clear-all blob is
+        // a full toYAML capture, and with parts placed that is ~4.7 KB on
+        // the reference bench (8 parts) - at 2 KB the append aborted every
+        // time and undo-of-clear-all silently restored nothing. 8 KB holds
+        // one parts-bearing board comfortably; a bridge-maxed 16-part board
+        // can still exceed it, and then the clear-all op records no blob
+        // and its undo refuses loudly (blobRestoreState size==0).
+        g_opCap = 256;
+        g_txnCap = 64;
+        g_blobCap = 8 * 1024;
     }
 
     // Persistence limits. With PSRAM we keep a deep history; without it the

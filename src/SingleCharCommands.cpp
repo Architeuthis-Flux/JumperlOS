@@ -884,7 +884,11 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
 
         // One synthesized step for the bare-part form; the step form reads
         // the viewer's table (and its script's power: for rail_sane).
-        static GuideScript bareScript;   // zeroed each use; hasPower=false
+        // Heap, not static: a zeroed GuideScript is ~7.8 KB and was a second
+        // permanent copy of the viewer's table. calloc'd for the bounded life
+        // of this command (checks are rare and user-paced), freed on every
+        // exit after the poll loop.
+        GuideScript* bareScript = nullptr;   // bare-part form only; hasPower=false
         GuideStep oneStep;
         const GuideStep* step = nullptr;
         const GuideScript* script = nullptr;
@@ -926,9 +930,13 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
                                 "default check for type '" + String( p.typeStr ) + "'\"" );
                 return CMD_DONT_SHOW_MENU;
             }
-            memset( &bareScript, 0, sizeof( bareScript ) );
+            bareScript = (GuideScript*)calloc( 1, sizeof( GuideScript ) );
+            if ( bareScript == nullptr ) {
+                Jerial.println( "CHECK error out of memory for check scratch" );
+                return CMD_DONT_SHOW_MENU;
+            }
             step = &oneStep;
-            script = &bareScript;
+            script = bareScript;
             label = String( p.name );
         }
 
@@ -954,6 +962,7 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
                 guideCheckAbort( );
                 Jerial.println( "CHECK part=" + label +
                                 " result=timeout val=timeout" );
+                free( bareScript );
                 return CMD_DONT_SHOW_MENU;
             }
             delayMicroseconds( 200 );
@@ -973,6 +982,15 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
             lineOut += " hint=\"" + String( hint ) + "\"";
         Jerial.println( lineOut );
         Jerial.flush( );
+        // The check is finished, but finishCheck leaves ck.script pointing
+        // at this allocation (and ck.active true) - abort before freeing so
+        // nothing in GuideChecks can ever dereference freed heap, and so
+        // guideCheckUsesScript() stops answering for a dead script. (The
+        // timeout path above already does this; with the old file-static
+        // buffer a dangling ck.script was impossible - the heap move made
+        // the invariant real.)
+        if ( guideCheckUsesScript( bareScript ) ) guideCheckAbort( );
+        free( bareScript );
         return CMD_DONT_SHOW_MENU;
     }
 

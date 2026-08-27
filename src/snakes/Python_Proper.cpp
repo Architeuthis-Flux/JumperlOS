@@ -966,6 +966,10 @@ bool initMicroPythonProper(Stream *stream, bool preserve_interrupt_char) {
   return true;
 }
 
+// The MP bridge's per-call scratch buffers (fs_read / get_all_paths /
+// overlay_serialize) live at most as long as the VM - released here.
+extern "C" void jl_bridge_free_scratches(void);
+
 void deinitMicroPythonProper(void) {
   if (mp_initialized) {
     global_mp_stream->println("[MP] Deinitializing MicroPython...");
@@ -981,6 +985,7 @@ void deinitMicroPythonProper(void) {
     oledGuiShutdownTransient();
     
     mp_embed_deinit();
+    jl_bridge_free_scratches();
     mp_initialized = false;
     mp_repl_active = false;
     jumperless_globals_loaded = false;  // Reset globals flag

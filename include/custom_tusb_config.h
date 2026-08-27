@@ -161,8 +161,16 @@ extern "C" {
 #define CFG_TUD_CDC_RX_BUFSIZE 128
 #define CFG_TUD_CDC_TX_BUFSIZE 128
 #else
-#define CFG_TUD_CDC_RX_BUFSIZE 1024   // Keep RX buffer reasonable
-#define CFG_TUD_CDC_TX_BUFSIZE 1024  // Larger TX buffer for streaming - double the previous size
+// V5 (RP2350): 1024/1024. The RAM reclamation pass tried 512/512 (the PHY is
+// full-speed, so 512 B is still 8 bulk packets of headroom; would save 4 KB
+// of _cdcd_itf) but the bench unit dropped off USB entirely minutes after
+// boot with that build - cores running normally, host seeing no device.
+// Unproven whether that was the FIFO size or this erratta board's flaky USB
+// (it also died mid-UF2-copy under the OLD firmware the same day), but a
+// USB-stability confound isn't worth 4 KB. Re-attempt only with a known-good
+// board and a soak test.
+#define CFG_TUD_CDC_RX_BUFSIZE 1024
+#define CFG_TUD_CDC_TX_BUFSIZE 1024
 #endif
 
 // STREAMING PERFORMANCE OPTIMIZATIONS

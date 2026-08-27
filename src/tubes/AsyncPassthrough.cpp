@@ -351,7 +351,11 @@ static volatile bool s_resync_requested = false;
 #if defined(OG_JUMPERLESS)
 #define UART_RX_RING_BITS 11                 // 2^11 = 2048 bytes
 #else
-#define UART_RX_RING_BITS 13                 // 2^13 = 8192 bytes
+// 2^12 = 4096 bytes (was 13 / 8 KB). At 115200 baud the UART delivers
+// ~11.5 KB/s and task() drains >=256 B per call, so 4 KB is ~350 ms of
+// consumer slack. uartReceivedOverflowCount (X panel / printUARTStats) now
+// actually counts laps, so a regression here is visible, not silent.
+#define UART_RX_RING_BITS 12
 #endif
 uint8_t uartReceived[ 1u << UART_RX_RING_BITS ]
     __attribute__( ( aligned( 1u << UART_RX_RING_BITS ) ) );
@@ -453,6 +457,18 @@ static char s_last_usb_to_uart_buf[LAST_DATA_SNAPSHOT_SIZE];
 static uint8_t s_last_usb_to_uart_head = 0; // next write index (task context)
 static uint8_t s_last_usb_to_uart_len = 0;  // number of valid bytes
 
+// write_addr snapshot for the overflow witness in rx_dma_sync_head().
+// NOT trans_count: on the RP2350, arming with 0xFFFFFFFF sets
+// TRANS_COUNT.MODE = 0xF = ENDLESS (the SDK's own
+// dma_encode_endless_transfer_count()), where the count never decrements -
+// so a trans_count delta is identically zero and the witness could never
+// fire (review finding). The write pointer advances per byte on both the
+// RP2350 and the RP2040, so its masked delta is the arrival count modulo
+// the ring size. An exact whole-lap alias (N*4096 bytes between two syncs
+// landing on the same masked address) reads as its remainder - the witness
+// can undercount extreme laps, but it can no longer miss every one.
+static volatile uint32_t s_rx_dma_last_wa = 0;
+
 // Refresh uartReceivedHead from the live RX-DMA write pointer. The DMA writes
 // the ring with zero CPU; this is how the consumer "sees" newly arrived bytes.
 static inline void rx_dma_sync_head( void ) {
@@ -462,7 +478,15 @@ static inline void rx_dma_sync_head( void ) {
         setupRxDma();
         return;
     }
+    // Overflow witness: if more bytes arrived since the last sync than the
+    // ring had free, the DMA overwrote unconsumed data. Count it (once per
+    // detection, not per byte) so the stats dumps report real laps.
     uint32_t wa = dma_hw->ch[ s_rx_dma_chan ].write_addr;
+    uint16_t arrived = (uint16_t)( ( wa - s_rx_dma_last_wa ) & UART_RECEIVED_MASK );
+    s_rx_dma_last_wa = wa;
+    uint16_t freeBytes = (uint16_t)( ( uartReceivedTail - uartReceivedHead - 1 ) & UART_RECEIVED_MASK );
+    if ( arrived > freeBytes ) uartReceivedOverflowCount++;
+
     uartReceivedHead =
         (uint16_t)( ( wa - (uint32_t)(uintptr_t)uartReceived ) & UART_RECEIVED_MASK );
 }
@@ -563,6 +587,8 @@ static void setupRxDma( void ) {
     channel_config_set_high_priority( &c, true );
 
     uartReceivedTail = 0;
+    // reset the overflow witness's baseline to where the DMA starts writing
+    s_rx_dma_last_wa = (uint32_t)(uintptr_t)uartReceived;
     dma_channel_configure(
         s_rx_dma_chan, &c,
         uartReceived,                                          // write: ring (aligned)

@@ -315,6 +315,9 @@ bool animationsEnabled = true;
 specialRowAnimation rowAnimations[ROW_ANIMATION_COUNT];
 volatile int doomOn = 0;
 
+// The one current-sense overlay instance (declared extern in Graphics.h).
+CurrentSenseOverlayState currentSenseOverlayState;
+
 int wireStatus[64][5]; // row, led (net stored)
 //char defconString[16] = " Fuck    You   ";
 char defconString[16] = "Jumper less V5 ";
@@ -2878,7 +2881,7 @@ void __not_in_flash_func(showRowAnimation)(int net) {
     return;
   }
 
-  if (assignedAnimations[net] < 0 || assignedAnimations[net] >= 50) {
+  if (assignedAnimations[net] < 0 || assignedAnimations[net] >= ROW_ANIMATION_COUNT) {
     return;
   }
 
