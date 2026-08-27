@@ -225,3 +225,58 @@ a measure tap at the send level.
 
 **Also in this round:** Kevin's single-site X-macro config system + TUI
 (config.h/configManager/Tui), VERSION -> 5.8.0.
+
+---
+
+## Day-2 evening: the part-identification round (Kevin's 16:37 brief)
+
+Rulings taken before he left: bench all mine (parts stay placed), stimulus
+my judgment, can't-identify -> place with warning, scope = BJT 3-tap ID +
+2-pin polarity + part health test + DIP-stays-anchor + web research + a
+future Parts > Auto whole-board scan; show measured values (hFE, Vf, R,
+I2C addresses). Release tagged **5.8.0** at 313f52e (not pushed).
+
+**Landed (4 commits, 88e1456..4f15e9d, all bench-verified where hardware
+allows):**
+- `src/sensing/PartMeasure.*` + `PartClassify.*` (Layers 0+1 of
+  DESIGN_PART_ID_FOLLOWUP, which §15 now amends with the measured facts) +
+  `part_identify()` MP binding. The 2N3906 identifies BJT_PNP roles E/B/C
+  in ALL tap orders, conf 0.90, Vbe 0.62V, hFE ~350, ~1.5s; empty rows
+  EMPTY; guarded refusals for user-wired rows (-3), a user-wired
+  measurement path (-6), and fabric-refused legs (-7).
+- Parts placement: any-order taps for transistors and 2-lead discretes,
+  identification permutes the rows into DB pin order; the tap prompt
+  accepts on lift-then-touch (fixcheck #2 closed: no parked self-accept,
+  no swallowed fast taps), per-signal rainbow, ignored taps flash and say
+  why; can't-verify -> sorted-taps placement + a new pins_unverified warn
+  column (RAM-only flag, measuredOhms rules).
+- Parts > Place/Test menu children; Test re-measures a placed part in
+  place (hFE/Vbe, Vf + LED color guess, ohms into measuredOhms), clears
+  the warning when roles match the placement, refuses wired parts gently.
+- CodeDocs/REF_COMPONENT_TESTER_RESEARCH.md: the Kübbeler-tester +
+  I2C-scan + auto-scan research brief (thresholds read from the shipping
+  C source; implementation stayed clean-room per §13).
+
+**Needs Kevin's hands (the probe can't be simulated - HANDOFF ambient-parts
+:76-80):** the whole tap flow end to end - any-order 2N3906 placement, the
+rainbow, parked-probe/fast-tap feel, Parts > Test on his placed parts.
+
+**Watch-items surfaced tonight:**
+- The board dropped off USB once BEFORE any stimulus ran (recovered by SWD
+  reset; cause unknown; second-ever occurrence would make it a hunt).
+- The active context flipped from slot 3 to the i2cscrn project run at
+  least twice this evening without an explicit load (suspect: the
+  breadboard display's beacon path auto-opening its project when the
+  panel's lanes reappear). Slot 3's file also got rewritten to a
+  DISP-only state once. Kevin's full pre-session state was snapshot and
+  is restored (fingerprint-verified) - but the flip mechanism deserves
+  eyes: an unattended board should never move its own context.
+- SWD bench hygiene (now in DESIGN_PART_ID_FOLLOWUP §15): a week-old
+  zombie openocd held the debug probe and corrupted flash READBACK;
+  phantom verify failures + sticky AP faults followed. Kill stale
+  openocds first; the rescue cfg parks the chip somewhere the standard
+  cfg can't examine - a watchdog TRIGGER via the working core's AP is
+  the way back.
+- Auto Scan deliberately NOT stubbed into the menu: the row census
+  (charge/decay poke, REF research §8) is the prerequisite for a
+  magic-feel sub-15s scan; landing it half-slow would betray the point.
