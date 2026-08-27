@@ -1827,10 +1827,11 @@ static bool pickedLineContains( int level, const char* needle ) {
 int selectSubmenuOption( int menuPosition, int menuLevel ) {
 
     int railMenu = 0;
-    // 2 detents per option step at ~4 raw quadrature counts per physical
-    // detent — the option carousel consumes encoderDirectionState, whose
-    // pacing is exactly rotaryDivider raw counts per UP/DOWN. One-detent
-    // stepping (divider 4) made the short option lists feel hair-trigger.
+    // One option step per physical detent (8 raw quadrature counts) — the
+    // option carousel consumes encoderDirectionState, whose pacing is
+    // exactly rotaryDivider raw counts per UP/DOWN. The old divider of 4
+    // stepped twice per detent, which made the short option lists feel
+    // hair-trigger.
     rotaryDivider = 8;
     delayMicroseconds( 3000 );
     int optionSelected = -1;
@@ -2888,7 +2889,11 @@ float getActionFloat( int menuPosition, int rail ) {
     int snap = 0; //! make this a config variable
 
     char floatString[ 8 ] = "0.0";
-    rotaryDivider = 3;
+    // No rotaryDivider override here: this screen reads raw encoderPosition
+    // deltas (see the acceleration block below), which the divider does NOT
+    // pace. The old `rotaryDivider = 3` did nothing for this screen and was
+    // never restored, so it leaked 3 to every event-consuming surface entered
+    // afterwards - one detent became 2-3 steps ("2 clicks in a half detent").
     // b.clear( 1 );
     int firstTime = 1;
     int snapToValue = 0;
@@ -5813,10 +5818,13 @@ void runHistoryScrubMenu( void ) {
     // (encoderDirectionState UP/DOWN) so this screen gets the same
     // phase-independent detent hysteresis as the top-level menu instead of
     // re-deriving steps from the raw count. rotaryDivider sets sensitivity:
-    // ~12 raw counts per step ≈ 3 detents on the V5 encoder (which yields
-    // ~4 quad counts per detent). Restored on exit in the cleanup below.
+    // 16 raw counts per step = exactly 2 physical detents (8 counts each) -
+    // deliberately slower than menu nav, and a whole-detent multiple so
+    // every step lands ON a detent click. (The old 12 assumed ~4 counts per
+    // detent - actually 1.5 detents, so steps alternated between firing at
+    // the notch and at the half-detent cam peak.) Restored on exit below.
     int lastDivider = rotaryDivider;
-    rotaryDivider = 12;
+    rotaryDivider = 16;
 
     Menus::getInstance( ).inClickMenu = 1;
     g_historyScrubActive = true;     // tell Core 2 to keep painting nets

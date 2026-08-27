@@ -66,7 +66,12 @@ public:
     // Public methods
     void clearHighlighting(int updateLEDs = 0);
     void resetReadingState(void);
-    int encoderNetHighlight(int print = 1, int mode = 1, int divider = 4);
+    // divider default 8 = one step per physical detent (8 raw quadrature
+    // counts). The old default of 4 made the main screen's row/net scroller
+    // step TWICE per detent - the second event fired at the half-detent cam
+    // peak (same bug clickMenu fixed in Menus.cpp, "old value of 4 was 2
+    // menu items per detent").
+    int encoderNetHighlight(int print = 1, int mode = 1, int divider = 8);
     int brightenNet(int node, int addBrightness = 5);
     int warnNet(int node);
     void warnNetTimeout(int clearAll = 1);
@@ -114,7 +119,7 @@ inline void clearHighlighting(int updateLEDs = 01) {
     Highlighting::getInstance().clearHighlighting(updateLEDs);
 }
 
-inline int encoderNetHighlight(int print = 1, int mode = 1, int divider = 4) {
+inline int encoderNetHighlight(int print = 1, int mode = 1, int divider = 8) {
     return Highlighting::getInstance().encoderNetHighlight(print, mode, divider);
 }
 
