@@ -790,6 +790,149 @@ static bool partsClearAll(void) {
     return true;
 }
 
+// Parts > Remove (Kevin's ask, 2026-08-27): tap ANY leg of a placed part to
+// remove that part - record, bridges, auto net names, all of it (the same
+// canonical single remove MicroPython's remove_part() uses). Repeats until
+// hold/click (done) or a serial byte (exit); a typed row number + enter
+// works without the probe (the placement convention).
+int jl_remove_part(const char* name);   // JumperlessMicroPythonAPI.cpp
+static void partsRemoveByTap(void) {
+    JumperlessState& st = globalState;
+    bool armed = false;
+    bool liftHinted = false;
+    unsigned long openMs = millis();
+    unsigned long lastEmitMs = 0;
+    char digits[4] = "";
+    int nDigits = 0;
+    auto prompt = [&](void) {
+        if (oled.oledConnected) {
+            char t[64];
+            snprintf(t, sizeof(t), "tap a part to remove\n%d placed  (hold = done)",
+                     (int)st.parts.numParts);
+            oled.resetMultiLineSmallText();
+            oled.showMultiLineSmallText(t);
+        }
+        Serial.print("\r\nPARTS remove prompt n=");
+        Serial.println((int)st.parts.numParts);
+        Serial.flush();
+    };
+    prompt();
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    while (st.parts.numParts > 0) {
+        jOS.serviceInner();
+        rotaryEncoderButtonStuff();
+        if (encoderButtonState == HELD ||
+            (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
+            while (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+                   encoderButtonState == LONG_HELD) {
+                jOS.serviceInner();
+                rotaryEncoderButtonStuff();
+                delayMicroseconds(1000);
+            }
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            return;
+        }
+
+        int row = -1;
+        while (Jerial.available() > 0) {
+            char c = (char)Jerial.read();
+            if (c >= '0' && c <= '9' && nDigits < 2) {
+                digits[nDigits++] = c;
+                digits[nDigits] = '\0';
+            } else if ((c == '\r' || c == '\n') && nDigits > 0) {
+                row = atoi(digits);
+                nDigits = 0;
+                digits[0] = '\0';
+                if (row < 1 || row > 60) {
+                    Serial.println("  row must be 1-60");
+                    row = -1;
+                }
+            } else if (c != '\r' && c != '\n') {
+                return;   // any other serial byte = exit (picker convention)
+            }
+        }
+
+        if (row < 0) {
+            // the placement flow's tap discipline: one accepted reading IS
+            // the tap; a lift re-arms (partsTapForRow's contract, verbatim)
+            int reading = probing.justReadProbe(true);
+            if (reading >= 1 && reading <= 60) {
+                bool wasArmed = armed;
+                lastEmitMs = millis();
+                armed = false;
+                if (wasArmed) {
+                    row = reading;
+                } else if (!liftHinted) {
+                    liftHinted = true;
+                    Serial.println("  (lift the probe, then tap the part)");
+                }
+            }
+            if (!armed) {
+                if (lastEmitMs == 0) {
+                    if (millis() - openMs >= 80) armed = true;   // opened in the air
+                } else if (millis() - lastEmitMs >= 700) {
+                    armed = true;                                 // really lifted
+                }
+            }
+        }
+        if (row < 0) {
+            delayMicroseconds(1000);
+            continue;
+        }
+
+        int idx = -1;
+        for (int i = 0; i < st.parts.numParts && i < MAX_PARTS && idx < 0; i++) {
+            const PartDefinition& p = st.parts.parts[i];
+            if (!p.placed) continue;
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++)
+                if (partPinNode(p, p.pins[j]) == row) { idx = i; break; }
+        }
+        if (idx < 0) {
+            b.lightUpNode(row, PARTS_TAP_IGNORED_COLOR);
+            requestLedShow(2);
+            Serial.print("  no part on row ");
+            Serial.println(row);
+            continue;
+        }
+
+        char name[16];
+        snprintf(name, sizeof(name), "%s", st.parts.parts[idx].name);
+        {
+            // the whole part flashes goodbye before it goes
+            const PartDefinition& p = st.parts.parts[idx];
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                if (node >= 1 && node <= 60)
+                    b.lightUpNode(node, PARTS_TAP_IGNORED_COLOR);
+            }
+            requestLedShow(2);
+            delay(180);
+        }
+        if (jl_remove_part(name) == 0) {
+            partLabels.requestRun();
+            Serial.print("\r\nPARTDB remove ok=");
+            Serial.print(name);
+            Serial.print(" row=");
+            Serial.println(row);
+            if (oled.oledConnected) {
+                char t[48];
+                snprintf(t, sizeof(t), "removed\n%s", name);
+                oled.clearPrintShow(t, 2, true, true, true);
+                delay(600);
+            }
+        }
+        b.clear();
+        requestLedShow(-1);
+        prompt();
+    }
+    if (oled.oledConnected)
+        oled.clearPrintShow("no parts\nleft", 2, true, true, true);
+    delay(600);
+}
+
 void partsAppLauncher(void) {
     // Own the render mode for the whole session (menus render one item at a
     // time; core 1 suppresses net paint while inClickMenu). runPicker's
@@ -803,7 +946,7 @@ void partsAppLauncher(void) {
         // Class level: only classes that actually hold placeable records,
         // plus a trailing Clear row while any part is on the table.
         int nClasses = 0;
-        static uint8_t classOf[PARTDB_NUM_CLASSES + 1];
+        static uint8_t classOf[PARTDB_NUM_CLASSES + 2];
         for (int i = 0; i < kNumPartClasses; i++) {
             if (!partsClassHasPlaceable(kPartClasses[i].cls)) continue;
             s_led[nClasses] = kPartClasses[i].led;
@@ -812,8 +955,15 @@ void partsAppLauncher(void) {
             classOf[nClasses] = kPartClasses[i].cls;
             nClasses++;
         }
+        int removeIdx = -1;
         int clearIdx = -1;
         if (globalState.parts.numParts > 0) {
+            removeIdx = nClasses;
+            s_led[nClasses] = "Rmv";
+            s_title[nClasses] = "Remove a part";
+            s_desc[nClasses] = "tap any leg of a part";
+            classOf[nClasses] = 0xFE;
+            nClasses++;
             clearIdx = nClasses;
             s_led[nClasses] = "Clear";
             s_title[nClasses] = "Clear parts";
@@ -824,6 +974,11 @@ void partsAppLauncher(void) {
         int pick = partsPicker("class", "Parts", nClasses, classIdx);
         if (pick < 0) break;   // hold or serial byte at the top level = exit
         classIdx = pick;
+        if (pick == removeIdx && removeIdx >= 0) {
+            partsRemoveByTap();
+            if (globalState.parts.numParts <= 0) classIdx = 0;
+            continue;                     // back to the class list
+        }
         if (pick == clearIdx) {
             if (partsClearAll()) break;   // cleared: exit, board is ambient
             continue;                     // declined: back to the class list
@@ -1645,6 +1800,15 @@ void partsAutoLauncher(void) {
     static float v0[61], v1[61];
     s_scanVizFlags = flags;
     int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck, partsScanViz);
+    if (found == -6) {
+        Serial.println("PARTSCAN no clean measurement lane - every free ADC"
+                       " reads driven (unwire the ADCs, or unpower whatever"
+                       " feeds them) - scan aborted");
+        if (oled.oledConnected)
+            oled.clearPrintShow("no clean ADC lane\nfor scanning", 2, true, true, true);
+        delay(1200);
+        goto adone;
+    }
     if (found < 0) {
         Serial.println("PARTSCAN auto busy - try again in a moment");
         if (oled.oledConnected)
@@ -1655,6 +1819,29 @@ void partsAutoLauncher(void) {
     if (partsAutoAborted) {
         Serial.println("PARTSCAN auto aborted");
         goto adone;
+    }
+    {
+        // Plausibility: most of the free board "holding charge" is not
+        // parts, it is POWER (45 legs unwired at once would be 15 loose
+        // transistors). Say so instead of clustering phantoms into chips
+        // (bench, 2026-08-27: a fed lane did exactly that).
+        int pokeable = 0;
+        for (int r = 1; r <= 60; r++)
+            if (flags[r] == 0 || flags[r] == 1) pokeable++;
+        if (found > 8 && pokeable > 0 && found * 10 >= pokeable * 7) {
+            Serial.print("\r\nPARTSCAN implausible: ");
+            Serial.print(found);
+            Serial.print(" of ");
+            Serial.print(pokeable);
+            Serial.println(" free rows read charged - that is power, not"
+                           " parts (something is feeding the matrix) - fix"
+                           " it and rescan");
+            if (oled.oledConnected)
+                oled.clearPrintShow("board reads powered\nscan can't see parts",
+                                    2, true, true, true);
+            partsWaitForPress();
+            goto adone;
+        }
     }
     {
         // second pass: isolated junction parts are invisible to the poke
@@ -1887,8 +2074,104 @@ void partsAutoLauncher(void) {
                     snprintf(line, sizeof(line), "rows %d-%d: something (unclear)", a, z);
                 }
             } else {
-                snprintf(line, sizeof(line), "rows %d-%d: %d legs (a chip?)", a, z, width);
-                for (int r = a; r <= z; r++) {
+                // NEXT-LAYER CHECKS (Kevin's ask: a wide span must EARN "one
+                // chip"). First, is it even a part? One 2-row identify says:
+                // its powered guard refuses (-4) when the rows are FED - and
+                // fed rows are power, not a component. Then, for spans small
+                // enough to walk, adjacent hit pairs get real identifies -
+                // two 2-leg parts side by side are NOT a 4-leg chip, and
+                // each discrete found splits out of the span. Chip pins
+                // read EMPTY between themselves and stay pooled.
+                Serial.print("  interrogating rows ");
+                Serial.print(a);
+                Serial.print("-");
+                Serial.print(z);
+                Serial.println("...");
+                Serial.flush();
+                if (oled.oledConnected) {
+                    char t[48];
+                    snprintf(t, sizeof(t), "rows %d-%d:\nchecking...", a, z);
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText(t);
+                }
+                bool poweredSpan = false;
+                int nSplit = 0, legsLeft = width;
+                bool consumed[61] = {false};
+                if (!partsAutoAbortCheck()) {
+                    int r = a;
+                    while (r < z && !partsAutoAborted) {
+                        bool rHit = (flags[r] == 1 || flags[r] == 5);
+                        bool nHit = (flags[r + 1] == 1 || flags[r + 1] == 5);
+                        if (!rHit || consumed[r] || !nHit || consumed[r + 1]) {
+                            r++;
+                            continue;
+                        }
+                        PartResult pres = identifyTwoLead(r, r + 1);
+                        if (pres.status == -4) {
+                            poweredSpan = true;
+                            break;
+                        }
+                        bool discrete =
+                            pres.status == 0 &&
+                            (pres.type == PartType::RESISTOR ||
+                             pres.type == PartType::DIODE ||
+                             pres.type == PartType::ZENER ||
+                             pres.type == PartType::LED ||
+                             pres.type == PartType::CAPACITOR ||
+                             pres.type == PartType::SHORT_CIRCUIT);
+                        if (discrete) {
+                            consumed[r] = consumed[r + 1] = true;
+                            nSplit++;
+                            legsLeft -= 2;
+                            char detail[24] = "";
+                            if (pres.type == PartType::RESISTOR)
+                                formatOhms(pres.value, detail, sizeof(detail));
+                            else if (pres.value != 0.0f)
+                                snprintf(detail, sizeof(detail), "%.2fV",
+                                         (double)pres.value);
+                            Serial.print("\r\n  rows ");
+                            Serial.print(r);
+                            Serial.print("-");
+                            Serial.print(r + 1);
+                            Serial.print(": ");
+                            Serial.print(partTypeName(pres.type));
+                            Serial.print(" ");
+                            Serial.print(detail);
+                            Serial.println(" (split from the span)");
+                            for (int t = 0; t < pres.nRows; t++) {
+                                uint32_t c =
+                                    (pres.roles[t] == PinRole::A) ? PARTS_ROLE_A_COLOR
+                                    : (pres.roles[t] == PinRole::K) ? PARTS_ROLE_K_COLOR
+                                    : partsTapHue(sp + nSplit, nSpans + 2, false);
+                                int pr = nodeToPrintRow((int)pres.rows[t]);
+                                if (pr >= 0) b.printRawRow(0b00011111, pr, c, 0xffffff);
+                            }
+                            requestLedShow(2);
+                            r += 2;
+                        } else {
+                            r++;
+                        }
+                        // wide spans get the powered probe and at most a few
+                        // splits - a 24-leg walk would take half a minute
+                        if (width > 8 && nSplit == 0) break;
+                    }
+                }
+                if (poweredSpan) {
+                    snprintf(line, sizeof(line),
+                             "rows %d-%d read POWERED - not a part", a, z);
+                } else if (nSplit > 0 && legsLeft <= 0) {
+                    snprintf(line, sizeof(line), "rows %d-%d: %d separate parts",
+                             a, z, nSplit);
+                } else if (nSplit > 0) {
+                    snprintf(line, sizeof(line),
+                             "rows %d-%d: %d parts + %d legs (a chip?)", a, z,
+                             nSplit, legsLeft);
+                } else {
+                    snprintf(line, sizeof(line), "rows %d-%d: %d legs (a chip?)",
+                             a, z, width);
+                }
+                for (int r = a; r <= z && !poweredSpan; r++) {
+                    if (consumed[r]) continue;
                     int pr = nodeToPrintRow(r);
                     if (pr >= 0) b.printRawRow(0b00011111, pr, partsTapHue(sp, nSpans, false), 0xffffff);
                 }

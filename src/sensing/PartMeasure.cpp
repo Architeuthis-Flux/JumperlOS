@@ -292,9 +292,14 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
 
     // ADC channels: one per row, distinct (mask out what we already hold -
     // infraAcquireAdc's keep-what-you-own rule returns the held channel
-    // again otherwise; the GuideChecks two-channel pattern).
+    // again otherwise; the GuideChecks two-channel pattern). Channels whose
+    // ADC node carries user wiring are never candidates - a fed lane reads
+    // its feed, not the row (the census's poisoned-lane lesson; the
+    // powered-row check below backstops anything subtler).
     for (int i = 0; i < 3; i++) s.adcCh[i] = -1;
     uint8_t mask = 0x0F;
+    for (int c = 0; c < 4; c++)
+        if (nodeHasAnyBridgePM(ADC0 + c)) mask &= (uint8_t)~(1u << c);
     for (int i = 0; i < nRows; i++) {
         int ch = infraAcquireAdc(INFRA_ADC_SCAN, mask, false);
         if (ch < 0) {
@@ -668,19 +673,53 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
     static ScanSession s;   // a claims-only session: no DUT rows, just legs
     if (s.active) return -2;
     for (int i = 0; i <= 60; i++) rowFlags[i] = 0;
+    s.nEph = 0;
+    s.ephAddFailed = false;
+    s.nLift = 0;
 
-    int ch = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);
-    if (ch < 0) {
-        infraReleaseAdc(INFRA_ADC_SCAN);
-        return -2;
+    // A CLEAN measurement lane, or no scan at all. A user bridge on an ADC
+    // node - or anything else feeding the lane - poisons every reading:
+    // bench, 2026-08-27, ~5V on a claimed lane censused the WHOLE board at
+    // 4.8V (45 phantom hits clustered into two giant "chips"). Structurally
+    // skip user-wired ADC channels, then trust nothing: discharge each
+    // candidate lane to GND, release it, and reject any lane something
+    // pulls back up (a floating lane stays near zero for milliseconds).
+    int ch = -1;
+    {
+        uint8_t mask = 0x0F;
+        for (int c = 0; c < 4; c++)
+            if (nodeHasAnyBridgePM(ADC0 + c)) mask &= (uint8_t)~(1u << c);
+        while (mask != 0) {
+            int cand = infraAcquireAdc(INFRA_ADC_SCAN, mask, false);
+            if (cand < 0) break;
+            legAdd(s, ADC0 + cand, GND);
+            bool built = legsBuild(s);
+            if (built) delay(2);
+            legsClear(s);
+            delay(2);
+            float open = built ? readAdcVoltage(cand, 4) : 99.0f;
+            if (built && open < 1.0f && open > -1.0f) {
+                ch = cand;
+                break;
+            }
+            Serial.print("\r\nPARTSCAN lane ADC");
+            Serial.print(cand);
+            if (!built) {
+                Serial.println(" discharge refused - rejected");
+            } else {
+                Serial.print(" reads ");
+                Serial.print(open, 2);
+                Serial.println("V after discharge - the lane is being FED, rejected");
+            }
+            infraReleaseAdc(INFRA_ADC_SCAN);
+            mask &= (uint8_t)~(1u << cand);
+        }
     }
+    if (ch < 0) return -6;   // no clean lane; the caller says so loudly
     if (!claimRovingGpio(s)) {
         infraReleaseAdc(INFRA_ADC_SCAN);
         return -2;
     }
-    s.nEph = 0;
-    s.ephAddFailed = false;
-    s.nLift = 0;
 
     // Prime the measurement lane: the FIRST poke reads its ring sample off
     // a cold ADC lane and lands marginally low - row 1 census-flagged 3/3
@@ -800,7 +839,10 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
             refreshQuiet();
         }
     }
-    int ch = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);  // parity with census claims
+    uint8_t claimMask = 0x0F;   // parity with census claims, minus wired ADCs
+    for (int c = 0; c < 4; c++)
+        if (nodeHasAnyBridgePM(ADC0 + c)) claimMask &= (uint8_t)~(1u << c);
+    int ch = infraAcquireAdc(INFRA_ADC_SCAN, claimMask, false);
     if (ch < 0) {
         infraReleaseAdc(INFRA_ADC_SCAN);
         // the lift (and the feed teardown, if a lift refresh ran) already

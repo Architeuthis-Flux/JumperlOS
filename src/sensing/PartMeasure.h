@@ -126,7 +126,10 @@ void partScanDischarge(ScanSession& s);
 // abortCheck (may be nullptr) is polled between rows; poked rows are left
 // charged (harmless - they leak back to the lane bias).
 // v0/v1 (may be nullptr, [61]) get the raw release/settled voltages for
-// tuning. Returns the number of rows flagged 1, or -2 = machinery busy.
+// tuning. Returns the number of rows flagged 1, -2 = machinery busy, or
+// -6 = no clean measurement lane (every candidate ADC is user-wired or
+// reads driven after a discharge - a fed lane censuses the whole board
+// as one giant phantom part; bench, 2026-08-27).
 // progress (optional) narrates onto whatever UI the caller owns:
 //   state 0 = probing this row, 1 = row hit, 2 = row empty,
 //   3 = sweeping pair (row, row+1), 4 = pair done (repaint from flags).
