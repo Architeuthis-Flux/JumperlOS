@@ -30,8 +30,10 @@ struct PartResult {
     uint8_t nRows = 0;
     bool degraded = false; // a fallback path was used; trust the type, not the numbers
     int8_t status = 0;     // 0 ok; <0 = partScanBegin refusal (-2 busy,
-                           // -3 row has user wiring, -4 row powered, -5 no
-                           // gpio, -6 user wiring on ISENSE/DAC0)
+                           // -3 too wired to briefly unwire, -4 row
+                           // powered, -5 no gpio, -7 fabric refused a leg)
+    uint8_t lifted = 0;    // user wires briefly removed for the session
+                           // (and put back) - say so in any report
     // raw evidence, for HIL assertions and the terminal's long form:
     // 3-lead: jmap = the junction map; 2-lead: screen = vAB,iAB,vBA,iBA
     float jmap[3][3] = { { 0 } };

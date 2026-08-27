@@ -40,15 +40,22 @@ struct ScanSession {
     uint8_t savedFloat = 0, savedState = 0;
     // live legs, for the teardown funnel
     int16_t ephA[8]; int16_t ephB[8]; uint8_t nEph = 0;
+    // user bridges briefly lifted for the session (Kevin's ruling: "if the
+    // part is wired in, just briefly unwire it to test") - restored with
+    // their duplicate stacking by partScanEnd
+    int16_t liftA[12]; int16_t liftB[12]; int16_t liftDup[12];
+    uint8_t nLift = 0;
     float dac0Restore = 0.0f;
     float iLimit_mA = 10.0f;
 };
 
-// Begin/end. rows are breadboard rows (1-60, not 29/30/59/60). Returns 0 ok,
-//  -1 bad args, -2 machinery busy (ADC pool / DAC0 feeding the probe / not
-//  core 0), -3 a row has user wiring, -4 a row reads powered, -5 no free
-//  routable GPIO, -6 user wiring on the measurement path (ISENSE pair /
-//  DAC0), -7 the fabric refused a leg.
+// Begin/end. rows are breadboard rows (1-60, not 29/30/59/60). User wiring
+// on the DUT rows or the measurement path (ISENSE pair / DAC0) is briefly
+// LIFTED for the session and restored by partScanEnd - s.nLift says how
+// many wires that took. Returns 0 ok, -1 bad args, -2 machinery busy (ADC
+// pool / DAC0 feeding the probe / not core 0), -3 too wired to briefly
+// unwire (more than the lift list holds), -4 a row reads powered, -5 no
+// free routable GPIO, -7 the fabric refused a leg.
 int  partScanBegin(ScanSession& s, const int* rows, int nRows,
                    float iLimit_mA = 10.0f);
 void partScanEnd(ScanSession& s);

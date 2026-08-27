@@ -76,6 +76,7 @@ PartResult identifyTwoLead(int rowA, int rowB) {
         r.status = (int8_t)rc;
         return r;
     }
+    r.lifted = s.nLift;
 
     // conduction screen, both directions, at a gentle 1mA / 5.5V ceiling
     float vAB = 0, iAB = 0, vBA = 0, iBA = 0;
@@ -222,6 +223,7 @@ PartResult identifyThreeLead(int rowA, int rowB, int rowC) {
         r.status = (int8_t)rc;
         return r;
     }
+    r.lifted = s.nLift;
 
     float v[3][3];
     partScanJunctionMap(s, v);

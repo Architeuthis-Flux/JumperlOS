@@ -836,6 +836,10 @@ void partsAppLauncher(void) {
                     Serial.print(" status=");
                     Serial.print((int)res.status);
                 }
+                if (res.lifted > 0) {
+                    Serial.print(" lifted=");
+                    Serial.print((int)res.lifted);
+                }
                 Serial.println(unverified ? " pins=assumed" : " pins=verified");
                 if (oled.oledConnected) {
                     char toast[64];
@@ -971,10 +975,16 @@ void partsTestLauncher(void) {
 
         char line1[24] = "";
         char line2[24] = "";
-        if (res.status == -3 || res.status == -6) {
-            snprintf(line1, sizeof(line1), "wired in");
-            snprintf(line2, sizeof(line2), "can't test");
-            Serial.println("  the part's rows carry wiring - a part is only testable in isolation");
+        if (res.lifted > 0) {
+            Serial.print("  briefly unwired ");
+            Serial.print((int)res.lifted);
+            Serial.println(res.lifted == 1 ? " wire to test - it's back"
+                                           : " wires to test - they're back");
+        }
+        if (res.status == -3) {
+            snprintf(line1, sizeof(line1), "too wired");
+            snprintf(line2, sizeof(line2), "to test");
+            Serial.println("  more wiring than a brief unwire can hold - clear a few connections first");
         } else if (res.status != 0) {
             snprintf(line1, sizeof(line1), "busy");
             Serial.println("  measurement machinery is busy - try again in a moment");

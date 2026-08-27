@@ -2285,10 +2285,10 @@ const char* jl_part_identify( int row1, int row2, int row3 ) {
     PartResult res = ( row3 > 0 ) ? identifyThreeLead( row1, row2, row3 )
                                   : identifyTwoLead( row1, row2 );
     int pos = snprintf( idBuffer, sizeof( idBuffer ),
-                        "type=%s conf=%.2f value=%.4g value2=%.4g degraded=%d status=%d rows=",
+                        "type=%s conf=%.2f value=%.4g value2=%.4g degraded=%d status=%d lifted=%d rows=",
                         partTypeName( res.type ), (double)res.confidence,
                         (double)res.value, (double)res.value2,
-                        res.degraded ? 1 : 0, (int)res.status );
+                        res.degraded ? 1 : 0, (int)res.status, (int)res.lifted );
     for ( int i = 0; i < res.nRows && pos > 0 && pos < (int)sizeof( idBuffer ) - 24; i++ )
         pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, "%s%d",
                          i ? "," : "", (int)res.rows[ i ] );

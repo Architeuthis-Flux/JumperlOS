@@ -24,6 +24,7 @@
 #include "routing/States.h"
 #include "routing/InfraPaths.h"
 #include "routing/NetsToChipConnections.h"  // unconnectablePaths
+#include "remembering/FileParsing.h"  // add/removeBridgeFromState (the lift)
 #include "configManager.h"
 
 // ---------------------------------------------------------------------------
@@ -180,24 +181,50 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
         for (int j = 0; j < i; j++)
             if (rows[j] == r) return -1;
     }
-    // Never energize user wiring: any bridge touching a DUT row refuses the
-    // scan (the caller places with a warning instead). With no wiring on any
-    // DUT row, the only thing that can power one is the part itself from
-    // another refused row - the v1 powered-row story.
-    for (int i = 0; i < nRows; i++)
-        if (nodeHasAnyBridgePM(rows[i])) return -3;
-    // The measurement path must be ours alone: user wiring on the ISENSE
-    // pair or DAC0 puts unknown sources across the shunt (bench: a
-    // UART_TX->ISENSE_MINUS bridge left ~2.4mA standing through INA0).
-    if (nodeHasAnyBridgePM(ISENSE_PLUS) || nodeHasAnyBridgePM(ISENSE_MINUS) ||
-        nodeHasAnyBridgePM(DAC0)) return -6;
     if (infraProbePowerSource() == DAC0) return -2;
+
+    // Never energize user wiring - by briefly REMOVING it (Kevin's ruling:
+    // "if the part is wired in, just briefly unwire it to test"). Every
+    // user bridge touching a DUT row, or the measurement path (ISENSE pair
+    // / DAC0 - bench: a UART_TX->ISENSE_MINUS bridge left ~2.4mA standing
+    // through INA0), is lifted with its duplicate count remembered and
+    // restored by partScanEnd. Lifting only ever ISOLATES; with the DUT
+    // rows bridge-free, nothing can power them but the part itself from
+    // another lifted row - the powered-row check below still stands guard.
+    s.nLift = 0;
+    {
+        const int liftCap = (int)(sizeof(s.liftA) / sizeof(s.liftA[0]));
+        for (int i = 0; i < globalState.connections.numBridges; i++) {
+            int n1 = globalState.connections.bridges[i][0];
+            int n2 = globalState.connections.bridges[i][1];
+            bool touches = (n1 == ISENSE_PLUS || n2 == ISENSE_PLUS ||
+                            n1 == ISENSE_MINUS || n2 == ISENSE_MINUS ||
+                            n1 == DAC0 || n2 == DAC0);
+            for (int r = 0; !touches && r < nRows; r++)
+                if (n1 == rows[r] || n2 == rows[r]) touches = true;
+            if (!touches) continue;
+            if (globalState.isEphemeralConnection(n1, n2)) continue;
+            if (infraIsBridge(n1, n2)) continue;   // never touch infra's own
+            if (s.nLift >= liftCap) return -3;     // too wired to briefly unwire
+            s.liftA[s.nLift] = (int16_t)n1;
+            s.liftB[s.nLift] = (int16_t)n2;
+            s.liftDup[s.nLift] = globalState.connections.bridges[i][2];
+            s.nLift++;
+        }
+        if (s.nLift > 0) {
+            String err;
+            for (int i = 0; i < s.nLift; i++)
+                removeBridgeFromState(s.liftA[i], s.liftB[i], false);
+            (void)err;
+        }
+    }
 
     s.nRows = nRows;
     for (int i = 0; i < nRows; i++) s.rows[i] = rows[i];
     s.nEph = 0;
     s.iLimit_mA = iLimit_mA;
     s.dac0Restore = globalState.power.dac0;
+    if (s.nLift > 0) refreshQuiet();   // the lift lands before any leg does
 
     // ADC channels: one per row, distinct (mask out what we already hold -
     // infraAcquireAdc's keep-what-you-own rule returns the held channel
@@ -287,10 +314,15 @@ void partScanEnd(ScanSession& s) {
             globalState.removeEphemeralConnection(s.ephA[i], s.ephB[i], err, false, 0);
         s.nEph = 0;
     }
-    if (s.active || s.nRows > 0) {
+    // put the briefly-lifted user wiring back, duplicate stacking and all,
+    // so the one refresh below re-routes the user's world in one pass
+    for (int i = 0; i < s.nLift; i++)
+        addBridgeToState(s.liftA[i], s.liftB[i], s.liftDup[i], false);
+    if (s.active || s.nRows > 0 || s.nLift > 0) {
         refreshLocalConnections(1, 0, 0);  // plain redraw, never -1 (blanks)
         waitCore2();
     }
+    s.nLift = 0;
     infraReleaseAdc(INFRA_ADC_SCAN);
     for (int i = 0; i < 3; i++) s.adcCh[i] = -1;
     s.nRows = 0;
