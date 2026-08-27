@@ -2641,7 +2641,7 @@ static mp_obj_t jl_load_project_func( mp_obj_t name_obj ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_load_project_obj, jl_load_project_func );
 
-// place_part(name, row, pins_json [, footprint] [, type] [, value]) -> 0 / -1
+// place_part(name, row, pins_json [, footprint] [, type] [, value] [, part_id]) -> 0 / -1
 // pins_json: {"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}
 static mp_obj_t jl_place_part_func( size_t n_args, const mp_obj_t* args ) {
     const char* name = mp_obj_str_get_str( args[ 0 ] );
@@ -4945,7 +4945,8 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "        a NAME opens the project's one run file; anything with a '/' is a literal path\n" );
         mp_printf( &mp_plat_print, "   place_part(name, row, pins_json) - Place a part, expand its pins to bridges (0 = ok)\n" );
         mp_printf( &mp_plat_print, "   part_identify(r1, r2 [, r3])     - Electrically identify the isolated part on those rows\n" );
-        mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value)\n" );
+        mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value, part_id)\n" );
+        mp_printf( &mp_plat_print, "        part_id: DB identity - re-placing the same part_id at the same row UPDATES it\n" );
         mp_printf( &mp_plat_print, "        pins_json: {\"A\": {\"pin\": 1, \"connect\": \"GND\"}, \"B\": {\"pin\": 2, \"connect\": 7}}\n" );
         mp_printf( &mp_plat_print, "        pin/offset place the leg, connect is a row or node name, class: signal|power|gnd|nc\n" );
         mp_printf( &mp_plat_print, "        footprint \"dip8\"/\"sip2\" (default: a SIP strip sized from the pins listed)\n" );

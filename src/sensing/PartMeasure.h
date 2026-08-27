@@ -40,6 +40,9 @@ struct ScanSession {
     uint8_t savedFloat = 0, savedState = 0;
     // live legs, for the teardown funnel
     int16_t ephA[8]; int16_t ephB[8]; uint8_t nEph = 0;
+    bool ephAddFailed = false;  // a leg never even STAGED (slots/table full)
+                                // - legsBuild turns this into a clean false
+                                // instead of measuring an incomplete fixture
     // user bridges briefly lifted for the session (Kevin's ruling: "if the
     // part is wired in, just briefly unwire it to test") - restored with
     // their duplicate stacking by partScanEnd
@@ -124,8 +127,13 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 // whole part through its own junctions, so nothing shares at release
 // (bench, 2N3906). This sweeps every adjacent free pair (both rows flagged
 // 0) with 1.0V through the shunt, both directions (~70ms per check): a
-// junction or a resistor conducts, and both rows get flagged 5. Returns
-// rows newly flagged, or -2 busy.
+// junction or a resistor conducts, and both rows get flagged 5. User wiring
+// on the measurement path (DAC0 / the ISENSE pair) is briefly LIFTED like an
+// identify session does it, and restored on every exit (bench: the standing
+// UART_TX->ISENSE_MINUS wire would otherwise sideline the sweep forever).
+// Returns rows newly flagged, or -2 = busy / probe fed from DAC0 (infra,
+// can't be lifted) / more path wiring than the lift list holds - then the
+// scan stays census-only and the launcher says so.
 int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void));
 
 #endif // PART_MEASURE_H

@@ -2307,7 +2307,8 @@ const char* jl_part_identify( int row1, int row2, int row3 ) {
     // nor the same ISENSE fabric - refuse honestly instead of measuring noise.
     (void)row1; (void)row2; (void)row3;
     snprintf( idBuffer, sizeof( idBuffer ),
-              "type=UNKNOWN conf=0.00 value=0 value2=0 degraded=0 status=-2 rows= roles=" );
+              "type=UNKNOWN conf=0.00 value=0 value2=0 degraded=0 status=-2"
+              " lifted=0 rows= roles=" );   // same token set as the V5 line
     return idBuffer;
 #else
     PartResult res = ( row3 > 0 ) ? identifyThreeLead( row1, row2, row3 )

@@ -59,6 +59,10 @@ static const uint32_t PARTS_TAP_IGNORED_COLOR = 0x200404; // tap on an already-u
 static const uint32_t PARTS_ROLE_E_COLOR = 0x2A0000;
 static const uint32_t PARTS_ROLE_B_COLOR = 0x201400;
 static const uint32_t PARTS_ROLE_C_COLOR = 0x00062A;
+// The diode counterpart, same warm-to-cool read: current enters at RED (A)
+// and leaves at BLUE (K).
+static const uint32_t PARTS_ROLE_A_COLOR = 0x2A0000;
+static const uint32_t PARTS_ROLE_K_COLOR = 0x00062A;
 
 // Every prompted signal gets its own hue - even undefined ones default to a
 // rainbow (Kevin's ruling). Dim like the rest of the palette: these sit next
@@ -542,13 +546,34 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
         }
     }
 
+    // Validate BEFORE the replace-on-identity removal below: geometry is
+    // pure (no occupancy checks), and removing the old part first meant a
+    // refused replacement left the user with NEITHER part (review finding).
+    char reason[96] = {0};
+    if (!partGeometryOk(tmp, reason, sizeof(reason))) {
+        Serial.print("\r\nPARTDB place refused reason=\"");
+        Serial.print(reason);
+        Serial.println("\"");
+        if (oled.oledConnected) {
+            char text[120];
+            snprintf(text, sizeof(text), "%s\n%s", rec.displayName, reason);
+            oled.resetMultiLineSmallText();
+            oled.showMultiLineSmallText(text);
+            delay(1200);
+        }
+        return false;
+    }
+
     // Re-placing the same part in the same spot is an UPDATE, not a clone:
     // the bench accumulated 2N3906/_2/_3 at rows 17-19 and a stale 74153
     // shadowing the 7400. Every existing placed part with the same identity
     // (part_id + baseRow + footprint) comes out first, through the full
-    // removal discipline (bridges, net names, undo guard).
+    // removal discipline (bridges, net names, undo guard). The first victim
+    // is kept for resurrection: applyPartPlacement can still refuse (bridge
+    // table full), and that failure must not eat the part being updated.
+    PartDefinition victimCopy;
+    bool haveVictim = false;
     {
-        bool removedAny = false;
         for (int i = 0; i < st.parts.numParts;) {
             const PartDefinition& q = st.parts.parts[i];
             if (q.placed && q.baseRow == tmp.baseRow &&
@@ -556,16 +581,18 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
                 strcmp(q.partId, tmp.partId) == 0 && tmp.partId[0] != '\0') {
                 Serial.print("\r\nPARTDB replacing ");
                 Serial.println(q.name);
+                if (!haveVictim) {
+                    victimCopy = q;   // copy before jl_remove_part memmoves
+                    haveVictim = true;
+                }
                 char victim[16];
                 strncpy(victim, q.name, sizeof(victim) - 1);
                 victim[sizeof(victim) - 1] = '\0';
                 jl_remove_part(victim);
-                removedAny = true;
                 continue;   // same index now holds the next part
             }
             i++;
         }
-        (void)removedAny;
     }
 
     // Unique name: NE555, NE555_2, ... (findByName is the serializer's own
@@ -589,21 +616,6 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
         }
     }
 
-    char reason[96] = {0};
-    if (!partGeometryOk(tmp, reason, sizeof(reason))) {
-        Serial.print("\r\nPARTDB place refused reason=\"");
-        Serial.print(reason);
-        Serial.println("\"");
-        if (oled.oledConnected) {
-            char text[120];
-            snprintf(text, sizeof(text), "%s\n%s", rec.displayName, reason);
-            oled.resetMultiLineSmallText();
-            oled.showMultiLineSmallText(text);
-            delay(1200);
-        }
-        return false;
-    }
-
     int idx = st.parts.numParts;
     st.parts.parts[idx] = tmp;
     st.parts.numParts++;
@@ -619,10 +631,26 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
     // treating those as success committed a part whose bridges never existed.
     // More reachable now that placement adds power bridges.
     if (added < 0 || err.length() > 0) {
-        String reason = err;   // removePartPlacement reuses err - keep the message
+        String refuseWhy = err;   // removePartPlacement reuses err - keep the message
         if (added >= 0) removePartPlacement(st, idx, err);
         st.parts.numParts--;   // roll the append back
-        Serial.println("\r\nPARTDB place refused reason=\"" + reason + "\"");
+        // a replace-on-identity removed the part being updated before this
+        // refusal - put it back (its own bridges just came free again, so
+        // its re-placement lives in the same conditions it lived in before)
+        if (haveVictim && st.parts.numParts < MAX_PARTS) {
+            st.parts.parts[st.parts.numParts] = victimCopy;
+            String rerr;
+            if (applyPartPlacement(st, st.parts.numParts, rerr) >= 0 &&
+                rerr.length() == 0) {
+                st.parts.numParts++;
+                Serial.print("\r\nPARTDB replaced part restored: ");
+                Serial.println(victimCopy.name);
+            } else {
+                Serial.print("\r\nPARTDB could NOT restore ");
+                Serial.println(victimCopy.name);
+            }
+        }
+        Serial.println("\r\nPARTDB place refused reason=\"" + refuseWhy + "\"");
         return false;
     }
     st.markDirty();
@@ -1027,6 +1055,64 @@ static void partsShowBjtResult(const PartDefinition& p, const PartResult& res) {
     requestLedShow(2);
 }
 
+// The 2-lead junction card (diode / LED / zener), the BJT card's idiom:
+// type + name, rows, A/K roles, Vf (plus the color guess or Vz), and the
+// board painted in the standing A/K colors.
+static void partsShowDiodeResult(const PartDefinition& p, const PartResult& res) {
+    int rowsS[2] = { (int)res.rows[0], (int)res.rows[1] };
+    PinRole rolesS[2] = { res.roles[0], res.roles[1] };
+    if (rowsS[1] < rowsS[0]) {
+        int tr = rowsS[0]; rowsS[0] = rowsS[1]; rowsS[1] = tr;
+        PinRole tp = rolesS[0]; rolesS[0] = rolesS[1]; rolesS[1] = tp;
+    }
+
+    if (oled.oledConnected) {
+        char rowLine[24], roleLine[24], vfBuf[16], extraBuf[16] = "";
+        snprintf(rowLine, sizeof(rowLine), "%-5d%d", rowsS[0], rowsS[1]);
+        snprintf(roleLine, sizeof(roleLine), "%-5s%s",
+                 pinRoleName(rolesS[0]), pinRoleName(rolesS[1]));
+        snprintf(vfBuf, sizeof(vfBuf), "Vf %.2fV", (double)res.value);
+        const char* typeStr = "DIODE";
+        if (res.type == PartType::LED) {
+            typeStr = "LED";
+            snprintf(extraBuf, sizeof(extraBuf), "%.10s", partLedColorGuess(res.value));
+        } else if (res.type == PartType::ZENER) {
+            typeStr = "ZENER";
+            snprintf(extraBuf, sizeof(extraBuf), "Vz %.1fV", (double)res.value2);
+        }
+        const int16_t f = 12;  // Andale Mono 5pt - four rows fit 32px
+        OledTextRow rows[4] = {};
+        rows[0].segs[0] = {typeStr, f, OLED_ALIGN_INHERIT};
+        rows[0].segs[1] = {p.name, f, OLED_ALIGN_RIGHT};
+        rows[0].segCount = 2;
+        rows[0].align = OLED_ALIGN_LEFT;
+        rows[1].segs[0] = {rowLine, f, OLED_ALIGN_INHERIT};
+        rows[1].segCount = 1;
+        rows[1].align = OLED_ALIGN_LEFT;
+        rows[2].segs[0] = {roleLine, f, OLED_ALIGN_INHERIT};
+        rows[2].segCount = 1;
+        rows[2].align = OLED_ALIGN_LEFT;
+        rows[3].segs[0] = {vfBuf, f, OLED_ALIGN_INHERIT};
+        rows[3].segCount = 1;
+        if (extraBuf[0] != '\0') {
+            rows[3].segs[1] = {extraBuf, f, OLED_ALIGN_RIGHT};
+            rows[3].segCount = 2;
+        }
+        rows[3].align = OLED_ALIGN_LEFT;
+        for (int i = 0; i < 4; i++) rows[i].fixedH = 7;
+        oled.clearPrintShowRich(rows, 4, 1, true, true, true);
+    }
+
+    b.clear();
+    for (int i = 0; i < 2; i++) {
+        uint32_t c = (rolesS[i] == PinRole::A) ? PARTS_ROLE_A_COLOR
+                                               : PARTS_ROLE_K_COLOR;
+        int pr = nodeToPrintRow(rowsS[i]);
+        if (pr >= 0) b.printRawRow(0b00011111, pr, c, 0xffffff);
+    }
+    requestLedShow(2);
+}
+
 // ============================================================================
 // Test Part - re-measure a placed part in place
 // ============================================================================
@@ -1193,6 +1279,7 @@ void partsTestLauncher(void) {
         char line1[24] = "";
         char line2[24] = "";
         bool bjtCard = false;
+        bool diodeCard = false;
         if (res.lifted > 0) {
             Serial.print("  briefly unwired ");
             Serial.print((int)res.lifted);
@@ -1213,14 +1300,17 @@ void partsTestLauncher(void) {
                     bjtCard = true;   // the dedicated card, no header bar
                     break;
                 case PartType::LED:
+                    if (res.nRows == 2) { diodeCard = true; break; }
                     snprintf(line1, sizeof(line1), "LED %.10s", partLedColorGuess(res.value));
                     snprintf(line2, sizeof(line2), "Vf %.2fV", (double)res.value);
                     break;
                 case PartType::DIODE:
+                    if (res.nRows == 2) { diodeCard = true; break; }
                     snprintf(line1, sizeof(line1), "diode");
                     snprintf(line2, sizeof(line2), "Vf %.2fV", (double)res.value);
                     break;
                 case PartType::ZENER:
+                    if (res.nRows == 2) { diodeCard = true; break; }
                     snprintf(line1, sizeof(line1), "zener");
                     snprintf(line2, sizeof(line2), "Vz %.1fV", (double)res.value2);
                     break;
@@ -1286,6 +1376,8 @@ void partsTestLauncher(void) {
         }
         if (bjtCard) {
             partsShowBjtResult(p, res);
+        } else if (diodeCard) {
+            partsShowDiodeResult(p, res);
         } else {
             ReadingDisplay::show(p.name, p.baseRow, line1[0] ? line1 : nullptr,
                                  line2[0] ? line2 : nullptr);
@@ -1340,6 +1432,25 @@ static const char* partsPlacedPartOnRow(int row) {
     return nullptr;
 }
 
+// Widen [lo,hi] to the rows this placed part claims in the same breadboard
+// half as `row`. The census only sees a part's FREE legs (wired legs are
+// flag 2 and never hit - bench: the 2N3906 with E and C wired in shows as a
+// lone base-row hit), but the placed record knows where the rest of it sits.
+static void partsPlacedRowsInHalf(const char* name, int row, int* lo, int* hi) {
+    int hLo = (row <= 30) ? 1 : 31, hHi = (row <= 30) ? 30 : 60;
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed || strcmp(p.name, name) != 0) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            int r = partPinNode(p, p.pins[j]);
+            if (r < hLo || r > hHi) continue;
+            if (r < *lo) *lo = r;
+            if (r > *hi) *hi = r;
+        }
+        return;
+    }
+}
+
 void partsAutoLauncher(void) {
     inClickMenu = 1;
     int lastDivider = rotaryDivider;
@@ -1380,6 +1491,11 @@ void partsAutoLauncher(void) {
         }
         int pairHits = partScanPairSweep(flags, partsAutoAbortCheck);
         if (pairHits > 0) found += pairHits;
+        else if (pairHits < 0)
+            // no silent caps: without the sweep, isolated junction parts
+            // (a lone transistor, a diode) are invisible to this scan
+            Serial.println("PARTSCAN pair sweep skipped (DAC0/ISENSE in use)"
+                           " - lone junction parts won't be seen");
     }
     if (partsAutoAborted) {
         Serial.println("PARTSCAN auto aborted");
@@ -1431,8 +1547,12 @@ void partsAutoLauncher(void) {
                 if (hit) {
                     if (cur < 0) { cur = r; curOwner = owner; }
                     last = r;
-                } else if (cur >= 0 && r > last + 1) {
-                    // gap of 2+ (or the end): close the span
+                } else if (cur >= 0 && (r > last + 1 || r > hi)) {
+                    // gap of 2+ or the end of the half: close the span.
+                    // (r > hi is the end - a span whose last hit IS row
+                    // hi has r == last + 1 here and the gap test alone
+                    // silently dropped it: a part on 26/27/28 scanned
+                    // clean and was never reported)
                     if (nSpans < 12) {
                         spanStart[nSpans] = cur;
                         spanEnd[nSpans] = last;
@@ -1448,18 +1568,39 @@ void partsAutoLauncher(void) {
         int shown = 0;
         char summary[96] = "";
         size_t sumLen = 0;
+        const char* lastOwner = nullptr;   // the dedupe for fragmented
+        int lastOwnerLo = -1, lastOwnerHi = -1;  // placed-part spans
+        int annexedRow = -1;   // row absorbed by a DIODE->BJT upgrade
         for (int sp = 0; sp < nSpans && !partsAutoAborted; sp++) {
             int a = spanStart[sp], z = spanEnd[sp];
+            if (a == annexedRow) a++;   // already reported as the BJT's pin
+            if (a > z) continue;
             int width = z - a + 1;
             const char* owner = nullptr;
             for (int r = a; r <= z && owner == nullptr; r++)
                 owner = partsPlacedPartOnRow(r);
 
             char line[64] = "";
-            if (width == 1) {
+            if (owner != nullptr) {
+                // already the user's - name the record, over its claimed rows
+                // (the census span can be narrower: wired legs never hit)
+                int plo = a, phi = z;
+                partsPlacedRowsInHalf(owner, a, &plo, &phi);
+                // census gaps can fragment one placed part into several
+                // spans; the record names them all identically - once is
+                // enough (repeats were eating both OLED summary lines)
+                if (lastOwner != nullptr && strcmp(owner, lastOwner) == 0 &&
+                    plo == lastOwnerLo && phi == lastOwnerHi)
+                    continue;
+                lastOwner = owner;
+                lastOwnerLo = plo;
+                lastOwnerHi = phi;
+                snprintf(line, sizeof(line), "rows %d-%d: %s (placed)", plo,
+                         phi, owner);
+            } else if (width == 1) {
                 // a lone hit: one leg of something bigger, or noise - say so
                 snprintf(line, sizeof(line), "row %d: one leg of something?", a);
-            } else if (width <= 3 && owner == nullptr) {
+            } else if (width <= 3) {
                 Serial.print("  checking rows ");
                 Serial.print(a);
                 Serial.print("-");
@@ -1478,10 +1619,19 @@ void partsAutoLauncher(void) {
                 if (width == 2 && (res.type == PartType::DIODE ||
                                    res.type == PartType::ZENER)) {
                     // two junction-legs might be a transistor missing its
-                    // quiet third pin - try a free neighbor on either side
+                    // quiet third pin - try a neighbor on either side. A
+                    // pair-conducting neighbor (flag 5) comes first even when
+                    // a placed record claims it: conduction INTO this span is
+                    // electrical evidence, a record is just data (bench: a
+                    // stale 74153 claiming row 17 split the 2N3906's emitter
+                    // off into the chip's span, and the empty-only fallback
+                    // went looking on the wrong side). The hFE test referees
+                    // - a chip pin that happens to conduct won't pass it.
                     int half2Lo = (a <= 28) ? 1 : 31;
                     int half2Hi = (a <= 28) ? 28 : 58;
-                    int extra = (z + 1 <= half2Hi && flags[z + 1] == 0) ? z + 1
+                    int extra = (z + 1 <= half2Hi && flags[z + 1] == 5) ? z + 1
+                                : (a - 1 >= half2Lo && flags[a - 1] == 5) ? a - 1
+                                : (z + 1 <= half2Hi && flags[z + 1] == 0) ? z + 1
                                 : (a - 1 >= half2Lo && flags[a - 1] == 0) ? a - 1
                                                                           : -1;
                     if (extra > 0 && !partsAutoAbortCheck()) {
@@ -1493,6 +1643,8 @@ void partsAutoLauncher(void) {
                              res3.type == PartType::NFET ||
                              res3.type == PartType::PFET)) {
                             res = res3;
+                            if (extra > z) annexedRow = extra;  // the next
+                            // span must not report this row a second time
                             z = (extra > z) ? extra : z;
                             a = (extra < a) ? extra : a;
                         }
@@ -1507,11 +1659,18 @@ void partsAutoLauncher(void) {
                         snprintf(detail, sizeof(detail), "%.2fV", (double)res.value);
                     snprintf(line, sizeof(line), "rows %d-%d: %s %s", a, z,
                              partTypeName(res.type), detail);
-                    // paint the span - BJTs get the standing role colors
-                    if (res.type == PartType::BJT_PNP || res.type == PartType::BJT_NPN) {
+                    // paint the span - junction parts get the standing role
+                    // colors (EBC for transistors, A/K for diodes)
+                    if (res.type == PartType::BJT_PNP ||
+                        res.type == PartType::BJT_NPN ||
+                        res.type == PartType::DIODE ||
+                        res.type == PartType::ZENER ||
+                        res.type == PartType::LED) {
                         for (int t = 0; t < res.nRows; t++) {
                             uint32_t c = (res.roles[t] == PinRole::E)   ? PARTS_ROLE_E_COLOR
                                          : (res.roles[t] == PinRole::B) ? PARTS_ROLE_B_COLOR
+                                         : (res.roles[t] == PinRole::A) ? PARTS_ROLE_A_COLOR
+                                         : (res.roles[t] == PinRole::K) ? PARTS_ROLE_K_COLOR
                                                                         : PARTS_ROLE_C_COLOR;
                             int pr = nodeToPrintRow((int)res.rows[t]);
                             if (pr >= 0) b.printRawRow(0b00011111, pr, c, 0xffffff);
@@ -1526,8 +1685,6 @@ void partsAutoLauncher(void) {
                 } else {
                     snprintf(line, sizeof(line), "rows %d-%d: something (unclear)", a, z);
                 }
-            } else if (owner != nullptr) {
-                snprintf(line, sizeof(line), "rows %d-%d: %s (placed)", a, z, owner);
             } else {
                 snprintf(line, sizeof(line), "rows %d-%d: %d legs (a chip?)", a, z, width);
                 for (int r = a; r <= z; r++) {

@@ -54,14 +54,21 @@ static bool nodeHasAnyBridgePM(int node) {
 // Stage one leg (no refresh). A pair already present as a regular bridge is
 // refused - never adopt user wiring.
 static bool legAdd(ScanSession& s, int a, int b) {
-    if (s.nEph >= (uint8_t)(sizeof(s.ephA) / sizeof(s.ephA[0]))) return false;
-    if (bridgeExistsInState(a, b)) return false;
+    if (s.nEph >= (uint8_t)(sizeof(s.ephA) / sizeof(s.ephA[0]))) {
+        s.ephAddFailed = true;
+        return false;
+    }
+    if (bridgeExistsInState(a, b)) {
+        s.ephAddFailed = true;
+        return false;
+    }
     String err;
     if (!globalState.addEphemeralConnection(a, b, err, false, 0)) {
         Serial.print("\r\nPARTSCAN add-fail ");
         Serial.print(a); Serial.print("-"); Serial.print(b);
         Serial.print(" "); Serial.print(err);
         Serial.flush();
+        s.ephAddFailed = true;
         return false;
     }
     if (partScanDebug) {
@@ -82,6 +89,7 @@ static void refreshQuiet(void) {
 
 // Remove every staged leg, one refresh. The teardown funnel.
 static void legsClear(ScanSession& s) {
+    s.ephAddFailed = false;
     if (s.nEph == 0) return;
     String err;
     for (int i = 0; i < s.nEph; i++)
@@ -115,6 +123,14 @@ static int ephRefused(ScanSession& s) {
 
 // Build the staged legs: refresh + refusal check. False = tear back down.
 static bool legsBuild(ScanSession& s) {
+    if (s.ephAddFailed) {
+        // a leg never even entered the session (slots/table full, or the
+        // pair collided with a bridge) - measuring on the incomplete
+        // fixture read a real diode as EMPTY (review finding: a lost
+        // ISENSE_MINUS->GND leg made every servo step read ~0mA)
+        legsClear(s);
+        return false;
+    }
     refreshQuiet();
     if (ephRefused(s) > 0) {
         legsClear(s);
@@ -260,6 +276,7 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     s.nRows = nRows;
     for (int i = 0; i < nRows; i++) s.rows[i] = rows[i];
     s.nEph = 0;
+    s.ephAddFailed = false;
     s.iLimit_mA = iLimit_mA;
     s.dac0Restore = globalState.power.dac0;
     if (s.nLift > 0) refreshQuiet();   // the lift lands before any leg does
@@ -272,7 +289,11 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     for (int i = 0; i < nRows; i++) {
         int ch = infraAcquireAdc(INFRA_ADC_SCAN, mask, false);
         if (ch < 0) {
-            infraReleaseAdc(INFRA_ADC_SCAN);
+            // through the full teardown funnel: the lift already landed on
+            // the fabric (refreshQuiet above), and a bare return here made
+            // the briefly-unwired user bridges PERMANENT - markDirty had
+            // already queued the deletion for the next auto-save
+            partScanEnd(s);
             return -2;
         }
         mask &= (uint8_t)~(1u << ch);
@@ -283,7 +304,7 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     s.gpioIdx = -1;
     if (nRows == 3) {
         if (!claimRovingGpio(s)) {
-            infraReleaseAdc(INFRA_ADC_SCAN);
+            partScanEnd(s);   // same funnel: the lift must go back
             return -5;
         }
     }
@@ -325,6 +346,7 @@ void partScanEnd(ScanSession& s) {
             globalState.removeEphemeralConnection(s.ephA[i], s.ephB[i], err, false, 0);
         s.nEph = 0;
     }
+    s.ephAddFailed = false;
     // put the briefly-lifted user wiring back, duplicate stacking and all,
     // so the one refresh below re-routes the user's world in one pass
     for (int i = 0; i < s.nLift; i++)
@@ -640,6 +662,7 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
         return -2;
     }
     s.nEph = 0;
+    s.ephAddFailed = false;
     s.nLift = 0;
 
     int found = 0;
@@ -695,13 +718,49 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
     if (rp2040.cpuid() != 0) return -2;
     static ScanSession s;
     if (s.active) return -2;
+    // The sweep owns DAC0 and the shunt for ~100 measurements. It must not
+    // steal the probe's power feed (infra - can't be lifted), and a user net
+    // touching the measurement path must not be merged into every swept
+    // pair - so it gets the SAME brief-unwire treatment an identify session
+    // gives it (Kevin's ruling; bench: the standing UART_TX->ISENSE_MINUS
+    // wire would otherwise disable the sweep on this board forever).
+    if (infraProbePowerSource() == DAC0) return -2;
+    s.nLift = 0;
+    {
+        const int liftCap = (int)(sizeof(s.liftA) / sizeof(s.liftA[0]));
+        for (int i = 0; i < globalState.connections.numBridges; i++) {
+            int n1 = globalState.connections.bridges[i][0];
+            int n2 = globalState.connections.bridges[i][1];
+            bool touches = (n1 == ISENSE_PLUS || n2 == ISENSE_PLUS ||
+                            n1 == ISENSE_MINUS || n2 == ISENSE_MINUS ||
+                            n1 == DAC0 || n2 == DAC0);
+            if (!touches) continue;
+            if (globalState.isEphemeralConnection(n1, n2)) continue;
+            if (infraIsBridge(n1, n2)) continue;
+            if (s.nLift >= liftCap) return -2;  // too wired to briefly unwire
+            s.liftA[s.nLift] = (int16_t)n1;
+            s.liftB[s.nLift] = (int16_t)n2;
+            s.liftDup[s.nLift] = globalState.connections.bridges[i][2];
+            s.nLift++;
+        }
+        if (s.nLift > 0) {
+            for (int i = 0; i < s.nLift; i++)
+                removeBridgeFromState(s.liftA[i], s.liftB[i], false);
+            refreshQuiet();
+        }
+    }
     int ch = infraAcquireAdc(INFRA_ADC_SCAN, 0x0F, false);  // parity with census claims
     if (ch < 0) {
         infraReleaseAdc(INFRA_ADC_SCAN);
+        // the lift already landed - put it back before bailing
+        for (int i = 0; i < s.nLift; i++)
+            addBridgeToState(s.liftA[i], s.liftB[i], s.liftDup[i], false);
+        if (s.nLift > 0) refreshQuiet();
+        s.nLift = 0;
         return -2;
     }
     s.nEph = 0;
-    s.nLift = 0;
+    s.ephAddFailed = false;
     s.gpioIdx = -1;
 
     // Bench truth: with the ISE legs routed the shunt reads a CONSTANT
@@ -779,8 +838,16 @@ sweepJudge:
         }
     }
 sweepDone:
-    setDac0voltage(0.0f, 0, 0, false);
+    // hardware back to what the state says it is - the sweep borrowed DAC0
+    // (a bare 0V here left a user's dac_set() supply silently dead while
+    // the UI still showed their voltage)
+    setDac0voltage(globalState.power.dac0, 0, 0, false);
     infraReleaseAdc(INFRA_ADC_SCAN);
+    // the briefly-unwired measurement-path wiring goes back, duplicate
+    // stacking and all, and the one refresh below re-routes it
+    for (int i = 0; i < s.nLift; i++)
+        addBridgeToState(s.liftA[i], s.liftB[i], s.liftDup[i], false);
+    s.nLift = 0;
     refreshLocalConnections(1, 0, 0);
     waitCore2();
     return newHits;
