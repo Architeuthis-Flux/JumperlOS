@@ -49,6 +49,11 @@ static const uint32_t PARTS_ITEM_COLOR = 0x100810;
 static const uint32_t PARTS_TAP_DONE_COLOR = 0x000C04;   // rows already tapped
 static const uint32_t PARTS_TAP_FLASH_COLOR = 0x0A2A08;  // the just-accepted tap
 static const uint32_t PARTS_TAP_IGNORED_COLOR = 0x200404; // tap on an already-used row
+// The standing transistor-role colors (Kevin's ruling): E red, B yellow,
+// C blue - the same three everywhere a result paints the board.
+static const uint32_t PARTS_ROLE_E_COLOR = 0x2A0000;
+static const uint32_t PARTS_ROLE_B_COLOR = 0x201400;
+static const uint32_t PARTS_ROLE_C_COLOR = 0x00062A;
 
 // Every prompted signal gets its own hue - even undefined ones default to a
 // rainbow (Kevin's ruling). Dim like the rest of the palette: these sit next
@@ -901,9 +906,14 @@ done:
 static int partsWaitForPress(void) {
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
+    unsigned long lastShowRequest = millis();
     while (true) {
         jOS.serviceInner();
         rotaryEncoderButtonStuff();
+        if (millis() - lastShowRequest >= 250) {
+            requestLedShow(2);
+            lastShowRequest = millis();
+        }
         if (encoderButtonState == HELD ||
             (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
             while (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
@@ -923,6 +933,67 @@ static int partsWaitForPress(void) {
         }
         delayMicroseconds(1000);
     }
+}
+
+// The transistor result card (Kevin's layout):
+//     PNP          2N3906
+//     17   18   19
+//     E    B    C
+//     hFE 401    Vbe 0.61V
+// No header bar - and the breadboard drops its text and paints each pin's
+// full row in the standing role colors while the card is up.
+static void partsShowBjtResult(const PartDefinition& p, const PartResult& res) {
+    // sort the three (row, role) pairs by row so columns read left-to-right
+    int rowsS[3];
+    PinRole rolesS[3];
+    for (int i = 0; i < 3; i++) {
+        rowsS[i] = (int)res.rows[i];
+        rolesS[i] = res.roles[i];
+    }
+    for (int a = 1; a < 3; a++)
+        for (int b2 = a; b2 > 0 && rowsS[b2] < rowsS[b2 - 1]; b2--) {
+            int tr = rowsS[b2]; rowsS[b2] = rowsS[b2 - 1]; rowsS[b2 - 1] = tr;
+            PinRole tp = rolesS[b2]; rolesS[b2] = rolesS[b2 - 1]; rolesS[b2 - 1] = tp;
+        }
+
+    if (oled.oledConnected) {
+        char rowLine[24], roleLine[24], hfeBuf[16], vbeBuf[16];
+        snprintf(rowLine, sizeof(rowLine), "%-5d%-5d%d", rowsS[0], rowsS[1], rowsS[2]);
+        snprintf(roleLine, sizeof(roleLine), "%-5s%-5s%s",
+                 pinRoleName(rolesS[0]), pinRoleName(rolesS[1]), pinRoleName(rolesS[2]));
+        snprintf(hfeBuf, sizeof(hfeBuf), "hFE %.0f", (double)res.value2);
+        snprintf(vbeBuf, sizeof(vbeBuf), "Vbe %.2fV", (double)res.value);
+        const char* typeStr = (res.type == PartType::BJT_PNP) ? "PNP" : "NPN";
+        const int16_t f = 12;  // Andale Mono 5pt - four rows fit 32px
+        OledTextRow rows[4] = {};
+        rows[0].segs[0] = {typeStr, f, OLED_ALIGN_INHERIT};
+        rows[0].segs[1] = {p.name, f, OLED_ALIGN_RIGHT};
+        rows[0].segCount = 2;
+        rows[0].align = OLED_ALIGN_LEFT;
+        rows[1].segs[0] = {rowLine, f, OLED_ALIGN_INHERIT};
+        rows[1].segCount = 1;
+        rows[1].align = OLED_ALIGN_LEFT;
+        rows[2].segs[0] = {roleLine, f, OLED_ALIGN_INHERIT};
+        rows[2].segCount = 1;
+        rows[2].align = OLED_ALIGN_LEFT;
+        rows[3].segs[0] = {hfeBuf, f, OLED_ALIGN_INHERIT};
+        rows[3].segs[1] = {vbeBuf, f, OLED_ALIGN_RIGHT};
+        rows[3].segCount = 2;
+        rows[3].align = OLED_ALIGN_LEFT;
+        for (int i = 0; i < 4; i++) rows[i].fixedH = 7;
+        oled.clearPrintShowRich(rows, 4, 1, true, true, true);
+    }
+
+    // breadboard: text off, each pin's whole row in its role color
+    b.clear();
+    for (int i = 0; i < 3; i++) {
+        uint32_t c = (rolesS[i] == PinRole::E)   ? PARTS_ROLE_E_COLOR
+                     : (rolesS[i] == PinRole::B) ? PARTS_ROLE_B_COLOR
+                                                 : PARTS_ROLE_C_COLOR;
+        int pr = nodeToPrintRow(rowsS[i]);
+        if (pr >= 0) b.printRawRow(0b00011111, pr, c, 0xffffff);
+    }
+    requestLedShow(2);
 }
 
 // ============================================================================
@@ -1090,6 +1161,7 @@ void partsTestLauncher(void) {
 
         char line1[24] = "";
         char line2[24] = "";
+        bool bjtCard = false;
         if (res.lifted > 0) {
             Serial.print("  briefly unwired ");
             Serial.print((int)res.lifted);
@@ -1107,10 +1179,7 @@ void partsTestLauncher(void) {
             switch (res.type) {
                 case PartType::BJT_PNP:
                 case PartType::BJT_NPN:
-                    snprintf(line1, sizeof(line1), "%s hFE %.0f",
-                             (res.type == PartType::BJT_PNP) ? "PNP" : "NPN",
-                             (double)res.value2);
-                    snprintf(line2, sizeof(line2), "Vbe %.2fV", (double)res.value);
+                    bjtCard = true;   // the dedicated card, no header bar
                     break;
                 case PartType::LED:
                     snprintf(line1, sizeof(line1), "LED %.10s", partLedColorGuess(res.value));
@@ -1184,8 +1253,12 @@ void partsTestLauncher(void) {
                 }
             }
         }
-        ReadingDisplay::show(p.name, p.baseRow, line1[0] ? line1 : nullptr,
-                             line2[0] ? line2 : nullptr);
+        if (bjtCard) {
+            partsShowBjtResult(p, res);
+        } else {
+            ReadingDisplay::show(p.name, p.baseRow, line1[0] ? line1 : nullptr,
+                                 line2[0] ? line2 : nullptr);
+        }
         // the reading stays up until the user says they've read it
         if (partsWaitForPress() == -2) break;
     }
