@@ -4026,6 +4026,7 @@ place_part = _native.place_part
 remove_part = _native.remove_part
 list_parts = _native.list_parts
 guide_progress = _native.guide_progress
+part_identify = _native.part_identify
 
 # ============================================================================
 # Context Control
@@ -4758,6 +4759,7 @@ __all__ = [
 
     # Projects and Parts (guided placement)
     'load_project', 'place_part', 'remove_part', 'list_parts', 'guide_progress',
+    'part_identify',
     
     # Context Control
     'context_toggle', 'context_get',

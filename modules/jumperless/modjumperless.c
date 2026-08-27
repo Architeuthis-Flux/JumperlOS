@@ -122,6 +122,7 @@ int jl_remove_part( const char* name );
 int jl_get_num_parts( void );
 const char* jl_get_part_info( int idx );
 int jl_guide_progress( void );
+const char* jl_part_identify( int row1, int row2, int row3 );
 
 void jl_restore_micropython_entry_state( void );
 int jl_has_unsaved_changes( void );
@@ -2659,6 +2660,18 @@ static mp_obj_t jl_remove_part_func( mp_obj_t name_obj ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_remove_part_obj, jl_remove_part_func );
 
+// part_identify(row1, row2 [, row3]) -> "type=... conf=... rows=... roles=..."
+// Electrically identifies the isolated part on those rows (junction map,
+// hFE/Vf/R via the Kelvin fixture). Refuses rows with user wiring (status=-3).
+static mp_obj_t jl_part_identify_func( size_t n_args, const mp_obj_t* args ) {
+    int r1 = mp_obj_get_int( args[ 0 ] );
+    int r2 = mp_obj_get_int( args[ 1 ] );
+    int r3 = ( n_args > 2 ) ? mp_obj_get_int( args[ 2 ] ) : -1;
+    const char* out = jl_part_identify( r1, r2, r3 );
+    return mp_obj_new_str( out, strlen( out ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_part_identify_obj, 2, 3, jl_part_identify_func );
+
 // Field of a '|'/','-delimited record: returns the start, sets *len and
 // advances *cursor past the delimiter (same hand-rolled split style
 // get_path_info uses - there is no JSON/CSV library on board).
@@ -4929,6 +4942,7 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "   load_project(\"555\")              - Begin/reopen a RUN of 555: /projects/555/555_run.yaml\n" );
         mp_printf( &mp_plat_print, "        a NAME opens the project's one run file; anything with a '/' is a literal path\n" );
         mp_printf( &mp_plat_print, "   place_part(name, row, pins_json) - Place a part, expand its pins to bridges (0 = ok)\n" );
+        mp_printf( &mp_plat_print, "   part_identify(r1, r2 [, r3])     - Electrically identify the isolated part on those rows\n" );
         mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value)\n" );
         mp_printf( &mp_plat_print, "        pins_json: {\"A\": {\"pin\": 1, \"connect\": \"GND\"}, \"B\": {\"pin\": 2, \"connect\": 7}}\n" );
         mp_printf( &mp_plat_print, "        pin/offset place the leg, connect is a row or node name, class: signal|power|gnd|nc\n" );
@@ -6840,6 +6854,7 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     // Projects + parts (guided placement)
     { MP_ROM_QSTR( MP_QSTR_load_project ), MP_ROM_PTR( &jl_load_project_obj ) },
     { MP_ROM_QSTR( MP_QSTR_place_part ), MP_ROM_PTR( &jl_place_part_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_part_identify ), MP_ROM_PTR( &jl_part_identify_obj ) },
     { MP_ROM_QSTR( MP_QSTR_remove_part ), MP_ROM_PTR( &jl_remove_part_obj ) },
     { MP_ROM_QSTR( MP_QSTR_list_parts ), MP_ROM_PTR( &jl_list_parts_obj ) },
     { MP_ROM_QSTR( MP_QSTR_guide_progress ), MP_ROM_PTR( &jl_guide_progress_obj ) },

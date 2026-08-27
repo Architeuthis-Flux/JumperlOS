@@ -3,6 +3,30 @@
 **FOLLOW-UP BRANCH.** Only 4 hooks land in the projects/guided-placement branch (§11).
 Siblings: DESIGN_PROJECTS_SUBSYSTEM.md, DESIGN_GUIDED_PLACEMENT.md. V5 only.
 
+> **2026-08-26 status: Layers 0+1 are LANDED and bench-verified** —
+> `src/sensing/PartMeasure.*` (session/fixtures/primitives),
+> `src/sensing/PartClassify.*` (two-lead + three-lead trees), MP binding
+> `part_identify(r1, r2 [, r3])`. The 2N3906 on rows 17/18/19 identifies as
+> BJT_PNP roles E/B/C in any tap order, conf 0.90, Vbe 0.62V, hFE ~350,
+> ~1.5s total. See §15 below for the bench facts that amended this design;
+> the deltas from the blueprint as written:
+> - **Per-measurement legs, not a persistent fixture.** A sip3 part has all
+>   three rows on ONE CH446Q; a parked 6-leg fixture exhausts that chip's
+>   lanes (the fabric refused the 6th leg on the bench). Every primitive
+>   builds its 3-5 legs, measures, removes them (~10ms per bypass pass), and
+>   validates the build against `unconnectablePaths[]` — a state-side add
+>   the hardware refused must fail loudly, not read 0V.
+> - **Hard-lows and discharge are row→GND legs, not GPIO pads** (no E9
+>   exposure, no claims); ONE roving GPIO covers every pull/gate duty.
+> - The junction map runs at ~50uA pull-up sensing (0.6V fwd / 3.2V blocked,
+>   both outside the E9 band); hFE drives from DAC0 at 1.2V so the base
+>   never enters the pad-leak band; E/C by two-orientation Ic asymmetry;
+>   Ib = Vbase / the in-session-calibrated pull (±20-25%).
+> - `identifyTwoLead` needs no GPIO at all (DAC + ISENSE + ADC lanes only,
+>   fully E9-free) — diode/LED/Zener/R/cap-detect per §5's recipes with the
+>   ratio law (Kübbeler doc): junction Vf barely moves over a 20x current
+>   ratio, a resistor's V scales, a cap keeps climbing on a re-read.
+
 ## 0. Verified fabric facts this design builds on
 
 From `src/routing/MatrixState.cpp:83-156` (`chipStatusInit`, V5r1):
@@ -287,3 +311,46 @@ never a short — `wouldShort` still gates every closure); I2C0 congestion (pace
 reads, pause OLED during tight sequences); parts-in-circuit misreads (v1 messaging:
 isolated parts on selected rows); MAX_EPHEMERAL_CONNECTIONS must fit 3-4 fixture
 bridges alongside MeasureMode's (check at phase 1).
+
+## 15. Bench-measured hardware facts (2026-08-26, V5 r7, MP prototype + C++ verify)
+
+Raw JSONs in the session scratchpad (charz_results, junction_map_2n3906,
+hfe*_2n3906); the numbers that survived into code:
+
+- **Hard-drive loop** DAC0→row→GPIO-low total ≈ **130Ω** (2Ω shunt + ~40Ω
+  DAC-side path + ~90Ω GPIO pad+path). DAC0 setpoint offset **−77mV**, gain
+  ~0.98 (read voltages with the ADC, don't trust the setpoint).
+- **ADC0-3 sense legs are near-high-Z**: input rests at **~2.31V bias**;
+  loading on a 50k-pulled node ~0.1V (Thevenin ~440k-class as loaded, but
+  float-recovery after a discharge takes tens of ms — treat the bias as a
+  float *signature*, give it settle time, never rely on it as a bias source).
+- **E9 pad leak, live**: a 50k pulldown cannot drag a node from above ~2.2V
+  (latched at 2.115V); a high-Z input node anywhere in ~1.5-2.6V gets pulled
+  toward ~2.1V with >50uA available — it CANCELLED the base pulldown at
+  VE=2.5V (zero collector current, both orientations identical) and works
+  fine at VE=1.2V (base 0.55V). Session pins run with the input buffer OFF
+  (`gpio_set_input_enabled(pin,false)`) and biased nodes stay <1.5V.
+- **INA1 (DAC0 shunt) carries a permanent V-proportional ~1.5k load** (probe
+  feed / output stage) — baseline-subtract or don't use it; **INA0 in the
+  DUT's ground-side return leg reads 0.000mA on an empty chain** and 5uA/LSB
+  from the shunt register. A user bridge on ISENSE± left 2.4mA standing
+  through INA0 — the session refuses (-6) when ISENSE±/DAC0 carry wiring.
+- **Junction map bands (through the real fabric, ADC legs attached)**:
+  Si forward 0.55-0.75V, blocked ~3.2V, BJT E-C floating-base leak ~2.7-2.9V
+  (varies with base loading — decide on it, never report it).
+- **2N3906 ground truth**: junction map finds B+PNP in one pass; fwd/rev Ic
+  asymmetry **21x** (3.59mA vs 0.17mA) — E/C unambiguous; hFE ~340-380 at
+  the 1.2V operating point (quasi-sat, honest ±25%).
+- **infraAcquireAdc keep-what-you-own**: repeated acquisition under one user
+  returns the SAME channel unless its bit is masked out of the next call —
+  three "distinct" legs all landed on ADC0 and shorted the DUT rows together
+  through the lane until masked (the GuideChecks two-channel pattern).
+- **SWD bench hygiene**: a week-old zombie openocd (platformio earlephilhower)
+  held the CMSIS-DAP probe and corrupted flash *readback* (phantom verify
+  failures, sticky AP faults reporting stale addresses). Recovery that
+  worked: kill the zombie, pyusb-reset the probe, and when `reset halt`
+  breaks while plain attach works, a **watchdog TRIGGER (0x400d8000 =
+  0x80000000) via the working core's AP** full-chip-resets back to a
+  bootable state. `target/rp2350-rescue.cfg` parks the chip in a state the
+  standard cfg cannot examine (core0 AP faults on the flash driver's DMA
+  read) — avoid it unless truly bricked.

@@ -32,6 +32,7 @@
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
+#include "sensing/PartClassify.h"  // part_identify binding
 #include "Undo.h"                  // UndoIngestGuard - placements are not undoable
 #include "ProjectsApp.h" // projectOpenLatestOrNew (load_project's name form)
 #include "WaveGen.h"
@@ -1250,15 +1251,43 @@ const char* jl_get_path_info( int pathIdx ) {
     return pathBuffer;
 }
 
+// ── Bridge scratch buffers ──────────────────────────────────────────────────
+// The three big string-returning APIs (get_all_paths / fs_read /
+// overlay_serialize) used to keep permanent function-local static buffers
+// (~12 KB of .bss on V5). Their pointer contract is only "valid until the
+// next call", so each keeps ONE lazily-allocated heap block instead,
+// released at MicroPython teardown (jl_bridge_free_scratches, called from
+// deinitMicroPythonProper). A session that never calls an API never
+// allocates its buffer. Ownership stays on this side deliberately: a
+// malloc'd return freed by the MP wrapper would leak on any mp_obj_new_*
+// MemoryError (nlr_jump skips the free).
+static char* s_allPathsScratch = nullptr;
+static char* s_fsReadScratch = nullptr;
+static char* s_overlayScratch = nullptr;
+
+static char* bridgeScratch( char** slot, size_t size ) {
+    if ( *slot == nullptr ) *slot = (char*)malloc( size );
+    if ( *slot != nullptr ) ( *slot )[ 0 ] = '\0';
+    return *slot;
+}
+
+void jl_bridge_free_scratches( void ) {
+    free( s_allPathsScratch ); s_allPathsScratch = nullptr;
+    free( s_fsReadScratch );   s_fsReadScratch = nullptr;
+    free( s_overlayScratch );  s_overlayScratch = nullptr;
+}
+
 // Get all active paths as a formatted string
 // Returns count, followed by each path on a new line
 const char* jl_get_all_path_info( void ) {
 #if defined(OG_JUMPERLESS)
-    static char allPathsBuffer[ 1024 ]; // RP2040: scarce SRAM, fewer paths fit
+    const size_t kAllPathsSize = 1024; // RP2040: scarce SRAM, fewer paths fit
 #else
-    static char allPathsBuffer[ 4096 ]; // Large buffer for multiple paths
+    const size_t kAllPathsSize = 4096; // Large buffer for multiple paths
 #endif
-    allPathsBuffer[ 0 ] = '\0';
+    char* allPathsBuffer = bridgeScratch( &s_allPathsScratch, kAllPathsSize );
+    if ( allPathsBuffer == nullptr )
+        return "0\n"; // alloc failed: report zero paths (wrapper atoi's this)
 
     // Note: Paths should already be computed by refreshLocalConnections()
     // We don't recompute here to avoid unnecessary overhead
@@ -1273,12 +1302,12 @@ const char* jl_get_all_path_info( void ) {
     Serial.println( numPaths );
 
     // First line: number of paths
-    pos += snprintf( allPathsBuffer + pos, sizeof( allPathsBuffer ) - pos, "%d\n", numPaths );
+    pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos, "%d\n", numPaths );
 
     // Each subsequent line: path info
-    for ( int i = 0; i < numPaths && pos < sizeof( allPathsBuffer ) - 256; i++ ) {
+    for ( int i = 0; i < numPaths && pos < (int)kAllPathsSize - 256; i++ ) {
         const pathStruct& path = globalState.connections.paths[ i ];
-        pos += snprintf( allPathsBuffer + pos, sizeof( allPathsBuffer ) - pos,
+        pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos,
                          "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                          path.node1, path.node2, path.net,
                          path.chip[ 0 ], path.chip[ 1 ], path.chip[ 2 ], path.chip[ 3 ],
@@ -2238,6 +2267,49 @@ int jl_guide_progress( void ) {
     return (int)globalState.parts.guideStep;
 }
 
+// part_identify(row1, row2 [, row3]): electrically identify the part on the
+// given rows (see src/sensing/PartClassify.*). Returns one machine-parseable
+// line; status<0 explains a refusal (-3 = a row has user wiring, -4 = a row
+// reads powered, -2 = machinery busy). Runs a full measurement session
+// (~0.5-3s) - the rows must hold an isolated part, nothing else wired.
+const char* jl_part_identify( int row1, int row2, int row3 ) {
+    static char idBuffer[ 384 ];
+    PartResult res = ( row3 > 0 ) ? identifyThreeLead( row1, row2, row3 )
+                                  : identifyTwoLead( row1, row2 );
+    int pos = snprintf( idBuffer, sizeof( idBuffer ),
+                        "type=%s conf=%.2f value=%.4g value2=%.4g degraded=%d status=%d rows=",
+                        partTypeName( res.type ), (double)res.confidence,
+                        (double)res.value, (double)res.value2,
+                        res.degraded ? 1 : 0, (int)res.status );
+    for ( int i = 0; i < res.nRows && pos > 0 && pos < (int)sizeof( idBuffer ) - 24; i++ )
+        pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, "%s%d",
+                         i ? "," : "", (int)res.rows[ i ] );
+    pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, " roles=" );
+    for ( int i = 0; i < res.nRows && pos > 0 && pos < (int)sizeof( idBuffer ) - 8; i++ )
+        pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, "%s%s",
+                         i ? "," : "", pinRoleName( res.roles[ i ] ) );
+    if ( res.type == PartType::LED && pos > 0 && pos < (int)sizeof( idBuffer ) - 40 )
+        pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, " color=%s",
+                         partLedColorGuess( res.value ) );
+    // raw evidence for HIL assertions and debugging
+    if ( res.status == 0 && pos > 0 && pos < (int)sizeof( idBuffer ) - 120 ) {
+        if ( res.nRows == 3 ) {
+            pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, " map=" );
+            for ( int a = 0; a < 3 && pos > 0; a++ )
+                for ( int b = 0; b < 3 && pos < (int)sizeof( idBuffer ) - 12; b++ )
+                    pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos,
+                                     "%s%.2f", ( a || b ) ? "," : "",
+                                     (double)res.jmap[ a ][ b ] );
+        } else {
+            snprintf( idBuffer + pos, sizeof( idBuffer ) - pos,
+                      " screen=%.3f,%.3f,%.3f,%.3f",
+                      (double)res.screen[ 0 ], (double)res.screen[ 1 ],
+                      (double)res.screen[ 2 ], (double)res.screen[ 3 ] );
+        }
+    }
+    return idBuffer;
+}
+
 // OLED Functions
 static int default_oled_text_size = 2; // Default to size 2
 
@@ -2961,23 +3033,26 @@ char* jl_fs_read_file( const char* path ) {
     if ( !path )
         return nullptr;
 
-    // Use static buffer for file contents
+    // Per-VM-lifetime scratch (see bridgeScratch above)
 #if defined(OG_JUMPERLESS)
-    static char fileBuffer[ 1024 ]; // RP2040: scarce SRAM, smaller max read via this API
+    const size_t kFsReadSize = 1024; // RP2040: scarce SRAM, smaller max read via this API
 #else
-    static char fileBuffer[ 4096 ];
+    const size_t kFsReadSize = 4096;
 #endif
+    char* fileBuffer = bridgeScratch( &s_fsReadScratch, kFsReadSize );
+    if ( fileBuffer == nullptr )
+        return nullptr; // alloc failed: wrapper maps this to None
     size_t bytesRead = 0;
 
-    if ( !safeFileReadAll( path, fileBuffer, sizeof( fileBuffer ), &bytesRead, 2000 ) ) {
+    if ( !safeFileReadAll( path, fileBuffer, kFsReadSize, &bytesRead, 2000 ) ) {
         return nullptr;
     }
 
     // Ensure null termination so text consumers (e.g. VFS readers) don't overrun
-    if ( bytesRead < sizeof( fileBuffer ) ) {
+    if ( bytesRead < kFsReadSize ) {
         fileBuffer[ bytesRead ] = '\0';
     } else {
-        fileBuffer[ sizeof( fileBuffer ) - 1 ] = '\0';
+        fileBuffer[ kFsReadSize - 1 ] = '\0';
     }
 
     return fileBuffer;
@@ -3838,17 +3913,23 @@ int jl_overlay_place(const char* name, int row, int col) {
  * @return Pointer to static string buffer containing JSON
  */
 char* jl_overlay_serialize(void) {
+    // Per-VM-lifetime scratch (see bridgeScratch above)
 #if defined(OG_JUMPERLESS)
-    static char overlayBuffer[256]; // RP2040: graphic overlays are out on OG
+    const size_t kOverlaySize = 256; // RP2040: graphic overlays are out on OG
 #else
-    static char overlayBuffer[4096];
+    const size_t kOverlaySize = 4096;
 #endif
+    char* overlayBuffer = bridgeScratch(&s_overlayScratch, kOverlaySize);
+    if (overlayBuffer == nullptr) {
+        // The MP wrapper strlen()s the return unconditionally - never NULL.
+        static char emptyOverlay[1] = { '\0' };
+        return emptyOverlay;
+    }
     String json;
     serializeOverlaysToJSON(json);
     
-    // Copy to static buffer
-    strncpy(overlayBuffer, json.c_str(), sizeof(overlayBuffer) - 1);
-    overlayBuffer[sizeof(overlayBuffer) - 1] = '\0';
+    strncpy(overlayBuffer, json.c_str(), kOverlaySize - 1);
+    overlayBuffer[kOverlaySize - 1] = '\0';
     
     return overlayBuffer;
 }
