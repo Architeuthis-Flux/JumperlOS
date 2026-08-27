@@ -23,6 +23,8 @@
 #include "LEDs.h"           // HsvToRaw - per-signal tap rainbow
 #include "sensing/PartClassify.h"  // tap-time electrical identification
 #include "sensing/PartMeasure.h"   // partScanCensus (Auto Scan)
+#include "remembering/FileParsing.h"  // add/removeBridgeFromState (scan board lift)
+#include "routing/InfraPaths.h"       // infraIsBridge - never lift infra's own
 #include "eyecandy/ReadingDisplay.h"  // measured values on the OLED
 #include "displays/DisplayService.h"   // display liveness (Parts > Test)
 #include "guiding/GuideScript.h"      // formatOhms
@@ -1771,6 +1773,77 @@ static void partsScanViz(int row, int state) {
     requestLedShow(2);
 }
 
+// Turn one scan finding into a PLACED part record (Kevin's ask, 12:15: "make
+// it so we can actually act on the scanned parts"). The canonical MicroPython
+// place path builds the record - offset pins keep the exact measured rows,
+// role names become pin names, footprint infers sipN. Records only: signal
+// pins route nothing, so the user's wiring is untouched.
+extern "C" int jl_place_part(const char* name, int row, const char* pins_json,
+                             const char* footprint, const char* type,
+                             const char* value,
+                             const char* part_id);   // JumperlessMicroPythonAPI.cpp
+static bool partsPlaceScanResult(const PartResult& res) {
+    if (res.nRows < 2 || res.nRows > 3) return false;
+    int idx[3] = {0, 1, 2};
+    for (int a2 = 1; a2 < res.nRows; a2++)
+        for (int b2 = a2; b2 > 0 && res.rows[idx[b2]] < res.rows[idx[b2 - 1]]; b2--) {
+            int t = idx[b2]; idx[b2] = idx[b2 - 1]; idx[b2 - 1] = t;
+        }
+    int baseRow = (int)res.rows[idx[0]];
+
+    const char* pfx;
+    const char* typeStr;
+    char value[12] = "";
+    switch (res.type) {
+        case PartType::RESISTOR: pfx = "R"; typeStr = "resistor";
+            formatOhms(res.value, value, sizeof(value)); break;
+        case PartType::DIODE:    pfx = "D";   typeStr = "diode"; break;
+        case PartType::ZENER:    pfx = "Z";   typeStr = "zener"; break;
+        case PartType::LED:      pfx = "LED"; typeStr = "led";
+            snprintf(value, sizeof(value), "%.10s", partLedColorGuess(res.value)); break;
+        case PartType::BJT_PNP:
+        case PartType::BJT_NPN:  pfx = "Q";   typeStr = "bjt"; break;
+        case PartType::POT:      pfx = "POT"; typeStr = "pot";
+            formatOhms(res.value, value, sizeof(value)); break;
+        case PartType::CAPACITOR: pfx = "C";  typeStr = "capacitor"; break;
+        case PartType::NFET:
+        case PartType::PFET:     pfx = "M";   typeStr = "fet"; break;
+        default: return false;
+    }
+    char name[16];
+    snprintf(name, sizeof(name), "%s%d", pfx, baseRow);
+
+    char pins[160];
+    int u = snprintf(pins, sizeof(pins), "{");
+    for (int k = 0; k < res.nRows; k++) {
+        const char* nm = pinRoleName(res.roles[idx[k]]);
+        char fallback[2] = { (char)('1' + k), '\0' };
+        if (nm == nullptr || nm[0] == '\0' || strcmp(nm, "LEAD") == 0 ||
+            strcmp(nm, "NONE") == 0)
+            nm = fallback;
+        u += snprintf(pins + u, sizeof(pins) - u, "%s\"%s\": {\"offset\": %d}",
+                      k ? ", " : "", nm, (int)res.rows[idx[k]] - baseRow);
+        if (u >= (int)sizeof(pins)) return false;
+    }
+    snprintf(pins + u, sizeof(pins) - u, "}");
+
+    if (jl_place_part(name, baseRow, pins, "", typeStr, value, name) != 0)
+        return false;
+    int pi = globalState.parts.findByName(name);
+    if (pi >= 0) {   // the scan's measurement IS this part's cached test
+        globalState.parts.parts[pi].lastTestType = (uint8_t)res.type;
+        globalState.parts.parts[pi].lastTestValue = res.value;
+        globalState.parts.parts[pi].lastTestValue2 = res.value2;
+    }
+    Serial.print("\r\nPARTSCAN added ");
+    Serial.print(name);
+    Serial.print(" rows ");
+    Serial.print(baseRow);
+    Serial.print("-");
+    Serial.println((int)res.rows[idx[res.nRows - 1]]);
+    return true;
+}
+
 // The hidden-graph star test: one extra junction sharing this diode's anode
 // means a chip's clamp network, never a discrete diode (a discrete has
 // exactly one isolated edge). Queries up to nCand candidate rows, first hit
@@ -1838,6 +1911,42 @@ void partsAutoLauncher(void) {
     static uint8_t flags[61];
     static float v0[61], v1[61];
     s_scanVizFlags = flags;
+
+    // The scan owns a CLEAN board (Kevin's ruling, 12:15): every user bridge
+    // comes off before the census - no router contention (a full board
+    // sprayed "couldn't find a path" through every identify), every lane
+    // free, every row scannable - and goes back at adone. Safe by
+    // construction: SlotManager is not in the inner set, so no auto-save
+    // can run while this app's modal loop holds the board cleared - slot0
+    // keeps the pre-scan state throughout, and a crash mid-scan reboots
+    // into the full board.
+    static int16_t scanLiftA[MAX_BRIDGES], scanLiftB[MAX_BRIDGES];
+    static int16_t scanLiftDup[MAX_BRIDGES];
+    int scanLiftN = 0;
+    // findings the user can ACT on (Kevin's ask): identified discretes
+    // collect here and a CONNECT press at the end places them as records
+    static PartResult addable[8];
+    int nAddable = 0;
+    {
+        for (int i = 0; i < globalState.connections.numBridges && i < MAX_BRIDGES; i++) {
+            int n1 = globalState.connections.bridges[i][0];
+            int n2 = globalState.connections.bridges[i][1];
+            if (globalState.isEphemeralConnection(n1, n2)) continue;
+            if (infraIsBridge(n1, n2)) continue;
+            scanLiftA[scanLiftN] = (int16_t)n1;
+            scanLiftB[scanLiftN] = (int16_t)n2;
+            scanLiftDup[scanLiftN] = globalState.connections.bridges[i][2];
+            scanLiftN++;
+        }
+        for (int i = 0; i < scanLiftN; i++)
+            removeBridgeFromState(scanLiftA[i], scanLiftB[i], false);
+        if (scanLiftN > 0) {
+            Serial.print("PARTSCAN board cleared for the scan (");
+            Serial.print(scanLiftN);
+            Serial.println(" wires lifted - they go back when it's done)");
+            refreshConnections(-1, 0, 0);
+        }
+    }
     int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck, partsScanViz);
     if (found == -6) {
         Serial.println("PARTSCAN no clean measurement lane - every free ADC"
@@ -2157,6 +2266,8 @@ void partsAutoLauncher(void) {
                         snprintf(detail, sizeof(detail), "%.2fV", (double)res.value);
                     snprintf(line, sizeof(line), "rows %d-%d: %s %s", a, z,
                              partTypeName(res.type), detail);
+                    if (nAddable < 8 && res.type != PartType::SHORT_CIRCUIT)
+                        addable[nAddable++] = res;   // actable finding
                     // paint the span - junction parts get the standing role
                     // colors (EBC for transistors, A/K for diodes)
                     if (res.type == PartType::BJT_PNP ||
@@ -2251,6 +2362,8 @@ void partsAutoLauncher(void) {
                             consumed[r] = consumed[r + 1] = true;
                             nSplit++;
                             legsLeft -= 2;
+                            if (nAddable < 8 && pres.type != PartType::SHORT_CIRCUIT)
+                                addable[nAddable++] = pres;   // actable finding
                             char detail[24] = "";
                             if (pres.type == PartType::RESISTOR)
                                 formatOhms(pres.value, detail, sizeof(detail));
@@ -2320,7 +2433,13 @@ void partsAutoLauncher(void) {
         } else {
             Serial.print("PARTSCAN auto done in ");
             Serial.print((millis() - scanT0) / 1000);
-            Serial.println("s (add parts via Parts > Place)");
+            if (nAddable > 0) {
+                Serial.print("s - ");
+                Serial.print(nAddable);
+                Serial.println(" placeable (CONNECT adds them to the board)");
+            } else {
+                Serial.println("s (add parts via Parts > Place)");
+            }
             if (oled.oledConnected) {
                 if (nSpans == 0) {
                     oled.clearPrintShow("board looks\nempty", 2, true, true, true);
@@ -2330,10 +2449,79 @@ void partsAutoLauncher(void) {
                 }
             }
             partsWaitForPress();
+
+            // Act on the findings (Kevin's ask): one CONNECT press places
+            // every identified discrete as a real record - highlightable,
+            // testable, removable - with the scan's measurement as its
+            // cached test data. Click passes.
+            if (nAddable > 0 && !partsAutoAborted) {
+                if (oled.oledConnected) {
+                    char t[64];
+                    snprintf(t, sizeof(t), "add %d found part%s?\nCONNECT = yes  click = no",
+                             nAddable, nAddable == 1 ? "" : "s");
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText(t);
+                }
+                Serial.print("\r\nPARTSCAN add confirm n=");
+                Serial.println(nAddable);
+                Serial.flush();
+                encoderButtonState = IDLE;
+                lastButtonEncoderState = IDLE;
+                bool addThem = false;
+                while (true) {
+                    jOS.serviceInner();
+                    rotaryEncoderButtonStuff();
+                    if (partsProbeButton() == 1) { addThem = true; break; }
+                    if (encoderButtonState == HELD ||
+                        (encoderButtonState == RELEASED &&
+                         lastButtonEncoderState == PRESSED)) {
+                        while (encoderButtonState == HELD ||
+                               encoderButtonState == MEDIUM_HELD ||
+                               encoderButtonState == LONG_HELD) {
+                            jOS.serviceInner();
+                            rotaryEncoderButtonStuff();
+                            delayMicroseconds(1000);
+                        }
+                        encoderButtonState = IDLE;
+                        lastButtonEncoderState = IDLE;
+                        break;
+                    }
+                    if (Serial.available() > 0) {
+                        char c = (char)Serial.read();
+                        if (c == 'y' || c == 'Y') { addThem = true; }
+                        break;   // serial twin: y = yes, anything else = no
+                    }
+                    delayMicroseconds(1000);
+                }
+                if (addThem) {
+                    int placed = 0;
+                    for (int q = 0; q < nAddable; q++)
+                        if (partsPlaceScanResult(addable[q])) placed++;
+                    partLabels.requestRun();
+                    if (oled.oledConnected) {
+                        char t[32];
+                        snprintf(t, sizeof(t), "added\n%d part%s", placed,
+                                 placed == 1 ? "" : "s");
+                        oled.clearPrintShow(t, 2, true, true, true);
+                        delay(800);
+                    }
+                }
+            }
         }
     }
 
 adone:
+    // the user's wiring goes back, duplicate stacking and all, in one
+    // refresh - every exit path funnels through here
+    if (scanLiftN > 0) {
+        for (int i = 0; i < scanLiftN; i++)
+            addBridgeToState(scanLiftA[i], scanLiftB[i], scanLiftDup[i], false);
+        Serial.print("PARTSCAN board restored (");
+        Serial.print(scanLiftN);
+        Serial.println(" wires back)");
+        scanLiftN = 0;
+        refreshConnections(-1, 0, 0);
+    }
     partsAutoAborted = false;
     inClickMenu = 0;
     rotaryDivider = lastDivider;
