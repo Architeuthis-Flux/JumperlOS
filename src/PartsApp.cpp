@@ -2316,6 +2316,93 @@ void partsAutoLauncher(void) {
             Serial.println(v1[r], 2);
         }
 
+        // edge-row findings first: pairs whose far row is an x-pin column
+        // (29/30/59/60) came from the sweep's edge stage. Several pairs
+        // sharing one edge row are ONE part - a 7-seg display is many LEDs
+        // into a common pin (bench, 14:00: Kevin's display's common anode
+        // on row 59 fans out to segments in BOTH halves, and its rows read
+        // EMPTY pairwise among themselves - only the common tells the story).
+        {
+            static const int kEdgeRows[4] = {29, 30, 59, 60};
+            for (int e = 0; e < 4 && !partsAutoAborted; e++) {
+                int E = kEdgeRows[e];
+                int members[12];
+                int nMembers = 0;
+                for (int gp = 0; gp < nGapPairs && nMembers < 12; gp++)
+                    if (gapPairs[2 * gp + 1] == E &&
+                        gapPairs[2 * gp] >= 1 && gapPairs[2 * gp] <= 60 &&
+                        flags[gapPairs[2 * gp]] == 5)
+                        members[nMembers++] = gapPairs[2 * gp];
+                if (nMembers == 0) continue;
+                Serial.print("  checking row ");
+                Serial.print(E);
+                Serial.print(" (an x-pin column) - ");
+                Serial.print(nMembers);
+                Serial.println(" rows conduct to it...");
+                Serial.flush();
+                if (partsAutoAbortCheck()) break;
+                // one typed identify names the family; the sweep already
+                // proved every member conducts the same way
+                PartResult er = identifyTwoLead(members[0], E);
+                bool ledLike = (er.status == 0 && (er.type == PartType::LED ||
+                                                   er.type == PartType::DIODE));
+                if (nMembers >= 3) {
+                    Serial.print("  rows ");
+                    for (int m = 0; m < nMembers; m++) {
+                        if (m) Serial.print(",");
+                        Serial.print(members[m]);
+                    }
+                    Serial.print(" all ");
+                    Serial.print(ledLike ? "light from" : "conduct to");
+                    Serial.print(" row ");
+                    Serial.print(E);
+                    Serial.println(ledLike ? " - a 7-seg display?" : " - a chip?");
+                    for (int m = 0; m < nMembers; m++) {
+                        crossUsed[members[m]] = true;
+                        int pr = nodeToPrintRow(members[m]);
+                        if (pr >= 0)
+                            b.printRawRow(0b00011111, pr, PARTS_ROLE_K_COLOR,
+                                          0xffffff);
+                    }
+                    int prE = nodeToPrintRow(E);
+                    if (prE >= 0)
+                        b.printRawRow(0b00011111, prE, PARTS_ROLE_A_COLOR,
+                                      0xffffff);
+                    requestLedShow(2);
+                    // placement of a multi-pin display is the Parts menu's
+                    // job (it knows the footprints); the scan names it only
+                } else {
+                    // one or two lone pairs: report like a cross-gap find;
+                    // same-half pairs are placeable (a lone LED to row 29),
+                    // mirror-half spans have no footprint yet - name only
+                    for (int m = 0; m < nMembers; m++) {
+                        PartResult mr = (m == 0) ? er
+                                                 : identifyTwoLead(members[m], E);
+                        if (mr.status != 0 || mr.type == PartType::EMPTY ||
+                            mr.type == PartType::UNKNOWN)
+                            continue;
+                        char detail[24] = "";
+                        if (mr.value != 0.0f)
+                            snprintf(detail, sizeof(detail), "%.2fV",
+                                     (double)mr.value);
+                        Serial.print("  rows ");
+                        Serial.print(members[m]);
+                        Serial.print("-");
+                        Serial.print(E);
+                        Serial.print(": ");
+                        Serial.print(partTypeName(mr.type));
+                        Serial.print(" ");
+                        Serial.println(detail);
+                        crossUsed[members[m]] = true;
+                        bool sameHalf = (members[m] <= 30) == (E <= 30);
+                        if (sameHalf && nAddable < 8 &&
+                            mr.type != PartType::SHORT_CIRCUIT)
+                            addable[nAddable++] = mr;
+                    }
+                }
+            }
+        }
+
         // cross-gap findings FIRST: a pair conducting across the center
         // channel (the LED plugged 21 -> 51) is one part in two halves.
         // Identified here and claimed via crossUsed, so the span former

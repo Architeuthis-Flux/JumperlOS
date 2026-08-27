@@ -144,7 +144,11 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 // (n,n+1) and across the center channel (n,n+30 - the same column on the
 // other half) - at 3.0V through the shunt, both directions (~70ms per
 // check): a junction, an LED, or a resistor (up to ~19k) conducts, and
-// both rows get flagged 5. User wiring on the
+// both rows get flagged 5. A third, evidence-gated stage sweeps the six
+// columns beside each x-pin row (29/30/59/60, unpokeable by the census)
+// against that row, widening to the mirror half when an edge row shows
+// hits - a 7-seg's common anode on row 59 fans out to segments in both
+// halves (bench, 2026-08-27) and is invisible any other way. User wiring on the
 // measurement path (DAC0 / the ISENSE pair) is briefly LIFTED like an
 // identify session does it, and restored on every exit (bench: the standing
 // UART_TX->ISENSE_MINUS wire would otherwise sideline the sweep forever).

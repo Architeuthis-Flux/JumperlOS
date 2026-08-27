@@ -231,7 +231,13 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     if (nRows < 2 || nRows > 3 || rows == nullptr) return -1;
     for (int i = 0; i < nRows; i++) {
         int r = rows[i];
-        if (r < 1 || r > 60 || r == 29 || r == 30 || r == 59 || r == 60) return -1;
+        // Rows 29/30/59/60 are welcome: they exist as chip K/L x-pins
+        // rather than y-lines, but DAC/GND/ISENSE/ADC legs all route to
+        // them fine (bench, 2026-08-27: ADC0 on row 59 read the DAC to
+        // within the normal fabric drop, and a 7-seg's common anode on 59
+        // lit segments through DAC0 legs). The old refusal here made any
+        // part with a pin on those columns electrically invisible.
+        if (r < 1 || r > 60) return -1;
         for (int j = 0; j < i; j++)
             if (rows[j] == r) return -1;
     }
@@ -894,7 +900,13 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
         static const int kGap[2] = {1, 30};
         static float di[2][58];
         static int16_t pairA[58];
+        static int16_t pairB[58];
         bool aborted = false;
+        // the gap-1 pass's per-direction empty line doubles as the edge
+        // stage's reference (same fixture, same artifact - too few edge
+        // pairs exist to self-calibrate)
+        float edgeMedian[2] = {0.0f, 0.0f};
+        bool haveEdgeMedian = false;
         for (int gi = 0; gi < 2 && !aborted; gi++) {
             int gap = kGap[gi];
             int nPairs = 0;
@@ -923,6 +935,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                     }
                     if (progress != nullptr) progress(a, 3);   // pair cursor
                     pairA[nPairs] = (int16_t)a;
+                    pairB[nPairs] = (int16_t)b;
                     di[0][nPairs] = di[1][nPairs] = 1.0e9f;  // no-reading sentinel
                     for (int dir = 0; dir < 2; dir++) {
                         int src = dir ? b : a, snk = dir ? a : b;
@@ -967,10 +980,14 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                         float t = sorted[y]; sorted[y] = sorted[y - 1]; sorted[y - 1] = t;
                     }
                 float median = sorted[n / 2];
+                if (gap == 1) {
+                    edgeMedian[dir] = median;
+                    haveEdgeMedian = true;
+                }
                 for (int i = 0; i < nPairs; i++) {
                     if (di[dir][i] > 1.0e8f) continue;
                     if (fabsf(di[dir][i] - median) > 0.15f) {
-                        int a = pairA[i], b = a + gap;
+                        int a = pairA[i], b = pairB[i];
                         if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
                         if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
                         if (progress != nullptr) {
@@ -995,6 +1012,94 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                     }
                 }
             }
+        }
+
+        // Edge-row stage: rows 29/30/59/60 exist as chip K/L x-pins - the
+        // census can't poke them, but parts END on those columns (bench,
+        // 2026-08-27: Kevin's 7-seg's common anode sits on row 59, its dp
+        // cathode on 29, and the whole display was invisible because
+        // nothing ever measured against them). Pairs (n, edge) with n in
+        // the 6 columns beside the edge sweep against the gap-1 pass's
+        // empty line; an edge row that shows hits then earns its MIRROR
+        // window too (the display's top segments bond to the BOTTOM
+        // common - only mirror pairs can see them). Evidence-gated, so an
+        // empty board pays one window, not two. Deviating pairs go to
+        // gapPairsOut like cross-gap pairs do - the edge row can never
+        // join a span (its census flag stays 3) and the launcher groups
+        // pairs sharing one edge row into a single finding.
+        if (!aborted && haveEdgeMedian) {
+            static const int kEdge[4] = {29, 30, 59, 60};
+            bool edgeHadHit[4] = {false, false, false, false};
+            for (int stage = 0; stage < 2 && !aborted; stage++) {
+                int nPairs = 0;
+                for (int e = 0; e < 4 && !aborted && nPairs < 58; e++) {
+                    if (stage == 1 && !edgeHadHit[e]) continue;
+                    int E = kEdge[e];
+                    int base = (stage == 0) ? E : ((E <= 30) ? E + 30 : E - 30);
+                    for (int n = base - 6; n <= base - 1 && nPairs < 58; n++) {
+                        if (n < 1 || n == 29 || n == 30 || n == 59 || n == 60)
+                            continue;
+                        if (rowFlags[n] != 0 && rowFlags[n] != 1 &&
+                            rowFlags[n] != 5)
+                            continue;
+                        if (abortCheck != nullptr && abortCheck()) {
+                            aborted = true;
+                            break;
+                        }
+                        if (progress != nullptr) progress(n, 3);
+                        pairA[nPairs] = (int16_t)n;
+                        pairB[nPairs] = (int16_t)E;
+                        di[0][nPairs] = di[1][nPairs] = 1.0e9f;
+                        for (int dir = 0; dir < 2; dir++) {
+                            int src = dir ? E : n, snk = dir ? n : E;
+                            setDac0voltage(0.0f, 0, 0, false);
+                            legAdd(s, DAC0, src);
+                            legAdd(s, snk, ISENSE_PLUS);
+                            legAdd(s, ISENSE_MINUS, GND);
+                            if (!legsBuild(s)) continue;
+                            setDac0voltage(3.0f, 0, 0, false);
+                            delay(3);
+                            (void)inaFreshMa();
+                            di[dir][nPairs] = inaFreshMa();
+                            setDac0voltage(0.0f, 0, 0, false);
+                            legsClear(s);
+                        }
+                        if (progress != nullptr) progress(n, 4);
+                        nPairs++;
+                    }
+                }
+                for (int dir = 0; dir < 2; dir++) {
+                    for (int i = 0; i < nPairs; i++) {
+                        if (di[dir][i] > 1.0e8f) continue;
+                        if (fabsf(di[dir][i] - edgeMedian[dir]) <= 0.15f)
+                            continue;
+                        int n = pairA[i], E = pairB[i];
+                        for (int e = 0; e < 4; e++)
+                            if (kEdge[e] == E) edgeHadHit[e] = true;
+                        if (rowFlags[n] == 0) { rowFlags[n] = 5; newHits++; }
+                        if (progress != nullptr) progress(n, 1);
+                        if (gapPairsOut != nullptr && nGapPairsOut != nullptr &&
+                            *nGapPairsOut < gapPairsCap) {
+                            bool dup = false;
+                            for (int q = 0; q < *nGapPairsOut; q++)
+                                if (gapPairsOut[2 * q] == n &&
+                                    gapPairsOut[2 * q + 1] == E)
+                                    dup = true;
+                            if (!dup) {
+                                gapPairsOut[2 * *nGapPairsOut] = (int16_t)n;
+                                gapPairsOut[2 * *nGapPairsOut + 1] = (int16_t)E;
+                                (*nGapPairsOut)++;
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (!aborted) {
+            // no silent caps: without the gap-1 empty line the edge rows
+            // can't be judged, and a part ending on 29/30/59/60 stays dark
+            Serial.println("PARTSCAN edge rows unswept (no calibration"
+                           " population) - parts ending on 29/30/59/60"
+                           " won't be seen");
         }
     }
 sweepDone:
