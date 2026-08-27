@@ -26,6 +26,7 @@
 #include "Menus.h"
 #include "ReadingDisplay.h"
 #include "PartLabels.h"      // partLabels - the part-highlight overlay channel
+#include "PartsApp.h"        // partsShowPartCard - the scroll's part card
 #include "PartPlacement.h"   // partPinNode - semantic labels for part-pin nets
 #include <Arduino.h>
 #include <cmath>
@@ -587,60 +588,28 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             }
         };
 
-        // Land the part focus. pj = -1 is the WHOLE part: role-color dots on
-        // every pin (the overlay carries the show, so it works with zero
-        // wires) and the OLED card - name, pin assignments, cached test
-        // data. pj >= 0 focuses one pin: a wired pin gets the full net
-        // treatment (row gradient + net boost + the semantic "<part> <pin>"
-        // reading), an unwired one lights through the overlay with its
-        // label on the panel - the label is the headline (Kevin's spec).
+        // Land the part focus. pj = -1 is the WHOLE part, pj >= 0 one pin.
+        // The part is the important thing (Kevin's spec): the card - name /
+        // type / cached test data / pin-row assignments - owns the panel in
+        // BOTH states, and highlightedNet stays parked so the live net
+        // updater can never repaint "Net N" over it. A focused wired pin
+        // still lights its net + row gradient (brightenedNet/Node feed the
+        // LEDs directly); an unwired pin's row lights through the overlay.
         auto focusPart = [&]( int pi, int pj ) {
             const PartDefinition& p = globalState.parts.parts[ pi ];
             partLabels.setPartHighlight( pi, pj, persistentHighlightTimeout );
+            highlightedNet = -1;
+            // a fresh stamp, or a STALE timer from the previous net stop
+            // fires the 1.8s clear mid-card (clearHighlighting tears the
+            // part focus down with it)
+            highlightTimer = millis( );
+            int net = -1;
+            int row = scrolledRow;
             if ( pj < 0 ) {
-                highlightedNet = -1;
                 brightenedNet = -1;
                 brightenedNode = -1;
-                // a fresh stamp, or a STALE timer from the previous net stop
-                // fires the 1.8s clear mid-card (clearHighlighting tears the
-                // part focus down with it)
-                highlightTimer = millis( );
-                requestLedShow( -1 );
-                char pinsLine[ 24 ] = "";
-                int used = 0, shown = 0;
-                for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
-                    const char* nm = p.pins[ j ].name;
-                    int nl = (int)strlen( nm );
-                    if ( used + nl + 2 >= (int)sizeof( pinsLine ) ) break;
-                    if ( shown > 0 ) pinsLine[ used++ ] = ' ';
-                    memcpy( pinsLine + used, nm, nl );
-                    used += nl;
-                    pinsLine[ used ] = '\0';
-                    shown++;
-                }
-                if ( shown < p.numPins )
-                    snprintf( pinsLine, sizeof( pinsLine ), "%d pins", (int)p.numPins );
-                char testLine[ 24 ];
-                bool haveTest = PartLabels::partTestSummary( p, testLine, sizeof( testLine ) );
-                ReadingDisplay::show( p.name, scrolledRow, pinsLine,
-                                      haveTest ? testLine
-                                               : ( p.value[ 0 ] ? p.value : nullptr ) );
-                if ( print ) {
-                    Serial.print( "\r\nPARTSEL part=" );
-                    Serial.print( p.name );
-                    Serial.print( " row=" );
-                    Serial.print( scrolledRow );
-                    Serial.print( " pins=" );
-                    Serial.print( pinsLine );
-                    if ( haveTest ) {
-                        Serial.print( " test=" );
-                        Serial.print( testLine );
-                    }
-                    Serial.println( );
-                }
             } else {
-                int row = partPinNode( p, p.pins[ pj ] );
-                int net = -1;
+                row = partPinNode( p, p.pins[ pj ] );
                 for ( int i = 0; i < numberOfPaths; i++ ) {
                     if ( globalState.connections.paths[ i ].node1 == row ||
                          globalState.connections.paths[ i ].node2 == row ) {
@@ -648,32 +617,31 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                         break;
                     }
                 }
-                if ( net > 0 ) {
-                    highlightedNet = net;
-                    brightenedNet = net;
-                    brightenedNode = row;
-                    brightenedAmount = 80;
-                    requestLedShow( -1 );
-                    highlightNets( 0, net, print );
-                } else {
-                    highlightedNet = -1;
-                    brightenedNet = -1;
-                    brightenedNode = -1;
-                    highlightTimer = millis( );   // same stale-timer guard
-                    requestLedShow( -1 );
-                    char line2[ 24 ];
-                    snprintf( line2, sizeof( line2 ), "pin %d (no net)",
-                              p.pins[ pj ].pinNumber );
-                    ReadingDisplay::show( p.name, row, p.pins[ pj ].name, line2 );
-                    if ( print ) {
-                        Serial.print( "\r\nPARTSEL part=" );
-                        Serial.print( p.name );
-                        Serial.print( " row=" );
-                        Serial.print( row );
-                        Serial.print( " pin=" );
-                        Serial.println( p.pins[ pj ].name );
+                brightenedNet = ( net > 0 ) ? net : -1;
+                brightenedNode = ( net > 0 ) ? row : -1;
+                brightenedAmount = 80;
+            }
+            requestLedShow( -1 );
+            partsShowPartCard( p, pj );
+            if ( print ) {
+                Serial.print( "\r\nPARTSEL part=" );
+                Serial.print( p.name );
+                Serial.print( " row=" );
+                Serial.print( row );
+                if ( pj < 0 ) {
+                    Serial.print( " pins=" );
+                    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+                        if ( j ) Serial.print( ' ' );
+                        Serial.print( p.pins[ j ].name );
                     }
+                } else {
+                    Serial.print( " pin=" );
+                    Serial.print( p.pins[ pj ].name );
+                    Serial.print( " net=" );
+                    if ( net > 0 ) Serial.print( net );
+                    else Serial.print( "none" );
                 }
+                Serial.println( );
             }
         };
 
@@ -683,6 +651,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                !globalState.parts.parts[ scrollPartIdx ].placed ) ) {
             scrollPartIdx = -1;
             scrollPartPin = -1;
+            partLabels.clearPartHighlight( );
         }
 
         if ( encoderDirectionState == UP ) {
@@ -701,8 +670,12 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     focusPart( scrollPartIdx, pj );
                     returnNode = scrolledRow;
                 } else {
+                    // leaving the part: its paint goes with it (bench,
+                    // 2026-08-27 - the dots/row wash lingered 15s after
+                    // scrolling on)
                     scrollPartIdx = -1;
                     scrollPartPin = -1;
+                    partLabels.clearPartHighlight( );
                 }
             }
 
@@ -750,6 +723,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     }
 
                     if ( foundConnection ) {
+                        partLabels.clearPartHighlight( );   // a net stop never wears part paint
                         highlightedNet = connectedNet;
                         brightenedNet = connectedNet;
                         brightenedNode = scrolledRow;
@@ -777,8 +751,10 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     focusPart( scrollPartIdx, pj );
                     returnNode = scrolledRow;
                 } else {
+                    // leaving the part: its paint goes with it (see UP)
                     scrollPartIdx = -1;
                     scrollPartPin = -1;
+                    partLabels.clearPartHighlight( );
                 }
             }
 
@@ -824,6 +800,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     }
 
                     if ( foundConnection ) {
+                        partLabels.clearPartHighlight( );   // a net stop never wears part paint
                         highlightedNet = connectedNet;
                         brightenedNet = connectedNet;
                         brightenedNode = scrolledRow;
@@ -1222,6 +1199,25 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
     } else {
 
         netHighlighted = brightenNet( probeReading );
+        // A probe tap is a fresh gesture: the part card yields the panel to
+        // the tapped net (otherwise the checkForReadingChanges part-focus
+        // gate would mute the tap's live readings for the rest of the hold).
+        // EXCEPT a tap on the focused part's own pins - the inspect listener
+        // owns that display, and racing it here would drop the pin dots.
+        if ( netHighlighted > 0 && partLabels.partHighlightActive( ) ) {
+            bool onFocusedPart = false;
+            int hp = partLabels.partHighlightPart( );
+            if ( hp >= 0 && hp < globalState.parts.numParts ) {
+                const PartDefinition& fp = globalState.parts.parts[ hp ];
+                for ( int j = 0; j < fp.numPins && j < MAX_PART_PINS; j++ ) {
+                    if ( partPinNode( fp, fp.pins[ j ] ) == probeReading ) {
+                        onFocusedPart = true;
+                        break;
+                    }
+                }
+            }
+            if ( !onFocusedPart ) partLabels.clearPartHighlight( );
+        }
     }
 
     auto& sensePrintInitialized   = g_readingGuards.sensePrintInitialized;
@@ -1752,6 +1748,16 @@ int Highlighting::checkForReadingChanges( void ) {
     unsigned long currentTime = millis( );
     // NOTE: removed the 50ms early-exit so checkForReadingChanges() evaluates
     // the UART snapshot and other sensors every time it's called by the service loop.
+
+    // While a PART has focus, the part card owns the panel - the live net
+    // reading must not repaint "Net N" over it (Kevin's bench, 2026-08-27:
+    // the card lasted seconds before a net reading stomped it). The latch
+    // drops so the reading doesn't resume stale when the focus ends.
+    if ( partLabels.partHighlightActive( ) ) {
+        showReadingNet = -1;
+        lastMeasuredNet = -1;
+        return -1;
+    }
 
     // Update showReadingNet to track brightenedNet (but don't clear on timeout)
     if ( brightenedNet > 0 ) {

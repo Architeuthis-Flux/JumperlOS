@@ -661,7 +661,8 @@ bool partScanFetProbe(ScanSession& s, int gIdx, int dIdx, int sIdx,
 // ---------------------------------------------------------------------------
 
 int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
-                   bool (*abortCheck)(void)) {
+                   bool (*abortCheck)(void),
+                   void (*progress)(int row, int state)) {
     if (rowFlags == nullptr) return -2;
     if (rp2040.cpuid() != 0) return -2;
     static ScanSession s;   // a claims-only session: no DUT rows, just legs
@@ -714,11 +715,13 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
             continue;
         }
         if (abortCheck != nullptr && abortCheck()) break;
+        if (progress != nullptr) progress(row, 0);   // the cursor row
 
         legAdd(s, row, ADC0 + ch);
         legAdd(s, row, rovingNode(s));
         if (!legsBuild(s)) {
             rowFlags[row] = 4;
+            if (progress != nullptr) progress(row, 2);
             continue;
         }
         rovingOut(s, true);      // charge the row hard
@@ -742,6 +745,7 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
             rowFlags[row] = 1;
             found++;
         }
+        if (progress != nullptr) progress(row, rowFlags[row] == 1 ? 1 : 2);
     }
 
     restoreRovingGpio(s);
@@ -751,7 +755,8 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
     return found;
 }
 
-int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
+int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
+                      void (*progress)(int row, int state)) {
     if (rowFlags == nullptr) return -2;
     if (rp2040.cpuid() != 0) return -2;
     static ScanSession s;
@@ -839,6 +844,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
                 bool bOk = bFree || rowFlags[b] == 1 || rowFlags[b] == 5;
                 if (!(aOk && bOk) || (!aFree && !bFree)) continue;
                 if (abortCheck != nullptr && abortCheck()) goto sweepJudge;
+                if (progress != nullptr) progress(a, 3);   // pair cursor
                 pairA[nPairs] = (int16_t)a;
                 di[0][nPairs] = di[1][nPairs] = 1.0e9f;  // no-reading sentinel
                 for (int dir = 0; dir < 2; dir++) {
@@ -858,6 +864,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void)) {
                     setDac0voltage(0.0f, 0, 0, false);
                     legsClear(s);
                 }
+                if (progress != nullptr) progress(a, 4);   // pair painted from flags
                 nPairs++;
             }
         }
@@ -880,6 +887,10 @@ sweepJudge:
                         int a = pairA[i], b = a + 1;
                         if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
                         if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
+                        if (progress != nullptr) {
+                            progress(a, 1);
+                            progress(b, 1);
+                        }
                     }
                 }
             }

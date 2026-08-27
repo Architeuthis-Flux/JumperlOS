@@ -32,6 +32,7 @@
 #include "ReadingDisplay.h"
 #include "guiding/GuideScript.h"     // formatOhms
 #include "sensing/PartClassify.h"    // PartType (the cached-test summary)
+#include "PartsApp.h"                // partsShowPartCard (the tap's card)
 #include "boards/board.h"      // currentBoard().caps.ledsPerRow (OG gate)
 
 PartLabels& PartLabels::getInstance() {
@@ -206,12 +207,11 @@ void PartLabels::listenForInspectTap(unsigned long now) {
             inspectUntilMs[i] = now + LBL_INSPECT_MS;
             // A select tap highlights JUST this pin - never the whole-part
             // landing the encoder scroll does (Kevin's spec, 2026-08-27).
-            // An unwired pin's row lights through the overlay this way.
+            // An unwired pin's row lights through the overlay this way, and
+            // the same part card the scroll shows keeps the display in one
+            // language (part first, [pin] bracketed, LED polarity labels).
             setPartHighlight(i, j, LBL_INSPECT_MS);
-
-            char line2[24];
-            snprintf(line2, sizeof(line2), "pin %d %s", pin.pinNumber, pinClassName(pin.pinClass));
-            ReadingDisplay::show(p.name, node, pin.name, line2);
+            partsShowPartCard(p, j);
 
             Serial.print("\r\nPARTPIN row=");
             Serial.print(node);

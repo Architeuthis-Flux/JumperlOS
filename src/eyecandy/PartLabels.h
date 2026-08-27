@@ -65,6 +65,7 @@ public:
     void setPartHighlight(int partIdx, int pinIdx, unsigned long holdMs);
     void clearPartHighlight();
     bool partHighlightActive() const { return hlPart >= 0; }
+    int partHighlightPart() const { return hlPart; }
 
     // Standing displays retire (Kevin's ruling, 2026-08-27: overlays are
     // informative but GO AWAY on board clear / parts-app exit): current

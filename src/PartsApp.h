@@ -2,6 +2,8 @@
 #ifndef PARTS_APP_H
 #define PARTS_APP_H
 
+#include "States.h"   // PartDefinition (the part card)
+
 // Parts picker / placement app (Guides-Simplification workstream B, M2/M3).
 //
 // The top-level "Parts" menu row lands here (menuTree.h row -> Menus.cpp
@@ -19,6 +21,12 @@
 void partsAppLauncher(void);
 void partsTestLauncher(void);
 void partsAutoLauncher(void);
+
+// The part card (Kevin's spec, 2026-08-27): name / type / cached test data /
+// "E - 17  B - 18  C - 19" (LEDs label polarity: "A+ - 21  K- - 51").
+// focusPin brackets one pin ([B - 18]); -1 = the whole part. 128x32, the
+// BJT-card idiom (four 5pt rows). The encoder scroll's part focus calls it.
+void partsShowPartCard(const PartDefinition& p, int focusPin);
 
 // Probe-button polarity: the probe_revision>3 swap lives in exactly TWO
 // sanctioned implementations - the MicroPython wrappers (jl_probe_button_*,

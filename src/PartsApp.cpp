@@ -1140,6 +1140,104 @@ static void partsShowDiodeResult(const PartDefinition& p, const PartResult& res)
     requestLedShow(2);
 }
 
+// The display label for one pin: LEDs wear their polarity (Kevin's ruling,
+// 2026-08-27: "use K - and A + as labels").
+static void partsCardPinLabel(const PartDefinition& p, const PartPin& pin,
+                              char* buf, size_t len) {
+    const char* suffix = "";
+    if (strcmp(p.typeStr, "led") == 0) {
+        if (pin.name[0] == 'A' && pin.name[1] == '\0') suffix = "+";
+        else if (pin.name[0] == 'K' && pin.name[1] == '\0') suffix = "-";
+    }
+    snprintf(buf, len, "%s%s", pin.name, suffix);
+}
+
+// The part card (Kevin's spec): the part is the important thing, never the
+// nodes. Four 5pt rows on the 128x32 panel, the BJT-card idiom:
+//   2N3906
+//   PNP
+//   hFE 457  0.60V          (cached test data, when there is any)
+//   E - 17  B - 18  C - 19  ([brackets] mark a focused pin)
+void partsShowPartCard(const PartDefinition& p, int focusPin) {
+    if (!oled.oledConnected) return;
+
+    // type line: the tested identity first, the authored type as fallback,
+    // the authored value riding along when it fits ("LED red")
+    char typeLine[26] = "";
+    switch ((PartType)p.lastTestType) {
+        case PartType::BJT_PNP:   snprintf(typeLine, sizeof(typeLine), "PNP"); break;
+        case PartType::BJT_NPN:   snprintf(typeLine, sizeof(typeLine), "NPN"); break;
+        case PartType::LED:       snprintf(typeLine, sizeof(typeLine), "LED"); break;
+        case PartType::DIODE:     snprintf(typeLine, sizeof(typeLine), "diode"); break;
+        case PartType::ZENER:     snprintf(typeLine, sizeof(typeLine), "zener"); break;
+        case PartType::RESISTOR:  snprintf(typeLine, sizeof(typeLine), "resistor"); break;
+        case PartType::POT:       snprintf(typeLine, sizeof(typeLine), "pot"); break;
+        case PartType::NFET:      snprintf(typeLine, sizeof(typeLine), "NFET"); break;
+        case PartType::PFET:      snprintf(typeLine, sizeof(typeLine), "PFET"); break;
+        case PartType::CAPACITOR: snprintf(typeLine, sizeof(typeLine), "capacitor"); break;
+        default:
+            snprintf(typeLine, sizeof(typeLine), "%s", p.typeStr);
+            break;
+    }
+    if (p.value[0] != '\0' && strlen(typeLine) + strlen(p.value) + 1 < sizeof(typeLine)) {
+        size_t tl = strlen(typeLine);
+        snprintf(typeLine + tl, sizeof(typeLine) - tl, " %s", p.value);
+    }
+
+    char testLine[26] = "";
+    PartLabels::partTestSummary(p, testLine, sizeof(testLine));
+
+    // pins line: every pin with its row for small parts, a summary for DIPs
+    char pinsLine[28] = "";
+    {
+        int used = 0;
+        if (p.numPins <= 3) {
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                char label[8];
+                partsCardPinLabel(p, p.pins[j], label, sizeof(label));
+                used += snprintf(pinsLine + used, sizeof(pinsLine) - used,
+                                 "%s%s%s - %d%s", j ? "  " : "",
+                                 (j == focusPin) ? "[" : "", label, node,
+                                 (j == focusPin) ? "]" : "");
+                if (used >= (int)sizeof(pinsLine)) break;
+            }
+        } else if (focusPin >= 0 && focusPin < p.numPins) {
+            char label[8];
+            partsCardPinLabel(p, p.pins[focusPin], label, sizeof(label));
+            snprintf(pinsLine, sizeof(pinsLine), "[%s - %d]  %d pins",
+                     label, partPinNode(p, p.pins[focusPin]), (int)p.numPins);
+        } else {
+            int lo = 61, hi = 0;
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                if (node < 1 || node > 60) continue;
+                if (node < lo) lo = node;
+                if (node > hi) hi = node;
+            }
+            snprintf(pinsLine, sizeof(pinsLine), "%d pins  rows %d-%d",
+                     (int)p.numPins, lo, hi);
+        }
+    }
+
+    const int16_t f = 12;  // Andale Mono 5pt - four rows fit 32px
+    OledTextRow rows[4] = {};
+    rows[0].segs[0] = {p.name, f, OLED_ALIGN_INHERIT};
+    rows[0].segCount = 1;
+    rows[0].align = OLED_ALIGN_LEFT;
+    rows[1].segs[0] = {typeLine, f, OLED_ALIGN_INHERIT};
+    rows[1].segCount = 1;
+    rows[1].align = OLED_ALIGN_LEFT;
+    rows[2].segs[0] = {testLine, f, OLED_ALIGN_INHERIT};
+    rows[2].segCount = 1;
+    rows[2].align = OLED_ALIGN_LEFT;
+    rows[3].segs[0] = {pinsLine, f, OLED_ALIGN_INHERIT};
+    rows[3].segCount = 1;
+    rows[3].align = OLED_ALIGN_LEFT;
+    for (int i = 0; i < 4; i++) rows[i].fixedH = 7;
+    oled.clearPrintShowRich(rows, 4, 1, true, true, true);
+}
+
 // ============================================================================
 // Test Part - re-measure a placed part in place
 // ============================================================================
@@ -1457,6 +1555,45 @@ static bool partsAutoAbortCheck(void) {
     return partsAutoAborted;
 }
 
+// Live scan visualization (Kevin's ask: clear the SCAN text, show what the
+// scan is DOING on the breadboard). The census cursor sweeps row by row;
+// hits stay lit, empties go dark, the pair sweep walks its pairs. Painted
+// straight into the LED buffer - inClickMenu=1 keeps the net render off it.
+// s_scanVizFlags points at the launcher's census flags for pair-done paints.
+static const uint8_t* s_scanVizFlags = nullptr;
+static const uint32_t PARTS_SCANVIZ_CURSOR = 0x181818;  // the probing row
+static const uint32_t PARTS_SCANVIZ_PAIR   = 0x101024;  // the swept pair
+static const uint32_t PARTS_SCANVIZ_HIT    = 0x0A2008;  // something conducts
+
+static void partsScanViz(int row, int state) {
+    int pr = nodeToPrintRow(row);
+    if (pr < 0) return;
+    switch (state) {
+        case 0: b.printRawRow(0b00011111, pr, PARTS_SCANVIZ_CURSOR, 0xffffff); break;
+        case 1: b.printRawRow(0b00011111, pr, PARTS_SCANVIZ_HIT, 0xffffff); break;
+        case 2: b.printRawRow(0b00011111, pr, 0x000000, 0xffffff); break;
+        case 3: {   // pair cursor: this row and the next
+            b.printRawRow(0b00011111, pr, PARTS_SCANVIZ_PAIR, 0xffffff);
+            int pr2 = nodeToPrintRow(row + 1);
+            if (pr2 >= 0) b.printRawRow(0b00011111, pr2, PARTS_SCANVIZ_PAIR, 0xffffff);
+            break;
+        }
+        case 4: {   // pair done: both rows back to what the flags say
+            for (int r = row; r <= row + 1; r++) {
+                int prr = nodeToPrintRow(r);
+                if (prr < 0) continue;
+                bool hit = s_scanVizFlags != nullptr && r >= 1 && r <= 60 &&
+                           (s_scanVizFlags[r] == 1 || s_scanVizFlags[r] == 5);
+                b.printRawRow(0b00011111, prr, hit ? PARTS_SCANVIZ_HIT : 0x000000,
+                              0xffffff);
+            }
+            break;
+        }
+        default: break;
+    }
+    requestLedShow(2);
+}
+
 // The placed part (if any) with a pin on this row, for "already yours" tags.
 static const char* partsPlacedPartOnRow(int row) {
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
@@ -1493,8 +1630,9 @@ void partsAutoLauncher(void) {
     rotaryDivider = 8;
     partsAutoAborted = false;
 
+    // No SCAN banner - the board itself shows what the scan is doing
+    // (Kevin's ask): the cursor row sweeps, hits stay lit, empties go dark.
     b.clear();
-    b.print("SCAN", PARTS_HEADER_COLOR, 0xFFFFFF, 0, 0, 1);
     requestLedShow(2);
     if (oled.oledConnected) {
         oled.resetMultiLineSmallText();
@@ -1505,7 +1643,8 @@ void partsAutoLauncher(void) {
 
     static uint8_t flags[61];
     static float v0[61], v1[61];
-    int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck);
+    s_scanVizFlags = flags;
+    int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck, partsScanViz);
     if (found < 0) {
         Serial.println("PARTSCAN auto busy - try again in a moment");
         if (oled.oledConnected)
@@ -1525,7 +1664,7 @@ void partsAutoLauncher(void) {
             oled.resetMultiLineSmallText();
             oled.showMultiLineSmallText("scanning pairs...\n(any press stops)");
         }
-        int pairHits = partScanPairSweep(flags, partsAutoAbortCheck);
+        int pairHits = partScanPairSweep(flags, partsAutoAbortCheck, partsScanViz);
         if (pairHits > 0) found += pairHits;
         else if (pairHits < 0)
             // no silent caps: without the sweep, isolated junction parts

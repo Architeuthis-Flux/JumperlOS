@@ -127,8 +127,12 @@ void partScanDischarge(ScanSession& s);
 // charged (harmless - they leak back to the lane bias).
 // v0/v1 (may be nullptr, [61]) get the raw release/settled voltages for
 // tuning. Returns the number of rows flagged 1, or -2 = machinery busy.
+// progress (optional) narrates onto whatever UI the caller owns:
+//   state 0 = probing this row, 1 = row hit, 2 = row empty,
+//   3 = sweeping pair (row, row+1), 4 = pair done (repaint from flags).
 int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
-                   bool (*abortCheck)(void));
+                   bool (*abortCheck)(void),
+                   void (*progress)(int row, int state) = nullptr);
 
 // The census's second pass: an isolated junction part (a lone transistor,
 // a diode) is INVISIBLE to the single-row poke - the drive pre-charges the
@@ -142,6 +146,7 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 // Returns rows newly flagged, or -2 = busy / probe fed from DAC0 (infra,
 // can't be lifted) / more path wiring than the lift list holds - then the
 // scan stays census-only and the launcher says so.
-int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void));
+int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
+                      void (*progress)(int row, int state) = nullptr);
 
 #endif // PART_MEASURE_H
