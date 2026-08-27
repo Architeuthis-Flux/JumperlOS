@@ -15,9 +15,9 @@
 // translation unit may include this header: src/partdb/PartDb.cpp -
 // same rule as projectFiles.h. Everything else includes PartDb.h.
 //
-// Dedup: 112 records -> 85 pinouts, 284 names, 8 i2c idents
-// Estimated rodata: ~23320 bytes (pins 8088, pinouts 680, records 4480, names 2272,
-//   i2cIdents 72, byClass 224, ranges 168, typeStrs 36, strings ~7300)
+// Dedup: 114 records -> 87 pinouts, 290 names, 8 i2c idents
+// Estimated rodata: ~23848 bytes (pins 8248, pinouts 696, records 4560, names 2320,
+//   i2cIdents 72, byClass 228, ranges 168, typeStrs 36, strings ~7520)
 // (assumes 32-bit pointers and in-TU merging of identical string literals)
 //
 // partdb_records / partdb_byClass ordering: class, then subclass,
@@ -1062,16 +1062,38 @@ const PartDbPin partdb_pins[] = {
   { "R2", 14, -1, 0, 0 },
   { "C7", 15, -1, 0, 0 },
   { "C8", 16, -1, 0, 0 },
-  // pinout 77: sip3 (ws2812)
+  // pinout 77: dip10 (led_7seg_ca)
+  { "E", 1, -1, 0, 0 },
+  { "D", 2, -1, 0, 0 },
+  { "CA1", 3, -1, 0, 0 },
+  { "C", 4, -1, 0, 0 },
+  { "DP", 5, -1, 0, 0 },
+  { "B", 6, -1, 0, 0 },
+  { "A", 7, -1, 0, 0 },
+  { "CA2", 8, -1, 0, 0 },
+  { "F", 9, -1, 0, 0 },
+  { "G", 10, -1, 0, 0 },
+  // pinout 78: dip10 (led_7seg_cc)
+  { "E", 1, -1, 0, 0 },
+  { "D", 2, -1, 0, 0 },
+  { "CC1", 3, -1, 0, 0 },
+  { "C", 4, -1, 0, 0 },
+  { "DP", 5, -1, 0, 0 },
+  { "B", 6, -1, 0, 0 },
+  { "A", 7, -1, 0, 0 },
+  { "CC2", 8, -1, 0, 0 },
+  { "F", 9, -1, 0, 0 },
+  { "G", 10, -1, 0, 0 },
+  // pinout 79: sip3 (ws2812)
   { "DIN", 1, -1, 0, 12 },
   { "VCC", 2, -1, 1, 1 },
   { "GND", 3, -1, 2, 2 },
-  // pinout 78: sip4 (sk9822)
+  // pinout 80: sip4 (sk9822)
   { "GND", 1, -1, 2, 2 },
   { "DIN", 2, -1, 0, 12 },
   { "CLK", 3, -1, 0, 14 },
   { "VCC", 4, -1, 1, 1 },
-  // pinout 79: sip8 (mpu6050)
+  // pinout 81: sip8 (mpu6050)
   { "VCC", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SCL", 3, -1, 0, 4 },
@@ -1080,14 +1102,14 @@ const PartDbPin partdb_pins[] = {
   { "XCL", 6, -1, 0, 0 },
   { "AD0", 7, -1, 0, 17 },
   { "INT", 8, -1, 0, 16 },
-  // pinout 80: sip6 (bme280 bmp280)
+  // pinout 82: sip6 (bme280 bmp280)
   { "VCC", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SCL", 3, -1, 0, 4 },
   { "SDA", 4, -1, 0, 3 },
   { "CSB", 5, -1, 0, 0 },
   { "SDO", 6, -1, 0, 0 },
-  // pinout 81: sip13 (pcf8574)
+  // pinout 83: sip13 (pcf8574)
   { "VCC", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SDA", 3, -1, 0, 3 },
@@ -1101,7 +1123,7 @@ const PartDbPin partdb_pins[] = {
   { "P5", 11, -1, 0, 0 },
   { "P6", 12, -1, 0, 0 },
   { "P7", 13, -1, 0, 0 },
-  // pinout 82: sip10 (ads1115)
+  // pinout 84: sip10 (ads1115)
   { "VDD", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SCL", 3, -1, 0, 4 },
@@ -1112,12 +1134,12 @@ const PartDbPin partdb_pins[] = {
   { "A1", 8, -1, 0, 0 },
   { "A2", 9, -1, 0, 0 },
   { "A3", 10, -1, 0, 0 },
-  // pinout 83: sip4 (at24c32)
+  // pinout 85: sip4 (at24c32)
   { "GND", 1, -1, 2, 2 },
   { "VCC", 2, -1, 1, 1 },
   { "SDA", 3, -1, 0, 3 },
   { "SCL", 4, -1, 0, 4 },
-  // pinout 84: sip6 (ds3231)
+  // pinout 86: sip6 (ds3231)
   { "32K", 1, -1, 0, 0 },
   { "SQW", 2, -1, 0, 0 },
   { "SCL", 3, -1, 0, 4 },
@@ -1204,14 +1226,16 @@ const PartDbPinout partdb_pinouts[] = {
   { 0, 9, 9, &partdb_pins[922] }, // 74
   { 0, 10, 10, &partdb_pins[931] }, // 75
   { 1, 16, 16, &partdb_pins[941] }, // 76
-  { 0, 3, 3, &partdb_pins[957] }, // 77
-  { 0, 4, 4, &partdb_pins[960] }, // 78
-  { 0, 8, 8, &partdb_pins[964] }, // 79
-  { 0, 6, 6, &partdb_pins[972] }, // 80
-  { 0, 13, 13, &partdb_pins[978] }, // 81
-  { 0, 10, 10, &partdb_pins[991] }, // 82
-  { 0, 4, 4, &partdb_pins[1001] }, // 83
-  { 0, 6, 6, &partdb_pins[1005] }, // 84
+  { 1, 10, 10, &partdb_pins[957] }, // 77
+  { 1, 10, 10, &partdb_pins[967] }, // 78
+  { 0, 3, 3, &partdb_pins[977] }, // 79
+  { 0, 4, 4, &partdb_pins[980] }, // 80
+  { 0, 8, 8, &partdb_pins[984] }, // 81
+  { 0, 6, 6, &partdb_pins[992] }, // 82
+  { 0, 13, 13, &partdb_pins[998] }, // 83
+  { 0, 10, 10, &partdb_pins[1011] }, // 84
+  { 0, 4, 4, &partdb_pins[1021] }, // 85
+  { 0, 6, 6, &partdb_pins[1025] }, // 86
 };
 
 const PartDbI2cIdent partdb_i2cIdents[] = {
@@ -1653,42 +1677,50 @@ const PartDbRecord partdb_records[] = {
   { "matrix_1088as", "1088AS 8x8", "1088AS", "1088AS \0318x8",
     "8x8 LED matrix, direct row/column drive",
     4, 3, 0, 0xFF, 76, 0xFFFF, 0xFFFF, 0, 0 },
-  // 103: DISPLAY/led_addr
+  // 103: DISPLAY/led_direct
+  { "led_7seg_ca", "7-seg CA", "7SEG", "7-seg  \031CA",
+    "7-segment LED digit, common ANODE (5161BS pinout)",
+    4, 3, 0, 0xFF, 77, 0xFFFF, 0xFFFF, 0, 0 },
+  // 104: DISPLAY/led_direct
+  { "led_7seg_cc", "7-seg CC", "7SEG", "7-seg  \031CC",
+    "7-segment LED digit, common CATHODE (5161AS pinout)",
+    4, 3, 0, 0xFF, 78, 0xFFFF, 0xFFFF, 0, 0 },
+  // 105: DISPLAY/led_addr
   { "ws2812", "WS2812", "WS2812", "WS2812",
     "Addressable RGB LED, single-wire",
-    4, 5, 0, 0xFF, 77, 0xFFFF, 0xFFFF, "ws2812", 0 },
-  // 104: DISPLAY/led_addr
+    4, 5, 0, 0xFF, 79, 0xFFFF, 0xFFFF, "ws2812", 0 },
+  // 106: DISPLAY/led_addr
   { "sk9822", "SK9822", "SK9822", "SK9822",
     "Addressable RGB LED, clocked (APA102)",
-    4, 5, 0, 0xFF, 78, 0xFFFF, 0xFFFF, "sk9822", 0 },
-  // 105: MODULE/sensor
+    4, 5, 0, 0xFF, 80, 0xFFFF, 0xFFFF, "sk9822", 0 },
+  // 107: MODULE/sensor
   { "mpu6050", "MPU6050", "MPU6050", "MPU6050",
     "6-axis accel+gyro I2C",
-    5, 0, 0, 0x01, 79, 0xFFFF, 0xFFFF, 0, 0 },
-  // 106: MODULE/sensor
+    5, 0, 0, 0x01, 81, 0xFFFF, 0xFFFF, 0, 0 },
+  // 108: MODULE/sensor
   { "bme280", "BME280", "BME280", "BME280",
     "Temp/humidity/pressure sensor I2C",
-    5, 0, 0, 0x02, 80, 0xFFFF, 0xFFFF, 0, 0 },
-  // 107: MODULE/sensor
+    5, 0, 0, 0x02, 82, 0xFFFF, 0xFFFF, 0, 0 },
+  // 109: MODULE/sensor
   { "bmp280", "BMP280", "BMP280", "BMP280",
     "Temp/pressure sensor I2C",
-    5, 0, 0, 0x03, 80, 0xFFFF, 0xFFFF, 0, 0 },
-  // 108: MODULE/io
+    5, 0, 0, 0x03, 82, 0xFFFF, 0xFFFF, 0, 0 },
+  // 110: MODULE/io
   { "pcf8574", "PCF8574", "PCF8574", "PCF8574",
     "8-bit I2C IO expander",
-    5, 1, 0, 0x04, 81, 0xFFFF, 0xFFFF, 0, 0 },
-  // 109: MODULE/io
+    5, 1, 0, 0x04, 83, 0xFFFF, 0xFFFF, 0, 0 },
+  // 111: MODULE/io
   { "ads1115", "ADS1115", "ADS1115", "ADS1115",
     "16-bit 4-channel I2C ADC",
-    5, 1, 0, 0x05, 82, 0xFFFF, 0xFFFF, 0, 0 },
-  // 110: MODULE/memory
+    5, 1, 0, 0x05, 84, 0xFFFF, 0xFFFF, 0, 0 },
+  // 112: MODULE/memory
   { "at24c32", "AT24C32", "AT24C32", "AT24C32",
     "32Kbit I2C EEPROM",
-    5, 2, 0, 0x06, 83, 0xFFFF, 0xFFFF, 0, 0 },
-  // 111: MODULE/other
+    5, 2, 0, 0x06, 85, 0xFFFF, 0xFFFF, 0, 0 },
+  // 113: MODULE/other
   { "ds3231", "DS3231", "DS3231", "DS3231",
     "RTC I2C, 0x68 without WHO_AM_I",
-    5, 3, 0, 0x07, 84, 0xFFFF, 0xFFFF, 0, 0 },
+    5, 3, 0, 0x07, 86, 0xFFFF, 0xFFFF, 0, 0 },
 };
 
 const PartDbName partdb_names[] = {
@@ -1726,6 +1758,8 @@ const PartDbName partdb_names[] = {
   { "4510", 58 },
   { "4511", 43 },
   { "4543", 59 },
+  { "5161AS", 104 },
+  { "5161BS", 103 },
   { "555", 67 },
   { "556", 68 },
   { "595", 2 },
@@ -1859,18 +1893,20 @@ const PartDbName partdb_names[] = {
   { "74LS86", 8 },
   { "74LS90", 31 },
   { "7805", 71 },
-  { "ads1115", 109 },
+  { "7SEG_CA", 103 },
+  { "7SEG_CC", 104 },
+  { "ads1115", 111 },
   { "AMS1117", 72 },
-  { "APA102", 104 },
-  { "at24c32", 110 },
+  { "APA102", 106 },
+  { "at24c32", 112 },
   { "BC547", 85 },
   { "BC548", 85 },
   { "BC549", 85 },
   { "BC556", 86 },
   { "BC557", 86 },
   { "BC558", 86 },
-  { "bme280", 106 },
-  { "bmp280", 107 },
+  { "bme280", 108 },
+  { "bmp280", 109 },
   { "BS170", 90 },
   { "capacitor", 75 },
   { "cap_polar", 76 },
@@ -1903,8 +1939,8 @@ const PartDbName partdb_names[] = {
   { "CD4511", 43 },
   { "CD4543", 59 },
   { "diode", 79 },
-  { "ds3231", 111 },
-  { "GY-521", 105 },
+  { "ds3231", 113 },
+  { "GY-521", 107 },
   { "hd44780", 98 },
   { "HEF4001", 38 },
   { "HEF4011", 33 },
@@ -1941,6 +1977,8 @@ const PartDbName partdb_names[] = {
   { "L7805", 71 },
   { "LCD1602", 98 },
   { "led", 77 },
+  { "led_7seg_ca", 103 },
+  { "led_7seg_cc", 104 },
   { "LM311", 66 },
   { "LM317", 70 },
   { "LM324", 62 },
@@ -1951,18 +1989,18 @@ const PartDbName partdb_names[] = {
   { "LM7805", 71 },
   { "lpm009m360a", 101 },
   { "matrix_1088as", 102 },
-  { "mpu6050", 105 },
+  { "mpu6050", 107 },
   { "NE5532", 63 },
   { "NE555", 67 },
   { "NE556", 68 },
-  { "NEOPIXEL", 103 },
-  { "pcf8574", 108 },
+  { "NEOPIXEL", 105 },
+  { "pcf8574", 110 },
   { "PN2222", 84 },
   { "potentiometer", 81 },
   { "resistor", 74 },
   { "sh1106_i2c", 92 },
-  { "SK6812", 103 },
-  { "sk9822", 104 },
+  { "SK6812", 105 },
+  { "sk9822", 106 },
   { "ssd1306_32_i2c", 95 },
   { "ssd1306_i2c", 91 },
   { "ssd1309_i2c", 94 },
@@ -1973,9 +2011,9 @@ const PartDbName partdb_names[] = {
   { "TL074", 64 },
   { "TL431", 73 },
   { "TLC555", 67 },
-  { "ws2812", 103 },
+  { "ws2812", 105 },
   { "zener", 80 },
-  { "ZS-042", 111 },
+  { "ZS-042", 113 },
 };
 
 const uint16_t partdb_byClass[] = {
@@ -1986,6 +2024,7 @@ const uint16_t partdb_byClass[] = {
   64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
   80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
   96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+  112, 113,
 };
 
 const PartDbRange partdb_classRanges[PARTDB_NUM_CLASSES] = {
@@ -1993,8 +2032,8 @@ const PartDbRange partdb_classRanges[PARTDB_NUM_CLASSES] = {
   { 60, 14 }, // ANALOG
   { 74, 8 }, // DISCRETE
   { 82, 9 }, // TRANSISTOR
-  { 91, 14 }, // DISPLAY
-  { 105, 7 }, // MODULE
+  { 91, 16 }, // DISPLAY
+  { 107, 7 }, // MODULE
 };
 
 const PartDbRange partdb_subclassRanges[PARTDB_NUM_CLASSES * PARTDB_MAX_SUBCLASSES] = {
@@ -2025,21 +2064,21 @@ const PartDbRange partdb_subclassRanges[PARTDB_NUM_CLASSES * PARTDB_MAX_SUBCLASS
   { 91, 5 }, // DISPLAY/oled
   { 96, 4 }, // DISPLAY/lcd
   { 100, 2 }, // DISPLAY/mip
-  { 102, 1 }, // DISPLAY/led_direct
+  { 102, 3 }, // DISPLAY/led_direct
   { 0, 0 }, // DISPLAY/led_driver
-  { 103, 2 }, // DISPLAY/led_addr
-  { 105, 3 }, // MODULE/sensor
-  { 108, 2 }, // MODULE/io
-  { 110, 1 }, // MODULE/memory
-  { 111, 1 }, // MODULE/other
+  { 105, 2 }, // DISPLAY/led_addr
+  { 107, 3 }, // MODULE/sensor
+  { 110, 2 }, // MODULE/io
+  { 112, 1 }, // MODULE/memory
+  { 113, 1 }, // MODULE/other
   { 0, 0 }, // MODULE/(unused)
   { 0, 0 }, // MODULE/(unused)
 };
 
-const uint16_t partdb_numRecords = 112;
-const uint16_t partdb_numPinouts = 85;
-const uint16_t partdb_numPins = 1011;
-const uint16_t partdb_numNames = 284;
+const uint16_t partdb_numRecords = 114;
+const uint16_t partdb_numPinouts = 87;
+const uint16_t partdb_numPins = 1031;
+const uint16_t partdb_numNames = 290;
 const uint16_t partdb_numI2cIdents = 8;
 const uint16_t partdb_numTypeStrs = 9;
 

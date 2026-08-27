@@ -2093,12 +2093,22 @@ static const char* partsI2CAddressName(uint8_t addr) {
     }
 }
 
+// A confirmed I2C module, held for the CONNECT prompt: the measured rows
+// plus the address are everything a partdb placement needs (Kevin, 15:19:
+// "We need to add the parts we find, including the display").
+struct I2cModuleFinding {
+    bool valid = false;
+    uint8_t addr = 0;
+    int gnd = -1, vdd = -1, scl = -1, sda = -1;
+};
+
 // Power a suspected chip cluster and ask its signal pins whether they speak
 // I2C (Kevin, 12:53: "Can we sense I2C data lines"). Bench-proven on the
 // SSD1306 module over the crossbar before this landed. Discipline, straight
 // from the doc: power pins connected LAST, current-limited first power-up,
 // INA watchdog, everything torn back down on every exit.
-static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLen) {
+static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLen,
+                                 I2cModuleFinding* foundOut) {
     if (cp.nSig < 2) return false;
     // Wire1 is the panel's bus on connection types 0/1/3 - re-pointing it
     // at breadboard rows would take the display down mid-scan. Kevin's r7
@@ -2166,16 +2176,43 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
             if (!gpio_get(22) || !gpio_get(23)) {
                 Serial.println("  bus line held low - not I2C (or unpowered)");
             } else {
+                // A healthy bus NACKs an empty address in ~0.2ms; only a
+                // wedged one runs into the 15ms timeout. Six timeouts in a
+                // row means this ordering's bus is not answering sanely -
+                // bail instead of grinding all 112 addresses through the
+                // timeout (Kevin, 15:19: "the I2C scan still takes a
+                // super long time").
+                int sour = 0;
                 for (int addr = 0x08; addr <= 0x77 && !partsAutoAbortCheck();
                      addr++) {
                     Wire1.beginTransmission((uint8_t)addr);
-                    if (Wire1.endTransmission() != 0) continue;
+                    uint8_t rc = Wire1.endTransmission();
+                    if (rc == 2 || rc == 3) {
+                        sour = 0;   // clean NACK: the bus is alive
+                        continue;
+                    }
+                    if (rc != 0) {
+                        if (++sour >= 6) {
+                            Serial.println("  bus not answering sanely -"
+                                           " skipping this ordering");
+                            break;
+                        }
+                        continue;
+                    }
                     const char* known = partsI2CAddressName((uint8_t)addr);
                     snprintf(out, outLen, "I2C 0x%02X on %d/%d%s%s", addr,
                              sdaRow, sclRow, known ? " - " : "",
                              known ? known : "");
                     Serial.print("  it answers: ");
                     Serial.println(out);
+                    if (foundOut != nullptr) {
+                        foundOut->valid = true;
+                        foundOut->addr = (uint8_t)addr;
+                        foundOut->gnd = cp.gndRow;
+                        foundOut->vdd = cp.vddRow;
+                        foundOut->scl = sclRow;
+                        foundOut->sda = sdaRow;
+                    }
                     found = true;
                     break;
                 }
@@ -2214,6 +2251,59 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
     if (!found)
         Serial.println("  no I2C answer - it isn't an I2C part (or needs 5V)");
     return found;
+}
+
+// A confirmed I2C module becomes a real partdb placement: the address picks
+// the record from the same candidates table the doc's i2c_addr design
+// names, the interrogation's measured rows become the pins, and
+// DisplayService takes it from there - the panel comes alive the moment
+// power reaches it, exactly as a hand placement does (Kevin, 15:19: "We
+// need to add the parts we find, including the display").
+static bool partsPlaceI2cModule(const I2cModuleFinding& f) {
+    if (!f.valid) return false;
+    const PartDbRecord* cands[4] = {nullptr};
+    int n = partdbCandidatesForI2cAddr(f.addr, cands, 4);
+    if (n < 1 || cands[0] == nullptr) {
+        Serial.println("PARTSCAN found module has no partdb record - not placed");
+        return false;
+    }
+    const PartDbRecord* rec = cands[0];
+    // only the 4-pin GND/VCC/SCL/SDA module shape places automatically -
+    // anything richer needs the picker's per-signal taps
+    if (partdb_pinouts[rec->pinoutIdx].numPins != 4) return false;
+    int base = f.gnd;
+    if (f.vdd < base) base = f.vdd;
+    if (f.scl < base) base = f.scl;
+    if (f.sda < base) base = f.sda;
+    char pins[200];
+    snprintf(pins, sizeof(pins),
+             "{\"GND\": {\"offset\": %d}, \"VCC\": {\"offset\": %d}, "
+             "\"SCL\": {\"offset\": %d}, \"SDA\": {\"offset\": %d}}",
+             f.gnd - base, f.vdd - base, f.scl - base, f.sda - base);
+    // record names allow [A-Za-z0-9_-] only - displayName can carry spaces
+    char name[16];
+    int u = 0;
+    for (const char* c = rec->displayName; *c && u < 15; c++) {
+        char ch = *c;
+        bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
+        name[u++] = ok ? ch : '_';
+    }
+    name[u] = '\0';
+    if (globalState.parts.findByName(name) >= 0) {
+        char uniq[16];
+        snprintf(uniq, sizeof(uniq), "%.11s_%d", name, base);
+        strncpy(name, uniq, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+    }
+    if (jl_place_part(name, base, pins, "", rec->id, "", rec->id) != 0)
+        return false;
+    Serial.print("\r\nPARTSCAN added ");
+    Serial.print(name);
+    Serial.print(" (");
+    Serial.print(rec->desc);
+    Serial.println(")");
+    return true;
 }
 
 // The placed part (if any) with a pin on this row, for "already yours" tags.
@@ -2283,6 +2373,9 @@ void partsAutoLauncher(void) {
     // collect here and a CONNECT press at the end places them as records
     static PartResult addable[8];
     int nAddable = 0;
+    // a confirmed I2C module (the SSD1306 answering 0x3C) is placeable too
+    static I2cModuleFinding i2cModule;
+    i2cModule.valid = false;
     // pairs that conducted ACROSS the center channel (n <-> n+30): their
     // rows live in different halves and can never form one span, so they
     // arrive from the sweep as explicit pairs and get identified as such
@@ -2783,7 +2876,8 @@ void partsAutoLauncher(void) {
                             Serial.print(" is ground and row ");
                             Serial.print(cp.vddRow);
                             Serial.println(" is the supply");
-                            if (partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine)))
+                            if (partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine),
+                                                     &i2cModule))
                                 snprintf(line, sizeof(line), "rows %d-%d: %s",
                                          lo, cl[nCl - 1], i2cLine);
                         }
@@ -3027,7 +3121,8 @@ void partsAutoLauncher(void) {
                         Serial.print(" is ground and row ");
                         Serial.print(cp.vddRow);
                         Serial.println(" is the supply");
-                        partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine));
+                        partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine),
+                                             &i2cModule);
                     }
                 }
                 if (poweredSpan) {
@@ -3066,11 +3161,13 @@ void partsAutoLauncher(void) {
         if (partsAutoAborted) {
             partsPrintAborted();
         } else {
+            // the confirmed I2C module counts as a placeable finding too
+            int nPlaceable = nAddable + (i2cModule.valid ? 1 : 0);
             Serial.print("PARTSCAN auto done in ");
             Serial.print((millis() - scanT0) / 1000);
-            if (nAddable > 0) {
+            if (nPlaceable > 0) {
                 Serial.print("s - ");
-                Serial.print(nAddable);
+                Serial.print(nPlaceable);
                 Serial.println(" placeable (CONNECT adds them to the board)");
             } else {
                 Serial.println("s (add parts via Parts > Place)");
@@ -3087,22 +3184,22 @@ void partsAutoLauncher(void) {
             // press between "done" and the add prompt was pure friction
             // (Kevin, 14:00: it took long "even to give me the add to the
             // board prompt"). With nothing to add, hold the summary.
-            if (nAddable == 0 || partsAutoAborted) partsWaitForPress();
+            if (nPlaceable == 0 || partsAutoAborted) partsWaitForPress();
 
             // Act on the findings (Kevin's ask): one CONNECT press places
             // every identified discrete as a real record - highlightable,
             // testable, removable - with the scan's measurement as its
             // cached test data. Click passes.
-            if (nAddable > 0 && !partsAutoAborted) {
+            if (nPlaceable > 0 && !partsAutoAborted) {
                 if (oled.oledConnected) {
                     char t[64];
                     snprintf(t, sizeof(t), "add %d found part%s?\nCONNECT = yes  click = no",
-                             nAddable, nAddable == 1 ? "" : "s");
+                             nPlaceable, nPlaceable == 1 ? "" : "s");
                     oled.resetMultiLineSmallText();
                     oled.showMultiLineSmallText(t);
                 }
                 Serial.print("\r\nPARTSCAN add confirm n=");
-                Serial.println(nAddable);
+                Serial.println(nPlaceable);
                 Serial.flush();
                 encoderButtonState = IDLE;
                 lastButtonEncoderState = IDLE;
@@ -3136,6 +3233,8 @@ void partsAutoLauncher(void) {
                     int placed = 0;
                     for (int q = 0; q < nAddable; q++)
                         if (partsPlaceScanResult(addable[q])) placed++;
+                    if (i2cModule.valid && partsPlaceI2cModule(i2cModule))
+                        placed++;   // DisplayService picks it up from here
                     partLabels.requestRun();
                     if (oled.oledConnected) {
                         char t[32];
