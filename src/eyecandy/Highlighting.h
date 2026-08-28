@@ -119,6 +119,13 @@ inline void clearHighlighting(int updateLEDs = 01) {
     Highlighting::getInstance().clearHighlighting(updateLEDs);
 }
 
+// The parts table just compacted or shrank (a part or pin was removed):
+// every raw part INDEX held by the highlight stack is suspect - the
+// stale-focus guard alone can't see a DIFFERENT part shifting into the
+// same slot. Every part-removal path must call this (jl_remove_part,
+// jl_remove_part_pin, partsClearAllRecords do).
+extern "C" void highlightingInvalidatePartFocus(void);
+
 inline int encoderNetHighlight(int print = 1, int mode = 1, int divider = 8) {
     return Highlighting::getInstance().encoderNetHighlight(print, mode, divider);
 }

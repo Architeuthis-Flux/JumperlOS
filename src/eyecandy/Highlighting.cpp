@@ -356,6 +356,16 @@ int scrolledRow = -1;
 static int8_t scrollPartIdx = -1;   // -1 = not in part focus
 static int8_t scrollPartPin = -1;   // -1 = the whole part
 
+// Every part-removal path calls this (Highlighting.h): the raw indices
+// above and PartLabels' highlight slot go stale the moment the parts table
+// compacts - the in-loop guard can only see out-of-range or unplaced, not
+// a DIFFERENT part shifted into the same slot (audit, 2026-08-27).
+extern "C" void highlightingInvalidatePartFocus(void) {
+    scrollPartIdx = -1;
+    scrollPartPin = -1;
+    partLabels.clearPartHighlight();
+}
+
 // First placed part with a pin on this row (its pin index in *pinIdx).
 static int scrollPartOnRow( int row, int* pinIdx ) {
     if ( row < 1 || row > 60 ) return -1;

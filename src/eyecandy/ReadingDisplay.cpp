@@ -355,6 +355,13 @@ void clearLiveSerialLine(void) {
         // of somebody else's lines now. Erasing would wipe THEIR output.
         return;
     }
+    if ((size_t)Serial.availableForWrite() < 32) {
+        // The same guard every sibling paint has: a connected host that
+        // stopped draining makes CDC write() spin forever in yield().
+        // Stale text on a wedged terminal beats a stalled core 0 (this
+        // was the ONE unguarded write in the file - audit, 2026-08-27).
+        return;
+    }
     // Wipe on the way out: the value is live, and one left frozen on screen
     // reads as current when it no longer is.
     pinCursorToLiveRow();
@@ -438,13 +445,22 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     // dedupe: the reading is buried in scrollback, so resurface it below the
     // new output even if the text itself is unchanged.
     bool serialPinStale = pinReserved && (s_port1LineFeeds != pinLineFeedSnapshot);
-    if (!serialNeedsRepin && !serialPinStale && strcmp(line, lastLine) == 0) {
+    bool sameLine = (strcmp(line, lastLine) == 0);
+    if (!serialNeedsRepin && !serialPinStale && sameLine) {
         return;  // already on screen, and the serial pin is intact
     }
     strncpy(lastLine, line, LINE_CAP - 1);
     lastLine[LINE_CAP - 1] = '\0';
 
     emitLiveSerialLine(line);
+    if (sameLine) {
+        // Only the SERIAL pin needed attention - the panel already shows
+        // this exact reading. Without this return, a latched
+        // serialNeedsRepin (the width-guard bail sets it and returns
+        // before the clear) pushed a full I2C frame on EVERY loop pass of
+        // a live updater while a long line was typed (audit, 2026-08-27).
+        return;
+    }
 
     // Value rows honor the configured font family at the closest point size;
     // the header uses Andale Mono 5pt (index 12) - the smallest font on board -

@@ -1266,6 +1266,13 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
     delay( 6 );
     refreshPaths( );
     clearAllNTCC( );
+    // A cleared board has no parts either (Kevin's ruling, 2026-08-27:
+    // "x clear all connections should remove all parts too"). This runs
+    // BEFORE clearActiveContext: that call saves the slot SYNCHRONOUSLY,
+    // and clearing the parts after it left them in the saved YAML to
+    // resurrect on reboot (audit, 2026-08-27). refresh=false - the one
+    // full refresh below covers the fabric.
+    int partsGone = partsClearAllRecords( false );
     // Clear the ACTIVE context, whatever backs it. Passing netSlot here would
     // hand -2 to saveSlot from a file context.
     clearActiveContext( );
@@ -1275,9 +1282,6 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
     // overlays retire with the board (Kevin's ruling, 2026-08-27).
     clearHighlighting( );
     partLabels.clearTransients( );
-    // A cleared board has no parts either (Kevin's ruling, 2026-08-27:
-    // "x clear all connections should remove all parts too").
-    int partsGone = partsClearAllRecords( );
     refreshConnections( -1, 1, 1 );
     digitalWrite( RESETPIN, LOW );
     if ( partsGone > 0 ) {

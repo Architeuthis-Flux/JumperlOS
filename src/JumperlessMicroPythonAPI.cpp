@@ -2131,6 +2131,10 @@ int jl_place_part( const char* name, int row, const char* pins_json,
 // remove_part(name): pull the expansion bridges, drop the {NAME}_{PIN} net
 // names the part owned, and remove the entry from the table.
 // Returns 0 on success, -1 when there is no such part.
+// The highlight stack holds raw part indices; every removal path must
+// invalidate them (Highlighting.cpp - see the audit note there).
+extern "C" void highlightingInvalidatePartFocus( void );
+
 int jl_remove_part( const char* name ) {
     if ( name == nullptr || name[ 0 ] == '\0' ) {
         Serial.println( "remove_part: empty name" );
@@ -2171,6 +2175,7 @@ int jl_remove_part( const char* name ) {
     }
     globalState.parts.numParts--;
     globalState.markDirty( );
+    highlightingInvalidatePartFocus( );   // raw indices just went stale
 
     releaseCore1Frames( );
 
@@ -2199,12 +2204,16 @@ int jl_remove_part( const char* name ) {
     return 0;
 }
 
-// remove_part_pin(name, pin): drop ONE leg from a placed part - its bridge,
-// its auto net name, its record entry - leaving the rest of the part in
-// place. Removing the LAST leg removes the part itself (Kevin's ruling,
-// 2026-08-27: "if we remove every node from a part... we should also remove
-// the part"). Same canonical discipline as remove_part, scoped to one pin.
-extern "C" int jl_remove_part_pin( const char* name, const char* pinName ) {
+// remove_part_pin(name, pin[, rowHint]): drop ONE leg from a placed part -
+// its bridge, its auto net name, its record entry - leaving the rest of the
+// part in place. Removing the LAST leg removes the part itself (Kevin's
+// ruling, 2026-08-27: "if we remove every node from a part... we should
+// also remove the part"). Same canonical discipline as remove_part, scoped
+// to one pin. rowHint (-1 = none) disambiguates DUPLICATE pin names - the
+// seed DB ships parts with two GND legs (pinout 75's sip10 displays), and
+// a bare first-name-match would remove the wrong one (audit, 2026-08-27).
+extern "C" int jl_remove_part_pin( const char* name, const char* pinName,
+                                   int rowHint ) {
     if ( name == nullptr || name[ 0 ] == '\0' || pinName == nullptr ||
          pinName[ 0 ] == '\0' ) {
         Serial.println( "remove_part_pin: empty name" );
@@ -2218,8 +2227,12 @@ extern "C" int jl_remove_part_pin( const char* name, const char* pinName ) {
     }
     PartDefinition& p = globalState.parts.parts[ idx ];
     int pj = -1;
-    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ )
-        if ( strcmp( p.pins[ j ].name, pinName ) == 0 ) { pj = j; break; }
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        if ( strcmp( p.pins[ j ].name, pinName ) != 0 ) continue;
+        if ( rowHint >= 1 && partPinNode( p, p.pins[ j ] ) != rowHint ) continue;
+        pj = j;
+        break;
+    }
     if ( pj < 0 ) {
         Serial.print( "remove_part_pin: no pin named " );
         Serial.print( pinName );
@@ -2255,6 +2268,7 @@ extern "C" int jl_remove_part_pin( const char* name, const char* pinName ) {
     }
     p.numPins--;
     globalState.markDirty( );
+    highlightingInvalidatePartFocus( );   // pin indices just shifted
     releaseCore1Frames( );
 
     refreshConnections( -1, 1, 0 );
