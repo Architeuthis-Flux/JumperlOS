@@ -75,3 +75,17 @@ record and the morning hand-back.
   geometry and placement machinery, but the full prompt flow needs your
   probe press - one Auto Scan + CONNECT is the last mile.
 - Never pushed; everything is local commits on dev.
+
+## Final verdicts (appended 23:15)
+
+- **HIL run 2 (on cd20423): PASS 9/10** - same shape as run 1, all
+  asserting suites green after the fix batch.
+- **Board reports `Jumperless firmware version: 5.7.8.1`** (release
+  build flashed, boot clean).
+- **Wire-up placement proven end to end over MicroPython**: the exact
+  jl_place_part call partsWireFoundDisplay makes - dip14 at base 52,
+  pin numbers spanning both halves, connects to TOP_RAIL + three GPIOs -
+  placed, routed all four bridges (58→TOP_RAIL, 52→GPIO_1, 54→GPIO_2,
+  22→GPIO_3), and remove_part tore every one back down.
+- **Release commit: 3ac03bc** (VERSION + firmware.uf2). No tag, no push -
+  both yours.
