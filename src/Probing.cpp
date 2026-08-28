@@ -3566,12 +3566,15 @@ void Probing::probeTick( ProbeSession& s ) {
                 // oled.print(definesToChar(nodesToConnect[0]));
                 // oled.print(" - ");
                 // oled.show();
-                char node1Name[ 12 ];
+                // 24 per name: definesToChar's longest short names are 12+
+                // chars ("ISENSE_MINUS" is 13 bytes with NUL) and the old
+                // [12] was one byte short; 52 fits both + " - " (audit #6)
+                char node1Name[ 24 ];
                 strcpy( node1Name, definesToChar( nodesToConnect[ 0 ] ) );
-                char node2Name[ 12 ];
+                char node2Name[ 24 ];
                 strcpy( node2Name, "   " );
 
-                char bothNames[ 25 ];
+                char bothNames[ 52 ];
                 strcpy( bothNames, node1Name );
                 strcat( bothNames, " - " );
                 strcat( bothNames, node2Name );
@@ -3659,15 +3662,15 @@ void Probing::probeTick( ProbeSession& s ) {
 
                     // Serial.println("fuck");
                     Serial.flush( );
-                    char node1Name[ 12 ];
+                    char node1Name[ 24 ];   // see the sibling above (audit #6)
 
                     strcpy( node1Name, definesToChar( nodesToConnect[ 0 ] ) );
 
-                    char node2Name[ 12 ];
+                    char node2Name[ 24 ];
 
                     strcpy( node2Name, definesToChar( nodesToConnect[ 1 ] ) );
 
-                    char bothNames[ 25 ];
+                    char bothNames[ 52 ];
                     strcpy( bothNames, node1Name );
                     strcat( bothNames, " - " );
                     strcat( bothNames, node2Name );

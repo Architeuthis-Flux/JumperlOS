@@ -2949,6 +2949,14 @@ bool __not_in_flash_func( slowPWMTimerCallback )( repeating_timer_t* rt ) {
 // Setup slow PWM using hardware timer
 int setupSlowPWM( int gpio_pin, float frequency, float duty_cycle ) {
 #if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
+#if defined(OG_JUMPERLESS)
     return pwmUnavailableOnOG( );
 #endif
     // Validate GPIO pin number (1-8 for regular GPIO pins)
@@ -3016,6 +3024,14 @@ int setupSlowPWM( int gpio_pin, float frequency, float duty_cycle ) {
 
 // Set slow PWM duty cycle
 int setSlowPWMDutyCycle( int gpio_pin, float duty_cycle ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3050,6 +3066,14 @@ int setSlowPWMDutyCycle( int gpio_pin, float duty_cycle ) {
 
 // Set slow PWM frequency
 int setSlowPWMFrequency( int gpio_pin, float frequency ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3078,6 +3102,14 @@ int setSlowPWMFrequency( int gpio_pin, float frequency ) {
 
 // Stop slow PWM
 int stopSlowPWM( int gpio_pin ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
 #if defined(OG_JUMPERLESS)
     return pwmUnavailableOnOG( );
 #endif
@@ -3113,6 +3145,14 @@ int stopSlowPWM( int gpio_pin ) {
 
 // PWM Functions
 int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
 #if defined(OG_JUMPERLESS)
     return pwmUnavailableOnOG( );
 #endif
@@ -3178,6 +3218,14 @@ int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
 }
 
 int setPWMDutyCycle( int gpio_pin, float duty_cycle ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3210,6 +3258,14 @@ int setPWMDutyCycle( int gpio_pin, float duty_cycle ) {
 }
 
 int setPWMFrequency( int gpio_pin, float frequency ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -3242,6 +3298,14 @@ int setPWMFrequency( int gpio_pin, float frequency ) {
 }
 
 int stopPWM( int gpio_pin ) {
+#if defined(OG_JUMPERLESS)
+    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
+    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
+    // ADC inputs (26-27). PWM on them drives real control lines - refuse
+    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
+    return -1;
+#endif
+
 #if defined(OG_JUMPERLESS)
     return pwmUnavailableOnOG( );
 #endif
