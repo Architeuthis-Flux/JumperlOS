@@ -517,3 +517,36 @@ database is worse than a gap.
 Phantom cleanup: Q10/D17/Q44 removed over port5 — the stale D17 had been
 shadowing the real 2N3906 ("it reads the transistor as a diode"). Board
 ends the day with LED21, Q17, SSD1306_I2C — all real, all scan-verified.
+
+### The evening rounds — be8fe81, 9a2a341, 732520f
+
+**The star walks to its edge (be8fe81).** The 7-seg moved one column off
+the x-pins and degraded to "a chip?" — the interrogation built members from
+FLAGS and a display's segments never flag. partsClusterFanOut sweeps the
+candidate band around a proven common (both halves, x-pins included) with
+junction-map triples; many LED-drop junctions all pointing one way IS a
+display. Bench: 33s scan, census saw 3 rows, verdict named all 8 cathodes
++ polarity ("common anode"). The chip path now feeds from the fan too, so
+the SSD1306 arc no longer depends on which rows census-hit.
+
+**Found parts wire themselves (9a2a341).** Per-part CONNECT prompts
+("ask per part, not all or nothing"), and the display's question is
+"wire?": a found display places as a record whose pins CONNECT — segments
+to free GPIOs, common to TOP_RAIL/GND — so the placement machinery builds
+the bridges and removal cleans them. GPIOs parked segments-off before the
+bridges land; then a two-pass segment chase maps GPIO→segment by eye.
+
+**Remove works leg by leg (732520f).** jl_remove_part_pin: tap a leg,
+that leg goes (bridge, net name, record entry); the last leg takes the
+part ("if we remove every node from a part... remove the part"). Rmv and
+Clear are always in the Parts menu now ("a menu whose rows come and go is
+a menu you can't learn"), and `x` clears parts with the board via the
+shared partsClearAllRecords.
+
+**Bench note:** the 1200-baud touch does NOT fire while the board sits in
+a modal app loop (core0 never reaches secondSerialHandler) — a Ctrl-C on
+port1 pops the loop and the queued touch fires immediately. The flash
+procedure is now: flush → Ctrl-C port1 → touch port5 → picotool.
+
+**5.7.8.1 prep underway:** 6-reviewer adversarial audit over today's 34
+commits + full HIL suite (port1 free tonight, first full run all day).
