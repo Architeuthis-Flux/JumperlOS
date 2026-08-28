@@ -22,6 +22,12 @@ void partsAppLauncher(void);
 void partsTestLauncher(void);
 void partsAutoLauncher(void);
 
+// Remove every part record (bridges, net names, guide progress), no
+// confirmation - Parts > Clear asks first and then calls this; the `x`
+// command calls it directly (clearing the board clears its parts too,
+// Kevin's ruling 2026-08-27). Returns how many parts were removed.
+int partsClearAllRecords(void);
+
 // The part card (Kevin's spec, 2026-08-27): name / type / cached test data /
 // "E - 17  B - 18  C - 19" (LEDs label polarity: "A+ - 21  K- - 51").
 // focusPin brackets one pin ([B - 18]); -1 = the whole part. 128x32, the

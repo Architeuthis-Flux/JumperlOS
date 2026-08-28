@@ -39,10 +39,6 @@
 // The canonical part removal (bridges, net names, undo guard, refresh) -
 // commit's replace-on-identity reuses it. Lives in JumperlessMicroPythonAPI.
 extern "C" int jl_remove_part(const char* name);
-// The canonical routable-GPIO setters (extern "C", same file): index 1-8,
-// dir 0 = output, 1 = input. The found-display wiring drives these.
-extern "C" void jl_gpio_set(int pin, int value);
-extern "C" void jl_gpio_set_dir(int pin, int direction);
 
 int partsProbeButton(void) {
     int bPress = probeButton.getButtonPress(true);
@@ -772,6 +768,18 @@ static bool partsClearAll(void) {
         delayMicroseconds(1000);
     }
 
+    partsClearAllRecords();
+    if (oled.oledConnected)
+        oled.clearPrintShow("Parts\ncleared", 2, true, true, true);
+    return true;
+}
+
+// The bulk clear itself, no questions asked - shared by Parts > Clear
+// (above, after its confirm) and the `x` command (Kevin, 20:53: "x clear
+// all connections should remove all parts too"). Returns how many went.
+int partsClearAllRecords(void) {
+    JumperlessState& st = globalState;
+    if (st.parts.numParts <= 0) return 0;
     // Same non-undoable contract as placement (see partsCommitPlacement):
     // undoing half of a clear resurrected bridges for parts that no longer
     // existed in the table.
@@ -794,17 +802,18 @@ static bool partsClearAll(void) {
     Serial.print("\r\nPARTS cleared n=");
     Serial.println(n);
     Serial.flush();
-    if (oled.oledConnected)
-        oled.clearPrintShow("Parts\ncleared", 2, true, true, true);
-    return true;
+    return n;
 }
 
-// Parts > Remove (Kevin's ask, 2026-08-27): tap ANY leg of a placed part to
-// remove that part - record, bridges, auto net names, all of it (the same
-// canonical single remove MicroPython's remove_part() uses). Repeats until
-// hold/click (done) or a serial byte (exit); a typed row number + enter
-// works without the probe (the placement convention).
+// Parts > Remove (Kevin's rulings, 2026-08-27): tap a leg of a placed part
+// to remove THAT LEG - its bridge, its net name, its record entry - and
+// removing the last leg removes the part itself ("if we remove every node
+// from a part... we should also remove the part"). A one-leg part goes in
+// one tap. Repeats until hold/click (done) or a serial byte (exit); a
+// typed row number + enter works without the probe (the placement
+// convention).
 int jl_remove_part(const char* name);   // JumperlessMicroPythonAPI.cpp
+extern "C" int jl_remove_part_pin(const char* name, const char* pinName);
 static void partsRemoveByTap(void) {
     JumperlessState& st = globalState;
     bool armed = false;
@@ -892,12 +901,12 @@ static void partsRemoveByTap(void) {
             continue;
         }
 
-        int idx = -1;
+        int idx = -1, pinIdx = -1;
         for (int i = 0; i < st.parts.numParts && i < MAX_PARTS && idx < 0; i++) {
             const PartDefinition& p = st.parts.parts[i];
             if (!p.placed) continue;
             for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++)
-                if (partPinNode(p, p.pins[j]) == row) { idx = i; break; }
+                if (partPinNode(p, p.pins[j]) == row) { idx = i; pinIdx = j; break; }
         }
         if (idx < 0) {
             b.lightUpNode(row, PARTS_TAP_IGNORED_COLOR);
@@ -907,9 +916,12 @@ static void partsRemoveByTap(void) {
             continue;
         }
 
-        char name[16];
+        char name[16], pinName[8];
+        bool lastPin = (st.parts.parts[idx].numPins <= 1);
         snprintf(name, sizeof(name), "%s", st.parts.parts[idx].name);
-        {
+        snprintf(pinName, sizeof(pinName), "%s",
+                 st.parts.parts[idx].pins[pinIdx].name);
+        if (lastPin) {
             // the whole part flashes goodbye before it goes
             const PartDefinition& p = st.parts.parts[idx];
             for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
@@ -919,16 +931,38 @@ static void partsRemoveByTap(void) {
             }
             requestLedShow(2);
             delay(180);
+        } else {
+            // just the tapped leg says goodbye
+            b.lightUpNode(row, PARTS_TAP_IGNORED_COLOR);
+            requestLedShow(2);
+            delay(120);
         }
-        if (jl_remove_part(name) == 0) {
+        if (jl_remove_part_pin(name, pinName) == 0) {
             partLabels.requestRun();
+            int left = -1;
+            {
+                int i2 = st.parts.findByName(name);
+                if (i2 >= 0) left = st.parts.parts[i2].numPins;
+            }
             Serial.print("\r\nPARTDB remove ok=");
             Serial.print(name);
+            Serial.print(" pin=");
+            Serial.print(pinName);
             Serial.print(" row=");
-            Serial.println(row);
+            Serial.print(row);
+            if (left > 0) {
+                Serial.print(" left=");
+                Serial.println(left);
+            } else {
+                Serial.println(" (part removed)");
+            }
             if (oled.oledConnected) {
                 char t[48];
-                snprintf(t, sizeof(t), "removed\n%s", name);
+                if (left > 0)
+                    snprintf(t, sizeof(t), "removed %s %s\n%d leg%s left", name,
+                             pinName, left, left == 1 ? "" : "s");
+                else
+                    snprintf(t, sizeof(t), "removed\n%s", name);
                 oled.clearPrintShow(t, 2, true, true, true);
                 delay(600);
             }
@@ -938,7 +972,8 @@ static void partsRemoveByTap(void) {
         prompt();
     }
     if (oled.oledConnected)
-        oled.clearPrintShow("no parts\nleft", 2, true, true, true);
+        oled.clearPrintShow(st.parts.numParts > 0 ? "done" : "no parts\nplaced",
+                            2, true, true, true);
     delay(600);
 }
 
@@ -964,31 +999,44 @@ void partsAppLauncher(void) {
             classOf[nClasses] = kPartClasses[i].cls;
             nClasses++;
         }
-        int removeIdx = -1;
-        int clearIdx = -1;
-        if (globalState.parts.numParts > 0) {
-            removeIdx = nClasses;
-            s_led[nClasses] = "Rmv";
-            s_title[nClasses] = "Remove a part";
-            s_desc[nClasses] = "tap any leg of a part";
-            classOf[nClasses] = 0xFE;
-            nClasses++;
-            clearIdx = nClasses;
-            s_led[nClasses] = "Clear";
-            s_title[nClasses] = "Clear parts";
-            s_desc[nClasses] = "remove every part";
-            classOf[nClasses] = 0xFF;
-            nClasses++;
-        }
+        // Remove and Clear are ALWAYS in the menu (Kevin, 20:53: a menu
+        // whose rows come and go is a menu you can't learn) - with no
+        // parts placed they say so and bounce back instead of hiding.
+        int removeIdx = nClasses;
+        s_led[nClasses] = "Rmv";
+        s_title[nClasses] = "Remove parts";
+        s_desc[nClasses] = "tap a leg to remove it";
+        classOf[nClasses] = 0xFE;
+        nClasses++;
+        int clearIdx = nClasses;
+        s_led[nClasses] = "Clear";
+        s_title[nClasses] = "Clear parts";
+        s_desc[nClasses] = "remove every part";
+        classOf[nClasses] = 0xFF;
+        nClasses++;
         int pick = partsPicker("class", "Parts", nClasses, classIdx);
         if (pick < 0) break;   // hold or serial byte at the top level = exit
         classIdx = pick;
-        if (pick == removeIdx && removeIdx >= 0) {
+        if (pick == removeIdx) {
+            if (globalState.parts.numParts <= 0) {
+                if (oled.oledConnected)
+                    oled.clearPrintShow("no parts\nplaced", 2, true, true, true);
+                Serial.println("\r\nPARTS remove: no parts placed");
+                delay(600);
+                continue;
+            }
             partsRemoveByTap();
             if (globalState.parts.numParts <= 0) classIdx = 0;
             continue;                     // back to the class list
         }
         if (pick == clearIdx) {
+            if (globalState.parts.numParts <= 0) {
+                if (oled.oledConnected)
+                    oled.clearPrintShow("no parts\nplaced", 2, true, true, true);
+                Serial.println("\r\nPARTS clear: no parts placed");
+                delay(600);
+                continue;
+            }
             if (partsClearAll()) break;   // cleared: exit, board is ambient
             continue;                     // declined: back to the class list
         }
@@ -2370,170 +2418,6 @@ static bool partsPlaceI2cModule(const I2cModuleFinding& f) {
     return true;
 }
 
-// A display the fan-out named, held for the wire-up prompt (Kevin, 20:17:
-// "give the option to wire up the parts when they're detected").
-struct DisplayFinding {
-    bool valid = false;
-    bool commonAnode = false;
-    int common = -1;
-    int rows[16];
-    int n = 0;
-};
-
-// Place the found display as a record whose pins CONNECT to free routable
-// GPIOs (segments) and the rail or GND (common) - the placement machinery
-// builds the bridges, so persistence, teardown and Remove-by-tap all ride
-// the parts layer, same as every display. Then a segment chase, one pass
-// around the digit: the user SEES it wired, and which GPIO lights which
-// segment is no longer a mystery. Common-anode: rail feeds the common and
-// a LOW segment GPIO lights it (fabric resistance is the series resistor,
-// ~8mA); HIGH parks it 0.5V under the rail - dark. Common-cathode mirrors.
-static bool partsWireFoundDisplay(const DisplayFinding& f) {
-    if (!f.valid || f.n < 1) return false;
-    // free routable GPIOs: nothing in the bridge table touches the node
-    // (this also skips the probe-power feed on GP_8 - BUF_IN owns it)
-    int freeG[8];
-    int nFree = 0;
-    for (int g = 0; g < 8 && nFree < 8; g++) {
-        int node = RP_GPIO_1 + g;
-        bool used = false;
-        for (int i = 0; i < globalState.connections.numBridges && !used; i++)
-            if (globalState.connections.bridges[i][0] == node ||
-                globalState.connections.bridges[i][1] == node)
-                used = true;
-        if (!used) freeG[nFree++] = g + 1;   // 1-based GPIO index
-    }
-    if (nFree < 1) {
-        Serial.println("PARTSCAN no free GPIOs - display not wired");
-        return false;
-    }
-    int nWire = (f.n < nFree) ? f.n : nFree;
-    if (nWire < f.n) {
-        Serial.print("PARTSCAN only ");
-        Serial.print(nFree);
-        Serial.print(" GPIOs free - wiring ");
-        Serial.print(nWire);
-        Serial.print(" of ");
-        Serial.print(f.n);
-        Serial.println(" segments");
-    }
-    // dip geometry from the measured columns: bottom row r = column r-30,
-    // top row t = column t; base anchors the bottom half (the dip rule)
-    int minCol = 61, maxCol = 0;
-    auto colOf = [](int r) { return (r <= 30) ? r : r - 30; };
-    for (int q = 0; q < f.n; q++) {
-        int c = colOf(f.rows[q]);
-        if (c < minCol) minCol = c;
-        if (c > maxCol) maxCol = c;
-    }
-    int cc = colOf(f.common);
-    if (cc < minCol) minCol = cc;
-    if (cc > maxCol) maxCol = cc;
-    int W = maxCol - minCol + 1;
-    if (W < 1 || W > 15) return false;
-    int base = minCol + 30;
-    auto pinOf = [&](int r) {
-        return (r > 30) ? (colOf(r) - minCol + 1)          // bottom: 1..W
-                        : (2 * W - (colOf(r) - minCol));   // top: 2W..W+1
-    };
-    char pins[640];
-    int u = snprintf(pins, sizeof(pins), "{\"COM\": {\"pin\": %d, \"connect\": \"%s\"}",
-                     pinOf(f.common), f.commonAnode ? "TOP_RAIL" : "GND");
-    for (int q = 0; q < f.n; q++) {
-        if (q < nWire)
-            u += snprintf(pins + u, sizeof(pins) - u,
-                          ", \"S%d\": {\"pin\": %d, \"connect\": \"RP_GPIO_%d\"}",
-                          q + 1, pinOf(f.rows[q]), freeG[q]);
-        else
-            u += snprintf(pins + u, sizeof(pins) - u,
-                          ", \"S%d\": {\"pin\": %d}", q + 1, pinOf(f.rows[q]));
-        if (u >= (int)sizeof(pins)) return false;
-    }
-    snprintf(pins + u, sizeof(pins) - u, "}");
-    // segments OFF before the bridges land: CA parks HIGH, CC parks LOW
-    for (int q = 0; q < nWire; q++) {
-        jl_gpio_set_dir(freeG[q], 0);
-        jl_gpio_set(freeG[q], f.commonAnode ? 1 : 0);
-    }
-    char fp[8], name[16];
-    snprintf(fp, sizeof(fp), "dip%d", 2 * W);
-    snprintf(name, sizeof(name), "7SEG%d", base);
-    const char* typeStr = f.commonAnode ? "led_7seg_ca" : "led_7seg_cc";
-    if (jl_place_part(name, base, pins, fp, typeStr, "", name) != 0)
-        return false;
-    if (f.commonAnode && getDacHardwareVoltage(2) < 2.0f)
-        Serial.println("PARTSCAN note: the top rail is under 2V - raise it"
-                       " to light the segments");
-    Serial.print("\r\nPARTSCAN wired ");
-    Serial.print(name);
-    Serial.print(" - ");
-    Serial.print(nWire);
-    Serial.print(" segments on GPIO, common ");
-    Serial.print(f.commonAnode ? "anode to TOP_RAIL" : "cathode to GND");
-    Serial.println();
-    // the chase: each segment alone for a beat, twice around, then dark -
-    // proof of wiring, and a live map of which GPIO owns which segment
-    for (int pass = 0; pass < 2; pass++) {
-        for (int q = 0; q < nWire; q++) {
-            jl_gpio_set(freeG[q], f.commonAnode ? 0 : 1);
-            uint32_t until = millis() + 120;
-            while (millis() < until) jOS.serviceInner();
-            jl_gpio_set(freeG[q], f.commonAnode ? 1 : 0);
-        }
-    }
-    return true;
-}
-
-// One yes/no per finding (Kevin, 20:17: "ask per part, not all or
-// nothing"). CONNECT or serial 'y' = yes; click or any other byte = skip
-// just this one; a HOLD ends the whole confirm pass.
-static int partsConfirmOne(const char* verb, const char* what) {
-    if (oled.oledConnected) {
-        char t[96];
-        snprintf(t, sizeof(t), "%s %s?\nCONNECT = yes  click = skip", verb, what);
-        oled.resetMultiLineSmallText();
-        oled.showMultiLineSmallText(t);
-    }
-    Serial.print("\r\nPARTSCAN ");
-    Serial.print(verb);
-    Serial.print("? ");
-    Serial.print(what);
-    Serial.println("  (CONNECT/y = yes, click/n = skip, hold = done)");
-    Serial.flush();
-    encoderButtonState = IDLE;
-    lastButtonEncoderState = IDLE;
-    while (true) {
-        jOS.serviceInner();
-        rotaryEncoderButtonStuff();
-        if (partsProbeButton() == 1) return 1;
-        if (encoderButtonState == HELD) {
-            while (encoderButtonState == HELD ||
-                   encoderButtonState == MEDIUM_HELD ||
-                   encoderButtonState == LONG_HELD) {
-                jOS.serviceInner();
-                rotaryEncoderButtonStuff();
-                delayMicroseconds(1000);
-            }
-            encoderButtonState = IDLE;
-            lastButtonEncoderState = IDLE;
-            return -1;
-        }
-        if (encoderButtonState == RELEASED &&
-            lastButtonEncoderState == PRESSED) {
-            encoderButtonState = IDLE;
-            lastButtonEncoderState = IDLE;
-            return 0;
-        }
-        if (Serial.available() > 0) {
-            char c = (char)Serial.read();
-            if (c == 'y' || c == 'Y') return 1;
-            if (c == '\r' || c == '\n') continue;   // stray line ending
-            return 0;
-        }
-        delayMicroseconds(1000);
-    }
-}
-
 // The placed part (if any) with a pin on this row, for "already yours" tags.
 static const char* partsPlacedPartOnRow(int row) {
     for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
@@ -2604,9 +2488,6 @@ void partsAutoLauncher(void) {
     // a confirmed I2C module (the SSD1306 answering 0x3C) is placeable too
     static I2cModuleFinding i2cModule;
     i2cModule.valid = false;
-    // and a fan-out-named display is WIREABLE (segments to GPIOs)
-    static DisplayFinding dispFound;
-    dispFound.valid = false;
     // pairs that conducted ACROSS the center channel (n <-> n+30): their
     // rows live in different halves and can never form one span, so they
     // arrive from the sweep as explicit pairs and get identified as such
@@ -3117,12 +2998,6 @@ void partsAutoLauncher(void) {
                                      "LED display? (%d segments, common %s %d)",
                                      fan.n, up > 0 ? "anode" : "cathode",
                                      anodeRow);
-                            dispFound.valid = true;
-                            dispFound.commonAnode = (up > 0);
-                            dispFound.common = anodeRow;
-                            dispFound.n = (fan.n < 16) ? fan.n : 16;
-                            for (int q = 0; q < dispFound.n; q++)
-                                dispFound.rows[q] = fan.rows[q];
                             for (int q = 0; q < fan.n; q++) {
                                 int pr = nodeToPrintRow(fan.rows[q]);
                                 if (pr >= 0)
@@ -3440,9 +3315,8 @@ void partsAutoLauncher(void) {
         if (partsAutoAborted) {
             partsPrintAborted();
         } else {
-            // the confirmed I2C module and the wireable display count too
-            int nPlaceable = nAddable + (i2cModule.valid ? 1 : 0) +
-                             (dispFound.valid ? 1 : 0);
+            // the confirmed I2C module counts as a placeable finding too
+            int nPlaceable = nAddable + (i2cModule.valid ? 1 : 0);
             Serial.print("PARTSCAN auto done in ");
             Serial.print((millis() - scanT0) / 1000);
             if (nPlaceable > 0) {
@@ -3466,53 +3340,55 @@ void partsAutoLauncher(void) {
             // board prompt"). With nothing to add, hold the summary.
             if (nPlaceable == 0 || partsAutoAborted) partsWaitForPress();
 
-            // Act on the findings, ONE AT A TIME (Kevin, 20:17: "ask per
-            // part, not all or nothing"): every placeable finding gets its
-            // own CONNECT, the display's question is "wire it", and a hold
-            // ends the pass early.
+            // Act on the findings (Kevin's ask): one CONNECT press places
+            // every identified discrete as a real record - highlightable,
+            // testable, removable - with the scan's measurement as its
+            // cached test data. Click passes.
             if (nPlaceable > 0 && !partsAutoAborted) {
+                if (oled.oledConnected) {
+                    char t[64];
+                    snprintf(t, sizeof(t), "add %d found part%s?\nCONNECT = yes  click = no",
+                             nPlaceable, nPlaceable == 1 ? "" : "s");
+                    oled.resetMultiLineSmallText();
+                    oled.showMultiLineSmallText(t);
+                }
                 Serial.print("\r\nPARTSCAN add confirm n=");
                 Serial.println(nPlaceable);
                 Serial.flush();
-                int placed = 0;
-                bool bail = false;
-                for (int q = 0; q < nAddable && !bail; q++) {
-                    int rlo = 61, rhi = 0;
-                    for (int t = 0; t < addable[q].nRows; t++) {
-                        int rr = (int)addable[q].rows[t];
-                        if (rr < rlo) rlo = rr;
-                        if (rr > rhi) rhi = rr;
+                encoderButtonState = IDLE;
+                lastButtonEncoderState = IDLE;
+                bool addThem = false;
+                while (true) {
+                    jOS.serviceInner();
+                    rotaryEncoderButtonStuff();
+                    if (partsProbeButton() == 1) { addThem = true; break; }
+                    if (encoderButtonState == HELD ||
+                        (encoderButtonState == RELEASED &&
+                         lastButtonEncoderState == PRESSED)) {
+                        while (encoderButtonState == HELD ||
+                               encoderButtonState == MEDIUM_HELD ||
+                               encoderButtonState == LONG_HELD) {
+                            jOS.serviceInner();
+                            rotaryEncoderButtonStuff();
+                            delayMicroseconds(1000);
+                        }
+                        encoderButtonState = IDLE;
+                        lastButtonEncoderState = IDLE;
+                        break;
                     }
-                    char what[48];
-                    snprintf(what, sizeof(what), "%s rows %d-%d",
-                             partTypeName(addable[q].type), rlo, rhi);
-                    int ans = partsConfirmOne("add", what);
-                    if (ans < 0) { bail = true; break; }
-                    if (ans == 1 && partsPlaceScanResult(addable[q])) placed++;
-                }
-                if (!bail && i2cModule.valid) {
-                    int rlo = i2cModule.gnd, rhi = i2cModule.gnd;
-                    int r4[3] = {i2cModule.vdd, i2cModule.scl, i2cModule.sda};
-                    for (int t = 0; t < 3; t++) {
-                        if (r4[t] < rlo) rlo = r4[t];
-                        if (r4[t] > rhi) rhi = r4[t];
+                    if (Serial.available() > 0) {
+                        char c = (char)Serial.read();
+                        if (c == 'y' || c == 'Y') { addThem = true; }
+                        break;   // serial twin: y = yes, anything else = no
                     }
-                    char what[48];
-                    snprintf(what, sizeof(what), "I2C 0x%02X module rows %d-%d",
-                             i2cModule.addr, rlo, rhi);
-                    int ans = partsConfirmOne("add", what);
-                    if (ans < 0) bail = true;
-                    else if (ans == 1 && partsPlaceI2cModule(i2cModule)) placed++;
+                    delayMicroseconds(1000);
                 }
-                if (!bail && dispFound.valid) {
-                    char what[56];
-                    snprintf(what, sizeof(what),
-                             "%d-seg display (common %d) to GPIOs",
-                             dispFound.n, dispFound.common);
-                    int ans = partsConfirmOne("wire", what);
-                    if (ans == 1 && partsWireFoundDisplay(dispFound)) placed++;
-                }
-                if (placed > 0) {
+                if (addThem) {
+                    int placed = 0;
+                    for (int q = 0; q < nAddable; q++)
+                        if (partsPlaceScanResult(addable[q])) placed++;
+                    if (i2cModule.valid && partsPlaceI2cModule(i2cModule))
+                        placed++;   // DisplayService picks it up from here
                     partLabels.requestRun();
                     if (oled.oledConnected) {
                         char t[32];

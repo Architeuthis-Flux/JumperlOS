@@ -2199,6 +2199,82 @@ int jl_remove_part( const char* name ) {
     return 0;
 }
 
+// remove_part_pin(name, pin): drop ONE leg from a placed part - its bridge,
+// its auto net name, its record entry - leaving the rest of the part in
+// place. Removing the LAST leg removes the part itself (Kevin's ruling,
+// 2026-08-27: "if we remove every node from a part... we should also remove
+// the part"). Same canonical discipline as remove_part, scoped to one pin.
+extern "C" int jl_remove_part_pin( const char* name, const char* pinName ) {
+    if ( name == nullptr || name[ 0 ] == '\0' || pinName == nullptr ||
+         pinName[ 0 ] == '\0' ) {
+        Serial.println( "remove_part_pin: empty name" );
+        return -1;
+    }
+    int idx = globalState.parts.findByName( name );
+    if ( idx < 0 ) {
+        Serial.print( "remove_part_pin: no part named " );
+        Serial.println( name );
+        return -1;
+    }
+    PartDefinition& p = globalState.parts.parts[ idx ];
+    int pj = -1;
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ )
+        if ( strcmp( p.pins[ j ].name, pinName ) == 0 ) { pj = j; break; }
+    if ( pj < 0 ) {
+        Serial.print( "remove_part_pin: no pin named " );
+        Serial.print( pinName );
+        Serial.print( " on " );
+        Serial.println( name );
+        return -1;
+    }
+    if ( p.numPins <= 1 ) {
+        return jl_remove_part( name );   // the last node takes the part along
+    }
+
+    char autoName[ 32 ];
+    makePinNetName( p, p.pins[ pj ], autoName );
+
+    holdCore1Frames( );
+    delayMicroseconds( 50 );
+    // Same undo contract as remove_part: the bridge removal would be
+    // recorded while the record edit below cannot be.
+    UndoIngestGuard undoGuard;
+    {
+        // the pin's own bridge, if it has one (removePartPlacement's idiom)
+        const PartPin& pin = p.pins[ pj ];
+        if ( pin.connect >= 0 ) {
+            int node = partPinNode( p, pin );
+            if ( node >= 0 && globalState.hasConnection( node, pin.connect ) ) {
+                String rerr;
+                globalState.removeConnection( node, pin.connect, rerr );
+            }
+        }
+    }
+    for ( int j = pj; j < p.numPins - 1 && j < MAX_PART_PINS - 1; j++ ) {
+        p.pins[ j ] = p.pins[ j + 1 ];
+    }
+    p.numPins--;
+    globalState.markDirty( );
+    releaseCore1Frames( );
+
+    refreshConnections( -1, 1, 0 );
+
+    // With the nets rebuilt, clear the pin's surviving auto name (the same
+    // sweep remove_part runs over its whole pin list).
+    bool cleared = false;
+    for ( int n = 1; n < MAX_NETS; n++ ) {
+        const char* nm = globalState.display.getNetName( n );
+        if ( nm != nullptr && strcmp( nm, autoName ) == 0 ) {
+            globalState.display.removeNetName( n );
+            cleared = true;
+        }
+    }
+    if ( cleared ) {
+        globalState.markDirty( );
+    }
+    return 0;
+}
+
 int jl_get_num_parts( void ) {
     return globalState.parts.numParts;
 }
