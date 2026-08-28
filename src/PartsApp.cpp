@@ -1946,6 +1946,66 @@ static bool partsDiodeIsChipClamp(int anodeRow, const int* cands, int nCand) {
     return partsStarEdgeRow(anodeRow, cands, nCand) > 0;
 }
 
+// When a star test proves a common pin, walk the star to its edge: sweep
+// the candidate band around the common - both halves, x-pins included -
+// and collect every row that junctions to it. This is what turns "a chip?"
+// into a named thing. The census can't see isolated LED cathodes (they
+// pre-charge through their own junctions) and the pair sweep skips pairs
+// between census hits, so a display's segments are only ever discoverable
+// THROUGH their common (bench, 19:18: the 7-seg moved one column off the
+// x-pins - common on 58, segments unflagged - and the cluster starved at
+// two members). Per-member forward drop and orientation ride along: seven
+// LED-drop junctions all pointing one way IS a display, and which way
+// they point says common-anode or common-cathode.
+struct ClusterFan {
+    int rows[16];
+    float vf[16];      // forward drop at the map's ~50uA (LEDs read 1.1-2.6)
+    int8_t dir[16];    // +1 = the common is the ANODE, -1 = cathode, 0 = both
+    int n = 0;
+};
+static void partsClusterFanOut(int anchorRow, ClusterFan* fan,
+                               const uint8_t* flags) {
+    fan->n = 0;
+    int cands[26];
+    int nc = 0;
+    auto addC = [&](int r) {
+        if (nc >= 26 || r < 1 || r > 60 || r == anchorRow) return;
+        if (flags[r] == 2 || flags[r] == 4) return;   // wired / refused
+        for (int q = 0; q < nc; q++)
+            if (cands[q] == r) return;
+        cands[nc++] = r;
+    };
+    int mirror = (anchorRow <= 30) ? anchorRow + 30 : anchorRow - 30;
+    for (int d = 1; d <= 6; d++) { addC(anchorRow - d); addC(anchorRow + d); }
+    addC(mirror);
+    for (int d = 1; d <= 6; d++) { addC(mirror - d); addC(mirror + d); }
+    for (int q = 0; q < nc && fan->n < 16; q += 2) {
+        if (partsAutoAbortCheck()) return;
+        int c1 = cands[q];
+        bool hasC2 = (q + 1 < nc);
+        int c2 = hasC2 ? cands[q + 1] : cands[q ? q - 1 : 0];
+        if (c2 == c1) break;
+        int rows3[3] = {anchorRow, c1, c2};
+        ScanSession s;
+        if (partScanBegin(s, rows3, 3) != 0) continue;
+        float v[3][3];
+        partScanJunctionMap(s, v);
+        partScanEnd(s);
+        for (int t = 1; t <= 2 && fan->n < 16; t++) {
+            if (t == 2 && !hasC2) break;   // the doubled filler row
+            int cand = (t == 1) ? c1 : c2;
+            float fwdA = v[0][t];   // anchor pulled up, cand grounded
+            float fwdC = v[t][0];   // cand pulled up, anchor grounded
+            bool aLow = fwdA < kJmFwd, cLow = fwdC < kJmFwd;
+            if (!aLow && !cLow) continue;       // no edge to the common
+            fan->rows[fan->n] = cand;
+            fan->vf[fan->n] = aLow ? fwdA : fwdC;
+            fan->dir[fan->n] = (aLow && !cLow) ? 1 : (!aLow && cLow) ? -1 : 0;
+            fan->n++;
+        }
+    }
+}
+
 // A real silicon BJT's Vbe at identify's test current sits in a narrow
 // band; the fakes don't. Bench, 14:00: a 7400's pin trios passed the hFE
 // test TWICE - "NPN 0.90V" and "NPN 0.44V", both placed as phantom
@@ -2853,33 +2913,75 @@ void partsAutoLauncher(void) {
                         snprintf(line, sizeof(line),
                                  "rows %d-%d: a chip? (several pins clamp to row %d)",
                                  lo, hi, anodeRow);
-                        // A small clamp star is exactly the shape of a
-                        // 4-pin I2C module (bench: Kevin's SSD1306 on rows
-                        // 1-4 landed here, not in the wide-span walk), so
-                        // it gets the same power-up-and-ask treatment.
-                        int cl[6];
-                        int nCl = 0;
-                        for (int r = lo; r <= hi && nCl < 6; r++)
-                            if (flags[r] == 1 || flags[r] == 5) cl[nCl++] = r;
-                        for (int d = 1; d <= 2 && nCl < 6; d++) {
-                            int nxt = hi + d;
-                            if (nxt <= ((hi <= 28) ? 28 : 58) &&
-                                (flags[nxt] == 1 || flags[nxt] == 5))
-                                cl[nCl++] = nxt;
+                        // Walk the star to its full extent: the flags can't
+                        // feed this (a display's segments never flag), so
+                        // the common itself is the only reliable map.
+                        Serial.print("  walking everything that shares row ");
+                        Serial.print(anodeRow);
+                        Serial.println("...");
+                        Serial.flush();
+                        static ClusterFan fan;
+                        partsClusterFanOut(anodeRow, &fan, flags);
+                        int ledish = 0, up = 0, down = 0;
+                        for (int q = 0; q < fan.n; q++) {
+                            if (fan.vf[q] >= 1.1f) ledish++;
+                            if (fan.dir[q] > 0) up++;
+                            else if (fan.dir[q] < 0) down++;
                         }
-                        ClusterPower cp;
-                        char i2cLine[64] = "";
-                        if (nCl >= 3 && !partsAutoAbortCheck() &&
-                            partsFindClusterPower(cl, nCl, &cp)) {
-                            Serial.print("  its clamps say row ");
-                            Serial.print(cp.gndRow);
-                            Serial.print(" is ground and row ");
-                            Serial.print(cp.vddRow);
-                            Serial.println(" is the supply");
-                            if (partsProbeClusterI2C(cp, i2cLine, sizeof(i2cLine),
-                                                     &i2cModule))
-                                snprintf(line, sizeof(line), "rows %d-%d: %s",
-                                         lo, cl[nCl - 1], i2cLine);
+                        if (fan.n >= 4 && ledish >= fan.n - 1 &&
+                            (up == 0 || down == 0)) {
+                            // many LED-drop junctions, one common terminal,
+                            // every one pointing the same way: a display
+                            Serial.print("  rows ");
+                            for (int q = 0; q < fan.n; q++) {
+                                if (q) Serial.print(",");
+                                Serial.print(fan.rows[q]);
+                            }
+                            Serial.print(" all light from row ");
+                            Serial.print(anodeRow);
+                            Serial.print(" - a 7-seg display? (common ");
+                            Serial.print(up > 0 ? "anode" : "cathode");
+                            Serial.println(")");
+                            snprintf(line, sizeof(line),
+                                     "LED display? (%d segments, common %s %d)",
+                                     fan.n, up > 0 ? "anode" : "cathode",
+                                     anodeRow);
+                            for (int q = 0; q < fan.n; q++) {
+                                int pr = nodeToPrintRow(fan.rows[q]);
+                                if (pr >= 0)
+                                    b.printRawRow(0b00011111, pr,
+                                                  PARTS_ROLE_K_COLOR, 0xffffff);
+                            }
+                            int prA = nodeToPrintRow(anodeRow);
+                            if (prA >= 0)
+                                b.printRawRow(0b00011111, prA,
+                                              PARTS_ROLE_A_COLOR, 0xffffff);
+                            requestLedShow(2);
+                        } else if (fan.n >= 2 && !partsAutoAbortCheck()) {
+                            // a real chip cluster: the fan's members feed
+                            // the supply-pin reader and the I2C question
+                            // (bench: Kevin's SSD1306 on rows 1-4 lands
+                            // here - this path no longer needs the flags)
+                            int cl[6];
+                            int nCl = 0;
+                            cl[nCl++] = anodeRow;
+                            for (int q = 0; q < fan.n && nCl < 6; q++)
+                                cl[nCl++] = fan.rows[q];
+                            ClusterPower cp;
+                            char i2cLine[64] = "";
+                            if (nCl >= 3 &&
+                                partsFindClusterPower(cl, nCl, &cp)) {
+                                Serial.print("  its clamps say row ");
+                                Serial.print(cp.gndRow);
+                                Serial.print(" is ground and row ");
+                                Serial.print(cp.vddRow);
+                                Serial.println(" is the supply");
+                                if (partsProbeClusterI2C(cp, i2cLine,
+                                                         sizeof(i2cLine),
+                                                         &i2cModule))
+                                    snprintf(line, sizeof(line), "rows %d-%d: %s",
+                                             lo, hi, i2cLine);
+                            }
                         }
                         for (int r = a; r <= z; r++) {
                             int pr = nodeToPrintRow(r);

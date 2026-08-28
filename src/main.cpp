@@ -618,7 +618,7 @@ void setup( ) {
     // enumerates, so a live print would have gone nowhere. Also reachable from
     // the memory menu, which is where you want it after the board has been
     // used for a while.
-    heapLedgerPrint();
+    // heapLedgerPrint();
 #endif
     // Serial.println("Service registration complete");
     // Serial.flush();
