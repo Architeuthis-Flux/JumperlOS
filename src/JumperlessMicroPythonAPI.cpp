@@ -33,6 +33,9 @@
 #include "States.h"
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
 #include "sensing/PartClassify.h"  // part_identify binding
+#include "sensing/PartMeasure.h"   // part_fingerprint binding (Tier-1 clamps)
+#include "partdb/PartDb.h"         // fingerprint matching (match= field)
+#include "PartsApp.h"              // part_vectors binding (Tier-3 runner)
 #include "Undo.h"                  // UndoIngestGuard - placements are not undoable
 #include "ProjectsApp.h" // projectOpenLatestOrNew (load_project's name form)
 #include "WaveGen.h"
@@ -1945,9 +1948,10 @@ static bool partStringSafe( const char* s, const char* what ) {
 //   connect: row 1-60 or any node name parseNodeName() resolves (GND, TOP_RAIL...)
 //   class:   signal|power|gnd|nc
 // footprint "" (default) infers sipN from the highest pin/offset listed, so a
-// 2-leg part just works; pass "dip8" for real DIP geometry (row MUST be
-// 31-60, pin 1's bottom-half hole) or "axial2" to straddle the ravine
-// (row MUST be 1-30; pin 2 lands at row+30).
+// 2-leg part just works; pass "dip8" for real DIP geometry (row = pin 1's
+// REAL hole, either half: 31-60 = dot bottom-left, 1-30 = rotated 180 with
+// pin 1 top-right) or "axial2" to straddle the ravine (row MUST be 1-30;
+// pin 2 lands at row+30).
 // Returns 0 on success, -1 on failure (reason printed).
 int jl_place_part( const char* name, int row, const char* pins_json,
                    const char* footprint, const char* type, const char* value,
@@ -2435,6 +2439,153 @@ const char* jl_part_identify( int row1, int row2, int row3 ) {
         }
     }
     return idBuffer;
+#endif // OG_JUMPERLESS
+}
+
+// part_fingerprint(base_row, width, gnd_row, vdd_row): Tier-1 unpowered
+// clamp fingerprint of a bottom-anchored dipN (DESIGN_IC_IDENTIFICATION.md
+// 5.1). Pin order is the DIP U with pin 1 = base_row (dot bottom-left,
+// PartDefinition::nodeForPin geometry). fp= is one char per pin:
+//   '-' rail pin   'x' unprobed (x-pin row / session refused)
+//   'N' open both ways          'G' junction to GND only
+//   'V' junction to VDD only    'B' junction both ways
+//   'R' a resistive path in either direction (not an ESD clamp)
+// pins= carries the evidence: row:<gnd><vdd>:vfGnd:vfVdd per pin, where the
+// letters are o/j/r (open/junction/resistive) and Vf is at 1 mA. ~0.5s per
+// probed pin; the rows must be unpowered (the session refuses otherwise).
+const char* jl_part_clamp_fingerprint( int baseRow, int width, int gndRow,
+                                       int vddRow ) {
+    static char fpBuffer[ 768 ];
+#if defined( OG_JUMPERLESS )
+    (void)baseRow; (void)width; (void)gndRow; (void)vddRow;
+    snprintf( fpBuffer, sizeof( fpBuffer ), "status=-2 fp= pins=" );
+    return fpBuffer;
+#else
+    int nPins = 2 * width;
+    if ( baseRow < 31 || baseRow > 60 || width < 2 ||
+         baseRow + width - 1 > 60 || nPins > MAX_PART_PINS ) {
+        snprintf( fpBuffer, sizeof( fpBuffer ), "status=-1 fp= pins=" );
+        return fpBuffer;
+    }
+    int rows[ MAX_PART_PINS ];
+    for ( int k = 1; k <= nPins; k++ )
+        rows[ k - 1 ] = ( k <= width ) ? baseRow + ( k - 1 )
+                                       : ( baseRow - 30 ) + ( nPins - k );
+    static ClampPin pins[ MAX_PART_PINS ];
+    int probed = partScanClampFingerprint( rows, nPins, gndRow, vddRow, pins );
+    if ( probed < 0 ) {
+        snprintf( fpBuffer, sizeof( fpBuffer ), "status=%d fp= pins=", probed );
+        return fpBuffer;
+    }
+    // The measured fp string (PartDb.h alphabet) - built once, printed AND
+    // matched against every same-size DIP record carrying a fingerprint.
+    char fp[ MAX_PART_PINS + 1 ];
+    for ( int i = 0; i < nPins; i++ ) {
+        const ClampPin& p = pins[ i ];
+        char c;
+        if ( p.row == gndRow || p.row == vddRow ) c = '-';
+        else if ( !p.probed ) c = 'x';
+        else if ( p.toGnd == PART_CLAMP_RESISTIVE ||
+                  p.toVdd == PART_CLAMP_RESISTIVE ) c = 'T';
+        else if ( p.toGnd == PART_CLAMP_JUNCTION &&
+                  p.toVdd == PART_CLAMP_JUNCTION ) c = 'B';
+        else if ( p.toGnd == PART_CLAMP_JUNCTION ) c = 'G';
+        else if ( p.toVdd == PART_CLAMP_JUNCTION ) c = 'V';
+        else c = 'N';
+        fp[ i ] = c;
+    }
+    fp[ nPins ] = '\0';
+
+    int pos = snprintf( fpBuffer, sizeof( fpBuffer ),
+                        "status=0 gnd=%d vdd=%d n=%d probed=%d fp=%s",
+                        gndRow, vddRow, nPins, probed, fp );
+
+    // Top-3 partdb candidates by ascending fingerprint mismatch, both
+    // orientations (the scan can't know which corner pin 1 is - the 'r'
+    // suffix = the 180-rotated alignment fit better, which is itself the
+    // pin-1 answer). Ties stay ties (5.4: never guess what the physics
+    // can't distinguish) - the caller sees the counts and decides.
+    struct { uint16_t rec; int miss; int rot; } best[ 3 ];
+    int nBest = 0;
+    for ( uint16_t i = 0; i < partdb_numRecords; i++ ) {
+        const PartDbRecord& r = partdb_records[ i ];
+        const PartDbPinout& po = partdb_pinouts[ r.pinoutIdx ];
+        if ( po.footprint != PARTDB_FOOT_DIP ) continue;
+        if ( (int)po.pinCount != nPins ) continue;
+        int rot = 0;
+        int miss = partdbFingerprintMismatchOriented( r, fp, &rot );
+        if ( miss < 0 ) continue;
+        int at = nBest;
+        while ( at > 0 && best[ at - 1 ].miss > miss ) at--;
+        if ( at >= 3 ) continue;
+        if ( nBest < 3 ) nBest++;
+        for ( int k = nBest - 1; k > at; k-- ) best[ k ] = best[ k - 1 ];
+        best[ at ].rec = i;
+        best[ at ].miss = miss;
+        best[ at ].rot = rot;
+    }
+    pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, " match=" );
+    for ( int k = 0; k < nBest && pos > 0 &&
+                     pos < (int)sizeof( fpBuffer ) - 24; k++ )
+        pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, "%s%s:%d%s",
+                         k ? "," : "", partdb_records[ best[ k ].rec ].id,
+                         best[ k ].miss, best[ k ].rot ? "r" : "" );
+
+    pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, " pins=" );
+    const char code[ 3 ] = { 'o', 'j', 'r' };
+    for ( int i = 0; i < nPins && pos > 0 &&
+                     pos < (int)sizeof( fpBuffer ) - 28; i++ ) {
+        const ClampPin& p = pins[ i ];
+        pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos,
+                         "%s%d:%c%c:%.2f:%.2f", i ? "," : "", p.row,
+                         code[ p.toGnd ], code[ p.toVdd ], (double)p.vfGnd,
+                         (double)p.vfVdd );
+    }
+    return fpBuffer;
+#endif // OG_JUMPERLESS
+}
+
+// part_vectors(base_row, width, gnd_row, vdd_row): Tier-3 powered
+// truth-table identification of a bottom-anchored dipN whose rails are
+// known (DESIGN_IC_IDENTIFICATION.md 5.2). Per candidate tried:
+// id:pass|fail@<step>|refused, with an 'r' prefix on the id's verdict when
+// the rails forced the 180-rotated orientation. POWERS THE CHIP - the
+// runner owns the safety discipline (GND first, current-limited, INA
+// watchdog, board-powered pre-check, teardown on every exit).
+const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow ) {
+    static char vecBuffer[ 384 ];
+#if defined( OG_JUMPERLESS )
+    (void)baseRow; (void)width; (void)gndRow; (void)vddRow;
+    snprintf( vecBuffer, sizeof( vecBuffer ), "status=-2 tried=0" );
+    return vecBuffer;
+#else
+    VectorIdentifyResult res[ 8 ];
+    int n = partsVectorIdentify( baseRow, width, gndRow, vddRow, res, 8 );
+    if ( n < 0 ) {
+        snprintf( vecBuffer, sizeof( vecBuffer ), "status=-1 tried=0" );
+        return vecBuffer;
+    }
+    int nPass = 0;
+    for ( int i = 0; i < n; i++ )
+        if ( res[ i ].verdict == 1 ) nPass++;
+    int pos = snprintf( vecBuffer, sizeof( vecBuffer ),
+                        "status=0 tried=%d pass=%d cands=", n, nPass );
+    for ( int i = 0; i < n && pos > 0 &&
+                     pos < (int)sizeof( vecBuffer ) - 40; i++ ) {
+        const PartDbRecord& rec = partdb_records[ res[ i ].recIdx ];
+        pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos, "%s%s%s:",
+                         i ? "," : "", rec.id, res[ i ].rotated ? "(r)" : "" );
+        if ( res[ i ].verdict == 1 )
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "pass" );
+        else if ( res[ i ].verdict == 0 )
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "fail@%d", (int)res[ i ].failStep );
+        else
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "refused" );
+    }
+    return vecBuffer;
 #endif // OG_JUMPERLESS
 }
 

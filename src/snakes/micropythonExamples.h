@@ -5685,10 +5685,11 @@ def place_part(name: str, row: int, pins_json: str, footprint: str = "",
 
     Args:
         name: Part name, 1-15 characters, unique (remove_part first to replace)
-        row: Breadboard row of pin 1. Plain SIP is legal on either half
-             (1-60); a DIP's pin 1 (the dot/notch) MUST be on the bottom half
-             (31-60) - real chips sit that way; axial2's pin 1 MUST be on the
-             top half (1-30) so pin 2 (row+30) lands across the ravine.
+        row: Breadboard row of pin 1's REAL hole. Plain SIP is legal on
+             either half (1-60); a DIP's half encodes its orientation -
+             31-60 = dot/notch bottom-left, 1-30 = rotated 180 with pin 1
+             top-right; axial2's pin 1 MUST be on the top half (1-30) so
+             pin 2 (row+30) lands across the ravine.
         pins_json: Pins map, e.g.
             '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'
             pin:     1-based physical pin, placed by the footprint geometry

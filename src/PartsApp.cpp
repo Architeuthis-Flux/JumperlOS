@@ -40,10 +40,39 @@
 // The canonical part removal (bridges, net names, undo guard, refresh) -
 // commit's replace-on-identity reuses it. Lives in JumperlessMicroPythonAPI.
 extern "C" int jl_remove_part(const char* name);
+
+// Forward declarations for the identify surfaces: partsTestLauncher sits
+// ABOVE the scan machinery it borrows (cluster rails, the Tier-3 runner) -
+// definitions live with their siblings further down.
+struct ClusterPower {
+    int gndRow = -1;
+    int vddRow = -1;
+    int sig[6] = {0};
+    int nSig = 0;
+};
+struct ChipIdentify {
+    int nTried = 0;
+    int nPass = 0;
+    VectorIdentifyResult res[8];
+    char fp[MAX_PART_PINS + 1];
+};
+static bool partsFindClusterPower(const int* rows, int nRows,
+                                  ClusterPower* out);
+static int partsChipPinRow(int baseRow, int nPins, bool rotated, int pin);
+static void partsIdentifyChip(int baseRow, int width, int gndRow, int vddRow,
+                              ChipIdentify* out);
+static int partsConfirmOne(const char* verb, const char* what,
+                           const char* detail);
+static bool partsAutoAborted = false;   // the scan-flow abort latch
+                                        // (partsAutoAbortCheck sets it)
 // The canonical routable-GPIO setters (extern "C", same file): index 1-8,
 // dir 0 = output, 1 = input. The found-display wiring drives these.
 extern "C" void jl_gpio_set(int pin, int value);
 extern "C" void jl_gpio_set_dir(int pin, int direction);
+// The card paints the OLED outside the live-reading pipeline; this drops
+// that pipeline's dedupe key and reprint guards so the next reading draws
+// (Highlighting.cpp - the scroll-back-doesn't-update fix, 08:38).
+extern "C" void highlightingNoteExternalOledPaint(void);
 
 int partsProbeButton(void) {
     int bPress = probeButton.getButtonPress(true);
@@ -443,10 +472,11 @@ static int partsIdentifyAndOrder(const PartDbRecord& rec, const PartDbPinout& po
 
 // DB record + tapped rows -> a placed part in the live state.
 //
-// nRows == 1 is the DIP anchor flow: the tap means "pin 1 goes HERE" and the
-// anchor mapping absorbs the half the footprint can't anchor on (a DIP tapped
-// on the top half anchors one column lower; +30 = same column, bottom half -
-// States.h geometry: DIP baseRow must be 31-60).
+// nRows == 1 is the DIP anchor flow: the tap means "pin 1 goes HERE",
+// whichever half that is - a bottom-half anchor is the normal orientation,
+// a TOP-half anchor is the same chip rotated 180 degrees (pin 1 top-right;
+// States.h geometry, Kevin's ruling 2026-08-28). The two-tap flow validated
+// the orientation before this is called, so nothing here second-guesses it.
 //
 // nRows == numPins is the per-signal flow (Kevin's ruling: SIP modules and
 // passives have no standard header order, so the taps ARE the truth):
@@ -477,9 +507,10 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
     tmp.measuredOhms = measuredOhms;
 
     if (nRows == 1) {
-        int baseRow = rows[0];
-        if (po.footprint == PARTDB_FOOT_DIP && baseRow <= 30) baseRow += 30;
-        tmp.baseRow = (int16_t)baseRow;
+        // the tap IS pin 1's hole, either half: a top-half DIP anchor is
+        // the rotated-180 encoding. The old `+30` here ASSUMED dot-bottom-
+        // left and silently unrotated the chip.
+        tmp.baseRow = (int16_t)rows[0];
     } else if (po.footprint == PARTDB_FOOT_AXIAL2 && nRows == 2) {
         int top = (rows[0] <= 30) ? rows[0] : rows[1];
         int bottom = (rows[0] <= 30) ? rows[1] : rows[0];
@@ -737,45 +768,82 @@ static int partsBuildClassList(uint8_t cls) {
     return n;
 }
 
+// The ONE yes/no gesture set (Kevin, 2026-08-28): probe CONNECT or a short
+// encoder click = yes, probe REMOVE or a hold = no. Every confirm answers
+// to all four, so no prompt spends OLED lines on a button legend again -
+// the paradigm IS the prompt, and `text` is the whole screen (multiline
+// ok): the question plus whatever detail earns the lines the legend used
+// to burn. Serial twins: y/Y = yes, n/N = no, line endings ignored, ANY
+// other byte = -1 (the picker's exit convention - callers treat it as
+// "stop asking me things").
+int partsConfirmYesNo(const char* text) {
+    if (oled.oledConnected) {
+        oled.resetMultiLineSmallText();
+        oled.showMultiLineSmallText(text);
+    }
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    while (true) {
+        jOS.serviceInner();
+        rotaryEncoderButtonStuff();
+        int bp = partsProbeButton();   // once per pass (eaten-press rule)
+        if (bp == 1) return 1;
+        if (bp == 2) return 0;
+        if (encoderButtonState == HELD) {
+            // wait out the hold so the release can't echo into the caller
+            while (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+                   encoderButtonState == LONG_HELD) {
+                jOS.serviceInner();
+                rotaryEncoderButtonStuff();
+                delayMicroseconds(1000);
+            }
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            return 0;
+        }
+        if (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED) {
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            return 1;
+        }
+        if (Serial.available() > 0) {
+            char c = (char)Serial.read();
+            if (c == 'y' || c == 'Y') return 1;
+            if (c == 'n' || c == 'N') return 0;
+            if (c == '\r' || c == '\n') continue;   // stray line ending
+            return -1;
+        }
+        delayMicroseconds(1000);
+    }
+}
+
 // B-M4 slice: clear every part off the table (their bridges come down via
-// removePartPlacement - the invariant path), CONNECT-confirmed. Returns
+// removePartPlacement - the invariant path), yes/no-confirmed. Returns
 // true when parts were cleared.
 static bool partsClearAll(void) {
     JumperlessState& st = globalState;
     if (st.parts.numParts <= 0) return false;
 
-    if (oled.oledConnected) {
-        char text[96];
-        snprintf(text, sizeof(text), "Clear %d part%s?\nCONNECT = yes\nclick = no",
-                 st.parts.numParts, st.parts.numParts == 1 ? "" : "s");
-        oled.resetMultiLineSmallText();
-        oled.showMultiLineSmallText(text);
+    // the legend's old lines now say WHAT is about to go: the part names,
+    // as many as fit, "+N" for the rest
+    char text[112];
+    int len = snprintf(text, sizeof(text), "Clear %d part%s?\n",
+                       st.parts.numParts, st.parts.numParts == 1 ? "" : "s");
+    int listed = 0;
+    for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
+        const char* nm = st.parts.parts[i].name;
+        if (len + (int)strlen(nm) + 7 >= (int)sizeof(text)) break;   // keep room for " +N"
+        len += snprintf(text + len, sizeof(text) - len, "%s%s",
+                        listed ? " " : "", nm);
+        listed++;
     }
+    if (listed < st.parts.numParts)
+        snprintf(text + len, sizeof(text) - len, " +%d",
+                 st.parts.numParts - listed);
     Serial.print("\r\nPARTS clear confirm n=");
     Serial.println(st.parts.numParts);
     Serial.flush();
-    encoderButtonState = IDLE;
-    lastButtonEncoderState = IDLE;
-
-    while (true) {
-        jOS.serviceInner();
-        rotaryEncoderButtonStuff();
-        int bPress = partsProbeButton();
-        if (bPress == 1) break;        // CONNECT = yes
-        if (bPress == 2) return false; // REMOVE = no
-        if (encoderButtonState == HELD ||
-            (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
-            encoderButtonState = IDLE;
-            lastButtonEncoderState = IDLE;
-            return false;
-        }
-        if (Serial.available() > 0) {
-            char c = (char)Serial.read();
-            if (c != 'y' && c != 'Y') return false;
-            break;                     // serial twin: y = yes
-        }
-        delayMicroseconds(1000);
-    }
+    if (partsConfirmYesNo(text) != 1) return false;
 
     partsClearAllRecords();
     if (oled.oledConnected)
@@ -783,9 +851,10 @@ static bool partsClearAll(void) {
     return true;
 }
 
-// The bulk clear itself, no questions asked - shared by Parts > Clear
-// (above, after its confirm) and the `x` command (Kevin, 20:53: "x clear
-// all connections should remove all parts too"). Returns how many went.
+// The bulk clear itself, no questions asked - shared by Parts > Remove's
+// All stop (partsClearAll above, after its confirm) and the `x` command
+// (Kevin, 20:53: "x clear all connections should remove all parts too").
+// Returns how many went.
 int partsClearAllRecords(bool refresh) {
     JumperlessState& st = globalState;
     if (st.parts.numParts <= 0) return 0;
@@ -815,45 +884,116 @@ int partsClearAllRecords(bool refresh) {
     return n;
 }
 
-// Parts > Remove (Kevin's rulings, 2026-08-27): tap a leg of a placed part
-// to remove THAT LEG - its bridge, its net name, its record entry - and
-// removing the last leg removes the part itself ("if we remove every node
-// from a part... we should also remove the part"). A one-leg part goes in
-// one tap. Repeats until hold/click (done) or a serial byte (exit); a
-// typed row number + enter works without the probe (the placement
-// convention).
+// Parts > Remove (Kevin's rulings, 2026-08-27 + 09:12 today): TWO ways in,
+// split the way the control surfaces split. The probe does the precise
+// work: tap a leg of a placed part to remove THAT LEG - its bridge, its
+// net name, its record entry - and removing the last leg removes the part
+// itself ("if we remove every node from a part... we should also remove
+// the part"). The wheel does the coarse work: scroll through the placed
+// parts - each one highlighted on the board in its placement rainbow with
+// its card on the panel - and a click removes the WHOLE highlighted part.
+// The scroll's last stop is All, which clears every part through the same
+// CONNECT-confirmed flow Parts > Clear used to own. Exits: hold, probe
+// REMOVE, or a click with nothing selected (the tap-only habit); a serial
+// byte exits; a typed row number + enter removes that leg without the
+// probe (the placement convention). Returns true when All cleared the
+// board - the launcher exits the app, the board is ambient.
 int jl_remove_part(const char* name);   // JumperlessMicroPythonAPI.cpp
 extern "C" int jl_remove_part_pin(const char* name, const char* pinName,
                                   int rowHint);
-static void partsRemoveByTap(void) {
+static bool partsRemoveByTap(void) {
     JumperlessState& st = globalState;
     bool armed = false;
     bool liftHinted = false;
     unsigned long openMs = millis();
     unsigned long lastEmitMs = 0;
+    unsigned long lastShowRequest = 0;
     char digits[4] = "";
     int nDigits = 0;
-    auto prompt = [&](void) {
-        if (oled.oledConnected) {
-            char t[64];
-            snprintf(t, sizeof(t), "tap a part to remove\n%d placed  (hold = done)",
-                     (int)st.parts.numParts);
-            oled.resetMultiLineSmallText();
-            oled.showMultiLineSmallText(t);
+    // -1 = nothing selected (the tap prompt), 0..numParts-1 = that part,
+    // numParts = All. A removal can compact the table under the selection;
+    // the loop top clamps before every draw.
+    int sel = -1;
+    bool needsDraw = true;
+
+    auto paintSel = [&](void) {
+        b.clear();
+        if (sel >= 0 && sel < st.parts.numParts) {
+            const PartDefinition& p = st.parts.parts[sel];
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                if (node >= 1 && node <= 60)
+                    b.lightUpNode(node, partsTapHue(j, p.numPins, true));
+            }
+        } else if (sel >= st.parts.numParts) {
+            // All: every part in its own hue, so the sweep reads as "these
+            // are the parts", not one anonymous wash
+            for (int i = 0; i < st.parts.numParts && i < MAX_PARTS; i++) {
+                const PartDefinition& p = st.parts.parts[i];
+                if (!p.placed) continue;
+                for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                    int node = partPinNode(p, p.pins[j]);
+                    if (node >= 1 && node <= 60)
+                        b.lightUpNode(node, partsTapHue(i, st.parts.numParts, false));
+                }
+            }
         }
-        Serial.print("\r\nPARTS remove prompt n=");
-        Serial.println((int)st.parts.numParts);
-        Serial.flush();
+        requestLedShow(2);
+        lastShowRequest = millis();
     };
-    prompt();
+    auto drawSel = [&](void) {
+        if (sel < 0) {
+            if (oled.oledConnected) {
+                char t[64];
+                snprintf(t, sizeof(t), "tap a leg or scroll\n%d placed  (hold = done)",
+                         (int)st.parts.numParts);
+                oled.resetMultiLineSmallText();
+                oled.showMultiLineSmallText(t);
+            }
+            Serial.print("\r\nPARTS remove prompt n=");
+            Serial.println((int)st.parts.numParts);
+        } else if (sel < st.parts.numParts) {
+            partsShowPartCard(st.parts.parts[sel], -1);
+            Serial.print("\r\nPARTS remove sel=");
+            Serial.print(st.parts.parts[sel].name);
+            Serial.println(" (click = remove)");
+        } else {
+            if (oled.oledConnected) {
+                char t[64];
+                snprintf(t, sizeof(t), "All\nclick = clear %d part%s",
+                         (int)st.parts.numParts,
+                         st.parts.numParts == 1 ? "" : "s");
+                oled.resetMultiLineSmallText();
+                oled.showMultiLineSmallText(t);
+            }
+            Serial.print("\r\nPARTS remove sel=ALL n=");
+            Serial.println((int)st.parts.numParts);
+        }
+        Serial.flush();
+        paintSel();
+    };
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
+    encoderDirectionState = NONE;
 
     while (st.parts.numParts > 0) {
+        if (sel > st.parts.numParts) sel = st.parts.numParts;
+        if (needsDraw) {
+            drawSel();
+            needsDraw = false;
+        }
         jOS.serviceInner();
         rotaryEncoderButtonStuff();
-        if (encoderButtonState == HELD ||
-            (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED)) {
+
+        // Core 2's end-of-frame compare-and-swap can swallow a show request
+        // issued mid-frame (partsPicker's keepalive) - re-assert so the
+        // highlight can't silently go dark mid-scroll.
+        if (millis() - lastShowRequest >= 250) {
+            requestLedShow(2);
+            lastShowRequest = millis();
+        }
+
+        if (encoderButtonState == HELD) {
             while (encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
                    encoderButtonState == LONG_HELD) {
                 jOS.serviceInner();
@@ -862,7 +1002,72 @@ static void partsRemoveByTap(void) {
             }
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
-            return;
+            break;   // done - the common tail cleans up
+        }
+
+        bool clicked =
+            (encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED);
+        if (clicked) {
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+        }
+        int bPress = partsProbeButton();
+        if (bPress == 2) break;                       // probe REMOVE = done
+        if (bPress == 1 && sel >= 0) clicked = true;  // CONNECT = the click
+        if (clicked) {
+            if (sel < 0) break;   // nothing selected: the tap-only exit habit
+            if (sel >= st.parts.numParts) {
+                // All - partsClearAll owns the CONNECT confirm
+                if (partsClearAll()) return true;
+                needsDraw = true;   // declined: repaint the All stop
+                continue;
+            }
+            // remove the WHOLE highlighted part. Name copied first: the
+            // reference dies the moment the table compacts.
+            char name[16];
+            snprintf(name, sizeof(name), "%s", st.parts.parts[sel].name);
+            {
+                const PartDefinition& p = st.parts.parts[sel];
+                for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                    int node = partPinNode(p, p.pins[j]);
+                    if (node >= 1 && node <= 60)
+                        b.lightUpNode(node, PARTS_TAP_IGNORED_COLOR);
+                }
+            }
+            requestLedShow(2);
+            delay(180);   // the goodbye flash
+            if (jl_remove_part(name) == 0) {
+                partLabels.requestRun();
+                Serial.print("\r\nPARTDB remove ok=");
+                Serial.print(name);
+                Serial.println(" (part removed)");
+                Serial.flush();
+                if (oled.oledConnected) {
+                    char t[32];
+                    snprintf(t, sizeof(t), "removed\n%s", name);
+                    oled.clearPrintShow(t, 2, true, true, true);
+                    delay(600);
+                }
+            }
+            b.clear();
+            requestLedShow(-1);
+            // stay in the flow: the next part slides into this slot; past
+            // the end, settle on the (new) last real part, not All
+            if (sel >= st.parts.numParts) sel = st.parts.numParts - 1;
+            needsDraw = true;
+            continue;
+        }
+
+        if (encoderDirectionState == UP) {
+            encoderDirectionState = NONE;
+            int stops = st.parts.numParts + 1;   // the parts, then All
+            sel = (sel < 0) ? 0 : (sel + 1) % stops;
+            needsDraw = true;
+        } else if (encoderDirectionState == DOWN) {
+            encoderDirectionState = NONE;
+            int stops = st.parts.numParts + 1;
+            sel = (sel < 0) ? stops - 1 : (sel - 1 + stops) % stops;
+            needsDraw = true;
         }
 
         int row = -1;
@@ -880,7 +1085,11 @@ static void partsRemoveByTap(void) {
                     row = -1;
                 }
             } else if (c != '\r' && c != '\n') {
-                return;   // any other serial byte = exit (picker convention)
+                // any other serial byte = exit (picker convention). The
+                // highlight may be lit - take it down on the way out.
+                b.clear();
+                requestLedShow(-1);
+                return false;
             }
         }
 
@@ -931,6 +1140,12 @@ static void partsRemoveByTap(void) {
                                       // 8-byte copy truncated "EXTCOMIN"
                                       // and the remove then missed (audit)
         bool lastPin = (st.parts.parts[idx].numPins <= 1);
+        // Captured BEFORE the removal compacts the table: a tap that takes
+        // a whole part shrinks numParts, and a selection that was parked on
+        // a PART must settle back onto a real part afterwards - drifting
+        // onto the All stop would arm clear-all without the user ever
+        // scrolling there. A selection deliberately ON All stays All.
+        bool selWasAll = (sel >= 0 && sel >= st.parts.numParts);
         snprintf(name, sizeof(name), "%s", st.parts.parts[idx].name);
         snprintf(pinName, sizeof(pinName), "%s",
                  st.parts.parts[idx].pins[pinIdx].name);
@@ -982,12 +1197,41 @@ static void partsRemoveByTap(void) {
         }
         b.clear();
         requestLedShow(-1);
-        prompt();
+        needsDraw = true;   // the loop top clamps sel and repaints
     }
+    b.clear();
+    requestLedShow(-1);
     if (oled.oledConnected)
         oled.clearPrintShow(st.parts.numParts > 0 ? "done" : "no parts\nplaced",
                             2, true, true, true);
     delay(600);
+    return false;
+}
+
+// The "Remove Parts" apps[] row (menu Parts > Remove Parts) lands HERE, not
+// in partsAppLauncher - the submenu row used to share the picker launcher
+// with "Place Part", so selecting Remove opened the class picker instead of
+// the remove flow. Same shape as partsTestLauncher: guard, own the render
+// mode, run the flow, common tail.
+void partsRemoveLauncher(void) {
+    if (globalState.parts.numParts <= 0) {
+        Serial.println("\r\nPARTS remove: no parts placed");
+        if (oled.oledConnected)
+            oled.clearPrintShow("no parts\nplaced", 2, true, true, true);
+        delay(600);
+        return;
+    }
+    inClickMenu = 1;
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 8;
+    partsRemoveByTap();
+    inClickMenu = 0;
+    rotaryDivider = lastDivider;
+    b.clear();
+    partLabels.clearTransients();   // standing overlays retire on app exit
+    requestLedShow(-1);
+    Serial.println();
+    oled.showJogo32h();
 }
 
 void partsAppLauncher(void) {
@@ -1012,20 +1256,16 @@ void partsAppLauncher(void) {
             classOf[nClasses] = kPartClasses[i].cls;
             nClasses++;
         }
-        // Remove and Clear are ALWAYS in the menu (Kevin, 20:53: a menu
-        // whose rows come and go is a menu you can't learn) - with no
-        // parts placed they say so and bounce back instead of hiding.
+        // Remove is ALWAYS in the menu (Kevin, 20:53: a menu whose rows
+        // come and go is a menu you can't learn) - with no parts placed it
+        // says so and bounces back instead of hiding. Clearing everything
+        // lives INSIDE Remove now, as the scroll's trailing All stop
+        // (Kevin, 09:12) - the separate Clear row said the same thing twice.
         int removeIdx = nClasses;
         s_led[nClasses] = "Rmv";
         s_title[nClasses] = "Remove parts";
-        s_desc[nClasses] = "tap a leg to remove it";
+        s_desc[nClasses] = "scroll or tap; All clears";
         classOf[nClasses] = 0xFE;
-        nClasses++;
-        int clearIdx = nClasses;
-        s_led[nClasses] = "Clear";
-        s_title[nClasses] = "Clear parts";
-        s_desc[nClasses] = "remove every part";
-        classOf[nClasses] = 0xFF;
         nClasses++;
         int pick = partsPicker("class", "Parts", nClasses, classIdx);
         if (pick < 0) break;   // hold or serial byte at the top level = exit
@@ -1038,20 +1278,9 @@ void partsAppLauncher(void) {
                 delay(600);
                 continue;
             }
-            partsRemoveByTap();
+            if (partsRemoveByTap()) break;   // All cleared: exit, board is ambient
             if (globalState.parts.numParts <= 0) classIdx = 0;
             continue;                     // back to the class list
-        }
-        if (pick == clearIdx) {
-            if (globalState.parts.numParts <= 0) {
-                if (oled.oledConnected)
-                    oled.clearPrintShow("no parts\nplaced", 2, true, true, true);
-                Serial.println("\r\nPARTS clear: no parts placed");
-                delay(600);
-                continue;
-            }
-            if (partsClearAll()) break;   // cleared: exit, board is ambient
-            continue;                     // declined: back to the class list
         }
         uint8_t cls = classOf[pick];
         const char* clsTitle = s_title[pick];
@@ -1066,12 +1295,14 @@ void partsAppLauncher(void) {
             partIdx = p;
             const PartDbRecord& rec = partdb_records[s_rec[p]];
 
-            // DIP crosses the center line - one orientation, one anchor tap.
-            // Transistors and 2-lead discretes take ANY-ORDER taps and the
-            // electrical identification sorts out which leg is which
-            // (Kevin's ask, 2026-08-26). Everything else (SIP modules, pots)
-            // taps every signal by name and the taps are the geometry
-            // (Kevin's ruling, 2026-08-25).
+            // DIP crosses the center line - TWO taps, pin 1 then the
+            // opposite corner, because orientation is never assumed
+            // (Kevin's ruling, 2026-08-28: pin 1 can sit bottom-left OR
+            // top-right). Transistors and 2-lead discretes take ANY-ORDER
+            // taps and the electrical identification sorts out which leg is
+            // which (Kevin's ask, 2026-08-26). Everything else (SIP
+            // modules, pots) taps every signal by name and the taps are the
+            // geometry (Kevin's ruling, 2026-08-25).
             const PartDbPinout& po = *partdbPinoutOf(rec);
             int rows[MAX_PART_PINS];
             int nRows = 0;
@@ -1088,10 +1319,65 @@ void partsAppLauncher(void) {
                 (rec.partClass == PARTDB_CLASS_DISCRETE && nSignals == 3 &&
                  rec.subClass == PARTDB_SUB_DISCRETE_POT);
             if (po.footprint == PARTDB_FOOT_DIP) {
-                int row = partsTapForRow(rec);
-                if (row == -2) goto done;
-                if (row == -1) continue;   // back to the part list
-                rows[nRows++] = row;
+                // Tap pin 1's REAL hole (either half), then the opposite
+                // corner (pin W+1, the diagonal). The pair fixes the
+                // orientation - bottom-left pin 1 = normal, top-right =
+                // rotated 180 - and catches a wrong-footprint tap before
+                // any record exists. The corner's row is fully determined
+                // by pin 1's row and the width, so a mismatch re-prompts
+                // from pin 1 with the expected row named.
+                int W = (int)po.pinCount / 2;
+                int anchor = -1;
+                while (true) {
+                    int row = partsTapForRow(rec);
+                    if (row == -2) goto done;
+                    if (row == -1) break;   // back to the part list
+                    bool fits = (row > 30) ? ((row - 30) + (W - 1) <= 30)
+                                           : (row - (W - 1) >= 1);
+                    if (!fits) {
+                        Serial.print("\r\nPARTDB place refused reason=\"dip");
+                        Serial.print((int)po.pinCount);
+                        Serial.print(" doesn't fit with pin 1 at row ");
+                        Serial.print(row);
+                        Serial.println("\"");
+                        if (oled.oledConnected)
+                            oled.clearPrintShow("doesn't fit\nthere", 2,
+                                                true, true, true);
+                        delay(700);
+                        continue;   // re-tap pin 1
+                    }
+                    int expect = (row > 30) ? (row - 30) + (W - 1)
+                                            : (row + 30) - (W - 1);
+                    char sig[12];
+                    snprintf(sig, sizeof(sig), "pin %d", W + 1);
+                    int corner = partsTapForRow(rec, sig, 2, 2, &row, 1);
+                    if (corner == -2) goto done;
+                    if (corner == -1) continue;   // re-tap pin 1
+                    if (corner != expect) {
+                        Serial.print("\r\nPARTPICK corner mismatch: pin ");
+                        Serial.print(W + 1);
+                        Serial.print(" of a dip");
+                        Serial.print((int)po.pinCount);
+                        Serial.print(" with pin 1 at ");
+                        Serial.print(row);
+                        Serial.print(" sits at row ");
+                        Serial.print(expect);
+                        Serial.println(" - re-tap pin 1");
+                        if (oled.oledConnected) {
+                            char t[64];
+                            snprintf(t, sizeof(t),
+                                     "pin %d should be\nrow %d - retry",
+                                     W + 1, expect);
+                            oled.clearPrintShow(t, 2, true, true, true);
+                        }
+                        delay(900);
+                        continue;   // re-tap pin 1
+                    }
+                    anchor = row;
+                    break;
+                }
+                if (anchor < 0) continue;   // backed out to the part list
+                rows[nRows++] = anchor;
             } else if (canIdentify) {
                 int got = partsTapAnyRows(rec, rows, nSignals);
                 if (got == -2) goto done;
@@ -1383,8 +1669,24 @@ static void partsCardPinLabel(const PartDefinition& p, const PartPin& pin,
 //   PNP
 //   hFE 457  0.60V          (cached test data, when there is any)
 //   E - 17  B - 18  C - 19  ([brackets] mark a focused pin)
+void partsAppendPinLabel(int node, char* buf, size_t cap) {
+    if (node < 1 || node > 60 || buf == nullptr || cap == 0) return;
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            if (partPinNode(p, p.pins[j]) != node) continue;
+            size_t len = strlen(buf);
+            if (len >= cap) return;
+            snprintf(buf + len, cap - len, " %s %s", p.name, p.pins[j].name);
+            return;
+        }
+    }
+}
+
 void partsShowPartCard(const PartDefinition& p, int focusPin) {
     if (!oled.oledConnected) return;
+    highlightingNoteExternalOledPaint();
 
     // type line: the tested identity first, the authored type as fallback,
     // the authored value riding along when it fits ("LED red")
@@ -1630,6 +1932,106 @@ void partsTestLauncher(void) {
                 if (partsWaitForPress() == -2) break;
                 continue;
             }
+            // A generic IC* record: the re-assignment home (5.2 surface b,
+            // "this is actually a ___"). The record knows nothing, so ask
+            // the chip: rails from the clamp map, Tier-1 fingerprint,
+            // Tier-3 vectors, then the same commit path a scan-time pick
+            // takes. The generic record is REMOVED on assignment -
+            // replace-on-identity keys on partId and can't see it.
+            if (p.footprint == 1 && p.partId[0] == '\0' && p.baseRow >= 31 &&
+                p.pinCount >= 4 && (p.pinCount % 2) == 0 &&
+                p.baseRow + p.pinCount / 2 - 1 <= 60) {
+                int w = p.pinCount / 2;
+                int base = p.baseRow;
+                int ans = partsConfirmOne("identify", p.name,
+                                          "powers it briefly");
+                if (ans == -1) break;
+                if (ans != 1) continue;
+                if (oled.oledConnected)
+                    oled.clearPrintShow("reading\nrails...", 2, true, true,
+                                        true);
+                // rails from the corners (+ two mid rows for junction
+                // stats) - corner power is the overwhelmingly common DIP
+                // layout, and partsFindClusterPower votes, not assumes
+                int conf[6] = {base, base + w - 1, base - 30,
+                               base - 30 + w - 1, base + 1, base - 29};
+                ClusterPower cp;
+                bool cpOk = partsFindClusterPower(conf, (w >= 3) ? 6 : 4, &cp);
+                partsAutoAborted = false;   // scan-flow flag, not Test's
+                if (!cpOk) {
+                    Serial.println("\r\nPARTID identify rails unclear - "
+                                   "can't name the supply pins");
+                    ReadingDisplay::show(p.name, p.baseRow, "rails unclear",
+                                         "can't identify");
+                    if (partsWaitForPress() == -2) break;
+                    continue;
+                }
+                if (oled.oledConnected)
+                    oled.clearPrintShow("identifying...", 2, true, true,
+                                        true);
+                ChipIdentify ident;
+                partsIdentifyChip(base, w, cp.gndRow, cp.vddRow, &ident);
+                partsAutoAborted = false;
+                if (ident.nPass == 0) {
+                    Serial.println("  no candidate's vectors match - it "
+                                   "stays generic");
+                    ReadingDisplay::show(p.name, p.baseRow, "no match",
+                                         "stays generic");
+                    if (partsWaitForPress() == -2) break;
+                    continue;
+                }
+                // survivors: exactly one = offer it by name; several = the
+                // picker filtered to them (ties stay ties)
+                int chosen = -1;
+                if (ident.nPass == 1) {
+                    for (int i = 0; i < ident.nTried; i++)
+                        if (ident.res[i].verdict == 1) chosen = i;
+                    const PartDbRecord& rec =
+                        partdb_records[ident.res[chosen].recIdx];
+                    int a2 = partsConfirmOne("assign", rec.displayName,
+                                             "vectors match");
+                    if (a2 == -1) break;
+                    if (a2 != 1) continue;
+                } else {
+                    int nOpt = 0;
+                    int survivorAt[8];
+                    for (int i = 0; i < ident.nTried &&
+                                    nOpt < PARTS_LIST_MAX; i++) {
+                        if (ident.res[i].verdict != 1) continue;
+                        const PartDbRecord& r =
+                            partdb_records[ident.res[i].recIdx];
+                        s_led[nOpt] = r.ledName;
+                        s_title[nOpt] = r.displayName;
+                        s_desc[nOpt] = "vectors match";
+                        s_rec[nOpt] = ident.res[i].recIdx;
+                        survivorAt[nOpt] = i;
+                        nOpt++;
+                    }
+                    int sel2 = partsPicker("chip", "Which?", nOpt, 0);
+                    if (sel2 == -2) break;
+                    if (sel2 < 0) continue;
+                    chosen = survivorAt[sel2];
+                }
+                const PartDbRecord& rec =
+                    partdb_records[ident.res[chosen].recIdx];
+                int p1 = partsChipPinRow(base, 2 * w,
+                                         ident.res[chosen].rotated != 0, 1);
+                char oldName[16];
+                strncpy(oldName, p.name, sizeof(oldName) - 1);
+                oldName[sizeof(oldName) - 1] = '\0';
+                jl_remove_part(oldName);   // p is dead past this line
+                if (partsCommitPlacement(rec, &p1, 1)) {
+                    Serial.print("\r\nPARTID reassigned ");
+                    Serial.print(oldName);
+                    Serial.print(" -> ");
+                    Serial.println(rec.id);
+                } else {
+                    Serial.println("\r\nPARTID reassign commit refused - "
+                                   "the generic record was removed");
+                }
+                pick = 0;   // the list just changed under the picker
+                continue;
+            }
             Serial.println("\r\nPARTID test unsupported for this part yet");
             if (oled.oledConnected)
                 oled.clearPrintShow("can't test\nthis one yet", 2, true, true, true);
@@ -1794,7 +2196,8 @@ void partsTestLauncher(void) {
 // (the phase-2 vector runner will name chips). Abortable at every step -
 // probe button, encoder, or any serial byte.
 
-static bool partsAutoAborted = false;
+// (partsAutoAborted itself is defined with the forward declarations up
+// top - partsTestLauncher resets it after borrowing scan machinery.)
 // WHY it stopped rides along: a stray keystroke into the terminal reads
 // as an abort (any serial byte = stop), and without the cause a scan that
 // quit mid-board looks like a crash (bench, 14:31: a lone 's' ended the
@@ -2111,12 +2514,8 @@ static bool partsBjtVbePlausible(const PartResult& r) {
 // six of them were most of the "insane long time" on Kevin's 170s scan).
 // In the map, v[i][j] = volts at row i (pulled up) with row j grounded:
 // a forward junction i->j clamps it LOW, blocked reads the ~3.2V pull-up.
-struct ClusterPower {
-    int gndRow = -1;
-    int vddRow = -1;
-    int sig[6] = {0};
-    int nSig = 0;
-};
+// (ClusterPower's definition rides with the forward declarations up top -
+// partsTestLauncher borrows it for the re-assign flow.)
 static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out) {
     if (nRows < 3 || nRows > 6) return false;
     Serial.println("  reading the cluster's clamps...");
@@ -2215,16 +2614,38 @@ static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out)
     return true;
 }
 
-// The few addresses worth naming (DESIGN_PART_ID_FOLLOWUP.md 9 wants a
-// /partdb/i2c_addr.txt; this is that table's first page, in rodata).
+// The addresses worth naming (DESIGN_PART_ID_FOLLOWUP.md 9 wants a
+// /partdb/i2c_addr.txt; this is that table's first pages, in rodata -
+// widened from REF_COMPONENT_TESTER_RESEARCH.md 6.3's survey).
 static const char* partsI2CAddressName(uint8_t addr) {
     switch (addr) {
+        case 0x0D: return "QMC5883L compass";
+        case 0x18: case 0x19: return "LIS3DH / MCP9808";
+        case 0x1D: return "ADXL345";
+        case 0x1E: return "HMC5883L / LIS3MDL";
+        case 0x23: return "BH1750 light";
+        case 0x28: case 0x29: return "VL53L0X / BNO055";
+        case 0x38: return "AHT10/20 / FT6206";
+        case 0x39: return "APDS-9960 / AS7341";
         case 0x3C: case 0x3D: return "SSD1306/SH1106 display";
         case 0x40: case 0x41: return "INA219 / PCA9685";
-        case 0x48: return "ADS1115 / LM75";
-        case 0x50: case 0x57: return "24Cxx EEPROM";
+        case 0x44: case 0x45: return "SHT3x/SHT4x";
+        case 0x48: case 0x49: case 0x4A: case 0x4B:
+            return "ADS1115 / LM75 / TMP102";
+        case 0x50: case 0x51: case 0x52: case 0x54:
+        case 0x55: case 0x56: return "24Cxx EEPROM";
+        case 0x53: return "ADXL345 / 24Cxx";
+        case 0x57: return "24Cxx / MAX3010x";
+        case 0x5A: case 0x5B: return "CCS811 / MLX90614";
+        case 0x5C: return "LPS2x / AM2320 / BH1750";
+        case 0x5D: return "GT911 touch / MPR121";
+        case 0x60: return "MCP4725 / Si5351";
+        case 0x61: return "SCD30 / Si5351";
         case 0x68: return "MPU6050 / DS3231";
-        case 0x76: case 0x77: return "BMP/BME280";
+        case 0x69: return "MPU (AD0 high) / ICM20948";
+        case 0x6A: case 0x6B: return "LSM6DSx IMU";
+        case 0x70: return "TCA9548A mux / HT16K33 / SHTC3";
+        case 0x76: case 0x77: return "BMP/BME280 / BMP3xx";
         default: return nullptr;
     }
 }
@@ -2442,6 +2863,561 @@ static bool partsPlaceI2cModule(const I2cModuleFinding& f) {
     return true;
 }
 
+// Chip membership, asked of the chip itself (Kevin, 2026-08-28: "do more
+// passes in different configurations to get more data before identification"
+// - the census poke reads TTL inputs and open-collector outputs as EMPTY,
+// so his 7447's bottom side censused 4 of 8 pins). An unpowered chip's ESD
+// network conducts supply-pin <-> any real pin: drive the GND row above the
+// candidate (substrate diode forward) or the candidate above the VDD row
+// (high-side clamp forward). partScanServo's reached-0.5mA IS the verdict -
+// no new fixture, and signal<->signal pairs (which read EMPTY and prove
+// nothing) are never asked.
+static bool partsChipMemberProbe(int candRow, int gndRow, int vddRow) {
+    for (int pass = 0; pass < 2; pass++) {
+        int drv = (pass == 0) ? gndRow : candRow;
+        int shn = (pass == 0) ? candRow : vddRow;
+        if (drv < 1 || shn < 1 || drv == shn) continue;
+        int rows2[2] = {drv, shn};
+        ScanSession s;
+        if (partScanBegin(s, rows2, 2) != 0) continue;
+        bool reached = partScanServo(s, 0, 1, 0.5f, 3.3f, nullptr, nullptr);
+        partScanEnd(s);
+        if (reached) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Tier-3 vector runner (DESIGN_IC_IDENTIFICATION.md 5.2, bench-decided
+// 2026-08-28). Drives a candidate record's truth-table vectors into a found
+// chip and reads the answers: inputs on routable GPIOs (3.3V - TTL Vih is
+// 2.0V, 74HC@3V3 is native), outputs one at a time through a scan-ADC leg
+// with a GPIO pull-up attached (an open-collector "off" reads H, exactly
+// what the datasheet truth tables mean). Power discipline is
+// partsProbeClusterI2C's - GND first, current-limited first touch, shunt in
+// the feed, teardown on every exit - plus the copper lesson: physically
+// wired boards power the chip AROUND anything we build (the bench 7447 ran
+// off jumper wires while INA0 read zero), so the VCC pin is read FIRST and
+// "already high" means board-powered mode: drive and read against the
+// user's own supply, never fight it.
+// ---------------------------------------------------------------------------
+
+static bool partsNodeWired(int node) {
+    for (int i = 0; i < globalState.connections.numBridges; i++)
+        if (globalState.connections.bridges[i][0] == node ||
+            globalState.connections.bridges[i][1] == node)
+            return true;
+    return false;
+}
+
+static bool partsBridgeExists(int a, int b) {
+    for (int i = 0; i < globalState.connections.numBridges; i++) {
+        int n1 = globalState.connections.bridges[i][0];
+        int n2 = globalState.connections.bridges[i][1];
+        if ((n1 == a && n2 == b) || (n1 == b && n2 == a)) return true;
+    }
+    return false;
+}
+
+// Physical pin -> breadboard row for a bottom-anchored dipN. rotated =
+// pin 1 top-right: the U-ordering shifted by HALF the pin count (a cyclic
+// shift, not a reversal - bench-verified on the pin-1-on-row-10 7447).
+static int partsChipPinRow(int baseRow, int nPins, bool rotated, int pin) {
+    int pos = rotated ? ((pin - 1 + nPins / 2) % nPins) + 1 : pin;
+    int half = nPins / 2;
+    if (pos <= half) return baseRow + (pos - 1);
+    return (baseRow - 30) + (nPins - pos);
+}
+
+// Which way does this record sit in these rows? The measured rails are the
+// truth: the record's GND/VCC pins must land exactly on them, and one of
+// the two DIP orientations does - or the candidate is impossible here.
+static bool partsChipOrientFromRails(const PartDbRecord& rec, int baseRow,
+                                     int nPins, int gndRow, int vddRow,
+                                     bool* rotatedOut) {
+    const PartDbPinout& po = partdb_pinouts[rec.pinoutIdx];
+    if ((int)po.pinCount != nPins) return false;
+    int gndPin = -1, vccPin = -1;
+    for (int i = 0; i < po.numPins; i++) {
+        if (po.pins[i].role == PARTDB_ROLE_GND && gndPin < 0)
+            gndPin = po.pins[i].pinNumber;
+        if (po.pins[i].role == PARTDB_ROLE_VCC && vccPin < 0)
+            vccPin = po.pins[i].pinNumber;
+    }
+    if (gndPin < 0 || vccPin < 0) return false;
+    for (int rot = 0; rot < 2; rot++) {
+        if (partsChipPinRow(baseRow, nPins, rot != 0, gndPin) == gndRow &&
+            partsChipPinRow(baseRow, nPins, rot != 0, vccPin) == vddRow) {
+            *rotatedOut = (rot != 0);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Free routable GPIOs, claimRovingGpio's filter (PartMeasure.cpp) - except
+// the panel pins are only off-limits when the panel actually rides them:
+// connection type 2 puts the OLED on I2C0, so its configured gpio_sda/scl
+// are stale numbers, not live wires (the exact gate partsProbeClusterI2C
+// runs on; a blanket exclusion cost the 7-input 7447 set its 7th GPIO on
+// the bench).
+static int partsFreeGpios(int* out, int maxOut) {
+    int n = 0;
+    for (int gi = 0; gi < 8 && n < maxOut; gi++) {
+        int node = gpioDef[gi][1];
+        if (globalState.config.gpioPythonOwned[gi]) continue;
+        if (globalState.config.gpioPwmEnabled[gi]) continue;
+        if (jumperlessConfig.top_oled.enabled &&
+            jumperlessConfig.top_oled.connection_type != 2 &&
+            (node == jumperlessConfig.top_oled.gpio_sda ||
+             node == jumperlessConfig.top_oled.gpio_scl)) continue;
+        if (infraOwnsNode(node)) continue;
+        if (partsNodeWired(node)) continue;
+        out[n++] = gi;
+    }
+    return n;
+}
+
+// Run ONE candidate's vector set at ONE supply choice.
+// Returns 1 = every checked step agreed, 0 = a step disagreed (failStepOut
+// says which), -1 = refused (resources / wiring / overcurrent) - a refusal
+// says nothing about the part.
+static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
+                             int nPins, bool rotated, int gndRow, int vddRow,
+                             bool use5V, int* failStepOut) {
+    if (failStepOut) *failStepOut = -1;
+    if (vs.numIn > 9 || vs.numOut > 16) return -1;
+
+    // Resources first - refuse before touching the board. numIn drivers
+    // plus one pull-up reader.
+    int gpios[10];
+    int nFree = partsFreeGpios(gpios, 10);
+    if (nFree < vs.numIn + 1) {
+        Serial.println("  vectors: not enough free GPIOs");
+        return -1;
+    }
+    for (int i = 0; i < vs.numIn; i++) {
+        int row = partsChipPinRow(baseRow, nPins, rotated, vs.inPins[i]);
+        if (row < 1 || row > 60 || partsNodeWired(row)) {
+            Serial.print("  vectors: input row ");
+            Serial.print(row);
+            Serial.println(" is wired - not driving into it");
+            return -1;
+        }
+    }
+    uint8_t adcMask = 0x0F;
+    for (int c = 0; c < 4; c++)
+        if (partsNodeWired(ADC0 + c)) adcMask &= (uint8_t)~(1u << c);
+    int adcCh = infraAcquireAdc(INFRA_ADC_SCAN, adcMask, false);
+    if (adcCh < 0) {
+        Serial.println("  vectors: no free measurement lane");
+        return -1;
+    }
+
+    bool ppRestore = infraProbePowerWanted();
+    infraSetProbePowerEnabled(false);
+    float dac0Restore = globalState.power.dac0;
+    float railRestore = getDacHardwareVoltage(2);
+    bool railTouched = false;
+
+    // The copper lesson, BOTH directions: read both rails before touching
+    // anything. A hot "GND" row means the hypothesis is wrong (rails
+    // swapped is geometrically identical to the flipped orientation, and
+    // the bench proved a wrong guess grounds a live copper-fed node) -
+    // refuse, never bridge. A hot VDD row means the board already powers
+    // the chip: use that supply, don't fight it.
+    bool boardPowered = false;
+    {
+        bool bG = addBridgeToState(ADC0 + adcCh, gndRow);
+        refreshConnections(-1, 0, 0);
+        delay(3);
+        float vg = readAdcVoltage(adcCh, 8);
+        if (bG) removeBridgeFromState(ADC0 + adcCh, gndRow, false);
+        if (vg > 2.5f) {
+            Serial.print("  vectors: the GND row reads ");
+            Serial.print(vg, 2);
+            Serial.println("V live - wrong rails, not grounding that");
+            infraSetProbePowerEnabled(ppRestore);
+            refreshConnections(-1, 0, 0);
+            infraReleaseAdc(INFRA_ADC_SCAN);
+            return -1;
+        }
+        bool bV = addBridgeToState(ADC0 + adcCh, vddRow);
+        refreshConnections(-1, 0, 0);
+        delay(3);
+        float v = readAdcVoltage(adcCh, 8);
+        if (bV) removeBridgeFromState(ADC0 + adcCh, vddRow, false);
+        boardPowered = (v > 2.5f);
+        if (boardPowered) {
+            Serial.print("  vectors: the board already powers it (");
+            Serial.print(v, 2);
+            Serial.println("V) - using that supply");
+        }
+    }
+
+    // GND first (doc 9 discipline) - but only if the board doesn't already
+    // provide it: a blind add-then-remove STOLE the placed record's own
+    // GND bridge on the bench (the 595's teardown unfloated the 7447's
+    // ground mid-pass). Only remove what this run created.
+    bool bGnd = false;
+    if (!partsBridgeExists(GND, gndRow)) {
+        bGnd = addBridgeToState(GND, gndRow);
+        refreshConnections(-1, 0, 0);
+    }
+
+    int verdict = 1;
+    bool bFeedP = false, bFeedM = false;
+    if (!boardPowered) {
+        if (use5V) {
+            // TOP_RAIL -> shunt -> VCC pin: the only source stiff enough
+            // for bipolar TTL (bench: a 7447 held 4.0-4.4V at the pin).
+            bFeedP = addBridgeToState(TOP_RAIL, ISENSE_PLUS);
+            bFeedM = addBridgeToState(ISENSE_MINUS, vddRow);
+            refreshConnections(-1, 0, 0);
+            if (railRestore < 4.4f) {
+                setDacByNumber(2, 5.0f, 0, 0, true);
+                railTouched = true;
+            }
+        } else {
+            setDac0voltage(0.0f, 0, 0, false);
+            bFeedP = addBridgeToState(DAC0, ISENSE_PLUS);
+            bFeedM = addBridgeToState(ISENSE_MINUS, vddRow);
+            refreshConnections(-1, 0, 0);
+            setDac0voltage(3.3f, 0, 0, false);
+        }
+        delay(25);
+        float icc = INA0.getCurrent_mA();
+        if (icc > 150.0f) {
+            Serial.print("  vectors: it draws ");
+            Serial.print(icc, 0);
+            Serial.println(" mA - backing off");
+            verdict = -1;
+        } else {
+            Serial.print("  vectors: powered at ");
+            Serial.print(use5V ? "5V (rail)" : "3.3V");
+            Serial.print(", icc ");
+            Serial.print(icc, 1);
+            Serial.println(" mA");
+        }
+    }
+
+    // Input drivers + the pull-up reader. The pins are CLAIMED the way the
+    // MicroPython wrappers claim them (owned flag + GPIO_FUNC_SIO + memory
+    // barrier) - core 2's readGPIO() twiddles unowned pads' pulls and
+    // input buffers between scans, and on the bench that unmade every
+    // driven level mid-vector (the chip read floating inputs = 1111 =
+    // blank). Configs saved for the restoreRovingGpio-idiom teardown;
+    // input buffers OFF - the E9 rule.
+    int savedDir[10], savedPull[10];
+    uint8_t savedFloat[10], savedState[10], savedOwned[10];
+    gpio_function_t savedFunc[10];
+    int nCfg = 0;
+    int pullGi = gpios[vs.numIn];
+    int pullNode = gpioDef[pullGi][1];
+    if (verdict == 1) {
+        for (int i = 0; i <= vs.numIn; i++) {
+            int gi = gpios[i];
+            savedDir[nCfg] = globalState.config.gpioDirection[gi];
+            savedPull[nCfg] = globalState.config.gpioPulls[gi];
+            savedFloat[nCfg] = globalState.config.gpioReadFloating[gi];
+            savedState[nCfg] = gpioState[gi];
+            savedOwned[nCfg] = globalState.config.gpioPythonOwned[gi] ? 1 : 0;
+            savedFunc[nCfg] = gpio_function_map[gi];
+            nCfg++;
+            int pin = gpioDef[gi][0];
+            globalState.config.gpioPythonOwned[gi] = true;
+            gpio_function_map[gi] = GPIO_FUNC_SIO;
+            __dmb();
+            globalState.config.gpioReadFloating[gi] = 0;
+            gpioReadFloating[gi] = 0;
+            if (i < vs.numIn) {
+                globalState.config.gpioDirection[gi] = 0;
+                gpioState[gi] = 0;
+                pinMode(pin, OUTPUT);
+                digitalWrite(pin, LOW);
+            } else {
+                globalState.config.gpioDirection[gi] = 1;
+                globalState.config.gpioPulls[gi] = 1;
+                gpioState[gi] = 3;
+                pinMode(pin, INPUT_PULLUP);
+            }
+            gpio_set_input_enabled(pin, false);
+        }
+        bool inputsOk = true;
+        for (int i = 0; i < vs.numIn; i++) {
+            int row = partsChipPinRow(baseRow, nPins, rotated, vs.inPins[i]);
+            if (!addBridgeToState(gpioDef[gpios[i]][1], row)) inputsOk = false;
+        }
+        refreshConnections(-1, 0, 0);
+        if (!inputsOk) {
+            Serial.println("  vectors: an input leg was refused");
+            verdict = -1;
+        }
+    }
+
+    // The steps. One moving read fixture: ADC leg + pull-up leg follow the
+    // output being read (one refresh per move, not two per read).
+    int readRow = -1;
+    auto moveRead = [&](int row) {
+        if (row == readRow) return;
+        if (readRow > 0) {
+            removeBridgeFromState(ADC0 + adcCh, readRow, false);
+            removeBridgeFromState(pullNode, readRow, false);
+        }
+        if (row > 0) {
+            addBridgeToState(ADC0 + adcCh, row);
+            addBridgeToState(pullNode, row);
+        }
+        refreshConnections(-1, 0, 0);
+        readRow = row;
+    };
+    for (int s = 0; s < vs.numSteps && verdict == 1; s++) {
+        if (partsAutoAbortCheck()) { verdict = -1; break; }
+        for (int i = 0; i < vs.numIn; i++) {
+            int gi = gpios[i];
+            int lvl = (vs.inBits[s] >> i) & 1;
+            gpioState[gi] = (uint8_t)lvl;   // keep the service's book true
+            digitalWrite(gpioDef[gi][0], lvl);
+        }
+        delay(3);
+        if (!boardPowered && INA0.getCurrent_mA() > 150.0f) {
+            Serial.println("  vectors: overcurrent mid-step - backing off");
+            verdict = -1;
+            break;
+        }
+        for (int o = 0; o < vs.numOut && verdict == 1; o++) {
+            if (!((vs.outCare[s] >> o) & 1)) continue;
+            int row = partsChipPinRow(baseRow, nPins, rotated, vs.outPins[o]);
+            moveRead(row);
+            delay(2);
+            float v = readAdcVoltage(adcCh, 8);
+            int want = (vs.outBits[s] >> o) & 1;
+            // L up to 1.4V: an output sinking a physically-wired LED sat
+            // at ~1.0V on the bench; the 1.4-2.2 gap still refuses garbage
+            int got = (v > 2.2f) ? 1 : (v < 1.4f) ? 0 : -1;
+            if (got != want) {
+                verdict = 0;
+                if (failStepOut) *failStepOut = s;
+                Serial.print("  vectors: step ");
+                Serial.print(s);
+                Serial.print(" pin ");
+                Serial.print(vs.outPins[o]);
+                Serial.print(" read ");
+                Serial.print(v, 2);
+                Serial.print("V, expected ");
+                Serial.println(want ? "H" : "L");
+            }
+        }
+    }
+    moveRead(-1);
+
+    // Teardown, every exit funnels through here.
+    for (int i = 0; i < nCfg; i++) {
+        int gi = gpios[i];
+        int pin = gpioDef[gi][0];
+        if (i < vs.numIn) digitalWrite(pin, LOW);
+        pinMode(pin, INPUT);
+        gpio_set_input_enabled(pin, true);
+        globalState.config.gpioDirection[gi] = savedDir[i];
+        globalState.config.gpioPulls[gi] = savedPull[i];
+        globalState.config.gpioReadFloating[gi] = savedFloat[i];
+        gpioReadFloating[gi] = savedFloat[i];
+        gpioState[gi] = savedState[i];
+        gpio_function_map[gi] = savedFunc[i];
+        globalState.config.gpioPythonOwned[gi] = (savedOwned[i] != 0);
+        __dmb();
+    }
+    for (int i = 0; i < vs.numIn && nCfg > 0; i++) {
+        int row = partsChipPinRow(baseRow, nPins, rotated, vs.inPins[i]);
+        removeBridgeFromState(gpioDef[gpios[i]][1], row, false);
+    }
+    if (!boardPowered) {
+        if (use5V) {
+            if (railTouched) setDacByNumber(2, railRestore, 0, 0, true);
+        } else {
+            setDac0voltage(0.0f, 0, 0, false);
+        }
+        if (bFeedP) removeBridgeFromState(use5V ? TOP_RAIL : DAC0,
+                                          ISENSE_PLUS, false);
+        if (bFeedM) removeBridgeFromState(ISENSE_MINUS, vddRow, false);
+        if (!use5V) setDac0voltage(dac0Restore, 0, 0, false);
+    }
+    if (bGnd) removeBridgeFromState(GND, gndRow, false);
+    infraSetProbePowerEnabled(ppRestore);
+    refreshConnections(-1, 0, 0);
+    infraReleaseAdc(INFRA_ADC_SCAN);
+    return verdict;
+}
+
+int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
+                        VectorIdentifyResult* out, int maxOut,
+                        const char* fpMeasured) {
+    if (out == nullptr || maxOut < 1) return -1;
+    int nPins = 2 * width;
+    if (baseRow < 31 || baseRow > 60 || width < 2 || nPins > MAX_PART_PINS ||
+        baseRow + width - 1 > 60)
+        return -1;
+    if (gndRow < 1 || gndRow > 60 || vddRow < 1 || vddRow > 60 ||
+        gndRow == vddRow)
+        return -1;
+    int n = 0;
+    for (uint16_t i = 0; i < partdb_numRecords && n < maxOut; i++) {
+        const PartDbRecord& rec = partdb_records[i];
+        const PartDbPinout& po = partdb_pinouts[rec.pinoutIdx];
+        if (po.footprint != PARTDB_FOOT_DIP) continue;
+        if ((int)po.pinCount != nPins) continue;
+        const PartDbVectorSet* vs = partdbVectorSetOf(rec);
+        if (vs == nullptr) continue;
+        bool rotated = false;
+        if (!partsChipOrientFromRails(rec, baseRow, nPins, gndRow, vddRow,
+                                      &rotated))
+            continue;   // its rails don't land on the measured ones
+        if (fpMeasured != nullptr && fpMeasured[0] != '\0' &&
+            partdbFingerprintOf(rec) != nullptr &&
+            partdbFingerprintMismatchOriented(rec, fpMeasured, nullptr) > 3) {
+            // Tier-1 gate: an all-G TTL chip never powers up as a CMOS
+            // candidate (and vice versa) - don't even feed it
+            Serial.print("  vectors: ");
+            Serial.print(rec.id);
+            Serial.println(" ruled out by the clamp fingerprint");
+            continue;
+        }
+        Serial.print("  vectors: trying ");
+        Serial.print(rec.id);
+        Serial.println(rotated ? " (rotated 180)" : "");
+        int failStep = -1;
+        // supply passes per the 5.2 decision: TTL-only = the rail; CMOS =
+        // 3.3V; family-wide = rail first, 3.3V retry (74HC at 5V can't
+        // trust 3.3V GPIO drive - Vih 3.5V)
+        int verdict;
+        if (vs->supply == PARTDB_VEC_SUPPLY_3V3) {
+            verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated, gndRow,
+                                        vddRow, false, &failStep);
+        } else {
+            verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated, gndRow,
+                                        vddRow, true, &failStep);
+            if (verdict == 0 && vs->supply == PARTDB_VEC_SUPPLY_EITHER)
+                verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated,
+                                            gndRow, vddRow, false, &failStep);
+        }
+        out[n].recIdx = i;
+        out[n].rotated = rotated ? 1 : 0;
+        out[n].verdict = (int8_t)verdict;
+        out[n].failStep = (int8_t)failStep;
+        n++;
+        if (partsAutoAbortCheck()) break;
+    }
+    return n;
+}
+
+// The measured Tier-1 fingerprint as the PartDb.h alphabet string the
+// matcher takes (same encoding jl_part_clamp_fingerprint emits). fpOut
+// must hold nPins+1. Returns pins probed, <0 = refused outright.
+static int partsCollectFingerprint(int baseRow, int width, int gndRow,
+                                   int vddRow, char* fpOut) {
+    int nPins = 2 * width;
+    fpOut[0] = '\0';
+    if (nPins > MAX_PART_PINS) return -1;
+    int rows[MAX_PART_PINS];
+    for (int k = 1; k <= nPins; k++)
+        rows[k - 1] = partsChipPinRow(baseRow, nPins, false, k);
+    static ClampPin pins[MAX_PART_PINS];
+    int probed = partScanClampFingerprint(rows, nPins, gndRow, vddRow, pins,
+                                          partsAutoAbortCheck);
+    if (probed < 0) return probed;
+    for (int i = 0; i < nPins; i++) {
+        const ClampPin& p = pins[i];
+        char c;
+        if (p.row == gndRow || p.row == vddRow) c = '-';
+        else if (!p.probed) c = 'x';
+        else if (p.toGnd == PART_CLAMP_RESISTIVE ||
+                 p.toVdd == PART_CLAMP_RESISTIVE) c = 'T';
+        else if (p.toGnd == PART_CLAMP_JUNCTION &&
+                 p.toVdd == PART_CLAMP_JUNCTION) c = 'B';
+        else if (p.toGnd == PART_CLAMP_JUNCTION) c = 'G';
+        else if (p.toVdd == PART_CLAMP_JUNCTION) c = 'V';
+        else c = 'N';
+        fpOut[i] = c;
+    }
+    fpOut[nPins] = '\0';
+    return probed;
+}
+
+// The whole identification of one dipN chip with named rails: Tier-1
+// clamp fingerprint (unpowered, ~0.7s/pin), then Tier-3 vectors on the
+// candidates that survive it. One serial line carries the evidence.
+// (ChipIdentify's definition rides with the forward declarations up top.)
+static void partsIdentifyChip(int baseRow, int width, int gndRow, int vddRow,
+                              ChipIdentify* out) {
+    out->fp[0] = '\0';
+    out->nTried = 0;
+    out->nPass = 0;
+    (void)partsCollectFingerprint(baseRow, width, gndRow, vddRow, out->fp);
+    if (partsAutoAbortCheck()) return;
+    int n = partsVectorIdentify(baseRow, width, gndRow, vddRow, out->res, 8,
+                                out->fp[0] ? out->fp : nullptr);
+    out->nTried = (n > 0) ? n : 0;
+    for (int i = 0; i < out->nTried; i++)
+        if (out->res[i].verdict == 1) out->nPass++;
+    Serial.print("PARTSCAN identify fp=");
+    Serial.print(out->fp[0] ? out->fp : "(none)");
+    Serial.print(" tried=");
+    Serial.print(out->nTried);
+    Serial.print(" pass=");
+    for (int i = 0, k = 0; i < out->nTried; i++) {
+        if (out->res[i].verdict != 1) continue;
+        if (k++) Serial.print(",");
+        Serial.print(partdb_records[out->res[i].recIdx].id);
+        if (out->res[i].rotated) Serial.print("(r)");
+    }
+    if (out->nPass == 0) Serial.print("none");
+    Serial.println();
+}
+
+// An unidentified chip the scan paired across the ravine becomes a generic
+// dipN record (Kevin, 2026-08-28: his 7447 censused as two half-spans and
+// was offered nothing). Every leg is listed - so labels, the part card and
+// Remove-by-tap see the whole package - but nothing connects: we don't know
+// what the chip IS, so the wiring stays the user's. Name IC<row>; the
+// record is a real part and persists like any hand placement.
+static bool partsPlaceFoundChip(int baseRow, int width) {
+    int nPins = 2 * width;
+    if (nPins < 4 || nPins > MAX_PART_PINS) return false;
+    char name[16];
+    snprintf(name, sizeof(name), "IC%d", baseRow);
+    if (globalState.parts.findByName(name) >= 0)
+        snprintf(name, sizeof(name), "IC%d_2", baseRow);
+    char fp[8];
+    snprintf(fp, sizeof(fp), "dip%d", nPins);
+    char pins[512];
+    size_t len = 0;
+    pins[len++] = '{';
+    for (int k = 1; k <= nPins; k++) {
+        len += (size_t)snprintf(pins + len, sizeof(pins) - len,
+                                "%s\"P%d\": {\"pin\": %d}",
+                                k > 1 ? ", " : "", k, k);
+        if (len >= sizeof(pins) - 2) return false;
+    }
+    pins[len++] = '}';
+    pins[len] = '\0';
+    if (jl_place_part(name, baseRow, pins, fp, "ic", "", "") != 0)
+        return false;
+    partLabels.requestRun();
+    Serial.print("\r\nPARTSCAN added ");
+    Serial.print(name);
+    Serial.print(" - dip");
+    Serial.print(nPins);
+    Serial.print(" at rows ");
+    Serial.print(baseRow);
+    Serial.print("-");
+    Serial.print(baseRow + width - 1);
+    Serial.print(" / ");
+    Serial.print(baseRow - 30);
+    Serial.print("-");
+    Serial.println(baseRow - 30 + width - 1);
+    return true;
+}
+
 // A display the fan-out named, held for the wire-up prompt (Kevin, 20:17:
 // "give the option to wire up the parts when they're detected").
 struct DisplayFinding {
@@ -2565,53 +3541,26 @@ static bool partsWireFoundDisplay(const DisplayFinding& f) {
 }
 
 // One yes/no per finding (Kevin, 20:17: "ask per part, not all or
-// nothing"). CONNECT or serial 'y' = yes; click or any other byte = skip
-// just this one; a HOLD ends the whole confirm pass.
-static int partsConfirmOne(const char* verb, const char* what) {
-    if (oled.oledConnected) {
-        char t[96];
-        snprintf(t, sizeof(t), "%s %s?\nCONNECT = yes  click = skip", verb, what);
-        oled.resetMultiLineSmallText();
-        oled.showMultiLineSmallText(t);
-    }
+// nothing"), asked through partsConfirmYesNo - the shared gesture set, no
+// button legend. `detail` (may be "") takes the OLED line the legend used
+// to burn: the measured value, the bus pins, the polarity. A non-y/n
+// serial byte (-1) ends the whole confirm pass.
+static int partsConfirmOne(const char* verb, const char* what,
+                           const char* detail) {
+    char t[112];
+    snprintf(t, sizeof(t), "%s %s?%s%s", verb, what,
+             (detail && detail[0]) ? "\n" : "", detail ? detail : "");
     Serial.print("\r\nPARTSCAN ");
     Serial.print(verb);
     Serial.print("? ");
     Serial.print(what);
-    Serial.println("  (CONNECT/y = yes, click/n = skip, hold = done)");
-    Serial.flush();
-    encoderButtonState = IDLE;
-    lastButtonEncoderState = IDLE;
-    while (true) {
-        jOS.serviceInner();
-        rotaryEncoderButtonStuff();
-        if (partsProbeButton() == 1) return 1;
-        if (encoderButtonState == HELD) {
-            while (encoderButtonState == HELD ||
-                   encoderButtonState == MEDIUM_HELD ||
-                   encoderButtonState == LONG_HELD) {
-                jOS.serviceInner();
-                rotaryEncoderButtonStuff();
-                delayMicroseconds(1000);
-            }
-            encoderButtonState = IDLE;
-            lastButtonEncoderState = IDLE;
-            return -1;
-        }
-        if (encoderButtonState == RELEASED &&
-            lastButtonEncoderState == PRESSED) {
-            encoderButtonState = IDLE;
-            lastButtonEncoderState = IDLE;
-            return 0;
-        }
-        if (Serial.available() > 0) {
-            char c = (char)Serial.read();
-            if (c == 'y' || c == 'Y') return 1;
-            if (c == '\r' || c == '\n') continue;   // stray line ending
-            return 0;
-        }
-        delayMicroseconds(1000);
+    if (detail && detail[0]) {
+        Serial.print("  ");
+        Serial.print(detail);
     }
+    Serial.println("  (y/n)");
+    Serial.flush();
+    return partsConfirmYesNo(t);
 }
 
 // The placed part (if any) with a pin on this row, for "already yours" tags.
@@ -2687,6 +3636,19 @@ void partsAutoLauncher(void) {
     // and a fan-out-named display is WIREABLE (segments to GPIOs)
     static DisplayFinding dispFound;
     dispFound.valid = false;
+    // an unidentified chip is placeable as a generic dipN (Kevin,
+    // 2026-08-28: "There's a 7447 IC on the board it's missing" - both of
+    // its half-spans were reported and NEITHER was offered): a bottom-half
+    // "a chip?" span whose mirror window also holds hits is one DIP
+    static int chipBase[2];
+    static int chipWidth[2];
+    // the cluster rails the second look found, carried to the confirm pass:
+    // Tier-1 fingerprinting and the vector runner both anchor on them, and
+    // recomputing clamps after the confirm would pay the junction maps twice
+    // (-1 = the clamps stayed unclear and the chip has no named rails)
+    static int chipGnd[2];
+    static int chipVdd[2];
+    int nChipF = 0;
     // pairs that conducted ACROSS the center channel (n <-> n+30): their
     // rows live in different halves and can never form one span, so they
     // arrive from the sweep as explicit pairs and get identified as such
@@ -2716,6 +3678,19 @@ void partsAutoLauncher(void) {
             refreshConnections(-1, 0, 0);
         }
     }
+    // Park the probe power feed for the WHOLE scan: it is an infra bridge,
+    // so the wire lift above deliberately skips it - and the census has no
+    // session to park it (the sweep and every identify session do). Bench,
+    // 2026-08-28: a scan launched from the menu right after a probe tap
+    // (feed = DAC0 at 3.37V, tip resting on the board) censused ALL 56
+    // rows charged and read 3.13V on a "discharged" ADC lane; the same
+    // scan launched with the probe quiet ran clean. The per-session parks
+    // inside become harmless no-ops; adone restores it in the same refresh
+    // that puts the wires back.
+    bool scanPpRestore = infraProbePowerWanted();
+    infraSetProbePowerEnabled(false);
+    refreshConnections(-1, 0, 0);
+
     int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck, partsScanViz);
     if (found == -6) {
         Serial.println("PARTSCAN no clean measurement lane - every free ADC"
@@ -3466,6 +4441,8 @@ void partsAutoLauncher(void) {
                 // module answers on the bus - a real identity beats "a
                 // chip?" (Kevin, 12:53: "Can we sense I2C data lines").
                 char i2cLine[64] = "";
+                ClusterPower cp;   // shared with the chip second look below
+                bool cpValid = false;
                 if (!poweredSpan && legsLeft >= 3 && width <= 6 &&
                     !partsAutoAbortCheck()) {
                     int cl[6];
@@ -3473,8 +4450,8 @@ void partsAutoLauncher(void) {
                     for (int r = a; r <= z && nCl < 6; r++)
                         if ((flags[r] == 1 || flags[r] == 5) && !consumed[r])
                             cl[nCl++] = r;
-                    ClusterPower cp;
                     if (nCl >= 3 && partsFindClusterPower(cl, nCl, &cp)) {
+                        cpValid = true;
                         Serial.print("  its clamps say row ");
                         Serial.print(cp.gndRow);
                         Serial.print(" is ground and row ");
@@ -3484,6 +4461,7 @@ void partsAutoLauncher(void) {
                                              &i2cModule);
                     }
                 }
+                bool chipVerdict = false;
                 if (poweredSpan) {
                     snprintf(line, sizeof(line),
                              "rows %d-%d read POWERED - not a part", a, z);
@@ -3496,9 +4474,122 @@ void partsAutoLauncher(void) {
                     snprintf(line, sizeof(line),
                              "rows %d-%d: %d parts + %d legs (a chip?)", a, z,
                              nSplit, legsLeft);
+                    chipVerdict = true;
                 } else {
                     snprintf(line, sizeof(line), "rows %d-%d: %d legs (a chip?)",
                              a, z, width);
+                    chipVerdict = true;
+                }
+                // A chip verdict on a BOTTOM-half span pairs with hits in
+                // its mirror window: the far side of the same U (the dip
+                // rule - pin 1 anchors the bottom, so the bottom span is
+                // the near side). Kevin's 7447 censused as span 32-39 plus
+                // top hits 2,3,5,9 and was offered NOTHING; the second
+                // bench round censused the bottom raggeder still (33 +
+                // 37-40 against top span 3-10) and a window-only union
+                // sized it dip8. So: the seed hits adopt their WHOLE
+                // far-side span (gap-1 tolerant, the span former's own
+                // rule), and then the chip itself gets asked about every
+                // row still dark (the second look below).
+                if (chipVerdict && a >= 31 && nChipF < 2) {
+                    auto topHit = [&](int r) {
+                        return r >= 1 && r <= 30 && !crossUsed[r] &&
+                               (flags[r] == 1 || flags[r] == 5);
+                    };
+                    int mLo = 0, mHi = 0;
+                    for (int r = a - 30; r <= z - 30; r++) {
+                        if (!topHit(r)) continue;
+                        if (mLo == 0) mLo = r;
+                        mHi = r;
+                    }
+                    if (mLo > 0) {
+                        for (;;) {
+                            if (topHit(mLo - 1)) { mLo -= 1; continue; }
+                            if (topHit(mLo - 2)) { mLo -= 2; continue; }
+                            break;
+                        }
+                        for (;;) {
+                            if (topHit(mHi + 1)) { mHi += 1; continue; }
+                            if (topHit(mHi + 2)) { mHi += 2; continue; }
+                            break;
+                        }
+                        int lo = a, hi = z;
+                        if (mLo + 30 < lo) lo = mLo + 30;
+                        if (mHi + 30 > hi) hi = mHi + 30;
+
+                        // The SECOND LOOK (Kevin, 2026-08-28: "more passes
+                        // in different configurations"): with the union
+                        // sized, probe every dark row inside it - plus one
+                        // column past each edge - against the cluster's
+                        // rails (partsChipMemberProbe; a different physics
+                        // than the poke, so it sees the pins the poke
+                        // can't). Needs the rails: when the clamps can't
+                        // name them, the union stands unprobed.
+                        // ponytail: interior confirms only flag/paint (the
+                        // union already spans them); a phantom pairing (a
+                        // top SIP module over an unrelated bottom cluster)
+                        // survives until the confirm prompt names rows the
+                        // user knows are two parts.
+                        // rails: reuse the i2c path's clamp reading when it
+                        // ran (width <= 6 spans - the exact 37-40 case paid
+                        // twice before this), hunt them over the UNION's
+                        // confirmed rows otherwise
+                        if (!cpValid) {
+                            int conf[6];
+                            int nConf = 0;
+                            for (int r = hi; r >= lo && nConf < 6; r--)
+                                if ((flags[r] == 1 || flags[r] == 5) &&
+                                    !consumed[r])   // split-out discretes
+                                    conf[nConf++] = r;
+                            for (int r = lo - 30; r <= hi - 30 && nConf < 6; r++)
+                                if (topHit(r)) conf[nConf++] = r;
+                            if (nConf >= 3 && !partsAutoAbortCheck())
+                                cpValid = partsFindClusterPower(conf, nConf, &cp);
+                        }
+                        if (cpValid) {
+                            Serial.print("  second look: rails gnd ");
+                            Serial.print(cp.gndRow);
+                            Serial.print(" vdd ");
+                            Serial.print(cp.vddRow);
+                            Serial.println(" - asking the dark rows...");
+                            Serial.flush();
+                            auto probe = [&](int r) {
+                                if (r < 1 || r > 60) return false;
+                                if (r <= 30 && crossUsed[r]) return false;
+                                if (flags[r] != 0) return false;
+                                if (partsAutoAbortCheck()) return false;
+                                if (!partsChipMemberProbe(r, cp.gndRow,
+                                                          cp.vddRow))
+                                    return false;
+                                flags[r] = 5;
+                                partsScanViz(r, 1);
+                                Serial.print("  row ");
+                                Serial.print(r);
+                                Serial.println(" answers - a pin");
+                                return true;
+                            };
+                            for (int r = lo; r <= hi; r++) probe(r);
+                            for (int r = lo - 30; r <= hi - 30; r++) probe(r);
+                            // edges: a column joins if EITHER of its rows
+                            // answers; stop at the first silent column
+                            while (lo - 1 >= 31 &&
+                                   hi - lo + 1 < MAX_PART_PINS / 2 &&
+                                   (probe(lo - 1) || probe(lo - 31)))
+                                lo--;
+                            while (hi + 1 <= 60 &&
+                                   hi - lo + 1 < MAX_PART_PINS / 2 &&
+                                   (probe(hi + 1) || probe(hi - 29)))
+                                hi++;
+                        }
+                        int w = hi - lo + 1;
+                        if (w >= 2 && w <= MAX_PART_PINS / 2) {
+                            chipBase[nChipF] = lo;
+                            chipWidth[nChipF] = w;
+                            chipGnd[nChipF] = cpValid ? cp.gndRow : -1;
+                            chipVdd[nChipF] = cpValid ? cp.vddRow : -1;
+                            nChipF++;
+                        }
+                    }
                 }
                 for (int r = a; r <= z && !poweredSpan; r++) {
                     if (consumed[r]) continue;
@@ -3520,8 +4611,9 @@ void partsAutoLauncher(void) {
         if (partsAutoAborted) {
             partsPrintAborted();
         } else {
-            // the confirmed I2C module and the wireable display count too
-            int nPlaceable = nAddable + (i2cModule.valid ? 1 : 0) +
+            // the confirmed I2C module, the paired chips and the wireable
+            // display count too
+            int nPlaceable = nAddable + nChipF + (i2cModule.valid ? 1 : 0) +
                              (dispFound.valid ? 1 : 0);
             Serial.print("PARTSCAN auto done in ");
             Serial.print((millis() - scanT0) / 1000);
@@ -3548,8 +4640,8 @@ void partsAutoLauncher(void) {
 
             // Act on the findings, ONE AT A TIME (Kevin, 20:17: "ask per
             // part, not all or nothing"): every placeable finding gets its
-            // own CONNECT, the display's question is "wire it", and a hold
-            // ends the pass early.
+            // own yes/no (the shared gesture set), the display's question
+            // is "wire it", and a stray serial byte ends the pass early.
             if (nPlaceable > 0 && !partsAutoAborted) {
                 Serial.print("\r\nPARTSCAN add confirm n=");
                 Serial.println(nPlaceable);
@@ -3566,9 +4658,141 @@ void partsAutoLauncher(void) {
                     char what[48];
                     snprintf(what, sizeof(what), "%s rows %d-%d",
                              partTypeName(addable[q].type), rlo, rhi);
-                    int ans = partsConfirmOne("add", what);
+                    // the freed line says WHICH one: the measured value,
+                    // in the summary's own idiom (ohms / volts)
+                    char detail[24] = "";
+                    if (addable[q].type == PartType::RESISTOR ||
+                        addable[q].type == PartType::POT)
+                        formatOhms(addable[q].value, detail, sizeof(detail));
+                    else if (addable[q].value != 0.0f)
+                        snprintf(detail, sizeof(detail), "%.2fV",
+                                 (double)addable[q].value);
+                    int ans = partsConfirmOne("add", what, detail);
                     if (ans < 0) { bail = true; break; }
                     if (ans == 1 && partsPlaceScanResult(addable[q])) placed++;
+                }
+                for (int q = 0; q < nChipF && !bail; q++) {
+                    char what[48];
+                    snprintf(what, sizeof(what), "dip%d chip rows %d-%d",
+                             2 * chipWidth[q], chipBase[q],
+                             chipBase[q] + chipWidth[q] - 1);
+                    char detail[24];   // the freed line: the far side
+                    snprintf(detail, sizeof(detail), "far side %d-%d",
+                             chipBase[q] - 30,
+                             chipBase[q] - 30 + chipWidth[q] - 1);
+                    int ans = partsConfirmOne("add", what, detail);
+                    if (ans < 0) { bail = true; break; }
+                    if (ans != 1) continue;
+                    // The "identify?" escalation (5.2 surface a): with the
+                    // rails named, the chip itself can be ASKED what it is
+                    // - Tier-1 clamp fingerprint, then partdb truth-table
+                    // vectors. Opt-in, because it powers the part.
+                    ChipIdentify ident;
+                    ident.nPass = 0;
+                    if (chipGnd[q] > 0 && chipVdd[q] > 0) {
+                        int ans2 = partsConfirmOne("identify", what,
+                                                   "powers it briefly");
+                        if (ans2 < 0) { bail = true; break; }
+                        if (ans2 == 1) {
+                            if (oled.oledConnected)
+                                oled.clearPrintShow("identifying...", 2,
+                                                    true, true, true);
+                            partsIdentifyChip(chipBase[q], chipWidth[q],
+                                              chipGnd[q], chipVdd[q],
+                                              &ident);
+                            if (partsAutoAborted) { bail = true; break; }
+                        }
+                    }
+                    // WHICH chip? (Kevin, 2026-08-28: "allow users to
+                    // assign a chip when we find a generic IC"). Every
+                    // partdb record with this exact DIP footprint, behind
+                    // a leading Generic stop - click-click keeps the fast
+                    // path, a scroll names the real part and places ITS
+                    // record instead: pin names, roles, power auto-route
+                    // and drivers included. Hold = changed my mind, skip
+                    // this finding; a serial byte ends the pass. When the
+                    // vectors NAMED survivors, the list is exactly them
+                    // (5.2: "offer the picker filtered to survivors") with
+                    // the best one preselected - and their orientation is
+                    // proven, so no pin-1 tap.
+                    int nOpt = 1;
+                    s_led[0] = "IC?";
+                    s_title[0] = "Generic IC";
+                    s_desc[0] = "unnamed pins";
+                    s_rec[0] = 0xFFFF;
+                    uint8_t rotFor[PARTS_LIST_MAX] = {0};
+                    bool taplessFor[PARTS_LIST_MAX] = {false};
+                    if (ident.nPass >= 1) {
+                        for (int i = 0; i < ident.nTried &&
+                                        nOpt < PARTS_LIST_MAX; i++) {
+                            if (ident.res[i].verdict != 1) continue;
+                            const PartDbRecord& r =
+                                partdb_records[ident.res[i].recIdx];
+                            s_led[nOpt] = r.ledName;
+                            s_title[nOpt] = r.displayName;
+                            s_desc[nOpt] = "vectors match";
+                            s_rec[nOpt] = ident.res[i].recIdx;
+                            rotFor[nOpt] = ident.res[i].rotated;
+                            taplessFor[nOpt] = true;
+                            nOpt++;
+                        }
+                    } else {
+                        for (uint16_t i = 0; i < partdb_numRecords &&
+                                             nOpt < PARTS_LIST_MAX; i++) {
+                            const PartDbRecord& r = partdb_records[i];
+                            const PartDbPinout& p2 =
+                                partdb_pinouts[r.pinoutIdx];
+                            if (p2.footprint != PARTDB_FOOT_DIP) continue;
+                            if ((int)p2.pinCount != 2 * chipWidth[q]) continue;
+                            if (!partdbPlaceableHere(r)) continue;
+                            s_led[nOpt] = r.ledName;
+                            s_title[nOpt] = r.displayName;
+                            s_desc[nOpt] = r.desc;
+                            s_rec[nOpt] = i;
+                            nOpt++;
+                        }
+                    }
+                    bool placedOne = false;
+                    if (nOpt > 1) {
+                        int pick = partsPicker("chip", "Which?", nOpt,
+                                               ident.nPass >= 1 ? 1 : 0);
+                        if (pick == -2) { bail = true; break; }
+                        if (pick >= 1) {
+                            const PartDbRecord& rec2 =
+                                partdb_records[s_rec[pick]];
+                            if (taplessFor[pick]) {
+                                // the vectors proved the orientation - the
+                                // rails only fit one way, so pin 1's row is
+                                // knowledge, not a question
+                                int p1 = partsChipPinRow(
+                                    chipBase[q], 2 * chipWidth[q],
+                                    rotFor[pick] != 0, 1);
+                                placedOne =
+                                    partsCommitPlacement(rec2, &p1, 1);
+                            } else {
+                                // A REAL record has a REAL pin 1 - never
+                                // assume which corner it sits in (Kevin,
+                                // 2026-08-28: "we need to ask for pin 1, it
+                                // placed the 7447 upside down"). The tap is
+                                // the truth, exactly like the place flow.
+                                int p1 = partsTapForRow(rec2);
+                                if (p1 == -2) { bail = true; break; }
+                                if (p1 >= 1)
+                                    placedOne =
+                                        partsCommitPlacement(rec2, &p1, 1);
+                                // p1 == -1 = changed their mind: skip
+                            }
+                        } else if (pick == 0) {
+                            placedOne = partsPlaceFoundChip(chipBase[q],
+                                                            chipWidth[q]);
+                        }
+                    } else {
+                        // nothing in the DB wears this footprint - the
+                        // generic record is the only honest offer
+                        placedOne = partsPlaceFoundChip(chipBase[q],
+                                                        chipWidth[q]);
+                    }
+                    if (placedOne) placed++;
                 }
                 if (!bail && i2cModule.valid) {
                     int rlo = i2cModule.gnd, rhi = i2cModule.gnd;
@@ -3580,7 +4804,10 @@ void partsAutoLauncher(void) {
                     char what[48];
                     snprintf(what, sizeof(what), "I2C 0x%02X module rows %d-%d",
                              i2cModule.addr, rlo, rhi);
-                    int ans = partsConfirmOne("add", what);
+                    char detail[24];   // the freed line: the bus pins
+                    snprintf(detail, sizeof(detail), "SDA %d SCL %d",
+                             i2cModule.sda, i2cModule.scl);
+                    int ans = partsConfirmOne("add", what, detail);
                     if (ans < 0) bail = true;
                     else if (ans == 1 && partsPlaceI2cModule(i2cModule)) placed++;
                 }
@@ -3589,7 +4816,10 @@ void partsAutoLauncher(void) {
                     snprintf(what, sizeof(what),
                              "%d-seg display (common %d) to GPIOs",
                              dispFound.n, dispFound.common);
-                    int ans = partsConfirmOne("wire", what);
+                    int ans = partsConfirmOne("wire", what,   // freed line: polarity
+                                              dispFound.commonAnode
+                                                  ? "common anode"
+                                                  : "common cathode");
                     if (ans == 1 && partsWireFoundDisplay(dispFound)) placed++;
                 }
                 if (placed > 0) {
@@ -3607,8 +4837,10 @@ void partsAutoLauncher(void) {
     }
 
 adone:
-    // the user's wiring goes back, duplicate stacking and all, in one
-    // refresh - every exit path funnels through here
+    // the user's wiring AND the parked probe feed go back, duplicate
+    // stacking and all, in ONE refresh - every exit path funnels through
+    // here (infraEvaluate at the refresh head reads the restored flag)
+    infraSetProbePowerEnabled(scanPpRestore);
     if (scanLiftN > 0) {
         for (int i = 0; i < scanLiftN; i++)
             addBridgeToState(scanLiftA[i], scanLiftB[i], scanLiftDup[i], false);
@@ -3616,8 +4848,8 @@ adone:
         Serial.print(scanLiftN);
         Serial.println(" wires back)");
         scanLiftN = 0;
-        refreshConnections(-1, 0, 0);
     }
+    refreshConnections(-1, 0, 0);
     partsAutoAborted = false;
     partsAutoAbortCause = nullptr;
     inClickMenu = 0;

@@ -145,11 +145,24 @@ extern CurrentSenseState currentSenseState;
 // is refreshed by the Peripherals poll at CURRENT_SENSE_POLL_INTERVAL_MS
 // (50 ms - the figure the guide check's sample counts and its 1400 ms timeout
 // floor are built on); a reader averages it across lastUpdatedMs ticks, which
-// only advance when the read actually landed. Never write INA0 config to
-// "improve" it.
+// only advance when the read actually landed. Never write INA0 SHUNT config
+// (samples/calibration) to "improve" it - inaFastPollMode below touches only
+// the poll cadence and the unused bus-voltage averaging.
 static inline float inaShuntCurrent_mA(void) {
     return currentSenseState.shuntVoltage_mV / 2.0f; // 2 ohm shunt R1
 }
+
+// Scan-scoped INA0 cadence (Kevin, 2026-08-28: "speed up the ina219 reads" -
+// identifies were paced by the 50ms poll gate, not the ~9ms conversion).
+// ON: the poll's 50ms pacing drops away (the hardware conversion period
+// paces it, CNVR cleared each read so "fresh" stays honest) and the UNUSED
+// bus-voltage conversion drops from 16 samples to 1 (~17ms -> ~9ms period;
+// the poll hardcodes busVoltage to 0 and scan sessions never read it).
+// OFF restores both - the DAC calibration app measures through
+// getBusVoltage() and keeps its 16-sample averaging, and the guide checks'
+// 50ms-derived timing math stays true. partScanBegin/partScanEnd own the
+// toggle; the End funnel runs on every session exit, so it can't stick.
+void inaFastPollMode(bool on);
 
 struct gpio_function_name_struct {
     gpio_function_t function;

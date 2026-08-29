@@ -41,8 +41,28 @@ no pyyaml; the on-device /partdb reader (B-M7) will speak the same grammar):
     menu: 40RGBX|160        # menuName override; '|' = the two-line break
     i2c: [0x3C, 0x3D]       # ACK addresses; '0x20-0x27' = contiguous range
     whoami: 0x75=0x68&0x7E  # WHO_AM_I reg=value[&mask] (mask defaults 0xFF)
+    whoami2: 0x6B=0x40&0x40 # optional second read - BOTH must match (the
+                            # BMP3xx / SHT2x two-read idents, REF 6.5)
+    probe_order: 50         # within one shared address, lower asks first
+                            # (REF 6.3: WHO_AM_I holders before heuristics
+                            # before registerless parts). Default 100.
     driver: ssd1306         # display driver key (agent C descriptor id)
     value: 10k              # defaultValue for label-only discretes
+    fingerprint: GGGGGGG-GGGGGGG-   # Tier-1 unpowered clamp map, one char
+                            # per PHYSICAL pin (PartDb.h alphabet: G/V/B =
+                            # junction to gnd/vdd/both, N = open, T = hard
+                            # tie, '-' = the supply pins themselves, '?' =
+                            # don't care, 'C' = conducts somehow - for
+                            # records whose aliases span TTL and CMOS)
+    vec_supply: either      # either (default: 5V rail pass, 3.3V retry) |
+                            # 5v (bipolar TTL only) | 3v3 (CMOS only)
+    vec: 1=0 2=0 -> 3=1     # Tier-3 truth-table step, REPEATABLE - one
+                            # line per step, run in order with no power
+                            # cycle. Each side is pin=level pairs (1-based
+                            # physical pins). An input omitted from a step
+                            # keeps its previous level (clocking); every
+                            # input must appear in the FIRST step. An
+                            # omitted output is unchecked at that step.
 
   pins: is POSITIONAL - entry i is physical pin i+1, and every physical pin
   must be listed. Entries are NAME or NAME=ROLE. Role and pin class derive
@@ -161,7 +181,8 @@ ID_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 # I2C ident flags (mirror PartDb.h)
 I2C_FLAG_WHOAMI = 0x01
-I2C_FLAG_RANGE = 0x02   # addrs[0] = base of a contiguous run of numAddrs
+I2C_FLAG_RANGE = 0x02    # addrs[0] = base of a contiguous run of numAddrs
+I2C_FLAG_WHOAMI2 = 0x04  # the second (reg,value,mask) must ALSO match
 
 warnings = []
 
@@ -257,6 +278,10 @@ def parse_file(path):
             if cur is None:
                 raise SrcError(f"{ctx}: indented line outside a record")
             k, v = split_kv(line.strip(), ctx)
+            if k == "vec":
+                # the one repeatable key: each line is one vector step
+                cur.setdefault("_vecs", []).append((v, ctx))
+                continue
             if k in cur and k not in ("subclass",):
                 raise SrcError(f"{ctx}: duplicate key {k!r}")
             cur[k] = v
@@ -335,6 +360,87 @@ def parse_i2c_addrs(v, ctx):
     if len(addrs) > 4 and not is_range:
         raise SrcError(f"{ctx}: >4 I2C addresses only as a contiguous range")
     return addrs, is_range
+
+
+VEC_SUPPLY = {"either": 0, "5v": 1, "3v3": 2}  # mirror PartDbVecSupply
+
+
+def parse_vectors(vec_lines, pin_count, pins, ctx):
+    """[(line, ctx)] -> pools dict for one PartDbVectorSet, or None.
+
+    Each line: 'pin=level ... -> pin=level ...'. Steps run in order with no
+    power cycle; an input omitted from a step keeps its previous level, an
+    omitted output is unchecked (outCare bit 0). Every input must appear in
+    the first step - carry-forward needs a starting level.
+    """
+    if not vec_lines:
+        return None
+    rail = {i + 1 for i, (n, pcls, role) in enumerate(pins)
+            if pcls in (PINCLASS_POWER, PINCLASS_GND)}
+    in_pins, out_pins, steps = [], [], []
+    for text, vctx in vec_lines:
+        if "->" not in text:
+            raise SrcError(f"{vctx}: vec needs 'in... -> out...'")
+        ins_s, outs_s = text.split("->", 1)
+
+        def side(s, vctx=vctx):
+            d = {}
+            for tok in s.split():
+                if "=" not in tok:
+                    raise SrcError(f"{vctx}: bad vec token {tok!r} "
+                                   f"(pin=level)")
+                p_s, l_s = tok.split("=", 1)
+                try:
+                    p, lvl = int(p_s), int(l_s)
+                except ValueError:
+                    raise SrcError(f"{vctx}: bad vec token {tok!r}")
+                if not 1 <= p <= pin_count:
+                    raise SrcError(f"{vctx}: vec pin {p} outside "
+                                   f"1-{pin_count}")
+                if p in rail:
+                    raise SrcError(f"{vctx}: vec pin {p} is a supply pin")
+                if lvl not in (0, 1):
+                    raise SrcError(f"{vctx}: vec level for pin {p} "
+                                   f"must be 0/1")
+                if p in d:
+                    raise SrcError(f"{vctx}: vec pin {p} repeated")
+                d[p] = lvl
+            return d
+
+        ins, outs = side(ins_s), side(outs_s)
+        for p in ins:
+            if p in out_pins:
+                raise SrcError(f"{vctx}: vec pin {p} both driven and read")
+            if p not in in_pins:
+                in_pins.append(p)
+        for p in outs:
+            if p in in_pins:
+                raise SrcError(f"{vctx}: vec pin {p} both driven and read")
+            if p not in out_pins:
+                out_pins.append(p)
+        steps.append((ins, outs, vctx))
+    if len(in_pins) > 16 or len(out_pins) > 16:
+        raise SrcError(f"{ctx}: vec set exceeds 16 in or out pins "
+                       f"(uint16 bit fields)")
+    if len(steps) > 255:
+        raise SrcError(f"{ctx}: more than 255 vec steps")
+    missing = [p for p in in_pins if p not in steps[0][0]]
+    if missing:
+        raise SrcError(f"{ctx}: vec inputs {missing} not set in the first "
+                       f"step (carry-forward needs a starting level)")
+    in_bits, out_bits, out_care = [], [], []
+    cur = {}
+    for ins, outs, vctx in steps:
+        cur.update(ins)
+        in_bits.append(sum((cur[p] & 1) << i for i, p in enumerate(in_pins)))
+        out_bits.append(sum((outs.get(p, 0) & 1) << i
+                            for i, p in enumerate(out_pins)))
+        out_care.append(sum(1 << i for i, p in enumerate(out_pins)
+                            if p in outs))
+    return {
+        "in_pins": in_pins, "out_pins": out_pins, "in_bits": in_bits,
+        "out_bits": out_bits, "out_care": out_care,
+    }
 
 
 def compose_led(rec, display, ctx):
@@ -490,29 +596,41 @@ def process_record(rec):
                 raise SrcError(f"{ctx}: bad alias {a!r}")
             aliases.append(a)
 
+    def parse_whoami(w, key):
+        if "=" not in w:
+            raise SrcError(f"{ctx}: {key} needs reg=value[&mask]")
+        reg_s, rest = w.split("=", 1)
+        if "&" in rest:
+            val_s, mask_s = rest.split("&", 1)
+        else:
+            val_s, mask_s = rest, "0xFF"
+        return int(reg_s, 0), int(val_s, 0), int(mask_s, 0)
+
     ident = None
     if "i2c" in rec:
         addrs, is_range = parse_i2c_addrs(rec["i2c"], ctx)
         flags = I2C_FLAG_RANGE if is_range else 0
         reg = val = mask = 0
+        reg2 = val2 = mask2 = 0
         if "whoami" in rec:
-            w = rec["whoami"]
-            if "=" not in w:
-                raise SrcError(f"{ctx}: whoami needs reg=value[&mask]")
-            reg_s, rest = w.split("=", 1)
-            if "&" in rest:
-                val_s, mask_s = rest.split("&", 1)
-            else:
-                val_s, mask_s = rest, "0xFF"
-            reg, val, mask = int(reg_s, 0), int(val_s, 0), int(mask_s, 0)
+            reg, val, mask = parse_whoami(rec["whoami"], "whoami")
             flags |= I2C_FLAG_WHOAMI
+        if "whoami2" in rec:
+            if "whoami" not in rec:
+                raise SrcError(f"{ctx}: whoami2 without whoami")
+            reg2, val2, mask2 = parse_whoami(rec["whoami2"], "whoami2")
+            flags |= I2C_FLAG_WHOAMI2
+        order = int(rec["probe_order"]) if "probe_order" in rec else 100
+        if not 0 <= order <= 255:
+            raise SrcError(f"{ctx}: probe_order {order} outside 0-255")
         if is_range:
             stored = (addrs[0], 0, 0, 0)
         else:
             stored = tuple(addrs) + (0,) * (4 - len(addrs))
-        ident = (len(addrs), stored, reg, val, mask, flags)
-    elif "whoami" in rec:
-        raise SrcError(f"{ctx}: whoami without i2c")
+        ident = (len(addrs), stored, reg, val, mask, reg2, val2, mask2,
+                 order, flags)
+    elif "whoami" in rec or "whoami2" in rec or "probe_order" in rec:
+        raise SrcError(f"{ctx}: whoami/whoami2/probe_order without i2c")
 
     type_key = (cls_name, None) if (cls_name, None) in TYPESTR_MAP \
         else (cls_name, sub_name)
@@ -531,6 +649,39 @@ def process_record(rec):
         raise SrcError(f"{ctx}: value {value!r} > 11 chars "
                        f"(PartDefinition.value[12])")
 
+    # Tier-1 clamp fingerprint (optional): one char per PHYSICAL pin. The
+    # alphabet must stay in lockstep with PartDb.h and the measured fp=
+    # string partScanClampFingerprint produces. Supply pins carry '-' (the
+    # measured string marks the rails it anchored on the same way).
+    fingerprint = rec.get("fingerprint")
+    if fingerprint is not None:
+        if len(fingerprint) != pin_count:
+            raise SrcError(f"{ctx}: fingerprint is {len(fingerprint)} chars "
+                           f"but {rec['package']} has {pin_count} pins")
+        bad = set(fingerprint) - set("GVBNT-?C")
+        if bad:
+            raise SrcError(f"{ctx}: fingerprint chars {sorted(bad)} not in "
+                           f"the G/V/B/N/T/-/?/C alphabet")
+        for n, (pname, pcls, role) in enumerate(pins):
+            is_rail = pcls in (PINCLASS_POWER, PINCLASS_GND)
+            ch = fingerprint[n]
+            if is_rail and ch not in "-?":
+                raise SrcError(f"{ctx}: fingerprint pin {n + 1} ({pname}) is "
+                               f"a supply pin - must be '-' (or '?')")
+            if not is_rail and ch == "-":
+                raise SrcError(f"{ctx}: fingerprint pin {n + 1} ({pname}) is "
+                               f"'-' but not a supply pin")
+
+    vectors = parse_vectors(rec.get("_vecs", []), pin_count, pins, ctx)
+    supply_key = rec.get("vec_supply", "either")
+    if supply_key not in VEC_SUPPLY:
+        raise SrcError(f"{ctx}: vec_supply {supply_key!r} not in "
+                       f"{sorted(VEC_SUPPLY)}")
+    if vectors is not None:
+        vectors["supply"] = VEC_SUPPLY[supply_key]
+    elif "vec_supply" in rec:
+        raise SrcError(f"{ctx}: vec_supply without any vec: lines")
+
     pop = int(rec["pop"]) if "pop" in rec else None
 
     return {
@@ -539,7 +690,8 @@ def process_record(rec):
         "cls_name": cls_name, "sub_name": sub_name,
         "foot": foot, "pin_count": pin_count, "pins": tuple(pins),
         "aliases": aliases, "ident": ident, "type_str": type_str,
-        "driver": driver, "value": value, "pop": pop, "ctx": ctx,
+        "driver": driver, "value": value, "pop": pop,
+        "fingerprint": fingerprint, "vectors": vectors, "ctx": ctx,
     }
 
 
@@ -587,6 +739,28 @@ def build_tables(records):
             idents.append(r["ident"])
         r["ident_idx"] = ident_key_to_idx[r["ident"]]
 
+    # Fingerprint dedup (the 74xx gate quartets share "CCCCCC-CCCCCC-").
+    fp_key_to_idx = {}
+    fingerprints = []
+    for r in records:
+        if r["fingerprint"] is None:
+            r["fp_idx"] = 0xFF
+            continue
+        if r["fingerprint"] not in fp_key_to_idx:
+            fp_key_to_idx[r["fingerprint"]] = len(fingerprints)
+            fingerprints.append(r["fingerprint"])
+        r["fp_idx"] = fp_key_to_idx[r["fingerprint"]]
+
+    # Vector sets: one per authored record, no dedup (bit patterns differ
+    # even when the pin lists agree - not worth the bookkeeping).
+    vector_sets = []
+    for r in records:
+        if r["vectors"] is None:
+            r["vec_idx"] = 0xFFFF
+            continue
+        r["vec_idx"] = len(vector_sets)
+        vector_sets.append((r["id"], r["vectors"]))
+
     # typeStr pool, ordered by first use (record order is deterministic).
     type_strs = []
     for r in records:
@@ -629,11 +803,15 @@ def build_tables(records):
     assert len(records) < 0xFFFF, "recIdx/pinout indices are uint16"
     assert len(pinouts) < 0xFFFF, "pinoutIdx is uint16 (0xFFFF reserved)"
     assert len(idents) < 0xFF, "i2cIdentIdx is uint8 (0xFF = none)"
+    assert len(fingerprints) < 0xFF, "fingerprintIdx is uint8 (0xFF = none)"
+    assert len(vector_sets) < 0xFFFF, "vectorSetIdx is uint16 (0xFFFF = none)"
     assert len(type_strs) < 256, "typeStrIdx is uint8"
 
     return {
         "records": records, "pinouts": pinouts, "pinout_users": pinout_users,
-        "idents": idents, "type_strs": type_strs, "names": names,
+        "idents": idents, "fingerprints": fingerprints,
+        "vector_sets": vector_sets,
+        "type_strs": type_strs, "names": names,
         "by_class": by_class, "class_ranges": class_ranges,
         "sub_ranges": sub_ranges,
     }
@@ -660,11 +838,17 @@ def estimate_rodata(t):
     for n, _ in t["names"]:
         strings.add(n)
     strings.update(t["type_strs"])
+    strings.update(t["fingerprints"])
     str_bytes = sum(len(s) + 1 for s in strings)
+    vec_bytes = sum(len(v["in_pins"]) + len(v["out_pins"]) +
+                    6 * len(v["in_bits"]) + 24
+                    for _, v in t["vector_sets"])
     sizes = {
         "pins": n_pins * 8,
         "pinouts": len(t["pinouts"]) * 8,
-        "i2cIdents": len(t["idents"]) * 9,
+        "i2cIdents": len(t["idents"]) * 13,
+        "fingerprints": len(t["fingerprints"]) * 4,
+        "vectorSets": vec_bytes,
         "records": len(t["records"]) * 40,
         "names": len(t["names"]) * 8,
         "byClass": len(t["by_class"]) * 2,
@@ -701,11 +885,14 @@ def emit_header(t, sizes):
         "// same rule as projectFiles.h. Everything else includes PartDb.h.",
         "//",
         f"// Dedup: {len(rec)} records -> {len(t['pinouts'])} pinouts, "
-        f"{len(t['names'])} names, {len(t['idents'])} i2c idents",
+        f"{len(t['names'])} names, {len(t['idents'])} i2c idents, "
+        f"{len(t['fingerprints'])} fingerprints",
         f"// Estimated rodata: ~{sizes['total']} bytes "
         f"(pins {sizes['pins']}, pinouts {sizes['pinouts']}, "
         f"records {sizes['records']}, names {sizes['names']},",
-        f"//   i2cIdents {sizes['i2cIdents']}, byClass {sizes['byClass']}, "
+        f"//   i2cIdents {sizes['i2cIdents']}, "
+        f"fingerprints {sizes['fingerprints']}, "
+        f"byClass {sizes['byClass']}, "
         f"ranges {sizes['ranges']}, typeStrs {sizes['typeStrs']}, "
         f"strings ~{sizes['strings']})",
         "// (assumes 32-bit pointers and in-TU merging of identical string"
@@ -746,11 +933,77 @@ def emit_header(t, sizes):
     lines.append("")
 
     # --- i2c idents ---
+    lines.append("// { numAddrs, addrs, whoAmIReg, whoAmIValue, whoAmIMask,")
+    lines.append("//   whoAmIReg2, whoAmIValue2, whoAmIMask2, probeOrder,"
+                 " flags }")
     lines.append("const PartDbI2cIdent partdb_i2cIdents[] = {")
-    for ii, (num, addrs, reg, val, mask, flags) in enumerate(t["idents"]):
+    for ii, (num, addrs, reg, val, mask, reg2, val2, mask2, order,
+             flags) in enumerate(t["idents"]):
         astr = ", ".join(f"0x{a:02X}" for a in addrs)
         lines.append(f"  {{ {num}, {{ {astr} }}, 0x{reg:02X}, 0x{val:02X}, "
-                     f"0x{mask:02X}, 0x{flags:02X} }}, // {ii}")
+                     f"0x{mask:02X}, 0x{reg2:02X}, 0x{val2:02X}, "
+                     f"0x{mask2:02X}, {order}, 0x{flags:02X} }}, // {ii}")
+    lines.append("};")
+    lines.append("")
+
+    # --- fingerprints ---
+    lines.append("// Tier-1 unpowered clamp fingerprints (PartDb.h alphabet)")
+    lines.append("const char* const partdb_fingerprints[] = {")
+    for fi, fp in enumerate(t["fingerprints"]):
+        lines.append(f"  {c_escape(fp)}, // {fi}")
+    lines.append("};")
+    lines.append("")
+
+    # --- vector sets (Tier-3 truth tables) ---
+    lines.append("// Tier-3 vector pin lists (per set: inPins then outPins)")
+    lines.append("static const uint8_t partdb_vecPins[] = {")
+    vec_pin_base = []
+    vp = 0
+    for vid, v in t["vector_sets"]:
+        vec_pin_base.append(vp)
+        ins = ", ".join(str(p) for p in v["in_pins"])
+        outs = ", ".join(str(p) for p in v["out_pins"])
+        lines.append(f"  {ins},   // {vid} in")
+        lines.append(f"  {outs},   // {vid} out")
+        vp += len(v["in_pins"]) + len(v["out_pins"])
+    if vp == 0:
+        lines.append("  0, // no vector sets authored")
+    lines.append("};")
+    lines.append("")
+    lines.append("// Tier-3 vector words (per set: inBits, outBits, outCare)")
+    lines.append("static const uint16_t partdb_vecWords[] = {")
+    vec_word_base = []
+    vw = 0
+    for vid, v in t["vector_sets"]:
+        vec_word_base.append(vw)
+        for label, arr in (("inBits", v["in_bits"]),
+                           ("outBits", v["out_bits"]),
+                           ("outCare", v["out_care"])):
+            row = ", ".join(f"0x{b:04X}" for b in arr)
+            lines.append(f"  {row},   // {vid} {label}")
+        vw += 3 * len(v["in_bits"])
+    if vw == 0:
+        lines.append("  0, // no vector sets authored")
+    lines.append("};")
+    lines.append("")
+    lines.append("// { supply, numIn, numOut, numSteps, inPins, outPins,")
+    lines.append("//   inBits, outBits, outCare }")
+    lines.append("const PartDbVectorSet partdb_vectorSets[] = {")
+    for k, (vid, v) in enumerate(t["vector_sets"]):
+        pb = vec_pin_base[k]
+        wb = vec_word_base[k]
+        n_in, n_out = len(v["in_pins"]), len(v["out_pins"])
+        n_steps = len(v["in_bits"])
+        lines.append(
+            f"  {{ {v['supply']}, {n_in}, {n_out}, {n_steps}, "
+            f"&partdb_vecPins[{pb}], &partdb_vecPins[{pb + n_in}],")
+        lines.append(
+            f"    &partdb_vecWords[{wb}], &partdb_vecWords[{wb + n_steps}], "
+            f"&partdb_vecWords[{wb + 2 * n_steps}] }}, // {k}: {vid}")
+    if not t["vector_sets"]:
+        lines.append("  { 0, 0, 0, 0, partdb_vecPins, partdb_vecPins,")
+        lines.append("    partdb_vecWords, partdb_vecWords, partdb_vecWords"
+                     " }, // none authored")
     lines.append("};")
     lines.append("")
 
@@ -763,7 +1016,8 @@ def emit_header(t, sizes):
 
     # --- records ---
     lines.append("// { id, displayName, ledName, menuName, desc,")
-    lines.append("//   partClass, subClass, typeStrIdx, i2cIdentIdx,")
+    lines.append("//   partClass, subClass, typeStrIdx, i2cIdentIdx,"
+                 " fingerprintIdx,")
     lines.append("//   pinoutIdx, altPinoutIdx, vectorSetIdx, driverKey,"
                  " defaultValue }")
     lines.append("const PartDbRecord partdb_records[] = {")
@@ -774,9 +1028,11 @@ def emit_header(t, sizes):
         lines.append(f"  {{ {c_escape(r['id'])}, {c_escape(r['display'])}, "
                      f"{c_escape(r['led'])}, {c_escape(r['menu'])},")
         lines.append(f"    {c_escape(r['desc'])},")
+        vec = "0xFFFF" if r["vec_idx"] == 0xFFFF else str(r["vec_idx"])
         lines.append(f"    {r['cls']}, {r['sub']}, {r['type_idx']}, "
-                     f"0x{r['ident_idx']:02X}, {r['pinout_idx']}, "
-                     f"0xFFFF, 0xFFFF, {drv}, {val} }},")
+                     f"0x{r['ident_idx']:02X}, 0x{r['fp_idx']:02X}, "
+                     f"{r['pinout_idx']}, "
+                     f"0xFFFF, {vec}, {drv}, {val} }},")
     lines.append("};")
     lines.append("")
 
@@ -826,6 +1082,8 @@ def emit_header(t, sizes):
         f"const uint16_t partdb_numPins = {n_pins};",
         f"const uint16_t partdb_numNames = {len(t['names'])};",
         f"const uint16_t partdb_numI2cIdents = {len(t['idents'])};",
+        f"const uint16_t partdb_numFingerprints = {len(t['fingerprints'])};",
+        f"const uint16_t partdb_numVectorSets = {len(t['vector_sets'])};",
         f"const uint16_t partdb_numTypeStrs = {len(t['type_strs'])};",
         "",
         "#endif // PARTDB_DATA_H",
@@ -858,6 +1116,26 @@ def self_test():
     m = compose_menu({}, "HD44780 1602", "test")
     assert m == "HD44780" + LINE_BREAK + "1602"
     assert compose_menu({}, "7400", "test") == "7400"
+    # vec parsing: carry-forward inputs, don't-care outputs, bit packing.
+    pins14 = ([("1A", 0, 0), ("1B", 0, 0), ("1Y", 0, 0)] +
+              [("x", 0, 0)] * 3 + [("GND", PINCLASS_GND, 2)] +
+              [("x", 0, 0)] * 6 + [("VCC", PINCLASS_POWER, 1)])
+    v = parse_vectors([("1=0 2=0 -> 3=1", "t1"), ("2=1 -> 3=1", "t2"),
+                       ("1=1 ->", "t3")], 14, pins14, "t")
+    assert v["in_pins"] == [1, 2] and v["out_pins"] == [3]
+    assert v["in_bits"] == [0b00, 0b10, 0b11], v["in_bits"]
+    assert v["out_bits"] == [1, 1, 0] and v["out_care"] == [1, 1, 0]
+    try:
+        parse_vectors([("2=1 -> 3=1", "t1"), ("1=0 ->", "t2")], 14,
+                      pins14, "t")
+        assert False, "late-appearing input must be rejected"
+    except SrcError:
+        pass
+    try:
+        parse_vectors([("7=0 -> 3=1", "t1")], 14, pins14, "t")
+        assert False, "driving a supply pin must be rejected"
+    except SrcError:
+        pass
 
 
 def main():
@@ -886,6 +1164,8 @@ def main():
     print(f"Names: {len(tables['names'])} "
           f"(ids + aliases, sorted for binary search)")
     print(f"I2C idents: {len(tables['idents'])}, "
+          f"fingerprints: {len(tables['fingerprints'])}, "
+          f"vector sets: {len(tables['vector_sets'])}, "
           f"typeStrs: {len(tables['type_strs'])}")
     print(f"Estimated rodata: ~{sizes['total']} bytes")
     if warnings:

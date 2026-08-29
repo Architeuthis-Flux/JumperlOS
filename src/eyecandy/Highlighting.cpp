@@ -366,6 +366,27 @@ extern "C" void highlightingInvalidatePartFocus(void) {
     partLabels.clearPartHighlight();
 }
 
+// The part card (partsShowPartCard) paints the OLED without going through
+// ReadingDisplay, so the live-reading pipeline's dedupe key AND the one-shot
+// reprint guards (lastPrintedNet / lastPrintedRowNode) still describe a
+// panel that is no longer there. Without this reset, scrolling back onto a
+// wired pin whose reading text hadn't changed early-returned before the
+// OLED write and left the previous pin's card up (Kevin's bench, 08:38 -
+// "scroll in from one direction sometimes doesn't update").
+//
+// EXACTLY these three latches, not resetReadingState(): the full reset also
+// wipes the live-value dead zones (prevRailVoltage & co), and with a STALE
+// highlight still armed (tap Top Rail, then inspect-tap an unwired part
+// leg - brightenNet(unwired) leaves highlightedNet parked on the rail) the
+// forced first repaint stomped the card ~80ms after it painted (adversarial
+// review, 09:12). The one-shot paints in highlightNets gate only on the
+// two guards below, so this narrow set is sufficient for the scroll fix.
+extern "C" void highlightingNoteExternalOledPaint(void) {
+    Highlighting::getInstance().lastPrintedNet = -1;
+    g_readingGuards.lastPrintedRowNode = -1;
+    ReadingDisplay::resetLastShown();
+}
+
 // First placed part with a pin on this row (its pin index in *pinIdx).
 static int scrollPartOnRow( int row, int* pinIdx ) {
     if ( row < 1 || row > 60 ) return -1;
@@ -1212,10 +1233,60 @@ static const char* adjustHintText( void ) {
 // Highlight readings label themselves with the currently brightened node.
 // The rendering itself lives in ReadingDisplay so measure mode, the voltage
 // adjuster and the probe cursor draw the exact same way.
+static void showNetReadingRaw( const char* name, const char* value,
+                               const char* value2 = nullptr,
+                               const char* hint = nullptr ) {
+    ReadingDisplay::show( name, brightenedNode, value, value2, hint );
+}
+
+// "7447 LT" for the placed part pin sitting on `node`. Matched by NODE,
+// never first-pin-on-net - a net carries many parts' pins at once and the
+// wrong part's name on the panel is worse than none (Kevin's ruling,
+// 2026-08-27). The part NAME is what truncates, never the pin suffix.
+static bool partPinHeaderForNode( int node, char* out, size_t outLen ) {
+    if ( node < 1 || node > 60 ) return false;
+    for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
+        const PartDefinition& p = globalState.parts.parts[ i ];
+        if ( !p.placed ) continue;
+        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+            if ( partPinNode( p, p.pins[ j ] ) != node ) continue;
+            const char* pn = p.pins[ j ].name;
+            int pinLen = (int)strlen( pn );
+            int nameBudget = (int)outLen - 1 - pinLen - 1;
+            if ( nameBudget < 1 ) nameBudget = 1;
+            snprintf( out, outLen, "%.*s %s", nameBudget, p.name, pn );
+            return true;
+        }
+    }
+    return false;
+}
+
+// The one funnel every net card passes through. When the brightened node is
+// a placed part's pin, the card is re-headed with the part identity so the
+// part display and the net display are ONE screen (Kevin, 08:38: a wired
+// pin's stop showed "the net display we'd show if it wasn't in a part"):
+// header "7447 LT" + row, first value row "GND 0.04 V" - source and value
+// combined on one small line, the 13:52 "make it smaller" idiom - with the
+// second value row and the hint riding through unchanged. Callers that
+// compose their OWN part-pin header (showGpioPinReading) paint through
+// showNetReadingRaw instead, so a name is never doubled.
 static void showNetReading( const char* name, const char* value,
                             const char* value2 = nullptr,
                             const char* hint = nullptr ) {
-    ReadingDisplay::show( name, brightenedNode, value, value2, hint );
+    char pinName[ 16 ];
+    if ( partPinHeaderForNode( brightenedNode, pinName, sizeof( pinName ) ) ) {
+        char detail[ 28 ];
+        bool haveName = ( name != nullptr && name[ 0 ] != '\0' );
+        bool haveValue = ( value != nullptr && value[ 0 ] != '\0' );
+        if ( haveName && haveValue )
+            snprintf( detail, sizeof( detail ), "%s %s", name, value );
+        else
+            snprintf( detail, sizeof( detail ), "%s",
+                      haveValue ? value : ( haveName ? name : "" ) );
+        ReadingDisplay::show( pinName, brightenedNode, detail, value2, hint );
+        return;
+    }
+    showNetReadingRaw( name, value, value2, hint );
 }
 
 // A GPIO on a part pin's net shows BOTH identities (Kevin's ask, 2026-08-27):
@@ -1229,8 +1300,16 @@ static void showGpioPinReading( int netNum, int gpioIdx, bool isOutput,
     snprintf( gpioLabel, sizeof( gpioLabel ), "GPIO %d %s", gpioIdx + 1,
               isOutput ? "out" : "in" );
     char pinName[ 16 ] = "";
-    if ( netNum > 0 && netNum < MAX_NETS &&
+    // The FOCUSED pin first, matched by node: with two parts on one net -
+    // exactly the 7447-driving-a-7seg board - the net walk below names
+    // whichever part the table lists first, which may not be the pin under
+    // the cursor. The net walk stays as the fallback for highlights that
+    // arrive from the GPIO side (header pad, bare wire), where no node
+    // matches but the net still deserves its part identity.
+    if ( !partPinHeaderForNode( brightenedNode, pinName, sizeof( pinName ) ) &&
+         netNum > 0 && netNum < MAX_NETS &&
          globalState.connections.nets[ netNum ].number == netNum ) {
+        pinName[ 0 ] = '\0';
         for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
             const PartDefinition& p = globalState.parts.parts[ i ];
             if ( !p.placed ) continue;
@@ -1251,52 +1330,25 @@ static void showGpioPinReading( int netNum, int gpioIdx, bool isOutput,
             if ( found ) break;
         }
     }
+    // Raw paints on purpose: the header is already the part pin (or
+    // deliberately not one), and the re-heading funnel would double it.
     if ( pinName[ 0 ] != '\0' ) {
-        showNetReading( pinName, gpioLabel, stateString );
+        showNetReadingRaw( pinName, gpioLabel, stateString );
     } else {
         char name[ 16 ];
         if ( netSemanticName( netNum, gpioIdx, name, sizeof( name ) ) )
-            showNetReading( name, stateString );   // the I2C "GPIO N SCL" form
+            showNetReadingRaw( name, stateString );   // the I2C "GPIO N SCL" form
         else
-            showNetReading( gpioLabel, stateString );
+            showNetReadingRaw( gpioLabel, stateString );
     }
 }
 
-// The rail/DAC twin of showGpioPinReading (Kevin, 12:53: "when we highlight
-// the E pin, it's just showing the rail thing, we need the same thing as
-// the gpio"). One deliberate difference: the pin is matched by the
-// brightened NODE, never first-pin-on-net - a rail net carries many parts'
-// pins at once and the wrong part's name on the panel is worse than none.
-// Returns false (nothing painted) when no placed pin sits on that node, so
-// the caller falls back to the plain rail card with its mA readout.
-static bool showSpecialPinReading( const char* srcLabel, const char* volts,
-                                   const char* hint ) {
-    if ( brightenedNode < 1 || brightenedNode > 60 ) return false;
-    for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
-        const PartDefinition& p = globalState.parts.parts[ i ];
-        if ( !p.placed ) continue;
-        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
-            if ( partPinNode( p, p.pins[ j ] ) != brightenedNode ) continue;
-            const char* pn = p.pins[ j ].name;
-            int pinLen = (int)strlen( pn );
-            char pinName[ 16 ];
-            int nameBudget = (int)sizeof( pinName ) - 1 - pinLen - 1;
-            if ( nameBudget < 1 ) nameBudget = 1;
-            snprintf( pinName, sizeof( pinName ), "%.*s %s", nameBudget,
-                      p.name, pn );
-            // One combined line, not two: "Top Rail" and the volts as
-            // separate value rows each auto-fit to a huge font that
-            // shouted over the pin's name (Kevin, 13:52: "that bit
-            // connected to the top rail is messing with the display,
-            // make it smaller"). The longer single string fits small.
-            char detail[ 28 ];
-            snprintf( detail, sizeof( detail ), "%s %s", srcLabel, volts );
-            showNetReading( pinName, detail, nullptr, hint );
-            return true;
-        }
-    }
-    return false;
-}
+// The rail/DAC-on-a-part-pin display (Kevin, 12:53: "when we highlight the
+// E pin, it's just showing the rail thing, we need the same thing as the
+// gpio") is no longer a special case: the showNetReading funnel above
+// re-heads EVERY net card - rails, DACs, GND, ADC, plain nets, I sense -
+// with the node-matched part pin, so the rail/DAC branches below just call
+// it like everyone else.
 
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
     // Serial.print("justReadProbe = ");
@@ -1404,8 +1456,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     // touching globalState.power.
                     snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 2 ) );
                     char curBuf[ 16 ];
-                    if ( !showSpecialPinReading( "Top Rail", value, adjustHintText( ) ) )
-                        showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
             }
             brightenedRail = 0;
@@ -1417,8 +1468,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 3 ) );
                     char curBuf[ 16 ];
-                    if ( !showSpecialPinReading( "Bottom Rail", value, adjustHintText( ) ) )
-                        showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
             }
             brightenedRail = 2;
@@ -1432,8 +1482,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 0 ) );
                     char curBuf[ 16 ];
-                    if ( !showSpecialPinReading( "DAC 0", value, adjustHintText( ) ) )
-                        showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    showNetReading( "DAC 0", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -1447,8 +1496,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     char value[ 28 ];
                     snprintf( value, sizeof( value ), "%0.2f V", getDacVoltage( 1 ) );
                     char curBuf[ 16 ];
-                    if ( !showSpecialPinReading( "DAC 1", value, adjustHintText( ) ) )
-                        showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    showNetReading( "DAC 1", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
                 }
                 lastPrintedNet = netHighlighted;
             }
@@ -1802,8 +1850,15 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     if ( print == 1 && ( lastPrintedNet != netHighlighted ||
                                          printedRowChanged ) ) {
                         char nameBuffer[ 16 ];
+                        char nodePin[ 16 ];
                         const char* baseName;
-                        if ( netSemanticName( netHighlighted, -1, nameBuffer, sizeof( nameBuffer ) ) )
+                        if ( partPinHeaderForNode( brightenedNode, nodePin, sizeof( nodePin ) ) )
+                            // showNetReading re-heads with THIS pin - and
+                            // netSemanticName's first-pin-on-net walk could
+                            // name a DIFFERENT part sharing the net, putting
+                            // "7SEG52 S4 0.31 V" under a "7447 D" header
+                            baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
+                        else if ( netSemanticName( netHighlighted, -1, nameBuffer, sizeof( nameBuffer ) ) )
                             baseName = nameBuffer;   // a placed part's pin label
                         else
                             baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
@@ -2040,8 +2095,7 @@ int Highlighting::checkForReadingChanges( void ) {
             snprintf( name, sizeof( name ), "DAC %d", dacNum );
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentDacVoltage );
             char curBuf[ 16 ];
-            if ( !showSpecialPinReading( name, valueString, adjustHintText( ) ) )
-                showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+            showNetReading( name, valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
 
             displayUpdated = true;
         }
@@ -2064,8 +2118,7 @@ int Highlighting::checkForReadingChanges( void ) {
 
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentRailVoltage );
             char curBuf[ 16 ];
-            if ( !showSpecialPinReading( top ? "Top Rail" : "Bottom Rail", valueString, adjustHintText( ) ) )
-                showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+            showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
 
             displayUpdated = true;
         }

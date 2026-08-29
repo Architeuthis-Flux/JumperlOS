@@ -16,6 +16,7 @@
 // #include "AdcUsb.h"
 #include "Commands.h"
 #include "Graphics.h"
+#include "PartsApp.h"       // partsAppendPinLabel - taps say which leg they hit
 #include "PersistentStuff.h"
 #include "RotaryEncoder.h"
 #include "ReadingDisplay.h"
@@ -3566,20 +3567,26 @@ void Probing::probeTick( ProbeSession& s ) {
                 // oled.print(definesToChar(nodesToConnect[0]));
                 // oled.print(" - ");
                 // oled.show();
-                // 24 per name: definesToChar's longest short names are 12+
-                // chars ("ISENSE_MINUS" is 13 bytes with NUL) and the old
-                // [12] was one byte short; 52 fits both + " - " (audit #6)
-                char node1Name[ 24 ];
-                strcpy( node1Name, definesToChar( nodesToConnect[ 0 ] ) );
+                // 40 per name: definesToChar's longest short name plus a
+                // part-pin suffix ("60 SSD1306_32_I_2 GND" - the tap says
+                // which leg it landed on, Kevin 08:38); 84 fits both + " - "
+                char node1Name[ 40 ];
+                snprintf( node1Name, sizeof( node1Name ), "%s",
+                          definesToChar( nodesToConnect[ 0 ] ) );
+                partsAppendPinLabel( nodesToConnect[ 0 ], node1Name, sizeof( node1Name ) );
                 char node2Name[ 24 ];
                 strcpy( node2Name, "   " );
 
-                char bothNames[ 52 ];
+                char bothNames[ 84 ];
                 strcpy( bothNames, node1Name );
                 strcat( bothNames, " - " );
                 strcat( bothNames, node2Name );
 
-                Serial.print( "\r                   \r" );
+                // EL 2 (whole-row erase), not a fixed run of spaces: the
+                // part-pin suffix makes these lines longer than any blank
+                // width we'd guess, and a short guess left tail residue
+                // ("...ND") after a no-print exit (adversarial review, 09:12)
+                Serial.print( "\x1b[2K\r" );
 
                 int numChars = strlen( node1Name );
                 for ( int i = 0; i < SPACE_FROM_LEFT - numChars; i++ ) {
@@ -3658,19 +3665,23 @@ void Probing::probeTick( ProbeSession& s ) {
                      nodesToConnect[ 0 ] > 0 && nodesToConnect[ 1 ] > 0 ) {
                     // b.printRawRow( 0b00011111, nodesToConnect[ 0 ] - 1, 0x0, 0x00000000 );
                     // b.printRawRow( 0b00011111, nodesToConnect[ 1 ] - 1, 0x0, 0x00000000 );
-                    Serial.print( "\r              \r" );
+                    Serial.print( "\x1b[2K\r" );   // see the first-tap blank above
 
                     // Serial.println("fuck");
                     Serial.flush( );
-                    char node1Name[ 24 ];   // see the sibling above (audit #6)
+                    char node1Name[ 40 ];   // name + part-pin suffix (see sibling above)
 
-                    strcpy( node1Name, definesToChar( nodesToConnect[ 0 ] ) );
+                    snprintf( node1Name, sizeof( node1Name ), "%s",
+                              definesToChar( nodesToConnect[ 0 ] ) );
+                    partsAppendPinLabel( nodesToConnect[ 0 ], node1Name, sizeof( node1Name ) );
 
-                    char node2Name[ 24 ];
+                    char node2Name[ 40 ];
 
-                    strcpy( node2Name, definesToChar( nodesToConnect[ 1 ] ) );
+                    snprintf( node2Name, sizeof( node2Name ), "%s",
+                              definesToChar( nodesToConnect[ 1 ] ) );
+                    partsAppendPinLabel( nodesToConnect[ 1 ], node2Name, sizeof( node2Name ) );
 
-                    char bothNames[ 52 ];
+                    char bothNames[ 84 ];
                     strcpy( bothNames, node1Name );
                     strcat( bothNames, " - " );
                     strcat( bothNames, node2Name );
@@ -3776,13 +3787,15 @@ void Probing::probeTick( ProbeSession& s ) {
 
                 } else if ( s.setOrClear == 0 ) {
 
-                    // 24 covers the longest short name + " cleared" + NUL
-                    // ("NANO_3V3 cleared" = 17) - the old [12] was a stack
-                    // smash on every named-node clear, and the bothNames
-                    // block read it uninitialized (sweep findings).
-                    char node1Name[ 24 ];
+                    // 40 covers the longest short name + a part-pin suffix
+                    // + " cleared" + NUL ("60 SSD1306_32_I_2 GND cleared" =
+                    // 30) - the old [12] was a stack smash on every
+                    // named-node clear (sweep finding), and the tap now says
+                    // which leg it landed on (Kevin, 08:38).
+                    char node1Name[ 40 ];
                     snprintf( node1Name, sizeof( node1Name ), "%s",
                               definesToChar( nodesToConnect[ 0 ] ) );
+                    partsAppendPinLabel( nodesToConnect[ 0 ], node1Name, sizeof( node1Name ) );
 
                     // int numChars = strlen(node1Name);
                     // for (int i = 0; i < SPACE_FROM_LEFT - numChars; i++) {
@@ -3871,8 +3884,14 @@ void Probing::probeTick( ProbeSession& s ) {
                         Serial.println( );
                         Serial.flush( );
 
-                        snprintf( node1Name, sizeof( node1Name ), "%s cleared",
-                                  definesToChar( nodesToConnect[ 0 ] ) );
+                        // Append in place - node1Name above already carries
+                        // the part-pin suffix a recompose would drop.
+                        {
+                            size_t nl = strlen( node1Name );
+                            if ( nl < sizeof( node1Name ) )
+                                snprintf( node1Name + nl, sizeof( node1Name ) - nl,
+                                          " cleared" );
+                        }
 
                         oled.clearPrintShow( node1Name, 2, true, true, true );
 

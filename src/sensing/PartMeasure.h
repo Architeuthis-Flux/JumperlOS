@@ -113,6 +113,43 @@ bool partScanHfe(ScanSession& s, int eIdx, int bIdx, int cIdx, bool pnp,
 bool partScanFetProbe(ScanSession& s, int gIdx, int dIdx, int sIdx,
                       bool gateHigh, float* id_mA);
 
+// Tier-1 unpowered clamp fingerprint (DESIGN_IC_IDENTIFICATION.md 5.1). An
+// unpowered chip is a diode mesh: every real pin conducts to the supply
+// pins through its ESD/substrate structures, and WHICH directions conduct
+// at WHAT drop is a family fingerprint. Bench truth (7447, 2026-08-28):
+// standard-TTL paths are junction CHAINS, not single diodes - inputs read
+// ~1.5V to GND (substrate->collector->base->emitter), open-collector
+// outputs ~1.7V to GND, and NOTHING conducts pin-above-VDD (that absence
+// is the open-collector/TTL signature; a 74HC clamps both ways at ~0.7V).
+// One servo at 1mA per direction - the 50uA two-current ratio law was
+// tried and dropped: it lives inside the fabric's transient floor and
+// painted phantom paths (see clampProbeDir in the .cpp).
+enum : uint8_t {
+    PART_CLAMP_OPEN = 0,        // no conduction inside 3.3V at 1mA
+    PART_CLAMP_JUNCTION = 1,    // junction(s): >= ~0.4V drop at 1mA
+    PART_CLAMP_RESISTIVE = 2,   // hard tie: < 0.25V drop (strap to a rail)
+};
+struct ClampPin {
+    int row = 0;
+    bool probed = false;   // false: rail row, x-pin row, or session refused
+    uint8_t toGnd = PART_CLAMP_OPEN;   // gnd row driven ABOVE the pin
+    uint8_t toVdd = PART_CLAMP_OPEN;   // pin driven ABOVE the vdd row
+    float vfGnd = 0.0f;    // drop at 1mA when conducting
+    float vfVdd = 0.0f;
+};
+// pinRows in physical pin order (the caller owns the geometry - see
+// PartDefinition::nodeForPin); pins that ARE the rails come back unprobed
+// with row filled in. Two 2-row sessions per pin (one per direction) -
+// never a 3-row session, whose roving-GPIO claim would refuse every pin on
+// a board with all GPIOs wired (bench: the 7-seg record owns all eight).
+// Wiring on the rail rows themselves (a rail feed keeping the chip
+// powered) is lifted ONCE for the whole run and restored after. Returns
+// pins probed, or -1 bad args. abortCheck (nullable) is polled between
+// pins.
+int partScanClampFingerprint(const int* pinRows, int nPins, int gndRow,
+                             int vddRow, ClampPin* out,
+                             bool (*abortCheck)(void) = nullptr);
+
 // Ground every session row briefly (GND legs, no pads), then remove.
 void partScanDischarge(ScanSession& s);
 
@@ -142,9 +179,10 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
 // whole part through its own junctions, so nothing shares at release
 // (bench, 2N3906). This sweeps free pairs in two arrangements - adjacent
 // (n,n+1) and across the center channel (n,n+30 - the same column on the
-// other half) - at 3.0V through the shunt, both directions (~70ms per
-// check): a junction, an LED, or a resistor (up to ~19k) conducts, and
-// both rows get flagged 5. A third, evidence-gated stage sweeps the six
+// other half) - at 3.0V through the shunt, both directions (~10ms per
+// check; current is read as the sink row's voltage on the scan ADC - the
+// ants' Ohm's-law idea - not the 50ms-gated INA): a junction, an LED, or
+// a resistor (up to ~19k) conducts, and both rows get flagged 5. A third, evidence-gated stage sweeps the six
 // columns beside each x-pin row (29/30/59/60, unpokeable by the census)
 // against that row, widening to the mirror half when an edge row shows
 // hits - a 7-seg's common anode on row 59 fans out to segments in both

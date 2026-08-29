@@ -485,10 +485,13 @@ power:
     # --- 7. The Python bindings: place_part / list_parts / remove_part ---------
     # Slot 3 is active and its parts table is empty (phase 6 loaded the no-parts
     # YAML), so every part seen from here on came from the API. Geometry (wave 2
-    # binding geometry - DIP row MUST be bottom-half, axial2 row MUST be top-half):
+    # binding geometry + the 2026-08-28 orientation ruling: a DIP row's HALF
+    # encodes rotation - bottom = dot bottom-left, top = rotated 180; axial2
+    # row MUST be top-half):
     #   U9 sip2 @ row 5 (footprint inferred):  A pin 1 -> node 5, B pin 2 -> node 6
     #   U8 dip8 @ row 44 (explicit):           VCC pin 8 -> (44-30)+(8-8) = node 14
     #   AX1 axial2 @ row 27 (explicit):        A pin 1 -> node 27, B pin 2 -> node 57
+    #   U7R dip8 @ row 25 (rotated):           A pin 1 -> node 25, B pin 8 -> node 55
     out = jl_exec("""
 print("gp_none=", guide_progress())
 print("rc=", place_part("U9", 5, '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'))
@@ -498,7 +501,8 @@ print("rc_dup=", place_part("U9", 20, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_odd=", place_part("BAD1", 20, '{"A": {"pin": 1, "connect": 30}}', "dip7"))
 print("rc_row=", place_part("BAD2", 99, '{"A": {"pin": 1, "connect": 30}}'))
 print("rc_nopins=", place_part("BAD3", 20, '{}'))
-print("rc_diptop=", place_part("BAD4", 5, '{"A": {"pin": 1, "connect": 32}}', "dip8"))
+print("rc_diprot=", place_part("U7R", 25, '{"A": {"pin": 1, "connect": 32}, "B": {"pin": 8, "connect": 33}}', "dip8"))
+print("rc_diprotfit=", place_part("BAD4", 2, '{"A": {"pin": 1, "connect": 32}}', "dip8"))
 print("rc_axbot=", place_part("BAD5", 35, '{"A": {"pin": 1, "connect": 32}}', "axial2"))
 print("rc_dipfit=", place_part("BAD6", 58, '{"A": {"pin": 1, "connect": 50}, "D": {"pin": 4, "connect": 51}}', "dip8"))
 print("rc_offbad=", place_part("BAD7", 25, '{"A": {"offset": 0, "connect": 40}, "B": {"offset": 10, "connect": 41}}', "sip2"))
@@ -522,11 +526,18 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
     check(vals.get("rc_odd") == -1, "place_part with an odd DIP pin count is refused (-1)")
     check(vals.get("rc_row") == -1, "place_part with row 99 is refused (-1)")
     check(vals.get("rc_nopins") == -1, "place_part with no parseable pins is refused (-1)")
-    # The wave-2 rejection needles: a top-anchored DIP (the mirrored bug) and a
-    # bottom-anchored axial2 (pin 2 would fall off the board) must both fail
-    # cleanly - no entry, no crash - matching PartPlacement.cpp's new validation.
-    check(vals.get("rc_diptop") == -1,
-          "place_part with a top-anchored dip8 (row 5) is refused (-1) - bottom half only")
+    # The 2026-08-28 orientation ruling: a TOP-half DIP anchor is the SAME
+    # chip rotated 180 degrees (pin 1 top-right) and is VALID now - the
+    # wave-2 "mirrored bug" was ASSUMING an orientation, not the top half
+    # itself. Rotated dip8 at 25: pin 1 -> 25 (top, right->left), pin 8 ->
+    # (25+30)-(8-8) = 55 (bottom, left->right) - the exact reverse
+    # permutation of the normal mapping. A rotated chip whose columns would
+    # run past row 1 still fails cleanly, as does a bottom-anchored axial2
+    # (pin 2 would fall off the board).
+    check(vals.get("rc_diprot") == 0,
+          "place_part with a top-anchored dip8 (row 25) is accepted (0) - rotated 180")
+    check(vals.get("rc_diprotfit") == -1,
+          "place_part with a rotated dip8 at row 2 (columns run past row 1) is refused (-1)")
     check(vals.get("rc_axbot") == -1,
           "place_part with a bottom-anchored axial2 (row 35) is refused (-1) - top half only")
     # Column-fit needle: dip8 at row 58 doesn't fit (near side would overflow
@@ -563,11 +574,11 @@ print("names_after=", ",".join(sorted(p["name"] for p in list_parts())))
           "place_part with a PIN name starting '- ' is refused (-1)")
     check(vals.get("rc_pinhash") == -1,
           "place_part with a PIN name starting '#' is refused (-1)")
-    # ...and nothing partial landed: only the three parts that were accepted -
+    # ...and nothing partial landed: only the four parts that were accepted -
     # including BAD6, whose pin 1 (node 58) would have worked on its own.
-    check(vals.get("names_after") == "AX1,U8,U9",
+    check(vals.get("names_after") == "AX1,U7R,U8,U9",
           f"every refused place_part left NO entry behind (table holds "
-          f"{vals.get('names_after')!r}, expected 'AX1,U8,U9')")
+          f"{vals.get('names_after')!r}, expected 'AX1,U7R,U8,U9')")
 
     out = jl_exec("""
 print("u9a=", 1 if is_connected(5, "GND") else 0)
@@ -576,7 +587,9 @@ print("u8vcc=", 1 if is_connected(14, "TOP_RAIL") else 0)
 print("ax1a=", 1 if is_connected(27, 40) else 0)
 print("ax1b=", 1 if is_connected(57, 41) else 0)
 print("bad=", 1 if is_connected(20, 30) else 0)
-print("diptopbad=", 1 if is_connected(5, 32) else 0)
+print("diprot=", 1 if is_connected(25, 32) else 0)
+print("diprotb=", 1 if is_connected(55, 33) else 0)
+print("diprotfitbad=", 1 if is_connected(2, 32) else 0)
 print("dipfitbad=", 1 if is_connected(58, 50) else 0)
 print("offbad=", 1 if is_connected(25, 40) else 0)
 print("badchar=", 1 if is_connected(30, 31) else 0)
@@ -592,8 +605,12 @@ for i in range(1, 59):
     check(vals.get("ax1a") == 1, "place_part expanded AX1 pin A: bridge 27 (row) <-> 40")
     check(vals.get("ax1b") == 1, "place_part expanded AX1 pin B: bridge 57 (row+30) <-> 41")
     check(vals.get("bad") == 0, "no bridge from any refused place_part call (20-30 absent)")
-    check(vals.get("diptopbad") == 0,
-          "no bridge from the rejected top-anchored dip8 (5-32 absent)")
+    check(vals.get("diprot") == 1,
+          "rotated dip8 expanded pin 1 (top-right, node 25) <-> 32")
+    check(vals.get("diprotb") == 1,
+          "rotated dip8 expanded pin 8 (bottom, node 55 = (25+30)-(8-8)) <-> 33")
+    check(vals.get("diprotfitbad") == 0,
+          "no bridge from the rejected unfittable rotated dip8 (2-32 absent)")
     check(vals.get("dipfitbad") == 0,
           "no PARTIAL placement from the rejected off-board dip8 (58-50 absent, "
           "even though pin 1 alone would have fit)")
@@ -655,10 +672,14 @@ print("ax1row=", ax1['row'])
 print("ax1fp=", ax1['footprint'])
 print("ax1anode=", ax1['pins']['A']['node'])
 print("ax1bnode=", ax1['pins']['B']['node'])
+u7r = by['U7R']
+print("u7rrow=", u7r['row'])
+print("u7ranode=", u7r['pins']['A']['node'])
+print("u7rbnode=", u7r['pins']['B']['node'])
 """)
     vals = parse_kv(out)
-    check(vals.get("n") == 3,
-          "list_parts() returned all three placed parts and nothing from the refused calls")
+    check(vals.get("n") == 4,
+          "list_parts() returned all four placed parts and nothing from the refused calls")
     check(vals.get("u9row") == 5, "list_parts: U9 row is 5")
     check(vals.get("u9fp") == "sip2", "list_parts: U9 footprint inferred as sip2")
     check(vals.get("u9placed") == 1, "list_parts: U9 placed is True")
@@ -674,6 +695,11 @@ print("ax1bnode=", ax1['pins']['B']['node'])
     check(vals.get("ax1fp") == "axial2", "list_parts: AX1 footprint is axial2")
     check(vals.get("ax1anode") == 27, "list_parts: AX1 pin A resolves to node 27 (row)")
     check(vals.get("ax1bnode") == 57, "list_parts: AX1 pin B resolves to node 57 (row+30)")
+    check(vals.get("u7rrow") == 25, "list_parts: U7R (rotated dip8) row is 25")
+    check(vals.get("u7ranode") == 25,
+          "list_parts: U7R pin 1 resolves to node 25 (top-right anchor)")
+    check(vals.get("u7rbnode") == 55,
+          "list_parts: U7R pin 8 resolves to node 55 - the rotated far side")
 
     # The silent-vanish check: a part BUILT by place_part must survive the
     # serializer AND re-parse on the next load (place_part enforces the same
@@ -690,7 +716,9 @@ print("ax1bnode=", ax1['pins']['B']['node'])
                    "VCC: {pin: 8, connect: TOP_RAIL, class: signal}",
                    '- name: "AX1"', "footprint: axial2", "row: 27",
                    "A: {pin: 1, connect: 40, class: signal}",
-                   "B: {pin: 2, connect: 41, class: signal}"):
+                   "B: {pin: 2, connect: 41, class: signal}",
+                   '- name: "U7R"', "row: 25",
+                   "B: {pin: 8, connect: 33, class: signal}"):
         check(needle in api_yaml, f"place_part serialized: {needle}")
 
     port1_command(f"<{bounce}", 4.0)
@@ -703,18 +731,23 @@ print("u9b=", 1 if is_connected(6, 7) else 0)
 print("u8vcc=", 1 if is_connected(14, "TOP_RAIL") else 0)
 print("ax1a=", 1 if is_connected(27, 40) else 0)
 print("ax1b=", 1 if is_connected(57, 41) else 0)
+print("u7rb=", 1 if is_connected(55, 33) else 0)
 """)
     vals = parse_kv(out)
-    check(vals.get("n") == 3, "reload: all three API-placed parts re-parsed (none silently dropped)")
+    check(vals.get("n") == 4, "reload: all four API-placed parts re-parsed (none silently dropped)")
     check(vals.get("u9b") == 1, "reload: U9 pin B bridge 6-7 re-expanded")
     check(vals.get("u8vcc") == 1, "reload: U8 pin VCC bridge 14-TOP_RAIL re-expanded")
     check(vals.get("ax1a") == 1, "reload: AX1 pin A bridge 27-40 re-expanded")
     check(vals.get("ax1b") == 1, "reload: AX1 pin B bridge 57-41 re-expanded")
+    check(vals.get("u7rb") == 1,
+          "reload: U7R (rotated dip8) pin 8 bridge 55-33 re-expanded - the "
+          "rotated encoding round-trips the YAML")
 
     out = jl_exec("""
 print("rm=", remove_part("U9"))
 print("rm2=", remove_part("U8"))
 print("rm3=", remove_part("AX1"))
+print("rm4=", remove_part("U7R"))
 print("rm_missing=", remove_part("U9"))
 print("n=", len(list_parts()))
 print("u9a=", 1 if is_connected(5, "GND") else 0)
@@ -722,10 +755,12 @@ print("u9b=", 1 if is_connected(6, 7) else 0)
 print("u8vcc=", 1 if is_connected(14, "TOP_RAIL") else 0)
 print("ax1a=", 1 if is_connected(27, 40) else 0)
 print("ax1b=", 1 if is_connected(57, 41) else 0)
+print("u7rb=", 1 if is_connected(55, 33) else 0)
 names = []
 for i in range(1, 59):
     nm = get_net_name(i)
-    if nm and (str(nm).startswith("U9_") or str(nm).startswith("AX1_")):
+    if nm and (str(nm).startswith("U9_") or str(nm).startswith("AX1_")
+               or str(nm).startswith("U7R_")):
         names.append(str(nm))
 print("leftover=", ",".join(names) if names else "none")
 """, timeout=40)
@@ -733,6 +768,7 @@ print("leftover=", ",".join(names) if names else "none")
     check(vals.get("rm") == 0, "remove_part('U9') returned 0")
     check(vals.get("rm2") == 0, "remove_part('U8') returned 0")
     check(vals.get("rm3") == 0, "remove_part('AX1') returned 0")
+    check(vals.get("rm4") == 0, "remove_part('U7R') returned 0")
     check(vals.get("rm_missing") == -1, "remove_part on an unknown name returns -1")
     check(vals.get("n") == 0, "remove_part dropped the entries (list_parts() empty)")
     check(vals.get("u9a") == 0, "remove_part pulled the 5 <-> GND bridge")
@@ -740,6 +776,7 @@ print("leftover=", ",".join(names) if names else "none")
     check(vals.get("u8vcc") == 0, "remove_part pulled the 14 <-> TOP_RAIL bridge")
     check(vals.get("ax1a") == 0, "remove_part pulled the 27 <-> 40 bridge")
     check(vals.get("ax1b") == 0, "remove_part pulled the 57 <-> 41 bridge")
+    check(vals.get("u7rb") == 0, "remove_part pulled the rotated dip8's 55 <-> 33 bridge")
     check(vals.get("leftover") == "none", "remove_part cleared the {NAME}_{PIN} net names too")
 
     # --- 8. load_project() + the slot-clobber regression -----------------------

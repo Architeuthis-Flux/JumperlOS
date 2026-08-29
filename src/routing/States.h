@@ -264,8 +264,9 @@ struct ConfigState {
 //       part_id: ""         # optional part-ID hook (future /partdb reference)
 //       footprint: dip8     # dipN | sipN | axial2 (N = PHYSICAL pin count;
 //                           # axial2 is always exactly 2 pins)
-//       row: 35             # breadboard row of pin 1 - DIP requires 31-60
-//                           # (bottom half only, pin 1's dot/notch), axial2
+//       row: 35             # breadboard row of pin 1 - for DIP the half
+//                           # encodes orientation: 31-60 = dot bottom-left,
+//                           # 1-30 = rotated 180 (pin 1 top-right); axial2
 //                           # requires 1-30 (top half; pin 2 = row+30), SIP
 //                           # is legal on either half
 //       placed: false       # runtime flag; always serialized
@@ -493,12 +494,17 @@ struct PartDefinition {
     // bottom-left; this flipped the original top-anchored mapping, which was
     // mirrored):
     //   SIP  -> baseRow+(k-1), legal on either half.
-    //   DIP  -> baseRow MUST be on the bottom half (31-60) - a top-anchored
-    //           baseRow is no longer a valid DIP anchor at all (returns -1
-    //           for every pin, not just the far side). k<=N/2: baseRow+(k-1)
-    //           (bottom, left->right); k>N/2: (baseRow-30)+(N-k) (top,
-    //           right->left). Example: dip8 at row 35 -> pins 1-4 =
-    //           35,36,37,38; pins 5-8 = 8,7,6,5.
+    //   DIP  -> baseRow = pin 1's REAL hole, either half; the HALF encodes
+    //           orientation (Kevin's ruling, 2026-08-28: never assume
+    //           dot-bottom-left). Bottom half (31-60) = normal: k<=N/2:
+    //           baseRow+(k-1) (bottom, left->right); k>N/2:
+    //           (baseRow-30)+(N-k) (top, right->left). Example: dip8 at
+    //           row 35 -> pins 1-4 = 35,36,37,38; pins 5-8 = 8,7,6,5.
+    //           TOP half (1-30) = rotated 180 (pin 1 top-RIGHT): k<=N/2:
+    //           baseRow-(k-1) (top, right->left); k>N/2:
+    //           (baseRow+30)-(N-k) (bottom, left->right). Example: dip8 at
+    //           row 8 -> pins 1-4 = 8,7,6,5; pins 5-8 = 35,36,37,38 - the
+    //           exact reverse permutation of the normal mapping.
     //   axial2 -> baseRow MUST be on the top half (1-30); pin 1 = baseRow,
     //           pin 2 = baseRow+30 (same column, straddling the ravine -
     //           the default footprint for 2-leg parts like resistors/diodes,

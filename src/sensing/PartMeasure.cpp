@@ -277,6 +277,13 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
         }
     }
 
+    // The session's INA reads run at the hardware conversion cadence, not
+    // the ambient 50ms poll gate (Kevin, 2026-08-28: identify time was
+    // ~5/6ths waiting on that gate). partScanEnd - the every-exit funnel
+    // below this point - restores it, so the ambient display never
+    // inherits the fast cadence.
+    inaFastPollMode(true);
+
     // Park the probe power feed for the whole session, whatever its source
     // (a DAC0 feed shares the sweep's stimulus source; any feed keeps the
     // tip energized against a DUT row). This used to REFUSE under a DAC0
@@ -358,6 +365,7 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
 }
 
 void partScanEnd(ScanSession& s) {
+    inaFastPollMode(false);   // ambient cadence back before anything else
     restoreRovingGpio(s);
     setDac0voltage(s.dac0Restore, 0, 0, false);
     if (s.nEph > 0) {
@@ -668,6 +676,101 @@ bool partScanFetProbe(ScanSession& s, int gIdx, int dIdx, int sIdx,
 }
 
 // ---------------------------------------------------------------------------
+// Tier-1 clamp fingerprint (DESIGN_IC_IDENTIFICATION.md 5.1)
+// ---------------------------------------------------------------------------
+
+// One direction of one pin, in its own 2-row session (rows = {driven,
+// shunted}) - NOT a 3-row session: those claim the roving GPIO, and a
+// board whose GPIOs are all wired (the bench 7-seg owns all eight) would
+// refuse every pin for a pull the servo never uses.
+//
+// One servo at 1mA, no low-current ratio pass: the 50uA regime lives
+// inside this fabric's transient floor (bench, 2026-08-28: fixture-build
+// charge draining through the shunt tripped 50uA at the first DAC step,
+// painting phantom 150-ohm paths onto pins a two-lead identify proved
+// blocked at 5.5V - and the phantom sometimes REPEATED in-session). The
+// 1mA trip never false-fired across any run. The junction-vs-strap call
+// comes from the drop itself: a clamp junction reads >= ~0.4V at 1mA, a
+// hard tie (a pin strapped to its rail - LT held high on a wired-up 7447)
+// reads ~0.05V. Returns false only when the session itself refused.
+static bool clampProbeDir(int rowDrv, int rowShn, uint8_t* verdict,
+                          float* vf) {
+    const float kI_mA = 1.0f, kVmax = 3.3f, kTieV = 0.25f;
+    int rows2[2] = {rowDrv, rowShn};
+    ScanSession s;
+    if (partScanBegin(s, rows2, 2) != 0) return false;
+    float v = 0.0f, i = 0.0f;
+    if (partScanServo(s, 0, 1, kI_mA, kVmax, &v, &i)) {
+        *verdict = (v < kTieV) ? PART_CLAMP_RESISTIVE : PART_CLAMP_JUNCTION;
+        *vf = v;
+    }
+    partScanEnd(s);
+    return true;
+}
+
+int partScanClampFingerprint(const int* pinRows, int nPins, int gndRow,
+                             int vddRow, ClampPin* out,
+                             bool (*abortCheck)(void)) {
+    if (pinRows == nullptr || out == nullptr || nPins < 1) return -1;
+    if (gndRow < 1 || gndRow > 60 || vddRow < 1 || vddRow > 60 ||
+        gndRow == vddRow) return -1;
+
+    // The fingerprint is an UNPOWERED measurement, but each pin's 2-row
+    // session only lifts wiring on its OWN rows - a rail feed on the chip's
+    // supply row (bench: TOP_RAIL wired to the 7447's VCC, rail live) keeps
+    // the chip powered through every GND-side session and every reading is
+    // chip-internal garbage. Lift everything touching the chip's rail rows
+    // ONCE for the whole run; a TTL part bleeds its own VCC net dry in
+    // microseconds once unfed. (During the Auto Scan all user bridges are
+    // already lifted and this finds nothing.)
+    int16_t liftA[12], liftB[12], liftDup[12];
+    int nLift = 0;
+    for (int i = 0; i < globalState.connections.numBridges; i++) {
+        int n1 = globalState.connections.bridges[i][0];
+        int n2 = globalState.connections.bridges[i][1];
+        if (n1 != gndRow && n2 != gndRow && n1 != vddRow && n2 != vddRow)
+            continue;
+        if (globalState.isEphemeralConnection(n1, n2)) continue;
+        if (infraIsBridge(n1, n2)) continue;
+        if (nLift >= 12) return -1;   // too wired to briefly unwire
+        liftA[nLift] = (int16_t)n1;
+        liftB[nLift] = (int16_t)n2;
+        liftDup[nLift] = globalState.connections.bridges[i][2];
+        nLift++;
+    }
+    if (nLift > 0) {
+        for (int i = 0; i < nLift; i++)
+            removeBridgeFromState(liftA[i], liftB[i], false);
+        refreshQuiet();
+        delay(50);   // the unfed part drains its own supply net
+    }
+
+    int probed = 0;
+    for (int p = 0; p < nPins; p++) {
+        out[p] = ClampPin{};
+        out[p].row = pinRows[p];
+        if (abortCheck && abortCheck()) break;
+        int r = pinRows[p];
+        // rails fingerprint nothing against themselves
+        if (r < 1 || r > 60 || r == gndRow || r == vddRow) continue;
+        // GND-side: drive the GND row above the pin (substrate diode fwd);
+        // VDD-side: drive the pin above the VDD row (high-side clamp fwd) -
+        // the same two orientations partsChipMemberProbe bench-proved.
+        bool gOk = clampProbeDir(gndRow, r, &out[p].toGnd, &out[p].vfGnd);
+        bool vOk = clampProbeDir(r, vddRow, &out[p].toVdd, &out[p].vfVdd);
+        out[p].probed = gOk || vOk;
+        if (out[p].probed) probed++;
+    }
+
+    if (nLift > 0) {
+        for (int i = 0; i < nLift; i++)
+            addBridgeToState(liftA[i], liftB[i], liftDup[i], false);
+        refreshQuiet();
+    }
+    return probed;
+}
+
+// ---------------------------------------------------------------------------
 // whole-board census (the Auto scan's first pass)
 // ---------------------------------------------------------------------------
 
@@ -866,24 +969,33 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
     s.ephAddFailed = false;
     s.gpioIdx = -1;
 
-    // Bench truth: with the ISE legs routed the shunt reads a CONSTANT
-    // standing current (2.39mA here - the GuideChecks ledger's board-
-    // internal sink), and the stimulus shifts every EMPTY pair by an
-    // equally constant amount (-0.77mA +-10uA at 1V on this board).
-    // Absolute thresholds are hopeless against an artifact that big; the
-    // pair population is its own calibration - sweep everything, take the
-    // per-direction MEDIAN as the empty line, flag what deviates. The
-    // 2N3906's junction pairs sat 2.2mA off the line.
+    // Current sense is the ADC, not the INA (Kevin, 2026-08-28: the net
+    // current ants already turn ADC node voltages + known path resistance
+    // into current - same idea here). The INA path cost two ~25-50ms
+    // settled conversions PER DIRECTION (its poll is gated to 50ms) and was
+    // the whole scan's dominant term; the sink row's voltage is one ~us ADC
+    // read. Physics: the sink row drains through one routed path (~65R) +
+    // the 2R shunt to GND, so DUT current reads directly as sink-row
+    // voltage (I * ~67R). An EMPTY pair holds the sink at ~0V no matter
+    // what the board-internal standing sink (the GuideChecks ledger's
+    // 2.39mA) is doing - that artifact enters ISENSE beside the shunt, not
+    // through the sink row. Path resistance varies per route, so the value
+    // is detection-grade, not measurement-grade - which is all the sweep
+    // ever was: the per-direction MEDIAN is still the empty line, deviation
+    // still flags the pair, identify still does the real numbers over the
+    // INA.
     //
     // Drive is 3.0V (was 1.0V): an LED's 1.8-3.1V forward knee never
     // conducted at 1V - the exact cross-gap LED this sweep now looks for
     // was invisible to it. 3V through the ~130R loop caps a dead short at
     // ~23mA for 3ms, which identify's own servo already does deliberately.
-    // The higher drive also drops the deviation floor to 0.15mA, so
-    // resistors up to ~19k make the line (10k deviated only ~0.1mA at 1V,
-    // under the old 0.35 threshold - silently unseen).
+    // Deviation threshold: the INA line drew at 0.15mA (resistors to ~19k
+    // at 3V); through the ~67R sink path that is ~10mV. Same reach.
+    // ponytail: 10mV is arithmetic, not bench-tuned - if a real board's
+    // empty line wanders near it, raise the read's sample count (16 -> 64)
+    // before touching the threshold.
+    static constexpr float kSweepDevV = 0.010f;
     setDac0voltage(0.0f, 0, 0, false);
-    (void)inaSettledMa();   // settle the poll pipeline before the loop
 
     int newHits = 0;
     if (nGapPairsOut != nullptr) *nGapPairsOut = 0;
@@ -943,14 +1055,13 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                         legAdd(s, DAC0, src);
                         legAdd(s, snk, ISENSE_PLUS);
                         legAdd(s, ISENSE_MINUS, GND);
+                        legAdd(s, snk, ADC0 + ch);   // the current sense
                         if (!legsBuild(s)) continue;
                         setDac0voltage(3.0f, 0, 0, false);
                         delay(3);
-                        // settled: the first read re-syncs the conversion
-                        // pipeline, the second is trustworthy - single reads
-                        // both missed a real junction and invented one (stale)
-                        (void)inaFreshMa();
-                        di[dir][nPairs] = inaFreshMa();
+                        // sink-row voltage IS the current (header comment):
+                        // one ~us read where two 25-50ms INA waits lived
+                        di[dir][nPairs] = readAdcVoltage(ch, 16);
                         setDac0voltage(0.0f, 0, 0, false);
                         legsClear(s);
                     }
@@ -986,7 +1097,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                 }
                 for (int i = 0; i < nPairs; i++) {
                     if (di[dir][i] > 1.0e8f) continue;
-                    if (fabsf(di[dir][i] - median) > 0.15f) {
+                    if (fabsf(di[dir][i] - median) > kSweepDevV) {
                         int a = pairA[i], b = pairB[i];
                         if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
                         if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
@@ -1056,11 +1167,11 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                             legAdd(s, DAC0, src);
                             legAdd(s, snk, ISENSE_PLUS);
                             legAdd(s, ISENSE_MINUS, GND);
+                            legAdd(s, snk, ADC0 + ch);   // the current sense
                             if (!legsBuild(s)) continue;
                             setDac0voltage(3.0f, 0, 0, false);
                             delay(3);
-                            (void)inaFreshMa();
-                            di[dir][nPairs] = inaFreshMa();
+                            di[dir][nPairs] = readAdcVoltage(ch, 16);
                             setDac0voltage(0.0f, 0, 0, false);
                             legsClear(s);
                         }
@@ -1071,7 +1182,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                 for (int dir = 0; dir < 2; dir++) {
                     for (int i = 0; i < nPairs; i++) {
                         if (di[dir][i] > 1.0e8f) continue;
-                        if (fabsf(di[dir][i] - edgeMedian[dir]) <= 0.15f)
+                        if (fabsf(di[dir][i] - edgeMedian[dir]) <= kSweepDevV)
                             continue;
                         int n = pairA[i], E = pairB[i];
                         for (int e = 0; e < 4; e++)

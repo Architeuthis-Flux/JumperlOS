@@ -124,6 +124,9 @@ int jl_get_num_parts( void );
 const char* jl_get_part_info( int idx );
 int jl_guide_progress( void );
 const char* jl_part_identify( int row1, int row2, int row3 );
+const char* jl_part_clamp_fingerprint( int baseRow, int width, int gndRow,
+                                       int vddRow );
+const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow );
 
 void jl_restore_micropython_entry_state( void );
 int jl_has_unsaved_changes( void );
@@ -2674,6 +2677,41 @@ static mp_obj_t jl_part_identify_func( size_t n_args, const mp_obj_t* args ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_part_identify_obj, 2, 3, jl_part_identify_func );
 
+// part_fingerprint(base_row, width, gnd_row, vdd_row)
+//   -> "status=... fp=... match=... pins=..."
+// Tier-1 unpowered ESD-clamp fingerprint of a bottom-anchored dipN chip:
+// per pin, which supply rails it clamps to and at what Vf. fp= is one char
+// per pin (G/V/B = clamps gnd/vdd/both, N = open, T = hard tie, '-' = rail,
+// x = unprobed); match= lists the top partdb candidates as id:mismatches.
+// Rail feeds on the gnd/vdd rows are lifted for the run and restored;
+// ~0.7s per pin.
+static mp_obj_t jl_part_fingerprint_func( size_t n_args, const mp_obj_t* args ) {
+    (void)n_args;
+    int baseRow = mp_obj_get_int( args[ 0 ] );
+    int width = mp_obj_get_int( args[ 1 ] );
+    int gndRow = mp_obj_get_int( args[ 2 ] );
+    int vddRow = mp_obj_get_int( args[ 3 ] );
+    const char* out = jl_part_clamp_fingerprint( baseRow, width, gndRow, vddRow );
+    return mp_obj_new_str( out, strlen( out ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_part_fingerprint_obj, 4, 4, jl_part_fingerprint_func );
+
+// part_vectors(base_row, width, gnd_row, vdd_row) -> "status=0 tried=... cands=..."
+// Tier-3: POWERS the found chip (current-limited, watchdogged) and runs
+// every same-footprint partdb candidate's truth-table vectors against it.
+// Per candidate: id:pass | id:fail@<step> | id:refused; "(r)" = the rails
+// forced the 180-rotated orientation (pin 1 top-right).
+static mp_obj_t jl_part_vectors_func( size_t n_args, const mp_obj_t* args ) {
+    (void)n_args;
+    int baseRow = mp_obj_get_int( args[ 0 ] );
+    int width = mp_obj_get_int( args[ 1 ] );
+    int gndRow = mp_obj_get_int( args[ 2 ] );
+    int vddRow = mp_obj_get_int( args[ 3 ] );
+    const char* out = jl_part_vectors( baseRow, width, gndRow, vddRow );
+    return mp_obj_new_str( out, strlen( out ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_part_vectors_obj, 4, 4, jl_part_vectors_func );
+
 // Field of a '|'/','-delimited record: returns the start, sets *len and
 // advances *cursor past the delimiter (same hand-rolled split style
 // get_path_info uses - there is no JSON/CSV library on board).
@@ -4945,6 +4983,8 @@ void jl_help_section( const char* section ) {
         mp_printf( &mp_plat_print, "        a NAME opens the project's one run file; anything with a '/' is a literal path\n" );
         mp_printf( &mp_plat_print, "   place_part(name, row, pins_json) - Place a part, expand its pins to bridges (0 = ok)\n" );
         mp_printf( &mp_plat_print, "   part_identify(r1, r2 [, r3])     - Electrically identify the isolated part on those rows\n" );
+        mp_printf( &mp_plat_print, "   part_fingerprint(base, w, gnd, vdd) - Unpowered ESD-clamp fingerprint of a dipN chip's pins\n" );
+        mp_printf( &mp_plat_print, "   part_vectors(base, w, gnd, vdd)  - Power the chip and run partdb truth-table vectors\n" );
         mp_printf( &mp_plat_print, "        optional: place_part(name, row, pins_json, footprint, type, value, part_id)\n" );
         mp_printf( &mp_plat_print, "        part_id: DB identity - re-placing the same part_id at the same row UPDATES it\n" );
         mp_printf( &mp_plat_print, "        pins_json: {\"A\": {\"pin\": 1, \"connect\": \"GND\"}, \"B\": {\"pin\": 2, \"connect\": 7}}\n" );
@@ -6858,6 +6898,8 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_load_project ), MP_ROM_PTR( &jl_load_project_obj ) },
     { MP_ROM_QSTR( MP_QSTR_place_part ), MP_ROM_PTR( &jl_place_part_obj ) },
     { MP_ROM_QSTR( MP_QSTR_part_identify ), MP_ROM_PTR( &jl_part_identify_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_part_fingerprint ), MP_ROM_PTR( &jl_part_fingerprint_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_part_vectors ), MP_ROM_PTR( &jl_part_vectors_obj ) },
     { MP_ROM_QSTR( MP_QSTR_remove_part ), MP_ROM_PTR( &jl_remove_part_obj ) },
     { MP_ROM_QSTR( MP_QSTR_list_parts ), MP_ROM_PTR( &jl_list_parts_obj ) },
     { MP_ROM_QSTR( MP_QSTR_guide_progress ), MP_ROM_PTR( &jl_guide_progress_obj ) },

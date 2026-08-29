@@ -125,7 +125,8 @@ still have one bridge.
 To **move** a part, tap any free hole and pin 1 jumps there. The wheel never
 moves a part - it only browses the steps. On the terminal, `m <row>` and `c` do
 the same two things the probe does. Chips (DIPs) sit with pin 1 - the dot or
-the notch - on the **bottom half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+the notch - wherever it really sits: **bottom-left** (rows 31-60) or rotated
+180 with pin 1 top-right (rows 1-30). Axial parts (resistors, diodes) straddle the
 middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
 
 **Browsing.** The wheel moves *between* steps rather than confirming them, and

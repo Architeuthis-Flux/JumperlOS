@@ -110,6 +110,19 @@ enum PartDbFootprint : uint8_t {
 #define PARTDB_I2C_FLAG_RANGE 0x02   // addrs[0] = base of a contiguous run
                                      // of numAddrs (PCF8574's 0x20-0x27
                                      // doesn't fit addrs[4] as a list)
+#define PARTDB_I2C_FLAG_WHOAMI2 0x04 // the second (reg,value,mask) is valid
+                                     // too - BOTH must match (REF 6.5: the
+                                     // BMP3xx / SHT2x two-read idents)
+
+// PartDbVectorSet.supply - what the part needs while vectors run
+// (DESIGN_IC_IDENTIFICATION.md 5.2, bench-decided 2026-08-28).
+enum PartDbVecSupply : uint8_t {
+  PARTDB_VEC_SUPPLY_EITHER = 0,  // family spans TTL+CMOS: try the 5V rail
+                                 // pass first, a 3.3V DAC pass on failure
+                                 // (74HC at 5V can't trust 3.3V GPIO drive)
+  PARTDB_VEC_SUPPLY_5V = 1,      // bipolar TTL: TOP_RAIL through the shunt
+  PARTDB_VEC_SUPPLY_3V3 = 2,     // CMOS-only record: DAC path suffices
+};
 
 struct PartDbPin {
   const char* name;  // <= 11 chars - copies into PartPin.name[12] (B-M3)
@@ -132,9 +145,47 @@ struct PartDbI2cIdent {
   uint8_t whoAmIReg;    // read-only probe - only ever read declared registers
   uint8_t whoAmIValue;
   uint8_t whoAmIMask;   // match: (read & mask) == (value & mask)
+  uint8_t whoAmIReg2;   // optional second read (PARTDB_I2C_FLAG_WHOAMI2)
+  uint8_t whoAmIValue2;
+  uint8_t whoAmIMask2;
+  uint8_t probeOrder;   // REF 6.3/6.5: within one address, lower asks first
+                        // (a WHO_AM_I holder outranks an RTC heuristic
+                        // outranks a registerless EEPROM). Default 100;
+                        // partdbCandidatesForI2cAddr returns ascending.
   uint8_t flags;        // PARTDB_I2C_FLAG_*
 };
 
+// Powered truth-table vectors (Tier 3, DESIGN_IC_IDENTIFICATION.md 5.2).
+// One set per record; steps run IN ORDER without a power cycle, so a
+// sequential part (the 74595) encodes its clock edges as consecutive
+// steps. Bit i of inBits[s] = the level driven on inPins[i] at step s; bit
+// i of outBits[s] = the level expected on outPins[i], checked only where
+// outCare[s] has bit i set (intermediate clocking steps check nothing).
+// Inputs are driven by 3.3V routable GPIOs; outputs are read through an
+// ADC leg with a GPIO pull-up attached (open-collector "off" reads H,
+// exactly how the datasheet truth tables mean it).
+struct PartDbVectorSet {
+  uint8_t supply;   // PartDbVecSupply
+  uint8_t numIn;    // <= 16 driven pins
+  uint8_t numOut;   // <= 16 read pins
+  uint8_t numSteps;
+  const uint8_t* inPins;    // [numIn] 1-based physical pin numbers
+  const uint8_t* outPins;   // [numOut]
+  const uint16_t* inBits;   // [numSteps]
+  const uint16_t* outBits;  // [numSteps]
+  const uint16_t* outCare;  // [numSteps]
+};
+
+// Unpowered clamp fingerprint (Tier 1, DESIGN_IC_IDENTIFICATION.md 5.1) -
+// one char per PHYSICAL pin, matching partScanClampFingerprint's measured
+// classes (the part_fingerprint fp= string uses the same alphabet):
+//   'G' junction to GND only     'V' junction to VDD only
+//   'B' junction both ways       'N' open both ways (NC pins)
+//   'T' hard tie (<0.25V drop)   '-' a supply pin (the rails themselves)
+// Record-side extras:
+//   '?' don't care               'C' conducts SOMEHOW (G, V, B or T) - for
+//                                    records whose aliases span TTL (reads
+//                                    G) and CMOS (reads B) families
 struct PartDbRecord {
   const char* id;           // <= 15 chars [A-Za-z0-9_-]; becomes partId[16]
   const char* displayName;  // <= 15 chars, OLED/terminal
@@ -147,6 +198,7 @@ struct PartDbRecord {
   uint8_t subClass;         // PartDbSubclass (within partClass)
   uint8_t typeStrIdx;       // partdb_typeStrs[] - PartDefinition.typeStr source
   uint8_t i2cIdentIdx;      // partdb_i2cIdents[], 0xFF = none
+  uint8_t fingerprintIdx;   // partdb_fingerprints[], 0xFF = none
   uint16_t pinoutIdx;       // partdb_pinouts[]
   uint16_t altPinoutIdx;    // 0xFFFF - reserved (alternate packages)
   uint16_t vectorSetIdx;    // 0xFFFF - reserved (phase-2 test vectors)
@@ -174,6 +226,8 @@ struct PartDbRange {
 extern const PartDbPin partdb_pins[];
 extern const PartDbPinout partdb_pinouts[];
 extern const PartDbI2cIdent partdb_i2cIdents[];
+extern const char* const partdb_fingerprints[];
+extern const PartDbVectorSet partdb_vectorSets[];
 extern const char* const partdb_typeStrs[];
 extern const PartDbRecord partdb_records[];
 extern const PartDbName partdb_names[];
@@ -185,6 +239,8 @@ extern const uint16_t partdb_numPinouts;
 extern const uint16_t partdb_numPins;
 extern const uint16_t partdb_numNames;
 extern const uint16_t partdb_numI2cIdents;
+extern const uint16_t partdb_numFingerprints;
+extern const uint16_t partdb_numVectorSets;
 extern const uint16_t partdb_numTypeStrs;
 
 //==============================================================================
@@ -208,6 +264,29 @@ const PartDbPinout* partdbPinoutOf(const PartDbRecord& r);
 // written (at most maxOut).
 int partdbCandidatesForI2cAddr(uint8_t addr, const PartDbRecord** out,
                                int maxOut);
+
+// The record's expected clamp fingerprint, NULL when it has none.
+const char* partdbFingerprintOf(const PartDbRecord& r);
+
+// Hard conflicts between a record's expected fingerprint and a MEASURED
+// one (the part_fingerprint fp= alphabet; 'x' = pin not probed, skipped).
+// -1 = not comparable (no record fingerprint, or lengths differ). 0 = a
+// clean match. Callers rank candidates by ascending mismatches and treat
+// ties as ties - the scan can't distinguish what the physics can't
+// (DESIGN_IC_IDENTIFICATION.md 5.4).
+int partdbFingerprintMismatch(const PartDbRecord& r, const char* measured);
+
+// The scan can't know which corner pin 1 sits in (bench, 2026-08-28:
+// Kevin's 7447 lived pin-1-top-right and its record was placed backwards).
+// A 180-rotated DIP reads the U-ordering shifted by HALF the pin count, so
+// this tries both alignments and returns the better mismatch count;
+// *rotatedOut (nullable) = 1 when the rotated alignment won - which also
+// says where pin 1 is, so a matcher hit can preselect the pin-1 tap.
+int partdbFingerprintMismatchOriented(const PartDbRecord& r,
+                                      const char* measured, int* rotatedOut);
+
+// The record's vector set, NULL when it has none.
+const PartDbVectorSet* partdbVectorSetOf(const PartDbRecord& r);
 
 // Can this record be placed on THIS board? Listed pins <= MAX_PART_PINS
 // (24 V5 / 16 OG) and the footprint fits the 60-row board (SIP within a

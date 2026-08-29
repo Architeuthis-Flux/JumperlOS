@@ -50,6 +50,18 @@ static void resetCurrentSenseMeasurement();
 static bool pollCurrentSenseMeasurement();
 static unsigned long lastCurrentSensePollMs = 0;
 static constexpr unsigned long CURRENT_SENSE_POLL_INTERVAL_MS = 50;
+// Scan-scoped fast cadence - see Peripherals.h. Volatile: set on core 0 by
+// the scan sessions, read by the same core's poll, but keep the intent
+// explicit for anyone moving the poll later.
+static volatile bool s_inaFastPoll = false;
+
+void inaFastPollMode(bool on) {
+    if (on == s_inaFastPoll) return;
+    s_inaFastPoll = on;
+    // 2^n samples: 0 = 1 sample (~532us), 4 = 16 samples (~8.5ms). Shunt
+    // config NEVER changes here (the 5 uA/LSB contract above).
+    INA0.setBusSamples(on ? 0 : 4);
+}
 static constexpr float CURRENT_SENSE_FILTER_ALPHA = 0.55f;
 static constexpr float CURRENT_SENSE_DIRECTION_EPSILON_MA = 0.25f;
 Peripherals& Peripherals::getInstance() {
@@ -108,16 +120,20 @@ static bool pollCurrentSenseMeasurement() {
     }
 
     unsigned long now = millis();
-    if ( now - lastCurrentSensePollMs < CURRENT_SENSE_POLL_INTERVAL_MS ) {
+    // Fast mode (scan sessions): no wall-clock pacing - the CNVR flag,
+    // cleared each read below, paces polls to the real ~9ms conversions.
+    if ( !s_inaFastPoll &&
+         now - lastCurrentSensePollMs < CURRENT_SENSE_POLL_INTERVAL_MS ) {
         return false;
     }
     // Attempt gate, stamped BEFORE any bus traffic: this runs from
     // serviceInner() too (probeMode's ~20 us loop), and the poll stamp
     // above only advances on a completed read - so a not-ready conversion
     // used to be re-asked over I2C on every single pass. >= 10 ms between
-    // attempts bounds the CNVR read to 100 Hz whatever the loop rate.
+    // attempts bounds the CNVR read to 100 Hz whatever the loop rate
+    // (fast mode: 2 ms / 500 Hz, one ~0.1ms bus read per attempt).
     static unsigned long lastAttemptMs = 0;
-    if ( now - lastAttemptMs < 10 ) {
+    if ( now - lastAttemptMs < ( s_inaFastPoll ? 2u : 10u ) ) {
         return false;
     }
     lastAttemptMs = now;
@@ -185,10 +201,11 @@ static bool pollCurrentSenseMeasurement() {
         return false;
     }
 
-    // (CNVR is sticky on the INA219 until the POWER register is read, which
-    // this path never does - so after the first conversion this is one bus
-    // read that always says yes. Kept as the cheap sanity check it is; the
-    // attempt gate above bounds its rate.)
+    // CNVR is real now: the POWER read below clears it every poll (the
+    // Probing.cpp INA1 idiom), so this is true only when a genuinely NEW
+    // conversion landed - which is what lets fast mode drop the wall-clock
+    // gate without ever stamping the same conversion fresh twice (the
+    // stale-read discipline inaSettledMa is built on).
     if ( !INA0.getConversionFlag() ) {
         return false;
     }
@@ -233,6 +250,9 @@ static bool pollCurrentSenseMeasurement() {
     if ( shuntOk ) {
         currentSenseState.shuntVoltage_mV = shunt_mV;
     }
+    // Reading POWER clears CNVR (Probing.cpp's INA1 idiom), re-arming the
+    // conversion flag so the next poll only fires on a genuinely new sample.
+    (void)INA0.getPower_mW();
 
     int direction = 0;
     if ( current_mA > CURRENT_SENSE_DIRECTION_EPSILON_MA ) {
