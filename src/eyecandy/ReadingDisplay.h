@@ -40,9 +40,19 @@ void show(const char* name, int rowNode, const char* value = nullptr,
 inline void showName(const char* name) { show(name, -1); }
 
 /// The serial half, kept narrow on purpose: the pinned-live-line manager
-/// reimplements these two and nothing else.
+/// reimplements these and nothing else.
 void emitLiveSerialLine(const char* line);
 void clearLiveSerialLine(void);
+
+/// One-shot selection trace (the part scroll's PARTSEL line), pinned one row
+/// ABOVE the live reading and rewritten in place - a raw print here would
+/// scroll the terminal on every encoder detent AND knock the reading pin
+/// loose. Clamped to one 80-column row. Also blanks the reading row, so emit
+/// the status BEFORE the reading that belongs with it.
+void emitLiveStatusLine(const char* line);
+/// Blank the status row (highlight cleared / moved on) without disturbing
+/// the reading below it. Safe to call anytime; no-op if the row isn't ours.
+void clearLiveStatusLine(void);
 
 /// Forget what was last shown, so the next show() always repaints.
 void resetLastShown(void);

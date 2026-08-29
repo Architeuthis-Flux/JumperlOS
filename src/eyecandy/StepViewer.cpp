@@ -9,6 +9,8 @@
 
 #include "StepViewer.h"
 
+#include <new>                 // std::nothrow (viewer arm/disarm heap alloc)
+
 #include "GuideScript.h"       // guideParse, GuideScript, step model
 #include "Highlighting.h"      // highlightedNet - net scroll owns the wheel
 #include "Menus.h"             // inClickMenu
@@ -26,29 +28,35 @@ StepViewer& StepViewer::getInstance() {
 }
 StepViewer& stepViewer = StepViewer::getInstance();
 
-// The step table: one static, same budget the old guide runner's static had
-// (~7.5 KB V5 / ~3.8 KB OG - that one died with GuidedFlow, so this is the
-// same RAM coming back for the ambient replacement).
-static GuideScript viewerScript;
-
-// The retained screen: header (title + counter) and three body lines, all
+// The step table + the retained screen, heap-allocated for exactly the armed
+// window (arm() ... disarm()). They used to be two permanent statics
+// (~11 KB V5 / ~5 KB OG of .bss) alive for the whole process while the viewer
+// is only armed when a project with a guide is open. OledGui holds
+// &viewer->screen while armed, and the z-check engine can hold
+// &viewer->script for a run, so disarm() deregisters/aborts both before the
+// delete. Screen layout: header (title + counter) and three body lines, all
 // Andale Mono 5pt on an 8 px pitch - showMultiLineSmallText's bench-proven
 // small-text recipe (oled.cpp:2667-2683: 4 lines of ~21 chars on the 128x32;
 // the first flash used Pragmatism 8/7pt, whose 18/16 px yAdvances couldn't
 // even fit three lines - "the font is way too big").
-static OledScreen viewerScreen;
+struct ViewerAlloc {
+    GuideScript script;
+    OledScreen screen;
+};
+static ViewerAlloc* viewer = nullptr;
 static int elHeader = -1, elBody1 = -1, elBody2 = -1, elBody3 = -1;
 
 static const int VIEWER_WRAP_COLS = 21;
 
 static void viewerBuildScreen() {
-    viewerScreen.clearElements();
-    viewerScreen.w = 128;
-    viewerScreen.h = 32;
-    elHeader = viewerScreen.addText("", 1, 0, "Andale Mono", 5);
-    elBody1 = viewerScreen.addText("", 1, 8, "Andale Mono", 5);
-    elBody2 = viewerScreen.addText("", 1, 16, "Andale Mono", 5);
-    elBody3 = viewerScreen.addText("", 1, 24, "Andale Mono", 5);
+    OledScreen& scr = viewer->screen;
+    scr.clearElements();
+    scr.w = 128;
+    scr.h = 32;
+    elHeader = scr.addText("", 1, 0, "Andale Mono", 5);
+    elBody1 = scr.addText("", 1, 8, "Andale Mono", 5);
+    elBody2 = scr.addText("", 1, 16, "Andale Mono", 5);
+    elBody3 = scr.addText("", 1, 24, "Andale Mono", 5);
 }
 
 // Word-wrap `text` into up to `nLines` lines of `cols` chars. Returns how
@@ -78,20 +86,20 @@ static size_t viewerWrap(const char* text, char lines[][64], int nLines, int col
 }
 
 int StepViewer::stepCount() const {
-    return active ? viewerScript.numSteps : 0;
+    return active ? viewer->script.numSteps : 0;
 }
 
 const GuideScript* StepViewer::armedScript() const {
-    return active ? &viewerScript : nullptr;
+    return active ? &viewer->script : nullptr;
 }
 
 // `VIEWER step=` id, the old GUIDE grammar's successor: <type>_<part|node>.
 static void viewerStepId(int idx, char* out, size_t outLen) {
-    if (idx < 0 || idx >= viewerScript.numSteps) {
+    if (idx < 0 || idx >= viewer->script.numSteps) {
         snprintf(out, outLen, "step");
         return;
     }
-    const GuideStep& st = viewerScript.steps[idx];
+    const GuideStep& st = viewer->script.steps[idx];
     switch (st.type) {
         case GuideStepType::PLACE:
             if (st.partIdx >= 0 && st.partIdx < globalState.parts.numParts) {
@@ -111,8 +119,8 @@ static void viewerStepId(int idx, char* out, size_t outLen) {
 void StepViewer::applyEmphasis() {
     int16_t nodes[PartLabels::MAX_EMPHASIS_NODES];
     int n = 0;
-    if (cursor >= 0 && cursor < viewerScript.numSteps) {
-        const GuideStep& st = viewerScript.steps[cursor];
+    if (cursor >= 0 && cursor < viewer->script.numSteps) {
+        const GuideStep& st = viewer->script.steps[cursor];
         if (st.type == GuideStepType::PLACE && st.partIdx >= 0 &&
             st.partIdx < globalState.parts.numParts) {
             const PartDefinition& p = globalState.parts.parts[st.partIdx];
@@ -134,21 +142,22 @@ void StepViewer::applyEmphasis() {
 
 void StepViewer::showStep(bool announce) {
     if (!active) return;
+    GuideScript& script = viewer->script;
     if (cursor < 0) cursor = 0;
-    if (cursor >= viewerScript.numSteps) cursor = viewerScript.numSteps - 1;
+    if (cursor >= script.numSteps) cursor = script.numSteps - 1;
 
     // Header: "<title> 3/10", truncated so the counter always fits in the
     // 21-char line. Body: three wrapped lines; a ".." tail marks text that
     // ran past the panel (the terminal's `z steps` always has all of it).
     char counter[12];
-    snprintf(counter, sizeof(counter), " %d/%d", cursor + 1, viewerScript.numSteps);
+    snprintf(counter, sizeof(counter), " %d/%d", cursor + 1, script.numSteps);
     char header[32];
     int titleCols = VIEWER_WRAP_COLS - (int)strlen(counter);
     if (titleCols < 4) titleCols = 4;
     snprintf(header, sizeof(header), "%.*s%s", titleCols,
-             viewerScript.title[0] ? viewerScript.title : "Steps", counter);
+             script.title[0] ? script.title : "Steps", counter);
 
-    const char* text = viewerScript.steps[cursor].text;
+    const char* text = script.steps[cursor].text;
     char lines[3][64];
     size_t consumed = viewerWrap(text, lines, 3, VIEWER_WRAP_COLS);
     if (consumed < strlen(text)) {
@@ -158,10 +167,10 @@ void StepViewer::showStep(bool announce) {
         strncat(lines[2], "..", sizeof(lines[2]) - l - 1);
     }
 
-    if (elHeader >= 0) viewerScreen.setText(elHeader, header);
-    if (elBody1 >= 0) viewerScreen.setText(elBody1, lines[0]);
-    if (elBody2 >= 0) viewerScreen.setText(elBody2, lines[1]);
-    if (elBody3 >= 0) viewerScreen.setText(elBody3, lines[2]);
+    if (elHeader >= 0) viewer->screen.setText(elHeader, header);
+    if (elBody1 >= 0) viewer->screen.setText(elBody1, lines[0]);
+    if (elBody2 >= 0) viewer->screen.setText(elBody2, lines[1]);
+    if (elBody3 >= 0) viewer->screen.setText(elBody3, lines[2]);
     OledGui::getInstance().requestRender();
 
     applyEmphasis();
@@ -169,7 +178,7 @@ void StepViewer::showStep(bool announce) {
     // Cursor persistence: the ordinary idle auto-save writes it; nothing is
     // force-saved per detent.
     globalState.parts.guideStep = (int16_t)cursor;
-    globalState.parts.guideTotal = (int16_t)viewerScript.numSteps;
+    globalState.parts.guideTotal = (int16_t)script.numSteps;
     globalState.markDirty();
 
     if (announce) {
@@ -178,7 +187,7 @@ void StepViewer::showStep(bool announce) {
         Serial.print("\r\nVIEWER step=");
         Serial.print(cursor + 1);
         Serial.print("/");
-        Serial.print(viewerScript.numSteps);
+        Serial.print(script.numSteps);
         Serial.print(" id=");
         Serial.print(id);
         Serial.print(" text=\"");
@@ -190,20 +199,25 @@ void StepViewer::showStep(bool announce) {
 
 int StepViewer::arm(const char* sourcePath, int cursorIn) {
     if (sourcePath == nullptr || sourcePath[0] == '\0') return -1;
-    // Disarm FIRST: guideParse memsets the LIVE static step table before it
-    // can fail (file deleted, FS unmounted), and a failed RE-arm used to
-    // leave active=true over a zeroed script - the next wheel turn divided
-    // by numSteps==0 (sweep finding, medium). A clean disarm before the
-    // parse means every failure path lands in a coherent off state.
+    // Disarm FIRST: it deregisters the old screen from OledGui and frees the
+    // old table, so every failure path below lands in a coherent off state
+    // (a failed RE-arm used to leave active=true over a zeroed script - the
+    // next wheel turn divided by numSteps==0; sweep finding, medium).
     disarm();
+    viewer = new (std::nothrow) ViewerAlloc();
+    if (viewer == nullptr) {
+        Serial.println("  (steps unavailable: out of memory)");
+        return -1;
+    }
     String err;
-    if (!guideParse(sourcePath, viewerScript, err)) {
+    if (!guideParse(sourcePath, viewer->script, err)) {
         Serial.println("  (steps unavailable: " + err + ")");
+        disarm();
         return -1;
     }
     if (err.length() > 0)
         Serial.println("  (guide parse warnings: " + err + ")");
-    if (viewerScript.numSteps <= 0) {
+    if (viewer->script.numSteps <= 0) {
         disarm();
         return 0;
     }
@@ -214,17 +228,25 @@ int StepViewer::arm(const char* sourcePath, int cursorIn) {
     holdLatch = false;
     cursor = cursorIn;
     viewerBuildScreen();
-    OledGui::getInstance().activate(&viewerScreen, /*persist=*/true);
+    OledGui::getInstance().activate(&viewer->screen, /*persist=*/true);
     showStep(/*announce=*/false);
-    return viewerScript.numSteps;
+    return viewer->script.numSteps;
 }
 
 void StepViewer::disarm() {
-    if (active) {
-        partLabels.clearEmphasis();
-        OledGui& gui = OledGui::getInstance();
-        gui.forgetIdle(&viewerScreen);
-        if (gui.active() == &viewerScreen) gui.deactivate();
+    if (viewer != nullptr) {
+        if (active) {
+            partLabels.clearEmphasis();
+            // The z-check engine may hold &viewer->script for an in-flight
+            // run (armedScript() feeds `z check step`); abort it before the
+            // storage goes away.
+            if (guideCheckUsesScript(&viewer->script)) guideCheckAbort();
+            OledGui& gui = OledGui::getInstance();
+            gui.forgetIdle(&viewer->screen);
+            if (gui.active() == &viewer->screen) gui.deactivate();
+        }
+        delete viewer;
+        viewer = nullptr;
     }
     active = false;
     armedSource[0] = '\0';
@@ -235,7 +257,7 @@ ServiceStatus StepViewer::service() {
 
     // Belt-and-braces against an armed-but-empty table (arm() disarms
     // before parsing now, but the cursor math below must never see 0).
-    if (viewerScript.numSteps <= 0) {
+    if (viewer->script.numSteps <= 0) {
         disarm();
         return ServiceStatus::IDLE;
     }
@@ -257,7 +279,7 @@ ServiceStatus StepViewer::service() {
     if (probeActive) return ServiceStatus::IDLE;
 
     OledGui& gui = OledGui::getInstance();
-    bool showing = (gui.active() == &viewerScreen) && gui.ownsPanel();
+    bool showing = (gui.active() == &viewer->screen) && gui.ownsPanel();
 
     // Click-and-HOLD while the steps screen is showing = the physical exit.
     // The button state is left alone (core 1's hold animation, and nothing
@@ -281,8 +303,6 @@ ServiceStatus StepViewer::service() {
     if (highlightedNet > 0) return ServiceStatus::IDLE;
 
     if (encoderDirectionState == UP || encoderDirectionState == DOWN) {
-        bool up = (encoderDirectionState == UP);
-        encoderDirectionState = NONE;
         if (!showing) {
             // First turn while yielded RECLAIMS the panel at the current
             // step; it does not move the cursor (turning past a reading
@@ -291,14 +311,19 @@ ServiceStatus StepViewer::service() {
             // persistent screen took the idle slot since (a MicroPython
             // stats page), stealing it back would silently evict the
             // user's page (sweep finding) - the turn falls through to
-            // Highlighting instead.
-            if (gui.idleScreen() != &viewerScreen) return ServiceStatus::IDLE;
+            // Highlighting instead - so test BEFORE the ack, since
+            // Highlighting is registered behind us and must still see the
+            // detent we are declining.
+            if (gui.idleScreen() != &viewer->screen) return ServiceStatus::IDLE;
+            encoderDirectionState = NONE;
             gui.showIdle();
             showStep(false);
             return ServiceStatus::BUSY;
         }
-        if (up) cursor = (cursor + 1) % viewerScript.numSteps;
-        else cursor = (cursor - 1 + viewerScript.numSteps) % viewerScript.numSteps;
+        bool up = (encoderDirectionState == UP);
+        encoderDirectionState = NONE;
+        if (up) cursor = (cursor + 1) % viewer->script.numSteps;
+        else cursor = (cursor - 1 + viewer->script.numSteps) % viewer->script.numSteps;
         showStep(false);   // wheel turns are silent on serial (bench law)
         return ServiceStatus::BUSY;
     }
@@ -337,19 +362,19 @@ void StepViewer::command(const String& rest) {
         return;
     }
     if (r == "next") {
-        cursor = (cursor + 1) % viewerScript.numSteps;
+        cursor = (cursor + 1) % viewer->script.numSteps;
         showStep(true);
     } else if (r == "prev") {
-        cursor = (cursor - 1 + viewerScript.numSteps) % viewerScript.numSteps;
+        cursor = (cursor - 1 + viewer->script.numSteps) % viewer->script.numSteps;
         showStep(true);
     } else if (r.length() > 0) {
         int n = r.toInt();
-        if (n >= 1 && n <= viewerScript.numSteps) {
+        if (n >= 1 && n <= viewer->script.numSteps) {
             cursor = n - 1;
             showStep(true);
         } else {
             Serial.println("VIEWER error step out of range (1-" +
-                           String(viewerScript.numSteps) + ")");
+                           String(viewer->script.numSteps) + ")");
         }
     } else {
         showStep(true);   // bare `z steps`: re-announce the current step

@@ -1,8 +1,18 @@
+// ============================================================================
+// Table-driven config manager.
+//
+// The option list lives in config.h (JL_CONFIG_ALL_OPTIONS) - ONE X() line
+// per option generates the struct field AND the descriptor entry below, which
+// drives parse, save, print, diff, help text, the config TUI, and migration.
+// Renamed/moved keys stay parseable through jlConfigAliases; removed keys
+// parse as silent no-ops so old config.txt files and pasted lines never
+// error out.
+// ============================================================================
+
 #include <FatFS.h>
 #include "Graphics.h"
 #include "MatrixState.h"
 #include "config.h"
-#include "JumperlessDefines.h"  // JL_BOOT_VERBOSE
 #include "PersistentStuff.h"
 #include "LEDs.h"
 #include "Commands.h"
@@ -12,18 +22,6 @@
 #include "Peripherals.h"
 #include "FilesystemStuff.h"
 #include "oled.h"
-
-// display_type is a `const char*` in the config struct, but both parse sites
-// were handed a pointer to the PARSER'S stack buffer - which is dead the
-// moment the line is consumed, so every later read (echo, save) dereferenced
-// freed stack (sweep finding, medium). Map onto static literals instead.
-static const char* oledDisplayTypeLiteral(const char* v) {
-    if (v == nullptr) return "SSD1306";
-    if (strcasecmp(v, "SH1106") == 0) return "SH1106";
-    if (strcasecmp(v, "SSD1309") == 0) return "SSD1309";
-    if (strcasecmp(v, "SSD1315") == 0) return "SSD1315";
-    return "SSD1306";
-}
 #include "ArduinoStuff.h"
 #include "Apps.h"
 #include "Jerial.h" // TermControl is now part of Jerial
@@ -35,18 +33,40 @@ static const char* oledDisplayTypeLiteral(const char* v) {
 #include "Python_Proper.h"
 #include "SelfTest.h"
 #include "FileCache.h"  // fileCacheFlushNow / fileCacheSpiftlSync - force config durable
-#include "InfraPaths.h" // infraNudge - re-evaluate the probe feed on dacs.probe_power_source
+#include "InfraPaths.h" // infraNudge - re-evaluate the probe feed on probe.power_source
+#include "eyecandy/MenuTransitions.h" // menuTransitionConfig <-> [clickwheel] fx_*
 
 #ifdef DONOTUSE_SERIALWRAPPER
     #include "SerialWrapper.h"
     #define Serial SerialWrap
 #endif
 
+// Which I2C port a pin can serve, and in which role - a mirror of the
+// gpioI2Cmap table initI2C() consults (src/Peripherals.cpp), so keep the two
+// in sync. role 0 = SDA, 1 = SCL. Returns the port (0 or 1), or -1 if the pin
+// cannot serve that role at all.
+static int oledI2CPortForPin(int pin, int role) {
+    static const int i2cPinPorts[14][3] = {
+        {  0, 0, 0 }, {  1, 1, 0 }, {  4, 0, 0 }, {  5, 1, 0 },
+        {  6, 0, 1 }, {  7, 1, 1 }, { 20, 0, 0 }, { 21, 1, 0 },
+        { 22, 0, 1 }, { 23, 1, 1 }, { 24, 0, 0 }, { 25, 1, 0 },
+        { 26, 0, 1 }, { 27, 1, 1 }
+    };
+    for (int i = 0; i < 14; i++) {
+        if (i2cPinPorts[i][0] == pin && i2cPinPorts[i][1] == role) {
+            return i2cPinPorts[i][2];
+        }
+    }
+    return -1;
+}
 
 // Define the global configuration instance
 
 bool configChanged = false;
 bool autoCalibrationNeeded = false;
+// Set by migration when the probe droop calibration has never run
+// (probe.droop_ohms == 0) - main loop prompts for Switch Calib / tip test.
+bool probeCalibrationNeeded = false;
 // Flag for async config save - set true to request background save
 volatile bool configSavePending = false;
 
@@ -54,6 +74,81 @@ struct config jumperlessConfig;
 // Shadow copy of last saved config for dirty tracking (avoids unnecessary writes)
 struct config lastSavedConfig;
 bool shadowConfigValid = false;
+
+// A pristine defaults instance - "reset to default" copies out of this, so
+// defaults live in exactly one place (the struct initializers config.h
+// generates from the option list).
+static const struct config jlConfigDefaults;
+
+// ============================================================================
+// THE descriptor table - second expansion of the single option list.
+// ============================================================================
+#define JL_XDESC(sect, key, type, def, minv, maxv, step, table, hook, flags, desc) \
+    { JLSECT_##sect, #key, JLT_##type, (void*)&jumperlessConfig.sect.key, \
+      (float)(minv), (float)(maxv), (float)(step), jlTableRef(table), \
+      (uint8_t)(hook), (uint16_t)(flags), desc },
+
+const ConfigOptionDesc jlConfigOptions[] = {
+    JL_CONFIG_ALL_OPTIONS(JL_XDESC)
+};
+const int jlConfigOptionCount = (int)(sizeof(jlConfigOptions) / sizeof(jlConfigOptions[0]));
+
+const ConfigSectionDesc jlConfigSections[JLSECT_COUNT] = {
+    { "firmware",    "Firmware",     "Update tracking (bookkeeping - hidden)." },
+    { "hardware",    "Hardware",     "Board identity and memory layout; preserved across resets." },
+    { "probe",       "Probe",        "Probe behavior, power feed, and calibration." },
+    { "clickwheel",  "Clickwheel",   "Rotary encoder behavior and menu transition eye candy." },
+    { "measurement", "Measurement",  "Net voltage/current scanning and how results are shown." },
+    { "terminal",    "Terminal",     "Serial terminal colors and input buffering." },
+    { "undo",        "Undo",         "Connection-history undo log persistence." },
+    { "dacs",        "DACs",         "DAC and rail output voltage limits." },
+    { "debug",       "Debug",        "Debug print gates (the single source of truth)." },
+    { "routing",     "Routing",      "Crosspoint path stacking for lower resistance." },
+    { "slots",       "Slots",        "Which slot the board boots into." },
+    { "calibration", "Calibration",  "DAC/rail/ADC transfer curves (written by the DAC calibration)." },
+    { "logo_pads",   "Logo Pads",    "Functions bound to the capacitive logo/building pads." },
+    { "display",     "Display",      "Breadboard LED rendering and brightness." },
+    { "serial_1",    "Serial 1",     "UART 1 role, baud, and passthrough behavior." },
+    { "serial_2",    "Serial 2",     "UART 2 role, baud, and passthrough behavior." },
+    { "top_oled",    "OLED",         "The top OLED: wiring, font, and boot behavior." },
+    { "usb_cdc",     "USB CDC",      "USB serial port flow control quirks." },
+    { "usb_audio",   "USB Audio",    "USB microphone streaming ADC channels to the host." },
+};
+
+// Old `[section] key` -> new home. Parsed transparently everywhere (file
+// load, pasted lines, dot notation), so old config files and muscle memory
+// keep working. Only renamed/moved keys need entries; removed keys just
+// fall through as no-ops.
+const ConfigAlias jlConfigAliases[] = {
+    { "dacs", "auto_connect_probe",               JLSECT_probe,       "auto_connect" },
+    { "dacs", "probe_power_source",               JLSECT_probe,       "power_source" },
+    { "dacs", "rail_click_adjust",                JLSECT_clickwheel,  "rail_click_adjust" },
+    { "hardware", "use_pio_probe_button",         JLSECT_probe,       "use_pio_button" },
+    { "hardware", "probe_led_on_button_pin",      JLSECT_probe,       "led_on_button_pin" },
+    { "hardware", "probe_led_refresh_us",         JLSECT_probe,       "led_refresh_us" },
+    { "hardware", "encoder_pio",                  JLSECT_clickwheel,  "encoder_pio" },
+    { "calibration", "probe_max",                 JLSECT_probe,       "pad_max" },
+    { "calibration", "probe_min",                 JLSECT_probe,       "pad_min" },
+    { "calibration", "probe_max_measure",         JLSECT_probe,       "pad_max_measure" },
+    { "calibration", "probe_max_measure_gpio",    JLSECT_probe,       "pad_max_measure_gpio" },
+    { "calibration", "probe_min_measure",         JLSECT_probe,       "pad_min_measure" },
+    { "calibration", "probe_switch_threshold_high", JLSECT_probe,     "switch_threshold_high" },
+    { "calibration", "probe_switch_threshold_low",  JLSECT_probe,     "switch_threshold_low" },
+    { "calibration", "probe_switch_select_max_ma",  JLSECT_probe,     "switch_select_max_ma" },
+    { "calibration", "probe_switch_blink_hold_pct", JLSECT_probe,     "switch_blink_hold_pct" },
+    { "calibration", "measure_mode_output_voltage", JLSECT_probe,     "measure_voltage" },
+    { "calibration", "probe_current_zero",        JLSECT_probe,       "current_zero" },
+    { "calibration", "minimum_probe_reading",     JLSECT_probe,       "min_valid_reading" },
+    { "calibration", "probe_droop_v0",            JLSECT_probe,       "droop_v0" },
+    { "calibration", "probe_droop_ohms",          JLSECT_probe,       "droop_ohms" },
+    { "calibration", "probe_pad_ohms",            JLSECT_probe,       "pad_ohms" },
+    { "calibration", "crosspoint_resistance",     JLSECT_measurement, "crosspoint_resistance" },
+    { "display", "net_currents",                  JLSECT_measurement, "net_currents" },
+    { "display", "current_flow",                  JLSECT_measurement, "current_flow" },
+    { "debug", "show_probe_current",              JLSECT_measurement, "show_probe_current" },
+    { "display", "terminal_line_buffering",       JLSECT_terminal,    "line_buffering" },
+};
+const int jlConfigAliasCount = (int)(sizeof(jlConfigAliases) / sizeof(jlConfigAliases[0]));
 
 // ============================================================================
 // ConfigSaveService - Background config save service
@@ -230,8 +325,6 @@ void parseCommaSeparatedBools(const char* str, bool* array, int maxValues) {
     }
 }
 
-
-
 // Helper for all parse functions
 static int parseFromTable(const StringIntEntry* table, int tableSize, const char* str, int fallbackIsAtoi = 1, int fallbackValue = -1) {
     char lower[32];
@@ -247,19 +340,6 @@ static int parseFromTable(const StringIntEntry* table, int tableSize, const char
         return atoi(str);
     else
         return fallbackValue;
-}
-
-static int printFromTable(const StringIntEntry* table, int tableSize, const char* str) {
-    char lower[32];
-    strncpy(lower, str, sizeof(lower)-1);
-    lower[sizeof(lower)-1] = '\0';
-    toLower(lower);
-    for (int i = 0; i < tableSize; ++i) {
-        if (strcmp(lower, table[i].name) == 0) {
-            return Serial.print(table[i].name);
-        }
-    }
-    return -1;
 }
 
 int parseHex(const char* str) {
@@ -382,10 +462,6 @@ int parseSerialPort(const char* str) {
     return parseFromTable(serialPortTable, serialPortTableSize, str);
 }
 
-int parseDumpFormat(const char* str) {
-    return parseFromTable(dumpFormatTable, dumpFormatTableSize, str);
-}
-
 int parseConnectionType(const char* str) {
     return parseFromTable(connectionTypeTable, connectionTypeTableSize, str);
 }
@@ -398,6 +474,13 @@ const char* getConnectionTypeString(int connectionType) {
         }
     }
     return "unknown";
+}
+
+const char* getStringFromTableRef(int value, const JlTableRef& ref) {
+    for (int i = 0; i < ref.n; i++) {
+        if (ref.t[i].value == value) return ref.t[i].name;
+    }
+    return nullptr;
 }
 
 // Update OLED pins based on connection_type
@@ -484,39 +567,408 @@ int parseInt(const char* str) {
     return atoi(str);
 }
 
+// ============================================================================
+// Generic option access
+// ============================================================================
+
+static size_t cfgFieldSize(const ConfigOptionDesc* o) {
+    switch (o->type) {
+        case JLT_BOOL:  return sizeof(bool);
+        case JLT_FLOAT: return sizeof(float);
+        case JLT_STR16: return 16;
+        case JLT_STR33: return 33;
+        default:        return sizeof(int);
+    }
+}
+
+static int cfgGetInt(const ConfigOptionDesc* o) {
+    switch (o->type) {
+        case JLT_BOOL:  return *(bool*)o->ptr ? 1 : 0;
+        case JLT_VINT:  return *(volatile int*)o->ptr;
+        case JLT_FLOAT: return (int)(*(float*)o->ptr);
+        default:        return *(int*)o->ptr;
+    }
+}
+
+static void cfgSetIntRaw(const ConfigOptionDesc* o, int v) {
+    switch (o->type) {
+        case JLT_BOOL:  *(bool*)o->ptr = (v != 0); break;
+        case JLT_VINT:  *(volatile int*)o->ptr = v; break;
+        case JLT_FLOAT: *(float*)o->ptr = (float)v; break;
+        default:        *(int*)o->ptr = v; break;
+    }
+}
+
+int configSectionFromName(const char* sectionName) {
+    if (strcmp(sectionName, "config") == 0) return -2; // virtual version stamp
+    for (int i = 0; i < JLSECT_COUNT; i++) {
+        if (strcmp(sectionName, jlConfigSections[i].name) == 0) return i;
+    }
+    return -1;
+}
+
+const ConfigOptionDesc* configFindOption(uint8_t section, const char* key) {
+    for (int i = 0; i < jlConfigOptionCount; i++) {
+        if (jlConfigOptions[i].section == section && strcmp(jlConfigOptions[i].key, key) == 0) {
+            return &jlConfigOptions[i];
+        }
+    }
+    return nullptr;
+}
+
+const ConfigOptionDesc* configFindOption(const char* sectionName, const char* key) {
+    int sect = configSectionFromName(sectionName);
+    if (sect >= 0) {
+        const ConfigOptionDesc* opt = configFindOption((uint8_t)sect, key);
+        if (opt) return opt;
+    }
+    // Renamed/moved keys: resolve through the alias map.
+    for (int i = 0; i < jlConfigAliasCount; i++) {
+        if (strcmp(jlConfigAliases[i].oldSection, sectionName) == 0 &&
+            strcmp(jlConfigAliases[i].oldKey, key) == 0) {
+            return configFindOption(jlConfigAliases[i].section, jlConfigAliases[i].newKey);
+        }
+    }
+    return nullptr;
+}
+
+// Format an option's current value. names=true prints enum/bool names
+// ("true", "passthrough", "uart_tx"); names=false prints raw numbers.
+void configFormatValue(const ConfigOptionDesc* opt, char* out, size_t outLen, bool names) {
+    out[0] = '\0';
+    switch (opt->type) {
+        case JLT_STR16:
+        case JLT_STR33:
+            snprintf(out, outLen, "%s", (const char*)opt->ptr);
+            return;
+        case JLT_FLOAT: {
+            // Calibration values get extra digits so a save/load round trip
+            // doesn't quietly shave precision off a measured constant.
+            int dec = (opt->flags & JLC_CAL) ? 4 : 2;
+            snprintf(out, outLen, "%.*f", dec, (double)(*(float*)opt->ptr));
+            return;
+        }
+        case JLT_HEX:
+            snprintf(out, outLen, "0x%02X", (unsigned)cfgGetInt(opt));
+            return;
+        case JLT_FONT:
+            snprintf(out, outLen, "%s", getFontString(cfgGetInt(opt)));
+            return;
+        case JLT_BOOL:
+            if (names) snprintf(out, outLen, "%s", cfgGetInt(opt) ? "true" : "false");
+            else snprintf(out, outLen, "%d", cfgGetInt(opt));
+            return;
+        default: {
+            int v = cfgGetInt(opt);
+            if (names && opt->table.t != nullptr) {
+                const char* name = getStringFromTableRef(v, opt->table);
+                if (name) { snprintf(out, outLen, "%s", name); return; }
+            }
+            snprintf(out, outLen, "%d", v);
+            return;
+        }
+    }
+}
+
+// Copy a string value in with whitespace/quote stripping (startup_message
+// paths and version stamps both want this).
+static void cfgSetString(const ConfigOptionDesc* o, const char* value) {
+    size_t cap = cfgFieldSize(o);
+    char* dst = (char*)o->ptr;
+    const char* start = value;
+    size_t valueLen = strlen(value);
+    if (valueLen == 0) { dst[0] = '\0'; return; }
+    const char* end = value + valueLen - 1;
+    while (*start && (isspace((unsigned char)*start) || *start == '"' || *start == '\'')) start++;
+    while (end > start && (isspace((unsigned char)*end) || *end == '"' || *end == '\'')) end--;
+    size_t len = (size_t)(end - start + 1);
+    if (len > cap - 1) len = cap - 1;
+    strncpy(dst, start, len);
+    dst[len] = '\0';
+}
+
+// Sync [clickwheel] fx_* into the live (volatile, cross-core) transition
+// config. Called from the hook on live changes and from boot apply.
+void configApplyMenuFx(void) {
+    int t = jumperlessConfig.clickwheel.fx_type;
+    if (t < 0 || t >= MENU_TRANSITION_TYPE_COUNT) t = MENU_TRANSITION_GLOW;
+    menuTransitionConfig.type = (uint8_t)t;
+    int d = jumperlessConfig.clickwheel.fx_duration_ms;
+    if (d < 0) d = 0; if (d > 1000) d = 1000;
+    menuTransitionConfig.durationMs = (uint16_t)d;
+    menuTransitionConfig.tintColor = (uint32_t)jumperlessConfig.clickwheel.fx_tint & 0xFFFFFF;
+    int dens = jumperlessConfig.clickwheel.fx_density;
+    if (dens < 0) dens = 0; if (dens > 255) dens = 255;
+    menuTransitionConfig.density = (uint8_t)dens;
+}
+
+// The Menu FX tuner mutates menuTransitionConfig directly; call this on its
+// way out to persist what the user dialed in.
+void configCaptureMenuFx(void) {
+    jumperlessConfig.clickwheel.fx_type = menuTransitionConfig.type;
+    jumperlessConfig.clickwheel.fx_duration_ms = menuTransitionConfig.durationMs;
+    jumperlessConfig.clickwheel.fx_tint = (int)(menuTransitionConfig.tintColor & 0xFFFFFF);
+    jumperlessConfig.clickwheel.fx_density = menuTransitionConfig.density;
+    configChanged = true;
+}
+
+// Set an option from a string value. liveApply runs the option's side-effect
+// hook (file loads pass false; boot apply happens in loadConfig /
+// readSettingsFromConfig). Returns false if the change was REFUSED (illegal
+// OLED pin pair) - in that case nothing was written.
+bool configSetValue(const ConfigOptionDesc* opt, const char* value, bool liveApply) {
+    int prevInt = (opt->type == JLT_STR16 || opt->type == JLT_STR33) ? 0 : cfgGetInt(opt);
+
+    // --- hooks that own the whole assignment -------------------------------
+    if (opt->hook == HOOK_OLED_CONNECTION) {
+        int connType = parseConnectionType(value);
+        if (liveApply) {
+            // Single helper handles disconnect, pin update, save, and reinit.
+            applyOledConnectionType(connType, /*reinitDisplay=*/true, /*persist=*/true);
+        } else {
+            updateOledPinsForConnectionType(connType);
+        }
+        return true;
+    }
+    if (opt->hook == HOOK_OLED_PIN && liveApply) {
+        // arduino-pico PANICS on setSDA/setSCL of a RUNNING Wire with
+        // different pins, and oled.init() does exactly that. Two rules,
+        // in order:
+        //   1. Reject pins initI2C() cannot program. Each pin is legal for
+        //      exactly ONE port in one role, so both pins have to resolve
+        //      to the SAME port that gpioI2Cmap picks.
+        //   2. Only re-pin a bus that is the OLED's ALONE - that is I2C1.
+        //      A pin change on I2C0 is refused outright (see below).
+        int newPin = parseInt(value);
+        bool wantSda = (strcmp(opt->key, "sda_pin") == 0);
+        int newSda = wantSda ? newPin : jumperlessConfig.top_oled.sda_pin;
+        int newScl = wantSda ? jumperlessConfig.top_oled.scl_pin : newPin;
+        int sdaPort = oledI2CPortForPin(newSda, 0);
+        int sclPort = oledI2CPortForPin(newScl, 1);
+        if (sdaPort < 0 || sclPort < 0 || sdaPort != sclPort) {
+            Serial.print("  refused: sda ");
+            Serial.print(newSda);
+            Serial.print(" / scl ");
+            Serial.print(newScl);
+            Serial.println(" is not a legal pair on one I2C port");
+            Serial.println("  I2C0: sda 0/4/20/24 with scl 1/5/21/25   I2C1: sda 6/22/26 with scl 7/23/27");
+            return false; // refused - don't save or echo a change that didn't happen
+        }
+        // I2C0 is the SYSTEM bus: the MCP4728 DAC (0x60) and both INA219s
+        // (0x40/0x41) come up on it at boot (initDAC/initINA219 begin Wire on
+        // GPIO 4/5) and wavegen streams the DAC on it. Re-pinning it live means
+        // Wire.end()/setSDA() underneath devices that are using it - the
+        // teardown teardownOldOledBus() documents as forbidden (it orphans the
+        // DAC and both current sensors until reboot), and the
+        // setSDA-while-running panic the pair check above only half-avoids.
+        // Persisting it for the next boot would be WORSE, not safer: Wire is
+        // already up on 4/5 by the time oled.init() runs, so any port-0 pair
+        // other than the hardwired (4,5) panics on EVERY boot, out of flash.
+        // And there is nothing useful to persist - the internal bus is
+        // hardwired. So refuse, and point at the control that does move the
+        // OLED. Keyed on the port the NEW pins resolve to (what initI2C() will
+        // program), with connection_type 2 as the second half: a display
+        // already talking on Wire must not have its bus moved either.
+        if (sdaPort == 0 || jumperlessConfig.top_oled.connection_type == 2) {
+            Serial.println("  refused: the internal I2C0 OLED bus is hardwired to GPIO 4/5,");
+            Serial.println("  shared with the DAC and both current sensors - it can't be re-pinned");
+            Serial.println("  use top_oled.connection_type to move the OLED to another bus");
+            return false;
+        }
+        // I2C1 is the OLED's alone, so ending it and re-pinning it is safe and
+        // applies now. Unconditional Wire1.end(): the pair check proved the new
+        // pins are port 1, and end() returns early on a bus nobody started -
+        // i2cScan() can leave Wire1 running even when the OLED lives elsewhere,
+        // which is exactly the case that panicked before.
+        oled.disconnect();
+        Wire1.end();
+        delay(50);
+        *(int*)opt->ptr = newPin;
+        delay(50);
+        oled.init();
+        return true;
+    }
+
+    // --- generic parse + store ---------------------------------------------
+    switch (opt->type) {
+        case JLT_STR16:
+        case JLT_STR33:
+            cfgSetString(opt, value);
+            break;
+        case JLT_FLOAT: {
+            float v = parseFloat(value);
+            if (!(opt->minv == 0.0f && opt->maxv == 0.0f)) {
+                if (v < opt->minv) v = opt->minv;
+                if (v > opt->maxv) v = opt->maxv;
+            }
+            *(float*)opt->ptr = v;
+            break;
+        }
+        case JLT_HEX: {
+            int v = parseHex(value);
+            if (!(opt->minv == 0.0f && opt->maxv == 0.0f)) {
+                if (v < (int)opt->minv) v = (int)opt->minv;
+                if (v > (int)opt->maxv) v = (int)opt->maxv;
+            }
+            *(int*)opt->ptr = v;
+            break;
+        }
+        case JLT_FONT:
+            *(int*)opt->ptr = parseFont(value);
+            break;
+        case JLT_BOOL:
+            *(bool*)opt->ptr = parseBool(value);
+            break;
+        default: {
+            int v;
+            if (opt->hook == HOOK_LINES_WIRES) v = parseLinesWires(value);
+            else if (opt->table.t != nullptr) v = parseFromTable(opt->table.t, opt->table.n, value);
+            else v = parseInt(value);
+            if (!(opt->minv == 0.0f && opt->maxv == 0.0f)) {
+                if (v < (int)opt->minv) v = (int)opt->minv;
+                if (v > (int)opt->maxv) v = (int)opt->maxv;
+            }
+            cfgSetIntRaw(opt, v);
+            break;
+        }
+    }
+
+    // --- side-effect hooks (live changes only) ------------------------------
+    switch (opt->hook) {
+        case HOOK_ENCODER_PIO: {
+            // -1 = auto (PIO2 then PIO1, PIO0 last); 0..2 = try that block
+            // first. Applied at the next boot (core 1 claims before live
+            // changes could land).
+            int v = cfgGetInt(opt);
+            if (v < -1 || v > 2) cfgSetIntRaw(opt, -1);
+            break;
+        }
+        case HOOK_LED_REFRESH_US:
+            if (cfgGetInt(opt) < 0) cfgSetIntRaw(opt, 0);
+            break;
+        case HOOK_UNDO:
+            // Persist cap is bounded by the static ring in Undo.cpp.
+            if (strcmp(opt->key, "max_saved_actions") == 0) {
+                int v = cfgGetInt(opt);
+                if (v < 1) v = 1;
+                if (v > 256) v = 256;
+                cfgSetIntRaw(opt, v);
+            }
+            break;
+        default: break;
+    }
+
+    if (liveApply) {
+        switch (opt->hook) {
+            case HOOK_PSRAM:
+                applyPsramModeChange(cfgGetInt(opt));
+                reinitMicroPythonForPsramChange();
+                break;
+            case HOOK_PROBE_AUTOCONNECT:
+                // Symmetric with jl_probe_autoconnect(): turning it back on must
+                // re-enable the feed too - it used to leave s_probePowerOn false,
+                // so auto_connect = 1 after a 0 left the probe unpowered until
+                // reboot.
+                if (jumperlessConfig.probe.auto_connect <= 0) {
+                    probing.routableBufferPower(0, 0, 1);
+                } else {
+                    probing.routableBufferPower(1, 0, 1);
+                }
+                break;
+            case HOOK_PROBE_POWER_SOURCE: {
+                int v = cfgGetInt(opt);
+                if (v != 0 && v != 1) { v = 0; cfgSetIntRaw(opt, v); }
+                // The order is read at every evaluation; a change only becomes
+                // real at the next rebuild, so ask for one now instead of
+                // waiting for an unrelated connect/disconnect.
+                if (v != prevInt) infraNudge();
+                break;
+            }
+            case HOOK_USB_CDC_DTR:
+                usb_cdc_set_ignore_dtr(jumperlessConfig.usb_cdc.ignore_dtr);
+                AsyncPassthrough::setDTRLockout(3000);
+                usb_cdc_apply_config();
+                break;
+            case HOOK_OLED_FONT: {
+                // Apply font from config value (config value IS the FontFamily enum)
+                int f = jumperlessConfig.top_oled.font;
+                if (f >= 0 && f <= FONT_PRAGMATISM) {
+                    FontFamily family = (FontFamily)f;
+                    oled.setFontForSize(family, 2);  // size 2 (large/12pt) default
+                    oled.currentFontFamily = family;
+                }
+                oled.show();
+                break;
+            }
+            case HOOK_LINE_BUFFERING:
+                pushLineBufferingToApp();
+                break;
+            case HOOK_SERIAL_FUNCTION:
+                initArduino();
+                break;
+            case HOOK_MENU_FX:
+                configApplyMenuFx();
+                break;
+            case HOOK_TERM_COLORS:
+                disableTerminalColors = !jumperlessConfig.terminal.colors;
+                break;
+            default: break;
+        }
+        // Settings that change what's on the board: push the config into the
+        // runtime globals and repaint.
+        if (opt->flags & JLC_LEDS) {
+            readSettingsFromConfig();
+            requestLedShow(-1);
+        }
+    }
+    return true;
+}
+
+void configResetOptionToDefault(const ConfigOptionDesc* opt, bool liveApply) {
+    // Format the DEFAULT value, then set it like any other change so hooks
+    // fire and clamps apply.
+    size_t off = (size_t)((char*)opt->ptr - (char*)&jumperlessConfig);
+    ConfigOptionDesc defOpt = *opt;
+    defOpt.ptr = (void*)((const char*)&jlConfigDefaults + off);
+    char defVal[64];
+    configFormatValue(&defOpt, defVal, sizeof(defVal), true);
+    configSetValue(opt, defVal, liveApply);
+}
+
+bool configOptionIsDefault(const ConfigOptionDesc* opt) {
+    size_t off = (size_t)((char*)opt->ptr - (char*)&jumperlessConfig);
+    return memcmp(opt->ptr, (const char*)&jlConfigDefaults + off, cfgFieldSize(opt)) == 0;
+}
+
 void resetConfigToDefaults(int clearCalibration, int clearHardware) {
-    // Preserve the WHOLE hardware and calibration structs by copy, not a
-    // hand-maintained field list (2026-08-16). The old list omitted
-    // probe_max/min_measure, probe_switch_threshold_high/low, probe_droop_v0,
-    // probe_droop_ohms, probe_pad_ohms and crosspoint_resistance - so every
-    // reset silently zeroed the self test's droop calibration ("probe_droop_ohms
-    // reverts to 0.0" in the handoff) and any key added later would have
-    // joined them. A struct copy can't forget a field.
-    struct config::hardware savedHw = jumperlessConfig.hardware;
-    struct config::calibration savedCal = jumperlessConfig.calibration;
-    int saved_probe_max = jumperlessConfig.calibration.probe_max;
-    int saved_probe_min = jumperlessConfig.calibration.probe_min;
+    // Preserve hardware by struct copy and calibration by JLC_CAL flag - the
+    // flag can't forget a field the way the old hand-maintained list did
+    // (probe droop values silently zeroed on every reset until 2026-08-16).
+    struct config saved = jumperlessConfig;
 
     // Initialize with default values from config.h
     jumperlessConfig = config();
 
-    // Restore hardware version values
+    // Bookkeeping, not a user setting: keep update detection working.
+    memcpy(jumperlessConfig.firmware.last_version, saved.firmware.last_version,
+           sizeof(jumperlessConfig.firmware.last_version));
+
     if (clearHardware == 0) {
-        jumperlessConfig.hardware = savedHw;
-    }
-    // Restore calibration values
-    if (saved_probe_min == 0 || saved_probe_max == 0) {
-        jumperlessConfig.calibration.probe_min = 15;
-        jumperlessConfig.calibration.probe_max = 4040;
+        jumperlessConfig.hardware = saved.hardware;
     }
     if (clearCalibration == 0) {
-        jumperlessConfig.calibration = savedCal;
-        // Keep the zero-sentinel fixup for a board that never calibrated the
-        // pads (the copy above would restore the zeros).
-        if (saved_probe_min == 0 || saved_probe_max == 0) {
-            jumperlessConfig.calibration.probe_min = 15;
-            jumperlessConfig.calibration.probe_max = 4040;
+        for (int i = 0; i < jlConfigOptionCount; i++) {
+            const ConfigOptionDesc* opt = &jlConfigOptions[i];
+            if (!(opt->flags & JLC_CAL)) continue;
+            size_t off = (size_t)((char*)opt->ptr - (char*)&jumperlessConfig);
+            memcpy(opt->ptr, (const char*)&saved + off, cfgFieldSize(opt));
         }
+    }
+    // Zero-sentinel fixup for a board that never calibrated the pads (the
+    // copy above would restore the zeros).
+    if (jumperlessConfig.probe.pad_min == 0 || jumperlessConfig.probe.pad_max == 0) {
+        jumperlessConfig.probe.pad_min = 15;
+        jumperlessConfig.probe.pad_max = 4040;
     }
 
     // Pick a sensible OLED connection_type default based on the (preserved or
@@ -531,12 +983,14 @@ void resetConfigToDefaults(int clearCalibration, int clearHardware) {
     // yet at this point (resetConfigToDefaults runs before oled.init() on a
     // fresh boot, and the live menu reset path will reinit explicitly).
     updateOledPinsForConnectionType(defaultConnType);
-    // defaultOledConnectionTypeForRevision is declared in oled.h, which
-    // configManager.cpp already includes via #include "oled.h" near the top.
 
     // NOTE: Don't call saveConfig() here - callers are responsible for saving
     // after they've had a chance to restore user settings they want to preserve
 }
+
+// ============================================================================
+// File load (+ firmware-version migration)
+// ============================================================================
 
 void updateConfigFromFile(const char* filename) {
     // Check if file exists using safe function
@@ -561,13 +1015,9 @@ void updateConfigFromFile(const char* filename) {
     char section[32] = "";
     char key[32];
     char value[64];
-    // Config version tracking  
-    const char* currentFirmwareVersion = firmwareVersion;
-
     
     bool foundConfigVersion = false;
     char configFirmwareVersion[16] = {0};
-    bool needsReset = false;
     delay(200);//!son of a bitch
     while (file.available()) {
         int bytesRead = file.readBytesUntil('\n', line, sizeof(line)-1);
@@ -591,7 +1041,7 @@ void updateConfigFromFile(const char* filename) {
         if (!equalsPos) continue;
         
         *equalsPos = '\0';
-        // Bounded copies: line[] is 128 bytes but key/value are 32/64 —
+        // Bounded copies: line[] is 128 bytes but key/value are 32/64 -
         // unbounded strcpy here was a stack smash on long config lines.
         strncpy(key, line, sizeof(key) - 1);
         key[sizeof(key) - 1] = '\0';
@@ -604,370 +1054,65 @@ void updateConfigFromFile(const char* filename) {
         size_t valueLen = strlen(value);
         if (valueLen > 0 && value[valueLen - 1] == ';') {
             value[valueLen - 1] = '\0';
+            trim(value);
         }
         
         toLower(key);
 
-        // Update config based on section and key
         if (strcmp(section, "config") == 0) {
             if (strcmp(key, "firmware_version") == 0) {
-                // Strip trailing semicolon from version string first
-                if (value[strlen(value)-1] == ';') {
-                    value[strlen(value)-1] = '\0';
-                }
-                // Trim leading and trailing whitespace more robustly
-                char* trimmed = value;
-                while (isspace(*trimmed)) trimmed++;  // Skip leading spaces
-                char* end = trimmed + strlen(trimmed) - 1;
-                while (end > trimmed && isspace(*end)) end--;  // Find end of non-space chars
-                *(end + 1) = '\0';  // Null terminate
-                
-                strncpy(configFirmwareVersion, trimmed, sizeof(configFirmwareVersion)-1);
-                configFirmwareVersion[sizeof(configFirmwareVersion)-1] = '\0';  // Ensure null termination
-                // Serial.print("configFirmwareVersion = ");
-                // Serial.println(configFirmwareVersion);
-                // Serial.print("firmwareVersion = ");
-                // Serial.println(firmwareVersion);
-                // Serial.print("strcmp(configFirmwareVersion, firmwareVersion) = ");
-                //Serial.println(strcmp(configFirmwareVersion, firmwareVersion));
+                strncpy(configFirmwareVersion, value, sizeof(configFirmwareVersion)-1);
+                configFirmwareVersion[sizeof(configFirmwareVersion)-1] = '\0';
                 foundConfigVersion = true;
             }
-            //! this is a place to add new config options
-        } else if (strcmp(section, "firmware") == 0) {
-            if (strcmp(key, "last_version") == 0) {
-                strncpy(jumperlessConfig.firmware.last_version, value, sizeof(jumperlessConfig.firmware.last_version)-1);
-                jumperlessConfig.firmware.last_version[sizeof(jumperlessConfig.firmware.last_version)-1] = '\0';
-            }
-            else if (strcmp(key, "files_provisioned") == 0) jumperlessConfig.firmware.files_provisioned = parseBool(value);
-        } else if (strcmp(section, "hardware") == 0) {
-            if (strcmp(key, "generation") == 0) jumperlessConfig.hardware.generation = parseInt(value);
-            else if (strcmp(key, "revision") == 0) jumperlessConfig.hardware.revision = parseInt(value);
-            else if (strcmp(key, "probe_revision") == 0) jumperlessConfig.hardware.probe_revision = parseInt(value);
-            else if (strcmp(key, "psram_installed") == 0) jumperlessConfig.hardware.psram_installed = parseBool(value);
-            else if (strcmp(key, "psram_app_size_kb") == 0) jumperlessConfig.hardware.psram_app_size_kb = parseInt(value);
-            else if (strcmp(key, "probe_led_on_button_pin") == 0) jumperlessConfig.hardware.probe_led_on_button_pin = parseBool(value);
-            else if (strcmp(key, "probe_led_refresh_us") == 0) jumperlessConfig.hardware.probe_led_refresh_us = parseInt(value);
-            else if (strcmp(key, "encoder_pio") == 0) jumperlessConfig.hardware.encoder_pio = parseInt(value);
-        } else if (strcmp(section, "dacs") == 0) {
-            // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
-            if (strcmp(key, "set_dacs_on_boot") == 0) jumperlessConfig.dacs.set_dacs_on_boot = parseBool(value);
-            else if (strcmp(key, "set_rails_on_boot") == 0) jumperlessConfig.dacs.set_rails_on_boot = parseBool(value);
-            else if (strcmp(key, "probe_power_dac") == 0) jumperlessConfig.dacs.probe_power_dac = parseInt(value);
-            else if (strcmp(key, "auto_connect_probe") == 0) jumperlessConfig.dacs.auto_connect_probe = parseInt(value);
-            else if (strcmp(key, "probe_power_source") == 0) jumperlessConfig.dacs.probe_power_source = parseInt(value);
-            else if (strcmp(key, "limit_max") == 0) jumperlessConfig.dacs.limit_max = parseFloat(value);
-            else if (strcmp(key, "rail_click_adjust") == 0) jumperlessConfig.dacs.rail_click_adjust = parseInt(value);
-            else if (strcmp(key, "limit_min") == 0) jumperlessConfig.dacs.limit_min = parseFloat(value);
-        } else if (strcmp(section, "debug") == 0) {
-            if (strcmp(key, "file_parsing") == 0) jumperlessConfig.debug.file_parsing = parseBool(value);
-            else if (strcmp(key, "net_manager") == 0) jumperlessConfig.debug.net_manager = parseBool(value);
-            else if (strcmp(key, "nets_to_chips") == 0) jumperlessConfig.debug.nets_to_chips = parseBool(value);
-            else if (strcmp(key, "nets_to_chips_alt") == 0) jumperlessConfig.debug.nets_to_chips_alt = parseBool(value);
-            else if (strcmp(key, "leds") == 0) jumperlessConfig.debug.leds = parseBool(value);
-            else if (strcmp(key, "probing") == 0) jumperlessConfig.debug.probing = parseBool(value);
-            else if (strcmp(key, "oled") == 0) jumperlessConfig.debug.oled = parseBool(value);
-            else if (strcmp(key, "logo_pads") == 0) jumperlessConfig.debug.logo_pads = parseBool(value);
-            else if (strcmp(key, "arduino") == 0) jumperlessConfig.debug.arduino = parseInt(value);
-            else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
-            else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);
-            else if (strcmp(key, "show_node_errors") == 0) jumperlessConfig.debug.show_node_errors = parseBool(value);
-            else if (strcmp(key, "probe_power_gpio") == 0) jumperlessConfig.debug.probe_power_gpio = parseBool(value);
-            else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
-            else if (strcmp(key, "probe_switch_agree") == 0) jumperlessConfig.debug.probe_switch_agree = parseBool(value);
-            else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
-            else if (strcmp(key, "net_scan_pair_taps") == 0) jumperlessConfig.debug.net_scan_pair_taps = parseInt(value);
-        } else if (strcmp(section, "routing") == 0) {
-            if (strcmp(key, "stack_paths") == 0) {
-                jumperlessConfig.routing.stack_paths = parseInt(value);
-                // Serial.print("Updated stack_paths to: ");
-                // Serial.println(jumperlessConfig.routing.stack_paths);
-            }
-            else if (strcmp(key, "stack_rails") == 0) jumperlessConfig.routing.stack_rails = parseInt(value);
-            else if (strcmp(key, "stack_dacs") == 0) jumperlessConfig.routing.stack_dacs = parseInt(value);
-            else if (strcmp(key, "rail_priority") == 0) jumperlessConfig.routing.rail_priority = parseInt(value);
-        } else if (strcmp(section, "slots") == 0) {
-            if (strcmp(key, "boot_mode") == 0) jumperlessConfig.slots.boot_mode = parseInt(value);
-            else if (strcmp(key, "boot_slot") == 0) jumperlessConfig.slots.boot_slot = parseInt(value);
-        } else if (strcmp(section, "calibration") == 0) {
-            if (strcmp(key, "top_rail_zero") == 0) jumperlessConfig.calibration.top_rail_zero = parseInt(value);
-            else if (strcmp(key, "top_rail_spread") == 0) jumperlessConfig.calibration.top_rail_spread = parseFloat(value);
-            else if (strcmp(key, "bottom_rail_zero") == 0) jumperlessConfig.calibration.bottom_rail_zero = parseInt(value);
-            else if (strcmp(key, "bottom_rail_spread") == 0) jumperlessConfig.calibration.bottom_rail_spread = parseFloat(value);
-            else if (strcmp(key, "dac_0_zero") == 0) jumperlessConfig.calibration.dac_0_zero = parseInt(value);
-            else if (strcmp(key, "dac_0_spread") == 0) jumperlessConfig.calibration.dac_0_spread = parseFloat(value);
-            else if (strcmp(key, "dac_1_zero") == 0) jumperlessConfig.calibration.dac_1_zero = parseInt(value);
-            else if (strcmp(key, "dac_1_spread") == 0) jumperlessConfig.calibration.dac_1_spread = parseFloat(value);
-            else if (strcmp(key, "adc_0_zero") == 0) jumperlessConfig.calibration.adc_0_zero = parseFloat(value);
-            else if (strcmp(key, "adc_0_spread") == 0) jumperlessConfig.calibration.adc_0_spread = parseFloat(value);
-            else if (strcmp(key, "adc_1_zero") == 0) jumperlessConfig.calibration.adc_1_zero = parseFloat(value);
-            else if (strcmp(key, "adc_1_spread") == 0) jumperlessConfig.calibration.adc_1_spread = parseFloat(value);
-            else if (strcmp(key, "adc_2_zero") == 0) jumperlessConfig.calibration.adc_2_zero = parseFloat(value);
-            else if (strcmp(key, "adc_2_spread") == 0) jumperlessConfig.calibration.adc_2_spread = parseFloat(value);
-            else if (strcmp(key, "adc_3_zero") == 0) jumperlessConfig.calibration.adc_3_zero = parseFloat(value);
-            else if (strcmp(key, "adc_3_spread") == 0) jumperlessConfig.calibration.adc_3_spread = parseFloat(value);
-            else if (strcmp(key, "adc_4_zero") == 0) jumperlessConfig.calibration.adc_4_zero = parseFloat(value);
-            else if (strcmp(key, "adc_4_spread") == 0) jumperlessConfig.calibration.adc_4_spread = parseFloat(value);
-            else if (strcmp(key, "adc_7_zero") == 0) jumperlessConfig.calibration.adc_7_zero = parseFloat(value);
-            else if (strcmp(key, "adc_7_spread") == 0) jumperlessConfig.calibration.adc_7_spread = parseFloat(value);
-            else if (strcmp(key, "probe_max") == 0) jumperlessConfig.calibration.probe_max = parseInt(value);
-            else if (strcmp(key, "probe_min") == 0) jumperlessConfig.calibration.probe_min = parseInt(value);
-            else if (strcmp(key, "probe_max_measure") == 0) jumperlessConfig.calibration.probe_max_measure = parseInt(value);
-        else if (strcmp(key, "probe_max_measure_gpio") == 0) jumperlessConfig.calibration.probe_max_measure_gpio = parseInt(value);
-            else if (strcmp(key, "probe_max_measure_gpio") == 0) jumperlessConfig.calibration.probe_max_measure_gpio = parseInt(value);
-            else if (strcmp(key, "probe_min_measure") == 0) jumperlessConfig.calibration.probe_min_measure = parseInt(value);
-            else if (strcmp(key, "probe_switch_threshold_high") == 0) jumperlessConfig.calibration.probe_switch_threshold_high = parseFloat(value);
-            else if (strcmp(key, "probe_switch_threshold_low") == 0) jumperlessConfig.calibration.probe_switch_threshold_low = parseFloat(value);
-            else if (strcmp(key, "probe_switch_select_max_ma") == 0) jumperlessConfig.calibration.probe_switch_select_max_ma = parseFloat(value);
-            else if (strcmp(key, "probe_switch_blink_hold_pct") == 0) jumperlessConfig.calibration.probe_switch_blink_hold_pct = parseInt(value);
-            else if (strcmp(key, "probe_switch_threshold") == 0) jumperlessConfig.calibration.probe_switch_threshold = parseFloat(value);
-            else if (strcmp(key, "measure_mode_output_voltage") == 0) jumperlessConfig.calibration.measure_mode_output_voltage = parseFloat(value);
-            else if (strcmp(key, "probe_current_zero") == 0) jumperlessConfig.calibration.probe_current_zero = parseFloat(value);
-            else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
-            else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
-            else if (strcmp(key, "probe_droop_ohms") == 0) jumperlessConfig.calibration.probe_droop_ohms = parseFloat(value);
-            else if (strcmp(key, "probe_pad_ohms") == 0) jumperlessConfig.calibration.probe_pad_ohms = parseFloat(value);
-            else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
-        } else if (strcmp(section, "logo_pads") == 0) {
-            if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);
-            else if (strcmp(key, "bottom_guy") == 0) jumperlessConfig.logo_pads.bottom_guy = parseArbitraryFunction(value);
-            else if (strcmp(key, "building_pad_top") == 0) jumperlessConfig.logo_pads.building_pad_top = parseArbitraryFunction(value);
-            else if (strcmp(key, "building_pad_bottom") == 0) jumperlessConfig.logo_pads.building_pad_bottom = parseArbitraryFunction(value);
-            else if (strcmp(key, "repeat_ms") == 0) jumperlessConfig.logo_pads.repeat_ms = parseInt(value);
-        } else if (strcmp(section, "display") == 0) {
-            if (strcmp(key, "lines_wires") == 0) jumperlessConfig.display.lines_wires = parseLinesWires(value);
-            else if (strcmp(key, "menu_brightness") == 0) jumperlessConfig.display.menu_brightness = parseInt(value);
-            else if (strcmp(key, "led_brightness") == 0) jumperlessConfig.display.led_brightness = parseInt(value);
-            else if (strcmp(key, "rail_brightness") == 0) jumperlessConfig.display.rail_brightness = parseInt(value);
-            else if (strcmp(key, "special_net_brightness") == 0) jumperlessConfig.display.special_net_brightness = parseInt(value);
-            else if (strcmp(key, "net_color_mode") == 0) jumperlessConfig.display.net_color_mode = parseNetColorMode(value);
-            else if (strcmp(key, "net_currents") == 0) jumperlessConfig.display.net_currents = parseBool(value);
-            else if (strcmp(key, "current_flow") == 0) jumperlessConfig.display.current_flow = parseCurrentFlow(value);
-            else if (strcmp(key, "dump_leds") == 0) jumperlessConfig.display.dump_leds = parseSerialPort(value);
-            else if (strcmp(key, "dump_format") == 0) jumperlessConfig.display.dump_format = parseDumpFormat(value);
-            else if (strcmp(key, "terminal_line_buffering") == 0) jumperlessConfig.display.terminal_line_buffering = parseBool(value);
-        } else if (strcmp(section, "serial_1") == 0) {
-            if (strcmp(key, "function") == 0) jumperlessConfig.serial_1.function = parseUartFunction(value);
-            else if (strcmp(key, "baud_rate") == 0) jumperlessConfig.serial_1.baud_rate = parseInt(value);
-            else if (strcmp(key, "print_passthrough") == 0) jumperlessConfig.serial_1.print_passthrough = parseBool(value);
-            else if (strcmp(key, "connect_on_boot") == 0) jumperlessConfig.serial_1.connect_on_boot = parseBool(value);
-            else if (strcmp(key, "lock_connection") == 0) jumperlessConfig.serial_1.lock_connection = parseBool(value);
-            else if (strcmp(key, "autoconnect_flashing") == 0) jumperlessConfig.serial_1.autoconnect_flashing = parseBool(value);
-            else if (strcmp(key, "async_passthrough") == 0) jumperlessConfig.serial_1.async_passthrough = parseBool(value);
-            else if (strcmp(key, "tag_parsing") == 0) jumperlessConfig.serial_1.tag_parsing = parseTagParsing(value);
-            else if (strcmp(key, "flash_reset_type") == 0) jumperlessConfig.serial_1.flash_reset_type = parseFlashType(value);
-        } else if (strcmp(section, "serial_2") == 0) {
-            if (strcmp(key, "function") == 0) jumperlessConfig.serial_2.function = parseUartFunction(value);
-            else if (strcmp(key, "baud_rate") == 0) jumperlessConfig.serial_2.baud_rate = parseInt(value);
-            else if (strcmp(key, "print_passthrough") == 0) jumperlessConfig.serial_2.print_passthrough = parseBool(value);
-            else if (strcmp(key, "connect_on_boot") == 0) jumperlessConfig.serial_2.connect_on_boot = parseBool(value);
-            else if (strcmp(key, "lock_connection") == 0) jumperlessConfig.serial_2.lock_connection = parseBool(value);
-            else if (strcmp(key, "autoconnect_flashing") == 0) jumperlessConfig.serial_2.autoconnect_flashing = parseBool(value);
-        } else if (strcmp(section, "top_oled") == 0) {
-            if (strcmp(key, "enabled") == 0) jumperlessConfig.top_oled.enabled = parseBool(value);
-            else if (strcmp(key, "i2c_address") == 0) jumperlessConfig.top_oled.i2c_address = parseInt(value);
-            else if (strcmp(key, "display_type") == 0) jumperlessConfig.top_oled.display_type = oledDisplayTypeLiteral(value);
-            else if (strcmp(key, "width") == 0) jumperlessConfig.top_oled.width = parseInt(value);
-            else if (strcmp(key, "height") == 0) jumperlessConfig.top_oled.height = parseInt(value);
-            else if (strcmp(key, "rotation") == 0) jumperlessConfig.top_oled.rotation = parseInt(value);
-            else if (strcmp(key, "connection_type") == 0) {
-                int connType = parseConnectionType(value);
-                updateOledPinsForConnectionType(connType);
-            }
-            else if (strcmp(key, "sda_pin") == 0) jumperlessConfig.top_oled.sda_pin = parseInt(value);
-            else if (strcmp(key, "scl_pin") == 0) jumperlessConfig.top_oled.scl_pin = parseInt(value);
-            else if (strcmp(key, "gpio_sda") == 0) jumperlessConfig.top_oled.gpio_sda = parseInt(value);
-            else if (strcmp(key, "gpio_scl") == 0) jumperlessConfig.top_oled.gpio_scl = parseInt(value);
-            else if (strcmp(key, "sda_row") == 0) jumperlessConfig.top_oled.sda_row = parseInt(value);
-            else if (strcmp(key, "scl_row") == 0) jumperlessConfig.top_oled.scl_row = parseInt(value);
-            else if (strcmp(key, "connect_on_boot") == 0) jumperlessConfig.top_oled.connect_on_boot = parseBool(value);
-            else if (strcmp(key, "lock_connection") == 0) jumperlessConfig.top_oled.lock_connection = parseBool(value);
-            else if (strcmp(key, "show_in_terminal") == 0) jumperlessConfig.top_oled.show_in_terminal = parseSerialPort(value);
-            else if (strcmp(key, "font") == 0) jumperlessConfig.top_oled.font = parseFont(value);
-            else if (strcmp(key, "startup_message") == 0) {
-                // Strip leading/trailing whitespace and quotes
-                const char* start = value;
-                size_t valueLen = strlen(value);
-                if (valueLen == 0) {
-                    jumperlessConfig.top_oled.startup_message[0] = '\0';
-                } else {
-                    const char* end = value + valueLen - 1;
-                    
-                    // Skip leading whitespace and quotes
-                    while (*start && (isspace((unsigned char)*start) || *start == '"' || *start == '\'')) {
-                        start++;
-                    }
-                    
-                    // Skip trailing whitespace and quotes
-                    while (end > start && (isspace((unsigned char)*end) || *end == '"' || *end == '\'')) {
-                        end--;
-                    }
-                    
-                    // Calculate length and copy
-                    size_t len = (size_t)(end - start + 1);
-                    if (len > 32) len = 32;
-                    
-                    strncpy(jumperlessConfig.top_oled.startup_message, start, len);
-                    jumperlessConfig.top_oled.startup_message[len] = '\0';
-                }
-            }
-        } else if (strcmp(section, "usb_cdc") == 0) {
-            // USB CDC flow control settings
-            if (strcmp(key, "ignore_dtr") == 0) jumperlessConfig.usb_cdc.ignore_dtr = parseBool(value);
-        } else if (strcmp(section, "usb_audio") == 0) {
-            if (strcmp(key, "enabled") == 0) jumperlessConfig.usb_audio.enabled = parseBool(value);
-            else if (strcmp(key, "left") == 0) jumperlessConfig.usb_audio.left = atoi(value);
-            else if (strcmp(key, "right") == 0) jumperlessConfig.usb_audio.right = atoi(value);
-            else if (strcmp(key, "rate") == 0) jumperlessConfig.usb_audio.rate = atoi(value);
-            else if (strcmp(key, "full_scale") == 0) jumperlessConfig.usb_audio.full_scale = atof(value);
-            else if (strcmp(key, "dc_block") == 0) jumperlessConfig.usb_audio.dc_block = parseBool(value);
+            continue;
+        }
+
+        // Everything else: descriptor table (alias-aware). Unknown/removed
+        // keys are silent no-ops so old files load cleanly.
+        const ConfigOptionDesc* opt = configFindOption(section, key);
+        if (opt) {
+            configSetValue(opt, value, /*liveApply=*/false);
         }
     }
     safeFileClose(file, false);  // Read-only, no flush
 
-    // Check if config needs to be reset due to version differences
-    if (!foundConfigVersion) {
-        // Old config without version tracking - reset to be safe
-        Serial.println("Config file missing version info. Resetting to defaults (preserving hardware/calibration)...");
-        needsReset = true;
-    } else {
-        // Parse version numbers to compare
-        int configGen = 5, configMajor = 0, configMinor = 0, configPatch = 0;
-        int currentGen = 5, currentMajor = 0, currentMinor = 0, currentPatch = 0;
-        
-        sscanf(configFirmwareVersion, "%d.%d.%d.%d", &configGen, &configMajor, &configMinor, &configPatch);
-        sscanf(currentFirmwareVersion, "%d.%d.%d.%d", &currentGen, &currentMajor, &currentMinor, &currentPatch);
-        
-        // Check if current firmware is newer than config firmware
-        bool isNewerFirmware = (currentMajor > configMajor) || 
-                              (currentMajor == configMajor && currentMinor > configMinor) ||
-                              (currentMajor == configMajor && currentMinor == configMinor && currentPatch > configPatch);
-        
-        if (isNewerFirmware && newConfigOptions) {
-            Serial.print("Firmware updated from ");
-            Serial.print(configFirmwareVersion);
-            Serial.print(" to ");
-            Serial.print(currentFirmwareVersion);
-            Serial.println(" with new config options. Reloading config...");
-            
-            // Save ALL current config values before reset
-            struct config savedConfig = jumperlessConfig;
-            
-            // Reset to defaults to get any new options
-            resetConfigToDefaults(0, 0);  // Don't clear calibration or hardware
-            
-            // Check if there are new calibration options by comparing calibration sections
-            bool hasNewCalibrationOptions = false;
-            
-            // Compare key calibration parameters to detect new options
-            if (jumperlessConfig.calibration.top_rail_zero != savedConfig.calibration.top_rail_zero ||
-                jumperlessConfig.calibration.top_rail_spread != savedConfig.calibration.top_rail_spread ||
-                jumperlessConfig.calibration.bottom_rail_zero != savedConfig.calibration.bottom_rail_zero ||
-                jumperlessConfig.calibration.bottom_rail_spread != savedConfig.calibration.bottom_rail_spread ||
-                jumperlessConfig.calibration.dac_0_zero != savedConfig.calibration.dac_0_zero ||
-                jumperlessConfig.calibration.dac_0_spread != savedConfig.calibration.dac_0_spread ||
-                jumperlessConfig.calibration.dac_1_zero != savedConfig.calibration.dac_1_zero ||
-                jumperlessConfig.calibration.dac_1_spread != savedConfig.calibration.dac_1_spread ||
-                jumperlessConfig.calibration.adc_0_zero != savedConfig.calibration.adc_0_zero ||
-                jumperlessConfig.calibration.adc_0_spread != savedConfig.calibration.adc_0_spread ||
-                jumperlessConfig.calibration.adc_1_zero != savedConfig.calibration.adc_1_zero ||
-                jumperlessConfig.calibration.adc_1_spread != savedConfig.calibration.adc_1_spread ||
-                jumperlessConfig.calibration.adc_2_zero != savedConfig.calibration.adc_2_zero ||
-                jumperlessConfig.calibration.adc_2_spread != savedConfig.calibration.adc_2_spread ||
-                jumperlessConfig.calibration.adc_3_zero != savedConfig.calibration.adc_3_zero ||
-                jumperlessConfig.calibration.adc_3_spread != savedConfig.calibration.adc_3_spread ||
-                jumperlessConfig.calibration.adc_4_zero != savedConfig.calibration.adc_4_zero ||
-                jumperlessConfig.calibration.adc_4_spread != savedConfig.calibration.adc_4_spread ||
-                jumperlessConfig.calibration.adc_7_zero != savedConfig.calibration.adc_7_zero ||
-                jumperlessConfig.calibration.adc_7_spread != savedConfig.calibration.adc_7_spread ||
-                jumperlessConfig.calibration.probe_switch_threshold != savedConfig.calibration.probe_switch_threshold ||
-                jumperlessConfig.calibration.measure_mode_output_voltage != savedConfig.calibration.measure_mode_output_voltage ||
-                jumperlessConfig.calibration.probe_current_zero != savedConfig.calibration.probe_current_zero ||
-                jumperlessConfig.calibration.minimum_probe_reading != savedConfig.calibration.minimum_probe_reading) {
-                hasNewCalibrationOptions = true;
-            }
-            
-            // Restore all saved values (this preserves user settings while adding any new defaults)
-            jumperlessConfig.firmware = savedConfig.firmware;
-            jumperlessConfig.hardware = savedConfig.hardware;
-            jumperlessConfig.dacs = savedConfig.dacs;
-            jumperlessConfig.debug = savedConfig.debug;
-            jumperlessConfig.routing = savedConfig.routing;
-            jumperlessConfig.slots = savedConfig.slots;
-            jumperlessConfig.calibration = savedConfig.calibration;
-            jumperlessConfig.logo_pads = savedConfig.logo_pads;
-            jumperlessConfig.display = savedConfig.display;
-            jumperlessConfig.serial_1 = savedConfig.serial_1;
-            jumperlessConfig.serial_2 = savedConfig.serial_2;
-            jumperlessConfig.top_oled = savedConfig.top_oled;
-            // KEEP THIS LIST COMPLETE. It must name every section of struct
-            // config; anything missing is silently reset to defaults AND
-            // written through by the saveConfig() below, so the user loses it
-            // with no way back. usb_cdc and usb_audio were both missing, which
-            // meant every firmware version bump (newConfigOptions is hardcoded
-            // true) wiped a saved USB mic setup.
-            jumperlessConfig.usb_cdc = savedConfig.usb_cdc;
-            jumperlessConfig.usb_audio = savedConfig.usb_audio;
-            
-            // Save the updated config with current firmware version
-            if (debugConfigSaveTiming) Serial.println("[ConfigSave] TRIGGER: firmware version update");
-            saveConfig();
-            //Serial.println("Config updated with new firmware version.");
-            
-            // Set flag to run calibration later if there are new calibration options
-            if (hasNewCalibrationOptions) {
-                Serial.println("New calibration options detected. Calibration will run after initialization...");
-                autoCalibrationNeeded = true;
-            }
-            
-            // Reset the flag so this only happens once per firmware update
+    // ------------------------------------------------------------------
+    // Firmware-version migration. Any version change resets everything to
+    // defaults EXCEPT hardware identity and JLC_CAL-flagged calibration -
+    // the defaults are the correct values for everything else, and this is
+    // what makes recategorized/renamed keys land cleanly in the new format.
+    // ------------------------------------------------------------------
+    bool versionChanged = !foundConfigVersion ||
+                          (strcmp(configFirmwareVersion, firmwareVersion) != 0);
+    if (versionChanged && newConfigOptions) {
+        Serial.print("Config file is from firmware ");
+        Serial.print(foundConfigVersion ? configFirmwareVersion : "(unversioned)");
+        Serial.print("; running ");
+        Serial.print(firmwareVersion);
+        Serial.println(". Migrating: keeping hardware + calibration, defaults for the rest.");
+
+        resetConfigToDefaults(0, 0);  // keeps hardware struct + JLC_CAL options
+
+        // The probe droop calibration writes droop_ohms; 0 is the firmware's
+        // own "never ran" sentinel. Boards that predate the pad/switch
+        // calibration should run it once after this update.
+        if (jumperlessConfig.probe.droop_ohms == 0.0f) {
+            probeCalibrationNeeded = true;
+        }
+
+        if (debugConfigSaveTiming) Serial.println("[ConfigSave] TRIGGER: firmware version migration");
+        saveConfig();  // writes the new-format file (and re-syncs globals)
             newConfigOptions = false;
-            return;
-        }
-        
-        // Check if firmware is significantly older (for backward compatibility warnings)
-        bool majorVersionDiff = (currentMajor > configMajor);
-        bool minorVersionDiff = (currentMajor == configMajor && currentMinor > configMinor + 1);
-        
-        if (majorVersionDiff || minorVersionDiff) {
-            Serial.print("Config from firmware ");
-            Serial.print(configFirmwareVersion);
-            Serial.print(" is significantly older than current firmware ");
-            Serial.print(currentFirmwareVersion);
-            Serial.println(". Resetting to defaults (preserving hardware/calibration)...");
-            needsReset = true;
-        }
-    }
-    
-    if (needsReset) {
-        // Save ALL current config values before reset
-        struct config savedConfig = jumperlessConfig;
-        
-        // Reset to defaults to get any new options
-        resetConfigToDefaults(1, 1);  // Clear calibration and hardware too, we'll restore them
-        
-        // Restore all saved values (this preserves user settings while adding any new defaults)
-        jumperlessConfig.firmware = savedConfig.firmware;
-        jumperlessConfig.hardware = savedConfig.hardware;
-        jumperlessConfig.dacs = savedConfig.dacs;
-        jumperlessConfig.debug = savedConfig.debug;
-        jumperlessConfig.routing = savedConfig.routing;
-        jumperlessConfig.slots = savedConfig.slots;
-        jumperlessConfig.calibration = savedConfig.calibration;
-        jumperlessConfig.logo_pads = savedConfig.logo_pads;
-        jumperlessConfig.display = savedConfig.display;
-        jumperlessConfig.serial_1 = savedConfig.serial_1;
-        jumperlessConfig.serial_2 = savedConfig.serial_2;
-        jumperlessConfig.top_oled = savedConfig.top_oled;
-        
-        // Save the updated config with preserved user settings + any new defaults
-        if (debugConfigSaveTiming) Serial.println("[ConfigSave] TRIGGER: major version diff reset");
-        saveConfig();
         return;
     }
     
     readSettingsFromConfig();
-    //initChipStatus();
 }
+
+// ============================================================================
+// Save
+// ============================================================================
 
 bool saveConfigToFile(const char* filename) {
     uint32_t startTime = micros();
@@ -1009,202 +1154,33 @@ bool saveConfigToFile(const char* filename) {
         AsyncPassthrough::resumeUARTRxIRQ();
         return false;
     }
- //! this is a place to add new config options
-    // Write config metadata section
+
+    // [config] version stamp
     file.println("[config]");
     file.print("firmware_version = "); file.print(firmwareVersion); file.println(";");
     file.println();
 
-    // Write firmware tracking section
-    file.println("[firmware]");
-    file.print("last_version = "); file.print(jumperlessConfig.firmware.last_version); file.println(";");
-    file.print("files_provisioned = "); file.print(jumperlessConfig.firmware.files_provisioned ? 1:0); file.println(";");
+    // Every section, every option, straight from the table.
+    char valBuf[64];
+    for (int s = 0; s < JLSECT_COUNT; s++) {
+        file.print("[");
+        file.print(jlConfigSections[s].name);
+        file.println("]");
+        for (int i = 0; i < jlConfigOptionCount; i++) {
+            const ConfigOptionDesc* opt = &jlConfigOptions[i];
+            if (opt->section != s) continue;
+            configFormatValue(opt, valBuf, sizeof(valBuf), /*names=*/true);
+            file.print(opt->key);
+            file.print(" = ");
+            file.print(valBuf);
+            file.println(";");
+        }
     file.println();
-
-    // Write hardware version section
-    file.println("[hardware]");
-    file.print("generation = "); file.print(jumperlessConfig.hardware.generation); file.println(";");
-    file.print("revision = "); file.print(jumperlessConfig.hardware.revision); file.println(";");
-    file.print("probe_revision = "); file.print(jumperlessConfig.hardware.probe_revision); file.println(";");
-    file.print("psram_installed = "); file.print(jumperlessConfig.hardware.psram_installed); file.println(";");
-    file.print("psram_app_size_kb = "); file.print(jumperlessConfig.hardware.psram_app_size_kb); file.println(";");
-    file.print("probe_led_on_button_pin = "); file.print(jumperlessConfig.hardware.probe_led_on_button_pin ? 1:0); file.println(";");
-    file.print("probe_led_refresh_us = "); file.print(jumperlessConfig.hardware.probe_led_refresh_us); file.println(";");
-    file.print("encoder_pio = "); file.print(jumperlessConfig.hardware.encoder_pio); file.println(";");
-    file.println();
-
-    // Write DAC settings section (voltage state moved to globalState.power in YAML files)
-    file.println("[dacs]");
-    file.print("set_dacs_on_boot = "); file.print(jumperlessConfig.dacs.set_dacs_on_boot ? 1:0); file.println(";");
-    file.print("set_rails_on_boot = "); file.print(jumperlessConfig.dacs.set_rails_on_boot ? 1:0); file.println(";");
-    file.print("probe_power_dac = "); file.print(jumperlessConfig.dacs.probe_power_dac == 0 ? 0 : 1); file.println(";");
-    file.print("auto_connect_probe = "); file.print(jumperlessConfig.dacs.auto_connect_probe == -1 ? -1 : 1); file.println(";");
-    file.print("probe_power_source = "); file.print(jumperlessConfig.dacs.probe_power_source == 1 ? 1 : 0); file.println(";");
-    file.print("limit_max = "); file.print(jumperlessConfig.dacs.limit_max); file.println(";");
-    file.print("limit_min = "); file.print(jumperlessConfig.dacs.limit_min); file.println(";");
-    file.print("rail_click_adjust = "); file.print(jumperlessConfig.dacs.rail_click_adjust); file.println(";");
-    file.println();
-
-    // Write debug flags section
-    file.println("[debug]");
-    file.print("file_parsing = "); file.print(jumperlessConfig.debug.file_parsing ? 1:0); file.println(";");
-    file.print("net_manager = "); file.print(jumperlessConfig.debug.net_manager ? 1:0); file.println(";");
-    file.print("nets_to_chips = "); file.print(jumperlessConfig.debug.nets_to_chips ? 1:0); file.println(";");
-    file.print("nets_to_chips_alt = "); file.print(jumperlessConfig.debug.nets_to_chips_alt ? 1:0); file.println(";");
-    file.print("leds = "); file.print(jumperlessConfig.debug.leds ? 1:0); file.println(";");
-    file.print("probing = "); file.print(jumperlessConfig.debug.probing ? 1:0); file.println(";");
-    file.print("oled = "); file.print(jumperlessConfig.debug.oled ? 1:0); file.println(";");
-    file.print("logo_pads = "); file.print(jumperlessConfig.debug.logo_pads ? 1:0); file.println(";");
-    file.print("arduino = "); file.print(jumperlessConfig.debug.arduino); file.println(";");
-    file.print("usb_mass_storage = "); file.print(jumperlessConfig.debug.usb_mass_storage ? 1:0); file.println(";");
-    file.print("show_probe_current = "); file.print(jumperlessConfig.debug.show_probe_current); file.println(";");
-    file.print("show_node_errors = "); file.print(jumperlessConfig.debug.show_node_errors ? 1:0); file.println(";");
-    file.print("probe_power_gpio = "); file.print(jumperlessConfig.debug.probe_power_gpio ? 1:0); file.println(";");
-    file.print("probe_switch_stats = "); file.print(jumperlessConfig.debug.probe_switch_stats ? 1:0); file.println(";");
-    file.print("probe_switch_agree = "); file.print(jumperlessConfig.debug.probe_switch_agree ? 1:0); file.println(";");
-    file.print("net_voltage_scan = "); file.print(jumperlessConfig.debug.net_voltage_scan ? 1:0); file.println(";");
-    file.print("net_scan_pair_taps = "); file.print(jumperlessConfig.debug.net_scan_pair_taps); file.println(";");
-    file.println();
-
-    // Write routing settings section
-    file.println("[routing]");
-    file.print("stack_paths = "); file.print(jumperlessConfig.routing.stack_paths); file.println(";");
-    file.print("stack_rails = "); file.print(jumperlessConfig.routing.stack_rails); file.println(";");
-    file.print("stack_dacs = "); file.print(jumperlessConfig.routing.stack_dacs); file.println(";");
-    file.print("rail_priority = "); file.print(jumperlessConfig.routing.rail_priority); file.println(";");
-
-    // Write slots settings section
-    file.println("[slots]");
-    file.print("boot_mode = "); file.print(jumperlessConfig.slots.boot_mode); file.println(";");
-    file.print("boot_slot = "); file.print(jumperlessConfig.slots.boot_slot); file.println(";");
-    file.println();
-
-    // Write calibration section
-    file.println("[calibration]");
-    file.print("top_rail_zero = "); file.print(jumperlessConfig.calibration.top_rail_zero); file.println(";");
-    file.print("top_rail_spread = "); file.print(jumperlessConfig.calibration.top_rail_spread); file.println(";");
-    file.print("bottom_rail_zero = "); file.print(jumperlessConfig.calibration.bottom_rail_zero); file.println(";");
-    file.print("bottom_rail_spread = "); file.print(jumperlessConfig.calibration.bottom_rail_spread); file.println(";");
-    file.print("dac_0_zero = "); file.print(jumperlessConfig.calibration.dac_0_zero); file.println(";");
-    file.print("dac_0_spread = "); file.print(jumperlessConfig.calibration.dac_0_spread); file.println(";");
-    file.print("dac_1_zero = "); file.print(jumperlessConfig.calibration.dac_1_zero); file.println(";");
-    file.print("dac_1_spread = "); file.print(jumperlessConfig.calibration.dac_1_spread); file.println(";");
-    file.print("adc_0_zero = "); file.print(jumperlessConfig.calibration.adc_0_zero); file.println(";");
-    file.print("adc_0_spread = "); file.print(jumperlessConfig.calibration.adc_0_spread); file.println(";");
-    file.print("adc_1_zero = "); file.print(jumperlessConfig.calibration.adc_1_zero); file.println(";");
-    file.print("adc_1_spread = "); file.print(jumperlessConfig.calibration.adc_1_spread); file.println(";");
-    file.print("adc_2_zero = "); file.print(jumperlessConfig.calibration.adc_2_zero); file.println(";");
-    file.print("adc_2_spread = "); file.print(jumperlessConfig.calibration.adc_2_spread); file.println(";");
-    file.print("adc_3_zero = "); file.print(jumperlessConfig.calibration.adc_3_zero); file.println(";");
-    file.print("adc_3_spread = "); file.print(jumperlessConfig.calibration.adc_3_spread); file.println(";");
-    file.print("adc_4_zero = "); file.print(jumperlessConfig.calibration.adc_4_zero); file.println(";");
-    file.print("adc_4_spread = "); file.print(jumperlessConfig.calibration.adc_4_spread); file.println(";");
-    file.print("adc_7_zero = "); file.print(jumperlessConfig.calibration.adc_7_zero); file.println(";");
-    file.print("adc_7_spread = "); file.print(jumperlessConfig.calibration.adc_7_spread); file.println(";");
-    file.print("probe_max = "); file.print(jumperlessConfig.calibration.probe_max); file.println(";");
-    file.print("probe_min = "); file.print(jumperlessConfig.calibration.probe_min); file.println(";");
-    file.print("probe_max_measure = "); file.print(jumperlessConfig.calibration.probe_max_measure); file.println(";");
-    file.print("probe_max_measure_gpio = "); file.print(jumperlessConfig.calibration.probe_max_measure_gpio); file.println(";");
-    file.print("probe_min_measure = "); file.print(jumperlessConfig.calibration.probe_min_measure); file.println(";");
-    file.print("probe_switch_threshold_high = "); file.print(jumperlessConfig.calibration.probe_switch_threshold_high); file.println(";");
-    file.print("probe_switch_threshold_low = "); file.print(jumperlessConfig.calibration.probe_switch_threshold_low); file.println(";");
-    file.print("probe_switch_select_max_ma = "); file.print(jumperlessConfig.calibration.probe_switch_select_max_ma); file.println(";");
-    file.print("probe_switch_blink_hold_pct = "); file.print(jumperlessConfig.calibration.probe_switch_blink_hold_pct); file.println(";");
-    file.print("probe_switch_threshold = "); file.print(jumperlessConfig.calibration.probe_switch_threshold); file.println(";");
-    file.print("measure_mode_output_voltage = "); file.print(jumperlessConfig.calibration.measure_mode_output_voltage); file.println(";");
-    file.print("probe_current_zero = "); file.print(jumperlessConfig.calibration.probe_current_zero); file.println(";");
-    file.print("minimum_probe_reading = "); file.print(jumperlessConfig.calibration.minimum_probe_reading); file.println(";");
-    file.print("probe_droop_v0 = "); file.print(jumperlessConfig.calibration.probe_droop_v0, 3); file.println(";");
-    file.print("probe_droop_ohms = "); file.print(jumperlessConfig.calibration.probe_droop_ohms, 1); file.println(";");
-    file.print("probe_pad_ohms = "); file.print(jumperlessConfig.calibration.probe_pad_ohms, 1); file.println(";");
-    file.print("crosspoint_resistance = "); file.print(jumperlessConfig.calibration.crosspoint_resistance); file.println(";");
-    file.println();
-
-    // Write logo pad settings section
-    file.println("[logo_pads]");
-    file.print("top_guy = "); file.print(jumperlessConfig.logo_pads.top_guy); file.println(";");
-    file.print("bottom_guy = "); file.print(jumperlessConfig.logo_pads.bottom_guy); file.println(";");
-    file.print("building_pad_top = "); file.print(jumperlessConfig.logo_pads.building_pad_top); file.println(";");
-    file.print("building_pad_bottom = "); file.print(jumperlessConfig.logo_pads.building_pad_bottom); file.println(";");
-    file.print("repeat_ms = "); file.print(jumperlessConfig.logo_pads.repeat_ms); file.println(";");
-    file.println();
-
-    // Write display settings section
-    file.println("[display]");
-    file.print("lines_wires = "); file.print(jumperlessConfig.display.lines_wires); file.println(";");
-    file.print("menu_brightness = "); file.print(jumperlessConfig.display.menu_brightness); file.println(";");
-    file.print("led_brightness = "); file.print(jumperlessConfig.display.led_brightness); file.println(";");
-    file.print("rail_brightness = "); file.print(jumperlessConfig.display.rail_brightness); file.println(";");
-    file.print("special_net_brightness = "); file.print(jumperlessConfig.display.special_net_brightness); file.println(";");
-    file.print("net_color_mode = "); file.print(jumperlessConfig.display.net_color_mode); file.println(";");
-    file.print("net_currents = "); file.print(jumperlessConfig.display.net_currents); file.println(";");
-    file.print("current_flow = "); file.print(jumperlessConfig.display.current_flow); file.println(";");
-    file.print("dump_leds = "); file.print(jumperlessConfig.display.dump_leds); file.println(";");
-    file.print("dump_format = "); file.print(jumperlessConfig.display.dump_format); file.println(";");
-    file.print("terminal_line_buffering = "); file.print(jumperlessConfig.display.terminal_line_buffering); file.println(";");
-    file.println();
-
-    // Write serial section
-    file.println("[serial_1]");
-    file.print("function = "); file.print(jumperlessConfig.serial_1.function); file.println(";");
-    file.print("baud_rate = "); file.print(jumperlessConfig.serial_1.baud_rate); file.println(";");
-    file.print("print_passthrough = "); file.print(jumperlessConfig.serial_1.print_passthrough); file.println(";");
-    file.print("connect_on_boot = "); file.print(jumperlessConfig.serial_1.connect_on_boot); file.println(";");
-    file.print("lock_connection = "); file.print(jumperlessConfig.serial_1.lock_connection); file.println(";");
-    file.print("autoconnect_flashing = "); file.print(jumperlessConfig.serial_1.autoconnect_flashing); file.println(";");
-    file.print("async_passthrough = "); file.print(jumperlessConfig.serial_1.async_passthrough ? 1:0); file.println(";");
-    file.print("tag_parsing = "); file.print(jumperlessConfig.serial_1.tag_parsing); file.println(";");
-    // Name, not number: the in-place updater and the ~ printer already write
-    // the name (parseFlashType accepts either), and the two serializers
-    // disagreeing made a full save look like a config change.
-    file.print("flash_reset_type = "); file.print(getStringFromTable(jumperlessConfig.serial_1.flash_reset_type, flashTypeTable)); file.println(";");
-    file.println();
-
-    file.println("[serial_2]");
-    file.print("function = "); file.print(jumperlessConfig.serial_2.function); file.println(";");
-    file.print("baud_rate = "); file.print(jumperlessConfig.serial_2.baud_rate); file.println(";");
-    file.print("print_passthrough = "); file.print(jumperlessConfig.serial_2.print_passthrough); file.println(";");
-    file.print("connect_on_boot = "); file.print(jumperlessConfig.serial_2.connect_on_boot); file.println(";");
-    file.print("lock_connection = "); file.print(jumperlessConfig.serial_2.lock_connection); file.println(";");
-    file.print("autoconnect_flashing = "); file.print(jumperlessConfig.serial_2.autoconnect_flashing); file.println(";");
-    file.println();
-    // Write top_oled section
-    file.println("[top_oled]");
-    file.print("enabled = "); file.print(jumperlessConfig.top_oled.enabled); file.println(";");
-    file.print("i2c_address = "); file.print(jumperlessConfig.top_oled.i2c_address); file.println(";");
-    file.print("width = "); file.print(jumperlessConfig.top_oled.width); file.println(";");
-    file.print("height = "); file.print(jumperlessConfig.top_oled.height); file.println(";");
-    file.print("rotation = "); file.print(jumperlessConfig.top_oled.rotation); file.println(";");
-    file.print("connection_type = "); file.print(getConnectionTypeString(jumperlessConfig.top_oled.connection_type)); file.println(";");
-    file.print("sda_pin = "); file.print(jumperlessConfig.top_oled.sda_pin); file.println(";");
-    file.print("scl_pin = "); file.print(jumperlessConfig.top_oled.scl_pin); file.println(";");
-    file.print("gpio_sda = "); file.print(jumperlessConfig.top_oled.gpio_sda); file.println(";");
-    file.print("gpio_scl = "); file.print(jumperlessConfig.top_oled.gpio_scl); file.println(";");
-    file.print("sda_row = "); file.print(jumperlessConfig.top_oled.sda_row); file.println(";");
-    file.print("scl_row = "); file.print(jumperlessConfig.top_oled.scl_row); file.println(";");
-    file.print("connect_on_boot = "); file.print(jumperlessConfig.top_oled.connect_on_boot ? 1:0); file.println(";");
-    file.print("lock_connection = "); file.print(jumperlessConfig.top_oled.lock_connection ? 1:0); file.println(";");
-    file.print("show_in_terminal = "); file.print(jumperlessConfig.top_oled.show_in_terminal ? 1:0); file.println(";");
-    file.print("font = "); file.print(jumperlessConfig.top_oled.font); file.println(";");
-    file.print("startup_message = "); file.print(jumperlessConfig.top_oled.startup_message); file.println("");
-    file.println();
-    
-    // Write usb_cdc section
-    file.println("[usb_cdc]");
-    file.print("ignore_dtr = "); file.print(jumperlessConfig.usb_cdc.ignore_dtr ? 1 : 0); file.println(";");
-
-    // Write usb_audio section
-    file.println("[usb_audio]");
-    file.print("enabled = "); file.print(jumperlessConfig.usb_audio.enabled ? 1 : 0); file.println(";");
-    file.print("left = "); file.print(jumperlessConfig.usb_audio.left); file.println(";");
-    file.print("right = "); file.print(jumperlessConfig.usb_audio.right); file.println(";");
-    file.print("rate = "); file.print(jumperlessConfig.usb_audio.rate); file.println(";");
-    file.print("full_scale = "); file.print(jumperlessConfig.usb_audio.full_scale, 2); file.println(";");
-    file.print("dc_block = "); file.print(jumperlessConfig.usb_audio.dc_block ? 1 : 0); file.println(";");
+    }
     
     // ponytail: f_write failures are sticky (volume-full stays full; hard I/O
     // errors set FIL.err and abort the file), so this final write failing
-    // catches any earlier print() failure without checking all ~180 of them.
+    // catches any earlier print() failure without checking all of them.
     bool writeOk = (file.println() == 2);
     size_t written = file.size();
     file.flush();
@@ -1233,6 +1209,8 @@ bool saveConfigToFile(const char* filename) {
     }
     unpauseCore2ForFlash(was_paused);
     AsyncPassthrough::resumeUARTRxIRQ();
+
+    updateShadowConfig();
     
     if (debugConfigSaveTiming) {
         Serial.print("[ConfigSave] FULL SAVE complete: ");
@@ -1245,1146 +1223,51 @@ bool saveConfigToFile(const char* filename) {
 // Copy current config to shadow (call after successful save)
 void updateShadowConfig() {
     memcpy(&lastSavedConfig, &jumperlessConfig, sizeof(struct config));
-    // Note: display_type is a const char* pointer, not a char array
-    // The pointer itself gets copied by memcpy, which is fine since
-    // it points to string literals that don't change
     shadowConfigValid = true;
 }
 
-
-//! This is where we add new config options
-// Compare current config with last saved to detect changes
-// Returns true if config has been modified since last save
+// Compare current config with last saved to detect changes - per-option
+// through the table (handles floats and strings correctly, and can't drift
+// from the struct).
 bool configHasChanges() {
     if (!shadowConfigValid) return true;  // No shadow = need to save
-    
-    // Compare each section individually for clarity and debuggability
-    // Note: We compare individual fields rather than memcmp to handle floats properly
-    
-    // Firmware section
-    if (strcmp(jumperlessConfig.firmware.last_version, lastSavedConfig.firmware.last_version) != 0) return true;
-    if (jumperlessConfig.firmware.files_provisioned != lastSavedConfig.firmware.files_provisioned) return true;
-    
-    // Hardware section
-    if (jumperlessConfig.hardware.generation != lastSavedConfig.hardware.generation) return true;
-    if (jumperlessConfig.hardware.revision != lastSavedConfig.hardware.revision) return true;
-    if (jumperlessConfig.hardware.probe_revision != lastSavedConfig.hardware.probe_revision) return true;
-    if (jumperlessConfig.hardware.psram_installed != lastSavedConfig.hardware.psram_installed) return true;
-    if (jumperlessConfig.hardware.psram_app_size_kb != lastSavedConfig.hardware.psram_app_size_kb) return true;
-    if (jumperlessConfig.hardware.probe_led_on_button_pin != lastSavedConfig.hardware.probe_led_on_button_pin) return true;
-    if (jumperlessConfig.hardware.probe_led_refresh_us != lastSavedConfig.hardware.probe_led_refresh_us) return true;
-    if (jumperlessConfig.hardware.encoder_pio != lastSavedConfig.hardware.encoder_pio) return true;
-
-    // DACs section
-    if (jumperlessConfig.dacs.set_dacs_on_boot != lastSavedConfig.dacs.set_dacs_on_boot) return true;
-    if (jumperlessConfig.dacs.set_rails_on_boot != lastSavedConfig.dacs.set_rails_on_boot) return true;
-    if (jumperlessConfig.dacs.probe_power_dac != lastSavedConfig.dacs.probe_power_dac) return true;
-    if (jumperlessConfig.dacs.auto_connect_probe == -1 && lastSavedConfig.dacs.auto_connect_probe != -1) return true;
-    if (jumperlessConfig.dacs.auto_connect_probe != -1 && lastSavedConfig.dacs.auto_connect_probe == -1) return true;
-    if (jumperlessConfig.dacs.probe_power_source != lastSavedConfig.dacs.probe_power_source) return true;
-    if (jumperlessConfig.dacs.limit_max != lastSavedConfig.dacs.limit_max) return true;
-    if (jumperlessConfig.dacs.rail_click_adjust != lastSavedConfig.dacs.rail_click_adjust) return true;
-    if (jumperlessConfig.dacs.limit_min != lastSavedConfig.dacs.limit_min) return true;
-    
-    // Debug section
-    if (jumperlessConfig.debug.file_parsing != lastSavedConfig.debug.file_parsing) return true;
-    if (jumperlessConfig.debug.net_manager != lastSavedConfig.debug.net_manager) return true;
-    if (jumperlessConfig.debug.nets_to_chips != lastSavedConfig.debug.nets_to_chips) return true;
-    if (jumperlessConfig.debug.nets_to_chips_alt != lastSavedConfig.debug.nets_to_chips_alt) return true;
-    if (jumperlessConfig.debug.leds != lastSavedConfig.debug.leds) return true;
-    if (jumperlessConfig.debug.probing != lastSavedConfig.debug.probing) return true;
-    if (jumperlessConfig.debug.oled != lastSavedConfig.debug.oled) return true;
-    if (jumperlessConfig.debug.logo_pads != lastSavedConfig.debug.logo_pads) return true;
-    if (jumperlessConfig.debug.arduino != lastSavedConfig.debug.arduino) return true;
-    if (jumperlessConfig.debug.usb_mass_storage != lastSavedConfig.debug.usb_mass_storage) return true;
-    if (jumperlessConfig.debug.show_probe_current != lastSavedConfig.debug.show_probe_current) return true;
-    if (jumperlessConfig.debug.show_node_errors != lastSavedConfig.debug.show_node_errors) return true;
-    if (jumperlessConfig.debug.probe_power_gpio != lastSavedConfig.debug.probe_power_gpio) return true;
-    if (jumperlessConfig.debug.probe_switch_stats != lastSavedConfig.debug.probe_switch_stats) return true;
-    if (jumperlessConfig.debug.probe_switch_agree != lastSavedConfig.debug.probe_switch_agree) return true;
-    if (jumperlessConfig.debug.net_voltage_scan != lastSavedConfig.debug.net_voltage_scan) return true;
-    if (jumperlessConfig.debug.net_scan_pair_taps != lastSavedConfig.debug.net_scan_pair_taps) return true;
-    
-    // Routing section
-    if (jumperlessConfig.routing.stack_paths != lastSavedConfig.routing.stack_paths) return true;
-    if (jumperlessConfig.routing.stack_rails != lastSavedConfig.routing.stack_rails) return true;
-    if (jumperlessConfig.routing.stack_dacs != lastSavedConfig.routing.stack_dacs) return true;
-    if (jumperlessConfig.routing.rail_priority != lastSavedConfig.routing.rail_priority) return true;
-    if (jumperlessConfig.slots.boot_mode != lastSavedConfig.slots.boot_mode) return true;
-    if (jumperlessConfig.slots.boot_slot != lastSavedConfig.slots.boot_slot) return true;
-    
-    // Calibration section
-    if (jumperlessConfig.calibration.top_rail_zero != lastSavedConfig.calibration.top_rail_zero) return true;
-    if (jumperlessConfig.calibration.top_rail_spread != lastSavedConfig.calibration.top_rail_spread) return true;
-    if (jumperlessConfig.calibration.bottom_rail_zero != lastSavedConfig.calibration.bottom_rail_zero) return true;
-    if (jumperlessConfig.calibration.bottom_rail_spread != lastSavedConfig.calibration.bottom_rail_spread) return true;
-    if (jumperlessConfig.calibration.dac_0_zero != lastSavedConfig.calibration.dac_0_zero) return true;
-    if (jumperlessConfig.calibration.dac_0_spread != lastSavedConfig.calibration.dac_0_spread) return true;
-    if (jumperlessConfig.calibration.dac_1_zero != lastSavedConfig.calibration.dac_1_zero) return true;
-    if (jumperlessConfig.calibration.dac_1_spread != lastSavedConfig.calibration.dac_1_spread) return true;
-    if (jumperlessConfig.calibration.adc_0_zero != lastSavedConfig.calibration.adc_0_zero) return true;
-    if (jumperlessConfig.calibration.adc_0_spread != lastSavedConfig.calibration.adc_0_spread) return true;
-    if (jumperlessConfig.calibration.adc_1_zero != lastSavedConfig.calibration.adc_1_zero) return true;
-    if (jumperlessConfig.calibration.adc_1_spread != lastSavedConfig.calibration.adc_1_spread) return true;
-    if (jumperlessConfig.calibration.adc_2_zero != lastSavedConfig.calibration.adc_2_zero) return true;
-    if (jumperlessConfig.calibration.adc_2_spread != lastSavedConfig.calibration.adc_2_spread) return true;
-    if (jumperlessConfig.calibration.adc_3_zero != lastSavedConfig.calibration.adc_3_zero) return true;
-    if (jumperlessConfig.calibration.adc_3_spread != lastSavedConfig.calibration.adc_3_spread) return true;
-    if (jumperlessConfig.calibration.adc_4_zero != lastSavedConfig.calibration.adc_4_zero) return true;
-    if (jumperlessConfig.calibration.adc_4_spread != lastSavedConfig.calibration.adc_4_spread) return true;
-    if (jumperlessConfig.calibration.adc_7_zero != lastSavedConfig.calibration.adc_7_zero) return true;
-    if (jumperlessConfig.calibration.adc_7_spread != lastSavedConfig.calibration.adc_7_spread) return true;
-    if (jumperlessConfig.calibration.probe_max != lastSavedConfig.calibration.probe_max) return true;
-    if (jumperlessConfig.calibration.probe_min != lastSavedConfig.calibration.probe_min) return true;
-    if (jumperlessConfig.calibration.probe_max_measure != lastSavedConfig.calibration.probe_max_measure) return true;
-    if (jumperlessConfig.calibration.probe_max_measure_gpio != lastSavedConfig.calibration.probe_max_measure_gpio) return true;
-    if (jumperlessConfig.calibration.probe_min_measure != lastSavedConfig.calibration.probe_min_measure) return true;
-    if (jumperlessConfig.calibration.probe_switch_threshold_high != lastSavedConfig.calibration.probe_switch_threshold_high) return true;
-    if (jumperlessConfig.calibration.probe_switch_threshold_low != lastSavedConfig.calibration.probe_switch_threshold_low) return true;
-    if (jumperlessConfig.calibration.probe_switch_select_max_ma != lastSavedConfig.calibration.probe_switch_select_max_ma) return true;
-    if (jumperlessConfig.calibration.probe_switch_blink_hold_pct != lastSavedConfig.calibration.probe_switch_blink_hold_pct) return true;
-    if (jumperlessConfig.calibration.probe_switch_threshold != lastSavedConfig.calibration.probe_switch_threshold) return true;
-    if (jumperlessConfig.calibration.measure_mode_output_voltage != lastSavedConfig.calibration.measure_mode_output_voltage) return true;
-    if (jumperlessConfig.calibration.probe_current_zero != lastSavedConfig.calibration.probe_current_zero) return true;
-    if (jumperlessConfig.calibration.minimum_probe_reading != lastSavedConfig.calibration.minimum_probe_reading) return true;
-    if (jumperlessConfig.calibration.probe_droop_v0 != lastSavedConfig.calibration.probe_droop_v0) return true;
-    if (jumperlessConfig.calibration.probe_droop_ohms != lastSavedConfig.calibration.probe_droop_ohms) return true;
-    if (jumperlessConfig.calibration.probe_pad_ohms != lastSavedConfig.calibration.probe_pad_ohms) return true;
-    if (jumperlessConfig.calibration.crosspoint_resistance != lastSavedConfig.calibration.crosspoint_resistance) return true;
-    
-    // Logo pads section
-    if (jumperlessConfig.logo_pads.top_guy != lastSavedConfig.logo_pads.top_guy) return true;
-    if (jumperlessConfig.logo_pads.bottom_guy != lastSavedConfig.logo_pads.bottom_guy) return true;
-    if (jumperlessConfig.logo_pads.building_pad_top != lastSavedConfig.logo_pads.building_pad_top) return true;
-    if (jumperlessConfig.logo_pads.building_pad_bottom != lastSavedConfig.logo_pads.building_pad_bottom) return true;
-    if (jumperlessConfig.logo_pads.repeat_ms != lastSavedConfig.logo_pads.repeat_ms) return true;
-    
-    // Display section
-    if (jumperlessConfig.display.lines_wires != lastSavedConfig.display.lines_wires) return true;
-    if (jumperlessConfig.display.menu_brightness != lastSavedConfig.display.menu_brightness) return true;
-    if (jumperlessConfig.display.led_brightness != lastSavedConfig.display.led_brightness) return true;
-    if (jumperlessConfig.display.rail_brightness != lastSavedConfig.display.rail_brightness) return true;
-    if (jumperlessConfig.display.special_net_brightness != lastSavedConfig.display.special_net_brightness) return true;
-    if (jumperlessConfig.display.net_color_mode != lastSavedConfig.display.net_color_mode) return true;
-    if (jumperlessConfig.display.net_currents != lastSavedConfig.display.net_currents) return true;
-    if (jumperlessConfig.display.current_flow != lastSavedConfig.display.current_flow) return true;
-    if (jumperlessConfig.display.dump_leds != lastSavedConfig.display.dump_leds) return true;
-    if (jumperlessConfig.display.dump_format != lastSavedConfig.display.dump_format) return true;
-    if (jumperlessConfig.display.terminal_line_buffering != lastSavedConfig.display.terminal_line_buffering) return true;
-    
-    // Serial 1 section
-    if (jumperlessConfig.serial_1.function != lastSavedConfig.serial_1.function) return true;
-    if (jumperlessConfig.serial_1.baud_rate != lastSavedConfig.serial_1.baud_rate) return true;
-    if (jumperlessConfig.serial_1.print_passthrough != lastSavedConfig.serial_1.print_passthrough) return true;
-    if (jumperlessConfig.serial_1.connect_on_boot != lastSavedConfig.serial_1.connect_on_boot) return true;
-    if (jumperlessConfig.serial_1.lock_connection != lastSavedConfig.serial_1.lock_connection) return true;
-    if (jumperlessConfig.serial_1.autoconnect_flashing != lastSavedConfig.serial_1.autoconnect_flashing) return true;
-    if (jumperlessConfig.serial_1.async_passthrough != lastSavedConfig.serial_1.async_passthrough) return true;
-    if (jumperlessConfig.serial_1.tag_parsing != lastSavedConfig.serial_1.tag_parsing) return true;
-    if (jumperlessConfig.serial_1.flash_reset_type != lastSavedConfig.serial_1.flash_reset_type) return true;
-    
-    // Serial 2 section
-    if (jumperlessConfig.serial_2.function != lastSavedConfig.serial_2.function) return true;
-    if (jumperlessConfig.serial_2.baud_rate != lastSavedConfig.serial_2.baud_rate) return true;
-    if (jumperlessConfig.serial_2.print_passthrough != lastSavedConfig.serial_2.print_passthrough) return true;
-    if (jumperlessConfig.serial_2.connect_on_boot != lastSavedConfig.serial_2.connect_on_boot) return true;
-    if (jumperlessConfig.serial_2.lock_connection != lastSavedConfig.serial_2.lock_connection) return true;
-    if (jumperlessConfig.serial_2.autoconnect_flashing != lastSavedConfig.serial_2.autoconnect_flashing) return true;
-    
-    // Top OLED section
-    if (jumperlessConfig.top_oled.enabled != lastSavedConfig.top_oled.enabled) return true;
-    if (jumperlessConfig.top_oled.i2c_address != lastSavedConfig.top_oled.i2c_address) return true;
-    if (jumperlessConfig.top_oled.width != lastSavedConfig.top_oled.width) return true;
-    if (jumperlessConfig.top_oled.height != lastSavedConfig.top_oled.height) return true;
-    if (jumperlessConfig.top_oled.rotation != lastSavedConfig.top_oled.rotation) return true;
-    if (jumperlessConfig.top_oled.connection_type != lastSavedConfig.top_oled.connection_type) return true;
-    if (jumperlessConfig.top_oled.sda_pin != lastSavedConfig.top_oled.sda_pin) return true;
-    if (jumperlessConfig.top_oled.scl_pin != lastSavedConfig.top_oled.scl_pin) return true;
-    if (jumperlessConfig.top_oled.gpio_sda != lastSavedConfig.top_oled.gpio_sda) return true;
-    if (jumperlessConfig.top_oled.gpio_scl != lastSavedConfig.top_oled.gpio_scl) return true;
-    if (jumperlessConfig.top_oled.sda_row != lastSavedConfig.top_oled.sda_row) return true;
-    if (jumperlessConfig.top_oled.scl_row != lastSavedConfig.top_oled.scl_row) return true;
-    if (jumperlessConfig.top_oled.connect_on_boot != lastSavedConfig.top_oled.connect_on_boot) return true;
-    if (jumperlessConfig.top_oled.lock_connection != lastSavedConfig.top_oled.lock_connection) return true;
-    if (jumperlessConfig.top_oled.show_in_terminal != lastSavedConfig.top_oled.show_in_terminal) return true;
-    if (jumperlessConfig.top_oled.font != lastSavedConfig.top_oled.font) return true;
-    if (strcmp(jumperlessConfig.top_oled.startup_message, lastSavedConfig.top_oled.startup_message) != 0) return true;
-
-    if (jumperlessConfig.usb_cdc.ignore_dtr != lastSavedConfig.usb_cdc.ignore_dtr) return true;
-
-    // USB audio. Without these, saveConfig() takes its "nothing changed" early
-    // out and usb_audio_save_config() writes nothing at all - the terminal
-    // reports the mic as saved while config.txt still holds the old value, so
-    // it reverts on the next boot.
-    if (jumperlessConfig.usb_audio.enabled != lastSavedConfig.usb_audio.enabled) return true;
-    if (jumperlessConfig.usb_audio.left != lastSavedConfig.usb_audio.left) return true;
-    if (jumperlessConfig.usb_audio.right != lastSavedConfig.usb_audio.right) return true;
-    if (jumperlessConfig.usb_audio.rate != lastSavedConfig.usb_audio.rate) return true;
-    if (jumperlessConfig.usb_audio.full_scale != lastSavedConfig.usb_audio.full_scale) return true;
-    if (jumperlessConfig.usb_audio.dc_block != lastSavedConfig.usb_audio.dc_block) return true;
-
-    return false;  // No changes detected
-}
-
-// Structure to hold a config key-value pair for incremental updates
-struct ConfigKeyValue {
-    char section[32];
-    char key[32];
-    char value[64];
-};
-
-// Helper to format a config value for writing
-static void formatConfigValue(char* buf, size_t bufSize, const char* key, int value) {
-    snprintf(buf, bufSize, "%s = %d;", key, value);
-}
-
-static void formatConfigValueFloat(char* buf, size_t bufSize, const char* key, float value) {
-    snprintf(buf, bufSize, "%s = %.2f;", key, value);
-}
-
-static void formatConfigValueBool(char* buf, size_t bufSize, const char* key, bool value) {
-    snprintf(buf, bufSize, "%s = %d;", key, value ? 1 : 0);
-}
-
-static void formatConfigValueStr(char* buf, size_t bufSize, const char* key, const char* value) {
-    snprintf(buf, bufSize, "%s = %s;", key, value);
-}
-
-// Check if config file has all required sections and keys
-// Returns true if file is complete, false if new options need to be added
-static bool configFileIsComplete(const char* fileContent) {
-    // Check for essential section headers - if any missing, need full rewrite
-    // This list should be updated when new sections are added
-    const char* requiredSections[] = {
-        "[config]", "[firmware]", "[hardware]", "[dacs]", "[debug]",
-        "[routing]", "[slots]", "[calibration]", "[logo_pads]", "[display]",
-        "[serial_1]", "[serial_2]", "[top_oled]", "[usb_cdc]", "[usb_audio]"
-    };
-    const int numRequired = sizeof(requiredSections) / sizeof(requiredSections[0]);
-    
-    for (int i = 0; i < numRequired; i++) {
-        if (strstr(fileContent, requiredSections[i]) == NULL) {
-#if JL_BOOT_VERBOSE
-            Serial.print("Config missing section: ");
-            Serial.println(requiredSections[i]);
-#endif
-            return false;
+    for (int i = 0; i < jlConfigOptionCount; i++) {
+        const ConfigOptionDesc* opt = &jlConfigOptions[i];
+        size_t off = (size_t)((char*)opt->ptr - (char*)&jumperlessConfig);
+        if (opt->type == JLT_STR16 || opt->type == JLT_STR33) {
+            if (strcmp((const char*)opt->ptr, (const char*)&lastSavedConfig + off) != 0) return true;
+        } else {
+            if (memcmp(opt->ptr, (const char*)&lastSavedConfig + off, cfgFieldSize(opt)) != 0) return true;
         }
     }
-    
-    // Check for some key fields that might be new in recent firmware
-    // Add new keys here when they're added to config.h
-    const char* requiredKeys[] = {
-        "firmware_version",
-        "probe_switch_threshold_high",
-        "probe_switch_threshold_low",
-        "measure_mode_output_voltage",
-        "probe_current_zero",
-        "probe_droop_v0",
-        "probe_droop_ohms",
-        "probe_pad_ohms",
-        "probe_power_source",
-        "probe_max_measure_gpio",
-        "probe_switch_select_max_ma",
-        "probe_switch_blink_hold_pct",
-        "probe_switch_agree",
-        "probe_led_refresh_us",
-        "encoder_pio",
-        "dc_block",
-        "async_passthrough"
-    };
-    const int numKeys = sizeof(requiredKeys) / sizeof(requiredKeys[0]);
-    
-    for (int i = 0; i < numKeys; i++) {
-        if (strstr(fileContent, requiredKeys[i]) == NULL) {
-#if JL_BOOT_VERBOSE
-            Serial.print("Config missing key: ");
-            Serial.println(requiredKeys[i]);
-#endif
             return false;
-        }
-    }
-    
-    return true;
 }
 
-// Debug flag for config save timing - set to true to see performance metrics
-// Enable with setConfigSaveDebug(true) or via serial command
 bool debugConfigSaveTiming = false;
-
 void setConfigSaveDebug(bool enable) {
     debugConfigSaveTiming = enable;
-    Serial.print("[ConfigSave] Debug timing ");
-    Serial.println(enable ? "ENABLED" : "DISABLED");
-}
-
-/*
-// Optimized incremental save - reads existing file, updates changed values, writes once
-// This minimizes flash writes by only updating when necessary
-void saveConfigIncremental(const char* filename) { return false; }
-*/
-
-// Append "<s>\n" to the rebuild buffer, refusing to overshoot.
-//
-// snprintf() returns the length it WOULD have written, so the previous
-// `dstPos += snprintf(...)` walked dstPos PAST dstEnd on any truncating call.
-// writeSize (dstPos - newContent) then covered never-initialised malloc'd bytes
-// and file.write() committed that raw heap into config.txt. Returns false on
-// truncation so the caller can abandon the in-place rebuild.
-static inline bool appendConfigLine(char*& dstPos, char* dstEnd, const char* s) {
-    size_t avail = (size_t)(dstEnd - dstPos);
-    if (avail == 0) return false;
-    int written = snprintf(dstPos, avail, "%s\n", s);
-    if (written < 0 || (size_t)written >= avail) {
-        *dstPos = '\0';   // drop the partial line
-        return false;
-    }
-    dstPos += written;
-    return true;
-}
-
-bool saveConfigIncremental(const char* filename) {
-    uint32_t totalStartTime = micros();
-    uint32_t stepTime;
-    
-    // First check if anything actually changed
-    stepTime = micros();
-    bool hasChanges = configHasChanges();
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave] hasChanges check: ");
-        Serial.print(micros() - stepTime);
-        Serial.print(" us (shadow valid: ");
-        Serial.print(shadowConfigValid ? "yes" : "NO - first save");
-        Serial.println(")");
-    }
-    
-    if (!hasChanges) {
-        if (debugConfigSaveTiming) {
-            Serial.print("[ConfigSave] SKIPPED - no changes. Total: ");
-            Serial.print(micros() - totalStartTime);
-            Serial.println(" us");
-        }
-        return true; // Considered success since nothing needed saving
-    }
-    
-    // Allocate buffer for file content (config is ~4KB)
-    // Use smaller buffers to reduce heap pressure - allocate sequentially
-    // Rebuild buffer for the whole file. config.txt is ~2.9 KB today and grows
-    // with every new key; the old 3000-byte value left ONE byte of headroom
-    // (2744 usable after the slack below), so from the [usb_audio] section on
-    // every save overflowed and fell back to the temp-file full writer - the
-    // path with by far the most flash erase/program traffic, each window
-    // parking core 1 with interrupts off. 8 KB keeps the incremental
-    // in-place rewrite as the normal path with years of headroom; the two
-    // buffers are transient heap.
-    const size_t MAX_CONFIG_SIZE = 8192;
-    char* fileContent = (char*)malloc(MAX_CONFIG_SIZE);
-    if (!fileContent) {
-        Serial.println("saveConfigIncremental: malloc1 failed, falling back to full save");
-        if (saveConfigToFile(filename)) {
-            updateShadowConfig();
-            return true; // Fallback succeeded
-        }
-        return false; // Fallback failed
-    }
-    
-    char* newContent = (char*)malloc(MAX_CONFIG_SIZE);
-    if (!newContent) {
-        Serial.println("saveConfigIncremental: malloc2 failed, falling back to full save");
-        free(fileContent);
-        if (saveConfigToFile(filename)) {
-            updateShadowConfig();
-            return true;
-        }
-        return false;
-    }
-    
-    // Read existing file content
-    stepTime = micros();
-    size_t bytesRead = 0;
-    bool fileTruncated = false;
-    bool fileExists = safeFileReadAll(filename, fileContent, MAX_CONFIG_SIZE, &bytesRead, 2000, &fileTruncated);
-    if (fileExists && fileTruncated) {
-        // The file is bigger than our buffer: an in-place rebuild of a prefix
-        // would leave a stale tail on disk. Rewrite the whole file instead.
-        Serial.println("[ConfigSave] config.txt larger than the rebuild buffer - using full writer");
-        free(fileContent);
-        free(newContent);
-        bool ok = saveConfigToFile(filename);
-        if (ok) updateShadowConfig();
-        return ok;
-    }
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave] File read (");
-        Serial.print(bytesRead);
-        Serial.print(" bytes): ");
-        Serial.print(micros() - stepTime);
-        Serial.println(" us");
-    }
-    
-    if (!fileExists || bytesRead == 0) {
-        // File doesn't exist or is empty - do full save
-        if (debugConfigSaveTiming) Serial.println("[ConfigSave] No existing file, doing full save");
-        free(fileContent);
-        free(newContent);
-        if (saveConfigToFile(filename)) {
-            updateShadowConfig();
-            return true;
-        }
-        return false;
-    }
-    
-    // Check if file has all required sections and keys
-    // If any are missing (e.g., new options from firmware update), do full save
-    stepTime = micros();
-    bool isComplete = configFileIsComplete(fileContent);
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave] Completeness check: ");
-        Serial.print(micros() - stepTime);
-        Serial.println(" us");
-    }
-    
-    if (!isComplete) {
-        if (debugConfigSaveTiming) Serial.println("[ConfigSave] File incomplete, doing full save");
-#if JL_BOOT_VERBOSE
-        Serial.println("Config file incomplete, doing full save to add new options");
-#endif
-        free(fileContent);
-        free(newContent);
-        if (saveConfigToFile(filename)) {
-            updateShadowConfig();
-            return true;
-        }
-        return false;
-    }
-    
-    // Parse and rebuild file with updated values
-    // We process line by line, updating values as needed
-    stepTime = micros();
-    char* srcPos = fileContent;
-    char* dstPos = newContent;
-    char* dstEnd = newContent + MAX_CONFIG_SIZE - 256;  // Leave room for additions
-    bool rebuildOverflowed = false;   // set if the in-place rebuild did not fit
-    
-    char currentSection[32] = "";
-    char line[256];
-    
-    // Track which keys we've seen to detect missing new options
-    bool seenKeys[128] = {false};  // Simple bitset for tracking
-    int keyIndex = 0;
-    
-    // Helper lambda-like structure for key tracking
-    #define MARK_KEY_SEEN(section, key) \
-        do { if (keyIndex < 128) seenKeys[keyIndex++] = true; } while(0)
-    
-    while (*srcPos && dstPos < dstEnd) {
-        // Extract one line
-        char* lineEnd = strchr(srcPos, '\n');
-        size_t lineLen;
-        if (lineEnd) {
-            lineLen = lineEnd - srcPos;
-            if (lineLen > sizeof(line) - 1) lineLen = sizeof(line) - 1;
-            memcpy(line, srcPos, lineLen);
-            line[lineLen] = '\0';
-            srcPos = lineEnd + 1;
+    if (enable) {
+        Serial.println("[ConfigSave] Debug timing ENABLED");
         } else {
-            lineLen = strlen(srcPos);
-            if (lineLen > sizeof(line) - 1) lineLen = sizeof(line) - 1;
-            memcpy(line, srcPos, lineLen);
-            line[lineLen] = '\0';
-            srcPos += lineLen;
-        }
-        
-        // Trim the line for parsing
-        char trimmedLine[256];
-        strncpy(trimmedLine, line, sizeof(trimmedLine) - 1);
-        trimmedLine[sizeof(trimmedLine) - 1] = '\0';
-        trim(trimmedLine);
-        
-        // Check for section header
-        if (trimmedLine[0] == '[' && trimmedLine[strlen(trimmedLine)-1] == ']') {
-            // Bounded copy: section name can be up to 253 chars of a garbled
-            // line but currentSection is 32 bytes — truncate, don't overflow.
-            size_t secLen = strlen(trimmedLine) - 2;
-            if (secLen >= sizeof(currentSection)) secLen = sizeof(currentSection) - 1;
-            memcpy(currentSection, trimmedLine + 1, secLen);
-            currentSection[secLen] = '\0';
-            toLower(currentSection);
-            
-            // Copy section header as-is
-            if (!appendConfigLine(dstPos, dstEnd, line)) { rebuildOverflowed = true; break; }
-            continue;
-        }
-        
-        // Check for key=value
-        char* equalsPos = strchr(trimmedLine, '=');
-        if (equalsPos && trimmedLine[0] != '#' && !(trimmedLine[0] == '/' && trimmedLine[1] == '/')) {
-            char key[64];
-            size_t keyLen = equalsPos - trimmedLine;
-            if (keyLen > sizeof(key) - 1) keyLen = sizeof(key) - 1;
-            memcpy(key, trimmedLine, keyLen);
-            key[keyLen] = '\0';
-            trim(key);
-            toLower(key);
-            
-//! This is where we add new config options
-            // Generate updated line based on section and key
-            char newLine[256];
-            bool updated = false;
-            
-            // Match section and key to generate new value
-            //! [config] section
-            if (strcmp(currentSection, "config") == 0) {
-                if (strcmp(key, "firmware_version") == 0) {
-                    snprintf(newLine, sizeof(newLine), "firmware_version = %s;", firmwareVersion);
-                    updated = true;
-                }
-            }
-            //! [firmware] section
-            else if (strcmp(currentSection, "firmware") == 0) {
-                if (strcmp(key, "last_version") == 0) {
-                    snprintf(newLine, sizeof(newLine), "last_version = %s;", jumperlessConfig.firmware.last_version);
-                    updated = true;
-                } else if (strcmp(key, "files_provisioned") == 0) {
-                    snprintf(newLine, sizeof(newLine), "files_provisioned = %d;", jumperlessConfig.firmware.files_provisioned ? 1 : 0);
-                    updated = true;
-                }
-            }
-            //! [hardware] section
-            else if (strcmp(currentSection, "hardware") == 0) {
-                if (strcmp(key, "generation") == 0) {
-                    snprintf(newLine, sizeof(newLine), "generation = %d;", jumperlessConfig.hardware.generation);
-                    updated = true;
-                } else if (strcmp(key, "revision") == 0) {
-                    snprintf(newLine, sizeof(newLine), "revision = %d;", jumperlessConfig.hardware.revision);
-                    updated = true;
-                } else if (strcmp(key, "probe_revision") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_revision = %d;", jumperlessConfig.hardware.probe_revision);
-                    updated = true;
-                } else if (strcmp(key, "psram_installed") == 0) {
-                    snprintf(newLine, sizeof(newLine), "psram_installed = %d;", jumperlessConfig.hardware.psram_installed);
-                    updated = true;
-                } else if (strcmp(key, "psram_app_size_kb") == 0) {
-                    snprintf(newLine, sizeof(newLine), "psram_app_size_kb = %d;", jumperlessConfig.hardware.psram_app_size_kb);
-                    updated = true;
-                } else if (strcmp(key, "probe_led_on_button_pin") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_led_on_button_pin = %d;", jumperlessConfig.hardware.probe_led_on_button_pin ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "probe_led_refresh_us") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_led_refresh_us = %d;", jumperlessConfig.hardware.probe_led_refresh_us);
-                    updated = true;
-                } else if (strcmp(key, "encoder_pio") == 0) {
-                    snprintf(newLine, sizeof(newLine), "encoder_pio = %d;", jumperlessConfig.hardware.encoder_pio);
-                    updated = true;
-                }
-            }
-            //! [dacs] section
-            else if (strcmp(currentSection, "dacs") == 0) {
-                if (strcmp(key, "set_dacs_on_boot") == 0) {
-                    snprintf(newLine, sizeof(newLine), "set_dacs_on_boot = %d;", jumperlessConfig.dacs.set_dacs_on_boot ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "set_rails_on_boot") == 0) {
-                    snprintf(newLine, sizeof(newLine), "set_rails_on_boot = %d;", jumperlessConfig.dacs.set_rails_on_boot ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "probe_power_dac") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_power_dac = %d;", jumperlessConfig.dacs.probe_power_dac == 0 ? 0 : 1);
-                    updated = true;
-                } else if (strcmp(key, "auto_connect_probe") == 0) {
-                    snprintf(newLine, sizeof(newLine), "auto_connect_probe = %d;", jumperlessConfig.dacs.auto_connect_probe == -1 ? -1 : 1);
-                    updated = true;
-                } else if (strcmp(key, "probe_power_source") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_power_source = %d;", jumperlessConfig.dacs.probe_power_source == 1 ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "rail_click_adjust") == 0) {
-                    snprintf(newLine, sizeof(newLine), "rail_click_adjust = %d;", jumperlessConfig.dacs.rail_click_adjust);
-                    updated = true;
-                } else if (strcmp(key, "limit_max") == 0) {
-                    snprintf(newLine, sizeof(newLine), "limit_max = %.2f;", jumperlessConfig.dacs.limit_max);
-                    updated = true;
-                } else if (strcmp(key, "limit_min") == 0) {
-                    snprintf(newLine, sizeof(newLine), "limit_min = %.2f;", jumperlessConfig.dacs.limit_min);
-                    updated = true;
-                }
-            }
-            //! [debug] section
-            else if (strcmp(currentSection, "debug") == 0) {
-                if (strcmp(key, "file_parsing") == 0) {
-                    snprintf(newLine, sizeof(newLine), "file_parsing = %d;", jumperlessConfig.debug.file_parsing ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "net_manager") == 0) {
-                    snprintf(newLine, sizeof(newLine), "net_manager = %d;", jumperlessConfig.debug.net_manager ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "nets_to_chips") == 0) {
-                    snprintf(newLine, sizeof(newLine), "nets_to_chips = %d;", jumperlessConfig.debug.nets_to_chips ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "nets_to_chips_alt") == 0) {
-                    snprintf(newLine, sizeof(newLine), "nets_to_chips_alt = %d;", jumperlessConfig.debug.nets_to_chips_alt ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "leds") == 0) {
-                    snprintf(newLine, sizeof(newLine), "leds = %d;", jumperlessConfig.debug.leds ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "probing") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probing = %d;", jumperlessConfig.debug.probing ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "oled") == 0) {
-                    snprintf(newLine, sizeof(newLine), "oled = %d;", jumperlessConfig.debug.oled ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "logo_pads") == 0) {
-                    snprintf(newLine, sizeof(newLine), "logo_pads = %d;", jumperlessConfig.debug.logo_pads ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "arduino") == 0) {
-                    snprintf(newLine, sizeof(newLine), "arduino = %d;", jumperlessConfig.debug.arduino);
-                    updated = true;
-                } else if (strcmp(key, "usb_mass_storage") == 0) {
-                    snprintf(newLine, sizeof(newLine), "usb_mass_storage = %d;", jumperlessConfig.debug.usb_mass_storage ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "probe_power_gpio") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_power_gpio = %d;", jumperlessConfig.debug.probe_power_gpio ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_stats") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_stats = %d;", jumperlessConfig.debug.probe_switch_stats ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_agree") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_agree = %d;", jumperlessConfig.debug.probe_switch_agree ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "net_scan_pair_taps") == 0) {
-                    snprintf(newLine, sizeof(newLine), "net_scan_pair_taps = %d;", jumperlessConfig.debug.net_scan_pair_taps);
-                    updated = true;
-                } else if (strcmp(key, "net_voltage_scan") == 0) {
-                    snprintf(newLine, sizeof(newLine), "net_voltage_scan = %d;", jumperlessConfig.debug.net_voltage_scan ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "show_probe_current") == 0) {
-                    snprintf(newLine, sizeof(newLine), "show_probe_current = %d;", jumperlessConfig.debug.show_probe_current);
-                    updated = true;
-                } else if (strcmp(key, "show_node_errors") == 0) {
-                    snprintf(newLine, sizeof(newLine), "show_node_errors = %d;", jumperlessConfig.debug.show_node_errors ? 1 : 0);
-                    updated = true;
-                }
-            }
-            //! [routing] section
-            else if (strcmp(currentSection, "routing") == 0) {
-                if (strcmp(key, "stack_paths") == 0) {
-                    snprintf(newLine, sizeof(newLine), "stack_paths = %d;", jumperlessConfig.routing.stack_paths);
-                    updated = true;
-                } else if (strcmp(key, "stack_rails") == 0) {
-                    snprintf(newLine, sizeof(newLine), "stack_rails = %d;", jumperlessConfig.routing.stack_rails);
-                    updated = true;
-                } else if (strcmp(key, "stack_dacs") == 0) {
-                    snprintf(newLine, sizeof(newLine), "stack_dacs = %d;", jumperlessConfig.routing.stack_dacs);
-                    updated = true;
-                } else if (strcmp(key, "rail_priority") == 0) {
-                    snprintf(newLine, sizeof(newLine), "rail_priority = %d;", jumperlessConfig.routing.rail_priority);
-                    updated = true;
-                }
-            }
-            //! [slots] section
-            else if (strcmp(currentSection, "slots") == 0) {
-                if (strcmp(key, "boot_mode") == 0) {
-                    snprintf(newLine, sizeof(newLine), "boot_mode = %d;", jumperlessConfig.slots.boot_mode);
-                    updated = true;
-                } else if (strcmp(key, "boot_slot") == 0) {
-                    snprintf(newLine, sizeof(newLine), "boot_slot = %d;", jumperlessConfig.slots.boot_slot);
-                    updated = true;
-                }
-            }
-            //! [calibration] section
-            else if (strcmp(currentSection, "calibration") == 0) {
-                if (strcmp(key, "top_rail_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "top_rail_zero = %d;", jumperlessConfig.calibration.top_rail_zero);
-                    updated = true;
-                } else if (strcmp(key, "top_rail_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "top_rail_spread = %.2f;", jumperlessConfig.calibration.top_rail_spread);
-                    updated = true;
-                } else if (strcmp(key, "bottom_rail_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "bottom_rail_zero = %d;", jumperlessConfig.calibration.bottom_rail_zero);
-                    updated = true;
-                } else if (strcmp(key, "bottom_rail_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "bottom_rail_spread = %.2f;", jumperlessConfig.calibration.bottom_rail_spread);
-                    updated = true;
-                } else if (strcmp(key, "dac_0_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dac_0_zero = %d;", jumperlessConfig.calibration.dac_0_zero);
-                    updated = true;
-                } else if (strcmp(key, "dac_0_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dac_0_spread = %.2f;", jumperlessConfig.calibration.dac_0_spread);
-                    updated = true;
-                } else if (strcmp(key, "dac_1_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dac_1_zero = %d;", jumperlessConfig.calibration.dac_1_zero);
-                    updated = true;
-                } else if (strcmp(key, "dac_1_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dac_1_spread = %.2f;", jumperlessConfig.calibration.dac_1_spread);
-                    updated = true;
-                } else if (strcmp(key, "adc_0_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_0_zero = %.2f;", jumperlessConfig.calibration.adc_0_zero);
-                    updated = true;
-                } else if (strcmp(key, "adc_0_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_0_spread = %.2f;", jumperlessConfig.calibration.adc_0_spread);
-                    updated = true;
-                } else if (strcmp(key, "adc_1_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_1_zero = %.2f;", jumperlessConfig.calibration.adc_1_zero);
-                    updated = true;
-                } else if (strcmp(key, "adc_1_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_1_spread = %.2f;", jumperlessConfig.calibration.adc_1_spread);
-                    updated = true;
-                } else if (strcmp(key, "adc_2_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_2_zero = %.2f;", jumperlessConfig.calibration.adc_2_zero);
-                    updated = true;
-                } else if (strcmp(key, "adc_2_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_2_spread = %.2f;", jumperlessConfig.calibration.adc_2_spread);
-                    updated = true;
-                } else if (strcmp(key, "adc_3_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_3_zero = %.2f;", jumperlessConfig.calibration.adc_3_zero);
-                    updated = true;
-                } else if (strcmp(key, "adc_3_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_3_spread = %.2f;", jumperlessConfig.calibration.adc_3_spread);
-                    updated = true;
-                } else if (strcmp(key, "adc_4_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_4_zero = %.2f;", jumperlessConfig.calibration.adc_4_zero);
-                    updated = true;
-                } else if (strcmp(key, "adc_4_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_4_spread = %.2f;", jumperlessConfig.calibration.adc_4_spread);
-                    updated = true;
-                } else if (strcmp(key, "adc_7_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_7_zero = %.2f;", jumperlessConfig.calibration.adc_7_zero);
-                    updated = true;
-                } else if (strcmp(key, "adc_7_spread") == 0) {
-                    snprintf(newLine, sizeof(newLine), "adc_7_spread = %.2f;", jumperlessConfig.calibration.adc_7_spread);
-                    updated = true;
-                } else if (strcmp(key, "probe_max") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_max = %d;", jumperlessConfig.calibration.probe_max);
-                    updated = true;
-                } else if (strcmp(key, "probe_min") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_min = %d;", jumperlessConfig.calibration.probe_min);
-                    updated = true;
-                } else if (strcmp(key, "probe_max_measure") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_max_measure = %d;", jumperlessConfig.calibration.probe_max_measure);
-                    updated = true;
-                } else if (strcmp(key, "probe_max_measure_gpio") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_max_measure_gpio = %d;", jumperlessConfig.calibration.probe_max_measure_gpio);
-                    updated = true;
-                } else if (strcmp(key, "probe_min_measure") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_min_measure = %d;", jumperlessConfig.calibration.probe_min_measure);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_threshold_high") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_threshold_high = %.2f;", jumperlessConfig.calibration.probe_switch_threshold_high);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_threshold_low") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_threshold_low = %.2f;", jumperlessConfig.calibration.probe_switch_threshold_low);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_select_max_ma") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_select_max_ma = %.2f;", jumperlessConfig.calibration.probe_switch_select_max_ma);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_blink_hold_pct") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_blink_hold_pct = %d;", jumperlessConfig.calibration.probe_switch_blink_hold_pct);
-                    updated = true;
-                } else if (strcmp(key, "probe_switch_threshold") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_switch_threshold = %.2f;", jumperlessConfig.calibration.probe_switch_threshold);
-                    updated = true;
-                } else if (strcmp(key, "measure_mode_output_voltage") == 0) {
-                    snprintf(newLine, sizeof(newLine), "measure_mode_output_voltage = %.2f;", jumperlessConfig.calibration.measure_mode_output_voltage);
-                    updated = true;
-                } else if (strcmp(key, "probe_current_zero") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_current_zero = %.2f;", jumperlessConfig.calibration.probe_current_zero);
-                    updated = true;
-                } else if (strcmp(key, "minimum_probe_reading") == 0) {
-                    snprintf(newLine, sizeof(newLine), "minimum_probe_reading = %d;", jumperlessConfig.calibration.minimum_probe_reading);
-                    updated = true;
-                } else if (strcmp(key, "probe_droop_v0") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_droop_v0 = %.3f;", jumperlessConfig.calibration.probe_droop_v0);
-                    updated = true;
-                } else if (strcmp(key, "probe_droop_ohms") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_droop_ohms = %.1f;", jumperlessConfig.calibration.probe_droop_ohms);
-                    updated = true;
-                } else if (strcmp(key, "probe_pad_ohms") == 0) {
-                    snprintf(newLine, sizeof(newLine), "probe_pad_ohms = %.1f;", jumperlessConfig.calibration.probe_pad_ohms);
-                    updated = true;
-                } else if (strcmp(key, "crosspoint_resistance") == 0) {
-                    snprintf(newLine, sizeof(newLine), "crosspoint_resistance = %.2f;", jumperlessConfig.calibration.crosspoint_resistance);
-                    updated = true;
-                }
-            }
-            //! [logo_pads] section
-            else if (strcmp(currentSection, "logo_pads") == 0) {
-                if (strcmp(key, "top_guy") == 0) {
-                    snprintf(newLine, sizeof(newLine), "top_guy = %d;", jumperlessConfig.logo_pads.top_guy);
-                    updated = true;
-                } else if (strcmp(key, "bottom_guy") == 0) {
-                    snprintf(newLine, sizeof(newLine), "bottom_guy = %d;", jumperlessConfig.logo_pads.bottom_guy);
-                    updated = true;
-                } else if (strcmp(key, "building_pad_top") == 0) {
-                    snprintf(newLine, sizeof(newLine), "building_pad_top = %d;", jumperlessConfig.logo_pads.building_pad_top);
-                    updated = true;
-                } else if (strcmp(key, "building_pad_bottom") == 0) {
-                    snprintf(newLine, sizeof(newLine), "building_pad_bottom = %d;", jumperlessConfig.logo_pads.building_pad_bottom);
-                    updated = true;
-                } else if (strcmp(key, "repeat_ms") == 0) {
-                    snprintf(newLine, sizeof(newLine), "repeat_ms = %d;", jumperlessConfig.logo_pads.repeat_ms);
-                    updated = true;
-                }
-            }
-            //! [display] section
-            else if (strcmp(currentSection, "display") == 0) {
-                if (strcmp(key, "lines_wires") == 0) {
-                    snprintf(newLine, sizeof(newLine), "lines_wires = %d;", jumperlessConfig.display.lines_wires);
-                    updated = true;
-                } else if (strcmp(key, "menu_brightness") == 0) {
-                    snprintf(newLine, sizeof(newLine), "menu_brightness = %d;", jumperlessConfig.display.menu_brightness);
-                    updated = true;
-                } else if (strcmp(key, "led_brightness") == 0) {
-                    snprintf(newLine, sizeof(newLine), "led_brightness = %d;", jumperlessConfig.display.led_brightness);
-                    updated = true;
-                } else if (strcmp(key, "rail_brightness") == 0) {
-                    snprintf(newLine, sizeof(newLine), "rail_brightness = %d;", jumperlessConfig.display.rail_brightness);
-                    updated = true;
-                } else if (strcmp(key, "special_net_brightness") == 0) {
-                    snprintf(newLine, sizeof(newLine), "special_net_brightness = %d;", jumperlessConfig.display.special_net_brightness);
-                    updated = true;
-                } else if (strcmp(key, "net_color_mode") == 0) {
-                    snprintf(newLine, sizeof(newLine), "net_color_mode = %d;", jumperlessConfig.display.net_color_mode);
-                    updated = true;
-                } else if (strcmp(key, "net_currents") == 0) {
-                    snprintf(newLine, sizeof(newLine), "net_currents = %d;", jumperlessConfig.display.net_currents);
-                    updated = true;
-                } else if (strcmp(key, "current_flow") == 0) {
-                    snprintf(newLine, sizeof(newLine), "current_flow = %d;", jumperlessConfig.display.current_flow);
-                    updated = true;
-                } else if (strcmp(key, "dump_leds") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dump_leds = %d;", jumperlessConfig.display.dump_leds);
-                    updated = true;
-                } else if (strcmp(key, "dump_format") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dump_format = %d;", jumperlessConfig.display.dump_format);
-                    updated = true;
-                } else if (strcmp(key, "terminal_line_buffering") == 0) {
-                    snprintf(newLine, sizeof(newLine), "terminal_line_buffering = %d;", jumperlessConfig.display.terminal_line_buffering);
-                    updated = true;
-                }
-            }
-            //! [serial_1] section
-            else if (strcmp(currentSection, "serial_1") == 0) {
-                if (strcmp(key, "function") == 0) {
-                    snprintf(newLine, sizeof(newLine), "function = %d;", jumperlessConfig.serial_1.function);
-                    updated = true;
-                } else if (strcmp(key, "baud_rate") == 0) {
-                    snprintf(newLine, sizeof(newLine), "baud_rate = %d;", jumperlessConfig.serial_1.baud_rate);
-                    updated = true;
-                } else if (strcmp(key, "print_passthrough") == 0) {
-                    snprintf(newLine, sizeof(newLine), "print_passthrough = %d;", jumperlessConfig.serial_1.print_passthrough);
-                    updated = true;
-                } else if (strcmp(key, "connect_on_boot") == 0) {
-                    snprintf(newLine, sizeof(newLine), "connect_on_boot = %d;", jumperlessConfig.serial_1.connect_on_boot);
-                    updated = true;
-                } else if (strcmp(key, "lock_connection") == 0) {
-                    snprintf(newLine, sizeof(newLine), "lock_connection = %d;", jumperlessConfig.serial_1.lock_connection);
-                    updated = true;
-                } else if (strcmp(key, "autoconnect_flashing") == 0) {
-                    snprintf(newLine, sizeof(newLine), "autoconnect_flashing = %d;", jumperlessConfig.serial_1.autoconnect_flashing);
-                    updated = true;
-                } else if (strcmp(key, "async_passthrough") == 0) {
-                    snprintf(newLine, sizeof(newLine), "async_passthrough = %d;", jumperlessConfig.serial_1.async_passthrough ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "tag_parsing") == 0) {
-                    snprintf(newLine, sizeof(newLine), "tag_parsing = %d;", jumperlessConfig.serial_1.tag_parsing);
-                    updated = true;
-                } else if (strcmp(key, "flash_reset_type") == 0) {
-                    snprintf(newLine, sizeof(newLine), "flash_reset_type = %s;", getStringFromTable(jumperlessConfig.serial_1.flash_reset_type, flashTypeTable));
-                    updated = true;
-                }
-            }
-            //! [serial_2] section
-            else if (strcmp(currentSection, "serial_2") == 0) {
-                if (strcmp(key, "function") == 0) {
-                    snprintf(newLine, sizeof(newLine), "function = %d;", jumperlessConfig.serial_2.function);
-                    updated = true;
-                } else if (strcmp(key, "baud_rate") == 0) {
-                    snprintf(newLine, sizeof(newLine), "baud_rate = %d;", jumperlessConfig.serial_2.baud_rate);
-                    updated = true;
-                } else if (strcmp(key, "print_passthrough") == 0) {
-                    snprintf(newLine, sizeof(newLine), "print_passthrough = %d;", jumperlessConfig.serial_2.print_passthrough);
-                    updated = true;
-                } else if (strcmp(key, "connect_on_boot") == 0) {
-                    snprintf(newLine, sizeof(newLine), "connect_on_boot = %d;", jumperlessConfig.serial_2.connect_on_boot);
-                    updated = true;
-                } else if (strcmp(key, "lock_connection") == 0) {
-                    snprintf(newLine, sizeof(newLine), "lock_connection = %d;", jumperlessConfig.serial_2.lock_connection);
-                    updated = true;
-                } else if (strcmp(key, "autoconnect_flashing") == 0) {
-                    snprintf(newLine, sizeof(newLine), "autoconnect_flashing = %d;", jumperlessConfig.serial_2.autoconnect_flashing);
-                    updated = true;
-                }
-            }
-            //! [top_oled] section
-            else if (strcmp(currentSection, "top_oled") == 0) {
-                if (strcmp(key, "enabled") == 0) {
-                    snprintf(newLine, sizeof(newLine), "enabled = %d;", jumperlessConfig.top_oled.enabled);
-                    updated = true;
-                } else if (strcmp(key, "i2c_address") == 0) {
-                    snprintf(newLine, sizeof(newLine), "i2c_address = %d;", jumperlessConfig.top_oled.i2c_address);
-                    updated = true;
-                } else if (strcmp(key, "width") == 0) {
-                    snprintf(newLine, sizeof(newLine), "width = %d;", jumperlessConfig.top_oled.width);
-                    updated = true;
-                } else if (strcmp(key, "height") == 0) {
-                    snprintf(newLine, sizeof(newLine), "height = %d;", jumperlessConfig.top_oled.height);
-                    updated = true;
-                } else if (strcmp(key, "rotation") == 0) {
-                    snprintf(newLine, sizeof(newLine), "rotation = %d;", jumperlessConfig.top_oled.rotation);
-                    updated = true;
-                } else if (strcmp(key, "connection_type") == 0) {
-                    snprintf(newLine, sizeof(newLine), "connection_type = %s;", getConnectionTypeString(jumperlessConfig.top_oled.connection_type));
-                    updated = true;
-                } else if (strcmp(key, "sda_pin") == 0) {
-                    snprintf(newLine, sizeof(newLine), "sda_pin = %d;", jumperlessConfig.top_oled.sda_pin);
-                    updated = true;
-                } else if (strcmp(key, "scl_pin") == 0) {
-                    snprintf(newLine, sizeof(newLine), "scl_pin = %d;", jumperlessConfig.top_oled.scl_pin);
-                    updated = true;
-                } else if (strcmp(key, "gpio_sda") == 0) {
-                    snprintf(newLine, sizeof(newLine), "gpio_sda = %d;", jumperlessConfig.top_oled.gpio_sda);
-                    updated = true;
-                } else if (strcmp(key, "gpio_scl") == 0) {
-                    snprintf(newLine, sizeof(newLine), "gpio_scl = %d;", jumperlessConfig.top_oled.gpio_scl);
-                    updated = true;
-                } else if (strcmp(key, "sda_row") == 0) {
-                    snprintf(newLine, sizeof(newLine), "sda_row = %d;", jumperlessConfig.top_oled.sda_row);
-                    updated = true;
-                } else if (strcmp(key, "scl_row") == 0) {
-                    snprintf(newLine, sizeof(newLine), "scl_row = %d;", jumperlessConfig.top_oled.scl_row);
-                    updated = true;
-                } else if (strcmp(key, "connect_on_boot") == 0) {
-                    snprintf(newLine, sizeof(newLine), "connect_on_boot = %d;", jumperlessConfig.top_oled.connect_on_boot ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "lock_connection") == 0) {
-                    snprintf(newLine, sizeof(newLine), "lock_connection = %d;", jumperlessConfig.top_oled.lock_connection ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "show_in_terminal") == 0) {
-                    snprintf(newLine, sizeof(newLine), "show_in_terminal = %d;", jumperlessConfig.top_oled.show_in_terminal ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "font") == 0) {
-                    snprintf(newLine, sizeof(newLine), "font = %d;", jumperlessConfig.top_oled.font);
-                    updated = true;
-                } else if (strcmp(key, "startup_message") == 0) {
-                    snprintf(newLine, sizeof(newLine), "startup_message = %s", jumperlessConfig.top_oled.startup_message);
-                    updated = true;
-                }
-            }
-            //! [usb_cdc] section
-            else if (strcmp(currentSection, "usb_cdc") == 0) {
-                if (strcmp(key, "ignore_dtr") == 0) {
-                    snprintf(newLine, sizeof(newLine), "ignore_dtr = %d;", jumperlessConfig.usb_cdc.ignore_dtr ? 1 : 0);
-                    updated = true;
-                }
-            }
-
-            //! [usb_audio] section
-            // Without this branch every usb_audio key falls through to the
-            // "unknown key, keep original line" case below, so an incremental
-            // save copies the STALE values back out and updateShadowConfig()
-            // then marks them clean - the setting silently reverts on reboot.
-            else if (strcmp(currentSection, "usb_audio") == 0) {
-                if (strcmp(key, "enabled") == 0) {
-                    snprintf(newLine, sizeof(newLine), "enabled = %d;", jumperlessConfig.usb_audio.enabled ? 1 : 0);
-                    updated = true;
-                } else if (strcmp(key, "left") == 0) {
-                    snprintf(newLine, sizeof(newLine), "left = %d;", jumperlessConfig.usb_audio.left);
-                    updated = true;
-                } else if (strcmp(key, "right") == 0) {
-                    snprintf(newLine, sizeof(newLine), "right = %d;", jumperlessConfig.usb_audio.right);
-                    updated = true;
-                } else if (strcmp(key, "rate") == 0) {
-                    snprintf(newLine, sizeof(newLine), "rate = %d;", jumperlessConfig.usb_audio.rate);
-                    updated = true;
-                } else if (strcmp(key, "full_scale") == 0) {
-                    snprintf(newLine, sizeof(newLine), "full_scale = %.2f;", (double)jumperlessConfig.usb_audio.full_scale);
-                    updated = true;
-                } else if (strcmp(key, "dc_block") == 0) {
-                    snprintf(newLine, sizeof(newLine), "dc_block = %d;", jumperlessConfig.usb_audio.dc_block ? 1 : 0);
-                    updated = true;
-                }
-            }
-
-            if (updated) {
-                if (!appendConfigLine(dstPos, dstEnd, newLine)) { rebuildOverflowed = true; break; }
-            } else {
-                // Unknown key, keep original line
-                if (!appendConfigLine(dstPos, dstEnd, line)) { rebuildOverflowed = true; break; }
-            }
-        } else {
-            // Comment, empty line, or other - copy as-is
-            if (!appendConfigLine(dstPos, dstEnd, line)) { rebuildOverflowed = true; break; }
-        }
+        Serial.println("[ConfigSave] Debug timing DISABLED");
     }
-    
-    *dstPos = '\0';
-
-    // If the rebuild did not fit, do NOT write the partial buffer - that would
-    // silently truncate config.txt. Fall back to the full writer, which rebuilds
-    // from the struct via temp file + rename and also clears any stale padded
-    // tail. Reachable now that sections keep being added to the config.
-    if (rebuildOverflowed) {
-        Serial.println("[ConfigSave] incremental rebuild overflowed - using full writer");
-        free(fileContent);
-        free(newContent);
-        if (saveConfigToFile(filename)) { updateShadowConfig(); return true; }
-        return false;
-    }
-
-    size_t writeSize = dstPos - newContent;
-    
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave] Parse & rebuild: ");
-        Serial.print(micros() - stepTime);
-        Serial.println(" us");
-    }
-    
-    // Check if content actually changed before writing
-    // This avoids flash writes when the rebuilt content is identical
-    bool contentChanged = (writeSize != bytesRead) || (memcmp(fileContent, newContent, writeSize) != 0);
-    
-    if (!contentChanged) {
-        if (debugConfigSaveTiming) {
-            Serial.println("[ConfigSave] Content unchanged after rebuild, skipping write");
-        }
-        free(fileContent);
-        free(newContent);
-        updateShadowConfig();
-        return true;
-    }
-    
-    // Write the updated content using r+ mode (overwrite in place, no truncate)
-    // This is MUCH faster than "w" mode which reallocates clusters
-    stepTime = micros();
-    uint32_t opTime;
-    
-    // CRITICAL: Ensure Core 2 is actually paused before writing to flash
-    // Increase timeout to 1000ms to allow long operations (like LED updates) to finish
-    // This prevents the XIP crash when leaving probe mode
-    bool was_paused = pauseCore2ForFlash(1000);
-    
-    // Suspend UART IRQ before flash ops to prevent starvation of USB stack
-    AsyncPassthrough::suspendUARTRxIRQ();
-    
-    extern volatile bool core2busy; // Check if it actually stopped
-    if (core2busy) {
-        if (debugConfigSaveTiming) Serial.println("[ConfigSave] Core 2 still busy after timeout! Aborting save to prevent crash.");
-        else Serial.println("[ConfigSave] Aborted: Core 2 busy");
-        unpauseCore2ForFlash(was_paused);
-        AsyncPassthrough::resumeUARTRxIRQ();
-        free(fileContent);
-        free(newContent);
-        return false; // Retry later
-    }
-    
-    // Use "r+" mode to overwrite in place - avoids cluster reallocation
-    // This is significantly faster than truncate + write
-    opTime = micros();
-    File file = safeFileOpen(filename, "r+", 1000);
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave]   safeFileOpen(r+): ");
-        Serial.print(micros() - opTime);
-        Serial.println(" us");
-    }
-    if (!file) {
-        // Fall back to "w" mode if r+ fails
-        if (debugConfigSaveTiming) Serial.println("[ConfigSave]   r+ failed, trying w mode");
-        file = safeFileOpen(filename, "w", 1000);
-        if (!file) {
-            Serial.println("saveConfigIncremental: failed to open file for writing");
-            unpauseCore2ForFlash(was_paused);
-            AsyncPassthrough::resumeUARTRxIRQ();
-            free(fileContent);
-            free(newContent);
-            return false;
-        }
-    }
-    
-    // Seek to beginning and overwrite
-    file.seek(0);
-    
-    // Write content directly to file handle
-    opTime = micros();
-    size_t written = file.write((const uint8_t*)newContent, writeSize);
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave]   file.write: ");
-        Serial.print(micros() - opTime);
-        Serial.println(" us");
-    }
-    
-    // If new content is shorter, clear remaining bytes to prevent garbage data
-    // CRITICAL: This prevents config corruption when values shrink (e.g., long font name → short)
-    // Writing spaces makes the file human-readable if opened mid-write
-    if (writeSize < bytesRead) {
-        size_t remainingBytes = bytesRead - writeSize;
-        // Write spaces to clear old data - much faster than "w" mode truncate
-        static const char spaces[64] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', 
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
-                                        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
-        while (remainingBytes > 0) {
-            size_t chunkSize = (remainingBytes > sizeof(spaces)) ? sizeof(spaces) : remainingBytes;
-            file.write((const uint8_t*)spaces, chunkSize);
-            remainingBytes -= chunkSize;
-        }
-        if (debugConfigSaveTiming) {
-            Serial.print("[ConfigSave]   cleared ");
-            Serial.print(bytesRead - writeSize);
-            Serial.println(" trailing bytes with spaces");
-        }
-    }
-    
-    // Skip explicit flush() - it does BOTH f_sync AND _fs->sync (full filesystem sync)
-    // FatFS f_close() internally calls f_sync which is sufficient for the file data
-    // This avoids the expensive _fs->sync() full filesystem sync
-    
-    opTime = micros();
-    safeFileClose(file, true);  // true = write mode, will pause Core2 during close
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave]   safeFileClose: ");
-        Serial.print(micros() - opTime);
-        Serial.println(" us");
-    }
-    
-    unpauseCore2ForFlash(was_paused);
-    AsyncPassthrough::resumeUARTRxIRQ();
-    
-    bool success = (written == writeSize);
-    
-    if (debugConfigSaveTiming) {
-        Serial.print("[ConfigSave] File write total (");
-        Serial.print(writeSize);
-        Serial.print(" bytes): ");
-        Serial.print(micros() - stepTime);
-        Serial.println(" us");
-    }
-    
-    free(fileContent);
-    free(newContent);
-    
-    if (success) {
-        updateShadowConfig();
-        if (debugConfigSaveTiming) {
-            Serial.print("[ConfigSave] SUCCESS - Total: ");
-            Serial.print(micros() - totalStartTime);
-            Serial.println(" us");
-        }
-    } else {
-        Serial.println("saveConfigIncremental: write failed");
-        return false;
-    }
-    return true; 
 }
 
 bool saveConfig(void) {
-    if (jumperlessConfig.calibration.probe_min == 0 || jumperlessConfig.calibration.probe_max == 0) {
-        jumperlessConfig.calibration.probe_min = 15;
-        jumperlessConfig.calibration.probe_max = 4040;
+    if (jumperlessConfig.probe.pad_min == 0 || jumperlessConfig.probe.pad_max == 0) {
+        jumperlessConfig.probe.pad_min = 15;
+        jumperlessConfig.probe.pad_max = 4040;
     }
 
-    // Use optimized incremental save - only writes if config has changed
-    // Falls back to full save if file doesn't exist or incremental fails
-    bool success = saveConfigIncremental("/config.txt");
+    // Diff gate: skip the flash write entirely when nothing changed.
+    if (shadowConfigValid && !configHasChanges()) {
+        if (debugConfigSaveTiming) Serial.println("[ConfigSave] No changes - skipping write");
+        // Still keep EEPROM/global sync coherent for callers that expect it.
+        readSettingsFromConfig();
+        return true;
+    }
+    
+    bool success = saveConfigToFile("/config.txt");
 
     if (success) {
         // Force the save all the way to flash NOW. FatFS runs SPIFTL in
@@ -2404,14 +1287,10 @@ bool saveConfig(void) {
         // Keep the durable EEPROM store (FS-wipe survivor: calibration + identity)
         // in sync with config.txt. eepromReconcileAfterConfig() lets the EEPROM
         // store WIN over config.txt on boot, so a calibration change written only
-        // to config.txt - which is exactly what the common saveConfigIncremental()
-        // path does - silently reverts to the stale EEPROM value on the next
+        // to config.txt silently reverts to the stale EEPROM value on the next
         // reboot. Mirror the kept fields and commit them here so the explicit save
-        // is fully durable. Both calls self-gate: eepromPersistFromConfig() only
-        // flags a commit when a kept field actually changed, and eepromCommitSafe()
-        // no-ops when nothing is pending, so ordinary (non-calibration) saves pay
-        // nothing extra. A calibration save trades a brief Core-2 pause for
-        // correctness, which is acceptable for an explicit config save.
+        // is fully durable. Both calls self-gate, so ordinary saves pay nothing
+        // extra.
         eepromPersistFromConfig();
         eepromCommitSafe();
 
@@ -2420,8 +1299,9 @@ bool saveConfig(void) {
     return success;
 }
 
+// ============================================================================
 // Firmware versioning and file provisioning system
-// ================================================
+// ============================================================================
 
 /**
  * Helper function to write embedded binary data to filesystem
@@ -2488,8 +1368,7 @@ void provisionFirmwareFiles(bool print) {
     // These are all images/*.bin OLED/breadboard-LED display assets. The OG has
     // no OLED and 1 LED per row, so they're unused - and writing them at boot
     // (each file open make_shared's a ~4KB FatFS FIL) aborts on the OG's tight,
-    // fragmented heap. Skip entirely; mark provisioned so we don't retry.
-    jumperlessConfig.firmware.files_provisioned = true;
+    // fragmented heap. Skip entirely.
     return;
 #endif
 
@@ -2506,7 +1385,6 @@ void provisionFirmwareFiles(bool print) {
     provisionEmbeddedFile("images/jogo32h.bin", jogo32h_file_bin, jogo32h_file_bin_len);
     provisionEmbeddedFile("images/bubbleJumpThiccWhite.bin", bubbleJumpThiccWhite_bin, bubbleJumpThiccWhite_bin_len);
     provisionEmbeddedFile("images/excelGUI.bin", excelGUI_bin, excelGUI_bin_len);
-    // ---- Paste into provisionFirmwareFiles() in src/configManager.cpp ----
 
     provisionEmbeddedFile("images/dayglow.bin", dayglow_bin, dayglow_bin_len);
     provisionEmbeddedFile("images/eevblog.bin", eevblog_bin, eevblog_bin_len);
@@ -2514,9 +1392,6 @@ void provisionFirmwareFiles(bool print) {
     provisionEmbeddedFile("images/jogotextInv.bin", jogotextInv_bin, jogotextInv_bin_len);
     provisionEmbeddedFile("images/jumperless_text.bin", jumperless_text_bin, jumperless_text_bin_len);
     provisionEmbeddedFile("images/ksc.bin", ksc_bin, ksc_bin_len);
-    
-    // Mark as provisioned
-    jumperlessConfig.firmware.files_provisioned = true;
     
     if (debugFP) {
     Serial.println("\n\rFile provisioning complete!\n\r");
@@ -2599,21 +1474,12 @@ bool checkAndHandleFirmwareUpdate(void) {
     // First boot (no version stored) or firmware was updated
     bool isFirstBoot = (strlen(lastVersion) == 0);
     bool wasUpdated = !isFirstBoot && (strcmp(lastVersion, currentVersion) != 0);
-    // delay(1000);
-    // changeTerminalColor( 166, true );
-    // Serial.print("Current version: ");
-    // Serial.println(currentVersion);
-    // Serial.print("Last version: ");
-    // Serial.println(lastVersion);
-    // Serial.flush();
     
     if (isFirstBoot) {
-        // if (debugFP) {
         changeTerminalColor( 164, true );
         Serial.println("\n\r╔═══════════════════════════════════════╗");
         Serial.println("║  First Boot Detected                  ║");
         Serial.println("╚═══════════════════════════════════════╝\n\r");
-        // }
         Serial.flush();
         Serial.print("Previous version: ");
         Serial.println(lastVersion);
@@ -2632,8 +1498,6 @@ bool checkAndHandleFirmwareUpdate(void) {
         }
         
     } else if (wasUpdated) {
-        // if (debugFP) {
-#if JL_BOOT_VERBOSE
         changeTerminalColor( 164, true );
         Serial.println("\n\r╔═══════════════════════════════════════╗");
         Serial.println("║  Firmware Update Detected             ║");
@@ -2645,7 +1509,6 @@ bool checkAndHandleFirmwareUpdate(void) {
         Serial.println();
         Serial.flush();
         changeTerminalColor( -1, true );
-#endif
         // Provision new files (will skip existing ones)
         provisionFirmwareFiles(false);
         
@@ -2692,9 +1555,9 @@ void loadHardwareFromEEPROM(void) {
 void loadConfig(void) {
     updateConfigFromFile("/config.txt");
 
-    if (jumperlessConfig.calibration.probe_min == 0 || jumperlessConfig.calibration.probe_max == 0) {
-        jumperlessConfig.calibration.probe_min = 15;
-        jumperlessConfig.calibration.probe_max = 4060;
+    if (jumperlessConfig.probe.pad_min == 0 || jumperlessConfig.probe.pad_max == 0) {
+        jumperlessConfig.probe.pad_min = 15;
+        jumperlessConfig.probe.pad_max = 4060;
     }
 
     // Seed the MEASURE-position pad endpoints from the base (select) pair so
@@ -2702,44 +1565,44 @@ void loadConfig(void) {
     // sentinel. They are stored in the 3.3V frame; the decode scales them by
     // the live tip voltage (ADC7) at runtime, so seeding with the base pair
     // is correct for a fresh board.
-    if (jumperlessConfig.calibration.probe_min_measure <= 0) {
-        jumperlessConfig.calibration.probe_min_measure = jumperlessConfig.calibration.probe_min;
+    if (jumperlessConfig.probe.pad_min_measure <= 0) {
+        jumperlessConfig.probe.pad_min_measure = jumperlessConfig.probe.pad_min;
     }
-    if (jumperlessConfig.calibration.probe_max_measure <= 0) {
-        jumperlessConfig.calibration.probe_max_measure = jumperlessConfig.calibration.probe_max;
+    if (jumperlessConfig.probe.pad_max_measure <= 0) {
+        jumperlessConfig.probe.pad_max_measure = jumperlessConfig.probe.pad_max;
     }
     // The GPIO-fed endpoint seeds from the DAC-fed one: a board upgrading
     // from a single-endpoint firmware has a calibration that was taken on
     // whichever feed was live (almost always DAC0, the default), and the
     // convergence step in the probe calibration app is what separates them.
-    if (jumperlessConfig.calibration.probe_max_measure_gpio <= 0) {
-        jumperlessConfig.calibration.probe_max_measure_gpio =
-            jumperlessConfig.calibration.probe_max_measure;
+    if (jumperlessConfig.probe.pad_max_measure_gpio <= 0) {
+        jumperlessConfig.probe.pad_max_measure_gpio =
+            jumperlessConfig.probe.pad_max_measure;
     }
 
     // Feed-blink hold percentage: a ratio, so 1..99; anything else is a
     // corrupt/hand-edited file - back to the physics-derived default.
-    if (jumperlessConfig.calibration.probe_switch_blink_hold_pct < 1 ||
-        jumperlessConfig.calibration.probe_switch_blink_hold_pct > 99) {
-        jumperlessConfig.calibration.probe_switch_blink_hold_pct = 50;
+    if (jumperlessConfig.probe.switch_blink_hold_pct < 1 ||
+        jumperlessConfig.probe.switch_blink_hold_pct > 99) {
+        jumperlessConfig.probe.switch_blink_hold_pct = 50;
     }
     // A negative select ceiling means "disabled" was mistyped; 0 is the
     // real disabled value.
-    if (jumperlessConfig.calibration.probe_switch_select_max_ma < 0.0f) {
-        jumperlessConfig.calibration.probe_switch_select_max_ma = 0.0f;
+    if (jumperlessConfig.probe.switch_select_max_ma < 0.0f) {
+        jumperlessConfig.probe.switch_select_max_ma = 0.0f;
     }
 
     // Probe feed order is a two-way switch; anything else means an old or
     // hand-edited file - fall back to DAC0-first (the sensed path).
-    if (jumperlessConfig.dacs.probe_power_source != 0 &&
-        jumperlessConfig.dacs.probe_power_source != 1) {
-        jumperlessConfig.dacs.probe_power_source = 0;
+    if (jumperlessConfig.probe.power_source != 0 &&
+        jumperlessConfig.probe.power_source != 1) {
+        jumperlessConfig.probe.power_source = 0;
     }
 
     // GPIO droop V0: persisted unloaded tip voltage for switch detection.
-    if (jumperlessConfig.calibration.probe_droop_v0 < 3.0f ||
-        jumperlessConfig.calibration.probe_droop_v0 > 3.6f) {
-        jumperlessConfig.calibration.probe_droop_v0 = 3.35f;
+    if (jumperlessConfig.probe.droop_v0 < 3.0f ||
+        jumperlessConfig.probe.droop_v0 > 3.6f) {
+        jumperlessConfig.probe.droop_v0 = 3.35f;
     }
     // Same sanity band for the measure-mode tip drive: a corrupted-high
     // value (a tip-voltage servo chasing a bad reference can save up to
@@ -2747,9 +1610,9 @@ void loadConfig(void) {
     // the top of the pad ladder past ADC full-scale - hardware-observed as
     // "measure mode off at the high end / logo pads" plus a self-test
     // reference stuck at the bad parked level.
-    if (jumperlessConfig.calibration.measure_mode_output_voltage < 3.0f ||
-        jumperlessConfig.calibration.measure_mode_output_voltage > 3.6f) {
-        jumperlessConfig.calibration.measure_mode_output_voltage = 3.33f;
+    if (jumperlessConfig.probe.measure_voltage < 3.0f ||
+        jumperlessConfig.probe.measure_voltage > 3.6f) {
+        jumperlessConfig.probe.measure_voltage = 3.33f;
     }
 
     readSettingsFromConfig();
@@ -2770,40 +1633,15 @@ void loadConfig(void) {
     // audio device without paying the 2s port drop.
     usb_audio_apply_config();
 #endif
-    
-    // Defer initChipStatus to reduce startup time - it can be done later
-    // initChipStatus();
 }
 
-//! This is where we add new config SECTIONS
-int parseSectionName(const char* sectionName) {
-    if (strcmp(sectionName, "config") == 0) return -2; // Special case for config section
-    else if (strcmp(sectionName, "firmware") == 0) return -3; // Firmware tracking section
-    else if (strcmp(sectionName, "hardware") == 0) return 0;
-    else if (strcmp(sectionName, "dacs") == 0) return 1;
-    else if (strcmp(sectionName, "debug") == 0) return 2;
-    else if (strcmp(sectionName, "routing") == 0) return 3;
-    else if (strcmp(sectionName, "calibration") == 0) return 4;
-    else if (strcmp(sectionName, "logo_pads") == 0) return 5;
-    else if (strcmp(sectionName, "display") == 0) return 6;
-    else if (strcmp(sectionName, "serial_1") == 0) return 7;
-    else if (strcmp(sectionName, "serial_2") == 0) return 8;
-    else if (strcmp(sectionName, "top_oled") == 0) return 9;
-    else if (strcmp(sectionName, "usb_cdc") == 0) return 11;
-    else if (strcmp(sectionName, "usb_audio") == 0) return 12;
-    else if (strcmp(sectionName, "slots") == 0) return 13;
-    return -1;
-}
+// ============================================================================
+// Printing (~ command)
+// ============================================================================
 
-void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
-    // If section is -1, try to parse input
-    if (showNames) {
-        showNames = 1;
-    }
-    else {
-        showNames = 0;
-    }
- //! this is a place to add new config options
+void printConfigSectionToSerial(int section, bool showNamesArg, bool pasteable) {
+    bool names = showNamesArg;
+
     if (pasteable == true) {
         Serial.println("\n\rcopy / edit / paste any of these lines \n\rinto the main menu to change a setting\n\r");
     }
@@ -2811,6 +1649,7 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.println("Jumperless Config:\n\r");
     }
     cycleTerminalColor(true, (highSaturationBrightColorsCount/8.0), true, &Serial, 0, 1);
+
     // Print config metadata section
     if (section == -1 || section == -2) {
         Serial.print("\n`[config] ");
@@ -2818,376 +1657,48 @@ void printConfigSectionToSerial(int section, bool showNames, bool pasteable) {
         Serial.print("firmware_version = "); Serial.print(firmwareVersion); Serial.println(";");
     }
     
-    // Print hardware version section
-    if (section == -1 || section == 0) {
-        Serial.print("\n`[hardware] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("generation = "); Serial.print(jumperlessConfig.hardware.generation); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("revision = "); Serial.print(jumperlessConfig.hardware.revision); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("probe_revision = "); Serial.print(jumperlessConfig.hardware.probe_revision); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("psram_installed = "); Serial.print(jumperlessConfig.hardware.psram_installed); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("psram_app_size_kb = "); Serial.print(jumperlessConfig.hardware.psram_app_size_kb); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("probe_led_on_button_pin = "); Serial.print(getStringFromTable(jumperlessConfig.hardware.probe_led_on_button_pin, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("probe_led_refresh_us = "); Serial.print(jumperlessConfig.hardware.probe_led_refresh_us); Serial.println(";");
-        if (pasteable == true) Serial.print("`[hardware] ");
-        Serial.print("encoder_pio = "); Serial.print(jumperlessConfig.hardware.encoder_pio); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print DAC settings section
-    if (section == -1 || section == 1) {
-        Serial.print("\n`[dacs] ");
-        if (pasteable == false) Serial.println();
-        // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
-        Serial.print("set_dacs_on_boot = "); Serial.print(getStringFromTable(jumperlessConfig.dacs.set_dacs_on_boot, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("set_rails_on_boot = "); Serial.print(getStringFromTable(jumperlessConfig.dacs.set_rails_on_boot, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("probe_power_dac = "); Serial.print(jumperlessConfig.dacs.probe_power_dac); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("auto_connect_probe = "); Serial.print(jumperlessConfig.dacs.auto_connect_probe); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("probe_power_source = "); Serial.print(jumperlessConfig.dacs.probe_power_source); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("limit_max = "); Serial.print(jumperlessConfig.dacs.limit_max); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("rail_click_adjust = "); Serial.print(jumperlessConfig.dacs.rail_click_adjust); Serial.println(";");
-        if (pasteable == true) Serial.print("`[dacs] ");
-        Serial.print("limit_min = "); Serial.print(jumperlessConfig.dacs.limit_min); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print debug flags section
-    if (section == -1 || section == 2) {
-        Serial.print("\n`[debug] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("file_parsing = "); Serial.print(getStringFromTable(jumperlessConfig.debug.file_parsing, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("net_manager = "); Serial.print(getStringFromTable(jumperlessConfig.debug.net_manager, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("nets_to_chips = "); Serial.print(getStringFromTable(jumperlessConfig.debug.nets_to_chips, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("nets_to_chips_alt = "); Serial.print(getStringFromTable(jumperlessConfig.debug.nets_to_chips_alt, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("leds = "); Serial.print(getStringFromTable(jumperlessConfig.debug.leds, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("probing = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probing, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("oled = "); Serial.print(getStringFromTable(jumperlessConfig.debug.oled, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("logo_pads = "); Serial.print(getStringFromTable(jumperlessConfig.debug.logo_pads, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("arduino = "); Serial.print(jumperlessConfig.debug.arduino); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("usb_mass_storage = "); Serial.print(getStringFromTable(jumperlessConfig.debug.usb_mass_storage, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("show_probe_current = "); Serial.print(jumperlessConfig.debug.show_probe_current); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("show_node_errors = "); Serial.print(getStringFromTable(jumperlessConfig.debug.show_node_errors, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("probe_power_gpio = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_power_gpio, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("probe_switch_stats = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_switch_stats, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("probe_switch_agree = "); Serial.print(getStringFromTable(jumperlessConfig.debug.probe_switch_agree, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("net_voltage_scan = "); Serial.print(getStringFromTable(jumperlessConfig.debug.net_voltage_scan, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[debug] ");
-        Serial.print("net_scan_pair_taps = "); Serial.print(jumperlessConfig.debug.net_scan_pair_taps); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print routing settings section
-    if (section == -1 || section == 3) {
-        Serial.print("\n`[routing] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("stack_paths = "); Serial.print(jumperlessConfig.routing.stack_paths); Serial.println(";");
-        if (pasteable == true) Serial.print("`[routing] ");
-        Serial.print("stack_rails = "); Serial.print(jumperlessConfig.routing.stack_rails); Serial.println(";");
-        if (pasteable == true) Serial.print("`[routing] ");
-        Serial.print("stack_dacs = "); Serial.print(jumperlessConfig.routing.stack_dacs); Serial.println(";");
-        if (pasteable == true) Serial.print("`[routing] ");
-        Serial.print("rail_priority = "); Serial.print(jumperlessConfig.routing.rail_priority); Serial.println(";");
-    }
+    char valBuf[64];
+    for (int s = 0; s < JLSECT_COUNT; s++) {
+        if (section != -1 && section != s) continue;
+        // Bookkeeping sections stay out of the printout unless asked for
+        // by name.
+        if (section == -1 && s == JLSECT_firmware) continue;
 
-    // Print slots settings section
-    if (section == 13 || section == -1) {
-        Serial.print("\n`[slots] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("boot_mode = "); Serial.print(jumperlessConfig.slots.boot_mode); Serial.println(";");
-        if (pasteable == true) Serial.print("`[slots] ");
-        Serial.print("boot_slot = "); Serial.print(jumperlessConfig.slots.boot_slot); Serial.println(";");
-    }
     cycleTerminalColor();
-    // Print calibration section
-    if (section == -1 || section == 4) {
-        Serial.print("\n`[calibration] ");
+        bool first = true;
+        for (int i = 0; i < jlConfigOptionCount; i++) {
+            const ConfigOptionDesc* opt = &jlConfigOptions[i];
+            if (opt->section != s) continue;
+            if (section == -1 && (opt->flags & JLC_HIDDEN)) continue;
+            if (first) {
+                Serial.print("\n`[");
+                Serial.print(jlConfigSections[s].name);
+                Serial.print("] ");
         if (pasteable == false) Serial.println();
-        Serial.print("top_rail_zero = "); Serial.print(jumperlessConfig.calibration.top_rail_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("top_rail_spread = "); Serial.print(jumperlessConfig.calibration.top_rail_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("bottom_rail_zero = "); Serial.print(jumperlessConfig.calibration.bottom_rail_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("bottom_rail_spread = "); Serial.print(jumperlessConfig.calibration.bottom_rail_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("dac_0_zero = "); Serial.print(jumperlessConfig.calibration.dac_0_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("dac_0_spread = "); Serial.print(jumperlessConfig.calibration.dac_0_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("dac_1_zero = "); Serial.print(jumperlessConfig.calibration.dac_1_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("dac_1_spread = "); Serial.print(jumperlessConfig.calibration.dac_1_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_0_zero = "); Serial.print(jumperlessConfig.calibration.adc_0_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_0_spread = "); Serial.print(jumperlessConfig.calibration.adc_0_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_1_zero = "); Serial.print(jumperlessConfig.calibration.adc_1_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_1_spread = "); Serial.print(jumperlessConfig.calibration.adc_1_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_2_zero = "); Serial.print(jumperlessConfig.calibration.adc_2_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_2_spread = "); Serial.print(jumperlessConfig.calibration.adc_2_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_3_zero = "); Serial.print(jumperlessConfig.calibration.adc_3_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_3_spread = "); Serial.print(jumperlessConfig.calibration.adc_3_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_4_zero = "); Serial.print(jumperlessConfig.calibration.adc_4_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_4_spread = "); Serial.print(jumperlessConfig.calibration.adc_4_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_7_zero = "); Serial.print(jumperlessConfig.calibration.adc_7_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("adc_7_spread = "); Serial.print(jumperlessConfig.calibration.adc_7_spread); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_max = "); Serial.print(jumperlessConfig.calibration.probe_max); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_min = "); Serial.print(jumperlessConfig.calibration.probe_min); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_max_measure = "); Serial.print(jumperlessConfig.calibration.probe_max_measure); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_max_measure_gpio = "); Serial.print(jumperlessConfig.calibration.probe_max_measure_gpio); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_min_measure = "); Serial.print(jumperlessConfig.calibration.probe_min_measure); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_switch_threshold_high = "); Serial.print(jumperlessConfig.calibration.probe_switch_threshold_high); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_switch_threshold_low = "); Serial.print(jumperlessConfig.calibration.probe_switch_threshold_low); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_switch_select_max_ma = "); Serial.print(jumperlessConfig.calibration.probe_switch_select_max_ma); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_switch_blink_hold_pct = "); Serial.print(jumperlessConfig.calibration.probe_switch_blink_hold_pct); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_switch_threshold = "); Serial.print(jumperlessConfig.calibration.probe_switch_threshold); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("measure_mode_output_voltage = "); Serial.print(jumperlessConfig.calibration.measure_mode_output_voltage); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_current_zero = "); Serial.print(jumperlessConfig.calibration.probe_current_zero); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("minimum_probe_reading = "); Serial.print(jumperlessConfig.calibration.minimum_probe_reading); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("probe_droop_v0 = "); Serial.print(jumperlessConfig.calibration.probe_droop_v0, 3); Serial.println(";");
-        Serial.print("probe_droop_ohms = "); Serial.print(jumperlessConfig.calibration.probe_droop_ohms, 1); Serial.println(";");
-        Serial.print("probe_pad_ohms = "); Serial.print(jumperlessConfig.calibration.probe_pad_ohms, 1); Serial.println(";");
-        if (pasteable == true) Serial.print("`[calibration] ");
-        Serial.print("crosspoint_resistance = "); Serial.print(jumperlessConfig.calibration.crosspoint_resistance); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print logo pad settings section
-    if (section == -1 || section == 5) {
-        Serial.print("\n`[logo_pads] ");
-        if (pasteable == false) Serial.println();   
-        Serial.print("top_guy = "); Serial.print(getStringFromTable(jumperlessConfig.logo_pads.top_guy, arbitraryFunctionTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[logo_pads] ");
-        Serial.print("bottom_guy = "); Serial.print(getStringFromTable(jumperlessConfig.logo_pads.bottom_guy, arbitraryFunctionTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[logo_pads] ");
-        Serial.print("building_pad_top = "); Serial.print(getStringFromTable(jumperlessConfig.logo_pads.building_pad_top, arbitraryFunctionTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[logo_pads] ");
-        Serial.print("building_pad_bottom = "); Serial.print(getStringFromTable(jumperlessConfig.logo_pads.building_pad_bottom, arbitraryFunctionTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[logo_pads] ");
-        Serial.print("repeat_ms = "); Serial.print(jumperlessConfig.logo_pads.repeat_ms); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print display settings section
-    if (section == -1 || section == 6) {
-        Serial.print("\n`[display] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("lines_wires = "); Serial.print(getStringFromTable(jumperlessConfig.display.lines_wires, linesWiresTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("menu_brightness = "); Serial.print(jumperlessConfig.display.menu_brightness); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("led_brightness = "); Serial.print(jumperlessConfig.display.led_brightness); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("rail_brightness = "); Serial.print(jumperlessConfig.display.rail_brightness); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("special_net_brightness = "); Serial.print(jumperlessConfig.display.special_net_brightness); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("net_color_mode = "); Serial.print(getStringFromTable(jumperlessConfig.display.net_color_mode, netColorModeTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("net_currents = "); Serial.print(getStringFromTable(jumperlessConfig.display.net_currents, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("current_flow = "); Serial.print(getStringFromTable(jumperlessConfig.display.current_flow, currentFlowTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("dump_leds = "); Serial.print(getStringFromTable(jumperlessConfig.display.dump_leds, serialPortTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("dump_format = "); Serial.print(getStringFromTable(jumperlessConfig.display.dump_format, dumpFormatTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[display] ");
-        Serial.print("terminal_line_buffering = "); Serial.print(jumperlessConfig.display.terminal_line_buffering); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print serial_1 section
-    if (section == -1 || section == 7) {
-        Serial.print("\n`[serial_1] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("function = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.function, uartFunctionTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("baud_rate = "); Serial.print(jumperlessConfig.serial_1.baud_rate); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("print_passthrough = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.print_passthrough, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("connect_on_boot = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.connect_on_boot, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("lock_connection = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.lock_connection, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("autoconnect_flashing = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.autoconnect_flashing, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("async_passthrough = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.async_passthrough, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("tag_parsing = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.tag_parsing, tagParsingTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_1] ");
-        Serial.print("flash_reset_type = "); Serial.print(getStringFromTable(jumperlessConfig.serial_1.flash_reset_type, flashTypeTable)); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print serial_2 section
-    if (section == -1 || section == 8) {
-        Serial.print("\n`[serial_2] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("function = "); Serial.print(getStringFromTable(jumperlessConfig.serial_2.function, uartFunctionTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_2] ");
-        Serial.print("baud_rate = "); Serial.print(jumperlessConfig.serial_2.baud_rate); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_2] ");
-        Serial.print("print_passthrough = "); Serial.print(getStringFromTable(jumperlessConfig.serial_2.print_passthrough, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_2] ");
-        Serial.print("connect_on_boot = "); Serial.print(getStringFromTable(jumperlessConfig.serial_2.connect_on_boot, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_2] ");
-        Serial.print("lock_connection = "); Serial.print(getStringFromTable(jumperlessConfig.serial_2.lock_connection, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[serial_2] ");
-        Serial.print("autoconnect_flashing = "); Serial.print(getStringFromTable(jumperlessConfig.serial_2.autoconnect_flashing, boolTable)); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print top_oled section
-    if (section == -1 || section == 10) {
-        Serial.print("\n`[top_oled] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("enabled = "); Serial.print(getStringFromTable(jumperlessConfig.top_oled.enabled, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("i2c_address = 0x"); Serial.print(jumperlessConfig.top_oled.i2c_address, HEX); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("width = "); Serial.print(jumperlessConfig.top_oled.width); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("height = "); Serial.print(jumperlessConfig.top_oled.height); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("connection_type = "); Serial.print(getConnectionTypeString(jumperlessConfig.top_oled.connection_type)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("sda_pin = ");
-        if (showNames) Serial.print(definesToChar(jumperlessConfig.top_oled.sda_pin, 0));
-        else Serial.print(jumperlessConfig.top_oled.sda_pin);
+                first = false;
+            } else if (pasteable == true) {
+                Serial.print("`[");
+                Serial.print(jlConfigSections[s].name);
+                Serial.print("] ");
+            }
+            configFormatValue(opt, valBuf, sizeof(valBuf), names);
+            Serial.print(opt->key);
+            Serial.print(" = ");
+            Serial.print(valBuf);
         Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("scl_pin = ");
-        if (showNames) Serial.print(definesToChar(jumperlessConfig.top_oled.scl_pin, 0));
-        else Serial.print(jumperlessConfig.top_oled.scl_pin);
-        Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("gpio_sda = ");
-        if (showNames) Serial.print(definesToChar(jumperlessConfig.top_oled.gpio_sda, 0));
-        else Serial.print(jumperlessConfig.top_oled.gpio_sda);
-        Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("gpio_scl = ");
-        if (showNames) Serial.print(definesToChar(jumperlessConfig.top_oled.gpio_scl, 0));
-        else Serial.print(jumperlessConfig.top_oled.gpio_scl);
-        Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("sda_row = ");
-        if (showNames) Serial.print(definesToChar(jumperlessConfig.top_oled.sda_row, 0));
-        else Serial.print(jumperlessConfig.top_oled.sda_row);
-        Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("scl_row = ");
-        if (showNames) Serial.print(definesToChar(jumperlessConfig.top_oled.scl_row, 0));
-        else Serial.print(jumperlessConfig.top_oled.scl_row);
-        Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("connect_on_boot = "); Serial.print(getStringFromTable(jumperlessConfig.top_oled.connect_on_boot, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("lock_connection = "); Serial.print(getStringFromTable(jumperlessConfig.top_oled.lock_connection, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("show_in_terminal = "); Serial.print(getStringFromTable(jumperlessConfig.top_oled.show_in_terminal, serialPortTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("font = "); Serial.print(getFontString(jumperlessConfig.top_oled.font)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[top_oled] ");
-        Serial.print("startup_message = "); Serial.print(jumperlessConfig.top_oled.startup_message); Serial.println("");
-    }
-    cycleTerminalColor();
-    // Print usb_cdc section
-    if (section == -1 || section == 11) {
-        Serial.print("\n`[usb_cdc] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("ignore_dtr = "); Serial.print(getStringFromTable(jumperlessConfig.usb_cdc.ignore_dtr, boolTable)); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // Print usb_audio section
-    if (section == -1 || section == 12) {
-        Serial.print("\n`[usb_audio] ");
-        if (pasteable == false) Serial.println();
-        Serial.print("enabled = "); Serial.print(getStringFromTable(jumperlessConfig.usb_audio.enabled, boolTable)); Serial.println(";");
-        if (pasteable == true) Serial.print("`[usb_audio] ");
-        Serial.print("left = "); Serial.print(jumperlessConfig.usb_audio.left); Serial.println(";");
-        if (pasteable == true) Serial.print("`[usb_audio] ");
-        Serial.print("right = "); Serial.print(jumperlessConfig.usb_audio.right); Serial.println(";");
-        if (pasteable == true) Serial.print("`[usb_audio] ");
-        Serial.print("rate = "); Serial.print(jumperlessConfig.usb_audio.rate); Serial.println(";");
-        if (pasteable == true) Serial.print("`[usb_audio] ");
-        Serial.print("full_scale = "); Serial.print(jumperlessConfig.usb_audio.full_scale, 2); Serial.println(";");
-        if (pasteable == true) Serial.print("`[usb_audio] ");
-        Serial.print("dc_block = "); Serial.print(getStringFromTable(jumperlessConfig.usb_audio.dc_block, boolTable)); Serial.println(";");
-    }
-    cycleTerminalColor();
-    // if (section == -1) {
-    //     Serial.println("\nEND\n\r");
-    // }
-}
-
-// Helper function to clean whitespace
-void cleanWhitespace(const char* input, char* output) {
-    int j = 0;
-    for (int i = 0; input[i]; i++) {
-        if (!isspace(input[i])) {
-            output[j++] = tolower(input[i]);
         }
     }
-    output[j] = '\0';
+    changeTerminalColor(-1, true);
 }
 
 // Helper function to parse setting.
 // All callers pass section[32], key[32], value[64] (see call sites) while the
-// input line can be up to 256 bytes — every copy below is capped to those
+// input line can be up to 256 bytes - every copy below is capped to those
 // sizes so a long/garbled line truncates instead of smashing the stack.
 #define PARSE_SECTION_CAP (31)
 #define PARSE_KEY_CAP     (31)
 #define PARSE_VALUE_CAP   (63)
 bool parseSetting(const char* line, char* section, char* key, char* value) {
-    // Serial.print("Parsing line: '");
-    // Serial.print(line);
-    // Serial.println("'");
-    
     // Check if this is dot notation format (config.section.key = value)
     if (strncmp(line, "config.", 7) == 0) {
         const char* start = line + 7;  // Skip "config."
@@ -3222,14 +1733,6 @@ bool parseSetting(const char* line, char* section, char* key, char* value) {
                 end--;
             }
             
-            // Serial.print("Dot notation - Section: '");
-            // Serial.print(section);
-            // Serial.print("', Key: '");
-            // Serial.print(key);
-            // Serial.print("', Value: '");
-            // Serial.print(value);
-            // Serial.println("'");
-            
             return true;
         }
     }
@@ -3246,14 +1749,6 @@ bool parseSetting(const char* line, char* section, char* key, char* value) {
     if (bsecLen > PARSE_SECTION_CAP) bsecLen = PARSE_SECTION_CAP;
     memcpy(section, line + 1, bsecLen);
     section[bsecLen] = '\0';
-    
-    // Convert section to lowercase for comparison
-    char sectionLower[32];
-    strncpy(sectionLower, section, sizeof(sectionLower) - 1);
-    sectionLower[sizeof(sectionLower) - 1] = '\0';
-    for(int i = 0; sectionLower[i]; i++) {
-        sectionLower[i] = tolower(sectionLower[i]);
-    }
     
     // Find the equals sign
     const char* equalsPos = strchr(sectionEnd, '=');
@@ -3291,65 +1786,19 @@ bool parseSetting(const char* line, char* section, char* key, char* value) {
     return true;
 }
 
-    
-
-// Helper function to print setting change
-void printSettingChange(const char* section, const char* key, const char* oldValue, const char* newValue) {
-    // Try to print names for enums/bools if possible
-    const char* oldName = nullptr;
-    const char* newName = nullptr;
-    if (strcmp(section, "display") == 0 && strcmp(key, "lines_wires") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), linesWiresTable);
-        newName = getStringFromTable(atoi(newValue), linesWiresTable);
-    } else if (strcmp(section, "display") == 0 && strcmp(key, "net_color_mode") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), netColorModeTable);
-        newName = getStringFromTable(atoi(newValue), netColorModeTable);
-    } else if (strcmp(section, "display") == 0 && strcmp(key, "current_flow") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), currentFlowTable);
-        newName = getStringFromTable(atoi(newValue), currentFlowTable);
-    } else if ((strcmp(section, "serial_1") == 0 || strcmp(section, "serial_2") == 0 || strcmp(section, "gpio") == 0) && (strstr(key, "function") != NULL)) {
-        oldName = getStringFromTable(atoi(oldValue), uartFunctionTable);
-        newName = getStringFromTable(atoi(newValue), uartFunctionTable);
-        initArduino();
-    } else if (strcmp(section, "logo_pads") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), arbitraryFunctionTable);
-        newName = getStringFromTable(atoi(newValue), arbitraryFunctionTable);
-    } else if (strcmp(section, "top_oled") == 0 && strcmp(key, "font") == 0) {
-        oldName = getFontString(atoi(oldValue));
-        newName = getFontString(atoi(newValue));
-    } else if (strcmp(section, "top_oled") == 0 && strcmp(key, "show_in_terminal") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), serialPortTable);
-        newName = getStringFromTable(atoi(newValue), serialPortTable);
-        initArduino();
-    } else if (strcmp(section, "display") == 0 && strcmp(key, "dump_leds") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), serialPortTable);
-        newName = getStringFromTable(atoi(newValue), serialPortTable);
-        initArduino();
-    } else if (strcmp(section, "display") == 0 && strcmp(key, "dump_format") == 0) {
-        oldName = getStringFromTable(atoi(oldValue), dumpFormatTable);
-        newName = getStringFromTable(atoi(newValue), dumpFormatTable);
-    } else if (
-        (strcmp(section, "dacs") == 0 && (strcmp(key, "set_dacs_on_startup") == 0 || strcmp(key, "set_rails_on_startup") == 0)) ||
-        (strcmp(section, "debug") == 0) ||
-        (strcmp(section, "serial_1") == 0 && (strcmp(key, "print_passthrough") == 0 || strcmp(key, "connect_on_boot") == 0 || strcmp(key, "lock_connection") == 0)) ||
-        (strcmp(section, "serial_2") == 0 && (strcmp(key, "print_passthrough") == 0 || strcmp(key, "connect_on_boot") == 0 || strcmp(key, "lock_connection") == 0))
-    ) {
-        oldName = getStringFromTable(atoi(oldValue), boolTable);
-        newName = getStringFromTable(atoi(newValue), boolTable);
-    }
+// Print a human-readable before/after line for a setting change.
+static void printSettingChange(const ConfigOptionDesc* opt, const char* oldValue, const char* newValue) {
     Serial.print("Changed [");
-    Serial.print(section);
+    Serial.print(jlConfigSections[opt->section].name);
     Serial.print("] ");
-    Serial.print(key);
+    Serial.print(opt->key);
     Serial.print(" from ");
-    if (oldName) Serial.print(oldName); else Serial.print(oldValue);
+    Serial.print(oldValue);
     Serial.print(" to ");
     Serial.println(newValue);
 }
 
 void printConfigHelp() {
-
-    
     Serial.println("\n\r");
     cycleTerminalColor(true, 8.0, true,  &Serial, 12, 1);
     Serial.println("                              Read config ");
@@ -3363,9 +1812,7 @@ void printConfigHelp() {
     Serial.println("                              Write config ");
     cycleTerminalColor(false, 2.0, true,  &Serial, 0, 1);
     Serial.println("`[section] setting = value; = enter config settings (pro tip: copy/paste setting from ~ output and just change the value)");
-    // Serial.println("\n\r    config setting format (prefix with ` to paste from main menu)\n\r");    
-    // Serial.println("    Example: ");
-    // Serial.println("`[serial_1]connect_on_boot = true;");
+    Serial.println("                          ` = open the interactive config menu (arrow keys)");
     cycleTerminalColor(true, 15.0, true,  &Serial, 1, 1);
 
     Serial.println("\n\r");
@@ -3385,14 +1832,6 @@ void printConfigHelp() {
     Serial.println("                              Help");
     cycleTerminalColor(false, 1.0, true,  &Serial, 0, 1);
     Serial.println("                         ~? = show this help\n\r");
-    // Serial.println("\n\r\tor you can use dot notation\n\r");
-    // Serial.println("`config.routing.stack_paths = 1;");
-    // Serial.println("\n\r\tor paste a whole section\n\r");
-    // Serial.println("`[dacs]");
-    // Serial.println("top_rail = 5.0;");
-    // Serial.println("bottom_rail = 3.3;");
-    // Serial.println("dac_0 = -2.0;");
-    // Serial.println("dac_1 = 3.33;");
     Serial.println("\n\r");
     delayMicroseconds(3000);
 }
@@ -3401,11 +1840,11 @@ void printConfigToSerial(bool showNamesArg) {
     char line[128] = {0};
     int lineIndex = 0;
     unsigned long lastCharTime = millis();
-    const unsigned long timeout = 1000; // 100ms timeout
+    const unsigned long timeout = 1000;
 
     // Check if we already have a command line from line buffering mode
-    // ONLY use buffered mode if terminal_line_buffering is enabled
-    if (jumperlessConfig.display.terminal_line_buffering == 1 && currentCommandLine.length() > 1) {
+    // ONLY use buffered mode if terminal line_buffering is enabled
+    if (jumperlessConfig.terminal.line_buffering == 1 && currentCommandLine.length() > 1) {
         // Capture and clear immediately to prevent reuse
         String configCmd = currentCommandLine;
         currentCommandLine = ""; // Clear NOW before any processing
@@ -3436,7 +1875,7 @@ void printConfigToSerial(bool showNamesArg) {
             int endBracket = configCmd.indexOf(']');
             if (endBracket > 0) {
                 String sectionName = configCmd.substring(1, endBracket);
-                int section = parseSectionName(sectionName.c_str());
+                int section = configSectionFromName(sectionName.c_str());
                 if (section != -1) {
                     printConfigSectionToSerial(section, showNamesArg);
                 } else {
@@ -3457,12 +1896,12 @@ void printConfigToSerial(bool showNamesArg) {
 
     // Wait for input with timeout (character-by-character mode)
     // Use Serial directly when line buffering is disabled, Jerial when enabled
-    Stream* inputStream = (jumperlessConfig.display.terminal_line_buffering == 1) ? (Stream*)&Jerial : (Stream*)&Serial;
+    Stream* inputStream = (jumperlessConfig.terminal.line_buffering == 1) ? (Stream*)&Jerial : (Stream*)&Serial;
     
     while (true) {
         if (inputStream->available() > 0) {
             char c = inputStream->read();
-            if (lineIndex < sizeof(line) - 1) {
+            if (lineIndex < (int)sizeof(line) - 1) {
                 line[lineIndex++] = c;
                 line[lineIndex] = '\0';
                 lastCharTime = millis();
@@ -3496,7 +1935,7 @@ void printConfigToSerial(bool showNamesArg) {
                     strncpy(sectionName, line + 1, endBracket - (line + 1));
                     sectionName[endBracket - (line + 1)] = '\0';
 
-                    int section = parseSectionName(sectionName);
+                    int section = configSectionFromName(sectionName);
                     if (section != -1) {
                         printConfigSectionToSerial(section, showNamesArg);
                     } else {
@@ -3517,91 +1956,67 @@ void printConfigToSerial(bool showNamesArg) {
     }
 }
 
-void readConfigFromSerial() {
-    char line[128] = {0};
-    int lineIndex = 0;
-    char currentSection[32] = {0};
-    bool inSection = false;
-    
+// Interactive config editor (ConfigTui.cpp).
+extern void configTuiRun(void);
 
-bool ledChange = false;
-bool dacChange = false;
-    unsigned long lastCharTime = millis();
-    const unsigned long timeout = 10;
-
-    // Check if we already have a command line from line buffering mode
-    // ONLY use buffered mode if terminal_line_buffering is enabled
-    if (jumperlessConfig.display.terminal_line_buffering == 1 && currentCommandLine.length() > 1) {
-        // Capture and clear immediately to prevent reuse
-        String configCmd = currentCommandLine;
-        currentCommandLine = ""; // Clear NOW before any processing
-        
-        // Remove the leading backtick character
-        configCmd = configCmd.substring(1);
-        configCmd.trim();
-        
-        if (configCmd.length() > 0) {
-            // Copy to our line buffer for processing
-            strncpy(line, configCmd.c_str(), sizeof(line) - 1);
-            line[sizeof(line) - 1] = '\0';
-            lineIndex = strlen(line);
-            
-            // Check for special commands first (before trying to parse as settings)
+// Handles the shared reset/self-test commands typed at the ` prompt.
+// Returns true when the line was one of them (handled here).
+static bool handleConfigCommandLine(const char* line) {
             if (strcmp(line, "?") == 0 || strcmp(line, "-h") == 0 || strcmp(line, "--help") == 0 || strcmp(line, "help") == 0) {
                 printConfigHelp();
-                return;
-            }
-            else if (strcmp(line, "reset") == 0) {
+        return true;
+    }
+    if (strcmp(line, "menu") == 0 || strcmp(line, "tui") == 0) {
+        configTuiRun();
+        return true;
+    }
+    if (strcmp(line, "reset") == 0) {
                 resetConfigToDefaults();
                 saveConfigToFile("/config.txt");
                 Serial.println("Done. Settings have been reset to defaults");
-                ledChange = true;
-                dacChange = true;
-                return;
+        return true;
             }
-            else if (strcmp(line, "clear_calibration") == 0 || strcmp(line, "clear_cal") == 0 || 
+    if (strcmp(line, "clear_calibration") == 0 || strcmp(line, "clear_cal") == 0 ||
                      strcmp(line, "reset_calibration") == 0 || strcmp(line, "reset_cal") == 0) {
                 resetConfigToDefaults(1, 0);
                 saveConfig();
                 Serial.println("Done. Calibration has been cleared");
-                ledChange = true;
-                dacChange = true;
-                return;
+        return true;
             }
-            else if (strcmp(line, "clear_hardware") == 0 || strcmp(line, "clear_hw") == 0 || 
+    if (strcmp(line, "clear_hardware") == 0 || strcmp(line, "clear_hw") == 0 ||
                      strcmp(line, "reset_hardware") == 0 || strcmp(line, "reset_hw") == 0) {
                 resetConfigToDefaults(0, 1);
                 saveConfig();
                 Serial.println("Done. Hardware has been cleared");
-                ledChange = true;
-                dacChange = true;
-                return;
+        return true;
             }
-            else if (strcmp(line, "clear_all") == 0 || strcmp(line, "reset_all") == 0) {
+    if (strcmp(line, "clear_all") == 0 || strcmp(line, "reset_all") == 0) {
                 resetConfigToDefaults(1, 1);
                 saveConfig();
                 Serial.println("Done. All settings have been cleared");
-                ledChange = true;
-                dacChange = true;
-                return;
+        return true;
             }
-            else if (strcmp(line, "clear_filesystem") == 0 || strcmp(line, "reset_filesystem") == 0) {
+    if (strcmp(line, "clear_filesystem") == 0 || strcmp(line, "reset_filesystem") == 0) {
                 Serial.println("Deleting all filesystem contents...");
-                bool deleteSuccess = deleteDirectoryContents("/");
+        deleteDirectoryContents("/");
                 Serial.println("Filesystem contents deleted.");
-                return;
+        return true;
             }
-            else if (strcmp(line, "self_test") == 0 || strcmp(line, "selftest") == 0) {
+    if (strcmp(line, "self_test") == 0 || strcmp(line, "selftest") == 0) {
                 // Non-destructive hardware self test (no FS wipe, no reboot)
                 runFullSelfTest(false);
-                return;
+        return true;
             }
-            else if (strcmp(line, "self_test_report") == 0 || strcmp(line, "selftest_report") == 0) {
+    if (strcmp(line, "self_test_report") == 0 || strcmp(line, "selftest_report") == 0) {
                 // Re-print the stored report without re-running the tests
                 selfTestPrintStoredReport();
-                return;
-            }
-            else if (strcmp(line, "force_first_start") == 0 || strcmp(line, "factory_reset") == 0) {
+        return true;
+    }
+    if (strcmp(line, "check") == 0 || strcmp(line, "selfcheck") == 0) {
+        configTableSelfCheck();
+        return true;
+    }
+    if (strcmp(line, "force_first_start") == 0 || strcmp(line, "factory_reset") == 0) {
                 cycleTerminalColor(true, 100.0, true, &Serial, 0, 1);
                 safeFileDelete("/config.txt");
                 Serial.println("Config file deleted.");
@@ -3647,6 +2062,39 @@ bool dacChange = false;
                 }
                 
                 rp2040.reboot();
+        return true;
+    }
+    return false;
+}
+
+void readConfigFromSerial() {
+    char line[128] = {0};
+    int lineIndex = 0;
+    char currentSection[32] = {0};
+    bool inSection = false;
+
+    unsigned long lastCharTime = millis();
+    const unsigned long timeout = 10;
+
+    // Check if we already have a command line from line buffering mode
+    // ONLY use buffered mode if terminal line_buffering is enabled
+    if (jumperlessConfig.terminal.line_buffering == 1 && currentCommandLine.length() > 1) {
+        // Capture and clear immediately to prevent reuse
+        String configCmd = currentCommandLine;
+        currentCommandLine = ""; // Clear NOW before any processing
+
+        // Remove the leading backtick character
+        configCmd = configCmd.substring(1);
+        configCmd.trim();
+
+        if (configCmd.length() > 0) {
+            // Copy to our line buffer for processing
+            strncpy(line, configCmd.c_str(), sizeof(line) - 1);
+            line[sizeof(line) - 1] = '\0';
+            lineIndex = strlen(line);
+
+            // Check for special commands first (before trying to parse as settings)
+            if (handleConfigCommandLine(line)) {
                 return;
             }
             
@@ -3672,33 +2120,43 @@ bool dacChange = false;
             } else {
                 Serial.println("Failed to parse config setting");
             }
+        } else {
+            // Bare ` with nothing after it: open the interactive editor.
+            configTuiRun();
         }
         return;
     }
 
-    Serial.println("\n\renter config settings (? for help)\n\r");
-
     // Use Serial directly when line buffering is disabled, Jerial when enabled
-    Stream* inputStream = (jumperlessConfig.display.terminal_line_buffering == 1) ? (Stream*)&Jerial : (Stream*)&Serial;
-    
-    while (inputStream->available() == 0) {
-        // delayMicroseconds(10);
-        if (millis() - lastCharTime > 400) {
-            //Serial.println("No input detected. Showing help.");
-            printConfigHelp();
+    Stream* inputStream = (jumperlessConfig.terminal.line_buffering == 1) ? (Stream*)&Jerial : (Stream*)&Serial;
+
+    // Decide between "user is pasting settings" and "bare ` - open the
+    // editor". Leftover line terminators from the dispatch (the \n of a
+    // \r\n, a straggling blank line) must not count as pasted input, or the
+    // editor never opens for terminals that send CRLF.
+    unsigned long waitStart = millis();
+    for (;;) {
+        if (inputStream->available() > 0) {
+            int p = inputStream->peek();
+            if (p == '\r' || p == '\n' || p == ' ') {
+                inputStream->read();
+                continue;
+            }
+            break;  // real content - fall into the paste-parse loop below
+        }
+        if (millis() - waitStart > 400) {
+            // Bare ` with no pasted settings: open the interactive editor.
+            configTuiRun();
             return;
         }
     }
+
+    Serial.println("\n\renter config settings (? for help)\n\r");
+
     int timedOut = 0;
     while (true) {
         if (inputStream->available() > 0) {
             char c = inputStream->read();
-            if (c == '\n' || c == '\r') {
-               // parseSetting(line);
-                // Serial.println("New line");
-            }
-
-            //lastCharTime = millis();
 
             // Handle backspace
             if (c == '\b' || c == 0x7F) {
@@ -3710,135 +2168,18 @@ bool dacChange = false;
             }
 
             // Add character to line buffer if there's space
-            if (lineIndex < sizeof(line) - 1) {
+            if (lineIndex < (int)sizeof(line) - 1) {
                 line[lineIndex++] = c;
                 line[lineIndex] = '\0'; // Keep string null-terminated
 
-                // Check for help commands as soon as they're typed
-                if (strcmp(line, "?") == 0 || strcmp(line, "-h") == 0 || strcmp(line, "--help") == 0 || strcmp(line, "help") == 0) {
-                    printConfigHelp();
+                // Special commands act as soon as they're fully typed
+                if (handleConfigCommandLine(line)) {
                     memset(line, 0, sizeof(line));
                     lineIndex = 0;
-                    continue;
-                }
-
-                // Check for reset
-                if (strcmp(line, "reset") == 0) {
-                    resetConfigToDefaults();
-                    saveConfigToFile("/config.txt");
-                    Serial.println("Done. Settings have been reset to defaults");
-                    ledChange = true;
-                    dacChange = true;
-                    memset(line, 0, sizeof(line));
-                    lineIndex = 0;
-                    continue;
-                } else if (strcmp(line, "clear_calibration") == 0 || strcmp(line, "clear_cal") == 0 || strcmp(line, "reset_calibration") == 0 || strcmp(line, "reset_cal") == 0) {
-                    resetConfigToDefaults(1, 0);
-                    saveConfig();
-                    Serial.println("Done. Calibration has been cleared");
-                    ledChange = true;
-                    dacChange = true;
-                    memset(line, 0, sizeof(line));
-                    lineIndex = 0;
-                    continue;
-                } else if (strcmp(line, "clear_hardware") == 0 || strcmp(line, "clear_hw") == 0 || strcmp(line, "reset_hardware") == 0 || strcmp(line, "reset_hw") == 0) {
-                    resetConfigToDefaults(0, 1);
-                    saveConfig();
-                    Serial.println("Done. Hardware has been cleared");
-                    ledChange = true;
-                    dacChange = true;
-                    memset(line, 0, sizeof(line));
-                    lineIndex = 0;
-                    continue;
-                } else if (strcmp(line, "clear_all") == 0 || strcmp(line, "reset_all") == 0) {
-                    resetConfigToDefaults(1, 1);
-                    saveConfig();
-                    Serial.println("Done. All settings have been cleared");
-                    ledChange = true;
-                    dacChange = true;
-                    memset(line, 0, sizeof(line));
-                    lineIndex = 0;
-                    continue;
-                } else if (strcmp(line, "clear_filesystem") == 0 || strcmp(line, "reset_filesystem") == 0) {
-                    Serial.println("Deleting all filesystem contents...");
-                    bool deleteSuccess = deleteDirectoryContents("/");
-                    Serial.println("Filesystem contents deleted.");
-                    continue;
-                
-                } else if (strcmp(line, "self_test") == 0 || strcmp(line, "selftest") == 0) {
-                    runFullSelfTest(false);
-                    continue;
-
-                } else if (strcmp(line, "self_test_report") == 0 || strcmp(line, "selftest_report") == 0) {
-                    selfTestPrintStoredReport();
-                    continue;
-
-                } else if (strcmp(line, "force_first_start") == 0 || strcmp(line, "factory_reset") == 0) {
-                    //firstStart = 1;
-                    cycleTerminalColor(true, 100.0, true,  &Serial, 0, 1);
-                    safeFileDelete("/config.txt");
-
-                    Serial.println("Config file deleted.");
-                    Serial.flush();
-
-                    // // Delete all contents of the filesystem recursively
-                    bool deleteSuccess = deleteDirectoryContents("/");
-                    
-                    cycleTerminalColor(false, 100.0, true,  &Serial, 0, 1);
-                    if (deleteSuccess) {
-                        Serial.println("All filesystem contents deleted successfully.");
-                    } else {
-                        Serial.println("Some files/directories could not be deleted (this may be normal).");
-                    }
-                    Serial.flush();
-
-
-                    
-
-                    EEPROM.write(FIRSTSTARTUPADDRESS, 0x00);
-                    eepromMarkDirty();
-                    eepromCommitSafe();  // reboot imminent - commit synchronously (safe envelope)
-                    cycleTerminalColor(false, 100.0, true,  &Serial, 0, 1);
-                    Serial.println("First startup flag cleared.");
-                    Serial.flush();
-                    
-
-                    cycleTerminalColor(false, 100.0, true,  &Serial, 0, 1);
-                    Serial.println("Done. All settings have been cleared");
-                    delay(200);
-                    cycleTerminalColor(false, 100.0, true,  &Serial, 0, 1);
-                   // Serial.println("\n\rPower cycle your Jumperless to reset config and force startup calibration.");
-
-                    unsigned long startTime = millis()+1000;
-                    int dots = 0;
-//return;
-                    while (millis() < 3000) {
-                         if (millis() - startTime > 500) {
-                        Serial.print("\r                                           \r");
-                        Serial.print("Power cycling");
-                       
-                            dots++;
-                            for (int i = 0; i < dots; i++) {
-                                Serial.print(".");
-                            }
-                            startTime = millis();
-                        }
-                        if (dots >= 3) {
-                            
-                            dots = 0;
-                        }
-                        Serial.flush();
-            
-                    }
-                    // saveConfigToFile("/config.txt");
-                    // Serial.println("Done. All settings have been reset to defaults");
-                    memset(line, 0, sizeof(line));
-                    lineIndex = 0;
-                    rp2040.reboot();
                     continue;
                 }
             }
-            // ... existing code ...
+
                         // Process line when newline or semicolon is received
             if (c == '\n' || c == '\r' || c == ';') {
                 if (lineIndex > 0) {
@@ -3903,17 +2244,10 @@ bool dacChange = false;
         } else if (millis() - lastCharTime > 10) {
             lastCharTime = millis();
             timedOut++;
-           
-
         }
- //Serial.println(timedOut);
-        if (timedOut > timeout) {
-            // printConfigHelp();
-            // Serial.println("\n\r");
-            // Serial.flush();
+        if (timedOut > (int)timeout) {
             memset(line, 0, sizeof(line));
             lineIndex = 0;
-
             break;
         }
     }
@@ -3922,12 +2256,7 @@ bool dacChange = false;
         inputStream->read();
         delayMicroseconds(100);
     }
-   // configChanged = true;
    readSettingsFromConfig();
-//    Serial.println(globalState.power.topRail);
-//    Serial.println(globalState.power.bottomRail);
-//    Serial.println(globalState.power.dac0);
-//    Serial.println(globalState.power.dac1);
     setRailsAndDACs(0);
     requestLedShow( -1 );
 }
@@ -3941,687 +2270,158 @@ int parseTrueFalse(const char* value) {
 }
 
 void updateConfigValue(const char* section, const char* key, const char* value) {
-    char oldValue[64] = {0};
-     //! this is a place to add new config options
-    // Get old value
-    if (strcmp(section, "firmware") == 0) {
-        if (strcmp(key, "last_version") == 0) sprintf(oldValue, "%s", jumperlessConfig.firmware.last_version);
-        else if (strcmp(key, "files_provisioned") == 0) sprintf(oldValue, "%d", jumperlessConfig.firmware.files_provisioned);
+    // [firmware] last_version arrives from checkAndHandleFirmwareUpdate's
+    // save path via file, never live - but accept it anyway.
+    const ConfigOptionDesc* opt = configFindOption(section, key);
+    if (!opt) {
+        Serial.print("Unknown or removed option [");
+        Serial.print(section);
+        Serial.print("] ");
+        Serial.print(key);
+        Serial.println(" (ignored)");
+        return;
     }
-    else if (strcmp(section, "hardware") == 0) {
-        if (strcmp(key, "generation") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.generation);
-        else if (strcmp(key, "revision") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.revision);
-        else if (strcmp(key, "probe_revision") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_revision);
-        else if (strcmp(key, "psram_installed") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.psram_installed);
-        else if (strcmp(key, "psram_app_size_kb") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.psram_app_size_kb);
-        else if (strcmp(key, "probe_led_on_button_pin") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_led_on_button_pin);
-        else if (strcmp(key, "probe_led_refresh_us") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.probe_led_refresh_us);
-        else if (strcmp(key, "encoder_pio") == 0) sprintf(oldValue, "%d", jumperlessConfig.hardware.encoder_pio);
-    }
-    else if (strcmp(section, "dacs") == 0) {
-        // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
-        if (strcmp(key, "set_dacs_on_boot") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.set_dacs_on_boot);
-        else if (strcmp(key, "set_rails_on_boot") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.set_rails_on_boot);
-        else if (strcmp(key, "probe_power_dac") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.probe_power_dac);
-        else if (strcmp(key, "auto_connect_probe") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.auto_connect_probe);
-        else if (strcmp(key, "probe_power_source") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.probe_power_source);
-        else if (strcmp(key, "limit_max") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.dacs.limit_max);
-        else if (strcmp(key, "rail_click_adjust") == 0) sprintf(oldValue, "%d", jumperlessConfig.dacs.rail_click_adjust);
-        else if (strcmp(key, "limit_min") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.dacs.limit_min);
-    }
-    else if (strcmp(section, "debug") == 0) {
-        if (strcmp(key, "file_parsing") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.file_parsing);
-        else if (strcmp(key, "net_manager") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_manager);
-        else if (strcmp(key, "nets_to_chips") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.nets_to_chips);
-        else if (strcmp(key, "nets_to_chips_alt") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.nets_to_chips_alt);
-        else if (strcmp(key, "leds") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.leds);
-        else if (strcmp(key, "probing") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probing);
-        else if (strcmp(key, "oled") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.oled);
-        else if (strcmp(key, "logo_pads") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.logo_pads);
-        else if (strcmp(key, "arduino") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.arduino);
-        else if (strcmp(key, "usb_mass_storage") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.usb_mass_storage);
-        else if (strcmp(key, "show_probe_current") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.show_probe_current);
-        else if (strcmp(key, "show_node_errors") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.show_node_errors);
-        else if (strcmp(key, "probe_power_gpio") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_power_gpio);
-        else if (strcmp(key, "probe_switch_stats") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_stats);
-        else if (strcmp(key, "probe_switch_agree") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.probe_switch_agree);
-        else if (strcmp(key, "net_voltage_scan") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_voltage_scan);
-        else if (strcmp(key, "net_scan_pair_taps") == 0) sprintf(oldValue, "%d", jumperlessConfig.debug.net_scan_pair_taps);
-    }
-    else if (strcmp(section, "slots") == 0) {
-        if (strcmp(key, "boot_mode") == 0) sprintf(oldValue, "%d", jumperlessConfig.slots.boot_mode);
-        else if (strcmp(key, "boot_slot") == 0) sprintf(oldValue, "%d", jumperlessConfig.slots.boot_slot);
-    }
-    else if (strcmp(section, "routing") == 0) {
-        if (strcmp(key, "stack_paths") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_paths);
-        else if (strcmp(key, "stack_rails") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_rails);
-        else if (strcmp(key, "stack_dacs") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.stack_dacs);
-        else if (strcmp(key, "rail_priority") == 0) sprintf(oldValue, "%d", jumperlessConfig.routing.rail_priority);
-    }
-    else if (strcmp(section, "usb_cdc") == 0) {
-        if (strcmp(key, "ignore_dtr") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_cdc.ignore_dtr);
-    }
-    else if (strcmp(section, "usb_audio") == 0) {
-        if (strcmp(key, "enabled") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.enabled ? 1 : 0);
-        else if (strcmp(key, "left") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.left);
-        else if (strcmp(key, "right") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.right);
-        else if (strcmp(key, "rate") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.rate);
-        else if (strcmp(key, "full_scale") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.usb_audio.full_scale);
-        else if (strcmp(key, "dc_block") == 0) sprintf(oldValue, "%d", jumperlessConfig.usb_audio.dc_block ? 1 : 0);
-    }
-    else if (strcmp(section, "calibration") == 0) {
-        if (strcmp(key, "top_rail_zero") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.top_rail_zero);
-        else if (strcmp(key, "top_rail_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.top_rail_spread);
-        else if (strcmp(key, "bottom_rail_zero") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.bottom_rail_zero);
-        else if (strcmp(key, "bottom_rail_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.bottom_rail_spread);
-        else if (strcmp(key, "dac_0_zero") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.dac_0_zero);
-        else if (strcmp(key, "dac_0_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.dac_0_spread);
-        else if (strcmp(key, "dac_1_zero") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.dac_1_zero);
-        else if (strcmp(key, "dac_1_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.dac_1_spread);
-        else if (strcmp(key, "adc_0_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_0_zero);
-        else if (strcmp(key, "adc_0_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_0_spread);
-        else if (strcmp(key, "adc_1_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_1_zero);
-        else if (strcmp(key, "adc_1_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_1_spread);
-        else if (strcmp(key, "adc_2_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_2_zero);
-        else if (strcmp(key, "adc_2_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_2_spread);
-        else if (strcmp(key, "adc_3_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_3_zero);
-        else if (strcmp(key, "adc_3_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_3_spread);
-        else if (strcmp(key, "adc_4_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_4_zero);
-        else if (strcmp(key, "adc_4_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_4_spread);
-        else if (strcmp(key, "adc_7_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_7_zero);
-        else if (strcmp(key, "adc_7_spread") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.adc_7_spread);
-        else if (strcmp(key, "probe_max") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max);
-        else if (strcmp(key, "probe_min") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_min);
-        else if (strcmp(key, "probe_max_measure") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max_measure);
-        else if (strcmp(key, "probe_max_measure_gpio") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_max_measure_gpio);
-        else if (strcmp(key, "probe_min_measure") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_min_measure);
-        else if (strcmp(key, "probe_switch_threshold_high") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold_high);
-        else if (strcmp(key, "probe_switch_threshold_low") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold_low);
-        else if (strcmp(key, "probe_switch_select_max_ma") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_select_max_ma);
-        else if (strcmp(key, "probe_switch_blink_hold_pct") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.probe_switch_blink_hold_pct);
-        else if (strcmp(key, "probe_switch_threshold") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_switch_threshold);
-        else if (strcmp(key, "probe_current_zero") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.probe_current_zero);
-        else if (strcmp(key, "minimum_probe_reading") == 0) sprintf(oldValue, "%d", jumperlessConfig.calibration.minimum_probe_reading);
-        else if (strcmp(key, "probe_droop_v0") == 0) sprintf(oldValue, "%.3f", jumperlessConfig.calibration.probe_droop_v0);
-        else if (strcmp(key, "probe_droop_ohms") == 0) sprintf(oldValue, "%.1f", jumperlessConfig.calibration.probe_droop_ohms);
-        else if (strcmp(key, "probe_pad_ohms") == 0) sprintf(oldValue, "%.1f", jumperlessConfig.calibration.probe_pad_ohms);
-        else if (strcmp(key, "measure_mode_output_voltage") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.measure_mode_output_voltage);
-        else if (strcmp(key, "crosspoint_resistance") == 0) sprintf(oldValue, "%.2f", jumperlessConfig.calibration.crosspoint_resistance);
-        }
-    else if (strcmp(section, "logo_pads") == 0) {
-        if (strcmp(key, "top_guy") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.top_guy);
-        else if (strcmp(key, "bottom_guy") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.bottom_guy);
-        else if (strcmp(key, "building_pad_top") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.building_pad_top);
-        else if (strcmp(key, "building_pad_bottom") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.building_pad_bottom);
-        else if (strcmp(key, "repeat_ms") == 0) sprintf(oldValue, "%d", jumperlessConfig.logo_pads.repeat_ms);
-    }
-    else if (strcmp(section, "display") == 0) {
-        if (strcmp(key, "lines_wires") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.lines_wires);
-        else if (strcmp(key, "menu_brightness") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.menu_brightness);
-        else if (strcmp(key, "led_brightness") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.led_brightness);
-        else if (strcmp(key, "rail_brightness") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.rail_brightness);
-        else if (strcmp(key, "special_net_brightness") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.special_net_brightness);
-        else if (strcmp(key, "net_color_mode") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.net_color_mode);
-        else if (strcmp(key, "net_currents") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.net_currents);
-        else if (strcmp(key, "current_flow") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.current_flow);
-        else if (strcmp(key, "dump_leds") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.dump_leds);
-        else if (strcmp(key, "dump_format") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.dump_format);
-        else if (strcmp(key, "terminal_line_buffering") == 0) sprintf(oldValue, "%d", jumperlessConfig.display.terminal_line_buffering);
-    }
-    else if (strcmp(section, "serial_1") == 0) {
-        if (strcmp(key, "function") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.function);
-        else if (strcmp(key, "baud_rate") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.baud_rate);
-        else if (strcmp(key, "print_passthrough") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.print_passthrough);
-        else if (strcmp(key, "connect_on_boot") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.connect_on_boot);
-        else if (strcmp(key, "lock_connection") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.lock_connection);
-        else if (strcmp(key, "autoconnect_flashing") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.autoconnect_flashing);
-        else if (strcmp(key, "async_passthrough") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.async_passthrough);
-        else if (strcmp(key, "tag_parsing") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.tag_parsing);
-        else if (strcmp(key, "flash_reset_type") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_1.flash_reset_type);
-    }
-    else if (strcmp(section, "serial_2") == 0) {
-        if (strcmp(key, "function") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_2.function);
-        else if (strcmp(key, "baud_rate") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_2.baud_rate);
-        else if (strcmp(key, "print_passthrough") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_2.print_passthrough);
-        else if (strcmp(key, "connect_on_boot") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_2.connect_on_boot);
-        else if (strcmp(key, "lock_connection") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_2.lock_connection);
-        else if (strcmp(key, "autoconnect_flashing") == 0) sprintf(oldValue, "%d", jumperlessConfig.serial_2.autoconnect_flashing);
-    }
-    else if (strcmp(section, "top_oled") == 0) {
-        if (strcmp(key, "enabled") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.enabled);
-        else if (strcmp(key, "i2c_address") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.i2c_address);
-        else if (strcmp(key, "display_type") == 0) sprintf(oldValue, "%s", jumperlessConfig.top_oled.display_type);
-        else if (strcmp(key, "width") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.width);
-        else if (strcmp(key, "height") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.height);
-        else if (strcmp(key, "rotation") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.rotation);
-        else if (strcmp(key, "connection_type") == 0) sprintf(oldValue, "%s", getConnectionTypeString(jumperlessConfig.top_oled.connection_type));
-        else if (strcmp(key, "sda_pin") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.sda_pin);
-        else if (strcmp(key, "scl_pin") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.scl_pin);
-        else if (strcmp(key, "gpio_sda") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.gpio_sda);
-        else if (strcmp(key, "gpio_scl") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.gpio_scl);
-        else if (strcmp(key, "sda_row") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.sda_row);
-        else if (strcmp(key, "scl_row") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.scl_row);
-        else if (strcmp(key, "connect_on_boot") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.connect_on_boot);
-        else if (strcmp(key, "lock_connection") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.lock_connection);
-        else if (strcmp(key, "show_in_terminal") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.show_in_terminal);
-        else if (strcmp(key, "font") == 0) sprintf(oldValue, "%d", jumperlessConfig.top_oled.font);
-        else if (strcmp(key, "startup_message") == 0) sprintf(oldValue, "%s", jumperlessConfig.top_oled.startup_message);
-    }
-    // Update the config structure
-    // Accept string names for enums/bools and convert to int
-    if (strcmp(section, "firmware") == 0) {
-        if (strcmp(key, "last_version") == 0) {
-            strncpy(jumperlessConfig.firmware.last_version, value, sizeof(jumperlessConfig.firmware.last_version) - 1);
-            jumperlessConfig.firmware.last_version[sizeof(jumperlessConfig.firmware.last_version) - 1] = '\0';
-        }
-        else if (strcmp(key, "files_provisioned") == 0) jumperlessConfig.firmware.files_provisioned = parseBool(value);
-    }
-    else if (strcmp(section, "hardware") == 0) {
-        if (strcmp(key, "generation") == 0) jumperlessConfig.hardware.generation = parseInt(value);
-        else if (strcmp(key, "revision") == 0) jumperlessConfig.hardware.revision = parseInt(value);
-        else if (strcmp(key, "probe_revision") == 0) jumperlessConfig.hardware.probe_revision = parseInt(value);
-        else if (strcmp(key, "psram_installed") == 0) {
-            int newValue = parseBool(value);
-            jumperlessConfig.hardware.psram_installed = newValue;
-            applyPsramModeChange(newValue);
-            reinitMicroPythonForPsramChange();
-        }
-        else if (strcmp(key, "psram_app_size_kb") == 0) {
-            // Changing the app/MP partition only takes effect on next boot
-            // since MicroPython has already mapped its heap.
-            jumperlessConfig.hardware.psram_app_size_kb = parseInt(value);
-        }
-        else if (strcmp(key, "probe_led_on_button_pin") == 0) {
-            // Pin binding happens once at initLEDs(); takes effect on next boot.
-            jumperlessConfig.hardware.probe_led_on_button_pin = parseBool(value);
-        }
-        else if (strcmp(key, "probe_led_refresh_us") == 0) {
-            int v = parseInt(value);
-            jumperlessConfig.hardware.probe_led_refresh_us = (v < 0) ? 0 : v;
-        }
-        else if (strcmp(key, "encoder_pio") == 0) {
-            int v = parseInt(value);
-            // -1 = auto (prefer PIO1, PIO0 last); 0..2 = try that block first.
-            // Applied at the next boot (core 1 claims before live changes land).
-            jumperlessConfig.hardware.encoder_pio = (v < -1 || v > 2) ? -1 : v;
-        }
-    }
-    else if (strcmp(section, "dacs") == 0) {
-        // Voltage state (top_rail, bottom_rail, dac_0, dac_1) moved to globalState.power
-        if (strcmp(key, "set_dacs_on_boot") == 0) jumperlessConfig.dacs.set_dacs_on_boot = parseBool(value);
-        else if (strcmp(key, "set_rails_on_boot") == 0) jumperlessConfig.dacs.set_rails_on_boot = parseBool(value);
-        else if (strcmp(key, "probe_power_dac") == 0) jumperlessConfig.dacs.probe_power_dac = parseInt(value);
-        else if (strcmp(key, "auto_connect_probe") == 0) {
-            jumperlessConfig.dacs.auto_connect_probe = parseInt(value);
-            // Symmetric with jl_probe_autoconnect(): turning it back on must
-            // re-enable the feed too - it used to leave s_probePowerOn false, so
-            // `[dacs] auto_connect_probe = 1` after a 0 left the probe unpowered
-            // until reboot ("probe_power off -> (none)" in i@; seen 2026-08-17).
-            if (jumperlessConfig.dacs.auto_connect_probe <= 0) {
-                probing.routableBufferPower(0, 0, 1);
-            } else {
-                probing.routableBufferPower(1, 0, 1);
+
+    char oldValue[64];
+    configFormatValue(opt, oldValue, sizeof(oldValue), true);
+
+    if (!configSetValue(opt, value, /*liveApply=*/true)) {
+                return; // refused - don't save or echo a change that didn't happen
             }
-        }
-        else if (strcmp(key, "probe_power_source") == 0) {
-            int v = parseInt(value);
-            int prev = jumperlessConfig.dacs.probe_power_source;
-            jumperlessConfig.dacs.probe_power_source = (v == 1) ? 1 : 0;
-            // The order is read at every evaluation; a change only becomes
-            // real at the next rebuild, so ask for one now instead of
-            // waiting for an unrelated connect/disconnect.
-            if (jumperlessConfig.dacs.probe_power_source != prev) {
-                infraNudge();
-            }
-        }
-        else if (strcmp(key, "limit_max") == 0) jumperlessConfig.dacs.limit_max = parseFloat(value);
-        else if (strcmp(key, "limit_min") == 0) jumperlessConfig.dacs.limit_min = parseFloat(value);
-        else if (strcmp(key, "rail_click_adjust") == 0) jumperlessConfig.dacs.rail_click_adjust = parseInt(value);
-    }
-    else if (strcmp(section, "debug") == 0) {
-        if (strcmp(key, "file_parsing") == 0) jumperlessConfig.debug.file_parsing = parseBool(value);
-        else if (strcmp(key, "net_manager") == 0) jumperlessConfig.debug.net_manager = parseBool(value);
-        else if (strcmp(key, "nets_to_chips") == 0) jumperlessConfig.debug.nets_to_chips = parseBool(value);
-        else if (strcmp(key, "nets_to_chips_alt") == 0) jumperlessConfig.debug.nets_to_chips_alt = parseBool(value);
-        else if (strcmp(key, "leds") == 0) jumperlessConfig.debug.leds = parseBool(value);
-        else if (strcmp(key, "probing") == 0) jumperlessConfig.debug.probing = parseBool(value);
-        else if (strcmp(key, "oled") == 0) jumperlessConfig.debug.oled = parseBool(value);
-        else if (strcmp(key, "logo_pads") == 0) jumperlessConfig.debug.logo_pads = parseBool(value);
-        else if (strcmp(key, "arduino") == 0) jumperlessConfig.debug.arduino = parseInt(value);
-        else if (strcmp(key, "usb_mass_storage") == 0) jumperlessConfig.debug.usb_mass_storage = parseBool(value);
-        else if (strcmp(key, "show_probe_current") == 0) jumperlessConfig.debug.show_probe_current = parseInt(value);
-        else if (strcmp(key, "show_node_errors") == 0) jumperlessConfig.debug.show_node_errors = parseBool(value);
-        // probe_power_gpio is DEPRECATED AND IGNORED (the feed source is
-        // candidate-driven in routing/InfraPaths.cpp) - parse it so old
-        // config files round-trip, but with NO side effects. (This used to
-        // call probing.routableBufferPower(1,0,1), force-ENABLING probe power as a
-        // side effect of setting an ignored flag.)
-        else if (strcmp(key, "probe_power_gpio") == 0) {
-            jumperlessConfig.debug.probe_power_gpio = parseBool(value);
-        }
-        else if (strcmp(key, "probe_switch_stats") == 0) jumperlessConfig.debug.probe_switch_stats = parseBool(value);
-        else if (strcmp(key, "probe_switch_agree") == 0) jumperlessConfig.debug.probe_switch_agree = parseBool(value);
-        else if (strcmp(key, "net_voltage_scan") == 0) jumperlessConfig.debug.net_voltage_scan = parseBool(value);
-        else if (strcmp(key, "net_scan_pair_taps") == 0) jumperlessConfig.debug.net_scan_pair_taps = parseInt(value);
-    }
-    else if (strcmp(section, "slots") == 0) {
-        if (strcmp(key, "boot_mode") == 0) jumperlessConfig.slots.boot_mode = parseInt(value);
-        else if (strcmp(key, "boot_slot") == 0) jumperlessConfig.slots.boot_slot = parseInt(value);
-    }
-    else if (strcmp(section, "routing") == 0) {
-        if (strcmp(key, "stack_paths") == 0) jumperlessConfig.routing.stack_paths = parseInt(value);
-        else if (strcmp(key, "stack_rails") == 0) jumperlessConfig.routing.stack_rails = parseInt(value);
-        else if (strcmp(key, "stack_dacs") == 0) jumperlessConfig.routing.stack_dacs = parseInt(value);
-        else if (strcmp(key, "rail_priority") == 0) jumperlessConfig.routing.rail_priority = parseInt(value);
-    }
-    else if (strcmp(section, "usb_audio") == 0) {
-        // Persisted values only; the live stream reads them at the next boot /
-        // usb_audio_apply_config(). Use the M command or usb_audio_setup() to
-        // change the running mic.
-        if (strcmp(key, "enabled") == 0) jumperlessConfig.usb_audio.enabled = parseBool(value);
-        else if (strcmp(key, "left") == 0) jumperlessConfig.usb_audio.left = parseInt(value);
-        else if (strcmp(key, "right") == 0) jumperlessConfig.usb_audio.right = parseInt(value);
-        else if (strcmp(key, "rate") == 0) jumperlessConfig.usb_audio.rate = parseInt(value);
-        else if (strcmp(key, "full_scale") == 0) jumperlessConfig.usb_audio.full_scale = parseFloat(value);
-        else if (strcmp(key, "dc_block") == 0) jumperlessConfig.usb_audio.dc_block = parseBool(value);
-    }
-    else if (strcmp(section, "usb_cdc") == 0) {
-        if (strcmp(key, "ignore_dtr") == 0) {
-            jumperlessConfig.usb_cdc.ignore_dtr = parseBool(value);
-            usb_cdc_set_ignore_dtr(jumperlessConfig.usb_cdc.ignore_dtr);
-            // Apply USB CDC config immediately so the change takes effect
-            // extern void setDTRLockout(uint32_t ms);
-            AsyncPassthrough::setDTRLockout(3000);
-            
-            usb_cdc_apply_config();
-        }
-    }
-    else if (strcmp(section, "calibration") == 0) {
-        if (strcmp(key, "top_rail_zero") == 0) jumperlessConfig.calibration.top_rail_zero = parseInt(value);
-        else if (strcmp(key, "top_rail_spread") == 0) jumperlessConfig.calibration.top_rail_spread = parseFloat(value);
-        else if (strcmp(key, "bottom_rail_zero") == 0) jumperlessConfig.calibration.bottom_rail_zero = parseInt(value);
-        else if (strcmp(key, "bottom_rail_spread") == 0) jumperlessConfig.calibration.bottom_rail_spread = parseFloat(value);
-        else if (strcmp(key, "dac_0_zero") == 0) jumperlessConfig.calibration.dac_0_zero = parseInt(value);
-        else if (strcmp(key, "dac_0_spread") == 0) jumperlessConfig.calibration.dac_0_spread = parseFloat(value);
-        else if (strcmp(key, "dac_1_zero") == 0) jumperlessConfig.calibration.dac_1_zero = parseInt(value);
-        else if (strcmp(key, "dac_1_spread") == 0) jumperlessConfig.calibration.dac_1_spread = parseFloat(value);
-        else if (strcmp(key, "adc_0_zero") == 0) jumperlessConfig.calibration.adc_0_zero = parseFloat(value);
-        else if (strcmp(key, "adc_0_spread") == 0) jumperlessConfig.calibration.adc_0_spread = parseFloat(value);
-        else if (strcmp(key, "adc_1_zero") == 0) jumperlessConfig.calibration.adc_1_zero = parseFloat(value);
-        else if (strcmp(key, "adc_1_spread") == 0) jumperlessConfig.calibration.adc_1_spread = parseFloat(value);
-        else if (strcmp(key, "adc_2_zero") == 0) jumperlessConfig.calibration.adc_2_zero = parseFloat(value);
-        else if (strcmp(key, "adc_2_spread") == 0) jumperlessConfig.calibration.adc_2_spread = parseFloat(value);
-        else if (strcmp(key, "adc_3_zero") == 0) jumperlessConfig.calibration.adc_3_zero = parseFloat(value);
-        else if (strcmp(key, "adc_3_spread") == 0) jumperlessConfig.calibration.adc_3_spread = parseFloat(value);
-        else if (strcmp(key, "adc_4_zero") == 0) jumperlessConfig.calibration.adc_4_zero = parseFloat(value);
-        else if (strcmp(key, "adc_4_spread") == 0) jumperlessConfig.calibration.adc_4_spread = parseFloat(value);
-        else if (strcmp(key, "adc_7_zero") == 0) jumperlessConfig.calibration.adc_7_zero = parseFloat(value);
-        else if (strcmp(key, "adc_7_spread") == 0) jumperlessConfig.calibration.adc_7_spread = parseFloat(value);
-        else if (strcmp(key, "probe_max") == 0) jumperlessConfig.calibration.probe_max = parseInt(value);
-        else if (strcmp(key, "probe_min") == 0) jumperlessConfig.calibration.probe_min = parseInt(value);
-        else if (strcmp(key, "probe_max_measure") == 0) jumperlessConfig.calibration.probe_max_measure = parseInt(value);
-        else if (strcmp(key, "probe_min_measure") == 0) jumperlessConfig.calibration.probe_min_measure = parseInt(value);
-        else if (strcmp(key, "measure_mode_output_voltage") == 0) jumperlessConfig.calibration.measure_mode_output_voltage = parseFloat(value);
-        else if (strcmp(key, "probe_switch_threshold_high") == 0) jumperlessConfig.calibration.probe_switch_threshold_high = parseFloat(value);
-        else if (strcmp(key, "probe_switch_threshold_low") == 0) jumperlessConfig.calibration.probe_switch_threshold_low = parseFloat(value);
-        else if (strcmp(key, "probe_switch_select_max_ma") == 0) jumperlessConfig.calibration.probe_switch_select_max_ma = parseFloat(value);
-        else if (strcmp(key, "probe_switch_blink_hold_pct") == 0) jumperlessConfig.calibration.probe_switch_blink_hold_pct = parseInt(value);
-        else if (strcmp(key, "probe_switch_threshold") == 0) jumperlessConfig.calibration.probe_switch_threshold = parseFloat(value);
-        else if (strcmp(key, "probe_current_zero") == 0) jumperlessConfig.calibration.probe_current_zero = parseFloat(value);
-        else if (strcmp(key, "minimum_probe_reading") == 0) jumperlessConfig.calibration.minimum_probe_reading = parseInt(value);
-        else if (strcmp(key, "probe_droop_v0") == 0) jumperlessConfig.calibration.probe_droop_v0 = parseFloat(value);
-        else if (strcmp(key, "probe_droop_ohms") == 0) jumperlessConfig.calibration.probe_droop_ohms = parseFloat(value);
-        else if (strcmp(key, "probe_pad_ohms") == 0) jumperlessConfig.calibration.probe_pad_ohms = parseFloat(value);
-        else if (strcmp(key, "crosspoint_resistance") == 0) jumperlessConfig.calibration.crosspoint_resistance = parseFloat(value);
-        }
-    else if (strcmp(section, "logo_pads") == 0) {
-        if (strcmp(key, "top_guy") == 0) jumperlessConfig.logo_pads.top_guy = parseArbitraryFunction(value);
-        else if (strcmp(key, "bottom_guy") == 0) jumperlessConfig.logo_pads.bottom_guy = parseArbitraryFunction(value);
-        else if (strcmp(key, "building_pad_top") == 0) jumperlessConfig.logo_pads.building_pad_top = parseArbitraryFunction(value);
-        else if (strcmp(key, "building_pad_bottom") == 0) jumperlessConfig.logo_pads.building_pad_bottom = parseArbitraryFunction(value);
-        else if (strcmp(key, "repeat_ms") == 0) jumperlessConfig.logo_pads.repeat_ms = parseInt(value);
-    }
-    else if (strcmp(section, "display") == 0) {
-        if (strcmp(key, "lines_wires") == 0) jumperlessConfig.display.lines_wires = parseLinesWires(value);
-        else if (strcmp(key, "menu_brightness") == 0) jumperlessConfig.display.menu_brightness = parseInt(value);
-        else if (strcmp(key, "led_brightness") == 0) jumperlessConfig.display.led_brightness = parseInt(value);
-        else if (strcmp(key, "rail_brightness") == 0) jumperlessConfig.display.rail_brightness = parseInt(value);
-        else if (strcmp(key, "special_net_brightness") == 0) jumperlessConfig.display.special_net_brightness = parseInt(value);
-        else if (strcmp(key, "net_color_mode") == 0) jumperlessConfig.display.net_color_mode = parseNetColorMode(value);
-        else if (strcmp(key, "net_currents") == 0) jumperlessConfig.display.net_currents = parseBool(value);
-        else if (strcmp(key, "current_flow") == 0) jumperlessConfig.display.current_flow = parseCurrentFlow(value);
-        else if (strcmp(key, "dump_leds") == 0) jumperlessConfig.display.dump_leds = parseSerialPort(value);
-        else if (strcmp(key, "dump_format") == 0) jumperlessConfig.display.dump_format = parseDumpFormat(value);
-        else if (strcmp(key, "terminal_line_buffering") == 0) jumperlessConfig.display.terminal_line_buffering = parseBool(value);
-    }
-    else if (strcmp(section, "serial_1") == 0) {
-        if (strcmp(key, "function") == 0) jumperlessConfig.serial_1.function = parseUartFunction(value);
-        else if (strcmp(key, "baud_rate") == 0) jumperlessConfig.serial_1.baud_rate = parseInt(value);
-        else if (strcmp(key, "print_passthrough") == 0) jumperlessConfig.serial_1.print_passthrough = parseBool(value);
-        else if (strcmp(key, "connect_on_boot") == 0) jumperlessConfig.serial_1.connect_on_boot = parseBool(value);
-        else if (strcmp(key, "lock_connection") == 0) jumperlessConfig.serial_1.lock_connection = parseBool(value);
-        else if (strcmp(key, "autoconnect_flashing") == 0) jumperlessConfig.serial_1.autoconnect_flashing = parseBool(value);
-        else if (strcmp(key, "async_passthrough") == 0) jumperlessConfig.serial_1.async_passthrough = parseBool(value);
-        else if (strcmp(key, "tag_parsing") == 0) jumperlessConfig.serial_1.tag_parsing = parseBool(value);
-        else if (strcmp(key, "flash_reset_type") == 0) jumperlessConfig.serial_1.flash_reset_type = parseFlashType(value);
-    }
-    else if (strcmp(section, "serial_2") == 0) {
-        if (strcmp(key, "function") == 0) jumperlessConfig.serial_2.function = parseUartFunction(value);
-        else if (strcmp(key, "baud_rate") == 0) jumperlessConfig.serial_2.baud_rate = parseInt(value);
-        else if (strcmp(key, "print_passthrough") == 0) jumperlessConfig.serial_2.print_passthrough = parseBool(value);
-        else if (strcmp(key, "connect_on_boot") == 0) jumperlessConfig.serial_2.connect_on_boot = parseBool(value);
-        else if (strcmp(key, "lock_connection") == 0) jumperlessConfig.serial_2.lock_connection = parseBool(value);
-        else if (strcmp(key, "autoconnect_flashing") == 0) jumperlessConfig.serial_2.autoconnect_flashing = parseBool(value);
-    }
-    else if (strcmp(section, "top_oled") == 0) {
-        if (strcmp(key, "enabled") == 0) jumperlessConfig.top_oled.enabled = parseBool(value);
-        if (strcmp(key, "i2c_address") == 0) jumperlessConfig.top_oled.i2c_address = parseHex(value);
-        else if (strcmp(key, "display_type") == 0) jumperlessConfig.top_oled.display_type = oledDisplayTypeLiteral(value);
-        else if (strcmp(key, "width") == 0) jumperlessConfig.top_oled.width = parseInt(value);
-        else if (strcmp(key, "height") == 0) jumperlessConfig.top_oled.height = parseInt(value);
-        else if (strcmp(key, "rotation") == 0) jumperlessConfig.top_oled.rotation = parseInt(value);
-        else if (strcmp(key, "connection_type") == 0) {
-            int connType = parseConnectionType(value);
-            // Single helper handles disconnect, pin update, save, and reinit.
-            applyOledConnectionType(connType, /*reinitDisplay=*/true, /*persist=*/true);
-        }
-        else if (strcmp(key, "sda_pin") == 0 || strcmp(key, "scl_pin") == 0) {
-            // arduino-pico PANICS on setSDA/setSCL of a RUNNING Wire with
-            // different pins, and oled.init() does exactly that - so end the
-            // bus first (the teardownOldOledBus discipline) and reject pins
-            // the silicon can't mux (SDA even / SCL odd) instead of crashing
-            // (sweep finding, high).
-            int newPin = parseInt(value);
-            bool wantSda = (strcmp(key, "sda_pin") == 0);
-            if (newPin < 0 || newPin > 29 || ((newPin % 2 == 0) != wantSda)) {
-                Serial.print("  refused: ");
-                Serial.print(key);
-                Serial.print(" must be an ");
-                Serial.print(wantSda ? "EVEN" : "ODD");
-                Serial.println(" GPIO 0-29 (RP2350 I2C pin mux)");
-            } else {
-                oled.disconnect();
-                if (jumperlessConfig.top_oled.connection_type == 2) Wire.end();
-                else Wire1.end();
-                delay(50);
-                if (wantSda) jumperlessConfig.top_oled.sda_pin = newPin;
-                else jumperlessConfig.top_oled.scl_pin = newPin;
-                delay(50);
-                oled.init();
-            }
-        }
-        else if (strcmp(key, "gpio_sda") == 0) jumperlessConfig.top_oled.gpio_sda = parseInt(value);
-        else if (strcmp(key, "gpio_scl") == 0) jumperlessConfig.top_oled.gpio_scl = parseInt(value);
-        else if (strcmp(key, "sda_row") == 0) jumperlessConfig.top_oled.sda_row = parseInt(value);
-        else if (strcmp(key, "scl_row") == 0) jumperlessConfig.top_oled.scl_row = parseInt(value);
-        else if (strcmp(key, "connect_on_boot") == 0) jumperlessConfig.top_oled.connect_on_boot = parseBool(value);
-        else if (strcmp(key, "lock_connection") == 0) jumperlessConfig.top_oled.lock_connection = parseBool(value);
-        else if (strcmp(key, "show_in_terminal") == 0) jumperlessConfig.top_oled.show_in_terminal = parseSerialPort(value);
-        else if (strcmp(key, "font") == 0) {
-            jumperlessConfig.top_oled.font = parseFont(value);
-            
-            // Apply font from config value (config value IS the FontFamily enum)
-            if (jumperlessConfig.top_oled.font >= 0 && jumperlessConfig.top_oled.font <= FONT_PRAGMATISM) {
-                FontFamily family = (FontFamily)jumperlessConfig.top_oled.font;
-                oled.setFontForSize(family, 2);  // Use size 2 (large/12pt) as default
-                oled.currentFontFamily = family;
-            }
-            oled.show();
-        }
-        else if (strcmp(key, "startup_message") == 0) {
-            // Strip leading/trailing whitespace and quotes
-            const char* start = value;
-            size_t valueLen = strlen(value);
-            if (valueLen == 0) {
-                jumperlessConfig.top_oled.startup_message[0] = '\0';
-            } else {
-                const char* end = value + valueLen - 1;
-                
-                // Skip leading whitespace and quotes
-                while (*start && (isspace((unsigned char)*start) || *start == '"' || *start == '\'')) {
-                    start++;
-                }
-                
-                // Skip trailing whitespace and quotes
-                while (end > start && (isspace((unsigned char)*end) || *end == '"' || *end == '\'')) {
-                    end--;
-                }
-                
-                // Calculate length and copy
-                size_t len = (size_t)(end - start + 1);
-                if (len > 32) len = 32;
-                
-                strncpy(jumperlessConfig.top_oled.startup_message, start, len);
-                jumperlessConfig.top_oled.startup_message[len] = '\0';
-            }
-        }
-    }
-    bool skipSave = (strcmp(section, "dacs") == 0 && strcmp(key, "auto_connect_probe") == 0
-                     && jumperlessConfig.dacs.auto_connect_probe == 0);
+
+    // Turning probe auto-connect off "until reboot" (0) is deliberately
+    // transient - don't persist it.
+    bool skipSave = (opt->section == JLSECT_probe &&
+                     strcmp(opt->key, "auto_connect") == 0 &&
+                     jumperlessConfig.probe.auto_connect == 0);
     if (!skipSave) {
         saveConfigToFile("/config.txt");
     }
-    printSettingChange(section, key, oldValue, value);
-    
-    // If we changed terminal_line_buffering, notify the app (the config value is
-    // already updated above; push it through the single control path so the app
-    // is told once, only when the state actually changed).
-    if (strcmp(section, "display") == 0 && strcmp(key, "terminal_line_buffering") == 0) {
-        pushLineBufferingToApp();
-    }
+
+    char newValue[64];
+    configFormatValue(opt, newValue, sizeof(newValue), true);
+    printSettingChange(opt, oldValue, newValue);
 }
 
 // Fast config parsing function optimized for tight loops
 // Returns true if valid config setting was parsed and updated, false otherwise
-// Designed to return quickly for invalid strings to minimize loop overhead
-//
-// Usage example in a tight loop:
-// while (someCondition) {
-//     char* inputString = getNextString(); // Your string source
-//     if (fastParseAndUpdateConfig(inputString)) {
-//         // Config was successfully updated
-//         Serial.println("Config updated");
-//     }
-//     // Function returns quickly for invalid strings, minimizing loop overhead
-// }
-//
 // Supported formats:
 // - Dot notation: "config.section.key = value"
-// - Bracket notation: "`[section]key = value"
+// - Bracket notation: "`[section]key = value" (backtick optional)
 bool fastParseAndUpdateConfig(const char* configString) {
     // Quick validation - must have minimum length and contain '='
     if (!configString || strlen(configString) < 5) {
-        Serial.println("too short");
         return false;
     }
     
     const char* equals = strchr(configString, '=');
     if (!equals) {
-        Serial.println("no equals");
         return false;
     }
     
     // Quick check for valid config formats
     bool isDotNotation = (strncmp(configString, "config.", 7) == 0);
-    bool isBracketNotation = (configString[0] == '`' && configString[1] == '[');
+    bool isBracketNotation = (configString[0] == '`' && configString[1] == '[') ||
+                             (configString[0] == '[');
     
     if (!isDotNotation && !isBracketNotation) {
-       // Serial.println(configString);
-        Serial.println("not a dot or bracket notation");
-        Serial.println(configString);
         return false;
     }
     
-    // Use existing parsing logic but with early returns for efficiency
+    // Strip the leading backtick if present
+    const char* line = (configString[0] == '`') ? configString + 1 : configString;
+
     char section[32], key[32], value[64];
-    
-    if (isDotNotation) {
-        // Parse dot notation: config.section.key = value
-        const char* start = configString + 7;  // Skip "config."
-        const char* firstDot = strchr(start, '.');
-        
-        if (!firstDot || firstDot >= equals) {
-            Serial.println("not a valid dot notation");
+    if (!parseSetting(line, section, key, value)) {
             return false;
         }
-        
-        // Extract section
-        int sectionLen = firstDot - start;
-        if (sectionLen >= sizeof(section)) {
-            Serial.println("section too long");
+    toLower(section);
+    toLower(key);
+    const ConfigOptionDesc* opt = configFindOption(section, key);
+    if (!opt) {
             return false;
         }
-        strncpy(section, start, sectionLen);
-        section[sectionLen] = '\0';
-        
-        // Extract key
-        const char* keyStart = firstDot + 1;
-        int keyLen = equals - keyStart;
-        if (keyLen >= sizeof(key) || keyLen <= 0) {
-            Serial.println("key too long");
+    if (!configSetValue(opt, value, /*liveApply=*/true)) {
             return false;
         }
-        strncpy(key, keyStart, keyLen);
-        key[keyLen] = '\0';
-        trim(key);
-        
-        // Extract value
-        const char* valueStart = equals + 1;
-        while (isspace(*valueStart)) valueStart++; // Skip leading whitespace
-        if (strlen(valueStart) >= sizeof(value)) {
-            Serial.println("value too long");
-            return false;
-        }
-        strcpy(value, valueStart);
-        
-        // Trim trailing whitespace and semicolon from value
-        char* end = value + strlen(value) - 1;
-        while (end > value && (isspace(*end) || *end == ';')) {
-            *end = '\0';
-            end--;
-        }
-        
-    } else if (isBracketNotation) {
-        // Parse bracket notation: [section]key = value
-        const char* sectionEnd = strchr(configString, ']');
-        if (!sectionEnd || sectionEnd >= equals) {
-            Serial.println("not a valid bracket notation");
-            return false;
-        }
-        
-        // Extract section (skip the `[)
-        int sectionLen = sectionEnd - configString - 2;  // -2 to account for `[
-        if (sectionLen >= sizeof(section) || sectionLen <= 0) {
-            Serial.println("section too long");
-            return false;
-        }
-        strncpy(section, configString + 2, sectionLen);
-        section[sectionLen] = '\0';
-        
-        // Extract key (skip the ])
-        const char* keyStart = sectionEnd + 1;
-        while (isspace(*keyStart)) keyStart++; // Skip leading whitespace
-        
-        int keyLen = equals - keyStart;
-        if (keyLen >= sizeof(key) || keyLen <= 0) {
-            Serial.println("key too long");
-            return false;
-        }
-        strncpy(key, keyStart, keyLen);
-        key[keyLen] = '\0';
-        
-        // Remove trailing whitespace from key
-        char* keyEnd = key + strlen(key) - 1;
-        while (keyEnd > key && isspace(*keyEnd)) {
-            *keyEnd = '\0';
-            keyEnd--;
-        }
-        
-        // Extract value (skip the =)
-        const char* valueStart = equals + 1;
-        while (isspace(*valueStart)) valueStart++; // Skip leading whitespace
-        if (strlen(valueStart) >= sizeof(value)) {
-            Serial.println("value too long");
-                    return false;
-        }
-        strcpy(value, valueStart);
-        
-        // Trim trailing whitespace and semicolon from value
-        char* end = value + strlen(value) - 1;
-        while (end > value && (isspace(*end) || *end == ';')) {
-            *end = '\0';
-            end--;
-        }
-    }
-    
-    // Quick validation that we have non-empty section, key, and value
-    if (strlen(section) == 0 || strlen(key) == 0 || strlen(value) == 0) {
-        Serial.println("section, key, or value is empty");
-        return false;
-    }
-    
-    // Convert section to lowercase for comparison
-    for(int i = 0; section[i]; i++) {
-        section[i] = tolower(section[i]);
-    }
-    
-    // Quick section validation - only proceed if it's a known section
-    if (strcmp(section, "config") != 0 &&
-        strcmp(section, "hardware") != 0 && 
-        strcmp(section, "dacs") != 0 && 
-        strcmp(section, "debug") != 0 && 
-        strcmp(section, "routing") != 0 && 
-        strcmp(section, "slots") != 0 && 
-        strcmp(section, "calibration") != 0 && 
-        strcmp(section, "logo_pads") != 0 && 
-        strcmp(section, "display") != 0 && 
-        strcmp(section, "gpio") != 0 && 
-        strcmp(section, "serial_1") != 0 && 
-        strcmp(section, "serial_2") != 0 && 
-        strcmp(section, "top_oled") != 0 &&
-        strcmp(section, "usb_cdc") != 0 &&
-        strcmp(section, "usb_audio") != 0) {
-        Serial.println("section not found");
-        Serial.println(section);
-        return false;
-    }
-    
-    // Update the config value using existing function
-    //updateConfigValue(section, key, value);
-    // Serial.print("section: ");
-    // Serial.println(section);
-    // Serial.print("key: ");
-    // Serial.println(key);
-    // Serial.print("value: ");
-    // Serial.println(value);
-    updateConfigValue(section, key, value);
-    configChanged = true;
+    configChanged = true;  // async save picks it up
     return true;
 }
 
-const char* getArbitraryFunctionString(int function) {
-    for (int i = 0; i < arbitraryFunctionTableSize; i++) {
-        if (arbitraryFunctionTable[i].value == function) {
-            return arbitraryFunctionTable[i].name;
-        }
-    }
-    return NULL; // or some default string
-}
+// ============================================================================
+// Self-check: the one runnable check that fails if the table machinery breaks.
+// Round-trips every option (format -> parse -> compare), checks key
+// uniqueness, and resolves every alias. Run with `check at the config prompt.
+// ============================================================================
+bool configTableSelfCheck(void) {
+    int failures = 0;
+    char before[64], after[64];
 
-template <size_t N>
-const char* getStringFromTable(int value, const StringIntEntry (&table)[N]) {
-    if (showNames) {
-        for (size_t i = 0; i < N; i++) {
-            if (table[i].value == value) {
-                // Serial.print("getStringFromTable: ");
-                // Serial.println(table[i].name);
-                return table[i].name;
+    // Key uniqueness within each section
+    for (int i = 0; i < jlConfigOptionCount; i++) {
+        for (int j = i + 1; j < jlConfigOptionCount; j++) {
+            if (jlConfigOptions[i].section == jlConfigOptions[j].section &&
+                strcmp(jlConfigOptions[i].key, jlConfigOptions[j].key) == 0) {
+                Serial.print("DUPLICATE key: [");
+                Serial.print(jlConfigSections[jlConfigOptions[i].section].name);
+                Serial.print("] ");
+                Serial.println(jlConfigOptions[i].key);
+                failures++;
             }
         }
-    } else {
-        static char buf[16];
-        snprintf(buf, sizeof(buf), "%d", value);
-        return buf;
     }
-    return NULL; // or some default string
+
+    // Every option round-trips through its own formatter/parser.
+    // OLED pins/connection get liveApply=false so no bus dance happens.
+    for (int i = 0; i < jlConfigOptionCount; i++) {
+        const ConfigOptionDesc* opt = &jlConfigOptions[i];
+        configFormatValue(opt, before, sizeof(before), true);
+        configSetValue(opt, before, /*liveApply=*/false);
+        configFormatValue(opt, after, sizeof(after), true);
+        if (strcmp(before, after) != 0) {
+            Serial.print("ROUND-TRIP failed: [");
+            Serial.print(jlConfigSections[opt->section].name);
+            Serial.print("] ");
+            Serial.print(opt->key);
+            Serial.print("  '");
+            Serial.print(before);
+            Serial.print("' -> '");
+            Serial.print(after);
+            Serial.println("'");
+            failures++;
+        }
+    }
+
+    // Every alias resolves to a real option.
+    for (int i = 0; i < jlConfigAliasCount; i++) {
+        if (!configFindOption(jlConfigAliases[i].section, jlConfigAliases[i].newKey)) {
+            Serial.print("ALIAS target missing: ");
+            Serial.print(jlConfigAliases[i].oldSection);
+            Serial.print(".");
+            Serial.println(jlConfigAliases[i].oldKey);
+            failures++;
+        }
+    }
+
+    // Every section has a name and every option a description.
+    for (int i = 0; i < jlConfigOptionCount; i++) {
+        if (jlConfigOptions[i].desc == nullptr || jlConfigOptions[i].desc[0] == '\0') {
+            Serial.print("MISSING description: ");
+            Serial.println(jlConfigOptions[i].key);
+            failures++;
+        }
+    }
+
+    Serial.print("configTableSelfCheck: ");
+    Serial.print(jlConfigOptionCount);
+    Serial.print(" options, ");
+    Serial.print(jlConfigAliasCount);
+    Serial.print(" aliases - ");
+    if (failures == 0) {
+        Serial.println("PASS");
+    } else {
+        Serial.print(failures);
+        Serial.println(" FAILURES");
+    }
+    return failures == 0;
 }

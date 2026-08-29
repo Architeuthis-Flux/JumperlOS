@@ -92,8 +92,6 @@ extern volatile uint8_t LEDbrightnessSpecial;
 extern JeoPixel probeLEDs;
 extern uint8_t probeLEDstateMachine;
 
-extern volatile int hideNets;
-
 extern volatile uint32_t logoColorOverride;
 
 extern volatile uint32_t logoColorOverrideTop;
@@ -411,17 +409,9 @@ enum LogoPalette {
 #define HUE_CHARTREUSE  70    // Yellow-green
 #define HUE_PURPLE      190   // Purple/violet
 
-extern uint32_t logoColors[LOGO_COLOR_LENGTH+11];
-extern uint32_t logoColorsHot[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsCold[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsYellow[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsPink[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsGreen[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsOrange[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsTurquoise[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsChartreuse[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsPurple[LOGO_COLOR_LENGTH+1];
-extern uint32_t logoColorsWhite[LOGO_COLOR_LENGTH+1];
+// The named single-hue palettes are file-local to LEDs.cpp now: they either
+// alias rows of logoColorsAll (V5) or exist only on the OG (cold/hot/pink).
+// Everything else reads logoColorsAll[LogoPalette] directly.
 extern uint32_t logoColors8vSelect[LOGO_COLOR_LENGTH+11];
 extern uint32_t logoColorsAll[LOGO_PALETTE_COUNT][LOGO_COLOR_LENGTH + 11];
 

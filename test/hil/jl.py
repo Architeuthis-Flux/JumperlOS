@@ -339,6 +339,24 @@ print("maxblk=", _lo)
             int(v.get("maxblk", -1)))
 
 
+def guarded(fn, *args, **kwargs):
+    """Call a helper and get (value, None) or (None, exc) instead of dying.
+
+    FOR run_all ONLY, and only around its READ-OUTS and its bench restore.
+    Almost everything in this module sys.exits rather than raising - jl_exec on
+    a non-zero REPL exec, fault_scan on a [crashlog]/[abort], port1_path on a
+    missing port - and for a SUITE that is right: a test that could not reach
+    the board has not passed. The runner is the one caller that has to outlive
+    it, because its last act is putting the bench back; an exit in the
+    between-suite heap read used to take that restore with it. Nothing
+    suite-facing changes: the exits stay, this only lets one caller catch them.
+    """
+    try:
+        return fn(*args, **kwargs), None
+    except (Exception, SystemExit) as exc:
+        return None, exc
+
+
 def jl_exec(code, timeout=15):
     """Run a MicroPython snippet on the device, return its stdout.
 
@@ -638,6 +656,13 @@ def board_state_restore(yaml):
         for d in diffs:
             print(f"    - {d}")
         return False
+    # Converge the active context's FILE with the restored live state. The
+    # paste heals RAM only; the slot/run file catches up on some later
+    # auto-save - and if the next thing is a reboot (or a flash), the stale
+    # file BECOMES the bench (2026-08-27: a mid-suite degraded slot3.yaml
+    # survived two suites' verified restores and materialized on the next
+    # flash, silently dropping a part and five of the user's bridges).
+    jl_exec("nodes_save()", timeout=20)
     return True
 
 

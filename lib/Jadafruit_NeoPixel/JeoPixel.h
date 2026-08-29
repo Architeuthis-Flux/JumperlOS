@@ -252,38 +252,38 @@ public:
              if show() would block (meaning some idle time is available).
   */
   bool canShow(void) {
-    // CRITICAL: With async DMA, also check if DMA transfer is still in progress
-    // This prevents starting a new transfer before the previous one completes,
-    // which is essential for proper WS2812 latch timing (300us quiet period)
 #if defined(ARDUINO_ARCH_RP2040)
+    // DMA-done is not wire-done: the joined TX FIFO still holds up to 8
+    // bytes (~84us on the RP2350 5%-slow bit clock). Starting the next
+    // frame then prefixes those leftovers onto the new stream — one
+    // frame of spatially shifted pixels. Wait for the FIFO to drain, then
+    // arm the 300us latch from that actual idle (not a projected endTime).
     if (use_dma && dma_channel >= 0) {
-      // If DMA is busy, we definitely can't show yet
       if (dma_channel_is_busy(dma_channel)) {
         return false;
       }
+      if (pio && pio_sm != (uint)-1 && !pio_sm_is_tx_fifo_empty(pio, pio_sm)) {
+        return false;
+      }
+      if (dma_awaiting_latch) {
+        endTime = micros() + 12; // last OSR byte still shifting
+        dma_awaiting_latch = false;
+      }
     }
 #endif
-    
-    // It's normal and possible for endTime to exceed micros() if the
-    // 32-bit clock counter has rolled over (about every 70 minutes).
-    // Since both are uint32_t, a negative delta correctly maps back to
-    // positive space, and it would seem like the subtraction below would
-    // suffice. But a problem arises if code invokes show() very
-    // infrequently...the micros() counter may roll over MULTIPLE times in
-    // that interval, the delta calculation is no longer correct and the
-    // next update may stall for a very long time. The check below resets
-    // the latch counter if a rollover has occurred. This can cause an
-    // extra delay of up to 300 microseconds in the rare case where a
-    // show() call happens precisely around the rollover, but that's
-    // neither likely nor especially harmful, vs. other code that might
-    // stall for 30+ minutes, or having to document and frequently remind
-    // and/or provide tech support explaining an unintuitive need for
-    // show() calls at least once an hour.
+    // Signed elapsed so a single micros() wrap (every ~71 min) still
+    // compares correctly. Legit future endTime is at most +12us (OSR
+    // drain) — an unconditional endTime>now clamp used to destroy that
+    // latch window. But with NO clamp, a strip idle 35.8-71.6 min reads
+    // elapsed as negative and show()'s spin wedges for up to ~36 min.
+    // So clamp only the impossible case: endTime more than 1ms ahead.
     uint32_t now = micros();
-    if (endTime > now) {
+    int32_t elapsed = (int32_t)(now - endTime);
+    if (elapsed < -1000) {
       endTime = now;
+      elapsed = 0;
     }
-    return (now - endTime) >= 300L;
+    return elapsed >= 300;
   }
   /*!
     @brief   Get a pointer directly to the NeoPixel data buffer in RAM.
@@ -452,6 +452,7 @@ private:
   uint32_t *dma_buffer_backup = NULL;  // Backup buffer for next frame
   bool   dma_has_pending = false;      // True if backup buffer has data ready
   uint32_t dma_pending_bytes = 0;      // Number of bytes in pending buffer
+  bool   dma_awaiting_latch = false;   // true from DMA start until FIFO idle is first observed
 #endif
 
 protected:

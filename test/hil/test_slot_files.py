@@ -149,6 +149,21 @@ def read_config():
     return device_text("/config.txt")
 
 
+# /config.txt serializes boot_mode by NAME (configManager's bootModeTable:
+# fixed_slot=0, last_active=1) while still ACCEPTING numeric writes - the
+# old numeric-only regex here read a working config as "boot_mode missing".
+_BOOT_MODE_NAMES = {"fixed_slot": 0, "last_active": 1}
+
+
+def parse_boot_mode(cfg):
+    """boot_mode from a /config.txt dump as an int, or None if absent."""
+    m = re.search(r"boot_mode\s*=\s*([A-Za-z0-9_]+)", cfg)
+    if m is None:
+        return None
+    tok = m.group(1)
+    return int(tok) if tok.isdigit() else _BOOT_MODE_NAMES.get(tok)
+
+
 def _distinct_rail(yaml_text):
     """A topRail target the file does not already carry, so a check for it
     cannot pass on a leftover value from an earlier run."""
@@ -597,6 +612,14 @@ print("e=", 1 if is_connected(41, 42) else 0)
     # it. Widen this wait to tell the two apart.
     time.sleep(4.0)
     _, _settled = read_device_file("/slots/slot2.yaml")
+    if _settled is None:
+        # since slots became files, an EMPTY slot has no backing file until
+        # its first save - there is nothing to arm and the old silent
+        # `if _settled is not None` skip red-flagged the canary check on any
+        # bench where slot 2 was never used. Seed the canonical file first.
+        jl_exec("nodes_save()", timeout=25)
+        time.sleep(1.0)
+        _, _settled = read_device_file("/slots/slot2.yaml")
     marker = "# w3t5-canary do-not-rewrite"
     if _settled is not None:
         jl_exec(f"print('marked=', 1 if fs_write('/slots/slot2.yaml', "
@@ -1109,11 +1132,11 @@ connect(57, 58)
 
     cfg = read_config()
     check("[slots]" in cfg, "/config.txt has the new [slots] section")
-    m_mode = re.search(r"boot_mode\s*=\s*(\d+)", cfg)
+    mode_val = parse_boot_mode(cfg)
     m_slot = re.search(r"boot_slot\s*=\s*(\d+)", cfg)
-    check(m_mode is not None, "[slots] boot_mode is written to /config.txt")
+    check(mode_val is not None, "[slots] boot_mode is written to /config.txt")
     check(m_slot is not None, "[slots] boot_slot is written to /config.txt")
-    boot_mode_before = int(m_mode.group(1)) if m_mode else 1
+    boot_mode_before = mode_val if mode_val is not None else 1
     boot_slot_before = int(m_slot.group(1)) if m_slot else 0
     check(boot_mode_before == 1,
           f"boot_mode defaults to 1 = boot the last-active FILE (got {boot_mode_before})")
@@ -1143,9 +1166,9 @@ print("e=", 1 if is_connected(41, 42) else 0)
         port1_command("`[slots] boot_mode = 0", 2.0)
         time.sleep(2.5)
         cfg2 = read_config()
-        m2 = re.search(r"boot_mode\s*=\s*(\d+)", cfg2)
-        check(m2 is not None and int(m2.group(1)) == 0,
-              f"boot_mode = 0 persisted to /config.txt (got {m2.group(1) if m2 else None})")
+        m2v = parse_boot_mode(cfg2)
+        check(m2v == 0,
+              f"boot_mode = 0 persisted to /config.txt (got {m2v})")
         ready2 = reboot_board()
         check(ready2, "board came back after the boot_mode 0 reboot")
         if ready2:
@@ -1220,9 +1243,8 @@ finally:
     if boot_mode_before is not None:
         def _verify_boot():
             cfg_end = read_config()
-            m_m = re.search(r"boot_mode\s*=\s*(\d+)", cfg_end)
+            got_m = parse_boot_mode(cfg_end)
             m_s = re.search(r"boot_slot\s*=\s*(\d+)", cfg_end)
-            got_m = int(m_m.group(1)) if m_m else None
             got_s = int(m_s.group(1)) if m_s else None
             check(got_m == boot_mode_before and got_s == boot_slot_before,
                   f"BOOT CONFIG RESTORED: /config.txt is back to boot_mode="

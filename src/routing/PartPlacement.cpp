@@ -61,13 +61,29 @@ int PartDefinition::nodeForPin(int k) const {
         return node;
     }
 
-    // DIP: U-shaped numbering. Bench verdict (wave 2, photo-confirmed): real
-    // chips sit dot/notch at bottom-left, pin 1 on the BOTTOM half - a
-    // top-anchored baseRow (<=30) was the mirrored bug and is no longer a
-    // valid anchor at all (the old +30 top-anchored branch is gone, not just
-    // relabeled). node n-30 is the same column across the ravine.
-    if (baseRow <= 30) return -1;
+    // DIP: U-shaped numbering, anchored by pin 1's REAL hole on either half.
+    // Bottom-half baseRow = the wave-2 bench orientation (dot/notch
+    // bottom-left, photo-confirmed). TOP-half baseRow = the SAME chip
+    // rotated 180 degrees (Kevin's ruling, 2026-08-28: never assume the
+    // orientation - pin 1 can sit top-RIGHT; the two-tap placement flow
+    // validates which). The rotated mapping is the exact reverse
+    // permutation of the normal one: pins run right->left along the top,
+    // then left->right along the bottom. node n+-30 is the same column
+    // across the ravine. (Pre-ruling firmware treated a top-half DIP anchor
+    // as invalid outright, so no old file can carry the rotated encoding by
+    // accident.)
     int half = pinCount / 2;
+    if (baseRow <= 30) {
+        // rotated 180: pin 1 top-right
+        if (k <= half) {
+            int node = baseRow - (k - 1);            // top, right->left
+            if (node < 1 || node > 30) return -1;
+            return node;
+        }
+        int node = (baseRow + 30) - (pinCount - k);  // bottom, left->right
+        if (node < 31 || node > 60) return -1;
+        return node;
+    }
     if (k <= half) {
         // near side: bottom half, left->right
         int node = baseRow + (k - 1);
@@ -194,29 +210,29 @@ bool partGeometryOk(const PartDefinition& p, char* reason, size_t reasonLen) {
     }
 
     if (p.footprint == 1) {
-        // DIP pin 1 (row:) must anchor the bottom half - the old top-anchored
-        // mapping was the mirrored bug (wave 2, bench-found). nodeForPin()
-        // would already return -1 for every pin of a top-anchored DIP, but
-        // that alone only fails PLACEMENT (0 bridges); rejecting the entry
-        // itself keeps it from round-tripping through an idle auto-save.
-        if (p.baseRow < 31 || p.baseRow > 60) {
-            geomReason(reason, reasonLen,
-                     "dip pin 1 (row:) must be on the bottom half (31-60)");
-            return false;
-        }
-        // Column-fit: the U-shape's far side must land within the top half -
-        // (row-30) + N/2 - 1 <= 30 (binding geometry). Below this bound the
-        // near side overflows past row 60 at the SAME row the far side
-        // overflows past row 30 (both sides share one inequality), so a chip
-        // that doesn't fit would otherwise place SOME pins and silently drop
-        // the rest - a partial chip is never right, so the whole entry is
-        // rejected, not just the pins that don't fit.
+        // DIP pin 1 (row:) anchors EITHER half now: bottom half = the wave-2
+        // bench orientation (dot/notch bottom-left), top half = the same
+        // chip rotated 180 degrees (pin 1 top-right - Kevin's ruling,
+        // 2026-08-28; nodeForPin has the mapping). Column-fit per
+        // orientation: both sides of the U share one inequality, so a chip
+        // that doesn't fit would otherwise place SOME pins and silently
+        // drop the rest - a partial chip is never right, so the whole entry
+        // is rejected, not just the pins that don't fit.
         int half = p.pinCount / 2;
-        if ((p.baseRow - 30) + (half - 1) > 30) {
-            geomReason(reason, reasonLen,
-                     "dip%d at row %d does not fit the board (far-side columns run past row 30)",
-                     (int)p.pinCount, (int)p.baseRow);
-            return false;
+        if (p.baseRow > 30) {
+            if ((p.baseRow - 30) + (half - 1) > 30) {
+                geomReason(reason, reasonLen,
+                         "dip%d at row %d does not fit the board (far-side columns run past row 30)",
+                         (int)p.pinCount, (int)p.baseRow);
+                return false;
+            }
+        } else {
+            if (p.baseRow - (half - 1) < 1) {
+                geomReason(reason, reasonLen,
+                         "dip%d rotated at row %d does not fit the board (columns run past row 1)",
+                         (int)p.pinCount, (int)p.baseRow);
+                return false;
+            }
         }
     } else if (p.footprint == 0) {
         // SIP: the whole run must stay on baseRow's half - nodeForPin()
@@ -718,6 +734,38 @@ static void commitPart(JumperlessState& st, PartDefinition& p, bool& open, bool&
         Serial.print(MAX_PARTS);
         Serial.println("); it will be lost on the next save.");
         return;
+    }
+    // NAMES ARE IDENTITY, so they have to be unique on the LOAD path too.
+    // jl_remove_part() resolves by name, findByName is the serializer's own
+    // lookup, and the display service binds its panel by name - but slot files
+    // are hand-editable text whose default names are non-unique by
+    // construction (partdbInstantiate names every SSD1306 record "SSD1306").
+    // Both CREATE paths already uniquify (PartsApp.cpp) or refuse
+    // (jl_place_part); this was the hole. Same scheme as PartsApp: NE555,
+    // NE555_2, ... capped at MAX_PARTS, base truncated to leave room for "_16".
+    if (st.parts.findByName(p.name) >= 0) {
+        char base[16];
+        strncpy(base, p.name, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
+        if (strlen(base) > 12) base[12] = '\0';
+        bool named = false;
+        for (int suffix = 2; suffix <= MAX_PARTS; suffix++) {
+            snprintf(p.name, sizeof(p.name), "%s_%d", base, suffix);
+            if (st.parts.findByName(p.name) < 0) { named = true; break; }
+        }
+        if (!named) {
+            // Unreachable while MAX_PARTS suffixes cover MAX_PARTS entries;
+            // dropping beats committing a silent duplicate.
+            Serial.print("Dropping part '"); Serial.print(base);
+            Serial.println("' - duplicate name and no free suffix.");
+            err += "part " + String(base) + ": duplicate name (dropped); ";
+            return;
+        }
+        Serial.print("part '"); Serial.print(base);
+        Serial.print("': duplicate name - renamed to ");
+        Serial.print(p.name); Serial.println(".");
+        err += "part " + String(base) + ": duplicate name - renamed to " +
+               String(p.name) + "; ";
     }
     st.parts.parts[st.parts.numParts++] = p;
 }

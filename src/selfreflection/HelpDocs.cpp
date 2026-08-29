@@ -237,11 +237,11 @@ void showCommandHelp(char command) {
             // Jerial.println("Great for seeing what's currently wired up.");
             break;
             
-        case '^':
+        case ':':
             changeTerminalColor(HELP_DESC_COLOR, true);
             Jerial.println("Set DAC voltage output");
             changeTerminalColor(HELP_USAGE_COLOR, true);
-            Jerial.println("Usage: ^3.3  (sets DAC 1 voltage to 3.3V)");
+            Jerial.println("Usage: :3.3  (sets DAC 1 voltage to 3.3V)");
             changeTerminalColor(HELP_DESC_COLOR, true);
             Jerial.println("DAC features:");
             Jerial.println("  - High precision 12-bit output");
@@ -990,9 +990,9 @@ Jerial.println(probe_art);
         Jerial.println("Work with power, signals, and measurements:\n");
         
         changeTerminalColor(HELP_COMMAND_COLOR, false);
-        Jerial.print("^  ");
+        Jerial.print(":  ");
         changeTerminalColor(HELP_DESC_COLOR, false);
-        Jerial.println("- Set DAC voltage output (^3.3 for 3.3V)");
+        Jerial.println("- Set DAC voltage output (:3.3 for 3.3V)");
         
         changeTerminalColor(HELP_COMMAND_COLOR, false);
         Jerial.print("v  ");

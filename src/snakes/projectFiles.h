@@ -162,8 +162,9 @@ still have one bridge.
 
 To **move** a part, tap any free hole and pin 1 jumps there. The wheel never
 moves a part - it only browses the steps. On the terminal, `m <row>` and `c` do
-the same two things the probe does. Chips (DIPs) sit with pin 1 - the dot or
-the notch - on the **bottom half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+the same two things the probe does. Chips (DIPs) anchor at pin 1 - the dot or
+the notch - wherever it really sits: **bottom-left** (rows 31-60) or rotated
+180 with pin 1 top-right (rows 1-30). Axial parts (resistors, diodes) straddle the
 middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
 
 **Browsing.** The wheel moves *between* steps rather than confirming them, and
@@ -191,8 +192,8 @@ you to the first thing you have not built yet.
 - LED dark but OUT reads ~2.5 V average: the LED is backwards. Long leg goes
   in row 22.
 )";
-const uint32_t PROJECT_555_README_MD_HASHES[9] = { 0x6B944773, 0x043F6084, 0x0F3158A4, 0x72FF45E0, 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
-const int PROJECT_555_README_MD_HASH_COUNT = 9;
+const uint32_t PROJECT_555_README_MD_HASHES[10] = { 0x9DD76F48, 0x6B944773, 0x043F6084, 0x0F3158A4, 0x72FF45E0, 0x561E244A, 0x7F9D3D88, 0xE846A64A, 0x52517D68, 0x4E203A59 };
+const int PROJECT_555_README_MD_HASH_COUNT = 10;
 
 const char* PROJECT_555_MAIN_PY = R"===("""555 LED Flasher - companion for /projects/555/wiring.yaml. See README.md.
 
@@ -621,7 +622,8 @@ still have one bridge.
 To **move** a part, tap any free hole and pin 1 jumps there. The wheel never
 moves a part - it only browses the steps. On the terminal, `m <row>` and `c` do
 the same two things the probe does. Chips (DIPs) sit with pin 1 - the dot or
-the notch - on the **bottom half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+the notch - wherever it really sits: **bottom-left** (rows 31-60) or rotated
+180 with pin 1 top-right (rows 1-30). Axial parts (resistors, diodes) straddle the
 middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
 
 **Browsing.** The wheel moves *between* steps rather than confirming them, and
@@ -654,8 +656,8 @@ you to the first thing you have not built yet.
   shares the i2c1 peripheral in every mode. Turn it off while you use this
   project.
 )";
-const uint32_t PROJECT_EEPROM_README_MD_HASHES[9] = { 0xF79BAFCE, 0x60313AF8, 0x8CCB4F44, 0x69A73992, 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
-const int PROJECT_EEPROM_README_MD_HASH_COUNT = 9;
+const uint32_t PROJECT_EEPROM_README_MD_HASHES[10] = { 0xA462E439, 0xF79BAFCE, 0x60313AF8, 0x8CCB4F44, 0x69A73992, 0x97332DFC, 0xAF82DCE7, 0x965FF7AE, 0x35314190, 0xF2E7D49B };
+const int PROJECT_EEPROM_README_MD_HASH_COUNT = 10;
 
 const char* PROJECT_EEPROM_MAIN_PY = R"===("""EEPROM Dumper - companion for /projects/eeprom/wiring.yaml.
 
@@ -1079,7 +1081,8 @@ still have one bridge.
 To **move** a part, tap any free hole and pin 1 jumps there. The wheel never
 moves a part - it only browses the steps. On the terminal, `m <row>` and `c` do
 the same two things the probe does. Chips (DIPs) sit with pin 1 - the dot or
-the notch - on the **bottom half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+the notch - wherever it really sits: **bottom-left** (rows 31-60) or rotated
+180 with pin 1 top-right (rows 1-30). Axial parts (resistors, diodes) straddle the
 middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
 
 **Browsing.** The wheel moves *between* steps rather than confirming them, and
@@ -1132,8 +1135,8 @@ you to the first thing you have not built yet.
 - **The screen shows garbage after a while** - drop `I2C_HZ` to 50000.
   Long crossbar paths plus breadboard capacitance slow the edges down.
 )===";
-const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[10] = { 0x6AF0D1BF, 0x6392E24F, 0xBCF87B83, 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
-const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 10;
+const uint32_t PROJECT_I2CSCRN_README_MD_HASHES[11] = { 0xD4A9C754, 0x6AF0D1BF, 0x6392E24F, 0xBCF87B83, 0x185ED360, 0x08C60795, 0x5D79CA91, 0xF62F698B, 0x9006DDCB, 0x4A5A7256, 0xBFC48EF5 };
+const int PROJECT_I2CSCRN_README_MD_HASH_COUNT = 11;
 
 const char* PROJECT_I2CSCRN_MAIN_PY = R"===("""Type to Screen - companion for /projects/i2cscrn/wiring.yaml, see README.md.
 
@@ -1720,7 +1723,8 @@ still have one bridge.
 To **move** a part, tap any free hole and pin 1 jumps there. The wheel never
 moves a part - it only browses the steps. On the terminal, `m <row>` and `c` do
 the same two things the probe does. Chips (DIPs) sit with pin 1 - the dot or
-the notch - on the **bottom half** of the board, rows 31-60. Axial parts (resistors, diodes) straddle the
+the notch - wherever it really sits: **bottom-left** (rows 31-60) or rotated
+180 with pin 1 top-right (rows 1-30). Axial parts (resistors, diodes) straddle the
 middle gap by default; radial parts (caps, LEDs) sit in two neighbouring rows.
 
 **Browsing.** The wheel moves *between* steps rather than confirming them, and
@@ -1754,8 +1758,8 @@ you to the first thing you have not built yet.
 - **The last two rows disagree** - one of the two input legs (rows 35, 36) is
   not making contact.
 )";
-const uint32_t PROJECT_NAND00_README_MD_HASHES[8] = { 0x3D3A125D, 0x1B3E29C7, 0xA7C19863, 0x94003C75, 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
-const int PROJECT_NAND00_README_MD_HASH_COUNT = 8;
+const uint32_t PROJECT_NAND00_README_MD_HASHES[9] = { 0x16FA909C, 0x3D3A125D, 0x1B3E29C7, 0xA7C19863, 0x94003C75, 0x59A4BE23, 0x36273393, 0x6F684328, 0x66A8E629 };
+const int PROJECT_NAND00_README_MD_HASH_COUNT = 9;
 
 const char* PROJECT_NAND00_MAIN_PY = R"("""Logic Gates 101 - companion script for /projects/nand00/wiring.yaml
 

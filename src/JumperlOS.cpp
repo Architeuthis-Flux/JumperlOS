@@ -307,15 +307,27 @@ void jOSmanager::serviceAll() {
  * = "every CRITICAL-priority service", which left AsyncPassthrough (HIGH)
  * dead for as long as a probe session or a menu was open.
  */
-void jOSmanager::serviceInner() {
+void jOSmanager::serviceInner() { serviceInnerPass(true); }
+
+void jOSmanager::serviceInnerPass(bool uiModal) {
     // Would-be watchdog kick from inside the modal loops (measure-only stage).
     kickGapStamp( 0, KICK_INNER );
-    // Being called AT ALL means a synchronous modal loop is pumping us -
+    // Being called AT ALL means something else owns the loop -
     // getBlockingService() is nullptr in that context (the loop never
     // RETURNED BLOCKING, it just... blocks), so services that soften their
     // work under modal load need this depth, not the latch (sweep finding:
     // all three of DisplayService's modal gates were dead).
+    //
+    // UI-MODAL is the narrower half: every caller of serviceInner() is a
+    // blocking USER interaction (probe mode, click/pad menus, pickers, the
+    // apps' loops) EXCEPT the MicroPython delay hook, which pumps the same
+    // set every 50 ms for a whole script's lifetime - counting that as modal
+    // made any running script defer DisplayService's routing, bring-up and
+    // flush budget (a panel placed mid-script never came alive). The script
+    // pump comes in through servicePython() instead, so the entry point is
+    // the discriminator and no modal loop needs wiring.
     innerDepth++;
+    if (uiModal) uiModalDepth++;
     for (uint8_t i = 0; i < serviceCount; i++) {
         if (!services[i].active) {
             continue;
@@ -337,6 +349,7 @@ void jOSmanager::serviceInner() {
         // (status ignored - we're in a blocking context already)
         runService(svc, now);
     }
+    if (uiModal) uiModalDepth--;
     innerDepth--;
 
     // (Peripherals and MpRemote are in the inner set, so the loop above ran
@@ -349,14 +362,14 @@ void jOSmanager::serviceInner() {
 /**
  * @brief Execute services needed during MicroPython REPL execution
  *
- * = serviceInner(). It used to hand-roll a subset (the USB pump +
- * Peripherals::service() called directly, bypassing the scheduler's gate and
- * stats); the inner set is exactly the "keep the system responsive while a
- * script runs" set. No caller in src/ today (mp_hal_delay_ms calls
- * serviceInner() directly) - kept as a named entry point.
+ * The same inner-set pass as serviceInner() - "keep the system responsive
+ * while a script runs" - but it does NOT raise the UI-modal depth: nobody is
+ * holding a menu open, a script is just sleeping. mp_hal_delay_ms
+ * (Python_Proper.cpp) must call THIS, not serviceInner(); calling
+ * serviceInner() made every running script read as a modal UI context.
  */
 void jOSmanager::servicePython() {
-    serviceInner();
+    serviceInnerPass(false);
 }
 
 /**
@@ -516,7 +529,7 @@ ServiceStatus TermSerialService::service() {
     
     // Only service if line buffering is enabled for user input
     // Relayed commands are handled separately by RelayedCommandService (fast path)
-    if (jumperlessConfig.display.terminal_line_buffering != 1) {
+    if (jumperlessConfig.terminal.line_buffering != 1) {
         return lastStatus;
     }
     
@@ -1020,6 +1033,7 @@ bool ContextManager::popContext() {
     // latches by age; this clears even a freshly-latched one on the exit
     // edge as a belt-and-suspenders guard.
     switch (current.type) {
+        case ContextType::APP_GENERIC:
         case ContextType::PYTHON_REPL:
         case ContextType::MAIN_MENU:
         case ContextType::CLICKWHEEL_MENU:

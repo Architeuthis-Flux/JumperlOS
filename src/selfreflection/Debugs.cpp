@@ -78,10 +78,10 @@ debugFlags:
   bool temp_debugNM = jumperlessConfig.debug.net_manager;
   bool temp_debugNTCC = jumperlessConfig.debug.nets_to_chips;
   bool temp_debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
-  bool temp_debugLEDs = jumperlessConfig.debug.leds;
+  bool temp_debugLEDs = debugLEDs;  // runtime-only (dropped from config.txt)
   bool temp_debugWaitLoopTiming = debugWaitLoopTiming;
   bool temp_debugUSB = debugUSB;
-  int temp_showProbeCurrent = jumperlessConfig.debug.show_probe_current;
+  int temp_showProbeCurrent = jumperlessConfig.measurement.show_probe_current;
   int temp_passthrough = jumperlessConfig.serial_1.print_passthrough;
   bool temp_asyncPassthrough = jumperlessConfig.serial_1.async_passthrough;
   bool temp_debugFakeGpio = getDebugFakeGpio();
@@ -95,17 +95,17 @@ debugFlags:
   bool temp_spiftlTiming = (spiftl_timing_debug != 0);
   // Probe button reader: persistent hardware path selector + ephemeral
   // verbose trace. Both toggled from this menu.
-  bool temp_usePIOProbeButton = jumperlessConfig.hardware.use_pio_probe_button;
+  bool temp_usePIOProbeButton = jumperlessConfig.probe.use_pio_button;
   bool temp_probeButtonTrace  = (probe_button_trace != 0);
   // Track originals for diffing on commit (config-backed flags from config).
   bool orig_debugFP = jumperlessConfig.debug.file_parsing;
   bool orig_debugNM = jumperlessConfig.debug.net_manager;
   bool orig_debugNTCC = jumperlessConfig.debug.nets_to_chips;
   bool orig_debugNTCC2 = jumperlessConfig.debug.nets_to_chips_alt;
-  bool orig_debugLEDs = jumperlessConfig.debug.leds;
+  bool orig_debugLEDs = debugLEDs;
   bool orig_debugWaitLoopTiming = debugWaitLoopTiming;
   bool orig_debugUSB = debugUSB;
-  int orig_showProbeCurrent = jumperlessConfig.debug.show_probe_current;
+  int orig_showProbeCurrent = jumperlessConfig.measurement.show_probe_current;
   int orig_passthrough = jumperlessConfig.serial_1.print_passthrough;
   bool orig_asyncPassthrough = jumperlessConfig.serial_1.async_passthrough;
   bool orig_debugFakeGpio = getDebugFakeGpio();
@@ -220,7 +220,7 @@ debugFlags:
         // selector deliberately doesn't (see note in the bulk-off branch).
         probe_button_trace = temp_probeButtonTrace ? 1 : 0;
         if (temp_usePIOProbeButton != orig_usePIOProbeButton) {
-          jumperlessConfig.hardware.use_pio_probe_button = temp_usePIOProbeButton;
+          jumperlessConfig.probe.use_pio_button = temp_usePIOProbeButton;
         }
       } else {
         // Commit individual diffs using debugFlagSet only for changed items
@@ -264,7 +264,7 @@ debugFlags:
         if (temp_spiftlTiming != orig_spiftlTiming) spiftl_timing_debug = temp_spiftlTiming ? 1 : 0;
         // Probe button path (persisted) + trace (runtime-only).
         if (temp_usePIOProbeButton != orig_usePIOProbeButton) {
-          jumperlessConfig.hardware.use_pio_probe_button = temp_usePIOProbeButton;
+          jumperlessConfig.probe.use_pio_button = temp_usePIOProbeButton;
         }
         if (temp_probeButtonTrace != orig_probeButtonTrace) {
           probe_button_trace = temp_probeButtonTrace ? 1 : 0;
@@ -1190,7 +1190,7 @@ extern "C" {
 #if defined(OG_JUMPERLESS)
 extern uint8_t uartReceived[2048];                      // AsyncPassthrough.cpp (DMA RX ring)
 #else
-extern uint8_t uartReceived[8192];                      // AsyncPassthrough.cpp (DMA RX ring)
+extern uint8_t uartReceived[4096];                      // AsyncPassthrough.cpp (DMA RX ring)
 #endif
 
 namespace {
@@ -1355,7 +1355,8 @@ size_t sram_heap_walk(block_visitor cb, void* ctx, uintptr_t* outTopEnd) {
 // ~12 KB in .bss, the renderer borrows the existing 24 KB shared transfer buffer
 // while the map is on screen (see action_memoryMap).
 constexpr int kMaxSegs = 512;
-static_assert(sizeof(MemSeg) * kMaxSegs <= SHARED_BUFFER_SIZE,
+// +2: the SRAM vacant + stack segments are appended after the capped heap walk.
+static_assert(sizeof(MemSeg) * (kMaxSegs + 2) <= SHARED_BUFFER_SIZE,
               "memory-map segment scratch must fit within the shared buffer");
 
 // Draw one labeled, colored grid for a memory region.
@@ -1518,10 +1519,31 @@ void action_memoryMap() {
     // clear() it on the way out since we scribble binary into its body.
     SharedBuffer& shared = SharedBuffer::getInstance();
     MemSeg* segScratch = (MemSeg*)shared.rawBuffer();
-    if (!segScratch) {
-        Serial.println("\n\r\033[91mmemory map: shared buffer unavailable\033[0m");
-        Serial.flush();
-        return;
+    const bool borrowed = (segScratch != nullptr);
+    int segCap = kMaxSegs;
+    if (!borrowed) {
+        // The borrow needs 24 KB contiguous - exactly what a memory-starved
+        // unit (no PSRAM arena + fragmented SRAM heap) can't give, and a
+        // starved unit is when this map matters most. Fall back to a small
+        // temporary block, halving the segment cap until the heap can satisfy
+        // it: run-merging keeps real segment counts low and blockRunCb absorbs
+        // the tail on cap hit, so a coarse cap still renders a correct map.
+        // +2 entries: the vacant + stack segs are pushed after the capped walk.
+        // ponytail: floor of 64 segs (~1.6 KB); below that there's no heap
+        // left to draw a map of anyway.
+        while (segCap >= 64) {
+            segScratch = (MemSeg*)malloc(((size_t)segCap + 2) * sizeof(MemSeg));
+            if (segScratch) break;
+            segCap /= 2;
+        }
+        if (!segScratch) {
+            struct mallinfo mi = mallinfo();
+            Serial.printf("\n\r\033[91mmemory map: no scratch memory (heap free %u B, smallest ask %u B)\033[0m\n\r",
+                          (unsigned)mi.fordblks,
+                          (unsigned)((64 + 2) * sizeof(MemSeg)));
+            Serial.flush();
+            return;
+        }
     }
 
     Serial.println("\n\r\033[1m╭──────────────────────────────────────────────────────────────────╮\033[0m");
@@ -1550,7 +1572,7 @@ void action_memoryMap() {
         holdCore1Frames( ); // park core 1 so the heap chunk chain can't shift mid-walk
         delay(2);
         uintptr_t topEnd = 0;
-        BlockRunCtx ctx{ segs, n, kMaxSegs, base, -1, 0 };
+        BlockRunCtx ctx{ segs, n, segCap, base, -1, 0 };
         size_t blocks = sram_heap_walk(blockRunCb, &ctx, &topEnd);
         releaseCore1Frames( );
         n = ctx.n;
@@ -1586,13 +1608,19 @@ void action_memoryMap() {
         // block so the memory hogs are visible by location.
         NamedAlloc named[16];
         int nNamed = collectNamedStatics(named, 16);
-        // The borrowed shared buffer (24 KB). On no-PSRAM units it sits on the
-        // SRAM heap, so mark it here; on PSRAM units its address is out of the
-        // SRAM range and the guard below simply skips it.
-        if (nNamed < 16)
-            named[nNamed++] = { "sharedBuffer", (uintptr_t)segScratch,
-                                (uint64_t)SHARED_BUFFER_SIZE, (uint8_t)cube256(1,1,5) };
-        for (int i = 0; i < nNamed && n < kMaxSegs; i++) {
+        // The scratch we're rendering from. Borrowed shared buffer: on no-PSRAM
+        // units it sits on the SRAM heap, so mark it here; on PSRAM units its
+        // address is out of the SRAM range and the guard below simply skips it.
+        // Fallback scratch: always on the SRAM heap, mark its true size.
+        if (nNamed < 16) {
+            if (borrowed)
+                named[nNamed++] = { "sharedBuffer", (uintptr_t)segScratch,
+                                    (uint64_t)shared.sharedBufferSize, (uint8_t)cube256(1,1,5) };
+            else
+                named[nNamed++] = { "map scratch", (uintptr_t)segScratch,
+                                    (uint64_t)((segCap + 2) * sizeof(MemSeg)), (uint8_t)cube256(1,1,5) };
+        }
+        for (int i = 0; i < nNamed && n < segCap; i++) {
             if (named[i].addr < base) continue;
             uint64_t off = (uint64_t)(named[i].addr - base);
             if (off + named[i].size > total) continue;  // must fall within the rendered SRAM range
@@ -1640,12 +1668,12 @@ void action_memoryMap() {
         if (headerSz > 0) psegs[n++] = { 0, headerSz, MC_RESERVED, 0.0f };
 
         // Walk the pool block-by-block for a true per-allocation map.
-        BlockRunCtx ctx{ psegs, n, kMaxSegs, base, -1, 0 };
+        BlockRunCtx ctx{ psegs, n, segCap, base, -1, 0 };
         psram_arena_walk(blockRunCb, &ctx);
         n = ctx.n;
 
         // MicroPython GC heap occupies the remainder of the chip.
-        if (mpSize > 0 && n < kMaxSegs)
+        if (mpSize > 0 && n < segCap)
             psegs[n++] = { (uint64_t)(mpBase - base), mpSize, MC_MPHEAP, 0.0f };
 
         uint64_t poolFree = psram_app_free();
@@ -1697,7 +1725,8 @@ void action_memoryMap() {
         drawMemRegion("FLASH  (16 MB)", info, base, total, segs, n);
     }
 
-    shared.clear();   // leave the borrowed buffer empty (we wrote binary into it)
+    if (borrowed) shared.clear();  // leave the borrowed buffer empty (we wrote binary into it)
+    else free(segScratch);
     Serial.println();
     Serial.flush();
 }
@@ -2119,16 +2148,21 @@ uint32_t measureButton( const Params& p, bool& pressedOut, uint32_t& stdOut ) {
 }
 
 // ── High-rate pre/post-trigger trace ring buffer (for serial CSV dumps). ────
-// Debug ADC trace ring. ~9 KB of static .bss at 1024 (t/v/s/d arrays). On the
-// RP2040 (OG) that .bss directly shrinks the heap, and this is a diagnostic-only
-// trace, so use a tiny ring there. All access is `% kTraceN`, so this is safe.
+// Debug ADC trace ring. This is a diagnostic-only trace and its .bss directly
+// shrinks the heap on both boards, so keep it small: 256 slots = ~2.3 KB on V5
+// (was 1024 = ~9.2 KB), 64 on the RP2040 OG. All access is `% kTraceN`.
 #if defined(OG_JUMPERLESS)
 constexpr int kTraceN = 64;
 #else
-constexpr int kTraceN = 1024;
+constexpr int kTraceN = 256;
 #endif
-constexpr int kTracePre = 300;
-constexpr int kTracePost = 300;
+// The pre/post dump window is derived from the ring so the trigger sample is
+// still resident when the deferred dump fires (a fixed 300/300 was larger than
+// the ring, which silently dumped a window trailing past the trigger).
+constexpr int kTracePre = kTraceN * 2 / 5;
+constexpr int kTracePost = kTracePre;
+static_assert(kTracePre + kTracePost + 1 <= kTraceN,
+              "trace dump window must fit within the ring");
 uint32_t g_trace_t[ kTraceN ];
 uint16_t g_trace_v[ kTraceN ];
 uint16_t g_trace_s[ kTraceN ]; // per-sample std-dev across reps
@@ -3237,8 +3271,25 @@ void action_menuTransitionTuner( void ) {
         delay( 2 );
     }
 
+    // Disarm the synthesized click. Every lap primes RELEASED/PRESSED to pop
+    // clickMenu() open; quitting between the prime and the consume leaves the
+    // pair armed, and the MAIN loop then "sees" a click and reopens the
+    // breadboard menu on top of whatever prints next (bench-observed as a
+    // stray \">Rails\" + the main menu stomping the tuner panel).
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
     requestLedShow( 1 ); // back to nets
-    Serial.print( "\033[0m" );
-    Serial.println( "\r\nMenu FX tuner exited." );
+
+    // Persist what the user dialed in: the tuner mutates menuTransitionConfig
+    // directly, so copy it back into [clickwheel] fx_* and save (debounced).
+    configCaptureMenuFx( );
+    requestConfigSave( );
+
+    // Leave a CLEAN screen behind - the menu echo lines the live breadboard
+    // menu printed below the panel would otherwise sit under whatever prints
+    // next (usually the main menu).
+    Serial.print( "\033[0m\033[2J\033[H" );
+    Serial.println( "Menu FX tuner exited." );
     Serial.flush( );
 }

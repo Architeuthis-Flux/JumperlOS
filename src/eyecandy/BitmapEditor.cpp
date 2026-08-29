@@ -96,12 +96,8 @@ bool BitmapEditor::loadFile(const String& filepath) {
         dataSize = (width * height + 7) / 8;
         
         // Allocate and clear bitmap data
-        bitmapData = new (std::nothrow) uint8_t[dataSize];
-        if (!bitmapData) {
-            Jerial.println("Failed to allocate memory for new bitmap");
-            return false;
-        }
-        
+        bitmapData = new uint8_t[dataSize];
+
         // Clear to all zeros (all pixels off)
         memset(bitmapData, 0, dataSize);
         
@@ -178,13 +174,8 @@ bool BitmapEditor::loadFile(const String& filepath) {
     }
     
     // Allocate and read bitmap data
-    bitmapData = new (std::nothrow) uint8_t[dataSize];
-    if (!bitmapData) {
-        Jerial.println("Failed to allocate memory for bitmap");
-        safeFileClose(file, false);
-        return false;
-    }
-    
+    bitmapData = new uint8_t[dataSize];
+
     size_t bytesRead = file.read(bitmapData, dataSize);
     safeFileClose(file, false);
     
@@ -217,12 +208,8 @@ bool BitmapEditor::newFile(const String& filepath, int w, int h) {
     // Allocate and clear bitmap data (freeing any bitmap this editor object
     // already held - newFile used to leak it on re-entry)
     delete[] bitmapData;
-    bitmapData = new (std::nothrow) uint8_t[dataSize];
-    if (!bitmapData) {
-        Jerial.println("Failed to allocate memory for new bitmap");
-        return false;
-    }
-    
+    bitmapData = new uint8_t[dataSize];
+
     // Clear to all zeros (all pixels off)
     memset(bitmapData, 0, dataSize);
     

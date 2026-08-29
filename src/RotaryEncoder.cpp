@@ -13,7 +13,7 @@
 #include "hardware/structs/sio.h" // sio_hw->cpuid for single-owner core check
 #include "pico/mutex.h"
 #include "pico/stdlib.h"
-#include "config.h"              // jumperlessConfig.hardware.encoder_pio (sampler block preference)
+#include "config.h"              // jumperlessConfig.clickwheel.encoder_pio (sampler block preference)
 #include "PioRegistry.h"         // sampler placement lands in X's PIO panel
 #include "encoder_sampler.pio.h" // the 1-instruction quadrature sampler (C7)
 #include "hardware/dma.h"
@@ -156,7 +156,7 @@ static void encSamplerInit( void ) {
     int nCand = 0;
     {
         PIO all[] = { pio0, pio1, pio2 };
-        int pref = jumperlessConfig.hardware.encoder_pio;
+        int pref = jumperlessConfig.clickwheel.encoder_pio;
         if ( pref >= 0 && pref <= 2 ) cand[ nCand++ ] = all[ pref ];
     }
     cand[ nCand++ ] = pio2;
@@ -1123,6 +1123,31 @@ static void rotaryEncoderStuffLocked( void ) {
             heldConfirmPos = prevEncoderPos;
             heldConfirmOffset = encoderPositionOffset;
             restMenuPosition = (long)position;
+
+            // Detent re-anchor: a shaft that rested this long is sitting in a
+            // physical notch, so lastRawForIdle IS a detent position. Small
+            // residuals against the hysteresis grid (E9-blip aliasing, settle
+            // chatter, the parallel-rig-measured ~-2/1460 count drift) would
+            // otherwise accumulate until trip points fire mid-travel instead
+            // of at the notch pull-in. Snap the baseline back onto the notch
+            // when it's within a quarter-divider; a larger residual means the
+            // shaft was deliberately held mid-travel, and snapping would
+            // swallow that real progress - leave it.
+            // ponytail: rest==notch is a heuristic; a shaft parked ON a cam
+            // peak defers the correction to the next true rest.
+            if ( rotaryDivider > 1 ) {
+                long r = ( lastRawForIdle - lastDetentRaw ) % (long)rotaryDivider;
+                if ( r < 0 ) r += rotaryDivider;
+                long tol = rotaryDivider / 4;
+                if ( r <= tol || r >= (long)rotaryDivider - tol ) {
+                    lastDetentRaw = lastRawForIdle;
+                }
+            }
+            // After a real pause, the settle/bounce the backlash margin
+            // guards against is long over. A stale lastStepDir would charge
+            // the first reverse detent the 1.5x margin (a dead first click
+            // when turning back); fresh start steps in one detent either way.
+            lastStepDir = 0;
         }
         lastRawForIdle = rawCount;
         lastRawChangeUs = nowClickUs;

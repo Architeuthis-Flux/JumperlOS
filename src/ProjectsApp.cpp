@@ -913,6 +913,25 @@ static void runCompanionScript(const RunContext& rc, const String& scriptPath) {
     lastButtonEncoderState = IDLE;
     delay(400);
 
+    // DRAIN WHAT THE LAUNCH LINE LEFT BEHIND. Nothing between the command
+    // reader and here consumes port-1 bytes, so anything still in the CDC RX
+    // FIFO becomes the script's FIRST input() line. The commonest case is the
+    // terminator itself: a host that ends the command with "\r\n" leaves the
+    // "\n", mp_hal_stdin_rx_chr normalizes it to "\r"
+    // (lib/micropython/port/mphalport.c:141), and readline hands the script a
+    // phantom empty line before the user has typed anything. test_projects.py
+    // works around it by sending "\r" only, and i2cscrn's main.py hand-rolls
+    // its own drain - both are the same missing line, in two places that
+    // should not have to know about it. Bounded so a genuine paste storm
+    // cannot spin here; type-ahead aimed at a script that has not started yet
+    // is not a feature anyone can be relying on.
+    {
+      int drained = 0;
+      while (Serial.available() > 0 && drained++ < 256) {
+        Serial.read();
+      }
+    }
+
     Serial.println("\r\nRunning " + scriptPath + " ...\r\n");
     // The return is checked, not discarded: executePythonFileContent answers
     // false WITHOUT printing when initMicroPythonQuiet() fails

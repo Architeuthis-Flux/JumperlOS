@@ -767,6 +767,22 @@ static bool pairTapEligible(int node) {
     return true;
 }
 
+// A path is off-limits when its NET carries a live display-bus line, not
+// just when an end is one: tapping any node of that net closes a crosspoint
+// onto SDA/SCL mid-transaction, the same reason rebuildScanList() drops the
+// whole net. Caller reads the bus nodes once per pass (cross-core).
+static bool pathOnDisplayBus(const pathStruct& p, const int16_t* busNodes,
+                             int numBusNodes) {
+    if (numBusNodes <= 0 || p.net <= 0 || p.net >= MAX_NETS) return false;
+    const netStruct& net = globalState.connections.nets[p.net];
+    for (int n = 0; n < MAX_NODES; n++) {
+        int node = net.nodes[n];
+        if (node <= 0) break;
+        if (node == busNodes[0] || node == busNodes[1]) return true;
+    }
+    return false;
+}
+
 // Full path count including the stacked duplicate entries fillUnusedPaths()
 // appends (duplicate == 1). globalState.connections.numPaths only counts the
 // originals; sendPaths() and we both need the whole set.
@@ -945,7 +961,7 @@ static void computePathCurrents() {
     for (int i = 0; i < MAX_NETS; i++) netCurrentInfo[i].valid = false;
 
     int numPaths = livePathCount();
-    float rXpoint = jumperlessConfig.calibration.crosspoint_resistance;
+    float rXpoint = jumperlessConfig.measurement.crosspoint_resistance;
     if (rXpoint < 1.0f) rXpoint = 1.0f;
     uint32_t ms = millis();
 
@@ -1158,7 +1174,7 @@ bool nodeVoltageValid(int node) {
 }
 
 void printNetVoltageScanStats(Stream* out) {
-    if (!jumperlessConfig.display.net_currents) {
+    if (!jumperlessConfig.measurement.net_currents) {
         out->println("[nvscan] net current scan is off ('i' to enable)");
         return;
     }
@@ -1262,6 +1278,11 @@ static bool seqPairComplete(int adcA) {
     if ((millis() - seqPendingMs) > 150) return false;
     if (adcA != seqPendingAdc) return false;
     if (!((p.node1 == seqPendingNode1 && p.node2 == seqPendingNode2))) return false;
+    // The bus can have attached since end A was parked - end B must not land
+    // on it either.
+    int16_t busNodes[2];
+    int numBusNodes = displayService.activeDataNodes(busNodes);
+    if (pathOnDisplayBus(p, busNodes, numBusNodes)) return false;
     float v2;
     if (!senseNodeVoltage(seqPendingNode2, adcA, &v2)) return true; // pass spent
     recordTapVoltage(seqPendingNode2, v2 - scanZeroOffset[adcA]);
@@ -1307,12 +1328,15 @@ static bool pairTapSlot(int adcA) {
     }
     int numPaths = livePathCount();
     if (numPaths <= 0) return false;
+    int16_t busNodes[2];
+    int numBusNodes = displayService.activeDataNodes(busNodes);
     for (int tries = 0; tries < numPaths; tries++) {
         int i = pairPathIndex % numPaths;
         pairPathIndex = (pairPathIndex + 1) % numPaths;
         const pathStruct& p = globalState.connections.paths[i];
         if (p.skip || p.net <= 0 || p.net >= MAX_NETS) continue;
         if (p.pathType == VIRTUAL || p.duplicate != 0) continue;
+        if (pathOnDisplayBus(p, busNodes, numBusNodes)) continue;
         bool e1 = pairTapEligible(p.node1);
         bool e2 = pairTapEligible(p.node2);
         if (!e1 && !e2) continue;
@@ -1365,7 +1389,7 @@ void serviceNetVoltageScan(void) {
     serviceOneShotTap();
 
     static bool wasEnabled = false;
-    if (!jumperlessConfig.display.net_currents) {
+    if (!jumperlessConfig.measurement.net_currents) {
         if (wasEnabled) {
             // Leave nothing stale behind for the display consumers.
             memset(nodeVoltageMs, 0, sizeof(nodeVoltageMs));
@@ -1535,7 +1559,7 @@ void serviceNetVoltageScan(void) {
 // dry-runs (planFastPath) are read-only.
 void serviceNetVoltageScanDebug(void) {
     if (!jumperlessConfig.debug.net_voltage_scan) return;
-    if (!jumperlessConfig.display.net_currents) return;
+    if (!jumperlessConfig.measurement.net_currents) return;
     static unsigned long lastDebugPrintMs = 0;
     if (millis() - lastDebugPrintMs < 1000) return;
     lastDebugPrintMs = millis();

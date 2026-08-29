@@ -90,11 +90,100 @@ int partdbCandidatesForI2cAddr(uint8_t addr, const PartDbRecord** out,
         }
       }
     }
-    if (hit) {
-      out[n++] = &r;
+    if (!hit) {
+      continue;
     }
+    // Insertion-sorted by probeOrder (REF 6.3: at 0x68 the WHO_AM_I-bearing
+    // MPU must be asked before the registerless RTC heuristic; the caller
+    // taking out[0] gets the most-confident candidate).
+    int at = n;
+    while (at > 0 &&
+           partdb_i2cIdents[out[at - 1]->i2cIdentIdx].probeOrder >
+               ident.probeOrder) {
+      out[at] = out[at - 1];
+      at--;
+    }
+    out[at] = &r;
+    n++;
   }
   return n;
+}
+
+const char* partdbFingerprintOf(const PartDbRecord& r) {
+  return (r.fingerprintIdx == 0xFF) ? 0
+                                    : partdb_fingerprints[r.fingerprintIdx];
+}
+
+const PartDbVectorSet* partdbVectorSetOf(const PartDbRecord& r) {
+  return (r.vectorSetIdx == 0xFFFF) ? 0 : &partdb_vectorSets[r.vectorSetIdx];
+}
+
+int partdbFingerprintMismatch(const PartDbRecord& r, const char* measured) {
+  const char* want = partdbFingerprintOf(r);
+  if (want == 0 || measured == 0) {
+    return -1;
+  }
+  int misses = 0;
+  int i = 0;
+  for (; want[i] != '\0' && measured[i] != '\0'; i++) {
+    char w = want[i];
+    char m = measured[i];
+    if (w == '?' || m == 'x') {
+      continue;   // authored don't-care / pin the session couldn't probe
+    }
+    if (w == 'C') {
+      // "conducts somehow" - TTL reads G where CMOS reads B; the alias
+      // families share one record, so the record can only promise
+      // conduction. Open or a rail position is the conflict.
+      if (m == 'N' || m == '-') {
+        misses++;
+      }
+      continue;
+    }
+    if (w != m) {
+      misses++;
+    }
+  }
+  if (want[i] != '\0' || measured[i] != '\0') {
+    return -1;   // different pin counts - not the same package, not comparable
+  }
+  return misses;
+}
+
+int partdbFingerprintMismatchOriented(const PartDbRecord& r,
+                                      const char* measured, int* rotatedOut) {
+  if (rotatedOut) {
+    *rotatedOut = 0;
+  }
+  int direct = partdbFingerprintMismatch(r, measured);
+  const PartDbPinout& po = partdb_pinouts[r.pinoutIdx];
+  if (po.footprint != PARTDB_FOOT_DIP || measured == 0) {
+    return direct;   // only a DIP has a second way to sit in its rows
+  }
+  int n = 0;
+  while (measured[n] != '\0') {
+    n++;
+  }
+  if (n != (int)po.pinCount || n > 60 || (n % 2) != 0) {
+    return direct;
+  }
+  // 180 degrees = physical pin k lands where the U-ordering puts pin
+  // k + n/2 (mod n) - a cyclic half-shift, NOT a reversal (verified on the
+  // bench: pin 1 at position 9 of the dip16's bottom-anchored order).
+  char rot[61];
+  int half = n / 2;
+  for (int i = 0; i < n; i++) {
+    rot[i] = measured[(i + half) % n];
+  }
+  rot[n] = '\0';
+  int rotated = partdbFingerprintMismatch(r, rot);
+  if (rotated >= 0 && (direct < 0 || rotated < direct)) {
+    if (rotatedOut) {
+      *rotatedOut = 1;
+    }
+    return rotated;
+  }
+  return direct;
 }
 
 bool partdbPlaceableHere(const PartDbRecord& r) {

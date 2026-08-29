@@ -6,11 +6,16 @@
 #include <Wire.h>
 #include "hardware/gpio.h"
 
-#include "Peripherals.h"   // gpio_function_map, gpioState
+#include "Peripherals.h"   // gpio_function_map, gpioState, gpioPWMEnabled, stopPWM
 #include "States.h"        // globalState.config.gpioPythonOwned
 #include "config.h"        // jumperlessConfig.top_oled.connection_type
 #include "oled.h"          // oled.oledConnected (is Wire1 owned?)
 #include "boards/board.h"  // caps.breadboardDisplays
+
+// PWM's other RAM-side flag: Peripherals.h exports gpioPWMEnabled but not the
+// slow-PWM twin, and telling a LIVE claim from a slot-restored ghost needs
+// both (see dropGhostPwmClaim).
+extern bool gpioSlowPWMEnabled[10];
 
 // Soft-I2C pin choice: RP 24/25 (nodes 135/136) - deliberately the pair that
 // can NEVER be hardware I2C1 ((24,25) maps to i2c0, the internal DAC/INA
@@ -133,6 +138,60 @@ static bool wire1IsFree(void) {
     return jumperlessConfig.top_oled.connection_type == 2 || !oled.oledConnected;
 }
 
+// A persisted gpioPwmEnabled with no PWM behind it is a GHOST claim: the flag
+// rides the slot YAML (States.cpp:2247/2394) but setupPWM is never re-run on
+// load, so a slot that remembers pwm(5) paused a perfectly live panel forever
+// with "claimed by your script" and no script anywhere (sweep finding). The
+// RAM-side flags are what an actual setupPWM/setupSlowPWM sets, and they are
+// set BEFORE the config flag, so config-set + both-RAM-clear is exactly the
+// ghost. Newer owner wins: the flag yields and the YAML heals on the next save.
+static void dropGhostPwmClaim(int idx) {
+    if (!globalState.config.gpioPwmEnabled[idx]) return;
+    if (gpioPWMEnabled[idx] || gpioSlowPWMEnabled[idx]) return;   // really running
+    globalState.config.gpioPwmEnabled[idx] = false;
+    globalState.markDirty();
+}
+
+// Does PWM hold this pin RIGHT NOW? The RAM flags are the honest answer once
+// the ghost is dropped (config-set implies RAM-set after that), and they also
+// catch the reverse skew - a slot load that clears the config flag out from
+// under a PWM that is still running.
+static bool pwmHoldsPin(int idx) {
+    dropGhostPwmClaim(idx);
+    return gpioPWMEnabled[idx] || gpioSlowPWMEnabled[idx];
+}
+
+// One pin, one answer. Claims are PER PIN everywhere they are made
+// (jl_gpio_claim_pin takes a pin, gpioPwmEnabled is indexed) - the old
+// all-or-nothing instance test is what left an unclaimed sibling half-owned.
+static bool pinClaimed(int pin) {
+    if (pin < 20 || pin > 27) return false;
+    int idx = pin - 20;
+    return globalState.config.gpioPythonOwned[idx] || pwmHoldsPin(idx);
+}
+
+// machine.PWM(24) - the RAW-INT form. mp_hal_get_pin_obj() takes a bare int,
+// so no machine.Pin is constructed and nothing registered a claim: the bus
+// kept bit-banging SIO into a PWM-muxed pad ("8 bus errors - re-beaconing",
+// forever). Called from lib/micropython/port/machine_pwm_jl.c right after
+// gpio_set_function(PWM), so machine.PWM lands in the SAME bookkeeping
+// jumperless.pwm() uses and the service yields on its next tick. It lives
+// here because this file is the pin-arbitration point and the MicroPython C
+// side cannot see globalState.
+extern "C" void jl_display_bus_pwm_taken(int pin) {
+    if (!board::currentBoard().caps.breadboardDisplays) return;
+    if (pin != SOFT_SDA_PIN && pin != SOFT_SCL_PIN) return;
+    int idx = pin - 20;
+    gpioPWMEnabled[idx] = true;                     // RAM side first, like
+    globalState.config.gpioPwmEnabled[idx] = true;  // setupPWM - a LIVE claim,
+    globalState.markDirty();                        // never a ghost
+    gpio_function_map[idx] = GPIO_FUNC_PWM;
+    // Newer owner wins: drop OUR bus-role mark on this pin so setGPIO() and
+    // readGPIO() stop treating it as display plumbing. The sibling pin keeps
+    // its mark until the (per-pin) release.
+    if (gpioState[idx] == 6) gpioState[idx] = 0;
+}
+
 bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     static const char* claimedReason = "GPIO claimed by your script";
     // Belt for future non-service callers (detect-driver, MP surface): on
@@ -155,6 +214,35 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     (void)wire1IsFree;
     d.sdaPin = SOFT_SDA_PIN;
     d.sclPin = SOFT_SCL_PIN;
+
+    // OWNERSHIP OF GP24/GP25, in one place (Kevin's rule: last one wins, and
+    // no refusals between the display and PWM - "allow the user to mess it up
+    // if they assign pwm on a display bus"):
+    //   * A script's machine.Pin claim wins outright: we refuse here, the
+    //     service yields with one line, and the claim clears itself on script
+    //     exit (jl_gpio_release_all_pins) so the poll resumes us.
+    //   * Display vs PWM is LAST WINS in BOTH directions. Acquiring STOPS
+    //     whatever PWM holds the pin (stopPWM kills the slice, the config
+    //     flag and the pad function - regular and slow alike); a PWM set up
+    //     afterwards takes the pin straight back, and both entry points
+    //     (setupPWM's config flag, machine.PWM's jl_display_bus_pwm_taken)
+    //     make the service yield before it touches the wire.
+    //   * A persisted PWM flag with NO live PWM behind it is a ghost from a
+    //     slot load and yields to any live owner (dropGhostPwmClaim).
+    //   * Release is per pin, and the gpioState 6 marks never outlive the
+    //     attachment - they are our bookkeeping, not the claimant's.
+    for (int k = 0; k < 2; k++) {
+        int pin = (k == 0) ? d.sdaPin : d.sclPin;
+        int idx = pin - 20;
+        // A Pin claim outranks us, so don't kill a PWM we're about to refuse
+        // over anyway.
+        if (pwmHoldsPin(idx) && !globalState.config.gpioPythonOwned[idx]) {
+            stopPWM(pin - 19);   // stopPWM speaks GPIO 1-8, not RP pin numbers
+            Serial.print("\r\nDISPLAY took GP");
+            Serial.print(pin);
+            Serial.println(" back from PWM (newer owner wins)");
+        }
+    }
     if (displayBusUserClaimed(d)) {
         if (reasonOut) *reasonOut = claimedReason;
         d.sdaPin = d.sclPin = -1;
@@ -180,30 +268,30 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
 
 void displayBusRelease(DisplayInstance& d) {
     if (d.sdaPin < 0) return;
-    if (displayBusUserClaimed(d)) {
-        // The USER's script owns these pins now (YIELDED detach) - resetting
-        // modes/marks would stomp its live configuration. Just forget them.
-        d.sdaPin = d.sclPin = -1;
-        return;
-    }
-    gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_NULL;
-    gpio_function_map[d.sclPin - 20] = GPIO_FUNC_NULL;
-    gpioState[d.sdaPin - 20] = 0;
-    gpioState[d.sclPin - 20] = 0;
-    if (d.sdaPin != 26) {   // soft pins: leave them released (inputs)
-        pinMode(d.sdaPin, INPUT);
-        pinMode(d.sclPin, INPUT);
+    // PER PIN (sweep finding): the skip used to be all-or-nothing across both
+    // pins while claims are per-pin, so a PWM or Pin claim on ONE pin made us
+    // forget the OTHER while it was still a driven output - nothing ever
+    // released it. And gpioState 6 is OUR bus-role mark, never the claimant's:
+    // always drop it, or setGPIO() and readGPIO() stay diverted on that pin
+    // for the rest of the session. Dropping it is safe under a live claim
+    // because gpioPythonOwned/gpioPwmEnabled gate those paths already.
+    bool hardwareBus = (d.sdaPin == 26);
+    for (int k = 0; k < 2; k++) {
+        int pin = (k == 0) ? d.sdaPin : d.sclPin;
+        if (pin < 20 || pin > 27) continue;
+        gpioState[pin - 20] = 0;
+        if (pinClaimed(pin)) continue;   // the new owner's pad is its own now
+        gpio_function_map[pin - 20] = GPIO_FUNC_NULL;
+        if (!hardwareBus) pinMode(pin, INPUT);   // soft pins: leave them released
     }
     d.sdaPin = d.sclPin = -1;
 }
 
 bool displayBusUserClaimed(const DisplayInstance& d) {
-    if (d.sdaPin < 20 || d.sclPin < 20) return false;
-    return globalState.config.gpioPythonOwned[d.sdaPin - 20] ||
-           globalState.config.gpioPythonOwned[d.sclPin - 20] ||
-           globalState.config.gpioPwmEnabled[d.sdaPin - 20] ||   // PWM on our
-           globalState.config.gpioPwmEnabled[d.sclPin - 20];      // pins is a
-                                              // claim too (sweep finding)
+    // PWM on our pins is a claim too (sweep finding), and it is checked per
+    // pin - a claim on either one pauses the bus, but only the claimed pin is
+    // treated as the claimant's on release.
+    return pinClaimed(d.sdaPin) || pinClaimed(d.sclPin);
 }
 
 // ---------------------------------------------------------------------------

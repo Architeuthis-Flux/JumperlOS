@@ -119,6 +119,10 @@ const char* guideCheckHint(void);
 // terminal's fuller sentence and it may contain spaces.
 const char* guideCheckDetail(void);
 void guideCheckAbort(void);
+// True while a check begun against `script` is still in flight. StepViewer's
+// disarm() uses it to abort before freeing its heap-allocated script - the
+// engine holds the GuideCheckRun pointers for the whole run.
+bool guideCheckUsesScript(const GuideScript* script);
 
 // ---------------------------------------------------------------------------
 // Part values, bands and display formatting (invest-measurement.md §2 / §4)

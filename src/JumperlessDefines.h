@@ -72,15 +72,6 @@
 #define UNDO_ENABLED 1
 #endif
 
-// Boot-time Serial chatter (PSRAM arena sizing, undo ring init, heap ledger,
-// file-cache pass-through notice). On only in jumperless_v5_debug (-DDEBUG);
-// PlatformIO release builds do not define NDEBUG on this core, so gate on DEBUG.
-#if defined(DEBUG)
-#define JL_BOOT_VERBOSE 1
-#else
-#define JL_BOOT_VERBOSE 0
-#endif
-
 #define TERM_SUPPORTS_RGB 0
 #define TERM_SUPPORTS_ANSI_COLORS 1
 
@@ -195,7 +186,7 @@ extern int probeRev;
 // hold a second copy of the state (the slot-load / migration / preview paths in
 // States.cpp copy it). Shrinking MAX_BRIDGES/MAX_NODES on OG cuts globalState
 // AND every copy of it, both to free heap and to keep state copies survivable.
-// MAX_NETS stays 60 (netNameConstants[] is initialized with 60 entries).
+// MAX_NETS stays 60 (netNameConstants[] must carry one initializer per net).
 #if defined(OG_JUMPERLESS)
 #define MAX_BRIDGES 72
 #define MAX_NODES 24 //this is the max number of nodes that can be connected to a net

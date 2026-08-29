@@ -13,7 +13,6 @@
 #include "USBfs.h"      // usbMountedByHost - refuse firmware writes while a host has the disk mounted
 #include "FileCache.h"  // fileCacheInvalidate + cache-aware wrappers
 #include "config.h"
-#include "JumperlessDefines.h"  // JL_BOOT_VERBOSE
 #include "externVars.h" // For fs_mutex filesystem synchronization
 #include "AsyncPassthrough.h" // For suspendUARTRxIRQ/resumeUARTRxIRQ during flash ops
 #include "micropythonExamples.h"
@@ -188,12 +187,10 @@ void addFilesystemMessage( const String& message, int color = 248 ) {
         fsMessages[ MAX_FS_MESSAGES - 1 ].color = color;
         fsMessages[ MAX_FS_MESSAGES - 1 ].timestamp = millis( );
     }
-#if JL_BOOT_VERBOSE
     changeTerminalColor( color, false );
     Serial.println( message );
     Serial.flush();
     changeTerminalColor( -1, false );
-#endif
     // displayFilesystemMessages();
     
     lastMessageDisplayTime = millis( );
@@ -2794,6 +2791,7 @@ void eKiloApp( ) {
 
     // Wait for user to press enter to break the input loop
     while ( Serial.available( ) == 0 ) {
+        jOS.serviceInner( ); // pump USB/probe/passthrough while this modal loop runs
         delayMicroseconds( 100 );
     }
     // Clear the enter keypress
@@ -3223,6 +3221,14 @@ int getConfiguredEditorLines( ) {
 // Recursively delete all contents of a directory
 // Note: fs_mutex is acquired by caller (provisionMicroPythonExamples)
 bool deleteDirectoryContents( const String& path ) {
+    // USB MSC guard: safeFileDelete refuses for us, but the FatFS.rmdir below
+    // is a raw FAT write - an empty subdirectory would still be removed behind
+    // the host's cached FAT.
+    if ( usbMountedByHost ) {
+        Serial.println( "[FS] directory delete refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
+
     Dir dir = FatFS.openDir( path );
     bool success = true;
 
@@ -4670,6 +4676,15 @@ bool safeFileDeleteRaw( const char* path, uint32_t timeout_ms ) {
 }
 
 bool safeFileDelete( const char* path, uint32_t timeout_ms ) {
+    // Refuse BEFORE touching the cache: fileCacheDelete drops a DIRTY entry
+    // unconditionally, so letting the refusal happen down in the Raw layer
+    // would destroy the unflushed content and leave the stale file on flash.
+    // (safeFileWriteAll checks in the same order, and the Raw guard stays for
+    // FileCache's direct safeFileDeleteRaw calls.)
+    if ( usbMountedByHost ) {
+        Serial.println( "[FS] delete refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
     // Drop any cached entry first so subsequent reads don't return stale data.
     fileCacheDelete( path );
     return safeFileDeleteRaw( path, timeout_ms );
@@ -4708,6 +4723,13 @@ bool safeFileRenameRaw( const char* pathFrom, const char* pathTo, uint32_t timeo
 }
 
 bool safeFileRename( const char* pathFrom, const char* pathTo, uint32_t timeout_ms ) {
+    // Refuse BEFORE touching the cache: fileCacheRename retargets the entry and
+    // keeps it dirty, so a refusal down in the Raw layer would leave pathTo
+    // reading as existing while only pathFrom exists on flash.
+    if ( usbMountedByHost ) {
+        Serial.println( "[FS] rename refused: USB host has the filesystem mounted; eject first" );
+        return false;
+    }
     fileCacheRename( pathFrom, pathTo );
     return safeFileRenameRaw( pathFrom, pathTo, timeout_ms );
 }

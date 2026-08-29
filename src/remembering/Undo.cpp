@@ -361,7 +361,12 @@ bool blobAppendCurrentState(uint32_t* outOffset, uint32_t* outSize) {
 // log even if the caller forgot to set g_undoApplying. The caller (undoUndo /
 // undoRedo) pushes the result to hardware via undoCommitToHardware().
 bool blobRestoreState(uint32_t offset, uint32_t size) {
-    (void)size;
+    // size 0 = the op was recorded WITHOUT a blob (the append failed at
+    // record time). Offset 0 is also a real arena slot, so validating
+    // whatever header happens to sit there passed magic+CRC on a STALE
+    // earlier blob and silently replaced the user's board with an older
+    // one (review finding). No blob, no restore - fail loudly instead.
+    if (size == 0) return false;
     if (!g_blobs || (size_t)offset + sizeof(BlobHeader) > g_blobCap) return false;
     BlobHeader* hdr = (BlobHeader*)(g_blobs + offset);
     if (hdr->magic != BLOB_MAGIC) {
@@ -529,6 +534,13 @@ void revertOp(const UndoOp& op) {
             if (!blobRestoreState(op.blob.blobOffset, op.blob.blobSize)) {
                 UNDBG("revert CLEAR_ALL: blob restore failed at off=%u",
                       (unsigned)op.blob.blobOffset);
+                // the user pressed undo and nothing came back - say so
+                // (blobSize 0 = the board was too big to snapshot when the
+                // clear-all was recorded)
+                Serial.println(op.blob.blobSize == 0
+                    ? "\r\n[Undo] clear-all can't be undone: the board was too"
+                      " large to snapshot when it was cleared"
+                    : "\r\n[Undo] clear-all restore failed (snapshot damaged)");
             }
             break;
         case UNDO_OP_GPIO_SET:
@@ -1112,6 +1124,12 @@ size_t undoSerialize(uint8_t* buf, size_t cap) {
     size_t maxTxns  = g_persistMaxTxns  ? g_persistMaxTxns  : UNDO_PERSIST_MAX_TXNS;
     size_t maxBytes = g_persistMaxBytes ? g_persistMaxBytes : UNDO_PERSIST_MAX_BYTES;
     if (maxTxns > UNDO_PERSIST_MAX_TXNS) maxTxns = UNDO_PERSIST_MAX_TXNS;
+    // [undo] max_saved_actions caps the persisted slice below the
+    // PSRAM/SRAM budget picked in undoInit (the RAM ring is unaffected).
+    {
+        int cfgMax = jumperlessConfig.undo.max_saved_actions;
+        if (cfgMax >= 1 && (size_t)cfgMax < maxTxns) maxTxns = (size_t)cfgMax;
+    }
     {
         size_t pos = g_txnHead;
         while (pos != g_txnTail && nKept < maxTxns) {
@@ -1629,9 +1647,18 @@ void undoInit(void) {
         g_txnCap = 4096;
         g_blobCap = 256 * 1024;
     } else {
-        g_opCap = 512;
-        g_txnCap = 128;
-        g_blobCap = 4 * 1024;
+        // Ops/txns halved in the RAM reclamation pass (was 512/128): history
+        // is shallower, and every ring is a power of two as the wrap math
+        // requires. Blobs are 8 KB, NOT the pass's 2 KB: a clear-all blob is
+        // a full toYAML capture, and with parts placed that is ~4.7 KB on
+        // the reference bench (8 parts) - at 2 KB the append aborted every
+        // time and undo-of-clear-all silently restored nothing. 8 KB holds
+        // one parts-bearing board comfortably; a bridge-maxed 16-part board
+        // can still exceed it, and then the clear-all op records no blob
+        // and its undo refuses loudly (blobRestoreState size==0).
+        g_opCap = 256;
+        g_txnCap = 64;
+        g_blobCap = 8 * 1024;
     }
 
     // Persistence limits. With PSRAM we keep a deep history; without it the
@@ -1703,7 +1730,6 @@ void undoInit(void) {
         g_activeSlot = (bucket >= 0) ? bucket : 0;
     }
 
-#if JL_BOOT_VERBOSE
     Serial.printf("[Undo] init: %u ops + %u txns + %u KB blob shared across %d slots (%s, active=%d)\n",
         (unsigned)g_opCap, (unsigned)g_txnCap, (unsigned)(g_blobCap / 1024),
         NUM_SLOTS, havePsram ? "PSRAM" : "SRAM-only", g_activeSlot);
@@ -1711,20 +1737,18 @@ void undoInit(void) {
         (unsigned)g_persistMaxTxns, (unsigned)g_persistMaxBytes,
         (unsigned)g_persistBufBytes,
         g_persistBuf ? "reserved" : "RESERVE FAILED (per-save alloc)");
-#endif
 
     snapshotInit();
-#if JL_BOOT_VERBOSE
     if (g_snapshots)
         Serial.printf("[Undo] snapshot ring: %u entries\n", (unsigned)g_snapshotCap);
-#endif
 
     // Restore persisted history (every board). If there's nothing to restore,
     // seed the snapshot ring with a fresh boot capture as before.
     bool restored = undoRestore();
 
-    // Boot-time restore summary (debug builds only; memory-menu undo_debug can
-    // still trace live ops). For each slot that has reachable history it reports
+    // Boot-time restore summary (always on - this runs once on Core 0 before
+    // Core 1 is spamming Serial, so it's safe even when undo_debug would not
+    // be). For each slot that has reachable history it reports the cursor, the
     // total reachable txns, and how many are undoable (reachable + strictly
     // older than the cursor). If a slot shows tot>0 but undoable=0 the cursor
     // was restored at the wrong end; if restore=0 the file was rejected.
@@ -1754,13 +1778,11 @@ void undoInit(void) {
                     (unsigned)g_slotCursor[s], (unsigned)reach, (unsigned)undoable);
             }
         }
-#if JL_BOOT_VERBOSE
         Serial.printf("[Undo] restore=%d head=%u tail=%u gid=%u active=%d "
                       "netSlot=%d reachable=%u%s\n",
             (int)restored, (unsigned)g_txnHead, (unsigned)g_txnTail,
             (unsigned)g_globalTxnId, g_activeSlot, netSlot,
             (unsigned)totalReachable, summary);
-#endif
     }
 
     if (g_snapshots && !restored)
@@ -1791,6 +1813,13 @@ void undoShutdown(void) {
 void undoPersistHistory(void) {
     if (!g_ops || !g_txns) return;
     if (!g_historyDirty) return;        // nothing new to write
+    // [undo] persist = false: keep the RAM ring but never touch flash, and
+    // drop any stale file so the next boot doesn't restore ghost history.
+    if (!jumperlessConfig.undo.persist) {
+        if (safeFileExists(UNDO_FILE_PATH)) safeFileDelete(UNDO_FILE_PATH);
+        g_historyDirty = false;
+        return;
+    }
     size_t bufBytes = g_persistBufBytes ? g_persistBufBytes : UNDO_PERSIST_BUF_BYTES;
 
     // Prefer the buffer reserved at boot (g_persistBuf) so a save never depends
@@ -1931,12 +1960,10 @@ bool undoRestore(void) {
     }
     if (ownBuf) undoFree(buf);
 
-#if JL_BOOT_VERBOSE
     if (restored) {
         Serial.printf("[Undo] restored history from %s (%u bytes)\n",
                       UNDO_FILE_PATH, (unsigned)readBytes);
     }
-#endif
     return restored;
 }
 

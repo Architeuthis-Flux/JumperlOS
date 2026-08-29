@@ -39,8 +39,7 @@ enum class MeasurementType {
  * - Detects when user taps a breadboard node
  * - Creates an ephemeral (temporary, never-saved) ADC connection
  * - Continuously displays voltage on OLED and serial
- * - Optionally shows a mini oscilloscope waveform
- * 
+ *
  * Design notes:
  * - Uses ephemeral connections that bypass markDirty() and are never saved
  * - Validates that tapped nodes are real measurable nodes (ignores special pads)
@@ -66,13 +65,7 @@ public:
     bool isMeasurementActive() const { return measurementActive; }
     int getMeasuredNode() const { return measuredNode; }
     float getLastVoltage() const { return smoothedVoltage; }
-    
-    // Oscilloscope mode control
-    void enableOscilloscope(bool enable);
-    bool isOscopeEnabled() const { return oscopeEnabled; }
-    void setOscopeTimebase(int timebaseMs);  // Time per screen (1-1000ms)
-    int getOscopeTimebase() const { return oscopeTimebaseMs; }
-    
+
     // Measurement type (for future expansion)
     void setMeasurementType(MeasurementType type);
     MeasurementType getMeasurementType() const { return currentType; }
@@ -93,23 +86,10 @@ private:
     MeasurementType currentType = MeasurementType::VOLTAGE;
     
     // ========================================================================
-    // Oscilloscope State
-    // ========================================================================
-    bool oscopeEnabled = false;
-    static constexpr int OSCOPE_SAMPLES = 128;  // Match OLED width
-    float oscopeSamples[OSCOPE_SAMPLES];
-    int oscopeSampleIndex = 0;
-    float oscopeMin = 0.0f;
-    float oscopeMax = 3.3f;
-    int oscopeTimebaseMs = 100;    // Time per screen in milliseconds
-    unsigned long lastOscopeSampleTime = 0;
-    
-    // ========================================================================
     // Timing and Rate Limiting
     // ========================================================================
     unsigned long lastUpdateTime = 0;
     static constexpr int UPDATE_INTERVAL_MS = 100;        // Display update rate
-    static constexpr int OSCOPE_UPDATE_INTERVAL_MS = 20;  // Faster for oscilloscope
     
     // ========================================================================
     // Voltage Smoothing
@@ -131,7 +111,6 @@ private:
     // ========================================================================
     int lastProbeReading = -1;
     int stableReadingCount = 0;
-    static constexpr int STABLE_READINGS_REQUIRED = 5;
     
     // ========================================================================
     // Helper Methods
@@ -142,19 +121,9 @@ private:
     
     // Display methods
     void updateVoltageDisplay();
-    void updateOscopeDisplay();
-    void drawOscopeGrid();
-    void drawOscopeWaveform();
-    void drawOscopeStatusBar();
-    
-    // Oscilloscope helpers
-    float voltageToPixelY(float voltage);
-    void autoRangeOscope();
-    void sampleForOscope();
 };
 
 // Global reference to singleton for convenience
-// NOTE: Named measureModeService to avoid conflict with Probing::measureMode() function
 extern MeasureMode& measureModeService;
 
 #endif // MEASUREMODE_H

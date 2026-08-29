@@ -602,19 +602,58 @@ uint16_t const* __wrap_tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 // CDC DTR Ignore Support
 //--------------------------------------------------------------------+
 // Wrapped function that handles tud_cdc_n_connected() calls
-// When ignore_dtr is enabled, always returns true if USB device is ready
-// This allows communication with hosts that don't set the DTR line
+// When ignore_dtr is enabled, returns true if USB device is ready AND the
+// port is still draining - this allows communication with hosts that don't
+// set the DTR line, without handing them an unbounded blocking write.
+//
+// Adafruit_USBD_CDC::write() is `while (remain && tud_cdc_n_connected(itf))
+// yield();` with NO timeout, so answering "connected" from tud_ready() alone
+// spins core 0 FOREVER on the first print larger than the TX FIFO once nobody
+// is reading - and with ignore_dtr set that is any enumerated board whose tty
+// is merely closed (LEDs keep running on core 1; input, commands and the probe
+// die until a terminal opens). This is the one choke point every CDC write
+// passes through, so the bound lives here: keep the fake "connected" only
+// while the FIFO is actually moving, and once it has been full this long with
+// no reader say disconnected so the writer DROPS the rest - the same
+// wait-then-drop contract as jl_cdc_wait_writable() (snakes/Python_Proper.cpp),
+// whose 100 ms this matches. It re-arms the moment a host starts reading, so a
+// DTR-less host that IS draining never sees a gap.
+#define JL_IGNORE_DTR_STALL_US 100000u
+
+// us of "FIFO full, nobody reading", per CDC instance; 0 = not stalled.
+// Written from whichever core prints - a torn read can only mis-time one
+// window, never fabricate connectivity, so no lock.
+static volatile uint32_t s_ignoreDtrStallUs[CFG_TUD_CDC] = {0};
+
 __attribute__((used))
 bool __wrap_tud_cdc_n_connected(uint8_t itf)
 {
-  // If DTR ignore mode is enabled, just check if USB is ready
-  // (not if DTR is set by the host)
-  if (g_usb_ignore_dtr) {
-    return tud_ready();
+  // Not in DTR ignore mode: the original behavior, which requires DTR to be
+  // set. Unchanged, including for an out-of-range itf.
+  if (!g_usb_ignore_dtr) {
+    return __real_tud_cdc_n_connected(itf);
   }
-  
-  // Otherwise, use the original behavior which requires DTR to be set
-  return __real_tud_cdc_n_connected(itf);
+
+  if (itf >= CFG_TUD_CDC) return false;   // the FIFO probe below indexes by itf
+
+  if (!tud_ready()) {
+    s_ignoreDtrStallUs[itf] = 0;
+    return false;
+  }
+
+  // A host that really did assert DTR gets exactly today's answer; only the
+  // FAKED connectivity is bounded.
+  if (__real_tud_cdc_n_connected(itf) || tud_cdc_n_write_available(itf) > 0) {
+    s_ignoreDtrStallUs[itf] = 0;
+    return true;
+  }
+
+  uint32_t now = time_us_32();
+  if (s_ignoreDtrStallUs[itf] == 0) {
+    s_ignoreDtrStallUs[itf] = now ? now : 1;   // 0 is the not-stalled sentinel
+    return true;
+  }
+  return (now - s_ignoreDtrStallUs[itf]) < JL_IGNORE_DTR_STALL_US;
 }
 
 // Initialize CDC configuration based on jumperlessConfig

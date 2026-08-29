@@ -32,6 +32,11 @@
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
+#include "sensing/PartClassify.h"  // part_identify binding
+#include "sensing/PartMeasure.h"   // part_fingerprint binding (Tier-1 clamps)
+#include "partdb/PartDb.h"         // fingerprint matching (match= field)
+#include "PartsApp.h"              // part_vectors binding (Tier-3 runner)
+#include "Undo.h"                  // UndoIngestGuard - placements are not undoable
 #include "ProjectsApp.h" // projectOpenLatestOrNew (load_project's name form)
 #include "WaveGen.h"
 #include "externVars.h" // For fs_mutex filesystem synchronization
@@ -1249,15 +1254,43 @@ const char* jl_get_path_info( int pathIdx ) {
     return pathBuffer;
 }
 
+// ── Bridge scratch buffers ──────────────────────────────────────────────────
+// The three big string-returning APIs (get_all_paths / fs_read /
+// overlay_serialize) used to keep permanent function-local static buffers
+// (~12 KB of .bss on V5). Their pointer contract is only "valid until the
+// next call", so each keeps ONE lazily-allocated heap block instead,
+// released at MicroPython teardown (jl_bridge_free_scratches, called from
+// deinitMicroPythonProper). A session that never calls an API never
+// allocates its buffer. Ownership stays on this side deliberately: a
+// malloc'd return freed by the MP wrapper would leak on any mp_obj_new_*
+// MemoryError (nlr_jump skips the free).
+static char* s_allPathsScratch = nullptr;
+static char* s_fsReadScratch = nullptr;
+static char* s_overlayScratch = nullptr;
+
+static char* bridgeScratch( char** slot, size_t size ) {
+    if ( *slot == nullptr ) *slot = (char*)malloc( size );
+    if ( *slot != nullptr ) ( *slot )[ 0 ] = '\0';
+    return *slot;
+}
+
+void jl_bridge_free_scratches( void ) {
+    free( s_allPathsScratch ); s_allPathsScratch = nullptr;
+    free( s_fsReadScratch );   s_fsReadScratch = nullptr;
+    free( s_overlayScratch );  s_overlayScratch = nullptr;
+}
+
 // Get all active paths as a formatted string
 // Returns count, followed by each path on a new line
 const char* jl_get_all_path_info( void ) {
 #if defined(OG_JUMPERLESS)
-    static char allPathsBuffer[ 1024 ]; // RP2040: scarce SRAM, fewer paths fit
+    const size_t kAllPathsSize = 1024; // RP2040: scarce SRAM, fewer paths fit
 #else
-    static char allPathsBuffer[ 4096 ]; // Large buffer for multiple paths
+    const size_t kAllPathsSize = 4096; // Large buffer for multiple paths
 #endif
-    allPathsBuffer[ 0 ] = '\0';
+    char* allPathsBuffer = bridgeScratch( &s_allPathsScratch, kAllPathsSize );
+    if ( allPathsBuffer == nullptr )
+        return "0\n"; // alloc failed: report zero paths (wrapper atoi's this)
 
     // Note: Paths should already be computed by refreshLocalConnections()
     // We don't recompute here to avoid unnecessary overhead
@@ -1272,12 +1305,12 @@ const char* jl_get_all_path_info( void ) {
     Serial.println( numPaths );
 
     // First line: number of paths
-    pos += snprintf( allPathsBuffer + pos, sizeof( allPathsBuffer ) - pos, "%d\n", numPaths );
+    pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos, "%d\n", numPaths );
 
     // Each subsequent line: path info
-    for ( int i = 0; i < numPaths && pos < sizeof( allPathsBuffer ) - 256; i++ ) {
+    for ( int i = 0; i < numPaths && pos < (int)kAllPathsSize - 256; i++ ) {
         const pathStruct& path = globalState.connections.paths[ i ];
-        pos += snprintf( allPathsBuffer + pos, sizeof( allPathsBuffer ) - pos,
+        pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos,
                          "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                          path.node1, path.node2, path.net,
                          path.chip[ 0 ], path.chip[ 1 ], path.chip[ 2 ], path.chip[ 3 ],
@@ -1879,6 +1912,9 @@ int jl_project_begin_run( const char* name ) {
 // is single-threaded, so there is no second builder.
 static PartDefinition placeScratch;
 
+int jl_remove_part( const char* name );  // defined below; place_part's
+                                         // replace-on-identity calls it
+
 // Charset guard for every user string that reaches serializeParts RAW.
 // Strings that arrive through the YAML path are pre-filtered by the line
 // scanner; API strings are not, and the serializer emits them verbatim:
@@ -1912,12 +1948,14 @@ static bool partStringSafe( const char* s, const char* what ) {
 //   connect: row 1-60 or any node name parseNodeName() resolves (GND, TOP_RAIL...)
 //   class:   signal|power|gnd|nc
 // footprint "" (default) infers sipN from the highest pin/offset listed, so a
-// 2-leg part just works; pass "dip8" for real DIP geometry (row MUST be
-// 31-60, pin 1's bottom-half hole) or "axial2" to straddle the ravine
-// (row MUST be 1-30; pin 2 lands at row+30).
+// 2-leg part just works; pass "dip8" for real DIP geometry (row = pin 1's
+// REAL hole, either half: 31-60 = dot bottom-left, 1-30 = rotated 180 with
+// pin 1 top-right) or "axial2" to straddle the ravine (row MUST be 1-30;
+// pin 2 lands at row+30).
 // Returns 0 on success, -1 on failure (reason printed).
 int jl_place_part( const char* name, int row, const char* pins_json,
-                   const char* footprint, const char* type, const char* value ) {
+                   const char* footprint, const char* type, const char* value,
+                   const char* part_id ) {
     if ( name == nullptr || name[ 0 ] == '\0' || strlen( name ) > 15 ) {
         Serial.println( "place_part: name must be 1-15 characters" );
         return -1;
@@ -1925,6 +1963,7 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     // Guard BEFORE anything is appended: these three are serialized raw.
     if ( !partStringSafe( name, "name" ) ) return -1;
     if ( !partStringSafe( type, "type" ) ) return -1;
+    if ( part_id != nullptr && !partStringSafe( part_id, "part_id" ) ) return -1;
     if ( !partStringSafe( value, "value" ) ) return -1;
     if ( globalState.parts.findByName( name ) >= 0 ) {
         Serial.print( "place_part: a part named " );
@@ -1944,6 +1983,7 @@ int jl_place_part( const char* name, int row, const char* pins_json,
     strncpy( p.name, name, sizeof( p.name ) - 1 );
     if ( type != nullptr ) strncpy( p.typeStr, type, sizeof( p.typeStr ) - 1 );
     if ( value != nullptr ) strncpy( p.value, value, sizeof( p.value ) - 1 );
+    if ( part_id != nullptr ) strncpy( p.partId, part_id, sizeof( p.partId ) - 1 );
     p.baseRow = (int16_t)row;
 
     // Footprint: explicit dipN/sipN, else inferred below from the pins.
@@ -2032,12 +2072,38 @@ int jl_place_part( const char* name, int row, const char* pins_json,
         }
     }
 
+    // Re-placing the same identity in the same spot is an UPDATE, not a
+    // clone (the PartsApp commit applies the same rule): every existing
+    // placed part with the same part_id + baseRow + footprint comes out
+    // first through the full removal discipline.
+    if ( p.partId[ 0 ] != '\0' ) {
+        for ( int i = 0; i < globalState.parts.numParts; ) {
+            const PartDefinition& q = globalState.parts.parts[ i ];
+            if ( q.placed && q.baseRow == p.baseRow &&
+                 q.footprint == p.footprint &&
+                 strcmp( q.partId, p.partId ) == 0 ) {
+                Serial.print( "place_part: replacing " );
+                Serial.println( q.name );
+                char victim[ 16 ];
+                strncpy( victim, q.name, sizeof( victim ) - 1 );
+                victim[ sizeof( victim ) - 1 ] = '\0';
+                jl_remove_part( victim );
+                continue;   // same index now holds the next part
+            }
+            i++;
+        }
+    }
+
     // Hold core-1 frames while the state changes, release BEFORE the refresh
     // (refreshConnections calls waitCore2 internally) - the jl_nodes_clear
     // pattern.
     holdCore1Frames( );
     delayMicroseconds( 50 );
 
+    // Placements are NOT undoable (the PartsApp contract): the bridge halves
+    // land in the undo stream but the parts-table halves cannot, so recording
+    // them desyncs the two and undone power bridges resurrect on reboot.
+    UndoIngestGuard undoGuard;
     globalState.parts.parts[ globalState.parts.numParts++ ] = p;
     int idx = globalState.parts.numParts - 1;
     String applyErr;
@@ -2069,6 +2135,10 @@ int jl_place_part( const char* name, int row, const char* pins_json,
 // remove_part(name): pull the expansion bridges, drop the {NAME}_{PIN} net
 // names the part owned, and remove the entry from the table.
 // Returns 0 on success, -1 when there is no such part.
+// The highlight stack holds raw part indices; every removal path must
+// invalidate them (Highlighting.cpp - see the audit note there).
+extern "C" void highlightingInvalidatePartFocus( void );
+
 int jl_remove_part( const char* name ) {
     if ( name == nullptr || name[ 0 ] == '\0' ) {
         Serial.println( "remove_part: empty name" );
@@ -2097,6 +2167,10 @@ int jl_remove_part( const char* name ) {
     holdCore1Frames( );
     delayMicroseconds( 50 );
 
+    // Mirror of place_part: the per-bridge removals would be recorded while the
+    // table compaction below cannot be, so an undo would re-add bridges for a
+    // part that no longer exists.
+    UndoIngestGuard undoGuard;
     String err;
     removePartPlacement( globalState, idx, err );
     // Drop the entry itself (placed=false alone would leave it in the YAML).
@@ -2105,6 +2179,7 @@ int jl_remove_part( const char* name ) {
     }
     globalState.parts.numParts--;
     globalState.markDirty( );
+    highlightingInvalidatePartFocus( );   // raw indices just went stale
 
     releaseCore1Frames( );
 
@@ -2130,6 +2205,91 @@ int jl_remove_part( const char* name ) {
         globalState.markDirty( );
     }
 
+    return 0;
+}
+
+// remove_part_pin(name, pin[, rowHint]): drop ONE leg from a placed part -
+// its bridge, its auto net name, its record entry - leaving the rest of the
+// part in place. Removing the LAST leg removes the part itself (Kevin's
+// ruling, 2026-08-27: "if we remove every node from a part... we should
+// also remove the part"). Same canonical discipline as remove_part, scoped
+// to one pin. rowHint (-1 = none) disambiguates DUPLICATE pin names - the
+// seed DB ships parts with two GND legs (pinout 75's sip10 displays), and
+// a bare first-name-match would remove the wrong one (audit, 2026-08-27).
+extern "C" int jl_remove_part_pin( const char* name, const char* pinName,
+                                   int rowHint ) {
+    if ( name == nullptr || name[ 0 ] == '\0' || pinName == nullptr ||
+         pinName[ 0 ] == '\0' ) {
+        Serial.println( "remove_part_pin: empty name" );
+        return -1;
+    }
+    int idx = globalState.parts.findByName( name );
+    if ( idx < 0 ) {
+        Serial.print( "remove_part_pin: no part named " );
+        Serial.println( name );
+        return -1;
+    }
+    PartDefinition& p = globalState.parts.parts[ idx ];
+    int pj = -1;
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        if ( strcmp( p.pins[ j ].name, pinName ) != 0 ) continue;
+        if ( rowHint >= 1 && partPinNode( p, p.pins[ j ] ) != rowHint ) continue;
+        pj = j;
+        break;
+    }
+    if ( pj < 0 ) {
+        Serial.print( "remove_part_pin: no pin named " );
+        Serial.print( pinName );
+        Serial.print( " on " );
+        Serial.println( name );
+        return -1;
+    }
+    if ( p.numPins <= 1 ) {
+        return jl_remove_part( name );   // the last node takes the part along
+    }
+
+    char autoName[ 32 ];
+    makePinNetName( p, p.pins[ pj ], autoName );
+
+    holdCore1Frames( );
+    delayMicroseconds( 50 );
+    // Same undo contract as remove_part: the bridge removal would be
+    // recorded while the record edit below cannot be.
+    UndoIngestGuard undoGuard;
+    {
+        // the pin's own bridge, if it has one (removePartPlacement's idiom)
+        const PartPin& pin = p.pins[ pj ];
+        if ( pin.connect >= 0 ) {
+            int node = partPinNode( p, pin );
+            if ( node >= 0 && globalState.hasConnection( node, pin.connect ) ) {
+                String rerr;
+                globalState.removeConnection( node, pin.connect, rerr );
+            }
+        }
+    }
+    for ( int j = pj; j < p.numPins - 1 && j < MAX_PART_PINS - 1; j++ ) {
+        p.pins[ j ] = p.pins[ j + 1 ];
+    }
+    p.numPins--;
+    globalState.markDirty( );
+    highlightingInvalidatePartFocus( );   // pin indices just shifted
+    releaseCore1Frames( );
+
+    refreshConnections( -1, 1, 0 );
+
+    // With the nets rebuilt, clear the pin's surviving auto name (the same
+    // sweep remove_part runs over its whole pin list).
+    bool cleared = false;
+    for ( int n = 1; n < MAX_NETS; n++ ) {
+        const char* nm = globalState.display.getNetName( n );
+        if ( nm != nullptr && strcmp( nm, autoName ) == 0 ) {
+            globalState.display.removeNetName( n );
+            cleared = true;
+        }
+    }
+    if ( cleared ) {
+        globalState.markDirty( );
+    }
     return 0;
 }
 
@@ -2227,6 +2387,206 @@ int jl_guide_progress( void ) {
         return -1;
     }
     return (int)globalState.parts.guideStep;
+}
+
+// part_identify(row1, row2 [, row3]): electrically identify the part on the
+// given rows (see src/sensing/PartClassify.*). Returns one machine-parseable
+// line; status<0 explains a refusal (-3 = a row has user wiring, -4 = a row
+// reads powered, -2 = machinery busy). Runs a full measurement session
+// (~0.5-3s) - the rows must hold an isolated part, nothing else wired.
+const char* jl_part_identify( int row1, int row2, int row3 ) {
+    static char idBuffer[ 384 ];
+#if defined( OG_JUMPERLESS )
+    // V5-only (DESIGN_PART_ID_FOLLOWUP): the OG has neither the INA1 shunt
+    // nor the same ISENSE fabric - refuse honestly instead of measuring noise.
+    (void)row1; (void)row2; (void)row3;
+    snprintf( idBuffer, sizeof( idBuffer ),
+              "type=UNKNOWN conf=0.00 value=0 value2=0 degraded=0 status=-2"
+              " lifted=0 rows= roles=" );   // same token set as the V5 line
+    return idBuffer;
+#else
+    PartResult res = ( row3 > 0 ) ? identifyThreeLead( row1, row2, row3 )
+                                  : identifyTwoLead( row1, row2 );
+    int pos = snprintf( idBuffer, sizeof( idBuffer ),
+                        "type=%s conf=%.2f value=%.4g value2=%.4g degraded=%d status=%d lifted=%d rows=",
+                        partTypeName( res.type ), (double)res.confidence,
+                        (double)res.value, (double)res.value2,
+                        res.degraded ? 1 : 0, (int)res.status, (int)res.lifted );
+    for ( int i = 0; i < res.nRows && pos > 0 && pos < (int)sizeof( idBuffer ) - 24; i++ )
+        pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, "%s%d",
+                         i ? "," : "", (int)res.rows[ i ] );
+    pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, " roles=" );
+    for ( int i = 0; i < res.nRows && pos > 0 && pos < (int)sizeof( idBuffer ) - 8; i++ )
+        pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, "%s%s",
+                         i ? "," : "", pinRoleName( res.roles[ i ] ) );
+    if ( res.type == PartType::LED && pos > 0 && pos < (int)sizeof( idBuffer ) - 40 )
+        pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, " color=%s",
+                         partLedColorGuess( res.value ) );
+    // raw evidence for HIL assertions and debugging
+    if ( res.status == 0 && pos > 0 && pos < (int)sizeof( idBuffer ) - 120 ) {
+        if ( res.nRows == 3 ) {
+            pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos, " map=" );
+            for ( int a = 0; a < 3 && pos > 0; a++ )
+                for ( int b = 0; b < 3 && pos < (int)sizeof( idBuffer ) - 12; b++ )
+                    pos += snprintf( idBuffer + pos, sizeof( idBuffer ) - pos,
+                                     "%s%.2f", ( a || b ) ? "," : "",
+                                     (double)res.jmap[ a ][ b ] );
+        } else {
+            snprintf( idBuffer + pos, sizeof( idBuffer ) - pos,
+                      " screen=%.3f,%.3f,%.3f,%.3f",
+                      (double)res.screen[ 0 ], (double)res.screen[ 1 ],
+                      (double)res.screen[ 2 ], (double)res.screen[ 3 ] );
+        }
+    }
+    return idBuffer;
+#endif // OG_JUMPERLESS
+}
+
+// part_fingerprint(base_row, width, gnd_row, vdd_row): Tier-1 unpowered
+// clamp fingerprint of a bottom-anchored dipN (DESIGN_IC_IDENTIFICATION.md
+// 5.1). Pin order is the DIP U with pin 1 = base_row (dot bottom-left,
+// PartDefinition::nodeForPin geometry). fp= is one char per pin:
+//   '-' rail pin   'x' unprobed (x-pin row / session refused)
+//   'N' open both ways          'G' junction to GND only
+//   'V' junction to VDD only    'B' junction both ways
+//   'R' a resistive path in either direction (not an ESD clamp)
+// pins= carries the evidence: row:<gnd><vdd>:vfGnd:vfVdd per pin, where the
+// letters are o/j/r (open/junction/resistive) and Vf is at 1 mA. ~0.5s per
+// probed pin; the rows must be unpowered (the session refuses otherwise).
+const char* jl_part_clamp_fingerprint( int baseRow, int width, int gndRow,
+                                       int vddRow ) {
+    static char fpBuffer[ 768 ];
+#if defined( OG_JUMPERLESS )
+    (void)baseRow; (void)width; (void)gndRow; (void)vddRow;
+    snprintf( fpBuffer, sizeof( fpBuffer ), "status=-2 fp= pins=" );
+    return fpBuffer;
+#else
+    int nPins = 2 * width;
+    if ( baseRow < 31 || baseRow > 60 || width < 2 ||
+         baseRow + width - 1 > 60 || nPins > MAX_PART_PINS ) {
+        snprintf( fpBuffer, sizeof( fpBuffer ), "status=-1 fp= pins=" );
+        return fpBuffer;
+    }
+    int rows[ MAX_PART_PINS ];
+    for ( int k = 1; k <= nPins; k++ )
+        rows[ k - 1 ] = ( k <= width ) ? baseRow + ( k - 1 )
+                                       : ( baseRow - 30 ) + ( nPins - k );
+    static ClampPin pins[ MAX_PART_PINS ];
+    int probed = partScanClampFingerprint( rows, nPins, gndRow, vddRow, pins );
+    if ( probed < 0 ) {
+        snprintf( fpBuffer, sizeof( fpBuffer ), "status=%d fp= pins=", probed );
+        return fpBuffer;
+    }
+    // The measured fp string (PartDb.h alphabet) - built once, printed AND
+    // matched against every same-size DIP record carrying a fingerprint.
+    char fp[ MAX_PART_PINS + 1 ];
+    for ( int i = 0; i < nPins; i++ ) {
+        const ClampPin& p = pins[ i ];
+        char c;
+        if ( p.row == gndRow || p.row == vddRow ) c = '-';
+        else if ( !p.probed ) c = 'x';
+        else if ( p.toGnd == PART_CLAMP_RESISTIVE ||
+                  p.toVdd == PART_CLAMP_RESISTIVE ) c = 'T';
+        else if ( p.toGnd == PART_CLAMP_JUNCTION &&
+                  p.toVdd == PART_CLAMP_JUNCTION ) c = 'B';
+        else if ( p.toGnd == PART_CLAMP_JUNCTION ) c = 'G';
+        else if ( p.toVdd == PART_CLAMP_JUNCTION ) c = 'V';
+        else c = 'N';
+        fp[ i ] = c;
+    }
+    fp[ nPins ] = '\0';
+
+    int pos = snprintf( fpBuffer, sizeof( fpBuffer ),
+                        "status=0 gnd=%d vdd=%d n=%d probed=%d fp=%s",
+                        gndRow, vddRow, nPins, probed, fp );
+
+    // Top-3 partdb candidates by ascending fingerprint mismatch, both
+    // orientations (the scan can't know which corner pin 1 is - the 'r'
+    // suffix = the 180-rotated alignment fit better, which is itself the
+    // pin-1 answer). Ties stay ties (5.4: never guess what the physics
+    // can't distinguish) - the caller sees the counts and decides.
+    struct { uint16_t rec; int miss; int rot; } best[ 3 ];
+    int nBest = 0;
+    for ( uint16_t i = 0; i < partdb_numRecords; i++ ) {
+        const PartDbRecord& r = partdb_records[ i ];
+        const PartDbPinout& po = partdb_pinouts[ r.pinoutIdx ];
+        if ( po.footprint != PARTDB_FOOT_DIP ) continue;
+        if ( (int)po.pinCount != nPins ) continue;
+        int rot = 0;
+        int miss = partdbFingerprintMismatchOriented( r, fp, &rot );
+        if ( miss < 0 ) continue;
+        int at = nBest;
+        while ( at > 0 && best[ at - 1 ].miss > miss ) at--;
+        if ( at >= 3 ) continue;
+        if ( nBest < 3 ) nBest++;
+        for ( int k = nBest - 1; k > at; k-- ) best[ k ] = best[ k - 1 ];
+        best[ at ].rec = i;
+        best[ at ].miss = miss;
+        best[ at ].rot = rot;
+    }
+    pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, " match=" );
+    for ( int k = 0; k < nBest && pos > 0 &&
+                     pos < (int)sizeof( fpBuffer ) - 24; k++ )
+        pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, "%s%s:%d%s",
+                         k ? "," : "", partdb_records[ best[ k ].rec ].id,
+                         best[ k ].miss, best[ k ].rot ? "r" : "" );
+
+    pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, " pins=" );
+    const char code[ 3 ] = { 'o', 'j', 'r' };
+    for ( int i = 0; i < nPins && pos > 0 &&
+                     pos < (int)sizeof( fpBuffer ) - 28; i++ ) {
+        const ClampPin& p = pins[ i ];
+        pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos,
+                         "%s%d:%c%c:%.2f:%.2f", i ? "," : "", p.row,
+                         code[ p.toGnd ], code[ p.toVdd ], (double)p.vfGnd,
+                         (double)p.vfVdd );
+    }
+    return fpBuffer;
+#endif // OG_JUMPERLESS
+}
+
+// part_vectors(base_row, width, gnd_row, vdd_row): Tier-3 powered
+// truth-table identification of a bottom-anchored dipN whose rails are
+// known (DESIGN_IC_IDENTIFICATION.md 5.2). Per candidate tried:
+// id:pass|fail@<step>|refused, with an 'r' prefix on the id's verdict when
+// the rails forced the 180-rotated orientation. POWERS THE CHIP - the
+// runner owns the safety discipline (GND first, current-limited, INA
+// watchdog, board-powered pre-check, teardown on every exit).
+const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow ) {
+    static char vecBuffer[ 384 ];
+#if defined( OG_JUMPERLESS )
+    (void)baseRow; (void)width; (void)gndRow; (void)vddRow;
+    snprintf( vecBuffer, sizeof( vecBuffer ), "status=-2 tried=0" );
+    return vecBuffer;
+#else
+    VectorIdentifyResult res[ 8 ];
+    int n = partsVectorIdentify( baseRow, width, gndRow, vddRow, res, 8 );
+    if ( n < 0 ) {
+        snprintf( vecBuffer, sizeof( vecBuffer ), "status=-1 tried=0" );
+        return vecBuffer;
+    }
+    int nPass = 0;
+    for ( int i = 0; i < n; i++ )
+        if ( res[ i ].verdict == 1 ) nPass++;
+    int pos = snprintf( vecBuffer, sizeof( vecBuffer ),
+                        "status=0 tried=%d pass=%d cands=", n, nPass );
+    for ( int i = 0; i < n && pos > 0 &&
+                     pos < (int)sizeof( vecBuffer ) - 40; i++ ) {
+        const PartDbRecord& rec = partdb_records[ res[ i ].recIdx ];
+        pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos, "%s%s%s:",
+                         i ? "," : "", rec.id, res[ i ].rotated ? "(r)" : "" );
+        if ( res[ i ].verdict == 1 )
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "pass" );
+        else if ( res[ i ].verdict == 0 )
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "fail@%d", (int)res[ i ].failStep );
+        else
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "refused" );
+    }
+    return vecBuffer;
+#endif // OG_JUMPERLESS
 }
 
 // OLED Functions
@@ -2821,16 +3181,16 @@ extern "C" int jl_check_switch_position( void ) {
 // enable: 1 = on, 0 = off (temporary, until reboot), -1 = query current state
 extern "C" int jl_probe_autoconnect( int enable ) {
     if ( enable == -1 ) {
-        return jumperlessConfig.dacs.auto_connect_probe;
+        return jumperlessConfig.probe.auto_connect;
     }
     if ( enable ) {
-        jumperlessConfig.dacs.auto_connect_probe = 1;
+        jumperlessConfig.probe.auto_connect = 1;
         probing.routableBufferPower( 1, 0, 1 );
     } else {
-        jumperlessConfig.dacs.auto_connect_probe = 0;
+        jumperlessConfig.probe.auto_connect = 0;
         probing.routableBufferPower( 0, 0, 1 );
     }
-    return jumperlessConfig.dacs.auto_connect_probe;
+    return jumperlessConfig.probe.auto_connect;
 }
 
 // Clickwheel (Rotary Encoder) Functions
@@ -2952,23 +3312,26 @@ char* jl_fs_read_file( const char* path ) {
     if ( !path )
         return nullptr;
 
-    // Use static buffer for file contents
+    // Per-VM-lifetime scratch (see bridgeScratch above)
 #if defined(OG_JUMPERLESS)
-    static char fileBuffer[ 1024 ]; // RP2040: scarce SRAM, smaller max read via this API
+    const size_t kFsReadSize = 1024; // RP2040: scarce SRAM, smaller max read via this API
 #else
-    static char fileBuffer[ 4096 ];
+    const size_t kFsReadSize = 4096;
 #endif
+    char* fileBuffer = bridgeScratch( &s_fsReadScratch, kFsReadSize );
+    if ( fileBuffer == nullptr )
+        return nullptr; // alloc failed: wrapper maps this to None
     size_t bytesRead = 0;
 
-    if ( !safeFileReadAll( path, fileBuffer, sizeof( fileBuffer ), &bytesRead, 2000 ) ) {
+    if ( !safeFileReadAll( path, fileBuffer, kFsReadSize, &bytesRead, 2000 ) ) {
         return nullptr;
     }
 
     // Ensure null termination so text consumers (e.g. VFS readers) don't overrun
-    if ( bytesRead < sizeof( fileBuffer ) ) {
+    if ( bytesRead < kFsReadSize ) {
         fileBuffer[ bytesRead ] = '\0';
     } else {
-        fileBuffer[ sizeof( fileBuffer ) - 1 ] = '\0';
+        fileBuffer[ kFsReadSize - 1 ] = '\0';
     }
 
     return fileBuffer;
@@ -3505,6 +3868,13 @@ void jl_fs_flush( void* file_handle ) {
 
 // Directory operations - all require mutex for thread safety
 // Returns 0 on success, negative errno on failure
+//
+// USB MSC guard (same chokepoint rule as jl_fs_open_file above): while a host
+// has the disk mounted it caches the FAT, so any firmware mutation behind its
+// back corrupts the host's view. These raw FatFS paths bypass the safe*
+// wrappers entirely, so each one has to refuse for itself.
+extern bool usbMountedByHost; // USBfs.h
+
 int jl_fs_mkdir( const char* path ) {
     if ( !path )
         return -EIO; // Invalid argument
@@ -3542,6 +3912,12 @@ int jl_fs_mkdir( const char* path ) {
     // Directory doesn't exist - try to create it
     // CRITICAL: Pause Core2 during flash write (directory creation modifies flash)
     fs_mutex_release( ); // Release before pausing Core2
+
+    // Guard the WRITE only: the exists() check above is a read, so an
+    // "ensure directory" call still reports -EEXIST while mounted.
+    if ( usbMountedByHost )
+        return -EROFS; // read-only while the USB host holds the disk
+
     bool was_paused = pauseCore2ForFlash( 100 );
     fs_mutex_acquire( ); // Reacquire after pause
     
@@ -3566,6 +3942,9 @@ int jl_fs_rmdir( const char* path ) {
     if ( !path )
         return 0;
 
+    if ( usbMountedByHost )
+        return 0; // read-only while the USB host holds the disk
+
     AsyncPassthrough::suspendUARTRxIRQ( );
     bool was_paused = pauseCore2ForFlash( 100 );
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
@@ -3581,6 +3960,9 @@ int jl_fs_remove( const char* path ) {
     if ( !path )
         return 0;
 
+    if ( usbMountedByHost )
+        return 0; // read-only while the USB host holds the disk
+
     AsyncPassthrough::suspendUARTRxIRQ( );
     bool was_paused = pauseCore2ForFlash( 100 );
     fs_mutex_acquire( ); // THREAD SAFETY: Lock filesystem
@@ -3595,6 +3977,9 @@ int jl_fs_remove( const char* path ) {
 int jl_fs_rename( const char* pathFrom, const char* pathTo ) {
     if ( !pathFrom || !pathTo )
         return 0;
+
+    if ( usbMountedByHost )
+        return 0; // read-only while the USB host holds the disk
 
     AsyncPassthrough::suspendUARTRxIRQ( );
     bool was_paused = pauseCore2ForFlash( 100 );
@@ -3744,7 +4129,12 @@ int jl_overlay_set(const char* name, int startRow, int startCol,
  */
 int jl_overlay_clear(const char* name) {
     if (!name) return 0;
-    return graphicOverlayState.removeOverlay(name) ? 1 : 0;
+    if (!graphicOverlayState.removeOverlay(name)) return 0;
+    // Clear-first NETS render: the -2 the removal itself posts is a menu
+    // flush, and a GFX-owned context (fx menu, staged graphics) never
+    // consumes its clear - the removed pixels stay latched on the strip.
+    requestLedShow(-1);
+    return 1;
 }
 
 /**
@@ -3752,6 +4142,7 @@ int jl_overlay_clear(const char* name) {
  */
 void jl_overlay_clear_all(void) {
     graphicOverlayState.clearAll();
+    requestLedShow(-1);   // see jl_overlay_clear
 }
 
 /**
@@ -3801,17 +4192,23 @@ int jl_overlay_place(const char* name, int row, int col) {
  * @return Pointer to static string buffer containing JSON
  */
 char* jl_overlay_serialize(void) {
+    // Per-VM-lifetime scratch (see bridgeScratch above)
 #if defined(OG_JUMPERLESS)
-    static char overlayBuffer[256]; // RP2040: graphic overlays are out on OG
+    const size_t kOverlaySize = 256; // RP2040: graphic overlays are out on OG
 #else
-    static char overlayBuffer[4096];
+    const size_t kOverlaySize = 4096;
 #endif
+    char* overlayBuffer = bridgeScratch(&s_overlayScratch, kOverlaySize);
+    if (overlayBuffer == nullptr) {
+        // The MP wrapper strlen()s the return unconditionally - never NULL.
+        static char emptyOverlay[1] = { '\0' };
+        return emptyOverlay;
+    }
     String json;
     serializeOverlaysToJSON(json);
     
-    // Copy to static buffer
-    strncpy(overlayBuffer, json.c_str(), sizeof(overlayBuffer) - 1);
-    overlayBuffer[sizeof(overlayBuffer) - 1] = '\0';
+    strncpy(overlayBuffer, json.c_str(), kOverlaySize - 1);
+    overlayBuffer[kOverlaySize - 1] = '\0';
     
     return overlayBuffer;
 }

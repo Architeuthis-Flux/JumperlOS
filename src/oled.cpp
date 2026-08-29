@@ -19,6 +19,7 @@
 #include "States.h"
 #include "WaveGen.h" // shared-I2C0 gate in show() checks wavegen.isRunning()
 #include "Wire.h"
+#include "boards/board.h"     // currentBoard().caps.hasOled (OG gate)
 #include "config.h"
 #include "configManager.h"
 
@@ -59,6 +60,13 @@ static Adafruit_SSD1306 _defaultDisplay(128, 32, &Wire1, -1);
 static Adafruit_SSD1306* _displayPtr = &_defaultDisplay;
 static int _currentDisplayWire = 1;  // Track which Wire is currently active (0 = Wire, 1 = Wire1)
 static bool _displayIsDynamic = false;  // Track if _displayPtr was dynamically allocated
+// Raw geometry the CURRENT display object was constructed with, which is what
+// begin() sizes the framebuffer from. The Adafruit_SSD1306 constructor takes
+// uint8_t w/h, so these are the truncated values - config width/height can be
+// larger (the menu offers up to 2048) and must never be used to size a copy
+// into getBuffer(). Initialized to _defaultDisplay's geometry.
+static int _createdDisplayWidth = 128;
+static int _createdDisplayHeight = 32;
 
 // I2C clock for the OLED's own transfers (the panel's rating). On I2C1 the OLED
 // is the only device, so clkDuring == clkAfter == this and the driver never
@@ -106,6 +114,17 @@ static int oledI2cPing(TwoWire& wire, uint8_t address) {
 // Function to get display reference - avoids macro conflicts with display() method name
 // Declared in oled.h for use by other files
 Adafruit_SSD1306& getDisplay() { return *_displayPtr; }
+
+// The GFX framebuffer is malloc'd by begin(), not by the constructor, so it is
+// NULL on any display object that has not been begun (the static placeholder,
+// or a recreated instance whose begin() failed). Every Adafruit_GFX draw call
+// indexes that pointer with no null check of its own - drawPixel writes it and
+// clearDisplay memsets it - so any path that paints the framebuffer has to ask
+// first. Not a connection test: painting while the panel is absent is
+// deliberate (see stillWriteToFramebuffer at oled::init).
+static bool oledFramebufferReady( ) {
+    return _displayPtr != nullptr && _displayPtr->getBuffer( ) != nullptr;
+}
 
 // Initialize or reinitialize display with the correct Wire based on connection_type
 // Returns true if display was (re)created, false if already using correct Wire.
@@ -159,6 +178,10 @@ bool initDisplayForConnectionType(int connectionType) {
 
     _displayIsDynamic = true;
     _currentDisplayWire = needWire;
+    // Mirror the constructor's uint8_t truncation: this, not config's
+    // width/height, is what begin() sizes the framebuffer from.
+    _createdDisplayWidth = (uint8_t)width;
+    _createdDisplayHeight = (uint8_t)height;
     return true;
 }
 
@@ -543,9 +566,49 @@ bool loadBitmapFromFile( const char* filepath ) {
 void oled::displayBitmap( int x, int y, const unsigned char* bitmap, int width, int height ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
         return;
-    
+    if ( !oledFramebufferReady( ) )
+        return;
+
     getDisplay().drawBitmap( x, y, bitmap, width, height, 1 );
 }
+
+// Shared-I2C0 reinit window (#38). show() and oledPeriodic already refuse to
+// touch Wire while wavegen holds it, but init() is the one path that MUST talk
+// to it - and it is a whole sequence, not a transaction: initI2C()'s
+// Wire.setSDA()/setSCL()/setClock()/begin() reprogram the I2C block, the
+// connection ping and the SSD1306 command stream ride on top. The I2C0 arbiter
+// only wraps whole SDK transactions, so it cannot cover the register writes in
+// between, and on the legacy fallback wavegen's per-sample loop is on core 1
+// with no lock at all. So instead of skipping (there is nothing to skip to) or
+// refusing (Kevin: the wave "kinda takes up the whole i2c bus" - mitigate, do
+// not forbid), quiesce wavegen for the whole init and let it resume after: one
+// gap in the waveform instead of a bus collision. Only for connection_type 2 -
+// on I2C1 the OLED owns the bus alone and nothing has to yield.
+extern "C" int wavegenBusWindowEnter( uint32_t maxMs );   // 0 = nothing to quiesce, 1 = quiesced, 2 = core-1 loop did not park in time
+extern "C" void wavegenBusWindowExit( void );
+
+namespace {
+struct OledSharedBusWindow {
+    bool held;
+    explicit OledSharedBusWindow( int targetWire ) : held( false ) {
+        if ( targetWire != 0 )
+            return;   // I2C1: OLED-exclusive, no one to wait for
+        int st = wavegenBusWindowEnter( 2000 );
+        if ( st == 0 )
+            return;   // no wave running (the common case): silent
+        held = true;
+        Serial.println( st == 2
+            ? "  wave did not park in time - OLED reinit on the shared I2C0 bus may glitch it"
+            : "  wave paused - OLED reinit owns the shared I2C0 bus" );
+    }
+    ~OledSharedBusWindow( ) {
+        if ( held )
+            wavegenBusWindowExit( );
+    }
+    OledSharedBusWindow( const OledSharedBusWindow& ) = delete;
+    OledSharedBusWindow& operator=( const OledSharedBusWindow& ) = delete;
+};
+}   // namespace
 
 // Initialization
 int oled::init( ) {
@@ -571,7 +634,11 @@ int oled::init( ) {
     // Type 3 = custom (via crossbar, NOT hardwired) - uses I2C1 (Wire1)
     int connType = jumperlessConfig.top_oled.connection_type;
     oledUsingHardwiredPins = ( connType == 1 || connType == 2 );
-    
+
+    // Hold the shared bus for everything below (see OledSharedBusWindow): the
+    // whole init is one window, released on every return path.
+    OledSharedBusWindow busWindow( connType == 2 ? 0 : 1 );
+
     #if OLED_DEBUG
     Serial.printf("[OLED] init(): addr=0x%02X, connType=%d, hardwired=%d\n", address, connType, oledUsingHardwiredPins);
     #endif
@@ -643,7 +710,15 @@ int oled::init( ) {
         currentFontFamily = FONT_EUROSTILE;
     }
 
-    getDisplay().begin( SSD1306_SWITCHCAPVCC, address, false, false );
+    // begin() returns false only when the framebuffer malloc fails, and it
+    // leaves getBuffer() NULL when it does. Everything below paints that
+    // buffer (clearDisplay is a bare memset), so bail out instead - the
+    // display stays marked unconnected and every draw path's
+    // oledFramebufferReady() gate keeps it that way.
+    if ( getDisplay().begin( SSD1306_SWITCHCAPVCC, address, false, false ) == false ) {
+        oledConnected = false;
+        return 0;
+    }
 
     //can give the oled some neat scanning effects that look like a crt
 
@@ -1291,6 +1366,8 @@ void oled::clearPrintShow( const char* text, int textSize, bool clear, bool show
     }
     if ( ( !oledConnected || !text ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     // Drawing our own content: let a persistent idle GUI page step aside.
     OledGui::getInstance().notePanelTakenByOther();
@@ -1521,6 +1598,7 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
                                bool topAnchor ) {
     if ( jumperlessConfig.top_oled.enabled == 0 ) return;
     if ( ( !oledConnected || !rows ) && stillWriteToFramebuffer == false ) return;
+    if ( !oledFramebufferReady( ) ) return;
     if ( rowCount < 1 ) return;
 
     // Drawing our own content: let a persistent idle GUI page step aside.
@@ -1624,8 +1702,19 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
         int baseline = y + rowH[r];
 
         // Flowing (INHERIT) segments pack together and the group is placed
-        // using the row's alignment.
-        int flowX = anchorX( row.align, flowW[r] );
+        // using the row's alignment. A JUSTIFY row spreads them instead:
+        // first flush left, last flush right, middles evenly interpolated
+        // (the part card's pin columns - the even spacing survives any mix
+        // of cell widths because it works from measured pixels).
+        bool justify = ( row.align == OLED_ALIGN_JUSTIFY );
+        int flowCount = 0;
+        if ( justify ) {
+            for ( int s = 0; s < n; s++ )
+                if ( row.segs[s].text && row.segs[s].text[0] &&
+                     row.segs[s].align == OLED_ALIGN_INHERIT )
+                    flowCount++;
+        }
+        int flowX = anchorX( justify ? OLED_ALIGN_LEFT : row.align, flowW[r] );
 
         int flowDrawn = 0;
         for ( int s = 0; s < n; s++ ) {
@@ -1638,7 +1727,20 @@ void oled::clearPrintShowRich( const OledTextRow* rows, int rowCount,
             currentFontFamily = fontList[fi].family;
 
             int x;
-            if ( row.segs[s].align == OLED_ALIGN_INHERIT ) {
+            if ( justify && row.segs[s].align == OLED_ALIGN_INHERIT ) {
+                // Match the LEFT pad and RIGHT margin the anchored rows use,
+                // so justified columns line up with LEFT/RIGHT rows above.
+                int xL = LEFT_JUSTIFY_TOP;
+                int xR = displayWidth - 5;
+                if ( flowCount <= 1 ) {
+                    x = ( displayWidth - segW[r][s] ) / 2;
+                } else {
+                    x = xL + flowDrawn * ( xR - xL - segW[r][s] ) /
+                                 ( flowCount - 1 );
+                }
+                if ( x < 0 ) x = 0;
+                flowDrawn++;
+            } else if ( row.segs[s].align == OLED_ALIGN_INHERIT ) {
                 if ( flowDrawn > 0 ) flowX += gap;
                 x = flowX;
                 flowX += segW[r][s];
@@ -1775,6 +1877,8 @@ void oled::clearPrintShow( const char* text, int textSize, FontFamily family, bo
     }
     if ( ( !oledConnected || !text ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     // Drawing our own content: let a persistent idle GUI page step aside.
     OledGui::getInstance().notePanelTakenByOther();
@@ -1898,6 +2002,8 @@ void oled::displayMultiLineText( const char* text, bool center ) {
     int start = 0;
 
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
     int pos = 0;
 
@@ -2169,6 +2275,8 @@ void oled::clearPrintShow( const String& text, int textSize, FontFamily family, 
 void oled::print( const char* s ) {
     if ( ( !oledConnected || !s ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     // Auto-adjust cursor if at top of screen - simplified
     int16_t currentY = getDisplay().getCursorY( );
@@ -2199,6 +2307,8 @@ void oled::print( const String& s ) {
 void oled::print( int i ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     getDisplay().print( i );
     charPos += String( i ).length( );
 }
@@ -2206,12 +2316,16 @@ void oled::print( int i ) {
 void oled::print( float f ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     getDisplay().print( f );
     charPos += String( f ).length( );
 }
 
 void oled::print( char c ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
     getDisplay().print( c );
     charPos += 1;
@@ -2247,6 +2361,10 @@ bool oled::clear( int waitToFinish ) {
         return false;
     }
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false ) {
+        charPos = 0;
+        return false;
+    }
+    if ( !oledFramebufferReady( ) ) {
         charPos = 0;
         return false;
     }
@@ -2421,6 +2539,8 @@ void oled::invertDisplay( bool inv ) {
 void oled::printSmallText( const char* text, int16_t x, int16_t y, bool clear ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     if ( clear ) {
         getDisplay().clearDisplay( );
@@ -2449,6 +2569,8 @@ void oled::printSmallText( const char* text, int16_t x, int16_t y, bool clear ) 
 
 void oled::printSmallTextLine( const char* text, int line, bool clear ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
 
     if ( clear ) {
@@ -2484,6 +2606,8 @@ void oled::printSmallTextLine( const char* text, int line, bool clear ) {
 
 void oled::clearLine( int line ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
 
     // Clear a specific line by drawing a black rectangle
@@ -2572,6 +2696,8 @@ void oled::showFileStatusBreadboard( const char* lineTop7, const char* lineBotto
 void oled::showFileStatusScrolled( const char* visibleText, int fileCount, int cursorPosition ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     // Clear display
     clearFramebuffer( );
@@ -2648,6 +2774,8 @@ void oled::showFileStatusScrolled( const char* visibleText, int fileCount, int c
 
 void oled::showMultiLineSmallText( const char* text, bool clear, bool show ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
 
     // Static line buffer for terminal-like scrolling
@@ -2823,7 +2951,9 @@ void oled::resetMultiLineSmallText() {
 void oled::showSmallTextBuffer( const SmallTextDisplayConfig& config ) {
     if ( !oledConnected && stillWriteToFramebuffer == false )
         return;
-    
+    if ( !oledFramebufferReady( ) )
+        return;
+
     if ( !config.text )
         return;
     
@@ -2983,6 +3113,8 @@ int startupDisplayed = 0;
 void oled::showJogo32h( ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     // If a persistent OLED-GUI screen is registered (oledgui show(persist=True)),
     // it takes the logo's place as the idle display. Drawing it here is what
@@ -3102,6 +3234,16 @@ static int oledHoldComputeBufferSize( int w, int h ) {
     return w * ( ( h + 7 ) / 8 );
 }
 
+// Bytes begin() actually malloc'd for the CURRENT display object, or 0 if it
+// has no framebuffer. Keyed to the geometry the object was BUILT with, never
+// to config-backed displayWidth/displayHeight: those two desync whenever the
+// panel size is changed at runtime, and every shadow memcpy below runs against
+// the live buffer. Returns 0 so callers degrade instead of copying a stale size.
+static int oledLiveBufferSize( ) {
+    if ( !oledFramebufferReady( ) ) return 0;
+    return oledHoldComputeBufferSize( _createdDisplayWidth, _createdDisplayHeight );
+}
+
 bool oledHoldActive( ) {
     uint32_t until = holdUntilMs;
     return until != 0 && (int32_t)(until - millis()) > 0;
@@ -3119,7 +3261,7 @@ void oled::oledHoldBegin( uint32_t durationMs ) {
         oledHold( durationMs );
         return;
     }
-    int needSize = oledHoldComputeBufferSize( displayWidth, displayHeight );
+    int needSize = oledLiveBufferSize( );
     if ( needSize <= 0 ) {
         oledHold( durationMs );
         return;
@@ -3178,9 +3320,14 @@ void oled::oledHoldBegin( uint32_t durationMs ) {
 static void oledHoldStashAfterPriorityFlush() {
     if ( !oledHoldArmed ) return;
     // Defensive: clear the latch on any abnormal state so a stale arm
-    // doesn't corrupt the next priority flush.
+    // doesn't corrupt the next priority flush. The size check is not
+    // redundant with oledHoldBegin's: the arm can outlive a geometry change
+    // (the flush that would consume it takes an early return, then the panel
+    // size is changed from the menu and the display object is rebuilt), and
+    // both memcpys below run at the arm-time size against the NEW framebuffer.
     if ( oledHoldShadow == nullptr || oledHoldShadowSize == 0 ||
-         _displayPtr == nullptr ) {
+         _displayPtr == nullptr ||
+         oledHoldShadowSize != oledLiveBufferSize( ) ) {
         oledHoldArmed = false;
         return;
     }
@@ -3209,11 +3356,14 @@ bool oled::oledIsHeld( ) const {
 // so we read from the panel shadow (updated at every priority flush)
 // to make the terminal-side dump match what the user actually sees on
 // the OLED. When no hold is active or the panel shadow isn't allocated
-// (OOM, hold never started), fall back to the live framebuffer - which
-// in those states equals the panel.
+// (OOM, hold never started, or it was sized for a geometry the display no
+// longer has), fall back to the live framebuffer - which in those states
+// equals the panel. Every consumer walks the returned buffer with the CURRENT
+// displayWidth/displayHeight, so a shadow that doesn't match the live
+// allocation would be read past its end.
 static uint8_t* oledGetDumpBuffer() {
     if ( oledHoldActive() && oledPanelShadow != nullptr &&
-         oledPanelShadowSize > 0 ) {
+         oledPanelShadowSize > 0 && oledPanelShadowSize == oledLiveBufferSize( ) ) {
         return oledPanelShadow;
     }
     if ( _displayPtr != nullptr ) {
@@ -3544,6 +3694,19 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
         return;
     }
 
+    // [top_oled] show_in_terminal picks the mirror target: 1..4 = the four
+    // USB CDC ports as they enumerate on the host (JLV5port1/3/5/7), 5 = the
+    // hardware UART. port_1 keeps the historical Jerial path (fans out to
+    // the main terminal plus any registered endpoints).
+    Stream* mirror = (Stream*)&Jerial;
+    switch ( jumperlessConfig.top_oled.show_in_terminal ) {
+        case 2: mirror = (Stream*)&USBSer1; break;  // port_3
+        case 3: mirror = (Stream*)&USBSer2; break;  // port_5
+        case 4: mirror = (Stream*)&USBSer3; break;  // port_7
+        case 5: mirror = (Stream*)&Serial1; break;  // uart
+        default: break;                             // port_1 / on
+    }
+
     // Skip manual positioning if windowing system is active
     // extern struct config jumperlessConfig;
     // bool useWindowing = jumperlessConfig.windowing.enabled &&
@@ -3551,20 +3714,20 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
 
     // if (!useWindowing) {
     // Legacy positioning for non-windowing mode
-    saveCursorPosition( &Jerial );
-    Jerial.printf( "\033[%d;%dH", y_pos - 1, x_pos + 1 );
-    Jerial.printf( "\033[0K" );
-    Jerial.printf( "\033[1B" );
-    Jerial.printf( "\033[0K" );
+    saveCursorPosition( mirror );
+    mirror->printf( "\033[%d;%dH", y_pos - 1, x_pos + 1 );
+    mirror->printf( "\033[0K" );
+    mirror->printf( "\033[1B" );
+    mirror->printf( "\033[0K" );
     // }
     // Windowing mode: WindowManager handles all positioning
 
     if ( border == 1 ) {
-        Jerial.println( "╭────────────────────────────────────────────────────────────────╮" );
+        mirror->println( "╭────────────────────────────────────────────────────────────────╮" );
     } else if ( border == 2 ) {
-        Jerial.println( "▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖" );
+        mirror->println( "▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖" );
     } else {
-        Jerial.println( "                                                                  " );
+        mirror->println( "                                                                  " );
     }
 
     // Quarter block characters for different pixel combinations
@@ -3589,14 +3752,14 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
 
     // Process framebuffer in 2x2 blocks to create 64x16 output
     for ( int blockRow = 0; blockRow < displayHeight / 2; blockRow++ ) {
-        Jerial.printf( "\033[%dC", x_pos );
-        Jerial.printf( "\033[0K" );
+        mirror->printf( "\033[%dC", x_pos );
+        mirror->printf( "\033[0K" );
         if ( border == 1 ) {
-            Jerial.print( "│" ); // Left border
+            mirror->print( "│" ); // Left border
         } else if ( border == 2 ) {
-            Jerial.print( "▐" ); // Left border
+            mirror->print( "▐" ); // Left border
         } else {
-            Jerial.print( " " ); // Left border
+            mirror->print( " " ); // Left border
         }
 
         for ( int blockCol = 0; blockCol < displayWidth / 2; blockCol++ ) {
@@ -3625,30 +3788,30 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
             }
 
             // Print the appropriate quarter block character
-            Jerial.print( quarterBlocks[ pixelMask ] );
+            mirror->print( quarterBlocks[ pixelMask ] );
         }
 
         if ( border == 1 ) {
-            Jerial.println( "│" ); // Right border and newline
+            mirror->println( "│" ); // Right border and newline
         } else if ( border == 2 ) {
-            Jerial.println( "▌" ); // Right border and newline
+            mirror->println( "▌" ); // Right border and newline
         } else {
-            Jerial.println( " " ); // Right border and newline
+            mirror->println( " " ); // Right border and newline
         }
     }
-    Jerial.printf( "\033[%dC", x_pos );
-    Jerial.printf( "\033[0K" );
+    mirror->printf( "\033[%dC", x_pos );
+    mirror->printf( "\033[0K" );
     if ( border == 1 ) {
-        Jerial.println( "╰────────────────────────────────────────────────────────────────╯" );
+        mirror->println( "╰────────────────────────────────────────────────────────────────╯" );
     } else if ( border == 2 ) {
-        Jerial.println( "▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘" );
+        mirror->println( "▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘" );
     } else {
-        Jerial.println( "                                                                  " );
+        mirror->println( "                                                                  " );
     }
     // if (!useWindowing) {
     // Legacy cursor restoration for non-windowing mode
-    Jerial.printf( "\033[%dB", y_pos - ( displayHeight / 2 ) + 2 );
-    Jerial.printf( "\033[50B" );
+    mirror->printf( "\033[%dB", y_pos - ( displayHeight / 2 ) + 2 );
+    mirror->printf( "\033[50B" );
     // }
     // Windowing mode: WindowManager handles all cursor management
     dumpingToSerial = false;
@@ -3823,10 +3986,10 @@ void oled::setSmallFont( SmallFont smallFont ) {
     int fontIndex;
     switch ( smallFont ) {
     case SMALL_FONT_UBUNTU:
-        fontIndex = 20; // ubuntu5pt7b
+        fontIndex = 30; // ubuntu5pt7b
         break;
     case SMALL_FONT_DOTGOTHIC:
-        fontIndex = 21; // DotGothic16_Regular4pt7b
+        fontIndex = 31; // DotGothic16_Regular4pt7b
         break;
     case SMALL_FONT_JOKERMAN:
         fontIndex = 2; // Jokerman8pt7b
@@ -3835,19 +3998,19 @@ void oled::setSmallFont( SmallFont smallFont ) {
         fontIndex = 12; // ANDALEMO5pt7b - monospaced for text highlighting
         break;
     case SMALL_FONT_IOSEVKA_REGULAR:
-        fontIndex = 18; // IosevkaSS08_Regular9pt
+        fontIndex = 24; // IosevkaSS08_Regular9pt
         break;
     case SMALL_FONT_IOSEVKA_5PT:
-        fontIndex = 22; // IosevkaSS08_Light5pt
+        fontIndex = 32; // IosevkaSS08_Light5pt
         break;
     case SMALL_FONT_PRAGMATISM_5PT:
-        fontIndex = 23; // Pragmatism5pt
+        fontIndex = 16; // Pragmatism5pt
         break;
     case SMALL_FONT_FREEMONO_5PT:
-        fontIndex = 24; // FreeMono5pt
+        fontIndex = 33; // FreeMono5pt
         break;
     case SMALL_FONT_ENVYCODE_5PT:
-        fontIndex = 25; // EnvyCodeRNerdFont_Regular5pt
+        fontIndex = 34; // EnvyCodeRNerdFont_Regular5pt
         break;
     default:
         fontIndex = 12; // Default to Andale Mono
@@ -3861,6 +4024,8 @@ void oled::setSmallFont( SmallFont smallFont ) {
 void oled::useSmallFont( SmallFont smallFont, const char* text, int16_t x, int16_t y, bool clear ) {
     if ( ( !oledConnected || !text ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
 
     if ( clear ) {
         getDisplay().clearDisplay( );
@@ -3873,6 +4038,8 @@ void oled::useSmallFont( SmallFont smallFont, const char* text, int16_t x, int16
 
 void oled::useSmallFontAndRestore( SmallFont smallFont, const char* text, int16_t x, int16_t y, bool clear, bool showw ) {
     if ( ( !oledConnected || !text ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
 
     if ( clear ) {
@@ -3915,11 +4082,15 @@ void oled::restoreNormalFont( ) {
 void oled::drawLine( int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     getDisplay().drawLine( x0, y0, x1, y1, color );
 }
 
 void oled::fillRect( int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
     getDisplay().fillRect( x, y, w, h, color );
 }
@@ -3928,17 +4099,23 @@ void oled::fillRect( int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color 
 void oled::clearFramebuffer( ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     getDisplay().clearDisplay( );
 }
 
 void oled::setPixel( int16_t x, int16_t y, uint16_t color ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     getDisplay().drawPixel( x, y, color );
 }
 
 void oled::drawChar( int16_t x, int16_t y, char c ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
     int16_t savedX = getDisplay().getCursorX( );
     int16_t savedY = getDisplay().getCursorY( );
@@ -3950,6 +4127,8 @@ void oled::drawChar( int16_t x, int16_t y, char c ) {
 void oled::drawText( int16_t x, int16_t y, const char* text ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     int16_t savedX = getDisplay().getCursorX( );
     int16_t savedY = getDisplay().getCursorY( );
     getDisplay().setCursor( x, y );
@@ -3959,6 +4138,8 @@ void oled::drawText( int16_t x, int16_t y, const char* text ) {
 
 void oled::drawHighlightedChar( int16_t x, int16_t y, char c ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
 
     // Get character bounds for background rectangle
@@ -4221,6 +4402,8 @@ void oled::moveCursorTerm( int x, int y ) {
 void oled::clearToEndOfLine( ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     int x = termCursorX * 6;
     int y = termCursorY * 8;
     getDisplay().fillRect( x, y, displayWidth - x, 8, SSD1306_BLACK );
@@ -4229,12 +4412,16 @@ void oled::clearToEndOfLine( ) {
 void oled::clearLine( ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
         return;
+    if ( !oledFramebufferReady( ) )
+        return;
     int y = termCursorY * 8;
     getDisplay().fillRect( 0, y, displayWidth, 8, SSD1306_BLACK );
 }
 
 void oled::clearToEndOfScreen( ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
     clearToEndOfLine( );
 
@@ -4246,6 +4433,8 @@ void oled::clearToEndOfScreen( ) {
 
 void oled::clearScreen( ) {
     if ( ( !oledConnected ) && stillWriteToFramebuffer == false )
+        return;
+    if ( !oledFramebufferReady( ) )
         return;
     getDisplay().clearDisplay( );
     termCursorX = 0;
@@ -4439,6 +4628,13 @@ bool probeOledOnInternalI2C0(uint8_t address) {
 // after the probe to bound any future "OLED disappeared" stalls on this
 // bus (see probeOledOnInternalI2C0()).
 bool autoDetectAndConfigureOled(void) {
+    // OG has no OLED and no internal I2C0 bus to probe, so an ACK from
+    // whatever is on those pins must never promote hardware.revision or
+    // re-point connection_type on a board that can't use either.
+    if ( !board::currentBoard( ).caps.hasOled ) {
+        return false;
+    }
+
     uint8_t oledAddr = (uint8_t)( jumperlessConfig.top_oled.i2c_address & 0x7F );
     if ( oledAddr == 0 ) {
         oledAddr = 0x3C; // SSD1306 default
@@ -4507,7 +4703,7 @@ int defaultOledConnectionTypeForRevision(int revision) {
     return 0; // GPIO 7/8 via crossbar
 }
 
-// Tear down the OLD I2C peripheral if (and ONLY if) it was Wire1.
+// Tear down Wire1 unless the OLED is staying on I2C0.
 //
 // Wire1 is OLED-exclusive on V5, so ending it is safe and is required to
 // avoid the same-bus pin-swap hang -- Earle Philhower's setSDA/setSCL/begin
@@ -4521,9 +4717,16 @@ int defaultOledConnectionTypeForRevision(int revision) {
 // down on failed I2C0 traffic. So we leave Wire alone -- the OLED is just
 // one of multiple devices on it, and initI2C() reconfigures pins/clock as
 // needed for the new connection_type.
-static void teardownOldOledBus(int oldConnectionType) {
-    bool wasOnWire1 = (oldConnectionType != 2);
-    if (wasOnWire1) {
+//
+// "Was the OLED on Wire1" is NOT the same question as "is Wire1 running":
+// i2cScan() leaves Wire1 begun on the scan pins even when the OLED lives on
+// I2C0, so leaving type 2 for a Wire1 type would hit the same pin-swap PANIC.
+// End Wire1 unless the new type keeps the OLED on I2C0 too (a no-op move).
+// TwoWire::end() returns early when it isn't running, so the extra call is
+// free on a bus nobody started.
+static void teardownOldOledBus(int oldConnectionType, int newConnectionType) {
+    bool bothOnI2C0 = (oldConnectionType == 2 && newConnectionType == 2);
+    if (!bothOnI2C0) {
         Wire1.end();
         delay(50);
     }
@@ -4543,7 +4746,7 @@ bool applyOledConnectionType(int newConnectionType, bool reinitDisplay, bool per
     oled.disconnect();
 
     // End Wire1 if appropriate (Wire stays alive for DAC + INA219 sensors).
-    teardownOldOledBus(oldConnType);
+    teardownOldOledBus(oldConnType, newConnectionType);
 
     // Single source of truth for pins/rows/hardwired-flag/connection_type.
     updateOledPinsForConnectionType(newConnectionType);

@@ -8,8 +8,12 @@
 # I2C breakout modules on SIP headers (pin 1..N left-to-right, components
 # toward you). i2c: lists the ACK addresses ('lo-hi' = contiguous range);
 # whoami: is reg=value[&mask], read-only, only ever read from declared
-# registers. DS3231 (0x68, no WHO_AM_I) vs MPU6050 (0x68, WHO_AM_I) is the
-# auto-detect disambiguation pair.
+# registers; whoami2: an optional second read that must ALSO match (the
+# Bosch BMP3xx / Sensirion two-read idents, REF_COMPONENT_TESTER 6.5).
+# probe_order: sequences candidates sharing an address (REF 6.3): WHO_AM_I
+# holders ~50, ordered follow-ups ~80, heuristics ~150-200, registerless
+# last-resorts ~220. DS3231 (0x68, no WHO_AM_I) vs MPU6050 (0x68, WHO_AM_I)
+# is the canonical disambiguation pair.
 
 class: MODULE
 
@@ -22,6 +26,10 @@ class: MODULE
   pop: 1
   i2c: [0x68, 0x69]
   whoami: 0x75=0x68&0x7E
+  # PWR_MGMT_1 wakes at POR with only the SLEEP bit set - a cheap second
+  # signature an RTC or EEPROM at 0x68 can't fake
+  whoami2: 0x6B=0x40&0x40
+  probe_order: 50
   pins: [VCC, GND, SCL, SDA, XDA, XCL, AD0=ADDR, INT]
 
 - id: bme280
@@ -32,6 +40,7 @@ class: MODULE
   pop: 2
   i2c: [0x76, 0x77]
   whoami: 0xD0=0x60
+  probe_order: 50
   # VERIFY: 6-pin GY-BME280 breakout order (4-pin VIN GND SCL SDA also common)
   pins: [VCC, GND, SCL, SDA, CSB, SDO]
 
@@ -43,8 +52,36 @@ class: MODULE
   pop: 3
   i2c: [0x76, 0x77]
   whoami: 0xD0=0x58
+  probe_order: 50
   # VERIFY: same GY- breakout header as the BME280
   pins: [VCC, GND, SCL, SDA, CSB, SDO]
+
+- id: bmp388
+  name: BMP388
+  desc: Precision pressure sensor I2C
+  subclass: sensor
+  package: sip6
+  pop: 4
+  i2c: [0x76, 0x77]
+  # Bosch moved CHIP_ID to register 0x00 for the BMP3xx family (REF 6.3) -
+  # asked AFTER the 0xD0 generation so a BME280's calibration bytes at 0x00
+  # never get read as an ID
+  whoami: 0x00=0x50
+  probe_order: 80
+  # VERIFY: GY-BMP388 breakout header order
+  pins: [VCC, GND, SCL, SDA, SDO, CS]
+
+- id: bmp390
+  name: BMP390
+  desc: Precision pressure sensor I2C
+  subclass: sensor
+  package: sip6
+  pop: 5
+  i2c: [0x76, 0x77]
+  whoami: 0x00=0x60
+  probe_order: 80
+  # VERIFY: same breakout family as the BMP388
+  pins: [VCC, GND, SCL, SDA, SDO, CS]
 
 - id: ads1115
   name: ADS1115
@@ -53,6 +90,8 @@ class: MODULE
   package: sip10
   pop: 2
   i2c: [0x48-0x4B]
+  # no ID register (REF 6.3) - config-POR heuristics only, ask late
+  probe_order: 200
   pins: [VDD, GND, SCL, SDA, ADDR, ALRT, A0, A1, A2, A3]
 
 - id: pcf8574
@@ -62,6 +101,9 @@ class: MODULE
   package: sip13
   pop: 1
   i2c: [0x20-0x27]
+  # registerless (ignores the pointer, returns the live port byte) - the
+  # last resort at its addresses
+  probe_order: 220
   # VERIFY: generic expander-board header (PCF8574A variant is 0x38-0x3F -
   # NOT aliased here on purpose)
   pins: [VCC, GND, SDA, SCL, INT, P0, P1, P2, P3, P4, P5, P6, P7]
@@ -74,6 +116,9 @@ class: MODULE
   aliases: [ZS-042]
   pop: 1
   i2c: [0x68]
+  # no ID register: BCD-plausibility heuristic - always asked AFTER the
+  # MPU's WHO_AM_I at the shared 0x68
+  probe_order: 200
   # VERIFY: ZS-042 module header order 32K SQW SCL SDA VCC GND
   pins: [32K, SQW, SCL, SDA, VCC, GND]
 
@@ -84,5 +129,8 @@ class: MODULE
   package: sip4
   pop: 1
   i2c: [0x50-0x57]
+  # registerless, and a probe with a payload can DESTROY data (REF 6.2) -
+  # the last resort; module hint: an RTC at 0x68 claims 0x57 as its EEPROM
+  probe_order: 220
   # VERIFY: standalone module header order
   pins: [GND, VCC, SDA, SCL]

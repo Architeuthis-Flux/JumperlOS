@@ -41,6 +41,11 @@
 // Forward declare the type - it's defined in extmod/machine_pwm.c
 extern const mp_obj_type_t machine_pwm_type;
 
+// Register a PWM takeover of a display-bus pin (src/displays/DisplayBus.cpp).
+// Declared locally rather than through a header, the machine_pin_jl.c:26
+// precedent for jl_gpio_claim_pin.
+extern void jl_display_bus_pwm_taken(int pin);
+
 /******************************************************************************/
 // MicroPython bindings for machine.PWM
 
@@ -169,6 +174,14 @@ static mp_obj_t mp_machine_pwm_make_new(const mp_obj_type_t *type, size_t n_args
 
     // Select PWM function for given GPIO.
     gpio_set_function(gpio, GPIO_FUNC_PWM);
+
+    // machine.PWM(24) with a bare int builds no machine.Pin, so nothing here
+    // registered a claim: the display service kept bit-banging soft-I2C into
+    // a pad this call just muxed to PWM ("8 bus errors - re-beaconing", with
+    // the waveform on the panel's SDA row). Newer owner wins - hand the pin
+    // over through the same bookkeeping jumperless.pwm() uses. No-op for
+    // every pin that is not a display-bus pin.
+    jl_display_bus_pwm_taken((int)gpio);
 
     return MP_OBJ_FROM_PTR(self);
 }

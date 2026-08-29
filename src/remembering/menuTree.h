@@ -21,6 +21,27 @@ String menuLines[150] = {
   "-*Add**Remove**",
   // "-->c2",
   
+  // Top-level, childless: selecting it walks off the end of its (empty)
+  // submenu range into doMenuAction, the same way Files and History do, and
+  // getActionCategory()'s "Parts" branch sends it to APPSACTION ->
+  // runApp(-1, "Parts"). Placed at the head of the "things you run"
+  // cluster, after the wiring tools (Rails/Connect/Output/Show).
+  //
+  // The row was "Projects" through wave 2 and "Guides" through the first
+  // ambient slice; Kevin retired Guides as a menu-level concept at the
+  // 2026-08-24 bench pass ("let's remove guides as a menu item and work on
+  // parts") - projects stay reachable via `z` and the Files browser. This
+  // string and the apps[] row { "Parts", ... } are ONE unit with the
+  // getActionCategory branch: "Parts" -> APPSACTION with the CHILD line as
+  // runApp's name arg (previousMenuPositions[1] - the 2-deep dispatch shape).
+  // The child text and the apps[] row name are ONE unit after
+  // normalizeSpaces ("-Place  \31Part" -> "Place Part").
+  "Parts",
+  "-Place  \31Part",
+  "-Test   \31Part",
+  "-Remove \31Parts",
+  "-Auto   \31Scan",
+
 
 
   "Output",
@@ -81,20 +102,6 @@ String menuLines[150] = {
  
  
 
-  // Top-level, childless: selecting it walks off the end of its (empty)
-  // submenu range into doMenuAction, the same way Files and History do, and
-  // getActionCategory()'s "Parts" branch sends it to APPSACTION ->
-  // runApp(-1, "Parts"). Placed at the head of the "things you run"
-  // cluster, after the wiring tools (Rails/Connect/Output/Show).
-  //
-  // The row was "Projects" through wave 2 and "Guides" through the first
-  // ambient slice; Kevin retired Guides as a menu-level concept at the
-  // 2026-08-24 bench pass ("let's remove guides as a menu item and work on
-  // parts") - projects stay reachable via `z` and the Files browser. This
-  // string and the apps[] row { "Parts", ... } are ONE unit with the
-  // getActionCategory branch: the menu line's own text IS runApp's name arg.
-  // 5 glyphs, renders whole on the LED half-row.
-  "Parts",
 
   "Apps",
   "-Bounce \31Startup",

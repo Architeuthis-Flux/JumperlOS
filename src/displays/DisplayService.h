@@ -50,6 +50,12 @@ public:
     // quietly retrying its way through every frame.
     void printStats(Stream* out) const;
 
+    // Test-surface query (Parts > Test): is the display bound to this part
+    // name answering? 1 = ALIVE (panel acks, frames flushing; *frames = how
+    // many so far), 0 = tracked but not answering (beacon / yielded),
+    // -1 = this part is not the attached display.
+    int aliveStateFor(const char* partName, uint32_t* frames = nullptr) const;
+
 private:
     DisplayService() = default;
     ~DisplayService() = default;
@@ -62,7 +68,6 @@ private:
     uint8_t flushFails = 0;       // consecutive chunk errors (8 = panel lost)
     uint8_t initFails = 0;        // consecutive init failures (5 = slow beacon)
     uint8_t routeFails = 0;       // consecutive routing refusals (5 = slow poll)
-    bool allocWarned = false;     // one line per framebuffer-OOM episode
     char attachedName[16] = {0};  // part identity at attach (index can slide)
     uint32_t flushRetryTotal = 0; // cumulative chunk retries (glitch health)
     uint32_t lostTotal = 0;       // beacon bounces after 8-in-a-row failures

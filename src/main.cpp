@@ -330,15 +330,11 @@ void setup( ) {
     if ( jumperlessConfig.hardware.psram_installed && detectedPsram > 0 ) {
         bool ok = psram_arena_init( detectedPsram, jumperlessConfig.hardware.psram_app_size_kb );
         if ( ok ) {
-#if JL_BOOT_VERBOSE
             Serial.printf( "[PSRAM] App arena ready: %u KB free, MP region %u KB\n",
                 (unsigned)( psram_app_free( ) / 1024 ),
                 (unsigned)( psram_mp_size( ) / 1024 ) );
-#endif
         } else {
-#if JL_BOOT_VERBOSE
             Serial.println( "[PSRAM] App arena init failed - continuing without app cache" );
-#endif
         }
     }
 
@@ -381,13 +377,14 @@ void setup( ) {
         dumpLED = 1;
     }
 
+    // A UART in OLED mode gets the mirror via Jerial's endpoint fan-out, so
+    // just turn the mirror ON (port_1 = the Jerial path). The old 2/3 values
+    // predate show_in_terminal being a real port selector.
     if ( jumperlessConfig.serial_1.function == 4 ||
-         jumperlessConfig.serial_1.function == 6 ) {
-        jumperlessConfig.top_oled.show_in_terminal = 2;
-    }
-    if ( jumperlessConfig.serial_2.function == 4 ||
+         jumperlessConfig.serial_1.function == 6 ||
+         jumperlessConfig.serial_2.function == 4 ||
          jumperlessConfig.serial_2.function == 6 ) {
-        jumperlessConfig.top_oled.show_in_terminal = 3;
+        jumperlessConfig.top_oled.show_in_terminal = 1;
     }
 
     // Jerial.addOutputStream(JerialEndpoint::USB_SER2);  // Output to Serial1
@@ -411,7 +408,7 @@ void setup( ) {
     // When probe_led_on_button_pin is set, GPIO9 belongs to probeLEDs (claimed
     // in initLEDs() on core1, possibly concurrently with this code) - touching
     // it here would clobber its PIO funcsel.
-    if ( jumperlessConfig.hardware.probe_led_on_button_pin ) {
+    if ( jumperlessConfig.probe.led_on_button_pin ) {
         pinMode( PROBE_LED_PIN, INPUT_PULLDOWN );
     } else {
         pinMode( BUTTON_PIN, INPUT_PULLDOWN );
@@ -617,10 +614,11 @@ void setup( ) {
     // descriptor by now. No-op unless audio is enabled.
     usb_audio_boot_enumerate( );
     heapMark("usb audio enumerate");
-    // Printed here (debug builds only) and from the memory menu on demand.
-#if JL_BOOT_VERBOSE
-    heapLedgerPrint();
-#endif
+    // Printed here and not per-stage: most of the stages above run before USB
+    // enumerates, so a live print would have gone nowhere. Also reachable from
+    // the memory menu, which is where you want it after the board has been
+    // used for a while.
+    // heapLedgerPrint();
 #endif
     // Serial.println("Service registration complete");
     // Serial.flush();
@@ -829,6 +827,23 @@ menu:
             // probeCalibApp();
             firstStart = false;
         }
+
+        // Migration sentinel: probe.droop_ohms == 0 means the probe switch /
+        // droop calibration has never run on this board (it predates the
+        // pad/switch calibration apps). Run it once after the update - it's
+        // quick and self-guided; skipping it leaves the switch classifier on
+        // the empirical fallback constants.
+        if ( probeCalibrationNeeded == true && firstStart == false ) {
+            probeCalibrationNeeded = false;
+            changeTerminalColor( 213, true );
+            Serial.println( "\n\rThis firmware update added probe switch/droop "
+                            "calibration that this board has never run." );
+            Serial.println( "Starting Switch Calib now (also reachable later: "
+                            "clickwheel menu > Calibration > Switch Thresh)." );
+            changeTerminalColor( -1, true );
+            delay( 1500 );
+            calibrateProbeSwitchThresholds( );
+        }
         firstLoop = 2;
 
         // Decide which context to come up in BEFORE the first loadfile: pass.
@@ -868,7 +883,7 @@ menu:
         // left for the next ~500ms service tick). Verify the feed actually
         // routed and force one synchronous rebuild if not - the probe must be
         // powered and parked before the user's first tap, every boot.
-        if ( jumperlessConfig.dacs.auto_connect_probe > 0 &&
+        if ( jumperlessConfig.probe.auto_connect > 0 &&
              infraProbePowerSource( ) < 0 ) {
             refreshLocalConnections( 0, 1, 0 );
         }
@@ -991,7 +1006,7 @@ dontshowmenu:
 
     // Calculate whether to use line buffering (variables declared at function scope)
     hasRelayedData = ( Jerial.getRelayStream( ) && Jerial.getRelayStream( )->available( ) > 0 );
-    useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasRelayedData;
+    useLineBuffering = ( jumperlessConfig.terminal.line_buffering == 1 ) || hasRelayedData;
 
     // DEBUG DISABLED: Heartbeat markers removed to minimize USB pressure
     static uint32_t heartbeatCounter = 0;
@@ -1009,7 +1024,7 @@ dontshowmenu:
 
         // Recalculate useLineBuffering each iteration
         hasRelayedData = ( Jerial.getRelayStream( ) && Jerial.getRelayStream( )->available( ) > 0 );
-        useLineBuffering = ( jumperlessConfig.display.terminal_line_buffering == 1 ) || hasRelayedData;
+        useLineBuffering = ( jumperlessConfig.terminal.line_buffering == 1 ) || hasRelayedData;
 
         unsigned long loopStart = micros( );
 
@@ -1524,7 +1539,6 @@ unsigned long timingPrintInterval = 1000; // Print summary every 1000ms
 
 // Track LED show() calls
 unsigned long ledShowCallCount = 0;
-unsigned long ledShowTime = 0;
 unsigned long ledShowTotalTime = 0;
 unsigned long ledShowMinTime = 999999;
 unsigned long ledShowMaxTime = 0;
@@ -1535,8 +1549,6 @@ bool printPowerSupplySense = false;
 unsigned long powerSupplySenseTimer = 0;
 unsigned long powerSupplySenseRate = 1000;
 float supplySense = 9.10F;
-
-#define LED_SHOW_MIN_TIME 14
 
 void loop1( ) {
     // Would-be watchdog kick, core 1 (measure-only stage - see KickGap.h).
@@ -1671,6 +1683,28 @@ unsigned long lastForcedShow = 0;
 // DEBUG: Set to 1 to disable Core 2 processing for crash debugging
 #define DEBUG_DISABLE_CORE2_PROCESSING 0 // TEMP: Testing if crash is in Core 2
 
+// Set by ledClass::show() when the strip DMA was still busy and the composed
+// frame was not pushed to the wire (LEDs.cpp).
+extern volatile bool ledShowFrameDropped;
+
+// Give back a request that was taken but not rendered/shown. A raw post() ORs
+// the mode back in on top of whatever core 0 posted meanwhile (LED_NETS|LED_MENU
+// pending together), and the decode below serves MENU first - the full render
+// gets downgraded to a menu flush. postMode() re-applies the mode exclusively
+// and carries the same keep-rule requestLedShow() uses (Commands.cpp).
+// Re-post BEFORE completing the taken generation: in between, the slot would
+// read idle (bits 0, doneGen caught up) for a frame that is neither shown nor
+// pending, and core 0 polls exactly that (ledShowIdle - Probing.cpp's
+// wait-for-shown spins on it). doneGen is monotonic, so completing the older
+// generation after the new post is safe.
+static void repostLedShow( uint32_t bits, uint32_t gen ) {
+    const uint32_t mode = bits & core1req::LED_MODE_MASK;
+    core1req::postMode( core1req::REQ_SHOW_LEDS, core1req::LED_MODE_MASK, mode,
+                        bits & ~core1req::LED_MODE_MASK,
+                        mode == core1req::LED_MENU ? ( core1req::LED_NETS | core1req::LED_GFX ) : 0 );
+    core1req::complete( core1req::REQ_SHOW_LEDS, gen );
+}
+
 void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 {
     core2busy = false;
@@ -1782,6 +1816,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             // swirl-only pass, which renders exactly as the old rails == 0 did.
             uint32_t ledGen = 0;
             uint32_t taken = ledPending ? core1req::take( core1req::REQ_SHOW_LEDS, &ledGen ) : 0;
+            uint32_t repostBits = taken;   // what a re-post below still owes; a flag is dropped as it is consumed
             int rails = 0;   // 3 doesn't show nets and keeps control of the LEDs
             if ( taken & core1req::LED_GFX )       rails = 3;
             else if ( taken & core1req::LED_MENU ) rails = 2;
@@ -1813,7 +1848,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             if ( rails != 2 && rails != 3 &&
                  ( inClickMenu == 0 || SlotManager::getInstance( ).isPreviewMode( ) ||
                    g_historyScrubActive ) &&
-                 inPadMenu == 0 && hideNets == 0 ) {
+                 inPadMenu == 0 ) {
                 needsLedShow = true;
 
                 // Skip defcon display when previewing slots - always show nets
@@ -1833,6 +1868,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                         clearLEDsExceptRails( );
                         // Serial.println("clearing");
                         clearBeforeSend = 0;
+                        repostBits &= ~core1req::LED_CLEAR;
                     }
 
                     // Check the frame hold before long-running showNets() to allow quick exit for flash ops
@@ -1844,8 +1880,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                         // (sweep finding - taken-but-never-completed wedged
                         // the whole gated pipeline).
                         if ( taken ) {
-                            core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
-                            core1req::post( core1req::REQ_SHOW_LEDS, taken );
+                            repostLedShow( repostBits, ledGen );
                         }
                         core2busy = false;
                         core_sync_release( );
@@ -1910,8 +1945,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 if ( core1FramesHeld( ) ) {
                     ledFrameAbortsPause++;
                     if ( taken ) {   // see the showNets() abort above
-                        core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
-                        core1req::post( core1req::REQ_SHOW_LEDS, taken );
+                        repostLedShow( repostBits, ledGen );
                     }
                     core_sync_release( );
                     return;
@@ -1953,11 +1987,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 if ( useBlockingMode ) {
                     leds.showBBBlocking( );
                 } else {
-                    if ( micros( ) - ledShowTime > LED_SHOW_MIN_TIME ) {
-                        ledShowTime = micros( );
-
-                        leds.show( );
-                    }
+                    leds.show( );
                 }
                 lastForcedShow = millis( );
                 ledFramesShown++;         // X: strip frames shown by this branch (idle renders + requests)
@@ -1975,9 +2005,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
             // The request we took is done (a show posted while we rendered is
             // still pending in the slot and runs next pass). A staged-graphics
             // request is done too - its ownership persists as state, not as a
-            // pending request.
+            // pending request. Unless leds.show() found the strip DMA busy and
+            // skipped the transfer - then the composed frame never reached the
+            // wire, so hand the request back the same way the aborts above do.
             if ( taken ) {
-                core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                if ( needsLedShow && ledShowFrameDropped ) {
+                    repostLedShow( repostBits, ledGen );
+                } else {
+                    core1req::complete( core1req::REQ_SHOW_LEDS, ledGen );
+                }
                 uint8_t menuBits = (uint8_t)( ( inClickMenu ? 1 : 0 ) | ( inPadMenu ? 2 : 0 ) );
                 uint8_t prev = (uint8_t)( ( ledTakeLogIdx + 31 ) & 31 );
                 if ( ledTakeLog[ prev ].t != 0 && ledTakeLog[ prev ].bits == (uint8_t)taken && ledTakeLog[ prev ].rails == (uint8_t)rails &&

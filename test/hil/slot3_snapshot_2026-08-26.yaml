@@ -1,0 +1,160 @@
+version: 2
+sourceOfTruth: bridges
+
+bridges:
+  - {n1: 5, n2: GND, dup: 2}
+  - {n1: 6, n2: TOP_RAIL, dup: 2}
+  - {n1: 7, n2: RP_GPIO_6, dup: 2}
+  - {n1: 29, n2: GND, dup: 2}
+  - {n1: 28, n2: GND, dup: 2}
+  - {n1: 8, n2: RP_GPIO_5, dup: 2}
+  - {n1: 19, n2: TOP_RAIL, dup: 2}
+  - {n1: 17, n2: 59, dup: 2}
+  - {n1: 46, n2: GND, dup: 2}
+  - {n1: 10, n2: TOP_RAIL, dup: 3}
+  - {n1: RP_UART_Tx, n2: ISENSE_MINUS, dup: 2}
+
+nets:
+  - {num: 1, nodes: [GND, 5, 29, 28, 46], anim: true}
+  - {num: 2, nodes: [TOP_R, 6, 19, 10], anim: true}
+  - {num: 6, nodes: [7, GP_6], name: "SSD1306_32_I2C_SCL", anim: true}
+  - {num: 7, nodes: [8, GP_5], name: "SSD1306_32_I2C_SDA", anim: true}
+  - {num: 8, nodes: [17, 59], color: pink, name: "2N3906_E"}
+  - {num: 9, nodes: [UART_Tx, I_NEG], anim: true}
+
+power:
+  topRail: 3.40
+  bottomRail: 3.40
+  dac0: 2.00
+  dac1: 0.00
+
+config:
+  routing: {stackPaths: 2, stackRails: 3, stackDacs: 0, railPriority: 1}
+  gpio:
+    direction:    [1,1,1,1,1,1,1,0,1,1]
+    pulls:        [0,0,0,0,0,0,0,0,0,0]
+    pwmFrequency: [1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00]
+    pwmDutyCycle: [0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50]
+    pwmEnabled:   [0,0,0,0,0,0,0,0,0,0]
+    readFloating: [1,1,1,1,1,1,1,1,0,0]
+  uart: {txFunction: 0, rxFunction: 1}
+  oled: {connected: false, lockConnection: false}
+parts:
+  - name: "SSD1306_32_I2C"
+    type: ic
+    part_id: "ssd1306_32_i2c"
+    footprint: sip4
+    row: 5
+    placed: true
+    pins:
+      GND: {pin: 1, offset: 0, connect: GND, class: gnd}
+      VCC: {pin: 2, offset: 1, connect: TOP_RAIL, class: power}
+      SCL: {pin: 3, offset: 2, connect: RP_GPIO_6, class: signal}
+      SDA: {pin: 4, offset: 3, connect: RP_GPIO_5, class: signal}
+  - name: "2N3906"
+    type: bjt
+    part_id: "2N3906"
+    footprint: sip3
+    row: 17
+    placed: true
+    pins:
+      E: {pin: 1, offset: 0, class: signal}
+      B: {pin: 2, offset: 1, class: signal}
+      C: {pin: 3, offset: 2, class: signal}
+  - name: "2N3906_2"
+    type: bjt
+    part_id: "2N3906"
+    footprint: sip3
+    row: 17
+    placed: true
+    pins:
+      E: {pin: 1, offset: 0, class: signal}
+      B: {pin: 2, offset: 1, class: signal}
+      C: {pin: 3, offset: 2, class: signal}
+  - name: "SSD1306_32_I_2"
+    type: ic
+    part_id: "ssd1306_32_i2c"
+    footprint: sip4
+    row: 5
+    placed: true
+    pins:
+      GND: {pin: 1, offset: 0, class: gnd}
+      VCC: {pin: 2, offset: 1, class: power}
+      SCL: {pin: 3, offset: 2, class: signal}
+      SDA: {pin: 4, offset: 3, class: signal}
+  - name: "74153"
+    type: ic
+    part_id: "74153"
+    footprint: dip16
+    row: 40
+    placed: true
+    pins:
+      1G: {pin: 1, class: signal}
+      B: {pin: 2, class: signal}
+      1C3: {pin: 3, class: signal}
+      1C2: {pin: 4, class: signal}
+      1C1: {pin: 5, class: signal}
+      1C0: {pin: 6, class: signal}
+      1Y: {pin: 7, class: signal}
+      GND: {pin: 8, class: gnd}
+      2Y: {pin: 9, class: signal}
+      2C0: {pin: 10, class: signal}
+      2C1: {pin: 11, class: signal}
+      2C2: {pin: 12, class: signal}
+      2C3: {pin: 13, class: signal}
+      A: {pin: 14, class: signal}
+      2G: {pin: 15, class: signal}
+      VCC: {pin: 16, connect: TOP_RAIL, class: power}
+  - name: "7400"
+    type: ic
+    part_id: "7400"
+    footprint: dip14
+    row: 40
+    placed: true
+    pins:
+      1A: {pin: 1, class: signal}
+      1B: {pin: 2, class: signal}
+      1Y: {pin: 3, class: signal}
+      2A: {pin: 4, class: signal}
+      2B: {pin: 5, class: signal}
+      2Y: {pin: 6, class: signal}
+      GND: {pin: 7, class: gnd}
+      3Y: {pin: 8, class: signal}
+      3A: {pin: 9, class: signal}
+      3B: {pin: 10, class: signal}
+      4Y: {pin: 11, class: signal}
+      4A: {pin: 12, class: signal}
+      4B: {pin: 13, class: signal}
+      VCC: {pin: 14, class: power}
+  - name: "7400_2"
+    type: ic
+    part_id: "7400"
+    footprint: dip14
+    row: 40
+    placed: true
+    pins:
+      1A: {pin: 1, class: signal}
+      1B: {pin: 2, class: signal}
+      1Y: {pin: 3, class: signal}
+      2A: {pin: 4, class: signal}
+      2B: {pin: 5, class: signal}
+      2Y: {pin: 6, class: signal}
+      GND: {pin: 7, connect: GND, class: gnd}
+      3Y: {pin: 8, class: signal}
+      3A: {pin: 9, class: signal}
+      3B: {pin: 10, class: signal}
+      4Y: {pin: 11, class: signal}
+      4A: {pin: 12, class: signal}
+      4B: {pin: 13, class: signal}
+      VCC: {pin: 14, connect: TOP_RAIL, class: power}
+  - name: "2N3906_3"
+    type: bjt
+    part_id: "2N3906"
+    footprint: sip3
+    row: 17
+    placed: true
+    pins:
+      E: {pin: 1, offset: 0, class: signal}
+      B: {pin: 2, offset: 1, class: signal}
+      C: {pin: 3, offset: 2, class: signal}
+

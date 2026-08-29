@@ -119,7 +119,14 @@ enum OledAlign {
     OLED_ALIGN_RIGHT = 2,   // flush right
     // Segment-only: flow with the row's packed group using the row's align.
     // (Not valid as a row alignment - rows always pick a concrete anchor.)
-    OLED_ALIGN_INHERIT = 3
+    OLED_ALIGN_INHERIT = 3,
+    // Row-only: spread the row's flowing segments evenly across the panel -
+    // first flush left, last flush right, the rest interpolated between
+    // (one segment just centers). The even spacing comes from measured
+    // pixel widths, so nothing can leak off the panel the way fixed
+    // character-count layouts did. Segments with their own LEFT/CENTER/
+    // RIGHT anchor still break out and anchor independently.
+    OLED_ALIGN_JUSTIFY = 4
 };
 
 // A single text segment within a row. Each segment carries its own font

@@ -166,3 +166,31 @@ class: DISPLAY
   pop: 1
   # VERIFY: the famously scrambled 1088AS row/column map - confirm on datasheet
   pins: [R5, R7, C2, C3, R8, C5, R6, R3, R1, C4, C6, R4, C1, R2, C7, C8]
+
+# 7-segment LED digits, direct drive (no controller). Pinout: the ubiquitous
+# 5161AS/BS single-digit layout - pins 1-5 across the bottom left-to-right
+# (decimal point at the right end), 6-10 across the top right-to-left,
+# commons on 3 and 8 (the middle of each row). Segment letters follow the
+# standard clockface: A top, B upper-right, C lower-right, D bottom,
+# E lower-left, F upper-left, G middle. No driver key yet: direct segment
+# drive is the GPIO_PARALLEL bus (workstream C-M3+) - these records make
+# the parts placeable and nameable today, the driver rides that milestone.
+# (14-segment alphanumerics wait for a known part number - pinouts vary too
+# much between makers to guess one into the database.)
+- id: led_7seg_ca
+  name: 7-seg CA
+  desc: 7-segment LED digit, common ANODE (5161BS pinout)
+  subclass: led_direct
+  package: dip10
+  led: 7SEG
+  aliases: [5161BS, 7SEG_CA]
+  pins: [E, D, CA1, C, DP, B, A, CA2, F, G]
+
+- id: led_7seg_cc
+  name: 7-seg CC
+  desc: 7-segment LED digit, common CATHODE (5161AS pinout)
+  subclass: led_direct
+  package: dip10
+  led: 7SEG
+  aliases: [5161AS, 7SEG_CC]
+  pins: [E, D, CC1, C, DP, B, A, CC2, F, G]

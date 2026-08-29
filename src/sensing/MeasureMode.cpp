@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /**
  * @file MeasureMode.cpp
- * @brief MeasureMode service implementation - voltage measurement with optional oscilloscope
+ * @brief MeasureMode service implementation - voltage measurement
  * 
  * This service handles continuous voltage measurement when the probe switch is in
  * measure mode. It creates ephemeral (temporary) ADC connections that are never
@@ -34,15 +34,9 @@ MeasureMode& MeasureMode::getInstance() {
 }
 
 // Global reference for convenience
-// NOTE: Named measureModeService to avoid conflict with Probing::measureMode() function
 MeasureMode& measureModeService = MeasureMode::getInstance();
 
-MeasureMode::MeasureMode() {
-    // Initialize oscilloscope sample buffer
-    for (int i = 0; i < OSCOPE_SAMPLES; i++) {
-        oscopeSamples[i] = 0.0f;
-    }
-}
+MeasureMode::MeasureMode() {}
 
 // ============================================================================
 // Service Implementation
@@ -128,11 +122,7 @@ ServiceStatus MeasureMode::service() {
             // audio capture yielded so the tip/pad channels read live.
             usb_audio_probe_activity();
 #endif
-            if (oscopeEnabled) {
-                updateOscopeDisplay();
-            } else {
-                updateVoltageDisplay();
-            }
+            updateVoltageDisplay();
             
             // Check if user tapped a different node (via probe) - only if stable
             if (stableProbeReading > 0 && stableProbeReading != measuredNode) {
@@ -238,7 +228,25 @@ void MeasureMode::startMeasurement(int node) {
     if (measurementActive && measuredNode == node) {
         return;
     }
-    
+
+    // Same net = same voltage: the ADC route in place already reads this
+    // node. Re-routing anyway cost two full fabric rebuilds per row hop
+    // (ephemeral remove + add), each one a chance to glitch the display
+    // bus mid-chunk - and measure mode hops rows constantly.
+    {
+        extern int8_t nodeToNetIndex[256];
+        if (measurementActive && node > 0 && node < 256 &&
+            measuredNode > 0 && measuredNode < 256 &&
+            nodeToNetIndex[node] > 0 &&
+            nodeToNetIndex[node] == nodeToNetIndex[measuredNode]) {
+            measuredNode = node;
+            lastUpdateTime = 0;   // repaint the label for the new node now
+            firstReading = true;
+            brightenNet(node);
+            return;
+        }
+    }
+
     // Stop any existing measurement first
     if (measurementActive) {
         stopMeasurement();
@@ -254,12 +262,6 @@ void MeasureMode::startMeasurement(int node) {
     // Note: measureModeActive is controlled by switch position in service(), not here
     lastUpdateTime = 0;  // Force immediate first update
     firstReading = true;  // Reset smoothing
-    
-    // Reset oscilloscope state
-    oscopeSampleIndex = 0;
-    for (int i = 0; i < OSCOPE_SAMPLES; i++) {
-        oscopeSamples[i] = 0.0f;
-    }
     
     // Highlight the node being measured (minimal LED change)
     brightenNet(node);
@@ -442,185 +444,6 @@ void MeasureMode::updateVoltageDisplay() {
         snprintf(valueString, sizeof(valueString), "%0.2f V", smoothedVoltage);
         ReadingDisplay::show(definesToChar(measuredNode, 0), -1, valueString);
     }
-}
-
-// ============================================================================
-// Oscilloscope Mode
-// ============================================================================
-
-void MeasureMode::enableOscilloscope(bool enable) {
-    oscopeEnabled = enable;
-    if (enable) {
-        // Reset oscilloscope state
-        oscopeSampleIndex = 0;
-        for (int i = 0; i < OSCOPE_SAMPLES; i++) {
-            oscopeSamples[i] = smoothedVoltage;  // Initialize to current voltage
-        }
-        oscopeMin = 0.0f;
-        oscopeMax = 3.3f;
-    }
-}
-
-void MeasureMode::setOscopeTimebase(int timebaseMs) {
-    oscopeTimebaseMs = constrain(timebaseMs, 1, 1000);
-}
-
-void MeasureMode::sampleForOscope() {
-    // Sample at rate determined by timebase
-    unsigned long sampleInterval = (oscopeTimebaseMs * 1000UL) / OSCOPE_SAMPLES;  // microseconds
-    unsigned long now = micros();
-    
-    if (now - lastOscopeSampleTime >= sampleInterval) {
-        lastOscopeSampleTime = now;
-        
-        // Take sample with fewer averages for speed
-        oscopeSamples[oscopeSampleIndex] = readAdcVoltage(adcChannel, 4);
-        oscopeSampleIndex = (oscopeSampleIndex + 1) % OSCOPE_SAMPLES;
-    }
-}
-
-void MeasureMode::autoRangeOscope() {
-    // Find min/max in sample buffer
-    float min = 3.3f, max = 0.0f;
-    for (int i = 0; i < OSCOPE_SAMPLES; i++) {
-        if (oscopeSamples[i] < min) min = oscopeSamples[i];
-        if (oscopeSamples[i] > max) max = oscopeSamples[i];
-    }
-    
-    // Add 10% margin
-    float range = max - min;
-    oscopeMin = min - range * 0.1f;
-    oscopeMax = max + range * 0.1f;
-    
-    // Ensure minimum range to avoid division by zero
-    if (oscopeMax - oscopeMin < 0.1f) {
-        float center = (max + min) / 2.0f;
-        oscopeMin = center - 0.05f;
-        oscopeMax = center + 0.05f;
-    }
-    
-    // Clamp to valid voltage range
-    if (oscopeMin < 0.0f) oscopeMin = 0.0f;
-    if (oscopeMax > 3.3f) oscopeMax = 3.3f;
-}
-
-float MeasureMode::voltageToPixelY(float voltage) {
-    // OLED is 64 pixels tall, plot area is 56 pixels (leaving 8 for status bar)
-    constexpr int PLOT_HEIGHT = 56;
-    
-    // Clamp voltage to range
-    if (voltage < oscopeMin) voltage = oscopeMin;
-    if (voltage > oscopeMax) voltage = oscopeMax;
-    
-    // Map voltage to pixel (inverted - 0V at bottom, 3.3V at top)
-    float normalized = (voltage - oscopeMin) / (oscopeMax - oscopeMin);
-    return PLOT_HEIGHT - 1 - (normalized * (PLOT_HEIGHT - 1));
-}
-
-void MeasureMode::drawOscopeGrid() {
-    // Draw dotted grid lines
-    // OLED is 128x64, plot area is 128x56
-    
-    // Vertical divisions (every 16 pixels = 8 divisions)
-    for (int x = 0; x < 128; x += 16) {
-        for (int y = 0; y < 56; y += 4) {
-            oled.setPixel(x, y, 1);
-        }
-    }
-    
-    // Horizontal divisions (center line and quarters)
-    int centerY = 28;
-    int quarterY = 14;
-    int threeQuarterY = 42;
-    
-    for (int x = 0; x < 128; x += 4) {
-        oled.setPixel(x, centerY, 1);
-        oled.setPixel(x, quarterY, 1);
-        oled.setPixel(x, threeQuarterY, 1);
-    }
-}
-
-void MeasureMode::drawOscopeWaveform() {
-    // Draw waveform as connected line segments
-    for (int x = 0; x < 127; x++) {
-        int idx1 = (oscopeSampleIndex + x) % OSCOPE_SAMPLES;
-        int idx2 = (oscopeSampleIndex + x + 1) % OSCOPE_SAMPLES;
-        
-        int y1 = (int)voltageToPixelY(oscopeSamples[idx1]);
-        int y2 = (int)voltageToPixelY(oscopeSamples[idx2]);
-        
-        // Clamp to plot area
-        y1 = constrain(y1, 0, 55);
-        y2 = constrain(y2, 0, 55);
-        
-        // Draw line segment (vertical line if points differ significantly)
-        if (y1 == y2) {
-            oled.setPixel(x, y1, 1);
-        } else {
-            // Draw vertical line between points
-            int yMin = min(y1, y2);
-            int yMax = max(y1, y2);
-            for (int y = yMin; y <= yMax; y++) {
-                oled.setPixel(x, y, 1);
-            }
-        }
-    }
-}
-
-void MeasureMode::drawOscopeStatusBar() {
-    // Status bar at bottom (y=56 to y=63)
-    // Draw separator line
-    for (int x = 0; x < 128; x++) {
-        oled.setPixel(x, 56, 1);
-    }
-    
-    // Format status text
-    char status[32];
-    sprintf(status, "%.2fV @%d %dms", smoothedVoltage, measuredNode, oscopeTimebaseMs);
-    
-    // Draw status text using OLED's small font
-    oled.setCursor(0, 63);
-    oled.setTextSize(1);
-    oled.print(status);
-}
-
-void MeasureMode::updateOscopeDisplay() {
-    if (!measurementActive || adcChannel < 0) {
-        return;
-    }
-    
-    // Sample for oscilloscope (rate determined by timebase)
-    sampleForOscope();
-    
-    // Also update smoothed voltage for status bar
-    float rawVoltage = readAdcVoltage(adcChannel, 8);
-    if (firstReading) {
-        smoothedVoltage = rawVoltage;
-        firstReading = false;
-    } else {
-        smoothedVoltage = (SMOOTHING_FACTOR * rawVoltage) + ((1.0f - SMOOTHING_FACTOR) * smoothedVoltage);
-    }
-    
-    // Rate limit display updates
-    unsigned long now = millis();
-    if (now - lastUpdateTime < OSCOPE_UPDATE_INTERVAL_MS) {
-        return;
-    }
-    lastUpdateTime = now;
-    
-    // Auto-range based on captured data
-    autoRangeOscope();
-    
-    // Clear and redraw display
-    oled.clearFramebuffer();
-    
-    // Draw in order: grid, waveform, status bar
-    drawOscopeGrid();
-    drawOscopeWaveform();
-    drawOscopeStatusBar();
-    
-    // Send to display
-    oled.flushFramebuffer();
 }
 
 // ============================================================================

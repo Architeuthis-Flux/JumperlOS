@@ -106,7 +106,10 @@ struct specialRowAnimation {
 #if defined(OG_JUMPERLESS)
 #define ROW_ANIMATION_COUNT 1
 #else
-#define ROW_ANIMATION_COUNT 50
+// initRowAnimations() writes slots 0-37 (3 rails + 10 idle + 20 keeper + the
+// four tail animations, whose data lands one past their .index stamp); 40
+// leaves slack. Was 50 with 12 slots never touched (~1.2 KB of .bss).
+#define ROW_ANIMATION_COUNT 40
 #endif
 
 
@@ -146,7 +149,11 @@ struct CurrentSenseOverlayState {
   int virtualWireNode2 = -1;
 };
 
-static CurrentSenseOverlayState currentSenseOverlayState;
+// Single shared instance, defined in Graphics.cpp. This used to be `static`
+// right here in the header, which gave every including TU its OWN 3.8 KB
+// copy - NetsToChipConnections' debug path was reading a permanently-default
+// instance while Graphics.cpp animated a different one.
+extern CurrentSenseOverlayState currentSenseOverlayState;
 
 extern int defNudge;
 

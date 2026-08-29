@@ -15,9 +15,9 @@
 // translation unit may include this header: src/partdb/PartDb.cpp -
 // same rule as projectFiles.h. Everything else includes PartDb.h.
 //
-// Dedup: 112 records -> 85 pinouts, 284 names, 8 i2c idents
-// Estimated rodata: ~23320 bytes (pins 8088, pinouts 680, records 4480, names 2272,
-//   i2cIdents 72, byClass 224, ranges 168, typeStrs 36, strings ~7300)
+// Dedup: 116 records -> 88 pinouts, 292 names, 10 i2c idents, 4 fingerprints
+// Estimated rodata: ~24707 bytes (pins 8296, pinouts 704, records 4640, names 2336,
+//   i2cIdents 130, fingerprints 16, byClass 232, ranges 168, typeStrs 36, strings ~7642)
 // (assumes 32-bit pointers and in-TU merging of identical string literals)
 //
 // partdb_records / partdb_byClass ordering: class, then subclass,
@@ -1062,16 +1062,38 @@ const PartDbPin partdb_pins[] = {
   { "R2", 14, -1, 0, 0 },
   { "C7", 15, -1, 0, 0 },
   { "C8", 16, -1, 0, 0 },
-  // pinout 77: sip3 (ws2812)
+  // pinout 77: dip10 (led_7seg_ca)
+  { "E", 1, -1, 0, 0 },
+  { "D", 2, -1, 0, 0 },
+  { "CA1", 3, -1, 0, 0 },
+  { "C", 4, -1, 0, 0 },
+  { "DP", 5, -1, 0, 0 },
+  { "B", 6, -1, 0, 0 },
+  { "A", 7, -1, 0, 0 },
+  { "CA2", 8, -1, 0, 0 },
+  { "F", 9, -1, 0, 0 },
+  { "G", 10, -1, 0, 0 },
+  // pinout 78: dip10 (led_7seg_cc)
+  { "E", 1, -1, 0, 0 },
+  { "D", 2, -1, 0, 0 },
+  { "CC1", 3, -1, 0, 0 },
+  { "C", 4, -1, 0, 0 },
+  { "DP", 5, -1, 0, 0 },
+  { "B", 6, -1, 0, 0 },
+  { "A", 7, -1, 0, 0 },
+  { "CC2", 8, -1, 0, 0 },
+  { "F", 9, -1, 0, 0 },
+  { "G", 10, -1, 0, 0 },
+  // pinout 79: sip3 (ws2812)
   { "DIN", 1, -1, 0, 12 },
   { "VCC", 2, -1, 1, 1 },
   { "GND", 3, -1, 2, 2 },
-  // pinout 78: sip4 (sk9822)
+  // pinout 80: sip4 (sk9822)
   { "GND", 1, -1, 2, 2 },
   { "DIN", 2, -1, 0, 12 },
   { "CLK", 3, -1, 0, 14 },
   { "VCC", 4, -1, 1, 1 },
-  // pinout 79: sip8 (mpu6050)
+  // pinout 81: sip8 (mpu6050)
   { "VCC", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SCL", 3, -1, 0, 4 },
@@ -1080,14 +1102,21 @@ const PartDbPin partdb_pins[] = {
   { "XCL", 6, -1, 0, 0 },
   { "AD0", 7, -1, 0, 17 },
   { "INT", 8, -1, 0, 16 },
-  // pinout 80: sip6 (bme280 bmp280)
+  // pinout 82: sip6 (bme280 bmp280)
   { "VCC", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SCL", 3, -1, 0, 4 },
   { "SDA", 4, -1, 0, 3 },
   { "CSB", 5, -1, 0, 0 },
   { "SDO", 6, -1, 0, 0 },
-  // pinout 81: sip13 (pcf8574)
+  // pinout 83: sip6 (bmp388 bmp390)
+  { "VCC", 1, -1, 1, 1 },
+  { "GND", 2, -1, 2, 2 },
+  { "SCL", 3, -1, 0, 4 },
+  { "SDA", 4, -1, 0, 3 },
+  { "SDO", 5, -1, 0, 0 },
+  { "CS", 6, -1, 0, 8 },
+  // pinout 84: sip13 (pcf8574)
   { "VCC", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SDA", 3, -1, 0, 3 },
@@ -1101,7 +1130,7 @@ const PartDbPin partdb_pins[] = {
   { "P5", 11, -1, 0, 0 },
   { "P6", 12, -1, 0, 0 },
   { "P7", 13, -1, 0, 0 },
-  // pinout 82: sip10 (ads1115)
+  // pinout 85: sip10 (ads1115)
   { "VDD", 1, -1, 1, 1 },
   { "GND", 2, -1, 2, 2 },
   { "SCL", 3, -1, 0, 4 },
@@ -1112,12 +1141,12 @@ const PartDbPin partdb_pins[] = {
   { "A1", 8, -1, 0, 0 },
   { "A2", 9, -1, 0, 0 },
   { "A3", 10, -1, 0, 0 },
-  // pinout 83: sip4 (at24c32)
+  // pinout 86: sip4 (at24c32)
   { "GND", 1, -1, 2, 2 },
   { "VCC", 2, -1, 1, 1 },
   { "SDA", 3, -1, 0, 3 },
   { "SCL", 4, -1, 0, 4 },
-  // pinout 84: sip6 (ds3231)
+  // pinout 87: sip6 (ds3231)
   { "32K", 1, -1, 0, 0 },
   { "SQW", 2, -1, 0, 0 },
   { "SCL", 3, -1, 0, 4 },
@@ -1204,25 +1233,109 @@ const PartDbPinout partdb_pinouts[] = {
   { 0, 9, 9, &partdb_pins[922] }, // 74
   { 0, 10, 10, &partdb_pins[931] }, // 75
   { 1, 16, 16, &partdb_pins[941] }, // 76
-  { 0, 3, 3, &partdb_pins[957] }, // 77
-  { 0, 4, 4, &partdb_pins[960] }, // 78
-  { 0, 8, 8, &partdb_pins[964] }, // 79
-  { 0, 6, 6, &partdb_pins[972] }, // 80
-  { 0, 13, 13, &partdb_pins[978] }, // 81
-  { 0, 10, 10, &partdb_pins[991] }, // 82
-  { 0, 4, 4, &partdb_pins[1001] }, // 83
-  { 0, 6, 6, &partdb_pins[1005] }, // 84
+  { 1, 10, 10, &partdb_pins[957] }, // 77
+  { 1, 10, 10, &partdb_pins[967] }, // 78
+  { 0, 3, 3, &partdb_pins[977] }, // 79
+  { 0, 4, 4, &partdb_pins[980] }, // 80
+  { 0, 8, 8, &partdb_pins[984] }, // 81
+  { 0, 6, 6, &partdb_pins[992] }, // 82
+  { 0, 6, 6, &partdb_pins[998] }, // 83
+  { 0, 13, 13, &partdb_pins[1004] }, // 84
+  { 0, 10, 10, &partdb_pins[1017] }, // 85
+  { 0, 4, 4, &partdb_pins[1027] }, // 86
+  { 0, 6, 6, &partdb_pins[1031] }, // 87
 };
 
+// { numAddrs, addrs, whoAmIReg, whoAmIValue, whoAmIMask,
+//   whoAmIReg2, whoAmIValue2, whoAmIMask2, probeOrder, flags }
 const PartDbI2cIdent partdb_i2cIdents[] = {
-  { 2, { 0x3C, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x02 }, // 0
-  { 2, { 0x68, 0x00, 0x00, 0x00 }, 0x75, 0x68, 0x7E, 0x03 }, // 1
-  { 2, { 0x76, 0x00, 0x00, 0x00 }, 0xD0, 0x60, 0xFF, 0x03 }, // 2
-  { 2, { 0x76, 0x00, 0x00, 0x00 }, 0xD0, 0x58, 0xFF, 0x03 }, // 3
-  { 8, { 0x20, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x02 }, // 4
-  { 4, { 0x48, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x02 }, // 5
-  { 8, { 0x50, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x02 }, // 6
-  { 1, { 0x68, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x00 }, // 7
+  { 2, { 0x3C, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 100, 0x02 }, // 0
+  { 2, { 0x68, 0x00, 0x00, 0x00 }, 0x75, 0x68, 0x7E, 0x6B, 0x40, 0x40, 50, 0x07 }, // 1
+  { 2, { 0x76, 0x00, 0x00, 0x00 }, 0xD0, 0x60, 0xFF, 0x00, 0x00, 0x00, 50, 0x03 }, // 2
+  { 2, { 0x76, 0x00, 0x00, 0x00 }, 0xD0, 0x58, 0xFF, 0x00, 0x00, 0x00, 50, 0x03 }, // 3
+  { 2, { 0x76, 0x00, 0x00, 0x00 }, 0x00, 0x50, 0xFF, 0x00, 0x00, 0x00, 80, 0x03 }, // 4
+  { 2, { 0x76, 0x00, 0x00, 0x00 }, 0x00, 0x60, 0xFF, 0x00, 0x00, 0x00, 80, 0x03 }, // 5
+  { 8, { 0x20, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 220, 0x02 }, // 6
+  { 4, { 0x48, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 200, 0x02 }, // 7
+  { 8, { 0x50, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 220, 0x02 }, // 8
+  { 1, { 0x68, 0x00, 0x00, 0x00 }, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 200, 0x00 }, // 9
+};
+
+// Tier-1 unpowered clamp fingerprints (PartDb.h alphabet)
+const char* const partdb_fingerprints[] = {
+  "CCCCCC-CCCCCC-", // 0
+  "BBBBBBB-BBBBBBB-", // 1
+  "CCNCCC-CCCNCC-", // 2
+  "GGGGGGG-GGGGGGG-", // 3
+};
+
+// Tier-3 vector pin lists (per set: inPins then outPins)
+static const uint8_t partdb_vecPins[] = {
+  1, 2, 4, 5, 9, 10, 12, 13,   // 7400 in
+  3, 6, 8, 11,   // 7400 out
+  1, 3, 5, 9, 11, 13,   // 7404 in
+  2, 4, 6, 8, 10, 12,   // 7404 out
+  13, 10, 11, 12, 14,   // 74595 in
+  15, 1, 2, 3, 4, 5, 6, 7, 9,   // 74595 out
+  1, 2, 4, 5, 9, 10, 12, 13,   // 7408 in
+  3, 6, 8, 11,   // 7408 out
+  1, 2, 4, 5, 9, 10, 12, 13,   // 7432 in
+  3, 6, 8, 11,   // 7432 out
+  1, 2, 4, 5, 9, 10, 12, 13,   // 7486 in
+  3, 6, 8, 11,   // 7486 out
+  2, 3, 5, 6, 8, 9, 11, 12,   // 7402 in
+  1, 4, 10, 13,   // 7402 out
+  3, 5, 6, 2, 1, 7,   // 7447 in
+  13, 12, 11, 10, 9, 15, 14,   // 7447 out
+};
+
+// Tier-3 vector words (per set: inBits, outBits, outCare)
+static const uint16_t partdb_vecWords[] = {
+  0x0000, 0x00AA, 0x0055, 0x00FF,   // 7400 inBits
+  0x000F, 0x000F, 0x000F, 0x0000,   // 7400 outBits
+  0x000F, 0x000F, 0x000F, 0x000F,   // 7400 outCare
+  0x0000, 0x003F,   // 7404 inBits
+  0x003F, 0x0000,   // 7404 outBits
+  0x003F, 0x003F,   // 7404 outCare
+  0x0000, 0x0008, 0x0012, 0x0016, 0x0012, 0x001A, 0x0002, 0x0006, 0x0002, 0x000A,   // 74595 inBits
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0001, 0x0000, 0x0000, 0x0000, 0x0002,   // 74595 outBits
+  0x0000, 0x01FF, 0x0000, 0x0100, 0x0000, 0x00FF, 0x0000, 0x0000, 0x0000, 0x00FF,   // 74595 outCare
+  0x0000, 0x00AA, 0x0055, 0x00FF,   // 7408 inBits
+  0x0000, 0x0000, 0x0000, 0x000F,   // 7408 outBits
+  0x000F, 0x000F, 0x000F, 0x000F,   // 7408 outCare
+  0x0000, 0x00AA, 0x0055, 0x00FF,   // 7432 inBits
+  0x0000, 0x000F, 0x000F, 0x000F,   // 7432 outBits
+  0x000F, 0x000F, 0x000F, 0x000F,   // 7432 outCare
+  0x0000, 0x00AA, 0x0055, 0x00FF,   // 7486 inBits
+  0x0000, 0x000F, 0x000F, 0x0000,   // 7486 outBits
+  0x000F, 0x000F, 0x000F, 0x000F,   // 7486 outCare
+  0x0000, 0x00AA, 0x0055, 0x00FF,   // 7402 inBits
+  0x000F, 0x0000, 0x0000, 0x0000,   // 7402 outBits
+  0x000F, 0x000F, 0x000F, 0x000F,   // 7402 outCare
+  0x0003, 0x0023, 0x000B, 0x0007,   // 7447 inBits
+  0x0040, 0x0079, 0x0019, 0x0000,   // 7447 outBits
+  0x007F, 0x007F, 0x007F, 0x007F,   // 7447 outCare
+};
+
+// { supply, numIn, numOut, numSteps, inPins, outPins,
+//   inBits, outBits, outCare }
+const PartDbVectorSet partdb_vectorSets[] = {
+  { 0, 8, 4, 4, &partdb_vecPins[0], &partdb_vecPins[8],
+    &partdb_vecWords[0], &partdb_vecWords[4], &partdb_vecWords[8] }, // 0: 7400
+  { 0, 6, 6, 2, &partdb_vecPins[12], &partdb_vecPins[18],
+    &partdb_vecWords[12], &partdb_vecWords[14], &partdb_vecWords[16] }, // 1: 7404
+  { 2, 5, 9, 10, &partdb_vecPins[24], &partdb_vecPins[29],
+    &partdb_vecWords[18], &partdb_vecWords[28], &partdb_vecWords[38] }, // 2: 74595
+  { 0, 8, 4, 4, &partdb_vecPins[38], &partdb_vecPins[46],
+    &partdb_vecWords[48], &partdb_vecWords[52], &partdb_vecWords[56] }, // 3: 7408
+  { 0, 8, 4, 4, &partdb_vecPins[50], &partdb_vecPins[58],
+    &partdb_vecWords[60], &partdb_vecWords[64], &partdb_vecWords[68] }, // 4: 7432
+  { 0, 8, 4, 4, &partdb_vecPins[62], &partdb_vecPins[70],
+    &partdb_vecWords[72], &partdb_vecWords[76], &partdb_vecWords[80] }, // 5: 7486
+  { 0, 8, 4, 4, &partdb_vecPins[74], &partdb_vecPins[82],
+    &partdb_vecWords[84], &partdb_vecWords[88], &partdb_vecWords[92] }, // 6: 7402
+  { 1, 6, 7, 4, &partdb_vecPins[86], &partdb_vecPins[92],
+    &partdb_vecWords[96], &partdb_vecWords[100], &partdb_vecWords[104] }, // 7: 7447
 };
 
 const char* const partdb_typeStrs[] = {
@@ -1238,457 +1351,473 @@ const char* const partdb_typeStrs[] = {
 };
 
 // { id, displayName, ledName, menuName, desc,
-//   partClass, subClass, typeStrIdx, i2cIdentIdx,
+//   partClass, subClass, typeStrIdx, i2cIdentIdx, fingerprintIdx,
 //   pinoutIdx, altPinoutIdx, vectorSetIdx, driverKey, defaultValue }
 const PartDbRecord partdb_records[] = {
   // 0: LOGIC/s7400
   { "7400", "7400", "7400", "7400",
     "Quad 2-input NAND gate",
-    0, 0, 0, 0xFF, 0, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x00, 0, 0xFFFF, 0, 0, 0 },
   // 1: LOGIC/s7400
   { "7404", "7404", "7404", "7404",
     "Hex inverter",
-    0, 0, 0, 0xFF, 1, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x00, 1, 0xFFFF, 1, 0, 0 },
   // 2: LOGIC/s7400
   { "74595", "74595", "74595", "74595",
     "8-bit shift register with output latch",
-    0, 0, 0, 0xFF, 2, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x01, 2, 0xFFFF, 2, 0, 0 },
   // 3: LOGIC/s7400
   { "7408", "7408", "7408", "7408",
     "Quad 2-input AND gate",
-    0, 0, 0, 0xFF, 0, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x00, 0, 0xFFFF, 3, 0, 0 },
   // 4: LOGIC/s7400
   { "7432", "7432", "7432", "7432",
     "Quad 2-input OR gate",
-    0, 0, 0, 0xFF, 0, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x00, 0, 0xFFFF, 4, 0, 0 },
   // 5: LOGIC/s7400
   { "74138", "74138", "74138", "74138",
     "3-to-8 line decoder/demultiplexer",
-    0, 0, 0, 0xFF, 3, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 3, 0xFFFF, 0xFFFF, 0, 0 },
   // 6: LOGIC/s7400
   { "7474", "7474", "7474", "7474",
     "Dual D flip-flop with preset and clear",
-    0, 0, 0, 0xFF, 4, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 4, 0xFFFF, 0xFFFF, 0, 0 },
   // 7: LOGIC/s7400
   { "74245", "74245", "74245", "74245",
     "Octal bus transceiver, 3-state",
-    0, 0, 0, 0xFF, 5, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 5, 0xFFFF, 0xFFFF, 0, 0 },
   // 8: LOGIC/s7400
   { "7486", "7486", "7486", "7486",
     "Quad 2-input XOR gate",
-    0, 0, 0, 0xFF, 0, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x00, 0, 0xFFFF, 5, 0, 0 },
   // 9: LOGIC/s7400
   { "74161", "74161", "74161", "74161",
     "4-bit synchronous binary counter, async clear",
-    0, 0, 0, 0xFF, 6, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 6, 0xFFFF, 0xFFFF, 0, 0 },
   // 10: LOGIC/s7400
   { "74165", "74165", "74165", "74165",
     "8-bit parallel-in serial-out shift register",
-    0, 0, 0, 0xFF, 7, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 7, 0xFFFF, 0xFFFF, 0, 0 },
   // 11: LOGIC/s7400
   { "74164", "74164", "74164", "74164",
     "8-bit serial-in parallel-out shift register",
-    0, 0, 0, 0xFF, 8, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 8, 0xFFFF, 0xFFFF, 0, 0 },
   // 12: LOGIC/s7400
   { "7414", "7414", "7414", "7414",
     "Hex Schmitt-trigger inverter",
-    0, 0, 0, 0xFF, 1, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 1, 0xFFFF, 0xFFFF, 0, 0 },
   // 13: LOGIC/s7400
   { "74373", "74373", "74373", "74373",
     "Octal transparent latch, 3-state",
-    0, 0, 0, 0xFF, 9, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 9, 0xFFFF, 0xFFFF, 0, 0 },
   // 14: LOGIC/s7400
   { "74374", "74374", "74374", "74374",
     "Octal D flip-flop, 3-state",
-    0, 0, 0, 0xFF, 10, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 10, 0xFFFF, 0xFFFF, 0, 0 },
   // 15: LOGIC/s7400
   { "7402", "7402", "7402", "7402",
     "Quad 2-input NOR gate",
-    0, 0, 0, 0xFF, 11, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x00, 11, 0xFFFF, 6, 0, 0 },
   // 16: LOGIC/s7400
   { "7410", "7410", "7410", "7410",
     "Triple 3-input NAND gate",
-    0, 0, 0, 0xFF, 12, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 12, 0xFFFF, 0xFFFF, 0, 0 },
   // 17: LOGIC/s7400
   { "74107", "74107", "74107", "74107",
     "Dual JK flip-flop with clear",
-    0, 0, 0, 0xFF, 13, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 13, 0xFFFF, 0xFFFF, 0, 0 },
   // 18: LOGIC/s7400
   { "74123", "74123", "74123", "74123",
     "Dual retriggerable monostable multivibrator",
-    0, 0, 0, 0xFF, 14, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 14, 0xFFFF, 0xFFFF, 0, 0 },
   // 19: LOGIC/s7400
   { "74125", "74125", "74125", "74125",
     "Quad 3-state buffer, active-low enable",
-    0, 0, 0, 0xFF, 15, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 15, 0xFFFF, 0xFFFF, 0, 0 },
   // 20: LOGIC/s7400
   { "74139", "74139", "74139", "74139",
     "Dual 2-to-4 line decoder/demultiplexer",
-    0, 0, 0, 0xFF, 16, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 16, 0xFFFF, 0xFFFF, 0, 0 },
   // 21: LOGIC/s7400
   { "74151", "74151", "74151", "74151",
     "8-input multiplexer with strobe",
-    0, 0, 0, 0xFF, 17, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 17, 0xFFFF, 0xFFFF, 0, 0 },
   // 22: LOGIC/s7400
   { "74153", "74153", "74153", "74153",
     "Dual 4-input multiplexer",
-    0, 0, 0, 0xFF, 18, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 18, 0xFFFF, 0xFFFF, 0, 0 },
   // 23: LOGIC/s7400
   { "74157", "74157", "74157", "74157",
     "Quad 2-input multiplexer",
-    0, 0, 0, 0xFF, 19, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 19, 0xFFFF, 0xFFFF, 0, 0 },
   // 24: LOGIC/s7400
   { "74174", "74174", "74174", "74174",
     "Hex D flip-flop with common clock and clear",
-    0, 0, 0, 0xFF, 20, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 20, 0xFFFF, 0xFFFF, 0, 0 },
   // 25: LOGIC/s7400
   { "74193", "74193", "74193", "74193",
     "4-bit up/down binary counter, dual clock",
-    0, 0, 0, 0xFF, 21, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 21, 0xFFFF, 0xFFFF, 0, 0 },
   // 26: LOGIC/s7400
   { "7420", "7420", "7420", "7420",
     "Dual 4-input NAND gate",
-    0, 0, 0, 0xFF, 22, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x02, 22, 0xFFFF, 0xFFFF, 0, 0 },
   // 27: LOGIC/s7400
   { "74240", "74240", "74240", "74240",
     "Octal inverting 3-state buffer/driver",
-    0, 0, 0, 0xFF, 23, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 23, 0xFFFF, 0xFFFF, 0, 0 },
   // 28: LOGIC/s7400
   { "74273", "74273", "74273", "74273",
     "Octal D flip-flop with clear",
-    0, 0, 0, 0xFF, 24, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 24, 0xFFFF, 0xFFFF, 0, 0 },
   // 29: LOGIC/s7400
   { "7442", "7442", "7442", "7442",
     "BCD to decimal decoder (1-of-10)",
-    0, 0, 0, 0xFF, 25, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 25, 0xFFFF, 0xFFFF, 0, 0 },
   // 30: LOGIC/s7400
   { "7447", "7447", "7447", "7447",
     "BCD to 7-segment decoder/driver, active-low",
-    0, 0, 0, 0xFF, 26, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0x03, 26, 0xFFFF, 7, 0, 0 },
   // 31: LOGIC/s7400
   { "7490", "7490", "7490", "7490",
     "Decade counter (divide-by-2 and divide-by-5)",
-    0, 0, 0, 0xFF, 27, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 0, 0, 0xFF, 0xFF, 27, 0xFFFF, 0xFFFF, 0, 0 },
   // 32: LOGIC/s4000
   { "4017", "4017", "4017", "4017",
     "Decade counter with 10 decoded outputs",
-    0, 1, 0, 0xFF, 28, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 28, 0xFFFF, 0xFFFF, 0, 0 },
   // 33: LOGIC/s4000
   { "4011", "4011", "4011", "4011",
     "Quad 2-input NAND gate",
-    0, 1, 0, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
   // 34: LOGIC/s4000
   { "4066", "4066", "4066", "4066",
     "Quad bilateral analog switch",
-    0, 1, 0, 0xFF, 30, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 30, 0xFFFF, 0xFFFF, 0, 0 },
   // 35: LOGIC/s4000
   { "4013", "4013", "4013", "4013",
     "Dual D flip-flop with set/reset",
-    0, 1, 0, 0xFF, 31, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 31, 0xFFFF, 0xFFFF, 0, 0 },
   // 36: LOGIC/s4000
   { "4051", "4051", "4051", "4051",
     "8-channel analog multiplexer/demultiplexer",
-    0, 1, 0, 0xFF, 32, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 32, 0xFFFF, 0xFFFF, 0, 0 },
   // 37: LOGIC/s4000
   { "4093", "4093", "4093", "4093",
     "Quad 2-input NAND Schmitt trigger",
-    0, 1, 0, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
   // 38: LOGIC/s4000
   { "4001", "4001", "4001", "4001",
     "Quad 2-input NOR gate",
-    0, 1, 0, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
   // 39: LOGIC/s4000
   { "4060", "4060", "4060", "4060",
     "14-stage ripple counter with oscillator",
-    0, 1, 0, 0xFF, 33, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 33, 0xFFFF, 0xFFFF, 0, 0 },
   // 40: LOGIC/s4000
   { "4040", "4040", "4040", "4040",
     "12-stage binary ripple counter",
-    0, 1, 0, 0xFF, 34, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 34, 0xFFFF, 0xFFFF, 0, 0 },
   // 41: LOGIC/s4000
   { "4069", "4069", "4069", "4069",
     "Hex inverter",
-    0, 1, 0, 0xFF, 35, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 35, 0xFFFF, 0xFFFF, 0, 0 },
   // 42: LOGIC/s4000
   { "4046", "4046", "4046", "4046",
     "Phase-locked loop with VCO",
-    0, 1, 0, 0xFF, 36, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 36, 0xFFFF, 0xFFFF, 0, 0 },
   // 43: LOGIC/s4000
   { "4511", "4511", "4511", "4511",
     "BCD to 7-segment latch/decoder/driver",
-    0, 1, 0, 0xFF, 37, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 37, 0xFFFF, 0xFFFF, 0, 0 },
   // 44: LOGIC/s4000
   { "4020", "4020", "4020", "4020",
     "14-stage binary ripple counter",
-    0, 1, 0, 0xFF, 38, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 38, 0xFFFF, 0xFFFF, 0, 0 },
   // 45: LOGIC/s4000
   { "4023", "4023", "4023", "4023",
     "Triple 3-input NAND gate",
-    0, 1, 0, 0xFF, 39, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 39, 0xFFFF, 0xFFFF, 0, 0 },
   // 46: LOGIC/s4000
   { "4024", "4024", "4024", "4024",
     "7-stage binary ripple counter",
-    0, 1, 0, 0xFF, 40, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 40, 0xFFFF, 0xFFFF, 0, 0 },
   // 47: LOGIC/s4000
   { "4026", "4026", "4026", "4026",
     "Decade counter with 7-segment display outputs",
-    0, 1, 0, 0xFF, 41, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 41, 0xFFFF, 0xFFFF, 0, 0 },
   // 48: LOGIC/s4000
   { "4027", "4027", "4027", "4027",
     "Dual JK flip-flop with set/reset",
-    0, 1, 0, 0xFF, 42, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 42, 0xFFFF, 0xFFFF, 0, 0 },
   // 49: LOGIC/s4000
   { "4028", "4028", "4028", "4028",
     "BCD to decimal decoder (1-of-10)",
-    0, 1, 0, 0xFF, 43, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 43, 0xFFFF, 0xFFFF, 0, 0 },
   // 50: LOGIC/s4000
   { "4049", "4049", "4049", "4049",
     "Hex inverting buffer (level-down capable)",
-    0, 1, 0, 0xFF, 44, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 44, 0xFFFF, 0xFFFF, 0, 0 },
   // 51: LOGIC/s4000
   { "4050", "4050", "4050", "4050",
     "Hex non-inverting buffer (level-down capable)",
-    0, 1, 0, 0xFF, 44, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 44, 0xFFFF, 0xFFFF, 0, 0 },
   // 52: LOGIC/s4000
   { "4052", "4052", "4052", "4052",
     "Dual 4-channel analog multiplexer/demultiplexer",
-    0, 1, 0, 0xFF, 45, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 45, 0xFFFF, 0xFFFF, 0, 0 },
   // 53: LOGIC/s4000
   { "4053", "4053", "4053", "4053",
     "Triple 2-channel analog multiplexer/demultiplexer",
-    0, 1, 0, 0xFF, 46, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 46, 0xFFFF, 0xFFFF, 0, 0 },
   // 54: LOGIC/s4000
   { "4070", "4070", "4070", "4070",
     "Quad 2-input XOR gate",
-    0, 1, 0, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
   // 55: LOGIC/s4000
   { "4071", "4071", "4071", "4071",
     "Quad 2-input OR gate",
-    0, 1, 0, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
   // 56: LOGIC/s4000
   { "4081", "4081", "4081", "4081",
     "Quad 2-input AND gate",
-    0, 1, 0, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 29, 0xFFFF, 0xFFFF, 0, 0 },
   // 57: LOGIC/s4000
   { "4094", "4094", "4094", "4094",
     "8-bit shift-and-store register, 3-state",
-    0, 1, 0, 0xFF, 47, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 47, 0xFFFF, 0xFFFF, 0, 0 },
   // 58: LOGIC/s4000
   { "4510", "4510", "4510", "4510",
     "BCD up/down counter with preset",
-    0, 1, 0, 0xFF, 48, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 48, 0xFFFF, 0xFFFF, 0, 0 },
   // 59: LOGIC/s4000
   { "4543", "4543", "4543", "4543",
     "BCD to 7-segment latch/driver for LCDs",
-    0, 1, 0, 0xFF, 49, 0xFFFF, 0xFFFF, 0, 0 },
+    0, 1, 0, 0xFF, 0xFF, 49, 0xFFFF, 0xFFFF, 0, 0 },
   // 60: ANALOG/opamp
   { "LM358", "LM358", "LM358", "LM358",
     "Dual op-amp, single-supply",
-    1, 0, 0, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
   // 61: ANALOG/opamp
   { "TL072", "TL072", "TL072", "TL072",
     "Dual JFET op-amp, low noise",
-    1, 0, 0, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
   // 62: ANALOG/opamp
   { "LM324", "LM324", "LM324", "LM324",
     "Quad op-amp, single-supply",
-    1, 0, 0, 0xFF, 51, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 51, 0xFFFF, 0xFFFF, 0, 0 },
   // 63: ANALOG/opamp
   { "NE5532", "NE5532", "NE5532", "NE5532",
     "Dual audio op-amp, low noise",
-    1, 0, 0, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
   // 64: ANALOG/opamp
   { "TL074", "TL074", "TL074", "TL074",
     "Quad JFET op-amp, low noise",
-    1, 0, 0, 0xFF, 51, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 51, 0xFFFF, 0xFFFF, 0, 0 },
   // 65: ANALOG/opamp
   { "LM393", "LM393", "LM393", "LM393",
     "Dual comparator, open-collector out",
-    1, 0, 0, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 50, 0xFFFF, 0xFFFF, 0, 0 },
   // 66: ANALOG/opamp
   { "LM311", "LM311", "LM311", "LM311",
     "Single comparator, open-collector out",
-    1, 0, 0, 0xFF, 52, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 0, 0, 0xFF, 0xFF, 52, 0xFFFF, 0xFFFF, 0, 0 },
   // 67: ANALOG/clock
   { "555", "555", "555", "555",
     "Timer, astable/monostable",
-    1, 1, 0, 0xFF, 53, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 1, 0, 0xFF, 0xFF, 53, 0xFFFF, 0xFFFF, 0, 0 },
   // 68: ANALOG/clock
   { "556", "556", "556", "556",
     "Dual 555 timer",
-    1, 1, 0, 0xFF, 54, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 1, 0, 0xFF, 0xFF, 54, 0xFFFF, 0xFFFF, 0, 0 },
   // 69: ANALOG/audio
   { "LM386", "LM386", "LM386", "LM386",
     "Audio power amplifier, 0.5W",
-    1, 2, 0, 0xFF, 55, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 2, 0, 0xFF, 0xFF, 55, 0xFFFF, 0xFFFF, 0, 0 },
   // 70: ANALOG/power
   { "LM317", "LM317", "LM317", "LM317",
     "Adjustable positive regulator, 1.2-37V",
-    1, 3, 0, 0xFF, 56, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 3, 0, 0xFF, 0xFF, 56, 0xFFFF, 0xFFFF, 0, 0 },
   // 71: ANALOG/power
   { "L7805", "L7805", "L7805", "L7805",
     "Fixed 5V positive regulator, 1A",
-    1, 3, 0, 0xFF, 57, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 3, 0, 0xFF, 0xFF, 57, 0xFFFF, 0xFFFF, 0, 0 },
   // 72: ANALOG/power
   { "AMS1117", "AMS1117", "AMS1117", "AMS1117",
     "1A LDO regulator (SOT-223 on adapter)",
-    1, 3, 0, 0xFF, 58, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 3, 0, 0xFF, 0xFF, 58, 0xFFFF, 0xFFFF, 0, 0 },
   // 73: ANALOG/power
   { "TL431", "TL431", "TL431", "TL431",
     "Programmable shunt voltage reference",
-    1, 3, 0, 0xFF, 59, 0xFFFF, 0xFFFF, 0, 0 },
+    1, 3, 0, 0xFF, 0xFF, 59, 0xFFFF, 0xFFFF, 0, 0 },
   // 74: DISCRETE/resistor
   { "resistor", "Resistor", "RES", "RES",
     "Fixed resistor, any value",
-    2, 0, 1, 0xFF, 60, 0xFFFF, 0xFFFF, 0, "10k" },
+    2, 0, 1, 0xFF, 0xFF, 60, 0xFFFF, 0xFFFF, 0, "10k" },
   // 75: DISCRETE/capacitor
   { "capacitor", "Capacitor", "CAP", "CAP",
     "Ceramic/film capacitor, non-polar",
-    2, 1, 2, 0xFF, 60, 0xFFFF, 0xFFFF, 0, "100nF" },
+    2, 1, 2, 0xFF, 0xFF, 60, 0xFFFF, 0xFFFF, 0, "100nF" },
   // 76: DISCRETE/capacitor
   { "cap_polar", "Polar Cap", "CAP+", "CAP+",
     "Electrolytic/tantalum capacitor, + on pin 1",
-    2, 1, 2, 0xFF, 61, 0xFFFF, 0xFFFF, 0, "10uF" },
+    2, 1, 2, 0xFF, 0xFF, 61, 0xFFFF, 0xFFFF, 0, "10uF" },
   // 77: DISCRETE/led
   { "led", "LED", "LED", "LED",
     "LED, anode on pin 1",
-    2, 2, 3, 0xFF, 62, 0xFFFF, 0xFFFF, 0, "red" },
+    2, 2, 3, 0xFF, 0xFF, 62, 0xFFFF, 0xFFFF, 0, "red" },
   // 78: DISCRETE/inductor
   { "inductor", "Inductor", "COIL", "COIL",
     "Fixed inductor, any value",
-    2, 3, 4, 0xFF, 60, 0xFFFF, 0xFFFF, 0, "100uH" },
+    2, 3, 4, 0xFF, 0xFF, 60, 0xFFFF, 0xFFFF, 0, "100uH" },
   // 79: DISCRETE/diode
   { "diode", "Diode", "Diode", "Diode",
     "Rectifier/signal diode, anode on pin 1",
-    2, 4, 5, 0xFF, 62, 0xFFFF, 0xFFFF, 0, "1N4148" },
+    2, 4, 5, 0xFF, 0xFF, 62, 0xFFFF, 0xFFFF, 0, "1N4148" },
   // 80: DISCRETE/diode
   { "zener", "Zener", "Zener", "Zener",
     "Zener diode, anode on pin 1",
-    2, 4, 5, 0xFF, 62, 0xFFFF, 0xFFFF, 0, "5.1V" },
+    2, 4, 5, 0xFF, 0xFF, 62, 0xFFFF, 0xFFFF, 0, "5.1V" },
   // 81: DISCRETE/pot
   { "potentiometer", "Potentiometer", "POT", "POT",
     "Potentiometer, wiper on pin 2",
-    2, 5, 6, 0xFF, 63, 0xFFFF, 0xFFFF, 0, "10k" },
+    2, 5, 6, 0xFF, 0xFF, 63, 0xFFFF, 0xFFFF, 0, "10k" },
   // 82: TRANSISTOR/bjt
   { "2N3904", "2N3904", "2N3904", "2N3904",
     "NPN 40V 200mA (EBC)",
-    3, 0, 7, 0xFF, 64, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 0, 7, 0xFF, 0xFF, 64, 0xFFFF, 0xFFFF, 0, 0 },
   // 83: TRANSISTOR/bjt
   { "2N3906", "2N3906", "2N3906", "2N3906",
     "PNP 40V 200mA (EBC)",
-    3, 0, 7, 0xFF, 64, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 0, 7, 0xFF, 0xFF, 64, 0xFFFF, 0xFFFF, 0, 0 },
   // 84: TRANSISTOR/bjt
   { "2N2222", "2N2222", "2N2222", "2N2222",
     "NPN 40V 800mA (EBC, TO-92 PN2222A)",
-    3, 0, 7, 0xFF, 64, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 0, 7, 0xFF, 0xFF, 64, 0xFFFF, 0xFFFF, 0, 0 },
   // 85: TRANSISTOR/bjt
   { "BC547", "BC547", "BC547", "BC547",
     "NPN 45V 100mA (CBE - reversed!)",
-    3, 0, 7, 0xFF, 65, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 0, 7, 0xFF, 0xFF, 65, 0xFFFF, 0xFFFF, 0, 0 },
   // 86: TRANSISTOR/bjt
   { "BC557", "BC557", "BC557", "BC557",
     "PNP 45V 100mA (CBE - reversed!)",
-    3, 0, 7, 0xFF, 65, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 0, 7, 0xFF, 0xFF, 65, 0xFFFF, 0xFFFF, 0, 0 },
   // 87: TRANSISTOR/bjt
   { "TIP120", "TIP120", "TIP120", "TIP120",
     "NPN Darlington 60V 5A (BCE, TO-220)",
-    3, 0, 7, 0xFF, 66, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 0, 7, 0xFF, 0xFF, 66, 0xFFFF, 0xFFFF, 0, 0 },
   // 88: TRANSISTOR/mosfet
   { "2N7000", "2N7000", "2N7000", "2N7000",
     "N-MOSFET 60V 200mA (SGD)",
-    3, 1, 8, 0xFF, 67, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 1, 8, 0xFF, 0xFF, 67, 0xFFFF, 0xFFFF, 0, 0 },
   // 89: TRANSISTOR/mosfet
   { "IRLZ44N", "IRLZ44N", "IRLZ44N", "IRLZ44N",
     "N-MOSFET logic-level 55V 47A (GDS, TO-220)",
-    3, 1, 8, 0xFF, 68, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 1, 8, 0xFF, 0xFF, 68, 0xFFFF, 0xFFFF, 0, 0 },
   // 90: TRANSISTOR/mosfet
   { "BS170", "BS170", "BS170", "BS170",
     "N-MOSFET 60V 500mA (DGS - mirror of 2N7000!)",
-    3, 1, 8, 0xFF, 69, 0xFFFF, 0xFFFF, 0, 0 },
+    3, 1, 8, 0xFF, 0xFF, 69, 0xFFFF, 0xFFFF, 0, 0 },
   // 91: DISPLAY/oled
   { "ssd1306_i2c", "SSD1306", "SSD1306", "SSD1306",
     "0.96in OLED 128x64 I2C",
-    4, 0, 0, 0x00, 70, 0xFFFF, 0xFFFF, "ssd1306", 0 },
+    4, 0, 0, 0x00, 0xFF, 70, 0xFFFF, 0xFFFF, "ssd1306", 0 },
   // 92: DISPLAY/oled
   { "sh1106_i2c", "SH1106", "SH1106", "SH1106",
     "1.3in OLED 128x64 I2C",
-    4, 0, 0, 0x00, 70, 0xFFFF, 0xFFFF, "sh1106", 0 },
+    4, 0, 0, 0x00, 0xFF, 70, 0xFFFF, 0xFFFF, "sh1106", 0 },
   // 93: DISPLAY/oled
   { "ssd1315_i2c", "SSD1315", "SSD1315", "SSD1315",
     "0.96in OLED 128x64 I2C (1306 clone)",
-    4, 0, 0, 0x00, 70, 0xFFFF, 0xFFFF, "ssd1306", 0 },
+    4, 0, 0, 0x00, 0xFF, 70, 0xFFFF, 0xFFFF, "ssd1306", 0 },
   // 94: DISPLAY/oled
   { "ssd1309_i2c", "SSD1309", "SSD1309", "SSD1309",
     "1.54in OLED 128x64 I2C",
-    4, 0, 0, 0x00, 70, 0xFFFF, 0xFFFF, "ssd1306", 0 },
+    4, 0, 0, 0x00, 0xFF, 70, 0xFFFF, 0xFFFF, "ssd1306", 0 },
   // 95: DISPLAY/oled
   { "ssd1306_32_i2c", "SSD1306 128x32", "OLED32", "SSD1306\031128x32",
     "0.91in OLED 128x32 I2C",
-    4, 0, 0, 0x00, 70, 0xFFFF, 0xFFFF, "ssd1306_32", 0 },
+    4, 0, 0, 0x00, 0xFF, 70, 0xFFFF, 0xFFFF, "ssd1306_32", 0 },
   // 96: DISPLAY/lcd
   { "40rgbx160_spi", "40RGBX160", "40RGBX", "40RGBX \031160",
     "40RGBX160 bar display, SPI",
-    4, 1, 0, 0xFF, 71, 0xFFFF, 0xFFFF, "40rgbx160", 0 },
+    4, 1, 0, 0xFF, 0xFF, 71, 0xFFFF, 0xFFFF, "40rgbx160", 0 },
   // 97: DISPLAY/lcd
   { "st7789_spi", "ST7789", "ST7789", "ST7789",
     "IPS TFT 240x240 SPI",
-    4, 1, 0, 0xFF, 72, 0xFFFF, 0xFFFF, "st7789", 0 },
+    4, 1, 0, 0xFF, 0xFF, 72, 0xFFFF, 0xFFFF, "st7789", 0 },
   // 98: DISPLAY/lcd
   { "hd44780", "HD44780 1602", "HD44780", "HD44780\0311602",
     "Character LCD 16x2 parallel",
-    4, 1, 0, 0xFF, 73, 0xFFFF, 0xFFFF, "hd44780", 0 },
+    4, 1, 0, 0xFF, 0xFF, 73, 0xFFFF, 0xFFFF, "hd44780", 0 },
   // 99: DISPLAY/lcd
   { "ili9341_spi", "ILI9341", "ILI9341", "ILI9341",
     "TFT 320x240 SPI",
-    4, 1, 0, 0xFF, 74, 0xFFFF, 0xFFFF, "ili9341", 0 },
+    4, 1, 0, 0xFF, 0xFF, 74, 0xFFFF, 0xFFFF, "ili9341", 0 },
   // 100: DISPLAY/mip
   { "jdi_ls027b7dh01", "JDI LS027B7DH01", "LS027B7", "LS027B7\031DH01",
     "2.7in Sharp/JDI memory LCD 400x240 SPI",
-    4, 2, 0, 0xFF, 75, 0xFFFF, 0xFFFF, "jdi_mip", 0 },
+    4, 2, 0, 0xFF, 0xFF, 75, 0xFFFF, 0xFFFF, "jdi_mip", 0 },
   // 101: DISPLAY/mip
   { "lpm009m360a", "LPM009M360A", "LPM009M", "LPM009M\031360A",
     "0.9in JDI MIP color 72x144 SPI",
-    4, 2, 0, 0xFF, 75, 0xFFFF, 0xFFFF, "jdi_mip", 0 },
+    4, 2, 0, 0xFF, 0xFF, 75, 0xFFFF, 0xFFFF, "jdi_mip", 0 },
   // 102: DISPLAY/led_direct
   { "matrix_1088as", "1088AS 8x8", "1088AS", "1088AS \0318x8",
     "8x8 LED matrix, direct row/column drive",
-    4, 3, 0, 0xFF, 76, 0xFFFF, 0xFFFF, 0, 0 },
-  // 103: DISPLAY/led_addr
+    4, 3, 0, 0xFF, 0xFF, 76, 0xFFFF, 0xFFFF, 0, 0 },
+  // 103: DISPLAY/led_direct
+  { "led_7seg_ca", "7-seg CA", "7SEG", "7-seg  \031CA",
+    "7-segment LED digit, common ANODE (5161BS pinout)",
+    4, 3, 0, 0xFF, 0xFF, 77, 0xFFFF, 0xFFFF, 0, 0 },
+  // 104: DISPLAY/led_direct
+  { "led_7seg_cc", "7-seg CC", "7SEG", "7-seg  \031CC",
+    "7-segment LED digit, common CATHODE (5161AS pinout)",
+    4, 3, 0, 0xFF, 0xFF, 78, 0xFFFF, 0xFFFF, 0, 0 },
+  // 105: DISPLAY/led_addr
   { "ws2812", "WS2812", "WS2812", "WS2812",
     "Addressable RGB LED, single-wire",
-    4, 5, 0, 0xFF, 77, 0xFFFF, 0xFFFF, "ws2812", 0 },
-  // 104: DISPLAY/led_addr
+    4, 5, 0, 0xFF, 0xFF, 79, 0xFFFF, 0xFFFF, "ws2812", 0 },
+  // 106: DISPLAY/led_addr
   { "sk9822", "SK9822", "SK9822", "SK9822",
     "Addressable RGB LED, clocked (APA102)",
-    4, 5, 0, 0xFF, 78, 0xFFFF, 0xFFFF, "sk9822", 0 },
-  // 105: MODULE/sensor
+    4, 5, 0, 0xFF, 0xFF, 80, 0xFFFF, 0xFFFF, "sk9822", 0 },
+  // 107: MODULE/sensor
   { "mpu6050", "MPU6050", "MPU6050", "MPU6050",
     "6-axis accel+gyro I2C",
-    5, 0, 0, 0x01, 79, 0xFFFF, 0xFFFF, 0, 0 },
-  // 106: MODULE/sensor
+    5, 0, 0, 0x01, 0xFF, 81, 0xFFFF, 0xFFFF, 0, 0 },
+  // 108: MODULE/sensor
   { "bme280", "BME280", "BME280", "BME280",
     "Temp/humidity/pressure sensor I2C",
-    5, 0, 0, 0x02, 80, 0xFFFF, 0xFFFF, 0, 0 },
-  // 107: MODULE/sensor
+    5, 0, 0, 0x02, 0xFF, 82, 0xFFFF, 0xFFFF, 0, 0 },
+  // 109: MODULE/sensor
   { "bmp280", "BMP280", "BMP280", "BMP280",
     "Temp/pressure sensor I2C",
-    5, 0, 0, 0x03, 80, 0xFFFF, 0xFFFF, 0, 0 },
-  // 108: MODULE/io
+    5, 0, 0, 0x03, 0xFF, 82, 0xFFFF, 0xFFFF, 0, 0 },
+  // 110: MODULE/sensor
+  { "bmp388", "BMP388", "BMP388", "BMP388",
+    "Precision pressure sensor I2C",
+    5, 0, 0, 0x04, 0xFF, 83, 0xFFFF, 0xFFFF, 0, 0 },
+  // 111: MODULE/sensor
+  { "bmp390", "BMP390", "BMP390", "BMP390",
+    "Precision pressure sensor I2C",
+    5, 0, 0, 0x05, 0xFF, 83, 0xFFFF, 0xFFFF, 0, 0 },
+  // 112: MODULE/io
   { "pcf8574", "PCF8574", "PCF8574", "PCF8574",
     "8-bit I2C IO expander",
-    5, 1, 0, 0x04, 81, 0xFFFF, 0xFFFF, 0, 0 },
-  // 109: MODULE/io
+    5, 1, 0, 0x06, 0xFF, 84, 0xFFFF, 0xFFFF, 0, 0 },
+  // 113: MODULE/io
   { "ads1115", "ADS1115", "ADS1115", "ADS1115",
     "16-bit 4-channel I2C ADC",
-    5, 1, 0, 0x05, 82, 0xFFFF, 0xFFFF, 0, 0 },
-  // 110: MODULE/memory
+    5, 1, 0, 0x07, 0xFF, 85, 0xFFFF, 0xFFFF, 0, 0 },
+  // 114: MODULE/memory
   { "at24c32", "AT24C32", "AT24C32", "AT24C32",
     "32Kbit I2C EEPROM",
-    5, 2, 0, 0x06, 83, 0xFFFF, 0xFFFF, 0, 0 },
-  // 111: MODULE/other
+    5, 2, 0, 0x08, 0xFF, 86, 0xFFFF, 0xFFFF, 0, 0 },
+  // 115: MODULE/other
   { "ds3231", "DS3231", "DS3231", "DS3231",
     "RTC I2C, 0x68 without WHO_AM_I",
-    5, 3, 0, 0x07, 84, 0xFFFF, 0xFFFF, 0, 0 },
+    5, 3, 0, 0x09, 0xFF, 87, 0xFFFF, 0xFFFF, 0, 0 },
 };
 
 const PartDbName partdb_names[] = {
@@ -1726,6 +1855,8 @@ const PartDbName partdb_names[] = {
   { "4510", 58 },
   { "4511", 43 },
   { "4543", 59 },
+  { "5161AS", 104 },
+  { "5161BS", 103 },
   { "555", 67 },
   { "556", 68 },
   { "595", 2 },
@@ -1859,18 +1990,22 @@ const PartDbName partdb_names[] = {
   { "74LS86", 8 },
   { "74LS90", 31 },
   { "7805", 71 },
-  { "ads1115", 109 },
+  { "7SEG_CA", 103 },
+  { "7SEG_CC", 104 },
+  { "ads1115", 113 },
   { "AMS1117", 72 },
-  { "APA102", 104 },
-  { "at24c32", 110 },
+  { "APA102", 106 },
+  { "at24c32", 114 },
   { "BC547", 85 },
   { "BC548", 85 },
   { "BC549", 85 },
   { "BC556", 86 },
   { "BC557", 86 },
   { "BC558", 86 },
-  { "bme280", 106 },
-  { "bmp280", 107 },
+  { "bme280", 108 },
+  { "bmp280", 109 },
+  { "bmp388", 110 },
+  { "bmp390", 111 },
   { "BS170", 90 },
   { "capacitor", 75 },
   { "cap_polar", 76 },
@@ -1903,8 +2038,8 @@ const PartDbName partdb_names[] = {
   { "CD4511", 43 },
   { "CD4543", 59 },
   { "diode", 79 },
-  { "ds3231", 111 },
-  { "GY-521", 105 },
+  { "ds3231", 115 },
+  { "GY-521", 107 },
   { "hd44780", 98 },
   { "HEF4001", 38 },
   { "HEF4011", 33 },
@@ -1941,6 +2076,8 @@ const PartDbName partdb_names[] = {
   { "L7805", 71 },
   { "LCD1602", 98 },
   { "led", 77 },
+  { "led_7seg_ca", 103 },
+  { "led_7seg_cc", 104 },
   { "LM311", 66 },
   { "LM317", 70 },
   { "LM324", 62 },
@@ -1951,18 +2088,18 @@ const PartDbName partdb_names[] = {
   { "LM7805", 71 },
   { "lpm009m360a", 101 },
   { "matrix_1088as", 102 },
-  { "mpu6050", 105 },
+  { "mpu6050", 107 },
   { "NE5532", 63 },
   { "NE555", 67 },
   { "NE556", 68 },
-  { "NEOPIXEL", 103 },
-  { "pcf8574", 108 },
+  { "NEOPIXEL", 105 },
+  { "pcf8574", 112 },
   { "PN2222", 84 },
   { "potentiometer", 81 },
   { "resistor", 74 },
   { "sh1106_i2c", 92 },
-  { "SK6812", 103 },
-  { "sk9822", 104 },
+  { "SK6812", 105 },
+  { "sk9822", 106 },
   { "ssd1306_32_i2c", 95 },
   { "ssd1306_i2c", 91 },
   { "ssd1309_i2c", 94 },
@@ -1973,9 +2110,9 @@ const PartDbName partdb_names[] = {
   { "TL074", 64 },
   { "TL431", 73 },
   { "TLC555", 67 },
-  { "ws2812", 103 },
+  { "ws2812", 105 },
   { "zener", 80 },
-  { "ZS-042", 111 },
+  { "ZS-042", 115 },
 };
 
 const uint16_t partdb_byClass[] = {
@@ -1986,6 +2123,7 @@ const uint16_t partdb_byClass[] = {
   64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
   80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
   96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+  112, 113, 114, 115,
 };
 
 const PartDbRange partdb_classRanges[PARTDB_NUM_CLASSES] = {
@@ -1993,8 +2131,8 @@ const PartDbRange partdb_classRanges[PARTDB_NUM_CLASSES] = {
   { 60, 14 }, // ANALOG
   { 74, 8 }, // DISCRETE
   { 82, 9 }, // TRANSISTOR
-  { 91, 14 }, // DISPLAY
-  { 105, 7 }, // MODULE
+  { 91, 16 }, // DISPLAY
+  { 107, 9 }, // MODULE
 };
 
 const PartDbRange partdb_subclassRanges[PARTDB_NUM_CLASSES * PARTDB_MAX_SUBCLASSES] = {
@@ -2025,22 +2163,24 @@ const PartDbRange partdb_subclassRanges[PARTDB_NUM_CLASSES * PARTDB_MAX_SUBCLASS
   { 91, 5 }, // DISPLAY/oled
   { 96, 4 }, // DISPLAY/lcd
   { 100, 2 }, // DISPLAY/mip
-  { 102, 1 }, // DISPLAY/led_direct
+  { 102, 3 }, // DISPLAY/led_direct
   { 0, 0 }, // DISPLAY/led_driver
-  { 103, 2 }, // DISPLAY/led_addr
-  { 105, 3 }, // MODULE/sensor
-  { 108, 2 }, // MODULE/io
-  { 110, 1 }, // MODULE/memory
-  { 111, 1 }, // MODULE/other
+  { 105, 2 }, // DISPLAY/led_addr
+  { 107, 5 }, // MODULE/sensor
+  { 112, 2 }, // MODULE/io
+  { 114, 1 }, // MODULE/memory
+  { 115, 1 }, // MODULE/other
   { 0, 0 }, // MODULE/(unused)
   { 0, 0 }, // MODULE/(unused)
 };
 
-const uint16_t partdb_numRecords = 112;
-const uint16_t partdb_numPinouts = 85;
-const uint16_t partdb_numPins = 1011;
-const uint16_t partdb_numNames = 284;
-const uint16_t partdb_numI2cIdents = 8;
+const uint16_t partdb_numRecords = 116;
+const uint16_t partdb_numPinouts = 88;
+const uint16_t partdb_numPins = 1037;
+const uint16_t partdb_numNames = 292;
+const uint16_t partdb_numI2cIdents = 10;
+const uint16_t partdb_numFingerprints = 4;
+const uint16_t partdb_numVectorSets = 8;
 const uint16_t partdb_numTypeStrs = 9;
 
 #endif // PARTDB_DATA_H

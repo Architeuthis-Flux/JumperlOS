@@ -22,7 +22,7 @@
 //
 // Runs on core 2 (call serviceNetVoltageScan() next to readFakeGPIO()), in
 // the same loop that processes sendAllPathsCore2, so taps can't race a
-// full crossbar refresh. Enabled by jumperlessConfig.display.net_currents.
+// full crossbar refresh. Enabled by jumperlessConfig.measurement.net_currents.
 
 // The OG has a different fabric and lines-only rendering; the scanner is
 // V5-only, so its arrays shrink to single dummy slots there to save SRAM.

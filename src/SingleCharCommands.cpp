@@ -28,6 +28,8 @@
 #include "Menus.h"
 #include "NetManager.h"
 #include "NetVoltageScan.h"
+#include "PartLabels.h"   // partLabels.clearTransients - x retires part overlays
+#include "PartsApp.h"     // partsClearAllRecords - x removes the parts too
 #include "NetsToChipConnections.h"
 #include "InfraPaths.h"
 #include "RouteSafety.h"
@@ -286,7 +288,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         Jerial.println( );
         // shownMenuItems += printMenuLine(showExtraMenu, 1, "\n\r");
         //  Jerial.print("\t$ = calibrate DACs\n\r");
-        shownMenuItems += printMenuLine( showExtraMenu, 3, "\t^ = set DAC 1 voltage\n\r" );
+        shownMenuItems += printMenuLine( showExtraMenu, 3, "\t: = set DAC 1 voltage\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 1, "\tv = get ADC reading\n\r" );
         // Jerial.println();
 
@@ -884,7 +886,11 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
 
         // One synthesized step for the bare-part form; the step form reads
         // the viewer's table (and its script's power: for rail_sane).
-        static GuideScript bareScript;   // zeroed each use; hasPower=false
+        // Heap, not static: a zeroed GuideScript is ~7.8 KB and was a second
+        // permanent copy of the viewer's table. calloc'd for the bounded life
+        // of this command (checks are rare and user-paced), freed on every
+        // exit after the poll loop.
+        GuideScript* bareScript = nullptr;   // bare-part form only; hasPower=false
         GuideStep oneStep;
         const GuideStep* step = nullptr;
         const GuideScript* script = nullptr;
@@ -926,9 +932,13 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
                                 "default check for type '" + String( p.typeStr ) + "'\"" );
                 return CMD_DONT_SHOW_MENU;
             }
-            memset( &bareScript, 0, sizeof( bareScript ) );
+            bareScript = (GuideScript*)calloc( 1, sizeof( GuideScript ) );
+            if ( bareScript == nullptr ) {
+                Jerial.println( "CHECK error out of memory for check scratch" );
+                return CMD_DONT_SHOW_MENU;
+            }
             step = &oneStep;
-            script = &bareScript;
+            script = bareScript;
             label = String( p.name );
         }
 
@@ -954,6 +964,7 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
                 guideCheckAbort( );
                 Jerial.println( "CHECK part=" + label +
                                 " result=timeout val=timeout" );
+                free( bareScript );
                 return CMD_DONT_SHOW_MENU;
             }
             delayMicroseconds( 200 );
@@ -973,6 +984,15 @@ CommandResult cmd_guidedProject( char c, const String& line ) {
             lineOut += " hint=\"" + String( hint ) + "\"";
         Jerial.println( lineOut );
         Jerial.flush( );
+        // The check is finished, but finishCheck leaves ck.script pointing
+        // at this allocation (and ck.active true) - abort before freeing so
+        // nothing in GuideChecks can ever dereference freed heap, and so
+        // guideCheckUsesScript() stops answering for a dead script. (The
+        // timeout path above already does this; with the old file-static
+        // buffer a dangling ck.script was impossible - the heap move made
+        // the invariant real.)
+        if ( guideCheckUsesScript( bareScript ) ) guideCheckAbort( );
+        free( bareScript );
         return CMD_DONT_SHOW_MENU;
     }
 
@@ -1246,12 +1266,31 @@ CommandResult cmd_clearConnections( char c, const String& line ) {
     delay( 6 );
     refreshPaths( );
     clearAllNTCC( );
+    // A cleared board has no parts either (Kevin's ruling, 2026-08-27:
+    // "x clear all connections should remove all parts too"). This runs
+    // BEFORE clearActiveContext: that call saves the slot SYNCHRONOUSLY,
+    // and clearing the parts after it left them in the saved YAML to
+    // resurrect on reboot (audit, 2026-08-27). refresh=false - the one
+    // full refresh below covers the fabric.
+    int partsGone = partsClearAllRecords( false );
     // Clear the ACTIVE context, whatever backs it. Passing netSlot here would
     // hand -2 to saveSlot from a file context.
     clearActiveContext( );
+    // The net table is about to be rebuilt from nothing - a surviving
+    // highlight index would point at a net that no longer exists (the
+    // same hazard cmd_loadNodeFile guards against). Standing part
+    // overlays retire with the board (Kevin's ruling, 2026-08-27).
+    clearHighlighting( );
+    partLabels.clearTransients( );
     refreshConnections( -1, 1, 1 );
     digitalWrite( RESETPIN, LOW );
-    target->println( "Cleared all connections" );
+    if ( partsGone > 0 ) {
+        target->print( "Cleared all connections and " );
+        target->print( partsGone );
+        target->println( partsGone == 1 ? " part" : " parts" );
+    } else {
+        target->println( "Cleared all connections" );
+    }
     return CMD_DONT_SHOW_MENU;
 }
 
@@ -1305,6 +1344,11 @@ CommandResult cmd_loadNodeFile( char c, const String& line ) {
 
     // Validation happens inside savePreformattedNodeFile via refreshLocalConnections
     // which calls the same validation logic. Don't duplicate the work here.
+
+    // The net table was rebuilt from scratch, so any surviving highlight index
+    // (brightenedNet et al) now points at a net that no longer exists. The other
+    // two clearHighlighting() sites are both skipped by CMD_DONT_SHOW_MENU.
+    clearHighlighting( );
 
     input = ' ';
     probeActive = 0;
@@ -1827,8 +1871,9 @@ static String getCommandArgs( const String& line, unsigned int timeoutMs = 50 ) 
 // paste as one 1-second-timeout blob (blank lines invisible) and Enter finished
 // it. The jumperless app now sends '\n' per Enter, which exposed the design.
 //
-// Rules: '\n', '\r' and "\r\n" all end a line (each line is trimmed, as before -
-// the parsers do not depend on indentation). Blank lines BEFORE any content are
+// Rules: '\n', '\r' and "\r\n" all end a line (trailing whitespace is trimmed;
+// LEADING whitespace is kept - the parts:/overlays: scanners are
+// indent-hardened, so indentation is content). Blank lines BEFORE any content are
 // skipped (a char-mode "S<CR><LF>" leaves its line end in the FIFO); blank lines
 // INSIDE the paste are kept. The block ends when an empty line is followed by
 // PASTE_QUIET_MS of silence - a paste burst never pauses that long, even
@@ -1838,6 +1883,12 @@ static String getCommandArgs( const String& line, unsigned int timeoutMs = 50 ) 
 // ---------------------------------------------------------------------------
 static const unsigned long PASTE_QUIET_MS = 500;
 static const unsigned long PASTE_IDLE_MS = 30000;
+// The heap is ~171 KB with no PSRAM, so an accidental paste (a few hundred KB of
+// diagram.json into L) must not be allowed to grow `out` until every other
+// allocation starts failing. Past the cap we keep draining the stream but stop
+// appending, so the block still ends on its own terminator instead of spilling
+// the remainder into the menu dispatcher.
+static const unsigned int PASTE_MAX_BYTES = 32768;
 
 static bool readPastedBlock( String& out ) {
     out = "";
@@ -1848,25 +1899,42 @@ static bool readPastedBlock( String& out ) {
     bool prevWasCR = false;       // to fold "\r\n" into one line end
     bool pendingEmpty = false;    // an empty line completed after content - the
                                   // terminator unless more bytes follow it
+    bool overflow = false;        // hit PASTE_MAX_BYTES, or String failed to grow
     unsigned long emptyAtMs = 0;
     unsigned long lastByteMs = millis( );
 
+    auto append = [ & ]( const char* s, unsigned int n ) {
+        if ( overflow ) return;
+        if ( out.length( ) + n > PASTE_MAX_BYTES || !out.concat( s, n ) ) {
+            overflow = true;
+        }
+    };
+
     auto completeLine = [ & ]( ) {
-        lineBuf.trim( );
+        // Trailing whitespace only - LEADING whitespace is content now: the
+        // parts:/overlays: scanners are indent-hardened (States.cpp), so the
+        // old full trim() flattened every pasted parts: section into
+        // invisibility (bench: an S paste of a Y snapshot restored bridges
+        // and power but silently dropped all 8 placed parts). The header
+        // comment's "the parsers do not depend on indentation" stopped being
+        // true when the parts: section arrived.
+        while ( lineBuf.length( ) > 0 &&
+                isspace( (unsigned char)lineBuf.charAt( lineBuf.length( ) - 1 ) ) )
+            lineBuf.remove( lineBuf.length( ) - 1 );
         if ( lineBuf.length( ) == 0 ) {
             if ( gotContent ) {
-                if ( pendingEmpty ) out += "\n"; // a run of blank lines: keep the earlier one
+                if ( pendingEmpty ) append( "\n", 1 ); // a run of blank lines: keep the earlier one
                 pendingEmpty = true;
                 emptyAtMs = millis( );
             }
             return; // leading blank lines are skipped
         }
         if ( pendingEmpty ) {
-            out += "\n"; // that blank line was inside the paste, not the end
+            append( "\n", 1 ); // that blank line was inside the paste, not the end
             pendingEmpty = false;
         }
-        out += lineBuf;
-        out += "\n";
+        append( lineBuf.c_str( ), lineBuf.length( ) );
+        append( "\n", 1 );
         gotContent = true;
         lineBuf = "";
     };
@@ -1890,7 +1958,12 @@ static bool readPastedBlock( String& out ) {
                 continue;
             }
             prevWasCR = false;
-            lineBuf += ch;
+            if ( !overflow ) {
+                if ( out.length( ) + lineBuf.length( ) >= PASTE_MAX_BYTES ||
+                     !lineBuf.concat( ch ) ) {
+                    overflow = true;
+                }
+            }
         }
 
         unsigned long now = millis( );
@@ -1905,13 +1978,18 @@ static bool readPastedBlock( String& out ) {
     }
 
     // A last line without a terminator (paste that does not end in a newline
-    // and no Enter) is still content.
-    lineBuf.trim( );
+    // and no Enter) is still content. Trailing trim only, as in completeLine.
+    while ( lineBuf.length( ) > 0 &&
+            isspace( (unsigned char)lineBuf.charAt( lineBuf.length( ) - 1 ) ) )
+        lineBuf.remove( lineBuf.length( ) - 1 );
     if ( lineBuf.length( ) > 0 ) {
-        if ( pendingEmpty ) out += "\n";
-        out += lineBuf;
-        out += "\n";
+        if ( pendingEmpty ) append( "\n", 1 );
+        append( lineBuf.c_str( ), lineBuf.length( ) );
+        append( "\n", 1 );
         gotContent = true;
+    }
+    if ( overflow ) {
+        Jerial.println( "\n\r◇ Warning: paste too large (>32KB), truncating" );
     }
     return gotContent;
 }
@@ -1993,8 +2071,6 @@ CommandResult cmd_showBridgeArray( char c, const String& line ) {
     target->println( jumperlessConfig.routing.stack_dacs );
     target->print( "railsDuplicates: " );
     target->println( jumperlessConfig.routing.stack_rails );
-    target->print( "railPriority: " );
-    target->println( jumperlessConfig.routing.rail_priority );
     couldntFindPath( 1 );
     target->print( "\n\rBridge Array\n\r" );
     printBridgeArray( target );
@@ -2074,12 +2150,12 @@ CommandResult cmd_toggleLineBuffering( char c, const String& line ) {
     if ( arg.length( ) > 0 && ( arg[ 0 ] == '0' || arg[ 0 ] == '1' ) ) {
         target = ( arg[ 0 ] == '1' );
     } else {
-        target = ( jumperlessConfig.display.terminal_line_buffering == 0 );
+        target = ( jumperlessConfig.terminal.line_buffering == 0 );
     }
     setTerminalLineBuffering( target );
     if (millis() > 10000) {
         Jerial.print( "Line buffering " );
-        Jerial.println( jumperlessConfig.display.terminal_line_buffering ? "enabled" : "disabled" );
+        Jerial.println( jumperlessConfig.terminal.line_buffering ? "enabled" : "disabled" );
         configChanged = true;
         
     }
@@ -2096,7 +2172,7 @@ CommandResult cmd_toggleLineBufferingQuiet( char c, const String& line ) {
     } else if ( c == '\x0F' ) {
         acknowledgeAppLineBuffering( false );
     } else {
-        setTerminalLineBuffering( jumperlessConfig.display.terminal_line_buffering == 0 );
+        setTerminalLineBuffering( jumperlessConfig.terminal.line_buffering == 0 );
     }
     return CMD_DONT_SHOW_MENU;
 }
@@ -2764,18 +2840,18 @@ CommandResult cmd_setDAC( char c, const String& line ) {
     // probePowerDAC is defined in Probing.h as int&
     extern bool configChanged;
 
-    char f[ 8 ] = { ' ' };
-    int index = 0;
-    float f1 = 0.0;
-    unsigned long timer = millis( );
-    while ( Jerial.available( ) == 0 && millis( ) - timer < 1000 ) {
-    }
-    while ( index < 8 ) {
-        f[ index ] = Jerial.read( );
-        index++;
+    String arg = getCommandArgs( line, 1000 );
+    if ( arg.length( ) == 0 ) {
+        Jerial.println( "Usage: :3.3  (sets DAC 1 voltage to 3.3V)" );
+        Jerial.flush( );
+        return CMD_DONT_SHOW_MENU;
     }
 
-    f1 = atof( f );
+    char f[ 16 ];
+    strncpy( f, arg.c_str( ), sizeof( f ) - 1 );
+    f[ sizeof( f ) - 1 ] = '\0';
+
+    float f1 = atof( f );
     // The non-probe DAC is always DAC1 now: DAC0 is the probe feed (the
     // only path INA1's switch sensing can see) and never the user's here.
     setDac1voltage( f1, 1, 1 );
@@ -3149,7 +3225,7 @@ CommandResult cmd_netCurrents( char c, const String& line ) {
             infraPrintStatus( target );
             target->printf( "[infra] droop ohms: %.1f (%s)\n\r",
                             (double)infraProbeDroopOhms( ),
-                            jumperlessConfig.calibration.probe_droop_ohms > 0.0f
+                            jumperlessConfig.probe.droop_ohms > 0.0f
                                 ? "calibrated" : "computed" );
             // The feed's set-once proof: DAC0 (A) writes must not move across
             // rebuilds that don't change its voltage.
@@ -3159,7 +3235,7 @@ CommandResult cmd_netCurrents( char c, const String& line ) {
         }
     }
 
-    bool enable = !jumperlessConfig.display.net_currents;
+    bool enable = !jumperlessConfig.measurement.net_currents;
     // Applies immediately and persists to /config.txt
     updateConfigValue( "display", "net_currents", enable ? "1" : "0" );
     target->printf( "\rnet current scan %s\n\r", enable ? "on" : "off" );
@@ -3424,7 +3500,7 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
                         (double)probeZeroDiag.sampleMin_mA, (double)probeZeroDiag.sampleMax_mA,
                         (unsigned long)probeZeroDiag.ledOffAckMs, probeZeroDiag.xbarIdleBeforeSampling ? "yes" : "NO",
                         (unsigned long)( probeZeroDiag.atMs / 1000 ), (unsigned long)probeZeroDiag.runs,
-                        (double)jumperlessConfig.calibration.probe_current_zero );
+                        (double)jumperlessConfig.probe.current_zero );
     }
     // Probe LED / button line: frames vs colour requests (shows >> requests
     // is the shared-GPIO9 constant re-send), button samples decoded.
@@ -3729,6 +3805,9 @@ CommandResult cmd_toggleTerminalColors( char c, const String& line ) {
     } else {
         disableTerminalColors = !disableTerminalColors;
     }
+    // Persist through [terminal] colors (the runtime flag is the inverse).
+    jumperlessConfig.terminal.colors = !disableTerminalColors;
+    configChanged = true;
     if ( disableTerminalColors ) {
         Jerial.println( "Terminal colors disabled" );
     } else {

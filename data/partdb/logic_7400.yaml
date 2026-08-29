@@ -7,6 +7,14 @@
 # physical pin i+1). Corner-power (GND at N/2, VCC at N) is validated for
 # dip14/dip16; the 7490 declares power: because its supply really is
 # mid-package. Aliases cover the HC/LS/HCT families.
+#
+# fingerprint: = Tier-1 unpowered clamp map (PartDb.h alphabet). Most gate
+# records use 'C' (conducts somehow) because one record covers TTL (reads
+# G - substrate diode to GND only; bench: the 7447 at ~0.67V) AND CMOS
+# aliases (read B - ESD clamps both ways at ~0.7V). The 7447 keeps its
+# bench-measured hard-G map: the all-G-no-vdd-clamp signature IS the
+# open-collector separator from the 74595 in the same dip16 (an HCT47
+# mismatches loudly and falls back to the picker - honest, not wrong).
 
 class: LOGIC
 subclass: s7400
@@ -17,12 +25,25 @@ subclass: s7400
   aliases: [74HC00, 74LS00, 74HCT00]
   pop: 1
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # NAND, all four gates in parallel: gates (A,B->Y) = (1,2->3) (4,5->6)
+  # (9,10->8) (12,13->11)
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=1 6=1 8=1 11=1
+  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
+  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=1 6=1 8=1 11=1
+  vec: 2=1 5=1 10=1 13=1 -> 3=0 6=0 8=0 11=0
 
 - id: 7402
   desc: Quad 2-input NOR gate
   package: dip14
   aliases: [74HC02, 74LS02, 74HCT02]
   pins: [1Y, 1A, 1B, 2Y, 2A, 2B, GND, 3A, 3B, 3Y, 4A, 4B, 4Y, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # NOR: gates (A,B->Y) = (2,3->1) (5,6->4) (8,9->10) (11,12->13)
+  vec: 2=0 3=0 5=0 6=0 8=0 9=0 11=0 12=0 -> 1=1 4=1 10=1 13=1
+  vec: 3=1 6=1 9=1 12=1 -> 1=0 4=0 10=0 13=0
+  vec: 2=1 3=0 5=1 6=0 8=1 9=0 11=1 12=0 -> 1=0 4=0 10=0 13=0
+  vec: 3=1 6=1 9=1 12=1 -> 1=0 4=0 10=0 13=0
 
 - id: 7404
   desc: Hex inverter
@@ -30,6 +51,10 @@ subclass: s7400
   aliases: [74HC04, 74LS04, 74HCT04]
   pop: 2
   pins: [1A, 1Y, 2A, 2Y, 3A, 3Y, GND, 4Y, 4A, 5Y, 5A, 6Y, 6A, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # inverters: (A->Y) = (1->2) (3->4) (5->6) (9->8) (11->10) (13->12)
+  vec: 1=0 3=0 5=0 9=0 11=0 13=0 -> 2=1 4=1 6=1 8=1 10=1 12=1
+  vec: 1=1 3=1 5=1 9=1 11=1 13=1 -> 2=0 4=0 6=0 8=0 10=0 12=0
 
 - id: 7408
   desc: Quad 2-input AND gate
@@ -37,6 +62,12 @@ subclass: s7400
   aliases: [74HC08, 74LS08, 74HCT08]
   pop: 4
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # AND: gates (A,B->Y) = (1,2->3) (4,5->6) (9,10->8) (12,13->11)
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=0 6=0 8=0 11=0
+  vec: 2=1 5=1 10=1 13=1 -> 3=0 6=0 8=0 11=0
+  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=0 6=0 8=0 11=0
+  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
 
 - id: 7410
   desc: Triple 3-input NAND gate
@@ -56,6 +87,7 @@ subclass: s7400
   package: dip14
   aliases: [74HC20, 74LS20, 74HCT20]
   pins: [1A, 1B, NC, 1C, 1D, 1Y, GND, 2Y, 2A, 2B, NC, 2C, 2D, VCC]
+  fingerprint: CCNCCC-CCCNCC-
 
 - id: 7432
   desc: Quad 2-input OR gate
@@ -63,6 +95,12 @@ subclass: s7400
   aliases: [74HC32, 74LS32, 74HCT32]
   pop: 5
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # OR: gates (A,B->Y) = (1,2->3) (4,5->6) (9,10->8) (12,13->11)
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=0 6=0 8=0 11=0
+  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
+  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=1 6=1 8=1 11=1
+  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
 
 - id: 7442
   desc: BCD to decimal decoder (1-of-10)
@@ -75,6 +113,20 @@ subclass: s7400
   package: dip16
   aliases: [74LS47, 74HCT47]
   pins: [B, C, LT, BI/RBO, RBI, D, A, GND, e, d, c, b, a, g, f, VCC]
+  # bench-measured 2026-08-28 (Kevin's board, part_fingerprint, correct
+  # rails after the pin-1-on-row-10 rotation was found): every pin one
+  # substrate diode to GND at 0.66-0.68V, nothing clamps pin-above-VCC -
+  # THE standard-TTL open-collector signature. One die quirk: BI/RBO also
+  # shows a repeatable 0.89V junction to VCC (1 mismatch, tolerated).
+  fingerprint: GGGGGGG-GGGGGGG-
+  # digits 0/1/4/8 with LT=RBI=1 (not blanked); outputs active-LOW,
+  # open-collector (the runner's pull-up reads "off" as H). BI/RBO (4)
+  # stays untouched - it is both an input and an output.
+  vec_supply: 5v
+  vec: 3=1 5=1 6=0 2=0 1=0 7=0 -> 13=0 12=0 11=0 10=0 9=0 15=0 14=1
+  vec: 7=1 -> 13=1 12=0 11=0 10=1 9=1 15=1 14=1
+  vec: 7=0 2=1 -> 13=1 12=0 11=0 10=1 9=1 15=0 14=0
+  vec: 2=0 6=1 -> 13=0 12=0 11=0 10=0 9=0 15=0 14=0
 
 - id: 7474
   desc: Dual D flip-flop with preset and clear
@@ -89,6 +141,12 @@ subclass: s7400
   aliases: [74HC86, 74LS86, 74HCT86]
   pop: 9
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # XOR: gates (A,B->Y) = (1,2->3) (4,5->6) (9,10->8) (12,13->11)
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=0 6=0 8=0 11=0
+  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
+  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=1 6=1 8=1 11=1
+  vec: 2=1 5=1 10=1 13=1 -> 3=0 6=0 8=0 11=0
 
 - id: 7490
   desc: Decade counter (divide-by-2 and divide-by-5)
@@ -219,3 +277,20 @@ subclass: s7400
   aliases: [74HC595, 74HCT595, 595]
   pop: 3
   pins: [QB, QC, QD, QE, QF, QG, QH, GND, QH', SRCLR, SRCLK, RCLK, OE, SER, QA, VCC]
+  # the 595 is HC/HCT in practice: CMOS ESD clamps both ways on every pin -
+  # the dip16 counterpart the 7447's all-G map separates from
+  fingerprint: BBBBBBB-BBBBBBB-
+  # sequential proof: clear, latch (all low), shift one 1 in, latch (QA
+  # high), shift once more, latch (the 1 moved to QB). Clock edges are
+  # consecutive steps; intermediate steps check nothing.
+  vec_supply: 3v3
+  vec: 13=0 10=0 11=0 12=0 14=0 ->
+  vec: 12=1 -> 15=0 1=0 2=0 3=0 4=0 5=0 6=0 7=0 9=0
+  vec: 12=0 10=1 14=1 ->
+  vec: 11=1 -> 9=0
+  vec: 11=0 ->
+  vec: 12=1 -> 15=1 1=0 2=0 3=0 4=0 5=0 6=0 7=0
+  vec: 12=0 14=0 ->
+  vec: 11=1 ->
+  vec: 11=0 ->
+  vec: 12=1 -> 15=0 1=1 2=0 3=0 4=0 5=0 6=0 7=0

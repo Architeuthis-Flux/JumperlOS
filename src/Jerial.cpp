@@ -30,7 +30,7 @@ int termInInteractiveMode = 0;
 
 void pushLineBufferingToApp( ) {
     extern struct config jumperlessConfig;
-    int target = ( jumperlessConfig.display.terminal_line_buffering == 1 ) ? 1 : 0;
+    int target = ( jumperlessConfig.terminal.line_buffering == 1 ) ? 1 : 0;
     if ( termInInteractiveMode != target ) {
         Serial.write( target ? 0x0E : 0x0F );
         Serial.flush( );
@@ -40,8 +40,8 @@ void pushLineBufferingToApp( ) {
 
 bool setTerminalLineBuffering( bool enabled ) {
     extern struct config jumperlessConfig;
-    bool previous = ( jumperlessConfig.display.terminal_line_buffering == 1 );
-    jumperlessConfig.display.terminal_line_buffering = enabled ? 1 : 0;
+    bool previous = ( jumperlessConfig.terminal.line_buffering == 1 );
+    jumperlessConfig.terminal.line_buffering = enabled ? 1 : 0;
     pushLineBufferingToApp( );
     return previous;
 }
@@ -49,7 +49,7 @@ bool setTerminalLineBuffering( bool enabled ) {
 void acknowledgeAppLineBuffering( bool enabled ) {
     extern struct config jumperlessConfig;
     int target = enabled ? 1 : 0;
-    jumperlessConfig.display.terminal_line_buffering = target;
+    jumperlessConfig.terminal.line_buffering = target;
     termInInteractiveMode = target; // app already knows; do not echo SO/SI back
 }
 
@@ -560,7 +560,7 @@ void TermControl::handleEnter( ) {
     extern struct config jumperlessConfig;
     bool holdForContinuation = false;
     if ( pending_target == nullptr &&
-         jumperlessConfig.display.terminal_line_buffering == 1 &&
+         jumperlessConfig.terminal.line_buffering == 1 &&
          brace_depth > 0 && line_length > 0 &&
          line_length < JERIAL_MAX_LINE_LENGTH - 1 ) {
         // Only hold for multi-line continuation when the line is a raw
@@ -1102,7 +1102,7 @@ bool JerialClass::service() {
     // USBSer3 backchannel - handled by SingleCharCommands
     singleCharCommands.serviceUSBSer3();
 
-    if (term_control_active && term_control && jumperlessConfig.display.terminal_line_buffering == 1) {
+    if (term_control_active && term_control && jumperlessConfig.terminal.line_buffering == 1) {
         return term_control->service();
     }
     #if DEBUG_JERIAL == 1

@@ -4026,6 +4026,7 @@ place_part = _native.place_part
 remove_part = _native.remove_part
 list_parts = _native.list_parts
 guide_progress = _native.guide_progress
+part_identify = _native.part_identify
 
 # ============================================================================
 # Context Control
@@ -4758,6 +4759,7 @@ __all__ = [
 
     # Projects and Parts (guided placement)
     'load_project', 'place_part', 'remove_part', 'list_parts', 'guide_progress',
+    'part_identify',
     
     # Context Control
     'context_toggle', 'context_get',
@@ -4904,8 +4906,8 @@ __all__ = [
 ]
 
 )";
-const uint32_t JUMPERLESS_MODULE_PY_HASHES[9] = { 0xE087762F, 0xF6FF4A6F, 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A, 0x6683E1CA };
-const int JUMPERLESS_MODULE_PY_HASH_COUNT = 9;
+const uint32_t JUMPERLESS_MODULE_PY_HASHES[8] = { 0xE087762F, 0xF6FF4A6F, 0xAE6629EA, 0x8BBCCB9B, 0x211A88F7, 0x7ED8BA57, 0xAA5F9F89, 0x843D1F2A };
+const int JUMPERLESS_MODULE_PY_HASH_COUNT = 8;
 #endif
 
 //==============================================================================
@@ -5683,10 +5685,11 @@ def place_part(name: str, row: int, pins_json: str, footprint: str = "",
 
     Args:
         name: Part name, 1-15 characters, unique (remove_part first to replace)
-        row: Breadboard row of pin 1. Plain SIP is legal on either half
-             (1-60); a DIP's pin 1 (the dot/notch) MUST be on the bottom half
-             (31-60) - real chips sit that way; axial2's pin 1 MUST be on the
-             top half (1-30) so pin 2 (row+30) lands across the ravine.
+        row: Breadboard row of pin 1's REAL hole. Plain SIP is legal on
+             either half (1-60); a DIP's half encodes its orientation -
+             31-60 = dot/notch bottom-left, 1-30 = rotated 180 with pin 1
+             top-right; axial2's pin 1 MUST be on the top half (1-30) so
+             pin 2 (row+30) lands across the ravine.
         pins_json: Pins map, e.g.
             '{"A": {"pin": 1, "connect": "GND"}, "B": {"pin": 2, "connect": 7}}'
             pin:     1-based physical pin, placed by the footprint geometry
@@ -6825,8 +6828,8 @@ class JFSModule:
 jfs: JFSModule
 
 )===";
-const uint32_t JUMPERLESS_STUB_PYI_HASHES[15] = { 0xCDF87BB7, 0x84364A5A, 0x3AC5793C, 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37, 0xE25DA938 };
-const int JUMPERLESS_STUB_PYI_HASH_COUNT = 15;
+const uint32_t JUMPERLESS_STUB_PYI_HASHES[14] = { 0xCDF87BB7, 0x84364A5A, 0x3AC5793C, 0x47F6426E, 0xA2CF37F7, 0xB0DAF75F, 0x1DB092B8, 0x77D4B7CA, 0x81BD6C21, 0xB35468E2, 0x591678B8, 0x05D64A8B, 0x34AD1B61, 0x2E64EB37 };
+const int JUMPERLESS_STUB_PYI_HASH_COUNT = 14;
 #endif
 
 //==============================================================================

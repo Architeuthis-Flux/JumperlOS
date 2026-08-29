@@ -1589,10 +1589,18 @@ print("gone=", 0 if fs_exists({I2C_DIR!r}) else 1)
         # mode - that is the whole point of "start fresh" - so this phase is
         # one of the two that phase 0's run_file_capture() exists for. The
         # teardown puts the user's bytes back.
+        # The blocking guide runner is gone (b1ce6fb, A-M3): a launch is
+        # AMBIENT now. What a guide-carrying `z ... new` must produce is the
+        # armed step viewer (VIEWER steps=<n>) and no placement side effects;
+        # `noscript` keeps the companion script out of the drive so the phase
+        # is deterministic for every project. (This phase spoke the retired
+        # GUIDE step=/state= protocol until the first contention-free
+        # run_all exposed it - the firmware moved on 08-24, the suite could
+        # not run to a verdict until 08-27.)
         guide_live = False
         d = GuideDriver()
         try:
-            d.send(f"z {pdir}/wiring.yaml new\r\n".encode())
+            d.send(f"z {proj} new noscript\r\n".encode())
             guide_live = True
             m = d.expect(r"RUNFILE path=(\S+) action=new",
                          f"{proj}: the launch wrote a run file")
@@ -1600,16 +1608,14 @@ print("gone=", 0 if fs_exists({I2C_DIR!r}) else 1)
                 check(m is not None and m.group(1) == project_run_path(pdir),
                       f"{proj}: single-file mode wrote {proj}_run.yaml "
                       f"(got {m.group(1) if m else None!r})")
-            m = d.expect(r"GUIDE step=1/(?P<n>\d+) id=",
-                         f"{proj}: guide: section parsed and the runtime started")
+            m = d.expect(r"VIEWER steps=(?P<n>\d+) cursor=\d+",
+                         f"{proj}: guide: section parsed and the viewer armed")
             if m:
                 n_steps = int(m.group("n"))
                 check(n_steps == want_steps,
                       f"{proj}: guide has {n_steps} steps (expected {want_steps})")
-            d.expect(r"GUIDE step=1/\d+ id=\w+ state=WAIT",
-                     f"{proj}: step 1 is waiting for input")
-            d.send(b"q")
-            d.expect(r"GUIDE .* state=EXIT", f"{proj}: 'q' quit the guide at step 1")
+            d.expect(r"SCRIPT action=skip",
+                     f"{proj}: noscript kept the companion script out of the drive")
             guide_live = False
         finally:
             if guide_live:
@@ -1624,7 +1630,7 @@ print("progress=", guide_progress())
 """, timeout=30)
         vals = parse_kv(out)
         check(vals.get("anyplaced") == 0,
-              f"{proj}: quitting at step 1 placed nothing")
+              f"{proj}: the ambient open placed nothing")
         check(vals.get("progress") in (0, -1),
               f"{proj}: no guide progress was committed (guide_progress()="
               f"{vals.get('progress')})")
@@ -1673,105 +1679,118 @@ print("nb=", get_num_bridges())
 """, timeout=30)
                 return parse_kv(o)
 
-            guide_live = False
+            # THE AMBIENT DRIVE (the blocking guide is gone, b1ce6fb).
+            # GuideChecks survived whole as the on-demand engine, so `z check
+            # step 4` runs the SAME i2cScan path the old guided step 4 did -
+            # the bug class this needle guards is unchanged. What the guide's
+            # place-commit used to do, the run FILE does: DISP gains
+            # `placed: true` and the reopen expands its pins to bridges (the
+            # file-driven door test_parts_roundtrip proves).
             before = after = None
             d = GuideDriver()
             try:
-                d.send(f"z {proj} new\r\n".encode())
-                guide_live = True
-                d.expect(r"GUIDE step=1/5 \S+ state=WAIT",
-                         "i2c needle: step 1 (note) is waiting")
-                d.send(b"n")
-                d.expect(r"GUIDE step=2/5 \S+ state=WAIT",
-                         "i2c needle: step 2 (place DISP) is waiting")
-                d.send(b"n")
-                m = d.expect(r"GUIDE step=2/5 \S+ state=RESULT check=presence "
-                             r"val=\S+ ok=(\d)",
-                             "i2c needle: the presence check reported", timeout=45)
-                # No panel on the bench, so presence fails on_fail: warn and a
-                # second confirm advances. If a panel IS plugged in it passes
-                # and commits straight through - both are fine here.
-                if m and m.group(1) == "0":
-                    d.send(b"n")
-                d.expect(r"GUIDE step=3/5 \S+ state=WAIT",
-                         "i2c needle: step 3 (power_on) is waiting", timeout=45)
-                d.send(b"n")
-                m = d.expect(r"GUIDE step=3/5 \S+ state=RESULT check=rail_sane "
-                             r"val=\S+ ok=(\d)",
-                             "i2c needle: rail_sane reported", timeout=45)
-                if m and m.group(1) == "0":
-                    d.send(b"n")
-                d.expect(r"GUIDE step=4/5 \S+ state=WAIT",
-                         "i2c needle: step 4 (the i2c verify) is waiting",
-                         timeout=45)
-
-                # DISP is committed: its four legs are on the fabric and the
-                # two that matter are the SDA/SCL bridges to the I2C pins.
-                before = _i2c_bridge_state()
-                check(before.get("sda") == 1 and before.get("scl") == 1,
-                      f"i2c needle: the committed wiring is live before the "
-                      f"check - 8<->RP_GPIO_7 and 7<->RP_GPIO_8 (got "
-                      f"{before.get('sda')}, {before.get('scl')})")
-
-                d.send(b"n")
-                d.expect(r"GUIDE step=4/5 \S+ state=VERIFY check=i2c",
-                         "i2c needle: the i2c check launched")
-                # i2cScan is the one BLOCKING check: a 128-address sweep plus
-                # its own ~2 s LED/OLED result UI. Generous window.
-                m = d.expect(r"GUIDE step=4/5 \S+ state=RESULT check=i2c "
-                             r"val=(\S+) ok=(\d)",
-                             "i2c needle: the i2c check finished", timeout=60)
-                print(f"  info: i2c verdict was {m.group(1) if m else '??'} "
-                      f"(not asserted - ghost ACKs on a panel-less bus)")
-
-                after = _i2c_bridge_state()
-                check(after.get("sda") == 1 and after.get("scl") == 1,
-                      f"i2c needle: THE CRITICAL - the project's own SDA/SCL "
-                      f"bridges SURVIVED the i2c check (8<->RP_GPIO_7 "
-                      f"{after.get('sda')}, 7<->RP_GPIO_8 {after.get('scl')})")
-                check(before.get("nb") == after.get("nb"),
-                      f"i2c needle: the check is bridge-count neutral - "
-                      f"{before.get('nb')} before, {after.get('nb')} after "
-                      f"(nothing removed, and no ephemeral leg leaked out of "
-                      f"the teardown funnel)")
-
-                # Advance past the step so it COMMITS and the guide saves the
-                # run file - the destructive removal's markDirty only reached
-                # disk at the next explicit save, which is the half a user
-                # actually loses.
-                #
-                # UNCONDITIONAL, and that is the fix: this used to send the
-                # confirm only on ok=0, which made the phase pass exactly when
-                # the bus was quiet and hang for 45 s when it was not. The
-                # verdict here is bench-dependent - see the "ghost ACKs on a
-                # panel-less bus" note above, where a pulled-down SDA reports
-                # all 126 addresses as present - so a branch on it is a coin
-                # flip. A verify step waits for its confirm either way; and in
-                # the case where a pass had already carried the guide to step 5,
-                # this `n` merely confirms that closing note and the expect
-                # below still finds the line it printed on the way there.
-                d.send(b"n")
-                # ANY step-5 state, not WAIT specifically. What this phase needs
-                # to know is that the verify step committed and the guide moved
-                # on; step 5 is a `note`, so when the confirm above is already
-                # buffered as it enters, it runs RESULT -> COMMIT -> DONE
-                # without ever printing a WAIT. Insisting on WAIT made the
-                # assertion depend on the arrival timing of a keystroke.
-                d.expect(r"GUIDE step=5/5 \S+ state=(?:WAIT|RESULT|COMMIT|DONE)",
-                         "i2c needle: the verify step committed and the guide "
-                         "reached step 5 (the closing note)", timeout=45)
-                d.send(b"q")
-                d.expect(r"GUIDE .* state=EXIT", "i2c needle: 'q' left the guide")
-                guide_live = False
+                d.send(f"z {proj} new noscript\r\n".encode())
+                d.expect(r"RUNFILE path=\S+ action=new",
+                         "i2c needle: fresh run file written")
+                d.expect(r"VIEWER steps=5",
+                         "i2c needle: the viewer armed on the 5-step guide")
+                d.expect(r"SCRIPT action=skip",
+                         "i2c needle: noscript kept main.py out of the drive")
             finally:
-                if guide_live:
-                    d.send(b"q")
-                    time.sleep(0.5)
                 d.close()
-                time.sleep(1.0)
+                time.sleep(0.5)
 
-            # The durable half, straight out of the saved file.
+            # LEAVE the run-file context before editing its file: a file
+            # context auto-saves back to ITSELF (test_slot_files' standing
+            # trap). The leave itself SCHEDULES one more save of the
+            # outgoing context, and that deferred write landed AFTER the
+            # first cut's fs_write - clobbering the placed: edit with the
+            # serializer's `placed: false` (bench, twice). Let it land,
+            # then edit, then PROVE the edit survived before reopening.
+            leave_context_to_slot3()
+            time.sleep(3.0)
             rpath = project_run_path(pdir)
+            exists, ryaml = read_device_file(rpath)
+            check(exists and ryaml is not None,
+                  "i2c needle: the fresh run file reads back")
+            # Fresh template = no `placed:` key; a churned file = the
+            # serializer's `placed: false`. Handle both, and RE-READ after
+            # the write - one late deferred save is retried through once.
+            def _inject_placed(txt):
+                if "placed: false" in txt:
+                    return txt.replace("placed: false", "placed: true", 1)
+                return txt.replace("    row: 5\n",
+                                   "    row: 5\n    placed: true\n", 1)
+
+            injected = False
+            for attempt in range(2):
+                placed_yaml = _inject_placed(ryaml or "")
+                if "placed: true" not in placed_yaml:
+                    break
+                out = jl_exec(f"""
+ok = fs_write({rpath!r}, {placed_yaml!r})
+print("wrote=", 1 if ok else 0)
+""", timeout=40)
+                if parse_kv(out).get("wrote") != 1:
+                    break
+                time.sleep(1.5)
+                _, ryaml = read_device_file(rpath)
+                if ryaml is not None and "placed: true" in ryaml:
+                    injected = True
+                    break
+                # a deferred save clobbered the edit - go around once more
+            check(injected,
+                  "i2c needle: DISP's placement is ON DISK and survived the "
+                  "outgoing context's deferred save")
+
+            # Reopen through the launcher: loads the edited file (DISP's pins
+            # expand to bridges) and re-arms the viewer for `z check step`.
+            d = GuideDriver()
+            try:
+                d.send(f"z {proj} noscript\r\n".encode())
+                d.expect(r"VIEWER steps=5",
+                         "i2c needle: the reopen re-armed the viewer")
+                d.expect(r"SCRIPT action=skip",
+                         "i2c needle: the reopen skipped the script too")
+            finally:
+                d.close()
+                time.sleep(0.5)
+
+            # DISP is committed: its four legs are on the fabric and the
+            # two that matter are the SDA/SCL bridges to the I2C pins.
+            before = _i2c_bridge_state()
+            check(before.get("sda") == 1 and before.get("scl") == 1,
+                  f"i2c needle: the committed wiring is live before the "
+                  f"check - 8<->RP_GPIO_7 and 7<->RP_GPIO_8 (got "
+                  f"{before.get('sda')}, {before.get('scl')})")
+
+            # i2cScan is the one BLOCKING check: a 128-address sweep plus
+            # its own ~2 s LED/OLED result UI. Generous window. The verdict
+            # is NOT asserted - ghost ACKs on a panel-less bus (0, 1 and 4
+            # all observed on this bench in one session).
+            resp = port1_command("z check step 4", collect_seconds=8.0,
+                                 quiet_after=5.0, max_seconds=90.0)
+            check("result=" in resp,
+                  "i2c needle: the on-demand i2c check ran to a verdict")
+            mres = re.search(r"result=(\S+)", resp)
+            print(f"  info: i2c verdict was {mres.group(1) if mres else '??'} "
+                  f"(not asserted - ghost ACKs on a panel-less bus)")
+
+            after = _i2c_bridge_state()
+            check(after.get("sda") == 1 and after.get("scl") == 1,
+                  f"i2c needle: THE CRITICAL - the project's own SDA/SCL "
+                  f"bridges SURVIVED the i2c check (8<->RP_GPIO_7 "
+                  f"{after.get('sda')}, 7<->RP_GPIO_8 {after.get('scl')})")
+            check(before.get("nb") == after.get("nb"),
+                  f"i2c needle: the check is bridge-count neutral - "
+                  f"{before.get('nb')} before, {after.get('nb')} after "
+                  f"(nothing removed, and no ephemeral leg leaked out of "
+                  f"the teardown funnel)")
+
+            # The durable half needs the state ON DISK - the old guide saved
+            # on step commit; ambiently the save is its own gesture.
+            jl_exec("nodes_save()", timeout=30)
+            time.sleep(1.0)
             exists, ryaml = read_device_file(rpath)
             check(exists, f"i2c needle: the run file {rpath} was written")
             # Bridges serialize with node NAMES (nodeValueToString), so

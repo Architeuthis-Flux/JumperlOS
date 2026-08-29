@@ -57,6 +57,27 @@ public:
     void setEmphasis(const int16_t* nodes, int count);
     void clearEmphasis() { setEmphasis(nullptr, 0); }
 
+    // Part highlight - the encoder scroll's part focus and the select tap.
+    // pinIdx -1 = the WHOLE part (every pin gets its role-color dot pair);
+    // pinIdx >= 0 focuses one pin (brightened, and an unwired pin's row is
+    // painted whole so it lights up like a wired one). holdMs bounds how
+    // long it shows; clearHighlighting() also clears it.
+    void setPartHighlight(int partIdx, int pinIdx, unsigned long holdMs);
+    void clearPartHighlight();
+    bool partHighlightActive() const { return hlPart >= 0; }
+    int partHighlightPart() const { return hlPart; }
+
+    // Standing displays retire (Kevin's ruling, 2026-08-27: overlays are
+    // informative but GO AWAY on board clear / parts-app exit): current
+    // warnings mute until they change or re-fire, inspect/bloom windows
+    // drop, any part highlight clears. The warn FLAGS survive - only the
+    // standing paint retires.
+    void clearTransients();
+
+    // The cached-test-data line for the part card ("hFE 370  0.59V" /
+    // "Vf 1.95V" / "1.0k"). False when the part was never tested.
+    static bool partTestSummary(const PartDefinition& p, char* buf, size_t len);
+
     bool hasWarnings() const { return warnActiveMask != 0; }
 
     static const int MAX_EMPHASIS_NODES = 16;
@@ -82,6 +103,15 @@ private:
     uint32_t warnActiveMask = 0;                     // bit per part
     uint8_t  warnReason[MAX_PARTS] = {0};            // PartWarnReason
     int8_t   warnPin[MAX_PARTS] = {0};               // pin index of the announce
+
+    // --- warn display muting (clearTransients) ---
+    uint32_t warnMutedMask = 0;                      // muted-standing bits
+    uint8_t  warnMutedReason[MAX_PARTS] = {0};       // unmute when it changes
+
+    // --- part highlight ---
+    int8_t hlPart = -1;                              // -1 = none
+    int8_t hlPin = -1;                               // -1 = whole part
+    unsigned long hlUntilMs = 0;
 
     // --- emphasis ---
     int16_t emphasisNodes[MAX_EMPHASIS_NODES] = {0};

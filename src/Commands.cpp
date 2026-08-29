@@ -150,6 +150,30 @@ unsigned long waitCore2() {
   return micros() - timeout;
 }
 
+// Cancel a REQ_BYPASS that is still posted at the head of a rebuild, right
+// before the path arrays are zeroed. Core 1 serves a bypass with no rebuild
+// guard at all - the frame-hold spin in loop1() takes it even while a hold is
+// up - so one taken after clearAllNTCC() diffs an EMPTY path list against
+// lastChipXY and physically disconnects every crosspoint: rails and every user
+// circuit drop for the few ms until the rebuild's own bypass puts them back,
+// which is long enough to reset a powered part on the breadboard.
+//
+// Cancelling is exact, not a drop: a bypass means "send the current paths, no
+// clean", those paths are about to be replaced, and every caller of this posts
+// its own send before it returns (REQ_BYPASS in the two local rebuilds,
+// REQ_SEND in refreshConnections). take() clears the bits atomically, so if
+// core 1 got there first we take nothing and the caller's pre-clear wait
+// (which spins on allIdle()) has already covered its send; complete() keeps a
+// cancelled slot from reading not-idle forever. REQ_SEND is deliberately NOT
+// cancelled - its SEND_CLEAN is sticky and carries the anyChipXYSuspect
+// re-sync, which no later bypass would redo.
+static void cancelStaleBypass(void) {
+  uint32_t staleGen = 0;
+  if (core1req::take(core1req::REQ_BYPASS, &staleGen)) {
+    core1req::complete(core1req::REQ_BYPASS, staleGen);
+  }
+}
+
 int lastSlot = netSlot;
 
 void refresh(int flashOrLocal, int ledShowOption, int fillUnused, int clean) {
@@ -215,6 +239,10 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
   // loadBridgesFromState(): slot preview calls that without applying to
   // hardware, and evaluation fires DAC/GPIO hardware callbacks.
   infraEvaluate();
+  // waitCore2() above is timeout-and-proceed, and the frame hold we just took
+  // makes loop1()'s pause spin serve a bypass instantly - so cancel one that
+  // outlived the wait before the arrays go away.
+  cancelStaleBypass();
   clearAllNTCC();
   //core1busy = true;
   // return;
@@ -337,7 +365,6 @@ void refreshConnections(int ledShowOption, int fillUnused, int clean) {
 // Separate guard for local refresh operations
 // Note: Not static because these are exported via Commands.h for auto-save deadlock prevention
 volatile bool refreshLocalInProgress = false;
-static volatile bool refreshLocalPending = false;
 static volatile uint32_t lastRefreshLocalTime = 0;
 
 void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
@@ -349,14 +376,15 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
   }
 
   // OPTIMIZATION: Prevent overlapping refreshes
-  // Queue up another refresh if one is already running
+  // Nothing is queued: the caller's edit is already in globalState, and a
+  // rebuild that has not yet reached loadBridgesFromState() picks it up. One
+  // already past it will not - InfraPaths' sticky s_nudgePending retry exists
+  // for exactly that case.
   if (refreshLocalInProgress) {
-    refreshLocalPending = true;
     return;
   }
   
   refreshLocalInProgress = true;
-  refreshLocalPending = false;
   lastRefreshLocalTime = millis();
 
   // OPTIMIZATION: Wait for Core 2 to finish previous operation before starting new one
@@ -364,7 +392,12 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
   // But it allows overlap: Core 0 can route while Core 2 sends previous paths
   // With the optimizations, Core 2 only runs when there's work, so this wait should be minimal
   unsigned long core2_wait_start = micros();
-  while (core2busy) {
+  // core2busy alone is blind to the hazard this wait exists for: it is raised
+  // only AROUND an actual send, so a REQ_BYPASS that is posted but not yet
+  // taken - or a DMA-fed send still strobing after sendPaths() returned -
+  // reads "not busy". Same condition waitCore2() uses (the mailbox's done
+  // generation has caught up in every send slot), which covers both.
+  while (core2busy || !core1req::allIdle()) {
     __dmb();  // Memory barrier
     tight_loop_contents();
     
@@ -385,6 +418,7 @@ void refreshLocalConnections(int ledShowOption, int fillUnused, int clean) {
   
   //holdCore1Frames( );
 unsigned long start2 = millis();
+  cancelStaleBypass();
   clearAllNTCC();
   core1busy = true;
   // See refreshConnections: infra convergence runs at every hardware-applying
@@ -478,12 +512,6 @@ unsigned long start2 = millis();
   // Serial.print(millis() - lastRefreshLocalTime);
   // Serial.println(" ms");
   
-  // If another refresh was requested while we were busy, do it now
-  // This is critical for MicroPython scripts that make multiple connections quickly
-  if (refreshLocalPending) {
-    refreshLocalPending = false;
-   // refreshLocalConnections(ledShowOption, fillUnused, clean);
-  }
 
 
   //!
@@ -561,14 +589,13 @@ void fastRefresh(int ledShowOption) {
     return;
   }
 
-  // Prevent overlapping refreshes
+  // Prevent overlapping refreshes (nothing is queued - see
+  // refreshLocalConnections)
   if (refreshLocalInProgress) {
-    refreshLocalPending = true;
     return;
   }
   
   refreshLocalInProgress = true;
-  refreshLocalPending = false;
   
   // Performance profiling (set PROFILE_FAST_REFRESH = 1 to enable)
   #define PROFILE_FAST_REFRESH 0
@@ -579,7 +606,9 @@ void fastRefresh(int ledShowOption) {
   // This is necessary to prevent race conditions in the path arrays
   // But it allows overlap: Core 0 can route while Core 2 sends previous paths
   unsigned long core2_wait_start = micros();
-  while (core2busy) {
+  // See refreshLocalConnections: core2busy misses a posted-but-untaken bypass
+  // and a DMA send still strobing; allIdle() covers both.
+  while (core2busy || !core1req::allIdle()) {
     __dmb();  // Memory barrier
     tight_loop_contents();
     
@@ -608,6 +637,7 @@ void fastRefresh(int ledShowOption) {
   // 2. Bypass Core 2 scheduler for immediate hardware update
   // 3. Minimal validation and error checking
   
+  cancelStaleBypass();                    // never send the arrays we are about to zero
   clearAllNTCC();                         // Clear routing state
   #if PROFILE_FAST_REFRESH
   Serial.print("clearAllNTCC: "); Serial.print(micros() - stepTime); Serial.println(" us");
@@ -699,10 +729,6 @@ void fastRefresh(int ledShowOption) {
   Serial.println();
   #endif
   
-  // Handle pending refresh if one was requested
-  if (refreshLocalPending) {
-    refreshLocalPending = false;
-  }
 }
 
 struct rowLEDs getRowLEDdata(int row) {

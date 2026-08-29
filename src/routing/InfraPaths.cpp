@@ -237,17 +237,42 @@ static void parkDacAtMeasureTarget(int dacNum) {
     // stays false: the voltage-claim nudge must never re-enter evaluation.
     // Clamp to the tip-drive sanity band (configManager also validates on
     // load): parking above 3.3V logic clips the pad ladder's high end.
-    float target = jumperlessConfig.calibration.measure_mode_output_voltage;
+    float target = jumperlessConfig.probe.measure_voltage;
     if (target < 3.0f || target > 3.6f) target = 3.33f;
-    // save only when the STATE value actually moves; the hardware decision is
-    // the driver's. (setDacVoltage now applies the same no-op gate itself -
-    // w3-5 - so this is belt-and-braces rather than load-bearing, but it also
-    // uses a 5 mV epsilon where the setter compares exactly, so keep it.)
-    bool stateOff = fabsf(getDacVoltage(dacNum) - target) > 0.005f;
+    // THE PARK IS A SYSTEM RE-ASSERT, NEVER A USER EDIT - so it writes the
+    // state field DIRECTLY and calls the setter with save=0. It must not go
+    // through globalState.setDacVoltage(), because that is the dirty marker.
+    //
+    // It used to: `save` was 1 whenever the state value was more than 5 mV
+    // from the target, and the setter then marked dirty. That is a LOAD-PATH
+    // WRITER, and it broke the contract States.cpp:986 exists to defend - a
+    // plain load with no user mutation must leave its file byte-identical.
+    // PowerState::setDefaults() seeds dac0 = 3.33 f, every shipped fixture and
+    // every Wokwi import writes `dac0: 3.33`, and a calibrated board's
+    // measure_mode_output_voltage is something else (3.32 on the bench that
+    // caught this). So loading such a slot parked DAC0 10 mV away, dirtied the
+    // state, and ~750 ms later the idle auto-save rewrote the file that had
+    // just been read - erasing test_slot_files' 6a-bis no-write canary, and in
+    // the field silently re-writing every slot whose dac0 is the default.
+    //
+    // Writing the field keeps RAM and hardware in agreement, which is
+    // load-bearing: loadSlot/loadSlotFromPath run applyStateToHardware()
+    // AFTER refreshConnections(), so a park that left the state alone would be
+    // undone by setRailsAndDACs(0) re-asserting the file's dac0 (and
+    // loadSlotFromPath has no trailing refresh to re-park). It also keeps
+    // dacVoltageInProbeWindow() - which reads the STATE - stable across
+    // evaluations, and drops the phantom undo record the setter used to write
+    // on nudge paths that are not wrapped in undoBeginIngest().
+    //
+    // The state may now disagree with the FILE (file 3.33, RAM 3.32) until
+    // some genuine user edit saves it. That is the intended trade: the park
+    // rides along on the next real save instead of forcing one of its own.
     if (dacNum == 0) {
-        setDac0voltage(target, stateOff ? 1 : 0, 0, false);
+        globalState.power.dac0 = target;
+        setDac0voltage(target, 0, 0, false);
     } else {
-        setDac1voltage(target, stateOff ? 1 : 0, 0, false);
+        globalState.power.dac1 = target;
+        setDac1voltage(target, 0, 0, false);
     }
 }
 
@@ -330,7 +355,7 @@ static const InfraCandidate s_probePowerCandidates[] = {
 };
 
 bool infraProbePowerGpioFirst(void) {
-    return jumperlessConfig.dacs.probe_power_source == 1;
+    return jumperlessConfig.probe.power_source == 1;
 }
 
 static int ordProbePower(int walk) {
@@ -342,7 +367,7 @@ static int ordProbePower(int walk) {
 static bool ovProbePower(void) { return nonInfraBridgeTouches(ROUTABLE_BUFFER_IN); }
 
 static bool enProbePower(void) {
-    return s_probePowerOn && jumperlessConfig.dacs.auto_connect_probe > 0;
+    return s_probePowerOn && jumperlessConfig.probe.auto_connect > 0;
 }
 
 #else // OG_JUMPERLESS: no routable buffer
@@ -618,7 +643,7 @@ bool infraProbePowerWanted(void) {
 static void pairPathStats(int a, int b, int* paths, int* dups, int* xp);
 
 float infraProbeDroopOhms(void) {
-    float calibrated = jumperlessConfig.calibration.probe_droop_ohms;
+    float calibrated = jumperlessConfig.probe.droop_ohms;
     if (calibrated > 0.0f) return calibrated;
 
     // Uncalibrated fallback - two answers, because two consumers:
@@ -645,8 +670,8 @@ float infraProbeDroopOhms(void) {
         if (routedXp > 0) xp = routedXp;
     }
 #endif
-    return jumperlessConfig.calibration.probe_pad_ohms +
-           (float)xp * jumperlessConfig.calibration.crosspoint_resistance;
+    return jumperlessConfig.probe.pad_ohms +
+           (float)xp * jumperlessConfig.measurement.crosspoint_resistance;
 }
 
 // ===========================================================================
@@ -660,9 +685,8 @@ void infraNudge(void) {
         refreshLocalConnections(0, 1, 0);
     }
     // else: the in-flight rebuild already ran its evaluation - the sticky
-    // flag makes infraServiceTick retry once it finishes. (The
-    // refreshLocalPending re-run is commented out in Commands.cpp, so we
-    // cannot rely on it.)
+    // flag makes infraServiceTick retry once it finishes. (Commands.cpp
+    // queues no re-run of its own, so we cannot rely on one.)
 }
 
 void infraServiceTick(void) {

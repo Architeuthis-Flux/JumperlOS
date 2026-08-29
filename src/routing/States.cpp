@@ -222,8 +222,8 @@ void PowerState::setDefaults() {
     // same gate infra's enProbePower() applies), so leave both DACs at
     // their non-probe defaults.
     extern volatile bool configLoaded;
-    if (configLoaded && jumperlessConfig.dacs.auto_connect_probe > 0) {
-        dac0 = jumperlessConfig.calibration.measure_mode_output_voltage;
+    if (configLoaded && jumperlessConfig.probe.auto_connect > 0) {
+        dac0 = jumperlessConfig.probe.measure_voltage;
     }
 }
 
@@ -2933,7 +2933,16 @@ void applyStateToHardware(bool skipPower) {
     // initGPIO()/setGPIO()/updateGPIOConfigFromState().
     for (int i = 0; i < 10; i++) {
         uint8_t gpio_pin = gpioDef[i][0];
-        
+
+        // Skip bus-role pins (gpioState 6: the display service's soft-I2C),
+        // same guard as setGPIO(). A slot load otherwise re-asserts the config
+        // direction/pulls on the live bus - a PULLDOWN across SDA's ACK window
+        // - and re-stamps state 4, which sends readGPIO down the pull-twiddling
+        // float path mid-transaction.
+        if (gpioState[i] == 6) {
+            continue;
+        }
+
         // Apply direction to hardware
         if (globalState.config.gpioDirection[i] == 0) {
             gpio_set_dir(gpio_pin, true);  // output

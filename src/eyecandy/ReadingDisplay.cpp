@@ -81,6 +81,55 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
     }
 }
 
+// findBestFitPointSize re-measures the string at every point size from 12
+// down - up to seven full glyph walks - and show() reaches it on every repaint
+// that gets past the dedupe, including the ~10 Hz live-value refreshes where a
+// settled reading dithers between a handful of strings. Keyed on the exact
+// text so the cached answer is always the one the search would have returned;
+// the family is part of the key, and the width/size bounds are literals at the
+// single call site.
+constexpr int FIT_CACHE_ENTRIES = 4;
+constexpr size_t FIT_CACHE_TEXT = 24;
+// maxPt rides the cache key: the same string fit under different caps
+// resolves to different fonts.
+
+struct FitCacheEntry {
+    char text[FIT_CACHE_TEXT];
+    FontFamily family;
+    int16_t font;
+    uint8_t maxPt;
+    bool valid;
+};
+FitCacheEntry fitCache[FIT_CACHE_ENTRIES] = {};
+int fitCacheNext = 0;
+
+int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 10) {
+    if (text != nullptr) {
+        for (int i = 0; i < FIT_CACHE_ENTRIES; i++) {
+            if (fitCache[i].valid && fitCache[i].family == family &&
+                fitCache[i].maxPt == maxPt &&
+                strcmp(fitCache[i].text, text) == 0) {
+                return fitCache[i].font;
+            }
+        }
+    }
+    uint8_t pt = FontManager::findBestFitPointSize(family, text, 128, maxPt, 6);
+    int16_t font = (int16_t)FontManager::getFontForPointSize(family, pt);
+    // Only a key we can hold WHOLE goes in: a truncated copy would match the
+    // wrong string later and hand back a font measured for something else.
+    if (text != nullptr && strlen(text) < FIT_CACHE_TEXT) {
+        FitCacheEntry& e = fitCache[fitCacheNext];
+        fitCacheNext = (fitCacheNext + 1) % FIT_CACHE_ENTRIES;
+        strncpy(e.text, text, FIT_CACHE_TEXT - 1);
+        e.text[FIT_CACHE_TEXT - 1] = '\0';
+        e.family = family;
+        e.font = font;
+        e.maxPt = maxPt;
+        e.valid = true;
+    }
+    return font;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -118,9 +167,20 @@ void appendField(char* buf, size_t& len, const char* sep, const char* text) {
 // jOS.serviceInner(), which dispatches only the inner set - so no
 // reading can repaint mid-takeover - and announce themselves through
 // resetLastShown(), which now only drops the OLED dedupe.
+//
+// The pin optionally carries a STATUS row directly above the reading (the
+// part scroll's PARTSEL trace lives there). It joins on the first
+// emitLiveStatusLine() - the pin grows from two rows to three - and leaves
+// only on a full re-pin: once anything scrolls the terminal, the next
+// reading pins the plain two-row shape again and the next status paint
+// re-grows it. clearLiveStatusLine() blanks the row's CONTENT but keeps the
+// geometry, so the reading's "two rows up" never has to move.
 
 namespace {
 bool pinReserved = false;
+// The pin is three rows tall (status + reading + spacer) instead of two.
+// Pure geometry: the status row may be blank (clearLiveStatusLine).
+bool statusRowReserved = false;
 // s_port1LineFeeds as of our last paint. While it still matches, nothing has
 // scrolled the terminal and the pinned rows are exactly where we left them.
 uint32_t pinLineFeedSnapshot = 0;
@@ -157,7 +217,25 @@ void emitLiveSerialLine(const char* line) {
         // on every pass for as long as the typed line stayed long. The separate
         // flag below is what forces the serial side to re-pin.
         pinReserved = false;
+        statusRowReserved = false;
         serialNeedsRepin = true;
+        return;
+    }
+    // Never start a write the CDC FIFO cannot take. Adafruit_USBD_CDC::write()
+    // loops in yield() until a CONNECTED host drains, with no timeout, and
+    // this runs BEFORE the OLED write - so a terminal that stopped reading
+    // wedges the panel too. The reading is live: drop this frame's serial
+    // repaint and the next value puts it back ~40 ms later. Deliberately does
+    // NOT set serialNeedsRepin - that bypasses the OLED dedupe below, which
+    // would repaint a 12 ms I2C frame every pass for as long as the host
+    // stayed stalled.
+    size_t needed = strlen(line) + 16;  // DECSC + CUU + CR + EL + DECRC
+    if (!pinStillValid()) {
+        // plus the re-pin's two CRLFs and Jerial's input-line redraw (its
+        // visible columns and an allowance for the prompt/highlight escapes)
+        needed += 4 + (size_t)Jerial.getInputLineColumns() + 32;
+    }
+    if ((size_t)Serial.availableForWrite() < needed) {
         return;
     }
     if (!pinStillValid()) {
@@ -173,6 +251,10 @@ void emitLiveSerialLine(const char* line) {
         // and leaves the cursor where the user actually is, mid-word.
         Jerial.redrawInputLine();
         pinReserved = true;
+        // A fresh pin is the plain two-row shape: whatever status row the old
+        // pin carried is in the scrollback with it. The next status paint
+        // grows this pin back to three rows.
+        statusRowReserved = false;
     }
     serialNeedsRepin = false;
     pinCursorToLiveRow();
@@ -185,20 +267,107 @@ void emitLiveSerialLine(const char* line) {
     pinLineFeedSnapshot = s_port1LineFeeds;
 }
 
+void emitLiveStatusLine(const char* line) {
+    if (Jerial.getInputLineColumns() >= kMaxInputColsForPin) {
+        // Same bail as the reading: past this width the cursor math below
+        // lands on the wrong rows once the typed line wraps.
+        pinReserved = false;
+        statusRowReserved = false;
+        serialNeedsRepin = true;
+        return;
+    }
+    // Same FIFO guard as the reading: never start a write a stalled host
+    // can't drain. A dropped status paint just waits for the next detent.
+    bool fresh = !pinStillValid();
+    bool grow = !fresh && !statusRowReserved;
+    size_t needed = strlen(line) + 48;  // escapes for three row erases
+    if (fresh || grow) {
+        needed += (fresh ? 6 : 2) + (size_t)Jerial.getInputLineColumns() + 32;
+    }
+    if ((size_t)Serial.availableForWrite() < needed) {
+        return;
+    }
+    if (fresh) {
+        // Three fresh rows: status, reading, spacer. Same CRLF + input-line
+        // repaint dance as the reading's two-row re-pin above.
+        Serial.print("\n\r\n\r\n\r");
+        Jerial.redrawInputLine();
+    } else if (grow) {
+        // Grow a live two-row pin by ONE newline instead of re-pinning three
+        // fresh rows: the old reading text lands exactly where the status row
+        // goes (erased by the paint below), the old spacer becomes the
+        // reading row, and the old input-line text becomes the spacer - which
+        // is why the paint below erases all three rows, not just its own.
+        Serial.print("\n\r");
+        Jerial.redrawInputLine();
+    }
+    pinReserved = true;
+    statusRowReserved = true;
+    Serial.print("\x1b" "7");            // DECSC
+    Serial.print("\x1b[3A\r\x1b[2K");    // CUU 3 to the status row, erase it
+    // Clamp to one 80-column terminal row. Autowrap scrolls WITHOUT a
+    // linefeed - the counter's documented blind spot - so a wrapping status
+    // line would silently shift every pinned row.
+    size_t len = strlen(line);
+    if (len > 78) len = 78;
+    Serial.write((const uint8_t*)line, len);
+    Serial.print("\x1b[B\r\x1b[2K");     // reading row: blanked so a stop with
+                                         // no reading (whole part, unwired
+                                         // pin) never pairs with a stale one
+    Serial.print("\x1b[B\r\x1b[2K");     // spacer (old input text after a grow)
+    Serial.print("\x1b" "8");            // DECRC
+    Serial.flush();
+    // The reading row was just blanked, so the next show() must repaint even
+    // if its text is unchanged.
+    serialNeedsRepin = true;
+    pinLineFeedSnapshot = s_port1LineFeeds;
+}
+
+void clearLiveStatusLine(void) {
+    if (!pinReserved || !statusRowReserved) {
+        return;
+    }
+    if (s_port1LineFeeds != pinLineFeedSnapshot) {
+        return;  // scrolled since our paint: that row is somebody else's now
+    }
+    if ((size_t)Serial.availableForWrite() < 16) {
+        return;  // stale text over a wedged host beats a blocked panel
+    }
+    // Blank the CONTENT, keep the geometry: statusRowReserved stays true so
+    // the reading's "two rows up" holds and the next status paint rewrites
+    // this row in place instead of growing the pin again.
+    Serial.print("\x1b" "7");
+    Serial.print("\x1b[3A\r\x1b[2K");
+    Serial.print("\x1b" "8");
+    Serial.flush();
+}
+
 void clearLiveSerialLine(void) {
     if (!pinReserved) {
         return;
     }
     pinReserved = false;
+    bool hadStatusRow = statusRowReserved;
+    statusRowReserved = false;
     if (s_port1LineFeeds != pinLineFeedSnapshot) {
         // The terminal scrolled since our last paint: the reading is already
         // somewhere in the scrollback and "two rows above the cursor" is one
         // of somebody else's lines now. Erasing would wipe THEIR output.
         return;
     }
+    if ((size_t)Serial.availableForWrite() < 32) {
+        // The same guard every sibling paint has: a connected host that
+        // stopped draining makes CDC write() spin forever in yield().
+        // Stale text on a wedged terminal beats a stalled core 0 (this
+        // was the ONE unguarded write in the file - audit, 2026-08-27).
+        return;
+    }
     // Wipe on the way out: the value is live, and one left frozen on screen
     // reads as current when it no longer is.
     pinCursorToLiveRow();
+    if (hadStatusRow) {
+        Serial.print("\x1b[A\r\x1b[2K");  // the status row rides out with it
+    }
     Serial.print("\x1b" "8");
     Serial.flush();
 }
@@ -244,6 +413,18 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
             rowLabel = rowBuf;
         }
     }
+    // The header is 5pt Andale Mono (fixed width, ~21 chars across 128px)
+    // and shares its row with the right-aligned label - a long part name
+    // ("SSD1306_32_I_2") used to run under it and clip. Truncate the name
+    // to what actually fits beside the label.
+    if (haveValues) {
+        size_t maxName = 21;
+        if (rowLabel != nullptr) {
+            size_t labelLen = strlen(rowLabel) + 1;  // plus a breathing space
+            maxName = (labelLen < 20) ? (21 - labelLen) : 1;
+        }
+        if (strlen(nameBuf) > maxName) nameBuf[maxName] = '\0';
+    }
 
     // One composed line drives both the dedupe check and the serial output.
     char line[LINE_CAP];
@@ -264,36 +445,38 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     // dedupe: the reading is buried in scrollback, so resurface it below the
     // new output even if the text itself is unchanged.
     bool serialPinStale = pinReserved && (s_port1LineFeeds != pinLineFeedSnapshot);
-    if (!serialNeedsRepin && !serialPinStale && strcmp(line, lastLine) == 0) {
+    bool sameLine = (strcmp(line, lastLine) == 0);
+    if (!serialNeedsRepin && !serialPinStale && sameLine) {
         return;  // already on screen, and the serial pin is intact
     }
     strncpy(lastLine, line, LINE_CAP - 1);
     lastLine[LINE_CAP - 1] = '\0';
 
     emitLiveSerialLine(line);
+    if (sameLine) {
+        // Only the SERIAL pin needed attention - the panel already shows
+        // this exact reading. Without this return, a latched
+        // serialNeedsRepin (the width-guard bail sets it and returns
+        // before the clear) pushed a full I2C frame on EVERY loop pass of
+        // a live updater while a long line was typed (audit, 2026-08-27).
+        return;
+    }
 
     // Value rows honor the configured font family at the closest point size;
     // the header uses Andale Mono 5pt (index 12) - the smallest font on board -
     // because most families have no readable sub-8pt cut and three
     // family-sized rows don't fit 32px.
     FontFamily fam = mapConfigValueToFontFamily(jumperlessConfig.top_oled.font);
-    int16_t medFont = (int16_t)FontManager::getFontForPointSize(fam, 8);
     int16_t labelFont = 12;  // Andale Mono 5pt
 
-    // Single value / name-only rows render as big as actually FITS: a fixed
-    // 12pt overflowed the panel on long words ("FLOATING").
-    auto bestFitFont = [&](const char* text) -> int16_t {
-        uint8_t pt = FontManager::findBestFitPointSize(fam, text, 120, 12, 6);
-        return (int16_t)FontManager::getFontForPointSize(fam, pt);
-    };
-
-    int16_t nameFont = haveValues ? labelFont : bestFitFont(nameText);
-    int16_t valueFont;
-    if (haveV1 && haveV2) {
-        valueFont = medFont;
-    } else {
-        valueFont = bestFitFont(haveV1 ? value : value2);
-    }
+    // EVERY value row renders as big as actually FITS: a fixed 12pt
+    // overflowed the panel on long words ("FLOATING"), and the old fixed
+    // 8pt two-value case clipped long readings ("PNP hFE 353") at the
+    // sides. Two stacked rows cap at 8pt so three rows still fit 32px.
+    int16_t nameFont = haveValues ? labelFont : bestFitFontFor(fam, nameText);
+    uint8_t valueCap = (haveV1 && haveV2) ? 8 : 12;
+    int16_t v1Font = haveV1 ? bestFitFontFor(fam, value, valueCap) : 0;
+    int16_t v2Font = haveV2 ? bestFitFontFor(fam, value2, valueCap) : 0;
 
     OledTextRow rows[3] = {};
     int n = 0;
@@ -313,13 +496,13 @@ void show(const char* name, int rowNode, const char* value, const char* value2,
     }
     n++;
     if (haveV1) {
-        rows[n].segs[0] = {value, valueFont, OLED_ALIGN_INHERIT};
+        rows[n].segs[0] = {value, v1Font, OLED_ALIGN_INHERIT};
         rows[n].segCount = 1;
         rows[n].align = OLED_ALIGN_CENTER;
         n++;
     }
     if (haveV2) {
-        rows[n].segs[0] = {value2, valueFont, OLED_ALIGN_INHERIT};
+        rows[n].segs[0] = {value2, v2Font, OLED_ALIGN_INHERIT};
         rows[n].segCount = 1;
         rows[n].align = OLED_ALIGN_CENTER;
         n++;

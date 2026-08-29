@@ -3,7 +3,6 @@
 // FileCache implementation.
 
 #include "FileCache.h"
-#include "JumperlessDefines.h"  // JL_BOOT_VERBOSE
 #include "PsramArena.h"
 #include "FilesystemStuff.h"  // safeFileReadAll/WriteAll backing store
 #include "externVars.h"        // core_sync_acquire / fs_mutex_try_acquire, systemIdleForFlush
@@ -1557,9 +1556,7 @@ ServiceStatus FileCacheFlushService::service() {
 #include <FatFS_LazyPersist.h>  // fatFsForceSync()
 
 void fileCacheInit() {
-#if JL_BOOT_VERBOSE
     Serial.println("FileCache: disabled (compile-time pass-through to FatFS)");
-#endif
 }
 
 void fileCacheRecoverPendingWrites() { /* no atomic temp-file commits in pass-through */ }

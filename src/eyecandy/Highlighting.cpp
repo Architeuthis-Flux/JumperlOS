@@ -25,6 +25,8 @@
 #include "Undo.h"
 #include "Menus.h"
 #include "ReadingDisplay.h"
+#include "PartLabels.h"      // partLabels - the part-highlight overlay channel
+#include "PartsApp.h"        // partsShowPartCard - the scroll's part card
 #include "PartPlacement.h"   // partPinNode - semantic labels for part-pin nets
 #include <Arduino.h>
 #include <cmath>
@@ -306,12 +308,21 @@ void Highlighting::clearHighlighting( int updateLEDs) {
     // Whatever is on the panel is no longer ours to dedupe against (a menu,
     // toast or script may paint over it), so force the next reading to draw.
     ReadingDisplay::resetLastShown( );
+    // The PARTSEL trace belongs to the selection that just ended: blank it so
+    // it can't hover over whatever reading comes next. (Content only - the
+    // pin keeps its shape, and the next part stop rewrites the row in place.)
+    ReadingDisplay::clearLiveStatusLine( );
 
     // Reset timers
     highlightTimer = 0;
     warningTimeout = 0;
     warningTimer = 0;
    // leds.clear( );
+
+    // The part-highlight overlay rides the same lifecycle: no highlight, no
+    // role-color dots (PartLabels re-shows them the next time something on
+    // the part is highlighted or tapped).
+    partLabels.clearPartHighlight( );
 
     // Note: No need to call assignNetColors() here - core 2's showNets() recomputes colors every frame
     // Use negative value to force clearBeforeSend, ensuring old highlights are fully cleared
@@ -335,6 +346,85 @@ void Highlighting::resetReadingState( ) {
 
 int lastReturnNode = -1;
 int scrolledRow = -1;
+
+// Part focus for the mode-1 scroll: a placed part is a first-class stop
+// (Kevin's spec, 2026-08-27). Landing on any of its rows highlights the
+// WHOLE part (role-color dots + the OLED card with pin assignments and
+// cached test data); the next detents walk its pins - every pin of this
+// half's span before anything else - then the row scan resumes past it.
+// Reachable with zero wires: the stop check is part geometry, not paths[].
+static int8_t scrollPartIdx = -1;   // -1 = not in part focus
+static int8_t scrollPartPin = -1;   // -1 = the whole part
+
+// Every part-removal path calls this (Highlighting.h): the raw indices
+// above and PartLabels' highlight slot go stale the moment the parts table
+// compacts - the in-loop guard can only see out-of-range or unplaced, not
+// a DIFFERENT part shifted into the same slot (audit, 2026-08-27).
+extern "C" void highlightingInvalidatePartFocus(void) {
+    scrollPartIdx = -1;
+    scrollPartPin = -1;
+    partLabels.clearPartHighlight();
+}
+
+// The part card (partsShowPartCard) paints the OLED without going through
+// ReadingDisplay, so the live-reading pipeline's dedupe key AND the one-shot
+// reprint guards (lastPrintedNet / lastPrintedRowNode) still describe a
+// panel that is no longer there. Without this reset, scrolling back onto a
+// wired pin whose reading text hadn't changed early-returned before the
+// OLED write and left the previous pin's card up (Kevin's bench, 08:38 -
+// "scroll in from one direction sometimes doesn't update").
+//
+// EXACTLY these three latches, not resetReadingState(): the full reset also
+// wipes the live-value dead zones (prevRailVoltage & co), and with a STALE
+// highlight still armed (tap Top Rail, then inspect-tap an unwired part
+// leg - brightenNet(unwired) leaves highlightedNet parked on the rail) the
+// forced first repaint stomped the card ~80ms after it painted (adversarial
+// review, 09:12). The one-shot paints in highlightNets gate only on the
+// two guards below, so this narrow set is sufficient for the scroll fix.
+extern "C" void highlightingNoteExternalOledPaint(void) {
+    Highlighting::getInstance().lastPrintedNet = -1;
+    g_readingGuards.lastPrintedRowNode = -1;
+    ReadingDisplay::resetLastShown();
+}
+
+// First placed part with a pin on this row (its pin index in *pinIdx).
+static int scrollPartOnRow( int row, int* pinIdx ) {
+    if ( row < 1 || row > 60 ) return -1;
+    for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
+        const PartDefinition& p = globalState.parts.parts[ i ];
+        if ( !p.placed ) continue;
+        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+            if ( partPinNode( p, p.pins[ j ] ) == row ) {
+                if ( pinIdx != nullptr ) *pinIdx = j;
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+extern unsigned long persistentHighlightTimeout;   // defined below (line ~870)
+
+// The part's next pin in travel order within the current half: the lowest
+// pin row above `fromRow` (up) / highest below (down). `inclusive` admits
+// fromRow itself - the whole-part -> first-pin step. Returns the pin index
+// or -1 when the span is exhausted.
+static int scrollPartNextPin( const PartDefinition& p, int fromRow, bool up, bool inclusive ) {
+    bool topHalf = ( fromRow <= 30 );
+    int best = -1, bestRow = up ? 61 : 0;
+    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+        int r = partPinNode( p, p.pins[ j ] );
+        if ( r < 1 || r > 60 || ( r <= 30 ) != topHalf ) continue;
+        bool beyond = up ? ( r > fromRow || ( inclusive && r == fromRow ) )
+                         : ( r < fromRow || ( inclusive && r == fromRow ) );
+        if ( !beyond ) continue;
+        if ( up ? ( r < bestRow ) : ( r > bestRow ) ) {
+            bestRow = r;
+            best = j;
+        }
+    }
+    return best;
+}
 
 int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
 
@@ -365,7 +455,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 currentHighlightedNode = 0;
             }
             currentHighlightedNode++;
-            if ( highlightedNet >= 0 && highlightedNet < numberOfNets && globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) {
+            if ( highlightedNet >= 0 && highlightedNet < numberOfNets && ( currentHighlightedNode >= MAX_NODES || globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) ) {
                 currentHighlightedNode = 0;
                 highlightedNet++;
                 if ( highlightedNet > numberOfNets - 1 ) {
@@ -433,7 +523,12 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     currentHighlightedNode = 0;
                 }
                 currentHighlightedNode = MAX_NODES - 1;
-                while ( highlightedNet >= 0 && highlightedNet < numberOfNets && globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) {
+                // Every iteration must leave currentHighlightedNode inside
+                // [0, MAX_NODES-1] - it is the index the loop test and the
+                // reads below it dereference - and the walk needs a bound of
+                // its own, since an all-empty net table would cycle forever.
+                int rescanLimit = numberOfNets * MAX_NODES;
+                while ( rescanLimit-- > 0 && highlightedNet >= 0 && highlightedNet < numberOfNets && globalState.connections.nets[ highlightedNet ].nodes[ currentHighlightedNode ] <= 0 ) {
                     currentHighlightedNode--;
                     if ( currentHighlightedNode < 0 ) {
                         highlightedNet--;
@@ -441,6 +536,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                             highlightedNet = numberOfNets - 1;
                             brightenedNet = numberOfNets - 1;
                             currentHighlightedNode = 0;
+                        } else {
+                            currentHighlightedNode = MAX_NODES - 1;
                         }
                     }
                 }
@@ -526,112 +623,255 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             }
         };
 
-        if ( encoderDirectionState == UP ) {
-            encoderDirectionState = NONE;
-            incrementRow( scrolledRow );
-
-            // Find a row with connections starting from current scrolledRow
-            int originalRow = scrolledRow;
-            do {
-                bool foundConnection = false;
-                int connectedNet = -1;
-
-                // Check if current scrolledRow has any connections
+        // Land the part focus. pj = -1 is the WHOLE part, pj >= 0 one pin.
+        // The part is the important thing (Kevin's spec): the card - name /
+        // type / cached test data / pin-row assignments - owns the panel in
+        // BOTH states, and highlightedNet stays parked so the live net
+        // updater can never repaint "Net N" over it. A focused wired pin
+        // still lights its net + row gradient (brightenedNet/Node feed the
+        // LEDs directly); an unwired pin's row lights through the overlay.
+        auto focusPart = [&]( int pi, int pj ) {
+            const PartDefinition& p = globalState.parts.parts[ pi ];
+            partLabels.setPartHighlight( pi, pj, persistentHighlightTimeout );
+            highlightedNet = -1;
+            // a fresh stamp, or a STALE timer from the previous net stop
+            // fires the 1.8s clear mid-card (clearHighlighting tears the
+            // part focus down with it)
+            highlightTimer = millis( );
+            int net = -1;
+            int row = scrolledRow;
+            bool specialNet = false;
+            if ( pj < 0 ) {
+                brightenedNet = -1;
+                brightenedNode = -1;
+            } else {
+                row = partPinNode( p, p.pins[ pj ] );
                 for ( int i = 0; i < numberOfPaths; i++ ) {
-                    if ( globalState.connections.paths[ i ].node1 == scrolledRow || globalState.connections.paths[ i ].node2 == scrolledRow ) {
-                        foundConnection = true;
-                        connectedNet = globalState.connections.paths[ i ].net;
+                    if ( globalState.connections.paths[ i ].node1 == row ||
+                         globalState.connections.paths[ i ].node2 == row ) {
+                        net = globalState.connections.paths[ i ].net;
                         break;
                     }
                 }
-                // Allow highlighting rails and GND even without explicit paths
-                if ( !foundConnection ) {
-                    if ( scrolledRow == GND ) {
-                        foundConnection = true;
-                        connectedNet = 1;
-                    } else if ( scrolledRow == TOP_RAIL ) {
-                        foundConnection = true;
-                        connectedNet = 2;
-                    } else if ( scrolledRow == BOTTOM_RAIL ) {
-                        foundConnection = true;
-                        connectedNet = 3;
+                brightenedNet = ( net > 0 ) ? net : -1;
+                brightenedNode = ( net > 0 ) ? row : -1;
+                brightenedAmount = 80;
+                // A pin wired to anything beyond the breadboard - a GPIO,
+                // ADC, DAC, rail, nano pin - hands the panel to the live
+                // net display: it knows how to show that thing (GPIO
+                // HIGH/LOW with click-to-toggle feedback, ADC volts...)
+                // and now says the pin's name too (showGpioPinReading).
+                if ( net > 0 && net < MAX_NETS &&
+                     globalState.connections.nets[ net ].number == net ) {
+                    if ( net <= 5 ) specialNet = true;
+                    for ( int n = 0; n < MAX_NODES && !specialNet; n++ ) {
+                        int nd = globalState.connections.nets[ net ].nodes[ n ];
+                        if ( nd == 0 ) break;
+                        if ( nd > 60 ) specialNet = true;
                     }
                 }
-
-                if ( foundConnection ) {
-                    highlightedNet = connectedNet;
-                    brightenedNet = connectedNet;
-                    brightenedNode = scrolledRow;
-                    brightenedAmount = 80; // Set brightness for highlighting
-                    // Serial.print("highlightedNet: ");
-                    // Serial.println(highlightedNet);
-                    // Serial.flush();
-                    // Serial.print("brightenedNet: ");
-                    // Serial.println(brightenedNet);
-                    // Serial.flush();
-                    // Serial.print("brightenedNode: ");
-                    // Serial.println(brightenedNode);
-                    // Serial.flush();
-                    // Serial.print("brightenedAmount: ");
-                    // Serial.println(brightenedAmount);
-                    // Serial.flush();
-                    // Serial.print("returnNode: ");
-                    // Serial.println(returnNode);
-                    // Serial.flush();
-                    requestLedShow( -1 );
-                    highlightNets( 0, highlightedNet, print );
-                    returnNode = scrolledRow;
-                    break;
+            }
+            requestLedShow( -1 );
+            if ( print ) {
+                // PARTSEL rides the pinned status row and repaints in place -
+                // the old raw "\r\n...\n" print scrolled the terminal on
+                // every detent AND knocked the reading pin loose, so one pass
+                // through a part left a screenful of stale selections behind.
+                // Emitted BEFORE the card/reading below: the status paint
+                // blanks the reading row, and the reading that belongs to
+                // THIS stop repaints right after (a whole-part or unwired-pin
+                // stop has none, and its row correctly stays blank).
+                char status[ 128 ];
+                size_t sl = (size_t)snprintf( status, sizeof( status ), "PARTSEL part=%s row=%d", p.name, row );
+                if ( sl >= sizeof( status ) ) sl = sizeof( status ) - 1;
+                if ( pj < 0 ) {
+                    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS && sl < sizeof( status ) - 1; j++ ) {
+                        sl += (size_t)snprintf( status + sl, sizeof( status ) - sl, "%s%s", j ? " " : " pins=", p.pins[ j ].name );
+                        if ( sl >= sizeof( status ) ) sl = sizeof( status ) - 1;
+                    }
+                } else if ( net > 0 ) {
+                    snprintf( status + sl, sizeof( status ) - sl, " pin=%s net=%d", p.pins[ pj ].name, net );
                 } else {
-                    incrementRow( scrolledRow );
+                    snprintf( status + sl, sizeof( status ) - sl, " pin=%s net=none", p.pins[ pj ].name );
                 }
-            } while ( scrolledRow != originalRow ); // prevent infinite loop
+                ReadingDisplay::emitLiveStatusLine( status );
+            }
+            if ( specialNet ) {
+                highlightNets( 0, net, print );   // the live card, part-named
+            } else {
+                partsShowPartCard( p, pj );
+            }
+        };
+
+        // A stale part focus (part removed / table rewritten) resets cleanly.
+        if ( scrollPartIdx >= 0 &&
+             ( scrollPartIdx >= globalState.parts.numParts ||
+               !globalState.parts.parts[ scrollPartIdx ].placed ) ) {
+            scrollPartIdx = -1;
+            scrollPartPin = -1;
+            partLabels.clearPartHighlight( );
+        }
+
+        if ( encoderDirectionState == UP ) {
+            encoderDirectionState = NONE;
+
+            // Part focus first: every pin of this part (this half's span)
+            // before anything else. The whole-part landing hands the first
+            // detent to the entry pin (inclusive), then upward through the
+            // span; exhausted, the row scan resumes past it.
+            if ( scrollPartIdx >= 0 ) {
+                const PartDefinition& p = globalState.parts.parts[ scrollPartIdx ];
+                int pj = scrollPartNextPin( p, scrolledRow, true, scrollPartPin < 0 );
+                if ( pj >= 0 ) {
+                    scrollPartPin = (int8_t)pj;
+                    scrolledRow = partPinNode( p, p.pins[ pj ] );
+                    focusPart( scrollPartIdx, pj );
+                    returnNode = scrolledRow;
+                } else {
+                    // leaving the part: its paint goes with it (bench,
+                    // 2026-08-27 - the dots/row wash lingered 15s after
+                    // scrolling on)
+                    scrollPartIdx = -1;
+                    scrollPartPin = -1;
+                    partLabels.clearPartHighlight( );
+                }
+            }
+
+            if ( returnNode == -1 ) {
+                incrementRow( scrolledRow );
+
+                // Find the next stop: a placed part's row (checked BEFORE the
+                // wiring test, so a part with no wires is reachable), else a
+                // row with connections, starting from current scrolledRow
+                int originalRow = scrolledRow;
+                do {
+                    int pj = -1;
+                    int pi = scrollPartOnRow( scrolledRow, &pj );
+                    if ( pi >= 0 ) {
+                        scrollPartIdx = (int8_t)pi;
+                        scrollPartPin = -1;   // the whole-part landing
+                        focusPart( pi, -1 );
+                        returnNode = scrolledRow;
+                        break;
+                    }
+
+                    bool foundConnection = false;
+                    int connectedNet = -1;
+
+                    // Check if current scrolledRow has any connections
+                    for ( int i = 0; i < numberOfPaths; i++ ) {
+                        if ( globalState.connections.paths[ i ].node1 == scrolledRow || globalState.connections.paths[ i ].node2 == scrolledRow ) {
+                            foundConnection = true;
+                            connectedNet = globalState.connections.paths[ i ].net;
+                            break;
+                        }
+                    }
+                    // Allow highlighting rails and GND even without explicit paths
+                    if ( !foundConnection ) {
+                        if ( scrolledRow == GND ) {
+                            foundConnection = true;
+                            connectedNet = 1;
+                        } else if ( scrolledRow == TOP_RAIL ) {
+                            foundConnection = true;
+                            connectedNet = 2;
+                        } else if ( scrolledRow == BOTTOM_RAIL ) {
+                            foundConnection = true;
+                            connectedNet = 3;
+                        }
+                    }
+
+                    if ( foundConnection ) {
+                        partLabels.clearPartHighlight( );   // a net stop never wears part paint
+                        highlightedNet = connectedNet;
+                        brightenedNet = connectedNet;
+                        brightenedNode = scrolledRow;
+                        brightenedAmount = 80; // Set brightness for highlighting
+                        requestLedShow( -1 );
+                        highlightNets( 0, highlightedNet, print );
+                        returnNode = scrolledRow;
+                        break;
+                    } else {
+                        incrementRow( scrolledRow );
+                    }
+                } while ( scrolledRow != originalRow ); // prevent infinite loop
+            }
 
         } else if ( encoderDirectionState == DOWN ) {
             encoderDirectionState = NONE;
-            decrementRow( scrolledRow );
 
-            // Find a row with connections starting from current scrolledRow
-            int originalRow = scrolledRow;
-            do {
-                bool foundConnection = false;
-                int connectedNet = -1;
+            // Part focus, mirrored: downward through this half's span.
+            if ( scrollPartIdx >= 0 ) {
+                const PartDefinition& p = globalState.parts.parts[ scrollPartIdx ];
+                int pj = scrollPartNextPin( p, scrolledRow, false, scrollPartPin < 0 );
+                if ( pj >= 0 ) {
+                    scrollPartPin = (int8_t)pj;
+                    scrolledRow = partPinNode( p, p.pins[ pj ] );
+                    focusPart( scrollPartIdx, pj );
+                    returnNode = scrolledRow;
+                } else {
+                    // leaving the part: its paint goes with it (see UP)
+                    scrollPartIdx = -1;
+                    scrollPartPin = -1;
+                    partLabels.clearPartHighlight( );
+                }
+            }
 
-                // Check if current scrolledRow has any connections
-                for ( int i = 0; i < numberOfPaths; i++ ) {
-                    if ( globalState.connections.paths[ i ].node1 == scrolledRow || globalState.connections.paths[ i ].node2 == scrolledRow ) {
-                        foundConnection = true;
-                        connectedNet = globalState.connections.paths[ i ].net;
+            if ( returnNode == -1 ) {
+                decrementRow( scrolledRow );
+
+                // Find the next stop (part row first - see the UP branch)
+                int originalRow = scrolledRow;
+                do {
+                    int pj = -1;
+                    int pi = scrollPartOnRow( scrolledRow, &pj );
+                    if ( pi >= 0 ) {
+                        scrollPartIdx = (int8_t)pi;
+                        scrollPartPin = -1;   // the whole-part landing
+                        focusPart( pi, -1 );
+                        returnNode = scrolledRow;
                         break;
                     }
-                }
-                // Allow highlighting rails and GND even without explicit paths
-                if ( !foundConnection ) {
-                    if ( scrolledRow == GND ) {
-                        foundConnection = true;
-                        connectedNet = 1;
-                    } else if ( scrolledRow == TOP_RAIL ) {
-                        foundConnection = true;
-                        connectedNet = 2;
-                    } else if ( scrolledRow == BOTTOM_RAIL ) {
-                        foundConnection = true;
-                        connectedNet = 3;
-                    }
-                }
 
-                if ( foundConnection ) {
-                    highlightedNet = connectedNet;
-                    brightenedNet = connectedNet;
-                    brightenedNode = scrolledRow;
-                    brightenedAmount = 80; // Set brightness for highlighting
-                    requestLedShow( -1 );
-                    highlightNets( 0, highlightedNet, print );
-                    returnNode = scrolledRow;
-                    break;
-                } else {
-                    decrementRow( scrolledRow );
-                }
-            } while ( scrolledRow != originalRow ); // prevent infinite loop
+                    bool foundConnection = false;
+                    int connectedNet = -1;
+
+                    // Check if current scrolledRow has any connections
+                    for ( int i = 0; i < numberOfPaths; i++ ) {
+                        if ( globalState.connections.paths[ i ].node1 == scrolledRow || globalState.connections.paths[ i ].node2 == scrolledRow ) {
+                            foundConnection = true;
+                            connectedNet = globalState.connections.paths[ i ].net;
+                            break;
+                        }
+                    }
+                    // Allow highlighting rails and GND even without explicit paths
+                    if ( !foundConnection ) {
+                        if ( scrolledRow == GND ) {
+                            foundConnection = true;
+                            connectedNet = 1;
+                        } else if ( scrolledRow == TOP_RAIL ) {
+                            foundConnection = true;
+                            connectedNet = 2;
+                        } else if ( scrolledRow == BOTTOM_RAIL ) {
+                            foundConnection = true;
+                            connectedNet = 3;
+                        }
+                    }
+
+                    if ( foundConnection ) {
+                        partLabels.clearPartHighlight( );   // a net stop never wears part paint
+                        highlightedNet = connectedNet;
+                        brightenedNet = connectedNet;
+                        brightenedNode = scrolledRow;
+                        brightenedAmount = 80; // Set brightness for highlighting
+                        requestLedShow( -1 );
+                        highlightNets( 0, highlightedNet, print );
+                        returnNode = scrolledRow;
+                        break;
+                    } else {
+                        decrementRow( scrolledRow );
+                    }
+                } while ( scrolledRow != originalRow ); // prevent infinite loop
+            }
         }
 
         // Ensure we always return a value for mode == 1
@@ -853,9 +1093,11 @@ void Highlighting::warnNetTimeout( int clearAll ) {
     // Check for highlighted net timeout
     // Use persistent node system to determine timeout duration
     unsigned long currentTimeout = highlightTimeout;
-    
-    if (shouldPersistHighlight(brightenedNode)) {
-        // Persistent nodes (rails, DACs, GPIO outputs) get much longer timeout
+
+    if (shouldPersistHighlight(brightenedNode) || partLabels.partHighlightActive()) {
+        // Persistent nodes (rails, DACs, GPIO outputs) get much longer
+        // timeout - and so does an active part focus (the whole-part card
+        // deserves reading time; its own 15s hold matches this window)
         currentTimeout = persistentHighlightTimeout;
     }
 
@@ -978,7 +1220,7 @@ static void uartRefreshLiveView( bool tx, bool rx, const char* txSnapshot,
 // persistent highlight, the button-press claim, and the prompt - so an
 // OLED-less board on the default setting behaves exactly as before.
 static bool clickAdjustEnabled( void ) {
-    int flag = jumperlessConfig.dacs.rail_click_adjust;
+    int flag = jumperlessConfig.clickwheel.rail_click_adjust;
     return flag == 2 || ( flag == 1 && oledConnected );
 }
 
@@ -991,11 +1233,122 @@ static const char* adjustHintText( void ) {
 // Highlight readings label themselves with the currently brightened node.
 // The rendering itself lives in ReadingDisplay so measure mode, the voltage
 // adjuster and the probe cursor draw the exact same way.
+static void showNetReadingRaw( const char* name, const char* value,
+                               const char* value2 = nullptr,
+                               const char* hint = nullptr ) {
+    ReadingDisplay::show( name, brightenedNode, value, value2, hint );
+}
+
+// "7447 LT" for the placed part pin sitting on `node`. Matched by NODE,
+// never first-pin-on-net - a net carries many parts' pins at once and the
+// wrong part's name on the panel is worse than none (Kevin's ruling,
+// 2026-08-27). The part NAME is what truncates, never the pin suffix.
+static bool partPinHeaderForNode( int node, char* out, size_t outLen ) {
+    if ( node < 1 || node > 60 ) return false;
+    for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
+        const PartDefinition& p = globalState.parts.parts[ i ];
+        if ( !p.placed ) continue;
+        for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+            if ( partPinNode( p, p.pins[ j ] ) != node ) continue;
+            const char* pn = p.pins[ j ].name;
+            int pinLen = (int)strlen( pn );
+            int nameBudget = (int)outLen - 1 - pinLen - 1;
+            if ( nameBudget < 1 ) nameBudget = 1;
+            snprintf( out, outLen, "%.*s %s", nameBudget, p.name, pn );
+            return true;
+        }
+    }
+    return false;
+}
+
+// The one funnel every net card passes through. When the brightened node is
+// a placed part's pin, the card is re-headed with the part identity so the
+// part display and the net display are ONE screen (Kevin, 08:38: a wired
+// pin's stop showed "the net display we'd show if it wasn't in a part"):
+// header "7447 LT" + row, first value row "GND 0.04 V" - source and value
+// combined on one small line, the 13:52 "make it smaller" idiom - with the
+// second value row and the hint riding through unchanged. Callers that
+// compose their OWN part-pin header (showGpioPinReading) paint through
+// showNetReadingRaw instead, so a name is never doubled.
 static void showNetReading( const char* name, const char* value,
                             const char* value2 = nullptr,
                             const char* hint = nullptr ) {
-    ReadingDisplay::show( name, brightenedNode, value, value2, hint );
+    char pinName[ 16 ];
+    if ( partPinHeaderForNode( brightenedNode, pinName, sizeof( pinName ) ) ) {
+        char detail[ 28 ];
+        bool haveName = ( name != nullptr && name[ 0 ] != '\0' );
+        bool haveValue = ( value != nullptr && value[ 0 ] != '\0' );
+        if ( haveName && haveValue )
+            snprintf( detail, sizeof( detail ), "%s %s", name, value );
+        else
+            snprintf( detail, sizeof( detail ), "%s",
+                      haveValue ? value : ( haveName ? name : "" ) );
+        ReadingDisplay::show( pinName, brightenedNode, detail, value2, hint );
+        return;
+    }
+    showNetReadingRaw( name, value, value2, hint );
 }
+
+// A GPIO on a part pin's net shows BOTH identities (Kevin's ask, 2026-08-27):
+// "7400 4Y" as the headline with "GPIO 3 out" + HIGH/LOW on the value lines.
+// netSemanticName can't name these nets - they are special-function, and its
+// authority gate is right for GND/rails - so the part scan runs here without
+// it: this is only ever called from inside a GPIO display branch.
+static void showGpioPinReading( int netNum, int gpioIdx, bool isOutput,
+                                const char* stateString ) {
+    char gpioLabel[ 16 ];
+    snprintf( gpioLabel, sizeof( gpioLabel ), "GPIO %d %s", gpioIdx + 1,
+              isOutput ? "out" : "in" );
+    char pinName[ 16 ] = "";
+    // The FOCUSED pin first, matched by node: with two parts on one net -
+    // exactly the 7447-driving-a-7seg board - the net walk below names
+    // whichever part the table lists first, which may not be the pin under
+    // the cursor. The net walk stays as the fallback for highlights that
+    // arrive from the GPIO side (header pad, bare wire), where no node
+    // matches but the net still deserves its part identity.
+    if ( !partPinHeaderForNode( brightenedNode, pinName, sizeof( pinName ) ) &&
+         netNum > 0 && netNum < MAX_NETS &&
+         globalState.connections.nets[ netNum ].number == netNum ) {
+        pinName[ 0 ] = '\0';
+        for ( int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++ ) {
+            const PartDefinition& p = globalState.parts.parts[ i ];
+            if ( !p.placed ) continue;
+            bool found = false;
+            for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
+                int node = partPinNode( p, p.pins[ j ] );
+                if ( node < 1 || node > 60 ) continue;
+                if ( !netHasNode( netNum, node ) ) continue;
+                const char* pn = p.pins[ j ].name;
+                int pinLen = (int)strlen( pn );
+                int nameBudget = (int)sizeof( pinName ) - 1 - pinLen - 1;
+                if ( nameBudget < 1 ) nameBudget = 1;
+                snprintf( pinName, sizeof( pinName ), "%.*s %s", nameBudget,
+                          p.name, pn );
+                found = true;
+                break;
+            }
+            if ( found ) break;
+        }
+    }
+    // Raw paints on purpose: the header is already the part pin (or
+    // deliberately not one), and the re-heading funnel would double it.
+    if ( pinName[ 0 ] != '\0' ) {
+        showNetReadingRaw( pinName, gpioLabel, stateString );
+    } else {
+        char name[ 16 ];
+        if ( netSemanticName( netNum, gpioIdx, name, sizeof( name ) ) )
+            showNetReadingRaw( name, stateString );   // the I2C "GPIO N SCL" form
+        else
+            showNetReadingRaw( gpioLabel, stateString );
+    }
+}
+
+// The rail/DAC-on-a-part-pin display (Kevin, 12:53: "when we highlight the
+// E pin, it's just showing the rail thing, we need the same thing as the
+// gpio") is no longer a special case: the showNetReading funnel above
+// re-heads EVERY net card - rails, DACs, GND, ADC, plain nets, I sense -
+// with the node-matched part pin, so the rail/DAC branches below just call
+// it like everyone else.
 
 int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, int print ) {
     // Serial.print("justReadProbe = ");
@@ -1015,6 +1368,25 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
     } else {
 
         netHighlighted = brightenNet( probeReading );
+        // A probe tap is a fresh gesture: the part card yields the panel to
+        // the tapped net (otherwise the checkForReadingChanges part-focus
+        // gate would mute the tap's live readings for the rest of the hold).
+        // EXCEPT a tap on the focused part's own pins - the inspect listener
+        // owns that display, and racing it here would drop the pin dots.
+        if ( netHighlighted > 0 && partLabels.partHighlightActive( ) ) {
+            bool onFocusedPart = false;
+            int hp = partLabels.partHighlightPart( );
+            if ( hp >= 0 && hp < globalState.parts.numParts ) {
+                const PartDefinition& fp = globalState.parts.parts[ hp ];
+                for ( int j = 0; j < fp.numPins && j < MAX_PART_PINS; j++ ) {
+                    if ( partPinNode( fp, fp.pins[ j ] ) == probeReading ) {
+                        onFocusedPart = true;
+                        break;
+                    }
+                }
+            }
+            if ( !onFocusedPart ) partLabels.clearPartHighlight( );
+        }
     }
 
     auto& sensePrintInitialized   = g_readingGuards.sensePrintInitialized;
@@ -1060,6 +1432,12 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
         // left it stale while the brightening moved along the rows.
         auto& lastPrintedRowNode = g_readingGuards.lastPrintedRowNode;
         bool printedRowChanged = ( lastPrintedRowNode != brightenedNode );
+        // Snapshot of the reprint gate the default branch's reading branches
+        // all test, taken before any of them moves lastPrintedNet - the
+        // trailing flush at the end of the switch is out of their scope and
+        // has to be gated on the same thing they are.
+        bool defaultBranchPrints = ( print == 1 &&
+                                     ( lastPrintedNet != netHighlighted || printedRowChanged ) );
         // NOTE: lastPrintedNet is deliberately NOT cleared here anymore.
         // Clearing it every call re-pushed the OLED on every loop while the
         // probe tip was held on a net. Net changes reprint below; value
@@ -1441,10 +1819,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                                 : ( gpioInputState == 1 ) ? "HIGH"
                                 : ( gpioInputState == 2 ) ? "FLOATING"
                                                           : "?";
-                            char name[ 16 ];
-                            if ( !netSemanticName( netHighlighted, gpioInputNumber, name, sizeof( name ) ) )
-                                snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
-                            showNetReading( name, stateString );
+                            showGpioPinReading( netHighlighted, gpioInputNumber,
+                                                false, stateString );
                         }
                         specialPrint = 1;
                     }
@@ -1457,10 +1833,8 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                         logoOverriden = true;
                         if ( print == 1 ) {
                             int gpioOutputState = gpio_get_out_level( gpioDef[ gpioOutputNumber ][ 0 ] );
-                            char name[ 16 ];
-                            if ( !netSemanticName( netHighlighted, gpioOutputNumber, name, sizeof( name ) ) )
-                                snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
-                            showNetReading( name, gpioOutputState ? "HIGH" : "LOW" );
+                            showGpioPinReading( netHighlighted, gpioOutputNumber,
+                                                true, gpioOutputState ? "HIGH" : "LOW" );
                         }
                         specialPrint = 1;
                     }
@@ -1476,8 +1850,15 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     if ( print == 1 && ( lastPrintedNet != netHighlighted ||
                                          printedRowChanged ) ) {
                         char nameBuffer[ 16 ];
+                        char nodePin[ 16 ];
                         const char* baseName;
-                        if ( netSemanticName( netHighlighted, -1, nameBuffer, sizeof( nameBuffer ) ) )
+                        if ( partPinHeaderForNode( brightenedNode, nodePin, sizeof( nodePin ) ) )
+                            // showNetReading re-heads with THIS pin - and
+                            // netSemanticName's first-pin-on-net walk could
+                            // name a DIFFERENT part sharing the net, putting
+                            // "7SEG52 S4 0.31 V" under a "7447 D" header
+                            baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
+                        else if ( netSemanticName( netHighlighted, -1, nameBuffer, sizeof( nameBuffer ) ) )
                             baseName = nameBuffer;   // a placed part's pin label
                         else
                             baseName = netDisplayName( netHighlighted, nameBuffer, sizeof( nameBuffer ) );
@@ -1499,7 +1880,9 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             }
             lastPrintedNet = netHighlighted;
         }
-            Serial.flush( );
+            if ( defaultBranchPrints ) {
+                Serial.flush( );
+            }
         }
         // One row-label latch for every reading branch above. The UART live
         // stream view deliberately ignores row changes (it has no node
@@ -1537,6 +1920,18 @@ int Highlighting::checkForReadingChanges( void ) {
     unsigned long currentTime = millis( );
     // NOTE: removed the 50ms early-exit so checkForReadingChanges() evaluates
     // the UART snapshot and other sensors every time it's called by the service loop.
+
+    // While a PART has focus AND the card owns the panel (highlightedNet
+    // parked), the live net reading must not repaint "Net N" over it
+    // (Kevin's bench, 2026-08-27: the card lasted seconds before a net
+    // reading stomped it). A part-pin focus that deliberately handed the
+    // panel to a special net - a GPIO pin wants its live HIGH/LOW and the
+    // click-to-toggle feedback - sets highlightedNet and passes through.
+    if ( partLabels.partHighlightActive( ) && highlightedNet <= 0 ) {
+        showReadingNet = -1;
+        lastMeasuredNet = -1;
+        return -1;
+    }
 
     // Update showReadingNet to track brightenedNet (but don't clear on timeout)
     if ( brightenedNet > 0 ) {
@@ -1610,10 +2005,7 @@ int Highlighting::checkForReadingChanges( void ) {
                 : ( currentGpioInputState == 1 ) ? "HIGH"
                 : ( currentGpioInputState == 2 ) ? "FLOATING"
                                                  : "?";
-            char name[ 16 ];
-            if ( !netSemanticName( showReadingNet, gpioInputNumber, name, sizeof( name ) ) )
-                snprintf( name, sizeof( name ), "GPIO %d input", gpioInputNumber + 1 );
-            showNetReading( name, stateString );
+            showGpioPinReading( showReadingNet, gpioInputNumber, false, stateString );
 
             displayUpdated = true;
         }
@@ -1629,10 +2021,8 @@ int Highlighting::checkForReadingChanges( void ) {
         if ( currentGpioOutputState != prevGpioOutputState ) {
             prevGpioOutputState = currentGpioOutputState;
 
-            char name[ 16 ];
-            if ( !netSemanticName( showReadingNet, gpioOutputNumber, name, sizeof( name ) ) )
-                snprintf( name, sizeof( name ), "GPIO %d out", gpioOutputNumber + 1 );
-            showNetReading( name, currentGpioOutputState ? "HIGH" : "LOW" );
+            showGpioPinReading( showReadingNet, gpioOutputNumber, true,
+                                currentGpioOutputState ? "HIGH" : "LOW" );
 
             displayUpdated = true;
         }
@@ -2113,9 +2503,15 @@ void Highlighting::adjustRailVoltage(int rail) {
         saveVoltages(globalState.power.topRail, globalState.power.bottomRail,
                      globalState.power.dac0, globalState.power.dac1);
         
-        // Re-highlight the rail to show updated voltage
+        // Re-highlight the rail to show updated voltage. clearHighlighting()
+        // zeroes highlightedNet/brightenedNode, so the identity has to be
+        // latched across it or the re-highlight highlights nothing.
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     } else {
         // User cancelled - restore original values in globalState
         globalState.power.topRail = origTopRail;
@@ -2123,8 +2519,12 @@ void Highlighting::adjustRailVoltage(int rail) {
         
         // Hardware was already restored by VoltageAdjuster callback
         // Re-highlight to refresh display
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     }
     
     requestLedShow( 1 );
@@ -2174,9 +2574,15 @@ void Highlighting::adjustDACVoltage(int dac) {
         saveVoltages(globalState.power.topRail, globalState.power.bottomRail,
                      globalState.power.dac0, globalState.power.dac1);
         
-        // Re-highlight the DAC to show updated voltage
+        // Re-highlight the DAC to show updated voltage. clearHighlighting()
+        // zeroes highlightedNet/brightenedNode, so the identity has to be
+        // latched across it or the re-highlight highlights nothing.
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     } else {
         // User cancelled - restore the ORIGINAL value in state AND hardware.
         // (The long-press cancel in VoltageAdjuster does not call the
@@ -2190,8 +2596,12 @@ void Highlighting::adjustDACVoltage(int dac) {
         else          setDac1voltage(origDac1, 0, 0, true);
         
         // Re-highlight to refresh display
+        int heldNet = highlightedNet;
+        int heldNode = brightenedNode;
         clearHighlighting();
-        highlightNets(0, highlightedNet, 1);
+        brightenedNet = heldNet;
+        brightenedNode = heldNode;
+        highlightNets(0, heldNet, 1);
     }
     
     requestLedShow( 1 );
