@@ -23,6 +23,17 @@ class: ANALOG
   aliases: [NE555, LM555, TLC555]
   pop: 1
   pins: [GND, TRIG, OUT, RESET, CTRL, THRES, DISCH, VCC]
+  fingerprint: -CCCCCC-
+  # THRES held at 0 so its comparator never resets the latch; CTRL floats
+  # on its internal divider. RESET low forces OUT low + DISCH conducting;
+  # TRIG low sets the flip-flop and it LATCHES after TRIG returns high
+  # (TI SLFS022K) - step 3 is the latch proof. TRIG=3.3V clears 1/2-CONT
+  # at both supplies. No icc band: the record spans NE555 (~3mA) and
+  # TLC555 (~0.2mA)
+  vec: 2=1 4=0 6=0 -> 3=0 7=0
+  vec: 4=1 2=0 -> 3=1 7=1
+  vec: 2=1 -> 3=1 7=1
+  vec: 4=0 -> 3=0 7=0
 
 - id: 556
   name: 556
@@ -32,6 +43,12 @@ class: ANALOG
   aliases: [NE556]
   pop: 2
   pins: [1DISCH, 1THRES, 1CTRL, 1RESET, 1OUT, 1TRIG, GND, 2TRIG, 2OUT, 2RESET, 2CTRL, 2THRES, 2DISCH, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # timer 1 only, same shape as the 555's vec (timer 2 untouched)
+  vec: 6=1 4=0 2=0 -> 5=0 1=0
+  vec: 4=1 6=0 -> 5=1 1=1
+  vec: 6=1 -> 5=1 1=1
+  vec: 4=0 -> 5=0 1=0
 
 - id: LM358
   desc: Dual op-amp, single-supply
@@ -39,6 +56,16 @@ class: ANALOG
   package: dip8
   pop: 1
   pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+  fingerprint: CCC-CCC-
+  # VICM includes ground and VOH >= 3.5V at 5V (TI SLOS068AB) - the one
+  # dual op-amp here that is fully in-spec as a 5V comparator. The icc
+  # band (0.7 typ / 1.2 max mA) is what separates it from a TL072/NE5532
+  # that happens to limp through the same steps out of spec
+  vec_supply: 5v
+  icc: 0.2-1.4
+  vec: 2=0 3=1 5=1 6=0 -> 1=1 7=1
+  vec: 2=1 3=0 5=0 6=1 -> 1=0 7=0
+  vec: 2=0 3=1 5=1 6=0 -> 1=1 7=1
 
 - id: LM324
   desc: Quad op-amp, single-supply
@@ -46,6 +73,15 @@ class: ANALOG
   package: dip14
   pop: 3
   pins: [1OUT, 1IN-, 1IN+, V+, 2IN+, 2IN-, 2OUT, 3OUT, 3IN-, 3IN+, V-, 4IN+, 4IN-, 4OUT]
+  fingerprint: CCC-CCCCCC-CCC
+  # amps 1+2 as comparators (amps 3/4 untouched). Quad total Icc equals
+  # the dual's (0.7 typ / 1.2 max mA, TI SLOS066AE) - the band does NOT
+  # double
+  vec_supply: 5v
+  icc: 0.2-1.4
+  vec: 2=0 3=1 5=1 6=0 -> 1=1 7=1
+  vec: 2=1 3=0 5=0 6=1 -> 1=0 7=0
+  vec: 2=0 3=1 5=1 6=0 -> 1=1 7=1
 
 - id: TL072
   desc: Dual JFET op-amp, low noise
@@ -53,6 +89,11 @@ class: ANALOG
   package: dip8
   pop: 2
   pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+  # No vec on purpose: the legacy TL072 die is rated 10V total supply
+  # minimum and its VICM at single 5V excludes both GPIO levels (TI
+  # SLOS080W) - any 5V behavior is out-of-spec accident. If one limps
+  # through the LM358's steps, the LM358 icc band is the last defense
+  fingerprint: CCC-CCC-
 
 - id: TL074
   desc: Quad JFET op-amp, low noise
@@ -60,6 +101,8 @@ class: ANALOG
   package: dip14
   pop: 5
   pins: [1OUT, 1IN-, 1IN+, V+, 2IN+, 2IN-, 2OUT, 3OUT, 3IN-, 3IN+, V-, 4IN+, 4IN-, 4OUT]
+  # no vec - same 10V-minimum story as the TL072
+  fingerprint: CCC-CCCCCC-CCC
 
 - id: NE5532
   desc: Dual audio op-amp, low noise
@@ -67,6 +110,9 @@ class: ANALOG
   package: dip8
   pop: 4
   pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+  # No vec: 10V total supply minimum, VICM stays ~3V off both rails (TI
+  # SLOS075K). Its ~6mA Icc is the anti-LM358 signature if it ever passes
+  fingerprint: CCC-CCC-
 
 - id: LM386
   desc: Audio power amplifier, 0.5W
@@ -74,13 +120,22 @@ class: ANALOG
   package: dip8
   pop: 1
   pins: [GAIN1, IN-, IN+, GND, OUT, VS, BYPASS, GAIN8]
+  # NO vec, EVER: the inputs are +/-0.4V ABSOLUTE MAX (TI SNAS545D) - a
+  # 3.3V GPIO drive damages the part. Quiescent OUT self-biases to VS/2
+  fingerprint: CCC-C-CC
 
 - id: LM311
   desc: Single comparator, open-collector out
   subclass: opamp
   package: dip8
   pop: 7
+  # pin 1 is really "EMIT OUT" - the output transistor's floating emitter,
+  # not a ground pin (TI SLCS007K; there is NO internal 1<->4 continuity).
+  # It stays named GND so single-supply placement grounds it, which is
+  # exactly what the emitter needs. No vec: two gnd-class pins make the
+  # measured-rails landing a coin flip (the finder may anchor either row)
   pins: [GND, IN+, IN-, V-, BAL, BAL/STRB, OUT, V+]
+  fingerprint: -CC-CCC-
 
 - id: LM393
   desc: Dual comparator, open-collector out
@@ -88,13 +143,26 @@ class: ANALOG
   package: dip8
   pop: 6
   pins: [1OUT, 1IN-, 1IN+, V-, 2IN+, 2IN-, 2OUT, V+]
+  fingerprint: CCC-CCC-
+  # open-collector outputs read H through the runner's pull-up, so the
+  # expected pattern matches the LM358's exactly - they tie, honestly
+  # (the bands overlap too: 0.45 typ / 1.0 max). VICM includes ground
+  vec_supply: 5v
+  icc: 0.1-1.2
+  vec: 2=0 3=1 5=1 6=0 -> 1=1 7=1
+  vec: 2=1 3=0 5=0 6=1 -> 1=0 7=0
+  vec: 2=0 3=1 5=1 6=0 -> 1=1 7=1
 
 - id: TL431
   desc: Programmable shunt voltage reference
   subclass: power
   package: sip3
   pop: 4
-  # VERIFY: TO-92 (LP) order REF/ANODE/CATHODE, flat face toward you
+  # Flat-face-forward order verified against TI SLVS543S (2026-08-30).
+  # Caveat: TI's LP drawing is a TOP view with pin NUMBERS running
+  # right-to-left - the leftmost physical leg is TI pin 3 (REF). The
+  # physical left-to-right list below is correct; don't "fix" it to match
+  # the numbering. REF strapped to CATHODE regulates at ~2.495V
   pins: [REF, ANODE, CATHODE]
 
 - id: LM317
@@ -117,5 +185,7 @@ class: ANALOG
   subclass: power
   package: sip3
   pop: 3
-  # VERIFY: adapter-board pin order GND/VOUT/VIN (SOT-223 tab = VOUT)
+  # SOT-223 pin order verified against the AMS DS1117 drawing
+  # (2026-08-30); tab = the pin-2 die pad = VOUT. Pin 1 is ADJ on the
+  # adjustable variant. Quiescent ~5mA (vs the LM317's ~50uA ADJ path)
   pins: [GND, VOUT, VIN]

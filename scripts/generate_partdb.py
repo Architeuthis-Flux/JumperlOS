@@ -56,6 +56,13 @@ no pyyaml; the on-device /partdb reader (B-M7) will speak the same grammar):
                             # records whose aliases span TTL and CMOS)
     vec_supply: either      # either (default: 5V rail pass, 3.3V retry) |
                             # 5v (bipolar TTL only) | 3v3 (CMOS only)
+    icc: 0.3-1.5            # expected supply-current band in mA while the
+                            # vectors run (the INA reads the feed anyway) -
+                            # the Tier-2 quiescent signature. Only author it
+                            # with a fixed vec_supply (5v or 3v3): the band
+                            # is checked on whichever pass runs. Needs vec:
+                            # lines. The one separator for vec-identical
+                            # parts (LM358 / TL072 / NE5532).
     vec: 1=0 2=0 -> 3=1     # Tier-3 truth-table step, REPEATABLE - one
                             # line per step, run in order with no power
                             # cycle. Each side is pin=level pairs (1-based
@@ -375,8 +382,13 @@ def parse_vectors(vec_lines, pin_count, pins, ctx):
     """
     if not vec_lines:
         return None
+    # Only the pins the runner actually powers are off-limits: the gnd-class
+    # rail and the VCC-role supply. A power-class pin with role NONE (the
+    # 4051/4052/4053's VEE) MAY be driven as a plain input - a GPIO held low
+    # IS the VEE=VSS strap the datasheet's single-supply hookup calls for.
     rail = {i + 1 for i, (n, pcls, role) in enumerate(pins)
-            if pcls in (PINCLASS_POWER, PINCLASS_GND)}
+            if pcls == PINCLASS_GND
+            or (pcls == PINCLASS_POWER and role == ROLE_INDEX["VCC"])}
     in_pins, out_pins, steps = [], [], []
     for text, vctx in vec_lines:
         if "->" not in text:
@@ -679,8 +691,32 @@ def process_record(rec):
                        f"{sorted(VEC_SUPPLY)}")
     if vectors is not None:
         vectors["supply"] = VEC_SUPPLY[supply_key]
+        vectors["icc10"] = (0, 0)
     elif "vec_supply" in rec:
         raise SrcError(f"{ctx}: vec_supply without any vec: lines")
+
+    # icc: LO-HI expected feed current (mA) during the vector run. Stored
+    # in tenths of a mA; 0,0 = no band. Meaningless without vectors, and
+    # ambiguous under the two-pass 'either' supply - refuse both.
+    if "icc" in rec:
+        if vectors is None:
+            raise SrcError(f"{ctx}: icc without any vec: lines")
+        if supply_key == "either":
+            raise SrcError(f"{ctx}: icc needs a fixed vec_supply (5v/3v3) - "
+                           f"the band is supply-dependent")
+        v = rec["icc"]
+        if "-" not in v:
+            raise SrcError(f"{ctx}: icc needs 'LO-HI' in mA, got {v!r}")
+        try:
+            lo, hi = (float(x) for x in v.split("-", 1))
+        except ValueError:
+            raise SrcError(f"{ctx}: bad icc band {v!r}")
+        if not 0 <= lo < hi <= 6553.5:
+            raise SrcError(f"{ctx}: icc band {v!r} out of range/order")
+        if lo == 0:
+            raise SrcError(f"{ctx}: icc lower bound must be > 0 "
+                           f"(0,0 means 'no band')")
+        vectors["icc10"] = (round(lo * 10), round(hi * 10))
 
     pop = int(rec["pop"]) if "pop" in rec else None
 
@@ -841,7 +877,7 @@ def estimate_rodata(t):
     strings.update(t["fingerprints"])
     str_bytes = sum(len(s) + 1 for s in strings)
     vec_bytes = sum(len(v["in_pins"]) + len(v["out_pins"]) +
-                    6 * len(v["in_bits"]) + 24
+                    6 * len(v["in_bits"]) + 28
                     for _, v in t["vector_sets"])
     sizes = {
         "pins": n_pins * 8,
@@ -986,22 +1022,25 @@ def emit_header(t, sizes):
         lines.append("  0, // no vector sets authored")
     lines.append("};")
     lines.append("")
-    lines.append("// { supply, numIn, numOut, numSteps, inPins, outPins,")
-    lines.append("//   inBits, outBits, outCare }")
+    lines.append("// { supply, numIn, numOut, numSteps, iccMin10, iccMax10,")
+    lines.append("//   inPins, outPins, inBits, outBits, outCare }")
     lines.append("const PartDbVectorSet partdb_vectorSets[] = {")
     for k, (vid, v) in enumerate(t["vector_sets"]):
         pb = vec_pin_base[k]
         wb = vec_word_base[k]
         n_in, n_out = len(v["in_pins"]), len(v["out_pins"])
         n_steps = len(v["in_bits"])
+        icc_lo, icc_hi = v["icc10"]
         lines.append(
             f"  {{ {v['supply']}, {n_in}, {n_out}, {n_steps}, "
-            f"&partdb_vecPins[{pb}], &partdb_vecPins[{pb + n_in}],")
+            f"{icc_lo}, {icc_hi},")
+        lines.append(
+            f"    &partdb_vecPins[{pb}], &partdb_vecPins[{pb + n_in}],")
         lines.append(
             f"    &partdb_vecWords[{wb}], &partdb_vecWords[{wb + n_steps}], "
             f"&partdb_vecWords[{wb + 2 * n_steps}] }}, // {k}: {vid}")
     if not t["vector_sets"]:
-        lines.append("  { 0, 0, 0, 0, partdb_vecPins, partdb_vecPins,")
+        lines.append("  { 0, 0, 0, 0, 0, 0, partdb_vecPins, partdb_vecPins,")
         lines.append("    partdb_vecWords, partdb_vecWords, partdb_vecWords"
                      " }, // none authored")
     lines.append("};")
@@ -1136,6 +1175,18 @@ def self_test():
         assert False, "driving a supply pin must be rejected"
     except SrcError:
         pass
+    try:
+        parse_vectors([("14=1 -> 3=1", "t1")], 14, pins14, "t")
+        assert False, "driving the VCC pin must be rejected"
+    except SrcError:
+        pass
+    # A power-class pin with role NONE (the 4051's VEE) IS drivable - a GPIO
+    # low is the VEE=VSS strap.
+    pins16 = ([("x", 0, 0)] * 6 + [("VEE", PINCLASS_POWER, 0)] +
+              [("VSS", PINCLASS_GND, 2)] + [("x", 0, 0)] * 7 +
+              [("VDD", PINCLASS_POWER, 1)])
+    v = parse_vectors([("7=0 11=1 -> 3=0", "t1")], 16, pins16, "t")
+    assert v["in_pins"] == [7, 11] and v["out_pins"] == [3]
 
 
 def main():

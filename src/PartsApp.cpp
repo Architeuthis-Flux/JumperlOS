@@ -3297,8 +3297,9 @@ static int partsFreeGpios(int* out, int maxOut) {
 // says nothing about the part.
 static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
                              int nPins, bool rotated, int gndRow, int vddRow,
-                             bool use5V, int* failStepOut) {
+                             bool use5V, int* failStepOut, float* iccOut) {
     if (failStepOut) *failStepOut = -1;
+    if (iccOut) *iccOut = -1.0f;
     if (vs.numIn > 9 || vs.numOut > 16) return -1;
 
     // Resources first - refuse before touching the board. numIn drivers
@@ -3400,6 +3401,7 @@ static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
         }
         delay(25);
         float icc = INA0.getCurrent_mA();
+        if (iccOut) *iccOut = icc;
         if (icc > 150.0f) {
             Serial.print("  vectors: it draws ");
             Serial.print(icc, 0);
@@ -3413,6 +3415,23 @@ static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
             Serial.print(icc, 1);
             Serial.println(" mA");
             partsTermReset();
+            // The Tier-2 quiescent signature: a record with an authored
+            // icc band that the measured feed falls outside is not this
+            // part - the only separator for vec-identical candidates (the
+            // LM358/TL072/NE5532 trio). failStep -2 marks the icc refusal.
+            // Skipped when the board powers the chip (nothing measured).
+            if (vs.iccMin10 != 0 || vs.iccMax10 != 0) {
+                float lo = vs.iccMin10 * 0.1f, hi = vs.iccMax10 * 0.1f;
+                if (icc < lo || icc > hi) {
+                    Serial.print("  vectors: icc outside the ");
+                    Serial.print(lo, 1);
+                    Serial.print("-");
+                    Serial.print(hi, 1);
+                    Serial.println(" mA band for this record");
+                    verdict = 0;
+                    if (failStepOut) *failStepOut = -2;
+                }
+            }
         }
     }
 
@@ -3575,7 +3594,8 @@ static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
 
 int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
                         VectorIdentifyResult* out, int maxOut,
-                        const char* fpMeasured) {
+                        const char* fpMeasured, int* triedOut) {
+    if (triedOut) *triedOut = 0;
     if (out == nullptr || maxOut < 1) return -1;
     int nPins = 2 * width;
     if (baseRow < 31 || baseRow > 60 || width < 2 || nPins > MAX_PART_PINS ||
@@ -3584,8 +3604,14 @@ int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
     if (gndRow < 1 || gndRow > 60 || vddRow < 1 || vddRow > 60 ||
         gndRow == vddRow)
         return -1;
+    // Try EVERY candidate - the result array caps what gets reported, not
+    // what gets run. With the 2026-08-30 database (60 vector sets, ~25 per
+    // DIP width) the old n<maxOut loop gate meant a part authored past the
+    // first 8 records (the 74393, the whole 4000 family) could never be
+    // named. Passes are never dropped: when the array is full of failures
+    // a pass evicts one.
     int n = 0;
-    for (uint16_t i = 0; i < partdb_numRecords && n < maxOut; i++) {
+    for (uint16_t i = 0; i < partdb_numRecords; i++) {
         const PartDbRecord& rec = partdb_records[i];
         const PartDbPinout& po = partdb_pinouts[rec.pinoutIdx];
         if (po.footprint != PARTDB_FOOT_DIP) continue;
@@ -3614,25 +3640,41 @@ int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
         Serial.println(rotated ? " (rotated 180)" : "");
         partsTermReset();
         int failStep = -1;
+        float iccMa = -1.0f;
         // supply passes per the 5.2 decision: TTL-only = the rail; CMOS =
         // 3.3V; family-wide = rail first, 3.3V retry (74HC at 5V can't
         // trust 3.3V GPIO drive - Vih 3.5V)
         int verdict;
         if (vs->supply == PARTDB_VEC_SUPPLY_3V3) {
             verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated, gndRow,
-                                        vddRow, false, &failStep);
+                                        vddRow, false, &failStep, &iccMa);
         } else {
             verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated, gndRow,
-                                        vddRow, true, &failStep);
+                                        vddRow, true, &failStep, &iccMa);
             if (verdict == 0 && vs->supply == PARTDB_VEC_SUPPLY_EITHER)
                 verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated,
-                                            gndRow, vddRow, false, &failStep);
+                                            gndRow, vddRow, false, &failStep,
+                                            &iccMa);
         }
-        out[n].recIdx = i;
-        out[n].rotated = rotated ? 1 : 0;
-        out[n].verdict = (int8_t)verdict;
-        out[n].failStep = (int8_t)failStep;
-        n++;
+        if (triedOut) (*triedOut)++;
+        int slot = n;
+        if (n < maxOut) {
+            n++;
+        } else if (verdict == 1) {
+            slot = -1;  // full: a pass evicts the latest non-pass
+            for (int j = maxOut - 1; j >= 0; j--)
+                if (out[j].verdict != 1) { slot = j; break; }
+        } else {
+            slot = -1;  // full of results and this one failed - drop it
+        }
+        if (slot >= 0) {
+            out[slot].recIdx = i;
+            out[slot].rotated = rotated ? 1 : 0;
+            out[slot].verdict = (int8_t)verdict;
+            out[slot].failStep = (int8_t)failStep;
+            out[slot].icc10 = (iccMa < 0.0f) ? -1
+                                             : (int16_t)(iccMa * 10.0f + 0.5f);
+        }
         if (partsAutoAbortCheck()) break;
     }
     return n;

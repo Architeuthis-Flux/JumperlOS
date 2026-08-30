@@ -229,14 +229,20 @@ def main():
         # one die quirk (BI/RBO's 0.89V path to VCC) tolerated
         odd = sum(1 for c in fp if c not in 'G-')
         jl.check(odd <= 1, f"all-G within one quirk (got {fp!r})")
+        # 2026-08-30 database: dozens of records carry generous 'C'
+        # (conducts-somehow) maps that "match" an all-G chip at 0 raw
+        # mismatches, and the all-B 74595 (14 real misses) legitimately
+        # drops out of the top 3. The ranking is evidence-weighted (a
+        # wildcard match costs a quarter of a real mismatch), so the
+        # 7447's specific all-G map must LEAD the list even on a
+        # die-quirk day.
         matches = d.get('match', '')
-        m47 = re.search(r'7447:(\d+)', matches)
-        m595 = re.search(r'74595:(\d+)', matches)
-        jl.check(m47 is not None, f"7447 in match list (got {matches!r})")
-        jl.check(m595 is not None, f"74595 in match list (got {matches!r})")
-        if m47 and m595:
-            jl.check(int(m47.group(1)) < int(m595.group(1)),
-                     f"7447 outranks 74595 ({matches})")
+        m47 = re.match(r'7447:(\d+)r?', matches)
+        jl.check(m47 is not None,
+                 f"the 7447 leads the match list (got {matches!r})")
+        if m47:
+            jl.check(int(m47.group(1)) <= 1,
+                     f"7447 within one quirk mismatch ({matches})")
 
         # ---- the rail resolver's premise --------------------------------
         # WHICH row is ground cannot come from the fingerprint STRING: on
