@@ -118,6 +118,29 @@ datasheet-verified (Sitronix ST7735S V1.1, ST7789V, Ilitek ILI9341 V1.11):
   the §1 rule: icc bands belong on analog records only.
 - Board state diffed CLEAN after both runs (capture/restore discipline).
 
+## 5a. The held-state authoring law (scan run, 2026-08-30 15:05)
+
+Kevin's Auto Scan failed the 74393 at its held-2QA check while the same
+vec passed via bare `part_vectors` on the same board. Scan context (LED
+traffic, read-fixture moves over the row NEXT to the async 2CLR pin) can
+glitch stored async state between steps. The law, applied to the 393 and
+binding for every future sequential vec:
+
+- **Assert a stored HIGH only in the step whose edge created it** - the
+  read happens immediately, before any other fixture traffic.
+- **Every later check of that register expects LOW after a clear** - a
+  glitch that corrupts the state still ends LOW, so the check is immune.
+- Exposure audit of the other counters: 7490/74107/74161/4013/4017/4020/
+  4024/4040/4060/4094 already read each count immediately after its edge
+  and end in clear-to-LOW; their residual held-HIGH checks (4013 step 5,
+  4017 steps 6-7, 4094 step 7) have small windows and no async pin
+  adjacent to a read row - left standing until a bench run says otherwise.
+
+Same session's other scan-context finds: the census roving GPIO was
+never OWNED (core 2 could unmake the drive mid-census - the intermittent
+every-LED-lit scans), and the second-look rails sampler was bottom-half
+blind (voted vdd=INH on the 4051). Both fixed - see the commit.
+
 ## 5b. Bench debts carried forward
 - 74HC90/74HC107 aliases assume the LS pin maps hold for HC (they do per
   Nexperia, but no HC90 exists at TI - the alias is thin).

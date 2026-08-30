@@ -516,7 +516,13 @@ subclass: s7400
   pins: [1CLK, 1CLR, 1QA, 1QB, 1QC, 1QD, GND, 2QD, 2QC, 2QB, 2QA, 2CLR, 2CLK, VCC]
   fingerprint: CCCCCC-CCCCCC-
   # count counter 1 to 4 (falling edges), one edge into counter 2, then
-  # clear each side separately - proves the two counters are independent
+  # clear each side. AUTHORING LAW (bench 2026-08-30): assert a STORED
+  # high only in the step that made it - the scan context (LED traffic +
+  # fixture moves over neighboring rows) can glitch an async CLR/CLK and
+  # eat held state between steps. The 2QA=1 evidence lives at the 2CLK
+  # edge's own step; every later check expects the glitch-immune LOW.
+  # (The original held-2QA check passed via bare part_vectors but failed
+  # deterministically inside the Auto Scan flow.)
   vec: 1=1 2=1 13=1 12=1 -> 3=0 4=0 5=0 6=0 11=0 8=0
   vec: 2=0 12=0 -> 3=0 4=0 5=0 6=0 11=0 8=0
   vec: 1=0 -> 3=1 4=0 5=0 6=0 11=0
@@ -527,7 +533,7 @@ subclass: s7400
   vec: 1=1 ->
   vec: 1=0 -> 3=0 4=0 5=1 6=0
   vec: 13=0 -> 11=1 8=0
-  vec: 2=1 -> 3=0 4=0 5=0 6=0 11=1
+  vec: 2=1 -> 3=0 4=0 5=0 6=0
   vec: 12=1 -> 11=0 8=0
 
 - id: 74595
