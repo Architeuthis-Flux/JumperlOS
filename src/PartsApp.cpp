@@ -58,6 +58,7 @@ struct ChipIdentify {
 };
 static bool partsFindClusterPower(const int* rows, int nRows,
                                   ClusterPower* out);
+static bool partsCornerRails(int lo, int hi, ClusterPower* out);
 static int partsChipPinRow(int baseRow, int nPins, bool rotated, int pin);
 static void partsIdentifyChip(int baseRow, int width, int gndRow, int vddRow,
                               ChipIdentify* out);
@@ -1950,13 +1951,17 @@ void partsTestLauncher(void) {
                 if (oled.oledConnected)
                     oled.clearPrintShow("reading\nrails...", 2, true, true,
                                         true);
-                // rails from the corners (+ two mid rows for junction
-                // stats) - corner power is the overwhelmingly common DIP
-                // layout, and partsFindClusterPower votes, not assumes
-                int conf[6] = {base, base + w - 1, base - 30,
-                               base - 30 + w - 1, base + 1, base - 29};
+                // rails: the corner substrate diode answers directly for
+                // corner-power DIPs (partsCornerRails - the vote ties on
+                // symmetric CMOS); the clamp vote stays as the fallback
+                // for mid-power/NC-corner layouts
                 ClusterPower cp;
-                bool cpOk = partsFindClusterPower(conf, (w >= 3) ? 6 : 4, &cp);
+                bool cpOk = partsCornerRails(base, base + w - 1, &cp);
+                if (!cpOk) {
+                    int conf[6] = {base, base + w - 1, base - 30,
+                                   base - 30 + w - 1, base + 1, base - 29};
+                    cpOk = partsFindClusterPower(conf, (w >= 3) ? 6 : 4, &cp);
+                }
                 partsAutoAborted = false;   // scan-flow flag, not Test's
                 if (!cpOk) {
                     Serial.println("\r\nPARTID identify rails unclear - "
@@ -2516,6 +2521,43 @@ static bool partsBjtVbePlausible(const PartResult& r) {
 // a forward junction i->j clamps it LOW, blocked reads the ~3.2V pull-up.
 // (ClusterPower's definition rides with the forward declarations up top -
 // partsTestLauncher borrows it for the re-assign flow.)
+// Corner-power rails FIRST, vote second (2026-08-30, round 2: against a
+// floating GND anchor EVERY clamped pin is a perfect one-way cathode, so
+// the vote's VDD pick degenerates to conf iteration order - the 15:05
+// scan voted vdd=INH, the corners-first retry voted vdd=CH4). Physics
+// that cannot tie: the substrate diode between the two corner-convention
+// rows (pin N/2's row and pin N's) conducts exactly one way,
+// gnd(anode) -> vdd(cathode), for TTL and CMOS alike - bench 15:30:
+// part_identify(38,1) DIODE A,K Vf 0.68 on the 4051, (47,11) A,K 0.57 on
+// the 74HC393. The 180-rotation swaps the two rows and the diode
+// direction answers that too. A bridged/NC/mid-power corner pair reads
+// resistive or open -> no verdict -> the caller falls back to the vote
+// (7490, 4049/4050, non-DIP clusters).
+static bool partsCornerRails(int lo, int hi, ClusterPower* out) {
+    int a = hi;        // pin N/2's row when pin 1 sits at lo
+    int b = lo - 30;   // pin N's row
+    if (a < 31 || a > 60 || b < 1 || b > 30 || lo > hi) return false;
+    int third = (hi - 1 > lo) ? hi - 1 : lo;   // fixture wants 3 rows
+    if (third == a) return false;
+    ScanSession s;
+    int rows3[3] = {a, b, third};
+    if (partScanBegin(s, rows3, 3) != 0) return false;
+    float v[3][3];
+    partScanJunctionMap(s, v);
+    partScanEnd(s);
+    bool fwd = v[0][1] < kJmFwd && v[1][0] > kJmBlk;   // a anode -> b
+    bool rev = v[1][0] < kJmFwd && v[0][1] > kJmBlk;   // b anode -> a
+    if (fwd == rev) return false;   // open, resistive, or double-clamped
+    out->gndRow = fwd ? a : b;
+    out->vddRow = fwd ? b : a;
+    out->nSig = 0;
+    Serial.print("  corner diode says gnd ");
+    Serial.print(out->gndRow);
+    Serial.print(" vdd ");
+    Serial.println(out->vddRow);
+    return true;
+}
+
 static bool partsFindClusterPower(const int* rows, int nRows, ClusterPower* out) {
     if (nRows < 3 || nRows > 6) return false;
     Serial.println("  reading the cluster's clamps...");
@@ -4577,16 +4619,20 @@ void partsAutoLauncher(void) {
                         // ran (width <= 6 spans - the exact 37-40 case paid
                         // twice before this), hunt them over the UNION's
                         // confirmed rows otherwise
+                        // The corner substrate diode first - one junction
+                        // read, cannot tie (see partsCornerRails)
+                        if (!cpValid)
+                            cpValid = partsCornerRails(lo, hi, &cp);
                         if (!cpValid) {
                             // CORNERS FIRST (2026-08-30: the 4051 scan
                             // voted vdd=INH). The old hi-downward fill
-                            // spent all 6 slots on the bottom half, so a
+                            // spent all 6 slots on one half, so a
                             // right-side-up chip's VDD - a TOP corner on
                             // the standard layout - was never even a
                             // candidate and a signal pin won the vote.
                             // (The 08-28 7447 dodged this by sitting
-                            // rotated.) Same corner set partsTestLauncher
-                            // already uses; the vote still decides.
+                            // rotated.) The vote still ties on symmetric
+                            // CMOS clamp meshes - it is the last resort.
                             int conf[6];
                             int nConf = 0;
                             int want[6] = {hi, lo, hi - 30, lo - 30,
