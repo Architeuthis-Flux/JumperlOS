@@ -38,6 +38,8 @@ struct ScanSession {
     int gpioIdx = -1;               // the one roving GPIO (gpioDef index)
     int savedDir = 0, savedPull = 0;
     uint8_t savedFloat = 0, savedState = 0;
+    uint8_t savedOwned = 0;         // gpioPythonOwned before the claim
+    int savedFunc = 0;              // gpio_function_map before the claim
     // live legs, for the teardown funnel
     int16_t ephA[8]; int16_t ephB[8]; uint8_t nEph = 0;
     bool ephAddFailed = false;  // a leg never even STAGED (slots/table full)

@@ -3396,15 +3396,16 @@ static void partsIdentifyChip(int baseRow, int width, int gndRow, int vddRow,
     out->nPass = 0;
     (void)partsCollectFingerprint(baseRow, width, gndRow, vddRow, out->fp);
     if (partsAutoAbortCheck()) return;
+    int tried = 0;
     int n = partsVectorIdentify(baseRow, width, gndRow, vddRow, out->res, 8,
-                                out->fp[0] ? out->fp : nullptr);
+                                out->fp[0] ? out->fp : nullptr, &tried);
     out->nTried = (n > 0) ? n : 0;
     for (int i = 0; i < out->nTried; i++)
         if (out->res[i].verdict == 1) out->nPass++;
     Serial.print("PARTSCAN identify fp=");
     Serial.print(out->fp[0] ? out->fp : "(none)");
-    Serial.print(" tried=");
-    Serial.print(out->nTried);
+    Serial.print(" tried=");    // candidates RUN; the res[] cap only
+    Serial.print(tried);        // limits what is reported (passes kept)
     Serial.print(" pass=");
     for (int i = 0, k = 0; i < out->nTried; i++) {
         if (out->res[i].verdict != 1) continue;
@@ -4577,14 +4578,37 @@ void partsAutoLauncher(void) {
                         // twice before this), hunt them over the UNION's
                         // confirmed rows otherwise
                         if (!cpValid) {
+                            // CORNERS FIRST (2026-08-30: the 4051 scan
+                            // voted vdd=INH). The old hi-downward fill
+                            // spent all 6 slots on the bottom half, so a
+                            // right-side-up chip's VDD - a TOP corner on
+                            // the standard layout - was never even a
+                            // candidate and a signal pin won the vote.
+                            // (The 08-28 7447 dodged this by sitting
+                            // rotated.) Same corner set partsTestLauncher
+                            // already uses; the vote still decides.
                             int conf[6];
                             int nConf = 0;
-                            for (int r = hi; r >= lo && nConf < 6; r--)
-                                if ((flags[r] == 1 || flags[r] == 5) &&
-                                    !consumed[r])   // split-out discretes
+                            int want[6] = {hi, lo, hi - 30, lo - 30,
+                                           hi - 1, lo + 1};
+                            auto confAdd = [&](int r) {
+                                if (nConf >= 6) return;
+                                for (int k = 0; k < nConf; k++)
+                                    if (conf[k] == r) return;
+                                if (r >= 31 && r <= 60) {
+                                    if ((flags[r] == 1 || flags[r] == 5) &&
+                                        !consumed[r])   // split-out parts
+                                        conf[nConf++] = r;
+                                } else if (r >= 1 && r <= 30 && topHit(r)) {
                                     conf[nConf++] = r;
-                            for (int r = lo - 30; r <= hi - 30 && nConf < 6; r++)
-                                if (topHit(r)) conf[nConf++] = r;
+                                }
+                            };
+                            for (int k = 0; k < 6; k++) confAdd(want[k]);
+                            for (int r = hi; r >= lo && nConf < 6; r--)
+                                confAdd(r);
+                            for (int r = lo - 30; r <= hi - 30 && nConf < 6;
+                                 r++)
+                                confAdd(r);
                             if (nConf >= 3 && !partsAutoAbortCheck())
                                 cpValid = partsFindClusterPower(conf, nConf, &cp);
                         }
