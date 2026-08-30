@@ -2500,12 +2500,17 @@ const char* jl_part_clamp_fingerprint( int baseRow, int width, int gndRow,
                         "status=0 gnd=%d vdd=%d n=%d probed=%d fp=%s",
                         gndRow, vddRow, nPins, probed, fp );
 
-    // Top-3 partdb candidates by ascending fingerprint mismatch, both
-    // orientations (the scan can't know which corner pin 1 is - the 'r'
-    // suffix = the 180-rotated alignment fit better, which is itself the
-    // pin-1 answer). Ties stay ties (5.4: never guess what the physics
-    // can't distinguish) - the caller sees the counts and decides.
-    struct { uint16_t rec; int miss; int rot; } best[ 3 ];
+    // Top-3 partdb candidates, both orientations (the scan can't know
+    // which corner pin 1 is - the 'r' suffix = the 180-rotated alignment
+    // fit better, which is itself the pin-1 answer). Ranked by EVIDENCE,
+    // not raw mismatches: a record matching through its own wildcards
+    // ('C' conducts-somehow, '?' don't-care) proves less than an
+    // exact-alphabet match, so a wildcard costs a quarter of a real
+    // mismatch. With the 2026-08-30 database a measured all-G 7447 would
+    // otherwise be buried by a page of generic C-maps "matching" at 0.
+    // The reported number stays the honest mismatch count; only the
+    // ordering uses the score. Ties stay ties (5.4).
+    struct { uint16_t rec; int miss; int rot; int score; } best[ 3 ];
     int nBest = 0;
     for ( uint16_t i = 0; i < partdb_numRecords; i++ ) {
         const PartDbRecord& r = partdb_records[ i ];
@@ -2515,14 +2520,20 @@ const char* jl_part_clamp_fingerprint( int baseRow, int width, int gndRow,
         int rot = 0;
         int miss = partdbFingerprintMismatchOriented( r, fp, &rot );
         if ( miss < 0 ) continue;
+        const char* rfp = partdbFingerprintOf( r );
+        int wild = 0;
+        for ( const char* c = rfp; c != nullptr && *c != '\0'; c++ )
+            if ( *c == 'C' || *c == '?' ) wild++;
+        int score = miss * 4 + wild;
         int at = nBest;
-        while ( at > 0 && best[ at - 1 ].miss > miss ) at--;
+        while ( at > 0 && best[ at - 1 ].score > score ) at--;
         if ( at >= 3 ) continue;
         if ( nBest < 3 ) nBest++;
         for ( int k = nBest - 1; k > at; k-- ) best[ k ] = best[ k - 1 ];
         best[ at ].rec = i;
         best[ at ].miss = miss;
         best[ at ].rot = rot;
+        best[ at ].score = score;
     }
     pos += snprintf( fpBuffer + pos, sizeof( fpBuffer ) - pos, " match=" );
     for ( int k = 0; k < nBest && pos > 0 &&
@@ -2560,7 +2571,9 @@ const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow ) {
     return vecBuffer;
 #else
     VectorIdentifyResult res[ 8 ];
-    int n = partsVectorIdentify( baseRow, width, gndRow, vddRow, res, 8 );
+    int tried = 0;
+    int n = partsVectorIdentify( baseRow, width, gndRow, vddRow, res, 8,
+                                 nullptr, &tried );
     if ( n < 0 ) {
         snprintf( vecBuffer, sizeof( vecBuffer ), "status=-1 tried=0" );
         return vecBuffer;
@@ -2568,8 +2581,11 @@ const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow ) {
     int nPass = 0;
     for ( int i = 0; i < n; i++ )
         if ( res[ i ].verdict == 1 ) nPass++;
+    // tried = candidates actually RUN; shown = results reported below
+    // (capped at 8, passes never dropped - a pass evicts a fail)
     int pos = snprintf( vecBuffer, sizeof( vecBuffer ),
-                        "status=0 tried=%d pass=%d cands=", n, nPass );
+                        "status=0 tried=%d shown=%d pass=%d cands=",
+                        tried, n, nPass );
     for ( int i = 0; i < n && pos > 0 &&
                      pos < (int)sizeof( vecBuffer ) - 40; i++ ) {
         const PartDbRecord& rec = partdb_records[ res[ i ].recIdx ];
@@ -2578,12 +2594,21 @@ const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow ) {
         if ( res[ i ].verdict == 1 )
             pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
                              "pass" );
+        else if ( res[ i ].verdict == 0 && res[ i ].failStep == -2 )
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "fail@icc" );
         else if ( res[ i ].verdict == 0 )
             pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
                              "fail@%d", (int)res[ i ].failStep );
         else
             pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
                              "refused" );
+        // the Tier-2 quiescent signature rides along when it was measured
+        if ( res[ i ].icc10 >= 0 && pos > 0 &&
+             pos < (int)sizeof( vecBuffer ) - 12 )
+            pos += snprintf( vecBuffer + pos, sizeof( vecBuffer ) - pos,
+                             "(%d.%dmA)", res[ i ].icc10 / 10,
+                             res[ i ].icc10 % 10 );
     }
     return vecBuffer;
 #endif // OG_JUMPERLESS

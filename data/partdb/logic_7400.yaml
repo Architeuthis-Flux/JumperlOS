@@ -26,12 +26,14 @@ subclass: s7400
   pop: 1
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
   fingerprint: CCCCCC-CCCCCC-
-  # NAND, all four gates in parallel: gates (A,B->Y) = (1,2->3) (4,5->6)
-  # (9,10->8) (12,13->11)
-  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=1 6=1 8=1 11=1
-  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
-  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=1 6=1 8=1 11=1
-  vec: 2=1 5=1 10=1 13=1 -> 3=0 6=0 8=0 11=0
+  # NAND, gates 1-3 in parallel (A,B->Y) = (1,2->3) (4,5->6) (9,10->8).
+  # Gate 4 untouched: the runner budgets numIn+1 GPIOs from a pool of 8,
+  # so 6 driven inputs is the quad-gate ceiling (the original 8-input set
+  # could never run). All four AB combos still covered.
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 -> 3=1 6=1 8=1
+  vec: 2=1 5=1 10=1 -> 3=1 6=1 8=1
+  vec: 1=1 4=1 9=1 -> 3=0 6=0 8=0
+  vec: 2=0 5=0 10=0 -> 3=1 6=1 8=1
 
 - id: 7402
   desc: Quad 2-input NOR gate
@@ -39,11 +41,12 @@ subclass: s7400
   aliases: [74HC02, 74LS02, 74HCT02]
   pins: [1Y, 1A, 1B, 2Y, 2A, 2B, GND, 3A, 3B, 3Y, 4A, 4B, 4Y, VCC]
   fingerprint: CCCCCC-CCCCCC-
-  # NOR: gates (A,B->Y) = (2,3->1) (5,6->4) (8,9->10) (11,12->13)
-  vec: 2=0 3=0 5=0 6=0 8=0 9=0 11=0 12=0 -> 1=1 4=1 10=1 13=1
-  vec: 3=1 6=1 9=1 12=1 -> 1=0 4=0 10=0 13=0
-  vec: 2=1 3=0 5=1 6=0 8=1 9=0 11=1 12=0 -> 1=0 4=0 10=0 13=0
-  vec: 3=1 6=1 9=1 12=1 -> 1=0 4=0 10=0 13=0
+  # NOR, gates 1-3 (A,B->Y) = (2,3->1) (5,6->4) (8,9->10); gate 4 untouched
+  # (6-input GPIO-budget ceiling - see the 7400 note). All AB combos hit.
+  vec: 2=0 3=0 5=0 6=0 8=0 9=0 -> 1=1 4=1 10=1
+  vec: 3=1 6=1 9=1 -> 1=0 4=0 10=0
+  vec: 2=1 3=0 5=1 6=0 8=1 9=0 -> 1=0 4=0 10=0
+  vec: 3=1 6=1 9=1 -> 1=0 4=0 10=0
 
 - id: 7404
   desc: Hex inverter
@@ -63,17 +66,27 @@ subclass: s7400
   pop: 4
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
   fingerprint: CCCCCC-CCCCCC-
-  # AND: gates (A,B->Y) = (1,2->3) (4,5->6) (9,10->8) (12,13->11)
-  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=0 6=0 8=0 11=0
-  vec: 2=1 5=1 10=1 13=1 -> 3=0 6=0 8=0 11=0
-  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=0 6=0 8=0 11=0
-  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
+  # AND, gates 1-3 (A,B->Y) = (1,2->3) (4,5->6) (9,10->8); gate 4 untouched
+  # (6-input GPIO-budget ceiling - see the 7400 note). All AB combos hit.
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 -> 3=0 6=0 8=0
+  vec: 2=1 5=1 10=1 -> 3=0 6=0 8=0
+  vec: 1=1 4=1 9=1 -> 3=1 6=1 8=1
+  vec: 2=0 5=0 10=0 -> 3=0 6=0 8=0
 
 - id: 7410
   desc: Triple 3-input NAND gate
   package: dip14
   aliases: [74HC10, 74LS10, 74HCT10]
-  pins: [1A, 1B, 2A, 2B, 2C, 2Y, GND, 3Y, 3A, 3B, 3C, 1C, 1Y, VCC]
+  # pins 12/13 were swapped in the first authoring - TI SDLS035A and
+  # Nexperia 74HC_HCT10 both put 1Y on 12 and 1C on 13 (verified 2026-08-30)
+  pins: [1A, 1B, 2A, 2B, 2C, 2Y, GND, 3Y, 3A, 3B, 3C, 1Y, 1C, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # 3-input NAND, gates 1+2 fully exercised (6-input GPIO budget), gate 3
+  # untouched: (1A,1B,1C->1Y) = (1,2,13->12), (2A,2B,2C->2Y) = (3,4,5->6)
+  vec: 1=0 2=0 13=0 3=0 4=0 5=0 -> 12=1 6=1
+  vec: 1=1 2=1 3=1 4=1 -> 12=1 6=1
+  vec: 13=1 5=1 -> 12=0 6=0
+  vec: 2=0 4=0 -> 12=1 6=1
 
 - id: 7414
   desc: Hex Schmitt-trigger inverter
@@ -81,6 +94,14 @@ subclass: s7400
   aliases: [74HC14, 74LS14, 74HCT14]
   pop: 13
   pins: [1A, 1Y, 2A, 2Y, 3A, 3Y, GND, 4Y, 4A, 5Y, 5A, 6Y, 6A, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # Same map and truth table as the 7404 - static vectors CANNOT separate
+  # them (both records pass on either chip; the survivors picker is the
+  # honest outcome, 5.4). The separator is the hysteresis sweep
+  # (DESIGN_PART_DISAMBIGUATION.md): 74HC14 VT+~2.4V/VT-~1.4V at 4.5V vs
+  # the 7404's single ~1.4V threshold.
+  vec: 1=0 3=0 5=0 9=0 11=0 13=0 -> 2=1 4=1 6=1 8=1 10=1 12=1
+  vec: 1=1 3=1 5=1 9=1 11=1 13=1 -> 2=0 4=0 6=0 8=0 10=0 12=0
 
 - id: 7420
   desc: Dual 4-input NAND gate
@@ -88,6 +109,12 @@ subclass: s7400
   aliases: [74HC20, 74LS20, 74HCT20]
   pins: [1A, 1B, NC, 1C, 1D, 1Y, GND, 2Y, 2A, 2B, NC, 2C, 2D, VCC]
   fingerprint: CCNCCC-CCCNCC-
+  # 4-input NAND, gate 1 only (both gates would need 8 inputs): all-low H,
+  # three-high H, all-high L, drop one back H
+  vec: 1=0 2=0 4=0 5=0 -> 6=1
+  vec: 1=1 2=1 4=1 -> 6=1
+  vec: 5=1 -> 6=0
+  vec: 2=0 -> 6=1
 
 - id: 7432
   desc: Quad 2-input OR gate
@@ -96,17 +123,25 @@ subclass: s7400
   pop: 5
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
   fingerprint: CCCCCC-CCCCCC-
-  # OR: gates (A,B->Y) = (1,2->3) (4,5->6) (9,10->8) (12,13->11)
-  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=0 6=0 8=0 11=0
-  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
-  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=1 6=1 8=1 11=1
-  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
+  # OR, gates 1-3 (A,B->Y) = (1,2->3) (4,5->6) (9,10->8); gate 4 untouched
+  # (6-input GPIO-budget ceiling - see the 7400 note). All AB combos hit.
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 -> 3=0 6=0 8=0
+  vec: 2=1 5=1 10=1 -> 3=1 6=1 8=1
+  vec: 1=1 4=1 9=1 -> 3=1 6=1 8=1
+  vec: 2=0 5=0 10=0 -> 3=1 6=1 8=1
 
 - id: 7442
   desc: BCD to decimal decoder (1-of-10)
   package: dip16
   aliases: [74HC42, 74LS42, 74HCT42]
   pins: [O0, O1, O2, O3, O4, O5, O6, GND, O7, O8, O9, D, C, B, A, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # 1-of-10 active-low decode; D(12)=MSB, A(15)=LSB. Codes 10-15 are
+  # invalid -> ALL outputs high (TI SDLS109) - step 4 checks exactly that
+  vec: 12=0 13=0 14=0 15=0 -> 1=0 2=1 3=1 4=1 5=1 6=1 7=1 9=1 10=1 11=1
+  vec: 15=1 -> 1=1 2=0 3=1 4=1 5=1 6=1 7=1 9=1 10=1 11=1
+  vec: 15=0 12=1 -> 1=1 2=1 3=1 4=1 5=1 6=1 7=1 9=1 10=0 11=1
+  vec: 13=1 -> 1=1 2=1 3=1 4=1 5=1 6=1 7=1 9=1 10=1 11=1
 
 - id: 7447
   desc: BCD to 7-segment decoder/driver, active-low
@@ -134,6 +169,16 @@ subclass: s7400
   aliases: [74HC74, 74LS74, 74HCT74]
   pop: 7
   pins: [1CLR, 1D, 1CLK, 1PRE, 1Q, 1Q~, GND, 2Q~, 2Q, 2PRE, 2CLK, 2D, 2CLR, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # FF1 only (FF2 untouched): rising-edge capture, async CLR/PRE both
+  # active-low (TI SDLS119). Steps prove clear, edge, hold-through-D-change,
+  # and preset
+  vec: 1=0 2=0 3=0 4=1 -> 5=0 6=1
+  vec: 1=1 -> 5=0 6=1
+  vec: 2=1 3=1 -> 5=1 6=0
+  vec: 3=0 2=0 -> 5=1 6=0
+  vec: 3=1 -> 5=0 6=1
+  vec: 4=0 -> 5=1 6=0
 
 - id: 7486
   desc: Quad 2-input XOR gate
@@ -142,11 +187,12 @@ subclass: s7400
   pop: 9
   pins: [1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3A, 3B, 4Y, 4A, 4B, VCC]
   fingerprint: CCCCCC-CCCCCC-
-  # XOR: gates (A,B->Y) = (1,2->3) (4,5->6) (9,10->8) (12,13->11)
-  vec: 1=0 2=0 4=0 5=0 9=0 10=0 12=0 13=0 -> 3=0 6=0 8=0 11=0
-  vec: 2=1 5=1 10=1 13=1 -> 3=1 6=1 8=1 11=1
-  vec: 1=1 2=0 4=1 5=0 9=1 10=0 12=1 13=0 -> 3=1 6=1 8=1 11=1
-  vec: 2=1 5=1 10=1 13=1 -> 3=0 6=0 8=0 11=0
+  # XOR, gates 1-3 (A,B->Y) = (1,2->3) (4,5->6) (9,10->8); gate 4 untouched
+  # (6-input GPIO-budget ceiling - see the 7400 note). All AB combos hit.
+  vec: 1=0 2=0 4=0 5=0 9=0 10=0 -> 3=0 6=0 8=0
+  vec: 2=1 5=1 10=1 -> 3=1 6=1 8=1
+  vec: 1=1 4=1 9=1 -> 3=0 6=0 8=0
+  vec: 2=0 5=0 10=0 -> 3=1 6=1 8=1
 
 - id: 7490
   desc: Decade counter (divide-by-2 and divide-by-5)
@@ -154,25 +200,69 @@ subclass: s7400
   aliases: [74LS90, 74HC90]
   power: VCC@5 GND@10
   pins: [CKB, R01, R02, NC, VCC, R91, R92, QC, QB, GND, QD, QA, NC, CKA]
+  fingerprint: CCCN-CCCC-CCNC
+  # FALLING-edge clocks (TI SDLS940A logic diagram); R0 pair sets 0, R9
+  # pair sets 9 (overrides R0). Div-2 (CKA->QA) and div-5 (CKB->QB) proven
+  # separately - the internal sections are not cascaded on-chip
+  vec: 14=1 1=1 2=1 3=1 6=0 7=0 -> 12=0 9=0 8=0 11=0
+  vec: 6=1 7=1 -> 12=1 9=0 8=0 11=1
+  vec: 6=0 7=0 -> 12=0 9=0 8=0 11=0
+  vec: 2=0 3=0 ->
+  vec: 14=0 -> 12=1
+  vec: 1=0 -> 9=1 8=0 11=0
+  vec: 14=1 1=1 ->
+  vec: 14=0 -> 12=0
+  vec: 2=1 3=1 -> 12=0 9=0 8=0 11=0
 
 - id: 74107
   desc: Dual JK flip-flop with clear
   package: dip14
   aliases: [74HC107, 74LS107]
-  # VERIFY: 74107 pin map from memory - check against TI SN74LS107A datasheet
+  # map verified against TI SDLS036 pin diagram AND logic-symbol numbers
+  # (2026-08-30) - the interleaved 1CLK@12/1CLR@13 is real
   pins: [1J, 1Q~, 1Q, 1K, 2Q, 2Q~, GND, 2J, 2CLK, 2CLR, 2K, 1CLK, 1CLR, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # FF1 only. FALLING-edge (LS107A); J/K changed only while CLK is LOW so
+  # the pulse-triggered plain '107 (master-slave ones-catching) passes the
+  # same sequence. Set, reset, toggle, async clear
+  vec: 1=0 4=0 12=0 13=0 -> 3=0 2=1
+  vec: 13=1 1=1 ->
+  vec: 12=1 ->
+  vec: 12=0 -> 3=1 2=0
+  vec: 1=0 4=1 ->
+  vec: 12=1 ->
+  vec: 12=0 -> 3=0 2=1
+  vec: 1=1 ->
+  vec: 12=1 ->
+  vec: 12=0 -> 3=1 2=0
+  vec: 13=0 -> 3=0 2=1
 
 - id: 74123
   desc: Dual retriggerable monostable multivibrator
   package: dip16
   aliases: [74HC123, 74LS123, 74HCT123]
   pins: [1A, 1B, 1CLR, 1Q~, 2Q, 2CEXT, 2RCEXT, GND, 2A, 2B, 2CLR, 2Q~, 1Q, 1CEXT, 1RCEXT, VCC]
+  fingerprint: CCCCC??-CCCCC??-
+  # Static-only test: both CLRs held LOW the whole run so the one-shots sit
+  # in the untriggered state (Q=L, Q~=H) no matter what A/B do. NEVER
+  # release CLR with A=L/B=H - a rising CLR itself fires a pulse (TI
+  # SDLS043). Pulses are invisible between steps anyway (no R/C -> ~150ns)
+  vec: 1=1 2=0 3=0 11=0 -> 13=0 4=1 5=0 12=1
+  vec: 1=0 2=1 -> 13=0 4=1 5=0 12=1
 
 - id: 74125
   desc: Quad 3-state buffer, active-low enable
   package: dip14
   aliases: [74HC125, 74LS125, 74HCT125]
   pins: [1OE, 1A, 1Y, 2OE, 2A, 2Y, GND, 3Y, 3A, 3OE, 4Y, 4A, 4OE, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # buffers 1-3 (OE,A->Y) = (1,2->3) (4,5->6) (10,9->8); buffer 4 untouched
+  # (6-input budget). Step 3 is the 3-state proof: disabled with A low, the
+  # pull-up reads H where a plain buffer would drive L
+  vec: 1=0 2=0 4=0 5=0 10=0 9=0 -> 3=0 6=0 8=0
+  vec: 2=1 5=1 9=1 -> 3=1 6=1 8=1
+  vec: 2=0 5=0 9=0 1=1 4=1 10=1 -> 3=1 6=1 8=1
+  vec: 1=0 4=0 10=0 -> 3=0 6=0 8=0
 
 - id: 74138
   desc: 3-to-8 line decoder/demultiplexer
@@ -180,30 +270,70 @@ subclass: s7400
   aliases: [74HC138, 74LS138, 74HCT138]
   pop: 6
   pins: [A, B, C, G2A, G2B, G1, Y7, GND, Y6, Y5, Y4, Y3, Y2, Y1, Y0, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # 1-of-8 active-low decode, C=MSB; enabled = G1 high AND G2A/G2B low.
+  # Codes 0, 1, 4, then both disable paths (TI SDLS014)
+  vec: 1=0 2=0 3=0 4=0 5=0 6=1 -> 15=0 14=1 13=1 12=1 11=1 10=1 9=1 7=1
+  vec: 1=1 -> 15=1 14=0 13=1 12=1 11=1 10=1 9=1 7=1
+  vec: 1=0 3=1 -> 15=1 14=1 13=1 12=1 11=0 10=1 9=1 7=1
+  vec: 4=1 -> 15=1 14=1 13=1 12=1 11=1 10=1 9=1 7=1
+  vec: 4=0 6=0 -> 15=1 14=1 13=1 12=1 11=1 10=1 9=1 7=1
 
 - id: 74139
   desc: Dual 2-to-4 line decoder/demultiplexer
   package: dip16
   aliases: [74HC139, 74LS139, 74HCT139]
   pins: [1G, 1A, 1B, 1Y0, 1Y1, 1Y2, 1Y3, GND, 2Y3, 2Y2, 2Y1, 2Y0, 2B, 2A, 2G, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # both halves in parallel (A=LSB): codes 0, 1, 3, then disabled
+  vec: 1=0 2=0 3=0 15=0 14=0 13=0 -> 4=0 5=1 6=1 7=1 12=0 11=1 10=1 9=1
+  vec: 2=1 14=1 -> 4=1 5=0 6=1 7=1 12=1 11=0 10=1 9=1
+  vec: 3=1 13=1 -> 4=1 5=1 6=1 7=0 12=1 11=1 10=1 9=0
+  vec: 1=1 15=1 -> 4=1 5=1 6=1 7=1 12=1 11=1 10=1 9=1
 
 - id: 74151
   desc: 8-input multiplexer with strobe
   package: dip16
   aliases: [74HC151, 74LS151, 74HCT151]
   pins: [D3, D2, D1, D0, Y, W, G, GND, C, B, A, D7, D6, D5, D4, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # W is always the complement of Y; strobe G high forces Y=L W=H (TI
+  # SDLS054). Only D0/D7 driven - unselected data inputs float, which the
+  # selected-input logic never sees
+  vec: 9=0 10=0 11=0 7=0 4=0 12=0 -> 5=0 6=1
+  vec: 4=1 -> 5=1 6=0
+  vec: 9=1 10=1 11=1 -> 5=0 6=1
+  vec: 12=1 -> 5=1 6=0
+  vec: 7=1 -> 5=0 6=1
 
 - id: 74153
   desc: Dual 4-input multiplexer
   package: dip16
   aliases: [74HC153, 74LS153, 74HCT153]
   pins: [1G, B, 1C3, 1C2, 1C1, 1C0, 1Y, GND, 2Y, 2C0, 2C1, 2C2, 2C3, A, 2G, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # half 1 exercised (C0 and C3), half 2 held strobed-off (2G=1 forces
+  # 2Y=L even with its data floating); strobe high = output LOW, not Z
+  vec: 1=0 2=0 14=0 6=0 3=0 15=1 -> 7=0 9=0
+  vec: 6=1 -> 7=1
+  vec: 2=1 14=1 -> 7=0
+  vec: 3=1 -> 7=1
+  vec: 1=1 -> 7=0 9=0
 
 - id: 74157
   desc: Quad 2-input multiplexer
   package: dip16
   aliases: [74HC157, 74LS157, 74HCT157]
   pins: [SEL, 1A, 1B, 1Y, 2A, 2B, 2Y, GND, 3Y, 3B, 3A, 4Y, 4B, 4A, EN, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # muxes 1+2 with A/B driven to opposite levels; the strobe (15) high
+  # forces ALL outputs LOW - driven low, not 3-state (TI SDLS058), which
+  # separates it from every 3-state part in this package
+  vec: 1=0 15=0 2=0 3=1 5=0 6=1 -> 4=0 7=0
+  vec: 2=1 5=1 -> 4=1 7=1
+  vec: 1=1 -> 4=1 7=1
+  vec: 3=0 6=0 -> 4=0 7=0
+  vec: 15=1 -> 4=0 7=0
 
 - id: 74161
   desc: 4-bit synchronous binary counter, async clear
@@ -211,6 +341,19 @@ subclass: s7400
   aliases: [74HC161, 74LS161, 74HCT161]
   pop: 10
   pins: [CLR, CLK, A, B, C, D, ENP, GND, LOAD, ENT, QD, QC, QB, QA, RCO, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # rising-edge sync counter; CLR is ASYNC active-low on the '161 (the
+  # '163's is sync - not aliased here), LOAD is sync. Count 0->1->2, then
+  # sync-load A=1 (B/C/D float - only QA checked), then async clear
+  vec: 1=0 2=0 3=0 7=1 9=1 10=1 -> 14=0 13=0 12=0 11=0 15=0
+  vec: 1=1 -> 14=0 13=0 12=0 11=0
+  vec: 2=1 -> 14=1 13=0 12=0 11=0
+  vec: 2=0 ->
+  vec: 2=1 -> 14=0 13=1 12=0 11=0
+  vec: 9=0 3=1 2=0 ->
+  vec: 2=1 -> 14=1
+  vec: 9=1 2=0 ->
+  vec: 1=0 -> 14=0 13=0 12=0 11=0
 
 - id: 74164
   desc: 8-bit serial-in parallel-out shift register
@@ -218,6 +361,18 @@ subclass: s7400
   aliases: [74HC164, 74LS164, 74HCT164]
   pop: 12
   pins: [A, B, QA, QB, QC, QD, GND, CLK, CLR, QE, QF, QG, QH, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # rising-edge SIPO; serial input = A AND B (the logic diagram's entry
+  # gate). Shift 1 in (A=B=1), then a 0 with B low - proves the AND gating
+  vec: 1=1 2=0 8=0 9=0 -> 3=0 4=0 5=0 6=0 13=0
+  vec: 9=1 -> 3=0
+  vec: 2=1 ->
+  vec: 8=1 -> 3=1 4=0
+  vec: 8=0 2=0 ->
+  vec: 8=1 -> 3=0 4=1
+  vec: 8=0 ->
+  vec: 8=1 -> 3=0 4=0 5=1
+  vec: 9=0 -> 3=0 4=0 5=0 6=0 13=0
 
 - id: 74165
   desc: 8-bit parallel-in serial-out shift register
@@ -225,24 +380,66 @@ subclass: s7400
   aliases: [74HC165, 74LS165, 74HCT165]
   pop: 11
   pins: [SH/LD, CLK, E, F, G, H, QH~, GND, QH, SER, A, B, C, D, CLKINH, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # SH/LD low = LEVEL-sensitive async load (QH follows the H input live -
+  # steps 1-2); rising-edge shift brings G into QH (step 4); CLKINH raised
+  # while CLK is high per the datasheet's rule, then a gated-out clock
+  # pulse proves the inhibit (TI SDLS062D)
+  vec: 1=0 2=0 15=0 10=0 5=1 6=1 -> 9=1 7=0
+  vec: 6=0 -> 9=0 7=1
+  vec: 1=1 -> 9=0 7=1
+  vec: 2=1 -> 9=1 7=0
+  vec: 15=1 ->
+  vec: 2=0 ->
+  vec: 2=1 -> 9=1 7=0
 
 - id: 74174
   desc: Hex D flip-flop with common clock and clear
   package: dip16
   aliases: [74HC174, 74LS174, 74HCT174]
   pins: [CLR, 1Q, 1D, 2D, 2Q, 3D, 3Q, GND, CLK, 4Q, 4D, 5Q, 5D, 6D, 6Q, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # rising-edge, async active-low clear; FFs 1-4 exercised (5/6 untouched)
+  vec: 1=0 9=0 3=0 4=0 6=0 11=0 -> 2=0 5=0 7=0 10=0
+  vec: 1=1 3=1 6=1 -> 2=0 7=0
+  vec: 9=1 -> 2=1 5=0 7=1 10=0
+  vec: 9=0 3=0 -> 2=1
+  vec: 9=1 -> 2=0 5=0 7=1
+  vec: 1=0 -> 2=0 5=0 7=0 10=0
 
 - id: 74193
   desc: 4-bit up/down binary counter, dual clock
   package: dip16
   aliases: [74HC193, 74LS193, 74HCT193]
   pins: [B, QB, QA, DOWN, UP, QC, QD, GND, D, C, LOAD, CO, BO, CLR, A, VCC]
+  fingerprint: CCCCCCC-CCCCCCC-
+  # rising-edge dual clocks, idle HIGH (TI note B); CLR is active-HIGH
+  # async (unusual); LOAD active-low async (A=0 loaded, B/C/D float - only
+  # QA checked). BO pulses low while DOWN is low at count 0; wrap to 15
+  vec: 5=1 4=1 14=1 11=1 15=0 -> 3=0 2=0 6=0 7=0
+  vec: 14=0 -> 3=0 2=0 6=0 7=0 12=1 13=1
+  vec: 5=0 ->
+  vec: 5=1 -> 3=1 2=0 6=0 7=0
+  vec: 4=0 -> 3=1
+  vec: 4=1 -> 3=0 2=0 6=0 7=0 13=1
+  vec: 4=0 -> 13=0
+  vec: 4=1 -> 13=1 3=1 2=1 6=1 7=1
+  vec: 11=0 -> 3=0
+  vec: 11=1 14=1 -> 3=0 2=0 6=0 7=0
 
 - id: 74240
   desc: Octal inverting 3-state buffer/driver
   package: dip20
   aliases: [74HC240, 74LS240, 74HCT240]
   pins: [1OE, 1A1, 2Y4, 1A2, 2Y3, 1A3, 2Y2, 1A4, 2Y1, GND, 2A1, 1Y4, 2A2, 1Y3, 2A3, 1Y2, 2A4, 1Y1, 2OE, VCC]
+  fingerprint: CCCCCCCCC-CCCCCCCCC-
+  # inverting: 1A1(2)->1Y1(18), 1A2(4)->1Y2(16), 2A1(11)->2Y1(9); each OE
+  # gates only its own half. Step 3: both halves disabled with inputs high
+  # - Z reads H where an active inverter would drive L
+  vec: 1=0 2=0 4=0 19=0 11=0 -> 18=1 16=1 9=1
+  vec: 2=1 11=1 -> 18=0 16=1 9=0
+  vec: 1=1 19=1 -> 18=1 16=1 9=1
+  vec: 1=0 19=0 -> 18=0 16=1 9=0
 
 - id: 74245
   desc: Octal bus transceiver, 3-state
@@ -250,12 +447,30 @@ subclass: s7400
   aliases: [74HC245, 74LS245, 74HCT245]
   pop: 8
   pins: [DIR, A1, A2, A3, A4, A5, A6, A7, A8, GND, B8, B7, B6, B5, B4, B3, B2, B1, OE, VCC]
+  fingerprint: CCCCCCCCC-CCCCCCCCC-
+  # DIR held HIGH the whole run (A drives B, TI SDLS146B) - NEVER drop it
+  # while GPIOs hold the A pins, or the B->A drivers fight the fixture.
+  # OE high = full isolation, both buses Z (pull-up reads H)
+  vec: 1=1 19=0 2=0 3=1 4=0 -> 18=0 17=1 16=0
+  vec: 2=1 4=1 -> 18=1 16=1
+  vec: 19=1 2=0 4=0 -> 18=1 17=1 16=1
+  vec: 19=0 -> 18=0 17=1 16=0
 
 - id: 74273
   desc: Octal D flip-flop with clear
   package: dip20
   aliases: [74HC273, 74LS273, 74HCT273]
   pins: [CLR, 1Q, 1D, 2D, 2Q, 3Q, 3D, 4D, 4Q, GND, CLK, 5Q, 5D, 6D, 6Q, 7Q, 7D, 8D, 8Q, VCC]
+  fingerprint: CCCCCCCCC-CCCCCCCCC-
+  # rising-edge, async active-low clear, outputs always driven (no OE -
+  # which is exactly what separates it from the '373/'374 sharing this
+  # package: their pin 1 disables outputs, this one clears them)
+  vec: 1=0 11=0 3=0 4=0 7=0 8=0 -> 2=0 5=0 6=0 9=0
+  vec: 1=1 3=1 7=1 -> 2=0 6=0
+  vec: 11=1 -> 2=1 5=0 6=1 9=0
+  vec: 11=0 3=0 -> 2=1
+  vec: 11=1 -> 2=0 5=0 6=1
+  vec: 1=0 -> 2=0 5=0 6=0 9=0
 
 - id: 74373
   desc: Octal transparent latch, 3-state
@@ -263,6 +478,15 @@ subclass: s7400
   aliases: [74HC373, 74LS373, 74HCT373]
   pop: 14
   pins: [OE, 1Q, 1D, 2D, 2Q, 3Q, 3D, 4D, 4Q, GND, LE, 5Q, 5D, 6D, 6Q, 7Q, 7D, 8D, 8Q, VCC]
+  fingerprint: CCCCCCCCC-CCCCCCCCC-
+  # TRANSPARENT latch: Q follows D live while LE(11) is high - step 2 is
+  # the discriminator against the '374 (same pins, edge-triggered: it
+  # captured D=0 at step 1's LE rise and holds). Step 4 proves 3-state
+  vec: 1=0 11=1 3=0 4=1 -> 2=0 5=1
+  vec: 3=1 4=0 -> 2=1 5=0
+  vec: 11=0 3=0 4=1 -> 2=1 5=0
+  vec: 1=1 -> 2=1 5=1
+  vec: 1=0 -> 2=1 5=0
 
 - id: 74374
   desc: Octal D flip-flop, 3-state
@@ -270,6 +494,41 @@ subclass: s7400
   aliases: [74HC374, 74LS374, 74HCT374]
   pop: 15
   pins: [OE, 1Q, 1D, 2D, 2Q, 3Q, 3D, 4D, 4Q, GND, CLK, 5Q, 5D, 6D, 6Q, 7Q, 7D, 8D, 8Q, VCC]
+  fingerprint: CCCCCCCCC-CCCCCCCCC-
+  # rising-EDGE register: step 3 changes D while CLK stays high and the
+  # outputs must NOT move - a '373 (transparent at pin 11 high) follows
+  # and fails there. Step 4 proves 3-state
+  vec: 1=0 11=0 3=1 4=0 ->
+  vec: 11=1 -> 2=1 5=0
+  vec: 3=0 4=1 -> 2=1 5=0
+  vec: 1=1 -> 2=1 5=1
+  vec: 1=0 -> 2=1 5=0
+
+- id: 74393
+  desc: Dual 4-bit binary ripple counter
+  package: dip14
+  aliases: [74HC393, 74LS393, 74HCT393]
+  pop: 16
+  # TI SDLS107 (LS) + SCLS143E (HC) + Nexperia 74HC_HCT393, 2026-08-30.
+  # Counter 2's outputs run MSB-first: pin 8 is 2QD, pin 11 is 2QA - the
+  # mirror of counter 1. Clocks are FALLING-edge; CLR is active-HIGH async
+  # (opposite of most LS clears)
+  pins: [1CLK, 1CLR, 1QA, 1QB, 1QC, 1QD, GND, 2QD, 2QC, 2QB, 2QA, 2CLR, 2CLK, VCC]
+  fingerprint: CCCCCC-CCCCCC-
+  # count counter 1 to 4 (falling edges), one edge into counter 2, then
+  # clear each side separately - proves the two counters are independent
+  vec: 1=1 2=1 13=1 12=1 -> 3=0 4=0 5=0 6=0 11=0 8=0
+  vec: 2=0 12=0 -> 3=0 4=0 5=0 6=0 11=0 8=0
+  vec: 1=0 -> 3=1 4=0 5=0 6=0 11=0
+  vec: 1=1 -> 3=1
+  vec: 1=0 -> 3=0 4=1 5=0 6=0
+  vec: 1=1 ->
+  vec: 1=0 -> 3=1 4=1
+  vec: 1=1 ->
+  vec: 1=0 -> 3=0 4=0 5=1 6=0
+  vec: 13=0 -> 11=1 8=0
+  vec: 2=1 -> 3=0 4=0 5=0 6=0 11=1
+  vec: 12=1 -> 11=0 8=0
 
 - id: 74595
   desc: 8-bit shift register with output latch

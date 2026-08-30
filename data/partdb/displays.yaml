@@ -1,6 +1,7 @@
 # source: Solomon Systech (SSD1306/09/15), Sinowealth (SH1106), Sitronix
-#   (ST7789), Ilitek (ILI9341), Hitachi (HD44780), Japan Display (LS027B7DH01,
-#   LPM009M360A), Worldsemi (WS2812), generic breakout-board silkscreens -
+#   (ST7789, ST7735S), Ilitek (ILI9341), Hitachi (HD44780), Japan Display
+#   (LS027B7DH01, LPM009M360A), Worldsemi (WS2812), GoldenMorning (GMT177),
+#   TOPLITE (1088AS), generic breakout-board silkscreens -
 #   pin-function facts transcribed by hand from datasheets and module
 #   headers; facts are not copyrightable. Never import Fritzing/KiCad/
 #   AVR-tester tables (CC-BY-SA/GPL).
@@ -107,8 +108,25 @@ class: DISPLAY
   package: sip9
   driver: ili9341
   pop: 4
-  # VERIFY: common 2.4in breakout order VCC GND CS RESET DC SDI SCK LED SDO
+  # header order verified against lcdwiki MSP2807/MSP2402 (2026-08-30);
+  # touch variants add T_CLK/T_CS/T_DIN/T_DO/T_IRQ as pins 10-14
   pins: [VCC, GND, CS, RESET=RST, DC, SDI=MOSI, SCK, LED=BL, SDO=MISO]
+
+- id: gmt177
+  name: GMT177
+  desc: 1.77in TFT 128x160 SPI (ST7735S)
+  subclass: lcd
+  package: sip8
+  driver: st7735
+  aliases: [ST7735, GMT177-06]
+  pop: 5
+  # GoldenMorning GMT177 family, ST7735S controller (manufacturer pages,
+  # 2026-08-30). 3.3V-class - the panel exposes VDDA/VDDIO with no verified
+  # onboard regulator; never feed 5V. BLK is active-high backlight enable.
+  # VERIFY: this is the 8-pin retail adaptor order; GoldenMorning's own
+  # GMT177-02 carrier is 7-pin (GND VCC SCL SDA RST DC CS, backlight
+  # hardwired) - drop BLK if the bench unit has 7 pins
+  pins: [GND, VCC, SCL=SCK, SDA=MOSI, RES=RST, DC, CS, BLK=BL]
 
 - id: jdi_ls027b7dh01
   name: JDI LS027B7DH01
@@ -142,8 +160,10 @@ class: DISPLAY
   driver: ws2812
   aliases: [SK6812, NEOPIXEL]
   pop: 1
-  # VERIFY: strip/breakout order varies (5V/DIN/GND is also common)
-  pins: [DIN, VCC, GND]
+  # The invariant across makers (Pololu/strip silk survey 2026-08-30):
+  # DATA is always the MIDDLE pad; which outer pad is 5V varies. VERIFY
+  # the rails per unit - tap-to-place by name makes the order cosmetic
+  pins: [VCC, DIN, GND]
 
 - id: sk9822
   name: SK9822
@@ -153,7 +173,9 @@ class: DISPLAY
   driver: sk9822
   aliases: [APA102]
   pop: 2
-  # VERIFY: strip input order varies (GND/DIN/CLK/5V assumed)
+  # Maker invariant (2026-08-30): power on the OUTSIDE pads, data+clock
+  # the middle two - this order matches it, but data/clock sequence and
+  # orientation still vary per strip. VERIFY per unit
   pins: [GND, DIN, CLK, VCC]
 
 - id: matrix_1088as
@@ -164,7 +186,9 @@ class: DISPLAY
   led: 1088AS
   power: none
   pop: 1
-  # VERIFY: the famously scrambled 1088AS row/column map - confirm on datasheet
+  # scrambled map verified pin-for-pin against the TOPLITE TOP-CC-1088AS
+  # datasheet circuit diagram (2026-08-30). Rows = anodes, columns =
+  # cathodes (the 1088BS is the mirror)
   pins: [R5, R7, C2, C3, R8, C5, R6, R3, R1, C4, C6, R4, C1, R2, C7, C8]
 
 # 7-segment LED digits, direct drive (no controller). Pinout: the ubiquitous

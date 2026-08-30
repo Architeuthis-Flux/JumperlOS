@@ -169,6 +169,12 @@ struct PartDbVectorSet {
   uint8_t numIn;    // <= 16 driven pins
   uint8_t numOut;   // <= 16 read pins
   uint8_t numSteps;
+  uint16_t iccMin10;  // expected feed current band while the vectors run,
+  uint16_t iccMax10;  // in mA*10; 0,0 = no band authored. The Tier-2
+                      // quiescent signature (the INA reads the feed anyway)
+                      // - the only separator for vec-identical parts (the
+                      // LM358/TL072/NE5532 trio). Authored only with a
+                      // fixed vec_supply; checked on whichever pass runs.
   const uint8_t* inPins;    // [numIn] 1-based physical pin numbers
   const uint8_t* outPins;   // [numOut]
   const uint16_t* inBits;   // [numSteps]

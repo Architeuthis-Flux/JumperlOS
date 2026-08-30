@@ -31,6 +31,9 @@ class: TRANSISTOR
   package: sip3
   aliases: [PN2222]
   pop: 3
+  # TRAP (onsemi, 2026-08-30): a part marked "P2N2222A" is C-B-E - the
+  # exact REVERSE of the PN2222A this record describes. Not aliased here:
+  # same name family, opposite legs. The Part-ID tester finds the truth
   pins: [E, B, C]
 
 - id: BC547
@@ -54,6 +57,9 @@ class: TRANSISTOR
   subclass: bjt
   package: sip3
   pop: 6
+  # Darlington signatures (onsemi Fig.1): internal C-E flyback diode
+  # conducts E->C; B-E reads ~8k resistive (shunt resistors), turn-on
+  # ~1.2-1.4V (two junctions). Tab = collector
   pins: [B, C, E]
 
 - id: 2N7000
@@ -61,8 +67,8 @@ class: TRANSISTOR
   subclass: mosfet
   package: sip3
   pop: 1
-  # VERIFY: datasheet says S-G-D flat-face-forward (the task brief wrote
-  # "SDG" - inconsistent with its own BS170 note; confirm against ON Semi)
+  # S-G-D flat-face-forward verified against onsemi NDS7002A/D Rev 11
+  # (2026-08-30)
   pins: [S, G, D]
 
 - id: IRLZ44N
@@ -77,5 +83,6 @@ class: TRANSISTOR
   subclass: mosfet
   package: sip3
   pop: 3
-  # VERIFY: BS170 is D-G-S, the reverse of the 2N7000 - confirm on datasheet
+  # D-G-S verified against onsemi MMBF170/D Rev 9 (2026-08-30) - truly
+  # the 2N7000's mirror; the body diode is the only way to tell them apart
   pins: [D, G, S]
