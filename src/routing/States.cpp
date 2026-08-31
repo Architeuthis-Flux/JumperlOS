@@ -54,7 +54,6 @@ extern struct config jumperlessConfig;
 extern volatile bool core1busy;
 extern volatile bool core2busy;
 extern int netSlot;  // Global slot number (defined in RotaryEncoder.cpp)
-extern const int gpioDef[10][3];  // GPIO pin definitions (defined in Peripherals.h)
 extern uint8_t gpioState[50];  // GPIO state for animations - 10 real + 8 fake out + 32 fake in (defined in Peripherals.cpp)
 extern bool debugFP;  // Debug flag for file parsing (defined in FileParsing.cpp)
 

@@ -9,6 +9,7 @@
 #include "JumperlessDefines.h"
 #include "JumperlOS.h"
 #include <cstdlib>
+#include "hardwarestuff/RoutableGpio.h"
 //#include "MCP23S17.h"
 
 /**
@@ -78,15 +79,6 @@ extern uint32_t adcReadingColors[8];
 extern float adcReadingRanges[8][2];
 
 extern float adcRange[8][2];
-// GPIO arrays: 10 real RP2040 GPIOs + 8 fake outputs + 32 fake inputs = 50 total
-// Index layout:
-//   0-9:   Real RP2040 GPIOs (RP_GPIO_20 through RP_GPIO_27, etc.)
-//   10-17: Fake GP Outputs (FAKE_GP_OUT_0 through FAKE_GP_OUT_7)
-//   18-49: Fake GP Inputs (FAKE_GP_IN_0 through FAKE_GP_IN_31)
-extern uint8_t gpioState[50];
-extern uint8_t gpioReading[50];
-extern uint8_t gpioReadFloating[10];
-extern int gpioNet[50];
 extern bool debugFakeGpio;       // Debug flag for fake GPIO visual integration
 
 // Helper macros for GPIO array indexing
@@ -100,7 +92,6 @@ extern float dacSpread[4];
 extern int dacZero[4];
 
 
-extern uint32_t gpioReadingColors[50];  // 10 real + 8 fake out + 32 fake in
 extern int revisionNumber;
 extern int probeRevision;
 
@@ -108,12 +99,7 @@ extern int baudRate;
 
 extern gpio_function_t gpio_function_map[10];
 
-// PWM state tracking
-extern float gpioPWMFrequency[10];
-extern float gpioPWMDutyCycle[10];
-extern bool gpioPWMEnabled[10];
 
-extern volatile bool readingGPIO;
 extern volatile bool readingADC;
 // Non-waiting ADC lock for callers that hold a hardware side effect across
 // the read (see the definitions): adcTryAcquire() -> readAdcHeld() -> adcRelease().
@@ -164,61 +150,23 @@ static inline float inaShuntCurrent_mA(void) {
 // toggle; the End funnel runs on every session exit, so it can't stick.
 void inaFastPollMode(bool on);
 
-struct gpio_function_name_struct {
-    gpio_function_t function;
-    char name[10];
-    };
 
-    extern gpio_function_name_struct gpio_function_names[15];
-    
-    // Pin-aware function name lookup (handles F9 ambiguity per RP2350 GPIO mux)
-    const char* gpio_function_name_for_pin( uint gpio, gpio_function_t function );
-
-// gpioDef[i][0] is the pin number
-// gpioDef[i][1] is the RP_GPIO_x define
-// gpioDef[i][2] is the index of the gpioState array
-const int gpioDef[10][3] = {
-    {20, RP_GPIO_1, 0},
-    {21, RP_GPIO_2, 1},
-    {22, RP_GPIO_3, 2},
-    {23, RP_GPIO_4, 3},
-    {24, RP_GPIO_5, 4},
-    {25, RP_GPIO_6, 5},
-    {26, RP_GPIO_7, 6},
-    {27, RP_GPIO_8, 7},
-    {0, RP_UART_TX, 8},
-    {1, RP_UART_RX, 9}
-};
 
 extern int gpioOutput[10];
 
-int getGPIOIndexFromPin(int pin);
 
 int convertPullToJumperless(int pull);
 
 
-int anythingInteractiveConnected(int net = -1);
-int anyGpioOutputConnected(int net = -1);
-int anyGpioInputConnected(int net = -1);
-int anyAdcConnected(int net = -1); // returns adc number
 
-void setGPIO(void);
-void readGPIO(void);
 void readFakeGPIO(void);
-void printGPIOState(Stream* target = &Serial);
 
-// gpio = -1 means toggle the brightened net
-// lowHigh = 2 means toggle 
-int toggleGPIO(int lowHigh = 2, int gpio = -1, int onlyCheck = 0);
-int probeToggle(int buttonState = -1);
 int handleHighlights(int probeReading);
-void erattaClearGPIO(int gpio = -1);
 
 int initI2C(int sdaPin = 26, int sclPin = 27, int speed = 100000);
 int findI2CAddress(int sdaPin = 26, int sclPin = 27, int i2cNumber = 1, int print = 0);
 
 int readFloatingOrStateMCP (int pin = 0);
-int gpioReadWithFloating(int pin, unsigned long usDelay = 10);
 void setCSex(int chip, int value);
 void initGPIOex(void);
 void writeGPIOex(int value, uint8_t pin);
@@ -439,18 +387,9 @@ const uint16_t DACLookup_FullSine_5Bit[32] =
         0, 39, 156, 345, 600, 910, 1264, 1648};
 
 // PWM functions
-int setupPWM(int gpio_pin, float frequency = 1000.0, float duty_cycle = 0.5);
-int setPWMDutyCycle(int gpio_pin, float duty_cycle);
-int setPWMFrequency(int gpio_pin, float frequency);
-int stopPWM(int gpio_pin);
 void printPWMState(void);
 void printPIOStateMachines(void);
 
-// Slow PWM functions (for frequencies below 10Hz)
-int setupSlowPWM(int gpio_pin, float frequency, float duty_cycle);
-int setSlowPWMDutyCycle(int gpio_pin, float duty_cycle);
-int setSlowPWMFrequency(int gpio_pin, float frequency);
-int stopSlowPWM(int gpio_pin);
 
 // ============================================================================
 // VoltageAdjuster Class - Interactive voltage adjustment via encoder

@@ -6,6 +6,7 @@
 #include "config.h"
 #include <EEPROM.h>
 #include "configManager.h"
+#include "hardwarestuff/RoutableGpio.h"
 
 #ifndef PERSSISTENTSTUFF_H
 #define PERSSISTENTSTUFF_H
@@ -117,12 +118,5 @@ void readLogoBindings(void);
 
 void readSettingsFromConfig();
 
-void updateGPIOConfigFromState(void);
-// Apply the persisted direction/pull config to hardware + gpioState.
-// onlyIdx >= 0 applies exactly that gpioDef index (what the probe GPIO menu
-// wants after changing one pin); -1 applies the whole SIO bank. Outputs get
-// gpioState = 0 ("starts low"), so bank-wide calls must not run while the
-// probe's GPIO buffer-power claim is active (the claim pin is skipped).
-void updateStateFromGPIOConfig(int onlyIdx = -1);
 
 #endif
