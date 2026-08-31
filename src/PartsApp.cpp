@@ -2545,6 +2545,20 @@ static void partsMeterDone(int a, int b2, int c) {
     requestLedShow(2);
 }
 
+// Back to the scan's own stage after a picker or identify owned the
+// matrix: wipe the glyphs ("Which? 4051" stood through the SECOND chip's
+// whole test - Kevin, 22:01) and every verdict paint, then re-light the
+// census hits, so the next finding starts from the ambient scan state
+// instead of the last winner's name and colors.
+static void partsScanStageRepaint(void) {
+    b.clear();
+    if (s_scanVizFlags != nullptr)
+        for (int r = 1; r <= 60; r++)
+            if (s_scanVizFlags[r] == 1 || s_scanVizFlags[r] == 5)
+                partsPaintRow(r, partsScanVizHue(r, PARTS_HIT_V));
+    requestLedShow(2);
+}
+
 // One finding, one detail string, in the summary's own idiom: ohms for
 // the resistive family, farads for a capacitor, volts for anything whose
 // number is a junction drop. Shared by the cross-gap report, the span
@@ -2820,24 +2834,35 @@ static bool partsBjtVbePlausible(const PartResult& r) {
 // direction answers that too. A bridged/NC/mid-power corner pair reads
 // resistive or open -> no verdict -> the caller falls back to the vote
 // (7490, 4049/4050, non-DIP clusters).
+// One junction-map read of a candidate rail pair: true only when it
+// conducts exactly ONE way at the map's junction thresholds - the anode
+// is GND, the cathode VDD. Resistive pairs read low both ways, bulk-cap
+// or LED-chain pairs read blocked, and both fall through to the caller's
+// next idea. The primitive under partsCornerRails AND the SIP power-end
+// hunt.
+static bool partsPairOneWay(int ra, int rb, int third, ClusterPower* out) {
+    if (third == ra || third == rb) return false;
+    ScanSession s;
+    int rows3[3] = {ra, rb, third};
+    if (partScanBegin(s, rows3, 3) != 0) return false;
+    float v[3][3];
+    partScanJunctionMap(s, v);
+    partScanEnd(s);
+    bool fwd = v[0][1] < kJmFwd && v[1][0] > kJmBlk;   // ra anode -> rb
+    bool rev = v[1][0] < kJmFwd && v[0][1] > kJmBlk;   // rb anode -> ra
+    if (fwd == rev) return false;   // open, resistive, or double-clamped
+    out->gndRow = fwd ? ra : rb;
+    out->vddRow = fwd ? rb : ra;
+    out->nSig = 0;
+    return true;
+}
+
 static bool partsCornerRails(int lo, int hi, ClusterPower* out) {
     int a = hi;        // pin N/2's row when pin 1 sits at lo
     int b = lo - 30;   // pin N's row
     if (a < 31 || a > 60 || b < 1 || b > 30 || lo > hi) return false;
     int third = (hi - 1 > lo) ? hi - 1 : lo;   // fixture wants 3 rows
-    if (third == a) return false;
-    ScanSession s;
-    int rows3[3] = {a, b, third};
-    if (partScanBegin(s, rows3, 3) != 0) return false;
-    float v[3][3];
-    partScanJunctionMap(s, v);
-    partScanEnd(s);
-    bool fwd = v[0][1] < kJmFwd && v[1][0] > kJmBlk;   // a anode -> b
-    bool rev = v[1][0] < kJmFwd && v[0][1] > kJmBlk;   // b anode -> a
-    if (fwd == rev) return false;   // open, resistive, or double-clamped
-    out->gndRow = fwd ? a : b;
-    out->vddRow = fwd ? b : a;
-    out->nSig = 0;
+    if (!partsPairOneWay(a, b, third, out)) return false;
     Serial.print("  corner diode says gnd ");
     Serial.print(out->gndRow);
     Serial.print(" vdd ");
@@ -3645,6 +3670,22 @@ int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
     if (gndRow < 1 || gndRow > 60 || vddRow < 1 || vddRow > 60 ||
         gndRow == vddRow)
         return -1;
+    // The measured clamp map picks the supply family ONCE for every
+    // either-supply record, halving the power cycles of the two-pass
+    // dance (Kevin, 22:01: "speed it up a little"): top clamps on the
+    // pins ('B'/'V') = CMOS, 3.3V pass alone; an all-G map = bipolar
+    // TTL, the rail pass alone. Mixed or missing map = both passes,
+    // exactly as before.
+    int fpFamily = 0;   // 0 = unknown, 1 = TTL-ish, 2 = CMOS-ish
+    if (fpMeasured != nullptr && fpMeasured[0] != '\0') {
+        int nB = 0, nG = 0;
+        for (const char* c = fpMeasured; *c != '\0'; c++) {
+            if (*c == 'B' || *c == 'V') nB++;
+            else if (*c == 'G') nG++;
+        }
+        if (nB >= 2 && nG <= 1) fpFamily = 2;
+        else if (nG >= 2 && nB <= 1) fpFamily = 1;
+    }
     // Try EVERY candidate - the result array caps what gets reported, not
     // what gets run. With the 2026-08-30 database (60 vector sets, ~25 per
     // DIP width) the old n<maxOut loop gate meant a part authored past the
@@ -3686,13 +3727,18 @@ int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
         // 3.3V; family-wide = rail first, 3.3V retry (74HC at 5V can't
         // trust 3.3V GPIO drive - Vih 3.5V)
         int verdict;
-        if (vs->supply == PARTDB_VEC_SUPPLY_3V3) {
+        if (vs->supply == PARTDB_VEC_SUPPLY_3V3 ||
+            (vs->supply == PARTDB_VEC_SUPPLY_EITHER && fpFamily == 2)) {
+            // CMOS-only record, or the measured clamp map already says
+            // CMOS: the 3.3V pass alone suffices (74HC is native there;
+            // even HCT's TTL thresholds pass a slow static test)
             verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated, gndRow,
                                         vddRow, false, &failStep, &iccMa);
         } else {
             verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated, gndRow,
                                         vddRow, true, &failStep, &iccMa);
-            if (verdict == 0 && vs->supply == PARTDB_VEC_SUPPLY_EITHER)
+            if (verdict == 0 && vs->supply == PARTDB_VEC_SUPPLY_EITHER &&
+                fpFamily != 1)
                 verdict = partsRunVectorSet(*vs, baseRow, nPins, rotated,
                                             gndRow, vddRow, false, &failStep,
                                             &iccMa);
@@ -4117,25 +4163,63 @@ static bool partsFindSipModule(uint8_t* flags, const int* seed, int nSeed,
     out->valid = false;
     out->nCand = 0;
     if (nSeed < 3) return false;
+    int lo = seed[0], hi = seed[0];
+    for (int i = 1; i < nSeed; i++) {
+        if (seed[i] < lo) lo = seed[i];
+        if (seed[i] > hi) hi = seed[i];
+    }
     ClusterPower cp;
-    if (cpKnown != nullptr) {
-        cp = *cpKnown;
-    } else {
-        bool got = (nSeed == 3)
-                       ? partsModuleRails3(seed, &cp)
-                       : partsFindClusterPower(seed, (nSeed > 6) ? 6 : nSeed,
-                                               &cp);
+    bool got = (cpKnown != nullptr);
+    if (got) cp = *cpKnown;
+    if (!got) {
+        // The power pair sits at one END of a module and its two pins are
+        // adjacent on every SIP record in the DB - and it hides from both
+        // voters: a decoupled supply pair reads CAPACITOR to the
+        // classifier, and the census often never flags GND at all (bench
+        // GMT177 at 21-28: the seed was {22,23,24} - VCC/SCL/SDA - and
+        // partsModuleRails3 rightly refused it). So step outward from the
+        // seed's edges and put the corner-diode question to each adjacent
+        // pair: one-way single junction = gnd(anode) -> vdd(cathode).
+        // Bench 22:05: part_identify(21,22) -> DIODE A,K 0.80V named the
+        // GMT177's rails on the first pair tried.
+        int bandLo = (lo <= 30) ? 1 : 31;
+        int bandHi = (lo <= 30) ? 28 : 58;
+        int pairA[6] = {lo - 1, lo,     lo - 2, hi,     hi - 1, hi + 1};
+        int pairB[6] = {lo,     lo + 1, lo - 1, hi + 1, hi,     hi + 2};
+        for (int k = 0; k < 6 && !got; k++) {
+            int ra = pairA[k], rb = pairB[k];
+            if (ra < bandLo || rb > bandHi) continue;
+            if (partsPlacedPartOnRow(ra) != nullptr ||
+                partsPlacedPartOnRow(rb) != nullptr)
+                continue;
+            if (partsAutoAbortCheck()) return false;
+            partsMeterViz2(ra, rb);
+            got = partsPairOneWay(ra, rb, seed[nSeed / 2], &cp);
+            partsMeterDone(ra, rb, -1);
+        }
+        if (got) {
+            Serial.print("  power-end diode says gnd ");
+            Serial.print(cp.gndRow);
+            Serial.print(" vdd ");
+            Serial.println(cp.vddRow);
+            if (cp.gndRow < lo || cp.vddRow < lo) lo = (cp.gndRow < cp.vddRow)
+                                                           ? cp.gndRow
+                                                           : cp.vddRow;
+            if (cp.gndRow > hi || cp.vddRow > hi) hi = (cp.gndRow > cp.vddRow)
+                                                           ? cp.gndRow
+                                                           : cp.vddRow;
+        }
+    }
+    if (!got) {
+        got = (nSeed == 3)
+                  ? partsModuleRails3(seed, &cp)
+                  : partsFindClusterPower(seed, (nSeed > 6) ? 6 : nSeed, &cp);
         if (!got) return false;
         Serial.print("  its clamps say row ");
         Serial.print(cp.gndRow);
         Serial.print(" is ground and row ");
         Serial.print(cp.vddRow);
         Serial.println(" is the supply");
-    }
-    int lo = seed[0], hi = seed[0];
-    for (int i = 1; i < nSeed; i++) {
-        if (seed[i] < lo) lo = seed[i];
-        if (seed[i] > hi) hi = seed[i];
     }
     // the pokeable band; the anchor may still reach onto the x-pin
     // columns just past it (they hold legs, they just refuse sessions)
@@ -5496,9 +5580,25 @@ void partsAutoLauncher(void) {
                 // on (see the phantom-pairing note above), and a bottom-
                 // half module with an empty mirror window. The rails and
                 // member probe are the second look's own physics; the
-                // record anchor does the naming.
+                // record anchor does the naming. A TOP-half span whose
+                // MIRROR window holds census hits is almost certainly a
+                // DIP's far side - the pairing pass (which owns the
+                // corner-diode ask) will adopt it when its bottom span
+                // comes around, and the module attempt here only burned
+                // 20s of pair-measuring on the 4051/393 tops (Kevin,
+                // 22:01: "speed it up a little"). A genuine top-half
+                // module over a coincidentally busy bottom loses its
+                // module offer - the confirm prompts referee that, same
+                // as the phantom-pairing note above.
+                bool mirrorBusy = false;
+                if (a <= 30) {
+                    int mh = 0;
+                    for (int r = a + 30; r <= z + 30 && r <= 60; r++)
+                        if (flags[r] == 1 || flags[r] == 5) mh++;
+                    mirrorBusy = (mh >= 2);
+                }
                 if (chipVerdict && nChipF == nChipFBefore && !sipFound.valid &&
-                    !partsAutoAbortCheck()) {
+                    !mirrorBusy && !partsAutoAbortCheck()) {
                     int seedW[6];
                     int nSeedW = 0;
                     for (int r = a; r <= z && nSeedW < 6; r++)
@@ -5720,6 +5820,9 @@ void partsAutoLauncher(void) {
                                                         chipWidth[q]);
                     }
                     if (placedOne) placed++;
+                    // the picker's glyphs and this chip's identify paints
+                    // must not bleed into the NEXT finding's test
+                    partsScanStageRepaint();
                 }
                 if (!bail && i2cModule.valid) {
                     int rlo = i2cModule.gnd, rhi = i2cModule.gnd;
@@ -5786,6 +5889,7 @@ void partsAutoLauncher(void) {
                     }
                     if (!bail && pick >= 0 &&
                         partsPlaceSipModule(sipFound, pick)) placed++;
+                    partsScanStageRepaint();   // no stale picker glyphs
                 }
                 if (placed > 0) {
                     partLabels.requestRun();
