@@ -133,11 +133,21 @@ PartResult identifyTwoLead(int rowA, int rowB) {
         float vfHi = fwdAB ? vAB : vBA;
 
         // low-current Vf for the junction-vs-resistor ratio law: a diode's
-        // Vf barely moves over a 20x current ratio, a resistor's V scales
+        // Vf barely moves over a 20x current ratio, a resistor's V scales.
+        // The low point has to be a real MEASUREMENT to say anything: a
+        // 50uA target lives inside this fabric's transient floor, where
+        // fixture-build charge draining through the shunt trips the servo
+        // at the first DAC step (bench, 2026-08-28 - the same finding that
+        // dropped the two-current law from clampProbeDir). A phantom trip
+        // reports a tiny vfLo, the ratio law then reads "scales like R",
+        // and an unpowered chip's junction chain came out of the Auto scan
+        // as "RESISTOR 2" between two of its own pins. Below a junction's
+        // own floor the low point proves nothing, so the conservative
+        // verdict stands: junction-like.
         float vfLo = 0, iLo = 0;
         bool gotLo = partScanServo(s, a, k, 0.05f, 5.5f, &vfLo, &iLo);
         bool junctionLike = true;
-        if (gotLo && vfLo > 0.01f) {
+        if (gotLo && vfLo > 0.25f) {
             if (!(vfHi > 1.05f * vfLo)) junctionLike = true;  // very flat: fine
             if (vfHi > 8.0f * vfLo) junctionLike = false;     // scales like R
         }
@@ -146,16 +156,63 @@ PartResult identifyTwoLead(int rowA, int rowB) {
         float vf2 = 0, i2 = 0;
         partScanServo(s, a, k, 1.0f, 5.5f, &vf2, &i2);
         if (vf2 > vfHi + 0.10f) {
+            // it IS a capacitor (big enough to trip the 1mA screen while
+            // charging) - so measure it. This branch used to return
+            // conf=0.00 with no value (bench, 2026-08-28: C12 read
+            // "CAPACITOR conf=0.00" and the parts list said "capacitor",
+            // nothing else).
             r.type = PartType::CAPACITOR;
-            r.degraded = true;   // detected via the diode path - odd part
+            r.roles[a] = r.roles[k] = PinRole::LEAD;  // the A/K vote was a
+                                                      // charge transient,
+                                                      // not polarity
+            float farads = 0.0f, tauMs = 0.0f;
+            partScanCapMeasure(s, a, k, &farads, &tauMs);
+            r.value = farads;
+            r.value2 = tauMs;
+            if (farads > 0.0f) r.confidence = 0.7f;
+            else r.degraded = true;   // present, but the value was refused
             partScanEnd(s);
             return r;
         }
         float vf = vf2;  // the settled 1mA reading
 
+        if (vf < 0.25f) {
+            // "Conducts" one way but drops under clampProbeDir's own tie
+            // threshold - no junction passes 1mA under 0.25V, and a
+            // NEGATIVE drop is a charged capacitor SOURCING current
+            // (bench, 2026-08-29: the scan's census poke and pair sweep
+            // left the 260uF C12 charged, and this branch called it
+            // "DIODE -0.41V"). Ask the cap machinery - its stage 2 only
+            // says yes when the current actually DECAYS, so a low-drop
+            // schottky lands in the honest UNKNOWN below instead.
+            float farads = 0.0f, tauMs = 0.0f;
+            if (partScanCapMeasure(s, a, k, &farads, &tauMs)) {
+                r.type = PartType::CAPACITOR;
+                r.roles[a] = r.roles[k] = PinRole::LEAD;   // A/K was the charge talking
+                r.value = farads;
+                r.value2 = tauMs;
+                r.confidence = (farads > 0.0f) ? 0.7f : 0.4f;
+                r.degraded = (farads <= 0.0f);
+                partScanEnd(s);
+                return r;
+            }
+            r.type = PartType::UNKNOWN;
+            r.value = vf;
+            r.degraded = true;
+            partScanEnd(s);
+            return r;
+        }
+
         if (!junctionLike) {
-            r.type = PartType::RESISTOR;
-            r.value = vf / 1.0e-3f / 1000.0f;  // rough ohms at 1mA
+            // Resistive, but only ONE way - which no two-terminal resistor
+            // can be, so this is a series junction (a diode-plus-resistor
+            // leg, a chip's internals) and RESISTOR.value would be a
+            // fiction. Report the drop and let the caller stay honest.
+            // (The old verdict also divided by 1000 on a field every other
+            // producer and formatOhms fill in OHMS, so a 1.7V-at-1mA chain
+            // printed as "2".)
+            r.type = PartType::UNKNOWN;
+            r.value = vf;                      // the drop at 1mA
             r.confidence = 0.4f;
             r.degraded = true;
             partScanEnd(s);
@@ -191,12 +248,17 @@ PartResult identifyTwoLead(int rowA, int rowB) {
         return r;
     }
 
-    // neither direction conducts: capacitor, or nothing
-    float decay = 0;
-    if (partScanCapDetect(s, 0, 1, 2.0f, &decay)) {
+    // Neither direction conducts: capacitor, or nothing. The measurement
+    // doubles as the detector and reaches far lower than the old INA
+    // decay watch ever did (a 100nF reads EMPTY to a 0.10mA-at-25ms
+    // screen; the pull-down decay times it cleanly).
+    float farads = 0.0f, tauMs = 0.0f;
+    if (partScanCapMeasure(s, 0, 1, &farads, &tauMs)) {
         r.type = PartType::CAPACITOR;
-        r.value2 = decay;
-        r.confidence = 0.7f;
+        r.value = farads;              // farads - 0 = detect-only
+        r.value2 = tauMs;
+        r.confidence = (farads > 0.0f) ? 0.8f : 0.5f;
+        r.degraded = (farads <= 0.0f);
         partScanEnd(s);
         return r;
     }

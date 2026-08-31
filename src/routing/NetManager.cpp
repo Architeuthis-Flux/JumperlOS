@@ -744,22 +744,41 @@ int findNodeInNet(int node) {
         }
       }
     }
+  // The GPIO / ADC fallbacks exist because those nodes can own a net without
+  // appearing in nets[].nodes[] (populateSpecialFunctions records the net in
+  // gpioNet[], and rebuildShownReadings walks PATHS for the ADCs - see the
+  // comment at Peripherals.cpp's "We can't use nodeToNetIndex" ). Both arrays
+  // hold NET NUMBERS, indexed by peripheral - every other reader in the tree
+  // compares them against a net. They used to be compared against the NODE
+  // being looked up, which is a different kind of number entirely:
+  //
+  //   - the intended lookup could never hit. RP_GPIO_1 is node 131 and ADC0
+  //     is 110, while MAX_NETS is 60, so gpioNet[i] == node was unreachable
+  //     for every real peripheral node.
+  //   - what DID hit was a collision. Ask about breadboard row 6 while
+  //     RP_GPIO_1 happens to sit on net 6 and this returned net 6 - a net row
+  //     6 has nothing to do with. Bench, 2026-08-28: five nets on Kevin's
+  //     board were named after unconnected 7447 legs that way
+  //     (7SEG52's row-57 segment came back "7447_RBI"), and the same false
+  //     hit tells PartLabels an unwired pin is wired.
+  //
+  // Keyed by node now, so the fallback answers the question it was written
+  // for and stays silent otherwise.
+  static const int gpioFallbackNodes[10] = {
+    RP_GPIO_1, RP_GPIO_2, RP_GPIO_3, RP_GPIO_4, RP_GPIO_5,
+    RP_GPIO_6, RP_GPIO_7, RP_GPIO_8, RP_UART_TX, RP_UART_RX,
+    };
   for (int i = 0; i < 10; i++) {
-    if (gpioNet[i] == node) {
-      //         Serial.print("found node ");
-      // Serial.print(node);
-      // Serial.print(" in net ");
-      // Serial.println(globalState.connections.nets[i].number);
-      return gpioNet[i];
-      }
+    if (node == gpioFallbackNodes[i] && gpioNet[i] > 0) return gpioNet[i];
     }
 
-  for (int i = 0; i < 8; i++) {
-    if (showADCreadings[i] == node) {
+  // showADCreadings[] is sized 8 but only 0-4 are ever written (ADC0-ADC4);
+  // 0 means "not on a net".
+  static const int adcFallbackNodes[5] = { ADC0, ADC1, ADC2, ADC3, ADC4 };
+  for (int i = 0; i < 5; i++) {
+    if (node == adcFallbackNodes[i] && showADCreadings[i] > 0)
       return showADCreadings[i];
-      }
     }
-
 
   return -1;
   }

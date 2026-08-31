@@ -58,6 +58,15 @@ struct ScanSession {
     bool probePowerRestore = false;
 };
 
+// The scan's liveness pulse (Kevin, 2026-08-30: "it should never seem like
+// it's frozen for more than a quarter of a second"). Nullable; when set,
+// every wait loop inside a session - INA conversion settles, decay
+// watches, drains - calls it, and the owner animates whatever surface it
+// likes (the Parts app shimmers the rows under the meter). The hook must
+// be cheap and self-rate-limited; it runs on core 0 inside measurement
+// loops. Cleared by whoever set it - never left dangling past an app.
+extern void (*partScanActivityHook)(void);
+
 // Begin/end. rows are breadboard rows (1-60, not 29/30/59/60). User wiring
 // on the DUT rows or the measurement path (ISENSE pair / DAC0) is briefly
 // LIFTED for the session and restored by partScanEnd - s.nLift says how
@@ -94,6 +103,26 @@ bool partScanResistance(ScanSession& s, int idxA, int idxB, float* ohms,
 // Capacitor detect: step to vStep and watch the shunt current decay.
 bool partScanCapDetect(ScanSession& s, int idxA, int idxB, float vStep,
                        float* decayMs);
+
+// Capacitance MEASUREMENT (Kevin, 2026-08-28: "we should also be testing
+// part values like capacitors"). Two fixtures, picked by what the part
+// does:
+//   1) pull-down decay (~5nF-20uF): charge rows[idxA] from the roving
+//      GPIO, release into the pin's own pulldown, and time the row's ADC
+//      through two fixed crossings. tau/R_pull = C, with R_pull measured
+//      in-session (partScanCalibratePull) - the internal pull is 30-70k
+//      and per-chip, never a constant.
+//   2) hard-loop charge integration (bigger, or no GPIO free): step DAC0
+//      through the drive fixture and integrate the charge into the cap -
+//      the first 30ms from the SINK row's voltage (the pair sweep's
+//      Ohm's-law trick, ~25us samples, bench-constant path resistance),
+//      the rest from the INA's true mA. C = Q / V(end).
+// True = a capacitor is PRESENT. *farads > 0 when it could be measured
+// (0 = detect-only: presence proven, value refused), *tauMs = the stage-1
+// time constant when stage 1 ran. Claims the roving GPIO when the session
+// doesn't already hold one; partScanEnd restores it either way.
+bool partScanCapMeasure(ScanSession& s, int idxA, int idxB, float* farads,
+                        float* tauMs);
 
 // 3-row: calibrate the roving GPIO's pull against rows[idx] through the
 // shunt-in-feed fixture (DAC0 -> ISENSE+ -> shunt -> ISENSE- -> row).
@@ -145,10 +174,15 @@ struct ClampPin {
 // Wiring on the rail rows themselves (a rail feed keeping the chip
 // powered) is lifted ONCE for the whole run and restored after. Returns
 // pins probed, or -1 bad args. abortCheck (nullable) is polled between
-// pins.
+// pins. progress (nullable) narrates onto whatever surface the caller
+// owns, per pin: state 0 = probing this row now, then the verdict -
+// 1 = open, 2 = junction to GND, 3 = junction to VDD, 4 = both ways,
+// 5 = hard tie (strapped), 6 = skipped (a rail row, or the session
+// refused).
 int partScanClampFingerprint(const int* pinRows, int nPins, int gndRow,
                              int vddRow, ClampPin* out,
-                             bool (*abortCheck)(void) = nullptr);
+                             bool (*abortCheck)(void) = nullptr,
+                             void (*progress)(int row, int state) = nullptr);
 
 // Ground every session row briefly (GND legs, no pads), then remove.
 void partScanDischarge(ScanSession& s);

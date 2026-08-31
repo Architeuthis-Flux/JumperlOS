@@ -324,7 +324,7 @@ public:
     void displayMultiLineText(const char* text, bool center);
     
     // Debug functions
-    void dumpFrameBufferQuarterSize(int clearFirst = 0, int x_pos = 40, int y_pos = 24, int border = 1);
+    void dumpFrameBufferQuarterSize(int clearFirst = 0, int x_pos = 54, int y_pos = 29, int border = 1);
     void dumpFrameBuffer(Stream* stream = nullptr);
     // Machine-readable framebuffer dump in a selectable encoding (see OledDumpEnc):
     // quarter/full = ASCII art, b64/raw = compact SSD1306 page-buffer bytes for host UIs.

@@ -692,6 +692,25 @@ void changeTerminalColor(int termColor, bool flush, Stream *stream, bool force) 
     }
 }
 
+void termColorLikeLed(uint32_t rgb, Stream *stream) {
+    if (rgb == 0) {
+        changeTerminalColor(-1, false, stream);
+        return;
+    }
+    uint32_t r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+    uint32_t m = (r > g) ? r : g;
+    if (b > m) m = b;
+    if (m == 0) {
+        changeTerminalColor(-1, false, stream);
+        return;
+    }
+    r = r * 255 / m;
+    g = g * 255 / m;
+    b = b * 255 / m;
+    changeTerminalColor(colorToVT100((r << 16) | (g << 8) | b, 256), false,
+                        stream);
+}
+
 void cycleTerminalColor(bool reset, float step, bool flush, Stream *stream, int startColorIndex, int bright) {
     if (disableTerminalColors) {
         return;

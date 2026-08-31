@@ -34,6 +34,8 @@
 #include "sensing/PartClassify.h"    // PartType (the cached-test summary)
 #include "PartsApp.h"                // partsShowPartCard (the tap's card)
 #include "boards/board.h"      // currentBoard().caps.ledsPerRow (OG gate)
+#include "Colors.h"            // termColorLikeLed - PARTPIN wears its dot color
+#include "JumperlOS.h"         // jOS.isUiModal - the card yields to modal UIs
 
 PartLabels& PartLabels::getInstance() {
     static PartLabels instance;
@@ -155,8 +157,12 @@ static bool netContainsNode(int netNum, int node) {
     return false;
 }
 
-// The validated net for a breadboard node, or -1 (the partsReassertNetNames
-// guard: findNodeInNet's gpio/adc fallbacks return NODE values).
+// The validated net for a breadboard node, or -1. The index check is the
+// partsReassertNetNames guard: a net number has to name a live net. (The old
+// comment here said findNodeInNet's gpio/adc fallbacks "return NODE values" -
+// they returned NET numbers that collided with the queried node, which is why
+// every unconnected part leg on a low row read as wired. Fixed at the root in
+// NetManager.cpp, 2026-08-28.)
 static int validNetForNode(int node) {
     int netNum = findNodeInNet(node);
     if (netNum <= 0 || netNum >= MAX_NETS) return -1;
@@ -210,8 +216,11 @@ void PartLabels::listenForInspectTap(unsigned long now) {
             // An unwired pin's row lights through the overlay this way, and
             // the same part card the scroll shows keeps the display in one
             // language (part first, [pin] bracketed, LED polarity labels).
+            // In a modal context (probe mode, a menu) the OLED belongs to
+            // that surface - the LED bloom and the serial line still fire,
+            // which is the whole point of running in the inner set.
             setPartHighlight(i, j, LBL_INSPECT_MS);
-            partsShowPartCard(p, j);
+            if (!jOS.isUiModal()) partsShowPartCard(p, j);
 
             Serial.print("\r\nPARTPIN row=");
             Serial.print(node);
@@ -220,7 +229,9 @@ void PartLabels::listenForInspectTap(unsigned long now) {
             Serial.print(" pin=");
             Serial.print(pin.pinNumber);
             Serial.print(" label=");
+            termColorLikeLed(pinDotColor(pin), &Serial);   // the dot's own hue
             Serial.print(pin.name);
+            changeTerminalColor(-1, false, &Serial, true);
             Serial.print(" class=");
             Serial.print(pinClassName(pin.pinClass));
             Serial.print(" net=");
@@ -671,6 +682,11 @@ bool PartLabels::partTestSummary(const PartDefinition& p, char* buf, size_t len)
         case PartType::POT:
             formatOhms(p.lastTestValue, ohms, sizeof(ohms));
             snprintf(buf, len, "pot %s", ohms);
+            return true;
+        case PartType::CAPACITOR:
+            if (p.lastTestValue <= 0.0f) break;   // detect-only: no number to show
+            formatFarads(p.lastTestValue, ohms, sizeof(ohms));
+            snprintf(buf, len, "%s measured", ohms);
             return true;
         case PartType::NFET:
         case PartType::PFET:

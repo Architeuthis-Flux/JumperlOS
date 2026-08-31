@@ -30,6 +30,53 @@ def kv(line):
             for t in line.split() if '=' in t}
 
 
+# kRailVfLo / kRailVfHi in PartsApp.cpp: one silicon junction at 1mA. The
+# rail resolver keeps the (gnd, vdd) pair whose GND side lands in this band.
+JUNCTION_LO, JUNCTION_HI = 0.40, 1.10
+
+
+def pin_drops(line):
+    """pins=row:<gndCode><vddCode>:vfGnd:vfVdd,... -> [(row, code, vf), ...]
+    for the GND side only (codes: o open, j junction, r resistive tie)."""
+    m = re.search(r'pins=(\S+)', line)
+    out = []
+    if not m:
+        return out
+    for field in m.group(1).split(','):
+        parts = field.split(':')
+        if len(parts) != 4:
+            continue
+        out.append((int(parts[0]), parts[1][0], float(parts[2])))
+    return out
+
+
+def lift_rows(rows):
+    """Briefly unwire everything touching these rows (the chip's supply
+    feeds, so an unpowered measurement is actually unpowered). Returns the
+    (node1, node2) pairs for restore."""
+    code = ("import jumperless as J\n"
+            f"rows = {list(rows)}\n"
+            "lift = []\n"
+            "for i in range(J.get_num_bridges()):\n"
+            "    b = J.get_bridge(i)\n"
+            "    if b and (b[0] in rows or b[1] in rows):\n"
+            "        lift.append((b[0], b[1]))\n"
+            "for a, c in lift:\n"
+            "    J.disconnect(a, c)\n"
+            "print('LIFT', lift)\n")
+    out = jl.jl_exec(code, timeout=60)
+    m = re.search(r'LIFT (\[.*\])', out)
+    return eval(m.group(1)) if m else []
+
+
+def restore_bridges(pairs):
+    if not pairs:
+        return
+    code = "import jumperless as J\n" + "".join(
+        f"J.connect({a}, {b})\n" for a, b in pairs)
+    jl.jl_exec(code, timeout=60)
+
+
 def find_bench_7447():
     """-> (baseRow bottom-anchored, width, gndRow, vddRow) or None."""
     out = jl.jl_exec(
@@ -47,6 +94,22 @@ def find_bench_7447():
         timeout=60)
     m = re.search(r'CHIP (\d+) (\d+) (\d+) (\d+)', out)
     return tuple(int(x) for x in m.groups()) if m else None
+
+
+def find_bench_capacitor():
+    """-> (rowA, rowB) of a placed two-leg capacitor record, or None."""
+    out = jl.jl_exec(
+        "import jumperless as J\n"
+        "for p in J.list_parts():\n"
+        "    if p.get('type') != 'capacitor' or not p.get('placed'):\n"
+        "        continue\n"
+        "    nodes = sorted(q['node'] for q in p.get('pins', {}).values())\n"
+        "    if len(nodes) == 2 and all(1 <= n <= 60 for n in nodes):\n"
+        "        print('CAP', nodes[0], nodes[1])\n"
+        "        break\n",
+        timeout=60)
+    m = re.search(r'CAP (\d+) (\d+)', out)
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def run_guarded(call, timeout):
@@ -110,6 +173,46 @@ def main():
     base, w, gnd, vdd = chip
     print(f"bench 7447: base {base} width {w} gnd {gnd} vdd {vdd}")
 
+    # ---- a blocked measurement lane still measures -----------------------
+    # FIRST, on the fully-wired board: ADC0-3, both DACs, GND and both rails
+    # all hang off crossbar chip K, each breadboard chip has ONE direct lane
+    # to it, and the bounce routes go through chip L - which the 7-seg's
+    # eight GPIO bridges fill. Lifting those (free_routable_gpios below)
+    # opens the bounce and the conflict disappears, so this check only means
+    # anything before it. Bench, 2026-08-28: C12 on rows 12/42 refused
+    # ("no path for 42 to ADC_1") beside the 7447's row-40 rail feed, and
+    # the session reported "busy" for a board that would never get less so.
+    near = vdd + 2 if vdd + 2 <= 58 else vdd - 2
+    if 31 <= near <= 58 and near not in (gnd, vdd):
+        id_line = run_guarded(f"J.part_identify({near - 30}, {near})",
+                              timeout=120)
+        st = kv(id_line).get('status', '0')
+        jl.check(st != '-7',
+                 f"rows {near - 30}/{near} measurable beside the row-{vdd} "
+                 f"rail feed and a full GPIO bank (status={st})")
+
+    # ---- a capacitor comes back with a VALUE ----------------------------
+    # Kevin's session log, 2026-08-28: C12 identified as "CAPACITOR
+    # conf=0.00" with no value - the fake-out branch never measured and the
+    # no-conduct branch only ever watched the INA decay. partScanCapMeasure
+    # now times a pull-down decay (or integrates the hard-loop charge) and
+    # both branches report farads in value= with a real confidence.
+    cap = find_bench_capacitor()
+    if cap is None:
+        print("  (no placed capacitor on this bench - value check skipped)")
+    else:
+        id_line = run_guarded(f"J.part_identify({cap[0]}, {cap[1]})",
+                              timeout=120)
+        d = kv(id_line)
+        jl.check(d.get('type') == 'CAPACITOR',
+                 f"rows {cap[0]}/{cap[1]} read CAPACITOR (got {id_line!r})")
+        if d.get('type') == 'CAPACITOR':
+            val = float(d.get('value', 0) or 0)
+            jl.check(1e-9 < val < 1e-1,
+                     f"capacitance measured, plausible farads (value={val})")
+            jl.check(float(d.get('conf', 0) or 0) >= 0.5,
+                     f"a measured cap is not conf=0.00 (conf={d.get('conf')})")
+
     lifted = free_routable_gpios()
     try:
         # ---- Tier-1: the unpowered clamp fingerprint --------------------
@@ -134,6 +237,39 @@ def main():
         if m47 and m595:
             jl.check(int(m47.group(1)) < int(m595.group(1)),
                      f"7447 outranks 74595 ({matches})")
+
+        # ---- the rail resolver's premise --------------------------------
+        # WHICH row is ground cannot come from the fingerprint STRING: on
+        # this chip the correct pair and its swap print the same one. It
+        # comes from the DROP - one substrate diode vs a junction chain -
+        # and getting it wrong would have the vector runner drive GND onto
+        # the supply pin. partsResolveChipRails scores exactly this band.
+        conducting = [(r, vf) for r, code, vf in pin_drops(fp_line)
+                      if code == 'j']
+        jl.check(len(conducting) >= 2 * w - 4,
+                 f"most pins conduct to the real ground row "
+                 f"(got {len(conducting)}/{2 * w})")
+        out_of_band = [(r, vf) for r, vf in conducting
+                       if not (JUNCTION_LO <= vf <= JUNCTION_HI)]
+        jl.check(len(out_of_band) <= 1,
+                 f"real ground reads ONE junction per pin, "
+                 f"{JUNCTION_LO}-{JUNCTION_HI}V (outliers: {out_of_band})")
+
+        swap_line = run_guarded(
+            f"J.part_fingerprint({base}, {w}, {vdd}, {gnd})", timeout=180)
+        d = kv(swap_line)
+        jl.check(d.get('status') == '0',
+                 f"swapped-rail fingerprint runs (got {d.get('status')})")
+        jl.check(d.get('fp') == fp,
+                 f"the fp STRING cannot referee the swap: {d.get('fp')!r} "
+                 f"vs {fp!r} - only the drop can")
+        swap_conducting = [(r, vf) for r, code, vf in pin_drops(swap_line)
+                           if code == 'j']
+        in_band = [(r, vf) for r, vf in swap_conducting
+                   if JUNCTION_LO <= vf <= JUNCTION_HI]
+        jl.check(swap_conducting and not in_band,
+                 f"the swapped pair reads a CHAIN, out of the junction band, "
+                 f"so the resolver rejects it (in-band: {in_band})")
 
         # ---- Tier-3: the vectors name it --------------------------------
         vec_line = run_guarded(
@@ -161,10 +297,49 @@ def main():
         jl.check('refused' in d.get('cands', ''),
                  f"swapped rails refused at the live-GND guard (got {vec_line!r})")
         # a top-half anchor is a bad argument, refused before touching rows
-        fp_line = run_guarded(
+        bad_line = run_guarded(
             f"J.part_fingerprint({base - 30}, {w}, {gnd}, {vdd})", timeout=60)
-        jl.check(kv(fp_line).get('status') == '-1',
-                 f"top-half anchor refused (got {fp_line!r})")
+        jl.check(kv(bad_line).get('status') == '-1',
+                 f"top-half anchor refused (got {bad_line!r})")
+
+        # ---- the chip's own pins are never a discrete resistor -----------
+        # Two adjacent signal pins of an unpowered TTL chip either read
+        # nothing or conduct ONE way through a junction chain (~1.5-2.2V at
+        # 1mA - bench: pins on rows 6/7 and 7/8 of this chip). Only a
+        # conducting pair proves anything, so walk until one conducts. The
+        # 50uA leg of the junction-vs-resistor ratio law lives inside this
+        # fabric's transient floor, so a conducting pair used to come back
+        # "RESISTOR 2" (kohms printed into an ohms field) - a phantom
+        # two-leg part INSIDE the chip, which the Auto scan then split out
+        # and offered for placement, stealing two of the chip's legs.
+        rows_free = sorted(r for r, _c, _v in pin_drops(fp_line)
+                           if r not in (gnd, vdd) and r <= 30)
+        rail_lift = lift_rows([gnd, vdd])   # an unpowered read, actually
+        try:
+            found = None
+            for r in rows_free:
+                if r + 1 not in rows_free:
+                    continue
+                d = kv(run_guarded(f"J.part_identify({r}, {r + 1})",
+                                   timeout=120))
+                if d.get('status', '0') != '0':
+                    continue
+                if d.get('type') in ('EMPTY', 'UNKNOWN') and \
+                        float(d.get('value', 0) or 0) == 0.0:
+                    continue        # nothing between these two pins
+                found = ((r, r + 1), d)
+                break
+            if found is None:
+                print("  (no conducting adjacent pin pair - nothing to prove)")
+            else:
+                pair, d = found
+                print(f"  conducting pin pair {pair}: {d.get('type')} "
+                      f"{d.get('value')}")
+                jl.check(d.get('type') not in ('RESISTOR', 'SHORT'),
+                         f"pins {pair} are not a discrete resistor "
+                         f"(got type={d.get('type')} value={d.get('value')})")
+        finally:
+            restore_bridges(rail_lift)
     finally:
         restore_gpios(lifted)
 
