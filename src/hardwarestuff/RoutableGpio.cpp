@@ -2480,3 +2480,737 @@ int bcdRangeSetup( void ) {
     Menus::getInstance( ).inClickMenu = 0;
     return -1;
 }
+
+// ============================================================================
+// GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md). Launched from
+// encoderNetHighlight() mode-1 when a turn lands on a highlighted routable-
+// GPIO net. Two-level modal: the carousel scrolls Direction - PWM - Pulls -
+// BCD; click/probe-connect enters an item's sub-editor; the sub-editor
+// returns to the carousel on confirm OR cancel (the carousel is the
+// stay-in-place level); hold/probe-remove/serial byte exits the whole thing.
+//
+// This is the codebase's first NESTED modal, and the raw probe codes and
+// encoder HELD are LEVELS, not edges (RotaryEncoder.cpp re-stamps HELD every
+// pass while the button is down past the threshold) - so every trigger that
+// crossed a level boundary is disarmed on the way back up and re-arms only
+// once its level reads clear. Without that, the probe-remove that cancelled
+// a sub-editor would cascade-cancel the carousel on the very next pass.
+// ============================================================================
+
+// Sub-editor return codes: 0 = confirmed, -1 = cancelled (nothing beyond
+// what the editor already applied live), -2 = serial byte (the carousel
+// propagates this as a full exit - a typing user wants the terminal back).
+
+enum GpioCarouselItem {
+    GPIO_ITEM_DIRECTION = 0,
+    GPIO_ITEM_PWM,
+    GPIO_ITEM_PULLS,
+    GPIO_ITEM_BCD,
+};
+
+// Order matches config.gpioPulls / updateStateFromGPIOConfig's switch:
+// 0 = pulldown, 1 = pullup, 2 = none, 3 = bus keeper.
+static const char* gpioPullNames[ 4 ] = { "down", "up", "none", "keep" };
+
+// Short frequency text that fits both the LED matrix and the option row.
+static void gpioFormatFrequency( float freq, char* buf, size_t bufLen ) {
+    if ( freq >= 1000000.0f ) {
+        snprintf( buf, bufLen, "%.1fM", (double)( freq / 1000000.0f ) );
+    } else if ( freq >= 1000.0f ) {
+        snprintf( buf, bufLen, "%.1fk", (double)( freq / 1000.0f ) );
+    } else if ( freq >= 100.0f ) {
+        snprintf( buf, bufLen, "%.0f", (double)freq );
+    } else if ( freq >= 10.0f ) {
+        snprintf( buf, bufLen, "%.1f", (double)freq );
+    } else {
+        snprintf( buf, bufLen, "%.2f", (double)freq );
+    }
+}
+
+// Current-state text for a carousel row, read from config / the live PWM
+// flags - cheap lookups only.
+static void gpioCarouselItemState( int gpioIdx, int item, char* buf,
+                                   size_t bufLen ) {
+    switch ( item ) {
+        case GPIO_ITEM_DIRECTION:
+            snprintf( buf, bufLen, "%s",
+                      globalState.config.gpioDirection[ gpioIdx ] == 0 ? "out"
+                                                                       : "in" );
+            break;
+        case GPIO_ITEM_PWM:
+            snprintf( buf, bufLen, "%s",
+                      ( gpioPWMEnabled[ gpioIdx ] || gpioSlowPWMEnabled[ gpioIdx ] )
+                          ? "on"
+                          : "off" );
+            break;
+        case GPIO_ITEM_PULLS: {
+            int pull = globalState.config.gpioPulls[ gpioIdx ];
+            if ( pull < 0 || pull > 3 ) {
+                pull = 2;
+            }
+            snprintf( buf, bufLen, "%s", gpioPullNames[ pull ] );
+            break;
+        }
+        case GPIO_ITEM_BCD:
+            if ( globalState.config.bcdStart < 0 ) {
+                snprintf( buf, bufLen, "off" );
+            } else {
+                snprintf( buf, bufLen, "%d", globalState.config.bcdValue );
+            }
+            break;
+        default:
+            buf[ 0 ] = '\0';
+            break;
+    }
+}
+
+// One carousel frame: OLED gets a header row (the pin's name) plus the
+// focused option as "< Dir  out >" via clearPrintShowRich; the LED matrix
+// keeps to the item name (the pin identity is already lit - the highlighted
+// net IS this pin's net); atomic LED show.
+static void gpioCarouselDrawFrame( int gpioIdx, int item ) {
+    static const char* itemNames[ 4 ] = { "Dir", "PWM", "Pulls", "BCD" };
+    const char* itemName = itemNames[ item ];
+    char stateText[ 16 ];
+    gpioCarouselItemState( gpioIdx, item, stateText, sizeof( stateText ) );
+
+    b.clear( );
+    b.print( itemName, 0x0a0a12, 0xffffff, 1, 0, 2 );
+
+    if ( oled.oledConnected ) {
+        char pinLabel[ 16 ];
+        bcdPinLabel( gpioIdx, pinLabel, sizeof( pinLabel ) );
+        char optionText[ 24 ];
+        if ( stateText[ 0 ] != '\0' ) {
+            snprintf( optionText, sizeof( optionText ), "< %s  %s >", itemName,
+                      stateText );
+        } else {
+            snprintf( optionText, sizeof( optionText ), "< %s >", itemName );
+        }
+        // Header in Andale Mono 5pt (index 12, the ReadingDisplay header
+        // idiom, pinned to its 7px cap height); option row in Pragmatism 8pt
+        // (index 19) - "< Pulls  keep >" still fits 128px there.
+        OledTextRow rows[ 2 ] = { };
+        rows[ 0 ].segs[ 0 ] = { pinLabel, 12, OLED_ALIGN_INHERIT };
+        rows[ 0 ].segCount = 1;
+        rows[ 0 ].align = OLED_ALIGN_CENTER;
+        rows[ 0 ].fixedH = 7;
+        rows[ 1 ].segs[ 0 ] = { optionText, 19, OLED_ALIGN_INHERIT };
+        rows[ 1 ].segCount = 1;
+        rows[ 1 ].align = OLED_ALIGN_CENTER;
+        oled.clearPrintShowRich( rows, 2, 1, true, true, true );
+    }
+
+    requestLedShow( 12 ); // 12 = blocking mode (atomic menu display)
+}
+
+// Frequency changes cross the 10 Hz slow/fast boundary through a full
+// stop+setup: setPWMFrequency() REFUSES the slow->fast crossing (it routes
+// to setSlowPWMFrequency, whose <=10 Hz validation returns -2 without ever
+// reaching the hardware-PWM path), and the fast->slow crossing via
+// setupPWM()->setupSlowPWM() re-muxes the pin to SIO but leaves the PWM
+// slice enabled behind it with gpioSlowPWMEnabled/gpioPWMEnabled then
+// disagreeing about who owns the pin. stopPWM() first (it routes to
+// stopSlowPWM() itself when the slow flag is set) makes either direction
+// clean; non-crossing changes stay on setPWMFrequency(), which re-setups in
+// place. The cancel-restore path goes through here too, so restoring an
+// entry value that sat on the other side of the boundary works.
+static void gpioPwmApplyFrequency( int gpioIdx, float freq ) {
+    if ( freq < 0.01f ) {
+        freq = 0.01f;
+    }
+    if ( freq > 62500000.0f ) {
+        freq = 62500000.0f;
+    }
+    bool isSlow = gpioSlowPWMEnabled[ gpioIdx ];
+    bool wantSlow = ( freq < 10.0f );
+    if ( isSlow != wantSlow ) {
+        float duty = gpioPWMDutyCycle[ gpioIdx ];
+        if ( duty < 0.0f || duty > 1.0f ) {
+            duty = 0.5f;
+        }
+        stopPWM( gpioIdx + 1 );
+        setupPWM( gpioIdx + 1, freq, duty ); // < 10 Hz delegates to slow PWM
+    } else {
+        setPWMFrequency( gpioIdx + 1, freq );
+    }
+}
+
+// Direction sub-editor: encoder toggles Input/Output, click/probe-connect
+// confirms (config write + applyPinConfig), hold/probe-remove cancels with
+// nothing written. Engine semantic (updateStateFromGPIOConfig's switch):
+// direction 0 = output, 1 = input.
+static int gpioDirectionEditor( int gpioIdx ) {
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    int dir = ( globalState.config.gpioDirection[ gpioIdx ] == 1 ) ? 1 : 0;
+
+    // The probe raw-2 level that ENTERED this editor must not instantly
+    // confirm; the raw-1 arm mirrors it so nothing stale cancels either.
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
+
+    bcdDrawFrame( "Dir", dir == 0 ? "out" : "in" );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        probing.justReadProbe( true );
+
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+
+        if ( Serial.available( ) > 0 ) {
+            Serial.read( );
+            return -2; // carousel exits fully
+        }
+
+        if ( encoderButtonState == HELD ||
+             ( probeCancelArmed && probeState == 1 ) ) {
+            encoderButtonState = IDLE;
+            return -1; // nothing written
+        }
+
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeState == 2 ) ) {
+            encoderButtonState = IDLE;
+            // Only a CHANGED direction goes through the funnel: an unchanged
+            // confirm must not re-run "output starts low" over a pin the
+            // user set HIGH (or displace its live PWM for nothing).
+            if ( dir != globalState.config.gpioDirection[ gpioIdx ] ) {
+                globalState.config.gpioDirection[ gpioIdx ] = dir;
+                applyPinConfig( gpioIdx ); // re-mux + dir/pulls + markDirty
+            }
+            return 0;
+        }
+
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps;
+                dir = 1 - dir; // two options: any detent batch flips
+                bcdDrawFrame( "Dir", dir == 0 ? "out" : "in" );
+            }
+        }
+    }
+
+    return -1; // unreachable
+}
+
+// Pulls sub-editor: encoder cycles Down/Up/None/Keeper, click confirms.
+// An INPUT applies immediately through applyPinConfig(); an OUTPUT just
+// stores + markDirty (pulls take effect when it becomes an input - the
+// config funnel would stomp the output level for nothing).
+static int gpioPullsEditor( int gpioIdx ) {
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    int sel = globalState.config.gpioPulls[ gpioIdx ];
+    if ( sel < 0 || sel > 3 ) {
+        sel = 2; // none
+    }
+
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
+
+    bcdDrawFrame( "Pull", gpioPullNames[ sel ] );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        probing.justReadProbe( true );
+
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+
+        if ( Serial.available( ) > 0 ) {
+            Serial.read( );
+            return -2;
+        }
+
+        if ( encoderButtonState == HELD ||
+             ( probeCancelArmed && probeState == 1 ) ) {
+            encoderButtonState = IDLE;
+            return -1;
+        }
+
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeState == 2 ) ) {
+            encoderButtonState = IDLE;
+            globalState.config.gpioPulls[ gpioIdx ] = sel;
+            if ( globalState.config.gpioDirection[ gpioIdx ] == 1 ) {
+                applyPinConfig( gpioIdx ); // input: pulls take effect now
+            } else {
+                globalState.markDirty( ); // output: stored for later
+            }
+            return 0;
+        }
+
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps;
+                sel = ( ( sel + steps ) % 4 + 4 ) % 4;
+                bcdDrawFrame( "Pull", gpioPullNames[ sel ] );
+            }
+        }
+    }
+
+    return -1; // unreachable
+}
+
+// Live Freq/Duty adjust (the PWM sub-editor's leaf). Encoder-accelerated;
+// every detent batch lands on the pin immediately. Frequency steps are
+// MULTIPLICATIVE (~2% per accelerated step) - the range spans 0.01 Hz to
+// 62.5 MHz, so linear Hz steps would be useless at both ends; Medium
+// acceleration makes a hard spin sweep decades. Duty is linear 1% steps on
+// Slow. Click keeps the value (the setup/set functions already persisted
+// it + markDirty); hold restores the entry value through the same
+// crossing-aware apply path.
+static int gpioPwmParamAdjust( int gpioIdx, bool isFreq ) {
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    EncoderAccelerator accelerator =
+        isFreq ? EncoderAccelerator::Medium( ) : EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    float entryValue =
+        isFreq ? gpioPWMFrequency[ gpioIdx ] : gpioPWMDutyCycle[ gpioIdx ];
+    float value = entryValue;
+
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
+
+    char valueText[ 16 ];
+    if ( isFreq ) {
+        gpioFormatFrequency( value, valueText, sizeof( valueText ) );
+    } else {
+        snprintf( valueText, sizeof( valueText ), "%d%%",
+                  (int)( value * 100.0f + 0.5f ) );
+    }
+    bcdDrawFrame( isFreq ? "Freq" : "Duty", valueText );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        probing.justReadProbe( true );
+
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+
+        // Serial byte: restore the entry value (bcdAdjust's serial-cancel
+        // contract), then propagate the full exit.
+        if ( Serial.available( ) > 0 ) {
+            Serial.read( );
+            if ( value != entryValue ) {
+                if ( isFreq ) {
+                    gpioPwmApplyFrequency( gpioIdx, entryValue );
+                } else {
+                    setPWMDutyCycle( gpioIdx + 1, entryValue );
+                }
+            }
+            return -2;
+        }
+
+        // Cancel: restore the entry value on the pin (same routed path the
+        // live steps used - it may sit across the 10 Hz boundary).
+        if ( encoderButtonState == HELD ||
+             ( probeCancelArmed && probeState == 1 ) ) {
+            encoderButtonState = IDLE;
+            if ( value != entryValue ) {
+                if ( isFreq ) {
+                    gpioPwmApplyFrequency( gpioIdx, entryValue );
+                } else {
+                    setPWMDutyCycle( gpioIdx + 1, entryValue );
+                }
+            }
+            return -1;
+        }
+
+        // Confirm: the value is already live and persisted.
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeState == 2 ) ) {
+            encoderButtonState = IDLE;
+            return 0;
+        }
+
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps;
+                if ( isFreq ) {
+                    float next = value * powf( 1.02f, (float)steps );
+                    if ( next < 0.01f ) {
+                        next = 0.01f;
+                    }
+                    if ( next > 62500000.0f ) {
+                        next = 62500000.0f;
+                    }
+                    gpioPwmApplyFrequency( gpioIdx, next );
+                    value = gpioPWMFrequency[ gpioIdx ]; // read back what landed
+                    gpioFormatFrequency( value, valueText, sizeof( valueText ) );
+                } else {
+                    value += 0.01f * (float)steps;
+                    if ( value < 0.0f ) {
+                        value = 0.0f;
+                    }
+                    if ( value > 1.0f ) {
+                        value = 1.0f;
+                    }
+                    setPWMDutyCycle( gpioIdx + 1, value ); // routes slow/fast itself
+                    snprintf( valueText, sizeof( valueText ), "%d%%",
+                              (int)( value * 100.0f + 0.5f ) );
+                }
+                bcdDrawFrame( isFreq ? "Freq" : "Duty", valueText );
+            }
+        }
+    }
+
+    return -1; // unreachable
+}
+
+// PWM sub-editor (gpioDef idx 0-7 only - the PWM functions validate
+// gpio_pin 1-8). Stage 0: encoder toggles the pending on/off, click
+// confirms - off->on runs setupPWM() with the stored config values (it
+// delegates to slow PWM itself below 10 Hz), on->off runs stopPWM() (which
+// routes to stopSlowPWM() when gpioSlowPWMEnabled is set) and returns.
+// Confirming ON opens stage 1: a Freq/Duty picker whose entries drop into
+// the live adjust above. Hold backs out one stage.
+static int gpioPwmEditor( int gpioIdx ) {
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    bool liveOn = gpioPWMEnabled[ gpioIdx ] || gpioSlowPWMEnabled[ gpioIdx ];
+    bool pending = liveOn;
+
+    int stage = 0;  // 0 = on/off toggle, 1 = Freq/Duty picker
+    int cursor = 0; // stage 1: 0 = Freq, 1 = Duty
+
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
+    // HELD is a re-stamped LEVEL: the hold that cancels the Freq/Duty leaf
+    // is still down on the next pass here and would back the picker out
+    // too. Disarmed after the leaf returns, re-armed once the button reads
+    // IDLE (released).
+    bool holdArmed = true;
+
+    char valueText[ 16 ];
+
+    auto drawStage = [ & ]( ) {
+        if ( stage == 0 ) {
+            bcdDrawFrame( "PWM", pending ? "on" : "off" );
+        } else if ( cursor == 0 ) {
+            gpioFormatFrequency( gpioPWMFrequency[ gpioIdx ], valueText,
+                                 sizeof( valueText ) );
+            bcdDrawFrame( "Freq", valueText );
+        } else {
+            snprintf( valueText, sizeof( valueText ), "%d%%",
+                      (int)( gpioPWMDutyCycle[ gpioIdx ] * 100.0f + 0.5f ) );
+            bcdDrawFrame( "Duty", valueText );
+        }
+    };
+    drawStage( );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        probing.justReadProbe( true );
+
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+        if ( !holdArmed && encoderButtonState == IDLE ) {
+            holdArmed = true;
+        }
+
+        if ( Serial.available( ) > 0 ) {
+            Serial.read( );
+            return -2;
+        }
+
+        // Hold backs out one stage: the picker returns to the toggle's
+        // parent (the carousel); the toggle cancels with nothing changed.
+        if ( ( holdArmed && encoderButtonState == HELD ) ||
+             ( probeCancelArmed && probeState == 1 ) ) {
+            encoderButtonState = IDLE;
+            return ( stage == 1 ) ? 0 : -1;
+        }
+
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeState == 2 ) ) {
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            probeConfirmArmed = false; // a NEW press for the next level
+            probeCancelArmed = false;
+            if ( stage == 0 ) {
+                if ( pending != liveOn ) {
+                    if ( pending ) {
+                        // Stored config values; the same fallbacks the set
+                        // functions use when the slot carries garbage.
+                        float freq = globalState.config.gpioPwmFrequency[ gpioIdx ];
+                        float duty = globalState.config.gpioPwmDutyCycle[ gpioIdx ];
+                        if ( freq < 0.01f ) {
+                            freq = 1000.0f;
+                        }
+                        if ( duty < 0.0f || duty > 1.0f ) {
+                            duty = 0.5f;
+                        }
+                        setupPWM( gpioIdx + 1, freq, duty );
+                    } else {
+                        stopPWM( gpioIdx + 1 ); // routes to stopSlowPWM if slow
+                    }
+                    // Read the truth back rather than assuming the apply
+                    // stuck (setupPWM can refuse).
+                    liveOn = gpioPWMEnabled[ gpioIdx ] ||
+                             gpioSlowPWMEnabled[ gpioIdx ];
+                    pending = liveOn;
+                }
+                if ( !liveOn ) {
+                    return 0; // off: nothing more to edit
+                }
+                stage = 1; // on: offer Freq / Duty
+            } else {
+                int r = gpioPwmParamAdjust( gpioIdx, cursor == 0 );
+                if ( r == -2 ) {
+                    return -2; // serial byte propagates all the way out
+                }
+                // Back in the picker: the leaf consumed presses and detents;
+                // the hold that may have cancelled it is still a live level.
+                encoderButtonState = IDLE;
+                lastButtonEncoderState = IDLE;
+                holdArmed = false;
+            }
+            accelerator.reset( );
+            encoderAccumulator = 0.0f;
+            lastEncoderPosition = encoderPosition;
+            drawStage( );
+            continue;
+        }
+
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps;
+                if ( stage == 0 ) {
+                    pending = !pending; // two options: any detent batch flips
+                } else {
+                    cursor = 1 - cursor; // Freq <-> Duty
+                }
+                drawStage( );
+            }
+        }
+    }
+
+    return -1; // unreachable
+}
+
+int gpioOptionsCarousel( int gpioIdx ) {
+    if ( gpioIdx < 0 || gpioIdx > 9 ) {
+        return -1;
+    }
+    if ( routableGpioAbsent( ) ) {
+        return -1;
+    }
+
+    // CRITICAL: reset button state so nothing in flight can instantly
+    // confirm (VoltageAdjuster::adjust idiom).
+    Menus::getInstance( ).inClickMenu = 1;
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 3;
+
+    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    // Items, built up front. PWM is skipped for the UART pins (idx 8/9) -
+    // setupPWM/stopPWM validate gpio_pin 1-8 only.
+    int items[ 4 ];
+    int itemCount = 0;
+    items[ itemCount++ ] = GPIO_ITEM_DIRECTION;
+    if ( gpioIdx <= 7 ) {
+        items[ itemCount++ ] = GPIO_ITEM_PWM;
+    }
+    items[ itemCount++ ] = GPIO_ITEM_PULLS;
+    items[ itemCount++ ] = GPIO_ITEM_BCD;
+    int cursor = 0;
+
+    // Level-triggered exits start ARMED (entry is a consumed encoder turn,
+    // nothing is in flight) and DISARM whenever a sub-editor returns - the
+    // hold/remove that cancelled the child is still a live level up here.
+    bool holdExitArmed = true;
+    bool probeCancelArmed = true;
+    bool probeConfirmArmed = true;
+
+    b.clear( 1 );
+    gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        // Discard the pad reading but keep the call: it services the probe
+        // state machine the raw getButtonState() comparisons below need.
+        probing.justReadProbe( true );
+
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+        if ( !holdExitArmed && encoderButtonState == IDLE ) {
+            holdExitArmed = true;
+        }
+
+        // Exit: hold / raw probe 1 / serial byte (raw pre-swap codes, copied
+        // verbatim from VoltageAdjuster::adjust - never invent a swap).
+        bool serialExit = ( Serial.available( ) > 0 );
+        if ( serialExit ) {
+            Serial.read( );
+        }
+        if ( ( holdExitArmed && encoderButtonState == HELD ) ||
+             ( probeCancelArmed && probeState == 1 ) || serialExit ) {
+            rotaryDivider = lastDivider;
+            encoderButtonState = IDLE;
+            requestLedShow( -1 );
+            b.clear( );
+            Menus::getInstance( ).inClickMenu = 0;
+            return 0;
+        }
+
+        // Enter the focused item's sub-editor (click-release / raw probe 2).
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeState == 2 ) ) {
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+
+            int r = 0;
+            switch ( items[ cursor ] ) {
+                case GPIO_ITEM_DIRECTION:
+                    r = gpioDirectionEditor( gpioIdx );
+                    break;
+                case GPIO_ITEM_PWM:
+                    r = gpioPwmEditor( gpioIdx );
+                    break;
+                case GPIO_ITEM_PULLS:
+                    r = gpioPullsEditor( gpioIdx );
+                    break;
+                case GPIO_ITEM_BCD:
+                    // Phase 3's counter modal; no range yet routes through
+                    // the range picker first, then counts.
+                    r = bcdAdjust( );
+                    if ( r == -2 ) {
+                        r = ( bcdRangeSetup( ) == 0 ) ? bcdAdjust( ) : -1;
+                    }
+                    if ( r >= 0 ) {
+                        r = 0; // bcdAdjust returns the counted value
+                    }
+                    break;
+                default:
+                    break;
+            }
+
+            if ( r == -2 ) {
+                // Serial byte inside a sub-editor: full exit, same teardown
+                // as the carousel's own exit paths.
+                rotaryDivider = lastDivider;
+                encoderButtonState = IDLE;
+                requestLedShow( -1 );
+                b.clear( );
+                Menus::getInstance( ).inClickMenu = 0;
+                return 0;
+            }
+
+            // Back at the stay-in-place level: re-assert EVERY modal
+            // invariant (the BCD modals restored their caller's divider and
+            // cleared inClickMenu on the way out), resync the encoder (a
+            // stale delta would jump items), and disarm the level-triggered
+            // exits until their levels read clear - the hold or probe-remove
+            // that cancelled the child must not cascade up.
+            Menus::getInstance( ).inClickMenu = 1;
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE;
+            rotaryDivider = 3;
+            holdExitArmed = false;
+            probeCancelArmed = false;
+            probeConfirmArmed = false;
+            accelerator.reset( );
+            encoderAccumulator = 0.0f;
+            lastEncoderPosition = encoderPosition;
+            b.clear( 1 );
+            gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+            continue;
+        }
+
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps;
+                cursor = ( ( cursor + steps ) % itemCount + itemCount ) % itemCount;
+                gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+            }
+        }
+    }
+
+    // Should never reach here (VoltageAdjuster tail)
+    rotaryDivider = lastDivider;
+    Menus::getInstance( ).inClickMenu = 0;
+    return 0;
+}

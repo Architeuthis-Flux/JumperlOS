@@ -10,7 +10,7 @@ todos:
     status: completed
   - id: highlight-carousel
     content: Encoder-turn on highlighted GPIO net opens Direction/PWM/Pulls/BCD carousel modal; keep connect-toggle and remove-unhighlight
-    status: pending
+    status: completed
   - id: bcd-core
     content: Counter state (start, width 1-10, binary/BCD mode, value) in ConfigState + YAML; bit map incl. UART top bits; bcdApply/bcdIncrement; bcdSelfCheck assert
     status: completed

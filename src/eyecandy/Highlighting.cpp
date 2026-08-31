@@ -712,6 +712,68 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             partLabels.clearPartHighlight( );
         }
 
+        // GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md): a turn on a
+        // highlighted routable-GPIO net opens the options modal instead of
+        // scrolling on. Gate on brightenedNet, NOT highlightedNet - part-pin
+        // stops park highlightedNet at -1 while brightenedNet still carries
+        // the pin's net (toggleGPIO keys its scan on brightenedNet the same
+        // way). scrollPartIdx < 0 keeps part-focus scrolling's detent
+        // priority. The gpioNet scan catches input/output/PWM/UART pins
+        // regardless of mux.
+        if ( ( encoderDirectionState == UP || encoderDirectionState == DOWN ) &&
+             scrollPartIdx < 0 && brightenedNet > 0 ) {
+            int gpioIdx = -1;
+            for ( int i = 0; i < 10; i++ ) { // the toggleGPIO net-scan idiom
+                if ( gpioNet[ i ] == brightenedNet ) {
+                    gpioIdx = i;
+                    break;
+                }
+            }
+            if ( gpioIdx >= 0 ) {
+                encoderDirectionState = NONE; // consume the detent
+                const char* owner = nullptr;
+                if ( !routableGpioAvailable( gpioIdx, &owner ) &&
+                     strcmp( owner, "PWM" ) != 0 ) {
+                    // An owned pin explains itself instead of opening a dead
+                    // editor (PWM excepted - the carousel manages PWM itself).
+                    char pinName[ 8 ];
+                    if ( gpioIdx == 8 ) {
+                        snprintf( pinName, sizeof( pinName ), "Tx" );
+                    } else if ( gpioIdx == 9 ) {
+                        snprintf( pinName, sizeof( pinName ), "Rx" );
+                    } else {
+                        snprintf( pinName, sizeof( pinName ), "GPIO %d", gpioIdx + 1 );
+                    }
+                    char toast[ 24 ];
+                    snprintf( toast, sizeof( toast ), "%s\n%s", pinName, owner );
+                    oled.clearPrintShow( toast, 2, 1200 );
+                    Serial.print( "\r\n" );
+                    Serial.print( pinName );
+                    Serial.print( " is held by " );
+                    Serial.println( owner );
+                } else {
+                    // Latch the highlight identity BEFORE the modal - the
+                    // 1.8s/15s highlight timeout can fire inside its
+                    // serviceInner() loop and zero brightenedNet/Node.
+                    int heldNet = brightenedNet;
+                    int heldNode = brightenedNode;
+                    gpioOptionsCarousel( gpioIdx );
+                    // Re-highlight on exit (the adjustDACVoltage idiom):
+                    // clearHighlighting() zeroes both, so the identity has to
+                    // be latched across it or the re-highlight highlights
+                    // nothing.
+                    clearHighlighting( );
+                    brightenedNet = heldNet;
+                    brightenedNode = heldNode;
+                    highlightNets( 0, heldNet, 1 );
+                    requestLedShow( 1 );
+                }
+                rotaryDivider = divider; // the modal restored ITS caller's
+                                         // divider; mode-1 runs at `divider`
+                return returnNode;       // -1: the scroller stays put this pass
+            }
+        }
+
         if ( encoderDirectionState == UP ) {
             encoderDirectionState = NONE;
 

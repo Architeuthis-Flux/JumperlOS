@@ -173,4 +173,15 @@ int bcdAdjust(void);
 // via setBcdRange() + bcdApply() and returns 0; cancel = -1, nothing changed.
 int bcdRangeSetup(void);
 
+// GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md): the highlight
+// gate's turn-to-configure modal, same VoltageAdjuster::adjust idiom as the
+// BCD modals above. Items Direction - PWM - Pulls - BCD (PWM skipped on idx
+// 8/9 - the PWM functions validate gpio_pin 1-8 only); encoder scrolls,
+// click/probe-connect enters an item's sub-editor, hold/probe-remove/serial
+// byte exits. Every mutation funnels through applyPinConfig() or the PWM
+// setup/stop functions (which persist their own config). Returns 0 on a
+// user exit, -1 when it refused to open (bad idx / OG). The CALLER owns the
+// re-highlight and its own rotaryDivider; this restores the divider it found.
+int gpioOptionsCarousel(int gpioIdx);
+
 #endif
