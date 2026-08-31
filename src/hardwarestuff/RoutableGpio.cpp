@@ -15,11 +15,17 @@
 #include "ArduinoStuff.h" // flashingArduino (readGPIO skips a mid-flash Arduino)
 #include "AsyncPassthrough.h" // uartTrafficSinceBoot (routableGpioAvailable)
 #include "CH446Q.h"       // sendXYrawUnchecked (erattaClearGPIO)
+#include "Commands.h"     // requestLedShow (BCD modals)
+#include "Graphics.h"     // bread b - LED matrix text (BCD modals)
 #include "Highlighting.h" // brightenedNet / highlightTimer (probeToggle, toggleGPIO)
 #include "InfraPaths.h"   // infraOwnsNode (routableGpioAvailable)
+#include "JumperlOS.h"    // jOS.serviceInner + probing (BCD modals)
+#include "Menus.h"        // Menus::getInstance().inClickMenu (BCD modals)
 #include "NetsToChipConnections.h" // numberOfNets (anyGpio* predicates)
 #include "Peripherals.h" // showADCreadings, getDacVoltage, initI2C
 #include "Probing.h"       // measuredState enum, ProbeButton, probeGpioPowerClaimIdx
+#include "ReadingDisplay.h" // OLED/serial mirror of the BCD modals
+#include "RotaryEncoder.h" // encoder globals + EncoderAccelerator (BCD modals)
 #include "States.h"        // globalState
 #include "configManager.h" // configChanged (updateGPIOConfigFromState)
 #include <oled.h>
@@ -1831,6 +1837,12 @@ void applyStateGpioToHardware(void) {
             gpio_put(gpio_pin, gpioState[i]);
         }
     }
+
+    // Re-drive a loaded slot's counter (Phase 3): the loop above restored
+    // per-pin config; the counter overlays its encoded value on the range.
+    if (globalState.config.bcdStart >= 0) {
+        bcdApply();
+    }
 }
 
 // The single mutation funnel (Phase 1b-ii). Applies globalState.config for
@@ -1915,4 +1927,556 @@ bool routableGpioAvailable( int idx, const char** ownerOut ) {
         return false;
     }
     return true;
+}
+
+// ============================================================================
+// BCD/binary counter (Phase 3, CodeDocs/GPIO_plan.md). Range + value live in
+// globalState.config (persisted per-slot); the pure encode/wrap helpers below
+// are file-static and touch NO globals so bcdSelfCheck() can assert them
+// without pin writes.
+// ============================================================================
+
+static int bcdPow10( int n ) {
+    int result = 1;
+    while ( n-- > 0 ) {
+        result *= 10;
+    }
+    return result;
+}
+
+static int bcdClampWidth( int width ) {
+    if ( width < 1 ) {
+        return 1;
+    }
+    if ( width > 10 ) {
+        return 10;
+    }
+    return width;
+}
+
+// Largest value a range of `width` bits can show. Binary: 2^width - 1. BCD:
+// all-9s over the full nibbles; a partial top nibble (width % 4 bits) carries
+// a top digit capped at min(9, 2^bits - 1) - so width 6 counts 0-39 (2 top
+// bits cap the tens digit at 3) and width 10 counts 0-399.
+static int bcdMaxValueFor( int width, int mode ) {
+    width = bcdClampWidth( width );
+    if ( mode == 0 ) {
+        return ( 1 << width ) - 1;
+    }
+    int fullDigits = width / 4;
+    int topBits = width % 4;
+    int scale = bcdPow10( fullDigits );
+    if ( topBits == 0 ) {
+        return scale - 1;
+    }
+    int topDigitMax = ( 1 << topBits ) - 1;
+    if ( topDigitMax > 9 ) {
+        topDigitMax = 9;
+    }
+    return topDigitMax * scale + ( scale - 1 );
+}
+
+// Wrap (not clamp) into [0, maxValue] - both directions, so max+1 -> 0 and
+// 0-1 -> max.
+static int bcdWrapValue( int value, int maxValue ) {
+    int span = maxValue + 1;
+    if ( span <= 0 ) {
+        return 0;
+    }
+    int wrapped = value % span;
+    if ( wrapped < 0 ) {
+        wrapped += span;
+    }
+    return wrapped;
+}
+
+// Level (0/1) of counter bit `bit` (LSB-first) for `value`. Binary: plain
+// bits. BCD: decimal digits LSD-first, one nibble (4 bits, LSB-first) per
+// digit - digit d = (value / 10^d) % 10 occupies bits 4d..4d+3.
+static int bcdEncodeBit( int value, int bit, int mode ) {
+    if ( bit < 0 ) {
+        return 0;
+    }
+    if ( mode == 0 ) {
+        return ( value >> bit ) & 1;
+    }
+    int digit = ( value / bcdPow10( bit / 4 ) ) % 10;
+    return ( digit >> ( bit % 4 ) ) & 1;
+}
+
+// Inverse of bcdEncodeBit over a whole level array - the self-check's
+// round-trip decoder.
+static int bcdDecodeLevels( const int* levels, int width, int mode ) {
+    width = bcdClampWidth( width );
+    if ( mode == 0 ) {
+        int value = 0;
+        for ( int bit = 0; bit < width; bit++ ) {
+            value |= ( levels[ bit ] & 1 ) << bit;
+        }
+        return value;
+    }
+    int value = 0;
+    for ( int digit = 0; digit * 4 < width; digit++ ) {
+        int nibble = 0;
+        for ( int b = 0; b < 4 && digit * 4 + b < width; b++ ) {
+            nibble |= ( levels[ digit * 4 + b ] & 1 ) << b;
+        }
+        value += nibble * bcdPow10( digit );
+    }
+    return value;
+}
+
+// May the COUNTER claim this pin? routableGpioAvailable() with one carve-out:
+// a pin refused only for leftover PWM is claimable, because the apply path
+// funnels through applyPinConfig() which displaces the PWM. Every other
+// owner (python / probe power / routing / serial lock / OLED / UART) wins.
+static bool bcdPinClaimable( int idx ) {
+    const char* owner = nullptr;
+    if ( routableGpioAvailable( idx, &owner ) ) {
+        return true;
+    }
+    return owner != nullptr && strcmp( owner, "PWM" ) == 0;
+}
+
+int bcdBitIndex( int bit ) {
+    int start = globalState.config.bcdStart;
+    if ( start < 0 || bit < 0 || bit >= globalState.config.bcdWidth ) {
+        return -1;
+    }
+    int idx = start + bit;
+    if ( idx > 9 ) {
+        return -1; // past UART Rx - the bank ends
+    }
+    return idx; // start+k rolls through GPIO 1-8 into Tx (8) then Rx (9)
+}
+
+void bcdApply( void ) {
+    if ( globalState.config.bcdStart < 0 || routableGpioAbsent( ) ) {
+        return;
+    }
+    int width = bcdClampWidth( globalState.config.bcdWidth );
+    int mode = globalState.config.bcdMode;
+    // Encode from a locally wrapped copy: a hand-edited or stale slot file
+    // can load bcdValue out of range (deserialize deliberately doesn't
+    // validate), and wrapping here keeps BCD digits 0-9 without writing the
+    // correction back on a pure load path.
+    int value = bcdWrapValue( globalState.config.bcdValue,
+                              bcdMaxValueFor( width, mode ) );
+    for ( int bit = 0; bit < width; bit++ ) {
+        int idx = bcdBitIndex( bit );
+        if ( idx < 0 ) {
+            break; // range ran past the end of the bank
+        }
+        if ( !bcdPinClaimable( idx ) ) {
+            continue; // something owns this bit's pin - the bit stays skipped
+        }
+        // Claimable: force the pin to an SIO output through the funnel
+        // (displaces leftover PWM, re-muxes to SIO, marks dirty), then drive
+        // the bit's level and mirror gpioState so LEDs/readouts agree
+        // (0 = output low, 1 = output high).
+        globalState.config.gpioDirection[ idx ] = 0;
+        applyPinConfig( idx );
+        int level = bcdEncodeBit( value, bit, mode );
+        gpio_put( gpioDef[ idx ][ 0 ], level );
+        gpioState[ idx ] = (uint8_t)level;
+    }
+}
+
+int bcdMaxValue( void ) {
+    return bcdMaxValueFor( globalState.config.bcdWidth, globalState.config.bcdMode );
+}
+
+int bcdIncrement( int delta ) {
+    if ( globalState.config.bcdStart < 0 ) {
+        return -1; // no range configured - nothing moved, nothing dirtied
+    }
+    int value = bcdWrapValue( globalState.config.bcdValue + delta, bcdMaxValue( ) );
+    globalState.setBcdValue( value ); // markDirty via the setter
+    bcdApply( );
+    return value;
+}
+
+bool bcdSelfCheck( Stream* out ) {
+    if ( out == nullptr ) {
+        out = &Serial;
+    }
+    bool allPass = true;
+    auto report = [ & ]( const char* label, bool pass ) {
+        out->print( pass ? "  pass  " : "  FAIL  " );
+        out->println( label );
+        if ( !pass ) {
+            allPass = false;
+        }
+    };
+    // Encode every value the range can show, decode the levels back, expect
+    // the same value.
+    auto roundTrip = [ & ]( int width, int mode, const char* label ) {
+        int maxV = bcdMaxValueFor( width, mode );
+        bool pass = true;
+        for ( int v = 0; v <= maxV; v++ ) {
+            int levels[ 10 ] = { 0 };
+            for ( int bit = 0; bit < width; bit++ ) {
+                levels[ bit ] = bcdEncodeBit( v, bit, mode );
+            }
+            if ( bcdDecodeLevels( levels, width, mode ) != v ) {
+                pass = false;
+                break;
+            }
+        }
+        report( label, pass );
+    };
+
+    out->println( "\r\nbcdSelfCheck: encode/wrap logic (no pin writes)" );
+
+    roundTrip( 1, 0, "binary width 1 round-trip (0-1)" );
+    roundTrip( 4, 0, "binary width 4 round-trip (0-15)" );
+    roundTrip( 10, 0, "binary width 10 round-trip (0-1023)" );
+    roundTrip( 4, 1, "BCD width 4 round-trip (0-9)" );
+    roundTrip( 8, 1, "BCD width 8 round-trip (0-99)" );
+    roundTrip( 6, 1, "BCD width 6 round-trip (0-39)" );
+
+    report( "binary width 10 max = 1023", bcdMaxValueFor( 10, 0 ) == 1023 );
+    report( "BCD width 4 max = 9", bcdMaxValueFor( 4, 1 ) == 9 );
+    report( "BCD width 8 max = 99", bcdMaxValueFor( 8, 1 ) == 99 );
+    report( "BCD width 6 max = 39 (2 top bits cap tens at 3)",
+            bcdMaxValueFor( 6, 1 ) == 39 );
+    report( "BCD width 10 max = 399 (2 top bits cap hundreds at 3)",
+            bcdMaxValueFor( 10, 1 ) == 399 );
+
+    {
+        static const int expected5[ 4 ] = { 1, 0, 1, 0 }; // 5 = 0b0101, LSB-first
+        bool pass = true;
+        for ( int bit = 0; bit < 4; bit++ ) {
+            if ( bcdEncodeBit( 5, bit, 0 ) != expected5[ bit ] ) {
+                pass = false;
+            }
+        }
+        report( "binary 5 @ width 4 = 1010 (LSB-first)", pass );
+    }
+    {
+        // 42: digit0 = 2 -> nibble 0100 LSB-first, digit1 = 4 -> 0010
+        static const int expected42[ 8 ] = { 0, 1, 0, 0, 0, 0, 1, 0 };
+        bool pass = true;
+        for ( int bit = 0; bit < 8; bit++ ) {
+            if ( bcdEncodeBit( 42, bit, 1 ) != expected42[ bit ] ) {
+                pass = false;
+            }
+        }
+        report( "BCD 42 @ width 8 = 0100 0010 (LSD-first)", pass );
+    }
+    {
+        // 39: digit0 = 9 -> 1001 LSB-first, partial top nibble = 3 -> 11
+        static const int expected39[ 6 ] = { 1, 0, 0, 1, 1, 1 };
+        bool pass = true;
+        for ( int bit = 0; bit < 6; bit++ ) {
+            if ( bcdEncodeBit( 39, bit, 1 ) != expected39[ bit ] ) {
+                pass = false;
+            }
+        }
+        report( "BCD 39 @ width 6 = 1001 11 (partial top nibble)", pass );
+    }
+
+    report( "binary width 4 wrap 15+1 -> 0",
+            bcdWrapValue( 15 + 1, bcdMaxValueFor( 4, 0 ) ) == 0 );
+    report( "binary width 4 wrap 0-1 -> 15",
+            bcdWrapValue( 0 - 1, bcdMaxValueFor( 4, 0 ) ) == 15 );
+    report( "binary width 10 wrap 1023+1 -> 0",
+            bcdWrapValue( 1023 + 1, bcdMaxValueFor( 10, 0 ) ) == 0 );
+    report( "binary width 10 wrap 0-1 -> 1023",
+            bcdWrapValue( 0 - 1, bcdMaxValueFor( 10, 0 ) ) == 1023 );
+    report( "BCD width 8 wrap 99+1 -> 0",
+            bcdWrapValue( 99 + 1, bcdMaxValueFor( 8, 1 ) ) == 0 );
+    report( "BCD width 8 wrap 0-1 -> 99",
+            bcdWrapValue( 0 - 1, bcdMaxValueFor( 8, 1 ) ) == 99 );
+    report( "BCD width 6 wrap 39+1 -> 0",
+            bcdWrapValue( 39 + 1, bcdMaxValueFor( 6, 1 ) ) == 0 );
+    report( "BCD width 6 wrap 0-1 -> 39",
+            bcdWrapValue( 0 - 1, bcdMaxValueFor( 6, 1 ) ) == 39 );
+
+    out->println( allPass ? "bcdSelfCheck: ALL PASS" : "bcdSelfCheck: FAILURES" );
+    return allPass;
+}
+
+// ============================================================================
+// BCD modals (VoltageAdjuster::adjust idiom - Peripherals.cpp)
+// ============================================================================
+
+// One frame of the counter/range modals: label on the top half, value on the
+// bottom (the VoltageAdjuster::updateDisplay layout); OLED + serial go
+// through the shared reading display (repeat calls dedupe); atomic LED show.
+static void bcdDrawFrame( const char* label, const char* valueText ) {
+    b.clear( );
+    b.print( label, 0x0a0a12, 0xffffff, 1, 0, 2 );
+    b.print( valueText, 0x0a1206, 0xffffff, 0, 1, 1 );
+    ReadingDisplay::show( label, -1, valueText );
+    requestLedShow( 12 ); // 12 = blocking mode (atomic menu display)
+}
+
+// User-facing pin name for a gpioDef index: "GPIO 1".."GPIO 8", "Tx", "Rx".
+static void bcdPinLabel( int idx, char* buf, size_t bufLen ) {
+    if ( idx == 8 ) {
+        snprintf( buf, bufLen, "Tx" );
+    } else if ( idx == 9 ) {
+        snprintf( buf, bufLen, "Rx" );
+    } else {
+        snprintf( buf, bufLen, "GPIO %d", idx + 1 );
+    }
+}
+
+int bcdAdjust( void ) {
+    if ( globalState.config.bcdStart < 0 ) {
+        return -2; // no range configured - caller routes to bcdRangeSetup()
+    }
+    if ( routableGpioAbsent( ) ) {
+        return -1;
+    }
+
+    // CRITICAL: reset button state so the press that launched this UI can't
+    // instantly confirm (VoltageAdjuster::adjust idiom).
+    Menus::getInstance( ).inClickMenu = 1;
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    int entryValue = globalState.config.bcdValue;
+    int value = entryValue;
+
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 3;
+
+    // Slow preset + divider 3 is the bench-proven "one step per careful
+    // detent, ~5 on a fast spin" pairing (Probing.cpp node selection).
+    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    char valueText[ 16 ];
+
+    // Drive the entry value onto the pins so the display and the range agree
+    // from the first frame.
+    bcdApply( );
+    snprintf( valueText, sizeof( valueText ), "%d", value );
+    b.clear( 1 );
+    bcdDrawFrame( "BCD", valueText );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        // Discard the pad reading but keep the call: it services the probe
+        // state machine the raw getButtonState() comparisons below need.
+        probing.justReadProbe( true );
+
+        // Cancel (hold / raw probe 1 - raw pre-swap codes, copied verbatim
+        // from VoltageAdjuster::adjust): restore the entry value to the pins.
+        if ( encoderButtonState == HELD || probeButton.getButtonState( ) == 1 ) {
+            if ( value != entryValue ) {
+                globalState.setBcdValue( entryValue );
+                bcdApply( );
+            }
+            rotaryDivider = lastDivider;
+            encoderButtonState = IDLE;
+            requestLedShow( -1 );
+            b.clear( );
+            Menus::getInstance( ).inClickMenu = 0;
+            return -1;
+        }
+
+        // Confirm (click-release / raw probe 2): keep the value (already
+        // live on the pins and marked dirty by bcdIncrement).
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             probeButton.getButtonState( ) == 2 ) {
+            encoderButtonState = IDLE;
+            rotaryDivider = lastDivider;
+            Menus::getInstance( ).inClickMenu = 0;
+            b.clear( );
+            requestLedShow( -1 );
+            return value;
+        }
+
+        // Serial byte cancels (third exit, same restore as hold-cancel)
+        if ( Serial.available( ) > 0 ) {
+            Serial.read( );
+            if ( value != entryValue ) {
+                globalState.setBcdValue( entryValue );
+                bcdApply( );
+            }
+            rotaryDivider = lastDivider;
+            Menus::getInstance( ).inClickMenu = 0;
+            b.clear( );
+            requestLedShow( -1 );
+            return -1;
+        }
+
+        // Encoder: negated like the probe node-selection idiom so clockwise
+        // counts up (VoltageAdjuster's value -= delta, same convention).
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps; // keep the fractional part
+                value = bcdIncrement( steps ); // live on the pins, wraps, marks dirty
+                snprintf( valueText, sizeof( valueText ), "%d", value );
+                bcdDrawFrame( "BCD", valueText );
+            }
+        }
+    }
+
+    // Should never reach here (VoltageAdjuster tail)
+    rotaryDivider = lastDivider;
+    Menus::getInstance( ).inClickMenu = 0;
+    return -1;
+}
+
+int bcdRangeSetup( void ) {
+    if ( routableGpioAbsent( ) ) {
+        return -1;
+    }
+
+    // Step-1 candidates: every pin the counter may claim (PWM counts - the
+    // apply path displaces it).
+    int candidates[ 10 ];
+    int candidateCount = 0;
+    for ( int idx = 0; idx < 10; idx++ ) {
+        if ( bcdPinClaimable( idx ) ) {
+            candidates[ candidateCount++ ] = idx;
+        }
+    }
+    if ( candidateCount == 0 ) {
+        Serial.println( "\r\nBCD: no free pins" );
+        oled.clearPrintShow( "BCD\nno free pins", 2, 1200 );
+        return -1;
+    }
+
+    Menus::getInstance( ).inClickMenu = 1;
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 3;
+
+    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
+    long lastEncoderPosition = encoderPosition;
+    float encoderAccumulator = 0.0f;
+
+    int step = 0; // 0 = pick start pin, 1 = pick width
+    int cursor = 0;
+    for ( int i = 0; i < candidateCount; i++ ) {
+        if ( candidates[ i ] == globalState.config.bcdStart ) {
+            cursor = i; // open on the current start when it's still free
+            break;
+        }
+    }
+    int start = -1;
+    int width = 1;
+    int maxWidth = 1;
+
+    // getButtonState() is a LEVEL (currentButtonState), not an edge - one
+    // probe press must not confirm both steps, so the probe confirm disarms
+    // on the step transition and re-arms once the button reads released.
+    bool probeConfirmArmed = true;
+
+    char valueText[ 16 ];
+    bcdPinLabel( candidates[ cursor ], valueText, sizeof( valueText ) );
+    b.clear( 1 );
+    bcdDrawFrame( "Start", valueText );
+
+    while ( true ) {
+        rotaryEncoderStuff( );
+        jOS.serviceInner( );
+        probing.justReadProbe( true );
+
+        if ( !probeConfirmArmed && probeButton.getButtonState( ) != 2 ) {
+            probeConfirmArmed = true;
+        }
+
+        // Cancel (hold / raw probe 1 / serial byte): nothing changed
+        bool serialCancel = ( Serial.available( ) > 0 );
+        if ( serialCancel ) {
+            Serial.read( );
+        }
+        if ( encoderButtonState == HELD || probeButton.getButtonState( ) == 1 ||
+             serialCancel ) {
+            rotaryDivider = lastDivider;
+            encoderButtonState = IDLE;
+            requestLedShow( -1 );
+            b.clear( );
+            Menus::getInstance( ).inClickMenu = 0;
+            return -1;
+        }
+
+        // Confirm (click-release / raw probe 2)
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeButton.getButtonState( ) == 2 ) ) {
+            encoderButtonState = IDLE;
+            lastButtonEncoderState = IDLE; // step 2 needs a NEW press
+            probeConfirmArmed = false;     // ...and a NEW probe press
+            if ( step == 0 ) {
+                // Start picked - the width pick spans the contiguous
+                // claimable run from it.
+                start = candidates[ cursor ];
+                maxWidth = 0;
+                for ( int idx = start; idx <= 9; idx++ ) {
+                    if ( !bcdPinClaimable( idx ) ) {
+                        break;
+                    }
+                    maxWidth++;
+                }
+                if ( maxWidth < 1 ) {
+                    maxWidth = 1; // start itself was claimable
+                }
+                width = globalState.config.bcdWidth;
+                if ( width < 1 ) {
+                    width = 1;
+                }
+                if ( width > maxWidth ) {
+                    width = maxWidth;
+                }
+                step = 1;
+                encoderAccumulator = 0.0f;
+                accelerator.reset( );
+                lastEncoderPosition = encoderPosition;
+                snprintf( valueText, sizeof( valueText ), "%d bit%s", width,
+                          width == 1 ? "" : "s" );
+                bcdDrawFrame( "Width", valueText );
+                continue;
+            }
+            // Width picked - commit the range (mode kept), drive the value.
+            globalState.setBcdRange( start, width, globalState.config.bcdMode );
+            bcdApply( );
+            rotaryDivider = lastDivider;
+            Menus::getInstance( ).inClickMenu = 0;
+            b.clear( );
+            requestLedShow( -1 );
+            return 0;
+        }
+
+        long currentEncoderPosition = encoderPosition;
+        long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
+        if ( encoderDelta != 0 ) {
+            lastEncoderPosition = currentEncoderPosition;
+            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
+            int steps = (int)encoderAccumulator;
+            if ( steps != 0 ) {
+                encoderAccumulator -= steps;
+                if ( step == 0 ) {
+                    cursor = ( ( cursor + steps ) % candidateCount + candidateCount ) %
+                             candidateCount;
+                    bcdPinLabel( candidates[ cursor ], valueText, sizeof( valueText ) );
+                    bcdDrawFrame( "Start", valueText );
+                } else {
+                    width = ( ( width - 1 + steps ) % maxWidth + maxWidth ) % maxWidth + 1;
+                    snprintf( valueText, sizeof( valueText ), "%d bit%s", width,
+                              width == 1 ? "" : "s" );
+                    bcdDrawFrame( "Width", valueText );
+                }
+            }
+        }
+    }
+
+    // Should never reach here
+    rotaryDivider = lastDivider;
+    Menus::getInstance( ).inClickMenu = 0;
+    return -1;
 }

@@ -4,19 +4,19 @@ overview: "Consolidate all routable-GPIO handling into a new RoutableGpio module
 todos:
   - id: create-module
     content: Create src/hardwarestuff/RoutableGpio.h/.cpp; move GPIO code from Peripherals.cpp/.h and PersistentStuff.cpp; single applyPinConfig funnel; central OG guard; drop dead code
-    status: pending
+    status: completed
   - id: register-truth
     content: Replace gpio_function_map[] with live routableGpioFunction() register reads; update all consumers; delete resync loop; add routableGpioAvailable() gate (infra/OLED/Python/probe claims, UART traffic-since-boot)
-    status: pending
+    status: completed
   - id: highlight-carousel
     content: Encoder-turn on highlighted GPIO net opens Direction/PWM/Pulls/BCD carousel modal; keep connect-toggle and remove-unhighlight
     status: pending
   - id: bcd-core
     content: Counter state (start, width 1-10, binary/BCD mode, value) in ConfigState + YAML; bit map incl. UART top bits; bcdApply/bcdIncrement; bcdSelfCheck assert
-    status: pending
+    status: completed
   - id: bcd-adjust
     content: bcdAdjust encoder counter modal + padActionTable bcd_up/bcd_down idle actions
-    status: pending
+    status: in_progress
   - id: menu-app
     content: "Parts-style GPIO settings app: menuTree rows, getActionCategory arm, apps[] entries, gpioSettingsLauncher with stay-in-menu loop"
     status: pending

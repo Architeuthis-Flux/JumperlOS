@@ -524,7 +524,14 @@ void ConfigState::setDefaults() {
     // UART defaults
     uartTxFunction = 0;  // TX
     uartRxFunction = 1;  // RX
-    
+
+    // BCD counter defaults: off (no range), 4-bit binary, value 0
+    bcdStart = -1;
+    bcdWidth = 4;
+    bcdMode = 0;
+    bcdValue = 0;
+
+
     // OLED defaults
     oledConnected = false;
     oledLockConnection = false;
@@ -1160,6 +1167,40 @@ void JumperlessState::setUartRxFunction(int function) {
 
 int JumperlessState::getUartRxFunction() const {
     return config.uartRxFunction;
+}
+
+// BCD counter (Phase 3)
+void JumperlessState::setBcdRange(int start, int width, int mode) {
+    if (start < -1 || start > 9) {
+        return;  // -1 = off, 0-9 = gpioDef bank index
+    }
+    if (width < 1) width = 1;
+    if (width > 10) width = 10;
+    config.bcdStart = start;
+    config.bcdWidth = width;
+    config.bcdMode = (mode != 0) ? 1 : 0;
+    markDirty();
+}
+
+void JumperlessState::setBcdValue(int value) {
+    config.bcdValue = value;
+    markDirty();
+}
+
+int JumperlessState::getBcdStart() const {
+    return config.bcdStart;
+}
+
+int JumperlessState::getBcdWidth() const {
+    return config.bcdWidth;
+}
+
+int JumperlessState::getBcdMode() const {
+    return config.bcdMode;
+}
+
+int JumperlessState::getBcdValue() const {
+    return config.bcdValue;
 }
 
 // Display
@@ -2259,9 +2300,17 @@ void JumperlessState::serializeConfig(String& output) const {
     // UART and OLED
     output += "  uart: {txFunction: " + String(config.uartTxFunction) + 
               ", rxFunction: " + String(config.uartRxFunction) + "}\n";
-    output += "  oled: {connected: " + String(config.oledConnected ? "true" : "false") + 
+    output += "  oled: {connected: " + String(config.oledConnected ? "true" : "false") +
               ", lockConnection: " + String(config.oledLockConnection ? "true" : "false") + "}\n";
-    
+
+    // BCD counter range + value. MUST stay above serializeFakeGpio(): its
+    // "fakeGpio:" header flips fromYAML's section tracker, so any config key
+    // emitted after it is silently dropped on load.
+    output += "  bcd: {start: " + String(config.bcdStart) +
+              ", width: " + String(config.bcdWidth) +
+              ", mode: " + String(config.bcdMode) +
+              ", value: " + String(config.bcdValue) + "}\n";
+
     // Fake GPIO configurations
     serializeFakeGpio(output);
 }
@@ -2456,7 +2505,41 @@ bool JumperlessState::deserializeConfig(const char* yamlContent, String& errorMs
             config.oledLockConnection = parseBoolean(val, parseSuccess);
         }
     }
-    
+    // Parse BCD counter
+    else if (line.startsWith("bcd:")) {
+        int startIdx = line.indexOf("start:");
+        if (startIdx >= 0) {
+            int commaIdx = line.indexOf(',', startIdx);
+            String val = line.substring(startIdx + 6, commaIdx);
+            val.trim();
+            config.bcdStart = val.toInt();
+        }
+
+        int widthIdx = line.indexOf("width:");
+        if (widthIdx >= 0) {
+            int commaIdx = line.indexOf(',', widthIdx);
+            String val = line.substring(widthIdx + 6, commaIdx);
+            val.trim();
+            config.bcdWidth = val.toInt();
+        }
+
+        int modeIdx = line.indexOf("mode:");
+        if (modeIdx >= 0) {
+            int commaIdx = line.indexOf(',', modeIdx);
+            String val = line.substring(modeIdx + 5, commaIdx);
+            val.trim();
+            config.bcdMode = val.toInt();
+        }
+
+        int valueIdx = line.indexOf("value:");
+        if (valueIdx >= 0) {
+            int endIdx = line.indexOf('}', valueIdx);
+            String val = line.substring(valueIdx + 6, endIdx);
+            val.trim();
+            config.bcdValue = val.toInt();
+        }
+    }
+
     return true;
 }
 

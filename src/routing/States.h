@@ -239,7 +239,16 @@ struct ConfigState {
     // UART configuration
     int uartTxFunction;  // 0 = tx, 1 = rx, 2 = gpio_in, 3 = gpio_out
     int uartRxFunction;  // 0 = tx, 1 = rx, 2 = gpio_in, 3 = gpio_out
-    
+
+    // BCD/binary counter range (Phase 3, CodeDocs/GPIO_plan.md). Bits map
+    // LSB-first from bcdStart through the gpioDef bank - UART Tx (idx 8) and
+    // Rx (idx 9) join as the top bits when the range reaches them.
+    int bcdStart;   // gpioDef bank index of bit 0 (-1 = counter off)
+    int bcdWidth;   // bits in the counter (1-10)
+    int bcdMode;    // 0 = binary, 1 = BCD nibbles (one decimal digit per 4 pins)
+    int bcdValue;   // current counter value
+
+
     // OLED state
     bool oledConnected;
     bool oledLockConnection;
@@ -659,7 +668,16 @@ public:
     int getUartTxFunction() const;
     void setUartRxFunction(int function);
     int getUartRxFunction() const;
-    
+
+    // BCD counter (Phase 3): range = start index + width + mode; value drives
+    // the pins via bcdApply() (hardwarestuff/RoutableGpio.cpp).
+    void setBcdRange(int start, int width, int mode);
+    void setBcdValue(int value);
+    int getBcdStart() const;
+    int getBcdWidth() const;
+    int getBcdMode() const;
+    int getBcdValue() const;
+
     // Display
     void setNetColor(int netNum, rgbColor color, uint32_t raw, const char* name);
     bool getNetColor(int netNum, rgbColor& color, uint32_t& raw, char* name) const;

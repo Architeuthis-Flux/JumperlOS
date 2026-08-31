@@ -126,4 +126,51 @@ void applyPinConfig(int idx);
 // assignment, not a conflict.
 bool routableGpioAvailable(int idx, const char** ownerOut = nullptr);
 
+// ============================================================================
+// BCD/binary counter (Phase 3, CodeDocs/GPIO_plan.md). The range lives in
+// globalState.config (bcdStart/bcdWidth/bcdMode/bcdValue, persisted per-slot);
+// these drive it onto the pins.
+// ============================================================================
+
+// Counter bit k (LSB-first) -> gpioDef index: bcdStart + k walks GPIO 1-8
+// (indices 0-7) and continues into UART Tx (8) and Rx (9) as the top bits.
+// Returns -1 when no range is set, k is outside the width, or the bit falls
+// past the end of the bank.
+int bcdBitIndex(int bit);
+
+// Encode bcdValue onto the range pins: forces each claimable range pin to an
+// SIO output through applyPinConfig() (displacing leftover PWM) and drives
+// its bit level, mirroring gpioState[] so LEDs/readouts agree. Pins something
+// else owns are skipped. No-op when bcdStart < 0 or on OG.
+void bcdApply(void);
+
+// Largest value the configured range can show: binary = 2^width - 1; BCD =
+// all-9s over the full nibbles, with a partial top nibble capped at
+// min(9, 2^bits - 1) as the top digit.
+int bcdMaxValue(void);
+
+// bcdValue = wrap(bcdValue + delta) into [0, bcdMaxValue()] (wraps BOTH
+// directions), applied live to the pins and marked dirty for the slot
+// autosave. Returns the new value, or -1 (untouched, not dirtied) when no
+// range is configured (bcdStart < 0) - callers toast instead of counting.
+int bcdIncrement(int delta);
+
+// Pure-logic assert run over the encode/wrap math (no pin writes, safe on
+// OG): prints pass/fail per case to `out`, returns overall pass. Reachable
+// from the serial test path: 'D' status menu -> "BCD SelfCheck".
+bool bcdSelfCheck(Stream* out = &Serial);
+
+// Blocking counter modal (VoltageAdjuster::adjust idiom): encoder counts the
+// value live on the pins, click-release/probe-connect confirms (returns the
+// value, >= 0), hold/probe-remove/serial byte cancels and restores the entry
+// value (-1). Returns -2 immediately when no range is configured - the
+// caller routes to bcdRangeSetup().
+int bcdAdjust(void);
+
+// Two-step blocking range pick (same modal idiom): step 1 start pin (skips
+// pins routableGpioAvailable() refuses, PWM excepted - bcdApply displaces
+// it), step 2 width (1..contiguous claimable pins from that start). Applies
+// via setBcdRange() + bcdApply() and returns 0; cancel = -1, nothing changed.
+int bcdRangeSetup(void);
+
 #endif
