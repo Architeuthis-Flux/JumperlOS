@@ -22,7 +22,7 @@ todos:
     status: completed
   - id: oled-chooser
     content: OLED 128x32 chooser bitmap in chooseGPIO() + clearPrintShow mirror in chooseGPIOinputOutput()
-    status: pending
+    status: completed
   - id: verify
     content: Build V5 + OG targets, run bcdSelfCheck, bench-check highlight/menu/pad flows
     status: pending
