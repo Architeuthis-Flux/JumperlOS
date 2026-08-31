@@ -4193,9 +4193,32 @@ static bool partsFindSipModule(uint8_t* flags, const int* seed, int nSeed,
                 partsPlacedPartOnRow(rb) != nullptr)
                 continue;
             if (partsAutoAbortCheck()) return false;
+            // HARD-drive identify, not the weak junction map: the map's
+            // 50k pull can't charge the supply pair's bulk caps (it read
+            // "resistive both ways" on the real GND/VCC) while the
+            // backlight LED chain drops under its threshold at 66uA -
+            // the 23:15 run named gnd 28 vdd 27, the BACKLIGHT, and the
+            // anchor would have placed the module reversed. The 1mA
+            // fixture charges the caps and reads true Vf: only a DIODE
+            // inside the resolver's one-junction window is a rail pair
+            // (0.79V on the GMT177's (21,22); the 5.4V LED chain reads
+            // LED and the pull-up mesh reads RESISTOR - both refused).
             partsMeterViz2(ra, rb);
-            got = partsPairOneWay(ra, rb, seed[nSeed / 2], &cp);
+            PartResult r2 = identifyTwoLead(ra, rb);
             partsMeterDone(ra, rb, -1);
+            if (r2.status != 0 || r2.nRows != 2) continue;
+            if (r2.type != PartType::DIODE) continue;
+            if (r2.value < kRailVfLo || r2.value > kRailVfHi) continue;
+            int g = -1, v = -1;
+            for (int t2 = 0; t2 < 2; t2++) {
+                if (r2.roles[t2] == PinRole::A) g = (int)r2.rows[t2];
+                else if (r2.roles[t2] == PinRole::K) v = (int)r2.rows[t2];
+            }
+            if (g < 0 || v < 0) continue;
+            cp.gndRow = g;
+            cp.vddRow = v;
+            cp.nSig = 0;
+            got = true;
         }
         if (got) {
             Serial.print("  power-end diode says gnd ");

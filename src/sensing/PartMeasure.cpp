@@ -1315,8 +1315,8 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
         // the gap-1 pass's per-direction empty line doubles as the edge
         // stage's reference (same fixture, same artifact - too few edge
         // pairs exist to self-calibrate)
-        float edgeMedian[2] = {0.0f, 0.0f};
-        bool haveEdgeMedian = false;
+        float edgeFloor[2] = {0.0f, 0.0f};
+        bool haveEdgeFloor = false;
         for (int gi = 0; gi < 2 && !aborted; gi++) {
             int gap = kGap[gi];
             int nPairs = 0;
@@ -1388,14 +1388,27 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                     for (int y = x; y > 0 && sorted[y] < sorted[y - 1]; y--) {
                         float t = sorted[y]; sorted[y] = sorted[y - 1]; sorted[y - 1] = t;
                     }
-                float median = sorted[n / 2];
+                // The baseline is the LOW-QUANTILE floor, not the median,
+                // and the verdict is one-sided. An empty pair passes no
+                // current, so empties are ALWAYS the low cluster; the
+                // median assumed they were also the MAJORITY, and Kevin's
+                // 2026-08-30 23:01 board (two DIPs + a display + four
+                // resistors = conductive-adjacent on most rows) flipped
+                // it onto the conductive cluster - every EMPTY pair then
+                // "deviated" and all 56 rows flagged (the intermittent
+                // every-LED-lit scans: near 50/50 density the flip rides
+                // run-to-run noise). sorted[max(1, n/8)] survives a couple
+                // of outlier-low readings and never flips with density.
+                int bi = n / 8;
+                if (bi < 1) bi = 1;
+                float base = sorted[bi];
                 if (gap == 1) {
-                    edgeMedian[dir] = median;
-                    haveEdgeMedian = true;
+                    edgeFloor[dir] = base;
+                    haveEdgeFloor = true;
                 }
                 for (int i = 0; i < nPairs; i++) {
                     if (di[dir][i] > 1.0e8f) continue;
-                    if (fabsf(di[dir][i] - median) > kSweepDevV) {
+                    if (di[dir][i] - base > kSweepDevV) {
                         int a = pairA[i], b = pairB[i];
                         if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
                         if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
@@ -1436,7 +1449,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
         // gapPairsOut like cross-gap pairs do - the edge row can never
         // join a span (its census flag stays 3) and the launcher groups
         // pairs sharing one edge row into a single finding.
-        if (!aborted && haveEdgeMedian) {
+        if (!aborted && haveEdgeFloor) {
             static const int kEdge[4] = {29, 30, 59, 60};
             bool edgeHadHit[4] = {false, false, false, false};
             for (int stage = 0; stage < 2 && !aborted; stage++) {
@@ -1480,7 +1493,11 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                 for (int dir = 0; dir < 2; dir++) {
                     for (int i = 0; i < nPairs; i++) {
                         if (di[dir][i] > 1.0e8f) continue;
-                        if (fabsf(di[dir][i] - edgeMedian[dir]) <= kSweepDevV)
+                        // one-sided against the gap-1 pass's empty FLOOR
+                        // (see the baseline note above - the median flip
+                        // painted phantom "conducts to row 29" edges on
+                        // six empty pairs at 23:01)
+                        if (di[dir][i] - edgeFloor[dir] <= kSweepDevV)
                             continue;
                         int n = pairA[i], E = pairB[i];
                         for (int e = 0; e < 4; e++)
