@@ -97,9 +97,6 @@ extern int probeRevision;
 
 extern int baudRate;
 
-extern gpio_function_t gpio_function_map[10];
-
-
 extern volatile bool readingADC;
 // Non-waiting ADC lock for callers that hold a hardware side effect across
 // the read (see the definitions): adcTryAcquire() -> readAdcHeld() -> adcRelease().
@@ -152,21 +149,11 @@ void inaFastPollMode(bool on);
 
 
 
-extern int gpioOutput[10];
-
-
-int convertPullToJumperless(int pull);
-
-
-
 void readFakeGPIO(void);
-
-int handleHighlights(int probeReading);
 
 int initI2C(int sdaPin = 26, int sclPin = 27, int speed = 100000);
 int findI2CAddress(int sdaPin = 26, int sclPin = 27, int i2cNumber = 1, int print = 0);
 
-int readFloatingOrStateMCP (int pin = 0);
 void setCSex(int chip, int value);
 void initGPIOex(void);
 void writeGPIOex(int value, uint8_t pin);
@@ -387,7 +374,6 @@ const uint16_t DACLookup_FullSine_5Bit[32] =
         0, 39, 156, 345, 600, 910, 1264, 1648};
 
 // PWM functions
-void printPWMState(void);
 void printPIOStateMachines(void);
 
 

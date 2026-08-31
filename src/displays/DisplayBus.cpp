@@ -6,7 +6,7 @@
 #include <Wire.h>
 #include "hardware/gpio.h"
 
-#include "Peripherals.h"   // gpio_function_map, gpioState, gpioPWMEnabled, stopPWM
+#include "Peripherals.h"   // gpioState, gpioPWMEnabled, stopPWM
 #include "States.h"        // globalState.config.gpioPythonOwned
 #include "config.h"        // jumperlessConfig.top_oled.connection_type
 #include "oled.h"          // oled.oledConnected (is Wire1 owned?)
@@ -185,7 +185,6 @@ extern "C" void jl_display_bus_pwm_taken(int pin) {
     gpioPWMEnabled[idx] = true;                     // RAM side first, like
     globalState.config.gpioPwmEnabled[idx] = true;  // setupPWM - a LIVE claim,
     globalState.markDirty();                        // never a ghost
-    gpio_function_map[idx] = GPIO_FUNC_PWM;
     // Newer owner wins: drop OUR bus-role mark on this pin so setGPIO() and
     // readGPIO() stop treating it as display plumbing. The sibling pin keeps
     // its mark until the (per-pin) release.
@@ -256,8 +255,6 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     pinMode(d.sclPin, INPUT_PULLUP);
     sdaHigh(d);
     sclHigh(d);
-    gpio_function_map[d.sdaPin - 20] = GPIO_FUNC_SIO;
-    gpio_function_map[d.sclPin - 20] = GPIO_FUNC_SIO;
     // gpioState 6 = "bus role" for the UI/scan, the oled.cpp:4316 precedent.
     // These marks survive Python exits (jl_gpio_claim_pin's do not) and stop
     // refreshConnections re-asserting config pulls under the live bus.
@@ -281,7 +278,6 @@ void displayBusRelease(DisplayInstance& d) {
         if (pin < 20 || pin > 27) continue;
         gpioState[pin - 20] = 0;
         if (pinClaimed(pin)) continue;   // the new owner's pad is its own now
-        gpio_function_map[pin - 20] = GPIO_FUNC_NULL;
         if (!hardwareBus) pinMode(pin, INPUT);   // soft pins: leave them released
     }
     d.sdaPin = d.sclPin = -1;

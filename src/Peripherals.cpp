@@ -610,11 +610,9 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
         // Only update gpioState for GPIO pins 20-29 (valid gpioDef indices)
         if ( sdaPin >= 20 && sdaPin <= 29 ) {
             gpioState[ gpioDef[ sdaPin - 20 ][ 2 ] ] = 6;
-            gpio_function_map[ gpioDef[ sdaPin - 20 ][ 2 ] ] = GPIO_FUNC_I2C;
         }
         if ( sclPin >= 20 && sclPin <= 29 ) {
             gpioState[ gpioDef[ sclPin - 20 ][ 2 ] ] = 6;
-            gpio_function_map[ gpioDef[ sclPin - 20 ][ 2 ] ] = GPIO_FUNC_I2C;
         }
 
         gpio_set_pulls( sdaPin, true, false ); // Enable pull-up on SDA
@@ -652,49 +650,9 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
 }
 
 
-int convertPullToJumperless(int pull) {
-    switch (pull) {
-        case 0: return 2; // no pull
-        case 1: return 1; // pullup
-        case 2: return 0; // pulldown
-        case 3: return 3; // bus keeper
-    }
-    return 2; // no pull
-    }
-
-
-
-gpio_function_t gpio_function_map[ 10 ] = {
-    GPIO_FUNC_SIO, GPIO_FUNC_SIO, GPIO_FUNC_SIO, GPIO_FUNC_SIO, GPIO_FUNC_SIO,
-    GPIO_FUNC_SIO, GPIO_FUNC_SIO, GPIO_FUNC_SIO, GPIO_FUNC_SIO, GPIO_FUNC_SIO };
-
-
-
-char* gpio_function_name( gpio_function_t function ) {
-    char* name = nullptr;
-    for ( int i = 0; i < GPIO_FUNCTION_NAMES_COUNT; i++ ) {
-        if ( gpio_function_names[ i ].function == function ) {
-            name = gpio_function_names[ i ].name;
-        }
-    }
-    return name;
-}
-
-
-
 // Debug flag for fake GPIO visual integration
 bool debugFakeGpio = false;  // Set to true to see detailed fake GPIO debug output
 
-uint32_t gpioIdleColors[ 10 ] = { 0x050206, 0x050307, 0x040407, 0x040407,
-                                  0x040407, 0x040407, 0x040407, 0x040407,
-                                  0x040407, 0x040407 };
-
-uint8_t gpioIdleHues[ 10 ] = { 0, 25, 50, 75, 100, 125, 150, 175, 200, 225 };
-
-
-// this is used to store the output state of the GPIO pins
-// 0 = low, 1 = high, 2 = input
-int gpioOutput[ 10 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 volatile bool readingADC = false;
 volatile bool usingI2C = false;
 CurrentSenseState currentSenseState;
@@ -1225,14 +1183,6 @@ void __not_in_flash_func(rebuildShownReadings)() {
         resetCurrentSenseMeasurement();
     }
 
-    for ( int i = 0; i < 10; i++ ) {
-        gpio_function_t fun = gpio_get_function( gpioDef[ i ][ 0 ] );
-
-        if ( fun != gpio_function_map[ i ] ) {
-            gpio_function_map[ i ] = fun;
-        }
-    }
-
     // Serial.println(micros( ) - lastRebuildShownReadingsTime);
     
     // Memory barrier to ensure all writes to showADCreadings[] are visible to other cores
@@ -1256,24 +1206,6 @@ void chooseShownReadings( void ) {
     // - lastNetCount (to detect net structure changes)
     // But for now, always rebuilding ensures no race conditions
 }
-
-int handleHighlights( int probeReading ) {
-
-    if ( probeReading <= 0 ) {
-        return probeReading;
-    }
-
-    if ( brightenedNet > 0 ) {
-        return probeToggle( -1 );  // -1 = read from hardware
-    }
-
-    return probeReading;
-}
-
-int highlightInteractable[ 10 ] = { RP_GPIO_0, RP_GPIO_1, RP_GPIO_2,
-                                    RP_GPIO_3, RP_GPIO_4, RP_GPIO_5,
-                                    RP_GPIO_6, RP_GPIO_7, RP_GPIO_8 };
-
 
 float railSpread = 17.88;
 
@@ -1900,57 +1832,6 @@ int __not_in_flash_func(readAdcHeld)( int channel, int samples ) {
     return adcReading;
 }
 
-
-void printPWMState( void ) {
-    Serial.println( "\n   PWM State:" );
-    Serial.println( "   number:\t\b1\t\b2\t\b3\t\b4\t\b5\t\b6\t\b7\t\b8" );
-
-    Serial.print( "  enabled:\t" );
-    for ( int i = 0; i < 8; i++ ) {
-        bool is_enabled = gpioPWMEnabled[ i ] || gpioSlowPWMEnabled[ i ];
-        Serial.print( is_enabled ? "yes" : "no" );
-        Serial.print( "\t" );
-    }
-    Serial.println( );
-
-    Serial.print( "frequency:\t" );
-    for ( int i = 0; i < 8; i++ ) {
-        if ( gpioPWMEnabled[ i ] || gpioSlowPWMEnabled[ i ] ) {
-            Serial.print( gpioPWMFrequency[ i ], 1 );
-            if ( gpioSlowPWMEnabled[ i ] ) {
-                Serial.print( "(S)" ); // Mark slow PWM
-            }
-        } else {
-            Serial.print( "-" );
-        }
-        Serial.print( "\t" );
-    }
-    Serial.println( );
-
-    Serial.print( "duty_cycle:\t" );
-    for ( int i = 0; i < 8; i++ ) {
-        if ( gpioPWMEnabled[ i ] || gpioSlowPWMEnabled[ i ] ) {
-            Serial.print( gpioPWMDutyCycle[ i ], 2 );
-        } else {
-            Serial.print( "-" );
-        }
-        Serial.print( "\t" );
-    }
-    Serial.println( );
-
-    Serial.print( "    type:\t" );
-    for ( int i = 0; i < 8; i++ ) {
-        if ( gpioSlowPWMEnabled[ i ] ) {
-            Serial.print( "slow" );
-        } else if ( gpioPWMEnabled[ i ] ) {
-            Serial.print( "hw" );
-        } else {
-            Serial.print( "-" );
-        }
-        Serial.print( "\t" );
-    }
-    Serial.println( );
-}
 
 // ============================================================================
 // VoltageAdjuster Class Implementation

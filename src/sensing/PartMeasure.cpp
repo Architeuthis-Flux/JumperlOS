@@ -213,7 +213,7 @@ static bool claimRovingGpio(ScanSession& s) {
     s.savedFloat = globalState.config.gpioReadFloating[s.gpioIdx];
     s.savedState = gpioState[s.gpioIdx];
     s.savedOwned = globalState.config.gpioPythonOwned[s.gpioIdx] ? 1 : 0;
-    s.savedFunc = (int)gpio_function_map[s.gpioIdx];
+    s.savedFunc = (int)gpio_get_function(gpioDef[s.gpioIdx][0]);
     // OWN the pad, the way the vector runner claims its drivers (bench,
     // 2026-08-28: core 2's readGPIO() twiddles UNOWNED pads' pulls and
     // input buffers between scans). Unowned, the roving drive can be
@@ -221,7 +221,6 @@ static bool claimRovingGpio(ScanSession& s) {
     // ~0V, all 56 rows flag as hits, and every LED row lights up
     // (Kevin's intermittent all-lit scans, 2026-08-30).
     globalState.config.gpioPythonOwned[s.gpioIdx] = true;
-    gpio_function_map[s.gpioIdx] = GPIO_FUNC_SIO;
     __dmb();
     globalState.config.gpioReadFloating[s.gpioIdx] = 0;
     gpioReadFloating[s.gpioIdx] = 0;
@@ -237,7 +236,7 @@ static void restoreRovingGpio(ScanSession& s) {
     globalState.config.gpioReadFloating[s.gpioIdx] = s.savedFloat;
     gpioReadFloating[s.gpioIdx] = s.savedFloat;
     gpioState[s.gpioIdx] = s.savedState;
-    gpio_function_map[s.gpioIdx] = (gpio_function_t)s.savedFunc;
+    gpio_set_function(gpioDef[s.gpioIdx][0], (gpio_function_t)s.savedFunc);
     globalState.config.gpioPythonOwned[s.gpioIdx] = (s.savedOwned != 0);
     __dmb();
     s.gpioIdx = -1;

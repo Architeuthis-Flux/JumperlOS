@@ -481,8 +481,7 @@ public:
     void calibrateDac0(float target = 3.3);
     
     void probeLEDhandler(void);
-    int probeToggle(int buttonState = -1);  // Note: Currently unused, global function used instead
-    
+
 private:
     Probing();
     ~Probing() = default;

@@ -58,7 +58,7 @@
 #include <Arduino.h>
 #include "Jerial.h" // Unified serial interface
 #include "Python_Proper.h" // For executeSinglePythonCommand and ScriptHistory
-#include "Peripherals.h" // For gpio_get_function in floating detection
+#include "Peripherals.h" // Routable GPIO externs (gpioState and friends)
 #include "externVars.h" // For gpioReadingColors and showLEDsCore2
 // External Jerial instance
 extern JerialClass Jerial;
@@ -1657,8 +1657,6 @@ void begin( unsigned long baud ) {
     // Configure UART pins and UART with HW FIFO enabled
     gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_UART );
     gpio_set_function( ASYNC_PASSTHROUGH_UART_RX_PIN, GPIO_FUNC_UART );
-    gpio_function_map[8] = GPIO_FUNC_UART;
-    gpio_function_map[9] = GPIO_FUNC_UART;
 
     uart_init( ASYNC_PASSTHROUGH_UART, baud );
     uart_set_format( ASYNC_PASSTHROUGH_UART, 8, 1, UART_PARITY_NONE );

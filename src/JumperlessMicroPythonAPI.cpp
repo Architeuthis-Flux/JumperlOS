@@ -789,9 +789,6 @@ int jl_gpio_get_floating_read( int pin ) {
 // Forward declaration of getGPIOIndexFromPin (C++ function defined in Peripherals.cpp)
 extern int getGPIOIndexFromPin(int pin);
 
-// Forward declaration of gpio_function_map (defined in Peripherals.cpp)
-extern gpio_function_t gpio_function_map[10];
-
 extern "C" { // reopen extern "C"
 
 // Debug flag for pin ownership - can be toggled via debugger or serial command
@@ -819,18 +816,13 @@ void jl_gpio_claim_pin( int pin ) {
         // and Pin.irq() see a dead pin plus phantom pull-twiddle edges.
         // Released by jl_gpio_release_all_pins() on Python exit / soft reboot.
         globalState.config.gpioPythonOwned[index] = true;
-        
-        // CRITICAL: Update the gpio_function_map to indicate this pin is in SIO mode
-        // This prevents other parts of the system from changing the function
-        gpio_function_map[index] = GPIO_FUNC_SIO;
-        
-        // CRITICAL: Memory barrier to ensure Core 2 sees the change
-        // This ensures the volatile write is visible to Core 2 immediately
+
+        // CRITICAL: Memory barrier to ensure Core 2 sees the ownership change
+        // This ensures the write is visible to Core 2 immediately
         __dmb();  // Data Memory Barrier
-        
+
         if (debugGpioPinOwnership) {
             Serial.printf("\n*** [MicroPython] Pin %d (index %d) CLAIMED - readGPIO will skip ***\n", pin, index);
-            Serial.printf("    GPIO function map[%d] = %d (SIO=%d)\n", index, gpio_function_map[index], GPIO_FUNC_SIO);
         }
     } else {
         Serial.printf("\n*** [MicroPython] WARNING: Pin %d not found in gpioDef ***\n", pin);

@@ -1514,20 +1514,20 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             int functionOnNetIndex = -1; // any other function index 0..9
             if ( netHighlighted > 0 ) {
                 // gpio indices 8 and 9 correspond to UART TX (pin 0) and RX (pin 1)
-                if ( gpioNet[ 8 ] == netHighlighted && gpio_function_map[ 8 ] == GPIO_FUNC_UART ) {
+                if ( gpioNet[ 8 ] == netHighlighted && routableGpioFunction( 8 ) == GPIO_FUNC_UART ) {
                     uartTxOnNet = true;
                 }
-                if ( gpioNet[ 9 ] == netHighlighted && gpio_function_map[ 9 ] == GPIO_FUNC_UART ) {
+                if ( gpioNet[ 9 ] == netHighlighted && routableGpioFunction( 9 ) == GPIO_FUNC_UART ) {
                     uartRxOnNet = true;
                 }
                 // I2C can be on any pins configured as I2C and tied to this net
                 for ( int i = 0; i < 10; i++ ) {
                     if ( gpioNet[ i ] == netHighlighted ) {
-                        if ( gpio_get_function( gpioDef[ i ][ 0 ] ) == GPIO_FUNC_I2C || gpio_function_map[ i ] == GPIO_FUNC_I2C ) {
+                        if ( gpio_get_function( gpioDef[ i ][ 0 ] ) == GPIO_FUNC_I2C ) {
                             i2cOnNet = true;
                             functionOnNetIndex = i;
                             break;
-                        } else if ( gpio_get_function( gpioDef[ i ][ 0 ] ) == GPIO_FUNC_PWM || gpio_function_map[ i ] == GPIO_FUNC_PWM ) {
+                        } else if ( gpio_get_function( gpioDef[ i ][ 0 ] ) == GPIO_FUNC_PWM ) {
                             pwmOnNet = true;
                             functionOnNetIndex = i;
                             break;
@@ -1541,15 +1541,6 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
             int adc = anyAdcConnected( netHighlighted );
             int gpioInputNumber = anyGpioInputConnected( netHighlighted );
             int gpioOutputNumber = anyGpioOutputConnected( netHighlighted );
-
-            // for ( int i = 0; i < 10; i++ ) {
-            //     if ( gpioNet[ i ] == netHighlighted ) {
-            //         Serial.print( "gpioNet[i] = " );
-            //         Serial.println( gpioNet[ i ] );
-            //         Serial.print( "gpio_function_map[i] = " );
-            //         Serial.print( gpio_function_map[ i ] );
-            //     }
-            // }
 
             // Serial.print("adc = ");
             // Serial.println(adc);
@@ -1758,7 +1749,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                             }
                         }
                         // Serial.print(AsyncPassthrough::uartReceived[AsyncPassthrough::uartReceivedHead]);
-                        // gpio_function_t fun = gpio_function_map[ functionOnNetIndex ];
+                        // gpio_function_t fun = routableGpioFunction( functionOnNetIndex );
                         // Serial.print( "Function: " );
                         // Serial.print( fun );
                         // Serial.print( " on GPIO " );
@@ -2037,8 +2028,8 @@ int Highlighting::checkForReadingChanges( void ) {
     bool uartRxOnNet = false;
     {
         if ( showReadingNet > 0 ) {
-            if ( gpioNet[ 8 ] == showReadingNet && gpio_function_map[ 8 ] == GPIO_FUNC_UART ) uartTxOnNet = true;
-            if ( gpioNet[ 9 ] == showReadingNet && gpio_function_map[ 9 ] == GPIO_FUNC_UART ) uartRxOnNet = true;
+            if ( gpioNet[ 8 ] == showReadingNet && routableGpioFunction( 8 ) == GPIO_FUNC_UART ) uartTxOnNet = true;
+            if ( gpioNet[ 9 ] == showReadingNet && routableGpioFunction( 9 ) == GPIO_FUNC_UART ) uartRxOnNet = true;
         }
 
         if ( uartTxOnNet || uartRxOnNet ) {

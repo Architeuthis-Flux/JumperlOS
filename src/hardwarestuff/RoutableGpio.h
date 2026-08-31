@@ -40,26 +40,15 @@ extern volatile uint32_t gpioSlowPWMDutyTicks[10];
 
 extern volatile bool readingGPIO;
 
-struct gpio_function_name_struct {
-    gpio_function_t function;
-    char name[10];
-    };
-
-// The definition's entry count differs by MCU (the RP2350-only mux functions
-// are compiled out on RP2040): 15 entries on RP2350, 10 on RP2040. Size the
-// extern per target so the sizeof-based count below stays correct in every TU
-// (the old Peripherals.h extern said [15] unconditionally - wrong on OG).
-#if defined(PICO_RP2350)
-extern gpio_function_name_struct gpio_function_names[15];
-#else
-extern gpio_function_name_struct gpio_function_names[10];
-#endif
-
-#define GPIO_FUNCTION_NAMES_COUNT                                              \
-    ( (int)( sizeof( gpio_function_names ) / sizeof( gpio_function_names[0] ) ) )
-
-// Pin-aware function name lookup (handles F9 ambiguity per RP2350 GPIO mux)
+// Pin-aware function name lookup (handles F9 ambiguity per RP2350 GPIO mux).
+// The name table itself is file-local to RoutableGpio.cpp - nothing else
+// reads it.
 const char* gpio_function_name_for_pin( uint gpio, gpio_function_t function );
+
+// Register truth for the routable bank: the pin's current mux function, read
+// live from the pads (gpio_get_function) - there is no shadow copy anymore.
+// idx is a gpioDef index 0..9; out of range returns GPIO_FUNC_NULL.
+gpio_function_t routableGpioFunction( int idx );
 
 // gpioDef[i][0] is the pin number
 // gpioDef[i][1] is the RP_GPIO_x define

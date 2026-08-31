@@ -4507,13 +4507,12 @@ int oled::connect( void ) {
     Serial.printf("[OLED] initI2C returned %d\n", found);
     #endif
 
-    // Mark function map so scan/UI reflect I2C role
+    // Mark the bus role so scan/UI reflect it (the pin function itself is
+    // read live from the registers, which initI2C's Wire1.begin just muxed)
     if ( jumperlessConfig.top_oled.sda_pin >= 20 ) {
-        gpio_function_map[ jumperlessConfig.top_oled.sda_pin - 20 ] = GPIO_FUNC_I2C;
         gpioState[ jumperlessConfig.top_oled.sda_pin - 20 ] = 6;
     }
     if ( jumperlessConfig.top_oled.scl_pin >= 20 ) {
-        gpio_function_map[ jumperlessConfig.top_oled.scl_pin - 20 ] = GPIO_FUNC_I2C;
         gpioState[ jumperlessConfig.top_oled.scl_pin - 20 ] = 6;
     }
 

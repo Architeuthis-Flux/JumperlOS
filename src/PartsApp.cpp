@@ -3071,12 +3071,14 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
         Serial.println(" mA - backing off, that isn't a supply pin");
     } else {
         // The GPIO service manages the routable pads: without the same
-        // gpioState/gpio_function_map bookkeeping initI2C does, it
-        // reasserts SIO on pins 22/23 mid-transaction and wedges the bus.
+        // gpioState bus-role marks initI2C sets, it reasserts SIO on pins
+        // 22/23 mid-transaction and wedges the bus. Pin function is register
+        // truth - save it live here, restore via gpio_set_function below
+        // (Wire1.begin in the loop is what actually muxes the pins to I2C).
         uint8_t gsSda = gpioState[2], gsScl = gpioState[3];
-        gpio_function_t gfSda = gpio_function_map[2], gfScl = gpio_function_map[3];
+        gpio_function_t gfSda = gpio_get_function(gpioDef[2][0]),
+                        gfScl = gpio_get_function(gpioDef[3][0]);
         gpioState[2] = gpioState[3] = 6;
-        gpio_function_map[2] = gpio_function_map[3] = GPIO_FUNC_I2C;
         for (int order = 0; order < 2 && !found; order++) {
             int sdaRow = order ? cp.sig[1] : cp.sig[0];
             int sclRow = order ? cp.sig[0] : cp.sig[1];
@@ -3164,8 +3166,8 @@ static bool partsProbeClusterI2C(const ClusterPower& cp, char* out, size_t outLe
         // hand the pads back to the GPIO service exactly as they were
         gpioState[2] = gsSda;
         gpioState[3] = gsScl;
-        gpio_function_map[2] = gfSda;
-        gpio_function_map[3] = gfScl;
+        gpio_set_function(gpioDef[2][0], gfSda);
+        gpio_set_function(gpioDef[3][0], gfScl);
     }
     setDac0voltage(0.0f, 0, 0, false);
     if (bVdd) removeBridgeFromState(DAC0, cp.vddRow, false);
@@ -3502,11 +3504,12 @@ static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
     }
 
     // Input drivers + the pull-up reader. The pins are CLAIMED the way the
-    // MicroPython wrappers claim them (owned flag + GPIO_FUNC_SIO + memory
-    // barrier) - core 2's readGPIO() twiddles unowned pads' pulls and
+    // MicroPython wrappers claim them (owned flag + memory barrier) -
+    // core 2's readGPIO() twiddles unowned pads' pulls and
     // input buffers between scans, and on the bench that unmade every
     // driven level mid-vector (the chip read floating inputs = 1111 =
-    // blank). Configs saved for the restoreRovingGpio-idiom teardown;
+    // blank). Configs saved for the restoreRovingGpio-idiom teardown
+    // (pin function saved live, restored via gpio_set_function);
     // input buffers OFF - the E9 rule.
     int savedDir[10], savedPull[10];
     uint8_t savedFloat[10], savedState[10], savedOwned[10];
@@ -3522,11 +3525,10 @@ static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
             savedFloat[nCfg] = globalState.config.gpioReadFloating[gi];
             savedState[nCfg] = gpioState[gi];
             savedOwned[nCfg] = globalState.config.gpioPythonOwned[gi] ? 1 : 0;
-            savedFunc[nCfg] = gpio_function_map[gi];
+            savedFunc[nCfg] = gpio_get_function(gpioDef[gi][0]);
             nCfg++;
             int pin = gpioDef[gi][0];
             globalState.config.gpioPythonOwned[gi] = true;
-            gpio_function_map[gi] = GPIO_FUNC_SIO;
             __dmb();
             globalState.config.gpioReadFloating[gi] = 0;
             gpioReadFloating[gi] = 0;
@@ -3632,7 +3634,7 @@ static int partsRunVectorSet(const PartDbVectorSet& vs, int baseRow,
         globalState.config.gpioReadFloating[gi] = savedFloat[i];
         gpioReadFloating[gi] = savedFloat[i];
         gpioState[gi] = savedState[i];
-        gpio_function_map[gi] = savedFunc[i];
+        gpio_set_function(pin, savedFunc[i]);
         globalState.config.gpioPythonOwned[gi] = (savedOwned[i] != 0);
         __dmb();
     }

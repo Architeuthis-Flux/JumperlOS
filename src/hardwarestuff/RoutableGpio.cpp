@@ -16,7 +16,7 @@
 #include "CH446Q.h"       // sendXYrawUnchecked (erattaClearGPIO)
 #include "Highlighting.h" // brightenedNet / highlightTimer (probeToggle, toggleGPIO)
 #include "NetsToChipConnections.h" // numberOfNets (anyGpio* predicates)
-#include "Peripherals.h" // gpio_function_map, showADCreadings, getDacVoltage, gpioOutput
+#include "Peripherals.h" // showADCreadings, getDacVoltage, initI2C
 #include "Probing.h"       // measuredState enum, ProbeButton
 #include "States.h"        // globalState
 #include "configManager.h" // configChanged (updateGPIOConfigFromState)
@@ -407,7 +407,13 @@ int gpioReadWithFloating(
 
 // The GPIO function mux differs by MCU: RP2350 adds HSTX, PIO2, XIP_CS1,
 // CORESIGHT_TRACE and UART_AUX functions that don't exist on the RP2040.
-gpio_function_name_struct gpio_function_names[] = {
+// File-local: gpio_function_name_for_pin() below is the only reader.
+struct gpio_function_name_struct {
+    gpio_function_t function;
+    char name[10];
+    };
+
+static gpio_function_name_struct gpio_function_names[] = {
 #if defined(PICO_RP2350)
     { GPIO_FUNC_HSTX, "HSTX" },
 #endif
@@ -431,6 +437,21 @@ gpio_function_name_struct gpio_function_names[] = {
     { GPIO_FUNC_UART_AUX, "UART_AUX" },
 #endif
     { GPIO_FUNC_NULL, "NULL" } };
+
+// sizeof-based so the per-MCU entry count above stays correct on both targets.
+#define GPIO_FUNCTION_NAMES_COUNT                                              \
+    ( (int)( sizeof( gpio_function_names ) / sizeof( gpio_function_names[0] ) ) )
+
+// Register truth for the routable bank (Phase 1b-i): the pin's current mux
+// function straight from the pads. There is no shadow function map anymore -
+// anything that wants to know what a routable pin is doing asks the
+// hardware. idx is a gpioDef index 0..9.
+gpio_function_t routableGpioFunction( int idx ) {
+    if ( idx < 0 || idx > 9 ) {
+        return GPIO_FUNC_NULL;
+    }
+    return gpio_get_function( (uint)gpioDef[ idx ][ 0 ] );
+}
 
 // Pin-aware function name lookup for RP2350
 // Function code 9 maps to different peripherals depending on the GPIO pin:
@@ -532,11 +553,8 @@ void printGPIOState( Stream* target ) {
 
     target->print( " function:\t" );
     for ( int i = 0; i < 10; i++ ) {
-        gpio_function_map[ i ] = gpio_get_function( gpioDef[ i ][ 0 ] );
+        target->print( gpio_function_name_for_pin( gpioDef[ i ][ 0 ], routableGpioFunction( i ) ) );
 
-        target->print( gpio_function_name_for_pin( gpioDef[ i ][ 0 ], gpio_function_map[ i ] ) );
-
-    
         target->print( "\t" );
     }
     target->println( );
@@ -700,20 +718,6 @@ void __not_in_flash_func(readGPIO)( ) {
         } else if ( gpioNet[ i ] == -3 ) {
             // gpioState[i] = 5;
             continue;
-        } else if ( globalState.config.gpioDirection[ i ] == 0 ) {
-            
-            /*if ( gpioState[ i ] == 0 ) {
-                // gpio_set_dir(gpioDef[i][0], true);
-                // gpio_put(gpioDef[i][0], 0);
-            } else if ( gpioState[ i ] == 1 ) {
-                // gpio_set_dir(gpioDef[i][0], true);
-                // gpio_put(gpioDef[i][0], 1);
-            }
-            */
-            
-            gpioOutput[ i ] = gpioState[ i ];
-
-            // continue;
         }
 
         if ( gpioNet[ i ] >= 0 ) {
@@ -1000,7 +1004,7 @@ int anyGpioOutputConnected( int net ) {
             if ( gpioNet[ i ] > 0 && gpioNet[ i ] <= numberOfNets ) {
                 if ( globalState.config.gpioDirection[ i ] == 0 ) {
                     // Only treat as GPIO output if pin function is SIO
-                    if ( gpio_function_map[ i ] == GPIO_FUNC_SIO ) {
+                    if ( routableGpioFunction( i ) == GPIO_FUNC_SIO ) {
                         return i;
                     }
                 }
@@ -1011,7 +1015,7 @@ int anyGpioOutputConnected( int net ) {
             if ( gpioNet[ i ] == net ) {
                 if ( globalState.config.gpioDirection[ i ] == 0 ) {
                     // Only treat as GPIO output if pin function is SIO
-                    if ( gpio_function_map[ i ] == GPIO_FUNC_SIO ) {
+                    if ( routableGpioFunction( i ) == GPIO_FUNC_SIO ) {
                         return i;
                     }
                 }
@@ -1032,7 +1036,7 @@ int anyGpioInputConnected( int net ) {
         for ( int i = 0; i < 10; i++ ) {
             if ( gpioNet[ i ] > 0 && gpioNet[ i ] <= numberOfNets ) {
                 if ( globalState.config.gpioDirection[ i ] == 1 ) {
-                    if ( gpio_function_map[ i ] == GPIO_FUNC_SIO ) {
+                    if ( routableGpioFunction( i ) == GPIO_FUNC_SIO ) {
                         return i;
                     }
                 }
@@ -1043,7 +1047,7 @@ int anyGpioInputConnected( int net ) {
         for ( int i = 0; i < 10; i++ ) {
             if ( gpioNet[ i ] == net ) {
                 if ( globalState.config.gpioDirection[ i ] == 1 ) {
-                    if ( gpio_function_map[ i ] == GPIO_FUNC_SIO ) {
+                    if ( routableGpioFunction( i ) == GPIO_FUNC_SIO ) {
                         return i;
                     }
                 }
@@ -1347,7 +1351,6 @@ int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
 
     // Set up PWM
     gpio_set_function( physical_pin, GPIO_FUNC_PWM );
-    gpio_function_map[ gpio_index ] = GPIO_FUNC_PWM;
 
     // Find out which PWM slice is connected to this GPIO
     uint slice_num = pwm_gpio_to_slice_num( physical_pin );
@@ -1545,7 +1548,7 @@ void updateStateFromGPIOConfig(int onlyIdx) {
     if (i == claimIdx) {
       continue;
     }
-    if (gpio_function_map[i] == GPIO_FUNC_SIO) {
+    if (routableGpioFunction(i) == GPIO_FUNC_SIO) {
 
       switch (globalState.config.gpioDirection[i]) {
         case 0: // output (starts low)
@@ -1615,7 +1618,7 @@ void updateGPIOConfigFromState(void) {
       continue;
     }
 
-    if (gpio_function_map[i] == GPIO_FUNC_SIO) {
+    if (routableGpioFunction(i) == GPIO_FUNC_SIO) {
 
       switch (gpioState[i]) {
         case 0: // output low
