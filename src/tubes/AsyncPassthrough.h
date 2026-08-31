@@ -215,6 +215,17 @@ namespace AsyncPassthrough {
      * After an idle period, UART framing is guaranteed to be correct
      */
     bool isLineIdle();
+
+    /**
+     * Has any REAL byte crossed the Arduino UART passthrough since boot, in
+     * either direction? Sticky - latches true and never clears. This is the
+     * routable-GPIO availability gate's signal for the UART Tx/Rx pins: a
+     * DTR-toggle phantom connect moves no bytes and does NOT latch it.
+     * Tradeoff (deliberate, permissive): latched at the consume points, so
+     * bytes drained while CDC is disconnected are missed - an untouched UART
+     * pin stays assignable.
+     */
+    bool uartTrafficSinceBoot();
     
     /**
      * Get the time in microseconds since the last byte was received

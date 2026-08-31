@@ -98,6 +98,19 @@ static uint32_t s_tag_parsing_disabled_time = 0;  // When tag parsing was disabl
 static uint32_t s_last_usb_to_uart_data_time = 0;  // Last time USB->UART data was sent
 static uint32_t s_tag_parsing_inactivity_timeout_ms = 0;  // Re-enable after this many ms of no data (0 = disabled)
 
+// Sticky since-boot traffic latches for uartTrafficSinceBoot() - the routable
+// GPIO availability gate's "has the UART actually been used" signal. Latched
+// TRUE at the REAL byte-flow points (the usb->uart forward push and the
+// uart->usb ring pops) and never cleared. Deliberately NOT the existing
+// timestamps: s_last_usb_to_uart_data_time is stamped by byte-less DTR
+// toggles (checkDTRState -> disableTagParsingWithInactivityTimeout /
+// enterFlashMode) and s_last_rx_byte_time_us only gets real values in the
+// #if 0'd dead ISR. Tradeoff: consume-point latching misses bytes drained
+// while CDC is disconnected (ring discarded unread) - chosen deliberately;
+// permissive is correct here (an untouched UART pin stays assignable).
+static bool s_usb_to_uart_traffic_since_boot = false;
+static bool s_uart_to_usb_traffic_since_boot = false;
+
 
 bool async_begun = false;
 // ============================================================================
@@ -1370,6 +1383,8 @@ static inline void bridge_usb_to_uart( uint8_t itf ) {
             // DMA moves bytes into the UART FIFO immediately, and it never
             // blocks Core 0 (the old flashing path busy-waited on the FIFO).
             if ( forward_idx > 0 ) {
+                // Real host->remote bytes about to hit the UART TX ring.
+                s_usb_to_uart_traffic_since_boot = true;
                 // Update USB→UART "last data" snapshot (keep last LAST_DATA_SNAPSHOT_SIZE bytes)
                 for ( size_t fi = 0; fi < forward_idx; fi++ ) {
                     s_last_usb_to_uart_buf[s_last_usb_to_uart_head] = (char)forward_buf[fi];
@@ -1443,6 +1458,7 @@ static inline void bridge_uart_to_usb( uint8_t itf ) {
         while ( ring_pop_byte( &c ) && forwardCount < MAX_FORWARD_BYTES ) {
             // Serial.write( c );
             // gpioReadingColors[9] = 0x200400;
+            s_uart_to_usb_traffic_since_boot = true; // real remote->host byte consumed
             s_forward_last_byte_us = micros();
             wrote++;
             processed++;
@@ -1481,6 +1497,8 @@ static inline void bridge_uart_to_usb( uint8_t itf ) {
         }
         
         if ( !ring_pop_byte( &c ) ) break;
+
+        s_uart_to_usb_traffic_since_boot = true; // real remote->host byte consumed
 
         // Update the RX "last data" snapshot for the OLED. This used to live in
         // the per-byte ISR (ring_push_byte); with DMA filling the ring, the
@@ -2676,6 +2694,13 @@ bool isLineIdle() {
     uint32_t now = time_us_32();
     uint32_t elapsed = now - s_last_rx_byte_time_us;
     return elapsed > UART_IDLE_THRESHOLD_US;
+}
+
+bool uartTrafficSinceBoot() {
+    // OR of the two sticky byte-flow latches (see their definition comment up
+    // top for why the existing timestamps are unusable and what consume-point
+    // latching deliberately misses).
+    return s_usb_to_uart_traffic_since_boot || s_uart_to_usb_traffic_since_boot;
 }
 
 uint32_t getTimeSinceLastRxUs() {

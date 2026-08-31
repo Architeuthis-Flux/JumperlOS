@@ -5515,7 +5515,11 @@ int Probing::chooseGPIO( int skipInputOutput ) {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {
             globalState.config.gpioDirection[ gpioChosen ] = 1;
-            updateStateFromGPIOConfig( gpioChosen );
+            // applyPinConfig = updateStateFromGPIOConfig(idx) + markDirty().
+            // This site changed config with NO markDirty (the sibling
+            // chooseGPIOinputOutput does it right), so the new direction
+            // silently never persisted to the slot.
+            applyPinConfig( gpioChosen );
             // gpioState[gpioChosen] = 4;
             // updateGPIOConfigFromState();
             // configChanged = true;
@@ -5525,7 +5529,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 4;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 1) {
             globalState.config.gpioDirection[ gpioChosen ] = 0;
-            updateStateFromGPIOConfig( gpioChosen );
+            applyPinConfig( gpioChosen ); // see the outIn == 1 note above
             // gpioState[gpioChosen] = 0;
             // updateGPIOConfigFromState();
             // configChanged = true;

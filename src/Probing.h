@@ -575,6 +575,11 @@ void probeMapRange(int* mapMin, int* mapMax);
 void probeGpioPowerHwClaim(int gpioDefIdx);
 void probeGpioPowerHwRelease(int gpioDefIdx);
 
+// The live claim's gpioDef index (-1 = no claim). GPIO-bank config appliers
+// (updateStateFromGPIOConfig) and the availability gate
+// (routableGpioAvailable) skip/deny the claimed pin through this.
+int probeGpioPowerClaimIdx(void);
+
 // The two switch-position detectors, exposed for the calibration app and the
 // self test (both live in Probing.cpp with the classifier). Return a POSITION:
 // 0 = MEASURE, 1 = SELECT, -1 = no opinion.

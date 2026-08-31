@@ -13,11 +13,13 @@
 #include "pico/time.h"     // repeating timers for slow PWM
 
 #include "ArduinoStuff.h" // flashingArduino (readGPIO skips a mid-flash Arduino)
+#include "AsyncPassthrough.h" // uartTrafficSinceBoot (routableGpioAvailable)
 #include "CH446Q.h"       // sendXYrawUnchecked (erattaClearGPIO)
 #include "Highlighting.h" // brightenedNet / highlightTimer (probeToggle, toggleGPIO)
+#include "InfraPaths.h"   // infraOwnsNode (routableGpioAvailable)
 #include "NetsToChipConnections.h" // numberOfNets (anyGpio* predicates)
 #include "Peripherals.h" // showADCreadings, getDacVoltage, initI2C
-#include "Probing.h"       // measuredState enum, ProbeButton
+#include "Probing.h"       // measuredState enum, ProbeButton, probeGpioPowerClaimIdx
 #include "States.h"        // globalState
 #include "configManager.h" // configChanged (updateGPIOConfigFromState)
 #include <oled.h>
@@ -92,20 +94,38 @@ volatile uint32_t gpioSlowPWMCounter[ 10 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 volatile uint32_t gpioSlowPWMPeriod[ 10 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 volatile uint32_t gpioSlowPWMDutyTicks[ 10 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-void initGPIO( void ) {
+// ============================================================================
+// THE central OG guard (Phase 1b-ii). Every mutating entry point in this
+// module opens with a one-line check on this helper instead of carrying its
+// own #if block - this is the ONLY OG_JUMPERLESS conditional in the file.
+//
+// Why it must fail closed: gpioDef describes the V5 routable-GPIO bank, but on
+// the OG (RP2040) those same physical pins are real control lines:
+//   20-23 = CH446Q crossbar chip selects for chips I/J/K/L (setCSex) - re-mux
+//           one to a GPIO input and every breadboard<->SF (nano/DAC/ADC)
+//           connection silently fails to program while A-H keep working
+//   24    = CH446Q RESET - driving it can wedge the whole crossbar
+//   25    = WS2812 breadboard-LED data (PIO-claimed by initLEDs on core1) -
+//           gpio_init() here races that claim, wins, and leaves the strip
+//           dark (observed: pin 25 stuck in SIO)
+//   26-27 = RP2040 ADC inputs - driving them corrupts every reading
+//   0/1   = the OG's real GPIO 0 and the MCP4822 DAC SPI chip select
+// A lost guard doesn't no-op - it drives those lines. The OG's only routable
+// GPIO (RP_GPIO_0 + UART TX/RX) are owned by their own subsystems.
+// ponytail: when the OG routable-GPIO map is finalized (Phase 2) this should
+// consult board::currentBoard().gpio instead of a compile-time macro.
+static inline bool routableGpioAbsent( void ) {
 #if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; it does NOT apply to the
-    // OG. On the OG pin 25 is the WS2812 breadboard-LED data line (claimed by
-    // PIO in initLEDs on core1) and pins 26-29 are the RP2040 ADC inputs. Running
-    // gpio_init() over 20-27 here re-muxes pin 25 from PIO back to SIO - and
-    // because initDAC()->initGPIO() on core0 races initLEDs() on core1, it wins
-    // and leaves the whole strip dark (observed: pin 25 stuck in SIO). It would
-    // also stomp the ADC pins. The OG's only routable GPIO (RP_GPIO_0 + UART
-    // TX/RX) are owned by their own subsystems, so skip this bank entirely.
-    // ponytail: when the OG routable-GPIO map is finalized (Phase 2) this should
-    // iterate board::currentBoard().gpio instead of the hard-coded V5 pins.
-    return;
+    return true;
+#else
+    return false;
 #endif
+}
+
+void initGPIO( void ) {
+    if ( routableGpioAbsent( ) ) {
+        return;
+    }
     for ( int i = 0; i < 8; i++ ) {
         int gpio_pin = 0;
         if ( i < 8 ) {         // Regular GPIO pins 0-7 are on pins 20-27
@@ -162,13 +182,11 @@ int getGPIOIndexFromPin(int pin) {
 
 void setGPIO( void ) {
     ///return;
-#if defined(OG_JUMPERLESS)
-    // See initGPIO(): the V5 routable-GPIO bank (pins 20-27) isn't present on the
-    // OG, and pins 25 (WS2812 LED) / 26-29 (ADC) must never be driven as SIO here.
-    // setGPIO() runs on every refreshConnections(), so leaving it active would
-    // re-assert gpio_set_dir()/gpio_put() on the LED pin each refresh. Skip.
-    return;
-#endif
+    // Runs on every refreshConnections() - on OG that would re-assert
+    // gpio_set_dir()/gpio_put() on the LED/CS bank each refresh.
+    if ( routableGpioAbsent( ) ) {
+        return;
+    }
     // Restore GPIO configurations from jumperlessConfig after
     // refreshConnections()
     for ( int i = 0; i < 10; i++ ) {
@@ -248,6 +266,14 @@ void setGPIO( void ) {
 
 int gpioReadWithFloating(
     int pin, unsigned long usDelay ) { // 2 = floating, 1 = high, 0 = low
+    // On OG never twiddle pulls/input-enable on this bank (CH446Q CS/RESET,
+    // WS2812 data, ADC inputs - see routableGpioAbsent()): just report the
+    // plain level. Safe before the lock: on OG every pull/IE-twiddling path
+    // is behind the central guard, so no concurrent twiddler exists and a
+    // bare gpio_get() needs no serialization.
+    if ( routableGpioAbsent( ) ) {
+        return gpio_get( pin );
+    }
     enum measuredState state = unknownState;
     int settleDelay = 18;
     int reading = -1;
@@ -781,6 +807,12 @@ void __not_in_flash_func(readGPIO)( ) {
 }
 
 void erattaClearGPIO( int gpio ) {
+    // NEW coverage (was unguarded, reachable via cmd_erattaClear on OG): the
+    // chip-L crosspoint layout below is the V5 map - on OG these
+    // sendXYrawUnchecked() calls would program bogus crosspoints.
+    if ( routableGpioAbsent( ) ) {
+        return;
+    }
 
     int freeYL = -1;
     if ( gpio == -1 ) {
@@ -820,6 +852,13 @@ void erattaClearGPIO( int gpio ) {
 }
 
 int probeToggle( int buttonState ) {
+    // OG coverage note: this function's ONLY pin mutations flow through
+    // toggleGPIO(), which carries the central routableGpioAbsent() guard and
+    // returns -2 ("no gpio found") on OG - so the connect path falls through
+    // to -6/-3 and the disconnect path to -5/-2 exactly as an empty bank
+    // reads today. An entry guard here would be WRONG: the -5 return drives
+    // the two-press regular-net disconnect warning, which is live OG
+    // functionality. (The DAC block below is dead - `&& false`.)
 
     // If buttonState is -1, read from hardware (legacy behavior)
     if ( buttonState == -1 ) {
@@ -904,15 +943,33 @@ int probeToggle( int buttonState ) {
 }
 
 int toggleGPIO( int lowHigh, int gpio, int onlyCheck ) {
+    // NEW coverage (was unguarded): gpio_put()/dir mutations on the gpioDef
+    // bank. -2 reads as "no gpio found/connected" to both probeToggle paths -
+    // the true answer on OG, where this bank doesn't exist.
+    if ( routableGpioAbsent( ) ) {
+        return -2;
+    }
 
     int gpioOutputFound = -2;
-    if ( gpio < 0 || gpio > 9 ) {
+    if ( gpio >= 0 && gpio <= 9 ) {
+        // An explicit in-range arg is the GPIO INDEX (0..9), resolved to its
+        // physical pin through gpioDef. (Pre-fix, an explicit arg skipped the
+        // search entirely, leaving gpioOutputFound = -2 - negative-index reads
+        // of gpioDirection/gpioDef, a stray gpioState[] write, and gpio_put()
+        // on the raw 0..9 value as a physical pin. Latent: no live caller
+        // passes an explicit arg today, only probeToggle with -1.)
+        gpioOutputFound = gpio;
+        gpio = gpioDef[ gpioOutputFound ][ 0 ];
+    } else {
         for ( int i = 0; i < 10; i++ ) {
-            if ( gpioNet[ i ] == brightenedNet ) {
-                if ( globalState.config.gpioDirection[ i ] == 0 ) {
-                    gpio = gpioDef[ i ][ 0 ];
-                    gpioOutputFound = i;
-                }
+            // Keep scanning past input pins on the net: only an OUTPUT
+            // (direction 0) match ends the search. (The old loop broke on the
+            // first gpioNet match even when that pin was an input, shadowing
+            // an output later in the bank on the same net -> spurious -2.)
+            if ( gpioNet[ i ] == brightenedNet &&
+                 globalState.config.gpioDirection[ i ] == 0 ) {
+                gpio = gpioDef[ i ][ 0 ];
+                gpioOutputFound = i;
                 break;
             }
         }
@@ -1081,20 +1138,14 @@ int anyAdcConnected( int net ) {
     return -1;
 }
 
-#if defined(OG_JUMPERLESS)
-// The PWM family resolves gpio_pin 1-8 through gpioDef to physical pins 20-27 -
-// the V5 routable-GPIO bank, which does NOT exist on the OG. There those pins
-// are the crosspoint chip selects for chips I-L (20-23), RESETPIN (24), the
-// WS2812 breadboard-LED data line (25) and the RP2040 ADC inputs (26-27), so
-// muxing one to GPIO_FUNC_PWM (or gpio_put()ing it from the slow-PWM timer
-// callback) corrupts routing, the LED strip or the ADCs. Same bank initGPIO()
-// and setGPIO() already refuse to touch.
-// ponytail: drop this once the OG routable-GPIO map (Phase 2) lands.
-static int pwmUnavailableOnOG( void ) {
-    Serial.println( "PWM isn't available on the Jumperless OG" );
-    return -1;
-}
-#endif
+// The PWM family (8 entry points below) resolves gpio_pin 1-8 through gpioDef
+// to physical pins 20-27 - on OG those are real control lines (see
+// routableGpioAbsent()), so each opens with the central guard returning a
+// SILENT -1: the MicroPython jl_pwm_* wrappers and DisplayBus call these with
+// no OG gate of their own and depend on the bare -1. (The old OG-only
+// "PWM isn't available" Serial-printing helper and its 4 call blocks were
+// statically unreachable - each sat behind a primary guard's unconditional
+// return -1 - and are deleted with this change.)
 
 // Slow PWM Functions (for frequencies below 10Hz)
 // Hardware timer callback for slow PWM
@@ -1123,17 +1174,9 @@ bool __not_in_flash_func( slowPWMTimerCallback )( repeating_timer_t* rt ) {
 
 // Setup slow PWM using hardware timer
 int setupSlowPWM( int gpio_pin, float frequency, float duty_cycle ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
-#if defined(OG_JUMPERLESS)
-    return pwmUnavailableOnOG( );
-#endif
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1199,14 +1242,9 @@ int setupSlowPWM( int gpio_pin, float frequency, float duty_cycle ) {
 
 // Set slow PWM duty cycle
 int setSlowPWMDutyCycle( int gpio_pin, float duty_cycle ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1241,14 +1279,9 @@ int setSlowPWMDutyCycle( int gpio_pin, float duty_cycle ) {
 
 // Set slow PWM frequency
 int setSlowPWMFrequency( int gpio_pin, float frequency ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1277,17 +1310,9 @@ int setSlowPWMFrequency( int gpio_pin, float frequency ) {
 
 // Stop slow PWM
 int stopSlowPWM( int gpio_pin ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
-#if defined(OG_JUMPERLESS)
-    return pwmUnavailableOnOG( );
-#endif
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1320,17 +1345,9 @@ int stopSlowPWM( int gpio_pin ) {
 
 // PWM Functions
 int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
-#if defined(OG_JUMPERLESS)
-    return pwmUnavailableOnOG( );
-#endif
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1392,14 +1409,9 @@ int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
 }
 
 int setPWMDutyCycle( int gpio_pin, float duty_cycle ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1432,14 +1444,9 @@ int setPWMDutyCycle( int gpio_pin, float duty_cycle ) {
 }
 
 int setPWMFrequency( int gpio_pin, float frequency ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1472,17 +1479,9 @@ int setPWMFrequency( int gpio_pin, float frequency ) {
 }
 
 int stopPWM( int gpio_pin ) {
-#if defined(OG_JUMPERLESS)
-    // The pins-20-27 bank is the V5 routable-GPIO map; on OG these are the
-    // CH446Q chip selects (20-23), RESETPIN (24), WS2812 data (25) and the
-    // ADC inputs (26-27). PWM on them drives real control lines - refuse
-    // until the Phase 2 OG map lands (audit #21, 2026-08-26).
-    return -1;
-#endif
-
-#if defined(OG_JUMPERLESS)
-    return pwmUnavailableOnOG( );
-#endif
+    if ( routableGpioAbsent( ) ) {
+        return -1; // silent by contract: jl_pwm_* / DisplayBus depend on bare -1
+    }
     // Validate GPIO pin number (1-8 for regular GPIO pins)
     if ( gpio_pin < 1 || gpio_pin > 8 ) {
         return -1; // Invalid pin
@@ -1520,14 +1519,9 @@ int stopPWM( int gpio_pin ) {
 }
 
 void updateStateFromGPIOConfig(int onlyIdx) {
-#if defined(OG_JUMPERLESS)
-  // SKIPPED on OG: same hazard as readSettingsFromConfig()/setGPIO() etc - the
-  // gpioDef bank (pins 20-27) is the V5 routable-GPIO map, but on the OG pins
-  // 20-23 are the CH446Q chip selects for chips I/J/K/L. Driving them here
-  // (reachable via the probe GPIO-direction selection, a Phase-2 path on OG)
-  // would re-mux those CS lines to inputs and break all SF routing.
-  return;
-#endif
+  if ( routableGpioAbsent( ) ) {
+    return;
+  }
   // NOTE: the probe's GPIO buffer-power claim (debug.probe_power_gpio) holds
   // one of these pins output-HIGH; forcing it through the "output starts
   // low" default here grounded ROUTABLE_BUFFER_IN and broke measure-mode
@@ -1535,7 +1529,6 @@ void updateStateFromGPIOConfig(int onlyIdx) {
   // (An old stray `break` also made this function only ever touch the FIRST
   // SIO pin - i.e. GPIO_1, the usual claim - regardless of which pin the
   // caller had changed. Callers now pass the index they modified.)
-  extern int probeGpioPowerClaimIdx(void);
   int claimIdx = probeGpioPowerClaimIdx();
 
   for (int i = 0; i < 10; i++) {  // Changed from 8 to 10 to include UART pins
@@ -1590,18 +1583,9 @@ void updateStateFromGPIOConfig(int onlyIdx) {
   }
 
 void updateGPIOConfigFromState(void) {
-#if defined(OG_JUMPERLESS)
-  // The V5 routable-GPIO bank described by gpioDef (pins 20-27) does NOT exist
-  // on the OG. There, pins 20-23 are the CH446Q chip selects for chips I/J/K/L,
-  // pin 24 is RESET, pin 25 is the WS2812 LED data line and 26-27 are ADC
-  // inputs. Running gpio_set_dir()/gpio_set_pulls() over that bank here re-muxes
-  // the SF chip-select pins into GPIO inputs, after which setCSex() can no
-  // longer assert them -- so every breadboard<->SF (nano/DAC/ADC) connection
-  // silently fails to program while A-H (CS 6-13, untouched) keep working. The
-  // OG has no user-routable GPIO bank here, so skip entirely (matches
-  // initGPIO()/setGPIO()).
-  return;
-#endif
+  if ( routableGpioAbsent( ) ) {
+    return;
+  }
   // Serial.println("updateGPIOConfigFromState");
   // Serial.flush();
   // return;
@@ -1700,17 +1684,12 @@ void updateGPIOConfigFromState(void) {
 // The readSettingsFromConfig() GPIO block (remembering/PersistentStuff.cpp),
 // extracted verbatim - readSettingsFromConfig() now calls this instead.
 void applyGpioSettingsFromConfig(void) {
-#if !defined(OG_JUMPERLESS)
-  // SKIPPED on OG: the gpioDef bank (pins 20-27) is the V5 routable-GPIO map.
-  // On the OG pins 20-23 are the CH446Q chip selects for chips I/J/K/L, 24 is
-  // RESET, 25 is the WS2812 LED data line and 26-27 are ADC inputs.
-  // readSettingsFromConfig() runs at boot and on every config change, AFTER
-  // initCH446Q() has set 20-23 to OUTPUT on core1. The default routable-GPIO
-  // config is input+pulldown, so this loop drives pins 20-23 back to inputs
-  // (gpio_set_dir false) -- setCSex() can then no longer assert them and every
-  // breadboard<->SF (nano/DAC/ADC) connection silently fails to program while
-  // A-H (CS 6-13, untouched) keep working. Matches the OG guards in
-  // initGPIO()/setGPIO()/updateGPIOConfigFromState()/applyStateToHardware().
+  // Runs at boot and on every config change, AFTER initCH446Q() has set the
+  // OG's CS pins 20-23 to OUTPUT on core1 - the central guard replaces the
+  // whole-body #if wrapper this function carried through Phase 1a.
+  if ( routableGpioAbsent( ) ) {
+    return;
+  }
   for (int i = 0; i < 10; i++) {  // Changed from 8 to 10 to include UART pins
 
     // Combine direction and pull settings into a single value
@@ -1777,5 +1756,163 @@ void applyGpioSettingsFromConfig(void) {
         }
      // }
     }
-#endif // !OG_JUMPERLESS
+}
+
+// The applyStateToHardware() GPIO loop (routing/States.cpp), moved here
+// verbatim so the central guard covers it - it was the 19th scattered
+// OG_JUMPERLESS block, wrapping a fourth copy of the config->hardware apply
+// loop that runs on every slot load. Its semantics deliberately differ from
+// updateStateFromGPIOConfig() and are preserved EXACTLY:
+//   - only skip: bus-role pins (gpioState 6) - no FUNC_SIO gate, no probe
+//     power-claim skip, no Python-owned skip, no PWM skip
+//   - pulls are applied per config even to OUTPUT pins
+//   - outputs keep their loaded level: gpio_put(pin, gpioState[i]) restores
+//     the slot's saved high/low instead of forcing "starts low"
+// (Closest relative is setGPIO(), minus its PWM/Python skips.)
+void applyStateGpioToHardware(void) {
+    if ( routableGpioAbsent( ) ) {
+        return;
+    }
+    for (int i = 0; i < 10; i++) {
+        uint8_t gpio_pin = gpioDef[i][0];
+
+        // Skip bus-role pins (gpioState 6: the display service's soft-I2C),
+        // same guard as setGPIO(). A slot load otherwise re-asserts the config
+        // direction/pulls on the live bus - a PULLDOWN across SDA's ACK window
+        // - and re-stamps state 4, which sends readGPIO down the pull-twiddling
+        // float path mid-transaction.
+        if (gpioState[i] == 6) {
+            continue;
+        }
+
+        // Apply direction to hardware
+        if (globalState.config.gpioDirection[i] == 0) {
+            gpio_set_dir(gpio_pin, true);  // output
+        } else {
+            gpio_set_dir(gpio_pin, false);  // input
+        }
+
+        // Apply pull resistors to hardware and update gpioState for animations
+        switch (globalState.config.gpioPulls[i]) {
+            case 0: // pulldown
+                gpio_set_pulls(gpio_pin, false, true);
+                if (globalState.config.gpioDirection[i] == 1) {
+                    gpioState[i] = 4;  // input with pulldown
+                }
+                break;
+            case 1: // pullup
+                gpio_set_pulls(gpio_pin, true, false);
+                if (globalState.config.gpioDirection[i] == 1) {
+                    gpioState[i] = 3;  // input with pullup
+                }
+                break;
+            case 2: // no pull
+                gpio_set_pulls(gpio_pin, false, false);
+                if (globalState.config.gpioDirection[i] == 1) {
+                    gpioState[i] = 2;  // input with no pull
+                }
+                break;
+            case 3: // bus keeper
+                gpio_set_pulls(gpio_pin, true, true);
+                if (globalState.config.gpioDirection[i] == 1) {
+                    gpioState[i] = 7;  // bus keeper mode
+                }
+                break;
+            default:
+                gpio_set_pulls(gpio_pin, false, false);
+                if (globalState.config.gpioDirection[i] == 1) {
+                    gpioState[i] = 2;  // input with no pull
+                }
+                break;
+        }
+
+        // Set initial output state for output pins
+        if (globalState.config.gpioDirection[i] == 0) {
+            gpio_put(gpio_pin, gpioState[i]);
+        }
+    }
+}
+
+// The single mutation funnel (Phase 1b-ii). Applies globalState.config for
+// one gpioDef index to hardware + gpioState[] and marks the state dirty for
+// the slot autosave. Assigning a pin RE-MUXES it to SIO: a live PWM claim is
+// displaced through its own stop path (stopPWM/stopSlowPWM force SIO and
+// clear both flag sets), anything else (UART passthrough, stale I2C) is
+// re-muxed directly - otherwise updateStateFromGPIOConfig's SIO gate would
+// silently drop the change on exactly the pins a user is reassigning.
+// Pins a service OWNS are refused outright (fail closed even if the caller
+// skipped the routableGpioAvailable() check).
+void applyPinConfig( int idx ) {
+    if ( idx < 0 || idx > 9 ) {
+        return;
+    }
+    if ( routableGpioAbsent( ) ) {
+        return;
+    }
+    if ( gpioState[ idx ] == 6 ) {
+        return; // bus role: OLED / soft-I2C holds this pin
+    }
+    if ( globalState.config.gpioPythonOwned[ idx ] ) {
+        return; // MicroPython machine.Pin claim
+    }
+    if ( probeGpioPowerClaimIdx( ) == idx ) {
+        return; // probe buffer-power claim holds it output-HIGH
+    }
+    if ( idx <= 7 ) { // PWM only exists on GPIO 1-8
+        if ( gpioSlowPWMEnabled[ idx ] ) {
+            stopSlowPWM( idx + 1 );
+        }
+        if ( gpioPWMEnabled[ idx ] ) {
+            stopPWM( idx + 1 );
+        }
+    }
+    if ( routableGpioFunction( idx ) != GPIO_FUNC_SIO ) {
+        gpio_set_function( (uint)gpioDef[ idx ][ 0 ], GPIO_FUNC_SIO );
+    }
+    updateStateFromGPIOConfig( idx );
+    globalState.markDirty( );
+}
+
+// May the USER assign this pin? (Phase 1b-ii availability gate.) Ordered most
+// specific owner first so ownerOut names the real holder. Deliberately NO
+// user-bridge check: a user bridge on the pin's node is the EXPECTED state
+// for assignment (they wired GPIO 3 to a row precisely to configure it) -
+// the four firmware skip-list scans (rpGpio/partsFreeGpios/claimRovingGpio/
+// oscTryGpioRoute) answer the different question "which pin can the firmware
+// silently borrow" and must not be copied here.
+bool routableGpioAvailable( int idx, const char** ownerOut ) {
+    const char* owner = nullptr;
+
+    if ( idx < 0 || idx > 9 ) {
+        owner = "index"; // out of range - not a routable pin at all
+    } else if ( routableGpioAbsent( ) ) {
+        owner = "board"; // OG: the bank is CH446Q CS/RESET, WS2812, ADC lines
+    } else if ( globalState.config.gpioPythonOwned[ idx ] ) {
+        owner = "python"; // machine.Pin claim (jl_gpio_claim_pin)
+    } else if ( probeGpioPowerClaimIdx( ) == idx ) {
+        owner = "probe power"; // buffer-power claim holds it output-HIGH
+    } else if ( infraOwnsNode( gpioDef[ idx ][ 1 ] ) ) {
+        // The infra registry holds the UART nodes (RP_UART_TX/RX) only via the
+        // serial_1 lock bridges (rpSerial1), so on idx 8/9 name the real
+        // owner; everything else in the registry is a routing/feed claim.
+        owner = ( idx >= 8 ) ? "serial lock" : "routing";
+    } else if ( gpioState[ idx ] == 6 ) {
+        owner = "OLED"; // bus-role mark: display soft-I2C / oled::connect
+    } else if ( globalState.config.gpioPwmEnabled[ idx ] ||
+                gpioPWMEnabled[ idx ] || gpioSlowPWMEnabled[ idx ] ) {
+        // The config flag can be a slot-load ghost (dropGhostPwmClaim); the
+        // RAM flags are live truth. Check all three so neither a ghost claim
+        // nor a live-but-unsaved PWM slips through.
+        owner = "PWM";
+    } else if ( idx >= 8 && AsyncPassthrough::uartTrafficSinceBoot( ) ) {
+        owner = "UART"; // real bytes moved through the passthrough this boot
+    }
+
+    if ( owner != nullptr ) {
+        if ( ownerOut != nullptr ) {
+            *ownerOut = owner;
+        }
+        return false;
+    }
+    return true;
 }

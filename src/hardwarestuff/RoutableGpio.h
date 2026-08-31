@@ -102,7 +102,28 @@ void updateStateFromGPIOConfig(int onlyIdx = -1);
 
 // The readSettingsFromConfig() GPIO block, extracted verbatim (Phase 1a):
 // applies the persisted direction/pull config to the routable bank at boot
-// and on every config change. Compiled out on OG (guard inside).
+// and on every config change. No-op on OG (central guard inside).
 void applyGpioSettingsFromConfig(void);
+
+// The applyStateToHardware() GPIO loop (routing/States.cpp), moved here so
+// the module's central OG guard covers it. Runs on every slot load. Its
+// semantics differ from updateStateFromGPIOConfig() on purpose - only skip is
+// bus-role pins (gpioState 6), pulls apply even to outputs, and outputs are
+// restored to their loaded level via gpio_put(pin, gpioState[i]).
+void applyStateGpioToHardware(void);
+
+// THE mutation funnel: apply globalState.config for one gpioDef index (0..9)
+// to hardware + gpioState[], then markDirty() for the slot autosave. Every
+// future mutation surface (options carousel, GPIO settings app, BCD counter)
+// goes through this. No-op on OG (central guard) and on out-of-range idx.
+void applyPinConfig(int idx);
+
+// May the user assign this pin? False when something owns it; then *ownerOut
+// (if given) points at a short static literal naming the owner - one of
+// "index", "board", "python", "probe power", "serial lock", "routing",
+// "OLED", "PWM", "UART". Checked most specific owner first. Deliberately no
+// user-bridge check: a user bridge on the node is the expected state for
+// assignment, not a conflict.
+bool routableGpioAvailable(int idx, const char** ownerOut = nullptr);
 
 #endif

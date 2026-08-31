@@ -2919,77 +2919,14 @@ void applyStateToHardware(bool skipPower) {
 
 
 
-#if !defined(OG_JUMPERLESS)
-    // Apply GPIO configurations from globalState to hardware.
-    // SKIPPED on OG: the gpioDef bank (pins 20-27) is the V5 routable-GPIO map.
-    // On the OG those pins are the CH446Q chip selects for chips I/J/K/L
-    // (20-23), RESET (24), the WS2812 LED data line (25) and ADC inputs (26-27).
-    // applyStateToHardware() runs at boot (slot load) and on every slot load, so
-    // driving this bank with gpio_set_dir()/gpio_set_pulls() here re-muxes the
-    // SF chip-select pins into GPIO inputs -- after which setCSex() can no longer
-    // assert them and every breadboard<->SF (nano/DAC/ADC) connection silently
-    // fails to program while A-H (CS 6-13) keep working. Matches the OG guards in
-    // initGPIO()/setGPIO()/updateGPIOConfigFromState().
-    for (int i = 0; i < 10; i++) {
-        uint8_t gpio_pin = gpioDef[i][0];
+    // Apply GPIO configurations from globalState to hardware. The loop that
+    // lived here verbatim (with its own OG_JUMPERLESS wrapper) moved to
+    // hardwarestuff/RoutableGpio.cpp so the module's central OG guard covers
+    // it - exact semantics preserved (only skip: gpioState 6 bus-role pins;
+    // outputs restored to their loaded level).
+    applyStateGpioToHardware();
 
-        // Skip bus-role pins (gpioState 6: the display service's soft-I2C),
-        // same guard as setGPIO(). A slot load otherwise re-asserts the config
-        // direction/pulls on the live bus - a PULLDOWN across SDA's ACK window
-        // - and re-stamps state 4, which sends readGPIO down the pull-twiddling
-        // float path mid-transaction.
-        if (gpioState[i] == 6) {
-            continue;
-        }
 
-        // Apply direction to hardware
-        if (globalState.config.gpioDirection[i] == 0) {
-            gpio_set_dir(gpio_pin, true);  // output
-        } else {
-            gpio_set_dir(gpio_pin, false);  // input
-        }
-        
-        // Apply pull resistors to hardware and update gpioState for animations
-        switch (globalState.config.gpioPulls[i]) {
-            case 0: // pulldown
-                gpio_set_pulls(gpio_pin, false, true);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 4;  // input with pulldown
-                }
-                break;
-            case 1: // pullup
-                gpio_set_pulls(gpio_pin, true, false);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 3;  // input with pullup
-                }
-                break;
-            case 2: // no pull
-                gpio_set_pulls(gpio_pin, false, false);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 2;  // input with no pull
-                }
-                break;
-            case 3: // bus keeper
-                gpio_set_pulls(gpio_pin, true, true);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 7;  // bus keeper mode
-                }
-                break;
-            default:
-                gpio_set_pulls(gpio_pin, false, false);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 2;  // input with no pull
-                }
-                break;
-        }
-        
-        // Set initial output state for output pins
-        if (globalState.config.gpioDirection[i] == 0) {
-            gpio_put(gpio_pin, gpioState[i]);
-        }
-    }
-#endif
-    
     if (debugFP) {
         Serial.println("✓ Applied state to hardware (power, GPIO)");
     }
