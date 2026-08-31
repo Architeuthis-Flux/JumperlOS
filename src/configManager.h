@@ -551,6 +551,8 @@ const StringIntEntry padActionTable[] = {
     {"dac_0_down", 26},
     {"dac_1_up", 27},
     {"dac_1_down", 28},
+    {"bcd_up", 29},
+    {"bcd_down", 30},
 };
 const int padActionTableSize = sizeof(padActionTable) / sizeof(padActionTable[0]);
 

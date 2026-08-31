@@ -16,10 +16,10 @@ todos:
     status: completed
   - id: bcd-adjust
     content: bcdAdjust encoder counter modal + padActionTable bcd_up/bcd_down idle actions
-    status: in_progress
+    status: completed
   - id: menu-app
     content: "Parts-style GPIO settings app: menuTree rows, getActionCategory arm, apps[] entries, gpioSettingsLauncher with stay-in-menu loop"
-    status: pending
+    status: completed
   - id: oled-chooser
     content: OLED 128x32 chooser bitmap in chooseGPIO() + clearPrintShow mirror in chooseGPIOinputOutput()
     status: pending

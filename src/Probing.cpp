@@ -7119,7 +7119,8 @@ float jl_dac_get( int channel );
 
 // Run a [logo_pads] *_idle action (padActionTable in configManager.h):
 // 1..8 = gpio toggle, 9..16 = gpio high, 17..24 = gpio low,
-// 25..28 = DAC 0/1 nudge up/down by 0.25V (clamped to the [dacs] limits).
+// 25..28 = DAC 0/1 nudge up/down by 0.25V (clamped to the [dacs] limits),
+// 29/30 = BCD counter up/down (wraps; toasts "no range" when unconfigured).
 static void runPadIdleAction( int action ) {
     char toast[ 32 ] = { 0 };
     if ( action >= 1 && action <= 24 ) {
@@ -7138,6 +7139,18 @@ static void runPadIdleAction( int action ) {
         jl_dac_set( dac, v, 1 );
         snprintf( toast, sizeof( toast ), "DAC %d\n%.2f V", dac, (double)v );
         Serial.printf( "\r\npad: DAC %d -> %.2f V\r\n", dac, (double)v );
+    } else if ( action == 29 || action == 30 ) {
+        // Phase 3's counter module (RoutableGpio, via Peripherals.h): wraps
+        // both directions, drives the pins, marks the slot dirty. -1 = no
+        // range configured - nothing moved, so toast that instead.
+        int v = bcdIncrement( action == 29 ? 1 : -1 );
+        if ( v >= 0 ) {
+            snprintf( toast, sizeof( toast ), "BCD\n%d", v );
+            Serial.printf( "\r\npad: BCD -> %d\r\n", v );
+        } else {
+            snprintf( toast, sizeof( toast ), "BCD\nno range" );
+            Serial.printf( "\r\npad: BCD no range configured\r\n" );
+        }
     } else {
         return;
     }

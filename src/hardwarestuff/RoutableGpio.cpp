@@ -3214,3 +3214,455 @@ int gpioOptionsCarousel( int gpioIdx ) {
     Menus::getInstance( ).inClickMenu = 0;
     return 0;
 }
+
+// ============================================================================
+// Click-menu apps (Phase 4, CodeDocs/GPIO_plan.md). Two parts-style
+// stay-in-menu launchers, name-dispatched by runApp() from the menuTree.h
+// "GPIO" children. The picker below is a clone of PartsApp.cpp's
+// partsPicker - that one reads PartsApp's file-static s_led/s_title/s_desc
+// arrays, so it can't take a caller-supplied list; this one does, plus a
+// selectable[] flag for pins something owns (the cursor lands on them so the
+// OWNER is named on the line - the plan's "greyed with the owner named" -
+// but a click refuses and stays).
+// ============================================================================
+
+// bcdDrawFrame's palette, one dim shade added for greyed rows.
+static const uint32_t GPIO_APP_HEADER_COLOR = 0x0a0a12;
+static const uint32_t GPIO_APP_ITEM_COLOR = 0x0a1206;
+static const uint32_t GPIO_APP_GREYED_COLOR = 0x020202;
+
+// One picker frame (the partsDrawItem layout): header + short label on the
+// LED matrix, title + desc on the OLED, title overwriting one serial line.
+static void gpioAppDrawItem( const char* header, const char* ledLabel,
+                             const char* title, const char* desc, bool avail ) {
+    b.clear( );
+    b.print( header, GPIO_APP_HEADER_COLOR, 0xFFFFFF, 0, 0, 1 );
+    b.print( ledLabel, avail ? GPIO_APP_ITEM_COLOR : GPIO_APP_GREYED_COLOR,
+             0xFFFFFF, 0, 1, 1 );
+    requestLedShow( 2 );
+
+    if ( oled.oledConnected ) {
+        char text[ 96 ];
+        snprintf( text, sizeof( text ), "%s\n%s", title, desc ? desc : "" );
+        oled.resetMultiLineSmallText( );
+        oled.showMultiLineSmallText( text );
+    }
+
+    Serial.print( "\r  " );
+    Serial.print( header );
+    Serial.print( ": " );
+    Serial.print( title );
+    Serial.print( "                    \r" );
+    Serial.flush( );
+}
+
+// The Phase 2 sub-editors return -1 on HELD immediately (their caller, the
+// carousel, disarms instead of waiting), and the BCD modals' cancel paths do
+// the same - so the hold that cancelled a child is still a live, re-stamped
+// level when control lands back in a picker loop. Wait it out (the
+// partsPicker/partsTapForRow discipline) so it can't cascade another level.
+static void gpioAppWaitOutHold( void ) {
+    while ( encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+            encoderButtonState == LONG_HELD ) {
+        jOS.serviceInner( );
+        rotaryEncoderButtonStuff( );
+        delayMicroseconds( 1000 );
+    }
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    encoderDirectionState = NONE;
+}
+
+// Encoder picker over caller-supplied lines (the partsPicker contract):
+// returns the chosen index, -1 on HELD (back one level), -2 on a serial byte
+// (exit the app - a byte left unconsumed would land on the single-char
+// handler). selectable == nullptr means everything is; a click on a
+// non-selectable row is refused and the picker stays.
+static int gpioAppPicker( const char* levelTag, const char* header, int count,
+                          int startIdx, const char* const* leds,
+                          const char* const* titles, const char* const* descs,
+                          const uint8_t* selectable ) {
+    if ( count <= 0 ) {
+        return -1;
+    }
+    int idx = ( startIdx >= 0 && startIdx < count ) ? startIdx : 0;
+    bool needsDraw = true;
+    unsigned long lastShowRequest = 0;
+
+    encoderButtonState = IDLE;
+    lastButtonEncoderState = IDLE;
+    encoderDirectionState = NONE;
+
+    Serial.print( "\r\nGPIOPICK level=" );
+    Serial.print( levelTag );
+    Serial.print( " n=" );
+    Serial.println( count );
+    Serial.flush( );
+
+    while ( true ) {
+        if ( needsDraw ) {
+            gpioAppDrawItem( header, leds[ idx ], titles[ idx ],
+                             descs ? descs[ idx ] : nullptr,
+                             selectable == nullptr || selectable[ idx ] );
+            lastShowRequest = millis( );
+            needsDraw = false;
+        }
+
+        jOS.serviceInner( );
+        rotaryEncoderButtonStuff( );
+
+        // Core 2's end-of-frame compare-and-swap can swallow a show request
+        // issued mid-frame (Menus.cpp's menuShowKeepalive) - re-assert.
+        if ( millis( ) - lastShowRequest >= 250 ) {
+            requestLedShow( 2 );
+            lastShowRequest = millis( );
+        }
+
+        if ( encoderButtonState == HELD ) {
+            // Wait out the hold so the release can't echo into the next level.
+            gpioAppWaitOutHold( );
+            return -1;
+        }
+        if ( Serial.available( ) > 0 ) {
+            Serial.read( );
+            return -2;
+        }
+        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) {
+            encoderButtonState = IDLE;
+            if ( selectable != nullptr && !selectable[ idx ] ) {
+                // The owner is already named on the line - refuse and stay.
+                Serial.print( "\r\nGPIOPICK refused " );
+                Serial.println( titles[ idx ] );
+                needsDraw = true;
+                continue;
+            }
+            return idx;
+        }
+        if ( encoderDirectionState == UP ) {
+            encoderDirectionState = NONE;
+            idx = ( idx + 1 ) % count;
+            needsDraw = true;
+        } else if ( encoderDirectionState == DOWN ) {
+            encoderDirectionState = NONE;
+            idx = ( idx - 1 + count ) % count;
+            needsDraw = true;
+        }
+        delayMicroseconds( 1000 );
+    }
+}
+
+// Level-1 line for one gpioDef index: short LED label + live-state title.
+// "3  out HIGH", "5  in  pull-up", "Tx  UART", "2  PWM 1.0k" - or, for a
+// pin something owns (routableGpioAvailable false, PWM excepted - the
+// editors displace PWM through applyPinConfig), the owner: "7  OLED".
+static bool gpioSettingsPinEntry( int idx, char* led, size_t ledLen,
+                                  char* title, size_t titleLen ) {
+    if ( idx == 8 ) {
+        snprintf( led, ledLen, "Tx" );
+    } else if ( idx == 9 ) {
+        snprintf( led, ledLen, "Rx" );
+    } else {
+        snprintf( led, ledLen, "%d", idx + 1 );
+    }
+
+    const char* owner = nullptr;
+    if ( !routableGpioAvailable( idx, &owner ) &&
+         !( owner != nullptr && strcmp( owner, "PWM" ) == 0 ) ) {
+        snprintf( title, titleLen, "%s  %s", led,
+                  owner != nullptr ? owner : "in use" );
+        return false; // greyed: shown with the owner named, not selectable
+    }
+
+    if ( idx <= 7 && ( gpioPWMEnabled[ idx ] || gpioSlowPWMEnabled[ idx ] ) ) {
+        char freqText[ 12 ];
+        gpioFormatFrequency( gpioPWMFrequency[ idx ], freqText,
+                             sizeof( freqText ) );
+        snprintf( title, titleLen, "%s  PWM %s", led, freqText );
+    } else if ( idx >= 8 && routableGpioFunction( idx ) == GPIO_FUNC_UART ) {
+        // Untouched UART mux (no traffic since boot, or it would be owned
+        // above) - assigning it re-muxes to SIO through applyPinConfig().
+        snprintf( title, titleLen, "%s  UART", led );
+    } else if ( globalState.config.gpioDirection[ idx ] == 0 ) {
+        const char* level = ( gpioState[ idx ] == 1 ) ? "HIGH"
+                            : ( gpioState[ idx ] == 0 ) ? "LOW"
+                                                        : "";
+        snprintf( title, titleLen, "%s  out %s", led, level );
+    } else {
+        static const char* pullLong[ 4 ] = { "pull-down", "pull-up", "float",
+                                             "keeper" };
+        int pull = globalState.config.gpioPulls[ idx ];
+        if ( pull < 0 || pull > 3 ) {
+            pull = 2;
+        }
+        snprintf( title, titleLen, "%s  in  %s", led, pullLong[ pull ] );
+    }
+    return true;
+}
+
+void gpioSettingsLauncher( void ) {
+    if ( routableGpioAbsent( ) ) {
+        Serial.println( "\r\nGPIO app: no routable GPIO on this board" );
+        if ( oled.oledConnected ) {
+            oled.clearPrintShow( "no routable\nGPIO", 2, true, true, true );
+        }
+        delay( 600 );
+        return;
+    }
+
+    // Own the render mode for the whole session (menus render one item at a
+    // time; core 1 suppresses net paint while inClickMenu). RE-assertion:
+    // the APPSACTION arm zeroed it via exitMenuModeForAction() before
+    // runApp. runPicker's save/restore discipline for the divider.
+    Menus::getInstance( ).inClickMenu = 1;
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 8;
+
+    {
+        // Entry line buffers - one modal at a time, so statics keep them off
+        // the stack (the partsApp s_* precedent).
+        static char pinLed[ 10 ][ 4 ];
+        static char pinTitle[ 10 ][ 24 ];
+        const char* leds[ 10 ];
+        const char* titles[ 10 ];
+        const char* descs[ 10 ];
+        uint8_t selectable[ 10 ];
+
+        int pinCursor = 0;
+        while ( true ) {
+            // Rebuilt every pass - the lines show LIVE state and an edit
+            // just changed it.
+            for ( int i = 0; i < 10; i++ ) {
+                selectable[ i ] = gpioSettingsPinEntry(
+                                      i, pinLed[ i ], sizeof( pinLed[ i ] ),
+                                      pinTitle[ i ], sizeof( pinTitle[ i ] ) )
+                                      ? 1
+                                      : 0;
+                leds[ i ] = pinLed[ i ];
+                titles[ i ] = pinTitle[ i ];
+                descs[ i ] = selectable[ i ] ? "click = options" : "in use";
+            }
+
+            int pick = gpioAppPicker( "pin", "GPIO", 10, pinCursor, leds,
+                                      titles, descs, selectable );
+            if ( pick == -1 ) {
+                break; // hold at the top level = exit
+            }
+            if ( pick == -2 ) {
+                goto done; // serial byte = exit the app
+            }
+            pinCursor = pick;
+            int gpioIdx = pick; // the list is all 10 pins in gpioDef order
+
+            char pinHeader[ 16 ];
+            bcdPinLabel( gpioIdx, pinHeader, sizeof( pinHeader ) );
+
+            // Level 2 - per-pin options, the carousel's item set (PWM absent
+            // for Tx/Rx - setupPWM/stopPWM validate gpio_pin 1-8 only).
+            int optItems[ 4 ];
+            int nOpts = 0;
+            optItems[ nOpts++ ] = GPIO_ITEM_DIRECTION;
+            optItems[ nOpts++ ] = GPIO_ITEM_PULLS;
+            if ( gpioIdx <= 7 ) {
+                optItems[ nOpts++ ] = GPIO_ITEM_PWM;
+            }
+            optItems[ nOpts++ ] = GPIO_ITEM_BCD;
+
+            static const char* optLed[ 4 ] = { "Dir", "PWM", "Pull", "BCD" };
+            static const char* optDesc[ 4 ] = { "input / output",
+                                                "freq / duty",
+                                                "up down none keep",
+                                                "counter" };
+            static char optTitle[ 4 ][ 24 ];
+            const char* oLeds[ 4 ];
+            const char* oTitles[ 4 ];
+            const char* oDescs[ 4 ];
+
+            int optCursor = 0;
+            while ( true ) {
+                // Live state on every line, rebuilt after each edit.
+                for ( int i = 0; i < nOpts; i++ ) {
+                    int item = optItems[ i ];
+                    char stateText[ 16 ];
+                    gpioCarouselItemState( gpioIdx, item, stateText,
+                                           sizeof( stateText ) );
+                    snprintf( optTitle[ i ], sizeof( optTitle[ i ] ),
+                              "%s  %s", optLed[ item ], stateText );
+                    oLeds[ i ] = optLed[ item ];
+                    oTitles[ i ] = optTitle[ i ];
+                    oDescs[ i ] = optDesc[ item ];
+                }
+
+                int o = gpioAppPicker( "opt", pinHeader, nOpts, optCursor,
+                                       oLeds, oTitles, oDescs, nullptr );
+                if ( o == -1 ) {
+                    break; // hold = back to the pin list
+                }
+                if ( o == -2 ) {
+                    goto done;
+                }
+                optCursor = o;
+
+                // The Phase 2 sub-editors were tuned under the carousel's
+                // divider 3 (raw encoderPosition deltas); the BCD modals
+                // set their own and restore what they find.
+                int r = 0;
+                switch ( optItems[ o ] ) {
+                    case GPIO_ITEM_DIRECTION:
+                        rotaryDivider = 3;
+                        r = gpioDirectionEditor( gpioIdx );
+                        break;
+                    case GPIO_ITEM_PULLS:
+                        rotaryDivider = 3;
+                        r = gpioPullsEditor( gpioIdx );
+                        break;
+                    case GPIO_ITEM_PWM:
+                        rotaryDivider = 3;
+                        r = gpioPwmEditor( gpioIdx );
+                        break;
+                    case GPIO_ITEM_BCD:
+                        // Phase 3's counter modal; no range yet routes
+                        // through the range picker first, then counts.
+                        r = bcdAdjust( );
+                        if ( r == -2 ) {
+                            r = ( bcdRangeSetup( ) == 0 ) ? bcdAdjust( ) : -1;
+                        }
+                        if ( r >= 0 ) {
+                            r = 0; // bcdAdjust returns the counted value
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                if ( r == -2 ) {
+                    goto done; // serial byte inside an editor = exit the app
+                }
+                // A value applied (or the editor cancelled): return to
+                // LEVEL 2 - the stay-in-menu behavior. Re-assert what the
+                // children may have cleared (the BCD modals zero inClickMenu
+                // and restore the divider on their way out) and wait out a
+                // live hold so it can't cascade this level too.
+                Menus::getInstance( ).inClickMenu = 1;
+                rotaryDivider = 8;
+                gpioAppWaitOutHold( );
+            }
+
+            // Back at level 1: same re-assert (a BCD modal may have run).
+            Menus::getInstance( ).inClickMenu = 1;
+            rotaryDivider = 8;
+            gpioAppWaitOutHold( );
+        }
+    }
+
+done:
+    // The parts teardown minus partLabels.clearTransients() (parts-specific).
+    // The menu path runs refreshConnections(-1, 0) after runApp returns.
+    Menus::getInstance( ).inClickMenu = 0;
+    rotaryDivider = lastDivider;
+    b.clear( );
+    requestLedShow( -1 );
+    Serial.println( );
+    oled.showJogo32h( );
+}
+
+void bcdMenuLauncher( void ) {
+    if ( routableGpioAbsent( ) ) {
+        Serial.println( "\r\nBCD app: no routable GPIO on this board" );
+        if ( oled.oledConnected ) {
+            oled.clearPrintShow( "no routable\nGPIO", 2, true, true, true );
+        }
+        delay( 600 );
+        return;
+    }
+
+    Menus::getInstance( ).inClickMenu = 1; // re-assert (see gpioSettingsLauncher)
+    int lastDivider = rotaryDivider;
+    rotaryDivider = 8;
+
+    {
+        static char itemTitle[ 3 ][ 24 ];
+        static const char* itemLed[ 3 ] = { "Cnt", "Rng", "Mode" };
+        static const char* itemDesc[ 3 ] = { "turn to count",
+                                             "start + width",
+                                             "binary / BCD" };
+        const char* leds[ 3 ];
+        const char* titles[ 3 ];
+        const char* descs[ 3 ];
+
+        int cursor = 0;
+        while ( true ) {
+            // Live state per line, rebuilt every pass.
+            if ( globalState.config.bcdStart < 0 ) {
+                snprintf( itemTitle[ 0 ], sizeof( itemTitle[ 0 ] ),
+                          "Count  no range" );
+                snprintf( itemTitle[ 1 ], sizeof( itemTitle[ 1 ] ),
+                          "Range  off" );
+            } else {
+                snprintf( itemTitle[ 0 ], sizeof( itemTitle[ 0 ] ),
+                          "Count  %d", globalState.config.bcdValue );
+                char startLabel[ 16 ];
+                bcdPinLabel( globalState.config.bcdStart, startLabel,
+                             sizeof( startLabel ) );
+                snprintf( itemTitle[ 1 ], sizeof( itemTitle[ 1 ] ),
+                          "Range  %s +%d", startLabel,
+                          globalState.config.bcdWidth );
+            }
+            snprintf( itemTitle[ 2 ], sizeof( itemTitle[ 2 ] ), "Mode  %s",
+                      globalState.config.bcdMode ? "BCD" : "binary" );
+            for ( int i = 0; i < 3; i++ ) {
+                leds[ i ] = itemLed[ i ];
+                titles[ i ] = itemTitle[ i ];
+                descs[ i ] = itemDesc[ i ];
+            }
+
+            int pick = gpioAppPicker( "bcd", "BCD", 3, cursor, leds, titles,
+                                      descs, nullptr );
+            if ( pick == -1 ) {
+                break; // hold = exit (single level)
+            }
+            if ( pick == -2 ) {
+                break; // serial byte = exit
+            }
+            cursor = pick;
+
+            if ( pick == 0 ) {
+                // Count: the bcdAdjust modal; no range yet routes through
+                // the range picker first, then counts (the carousel's shape).
+                int r = bcdAdjust( );
+                if ( r == -2 && bcdRangeSetup( ) == 0 ) {
+                    bcdAdjust( );
+                }
+            } else if ( pick == 1 ) {
+                bcdRangeSetup( );
+            } else {
+                // Mode toggle - stored through the accessor, which permits
+                // start -1 (validates -1..9), so no range is ever invented:
+                // with the counter off the mode just persists for later.
+                // setBcdRange only STORES - with a live range, re-encode the
+                // value onto the pins in the new mode.
+                int newMode = ( globalState.config.bcdMode != 0 ) ? 0 : 1;
+                globalState.setBcdRange( globalState.config.bcdStart,
+                                         globalState.config.bcdWidth,
+                                         newMode );
+                if ( globalState.config.bcdStart >= 0 ) {
+                    bcdApply( );
+                }
+                Serial.print( "\r\nBCD mode -> " );
+                Serial.println( newMode ? "BCD" : "binary" );
+            }
+
+            // Back at the Count/Range/Mode level (stay in menu): re-assert
+            // what the modals cleared, wait out a live hold.
+            Menus::getInstance( ).inClickMenu = 1;
+            rotaryDivider = 8;
+            gpioAppWaitOutHold( );
+        }
+    }
+
+    // Same teardown contract as gpioSettingsLauncher.
+    Menus::getInstance( ).inClickMenu = 0;
+    rotaryDivider = lastDivider;
+    b.clear( );
+    requestLedShow( -1 );
+    Serial.println( );
+    oled.showJogo32h( );
+}

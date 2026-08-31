@@ -4063,6 +4063,21 @@ actionCategories getActionCategory( void ) {
         // slice.)
         return APPSACTION;
 
+    } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
+                    "GPIO" ) != -1 ) {
+        // GPIO -> APPSACTION with the CHILD line as runApp's name arg
+        // (previousMenuPositions[1] - the 2-deep dispatch shape, like Parts'
+        // children). "-Set    \31Pins" / "-BCD    \31Counter" name-match the
+        // apps[] rows { "Set Pins", ... } / { "BCD Counter", ... } after
+        // normalizeSpaces - each child and its row are ONE unit.
+        //
+        // Order-safe both directions: no earlier keyword (Slots, Rails,
+        // Show, Output, Arduino, Probe, Connect, Display, Apps, Routing,
+        // OLED, Calib, History, Files, Python, Parts) is a substring of
+        // "GPIO", and "GPIO" appears in no other TOP-LEVEL row - the
+        // Output/Show "$GPIO$" rows are level 1+ and never reach this test.
+        return APPSACTION;
+
     } else {
         return NOCATEGORY;
     }

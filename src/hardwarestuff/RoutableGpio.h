@@ -184,4 +184,25 @@ int bcdRangeSetup(void);
 // re-highlight and its own rotaryDivider; this restores the divider it found.
 int gpioOptionsCarousel(int gpioIdx);
 
+// ============================================================================
+// Click-menu apps (Phase 4, CodeDocs/GPIO_plan.md) - the parts-style
+// stay-in-menu launchers. Name-dispatched by runApp() from the menuTree.h
+// "GPIO" children ("Set Pins" / "BCD Counter" apps[] rows in Apps.cpp).
+// ============================================================================
+
+// Pin settings app: level 1 picks a pin (GPIO 1-8, Tx, Rx - each line shows
+// live state; pins something owns show the owner and refuse selection),
+// level 2 picks Direction / Pulls / PWM / BCD (PWM absent for Tx/Rx) and
+// drops into the Phase 2 sub-editors. After a value applies it returns to
+// level 2 (stay in menu); hold backs out one level, a serial byte exits the
+// whole app. No-op toast on OG.
+void gpioSettingsLauncher(void);
+
+// BCD counter app: one level - Count (the bcdAdjust modal; routes through
+// bcdRangeSetup first when no range is configured), Range (bcdRangeSetup),
+// Mode (binary <-> BCD nibbles toggle; never invents a range - with
+// bcdStart -1 the mode is stored and the range stays off). Hold or a serial
+// byte exits. No-op toast on OG.
+void bcdMenuLauncher(void);
+
 #endif
