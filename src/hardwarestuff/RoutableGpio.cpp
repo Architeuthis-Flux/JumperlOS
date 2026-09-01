@@ -2306,6 +2306,58 @@ static void bcdDrawFrame( const char* label, const char* valueText ) {
     ReadingDisplay::show( label, -1, valueText );
 }
 
+// One frame of the COUNTER modal. Along the TOP: the live states of every
+// pin the counter involves - pin labels over levels (mono font keeps the
+// columns aligned), '-' for a bit whose pin something else owns (that bit
+// isn't driven). Below: the hex count, big. (Kevin 2026-08-31: "show along
+// the top the states of all the gpio involved on the oled".) Serial mirrors
+// the same line; nothing here touches the LED matrix - the breadboard keeps
+// showing the circuit.
+static void bcdDrawAdjustFrame( int value ) {
+    char valueText[ 16 ];
+    bcdFormatValue( value, valueText, sizeof( valueText ) );
+
+    int width = bcdClampWidth( globalState.config.bcdWidth );
+    char labels[ 32 ] = { 0 };
+    char levels[ 32 ] = { 0 };
+    int n = 0;
+    for ( int bit = 0; bit < width && n < 30; bit++ ) {
+        int idx = bcdBitIndex( bit );
+        if ( idx < 0 ) {
+            break;
+        }
+        if ( n > 0 ) {
+            labels[ n ] = ' ';
+            levels[ n ] = ' ';
+            n++;
+        }
+        labels[ n ] = ( idx == 8 ) ? 'T' : ( ( idx == 9 ) ? 'R' : (char)( '1' + idx ) );
+        levels[ n ] = !bcdPinClaimable( idx )
+                          ? '-'
+                          : ( ( ( value >> bit ) & 1 ) ? '1' : '0' );
+        n++;
+    }
+
+    if ( oled.oledConnected ) {
+        const int16_t f = 12; // Andale Mono 5pt
+        OledTextRow rows[ 3 ] = { };
+        rows[ 0 ].segs[ 0 ] = { labels, f, OLED_ALIGN_INHERIT };
+        rows[ 0 ].segCount = 1;
+        rows[ 0 ].align = OLED_ALIGN_CENTER;
+        rows[ 0 ].fixedH = 7;
+        rows[ 1 ].segs[ 0 ] = { levels, f, OLED_ALIGN_INHERIT };
+        rows[ 1 ].segCount = 1;
+        rows[ 1 ].align = OLED_ALIGN_CENTER;
+        rows[ 1 ].fixedH = 7;
+        rows[ 2 ].segs[ 0 ] = { "BCD", f, OLED_ALIGN_INHERIT };
+        rows[ 2 ].segs[ 1 ] = { valueText, 19, OLED_ALIGN_RIGHT }; // 8pt value
+        rows[ 2 ].segCount = 2;
+        rows[ 2 ].align = OLED_ALIGN_LEFT;
+        oled.clearPrintShowRich( rows, 3, 1, true, true, true );
+    }
+    Serial.printf( "\rBCD %-4s  %s   ", valueText, levels );
+}
+
 // User-facing pin name for a gpioDef index: "GPIO 1".."GPIO 8", "Tx", "Rx".
 static void bcdPinLabel( int idx, char* buf, size_t bufLen ) {
     if ( idx == 8 ) {
@@ -2396,9 +2448,9 @@ int bcdAdjust( int preferredStart ) {
     long lastEncoderPosition = encoderPosition;
     float encoderAccumulator = 0.0f;
 
-    char valueText[ 16 ];
-    bcdFormatValue( value, valueText, sizeof( valueText ) );
-    bcdDrawFrame( "BCD", valueText );
+    ReadingDisplay::resetLastShown( ); // this modal paints the panel directly
+    bcdDrawAdjustFrame( value );
+    unsigned long lastLivePoll = millis( );
 
     // getButtonState() is a LEVEL, not an edge, and a human probe press
     // outlasts the first loop pass - so the press that ENTERED this modal
@@ -2420,6 +2472,21 @@ int bcdAdjust( int preferredStart ) {
         }
         if ( !probeCancelArmed && probeState != 1 ) {
             probeCancelArmed = true;
+        }
+
+        // The counter is live BOTH ways: a pin toggled by probe tap, pad
+        // action or MicroPython while this modal is open must update the
+        // number and the top-row states too. ~10 Hz is plenty.
+        if ( millis( ) - lastLivePoll > 100 ) {
+            lastLivePoll = millis( );
+            int live = bcdReadValue( );
+            if ( live != value ) {
+                value = live;
+                if ( globalState.config.bcdValue != live ) {
+                    globalState.setBcdValue( live );
+                }
+                bcdDrawAdjustFrame( value );
+            }
         }
 
         // Exit (hold / raw probe 1 - raw pre-swap codes, copied verbatim
@@ -2474,8 +2541,7 @@ int bcdAdjust( int preferredStart ) {
             if ( steps != 0 ) {
                 encoderAccumulator -= steps; // keep the fractional part
                 value = bcdIncrement( steps ); // live on the pins, wraps, marks dirty
-                bcdFormatValue( value, valueText, sizeof( valueText ) );
-                bcdDrawFrame( "BCD", valueText );
+                bcdDrawAdjustFrame( value );
             }
         }
     }

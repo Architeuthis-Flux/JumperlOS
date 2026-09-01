@@ -426,6 +426,37 @@ static int scrollPartNextPin( const PartDefinition& p, int fromRow, bool up, boo
     return best;
 }
 
+// ---------------------------------------------------------------------------
+// GPIO click window (Kevin 2026-08-31). The Phase 2 turn-gate CAPTURED the
+// scroller: landing on a GPIO row meant the next detent opened the carousel,
+// so you could not scroll past a GPIO net. Now the scroller is never
+// captured: ENTERING a GPIO highlight (encoder scroll or probe tap - both
+// move brightenedNet) opens a 1 s window in which an encoder CLICK opens the
+// options carousel; after the window, clicks fall through to the menu like
+// any other row, and turns were always just turns.
+static int s_gpioSeenNet = -12345;       // last brightenedNet observed
+static int s_gpioWindowNet = -1;         // net whose click window is open
+static unsigned long s_gpioWindowAt = 0; // when that highlight landed
+
+// gpioDef index of a routable GPIO on this net, or -1 (toggleGPIO net-scan
+// idiom; catches input/output/PWM/UART pins regardless of mux).
+static int routableGpioOnNet( int net ) {
+    if ( net <= 0 ) {
+        return -1;
+    }
+    for ( int i = 0; i < 10; i++ ) {
+        if ( gpioNet[ i ] == net ) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool gpioClickWindowOpen( void ) {
+    return s_gpioWindowNet > 0 && brightenedNet == s_gpioWindowNet &&
+           ( millis( ) - s_gpioWindowAt ) < 1000;
+}
+
 int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
 
     int lastDivider = rotaryDivider;
@@ -712,65 +743,19 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             partLabels.clearPartHighlight( );
         }
 
-        // GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md): a turn on a
-        // highlighted routable-GPIO net opens the options modal instead of
-        // scrolling on. Gate on brightenedNet, NOT highlightedNet - part-pin
-        // stops park highlightedNet at -1 while brightenedNet still carries
-        // the pin's net (toggleGPIO keys its scan on brightenedNet the same
-        // way). scrollPartIdx < 0 keeps part-focus scrolling's detent
-        // priority. The gpioNet scan catches input/output/PWM/UART pins
-        // regardless of mux.
-        if ( ( encoderDirectionState == UP || encoderDirectionState == DOWN ) &&
-             scrollPartIdx < 0 && brightenedNet > 0 ) {
-            int gpioIdx = -1;
-            for ( int i = 0; i < 10; i++ ) { // the toggleGPIO net-scan idiom
-                if ( gpioNet[ i ] == brightenedNet ) {
-                    gpioIdx = i;
-                    break;
-                }
-            }
-            if ( gpioIdx >= 0 ) {
-                encoderDirectionState = NONE; // consume the detent
-                const char* owner = nullptr;
-                if ( !routableGpioAvailable( gpioIdx, &owner ) &&
-                     strcmp( owner, "PWM" ) != 0 ) {
-                    // An owned pin explains itself instead of opening a dead
-                    // editor (PWM excepted - the carousel manages PWM itself).
-                    char pinName[ 8 ];
-                    if ( gpioIdx == 8 ) {
-                        snprintf( pinName, sizeof( pinName ), "Tx" );
-                    } else if ( gpioIdx == 9 ) {
-                        snprintf( pinName, sizeof( pinName ), "Rx" );
-                    } else {
-                        snprintf( pinName, sizeof( pinName ), "GPIO %d", gpioIdx + 1 );
-                    }
-                    char toast[ 24 ];
-                    snprintf( toast, sizeof( toast ), "%s\n%s", pinName, owner );
-                    oled.clearPrintShow( toast, 2, 1200 );
-                    Serial.print( "\r\n" );
-                    Serial.print( pinName );
-                    Serial.print( " is held by " );
-                    Serial.println( owner );
-                } else {
-                    // Latch the highlight identity BEFORE the modal - the
-                    // 1.8s/15s highlight timeout can fire inside its
-                    // serviceInner() loop and zero brightenedNet/Node.
-                    int heldNet = brightenedNet;
-                    int heldNode = brightenedNode;
-                    gpioOptionsCarousel( gpioIdx );
-                    // Re-highlight on exit (the adjustDACVoltage idiom):
-                    // clearHighlighting() zeroes both, so the identity has to
-                    // be latched across it or the re-highlight highlights
-                    // nothing.
-                    clearHighlighting( );
-                    brightenedNet = heldNet;
-                    brightenedNode = heldNode;
-                    highlightNets( 0, heldNet, 1 );
-                    requestLedShow( 1 );
-                }
-                rotaryDivider = divider; // the modal restored ITS caller's
-                                         // divider; mode-1 runs at `divider`
-                return returnNode;       // -1: the scroller stays put this pass
+        // GPIO click window (see the block comment above routableGpioOnNet):
+        // note when the highlight ENTERS a routable-GPIO net. This runs every
+        // service pass, so a brightenedNet change - encoder scroll landing or
+        // probe tap - is seen within one loop. The carousel-exit re-highlight
+        // restores the SAME net, so it does not restart the window; a
+        // highlight timeout drops brightenedNet and re-arms the next entry.
+        if ( brightenedNet != s_gpioSeenNet ) {
+            s_gpioSeenNet = brightenedNet;
+            if ( routableGpioOnNet( brightenedNet ) >= 0 ) {
+                s_gpioWindowNet = brightenedNet;
+                s_gpioWindowAt = millis( );
+            } else {
+                s_gpioWindowNet = -1;
             }
         }
 
@@ -2407,6 +2392,14 @@ bool Highlighting::shouldPersistHighlight(int node) {
  * @return true if button press should be handled by voltage adjustment, false otherwise
  */
 bool Highlighting::wantsToHandleButtonPress(void) {
+    // GPIO click window - the click belongs to the options carousel, not the
+    // menu (see handleEncoderButtonPress). Checked before the gates below:
+    // GPIO inputs/UART pins don't persist-highlight, and part-pin stops park
+    // highlightedNet at -1 while brightenedNet still holds the net.
+    if (gpioClickWindowOpen()) {
+        return true;
+    }
+
     // Only want to handle if a net is highlighted
     if (highlightedNet <= 0) {
         return false;
@@ -2448,6 +2441,50 @@ bool Highlighting::wantsToHandleButtonPress(void) {
  * @return 1 if button press was handled, 0 if not
  */
 int Highlighting::handleEncoderButtonPress(void) {
+    // GPIO click window (Kevin 2026-08-31): a click within 1 s of ENTERING a
+    // GPIO highlight opens the options carousel - the scroller itself is
+    // never captured, turns always keep scrolling. Before the persistence
+    // gates below for the same reasons as wantsToHandleButtonPress.
+    if ( gpioClickWindowOpen( ) ) {
+        int gpioIdx = routableGpioOnNet( brightenedNet );
+        const char* owner = nullptr;
+        if ( !routableGpioAvailable( gpioIdx, &owner ) &&
+             strcmp( owner, "PWM" ) != 0 ) {
+            // An owned pin explains itself instead of opening a dead editor
+            // (PWM excepted - the carousel manages PWM itself).
+            char pinName[ 8 ];
+            if ( gpioIdx == 8 ) {
+                snprintf( pinName, sizeof( pinName ), "Tx" );
+            } else if ( gpioIdx == 9 ) {
+                snprintf( pinName, sizeof( pinName ), "Rx" );
+            } else {
+                snprintf( pinName, sizeof( pinName ), "GPIO %d", gpioIdx + 1 );
+            }
+            char toast[ 24 ];
+            snprintf( toast, sizeof( toast ), "%s\n%s", pinName, owner );
+            oled.clearPrintShow( toast, 2, 1200 );
+            Serial.print( "\r\n" );
+            Serial.print( pinName );
+            Serial.print( " is held by " );
+            Serial.println( owner );
+        } else {
+            // Latch the highlight identity BEFORE the modal - the highlight
+            // timeout can fire inside its serviceInner() loop and zero
+            // brightenedNet/Node; re-highlight on exit (the adjustDACVoltage
+            // idiom). The restore is the SAME net, so the entry tracker does
+            // not restart the click window.
+            int heldNet = brightenedNet;
+            int heldNode = brightenedNode;
+            gpioOptionsCarousel( gpioIdx );
+            clearHighlighting( );
+            brightenedNet = heldNet;
+            brightenedNode = heldNode;
+            highlightNets( 0, heldNet, 1 );
+            requestLedShow( 1 );
+        }
+        return 1; // consumed either way - the menu must not open on this press
+    }
+
     // Only handle if something is highlighted (check net, not node which can be 0 or negative)
     if (highlightedNet <= 0) {
         return 0;
