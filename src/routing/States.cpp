@@ -54,7 +54,6 @@ extern struct config jumperlessConfig;
 extern volatile bool core1busy;
 extern volatile bool core2busy;
 extern int netSlot;  // Global slot number (defined in RotaryEncoder.cpp)
-extern const int gpioDef[10][3];  // GPIO pin definitions (defined in Peripherals.h)
 extern uint8_t gpioState[50];  // GPIO state for animations - 10 real + 8 fake out + 32 fake in (defined in Peripherals.cpp)
 extern bool debugFP;  // Debug flag for file parsing (defined in FileParsing.cpp)
 
@@ -525,7 +524,12 @@ void ConfigState::setDefaults() {
     // UART defaults
     uartTxFunction = 0;  // TX
     uartRxFunction = 1;  // RX
-    
+
+    // BCD counter defaults: off (no pins claimed), value 0
+    bcdPins = 0;
+    bcdValue = 0;
+
+
     // OLED defaults
     oledConnected = false;
     oledLockConnection = false;
@@ -1161,6 +1165,40 @@ void JumperlessState::setUartRxFunction(int function) {
 
 int JumperlessState::getUartRxFunction() const {
     return config.uartRxFunction;
+}
+
+// BCD counter (Phase 3)
+void JumperlessState::setBcdPins(int mask) {
+    mask &= 0x3FF;  // bit i = gpioDef bank index i: GPIO 1-8, Tx (8), Rx (9)
+    config.bcdPins = mask;
+    // The counter is plain binary over the mask's set bits, so the largest
+    // value the pins can show is 2^popcount - 1. This accessor owns EVERY
+    // mask write, so wrap the stored value here: shrinking the mask (10
+    // pins -> 4) otherwise leaves bcdValue above the new max and every
+    // readout shows a count the pins are not displaying. Wrap (not clamp)
+    // matches bcdWrapValue(). Mask 0 = counter off, value 0.
+    if (mask == 0) {
+        config.bcdValue = 0;
+    } else {
+        int span = 1 << __builtin_popcount((unsigned)mask);
+        int value = config.bcdValue % span;
+        if (value < 0) value += span;
+        config.bcdValue = value;
+    }
+    markDirty();
+}
+
+void JumperlessState::setBcdValue(int value) {
+    config.bcdValue = value;
+    markDirty();
+}
+
+int JumperlessState::getBcdPins() const {
+    return config.bcdPins;
+}
+
+int JumperlessState::getBcdValue() const {
+    return config.bcdValue;
 }
 
 // Display
@@ -2260,9 +2298,15 @@ void JumperlessState::serializeConfig(String& output) const {
     // UART and OLED
     output += "  uart: {txFunction: " + String(config.uartTxFunction) + 
               ", rxFunction: " + String(config.uartRxFunction) + "}\n";
-    output += "  oled: {connected: " + String(config.oledConnected ? "true" : "false") + 
+    output += "  oled: {connected: " + String(config.oledConnected ? "true" : "false") +
               ", lockConnection: " + String(config.oledLockConnection ? "true" : "false") + "}\n";
-    
+
+    // BCD counter range + value. MUST stay above serializeFakeGpio(): its
+    // "fakeGpio:" header flips fromYAML's section tracker, so any config key
+    // emitted after it is silently dropped on load.
+    output += "  bcd: {pins: " + String(config.bcdPins) +
+              ", value: " + String(config.bcdValue) + "}\n";
+
     // Fake GPIO configurations
     serializeFakeGpio(output);
 }
@@ -2457,7 +2501,58 @@ bool JumperlessState::deserializeConfig(const char* yamlContent, String& errorMs
             config.oledLockConnection = parseBoolean(val, parseSuccess);
         }
     }
-    
+    // Parse BCD counter. Each key is found by its own indexOf, so a slot
+    // file from an older firmware (a "mode: 0" between width and value, or
+    // the pre-mask "start:"/"width:" pair handled below) still parses -
+    // unknown keys are simply ignored and drop out on the next save.
+    else if (line.startsWith("bcd:")) {
+        int pinsIdx = line.indexOf("pins:");
+        if (pinsIdx >= 0) {
+            int commaIdx = line.indexOf(',', pinsIdx);
+            String val = line.substring(pinsIdx + 5, commaIdx);
+            val.trim();
+            config.bcdPins = val.toInt() & 0x3FF;
+        } else {
+            // BACKWARD COMPAT: a pre-mask slot file carries start/width (a
+            // contiguous range). The old bit map was exactly gpioDef indices
+            // start..start+width-1, so the mask conversion is lossless;
+            // start -1 (counter off) -> mask 0.
+            int startIdx = line.indexOf("start:");
+            if (startIdx >= 0) {
+                int commaIdx = line.indexOf(',', startIdx);
+                String val = line.substring(startIdx + 6, commaIdx);
+                val.trim();
+                int start = val.toInt();
+
+                int width = 1;
+                int widthIdx = line.indexOf("width:");
+                if (widthIdx >= 0) {
+                    int wCommaIdx = line.indexOf(',', widthIdx);
+                    String wVal = line.substring(widthIdx + 6, wCommaIdx);
+                    wVal.trim();
+                    width = wVal.toInt();
+                }
+                if (width < 1) width = 1;
+                if (width > 10) width = 10;
+
+                if (start >= 0 && start <= 9) {
+                    config.bcdPins =
+                        (int)((((1u << width) - 1) << start) & 0x3FFu);
+                } else {
+                    config.bcdPins = 0;
+                }
+            }
+        }
+
+        int valueIdx = line.indexOf("value:");
+        if (valueIdx >= 0) {
+            int endIdx = line.indexOf('}', valueIdx);
+            String val = line.substring(valueIdx + 6, endIdx);
+            val.trim();
+            config.bcdValue = val.toInt();
+        }
+    }
+
     return true;
 }
 
@@ -2920,77 +3015,14 @@ void applyStateToHardware(bool skipPower) {
 
 
 
-#if !defined(OG_JUMPERLESS)
-    // Apply GPIO configurations from globalState to hardware.
-    // SKIPPED on OG: the gpioDef bank (pins 20-27) is the V5 routable-GPIO map.
-    // On the OG those pins are the CH446Q chip selects for chips I/J/K/L
-    // (20-23), RESET (24), the WS2812 LED data line (25) and ADC inputs (26-27).
-    // applyStateToHardware() runs at boot (slot load) and on every slot load, so
-    // driving this bank with gpio_set_dir()/gpio_set_pulls() here re-muxes the
-    // SF chip-select pins into GPIO inputs -- after which setCSex() can no longer
-    // assert them and every breadboard<->SF (nano/DAC/ADC) connection silently
-    // fails to program while A-H (CS 6-13) keep working. Matches the OG guards in
-    // initGPIO()/setGPIO()/updateGPIOConfigFromState().
-    for (int i = 0; i < 10; i++) {
-        uint8_t gpio_pin = gpioDef[i][0];
+    // Apply GPIO configurations from globalState to hardware. The loop that
+    // lived here verbatim (with its own OG_JUMPERLESS wrapper) moved to
+    // hardwarestuff/RoutableGpio.cpp so the module's central OG guard covers
+    // it - exact semantics preserved (only skip: gpioState 6 bus-role pins;
+    // outputs restored to their loaded level).
+    applyStateGpioToHardware();
 
-        // Skip bus-role pins (gpioState 6: the display service's soft-I2C),
-        // same guard as setGPIO(). A slot load otherwise re-asserts the config
-        // direction/pulls on the live bus - a PULLDOWN across SDA's ACK window
-        // - and re-stamps state 4, which sends readGPIO down the pull-twiddling
-        // float path mid-transaction.
-        if (gpioState[i] == 6) {
-            continue;
-        }
 
-        // Apply direction to hardware
-        if (globalState.config.gpioDirection[i] == 0) {
-            gpio_set_dir(gpio_pin, true);  // output
-        } else {
-            gpio_set_dir(gpio_pin, false);  // input
-        }
-        
-        // Apply pull resistors to hardware and update gpioState for animations
-        switch (globalState.config.gpioPulls[i]) {
-            case 0: // pulldown
-                gpio_set_pulls(gpio_pin, false, true);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 4;  // input with pulldown
-                }
-                break;
-            case 1: // pullup
-                gpio_set_pulls(gpio_pin, true, false);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 3;  // input with pullup
-                }
-                break;
-            case 2: // no pull
-                gpio_set_pulls(gpio_pin, false, false);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 2;  // input with no pull
-                }
-                break;
-            case 3: // bus keeper
-                gpio_set_pulls(gpio_pin, true, true);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 7;  // bus keeper mode
-                }
-                break;
-            default:
-                gpio_set_pulls(gpio_pin, false, false);
-                if (globalState.config.gpioDirection[i] == 1) {
-                    gpioState[i] = 2;  // input with no pull
-                }
-                break;
-        }
-        
-        // Set initial output state for output pins
-        if (globalState.config.gpioDirection[i] == 0) {
-            gpio_put(gpio_pin, gpioState[i]);
-        }
-    }
-#endif
-    
     if (debugFP) {
         Serial.println("✓ Applied state to hardware (power, GPIO)");
     }

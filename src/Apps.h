@@ -5,7 +5,7 @@
 #include "ImagesApp.h"
 #include <stdint.h>
 
-#define NUM_APPS 31
+#define NUM_APPS 33
 
 struct app {
   char name[20];

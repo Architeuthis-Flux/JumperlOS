@@ -145,6 +145,15 @@ int closestPaletteHueIdx(int hue);
 void changeTerminalColor(int termColor, bool flush, Stream *stream, bool force = true);
 
 /**
+ * @brief Set the terminal color to the HUE of a (possibly dim) LED color.
+ * LED palette values live at breadboard brightness (~0x30 peak) and would
+ * quantize to black in the xterm-256 cube; this scales the hue to full
+ * brightness first, so the terminal wears the same color the LEDs do.
+ * rgb == 0 resets. Honors disableTerminalColors like every other helper.
+ */
+void termColorLikeLed(uint32_t rgb, Stream *stream);
+
+/**
  * @brief Cycle through high saturation spectrum colors
  * @param reset If true, reset to start color
  * @param step Step size for color cycling (0.1-100.0)

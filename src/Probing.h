@@ -481,8 +481,7 @@ public:
     void calibrateDac0(float target = 3.3);
     
     void probeLEDhandler(void);
-    int probeToggle(int buttonState = -1);  // Note: Currently unused, global function used instead
-    
+
 private:
     Probing();
     ~Probing() = default;
@@ -575,6 +574,11 @@ void probeMapRange(int* mapMin, int* mapMax);
 // model. Candidate selection lives in InfraPaths.
 void probeGpioPowerHwClaim(int gpioDefIdx);
 void probeGpioPowerHwRelease(int gpioDefIdx);
+
+// The live claim's gpioDef index (-1 = no claim). GPIO-bank config appliers
+// (updateStateFromGPIOConfig) and the availability gate
+// (routableGpioAvailable) skip/deny the claimed pin through this.
+int probeGpioPowerClaimIdx(void);
 
 // The two switch-position detectors, exposed for the calibration app and the
 // self test (both live in Probing.cpp with the classifier). Return a POSITION:

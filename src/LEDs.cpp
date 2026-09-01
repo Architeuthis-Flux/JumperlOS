@@ -1287,6 +1287,19 @@ int checkChangedNetColors(int netIndex) {
 uint32_t railNetColors[3] = // dim
   {  0x000f04, 0x0f0202, 0x0f0202 };
 
+// A power rail sitting NEGATIVE paints its whole net BLUE (Kevin, 2026-09-01:
+// the wires are the rail color people actually look at), at the same dim
+// weight as the red. Hardware truth first, persisted value as the fallback -
+// the rule lightUpRail uses for the rail strip itself. assignNetColors runs
+// every frame from showNets, so the wires follow the dial live.
+static uint32_t railNetColor(int rail) {
+  float v = (railHwVolts[rail] > -99.0f)
+                ? railHwVolts[rail]
+                : ((rail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+  if (v < -0.1f) return 0x03031e;
+  return railNetColors[rail + 1];
+}
+
 void assignNetColors(int preview) {
   // numberOfNets = 60;
 
@@ -1342,12 +1355,12 @@ void assignNetColors(int preview) {
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 2:
-        netColors[netIdx] = unpackRgb(railNetColors[1]);
+        netColors[netIdx] = unpackRgb(railNetColor(0));
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 3:
-        netColors[netIdx] = unpackRgb(railNetColors[2]);
+        netColors[netIdx] = unpackRgb(railNetColor(1));
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
@@ -3390,6 +3403,18 @@ uint32_t railColorsV5[4][5] = {
   {0x001C05, 0x002514, 0x0f2C0f, 0x0a2C0a, 0x002C14}//gnd dim, gnd bright, gnd danger, gnd brightened, gnd negative
   };
 
+// The same five shades, in BLUE, for a power rail sitting at a NEGATIVE
+// voltage (Kevin, 2026-09-01: "make the rail animations change color when
+// the voltage is set negative - blue, same animation"). Danger stays orange
+// so the >=5V magnitude cue reads the same either way; ground rows are
+// never negative and mirror the main palette.
+uint32_t railColorsV5Neg[4][5] = {
+  {0x030630, 0x061048, 0x301A02, 0x0c1a58, 0x081848},//top: dim, bright, danger, brightened, negative fill
+  {0x001C05, 0x002C14, 0x0f2C0f, 0x0f2C0f, 0x002C14},//gnd (unused)
+  {0x03062c, 0x061044, 0x301A02, 0x0c1a54, 0x081844},//bottom
+  {0x001C05, 0x002514, 0x0f2C0f, 0x0a2C0a, 0x002C14}//gnd (unused)
+  };
+
 
 
 uint32_t dotColor = 0x06061f;
@@ -3436,8 +3461,20 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
   for (int j = 0; j < 4; j++) {
     if (j == rail || rail == -1) {
 
+      // Negative rail = BLUE, same animation: pick the palette per rail once,
+      // every draw below indexes it. Ground rails (odd j) are never negative.
+      // railHwVolts is read directly - this renderer is __not_in_flash_func.
+      const uint32_t* railPal = railColorsV5[j];
+      if ((j % 2) == 0) {
+        int pr = j / 2;
+        float vRail = (railHwVolts[pr] > -99.0f)
+                          ? railHwVolts[pr]
+                          : ((pr == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+        if (vRail < -0.1f) railPal = railColorsV5Neg[j];
+      }
 
-      uint32_t color = railColorsV5[j][0];
+
+      uint32_t color = railPal[0];
 
 
 
@@ -3476,19 +3513,19 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
 
                     } else if (i > 24 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) < 5.0)) {
 
-                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][3], scaleScale(0)));
+                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[3], scaleScale(0)));
 
                       } else if (i > 49 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][2], scaleScale(30)));
+                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[2], scaleScale(30)));
 
                         } else if (i < 49 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][3], scaleScale(0)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[3], scaleScale(0)));
 
                           } else {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][3], scaleScale(-40)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[3], scaleScale(-40)));
 
                           }
 
@@ -3504,21 +3541,21 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
 
                     } else if (i < abs((int)(((currentRailVoltage + 0.1) * 5) - 1)) && (abs((int)currentRailVoltage) < 5.0)) {
 
-                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][3], scaleScale(15)));
+                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[3], scaleScale(15)));
 
                       } else if (i < (abs((int)(((currentRailVoltage - 4.9) * 5) - 1))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][2], scaleScale(30)));
+                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[2], scaleScale(30)));
                         } else if (i > (abs((int)(((currentRailVoltage - 4.9) * 5) - 1))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][3], scaleScale(15)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[3], scaleScale(15)));
 
                           } else {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][1], scaleScale(-40)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[1], scaleScale(-40)));
                           }
               } else {
-              leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][1], scaleScale(-50)));
+              leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[1], scaleScale(-50)));
               }
 
             } else { //this is when the rails are not highlighted
@@ -3547,19 +3584,19 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
 
                     } else if (i > 25 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) < 5.0)) {
 
-                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][4], scaleScale(-20)));
+                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[4], scaleScale(-20)));
 
                       } else if (i > 50 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][2], scaleScale(-30)));
+                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[2], scaleScale(-30)));
 
                         } else if (i < 50 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][4], scaleScale(-20)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[4], scaleScale(-20)));
 
                           } else {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][0], scaleScale(-85)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[0], scaleScale(-85)));
 
                           }
 
@@ -3575,22 +3612,22 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
 
                     } else if (i < abs((int)(((currentRailVoltage + 0.1) * 5) - 1)) && (abs((int)currentRailVoltage) < 5.0)) {
 
-                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][1], scaleScale(-20)));
+                      leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[1], scaleScale(-20)));
 
                       } else if (i < (abs((int)(((currentRailVoltage - 4.9) * 5) - 1))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][2], scaleScale(-30)));
+                        leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[2], scaleScale(-30)));
 
                         } else if (i > (abs((int)(((currentRailVoltage - 4.9) * 5) - 1))) && (abs(currentRailVoltage) >= 5.0)) {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][1], scaleScale(-20)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[1], scaleScale(-20)));
 
                           } else {
 
-                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][0], scaleScale(-85)));
+                          leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[0], scaleScale(-85)));
                           }
               } else {
-              leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railColorsV5[j][0], scaleScale(-80)));
+              leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[0], scaleScale(-80)));
               }
             }
 
@@ -3731,9 +3768,19 @@ void __not_in_flash_func(showNets)(void) {
           { 68, 67, 64, 63, 60 }, // rail 3: bottom negative
       };
       for (int j = 0; j < 4; j++) {
+        // Same palette rule as lightUpRail: a power rail sitting NEGATIVE
+        // paints blue (ground rails, odd j, never do).
+        const uint32_t* railPal = railColorsV5[j];
+        if ((j % 2) == 0) {
+          int pr = j / 2;
+          float vRail = (railHwVolts[pr] > -99.0f)
+                            ? railHwVolts[pr]
+                            : ((pr == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+          if (vRail < -0.1f) railPal = railColorsV5Neg[j];
+        }
         // Use the dim rail variant directly (no scale-up): the rails read too
         // bright otherwise on the OG's single LED per rail segment.
-        uint32_t railColor = railColorsV5[j][0];
+        uint32_t railColor = railPal[0];
         for (int i = 0; i < 5; i++) {
           // Only fill unlit rail pixels: a rail that is part of a net was
           // already painted its net color by lightUpNet() (pixels 60/61 are the

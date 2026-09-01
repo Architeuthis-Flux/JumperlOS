@@ -430,6 +430,7 @@ void action_probeLedMergedToggle();
 void action_colorSpectrum();
 void action_encoderButtonAnalyzer(); // implemented at the bottom of this file
 void action_menuTransitionTuner();   // implemented at the bottom of this file
+void action_bcdSelfCheck();
 
 // Menu items array
 const StatusMenuItem statusMenuItems[] = {
@@ -449,6 +450,7 @@ const StatusMenuItem statusMenuItems[] = {
     { "Color Spectrum",     "Display terminal color palette",         action_colorSpectrum },
     { "Encoder Btn",        "Analog click-wheel button press test",   action_encoderButtonAnalyzer },
     { "Menu FX",            "Tune menu frame transitions",            action_menuTransitionTuner },
+    { "BCD SelfCheck",      "BCD counter encode/wrap assert run",     action_bcdSelfCheck },
 };
 const int STATUS_MENU_COUNT = sizeof(statusMenuItems) / sizeof(statusMenuItems[0]);
 
@@ -1051,6 +1053,10 @@ void action_psramTest() {
 
 void action_gpioState() {
     printGPIOState();
+}
+
+void action_bcdSelfCheck() {
+    bcdSelfCheck(&Serial);
 }
 
 void action_netlist() {

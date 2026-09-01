@@ -551,8 +551,18 @@ const StringIntEntry padActionTable[] = {
     {"dac_0_down", 26},
     {"dac_1_up", 27},
     {"dac_1_down", 28},
+    {"bcd_up", 29},
+    {"bcd_down", 30},
 };
 const int padActionTableSize = sizeof(padActionTable) / sizeof(padActionTable[0]);
+
+// [routing] part_safety levels (see PartLabels::connectionRefused)
+const StringIntEntry partSafetyTable[] = {
+    {"off", 0},
+    {"power", 1},
+    {"all", 2},
+};
+const int partSafetyTableSize = sizeof(partSafetyTable) / sizeof(partSafetyTable[0]);
 
 // [top_oled] show_in_terminal - where the quarter-block OLED mirror goes.
 // 1..4 are the four USB CDC ports as they enumerate on the host

@@ -3248,6 +3248,35 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
     frameColors[3] = tempFrame[1];
     frameColors[4] = tempFrame[0];
   }
+
+  // A power rail sitting NEGATIVE runs its row animation in BLUE (Kevin,
+  // 2026-09-01: "change color when the voltage is set negative - blue, keep
+  // the same animation"). Slots 0 and 2 are the top and bottom rail sets
+  // (initRowAnimations). Swapping R and B on every frame keeps the exact
+  // motion and brightness and only moves the hue. railHwVolts is the same
+  // hardware truth lightUpRail and assignNetColors read; this painter runs
+  // after drawWires, which is why the blue net color alone never showed.
+  if (index == 0 || index == 2) {
+    int rail = (index == 0) ? 0 : 1;
+    float railV = (railHwVolts[rail] > -99.0f)
+                      ? railHwVolts[rail]
+                      : ((rail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+    if (railV < -0.1f) {
+      // "A little hotter" (Kevin, 08:55): the red frames peak at 0x09, so
+      // the blue that replaces them doubles the dominant channel and keeps
+      // the accents at their weight - same motion, a hue that reads as blue
+      // from across the bench instead of navy.
+      auto toHotBlue = [](uint32_t c) -> uint32_t {
+        uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+        uint32_t hot = r * 2; if (hot > 0xFF) hot = 0xFF;
+        return (b << 16) | (g << 8) | hot;
+      };
+      for (int i = 0; i < 5; i++) {
+        frameColors[i] = toHotBlue(frameColors[i]);
+        brightenedNodeColors[i] = toHotBlue(brightenedNodeColors[i]);
+      }
+    }
+  }
   // Jerial.print("\n\n\rnet = ");
   // Jerial.print(net);
   // Jerial.print("   actualNet = ");

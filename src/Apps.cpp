@@ -26,6 +26,8 @@
                           // and the launcher's only caller.
 #include "Python_Proper.h"
 #include "RotaryEncoder.h"
+#include "hardwarestuff/RoutableGpio.h" // gpioSettingsLauncher / bcdMenuLauncher
+                                        // - the "Set Pins" / "BCD Counter" rows
 #include "SelfTest.h"
 #include "States.h"
 #include "USBAudio.h"
@@ -113,6 +115,11 @@ struct app apps[ NUM_APPS ] = {
     { "Test Part", 28, 1, partsTestLauncher },
     { "Auto Scan", 29, 1, partsAutoLauncher },
     { "Remove Parts", 30, 1, partsRemoveLauncher },
+    // The GPIO submenu children (menuTree.h "-Set    \31Pins" /
+    // "-BCD    \31Counter" -> getActionCategory's "GPIO" arm) - same
+    // name-coupling rule as the Parts children above.
+    { "Set Pins", 31, 1, gpioSettingsLauncher },
+    { "BCD Counter", 32, 1, bcdMenuLauncher },
     // NAME-DISPATCH ONLY, and deliberately WITHOUT a menuTree.h row: the
     // 2026-08-24 bench ruling retired "Guides" as a MENU-level concept and
     // that stands - the Apps submenu is a hand-written list in menuTree.h, so

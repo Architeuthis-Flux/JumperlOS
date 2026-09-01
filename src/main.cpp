@@ -1844,10 +1844,12 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 
             // Allow showing nets if not in menu OR if in preview mode OR
             // if the History scrub menu is live (its job is to show the
-            // reverted bridge state on the breadboard, not menu text).
+            // reverted bridge state on the breadboard, not menu text), or if a
+            // GPIO/BCD UI is open (same deal: it lives on the OLED so the
+            // breadboard can keep showing the circuit being configured).
             if ( rails != 2 && rails != 3 &&
                  ( inClickMenu == 0 || SlotManager::getInstance( ).isPreviewMode( ) ||
-                   g_historyScrubActive ) &&
+                   g_historyScrubActive || g_gpioUiShowsCircuit ) &&
                  inPadMenu == 0 ) {
                 needsLedShow = true;
 

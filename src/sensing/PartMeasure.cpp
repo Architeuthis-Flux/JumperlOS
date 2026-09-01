@@ -34,6 +34,12 @@
 // Per-leg add chatter for bring-up; refusals and add failures always print.
 static bool partScanDebug = false;
 
+// Liveness pulse - see the header. Checked in every wait loop below.
+void (*partScanActivityHook)(void) = nullptr;
+static inline void scanPulse(void) {
+    if (partScanActivityHook) partScanActivityHook();
+}
+
 static bool bridgeExistsInState(int a, int b) {
     for (int i = 0; i < globalState.connections.numBridges; i++) {
         int n1 = globalState.connections.bridges[i][0];
@@ -64,7 +70,7 @@ static bool legAdd(ScanSession& s, int a, int b) {
     }
     String err;
     if (!globalState.addEphemeralConnection(a, b, err, false, 0)) {
-        Serial.print("\r\nPARTSCAN add-fail ");
+        Serial.print("\r\nleg add failed ");
         Serial.print(a); Serial.print("-"); Serial.print(b);
         Serial.print(" "); Serial.print(err);
         Serial.flush();
@@ -72,7 +78,7 @@ static bool legAdd(ScanSession& s, int a, int b) {
         return false;
     }
     if (partScanDebug) {
-        Serial.print("\r\nPARTSCAN eph ");
+        Serial.print("\r\nleg ");
         Serial.print(a); Serial.print("-"); Serial.print(b);
         Serial.flush();
     }
@@ -110,7 +116,7 @@ static int ephRefused(ScanSession& s) {
             if ((a == s.ephA[i] && b == s.ephB[i]) ||
                 (a == s.ephB[i] && b == s.ephA[i])) {
                 refused++;
-                Serial.print("\r\nPARTSCAN REFUSED ");
+                Serial.print("\r\nno fabric path for ");
                 Serial.print(s.ephA[i]); Serial.print("-");
                 Serial.print(s.ephB[i]);
                 Serial.flush();
@@ -147,6 +153,8 @@ static float inaFreshMa(uint32_t maxWaitMs = 150) {
     while (millis() - start < maxWaitMs) {
         Peripherals::getInstance().pollCurrentSense();
         if (currentSenseState.lastUpdatedMs != seen) break;
+        scanPulse();   // every servo settle passes through here - the one
+                       // spot that covers most of a session's wall time
         delayMicroseconds(2000);
     }
     return currentSenseState.shuntVoltage_mV / 2.0f;
@@ -204,6 +212,16 @@ static bool claimRovingGpio(ScanSession& s) {
     s.savedPull = globalState.config.gpioPulls[s.gpioIdx];
     s.savedFloat = globalState.config.gpioReadFloating[s.gpioIdx];
     s.savedState = gpioState[s.gpioIdx];
+    s.savedOwned = globalState.config.gpioPythonOwned[s.gpioIdx] ? 1 : 0;
+    s.savedFunc = (int)gpio_get_function(gpioDef[s.gpioIdx][0]);
+    // OWN the pad, the way the vector runner claims its drivers (bench,
+    // 2026-08-28: core 2's readGPIO() twiddles UNOWNED pads' pulls and
+    // input buffers between scans). Unowned, the roving drive can be
+    // unmade mid-census on a cross-core race - every poke then reads
+    // ~0V, all 56 rows flag as hits, and every LED row lights up
+    // (Kevin's intermittent all-lit scans, 2026-08-30).
+    globalState.config.gpioPythonOwned[s.gpioIdx] = true;
+    __dmb();
     globalState.config.gpioReadFloating[s.gpioIdx] = 0;
     gpioReadFloating[s.gpioIdx] = 0;
     gpio_set_input_enabled(gpioDef[s.gpioIdx][0], false);
@@ -218,12 +236,61 @@ static void restoreRovingGpio(ScanSession& s) {
     globalState.config.gpioReadFloating[s.gpioIdx] = s.savedFloat;
     gpioReadFloating[s.gpioIdx] = s.savedFloat;
     gpioState[s.gpioIdx] = s.savedState;
+    gpio_set_function(gpioDef[s.gpioIdx][0], (gpio_function_t)s.savedFunc);
+    globalState.config.gpioPythonOwned[s.gpioIdx] = (s.savedOwned != 0);
+    __dmb();
     s.gpioIdx = -1;
 }
 
 // ---------------------------------------------------------------------------
 // session
 // ---------------------------------------------------------------------------
+
+// Stage the user bridges that have to come off for a session on these rows
+// and remove them, remembering each one's duplicate stacking so partScanEnd
+// puts it back exactly (Kevin's ruling: "if the part is wired in, just
+// briefly unwire it to test"). Lifting only ever ISOLATES.
+//
+// `everything` widens the rule from "touches a DUT row or the measurement
+// path" to "every bridge we are allowed to lift". That is the retry after
+// the fabric refuses a plain sense leg: the DUT's own rows can be bare and
+// still have no lane, because ADC0-3, both DACs, GND and both rails all
+// live on ONE crossbar chip (K) and each breadboard chip has a single
+// direct lane to it. Bench, 2026-08-28: a capacitor on rows 12/42 was
+// untestable ("no path for 42 to ADC_1") while the 7447's row-40 rail feed
+// held chip F's lane - the same identify read CAPACITOR the moment that
+// unrelated wire came off. Returns bridges newly lifted, or -1 when the
+// lift list can't hold them (caller: "too wired to briefly unwire").
+static int liftWiringInTheWay(ScanSession& s, const int* rows, int nRows,
+                              bool everything) {
+    const int liftCap = (int)(sizeof(s.liftA) / sizeof(s.liftA[0]));
+    const uint8_t was = s.nLift;
+    for (int i = 0; i < globalState.connections.numBridges; i++) {
+        int n1 = globalState.connections.bridges[i][0];
+        int n2 = globalState.connections.bridges[i][1];
+        bool touches = everything ||
+                       (n1 == ISENSE_PLUS || n2 == ISENSE_PLUS ||
+                        n1 == ISENSE_MINUS || n2 == ISENSE_MINUS ||
+                        n1 == DAC0 || n2 == DAC0);
+        for (int r = 0; !touches && r < nRows; r++)
+            if (n1 == rows[r] || n2 == rows[r]) touches = true;
+        if (!touches) continue;
+        if (globalState.isEphemeralConnection(n1, n2)) continue;
+        if (infraIsBridge(n1, n2)) continue;   // never touch infra's own
+        if (s.nLift >= liftCap) {
+            s.nLift = was;   // nothing removed yet: leave no phantom to restore
+            return -1;       // too wired to briefly unwire
+        }
+        s.liftA[s.nLift] = (int16_t)n1;
+        s.liftB[s.nLift] = (int16_t)n2;
+        s.liftDup[s.nLift] = globalState.connections.bridges[i][2];
+        s.nLift++;
+    }
+    // the just-staged ones only - an earlier pass already removed its own
+    for (int i = was; i < s.nLift; i++)
+        removeBridgeFromState(s.liftA[i], s.liftB[i], false);
+    return s.nLift - was;
+}
 
 int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     if (s.active) return -2;
@@ -241,41 +308,13 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
         for (int j = 0; j < i; j++)
             if (rows[j] == r) return -1;
     }
-    // Never energize user wiring - by briefly REMOVING it (Kevin's ruling:
-    // "if the part is wired in, just briefly unwire it to test"). Every
-    // user bridge touching a DUT row, or the measurement path (ISENSE pair
-    // / DAC0 - bench: a UART_TX->ISENSE_MINUS bridge left ~2.4mA standing
-    // through INA0), is lifted with its duplicate count remembered and
-    // restored by partScanEnd. Lifting only ever ISOLATES; with the DUT
-    // rows bridge-free, nothing can power them but the part itself from
-    // another lifted row - the powered-row check below still stands guard.
+    // Never energize user wiring - briefly REMOVE it instead
+    // (liftWiringInTheWay above owns the rule and the restore contract).
+    // With the DUT rows bridge-free nothing can power them but the part
+    // itself from another lifted row, and the powered-row check below
+    // still stands guard over that.
     s.nLift = 0;
-    {
-        const int liftCap = (int)(sizeof(s.liftA) / sizeof(s.liftA[0]));
-        for (int i = 0; i < globalState.connections.numBridges; i++) {
-            int n1 = globalState.connections.bridges[i][0];
-            int n2 = globalState.connections.bridges[i][1];
-            bool touches = (n1 == ISENSE_PLUS || n2 == ISENSE_PLUS ||
-                            n1 == ISENSE_MINUS || n2 == ISENSE_MINUS ||
-                            n1 == DAC0 || n2 == DAC0);
-            for (int r = 0; !touches && r < nRows; r++)
-                if (n1 == rows[r] || n2 == rows[r]) touches = true;
-            if (!touches) continue;
-            if (globalState.isEphemeralConnection(n1, n2)) continue;
-            if (infraIsBridge(n1, n2)) continue;   // never touch infra's own
-            if (s.nLift >= liftCap) return -3;     // too wired to briefly unwire
-            s.liftA[s.nLift] = (int16_t)n1;
-            s.liftB[s.nLift] = (int16_t)n2;
-            s.liftDup[s.nLift] = globalState.connections.bridges[i][2];
-            s.nLift++;
-        }
-        if (s.nLift > 0) {
-            String err;
-            for (int i = 0; i < s.nLift; i++)
-                removeBridgeFromState(s.liftA[i], s.liftB[i], false);
-            (void)err;
-        }
-    }
+    if (liftWiringInTheWay(s, rows, nRows, false) < 0) return -3;
 
     // The session's INA reads run at the hardware conversion cadence, not
     // the ambient 50ms poll gate (Kevin, 2026-08-28: identify time was
@@ -345,11 +384,33 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     // indistinguishable from the floating lane bias here - the wiring gate
     // above is what actually guarantees cold rows.)
     bool powered = false;
+    bool widened = false;
     for (int i = 0; i < nRows; i++) {
         legAdd(s, s.rows[i], ADC0 + s.adcCh[i]);
         if (!legsBuild(s)) {
-            partScanEnd(s);
-            return -7;
+            // No lane for a plain sense leg. Standing wiring on a row this
+            // one merely SHARES A CHIP with can own the last one, so briefly
+            // unwire the rest of the board and ask once more before giving
+            // up (liftWiringInTheWay has the bench case). Say so - the
+            // router already printed its "Couldn't find a path" lines for
+            // the failed attempt, and without this the retry reads like
+            // the board is misbehaving instead of being cleared.
+            if (widened || liftWiringInTheWay(s, rows, nRows, true) <= 0) {
+                partScanEnd(s);
+                return -7;
+            }
+            widened = true;
+            Serial.print("  no measurement lane to row ");
+            Serial.print(s.rows[i]);
+            Serial.println(" - briefly unwiring the rest of the board"
+                           " and asking again...");
+            Serial.flush();
+            refreshQuiet();
+            legAdd(s, s.rows[i], ADC0 + s.adcCh[i]);
+            if (!legsBuild(s)) {
+                partScanEnd(s);
+                return -7;
+            }
         }
         delay(3);
         float v = readAdcVoltage(s.adcCh[i], 8);
@@ -399,9 +460,30 @@ void partScanEnd(ScanSession& s) {
 
 void partScanDischarge(ScanSession& s) {
     if (!s.active) return;
-    for (int i = 0; i < s.nRows; i++) legAdd(s, s.rows[i], GND);
+    for (int i = 0; i < s.nRows; i++) {
+        legAdd(s, s.rows[i], GND);
+        legAdd(s, s.rows[i], ADC0 + s.adcCh[i]);   // watch what we drain
+    }
     refreshQuiet();   // refusals here are harmless - discharge is best-effort
     delay(5);
+    // VERIFIED drain, not a blind wait. A 204uF cap through two routed GND
+    // legs is tau ~27ms - the old fixed 5ms left it near 2V, and the very
+    // next identify read the charged cap as "DIODE conf=0.90" (bench,
+    // 2026-08-29: the HIL cap-value check's own second pass). A grounded
+    // plate still reads its share of the cap voltage while charge remains,
+    // so the row ADCs are the witness; a clean session passes the first
+    // read and pays ~5ms exactly as before. 600ms covers ~1000uF.
+    unsigned long t0 = millis();
+    while (millis() - t0 < 600) {
+        bool flat = true;
+        for (int i = 0; i < s.nRows; i++) {
+            float v = readAdcVoltage(s.adcCh[i], 2);
+            if (v > 0.05f || v < -0.05f) flat = false;
+        }
+        if (flat) break;
+        scanPulse();   // draining a big cap takes visible time
+        delay(5);
+    }
     legsClear(s);
 }
 
@@ -567,12 +649,210 @@ bool partScanCapDetect(ScanSession& s, int idxA, int idxB, float vStep,
     return decayed;
 }
 
+bool partScanCapMeasure(ScanSession& s, int idxA, int idxB, float* farads,
+                        float* tauMs) {
+    if (farads) *farads = 0.0f;
+    if (tauMs) *tauMs = 0.0f;
+    if (!s.active || idxA < 0 || idxA >= s.nRows || idxB < 0 ||
+        idxB >= s.nRows || idxA == idxB) return false;
+
+    bool needHardLoop = false;
+    bool sawCap = false;
+
+    // ---- stage 1: pull-down decay -----------------------------------
+    // Charge A from the roving pin (~80R: pin ~41R + one routed path),
+    // 40ms lifts anything under ~500uF past 2V; release into the pin's
+    // pulldown and time the ADC through 2.0V and 0.9V. Two crossings kill
+    // the release-instant unknown, and the measured end voltage takes the
+    // ADC lane bias back out of the asymptote. The E9 rule holds: the
+    // roving pin's input buffer is off, only the ADC reads the row.
+    if (s.gpioIdx < 0) (void)claimRovingGpio(s);   // partScanEnd restores
+    if (s.gpioIdx >= 0) {
+        rovingIn(s, 0);
+        legAdd(s, s.rows[idxA], ADC0 + s.adcCh[idxA]);
+        legAdd(s, s.rows[idxA], rovingNode(s));
+        legAdd(s, s.rows[idxB], GND);
+        if (!legsBuild(s)) {
+            needHardLoop = true;
+        } else {
+            rovingOut(s, true);
+            delay(40);
+            float v0 = readAdcVoltage(s.adcCh[idxA], 4);
+            if (v0 < 2.0f) {
+                // the pin can't lift the row in 40ms: over ~500uF (or a
+                // load that is no capacitor at all) - the hard loop says
+                rovingOut(s, false);   // never release a held-high pin
+                delay(2);              // into a rail-sized cap: drain first
+                rovingIn(s, 0);
+                legsClear(s);
+                needHardLoop = true;
+            } else {
+                rovingIn(s, -1);           // release into the pulldown
+                uint32_t tRel = micros();
+                uint32_t t1 = 0, t2 = 0;
+                bool slow = false;
+                while (true) {
+                    float v = readAdcVoltage(s.adcCh[idxA], 1);
+                    uint32_t t = micros();
+                    if (t1 == 0 && v <= 2.0f) t1 = t;
+                    if (t1 != 0 && v <= 0.9f) { t2 = t; break; }
+                    if (t - tRel > 900000u) { slow = true; break; }
+                    scanPulse();   // a big cap's decay watch runs ~1s
+                }
+                if (slow) {
+                    rovingIn(s, 0);
+                    legsClear(s);
+                    needHardLoop = true;   // holding after 900ms: big cap
+                } else if (t2 - t1 < 150u) {
+                    // fell straight through: nothing holds the row above
+                    // the ~5nF floor (an empty row's own ~100pF decays in
+                    // single-digit us; the ADC samples every ~25us)
+                    rovingIn(s, 0);
+                    legsClear(s);
+                } else {
+                    // let it finish so the asymptote is a measurement
+                    uint32_t tEnd = micros();
+                    uint32_t settle = 5 * (t2 - t1);
+                    if (settle > 200000u) settle = 200000u;
+                    while (micros() - tEnd < settle) scanPulse();
+                    float vEnd = readAdcVoltage(s.adcCh[idxA], 4);
+                    if (vEnd > 0.7f || vEnd < -0.5f) vEnd = 0.0f;
+                    rovingIn(s, 0);
+                    legsClear(s);
+                    float tauUs =
+                        (float)(t2 - t1) /
+                        logf((2.0f - vEnd) / (0.9f - vEnd));
+                    if (tauMs) *tauMs = tauUs / 1000.0f;
+                    sawCap = true;
+                    float pull = partScanCalibratePull(s, idxA, false);
+                    if (pull > 1000.0f && farads) {
+                        *farads = (tauUs * 1.0e-6f) / pull;
+                    } else if (tauUs > 100000.0f) {
+                        // pull refused but the part is >= ~2uF: big enough
+                        // for the hard loop to put a number on it
+                        needHardLoop = true;
+                    }
+                    // else: presence proven, value honestly refused
+                }
+            }
+        }
+    } else {
+        needHardLoop = true;   // every GPIO wired: the hard loop covers >=1uF
+    }
+
+    // ---- stage 2: hard-loop charge integration ------------------------
+    // Step DAC0 to 2V through driveBuild's fixture and count the charge
+    // going in. The sink row drains through one routed path + the shunt,
+    // so its voltage IS the current (the pair sweep's Ohm's-law trick) at
+    // ~25us a sample for the fast part of the transient; whatever is
+    // still charging at 30ms is big enough for the INA's true mA (~1ms a
+    // conversion in fast-poll mode). C = Q / V(cap, end).
+    if (needHardLoop) {
+        partScanDischarge(s);   // verified drain: starts the count from 0V,
+                                // however charged it arrived (the fake-out
+                                // path hands over a cap the servo walked
+                                // toward 5.5V)
+        if (!driveBuild(s, idxA, idxB)) return sawCap;
+        setDac0voltage(0.0f, 0, 0, false);
+        delay(20);
+        // The sink-path resistance is MEASURED against the shunt while the
+        // cap is still drawing: one non-blocking INA poll per ms rides the
+        // tight ADC loop, and every fresh conversion pairs the shunt's
+        // true mA with the sink row's volts at that instant - the ratio IS
+        // the live route, whatever the router picked. This replaced a 67R
+        // "one hop + shunt" constant after Kevin's known-100uF part read
+        // 260uF: the route that day was a two-hop bounce (~170R), and no
+        // constant covers both shapes. 67R stays as the fallback for
+        // transients too fast to give both meters the same instant -
+        // those caps' VALUES come from stage 1 anyway.
+        const float kRsinkDefault = 67.0f;
+        float sumV_us = 0.0f;           // integral of vB dt, V*us
+        float q_uC = 0.0f;
+        float vPk = 0.0f;
+        bool decayed = false;           // a cap's current DIES; a diode's
+                                        // or resistor's holds steady
+        float ratio[16];                // vB / I_shunt pairs, ohms
+        int nRatio = 0;
+        unsigned long inaSeen = currentSenseState.lastUpdatedMs;
+        setDac0voltage(2.0f, 0, 0, false);
+        uint32_t t0 = micros();
+        uint32_t tPrev = t0;
+        uint32_t tInaPoll = t0;
+        float vPrev = 0.0f;
+        while (true) {                  // fast phase, 30ms cap
+            float v = readAdcVoltage(s.adcCh[idxB], 1);
+            uint32_t t = micros();
+            sumV_us += 0.5f * (v + vPrev) * (float)(t - tPrev);
+            vPrev = v;
+            tPrev = t;
+            if (v > vPk) vPk = v;
+            if (t - t0 > 30000u) break;
+            if (vPk > 0.03f && v < 0.008f) { decayed = true; break; }
+            if (t - tInaPoll >= 1000u) {   // one I2C poll per ms, max -
+                tInaPoll = t;              // the trapezoid spans the gap
+                Peripherals::getInstance().pollCurrentSense();
+                if (currentSenseState.lastUpdatedMs != inaSeen) {
+                    inaSeen = currentSenseState.lastUpdatedMs;
+                    float i = currentSenseState.shuntVoltage_mV / 2.0f;
+                    if (i > 0.3f && v > 0.02f && nRatio < 16)
+                        ratio[nRatio++] = v / (i * 0.001f);
+                }
+            }
+        }
+        float rSink = kRsinkDefault;
+        if (nRatio >= 2) {
+            for (int x = 1; x < nRatio; x++)
+                for (int y = x; y > 0 && ratio[y] < ratio[y - 1]; y--) {
+                    float tr = ratio[y]; ratio[y] = ratio[y - 1]; ratio[y - 1] = tr;
+                }
+            rSink = ratio[nRatio / 2];             // median: conversion
+            if (rSink < 20.0f) rSink = 20.0f;      // edges land as outliers
+            if (rSink > 400.0f) rSink = 400.0f;
+        }
+        q_uC = sumV_us / rSink;         // V*us / ohm = uC
+        if (vPk > 0.03f && !decayed) {              // still charging: INA
+            unsigned long tSlow = millis();
+            uint32_t tPrevIna = micros();
+            while (millis() - tSlow < 2000) {       // ponytail: leaky
+                scanPulse();
+                float i = inaFreshMa();             // electrolytics ride the
+                uint32_t t = micros();              // 2s cap and read HIGH -
+                q_uC += i * 1.0e-3f * (float)(t - tPrevIna);  // a leak-slope
+                tPrevIna = t;                       // fit is the upgrade
+                if (i < 0.05f) { decayed = true; break; }
+            }
+        }
+        float vA = readAdcVoltage(s.adcCh[idxA], 4);
+        float vB = readAdcVoltage(s.adcCh[idxB], 4);
+        driveDown(s);
+        // presence gate: an empty pair never lifts the sink row (~mV
+        // noise) and never moves real charge (0.05uC is ~25nF at 2V) -
+        // and anything whose current NEVER decayed is conducting DC
+        // (a low-drop diode, a resistor), not storing charge
+        if (vPk > 0.03f && q_uC > 0.05f && decayed) {
+            sawCap = true;
+            float dV = vA - vB;
+            if (dV > 0.5f && farads) *farads = q_uC * 1.0e-6f / dV;
+        }
+    }
+    // Leave the part FLAT whichever stage ran: stage 2 charged it to ~2V
+    // outright, and stage 1's pull calibration parks the part at 1.2V
+    // (the shunt-in-feed fixture holds the row there). partScanDischarge
+    // verifies the drain, so the next session's screen meets a dead part,
+    // not yesterday's charge reading as a 0.9-confidence diode.
+    if (sawCap) partScanDischarge(s);
+    return sawCap;
+}
+
 // ---------------------------------------------------------------------------
 // BJT / FET support (3-row sessions)
 // ---------------------------------------------------------------------------
 
 float partScanCalibratePull(ScanSession& s, int idx, bool up) {
-    if (!s.active || s.nRows != 3 || idx < 0 || idx >= s.nRows) return -1.0f;
+    // any session shape works - the fixture only needs the one row, the
+    // shunt-in-feed legs and a claimed roving GPIO (partScanCapMeasure
+    // claims one into a 2-row session for exactly this)
+    if (!s.active || idx < 0 || idx >= s.nRows) return -1.0f;
     if (s.gpioIdx < 0) return -1.0f;
     // DAC0 -> ISENSE+ -> shunt -> ISENSE- -> row: the shunt sits in the
     // feed, so INA0 reads the pull current exactly. Pulldown: row at 1.2V,
@@ -710,7 +990,8 @@ static bool clampProbeDir(int rowDrv, int rowShn, uint8_t* verdict,
 
 int partScanClampFingerprint(const int* pinRows, int nPins, int gndRow,
                              int vddRow, ClampPin* out,
-                             bool (*abortCheck)(void)) {
+                             bool (*abortCheck)(void),
+                             void (*progress)(int row, int state)) {
     if (pinRows == nullptr || out == nullptr || nPins < 1) return -1;
     if (gndRow < 1 || gndRow > 60 || vddRow < 1 || vddRow > 60 ||
         gndRow == vddRow) return -1;
@@ -752,7 +1033,11 @@ int partScanClampFingerprint(const int* pinRows, int nPins, int gndRow,
         if (abortCheck && abortCheck()) break;
         int r = pinRows[p];
         // rails fingerprint nothing against themselves
-        if (r < 1 || r > 60 || r == gndRow || r == vddRow) continue;
+        if (r < 1 || r > 60 || r == gndRow || r == vddRow) {
+            if (progress) progress(r, 6);
+            continue;
+        }
+        if (progress) progress(r, 0);
         // GND-side: drive the GND row above the pin (substrate diode fwd);
         // VDD-side: drive the pin above the VDD row (high-side clamp fwd) -
         // the same two orientations partsChipMemberProbe bench-proved.
@@ -760,6 +1045,18 @@ int partScanClampFingerprint(const int* pinRows, int nPins, int gndRow,
         bool vOk = clampProbeDir(r, vddRow, &out[p].toVdd, &out[p].vfVdd);
         out[p].probed = gOk || vOk;
         if (out[p].probed) probed++;
+        if (progress) {
+            int st;
+            if (!out[p].probed) st = 6;
+            else if (out[p].toGnd == PART_CLAMP_RESISTIVE ||
+                     out[p].toVdd == PART_CLAMP_RESISTIVE) st = 5;
+            else if (out[p].toGnd == PART_CLAMP_JUNCTION &&
+                     out[p].toVdd == PART_CLAMP_JUNCTION) st = 4;
+            else if (out[p].toGnd == PART_CLAMP_JUNCTION) st = 2;
+            else if (out[p].toVdd == PART_CLAMP_JUNCTION) st = 3;
+            else st = 1;
+            progress(r, st);
+        }
     }
 
     if (nLift > 0) {
@@ -811,7 +1108,7 @@ int partScanCensus(uint8_t* rowFlags, float* v0dbg, float* v1dbg,
                 ch = cand;
                 break;
             }
-            Serial.print("\r\nPARTSCAN lane ADC");
+            Serial.print("\r\nlane ADC");
             Serial.print(cand);
             if (!built) {
                 Serial.println(" discharge refused - rejected");
@@ -1017,8 +1314,8 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
         // the gap-1 pass's per-direction empty line doubles as the edge
         // stage's reference (same fixture, same artifact - too few edge
         // pairs exist to self-calibrate)
-        float edgeMedian[2] = {0.0f, 0.0f};
-        bool haveEdgeMedian = false;
+        float edgeFloor[2] = {0.0f, 0.0f};
+        bool haveEdgeFloor = false;
         for (int gi = 0; gi < 2 && !aborted; gi++) {
             int gap = kGap[gi];
             int nPairs = 0;
@@ -1072,7 +1369,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
             if (nPairs > 0 && nPairs < 5) {
                 // no silent caps: a nearly-full board can leave an
                 // arrangement without enough pairs to self-calibrate
-                Serial.print("PARTSCAN sweep gap-");
+                Serial.print("sweep gap-");
                 Serial.print(gap);
                 Serial.print(": only ");
                 Serial.print(nPairs);
@@ -1090,14 +1387,27 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                     for (int y = x; y > 0 && sorted[y] < sorted[y - 1]; y--) {
                         float t = sorted[y]; sorted[y] = sorted[y - 1]; sorted[y - 1] = t;
                     }
-                float median = sorted[n / 2];
+                // The baseline is the LOW-QUANTILE floor, not the median,
+                // and the verdict is one-sided. An empty pair passes no
+                // current, so empties are ALWAYS the low cluster; the
+                // median assumed they were also the MAJORITY, and Kevin's
+                // 2026-08-30 23:01 board (two DIPs + a display + four
+                // resistors = conductive-adjacent on most rows) flipped
+                // it onto the conductive cluster - every EMPTY pair then
+                // "deviated" and all 56 rows flagged (the intermittent
+                // every-LED-lit scans: near 50/50 density the flip rides
+                // run-to-run noise). sorted[max(1, n/8)] survives a couple
+                // of outlier-low readings and never flips with density.
+                int bi = n / 8;
+                if (bi < 1) bi = 1;
+                float base = sorted[bi];
                 if (gap == 1) {
-                    edgeMedian[dir] = median;
-                    haveEdgeMedian = true;
+                    edgeFloor[dir] = base;
+                    haveEdgeFloor = true;
                 }
                 for (int i = 0; i < nPairs; i++) {
                     if (di[dir][i] > 1.0e8f) continue;
-                    if (fabsf(di[dir][i] - median) > kSweepDevV) {
+                    if (di[dir][i] - base > kSweepDevV) {
                         int a = pairA[i], b = pairB[i];
                         if (rowFlags[a] == 0) { rowFlags[a] = 5; newHits++; }
                         if (rowFlags[b] == 0) { rowFlags[b] = 5; newHits++; }
@@ -1138,7 +1448,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
         // gapPairsOut like cross-gap pairs do - the edge row can never
         // join a span (its census flag stays 3) and the launcher groups
         // pairs sharing one edge row into a single finding.
-        if (!aborted && haveEdgeMedian) {
+        if (!aborted && haveEdgeFloor) {
             static const int kEdge[4] = {29, 30, 59, 60};
             bool edgeHadHit[4] = {false, false, false, false};
             for (int stage = 0; stage < 2 && !aborted; stage++) {
@@ -1182,7 +1492,11 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
                 for (int dir = 0; dir < 2; dir++) {
                     for (int i = 0; i < nPairs; i++) {
                         if (di[dir][i] > 1.0e8f) continue;
-                        if (fabsf(di[dir][i] - edgeMedian[dir]) <= kSweepDevV)
+                        // one-sided against the gap-1 pass's empty FLOOR
+                        // (see the baseline note above - the median flip
+                        // painted phantom "conducts to row 29" edges on
+                        // six empty pairs at 23:01)
+                        if (di[dir][i] - edgeFloor[dir] <= kSweepDevV)
                             continue;
                         int n = pairA[i], E = pairB[i];
                         for (int e = 0; e < 4; e++)
@@ -1208,7 +1522,7 @@ int partScanPairSweep(uint8_t* rowFlags, bool (*abortCheck)(void),
         } else if (!aborted) {
             // no silent caps: without the gap-1 empty line the edge rows
             // can't be judged, and a part ending on 29/30/59/60 stays dark
-            Serial.println("PARTSCAN edge rows unswept (no calibration"
+            Serial.println("edge rows unswept (no calibration"
                            " population) - parts ending on 29/30/59/60"
                            " won't be seen");
         }

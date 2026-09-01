@@ -4481,6 +4481,25 @@ int Probing::attachPadsToSettings( int pad ) {
                     break;
                 }
 
+                // Refuse a pin a service OWNS before touching anything:
+                // the bare gpioState write below destroys the bus-role
+                // sentinel (gpioState == 6) that setGPIO honors - the
+                // same OLED-bus-killer chooseGPIO's edge branches refuse.
+                const char* padGpioOwner = nullptr;
+                if ( !routableGpioAvailable( gpioChosen - 1,
+                                             &padGpioOwner ) ) {
+                    char ownerToast[ 24 ];
+                    snprintf( ownerToast, sizeof( ownerToast ),
+                              "GPIO %d\n%s", gpioChosen,
+                              padGpioOwner ? padGpioOwner : "in use" );
+                    oled.clearPrintShow( ownerToast, 2, 1200 );
+                    Serial.printf( "\n\rGPIO %d is held by %s\n\r",
+                                   gpioChosen,
+                                   padGpioOwner ? padGpioOwner
+                                                : "another service" );
+                    break;
+                }
+
                 // Serial.print( "gpioChosen: " );
                 // Serial.println( gpioChosen );
                 // Serial.print( "gpioState[gpioChosen]: " );
@@ -5109,6 +5128,25 @@ int Probing::chooseADC( void ) {
 }
 
 int Probing::chooseGPIOinputOutput( int gpioChosen ) {
+    // Refuse a pin a service OWNS before offering the Input/Output choice
+    // at all (the chooseGPIO edge-branch idiom): the bare gpioState writes
+    // in the apply block below destroy the bus-role sentinel (gpioState ==
+    // 6) that setGPIO/applyPinConfig honor, so accepting GPIO 7/8 while
+    // the OLED runs on the crossbar I2C pads re-muxes the live display bus
+    // and kills the panel. gpioChosen is 1-BASED here (the
+    // gpioState[gpioChosen - 1] writes below are the proof). Name the
+    // owner instead; -1 reads as cancel at both call sites.
+    const char* gpioOwner = nullptr;
+    if ( !routableGpioAvailable( gpioChosen - 1, &gpioOwner ) ) {
+        char ownerToast[ 24 ];
+        snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                  gpioChosen, gpioOwner ? gpioOwner : "in use" );
+        oled.clearPrintShow( ownerToast, 2, 1200 );
+        Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen,
+                       gpioOwner ? gpioOwner : "another service" );
+        return -1;
+    }
+
     int settingOption = -1;
     int selectedOption = 0; // 0 = input (default), 1 = output
 
@@ -5145,6 +5183,13 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
     b.print( "Output", outputColor, 0xFFFFFF, 0, 1, 3 );
     lastSelectedOption = selectedOption;
 
+    // OLED mirror (chooseIsense precedent). gpioChosen is 1-based here,
+    // so gpioNumStr already holds the number to show.
+    char oledMenuStr[ 24 ];
+    snprintf( oledMenuStr, sizeof( oledMenuStr ), "GPIO %s\nInput / Output",
+              gpioNumStr );
+    oled.clearPrintShow( oledMenuStr, 2, 100 );
+
     // CRITICAL FIX: Signal Core 2 to display menu with blocking PIO transfer
     // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
     // Without this, async DMA may drop the frame and menu won't display,
@@ -5177,6 +5222,16 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
         if ( selectedOption != lastSelectedOption ) {
             b.clear( );
             clearLEDsExceptRails( );
+
+            // OLED mirror (chooseIsense precedent).
+            if ( selectedOption == 0 ) {
+                snprintf( oledMenuStr, sizeof( oledMenuStr ), "GPIO %s\nInput",
+                          gpioNumStr );
+            } else {
+                snprintf( oledMenuStr, sizeof( oledMenuStr ), "GPIO %s\nOutput",
+                          gpioNumStr );
+            }
+            oled.clearPrintShow( oledMenuStr, 2, 100 );
 
             inputColor = ( selectedOption == 0 ) ? 0x4500e8 : 0x150050;
             outputColor = ( selectedOption == 1 ) ? 0x4500e8 : 0x150050;
@@ -5259,6 +5314,88 @@ int Probing::chooseGPIOinputOutput( int gpioChosen ) {
     return settingOption;
 }
 
+// ---- OLED mirror of the "Choose GPIO" probe chooser ----
+// Two 128x32 1-bit bitmaps in Adafruit GFX drawBitmap format: row-major,
+// MSB-first, 16 bytes per scanline (512 bytes each). Authored as 0b
+// literals so the image reads right here in the source - each line below
+// is one scanline, set bits are lit pixels.
+// gpioChooserBmp: breadboard outline + center channel + digits 1-8.
+// gpioChooserMarkersBmp: the i (input, left of each digit) and o (output,
+// right of each digit) tap-zone markers - riding above the top-row digits
+// and below the bottom-row digits like the pad tap zones they mirror.
+// Kept as a separate overlay so clear mode can hide the markers exactly
+// like the LED menu does (drawBitmap leaves unset bits transparent, so
+// the overlay layers cleanly over the base art).
+static const unsigned char gpioChooserBmp[] PROGMEM = {
+    0b00111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111100,
+    0b01000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000010,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000000, 0b00000000, 0b00000001, 0b00000000, 0b00000001,
+    0b10000000, 0b00000110, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000000, 0b00000000, 0b00000011, 0b00000000, 0b00000001,
+    0b10000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000101, 0b00000000, 0b00000001,
+    0b10000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00000011, 0b00000000, 0b00000000, 0b00000000, 0b00000011, 0b00000000, 0b00000000, 0b00000000, 0b00001001, 0b00000000, 0b00000001,
+    0b10000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00000100, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00001111, 0b10000000, 0b00000001,
+    0b10000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000000, 0b00000000, 0b00000001, 0b00000000, 0b00000001,
+    0b10000000, 0b00000111, 0b00000000, 0b00000000, 0b00000000, 0b00001111, 0b10000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000000, 0b00000000, 0b00000001, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10011111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10011111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00001111, 0b10000000, 0b00000000, 0b00000000, 0b00000011, 0b00000000, 0b00000000, 0b00000000, 0b00001111, 0b10000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000001,
+    0b10000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000, 0b00000100, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000001,
+    0b10000000, 0b00001111, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000, 0b00000001, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000001,
+    0b10000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00001111, 0b00000000, 0b00000000, 0b00000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000000, 0b00000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000001,
+    0b10000000, 0b00001000, 0b10000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000000, 0b00000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b10000000, 0b00000001,
+    0b10000000, 0b00000111, 0b00000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000000, 0b00000000, 0b00000010, 0b00000000, 0b00000000, 0b00000000, 0b00000111, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001,
+    0b01000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000010,
+    0b00111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111100
+};
+
+static const unsigned char gpioChooserMarkersBmp[] PROGMEM = {
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000,
+    0b00000000, 0b00000000, 0b00001010, 0b00000000, 0b00000000, 0b00000000, 0b00001010, 0b00000000, 0b00000000, 0b00000000, 0b00001010, 0b00000000, 0b00000000, 0b00000000, 0b00001010, 0b00000000,
+    0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000,
+    0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000,
+    0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b10000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000,
+    0b00000000, 0b10000000, 0b00001010, 0b00000000, 0b00000000, 0b10000000, 0b00001010, 0b00000000, 0b00000000, 0b10000000, 0b00001010, 0b00000000, 0b00000000, 0b10000000, 0b00001010, 0b00000000,
+    0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000, 0b00000000, 0b10000000, 0b00001110, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000
+};
+
 int Probing::chooseGPIO( int skipInputOutput ) {
     int function = -1;
     sfProbeMenu = 3;
@@ -5323,6 +5460,16 @@ int Probing::chooseGPIO( int skipInputOutput ) {
     b.print( "8", sfOptionColors[ 7 ], 0xFFFFFF, 6, 1, -2 );
     b.printRawRow( 0b00000011, 57, outColor, 0xFFFFFF );
     b.printRawRow( 0b00000011, 58, outColor, 0xFFFFFF );
+
+    // OLED mirror of this chooser: base art always, i/o marker overlay
+    // hidden in clear mode exactly like the LED markers above (inColor /
+    // outColor forced to 0x000000 when connectOrClearProbe == 0).
+    oled.clearFramebuffer( );
+    oled.displayBitmap( 0, 0, gpioChooserBmp, 128, 32 );
+    if ( connectOrClearProbe != 0 ) {
+        oled.displayBitmap( 0, 0, gpioChooserMarkersBmp, 128, 32 );
+    }
+    oled.show( );
 
     // CRITICAL FIX: Signal Core 2 to display menu with blocking PIO transfer
     // Core 1 must NEVER call leds.showBlocking() - use flag to signal Core 2
@@ -5479,10 +5626,14 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         }
     }
 
-    if ( function == -1 ) {
-        return function;
-    }
-    if ( selected == -1 ) {
+    if ( function == -1 || selected == -1 ) {
+        // Cancel / timeout: the press that cancelled must not echo into the
+        // surrounding session as a fresh gesture - same button cleanup the
+        // success tail below runs. The LED/OLED restores are deliberately
+        // NOT here: cancel leaves those to the probe-exit path.
+        ProbeButton::getInstance( ).clearButtonState( );
+        blockProbeButton = 500;
+        blockProbeButtonTimer = millis( );
         return function;
     }
     if ( skipInputOutput == 0 && connectOrClearProbe == 1 ) {
@@ -5512,25 +5663,78 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         if ( outIn == 2 ) {
             chooseGPIOinputOutput( gpioChosen + 1 );
         } else if ( outIn == 1 ) {
+            // Refuse a pin a service OWNS before touching anything. The
+            // bare gpioState pre-write below destroys the bus-role sentinel
+            // (gpioState == 6) that applyPinConfig refuses on, so without
+            // this check picking GPIO 7/8 while the OLED runs on the crossbar
+            // I2C pads re-muxes the live display bus to SIO and kills the
+            // panel. Name the owner instead, like the highlight carousel.
+            const char* gpioOwner = nullptr;
+            if ( !routableGpioAvailable( gpioChosen, &gpioOwner ) ) {
+                char ownerToast[ 24 ];
+                snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                          gpioChosen + 1, gpioOwner ? gpioOwner : "in use" );
+                oled.clearPrintShow( ownerToast, 2, 1200 );
+                Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
+                               gpioOwner ? gpioOwner : "another service" );
+                // The refusal must cancel the CONNECT too: with function
+                // still set, readRows took the owned pin as the connect
+                // target and the wire landed on the live bus anyway - the
+                // toast said refused while the commit spliced the user's
+                // row onto it. Callers treat -1 as cancel.
+                function = -1;
+            } else {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {
             globalState.config.gpioDirection[ gpioChosen ] = 1;
-            updateStateFromGPIOConfig( gpioChosen );
+            // applyPinConfig = updateStateFromGPIOConfig(idx) + markDirty().
+            // This site changed config with NO markDirty (the sibling
+            // chooseGPIOinputOutput does it right), so the new direction
+            // silently never persisted to the slot.
+            applyPinConfig( gpioChosen );
             // gpioState[gpioChosen] = 4;
             // updateGPIOConfigFromState();
             // configChanged = true;
             // printGPIOState();
             //  }
+
+            // OLED mirror: confirm the landed selection. gpioChosen is
+            // 0-based here (the chooseGPIOinputOutput(gpioChosen + 1)
+            // call above is the proof), so display gpioChosen + 1.
+            char gpioOledStr[ 16 ];
+            snprintf( gpioOledStr, sizeof( gpioOledStr ), "GPIO %d\nInput",
+                      gpioChosen + 1 );
+            oled.clearPrintShow( gpioOledStr, 2, 100 );
+            }
         } else if ( outIn == 0 ) {
+            // Same owner refusal as the outIn == 1 branch above.
+            const char* gpioOwnerOut = nullptr;
+            if ( !routableGpioAvailable( gpioChosen, &gpioOwnerOut ) ) {
+                char ownerToast[ 24 ];
+                snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                          gpioChosen + 1,
+                          gpioOwnerOut ? gpioOwnerOut : "in use" );
+                oled.clearPrintShow( ownerToast, 2, 1200 );
+                Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
+                               gpioOwnerOut ? gpioOwnerOut : "another service" );
+                function = -1; // cancel the connect too (see outIn == 1)
+            } else {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 4;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 1) {
             globalState.config.gpioDirection[ gpioChosen ] = 0;
-            updateStateFromGPIOConfig( gpioChosen );
+            applyPinConfig( gpioChosen ); // see the outIn == 1 note above
             // gpioState[gpioChosen] = 0;
             // updateGPIOConfigFromState();
             // configChanged = true;
             // printGPIOState();
             //}
+
+            // OLED mirror: see the outIn == 1 note - display gpioChosen + 1.
+            char gpioOledStr[ 16 ];
+            snprintf( gpioOledStr, sizeof( gpioOledStr ), "GPIO %d\nOutput",
+                      gpioChosen + 1 );
+            oled.clearPrintShow( gpioOledStr, 2, 100 );
+            }
         }
 
         // Serial.print("gpioChosen (chooseGPIO): ");
@@ -7115,7 +7319,9 @@ float jl_dac_get( int channel );
 
 // Run a [logo_pads] *_idle action (padActionTable in configManager.h):
 // 1..8 = gpio toggle, 9..16 = gpio high, 17..24 = gpio low,
-// 25..28 = DAC 0/1 nudge up/down by 0.25V (clamped to the [dacs] limits).
+// 25..28 = DAC 0/1 nudge up/down by 0.25V (clamped to the [dacs] limits),
+// 29/30 = BCD counter up/down (wraps; hex readout; toasts "no range" when
+// unconfigured).
 static void runPadIdleAction( int action ) {
     char toast[ 32 ] = { 0 };
     if ( action >= 1 && action <= 24 ) {
@@ -7134,6 +7340,22 @@ static void runPadIdleAction( int action ) {
         jl_dac_set( dac, v, 1 );
         snprintf( toast, sizeof( toast ), "DAC %d\n%.2f V", dac, (double)v );
         Serial.printf( "\r\npad: DAC %d -> %.2f V\r\n", dac, (double)v );
+    } else if ( action == 29 || action == 30 ) {
+        // Phase 3's counter module (RoutableGpio, via Peripherals.h): wraps
+        // both directions, drives the pins, marks the slot dirty. -1 = no
+        // range configured - nothing moved, so toast that instead.
+        int v = bcdIncrement( action == 29 ? 1 : -1 );
+        if ( v >= 0 ) {
+            // Hex, zero-padded to the range's nibble count - the same string
+            // every other counter readout shows.
+            char hexText[ 16 ];
+            bcdFormatValue( v, hexText, sizeof( hexText ) );
+            snprintf( toast, sizeof( toast ), "BCD\n%s", hexText );
+            Serial.printf( "\r\npad: BCD -> %s\r\n", hexText );
+        } else {
+            snprintf( toast, sizeof( toast ), "BCD\nno range" );
+            Serial.printf( "\r\npad: BCD no range configured\r\n" );
+        }
     } else {
         return;
     }

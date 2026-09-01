@@ -392,6 +392,15 @@ uint8_t FontManager::findBestFitPointSize( FontFamily family, const char* text, 
     return minPointSize;
 }
 
+int16_t FontManager::measureTextWidth( int fontIndex, const char* text ) {
+    if ( fontIndex < 0 || fontIndex >= numFonts || text == nullptr ) {
+        return -1;
+    }
+    int16_t w, h;
+    getTextBoundsWithFont( getDisplay( ), fontList[ fontIndex ].font, text, &w, &h );
+    return w;
+}
+
 // Get all available point sizes for a font family (stored in PROGMEM)
 void FontManager::getAvailableSizes( FontFamily family, uint8_t* sizes, int* count ) {
     *count = 0;
@@ -4507,13 +4516,12 @@ int oled::connect( void ) {
     Serial.printf("[OLED] initI2C returned %d\n", found);
     #endif
 
-    // Mark function map so scan/UI reflect I2C role
+    // Mark the bus role so scan/UI reflect it (the pin function itself is
+    // read live from the registers, which initI2C's Wire1.begin just muxed)
     if ( jumperlessConfig.top_oled.sda_pin >= 20 ) {
-        gpio_function_map[ jumperlessConfig.top_oled.sda_pin - 20 ] = GPIO_FUNC_I2C;
         gpioState[ jumperlessConfig.top_oled.sda_pin - 20 ] = 6;
     }
     if ( jumperlessConfig.top_oled.scl_pin >= 20 ) {
-        gpio_function_map[ jumperlessConfig.top_oled.scl_pin - 20 ] = GPIO_FUNC_I2C;
         gpioState[ jumperlessConfig.top_oled.scl_pin - 20 ] = 6;
     }
 

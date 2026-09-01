@@ -20,7 +20,7 @@
 // ACKs because SDA never rises) - the beacon's >8-ACK heuristic names it.
 
 // Pick pins + peripheral for this instance and mark them
-// (gpio_function_map/gpioState - the oled.cpp:4316 precedent, which survives
+// (gpioState bus-role marks - the oled.cpp precedent, which survives
 // Python exits; jl_gpio_claim_pin does not). Returns false with a reason
 // when the pins are user-claimed.
 bool displayBusAcquire(DisplayInstance& d, const char** reasonOut);

@@ -321,6 +321,19 @@ static bool isPartsAutoName(const JumperlessState& st, const char* name) {
     return false;
 }
 
+// Does this net actually hold this node? (netHasNode in Highlighting.cpp and
+// netContainsNode in PartLabels.cpp are the same three lines, both
+// file-local.) Empty node slots are 0.
+static bool netHoldsNode(const JumperlessState& st, int netNum, int node) {
+    if (netNum <= 0 || netNum >= MAX_NETS) return false;
+    for (int n = 0; n < MAX_NODES; n++) {
+        int nd = st.connections.nets[netNum].nodes[n];
+        if (nd == 0 || nd == -1) break;
+        if (nd == node) return true;
+    }
+    return false;
+}
+
 void partsReassertNetNames(JumperlessState& st) {
     if (st.parts.numParts <= 0) return;
     // Lowest part index wins per net, per pass.
@@ -337,6 +350,17 @@ void partsReassertNetNames(JumperlessState& st) {
             // findNodeInNet's gpio/adc fallbacks return NODE values, not net
             // numbers - only accept a real net at that index.
             if (st.connections.nets[netNum].number != netNum) continue;
+            // ...and ask the net directly as well. findNodeInNet's GPIO/ADC
+            // fallbacks used to compare the node against arrays of NET
+            // NUMBERS, so a row that happened to share a number with a live
+            // GPIO's net came back as a hit on a net it had nothing to do
+            // with - bench, 2026-08-28: the 7447's unconnected RBI leg on
+            // row 6 renamed net 6, the 7-seg's row-57 segment, to
+            // "7447_RBI", and four neighbours did the same to nets 7-10.
+            // That is fixed at the root now (NetManager.cpp), and this stays
+            // as the belt: naming is the one caller whose mistakes the user
+            // reads back off the board.
+            if (!netHoldsNode(st, netNum, node)) continue;
             // Never rename GND / rails / DACs - their names are authoritative.
             if (st.connections.nets[netNum].specialFunction > 0) continue;
             if (claimed[netNum]) continue;

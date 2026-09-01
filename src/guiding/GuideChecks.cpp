@@ -123,6 +123,19 @@ void formatOhms(float r, char* out, size_t n) {
     else                      snprintf(out, n, "%.2fM", (double)(r / 1000000.0f));
 }
 
+void formatFarads(float f, char* out, size_t n) {
+    if (out == nullptr || n == 0) return;
+    if (!(f > 0.0f)) { snprintf(out, n, "?"); return; }
+    // 'u', never the micro sign - the OLED fonts and every serial consumer
+    // are plain ASCII, and parsePartValue reads it back
+    if (f < 1.0e-9f)       snprintf(out, n, "%.0fpF", (double)(f * 1.0e12f));
+    else if (f < 1.0e-7f)  snprintf(out, n, "%.1fnF", (double)(f * 1.0e9f));
+    else if (f < 1.0e-6f)  snprintf(out, n, "%.0fnF", (double)(f * 1.0e9f));
+    else if (f < 1.0e-5f)  snprintf(out, n, "%.1fuF", (double)(f * 1.0e6f));
+    else if (f < 1.0e-3f)  snprintf(out, n, "%.0fuF", (double)(f * 1.0e6f));
+    else                   snprintf(out, n, "%.1fmF", (double)(f * 1.0e3f));
+}
+
 bool guideResistorBand(float rNom, uint8_t tolAuthorPct, float* lo, float* hi) {
     if (!(rNom > 0.0f)) return false;
     // tol_author covers the PART (5-10 % parts plus drift); tol_meas covers

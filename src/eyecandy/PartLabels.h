@@ -27,9 +27,10 @@
 // the user; nothing is ever gated or forced.
 //
 // The service composes ON CHANGE only (fingerprint compare per pass, ~50 Hz);
-// every post is clear-first requestLedShow(-1). NOT in the inner set: it
-// freezes during menus/probe mode while core 1 keeps rendering the already-
-// registered overlay.
+// every post is clear-first requestLedShow(-1). IN the inner set since
+// 2026-08-29 (Kevin: "activate the parts bloom in probing"), so taps bloom
+// during probe mode and the menus too - the OLED part card alone stays
+// gated to non-modal contexts.
 class PartLabels : public Service {
 public:
     static PartLabels& getInstance();
@@ -46,6 +47,14 @@ public:
     // (20 ms here made tap-to-inspect a coin flip). The tick body is a few
     // compares; the heavy recompose work stays fingerprint-gated.
     uint32_t periodUs() const override { return 5000; }
+
+    // Inner set (Kevin, 2026-08-29: "activate the parts bloom in probing"):
+    // probe mode and the menus pump serviceInner(), so membership here is
+    // what lets a probe tap bloom a part's labels DURING probing instead of
+    // only after it exits. The OLED part card stays gated to non-modal
+    // contexts (listenForInspectTap) - probe mode owns that screen; the
+    // LED bloom, the pin highlight and the PARTPIN line run everywhere.
+    bool inInnerSet() const override { return true; }
 
     // Synchronous recompose + post, for callers that change state while this
     // service can't run (SlotManager preview enter/exit inside the menu loop).
@@ -79,6 +88,11 @@ public:
     static bool partTestSummary(const PartDefinition& p, char* buf, size_t len);
 
     bool hasWarnings() const { return warnActiveMask != 0; }
+
+    // part_safety: would bridging node1-node2 put wrong-way power on a placed
+    // part, at the configured level? true = refused (announced on serial +
+    // OLED). addBridgeToState is the only caller - see the .cpp note.
+    bool connectionRefused(int node1, int node2);
 
     static const int MAX_EMPHASIS_NODES = 16;
 

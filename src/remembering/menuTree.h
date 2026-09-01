@@ -42,7 +42,15 @@ String menuLines[150] = {
   "-Remove \31Parts",
   "-Auto   \31Scan",
 
-
+  // Same 2-deep dispatch shape as Parts' children: getActionCategory's
+  // "GPIO" arm -> APPSACTION with the CHILD line as runApp's name arg, so
+  // each child and its apps[] row are ONE unit after normalizeSpaces
+  // ("-Set    \31Pins" -> "Set Pins", "-BCD    \31Counter" -> "BCD Counter").
+  // The live "-$GPIO$" rows under Output and Show are UNRELATED - they are
+  // level 1+ and never reach getActionCategory's top-level test.
+  "GPIO",
+  "-Set    \31Pins",
+  "-BCD    \31Counter",
 
   "Output",
   "-Limits",

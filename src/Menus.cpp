@@ -452,6 +452,35 @@ int returnToMenuPosition = -1;
 int returnToMenuLevel = -1;
 int returningFromTimeout = 0;
 
+// Programmatic menu entry (the GPIO click-menu apps' hold unwind): set by
+// Menus::requestReopenAtTopLevel(), consumed by clickMenu()'s entry check.
+// A session then starts on the next service pass exactly as if the wheel
+// had been clicked, and the returnToMenu* pair above lands it on the
+// requested top-level row.
+static bool s_menuReopenRequested = false;
+
+void Menus::requestReopenAtTopLevel( const char* rowText ) {
+    if ( rowText == nullptr ) {
+        return;
+    }
+    for ( int i = 0; i <= menuLineIndex && i < 150; i++ ) {
+        if ( menuLevels[ i ] != 0 ) {
+            continue; // only a LEVEL-0 row can be the landing
+        }
+        // Compare a trimmed copy: the FatFS read path (readStringUntil)
+        // can leave a trailing '\r' on every line; the compiled-in tree
+        // cannot. parseMenuFile has already stripped levels/$/^/*/actions.
+        String row = menuLines[ i ];
+        row.trim( );
+        if ( row.equals( rowText ) ) {
+            returnToMenuPosition = i;
+            returnToMenuLevel = 0;
+            s_menuReopenRequested = true;
+            return;
+        }
+    }
+}
+
 char submenuBuffer[ 20 ];
 
 char chosenOptions[ 20 ][ 40 ];
@@ -503,16 +532,27 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
 
     int returnedMenuPosition = -1;
     bool menuSessionRan = false;
-    if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) {
-        // Check if Highlighting wants to handle this button press (for voltage adjustment)
-        if ( Highlighting::getInstance( ).wantsToHandleButtonPress( ) ) {
-            // Don't consume the button press - let Highlighting handle it
-            return -1;
+    // Two ways into a session: the physical click edge, or a programmatic
+    // reopen request (requestReopenAtTopLevel - the GPIO apps' hold
+    // unwind). The flag path skips only the click-specific parts: no
+    // Highlighting veto (there is no press to hand over) and no
+    // encoder-state consume.
+    bool reopenRequested = s_menuReopenRequested;
+    if ( reopenRequested ||
+         ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ) {
+        if ( reopenRequested ) {
+            s_menuReopenRequested = false;
+        } else {
+            // Check if Highlighting wants to handle this button press (for voltage adjustment)
+            if ( Highlighting::getInstance( ).wantsToHandleButtonPress( ) ) {
+                // Don't consume the button press - let Highlighting handle it
+                return -1;
+            }
+            encoderButtonState = IDLE;
         }
         // Don't set showLEDsCore2 here - buffer not ready yet
         // It will be set in getMenuSelection() after buffer is prepared
 
-        encoderButtonState = IDLE;
         inClickMenu = 1;
         menuSessionRan = true;
         // The menu owns the terminal for this session and scrolls it freely,
@@ -630,10 +670,17 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // Leave the terminal in a known state when the wheel session ends:
         // clear whatever the menu / launched app left on screen and reprint
         // the serial main menu (printMenu() itself respects dontShowMenu).
-        extern int showExtraMenu;
-        Serial.print( "\x1b[2J\x1b[H" );
-        Serial.flush( );
-        singleCharCommands.printMenu( showExtraMenu );
+        // NOT when a reopen is pending (the GPIO apps' hold unwind): the
+        // wipe destroyed the visible GPIOPICK/BCD context - refusal lines
+        // included - and printed a main menu the reopened session
+        // supersedes one loop pass later. The reopened session owns the
+        // terminal again immediately.
+        if ( !s_menuReopenRequested ) {
+            extern int showExtraMenu;
+            Serial.print( "\x1b[2J\x1b[H" );
+            Serial.flush( );
+            singleCharCommands.printMenu( showExtraMenu );
+        }
     }
 
     // oled.showJogo32h();
@@ -4061,6 +4108,21 @@ actionCategories getActionCategory( void ) {
         // "Parts", so no earlier arm can claim the row. (The row was
         // "Projects" through wave 2 and "Guides" through the first ambient
         // slice.)
+        return APPSACTION;
+
+    } else if ( menuLines[ currentAction.previousMenuPositions[ 0 ] ].indexOf(
+                    "GPIO" ) != -1 ) {
+        // GPIO -> APPSACTION with the CHILD line as runApp's name arg
+        // (previousMenuPositions[1] - the 2-deep dispatch shape, like Parts'
+        // children). "-Set    \31Pins" / "-BCD    \31Counter" name-match the
+        // apps[] rows { "Set Pins", ... } / { "BCD Counter", ... } after
+        // normalizeSpaces - each child and its row are ONE unit.
+        //
+        // Order-safe both directions: no earlier keyword (Slots, Rails,
+        // Show, Output, Arduino, Probe, Connect, Display, Apps, Routing,
+        // OLED, Calib, History, Files, Python, Parts) is a substring of
+        // "GPIO", and "GPIO" appears in no other TOP-LEVEL row - the
+        // Output/Show "$GPIO$" rows are level 1+ and never reach this test.
         return APPSACTION;
 
     } else {

@@ -324,7 +324,7 @@ public:
     void displayMultiLineText(const char* text, bool center);
     
     // Debug functions
-    void dumpFrameBufferQuarterSize(int clearFirst = 0, int x_pos = 40, int y_pos = 24, int border = 1);
+    void dumpFrameBufferQuarterSize(int clearFirst = 0, int x_pos = 54, int y_pos = 29, int border = 1);
     void dumpFrameBuffer(Stream* stream = nullptr);
     // Machine-readable framebuffer dump in a selectable encoding (see OledDumpEnc):
     // quarter/full = ASCII art, b64/raw = compact SSD1306 page-buffer bytes for host UIs.
@@ -614,6 +614,12 @@ public:
     // Find largest font that fits given text width
     // Returns optimal point size for the text to fit within maxWidth
     static uint8_t findBestFitPointSize(FontFamily family, const char* text, int16_t maxWidth, uint8_t maxPointSize = 15, uint8_t minPointSize = 5);
+    // Width of `text` in the font at fontList[fontIndex], in pixels; -1 on a
+    // bad index. Public so callers of findBestFitPointSize can VERIFY the fit:
+    // that function returns minPointSize when nothing fits, and
+    // getFontForPointSize maps it to the family's NEAREST cut - which can be
+    // far larger than requested (see ReadingDisplay::bestFitFontFor).
+    static int16_t measureTextWidth(int fontIndex, const char* text);
     
     // Get all available point sizes for a font family (stored in PROGMEM)
     static void getAvailableSizes(FontFamily family, uint8_t* sizes, int* count);

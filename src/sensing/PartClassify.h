@@ -23,8 +23,8 @@ enum class PinRole : uint8_t { NONE = 0, A, K, B, C, E, G, D, S, W, LEAD };
 struct PartResult {
     PartType type = PartType::UNKNOWN;
     float confidence = 0.0f;
-    float value = 0.0f;    // R ohms / Vf volts / Vz volts
-    float value2 = 0.0f;   // hFE / linearity / reverse-knee volts
+    float value = 0.0f;    // R ohms / Vf volts / Vz volts / C farads
+    float value2 = 0.0f;   // hFE / linearity / reverse-knee volts / cap tau ms
     uint8_t rows[3] = { 0, 0, 0 };
     PinRole roles[3] = { PinRole::NONE, PinRole::NONE, PinRole::NONE };
     uint8_t nRows = 0;

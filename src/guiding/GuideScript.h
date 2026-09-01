@@ -151,6 +151,7 @@ ParsedPartValue parsePartValue(const char* s, const char* typeStr);
 // ~3 significant figures, always <= 7 chars: 330 / 4.68k / 46.3k / 220k /
 // 1.20M. Fits ck.val[24] with room for a prefix.
 void formatOhms(float r, char* out, size_t n);
+void formatFarads(float f, char* out, size_t n);   // "47nF" / "4.7uF" - parsePartValue reads it back
 
 // The derived continuity band in OHMS. tol_total = tol_author (per-part
 // `tol:`, 0 = the 15 % default) + tol_meas (R <= 10k: 5, <= 100k: 10, else

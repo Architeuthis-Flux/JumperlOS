@@ -34,6 +34,8 @@
 #include "sensing/PartClassify.h"    // PartType (the cached-test summary)
 #include "PartsApp.h"                // partsShowPartCard (the tap's card)
 #include "boards/board.h"      // currentBoard().caps.ledsPerRow (OG gate)
+#include "Colors.h"            // termColorLikeLed - PARTPIN wears its dot color
+#include "JumperlOS.h"         // jOS.isUiModal - the card yields to modal UIs
 
 PartLabels& PartLabels::getInstance() {
     static PartLabels instance;
@@ -64,7 +66,7 @@ static const unsigned long LBL_SWITCH_DEBOUNCE_MS = 300;
 // the probe really lifted, not that a held row is being rate-limited.
 static const unsigned long LBL_LIFT_MS = 700;
 
-enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT, WARN_PINS_UNVERIFIED };
+enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT, WARN_PINS_UNVERIFIED, WARN_VEE_TO_HOT, WARN_VCC_TO_NEG };
 
 static const char* warnReasonName(uint8_t r) {
     switch (r) {
@@ -73,6 +75,8 @@ static const char* warnReasonName(uint8_t r) {
         case WARN_SELF_SHORT: return "self_short";
         case WARN_POWER_OVERVOLT: return "power_overvolt";
         case WARN_PINS_UNVERIFIED: return "pins_unverified";
+        case WARN_VEE_TO_HOT: return "vee_to_hot";
+        case WARN_VCC_TO_NEG: return "vcc_to_neg";
         default:              return "none";
     }
 }
@@ -155,8 +159,12 @@ static bool netContainsNode(int netNum, int node) {
     return false;
 }
 
-// The validated net for a breadboard node, or -1 (the partsReassertNetNames
-// guard: findNodeInNet's gpio/adc fallbacks return NODE values).
+// The validated net for a breadboard node, or -1. The index check is the
+// partsReassertNetNames guard: a net number has to name a live net. (The old
+// comment here said findNodeInNet's gpio/adc fallbacks "return NODE values" -
+// they returned NET numbers that collided with the queried node, which is why
+// every unconnected part leg on a low row read as wired. Fixed at the root in
+// NetManager.cpp, 2026-08-28.)
 static int validNetForNode(int node) {
     int netNum = findNodeInNet(node);
     if (netNum <= 0 || netNum >= MAX_NETS) return -1;
@@ -210,8 +218,11 @@ void PartLabels::listenForInspectTap(unsigned long now) {
             // An unwired pin's row lights through the overlay this way, and
             // the same part card the scroll shows keeps the display in one
             // language (part first, [pin] bracketed, LED polarity labels).
+            // In a modal context (probe mode, a menu) the OLED belongs to
+            // that surface - the LED bloom and the serial line still fire,
+            // which is the whole point of running in the inner set.
             setPartHighlight(i, j, LBL_INSPECT_MS);
-            partsShowPartCard(p, j);
+            if (!jOS.isUiModal()) partsShowPartCard(p, j);
 
             Serial.print("\r\nPARTPIN row=");
             Serial.print(node);
@@ -220,7 +231,9 @@ void PartLabels::listenForInspectTap(unsigned long now) {
             Serial.print(" pin=");
             Serial.print(pin.pinNumber);
             Serial.print(" label=");
+            termColorLikeLed(pinDotColor(pin), &Serial);   // the dot's own hue
             Serial.print(pin.name);
+            changeTerminalColor(-1, false, &Serial, true);
             Serial.print(" class=");
             Serial.print(pinClassName(pin.pinClass));
             Serial.print(" net=");
@@ -237,6 +250,96 @@ void PartLabels::listenForInspectTap(unsigned long now) {
 // ---------------------------------------------------------------------------
 // Warnings (warn, never block - certainties only)
 // ---------------------------------------------------------------------------
+
+// A power-CLASS pin whose name says it is the NEGATIVE supply (VEE, VSS,
+// V-) is EXPECTED on GND in single-supply use - the 4051 bench board wears
+// VEE->GND as its standard hookup (2026-08-31, Kevin hit a false
+// "vcc_to_gnd!" doing exactly that). Only positive supplies warn on GND.
+static bool isNegativeSupplyPin(const char* name) {
+    if (name == nullptr) return false;
+    // case-insensitive compare against the short list partdb actually uses
+    char up[12];
+    int n = 0;
+    while (name[n] != '\0' && n < 11) {
+        char c = name[n];
+        up[n] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        n++;
+    }
+    up[n] = '\0';
+    return strcmp(up, "VEE") == 0 || strcmp(up, "VSS") == 0 ||
+           strcmp(up, "V-") == 0 || strcmp(up, "-V") == 0 ||
+           strcmp(up, "GND") == 0; // a gnd-NAMED pin misclassed as power
+}
+
+
+// The net a pin sits on - the LIVE net for evaluateWarnings, or the MERGED
+// net a proposed bridge would create for the part_safety gate (both nets
+// plus the two bridge nodes). One judgment routine serves both, so the warn
+// rules and the refusal rules can never drift apart.
+struct NetView {
+    int netA, netB, nodeA, nodeB;
+    bool has(int node) const {
+        if (node <= 0) return false;
+        if (node == nodeA || node == nodeB) return true;
+        if (netA > 0 && netContainsNode(netA, node)) return true;
+        if (netB > 0 && netContainsNode(netB, node)) return true;
+        return false;
+    }
+};
+
+// The strongest source on the net (rail or DAC), by magnitude. A net that
+// carries both a rail and a DAC is its own problem; judging by the hotter
+// one keeps the old per-source "any of them hot" behavior.
+static bool netSourceVolts(const NetView& v, float top, float bot, float d0, float d1, float* out) {
+    bool found = false;
+    float best = 0.0f;
+    struct { int node; float volts; } src[4] = {
+        {TOP_RAIL, top}, {BOTTOM_RAIL, bot}, {DAC0, d0}, {DAC1, d1}};
+    for (int i = 0; i < 4; i++) {
+        if (v.has(src[i].node) && (!found || fabsf(src[i].volts) > fabsf(best))) {
+            best = src[i].volts;
+            found = true;
+        }
+    }
+    *out = best;
+    return found;
+}
+
+// Judge ONE pin of ONE part against the net it sits on. Power pins split by
+// POLARITY (Kevin, 2026-09-01): VCC/VDD expect the most positive supply, so
+// GND or a negative source under them is wrong-way power; VEE/VSS/V- expect
+// the most negative, so GND (single supply) and a negative rail (bipolar)
+// are both right and only a POSITIVE source is the fault.
+static uint8_t judgePartPin(const PartDefinition& p, int j, const NetView& v,
+                            float top, float bot, float d0, float d1) {
+    const PartPin& pin = p.pins[j];
+    float src = 0.0f;
+    bool hasSrc = netSourceVolts(v, top, bot, d0, d1, &src);
+    if (pin.pinClass == 1) {                          // power-class pin
+        if (!isNegativeSupplyPin(pin.name)) {
+            if (v.has(GND))              return WARN_VCC_TO_GND;
+            if (hasSrc && src < -0.25f)  return WARN_VCC_TO_NEG;
+        } else {
+            if (hasSrc && src > 0.25f)   return WARN_VEE_TO_HOT;
+        }
+        for (int k = 0; k < p.numPins && k < MAX_PART_PINS; k++) {
+            if (k != j && p.pins[k].pinClass == 2 &&
+                v.has(partPinNode(p, p.pins[k]))) {
+                return WARN_SELF_SHORT;
+            }
+        }
+        // 3.3V panels riding a hot rail: at 4V the bench panel NACKed at
+        // random byte offsets until the display cycled lost/alive. Only
+        // display-driver parts get this - plenty of logic is happy at 5V,
+        // but every panel we drive is a 3.3V part.
+        if (partdbResolveDriver(p) != nullptr && hasSrc && src > 3.6f) {
+            return WARN_POWER_OVERVOLT;
+        }
+    } else if (pin.pinClass == 2) {                   // gnd-class pin
+        if (hasSrc && fabsf(src) > 0.25f)  return WARN_GND_TO_HOT;
+    }
+    return WARN_NONE;
+}
 
 void PartLabels::evaluateWarnings() {
     uint32_t newMask = 0;
@@ -264,50 +367,13 @@ void PartLabels::evaluateWarnings() {
             pinNet[j] = (node >= 1 && node <= 60) ? validNetForNode(node) : -1;
         }
         for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
-            const PartPin& pin = p.pins[j];
             int netNum = pinNet[j];
             if (netNum < 0) continue;
-
-            if (pin.pinClass == 1) {          // power-class pin
-                if (netContainsNode(netNum, GND)) {
-                    newMask |= (1u << i); newReason[i] = WARN_VCC_TO_GND; newPin[i] = (int8_t)j;
-                    break;
-                }
-                bool shorted = false;
-                for (int k = 0; k < p.numPins && k < MAX_PART_PINS; k++) {
-                    if (k != j && p.pins[k].pinClass == 2 && pinNet[k] == netNum) {
-                        shorted = true;
-                        break;
-                    }
-                }
-                if (shorted) {
-                    newMask |= (1u << i); newReason[i] = WARN_SELF_SHORT; newPin[i] = (int8_t)j;
-                    break;
-                }
-                // 3.3V panels riding a hot rail: at 4V the bench panel NACKed
-                // at random byte offsets until the display cycled lost/alive.
-                // Only display-driver parts get this - plenty of logic is
-                // happy at 5V, but every panel we drive is a 3.3V part.
-                if (partdbResolveDriver(p) != nullptr) {
-                    float v = 0.0f;
-                    if (netContainsNode(netNum, TOP_RAIL))         v = top;
-                    else if (netContainsNode(netNum, BOTTOM_RAIL)) v = bot;
-                    else if (netContainsNode(netNum, DAC0))        v = d0;
-                    else if (netContainsNode(netNum, DAC1))        v = d1;
-                    if (v > 3.6f) {
-                        newMask |= (1u << i); newReason[i] = WARN_POWER_OVERVOLT; newPin[i] = (int8_t)j;
-                        break;
-                    }
-                }
-            } else if (pin.pinClass == 2) {   // gnd-class pin
-                bool hot = (netContainsNode(netNum, TOP_RAIL) && fabsf(top) > 0.25f) ||
-                           (netContainsNode(netNum, BOTTOM_RAIL) && fabsf(bot) > 0.25f) ||
-                           (netContainsNode(netNum, DAC0) && fabsf(d0) > 0.25f) ||
-                           (netContainsNode(netNum, DAC1) && fabsf(d1) > 0.25f);
-                if (hot) {
-                    newMask |= (1u << i); newReason[i] = WARN_GND_TO_HOT; newPin[i] = (int8_t)j;
-                    break;
-                }
+            NetView live = { netNum, -1, 0, 0 };
+            uint8_t r = judgePartPin(p, j, live, top, bot, d0, d1);
+            if (r != WARN_NONE) {
+                newMask |= (1u << i); newReason[i] = r; newPin[i] = (int8_t)j;
+                break;
             }
         }
     }
@@ -332,6 +398,12 @@ void PartLabels::evaluateWarnings() {
             Serial.flush();
             char hint[32];
             snprintf(hint, sizeof(hint), "%s!", warnReasonName(newReason[i]));
+            // The OLED card reads as words, not a machine token: underscores
+            // become spaces ("vcc to gnd!"), and some display fonts have no
+            // '_' glyph anyway. The serial trace above keeps the token.
+            for (char* c = hint; *c != '\0'; c++) {
+                if (*c == '_') *c = ' ';
+            }
             ReadingDisplay::show(p.name, node, hint);
         }
     }
@@ -347,6 +419,44 @@ void PartLabels::evaluateWarnings() {
     warnActiveMask = newMask;
     memcpy(warnReason, newReason, sizeof(warnReason));
     memcpy(warnPin, newPin, sizeof(warnPin));
+}
+
+// part_safety gate ([routing] part_safety: 0 off / 1 power / 2 all). Called
+// from addBridgeToState - the one path every USER connection takes (slot
+// loads and undo go through addConnection directly and are NOT gated: a saved
+// state is the user's business). Judges every placed part's pins against the
+// net the bridge WOULD create. true = refused, already announced.
+bool PartLabels::connectionRefused(int node1, int node2) {
+    int level = jumperlessConfig.routing.part_safety;
+    if (level <= 0) return false;
+    NetView v = { validNetForNode(node1), validNetForNode(node2), node1, node2 };
+    float top = railTruth(0), bot = railTruth(1);
+    float d0 = dacTruth(0), d1 = dacTruth(1);
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            int node = partPinNode(p, p.pins[j]);
+            if (!v.has(node)) continue;           // this pin isn't on the merged net
+            uint8_t r = judgePartPin(p, j, v, top, bot, d0, d1);
+            if (r == WARN_NONE) continue;
+            bool power = (r == WARN_VCC_TO_GND || r == WARN_VCC_TO_NEG ||
+                          r == WARN_VEE_TO_HOT || r == WARN_GND_TO_HOT ||
+                          r == WARN_SELF_SHORT);
+            if (level == 1 && !power) continue;   // "power" lets non-power warns through
+            Serial.printf("\r\nPARTDB connect refused part=\"%s\" pin=\"%s\" row=%d reason=\"%s\"\r\n",
+                          p.name, p.pins[j].name, node, warnReasonName(r));
+            Serial.flush();
+            char words[32];
+            snprintf(words, sizeof(words), "%s", warnReasonName(r));
+            for (char* c = words; *c != '\0'; c++) {
+                if (*c == '_') *c = ' ';
+            }
+            ReadingDisplay::show(p.name, node, words, "refused");
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +781,11 @@ bool PartLabels::partTestSummary(const PartDefinition& p, char* buf, size_t len)
         case PartType::POT:
             formatOhms(p.lastTestValue, ohms, sizeof(ohms));
             snprintf(buf, len, "pot %s", ohms);
+            return true;
+        case PartType::CAPACITOR:
+            if (p.lastTestValue <= 0.0f) break;   // detect-only: no number to show
+            formatFarads(p.lastTestValue, ohms, sizeof(ohms));
+            snprintf(buf, len, "%s measured", ohms);
             return true;
         case PartType::NFET:
         case PartType::PFET:

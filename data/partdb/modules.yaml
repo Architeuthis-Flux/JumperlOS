@@ -41,7 +41,10 @@ class: MODULE
   i2c: [0x76, 0x77]
   whoami: 0xD0=0x60
   probe_order: 50
-  # VERIFY: 6-pin GY-BME280 breakout order (4-pin VIN GND SCL SDA also common)
+  # GY-BME280 6-pin order verified (2026-08-30); 4-pin variant is
+  # VIN GND SCL SDA. CSB high = I2C (pulled up on-module); SDO low = 0x76,
+  # high = 0x77. Scam boards silk-screened BME280 often carry a BMP280 -
+  # the 0xD0 WHO_AM_I (0x60 vs 0x58) is the honest tell
   pins: [VCC, GND, SCL, SDA, CSB, SDO]
 
 - id: bmp280
@@ -104,9 +107,11 @@ class: MODULE
   # registerless (ignores the pointer, returns the live port byte) - the
   # last resort at its addresses
   probe_order: 220
-  # VERIFY: generic expander-board header (PCF8574A variant is 0x38-0x3F -
-  # NOT aliased here on purpose)
-  pins: [VCC, GND, SDA, SCL, INT, P0, P1, P2, P3, P4, P5, P6, P7]
+  # The common cascadable module is physically TWO headers (2026-08-30):
+  # a 1x4 I2C end [VCC GND SDA SCL] and a 1x9 port row [P0..P7, INT] -
+  # INT sits AFTER P7. Tap-to-place by name makes the flat order cosmetic.
+  # (PCF8574A variant is 0x38-0x3F - NOT aliased here on purpose)
+  pins: [VCC, GND, SDA, SCL, P0, P1, P2, P3, P4, P5, P6, P7, INT]
 
 - id: ds3231
   name: DS3231
@@ -119,7 +124,9 @@ class: MODULE
   # no ID register: BCD-plausibility heuristic - always asked AFTER the
   # MPU's WHO_AM_I at the shared 0x68
   probe_order: 200
-  # VERIFY: ZS-042 module header order 32K SQW SCL SDA VCC GND
+  # ZS-042 main-header order verified (2026-08-30); the 4-pin end header
+  # mirrors power+I2C for chaining. Board hazards: the onboard AT24C32
+  # answers at 0x57, and the LIR2032 charge circuit cooks a CR2032 at 5V
   pins: [32K, SQW, SCL, SDA, VCC, GND]
 
 - id: at24c32

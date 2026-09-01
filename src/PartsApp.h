@@ -76,13 +76,19 @@ struct VectorIdentifyResult {
     uint16_t recIdx;    // partdb record index
     uint8_t rotated;    // 1 = pin 1 top-right
     int8_t verdict;     // 1 pass, 0 fail, -1 refused
-    int8_t failStep;    // first disagreeing step when verdict == 0
+    int8_t failStep;    // first disagreeing step when verdict == 0;
+                        // -2 = the icc band refused it (record's
+                        // iccMin10/iccMax10 vs the measured feed)
+    int16_t icc10;      // measured feed current during the run, mA*10;
+                        // -1 = not measured (board-powered / refused
+                        // before power-up)
 };
 // fpMeasured (nullable): a measured Tier-1 clamp string (the part_fingerprint
 // fp= alphabet) - candidates whose authored fingerprint conflicts hard are
 // skipped BEFORE being powered.
 int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
                         VectorIdentifyResult* out, int maxOut,
-                        const char* fpMeasured = nullptr);
+                        const char* fpMeasured = nullptr,
+                        int* triedOut = nullptr);
 
 #endif // PARTS_APP_H
