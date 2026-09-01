@@ -556,6 +556,14 @@ const StringIntEntry padActionTable[] = {
 };
 const int padActionTableSize = sizeof(padActionTable) / sizeof(padActionTable[0]);
 
+// [routing] part_safety levels (see PartLabels::connectionRefused)
+const StringIntEntry partSafetyTable[] = {
+    {"off", 0},
+    {"power", 1},
+    {"all", 2},
+};
+const int partSafetyTableSize = sizeof(partSafetyTable) / sizeof(partSafetyTable[0]);
+
 // [top_oled] show_in_terminal - where the quarter-block OLED mirror goes.
 // 1..4 are the four USB CDC ports as they enumerate on the host
 // (JLV5port1/3/5/7); 5 is the hardware UART. Old serial-port names and the

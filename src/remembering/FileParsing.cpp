@@ -7,6 +7,7 @@
 #include "LEDs.h"
 #include "FilesystemStuff.h"  // For safe file operations
 #include "FakeGpio.h"  // For fake GPIO state updates
+#include "PartLabels.h" // part_safety connection gate
 // #include "LittleFS.h"
 #include "Commands.h"
 // #include "MachineCommands.h"
@@ -229,6 +230,14 @@ void clearNodeFileString() { nodeFileString.clear(); }
  */
 bool addBridgeToState(int node1, int node2, int duplicates, bool autoRefresh) {
     String errorMsg;
+
+    // [routing] part_safety: refuse a USER connection that would put
+    // wrong-way power on a placed part (off by default). This is the one
+    // path every user connection takes; slot loads and undo call
+    // addConnection directly and are deliberately not gated.
+    if (partLabels.connectionRefused(node1, node2)) {
+        return false;
+    }
     
     // Use the state's built-in validation and addition
     bool success = globalState.addConnection(node1, node2, errorMsg, duplicates);

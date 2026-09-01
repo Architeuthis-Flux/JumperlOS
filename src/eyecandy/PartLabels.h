@@ -89,6 +89,11 @@ public:
 
     bool hasWarnings() const { return warnActiveMask != 0; }
 
+    // part_safety: would bridging node1-node2 put wrong-way power on a placed
+    // part, at the configured level? true = refused (announced on serial +
+    // OLED). addBridgeToState is the only caller - see the .cpp note.
+    bool connectionRefused(int node1, int node2);
+
     static const int MAX_EMPHASIS_NODES = 16;
 
 private:

@@ -66,7 +66,7 @@ static const unsigned long LBL_SWITCH_DEBOUNCE_MS = 300;
 // the probe really lifted, not that a held row is being rate-limited.
 static const unsigned long LBL_LIFT_MS = 700;
 
-enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT, WARN_PINS_UNVERIFIED };
+enum PartWarnReason : uint8_t { WARN_NONE = 0, WARN_VCC_TO_GND, WARN_GND_TO_HOT, WARN_SELF_SHORT, WARN_POWER_OVERVOLT, WARN_PINS_UNVERIFIED, WARN_VEE_TO_HOT, WARN_VCC_TO_NEG };
 
 static const char* warnReasonName(uint8_t r) {
     switch (r) {
@@ -75,6 +75,8 @@ static const char* warnReasonName(uint8_t r) {
         case WARN_SELF_SHORT: return "self_short";
         case WARN_POWER_OVERVOLT: return "power_overvolt";
         case WARN_PINS_UNVERIFIED: return "pins_unverified";
+        case WARN_VEE_TO_HOT: return "vee_to_hot";
+        case WARN_VCC_TO_NEG: return "vcc_to_neg";
         default:              return "none";
     }
 }
@@ -269,6 +271,76 @@ static bool isNegativeSupplyPin(const char* name) {
            strcmp(up, "GND") == 0; // a gnd-NAMED pin misclassed as power
 }
 
+
+// The net a pin sits on - the LIVE net for evaluateWarnings, or the MERGED
+// net a proposed bridge would create for the part_safety gate (both nets
+// plus the two bridge nodes). One judgment routine serves both, so the warn
+// rules and the refusal rules can never drift apart.
+struct NetView {
+    int netA, netB, nodeA, nodeB;
+    bool has(int node) const {
+        if (node <= 0) return false;
+        if (node == nodeA || node == nodeB) return true;
+        if (netA > 0 && netContainsNode(netA, node)) return true;
+        if (netB > 0 && netContainsNode(netB, node)) return true;
+        return false;
+    }
+};
+
+// The strongest source on the net (rail or DAC), by magnitude. A net that
+// carries both a rail and a DAC is its own problem; judging by the hotter
+// one keeps the old per-source "any of them hot" behavior.
+static bool netSourceVolts(const NetView& v, float top, float bot, float d0, float d1, float* out) {
+    bool found = false;
+    float best = 0.0f;
+    struct { int node; float volts; } src[4] = {
+        {TOP_RAIL, top}, {BOTTOM_RAIL, bot}, {DAC0, d0}, {DAC1, d1}};
+    for (int i = 0; i < 4; i++) {
+        if (v.has(src[i].node) && (!found || fabsf(src[i].volts) > fabsf(best))) {
+            best = src[i].volts;
+            found = true;
+        }
+    }
+    *out = best;
+    return found;
+}
+
+// Judge ONE pin of ONE part against the net it sits on. Power pins split by
+// POLARITY (Kevin, 2026-09-01): VCC/VDD expect the most positive supply, so
+// GND or a negative source under them is wrong-way power; VEE/VSS/V- expect
+// the most negative, so GND (single supply) and a negative rail (bipolar)
+// are both right and only a POSITIVE source is the fault.
+static uint8_t judgePartPin(const PartDefinition& p, int j, const NetView& v,
+                            float top, float bot, float d0, float d1) {
+    const PartPin& pin = p.pins[j];
+    float src = 0.0f;
+    bool hasSrc = netSourceVolts(v, top, bot, d0, d1, &src);
+    if (pin.pinClass == 1) {                          // power-class pin
+        if (!isNegativeSupplyPin(pin.name)) {
+            if (v.has(GND))              return WARN_VCC_TO_GND;
+            if (hasSrc && src < -0.25f)  return WARN_VCC_TO_NEG;
+        } else {
+            if (hasSrc && src > 0.25f)   return WARN_VEE_TO_HOT;
+        }
+        for (int k = 0; k < p.numPins && k < MAX_PART_PINS; k++) {
+            if (k != j && p.pins[k].pinClass == 2 &&
+                v.has(partPinNode(p, p.pins[k]))) {
+                return WARN_SELF_SHORT;
+            }
+        }
+        // 3.3V panels riding a hot rail: at 4V the bench panel NACKed at
+        // random byte offsets until the display cycled lost/alive. Only
+        // display-driver parts get this - plenty of logic is happy at 5V,
+        // but every panel we drive is a 3.3V part.
+        if (partdbResolveDriver(p) != nullptr && hasSrc && src > 3.6f) {
+            return WARN_POWER_OVERVOLT;
+        }
+    } else if (pin.pinClass == 2) {                   // gnd-class pin
+        if (hasSrc && fabsf(src) > 0.25f)  return WARN_GND_TO_HOT;
+    }
+    return WARN_NONE;
+}
+
 void PartLabels::evaluateWarnings() {
     uint32_t newMask = 0;
     uint8_t newReason[MAX_PARTS] = {0};
@@ -295,51 +367,13 @@ void PartLabels::evaluateWarnings() {
             pinNet[j] = (node >= 1 && node <= 60) ? validNetForNode(node) : -1;
         }
         for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
-            const PartPin& pin = p.pins[j];
             int netNum = pinNet[j];
             if (netNum < 0) continue;
-
-            if (pin.pinClass == 1) {          // power-class pin
-                if (netContainsNode(netNum, GND) &&
-                    !isNegativeSupplyPin(pin.name)) {
-                    newMask |= (1u << i); newReason[i] = WARN_VCC_TO_GND; newPin[i] = (int8_t)j;
-                    break;
-                }
-                bool shorted = false;
-                for (int k = 0; k < p.numPins && k < MAX_PART_PINS; k++) {
-                    if (k != j && p.pins[k].pinClass == 2 && pinNet[k] == netNum) {
-                        shorted = true;
-                        break;
-                    }
-                }
-                if (shorted) {
-                    newMask |= (1u << i); newReason[i] = WARN_SELF_SHORT; newPin[i] = (int8_t)j;
-                    break;
-                }
-                // 3.3V panels riding a hot rail: at 4V the bench panel NACKed
-                // at random byte offsets until the display cycled lost/alive.
-                // Only display-driver parts get this - plenty of logic is
-                // happy at 5V, but every panel we drive is a 3.3V part.
-                if (partdbResolveDriver(p) != nullptr) {
-                    float v = 0.0f;
-                    if (netContainsNode(netNum, TOP_RAIL))         v = top;
-                    else if (netContainsNode(netNum, BOTTOM_RAIL)) v = bot;
-                    else if (netContainsNode(netNum, DAC0))        v = d0;
-                    else if (netContainsNode(netNum, DAC1))        v = d1;
-                    if (v > 3.6f) {
-                        newMask |= (1u << i); newReason[i] = WARN_POWER_OVERVOLT; newPin[i] = (int8_t)j;
-                        break;
-                    }
-                }
-            } else if (pin.pinClass == 2) {   // gnd-class pin
-                bool hot = (netContainsNode(netNum, TOP_RAIL) && fabsf(top) > 0.25f) ||
-                           (netContainsNode(netNum, BOTTOM_RAIL) && fabsf(bot) > 0.25f) ||
-                           (netContainsNode(netNum, DAC0) && fabsf(d0) > 0.25f) ||
-                           (netContainsNode(netNum, DAC1) && fabsf(d1) > 0.25f);
-                if (hot) {
-                    newMask |= (1u << i); newReason[i] = WARN_GND_TO_HOT; newPin[i] = (int8_t)j;
-                    break;
-                }
+            NetView live = { netNum, -1, 0, 0 };
+            uint8_t r = judgePartPin(p, j, live, top, bot, d0, d1);
+            if (r != WARN_NONE) {
+                newMask |= (1u << i); newReason[i] = r; newPin[i] = (int8_t)j;
+                break;
             }
         }
     }
@@ -385,6 +419,44 @@ void PartLabels::evaluateWarnings() {
     warnActiveMask = newMask;
     memcpy(warnReason, newReason, sizeof(warnReason));
     memcpy(warnPin, newPin, sizeof(warnPin));
+}
+
+// part_safety gate ([routing] part_safety: 0 off / 1 power / 2 all). Called
+// from addBridgeToState - the one path every USER connection takes (slot
+// loads and undo go through addConnection directly and are NOT gated: a saved
+// state is the user's business). Judges every placed part's pins against the
+// net the bridge WOULD create. true = refused, already announced.
+bool PartLabels::connectionRefused(int node1, int node2) {
+    int level = jumperlessConfig.routing.part_safety;
+    if (level <= 0) return false;
+    NetView v = { validNetForNode(node1), validNetForNode(node2), node1, node2 };
+    float top = railTruth(0), bot = railTruth(1);
+    float d0 = dacTruth(0), d1 = dacTruth(1);
+    for (int i = 0; i < globalState.parts.numParts && i < MAX_PARTS; i++) {
+        const PartDefinition& p = globalState.parts.parts[i];
+        if (!p.placed) continue;
+        for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+            int node = partPinNode(p, p.pins[j]);
+            if (!v.has(node)) continue;           // this pin isn't on the merged net
+            uint8_t r = judgePartPin(p, j, v, top, bot, d0, d1);
+            if (r == WARN_NONE) continue;
+            bool power = (r == WARN_VCC_TO_GND || r == WARN_VCC_TO_NEG ||
+                          r == WARN_VEE_TO_HOT || r == WARN_GND_TO_HOT ||
+                          r == WARN_SELF_SHORT);
+            if (level == 1 && !power) continue;   // "power" lets non-power warns through
+            Serial.printf("\r\nPARTDB connect refused part=\"%s\" pin=\"%s\" row=%d reason=\"%s\"\r\n",
+                          p.name, p.pins[j].name, node, warnReasonName(r));
+            Serial.flush();
+            char words[32];
+            snprintf(words, sizeof(words), "%s", warnReasonName(r));
+            for (char* c = words; *c != '\0'; c++) {
+                if (*c == '_') *c = ' ';
+            }
+            ReadingDisplay::show(p.name, node, words, "refused");
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
