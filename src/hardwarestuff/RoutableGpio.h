@@ -127,9 +127,11 @@ void applyPinConfig(int idx);
 bool routableGpioAvailable(int idx, const char** ownerOut = nullptr);
 
 // ============================================================================
-// BCD/binary counter (Phase 3, CodeDocs/GPIO_plan.md). The range lives in
-// globalState.config (bcdStart/bcdWidth/bcdMode/bcdValue, persisted per-slot);
-// these drive it onto the pins.
+// Binary counter (Phase 3, CodeDocs/GPIO_plan.md). The range lives in
+// globalState.config (bcdStart/bcdWidth/bcdValue, persisted per-slot); these
+// drive it onto the pins. The encoding is always plain binary; the READOUT
+// is hexadecimal (one uppercase digit per 4 bits of width) - there is no
+// decimal/BCD-nibble mode.
 // ============================================================================
 
 // Counter bit k (LSB-first) -> gpioDef index: bcdStart + k walks GPIO 1-8
@@ -142,17 +144,38 @@ int bcdBitIndex(int bit);
 // SIO output through applyPinConfig() (displacing leftover PWM) and drives
 // its bit level, mirroring gpioState[] so LEDs/readouts agree. Pins something
 // else owns are skipped. No-op when bcdStart < 0 or on OG.
-void bcdApply(void);
+//
+// fromLoad = true is the LOAD-PATH re-drive (applyStateGpioToHardware /
+// applyGpioSettingsFromConfig): it sets mux/dir/level inline instead of
+// going through applyPinConfig(), so it never markDirty()s a state that was
+// just read off disk (that dirty made the idle autosave rewrite the slot on
+// every boot and left read-only templates nagging "unsaved edits"). It also
+// never displaces PWM - stopPWM() marks dirty - so a range pin PWM owns is
+// left undriven until the next user-initiated count.
+void bcdApply(bool fromLoad = false);
 
-// Largest value the configured range can show: binary = 2^width - 1; BCD =
-// all-9s over the full nibbles, with a partial top nibble capped at
-// min(9, 2^bits - 1) as the top digit.
+// Compose the counter's value from the LIVE pin levels rather than the
+// stored field, so a probe toggle / pad action / MicroPython write shows up
+// in the readouts and counts from what is actually on the pins. An output's
+// level is gpio_get_out_level() (the driven truth readGPIO/toggleGPIO use);
+// an input reads gpio_get(). A bit whose pin is not SIO, or that something
+// else owns (bcdApply skipped it), reads 0. Returns 0 when bcdStart < 0.
+int bcdReadValue(void);
+
+// The counter readout: uppercase hex, zero-padded to one digit per 4 bits of
+// the configured width ("0".."F" at width 4, "00".."FF" at width 8,
+// "000".."3FF" at width 10). Every count display goes through this.
+void bcdFormatValue(int value, char* buf, size_t bufLen);
+
+// Largest value the configured range can show: 2^width - 1.
 int bcdMaxValue(void);
 
-// bcdValue = wrap(bcdValue + delta) into [0, bcdMaxValue()] (wraps BOTH
+// value = wrap(bcdReadValue() + delta) into [0, bcdMaxValue()] (wraps BOTH
 // directions), applied live to the pins and marked dirty for the slot
-// autosave. Returns the new value, or -1 (untouched, not dirtied) when no
-// range is configured (bcdStart < 0) - callers toast instead of counting.
+// autosave. The arithmetic starts from the LIVE pin levels, not the stored
+// field, so a manual toggle followed by a pad tap counts from what is
+// actually there. Returns the new value, or -1 (untouched, not dirtied) when
+// no range is configured (bcdStart < 0) - callers toast instead of counting.
 int bcdIncrement(int delta);
 
 // Pure-logic assert run over the encode/wrap math (no pin writes, safe on
@@ -160,17 +183,25 @@ int bcdIncrement(int delta);
 // from the serial test path: 'D' status menu -> "BCD SelfCheck".
 bool bcdSelfCheck(Stream* out = &Serial);
 
-// Blocking counter modal (VoltageAdjuster::adjust idiom): encoder counts the
-// value live on the pins, click-release/probe-connect confirms (returns the
-// value, >= 0), hold/probe-remove/serial byte cancels and restores the entry
-// value (-1). Returns -2 immediately when no range is configured - the
-// caller routes to bcdRangeSetup().
-int bcdAdjust(void);
+// Blocking counter modal (VoltageAdjuster::adjust idiom). Entry READS the
+// current value off the pins; the encoder then counts it live. The counter
+// IS the pins, so every exit keeps what is on them - click/probe-connect
+// returns the value (>= 0), hold/probe-remove/serial byte just leaves (-1).
+// Nothing reverts.
+//
+// No range configured? It DEFINES one instead of asking (Kevin: "just click
+// BCD and then scrolling the wheel updates them live"): LSB = preferredStart
+// when that pin is claimable (the carousel/pin app pass the pin the user is
+// on), otherwise the lowest claimable pin; width = the contiguous claimable
+// run from there, capped at 4 (one hex digit). Returns -1 without a range
+// only when no pin is claimable at all, or on OG.
+int bcdAdjust(int preferredStart = -1);
 
 // Two-step blocking range pick (same modal idiom): step 1 start pin (skips
 // pins routableGpioAvailable() refuses, PWM excepted - bcdApply displaces
 // it), step 2 width (1..contiguous claimable pins from that start). Applies
 // via setBcdRange() + bcdApply() and returns 0; cancel = -1, nothing changed.
+// This is the EXPLICIT "Range" item only - no path forces a user through it.
 int bcdRangeSetup(void);
 
 // GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md): the highlight
@@ -198,11 +229,10 @@ int gpioOptionsCarousel(int gpioIdx);
 // whole app. No-op toast on OG.
 void gpioSettingsLauncher(void);
 
-// BCD counter app: one level - Count (the bcdAdjust modal; routes through
-// bcdRangeSetup first when no range is configured), Range (bcdRangeSetup),
-// Mode (binary <-> BCD nibbles toggle; never invents a range - with
-// bcdStart -1 the mode is stored and the range stays off). Hold or a serial
-// byte exits. No-op toast on OG.
+// BCD counter app: one level - Count (straight into the bcdAdjust modal,
+// which defines a range from the lowest claimable pin when none is set) and
+// Range (bcdRangeSetup, for a custom start/width). Hold or a serial byte
+// exits. No-op toast on OG.
 void bcdMenuLauncher(void);
 
 #endif

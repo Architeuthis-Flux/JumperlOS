@@ -1762,6 +1762,17 @@ void applyGpioSettingsFromConfig(void) {
         }
      // }
     }
+
+    // Re-drive a configured counter (Phase 3). REQUIRED, not cosmetic: the
+    // loop above just stamped gpioState[i] = 0 on every output, and every
+    // config.txt save reaches here through readSettingsFromConfig() - without
+    // this the next setGPIO() refresh drives every counter bit LOW while the
+    // UI still shows the old count. fromLoad = no markDirty (this runs on
+    // pure load/apply paths; dirtying here made the idle autosave rewrite the
+    // slot file after every config change).
+    if (globalState.config.bcdStart >= 0) {
+        bcdApply(true);
+    }
 }
 
 // The applyStateToHardware() GPIO loop (routing/States.cpp), moved here
@@ -1840,8 +1851,11 @@ void applyStateGpioToHardware(void) {
 
     // Re-drive a loaded slot's counter (Phase 3): the loop above restored
     // per-pin config; the counter overlays its encoded value on the range.
+    // fromLoad = true: a slot LOAD must not come out dirty (applyPinConfig's
+    // unconditional markDirty made the idle autosave rewrite the file on
+    // every boot and left read-only templates nagging "unsaved edits").
     if (globalState.config.bcdStart >= 0) {
-        bcdApply();
+        bcdApply(true);
     }
 }
 
@@ -1930,19 +1944,16 @@ bool routableGpioAvailable( int idx, const char** ownerOut ) {
 }
 
 // ============================================================================
-// BCD/binary counter (Phase 3, CodeDocs/GPIO_plan.md). Range + value live in
-// globalState.config (persisted per-slot); the pure encode/wrap helpers below
-// are file-static and touch NO globals so bcdSelfCheck() can assert them
-// without pin writes.
+// Binary counter (Phase 3, CodeDocs/GPIO_plan.md). Range + value live in
+// globalState.config (persisted per-slot); the pure encode/wrap/format
+// helpers below are file-static and touch NO globals so bcdSelfCheck() can
+// assert them without pin writes.
+//
+// The encoding is plain binary and the readout is HEXADECIMAL - the
+// decimal/BCD-nibble mode is gone (Kevin: "with the BCD thing, we shouldn't
+// even make decimal an option, just 0-F"). The name stays because the
+// feature, the config keys and the pad actions are all called BCD.
 // ============================================================================
-
-static int bcdPow10( int n ) {
-    int result = 1;
-    while ( n-- > 0 ) {
-        result *= 10;
-    }
-    return result;
-}
 
 static int bcdClampWidth( int width ) {
     if ( width < 1 ) {
@@ -1954,26 +1965,34 @@ static int bcdClampWidth( int width ) {
     return width;
 }
 
-// Largest value a range of `width` bits can show. Binary: 2^width - 1. BCD:
-// all-9s over the full nibbles; a partial top nibble (width % 4 bits) carries
-// a top digit capped at min(9, 2^bits - 1) - so width 6 counts 0-39 (2 top
-// bits cap the tens digit at 3) and width 10 counts 0-399.
-static int bcdMaxValueFor( int width, int mode ) {
+// Largest value a range of `width` bits can show: 2^width - 1. (The
+// decimal/BCD-nibble mode is gone - the counter is plain binary and the
+// readout is hex.)
+static int bcdMaxValueFor( int width ) {
     width = bcdClampWidth( width );
-    if ( mode == 0 ) {
-        return ( 1 << width ) - 1;
+    return ( 1 << width ) - 1;
+}
+
+// Hex digits the readout needs for a range: one per 4 bits, rounded up.
+// width 1-4 -> 1 ("0".."F"), 5-8 -> 2 ("00".."FF"), 9-10 -> 3 ("000".."3FF").
+static int bcdHexDigits( int width ) {
+    return ( bcdClampWidth( width ) + 3 ) / 4;
+}
+
+// The readout, width-parameterised so bcdSelfCheck() can assert it without
+// touching globalState.
+static void bcdFormatValueFor( int value, int width, char* buf, size_t bufLen ) {
+    if ( buf == nullptr || bufLen == 0 ) {
+        return;
     }
-    int fullDigits = width / 4;
-    int topBits = width % 4;
-    int scale = bcdPow10( fullDigits );
-    if ( topBits == 0 ) {
-        return scale - 1;
+    if ( value < 0 ) {
+        value = 0;
     }
-    int topDigitMax = ( 1 << topBits ) - 1;
-    if ( topDigitMax > 9 ) {
-        topDigitMax = 9;
-    }
-    return topDigitMax * scale + ( scale - 1 );
+    snprintf( buf, bufLen, "%0*X", bcdHexDigits( width ), (unsigned)value );
+}
+
+void bcdFormatValue( int value, char* buf, size_t bufLen ) {
+    bcdFormatValueFor( value, globalState.config.bcdWidth, buf, bufLen );
 }
 
 // Wrap (not clamp) into [0, maxValue] - both directions, so max+1 -> 0 and
@@ -1990,38 +2009,21 @@ static int bcdWrapValue( int value, int maxValue ) {
     return wrapped;
 }
 
-// Level (0/1) of counter bit `bit` (LSB-first) for `value`. Binary: plain
-// bits. BCD: decimal digits LSD-first, one nibble (4 bits, LSB-first) per
-// digit - digit d = (value / 10^d) % 10 occupies bits 4d..4d+3.
-static int bcdEncodeBit( int value, int bit, int mode ) {
+// Level (0/1) of counter bit `bit` (LSB-first) for `value` - plain binary.
+static int bcdEncodeBit( int value, int bit ) {
     if ( bit < 0 ) {
         return 0;
     }
-    if ( mode == 0 ) {
-        return ( value >> bit ) & 1;
-    }
-    int digit = ( value / bcdPow10( bit / 4 ) ) % 10;
-    return ( digit >> ( bit % 4 ) ) & 1;
+    return ( value >> bit ) & 1;
 }
 
 // Inverse of bcdEncodeBit over a whole level array - the self-check's
 // round-trip decoder.
-static int bcdDecodeLevels( const int* levels, int width, int mode ) {
+static int bcdDecodeLevels( const int* levels, int width ) {
     width = bcdClampWidth( width );
-    if ( mode == 0 ) {
-        int value = 0;
-        for ( int bit = 0; bit < width; bit++ ) {
-            value |= ( levels[ bit ] & 1 ) << bit;
-        }
-        return value;
-    }
     int value = 0;
-    for ( int digit = 0; digit * 4 < width; digit++ ) {
-        int nibble = 0;
-        for ( int b = 0; b < 4 && digit * 4 + b < width; b++ ) {
-            nibble |= ( levels[ digit * 4 + b ] & 1 ) << b;
-        }
-        value += nibble * bcdPow10( digit );
+    for ( int bit = 0; bit < width; bit++ ) {
+        value |= ( levels[ bit ] & 1 ) << bit;
     }
     return value;
 }
@@ -2050,47 +2052,102 @@ int bcdBitIndex( int bit ) {
     return idx; // start+k rolls through GPIO 1-8 into Tx (8) then Rx (9)
 }
 
-void bcdApply( void ) {
+void bcdApply( bool fromLoad ) {
     if ( globalState.config.bcdStart < 0 || routableGpioAbsent( ) ) {
         return;
     }
     int width = bcdClampWidth( globalState.config.bcdWidth );
-    int mode = globalState.config.bcdMode;
     // Encode from a locally wrapped copy: a hand-edited or stale slot file
     // can load bcdValue out of range (deserialize deliberately doesn't
-    // validate), and wrapping here keeps BCD digits 0-9 without writing the
-    // correction back on a pure load path.
+    // validate), and wrapping here keeps the pins in range without writing
+    // the correction back on a pure load path.
     int value = bcdWrapValue( globalState.config.bcdValue,
-                              bcdMaxValueFor( width, mode ) );
+                              bcdMaxValueFor( width ) );
+    for ( int bit = 0; bit < width; bit++ ) {
+        int idx = bcdBitIndex( bit );
+        if ( idx < 0 ) {
+            break; // range ran past the end of the bank
+        }
+        if ( fromLoad ) {
+            // LOAD PATH: no markDirty, anywhere. applyPinConfig() marks
+            // dirty unconditionally, and its PWM displacement runs stopPWM()
+            // which marks dirty too - either one leaves a freshly-loaded
+            // slot looking edited, so the idle autosave rewrites the file on
+            // every boot and a read-only template nags "unsaved edits"
+            // forever. Here the mux/dir/level go on inline, config fields are
+            // written only when they actually differ, and a pin PWM still
+            // owns is left alone (strict availability, not bcdPinClaimable):
+            // that bit stays undriven until the next user-initiated count,
+            // which takes the funnel below and displaces the PWM then.
+            if ( !routableGpioAvailable( idx ) ) {
+                continue;
+            }
+            if ( globalState.config.gpioDirection[ idx ] != 0 ) {
+                globalState.config.gpioDirection[ idx ] = 0;
+            }
+            if ( routableGpioFunction( idx ) != GPIO_FUNC_SIO ) {
+                gpio_set_function( (uint)gpioDef[ idx ][ 0 ], GPIO_FUNC_SIO );
+            }
+            gpio_set_dir( (uint)gpioDef[ idx ][ 0 ], true );
+        } else {
+            if ( !bcdPinClaimable( idx ) ) {
+                continue; // something owns this bit's pin - the bit stays skipped
+            }
+            // Claimable: force the pin to an SIO output through the funnel
+            // (displaces leftover PWM, re-muxes to SIO, marks dirty).
+            globalState.config.gpioDirection[ idx ] = 0;
+            applyPinConfig( idx );
+        }
+        // Drive the bit's level and mirror gpioState so LEDs/readouts agree
+        // (0 = output low, 1 = output high).
+        int level = bcdEncodeBit( value, bit );
+        gpio_put( gpioDef[ idx ][ 0 ], level );
+        gpioState[ idx ] = (uint8_t)level;
+    }
+}
+
+int bcdReadValue( void ) {
+    if ( globalState.config.bcdStart < 0 || routableGpioAbsent( ) ) {
+        return 0;
+    }
+    int width = bcdClampWidth( globalState.config.bcdWidth );
+    int value = 0;
     for ( int bit = 0; bit < width; bit++ ) {
         int idx = bcdBitIndex( bit );
         if ( idx < 0 ) {
             break; // range ran past the end of the bank
         }
         if ( !bcdPinClaimable( idx ) ) {
-            continue; // something owns this bit's pin - the bit stays skipped
+            continue; // bcdApply skipped this bit too - it reads 0
         }
-        // Claimable: force the pin to an SIO output through the funnel
-        // (displaces leftover PWM, re-muxes to SIO, marks dirty), then drive
-        // the bit's level and mirror gpioState so LEDs/readouts agree
-        // (0 = output low, 1 = output high).
-        globalState.config.gpioDirection[ idx ] = 0;
-        applyPinConfig( idx );
-        int level = bcdEncodeBit( value, bit, mode );
-        gpio_put( gpioDef[ idx ][ 0 ], level );
-        gpioState[ idx ] = (uint8_t)level;
+        if ( routableGpioFunction( idx ) != GPIO_FUNC_SIO ) {
+            continue; // PWM / UART / a stale mux holds the pad - not our level
+        }
+        uint pin = (uint)gpioDef[ idx ][ 0 ];
+        // An OUTPUT's truth is the level SIO DRIVES, which is what readGPIO()
+        // and toggleGPIO() both read (gpio_get_out_level); gpio_get() on a
+        // driven output reports the pad, so a shorted row would read back as
+        // a different count. An input is whatever is on the pad.
+        int level = ( globalState.config.gpioDirection[ idx ] == 0 )
+                        ? ( gpio_get_out_level( pin ) ? 1 : 0 )
+                        : ( gpio_get( pin ) ? 1 : 0 );
+        value |= level << bit;
     }
+    return value;
 }
 
 int bcdMaxValue( void ) {
-    return bcdMaxValueFor( globalState.config.bcdWidth, globalState.config.bcdMode );
+    return bcdMaxValueFor( globalState.config.bcdWidth );
 }
 
 int bcdIncrement( int delta ) {
     if ( globalState.config.bcdStart < 0 ) {
         return -1; // no range configured - nothing moved, nothing dirtied
     }
-    int value = bcdWrapValue( globalState.config.bcdValue + delta, bcdMaxValue( ) );
+    // Count from what is ACTUALLY on the pins: a probe toggle, a pad action
+    // or a MicroPython write between two taps must not be undone by
+    // arithmetic on a stale stored value.
+    int value = bcdWrapValue( bcdReadValue( ) + delta, bcdMaxValue( ) );
     globalState.setBcdValue( value ); // markDirty via the setter
     bcdApply( );
     return value;
@@ -2110,88 +2167,70 @@ bool bcdSelfCheck( Stream* out ) {
     };
     // Encode every value the range can show, decode the levels back, expect
     // the same value.
-    auto roundTrip = [ & ]( int width, int mode, const char* label ) {
-        int maxV = bcdMaxValueFor( width, mode );
+    auto roundTrip = [ & ]( int width, const char* label ) {
+        int maxV = bcdMaxValueFor( width );
         bool pass = true;
         for ( int v = 0; v <= maxV; v++ ) {
             int levels[ 10 ] = { 0 };
             for ( int bit = 0; bit < width; bit++ ) {
-                levels[ bit ] = bcdEncodeBit( v, bit, mode );
+                levels[ bit ] = bcdEncodeBit( v, bit );
             }
-            if ( bcdDecodeLevels( levels, width, mode ) != v ) {
+            if ( bcdDecodeLevels( levels, width ) != v ) {
                 pass = false;
                 break;
             }
         }
         report( label, pass );
     };
+    // Hex readout: format `value` at `width` and compare against `expect`.
+    auto hexIs = [ & ]( int value, int width, const char* expect,
+                        const char* label ) {
+        char buf[ 8 ] = { 0 };
+        bcdFormatValueFor( value, width, buf, sizeof( buf ) );
+        report( label, strcmp( buf, expect ) == 0 );
+    };
 
-    out->println( "\r\nbcdSelfCheck: encode/wrap logic (no pin writes)" );
+    out->println( "\r\nbcdSelfCheck: encode/wrap/hex logic (no pin writes)" );
 
-    roundTrip( 1, 0, "binary width 1 round-trip (0-1)" );
-    roundTrip( 4, 0, "binary width 4 round-trip (0-15)" );
-    roundTrip( 10, 0, "binary width 10 round-trip (0-1023)" );
-    roundTrip( 4, 1, "BCD width 4 round-trip (0-9)" );
-    roundTrip( 8, 1, "BCD width 8 round-trip (0-99)" );
-    roundTrip( 6, 1, "BCD width 6 round-trip (0-39)" );
+    roundTrip( 1, "width 1 round-trip (0-1)" );
+    roundTrip( 4, "width 4 round-trip (0-15)" );
+    roundTrip( 10, "width 10 round-trip (0-1023)" );
 
-    report( "binary width 10 max = 1023", bcdMaxValueFor( 10, 0 ) == 1023 );
-    report( "BCD width 4 max = 9", bcdMaxValueFor( 4, 1 ) == 9 );
-    report( "BCD width 8 max = 99", bcdMaxValueFor( 8, 1 ) == 99 );
-    report( "BCD width 6 max = 39 (2 top bits cap tens at 3)",
-            bcdMaxValueFor( 6, 1 ) == 39 );
-    report( "BCD width 10 max = 399 (2 top bits cap hundreds at 3)",
-            bcdMaxValueFor( 10, 1 ) == 399 );
+    report( "width 1 max = 1", bcdMaxValueFor( 1 ) == 1 );
+    report( "width 4 max = 15", bcdMaxValueFor( 4 ) == 15 );
+    report( "width 8 max = 255", bcdMaxValueFor( 8 ) == 255 );
+    report( "width 10 max = 1023", bcdMaxValueFor( 10 ) == 1023 );
 
     {
         static const int expected5[ 4 ] = { 1, 0, 1, 0 }; // 5 = 0b0101, LSB-first
         bool pass = true;
         for ( int bit = 0; bit < 4; bit++ ) {
-            if ( bcdEncodeBit( 5, bit, 0 ) != expected5[ bit ] ) {
+            if ( bcdEncodeBit( 5, bit ) != expected5[ bit ] ) {
                 pass = false;
             }
         }
-        report( "binary 5 @ width 4 = 1010 (LSB-first)", pass );
-    }
-    {
-        // 42: digit0 = 2 -> nibble 0100 LSB-first, digit1 = 4 -> 0010
-        static const int expected42[ 8 ] = { 0, 1, 0, 0, 0, 0, 1, 0 };
-        bool pass = true;
-        for ( int bit = 0; bit < 8; bit++ ) {
-            if ( bcdEncodeBit( 42, bit, 1 ) != expected42[ bit ] ) {
-                pass = false;
-            }
-        }
-        report( "BCD 42 @ width 8 = 0100 0010 (LSD-first)", pass );
-    }
-    {
-        // 39: digit0 = 9 -> 1001 LSB-first, partial top nibble = 3 -> 11
-        static const int expected39[ 6 ] = { 1, 0, 0, 1, 1, 1 };
-        bool pass = true;
-        for ( int bit = 0; bit < 6; bit++ ) {
-            if ( bcdEncodeBit( 39, bit, 1 ) != expected39[ bit ] ) {
-                pass = false;
-            }
-        }
-        report( "BCD 39 @ width 6 = 1001 11 (partial top nibble)", pass );
+        report( "5 @ width 4 = 1010 (LSB-first)", pass );
     }
 
-    report( "binary width 4 wrap 15+1 -> 0",
-            bcdWrapValue( 15 + 1, bcdMaxValueFor( 4, 0 ) ) == 0 );
-    report( "binary width 4 wrap 0-1 -> 15",
-            bcdWrapValue( 0 - 1, bcdMaxValueFor( 4, 0 ) ) == 15 );
-    report( "binary width 10 wrap 1023+1 -> 0",
-            bcdWrapValue( 1023 + 1, bcdMaxValueFor( 10, 0 ) ) == 0 );
-    report( "binary width 10 wrap 0-1 -> 1023",
-            bcdWrapValue( 0 - 1, bcdMaxValueFor( 10, 0 ) ) == 1023 );
-    report( "BCD width 8 wrap 99+1 -> 0",
-            bcdWrapValue( 99 + 1, bcdMaxValueFor( 8, 1 ) ) == 0 );
-    report( "BCD width 8 wrap 0-1 -> 99",
-            bcdWrapValue( 0 - 1, bcdMaxValueFor( 8, 1 ) ) == 99 );
-    report( "BCD width 6 wrap 39+1 -> 0",
-            bcdWrapValue( 39 + 1, bcdMaxValueFor( 6, 1 ) ) == 0 );
-    report( "BCD width 6 wrap 0-1 -> 39",
-            bcdWrapValue( 0 - 1, bcdMaxValueFor( 6, 1 ) ) == 39 );
+    report( "width 4 wrap 15+1 -> 0",
+            bcdWrapValue( 15 + 1, bcdMaxValueFor( 4 ) ) == 0 );
+    report( "width 4 wrap 0-1 -> 15",
+            bcdWrapValue( 0 - 1, bcdMaxValueFor( 4 ) ) == 15 );
+    report( "width 10 wrap 1023+1 -> 0",
+            bcdWrapValue( 1023 + 1, bcdMaxValueFor( 10 ) ) == 0 );
+    report( "width 10 wrap 0-1 -> 1023",
+            bcdWrapValue( 0 - 1, bcdMaxValueFor( 10 ) ) == 1023 );
+
+    // One uppercase hex digit per 4 bits of width, zero-padded.
+    report( "width 4 -> 1 hex digit", bcdHexDigits( 4 ) == 1 );
+    report( "width 8 -> 2 hex digits", bcdHexDigits( 8 ) == 2 );
+    report( "width 10 -> 3 hex digits", bcdHexDigits( 10 ) == 3 );
+    hexIs( 0, 4, "0", "hex 0 @ width 4 = \"0\"" );
+    hexIs( 10, 4, "A", "hex 10 @ width 4 = \"A\"" );
+    hexIs( 15, 4, "F", "hex 15 @ width 4 = \"F\"" );
+    hexIs( 5, 8, "05", "hex 5 @ width 8 = \"05\"" );
+    hexIs( 255, 8, "FF", "hex 255 @ width 8 = \"FF\"" );
+    hexIs( 1023, 10, "3FF", "hex 1023 @ width 10 = \"3FF\"" );
 
     out->println( allPass ? "bcdSelfCheck: ALL PASS" : "bcdSelfCheck: FAILURES" );
     return allPass;
@@ -2201,15 +2240,15 @@ bool bcdSelfCheck( Stream* out ) {
 // BCD modals (VoltageAdjuster::adjust idiom - Peripherals.cpp)
 // ============================================================================
 
-// One frame of the counter/range modals: label on the top half, value on the
-// bottom (the VoltageAdjuster::updateDisplay layout); OLED + serial go
-// through the shared reading display (repeat calls dedupe); atomic LED show.
+// One frame of the counter/range modals: OLED + serial through the shared
+// reading display (repeat calls dedupe).
+//
+// NOTHING here paints the LED matrix. Kevin: "We shouldn't print the gpio
+// options on the breadboard so we can see the circuit." The whole GPIO/BCD
+// UI renders on the OLED and the terminal only, so the matrix keeps showing
+// the nets/highlights the user is configuring against.
 static void bcdDrawFrame( const char* label, const char* valueText ) {
-    b.clear( );
-    b.print( label, 0x0a0a12, 0xffffff, 1, 0, 2 );
-    b.print( valueText, 0x0a1206, 0xffffff, 0, 1, 1 );
     ReadingDisplay::show( label, -1, valueText );
-    requestLedShow( 12 ); // 12 = blocking mode (atomic menu display)
 }
 
 // User-facing pin name for a gpioDef index: "GPIO 1".."GPIO 8", "Tx", "Rx".
@@ -2223,11 +2262,56 @@ static void bcdPinLabel( int idx, char* buf, size_t bufLen ) {
     }
 }
 
-int bcdAdjust( void ) {
-    if ( globalState.config.bcdStart < 0 ) {
-        return -2; // no range configured - caller routes to bcdRangeSetup()
+// Define a counter range on the spot rather than sending the user through
+// the range picker. Kevin: "we shouldn't need to select the number, just
+// click BCD and then scrolling the wheel updates them live." LSB = the pin
+// the user is on when that pin is claimable, otherwise the lowest claimable
+// pin; width = the contiguous claimable run from there, capped at 4 - one
+// hex digit, matching "just 0-F". Returns true when a range is configured
+// (already-configured counts as success), false when no pin is claimable.
+static bool bcdEnsureRange( int preferredStart ) {
+    if ( globalState.config.bcdStart >= 0 ) {
+        return true;
     }
+    int start = -1;
+    if ( preferredStart >= 0 && preferredStart <= 9 &&
+         bcdPinClaimable( preferredStart ) ) {
+        start = preferredStart;
+    } else {
+        for ( int idx = 0; idx <= 9; idx++ ) {
+            if ( bcdPinClaimable( idx ) ) {
+                start = idx;
+                break;
+            }
+        }
+    }
+    if ( start < 0 ) {
+        return false; // nothing free - the caller toasts
+    }
+    int width = 0;
+    for ( int idx = start; idx <= 9 && width < 4; idx++ ) {
+        if ( !bcdPinClaimable( idx ) ) {
+            break;
+        }
+        width++;
+    }
+    if ( width < 1 ) {
+        width = 1; // start itself was claimable
+    }
+    globalState.setBcdRange( start, width ); // wraps the stored value in range
+    return true;
+}
+
+int bcdAdjust( int preferredStart ) {
     if ( routableGpioAbsent( ) ) {
+        return -1;
+    }
+    // No range? Define one from where the user is instead of asking. The
+    // explicit start/width pick lives in bcdRangeSetup(), reachable only
+    // from the BCD app's "Range" item - nothing forces a user through it.
+    if ( !bcdEnsureRange( preferredStart ) ) {
+        Serial.println( "\r\nBCD: no free pins" );
+        oled.clearPrintShow( "BCD\nno free pins", 2, 1200 );
         return -1;
     }
 
@@ -2237,8 +2321,15 @@ int bcdAdjust( void ) {
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
 
-    int entryValue = globalState.config.bcdValue;
-    int value = entryValue;
+    // START FROM THE PINS, not the stored field: a probe toggle, a pad
+    // action or a MicroPython write since the last count is the truth, and
+    // driving the stored value here would stomp exactly that. Sync the
+    // config to it only when it actually differs, so opening the modal on an
+    // untouched counter doesn't dirty the slot.
+    int value = bcdReadValue( );
+    if ( value != globalState.config.bcdValue ) {
+        globalState.setBcdValue( value );
+    }
 
     int lastDivider = rotaryDivider;
     rotaryDivider = 3;
@@ -2250,12 +2341,7 @@ int bcdAdjust( void ) {
     float encoderAccumulator = 0.0f;
 
     char valueText[ 16 ];
-
-    // Drive the entry value onto the pins so the display and the range agree
-    // from the first frame.
-    bcdApply( );
-    snprintf( valueText, sizeof( valueText ), "%d", value );
-    b.clear( 1 );
+    bcdFormatValue( value, valueText, sizeof( valueText ) );
     bcdDrawFrame( "BCD", valueText );
 
     while ( true ) {
@@ -2265,17 +2351,15 @@ int bcdAdjust( void ) {
         // state machine the raw getButtonState() comparisons below need.
         probing.justReadProbe( true );
 
-        // Cancel (hold / raw probe 1 - raw pre-swap codes, copied verbatim
-        // from VoltageAdjuster::adjust): restore the entry value to the pins.
+        // Exit (hold / raw probe 1 - raw pre-swap codes, copied verbatim
+        // from VoltageAdjuster::adjust). The counter is LIVE: what is on the
+        // pins IS the value, so leaving keeps it. Reverting to the entry
+        // value would contradict "the wheel updates them live", so there is
+        // no restore on any exit path.
         if ( encoderButtonState == HELD || probeButton.getButtonState( ) == 1 ) {
-            if ( value != entryValue ) {
-                globalState.setBcdValue( entryValue );
-                bcdApply( );
-            }
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             requestLedShow( -1 );
-            b.clear( );
             Menus::getInstance( ).inClickMenu = 0;
             return -1;
         }
@@ -2287,21 +2371,16 @@ int bcdAdjust( void ) {
             encoderButtonState = IDLE;
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
-            b.clear( );
             requestLedShow( -1 );
             return value;
         }
 
-        // Serial byte cancels (third exit, same restore as hold-cancel)
+        // Serial byte exits too - and, like every other exit, keeps what the
+        // wheel put on the pins.
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
-            if ( value != entryValue ) {
-                globalState.setBcdValue( entryValue );
-                bcdApply( );
-            }
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
-            b.clear( );
             requestLedShow( -1 );
             return -1;
         }
@@ -2317,7 +2396,7 @@ int bcdAdjust( void ) {
             if ( steps != 0 ) {
                 encoderAccumulator -= steps; // keep the fractional part
                 value = bcdIncrement( steps ); // live on the pins, wraps, marks dirty
-                snprintf( valueText, sizeof( valueText ), "%d", value );
+                bcdFormatValue( value, valueText, sizeof( valueText ) );
                 bcdDrawFrame( "BCD", valueText );
             }
         }
@@ -2379,7 +2458,6 @@ int bcdRangeSetup( void ) {
 
     char valueText[ 16 ];
     bcdPinLabel( candidates[ cursor ], valueText, sizeof( valueText ) );
-    b.clear( 1 );
     bcdDrawFrame( "Start", valueText );
 
     while ( true ) {
@@ -2401,7 +2479,6 @@ int bcdRangeSetup( void ) {
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             requestLedShow( -1 );
-            b.clear( );
             Menus::getInstance( ).inClickMenu = 0;
             return -1;
         }
@@ -2442,12 +2519,12 @@ int bcdRangeSetup( void ) {
                 bcdDrawFrame( "Width", valueText );
                 continue;
             }
-            // Width picked - commit the range (mode kept), drive the value.
-            globalState.setBcdRange( start, width, globalState.config.bcdMode );
+            // Width picked - commit the range (the accessor wraps the
+            // stored value into it), drive the value.
+            globalState.setBcdRange( start, width );
             bcdApply( );
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
-            b.clear( );
             requestLedShow( -1 );
             return 0;
         }
@@ -2555,7 +2632,9 @@ static void gpioCarouselItemState( int gpioIdx, int item, char* buf,
             if ( globalState.config.bcdStart < 0 ) {
                 snprintf( buf, bufLen, "off" );
             } else {
-                snprintf( buf, bufLen, "%d", globalState.config.bcdValue );
+                // The LIVE pins, not the stored field: a probe tap / pad
+                // action / MicroPython write shows up here immediately.
+                bcdFormatValue( bcdReadValue( ), buf, bufLen );
             }
             break;
         default:
@@ -2565,21 +2644,22 @@ static void gpioCarouselItemState( int gpioIdx, int item, char* buf,
 }
 
 // One carousel frame: OLED gets a header row (the pin's name) plus the
-// focused option as "< Dir  out >" via clearPrintShowRich; the LED matrix
-// keeps to the item name (the pin identity is already lit - the highlighted
-// net IS this pin's net); atomic LED show.
+// focused option as "< Dir  out >" via clearPrintShowRich, and the terminal
+// gets the same on one overwritten line.
+//
+// The LED matrix is deliberately untouched - the highlighted net IS this
+// pin's net, and painting the option name over it hid the circuit the user
+// is configuring (Kevin's ruling).
 static void gpioCarouselDrawFrame( int gpioIdx, int item ) {
     static const char* itemNames[ 4 ] = { "Dir", "PWM", "Pulls", "BCD" };
     const char* itemName = itemNames[ item ];
     char stateText[ 16 ];
     gpioCarouselItemState( gpioIdx, item, stateText, sizeof( stateText ) );
 
-    b.clear( );
-    b.print( itemName, 0x0a0a12, 0xffffff, 1, 0, 2 );
+    char pinLabelSerial[ 16 ];
+    bcdPinLabel( gpioIdx, pinLabelSerial, sizeof( pinLabelSerial ) );
 
     if ( oled.oledConnected ) {
-        char pinLabel[ 16 ];
-        bcdPinLabel( gpioIdx, pinLabel, sizeof( pinLabel ) );
         char optionText[ 24 ];
         if ( stateText[ 0 ] != '\0' ) {
             snprintf( optionText, sizeof( optionText ), "< %s  %s >", itemName,
@@ -2591,7 +2671,7 @@ static void gpioCarouselDrawFrame( int gpioIdx, int item ) {
         // idiom, pinned to its 7px cap height); option row in Pragmatism 8pt
         // (index 19) - "< Pulls  keep >" still fits 128px there.
         OledTextRow rows[ 2 ] = { };
-        rows[ 0 ].segs[ 0 ] = { pinLabel, 12, OLED_ALIGN_INHERIT };
+        rows[ 0 ].segs[ 0 ] = { pinLabelSerial, 12, OLED_ALIGN_INHERIT };
         rows[ 0 ].segCount = 1;
         rows[ 0 ].align = OLED_ALIGN_CENTER;
         rows[ 0 ].fixedH = 7;
@@ -2601,7 +2681,18 @@ static void gpioCarouselDrawFrame( int gpioIdx, int item ) {
         oled.clearPrintShowRich( rows, 2, 1, true, true, true );
     }
 
-    requestLedShow( 12 ); // 12 = blocking mode (atomic menu display)
+    // Serial is the whole readout on a board with no OLED (the LED matrix
+    // used to be the fallback) - one overwritten line, not a scroll.
+    Serial.print( "\r  " );
+    Serial.print( pinLabelSerial );
+    Serial.print( ": " );
+    Serial.print( itemName );
+    if ( stateText[ 0 ] != '\0' ) {
+        Serial.print( "  " );
+        Serial.print( stateText );
+    }
+    Serial.print( "                    \r" );
+    Serial.flush( );
 }
 
 // Frequency changes cross the 10 Hz slow/fast boundary through a full
@@ -2832,8 +2923,10 @@ static int gpioPwmParamAdjust( int gpioIdx, bool isFreq ) {
             probeCancelArmed = true;
         }
 
-        // Serial byte: restore the entry value (bcdAdjust's serial-cancel
-        // contract), then propagate the full exit.
+        // Serial byte: restore the entry value, then propagate the full
+        // exit. (PWM is NOT the live counter - bcdAdjust keeps whatever the
+        // wheel put on the pins because the pins ARE the value; a frequency
+        // the user was only auditioning has no such claim.)
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
             if ( value != entryValue ) {
@@ -3094,7 +3187,6 @@ int gpioOptionsCarousel( int gpioIdx ) {
     bool probeCancelArmed = true;
     bool probeConfirmArmed = true;
 
-    b.clear( 1 );
     gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
 
     while ( true ) {
@@ -3126,7 +3218,6 @@ int gpioOptionsCarousel( int gpioIdx ) {
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             requestLedShow( -1 );
-            b.clear( );
             Menus::getInstance( ).inClickMenu = 0;
             return 0;
         }
@@ -3149,12 +3240,10 @@ int gpioOptionsCarousel( int gpioIdx ) {
                     r = gpioPullsEditor( gpioIdx );
                     break;
                 case GPIO_ITEM_BCD:
-                    // Phase 3's counter modal; no range yet routes through
-                    // the range picker first, then counts.
-                    r = bcdAdjust( );
-                    if ( r == -2 ) {
-                        r = ( bcdRangeSetup( ) == 0 ) ? bcdAdjust( ) : -1;
-                    }
+                    // Straight into live counting - no range pick first.
+                    // With no range configured bcdAdjust() defines one from
+                    // THIS pin (the one the highlight is on) outward.
+                    r = bcdAdjust( gpioIdx );
                     if ( r >= 0 ) {
                         r = 0; // bcdAdjust returns the counted value
                     }
@@ -3169,7 +3258,6 @@ int gpioOptionsCarousel( int gpioIdx ) {
                 rotaryDivider = lastDivider;
                 encoderButtonState = IDLE;
                 requestLedShow( -1 );
-                b.clear( );
                 Menus::getInstance( ).inClickMenu = 0;
                 return 0;
             }
@@ -3190,7 +3278,6 @@ int gpioOptionsCarousel( int gpioIdx ) {
             accelerator.reset( );
             encoderAccumulator = 0.0f;
             lastEncoderPosition = encoderPosition;
-            b.clear( 1 );
             gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
             continue;
         }
@@ -3222,25 +3309,21 @@ int gpioOptionsCarousel( int gpioIdx ) {
 // partsPicker - that one reads PartsApp's file-static s_led/s_title/s_desc
 // arrays, so it can't take a caller-supplied list; this one does, plus a
 // selectable[] flag for pins something owns (the cursor lands on them so the
-// OWNER is named on the line - the plan's "greyed with the owner named" -
-// but a click refuses and stays).
+// OWNER is named on the line - the plan's "greyed with the owner named",
+// now carried entirely by the title text - but a click refuses and stays).
+//
+// Unlike partsPicker these render on the OLED + serial ONLY. Nothing in the
+// GPIO/BCD UI paints the LED matrix, so the breadboard keeps showing the
+// circuit.
 // ============================================================================
 
-// bcdDrawFrame's palette, one dim shade added for greyed rows.
-static const uint32_t GPIO_APP_HEADER_COLOR = 0x0a0a12;
-static const uint32_t GPIO_APP_ITEM_COLOR = 0x0a1206;
-static const uint32_t GPIO_APP_GREYED_COLOR = 0x020202;
-
-// One picker frame (the partsDrawItem layout): header + short label on the
-// LED matrix, title + desc on the OLED, title overwriting one serial line.
-static void gpioAppDrawItem( const char* header, const char* ledLabel,
-                             const char* title, const char* desc, bool avail ) {
-    b.clear( );
-    b.print( header, GPIO_APP_HEADER_COLOR, 0xFFFFFF, 0, 0, 1 );
-    b.print( ledLabel, avail ? GPIO_APP_ITEM_COLOR : GPIO_APP_GREYED_COLOR,
-             0xFFFFFF, 0, 1, 1 );
-    requestLedShow( 2 );
-
+// One picker frame (the partsDrawItem layout minus its LED half): title +
+// desc on the OLED, title overwriting one serial line. The LED matrix is
+// deliberately left alone so the breadboard keeps showing the circuit - a
+// pin something owns is already named on its title line, which is what the
+// dim "greyed" LED shade used to say.
+static void gpioAppDrawItem( const char* header, const char* title,
+                             const char* desc ) {
     if ( oled.oledConnected ) {
         char text[ 96 ];
         snprintf( text, sizeof( text ), "%s\n%s", title, desc ? desc : "" );
@@ -3277,17 +3360,17 @@ static void gpioAppWaitOutHold( void ) {
 // returns the chosen index, -1 on HELD (back one level), -2 on a serial byte
 // (exit the app - a byte left unconsumed would land on the single-char
 // handler). selectable == nullptr means everything is; a click on a
-// non-selectable row is refused and the picker stays.
+// non-selectable row is refused and the picker stays. Renders on the OLED +
+// serial only - no LED matrix, so the circuit stays visible.
 static int gpioAppPicker( const char* levelTag, const char* header, int count,
-                          int startIdx, const char* const* leds,
-                          const char* const* titles, const char* const* descs,
+                          int startIdx, const char* const* titles,
+                          const char* const* descs,
                           const uint8_t* selectable ) {
     if ( count <= 0 ) {
         return -1;
     }
     int idx = ( startIdx >= 0 && startIdx < count ) ? startIdx : 0;
     bool needsDraw = true;
-    unsigned long lastShowRequest = 0;
 
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
@@ -3301,22 +3384,13 @@ static int gpioAppPicker( const char* levelTag, const char* header, int count,
 
     while ( true ) {
         if ( needsDraw ) {
-            gpioAppDrawItem( header, leds[ idx ], titles[ idx ],
-                             descs ? descs[ idx ] : nullptr,
-                             selectable == nullptr || selectable[ idx ] );
-            lastShowRequest = millis( );
+            gpioAppDrawItem( header, titles[ idx ],
+                             descs ? descs[ idx ] : nullptr );
             needsDraw = false;
         }
 
         jOS.serviceInner( );
         rotaryEncoderButtonStuff( );
-
-        // Core 2's end-of-frame compare-and-swap can swallow a show request
-        // issued mid-frame (Menus.cpp's menuShowKeepalive) - re-assert.
-        if ( millis( ) - lastShowRequest >= 250 ) {
-            requestLedShow( 2 );
-            lastShowRequest = millis( );
-        }
 
         if ( encoderButtonState == HELD ) {
             // Wait out the hold so the release can't echo into the next level.
@@ -3422,7 +3496,6 @@ void gpioSettingsLauncher( void ) {
         // the stack (the partsApp s_* precedent).
         static char pinLed[ 10 ][ 4 ];
         static char pinTitle[ 10 ][ 24 ];
-        const char* leds[ 10 ];
         const char* titles[ 10 ];
         const char* descs[ 10 ];
         uint8_t selectable[ 10 ];
@@ -3430,19 +3503,19 @@ void gpioSettingsLauncher( void ) {
         int pinCursor = 0;
         while ( true ) {
             // Rebuilt every pass - the lines show LIVE state and an edit
-            // just changed it.
+            // just changed it. (pinLed is scratch for the short name the
+            // title line opens with; nothing paints it on its own anymore.)
             for ( int i = 0; i < 10; i++ ) {
                 selectable[ i ] = gpioSettingsPinEntry(
                                       i, pinLed[ i ], sizeof( pinLed[ i ] ),
                                       pinTitle[ i ], sizeof( pinTitle[ i ] ) )
                                       ? 1
                                       : 0;
-                leds[ i ] = pinLed[ i ];
                 titles[ i ] = pinTitle[ i ];
                 descs[ i ] = selectable[ i ] ? "click = options" : "in use";
             }
 
-            int pick = gpioAppPicker( "pin", "GPIO", 10, pinCursor, leds,
+            int pick = gpioAppPicker( "pin", "GPIO", 10, pinCursor,
                                       titles, descs, selectable );
             if ( pick == -1 ) {
                 break; // hold at the top level = exit
@@ -3473,7 +3546,6 @@ void gpioSettingsLauncher( void ) {
                                                 "up down none keep",
                                                 "counter" };
             static char optTitle[ 4 ][ 24 ];
-            const char* oLeds[ 4 ];
             const char* oTitles[ 4 ];
             const char* oDescs[ 4 ];
 
@@ -3487,13 +3559,12 @@ void gpioSettingsLauncher( void ) {
                                            sizeof( stateText ) );
                     snprintf( optTitle[ i ], sizeof( optTitle[ i ] ),
                               "%s  %s", optLed[ item ], stateText );
-                    oLeds[ i ] = optLed[ item ];
                     oTitles[ i ] = optTitle[ i ];
                     oDescs[ i ] = optDesc[ item ];
                 }
 
                 int o = gpioAppPicker( "opt", pinHeader, nOpts, optCursor,
-                                       oLeds, oTitles, oDescs, nullptr );
+                                       oTitles, oDescs, nullptr );
                 if ( o == -1 ) {
                     break; // hold = back to the pin list
                 }
@@ -3520,12 +3591,10 @@ void gpioSettingsLauncher( void ) {
                         r = gpioPwmEditor( gpioIdx );
                         break;
                     case GPIO_ITEM_BCD:
-                        // Phase 3's counter modal; no range yet routes
-                        // through the range picker first, then counts.
-                        r = bcdAdjust( );
-                        if ( r == -2 ) {
-                            r = ( bcdRangeSetup( ) == 0 ) ? bcdAdjust( ) : -1;
-                        }
+                        // Straight into live counting - no range pick first;
+                        // with no range configured bcdAdjust() defines one
+                        // from THIS pin outward.
+                        r = bcdAdjust( gpioIdx );
                         if ( r >= 0 ) {
                             r = 0; // bcdAdjust returns the counted value
                         }
@@ -3554,11 +3623,12 @@ void gpioSettingsLauncher( void ) {
     }
 
 done:
-    // The parts teardown minus partLabels.clearTransients() (parts-specific).
+    // The parts teardown minus partLabels.clearTransients() (parts-specific)
+    // and minus the buffer clear - this app never painted the matrix, so the
+    // -1 (clear + netlist) is the whole hand-back.
     // The menu path runs refreshConnections(-1, 0) after runApp returns.
     Menus::getInstance( ).inClickMenu = 0;
     rotaryDivider = lastDivider;
-    b.clear( );
     requestLedShow( -1 );
     Serial.println( );
     oled.showJogo32h( );
@@ -3579,14 +3649,13 @@ void bcdMenuLauncher( void ) {
     rotaryDivider = 8;
 
     {
-        static char itemTitle[ 3 ][ 24 ];
-        static const char* itemLed[ 3 ] = { "Cnt", "Rng", "Mode" };
-        static const char* itemDesc[ 3 ] = { "turn to count",
-                                             "start + width",
-                                             "binary / BCD" };
-        const char* leds[ 3 ];
-        const char* titles[ 3 ];
-        const char* descs[ 3 ];
+        // Two items now: the decimal/BCD-nibble mode is gone - the counter is
+        // always plain binary and always reads out in hex ("just 0-F").
+        static char itemTitle[ 2 ][ 24 ];
+        static const char* itemDesc[ 2 ] = { "turn to count",
+                                             "start + width" };
+        const char* titles[ 2 ];
+        const char* descs[ 2 ];
 
         int cursor = 0;
         while ( true ) {
@@ -3597,8 +3666,12 @@ void bcdMenuLauncher( void ) {
                 snprintf( itemTitle[ 1 ], sizeof( itemTitle[ 1 ] ),
                           "Range  off" );
             } else {
+                // The LIVE pins in hex, not the stored field.
+                char valueText[ 16 ];
+                bcdFormatValue( bcdReadValue( ), valueText,
+                                sizeof( valueText ) );
                 snprintf( itemTitle[ 0 ], sizeof( itemTitle[ 0 ] ),
-                          "Count  %d", globalState.config.bcdValue );
+                          "Count  %s", valueText );
                 char startLabel[ 16 ];
                 bcdPinLabel( globalState.config.bcdStart, startLabel,
                              sizeof( startLabel ) );
@@ -3606,15 +3679,12 @@ void bcdMenuLauncher( void ) {
                           "Range  %s +%d", startLabel,
                           globalState.config.bcdWidth );
             }
-            snprintf( itemTitle[ 2 ], sizeof( itemTitle[ 2 ] ), "Mode  %s",
-                      globalState.config.bcdMode ? "BCD" : "binary" );
-            for ( int i = 0; i < 3; i++ ) {
-                leds[ i ] = itemLed[ i ];
+            for ( int i = 0; i < 2; i++ ) {
                 titles[ i ] = itemTitle[ i ];
                 descs[ i ] = itemDesc[ i ];
             }
 
-            int pick = gpioAppPicker( "bcd", "BCD", 3, cursor, leds, titles,
+            int pick = gpioAppPicker( "bcd", "BCD", 2, cursor, titles,
                                       descs, nullptr );
             if ( pick == -1 ) {
                 break; // hold = exit (single level)
@@ -3625,43 +3695,26 @@ void bcdMenuLauncher( void ) {
             cursor = pick;
 
             if ( pick == 0 ) {
-                // Count: the bcdAdjust modal; no range yet routes through
-                // the range picker first, then counts (the carousel's shape).
-                int r = bcdAdjust( );
-                if ( r == -2 && bcdRangeSetup( ) == 0 ) {
-                    bcdAdjust( );
-                }
-            } else if ( pick == 1 ) {
-                bcdRangeSetup( );
+                // Count: straight into the live modal. No highlighted pin
+                // here, so bcdAdjust() falls back to the lowest claimable
+                // one when no range is configured.
+                bcdAdjust( -1 );
             } else {
-                // Mode toggle - stored through the accessor, which permits
-                // start -1 (validates -1..9), so no range is ever invented:
-                // with the counter off the mode just persists for later.
-                // setBcdRange only STORES - with a live range, re-encode the
-                // value onto the pins in the new mode.
-                int newMode = ( globalState.config.bcdMode != 0 ) ? 0 : 1;
-                globalState.setBcdRange( globalState.config.bcdStart,
-                                         globalState.config.bcdWidth,
-                                         newMode );
-                if ( globalState.config.bcdStart >= 0 ) {
-                    bcdApply( );
-                }
-                Serial.print( "\r\nBCD mode -> " );
-                Serial.println( newMode ? "BCD" : "binary" );
+                bcdRangeSetup( ); // the explicit custom start/width pick
             }
 
-            // Back at the Count/Range/Mode level (stay in menu): re-assert
-            // what the modals cleared, wait out a live hold.
+            // Back at the Count/Range level (stay in menu): re-assert what
+            // the modals cleared, wait out a live hold.
             Menus::getInstance( ).inClickMenu = 1;
             rotaryDivider = 8;
             gpioAppWaitOutHold( );
         }
     }
 
-    // Same teardown contract as gpioSettingsLauncher.
+    // Same teardown contract as gpioSettingsLauncher (no buffer clear - this
+    // app never painted the matrix).
     Menus::getInstance( ).inClickMenu = 0;
     rotaryDivider = lastDivider;
-    b.clear( );
     requestLedShow( -1 );
     Serial.println( );
     oled.showJogo32h( );

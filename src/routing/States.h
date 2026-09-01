@@ -240,13 +240,13 @@ struct ConfigState {
     int uartTxFunction;  // 0 = tx, 1 = rx, 2 = gpio_in, 3 = gpio_out
     int uartRxFunction;  // 0 = tx, 1 = rx, 2 = gpio_in, 3 = gpio_out
 
-    // BCD/binary counter range (Phase 3, CodeDocs/GPIO_plan.md). Bits map
+    // Binary counter range (Phase 3, CodeDocs/GPIO_plan.md). Bits map
     // LSB-first from bcdStart through the gpioDef bank - UART Tx (idx 8) and
-    // Rx (idx 9) join as the top bits when the range reaches them.
+    // Rx (idx 9) join as the top bits when the range reaches them. Always
+    // plain binary; the READOUT is hexadecimal (one digit per 4 bits).
     int bcdStart;   // gpioDef bank index of bit 0 (-1 = counter off)
     int bcdWidth;   // bits in the counter (1-10)
-    int bcdMode;    // 0 = binary, 1 = BCD nibbles (one decimal digit per 4 pins)
-    int bcdValue;   // current counter value
+    int bcdValue;   // current counter value, 0 .. 2^bcdWidth - 1
 
 
     // OLED state
@@ -669,13 +669,14 @@ public:
     void setUartRxFunction(int function);
     int getUartRxFunction() const;
 
-    // BCD counter (Phase 3): range = start index + width + mode; value drives
-    // the pins via bcdApply() (hardwarestuff/RoutableGpio.cpp).
-    void setBcdRange(int start, int width, int mode);
+    // BCD counter (Phase 3): range = start index + width; value drives the
+    // pins via bcdApply() (hardwarestuff/RoutableGpio.cpp). setBcdRange()
+    // WRAPS the stored value into the new range - shrinking a range must not
+    // leave a count the pins cannot show.
+    void setBcdRange(int start, int width);
     void setBcdValue(int value);
     int getBcdStart() const;
     int getBcdWidth() const;
-    int getBcdMode() const;
     int getBcdValue() const;
 
     // Display

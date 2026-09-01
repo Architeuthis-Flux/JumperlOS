@@ -525,10 +525,9 @@ void ConfigState::setDefaults() {
     uartTxFunction = 0;  // TX
     uartRxFunction = 1;  // RX
 
-    // BCD counter defaults: off (no range), 4-bit binary, value 0
+    // BCD counter defaults: off (no range), 4-bit (one hex digit), value 0
     bcdStart = -1;
     bcdWidth = 4;
-    bcdMode = 0;
     bcdValue = 0;
 
 
@@ -1170,7 +1169,7 @@ int JumperlessState::getUartRxFunction() const {
 }
 
 // BCD counter (Phase 3)
-void JumperlessState::setBcdRange(int start, int width, int mode) {
+void JumperlessState::setBcdRange(int start, int width) {
     if (start < -1 || start > 9) {
         return;  // -1 = off, 0-9 = gpioDef bank index
     }
@@ -1178,7 +1177,15 @@ void JumperlessState::setBcdRange(int start, int width, int mode) {
     if (width > 10) width = 10;
     config.bcdStart = start;
     config.bcdWidth = width;
-    config.bcdMode = (mode != 0) ? 1 : 0;
+    // The counter is plain binary over the range, so the largest value the
+    // pins can show is 2^width - 1. This accessor owns BOTH range writes, so
+    // wrap the stored value here: shrinking a range (10 bits -> 4) otherwise
+    // leaves bcdValue above the new max and every readout shows a count the
+    // pins are not displaying. Wrap (not clamp) matches bcdWrapValue().
+    int span = (1 << width);
+    int value = config.bcdValue % span;
+    if (value < 0) value += span;
+    config.bcdValue = value;
     markDirty();
 }
 
@@ -1193,10 +1200,6 @@ int JumperlessState::getBcdStart() const {
 
 int JumperlessState::getBcdWidth() const {
     return config.bcdWidth;
-}
-
-int JumperlessState::getBcdMode() const {
-    return config.bcdMode;
 }
 
 int JumperlessState::getBcdValue() const {
@@ -2308,7 +2311,6 @@ void JumperlessState::serializeConfig(String& output) const {
     // emitted after it is silently dropped on load.
     output += "  bcd: {start: " + String(config.bcdStart) +
               ", width: " + String(config.bcdWidth) +
-              ", mode: " + String(config.bcdMode) +
               ", value: " + String(config.bcdValue) + "}\n";
 
     // Fake GPIO configurations
@@ -2505,7 +2507,10 @@ bool JumperlessState::deserializeConfig(const char* yamlContent, String& errorMs
             config.oledLockConnection = parseBoolean(val, parseSuccess);
         }
     }
-    // Parse BCD counter
+    // Parse BCD counter. Each key is found by its own indexOf, so a slot
+    // file written before the hex-only change (which carried a "mode: 0"
+    // between width and value) still parses - the key is simply ignored and
+    // drops out of the file on the next save.
     else if (line.startsWith("bcd:")) {
         int startIdx = line.indexOf("start:");
         if (startIdx >= 0) {
@@ -2521,14 +2526,6 @@ bool JumperlessState::deserializeConfig(const char* yamlContent, String& errorMs
             String val = line.substring(widthIdx + 6, commaIdx);
             val.trim();
             config.bcdWidth = val.toInt();
-        }
-
-        int modeIdx = line.indexOf("mode:");
-        if (modeIdx >= 0) {
-            int commaIdx = line.indexOf(',', modeIdx);
-            String val = line.substring(modeIdx + 5, commaIdx);
-            val.trim();
-            config.bcdMode = val.toInt();
         }
 
         int valueIdx = line.indexOf("value:");
