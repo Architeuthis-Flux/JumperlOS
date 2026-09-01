@@ -364,6 +364,12 @@ void PartLabels::evaluateWarnings() {
             Serial.flush();
             char hint[32];
             snprintf(hint, sizeof(hint), "%s!", warnReasonName(newReason[i]));
+            // The OLED card reads as words, not a machine token: underscores
+            // become spaces ("vcc to gnd!"), and some display fonts have no
+            // '_' glyph anyway. The serial trace above keeps the token.
+            for (char* c = hint; *c != '\0'; c++) {
+                if (*c == '_') *c = ' ';
+            }
             ReadingDisplay::show(p.name, node, hint);
         }
     }

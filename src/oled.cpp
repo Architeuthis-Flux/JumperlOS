@@ -392,6 +392,15 @@ uint8_t FontManager::findBestFitPointSize( FontFamily family, const char* text, 
     return minPointSize;
 }
 
+int16_t FontManager::measureTextWidth( int fontIndex, const char* text ) {
+    if ( fontIndex < 0 || fontIndex >= numFonts || text == nullptr ) {
+        return -1;
+    }
+    int16_t w, h;
+    getTextBoundsWithFont( getDisplay( ), fontList[ fontIndex ].font, text, &w, &h );
+    return w;
+}
+
 // Get all available point sizes for a font family (stored in PROGMEM)
 void FontManager::getAvailableSizes( FontFamily family, uint8_t* sizes, int* count ) {
     *count = 0;

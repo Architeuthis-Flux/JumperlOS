@@ -115,6 +115,21 @@ int16_t bestFitFontFor(FontFamily family, const char* text, uint8_t maxPt = 10) 
     }
     uint8_t pt = FontManager::findBestFitPointSize(family, text, 128, maxPt, 6);
     int16_t font = (int16_t)FontManager::getFontForPointSize(family, pt);
+    // TRUST, BUT MEASURE: findBestFitPointSize returns its FLOOR size when no
+    // cut fits, and getFontForPointSize maps that to the family's NEAREST
+    // cut - which can be far LARGER (a display family whose smallest cut is
+    // 10pt turns the 6pt floor back into 10pt). That rendered the boot warn
+    // card's "vcc_to_gnd!" as a billboard clipped off both panel edges
+    // (Kevin, 2026-09-01). If the chosen cut doesn't actually fit, step down
+    // through the mono cuts, which go small enough for any reading this
+    // panel shows.
+    if (FontManager::measureTextWidth(font, text) > 128) {
+        int16_t mono7 =
+            (int16_t)FontManager::getFontForPointSize(FONT_ANDALE_MONO, 7);
+        font = (FontManager::measureTextWidth(mono7, text) <= 128)
+                   ? mono7
+                   : (int16_t)12;  // Andale Mono 5pt - ~21 chars, the floor
+    }
     // Only a key we can hold WHOLE goes in: a truncated copy would match the
     // wrong string later and hand back a font measured for something else.
     if (text != nullptr && strlen(text) < FIT_CACHE_TEXT) {
