@@ -133,22 +133,23 @@ bool routableGpioAvailable(int idx, const char** ownerOut = nullptr);
 
 // ============================================================================
 // Binary counter (Phase 3, CodeDocs/GPIO_plan.md). The range lives in
-// globalState.config (bcdStart/bcdWidth/bcdValue, persisted per-slot); these
-// drive it onto the pins. The encoding is always plain binary; the READOUT
-// is hexadecimal (one uppercase digit per 4 bits of width) - there is no
-// decimal/BCD-nibble mode.
+// globalState.config (bcdPins/bcdValue, persisted per-slot); these drive it
+// onto the pins. The range is a pin MASK - bit i = gpioDef index i (GPIO
+// 1-8 = bits 0-7, UART Tx = 8, Rx = 9), so the counter spans routed-but-
+// non-contiguous pins without phantom bits. The encoding is always plain
+// binary; the READOUT is hexadecimal (one uppercase digit per 4 bits of the
+// pin count) - there is no decimal/BCD-nibble mode.
 // ============================================================================
 
-// Counter bit k (LSB-first) -> gpioDef index: bcdStart + k walks GPIO 1-8
-// (indices 0-7) and continues into UART Tx (8) and Rx (9) as the top bits.
-// Returns -1 when no range is set, k is outside the width, or the bit falls
-// past the end of the bank.
+// Counter bit k (LSB-first) -> gpioDef index: the k-th SET bit of
+// config.bcdPins, LSB-first. Returns -1 when no mask is set or k is past
+// the mask's pin count.
 int bcdBitIndex(int bit);
 
-// Encode bcdValue onto the range pins: forces each claimable range pin to an
+// Encode bcdValue onto the mask's pins: forces each claimable mask pin to an
 // SIO output through applyPinConfig() (displacing leftover PWM) and drives
 // its bit level, mirroring gpioState[] so LEDs/readouts agree. Pins something
-// else owns are skipped. No-op when bcdStart < 0 or on OG.
+// else owns are skipped. No-op when bcdPins == 0 or on OG.
 //
 // fromLoad = true is the LOAD-PATH re-drive (applyStateGpioToHardware /
 // applyGpioSettingsFromConfig): it sets mux/dir/level inline instead of
@@ -164,19 +165,19 @@ void bcdApply(bool fromLoad = false);
 // in the readouts and counts from what is actually on the pins. An output's
 // level is gpio_get_out_level() (the driven truth readGPIO/toggleGPIO use);
 // an input reads gpio_get(). A bit whose pin is not SIO, or that something
-// else owns (bcdApply skipped it), reads 0. Returns 0 when bcdStart < 0.
+// else owns (bcdApply skipped it), reads 0. Returns 0 when bcdPins == 0.
 int bcdReadValue(void);
 
 // True when idx is a live OUTPUT bit of the configured counter. readGPIO's
 // sweep checks this so it never stamps a driven counter bit back to an input.
 bool bcdOwnsPin(int idx);
 
-// The counter readout: uppercase hex, zero-padded to one digit per 4 bits of
-// the configured width ("0".."F" at width 4, "00".."FF" at width 8,
-// "000".."3FF" at width 10). Every count display goes through this.
+// The counter readout: uppercase hex, zero-padded to one digit per 4 bits
+// of the configured pin count ("0".."F" at 4 pins, "00".."FF" at 8,
+// "000".."3FF" at 10). Every count display goes through this.
 void bcdFormatValue(int value, char* buf, size_t bufLen);
 
-// Largest value the configured range can show: 2^width - 1.
+// Largest value the configured mask can show: 2^popcount(bcdPins) - 1.
 int bcdMaxValue(void);
 
 // value = wrap(bcdReadValue() + delta) into [0, bcdMaxValue()] (wraps BOTH
@@ -184,7 +185,7 @@ int bcdMaxValue(void);
 // autosave. The arithmetic starts from the LIVE pin levels, not the stored
 // field, so a manual toggle followed by a pad tap counts from what is
 // actually there. Returns the new value, or -1 (untouched, not dirtied) when
-// no range is configured (bcdStart < 0) - callers toast instead of counting.
+// no range is configured (bcdPins == 0) - callers toast instead of counting.
 int bcdIncrement(int delta);
 
 // Pure-logic assert run over the encode/wrap math (no pin writes, safe on
@@ -199,18 +200,22 @@ bool bcdSelfCheck(Stream* out = &Serial);
 // Nothing reverts.
 //
 // No range configured? It DEFINES one instead of asking (Kevin: "just click
-// BCD and then scrolling the wheel updates them live"): LSB = preferredStart
-// when that pin is claimable (the carousel/pin app pass the pin the user is
-// on), otherwise the lowest claimable pin; width = the contiguous claimable
-// run from there, capped at 4 (one hex digit). Returns -1 without a range
-// only when no pin is claimable at all, or on OG.
+// BCD and then scrolling the wheel updates them live"). The default is
+// every ROUTED claimable pin (Kevin: "make the BCD counter default to all
+// the gpio pins that are currently routed") - preferredStart only matters
+// when nothing is routed, which falls back to the old shape: a contiguous
+// claimable run from preferredStart (or the lowest claimable pin), capped
+// at 4 bits (one hex digit). Returns -1 without a range only when no pin is
+// claimable at all, or on OG.
 int bcdAdjust(int preferredStart = -1);
 
 // Two-step blocking range pick (same modal idiom): step 1 start pin (skips
 // pins routableGpioAvailable() refuses, PWM excepted - bcdApply displaces
-// it), step 2 width (1..contiguous claimable pins from that start). Applies
-// via setBcdRange() + bcdApply() and returns 0; cancel = -1, nothing changed.
-// This is the EXPLICIT "Range" item only - no path forces a user through it.
+// it), step 2 width (1..contiguous claimable pins from that start). This
+// picker builds CONTIGUOUS masks only; the sparse routed-pin default comes
+// from bcdAdjust's auto-define. Applies via setBcdPins() + bcdApply() and
+// returns 0; cancel = -1, nothing changed. This is the EXPLICIT "Range"
+// item only - no path forces a user through it.
 int bcdRangeSetup(void);
 
 // GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md): the highlight
@@ -234,14 +239,18 @@ int gpioOptionsCarousel(int gpioIdx);
 // live state; pins something owns show the owner and refuse selection),
 // level 2 picks Direction / Pulls / PWM / BCD (PWM absent for Tx/Rx) and
 // drops into the Phase 2 sub-editors. After a value applies it returns to
-// level 2 (stay in menu); hold backs out one level, a serial byte exits the
-// whole app. No-op toast on OG.
+// level 2 (stay in menu); a HOLD anywhere unwinds the WHOLE app and reopens
+// the top-level click menu on its "GPIO" row (Menus::
+// requestReopenAtTopLevel) - there is no back-one-level in this launcher. A
+// serial byte exits the whole app with no reopen (the terminal wants the
+// board). No-op toast on OG.
 void gpioSettingsLauncher(void);
 
 // BCD counter app: one level - Count (straight into the bcdAdjust modal,
-// which defines a range from the lowest claimable pin when none is set) and
-// Range (bcdRangeSetup, for a custom start/width). Hold or a serial byte
-// exits. No-op toast on OG.
+// which defaults the range to every routed claimable pin when none is set)
+// and Range (bcdRangeSetup, for an explicit contiguous start/width). A HOLD
+// anywhere unwinds the whole app and reopens the top-level click menu on
+// its "GPIO" row; a serial byte exits with no reopen. No-op toast on OG.
 void bcdMenuLauncher(void);
 
 #endif

@@ -240,13 +240,14 @@ struct ConfigState {
     int uartTxFunction;  // 0 = tx, 1 = rx, 2 = gpio_in, 3 = gpio_out
     int uartRxFunction;  // 0 = tx, 1 = rx, 2 = gpio_in, 3 = gpio_out
 
-    // Binary counter range (Phase 3, CodeDocs/GPIO_plan.md). Bits map
-    // LSB-first from bcdStart through the gpioDef bank - UART Tx (idx 8) and
-    // Rx (idx 9) join as the top bits when the range reaches them. Always
-    // plain binary; the READOUT is hexadecimal (one digit per 4 bits).
-    int bcdStart;   // gpioDef bank index of bit 0 (-1 = counter off)
-    int bcdWidth;   // bits in the counter (1-10)
-    int bcdValue;   // current counter value, 0 .. 2^bcdWidth - 1
+    // Binary counter range (Phase 3, CodeDocs/GPIO_plan.md). The range is
+    // a pin MASK: bit i = gpioDef bank index i (GPIO 1-8 = bits 0-7, UART
+    // Tx = bit 8, Rx = bit 9), so the counter can span routed-but-non-
+    // contiguous pins without phantom bits. Counter bit k (LSB-first) is
+    // the k-th SET bit of the mask. Always plain binary; the READOUT is
+    // hexadecimal (one digit per 4 bits of the pin count).
+    int bcdPins;    // pin mask (0 = counter off)
+    int bcdValue;   // current counter value, 0 .. 2^popcount(bcdPins) - 1
 
 
     // OLED state
@@ -669,14 +670,14 @@ public:
     void setUartRxFunction(int function);
     int getUartRxFunction() const;
 
-    // BCD counter (Phase 3): range = start index + width; value drives the
-    // pins via bcdApply() (hardwarestuff/RoutableGpio.cpp). setBcdRange()
-    // WRAPS the stored value into the new range - shrinking a range must not
-    // leave a count the pins cannot show.
-    void setBcdRange(int start, int width);
+    // BCD counter (Phase 3): range = pin MASK (bit i = gpioDef bank index
+    // i); value drives the pins via bcdApply() (hardwarestuff/
+    // RoutableGpio.cpp). setBcdPins() WRAPS the stored value into the new
+    // mask's max - shrinking the mask must not leave a count the pins
+    // cannot show.
+    void setBcdPins(int mask);
     void setBcdValue(int value);
-    int getBcdStart() const;
-    int getBcdWidth() const;
+    int getBcdPins() const;
     int getBcdValue() const;
 
     // Display

@@ -452,6 +452,35 @@ int returnToMenuPosition = -1;
 int returnToMenuLevel = -1;
 int returningFromTimeout = 0;
 
+// Programmatic menu entry (the GPIO click-menu apps' hold unwind): set by
+// Menus::requestReopenAtTopLevel(), consumed by clickMenu()'s entry check.
+// A session then starts on the next service pass exactly as if the wheel
+// had been clicked, and the returnToMenu* pair above lands it on the
+// requested top-level row.
+static bool s_menuReopenRequested = false;
+
+void Menus::requestReopenAtTopLevel( const char* rowText ) {
+    if ( rowText == nullptr ) {
+        return;
+    }
+    for ( int i = 0; i <= menuLineIndex && i < 150; i++ ) {
+        if ( menuLevels[ i ] != 0 ) {
+            continue; // only a LEVEL-0 row can be the landing
+        }
+        // Compare a trimmed copy: the FatFS read path (readStringUntil)
+        // can leave a trailing '\r' on every line; the compiled-in tree
+        // cannot. parseMenuFile has already stripped levels/$/^/*/actions.
+        String row = menuLines[ i ];
+        row.trim( );
+        if ( row.equals( rowText ) ) {
+            returnToMenuPosition = i;
+            returnToMenuLevel = 0;
+            s_menuReopenRequested = true;
+            return;
+        }
+    }
+}
+
 char submenuBuffer[ 20 ];
 
 char chosenOptions[ 20 ][ 40 ];
@@ -503,16 +532,27 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
 
     int returnedMenuPosition = -1;
     bool menuSessionRan = false;
-    if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) {
-        // Check if Highlighting wants to handle this button press (for voltage adjustment)
-        if ( Highlighting::getInstance( ).wantsToHandleButtonPress( ) ) {
-            // Don't consume the button press - let Highlighting handle it
-            return -1;
+    // Two ways into a session: the physical click edge, or a programmatic
+    // reopen request (requestReopenAtTopLevel - the GPIO apps' hold
+    // unwind). The flag path skips only the click-specific parts: no
+    // Highlighting veto (there is no press to hand over) and no
+    // encoder-state consume.
+    bool reopenRequested = s_menuReopenRequested;
+    if ( reopenRequested ||
+         ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ) {
+        if ( reopenRequested ) {
+            s_menuReopenRequested = false;
+        } else {
+            // Check if Highlighting wants to handle this button press (for voltage adjustment)
+            if ( Highlighting::getInstance( ).wantsToHandleButtonPress( ) ) {
+                // Don't consume the button press - let Highlighting handle it
+                return -1;
+            }
+            encoderButtonState = IDLE;
         }
         // Don't set showLEDsCore2 here - buffer not ready yet
         // It will be set in getMenuSelection() after buffer is prepared
 
-        encoderButtonState = IDLE;
         inClickMenu = 1;
         menuSessionRan = true;
         // The menu owns the terminal for this session and scrolls it freely,

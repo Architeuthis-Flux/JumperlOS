@@ -49,6 +49,13 @@ public:
     // Public methods
     void initMenu(void);
     int clickMenu(int menuType = -1, int menuOption = -1, int extraOptions = 0);
+
+    // Programmatic menu re-entry (the GPIO click-menu apps' hold unwind):
+    // the NEXT Menus::service() pass opens a full click-menu session - no
+    // physical click needed - landed on the LEVEL-0 menu row whose text
+    // equals rowText ("GPIO"). No-op when no top-level row matches (a
+    // custom MenuTree.txt without that row: the app just exits).
+    void requestReopenAtTopLevel(const char* rowText);
     
 private:
     Menus();

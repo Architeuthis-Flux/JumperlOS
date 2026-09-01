@@ -1781,7 +1781,7 @@ void applyGpioSettingsFromConfig(void) {
     // UI still shows the old count. fromLoad = no markDirty (this runs on
     // pure load/apply paths; dirtying here made the idle autosave rewrite the
     // slot file after every config change).
-    if (globalState.config.bcdStart >= 0) {
+    if (globalState.config.bcdPins != 0) {
         bcdApply(true);
     }
 }
@@ -1865,7 +1865,7 @@ void applyStateGpioToHardware(void) {
     // fromLoad = true: a slot LOAD must not come out dirty (applyPinConfig's
     // unconditional markDirty made the idle autosave rewrite the file on
     // every boot and left read-only templates nagging "unsaved edits").
-    if (globalState.config.bcdStart >= 0) {
+    if (globalState.config.bcdPins != 0) {
         bcdApply(true);
     }
 }
@@ -1966,44 +1966,71 @@ bool routableGpioAvailable( int idx, const char** ownerOut ) {
 // feature, the config keys and the pad actions are all called BCD.
 // ============================================================================
 
-static int bcdClampWidth( int width ) {
-    if ( width < 1 ) {
-        return 1;
+// Pins in a mask (mask semantics: bit i = gpioDef index i, 10 pins total).
+static int bcdPinCount( int mask ) {
+    return __builtin_popcount( (unsigned)( mask & 0x3FF ) );
+}
+
+// Counter bit k (LSB-first) -> gpioDef index: the k-th SET bit of `mask`.
+// Returns -1 when k is negative or the mask has fewer than k+1 pins.
+static int bcdBitIndexIn( int mask, int k ) {
+    if ( k < 0 ) {
+        return -1;
     }
-    if ( width > 10 ) {
-        return 10;
+    mask &= 0x3FF;
+    for ( int idx = 0; idx <= 9; idx++ ) {
+        if ( mask & ( 1 << idx ) ) {
+            if ( k == 0 ) {
+                return idx;
+            }
+            k--;
+        }
     }
-    return width;
+    return -1;
 }
 
-// Largest value a range of `width` bits can show: 2^width - 1. (The
-// decimal/BCD-nibble mode is gone - the counter is plain binary and the
-// readout is hex.)
-static int bcdMaxValueFor( int width ) {
-    width = bcdClampWidth( width );
-    return ( 1 << width ) - 1;
+// Largest value a mask's pins can show: 2^popcount - 1. (The decimal/
+// BCD-nibble mode is gone - the counter is plain binary and the readout is
+// hex.) An empty mask floors at 1 bit so the format/wrap math keeps its
+// shape; the public entry points gate on bcdPins != 0 before it matters.
+static int bcdMaxValueForMask( int mask ) {
+    int count = bcdPinCount( mask );
+    if ( count < 1 ) {
+        count = 1;
+    }
+    return ( 1 << count ) - 1;
 }
 
-// Hex digits the readout needs for a range: one per 4 bits, rounded up.
-// width 1-4 -> 1 ("0".."F"), 5-8 -> 2 ("00".."FF"), 9-10 -> 3 ("000".."3FF").
-static int bcdHexDigits( int width ) {
-    return ( bcdClampWidth( width ) + 3 ) / 4;
+// Hex digits the readout needs: one per 4 bits of pin count, rounded up.
+// count 1-4 -> 1 ("0".."F"), 5-8 -> 2 ("00".."FF"), 9-10 -> 3
+// ("000".."3FF"). Clamped 1..3 - the mask holds at most 10 pins.
+static int bcdHexDigitsFor( int count ) {
+    int digits = ( count + 3 ) / 4;
+    if ( digits < 1 ) {
+        digits = 1;
+    }
+    if ( digits > 3 ) {
+        digits = 3;
+    }
+    return digits;
 }
 
-// The readout, width-parameterised so bcdSelfCheck() can assert it without
+// The readout, count-parameterised so bcdSelfCheck() can assert it without
 // touching globalState.
-static void bcdFormatValueFor( int value, int width, char* buf, size_t bufLen ) {
+static void bcdFormatValueForCount( int value, int count, char* buf,
+                                    size_t bufLen ) {
     if ( buf == nullptr || bufLen == 0 ) {
         return;
     }
     if ( value < 0 ) {
         value = 0;
     }
-    snprintf( buf, bufLen, "%0*X", bcdHexDigits( width ), (unsigned)value );
+    snprintf( buf, bufLen, "%0*X", bcdHexDigitsFor( count ), (unsigned)value );
 }
 
 void bcdFormatValue( int value, char* buf, size_t bufLen ) {
-    bcdFormatValueFor( value, globalState.config.bcdWidth, buf, bufLen );
+    bcdFormatValueForCount( value, bcdPinCount( globalState.config.bcdPins ),
+                            buf, bufLen );
 }
 
 // Wrap (not clamp) into [0, maxValue] - both directions, so max+1 -> 0 and
@@ -2029,11 +2056,17 @@ static int bcdEncodeBit( int value, int bit ) {
 }
 
 // Inverse of bcdEncodeBit over a whole level array - the self-check's
-// round-trip decoder.
-static int bcdDecodeLevels( const int* levels, int width ) {
-    width = bcdClampWidth( width );
+// round-trip decoder. Count-parameterised: which pins carry the bits does
+// not change the arithmetic.
+static int bcdDecodeLevels( const int* levels, int count ) {
+    if ( count < 1 ) {
+        count = 1;
+    }
+    if ( count > 10 ) {
+        count = 10;
+    }
     int value = 0;
-    for ( int bit = 0; bit < width; bit++ ) {
+    for ( int bit = 0; bit < count; bit++ ) {
         value |= ( levels[ bit ] & 1 ) << bit;
     }
     return value;
@@ -2052,35 +2085,20 @@ static bool bcdPinClaimable( int idx ) {
 }
 
 int bcdBitIndex( int bit ) {
-    int start = globalState.config.bcdStart;
-    if ( start < 0 || bit < 0 || bit >= globalState.config.bcdWidth ) {
-        return -1;
-    }
-    int idx = start + bit;
-    if ( idx > 9 ) {
-        return -1; // past UART Rx - the bank ends
-    }
-    return idx; // start+k rolls through GPIO 1-8 into Tx (8) then Rx (9)
+    return bcdBitIndexIn( globalState.config.bcdPins, bit );
 }
 
 // Is this pin a live bit of the configured counter, driving as an output?
 // readGPIO's sweep uses this to leave a driven bit alone (see the gpioNet
 // == -1 stamp): an unrouted counter pin is still a counter pin.
 bool bcdOwnsPin( int idx ) {
-    int start = globalState.config.bcdStart;
-    if ( start < 0 || idx < 0 || idx > 9 ) {
+    if ( globalState.config.bcdPins == 0 || idx < 0 || idx > 9 ) {
         return false;
     }
     if ( globalState.config.gpioDirection[ idx ] != 0 ) {
         return false; // only an OUTPUT bit is ours to protect
     }
-    int width = bcdClampWidth( globalState.config.bcdWidth );
-    for ( int bit = 0; bit < width; bit++ ) {
-        if ( bcdBitIndex( bit ) == idx ) {
-            return true;
-        }
-    }
-    return false;
+    return ( globalState.config.bcdPins & ( 1 << idx ) ) != 0;
 }
 
 // Take/release the readingGPIO lock around counter pin mutations. A logo-pad
@@ -2106,21 +2124,22 @@ static void bcdUnlockGpioReads( void ) {
 }
 
 void bcdApply( bool fromLoad ) {
-    if ( globalState.config.bcdStart < 0 || routableGpioAbsent( ) ) {
+    int mask = globalState.config.bcdPins;
+    if ( mask == 0 || routableGpioAbsent( ) ) {
         return;
     }
-    int width = bcdClampWidth( globalState.config.bcdWidth );
+    int count = bcdPinCount( mask );
     // Encode from a locally wrapped copy: a hand-edited or stale slot file
     // can load bcdValue out of range (deserialize deliberately doesn't
     // validate), and wrapping here keeps the pins in range without writing
     // the correction back on a pure load path.
     int value = bcdWrapValue( globalState.config.bcdValue,
-                              bcdMaxValueFor( width ) );
+                              bcdMaxValueForMask( mask ) );
     bcdLockGpioReads( );
-    for ( int bit = 0; bit < width; bit++ ) {
-        int idx = bcdBitIndex( bit );
+    for ( int bit = 0; bit < count; bit++ ) {
+        int idx = bcdBitIndexIn( mask, bit );
         if ( idx < 0 ) {
-            break; // range ran past the end of the bank
+            break; // fewer set bits than the count - cannot happen
         }
         if ( fromLoad ) {
             // LOAD PATH: no markDirty, anywhere. applyPinConfig() marks
@@ -2162,15 +2181,16 @@ void bcdApply( bool fromLoad ) {
 }
 
 int bcdReadValue( void ) {
-    if ( globalState.config.bcdStart < 0 || routableGpioAbsent( ) ) {
+    int mask = globalState.config.bcdPins;
+    if ( mask == 0 || routableGpioAbsent( ) ) {
         return 0;
     }
-    int width = bcdClampWidth( globalState.config.bcdWidth );
+    int count = bcdPinCount( mask );
     int value = 0;
-    for ( int bit = 0; bit < width; bit++ ) {
-        int idx = bcdBitIndex( bit );
+    for ( int bit = 0; bit < count; bit++ ) {
+        int idx = bcdBitIndexIn( mask, bit );
         if ( idx < 0 ) {
-            break; // range ran past the end of the bank
+            break; // fewer set bits than the count - cannot happen
         }
         if ( !bcdPinClaimable( idx ) ) {
             continue; // bcdApply skipped this bit too - it reads 0
@@ -2192,11 +2212,11 @@ int bcdReadValue( void ) {
 }
 
 int bcdMaxValue( void ) {
-    return bcdMaxValueFor( globalState.config.bcdWidth );
+    return bcdMaxValueForMask( globalState.config.bcdPins );
 }
 
 int bcdIncrement( int delta ) {
-    if ( globalState.config.bcdStart < 0 ) {
+    if ( globalState.config.bcdPins == 0 ) {
         return -1; // no range configured - nothing moved, nothing dirtied
     }
     // Count from what is ACTUALLY on the pins: a probe toggle, a pad action
@@ -2220,41 +2240,45 @@ bool bcdSelfCheck( Stream* out ) {
             allPass = false;
         }
     };
-    // Encode every value the range can show, decode the levels back, expect
-    // the same value.
-    auto roundTrip = [ & ]( int width, const char* label ) {
-        int maxV = bcdMaxValueFor( width );
+    // Encode every value a mask can show, decode the levels back, expect
+    // the same value (bit arithmetic is count-based - which pins carry the
+    // bits doesn't enter it).
+    auto roundTrip = [ & ]( int mask, const char* label ) {
+        int count = bcdPinCount( mask );
+        int maxV = bcdMaxValueForMask( mask );
         bool pass = true;
         for ( int v = 0; v <= maxV; v++ ) {
             int levels[ 10 ] = { 0 };
-            for ( int bit = 0; bit < width; bit++ ) {
+            for ( int bit = 0; bit < count; bit++ ) {
                 levels[ bit ] = bcdEncodeBit( v, bit );
             }
-            if ( bcdDecodeLevels( levels, width ) != v ) {
+            if ( bcdDecodeLevels( levels, count ) != v ) {
                 pass = false;
                 break;
             }
         }
         report( label, pass );
     };
-    // Hex readout: format `value` at `width` and compare against `expect`.
-    auto hexIs = [ & ]( int value, int width, const char* expect,
+    // Hex readout: format `value` at a mask's pin count, compare `expect`.
+    auto hexIs = [ & ]( int value, int mask, const char* expect,
                         const char* label ) {
         char buf[ 8 ] = { 0 };
-        bcdFormatValueFor( value, width, buf, sizeof( buf ) );
+        bcdFormatValueForCount( value, bcdPinCount( mask ), buf,
+                                sizeof( buf ) );
         report( label, strcmp( buf, expect ) == 0 );
     };
 
-    out->println( "\r\nbcdSelfCheck: encode/wrap/hex logic (no pin writes)" );
+    out->println( "\r\nbcdSelfCheck: encode/wrap/hex/mask logic (no pin writes)" );
 
-    roundTrip( 1, "width 1 round-trip (0-1)" );
-    roundTrip( 4, "width 4 round-trip (0-15)" );
-    roundTrip( 10, "width 10 round-trip (0-1023)" );
+    // Contiguous masks reproduce every pre-mask expectation.
+    roundTrip( 0x001, "1-pin round-trip (0-1)" );
+    roundTrip( 0x00F, "4-pin round-trip (0-15)" );
+    roundTrip( 0x3FF, "10-pin round-trip (0-1023)" );
 
-    report( "width 1 max = 1", bcdMaxValueFor( 1 ) == 1 );
-    report( "width 4 max = 15", bcdMaxValueFor( 4 ) == 15 );
-    report( "width 8 max = 255", bcdMaxValueFor( 8 ) == 255 );
-    report( "width 10 max = 1023", bcdMaxValueFor( 10 ) == 1023 );
+    report( "1-pin mask max = 1", bcdMaxValueForMask( 0x001 ) == 1 );
+    report( "4-pin mask max = 15", bcdMaxValueForMask( 0x00F ) == 15 );
+    report( "8-pin mask max = 255", bcdMaxValueForMask( 0x0FF ) == 255 );
+    report( "10-pin mask max = 1023", bcdMaxValueForMask( 0x3FF ) == 1023 );
 
     {
         static const int expected5[ 4 ] = { 1, 0, 1, 0 }; // 5 = 0b0101, LSB-first
@@ -2267,25 +2291,44 @@ bool bcdSelfCheck( Stream* out ) {
         report( "5 @ width 4 = 1010 (LSB-first)", pass );
     }
 
-    report( "width 4 wrap 15+1 -> 0",
-            bcdWrapValue( 15 + 1, bcdMaxValueFor( 4 ) ) == 0 );
-    report( "width 4 wrap 0-1 -> 15",
-            bcdWrapValue( 0 - 1, bcdMaxValueFor( 4 ) ) == 15 );
-    report( "width 10 wrap 1023+1 -> 0",
-            bcdWrapValue( 1023 + 1, bcdMaxValueFor( 10 ) ) == 0 );
-    report( "width 10 wrap 0-1 -> 1023",
-            bcdWrapValue( 0 - 1, bcdMaxValueFor( 10 ) ) == 1023 );
+    report( "4-pin wrap 15+1 -> 0",
+            bcdWrapValue( 15 + 1, bcdMaxValueForMask( 0x00F ) ) == 0 );
+    report( "4-pin wrap 0-1 -> 15",
+            bcdWrapValue( 0 - 1, bcdMaxValueForMask( 0x00F ) ) == 15 );
+    report( "10-pin wrap 1023+1 -> 0",
+            bcdWrapValue( 1023 + 1, bcdMaxValueForMask( 0x3FF ) ) == 0 );
+    report( "10-pin wrap 0-1 -> 1023",
+            bcdWrapValue( 0 - 1, bcdMaxValueForMask( 0x3FF ) ) == 1023 );
 
-    // One uppercase hex digit per 4 bits of width, zero-padded.
-    report( "width 4 -> 1 hex digit", bcdHexDigits( 4 ) == 1 );
-    report( "width 8 -> 2 hex digits", bcdHexDigits( 8 ) == 2 );
-    report( "width 10 -> 3 hex digits", bcdHexDigits( 10 ) == 3 );
-    hexIs( 0, 4, "0", "hex 0 @ width 4 = \"0\"" );
-    hexIs( 10, 4, "A", "hex 10 @ width 4 = \"A\"" );
-    hexIs( 15, 4, "F", "hex 15 @ width 4 = \"F\"" );
-    hexIs( 5, 8, "05", "hex 5 @ width 8 = \"05\"" );
-    hexIs( 255, 8, "FF", "hex 255 @ width 8 = \"FF\"" );
-    hexIs( 1023, 10, "3FF", "hex 1023 @ width 10 = \"3FF\"" );
+    // One uppercase hex digit per 4 bits of pin count, zero-padded.
+    report( "4 pins -> 1 hex digit", bcdHexDigitsFor( 4 ) == 1 );
+    report( "8 pins -> 2 hex digits", bcdHexDigitsFor( 8 ) == 2 );
+    report( "10 pins -> 3 hex digits", bcdHexDigitsFor( 10 ) == 3 );
+    hexIs( 0, 0x00F, "0", "hex 0 @ 4 pins = \"0\"" );
+    hexIs( 10, 0x00F, "A", "hex 10 @ 4 pins = \"A\"" );
+    hexIs( 15, 0x00F, "F", "hex 15 @ 4 pins = \"F\"" );
+    hexIs( 5, 0x0FF, "05", "hex 5 @ 8 pins = \"05\"" );
+    hexIs( 255, 0x0FF, "FF", "hex 255 @ 8 pins = \"FF\"" );
+    hexIs( 1023, 0x3FF, "3FF", "hex 1023 @ 10 pins = \"3FF\"" );
+
+    // Sparse masks - the mask model's own cases. 0b0000001101 = gpioDef
+    // indices 0, 2, 3: a 3-bit counter whose bit k is the k-th SET bit, so
+    // 5 (= 0b101 LSB-first) lands bit0 -> idx 0 HIGH, bit1 -> idx 2 LOW,
+    // bit2 -> idx 3 HIGH.
+    report( "mask 0b1101 counts 3 pins", bcdPinCount( 0x00D ) == 3 );
+    report( "mask 0b1101 max = 7", bcdMaxValueForMask( 0x00D ) == 7 );
+    report( "mask 0b1101 bit walk k=0/1/2/3 -> 0/2/3/-1",
+            bcdBitIndexIn( 0x00D, 0 ) == 0 && bcdBitIndexIn( 0x00D, 1 ) == 2 &&
+            bcdBitIndexIn( 0x00D, 2 ) == 3 && bcdBitIndexIn( 0x00D, 3 ) == -1 );
+    report( "5 on mask 0b1101: idx0=1 idx2=0 idx3=1",
+            bcdEncodeBit( 5, 0 ) == 1 && bcdEncodeBit( 5, 1 ) == 0 &&
+            bcdEncodeBit( 5, 2 ) == 1 );
+    roundTrip( 0x00D, "sparse 0b1101 round-trip (0-7)" );
+
+    // Legacy slot-file conversion (deserializeConfig's compat branch):
+    // start 2 width 4 covered gpioDef indices 2..5 - exactly mask 0b0111100.
+    report( "legacy start 2 width 4 -> mask 0b0111100",
+            (int)( ( ( ( 1u << 4 ) - 1 ) << 2 ) & 0x3FFu ) == 0x03C );
 
     out->println( allPass ? "bcdSelfCheck: ALL PASS" : "bcdSelfCheck: FAILURES" );
     return allPass;
@@ -2317,12 +2360,13 @@ static void bcdDrawAdjustFrame( int value ) {
     char valueText[ 16 ];
     bcdFormatValue( value, valueText, sizeof( valueText ) );
 
-    int width = bcdClampWidth( globalState.config.bcdWidth );
+    int mask = globalState.config.bcdPins;
+    int count = bcdPinCount( mask );
     char labels[ 32 ] = { 0 };
     char levels[ 32 ] = { 0 };
     int n = 0;
-    for ( int bit = 0; bit < width && n < 30; bit++ ) {
-        int idx = bcdBitIndex( bit );
+    for ( int bit = 0; bit < count && n < 30; bit++ ) {
+        int idx = bcdBitIndexIn( mask, bit );
         if ( idx < 0 ) {
             break;
         }
@@ -2369,17 +2413,93 @@ static void bcdPinLabel( int idx, char* buf, size_t bufLen ) {
     }
 }
 
+// One-char pin label for the compact mask readout: '1'..'8', 'T', 'R'.
+static char bcdPinChar( int idx ) {
+    if ( idx == 8 ) {
+        return 'T';
+    }
+    if ( idx == 9 ) {
+        return 'R';
+    }
+    return (char)( '1' + idx );
+}
+
+// Compact text for a pin mask: contiguous runs collapse ("1-4"), sparse
+// masks list ("1,3,T"), mixed does both ("1-3,5,T-R"). "off" for mask 0.
+static void bcdFormatMask( int mask, char* buf, size_t bufLen ) {
+    if ( buf == nullptr || bufLen == 0 ) {
+        return;
+    }
+    mask &= 0x3FF;
+    if ( mask == 0 ) {
+        snprintf( buf, bufLen, "off" );
+        return;
+    }
+    size_t n = 0;
+    bool first = true;
+    for ( int idx = 0; idx <= 9; ) {
+        if ( !( mask & ( 1 << idx ) ) ) {
+            idx++;
+            continue;
+        }
+        int runEnd = idx;
+        while ( runEnd < 9 && ( mask & ( 1 << ( runEnd + 1 ) ) ) ) {
+            runEnd++;
+        }
+        char piece[ 6 ];
+        if ( runEnd > idx ) {
+            snprintf( piece, sizeof( piece ), "%s%c-%c", first ? "" : ",",
+                      bcdPinChar( idx ), bcdPinChar( runEnd ) );
+        } else {
+            snprintf( piece, sizeof( piece ), "%s%c", first ? "" : ",",
+                      bcdPinChar( idx ) );
+        }
+        size_t pieceLen = strlen( piece );
+        if ( n + pieceLen + 1 > bufLen ) {
+            break; // out of room - what fits already names the pins
+        }
+        memcpy( buf + n, piece, pieceLen );
+        n += pieceLen;
+        first = false;
+        idx = runEnd + 1;
+    }
+    buf[ n ] = '\0';
+}
+
 // Define a counter range on the spot rather than sending the user through
 // the range picker. Kevin: "we shouldn't need to select the number, just
-// click BCD and then scrolling the wheel updates them live." LSB = the pin
-// the user is on when that pin is claimable, otherwise the lowest claimable
-// pin; width = the contiguous claimable run from there, capped at 4 - one
-// hex digit, matching "just 0-F". Returns true when a range is configured
-// (already-configured counts as success), false when no pin is claimable.
+// click BCD and then scrolling the wheel updates them live" and "make the
+// BCD counter default to all the gpio pins that are currently routed."
+//
+// DEFAULT: the mask of every ROUTED (gpioNet > 0) claimable pin - routed
+// pins need not be contiguous, and the mask model counts them without
+// phantom bits, so a wired-up display never shows garbage columns. When
+// anything is routed, preferredStart is ignored ("all the routed pins" is
+// the ask). Nothing routed? Fall back to the old shape: a contiguous
+// claimable run from preferredStart (the carousel/pin app pass the pin the
+// user is on) or the lowest claimable pin, capped at 4 bits - one hex
+// digit, matching "just 0-F". Returns true when a range is configured
+// (already-configured counts as success), false when no pin is claimable
+// at all.
 static bool bcdEnsureRange( int preferredStart ) {
-    if ( globalState.config.bcdStart >= 0 ) {
+    if ( globalState.config.bcdPins != 0 ) {
         return true;
     }
+
+    // Every routed claimable pin (gpioDef index i reads gpioNet[i] - the
+    // routable bank occupies gpioNet slots 0-9 in gpioDef order).
+    int mask = 0;
+    for ( int idx = 0; idx <= 9; idx++ ) {
+        if ( gpioNet[ idx ] > 0 && bcdPinClaimable( idx ) ) {
+            mask |= ( 1 << idx );
+        }
+    }
+    if ( mask != 0 ) {
+        globalState.setBcdPins( mask ); // wraps the stored value in range
+        return true;
+    }
+
+    // Nothing routed: contiguous claimable run from where the user is.
     int start = -1;
     if ( preferredStart >= 0 && preferredStart <= 9 &&
          bcdPinClaimable( preferredStart ) ) {
@@ -2405,7 +2525,8 @@ static bool bcdEnsureRange( int preferredStart ) {
     if ( width < 1 ) {
         width = 1; // start itself was claimable
     }
-    globalState.setBcdRange( start, width ); // wraps the stored value in range
+    globalState.setBcdPins(
+        (int)( ( ( ( 1u << width ) - 1 ) << start ) & 0x3FFu ) );
     return true;
 }
 
@@ -2413,9 +2534,11 @@ int bcdAdjust( int preferredStart ) {
     if ( routableGpioAbsent( ) ) {
         return -1;
     }
-    // No range? Define one from where the user is instead of asking. The
-    // explicit start/width pick lives in bcdRangeSetup(), reachable only
-    // from the BCD app's "Range" item - nothing forces a user through it.
+    // No range? Define one instead of asking: every routed claimable pin,
+    // or a contiguous run from where the user is when nothing is routed.
+    // The explicit start/width pick lives in bcdRangeSetup(), reachable
+    // only from the BCD app's "Range" item - nothing forces a user
+    // through it.
     if ( !bcdEnsureRange( preferredStart ) ) {
         Serial.println( "\r\nBCD: no free pins" );
         oled.clearPrintShow( "BCD\nno free pins", 2, 1200 );
@@ -2587,9 +2710,12 @@ int bcdRangeSetup( void ) {
 
     int step = 0; // 0 = pick start pin, 1 = pick width
     int cursor = 0;
+    // Open on the current mask's lowest set bit when it's still free (-1
+    // when the counter is off - no candidate matches, cursor stays 0).
+    int currentStart = bcdBitIndexIn( globalState.config.bcdPins, 0 );
     for ( int i = 0; i < candidateCount; i++ ) {
-        if ( candidates[ i ] == globalState.config.bcdStart ) {
-            cursor = i; // open on the current start when it's still free
+        if ( candidates[ i ] == currentStart ) {
+            cursor = i;
             break;
         }
     }
@@ -2660,9 +2786,9 @@ int bcdRangeSetup( void ) {
                 if ( maxWidth < 1 ) {
                     maxWidth = 1; // start itself was claimable
                 }
-                width = globalState.config.bcdWidth;
+                width = bcdPinCount( globalState.config.bcdPins );
                 if ( width < 1 ) {
-                    width = 1;
+                    width = 4; // counter off - open on one hex digit
                 }
                 if ( width > maxWidth ) {
                     width = maxWidth;
@@ -2676,9 +2802,10 @@ int bcdRangeSetup( void ) {
                 bcdDrawFrame( "Width", valueText );
                 continue;
             }
-            // Width picked - commit the range (the accessor wraps the
-            // stored value into it), drive the value.
-            globalState.setBcdRange( start, width );
+            // Width picked - commit the contiguous mask (the accessor
+            // wraps the stored value into it), drive the value.
+            globalState.setBcdPins(
+                (int)( ( ( ( 1u << width ) - 1 ) << start ) & 0x3FFu ) );
             bcdApply( );
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
@@ -2788,7 +2915,7 @@ static void gpioCarouselItemState( int gpioIdx, int item, char* buf,
             break;
         }
         case GPIO_ITEM_BCD:
-            if ( globalState.config.bcdStart < 0 ) {
+            if ( globalState.config.bcdPins == 0 ) {
                 snprintf( buf, bufLen, "off" );
             } else {
                 // The LIVE pins, not the stored field: a probe tap / pad
@@ -3414,8 +3541,8 @@ int gpioOptionsCarousel( int gpioIdx ) {
                     break;
                 case GPIO_ITEM_BCD:
                     // Straight into live counting - no range pick first.
-                    // With no range configured bcdAdjust() defines one from
-                    // THIS pin (the one the highlight is on) outward.
+                    // With no range configured bcdAdjust() defaults to all
+                    // routed pins (THIS pin outward when nothing is routed).
                     r = bcdAdjust( gpioIdx );
                     if ( r >= 0 ) {
                         r = 0; // bcdAdjust returns the counted value
@@ -3702,10 +3829,20 @@ void gpioSettingsLauncher( void ) {
             int pick = gpioAppPicker( "pin", "GPIO", 10, pinCursor,
                                       titles, descs, selectable );
             if ( pick == -1 ) {
-                break; // hold at the top level = exit
+                // Hold = unwind the WHOLE app and reopen the top-level
+                // click menu on its GPIO row (Kevin: "bring us out of the
+                // gpio menus all the way to the top level clickwheel menu
+                // with GPIO highlighted"). Wait out the live hold first:
+                // the menu's own hold-to-back at level 0 is an instant
+                // exit, so a still-down button would close the reopened
+                // menu on its first pass. (The picker already waited -
+                // belt+braces for uniformity with the editor sites below.)
+                gpioAppWaitOutHold( );
+                Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                goto done;
             }
             if ( pick == -2 ) {
-                goto done; // serial byte = exit the app
+                goto done; // serial byte = exit the app, NO reopen
             }
             pinCursor = pick;
             int gpioIdx = pick; // the list is all 10 pins in gpioDef order
@@ -3750,7 +3887,11 @@ void gpioSettingsLauncher( void ) {
                 int o = gpioAppPicker( "opt", pinHeader, nOpts, optCursor,
                                        oTitles, oDescs, nullptr );
                 if ( o == -1 ) {
-                    break; // hold = back to the pin list
+                    // Hold = full unwind + menu reopen on the GPIO row -
+                    // back-one-level is gone by design.
+                    gpioAppWaitOutHold( );
+                    Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                    goto done;
                 }
                 if ( o == -2 ) {
                     goto done;
@@ -3776,8 +3917,9 @@ void gpioSettingsLauncher( void ) {
                         break;
                     case GPIO_ITEM_BCD:
                         // Straight into live counting - no range pick first;
-                        // with no range configured bcdAdjust() defines one
-                        // from THIS pin outward.
+                        // with no range configured bcdAdjust() defaults to
+                        // all routed pins (THIS pin outward when nothing is
+                        // routed).
                         r = bcdAdjust( gpioIdx );
                         if ( r >= 0 ) {
                             r = 0; // bcdAdjust returns the counted value
@@ -3789,22 +3931,28 @@ void gpioSettingsLauncher( void ) {
                 if ( r == -2 ) {
                     goto done; // serial byte inside an editor = exit the app
                 }
-                // A value applied (or the editor cancelled): return to
-                // LEVEL 2 - the stay-in-menu behavior. Re-assert what the
-                // children may have cleared (the BCD modals zero inClickMenu
-                // and restore the divider on their way out) and wait out a
-                // live hold so it can't cascade this level too.
+                if ( r == -1 ) {
+                    // Hold/probe-remove cancelled the editor: full unwind +
+                    // menu reopen. The editors return -1 with the hold
+                    // still physically down - wait it out before handing
+                    // the encoder to the reopened menu.
+                    gpioAppWaitOutHold( );
+                    Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                    goto done;
+                }
+                // A value applied: return to LEVEL 2 - the stay-in-menu
+                // behavior. Re-assert what the children may have cleared
+                // (the BCD modals zero inClickMenu and restore the divider
+                // on their way out) and wait out a live hold so it can't
+                // cascade this level too.
                 Menus::getInstance( ).inClickMenu = 1;
                 g_gpioUiShowsCircuit = true;
                 rotaryDivider = 8;
                 gpioAppWaitOutHold( );
             }
 
-            // Back at level 1: same re-assert (a BCD modal may have run).
-            Menus::getInstance( ).inClickMenu = 1;
-            g_gpioUiShowsCircuit = true;
-            rotaryDivider = 8;
-            gpioAppWaitOutHold( );
+            // (Unreachable: the option loop above only leaves via goto done
+            // - hold no longer backs out to the pin list.)
         }
     }
 
@@ -3839,7 +3987,7 @@ void bcdMenuLauncher( void ) {
     {
         // Two items now: the decimal/BCD-nibble mode is gone - the counter is
         // always plain binary and always reads out in hex ("just 0-F").
-        static char itemTitle[ 2 ][ 24 ];
+        static char itemTitle[ 2 ][ 32 ];
         static const char* itemDesc[ 2 ] = { "turn to count",
                                              "start + width" };
         const char* titles[ 2 ];
@@ -3848,7 +3996,7 @@ void bcdMenuLauncher( void ) {
         int cursor = 0;
         while ( true ) {
             // Live state per line, rebuilt every pass.
-            if ( globalState.config.bcdStart < 0 ) {
+            if ( globalState.config.bcdPins == 0 ) {
                 snprintf( itemTitle[ 0 ], sizeof( itemTitle[ 0 ] ),
                           "Count  no range" );
                 snprintf( itemTitle[ 1 ], sizeof( itemTitle[ 1 ] ),
@@ -3860,12 +4008,12 @@ void bcdMenuLauncher( void ) {
                                 sizeof( valueText ) );
                 snprintf( itemTitle[ 0 ], sizeof( itemTitle[ 0 ] ),
                           "Count  %s", valueText );
-                char startLabel[ 16 ];
-                bcdPinLabel( globalState.config.bcdStart, startLabel,
-                             sizeof( startLabel ) );
+                // Compact mask text: contiguous -> "1-4", sparse -> "1,3,T".
+                char maskText[ 20 ];
+                bcdFormatMask( globalState.config.bcdPins, maskText,
+                               sizeof( maskText ) );
                 snprintf( itemTitle[ 1 ], sizeof( itemTitle[ 1 ] ),
-                          "Range  %s +%d", startLabel,
-                          globalState.config.bcdWidth );
+                          "Range  %s", maskText );
             }
             for ( int i = 0; i < 2; i++ ) {
                 titles[ i ] = itemTitle[ i ];
@@ -3875,24 +4023,41 @@ void bcdMenuLauncher( void ) {
             int pick = gpioAppPicker( "bcd", "BCD", 2, cursor, titles,
                                       descs, nullptr );
             if ( pick == -1 ) {
-                break; // hold = exit (single level)
+                // Hold = unwind + reopen the top-level menu on the GPIO row
+                // (see gpioSettingsLauncher - same gesture, same landing).
+                gpioAppWaitOutHold( );
+                Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                goto done;
             }
             if ( pick == -2 ) {
-                break; // serial byte = exit
+                break; // serial byte = exit, NO reopen
             }
             cursor = pick;
 
+            int r;
             if ( pick == 0 ) {
                 // Count: straight into the live modal. No highlighted pin
-                // here, so bcdAdjust() falls back to the lowest claimable
-                // one when no range is configured.
-                if ( bcdAdjust( -1 ) == -2 ) {
-                    goto done; // serial byte = exit the whole app
+                // here; with no range configured bcdAdjust() defaults to
+                // every routed claimable pin (lowest claimable run when
+                // nothing is routed).
+                r = bcdAdjust( -1 );
+                if ( r >= 0 ) {
+                    r = 0; // bcdAdjust returns the counted value
                 }
             } else {
-                if ( bcdRangeSetup( ) == -2 ) {
-                    goto done;
-                }
+                r = bcdRangeSetup( );
+            }
+            if ( r == -2 ) {
+                goto done; // serial byte = exit the whole app, NO reopen
+            }
+            if ( r == -1 ) {
+                // Hold/probe-remove inside the modal (or bcdAdjust refused
+                // to open - no free pins): full unwind + menu reopen. The
+                // modals return -1 with the hold still down - wait it out
+                // first.
+                gpioAppWaitOutHold( );
+                Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                goto done;
             }
 
             // Back at the Count/Range level (stay in menu): re-assert what

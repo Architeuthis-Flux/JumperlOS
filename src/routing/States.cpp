@@ -525,9 +525,8 @@ void ConfigState::setDefaults() {
     uartTxFunction = 0;  // TX
     uartRxFunction = 1;  // RX
 
-    // BCD counter defaults: off (no range), 4-bit (one hex digit), value 0
-    bcdStart = -1;
-    bcdWidth = 4;
+    // BCD counter defaults: off (no pins claimed), value 0
+    bcdPins = 0;
     bcdValue = 0;
 
 
@@ -1169,23 +1168,23 @@ int JumperlessState::getUartRxFunction() const {
 }
 
 // BCD counter (Phase 3)
-void JumperlessState::setBcdRange(int start, int width) {
-    if (start < -1 || start > 9) {
-        return;  // -1 = off, 0-9 = gpioDef bank index
+void JumperlessState::setBcdPins(int mask) {
+    mask &= 0x3FF;  // bit i = gpioDef bank index i: GPIO 1-8, Tx (8), Rx (9)
+    config.bcdPins = mask;
+    // The counter is plain binary over the mask's set bits, so the largest
+    // value the pins can show is 2^popcount - 1. This accessor owns EVERY
+    // mask write, so wrap the stored value here: shrinking the mask (10
+    // pins -> 4) otherwise leaves bcdValue above the new max and every
+    // readout shows a count the pins are not displaying. Wrap (not clamp)
+    // matches bcdWrapValue(). Mask 0 = counter off, value 0.
+    if (mask == 0) {
+        config.bcdValue = 0;
+    } else {
+        int span = 1 << __builtin_popcount((unsigned)mask);
+        int value = config.bcdValue % span;
+        if (value < 0) value += span;
+        config.bcdValue = value;
     }
-    if (width < 1) width = 1;
-    if (width > 10) width = 10;
-    config.bcdStart = start;
-    config.bcdWidth = width;
-    // The counter is plain binary over the range, so the largest value the
-    // pins can show is 2^width - 1. This accessor owns BOTH range writes, so
-    // wrap the stored value here: shrinking a range (10 bits -> 4) otherwise
-    // leaves bcdValue above the new max and every readout shows a count the
-    // pins are not displaying. Wrap (not clamp) matches bcdWrapValue().
-    int span = (1 << width);
-    int value = config.bcdValue % span;
-    if (value < 0) value += span;
-    config.bcdValue = value;
     markDirty();
 }
 
@@ -1194,12 +1193,8 @@ void JumperlessState::setBcdValue(int value) {
     markDirty();
 }
 
-int JumperlessState::getBcdStart() const {
-    return config.bcdStart;
-}
-
-int JumperlessState::getBcdWidth() const {
-    return config.bcdWidth;
+int JumperlessState::getBcdPins() const {
+    return config.bcdPins;
 }
 
 int JumperlessState::getBcdValue() const {
@@ -2309,8 +2304,7 @@ void JumperlessState::serializeConfig(String& output) const {
     // BCD counter range + value. MUST stay above serializeFakeGpio(): its
     // "fakeGpio:" header flips fromYAML's section tracker, so any config key
     // emitted after it is silently dropped on load.
-    output += "  bcd: {start: " + String(config.bcdStart) +
-              ", width: " + String(config.bcdWidth) +
+    output += "  bcd: {pins: " + String(config.bcdPins) +
               ", value: " + String(config.bcdValue) + "}\n";
 
     // Fake GPIO configurations
@@ -2508,24 +2502,46 @@ bool JumperlessState::deserializeConfig(const char* yamlContent, String& errorMs
         }
     }
     // Parse BCD counter. Each key is found by its own indexOf, so a slot
-    // file written before the hex-only change (which carried a "mode: 0"
-    // between width and value) still parses - the key is simply ignored and
-    // drops out of the file on the next save.
+    // file from an older firmware (a "mode: 0" between width and value, or
+    // the pre-mask "start:"/"width:" pair handled below) still parses -
+    // unknown keys are simply ignored and drop out on the next save.
     else if (line.startsWith("bcd:")) {
-        int startIdx = line.indexOf("start:");
-        if (startIdx >= 0) {
-            int commaIdx = line.indexOf(',', startIdx);
-            String val = line.substring(startIdx + 6, commaIdx);
+        int pinsIdx = line.indexOf("pins:");
+        if (pinsIdx >= 0) {
+            int commaIdx = line.indexOf(',', pinsIdx);
+            String val = line.substring(pinsIdx + 5, commaIdx);
             val.trim();
-            config.bcdStart = val.toInt();
-        }
+            config.bcdPins = val.toInt() & 0x3FF;
+        } else {
+            // BACKWARD COMPAT: a pre-mask slot file carries start/width (a
+            // contiguous range). The old bit map was exactly gpioDef indices
+            // start..start+width-1, so the mask conversion is lossless;
+            // start -1 (counter off) -> mask 0.
+            int startIdx = line.indexOf("start:");
+            if (startIdx >= 0) {
+                int commaIdx = line.indexOf(',', startIdx);
+                String val = line.substring(startIdx + 6, commaIdx);
+                val.trim();
+                int start = val.toInt();
 
-        int widthIdx = line.indexOf("width:");
-        if (widthIdx >= 0) {
-            int commaIdx = line.indexOf(',', widthIdx);
-            String val = line.substring(widthIdx + 6, commaIdx);
-            val.trim();
-            config.bcdWidth = val.toInt();
+                int width = 1;
+                int widthIdx = line.indexOf("width:");
+                if (widthIdx >= 0) {
+                    int wCommaIdx = line.indexOf(',', widthIdx);
+                    String wVal = line.substring(widthIdx + 6, wCommaIdx);
+                    wVal.trim();
+                    width = wVal.toInt();
+                }
+                if (width < 1) width = 1;
+                if (width > 10) width = 10;
+
+                if (start >= 0 && start <= 9) {
+                    config.bcdPins =
+                        (int)((((1u << width) - 1) << start) & 0x3FFu);
+                } else {
+                    config.bcdPins = 0;
+                }
+            }
         }
 
         int valueIdx = line.indexOf("value:");
