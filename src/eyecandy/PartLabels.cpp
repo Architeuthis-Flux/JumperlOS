@@ -249,6 +249,26 @@ void PartLabels::listenForInspectTap(unsigned long now) {
 // Warnings (warn, never block - certainties only)
 // ---------------------------------------------------------------------------
 
+// A power-CLASS pin whose name says it is the NEGATIVE supply (VEE, VSS,
+// V-) is EXPECTED on GND in single-supply use - the 4051 bench board wears
+// VEE->GND as its standard hookup (2026-08-31, Kevin hit a false
+// "vcc_to_gnd!" doing exactly that). Only positive supplies warn on GND.
+static bool isNegativeSupplyPin(const char* name) {
+    if (name == nullptr) return false;
+    // case-insensitive compare against the short list partdb actually uses
+    char up[12];
+    int n = 0;
+    while (name[n] != '\0' && n < 11) {
+        char c = name[n];
+        up[n] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        n++;
+    }
+    up[n] = '\0';
+    return strcmp(up, "VEE") == 0 || strcmp(up, "VSS") == 0 ||
+           strcmp(up, "V-") == 0 || strcmp(up, "-V") == 0 ||
+           strcmp(up, "GND") == 0; // a gnd-NAMED pin misclassed as power
+}
+
 void PartLabels::evaluateWarnings() {
     uint32_t newMask = 0;
     uint8_t newReason[MAX_PARTS] = {0};
@@ -280,7 +300,8 @@ void PartLabels::evaluateWarnings() {
             if (netNum < 0) continue;
 
             if (pin.pinClass == 1) {          // power-class pin
-                if (netContainsNode(netNum, GND)) {
+                if (netContainsNode(netNum, GND) &&
+                    !isNegativeSupplyPin(pin.name)) {
                     newMask |= (1u << i); newReason[i] = WARN_VCC_TO_GND; newPin[i] = (int8_t)j;
                     break;
                 }

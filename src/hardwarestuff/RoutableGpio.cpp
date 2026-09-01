@@ -2696,6 +2696,17 @@ int bcdRangeSetup( void ) {
         return -1;
     }
 
+    // First stop of the start picker: "Routed" - one click snaps the counter
+    // to every wired pin (the same set the no-range default claims). Kevin's
+    // bench flow: the wires ARE the range; start+width stays for the rest.
+    int routedMask = 0;
+    for ( int idx = 0; idx <= 9; idx++ ) {
+        if ( gpioNet[ idx ] > 0 && bcdPinClaimable( idx ) ) {
+            routedMask |= ( 1 << idx );
+        }
+    }
+    int hasRouted = ( routedMask != 0 ) ? 1 : 0; // cursor 0 = Routed stop
+
     Menus::getInstance( ).inClickMenu = 1;
     g_gpioUiShowsCircuit = true;
     encoderButtonState = IDLE;
@@ -2704,9 +2715,7 @@ int bcdRangeSetup( void ) {
     int lastDivider = rotaryDivider;
     rotaryDivider = 3;
 
-    EncoderAccelerator accelerator = EncoderAccelerator::Slow( );
     long lastEncoderPosition = encoderPosition;
-    float encoderAccumulator = 0.0f;
 
     int step = 0; // 0 = pick start pin, 1 = pick width
     int cursor = 0;
@@ -2715,10 +2724,11 @@ int bcdRangeSetup( void ) {
     int currentStart = bcdBitIndexIn( globalState.config.bcdPins, 0 );
     for ( int i = 0; i < candidateCount; i++ ) {
         if ( candidates[ i ] == currentStart ) {
-            cursor = i;
+            cursor = i + hasRouted; // slot 0 is the Routed stop when present
             break;
         }
     }
+    int stopCount = candidateCount + hasRouted;
     int start = -1;
     int width = 1;
     int maxWidth = 1;
@@ -2733,8 +2743,16 @@ int bcdRangeSetup( void ) {
     bool probeCancelArmed = false;
 
     char valueText[ 16 ];
-    bcdPinLabel( candidates[ cursor ], valueText, sizeof( valueText ) );
-    bcdDrawFrame( "Start", valueText );
+    char maskText[ 16 ];
+    if ( hasRouted && cursor == 0 ) {
+        bcdFormatMask( routedMask, maskText, sizeof( maskText ) );
+        snprintf( valueText, sizeof( valueText ), "%s", maskText );
+        bcdDrawFrame( "Routed", valueText );
+    } else {
+        bcdPinLabel( candidates[ cursor - hasRouted ], valueText,
+                     sizeof( valueText ) );
+        bcdDrawFrame( "Start", valueText );
+    }
 
     while ( true ) {
         rotaryEncoderStuff( );
@@ -2772,10 +2790,21 @@ int bcdRangeSetup( void ) {
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE; // step 2 needs a NEW press
             probeConfirmArmed = false;     // ...and a NEW probe press
+            if ( step == 0 && hasRouted && cursor == 0 ) {
+                // Routed picked: commit every wired+claimable pin, done -
+                // no width step (the wires already chose it).
+                globalState.setBcdPins( routedMask );
+                bcdApply( );
+                rotaryDivider = lastDivider;
+                Menus::getInstance( ).inClickMenu = 0;
+                g_gpioUiShowsCircuit = false;
+                requestLedShow( -1 );
+                return 0;
+            }
             if ( step == 0 ) {
                 // Start picked - the width pick spans the contiguous
                 // claimable run from it.
-                start = candidates[ cursor ];
+                start = candidates[ cursor - hasRouted ];
                 maxWidth = 0;
                 for ( int idx = start; idx <= 9; idx++ ) {
                     if ( !bcdPinClaimable( idx ) ) {
@@ -2794,8 +2823,6 @@ int bcdRangeSetup( void ) {
                     width = maxWidth;
                 }
                 step = 1;
-                encoderAccumulator = 0.0f;
-                accelerator.reset( );
                 lastEncoderPosition = encoderPosition;
                 snprintf( valueText, sizeof( valueText ), "%d bit%s", width,
                           width == 1 ? "" : "s" );
@@ -2818,21 +2845,29 @@ int bcdRangeSetup( void ) {
         long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
         if ( encoderDelta != 0 ) {
             lastEncoderPosition = currentEncoderPosition;
-            encoderAccumulator += accelerator.getAcceleratedDelta( encoderDelta );
-            int steps = (int)encoderAccumulator;
-            if ( steps != 0 ) {
-                encoderAccumulator -= steps;
-                if ( step == 0 ) {
-                    cursor = ( ( cursor + steps ) % candidateCount + candidateCount ) %
-                             candidateCount;
-                    bcdPinLabel( candidates[ cursor ], valueText, sizeof( valueText ) );
-                    bcdDrawFrame( "Start", valueText );
+            // NO acceleration on a <=11-stop dial: the bench run (2026-08-31)
+            // overshot the width pick all night (8->6->4->1). One detent =
+            // one step, and the width CLAMPS at its ends instead of wrapping
+            // - a dial with endpoints reads as a dial.
+            int steps = ( encoderDelta > 0 ) ? 1 : -1;
+            if ( step == 0 ) {
+                cursor = ( ( cursor + steps ) % stopCount + stopCount ) % stopCount;
+                if ( hasRouted && cursor == 0 ) {
+                    bcdFormatMask( routedMask, maskText, sizeof( maskText ) );
+                    snprintf( valueText, sizeof( valueText ), "%s", maskText );
+                    bcdDrawFrame( "Routed", valueText );
                 } else {
-                    width = ( ( width - 1 + steps ) % maxWidth + maxWidth ) % maxWidth + 1;
-                    snprintf( valueText, sizeof( valueText ), "%d bit%s", width,
-                              width == 1 ? "" : "s" );
-                    bcdDrawFrame( "Width", valueText );
+                    bcdPinLabel( candidates[ cursor - hasRouted ], valueText,
+                                 sizeof( valueText ) );
+                    bcdDrawFrame( "Start", valueText );
                 }
+            } else {
+                width += steps;
+                if ( width < 1 ) width = 1;
+                if ( width > maxWidth ) width = maxWidth;
+                snprintf( valueText, sizeof( valueText ), "%d bit%s", width,
+                          width == 1 ? "" : "s" );
+                bcdDrawFrame( "Width", valueText );
             }
         }
     }
