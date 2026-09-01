@@ -124,6 +124,11 @@ void applyPinConfig(int idx);
 // "OLED", "PWM", "UART". Checked most specific owner first. Deliberately no
 // user-bridge check: a user bridge on the node is the expected state for
 // assignment, not a conflict.
+// True while a GPIO/BCD on-board UI is open. Those UIs render to the OLED
+// and never paint the LED matrix, so core 1 must keep showing the circuit
+// even though inClickMenu is set (see the gate in main.cpp).
+extern volatile bool g_gpioUiShowsCircuit;
+
 bool routableGpioAvailable(int idx, const char** ownerOut = nullptr);
 
 // ============================================================================
@@ -161,6 +166,10 @@ void bcdApply(bool fromLoad = false);
 // an input reads gpio_get(). A bit whose pin is not SIO, or that something
 // else owns (bcdApply skipped it), reads 0. Returns 0 when bcdStart < 0.
 int bcdReadValue(void);
+
+// True when idx is a live OUTPUT bit of the configured counter. readGPIO's
+// sweep checks this so it never stamps a driven counter bit back to an input.
+bool bcdOwnsPin(int idx);
 
 // The counter readout: uppercase hex, zero-padded to one digit per 4 bits of
 // the configured width ("0".."F" at width 4, "00".."FF" at width 8,

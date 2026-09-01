@@ -5621,6 +5621,21 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         if ( outIn == 2 ) {
             chooseGPIOinputOutput( gpioChosen + 1 );
         } else if ( outIn == 1 ) {
+            // Refuse a pin a service OWNS before touching anything. The
+            // bare gpioState pre-write below destroys the bus-role sentinel
+            // (gpioState == 6) that applyPinConfig refuses on, so without
+            // this check picking GPIO 7/8 while the OLED runs on the crossbar
+            // I2C pads re-muxes the live display bus to SIO and kills the
+            // panel. Name the owner instead, like the highlight carousel.
+            const char* gpioOwner = nullptr;
+            if ( !routableGpioAvailable( gpioChosen, &gpioOwner ) ) {
+                char ownerToast[ 24 ];
+                snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                          gpioChosen + 1, gpioOwner ? gpioOwner : "in use" );
+                oled.clearPrintShow( ownerToast, 2, 1200 );
+                Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
+                               gpioOwner ? gpioOwner : "another service" );
+            } else {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {
             globalState.config.gpioDirection[ gpioChosen ] = 1;
@@ -5642,7 +5657,19 @@ int Probing::chooseGPIO( int skipInputOutput ) {
             snprintf( gpioOledStr, sizeof( gpioOledStr ), "GPIO %d\nInput",
                       gpioChosen + 1 );
             oled.clearPrintShow( gpioOledStr, 2, 100 );
+            }
         } else if ( outIn == 0 ) {
+            // Same owner refusal as the outIn == 1 branch above.
+            const char* gpioOwnerOut = nullptr;
+            if ( !routableGpioAvailable( gpioChosen, &gpioOwnerOut ) ) {
+                char ownerToast[ 24 ];
+                snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                          gpioChosen + 1,
+                          gpioOwnerOut ? gpioOwnerOut : "in use" );
+                oled.clearPrintShow( ownerToast, 2, 1200 );
+                Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
+                               gpioOwnerOut ? gpioOwnerOut : "another service" );
+            } else {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 4;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 1) {
             globalState.config.gpioDirection[ gpioChosen ] = 0;
@@ -5658,6 +5685,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
             snprintf( gpioOledStr, sizeof( gpioOledStr ), "GPIO %d\nOutput",
                       gpioChosen + 1 );
             oled.clearPrintShow( gpioOledStr, 2, 100 );
+            }
         }
 
         // Serial.print("gpioChosen (chooseGPIO): ");

@@ -30,6 +30,13 @@
 #include "configManager.h" // configChanged (updateGPIOConfigFromState)
 #include <oled.h>
 
+// True while a GPIO/BCD on-board UI (carousel, Set Pins, BCD Counter) is open.
+// Those UIs render to the OLED and deliberately do NOT paint the LED matrix -
+// the breadboard's job is to keep showing the CIRCUIT while you configure it.
+// Core 1 skips showNets() whenever inClickMenu == 1, so this flag overrides
+// that gate, exactly like g_historyScrubActive does for the History scrub.
+volatile bool g_gpioUiShowsCircuit = false;
+
 // gpioDef[i][0] is the pin number
 // gpioDef[i][1] is the RP_GPIO_x define
 // gpioDef[i][2] is the index of the gpioState array
@@ -740,8 +747,12 @@ void __not_in_flash_func(readGPIO)( ) {
         }
 
         if ( gpioNet[ i ] == -1 ) {
-            if ( gpioState[ i ] != 6 ) {   // bus-role marks survive the
-                gpioState[ i ] = 4;        // acquire-to-route window (sweep)
+            if ( gpioState[ i ] != 6 && !bcdOwnsPin( i ) ) {
+                // bus-role marks survive the acquire-to-route window (sweep),
+                // and so does a live BCD counter bit: an unrouted counter pin
+                // is still driving a real level, and stamping it to 4 here
+                // makes the next setGPIO() turn the bit back into an input.
+                gpioState[ i ] = 4;
             }
             // continue;
         } else if ( gpioNet[ i ] == -2 ) {
@@ -2052,6 +2063,48 @@ int bcdBitIndex( int bit ) {
     return idx; // start+k rolls through GPIO 1-8 into Tx (8) then Rx (9)
 }
 
+// Is this pin a live bit of the configured counter, driving as an output?
+// readGPIO's sweep uses this to leave a driven bit alone (see the gpioNet
+// == -1 stamp): an unrouted counter pin is still a counter pin.
+bool bcdOwnsPin( int idx ) {
+    int start = globalState.config.bcdStart;
+    if ( start < 0 || idx < 0 || idx > 9 ) {
+        return false;
+    }
+    if ( globalState.config.gpioDirection[ idx ] != 0 ) {
+        return false; // only an OUTPUT bit is ours to protect
+    }
+    int width = bcdClampWidth( globalState.config.bcdWidth );
+    for ( int bit = 0; bit < width; bit++ ) {
+        if ( bcdBitIndex( bit ) == idx ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Take/release the readingGPIO lock around counter pin mutations. A logo-pad
+// tap counts while inClickMenu == 0, so core 2's readGPIO sweep is LIVE and
+// can be mid-gpioReadWithFloating on the very pin being claimed - that
+// function twiddles the pad's input-enable and pulls under this same lock,
+// and unserialized overlap is exactly the "driven HIGH reads low" failure its
+// comment documents. Same 100ms takeover as every other holder: a legit hold
+// is ~200us, so a longer wait means the holder was parked mid-lock and
+// spinning forever would wedge this core.
+static void bcdLockGpioReads( void ) {
+    unsigned long waitStart = micros( );
+    while ( __atomic_test_and_set( (volatile char*)&readingGPIO, __ATOMIC_ACQUIRE ) ) {
+        if ( micros( ) - waitStart > 100000 ) {
+            break; // take it over
+        }
+        delayMicroseconds( 1 );
+    }
+}
+
+static void bcdUnlockGpioReads( void ) {
+    __atomic_clear( (volatile char*)&readingGPIO, __ATOMIC_RELEASE );
+}
+
 void bcdApply( bool fromLoad ) {
     if ( globalState.config.bcdStart < 0 || routableGpioAbsent( ) ) {
         return;
@@ -2063,6 +2116,7 @@ void bcdApply( bool fromLoad ) {
     // the correction back on a pure load path.
     int value = bcdWrapValue( globalState.config.bcdValue,
                               bcdMaxValueFor( width ) );
+    bcdLockGpioReads( );
     for ( int bit = 0; bit < width; bit++ ) {
         int idx = bcdBitIndex( bit );
         if ( idx < 0 ) {
@@ -2104,6 +2158,7 @@ void bcdApply( bool fromLoad ) {
         gpio_put( gpioDef[ idx ][ 0 ], level );
         gpioState[ idx ] = (uint8_t)level;
     }
+    bcdUnlockGpioReads( );
 }
 
 int bcdReadValue( void ) {
@@ -2318,6 +2373,7 @@ int bcdAdjust( int preferredStart ) {
     // CRITICAL: reset button state so the press that launched this UI can't
     // instantly confirm (VoltageAdjuster::adjust idiom).
     Menus::getInstance( ).inClickMenu = 1;
+    g_gpioUiShowsCircuit = true;
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
 
@@ -2344,6 +2400,13 @@ int bcdAdjust( int preferredStart ) {
     bcdFormatValue( value, valueText, sizeof( valueText ) );
     bcdDrawFrame( "BCD", valueText );
 
+    // getButtonState() is a LEVEL, not an edge, and a human probe press
+    // outlasts the first loop pass - so the press that ENTERED this modal
+    // (carousel BCD item confirmed by probe-connect) would instantly exit it
+    // again. Arm both codes only once the button reads clear.
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
+
     while ( true ) {
         rotaryEncoderStuff( );
         jOS.serviceInner( );
@@ -2351,38 +2414,53 @@ int bcdAdjust( int preferredStart ) {
         // state machine the raw getButtonState() comparisons below need.
         probing.justReadProbe( true );
 
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+
         // Exit (hold / raw probe 1 - raw pre-swap codes, copied verbatim
         // from VoltageAdjuster::adjust). The counter is LIVE: what is on the
         // pins IS the value, so leaving keeps it. Reverting to the entry
         // value would contradict "the wheel updates them live", so there is
         // no restore on any exit path.
-        if ( encoderButtonState == HELD || probeButton.getButtonState( ) == 1 ) {
+        if ( encoderButtonState == HELD ||
+             ( probeCancelArmed && probeState == 1 ) ) {
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             requestLedShow( -1 );
             Menus::getInstance( ).inClickMenu = 0;
+            g_gpioUiShowsCircuit = false;
             return -1;
         }
 
         // Confirm (click-release / raw probe 2): keep the value (already
         // live on the pins and marked dirty by bcdIncrement).
         if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
-             probeButton.getButtonState( ) == 2 ) {
+             ( probeConfirmArmed && probeState == 2 ) ) {
             encoderButtonState = IDLE;
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
+            g_gpioUiShowsCircuit = false;
             requestLedShow( -1 );
             return value;
         }
 
         // Serial byte exits too - and, like every other exit, keeps what the
-        // wheel put on the pins.
+        // wheel put on the pins. It returns -2, NOT -1: the sub-editor
+        // contract is that a typed byte tears down the WHOLE UI so the bytes
+        // after it reach the single-char command parser. Returning -1 here
+        // made each keystroke peel one level and get eaten.
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
+            g_gpioUiShowsCircuit = false;
             requestLedShow( -1 );
-            return -1;
+            return -2;
         }
 
         // Encoder: negated like the probe node-selection idiom so clockwise
@@ -2405,6 +2483,7 @@ int bcdAdjust( int preferredStart ) {
     // Should never reach here (VoltageAdjuster tail)
     rotaryDivider = lastDivider;
     Menus::getInstance( ).inClickMenu = 0;
+    g_gpioUiShowsCircuit = false;
     return -1;
 }
 
@@ -2429,6 +2508,7 @@ int bcdRangeSetup( void ) {
     }
 
     Menus::getInstance( ).inClickMenu = 1;
+    g_gpioUiShowsCircuit = true;
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
 
@@ -2454,7 +2534,11 @@ int bcdRangeSetup( void ) {
     // getButtonState() is a LEVEL (currentButtonState), not an edge - one
     // probe press must not confirm both steps, so the probe confirm disarms
     // on the step transition and re-arms once the button reads released.
-    bool probeConfirmArmed = true;
+    // Start DISARMED: the probe press that entered this picker is still down
+    // (getButtonState is a level), and an armed confirm would pick step 0's
+    // opening candidate instantly. The cancel code arms the same way.
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
 
     char valueText[ 16 ];
     bcdPinLabel( candidates[ cursor ], valueText, sizeof( valueText ) );
@@ -2468,19 +2552,26 @@ int bcdRangeSetup( void ) {
         if ( !probeConfirmArmed && probeButton.getButtonState( ) != 2 ) {
             probeConfirmArmed = true;
         }
+        if ( !probeCancelArmed && probeButton.getButtonState( ) != 1 ) {
+            probeCancelArmed = true;
+        }
 
-        // Cancel (hold / raw probe 1 / serial byte): nothing changed
+        // Cancel (hold / raw probe 1 / serial byte): nothing changed. A
+        // serial byte returns -2 (tear down the whole UI, sub-editor
+        // contract); hold/probe return -1 (cancel just this picker).
         bool serialCancel = ( Serial.available( ) > 0 );
         if ( serialCancel ) {
             Serial.read( );
         }
-        if ( encoderButtonState == HELD || probeButton.getButtonState( ) == 1 ||
+        if ( encoderButtonState == HELD ||
+             ( probeCancelArmed && probeButton.getButtonState( ) == 1 ) ||
              serialCancel ) {
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             requestLedShow( -1 );
             Menus::getInstance( ).inClickMenu = 0;
-            return -1;
+            g_gpioUiShowsCircuit = false;
+            return serialCancel ? -2 : -1;
         }
 
         // Confirm (click-release / raw probe 2)
@@ -2525,6 +2616,7 @@ int bcdRangeSetup( void ) {
             bcdApply( );
             rotaryDivider = lastDivider;
             Menus::getInstance( ).inClickMenu = 0;
+            g_gpioUiShowsCircuit = false;
             requestLedShow( -1 );
             return 0;
         }
@@ -2555,6 +2647,7 @@ int bcdRangeSetup( void ) {
     // Should never reach here
     rotaryDivider = lastDivider;
     Menus::getInstance( ).inClickMenu = 0;
+    g_gpioUiShowsCircuit = false;
     return -1;
 }
 
@@ -3058,7 +3151,13 @@ static int gpioPwmEditor( int gpioIdx ) {
         if ( !probeCancelArmed && probeState != 1 ) {
             probeCancelArmed = true;
         }
-        if ( !holdArmed && encoderButtonState == IDLE ) {
+        // Re-arm on the PHYSICAL button, not the consumed enum: core 1
+        // re-stamps HELD every ~500us while the button is down, so arming on a
+        // stale IDLE lets the hold that cancelled the child immediately close
+        // this level too.
+        if ( !holdArmed && !isEncoderButtonPhysicallyPressed( ) &&
+             encoderButtonState != HELD && encoderButtonState != MEDIUM_HELD &&
+             encoderButtonState != LONG_HELD ) {
             holdArmed = true;
         }
 
@@ -3158,6 +3257,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
     // CRITICAL: reset button state so nothing in flight can instantly
     // confirm (VoltageAdjuster::adjust idiom).
     Menus::getInstance( ).inClickMenu = 1;
+    g_gpioUiShowsCircuit = true;
     encoderButtonState = IDLE;
     lastButtonEncoderState = IDLE;
 
@@ -3203,7 +3303,13 @@ int gpioOptionsCarousel( int gpioIdx ) {
         if ( !probeCancelArmed && probeState != 1 ) {
             probeCancelArmed = true;
         }
-        if ( !holdExitArmed && encoderButtonState == IDLE ) {
+        // Re-arm on the PHYSICAL button, not the consumed enum: core 1
+        // re-stamps HELD every ~500us while the button is down, so arming on a
+        // stale IDLE lets the hold that cancelled the child immediately close
+        // this level too.
+        if ( !holdExitArmed && !isEncoderButtonPhysicallyPressed( ) &&
+             encoderButtonState != HELD && encoderButtonState != MEDIUM_HELD &&
+             encoderButtonState != LONG_HELD ) {
             holdExitArmed = true;
         }
 
@@ -3219,6 +3325,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
             encoderButtonState = IDLE;
             requestLedShow( -1 );
             Menus::getInstance( ).inClickMenu = 0;
+            g_gpioUiShowsCircuit = false;
             return 0;
         }
 
@@ -3259,6 +3366,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
                 encoderButtonState = IDLE;
                 requestLedShow( -1 );
                 Menus::getInstance( ).inClickMenu = 0;
+                g_gpioUiShowsCircuit = false;
                 return 0;
             }
 
@@ -3269,6 +3377,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
             // exits until their levels read clear - the hold or probe-remove
             // that cancelled the child must not cascade up.
             Menus::getInstance( ).inClickMenu = 1;
+            g_gpioUiShowsCircuit = true;
             encoderButtonState = IDLE;
             lastButtonEncoderState = IDLE;
             rotaryDivider = 3;
@@ -3299,6 +3408,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
     // Should never reach here (VoltageAdjuster tail)
     rotaryDivider = lastDivider;
     Menus::getInstance( ).inClickMenu = 0;
+    g_gpioUiShowsCircuit = false;
     return 0;
 }
 
@@ -3345,7 +3455,14 @@ static void gpioAppDrawItem( const char* header, const char* title,
 // level when control lands back in a picker loop. Wait it out (the
 // partsPicker/partsTapForRow discipline) so it can't cascade another level.
 static void gpioAppWaitOutHold( void ) {
-    while ( encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
+    // Wait on the PHYSICAL button, not just the consumed enum. Core 1
+    // re-stamps HELD every ~500us while the button is down, so a wait that
+    // only watches the enum can return inside a stale-IDLE window and let the
+    // parent level immediately re-observe the same hold - backing the user out
+    // one extra level (Set Pins landing on the pin list instead of the pin's
+    // options, or the BCD app closing outright).
+    while ( isEncoderButtonPhysicallyPressed( ) || encoderButtonState == HELD ||
+            encoderButtonState == MEDIUM_HELD ||
             encoderButtonState == LONG_HELD ) {
         jOS.serviceInner( );
         rotaryEncoderButtonStuff( );
@@ -3488,6 +3605,7 @@ void gpioSettingsLauncher( void ) {
     // the APPSACTION arm zeroed it via exitMenuModeForAction() before
     // runApp. runPicker's save/restore discipline for the divider.
     Menus::getInstance( ).inClickMenu = 1;
+    g_gpioUiShowsCircuit = true;
     int lastDivider = rotaryDivider;
     rotaryDivider = 8;
 
@@ -3611,12 +3729,14 @@ void gpioSettingsLauncher( void ) {
                 // and restore the divider on their way out) and wait out a
                 // live hold so it can't cascade this level too.
                 Menus::getInstance( ).inClickMenu = 1;
+                g_gpioUiShowsCircuit = true;
                 rotaryDivider = 8;
                 gpioAppWaitOutHold( );
             }
 
             // Back at level 1: same re-assert (a BCD modal may have run).
             Menus::getInstance( ).inClickMenu = 1;
+            g_gpioUiShowsCircuit = true;
             rotaryDivider = 8;
             gpioAppWaitOutHold( );
         }
@@ -3628,6 +3748,7 @@ done:
     // -1 (clear + netlist) is the whole hand-back.
     // The menu path runs refreshConnections(-1, 0) after runApp returns.
     Menus::getInstance( ).inClickMenu = 0;
+    g_gpioUiShowsCircuit = false;
     rotaryDivider = lastDivider;
     requestLedShow( -1 );
     Serial.println( );
@@ -3645,6 +3766,7 @@ void bcdMenuLauncher( void ) {
     }
 
     Menus::getInstance( ).inClickMenu = 1; // re-assert (see gpioSettingsLauncher)
+    g_gpioUiShowsCircuit = true;
     int lastDivider = rotaryDivider;
     rotaryDivider = 8;
 
@@ -3698,22 +3820,29 @@ void bcdMenuLauncher( void ) {
                 // Count: straight into the live modal. No highlighted pin
                 // here, so bcdAdjust() falls back to the lowest claimable
                 // one when no range is configured.
-                bcdAdjust( -1 );
+                if ( bcdAdjust( -1 ) == -2 ) {
+                    goto done; // serial byte = exit the whole app
+                }
             } else {
-                bcdRangeSetup( ); // the explicit custom start/width pick
+                if ( bcdRangeSetup( ) == -2 ) {
+                    goto done;
+                }
             }
 
             // Back at the Count/Range level (stay in menu): re-assert what
             // the modals cleared, wait out a live hold.
             Menus::getInstance( ).inClickMenu = 1;
+            g_gpioUiShowsCircuit = true;
             rotaryDivider = 8;
             gpioAppWaitOutHold( );
         }
     }
 
+done:
     // Same teardown contract as gpioSettingsLauncher (no buffer clear - this
     // app never painted the matrix).
     Menus::getInstance( ).inClickMenu = 0;
+    g_gpioUiShowsCircuit = false;
     rotaryDivider = lastDivider;
     requestLedShow( -1 );
     Serial.println( );
