@@ -1296,7 +1296,7 @@ static uint32_t railNetColor(int rail) {
   float v = (railHwVolts[rail] > -99.0f)
                 ? railHwVolts[rail]
                 : ((rail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
-  if (v < -0.1f) return 0x02020f;
+  if (v < -0.1f) return 0x03031e;
   return railNetColors[rail + 1];
 }
 
@@ -3409,9 +3409,9 @@ uint32_t railColorsV5[4][5] = {
 // so the >=5V magnitude cue reads the same either way; ground rows are
 // never negative and mirror the main palette.
 uint32_t railColorsV5Neg[4][5] = {
-  {0x02041c, 0x040a2e, 0x301A02, 0x08122f, 0x05102c},//top: dim, bright, danger, brightened, negative fill
+  {0x030630, 0x061048, 0x301A02, 0x0c1a58, 0x081848},//top: dim, bright, danger, brightened, negative fill
   {0x001C05, 0x002C14, 0x0f2C0f, 0x0f2C0f, 0x002C14},//gnd (unused)
-  {0x02041a, 0x040a2c, 0x301A02, 0x08122d, 0x05102a},//bottom
+  {0x03062c, 0x061044, 0x301A02, 0x0c1a54, 0x081844},//bottom
   {0x001C05, 0x002514, 0x0f2C0f, 0x0a2C0a, 0x002C14}//gnd (unused)
   };
 

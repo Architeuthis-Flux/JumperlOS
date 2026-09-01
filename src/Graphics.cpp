@@ -3262,11 +3262,18 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
                       ? railHwVolts[rail]
                       : ((rail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
     if (railV < -0.1f) {
+      // "A little hotter" (Kevin, 08:55): the red frames peak at 0x09, so
+      // the blue that replaces them doubles the dominant channel and keeps
+      // the accents at their weight - same motion, a hue that reads as blue
+      // from across the bench instead of navy.
+      auto toHotBlue = [](uint32_t c) -> uint32_t {
+        uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+        uint32_t hot = r * 2; if (hot > 0xFF) hot = 0xFF;
+        return (b << 16) | (g << 8) | hot;
+      };
       for (int i = 0; i < 5; i++) {
-        uint32_t c = frameColors[i];
-        frameColors[i] = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
-        uint32_t b = brightenedNodeColors[i];
-        brightenedNodeColors[i] = ((b & 0xFF) << 16) | (b & 0xFF00) | ((b >> 16) & 0xFF);
+        frameColors[i] = toHotBlue(frameColors[i]);
+        brightenedNodeColors[i] = toHotBlue(brightenedNodeColors[i]);
       }
     }
   }
