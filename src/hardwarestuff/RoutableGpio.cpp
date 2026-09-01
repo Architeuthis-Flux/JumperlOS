@@ -2540,9 +2540,9 @@ int bcdAdjust( int preferredStart ) {
     // only from the BCD app's "Range" item - nothing forces a user
     // through it.
     if ( !bcdEnsureRange( preferredStart ) ) {
-        Serial.println( "\r\nBCD: no free pins" );
+        Serial.println( "\r\nBCD refused reason=\"no free pins\"" );
         oled.clearPrintShow( "BCD\nno free pins", 2, 1200 );
-        return -1;
+        return -3; // refused to open - NOT the escape gesture (see launcher)
     }
 
     // CRITICAL: reset button state so the press that launched this UI can't
@@ -2597,9 +2597,11 @@ int bcdAdjust( int preferredStart ) {
             probeCancelArmed = true;
         }
 
-        // The counter is live BOTH ways: a pin toggled by probe tap, pad
-        // action or MicroPython while this modal is open must update the
-        // number and the top-row states too. ~10 Hz is plenty.
+        // The counter reads the LIVE pins, so a change that lands on them
+        // while this modal is open (MicroPython, another surface) moves the
+        // number and the top-row states. Pad taps do NOT land here -
+        // ProbePads isn't serviced inside modals, so bcd_up/bcd_down wait
+        // for the modal to close. ~10 Hz is plenty.
         if ( millis( ) - lastLivePoll > 100 ) {
             lastLivePoll = millis( );
             int live = bcdReadValue( );
@@ -2691,21 +2693,25 @@ int bcdRangeSetup( void ) {
         }
     }
     if ( candidateCount == 0 ) {
-        Serial.println( "\r\nBCD: no free pins" );
+        Serial.println( "\r\nBCD refused reason=\"no free pins\"" );
         oled.clearPrintShow( "BCD\nno free pins", 2, 1200 );
-        return -1;
+        return -3; // refused to open - NOT the escape gesture (see launcher)
     }
 
     // First stop of the start picker: "Routed" - one click snaps the counter
     // to every wired pin (the same set the no-range default claims). Kevin's
     // bench flow: the wires ARE the range; start+width stays for the rest.
+    // The stop exists even with NOTHING routed (it shows "none" and refuses
+    // the click): a stop that vanished with the wiring silently changed
+    // what a learned blind click-click did - stop 0 became "Start GPIO 1"
+    // and committed a width mask instead.
     int routedMask = 0;
     for ( int idx = 0; idx <= 9; idx++ ) {
         if ( gpioNet[ idx ] > 0 && bcdPinClaimable( idx ) ) {
             routedMask |= ( 1 << idx );
         }
     }
-    int hasRouted = ( routedMask != 0 ) ? 1 : 0; // cursor 0 = Routed stop
+    int hasRouted = 1; // cursor 0 = the Routed stop, always
 
     Menus::getInstance( ).inClickMenu = 1;
     g_gpioUiShowsCircuit = true;
@@ -2745,8 +2751,12 @@ int bcdRangeSetup( void ) {
     char valueText[ 16 ];
     char maskText[ 16 ];
     if ( hasRouted && cursor == 0 ) {
-        bcdFormatMask( routedMask, maskText, sizeof( maskText ) );
-        snprintf( valueText, sizeof( valueText ), "%s", maskText );
+        if ( routedMask == 0 ) {
+            snprintf( valueText, sizeof( valueText ), "none" );
+        } else {
+            bcdFormatMask( routedMask, maskText, sizeof( maskText ) );
+            snprintf( valueText, sizeof( valueText ), "%s", maskText );
+        }
         bcdDrawFrame( "Routed", valueText );
     } else {
         bcdPinLabel( candidates[ cursor - hasRouted ], valueText,
@@ -2791,6 +2801,15 @@ int bcdRangeSetup( void ) {
             lastButtonEncoderState = IDLE; // step 2 needs a NEW press
             probeConfirmArmed = false;     // ...and a NEW probe press
             if ( step == 0 && hasRouted && cursor == 0 ) {
+                if ( routedMask == 0 ) {
+                    // "Routed  none": nothing to commit - refuse and stay
+                    // (the pin list's refuse idiom), so the stop keeps its
+                    // place without inventing a range.
+                    Serial.println(
+                        "\r\nBCD refused reason=\"nothing routed\"" );
+                    bcdDrawFrame( "Routed", "none" );
+                    continue;
+                }
                 // Routed picked: commit every wired+claimable pin, done -
                 // no width step (the wires already chose it).
                 globalState.setBcdPins( routedMask );
@@ -2853,8 +2872,14 @@ int bcdRangeSetup( void ) {
             if ( step == 0 ) {
                 cursor = ( ( cursor + steps ) % stopCount + stopCount ) % stopCount;
                 if ( hasRouted && cursor == 0 ) {
-                    bcdFormatMask( routedMask, maskText, sizeof( maskText ) );
-                    snprintf( valueText, sizeof( valueText ), "%s", maskText );
+                    if ( routedMask == 0 ) {
+                        snprintf( valueText, sizeof( valueText ), "none" );
+                    } else {
+                        bcdFormatMask( routedMask, maskText,
+                                       sizeof( maskText ) );
+                        snprintf( valueText, sizeof( valueText ), "%s",
+                                  maskText );
+                    }
                     bcdDrawFrame( "Routed", valueText );
                 } else {
                     bcdPinLabel( candidates[ cursor - hasRouted ], valueText,
@@ -2897,7 +2922,10 @@ int bcdRangeSetup( void ) {
 
 // Sub-editor return codes: 0 = confirmed, -1 = cancelled (nothing beyond
 // what the editor already applied live), -2 = serial byte (the carousel
-// propagates this as a full exit - a typing user wants the terminal back).
+// propagates this as a full exit - a typing user wants the terminal back),
+// -3 = refused to open (bcdAdjust/bcdRangeSetup with no free pins). -3 is
+// NOT the escape gesture: every caller falls through to its stay-in-place
+// re-assert block, so a refusal never teleports the user out of the menu.
 
 enum GpioCarouselItem {
     GPIO_ITEM_DIRECTION = 0,
@@ -3048,6 +3076,18 @@ static void gpioPwmApplyFrequency( int gpioIdx, float freq ) {
     }
 }
 
+// Sub-editor frame label: "GPIO 2 Dir", "Tx Pull". Every editor frame
+// names WHICH pin it edits - three near-identical "Dir  in" screens in a
+// row (the mux-select bench flow) invited editing the wrong line, and only
+// the carousel header carried the identity. Longest is "GPIO 8 Duty"
+// (11 chars), well inside ReadingDisplay's 21-char header budget.
+static void gpioEditorFrameLabel( int gpioIdx, const char* what, char* buf,
+                                  size_t bufLen ) {
+    char pinName[ 12 ];
+    bcdPinLabel( gpioIdx, pinName, sizeof( pinName ) );
+    snprintf( buf, bufLen, "%s %s", pinName, what );
+}
+
 // Direction sub-editor: encoder toggles Input/Output, click/probe-connect
 // confirms (config write + applyPinConfig), hold/probe-remove cancels with
 // nothing written. Engine semantic (updateStateFromGPIOConfig's switch):
@@ -3067,7 +3107,9 @@ static int gpioDirectionEditor( int gpioIdx ) {
     bool probeConfirmArmed = false;
     bool probeCancelArmed = false;
 
-    bcdDrawFrame( "Dir", dir == 0 ? "out" : "in" );
+    char frameLabel[ 20 ];
+    gpioEditorFrameLabel( gpioIdx, "Dir", frameLabel, sizeof( frameLabel ) );
+    bcdDrawFrame( frameLabel, dir == 0 ? "out" : "in" );
 
     while ( true ) {
         rotaryEncoderStuff( );
@@ -3115,7 +3157,7 @@ static int gpioDirectionEditor( int gpioIdx ) {
             if ( steps != 0 ) {
                 encoderAccumulator -= steps;
                 dir = 1 - dir; // two options: any detent batch flips
-                bcdDrawFrame( "Dir", dir == 0 ? "out" : "in" );
+                bcdDrawFrame( frameLabel, dir == 0 ? "out" : "in" );
             }
         }
     }
@@ -3143,7 +3185,9 @@ static int gpioPullsEditor( int gpioIdx ) {
     bool probeConfirmArmed = false;
     bool probeCancelArmed = false;
 
-    bcdDrawFrame( "Pull", gpioPullNames[ sel ] );
+    char frameLabel[ 20 ];
+    gpioEditorFrameLabel( gpioIdx, "Pull", frameLabel, sizeof( frameLabel ) );
+    bcdDrawFrame( frameLabel, gpioPullNames[ sel ] );
 
     while ( true ) {
         rotaryEncoderStuff( );
@@ -3190,7 +3234,7 @@ static int gpioPullsEditor( int gpioIdx ) {
             if ( steps != 0 ) {
                 encoderAccumulator -= steps;
                 sel = ( ( sel + steps ) % 4 + 4 ) % 4;
-                bcdDrawFrame( "Pull", gpioPullNames[ sel ] );
+                bcdDrawFrame( frameLabel, gpioPullNames[ sel ] );
             }
         }
     }
@@ -3222,6 +3266,9 @@ static int gpioPwmParamAdjust( int gpioIdx, bool isFreq ) {
     bool probeConfirmArmed = false;
     bool probeCancelArmed = false;
 
+    char frameLabel[ 20 ];
+    gpioEditorFrameLabel( gpioIdx, isFreq ? "Freq" : "Duty", frameLabel,
+                          sizeof( frameLabel ) );
     char valueText[ 16 ];
     if ( isFreq ) {
         gpioFormatFrequency( value, valueText, sizeof( valueText ) );
@@ -3229,7 +3276,7 @@ static int gpioPwmParamAdjust( int gpioIdx, bool isFreq ) {
         snprintf( valueText, sizeof( valueText ), "%d%%",
                   (int)( value * 100.0f + 0.5f ) );
     }
-    bcdDrawFrame( isFreq ? "Freq" : "Duty", valueText );
+    bcdDrawFrame( frameLabel, valueText );
 
     while ( true ) {
         rotaryEncoderStuff( );
@@ -3313,7 +3360,7 @@ static int gpioPwmParamAdjust( int gpioIdx, bool isFreq ) {
                     snprintf( valueText, sizeof( valueText ), "%d%%",
                               (int)( value * 100.0f + 0.5f ) );
                 }
-                bcdDrawFrame( isFreq ? "Freq" : "Duty", valueText );
+                bcdDrawFrame( frameLabel, valueText );
             }
         }
     }
@@ -3353,16 +3400,23 @@ static int gpioPwmEditor( int gpioIdx ) {
     char valueText[ 16 ];
 
     auto drawStage = [ & ]( ) {
+        char frameLabel[ 20 ];
         if ( stage == 0 ) {
-            bcdDrawFrame( "PWM", pending ? "on" : "off" );
+            gpioEditorFrameLabel( gpioIdx, "PWM", frameLabel,
+                                  sizeof( frameLabel ) );
+            bcdDrawFrame( frameLabel, pending ? "on" : "off" );
         } else if ( cursor == 0 ) {
+            gpioEditorFrameLabel( gpioIdx, "Freq", frameLabel,
+                                  sizeof( frameLabel ) );
             gpioFormatFrequency( gpioPWMFrequency[ gpioIdx ], valueText,
                                  sizeof( valueText ) );
-            bcdDrawFrame( "Freq", valueText );
+            bcdDrawFrame( frameLabel, valueText );
         } else {
+            gpioEditorFrameLabel( gpioIdx, "Duty", frameLabel,
+                                  sizeof( frameLabel ) );
             snprintf( valueText, sizeof( valueText ), "%d%%",
                       (int)( gpioPWMDutyCycle[ gpioIdx ] * 100.0f + 0.5f ) );
-            bcdDrawFrame( "Duty", valueText );
+            bcdDrawFrame( frameLabel, valueText );
         }
     };
     drawStage( );
@@ -3394,12 +3448,16 @@ static int gpioPwmEditor( int gpioIdx ) {
             return -2;
         }
 
-        // Hold backs out one stage: the picker returns to the toggle's
-        // parent (the carousel); the toggle cancels with nothing changed.
+        // Hold cancels this editor (-1 from either stage): the carousel
+        // treats -1 and 0 identically as stay-in-place, and the click-menu
+        // launchers unwind on -1 - so hold means the same thing here as in
+        // Dir/Pulls/BCD instead of stranding the user one level up. (The
+        // stage-1 hold used to return 0, which the launchers read as
+        // "value applied, stay".)
         if ( ( holdArmed && encoderButtonState == HELD ) ||
              ( probeCancelArmed && probeState == 1 ) ) {
             encoderButtonState = IDLE;
-            return ( stage == 1 ) ? 0 : -1;
+            return -1;
         }
 
         if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
@@ -3515,7 +3573,20 @@ int gpioOptionsCarousel( int gpioIdx ) {
     bool probeCancelArmed = true;
     bool probeConfirmArmed = true;
 
-    gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+    // The BCD row shows the LIVE pins (gpioCarouselItemState reads
+    // bcdReadValue()), so it must repaint when something else moves them -
+    // MicroPython, another surface - not just on cursor motion. Same ~10 Hz
+    // poll as bcdAdjust's live branch; drawFrame records what the BCD row
+    // last showed so the poll only repaints on a real change.
+    unsigned long lastLivePoll = millis( );
+    int lastBcdLive = -1;
+    auto drawFrame = [ & ]( ) {
+        gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+        lastBcdLive = ( globalState.config.bcdPins == 0 ) ? -1
+                                                          : bcdReadValue( );
+    };
+
+    drawFrame( );
 
     while ( true ) {
         rotaryEncoderStuff( );
@@ -3523,6 +3594,16 @@ int gpioOptionsCarousel( int gpioIdx ) {
         // Discard the pad reading but keep the call: it services the probe
         // state machine the raw getButtonState() comparisons below need.
         probing.justReadProbe( true );
+
+        if ( items[ cursor ] == GPIO_ITEM_BCD &&
+             millis( ) - lastLivePoll > 100 ) {
+            lastLivePoll = millis( );
+            int live = ( globalState.config.bcdPins == 0 ) ? -1
+                                                           : bcdReadValue( );
+            if ( live != lastBcdLive ) {
+                drawFrame( );
+            }
+        }
 
         int probeState = probeButton.getButtonState( );
         if ( !probeConfirmArmed && probeState != 2 ) {
@@ -3615,7 +3696,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
             accelerator.reset( );
             encoderAccumulator = 0.0f;
             lastEncoderPosition = encoderPosition;
-            gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+            drawFrame( );
             continue;
         }
 
@@ -3628,7 +3709,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
             if ( steps != 0 ) {
                 encoderAccumulator -= steps;
                 cursor = ( ( cursor + steps ) % itemCount + itemCount ) % itemCount;
-                gpioCarouselDrawFrame( gpioIdx, items[ cursor ] );
+                drawFrame( );
             }
         }
     }
@@ -3721,6 +3802,14 @@ static int gpioAppPicker( const char* levelTag, const char* header, int count,
     lastButtonEncoderState = IDLE;
     encoderDirectionState = NONE;
 
+    // Probe confirm/cancel, the sub-editor idiom (gpioDirectionEditor): the
+    // buttons that just confirmed a Dir edit must not go silently inert one
+    // screen up. getButtonState() is a LEVEL - arm each code only once the
+    // button reads clear, so the press that ENTERED this picker can't
+    // instantly select or back out.
+    bool probeConfirmArmed = false;
+    bool probeCancelArmed = false;
+
     Serial.print( "\r\nGPIOPICK level=" );
     Serial.print( levelTag );
     Serial.print( " n=" );
@@ -3736,22 +3825,63 @@ static int gpioAppPicker( const char* levelTag, const char* header, int count,
 
         jOS.serviceInner( );
         rotaryEncoderButtonStuff( );
+        // Discard the pad reading but keep the call: it services the probe
+        // state machine the raw getButtonState() comparisons below need.
+        probing.justReadProbe( true );
 
-        if ( encoderButtonState == HELD ) {
-            // Wait out the hold so the release can't echo into the next level.
+        int probeState = probeButton.getButtonState( );
+        if ( !probeConfirmArmed && probeState != 2 ) {
+            probeConfirmArmed = true;
+        }
+        if ( !probeCancelArmed && probeState != 1 ) {
+            probeCancelArmed = true;
+        }
+
+        if ( encoderButtonState == HELD ||
+             ( probeCancelArmed && probeState == 1 ) ) {
+            // Wait out the hold so the release can't echo into the next
+            // level (immediate no-op on the probe-remove path).
             gpioAppWaitOutHold( );
+            if ( probeState == 1 ) {
+                // The remove press ALSO queued a buttonPress EVENT that no
+                // modal loop consumes (they read levels) - left alone it
+                // echoes into the reopened menu, whose getButtonPress()
+                // read backs out of level 0 instantly. Same clear+block
+                // idiom as chooseGPIO's success tail - it exists precisely
+                // to stop that echo.
+                ProbeButton::getInstance( ).clearButtonState( );
+                blockProbeButton = 500;
+                blockProbeButtonTimer = millis( );
+            }
             return -1;
         }
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
             return -2;
         }
-        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) {
+        if ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ||
+             ( probeConfirmArmed && probeState == 2 ) ) {
             encoderButtonState = IDLE;
+            probeConfirmArmed = false; // a NEW press for the next level
             if ( selectable != nullptr && !selectable[ idx ] ) {
-                // The owner is already named on the line - refuse and stay.
-                Serial.print( "\r\nGPIOPICK refused " );
-                Serial.println( titles[ idx ] );
+                // The owner is already named on the line - refuse and stay,
+                // but the click must visibly BOUNCE on the board too (serial
+                // alone said so before): one distinct frame - the owner
+                // line, big - held briefly, then the list repaints. Serviced
+                // wait, not delay - the probe/encoder state machines keep
+                // running.
+                Serial.print( "\r\nGPIOPICK refused row=\"" );
+                Serial.print( titles[ idx ] );
+                Serial.println( "\" reason=\"in use\"" );
+                if ( oled.oledConnected ) {
+                    oled.clearPrintShow( titles[ idx ], 2, true, true, true );
+                    unsigned long bounceStart = millis( );
+                    while ( millis( ) - bounceStart < 300 ) {
+                        jOS.serviceInner( );
+                        rotaryEncoderButtonStuff( );
+                        delayMicroseconds( 1000 );
+                    }
+                }
                 needsDraw = true;
                 continue;
             }
@@ -3836,6 +3966,11 @@ void gpioSettingsLauncher( void ) {
     g_gpioUiShowsCircuit = true;
     int lastDivider = rotaryDivider;
     rotaryDivider = 8;
+    // Exit paths that queued a menu reopen skip the teardown's logo: the
+    // reopened menu paints "GPIO" one loop pass later, and the jogo flash
+    // in the gap read as "exited everything" a beat before the menu
+    // appeared. Serial-byte exits (no reopen) keep it.
+    bool reopening = false;
 
     {
         // Entry line buffers - one modal at a time, so statics keep them off
@@ -3874,6 +4009,7 @@ void gpioSettingsLauncher( void ) {
                 // belt+braces for uniformity with the editor sites below.)
                 gpioAppWaitOutHold( );
                 Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                reopening = true;
                 goto done;
             }
             if ( pick == -2 ) {
@@ -3926,6 +4062,7 @@ void gpioSettingsLauncher( void ) {
                     // back-one-level is gone by design.
                     gpioAppWaitOutHold( );
                     Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                    reopening = true;
                     goto done;
                 }
                 if ( o == -2 ) {
@@ -3973,6 +4110,7 @@ void gpioSettingsLauncher( void ) {
                     // the encoder to the reopened menu.
                     gpioAppWaitOutHold( );
                     Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                    reopening = true;
                     goto done;
                 }
                 // A value applied: return to LEVEL 2 - the stay-in-menu
@@ -4001,7 +4139,9 @@ done:
     rotaryDivider = lastDivider;
     requestLedShow( -1 );
     Serial.println( );
-    oled.showJogo32h( );
+    if ( !reopening ) {
+        oled.showJogo32h( ); // reopen paths go straight to the menu paint
+    }
 }
 
 void bcdMenuLauncher( void ) {
@@ -4018,6 +4158,7 @@ void bcdMenuLauncher( void ) {
     g_gpioUiShowsCircuit = true;
     int lastDivider = rotaryDivider;
     rotaryDivider = 8;
+    bool reopening = false; // see gpioSettingsLauncher - skip the exit logo
 
     {
         // Two items now: the decimal/BCD-nibble mode is gone - the counter is
@@ -4062,6 +4203,7 @@ void bcdMenuLauncher( void ) {
                 // (see gpioSettingsLauncher - same gesture, same landing).
                 gpioAppWaitOutHold( );
                 Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                reopening = true;
                 goto done;
             }
             if ( pick == -2 ) {
@@ -4086,17 +4228,20 @@ void bcdMenuLauncher( void ) {
                 goto done; // serial byte = exit the whole app, NO reopen
             }
             if ( r == -1 ) {
-                // Hold/probe-remove inside the modal (or bcdAdjust refused
-                // to open - no free pins): full unwind + menu reopen. The
-                // modals return -1 with the hold still down - wait it out
-                // first.
+                // Hold/probe-remove inside the modal: full unwind + menu
+                // reopen. The modals return -1 with the hold still down -
+                // wait it out first.
                 gpioAppWaitOutHold( );
                 Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
+                reopening = true;
                 goto done;
             }
 
-            // Back at the Count/Range level (stay in menu): re-assert what
-            // the modals cleared, wait out a live hold.
+            // Back at the Count/Range level (stay in menu) - including a
+            // -3 refusal (no free pins): the user never asked to leave, so
+            // the refusal reads in place instead of teleporting them to the
+            // top-level menu. Re-assert what the modals cleared, wait out a
+            // live hold.
             Menus::getInstance( ).inClickMenu = 1;
             g_gpioUiShowsCircuit = true;
             rotaryDivider = 8;
@@ -4112,5 +4257,7 @@ done:
     rotaryDivider = lastDivider;
     requestLedShow( -1 );
     Serial.println( );
-    oled.showJogo32h( );
+    if ( !reopening ) {
+        oled.showJogo32h( ); // reopen paths go straight to the menu paint
+    }
 }

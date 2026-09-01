@@ -670,10 +670,17 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // Leave the terminal in a known state when the wheel session ends:
         // clear whatever the menu / launched app left on screen and reprint
         // the serial main menu (printMenu() itself respects dontShowMenu).
-        extern int showExtraMenu;
-        Serial.print( "\x1b[2J\x1b[H" );
-        Serial.flush( );
-        singleCharCommands.printMenu( showExtraMenu );
+        // NOT when a reopen is pending (the GPIO apps' hold unwind): the
+        // wipe destroyed the visible GPIOPICK/BCD context - refusal lines
+        // included - and printed a main menu the reopened session
+        // supersedes one loop pass later. The reopened session owns the
+        // terminal again immediately.
+        if ( !s_menuReopenRequested ) {
+            extern int showExtraMenu;
+            Serial.print( "\x1b[2J\x1b[H" );
+            Serial.flush( );
+            singleCharCommands.printMenu( showExtraMenu );
+        }
     }
 
     // oled.showJogo32h();

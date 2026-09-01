@@ -205,8 +205,10 @@ bool bcdSelfCheck(Stream* out = &Serial);
 // the gpio pins that are currently routed") - preferredStart only matters
 // when nothing is routed, which falls back to the old shape: a contiguous
 // claimable run from preferredStart (or the lowest claimable pin), capped
-// at 4 bits (one hex digit). Returns -1 without a range only when no pin is
-// claimable at all, or on OG.
+// at 4 bits (one hex digit). Returns the counted value on confirm, -1 on
+// hold/probe cancel, -2 on a serial byte (tear down the whole UI), and -3
+// when it REFUSES to open (no claimable pin at all, or OG) - refusal is
+// not the escape gesture, callers stay in place on -3.
 int bcdAdjust(int preferredStart = -1);
 
 // Two-step blocking range pick (same modal idiom): step 1 start pin (skips
@@ -214,8 +216,10 @@ int bcdAdjust(int preferredStart = -1);
 // it), step 2 width (1..contiguous claimable pins from that start). This
 // picker builds CONTIGUOUS masks only; the sparse routed-pin default comes
 // from bcdAdjust's auto-define. Applies via setBcdPins() + bcdApply() and
-// returns 0; cancel = -1, nothing changed. This is the EXPLICIT "Range"
-// item only - no path forces a user through it.
+// returns 0; cancel = -1, serial byte = -2 (full-UI exit), refused to open
+// (nothing claimable / OG) = -3 with nothing changed. This is the EXPLICIT
+// "Range" item only - no path forces a user through it. The "Routed" first
+// stop is always present; with nothing routed it reads "none" and refuses.
 int bcdRangeSetup(void);
 
 // GPIO options carousel (Phase 2, CodeDocs/GPIO_plan.md): the highlight

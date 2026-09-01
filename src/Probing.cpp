@@ -4481,6 +4481,25 @@ int Probing::attachPadsToSettings( int pad ) {
                     break;
                 }
 
+                // Refuse a pin a service OWNS before touching anything:
+                // the bare gpioState write below destroys the bus-role
+                // sentinel (gpioState == 6) that setGPIO honors - the
+                // same OLED-bus-killer chooseGPIO's edge branches refuse.
+                const char* padGpioOwner = nullptr;
+                if ( !routableGpioAvailable( gpioChosen - 1,
+                                             &padGpioOwner ) ) {
+                    char ownerToast[ 24 ];
+                    snprintf( ownerToast, sizeof( ownerToast ),
+                              "GPIO %d\n%s", gpioChosen,
+                              padGpioOwner ? padGpioOwner : "in use" );
+                    oled.clearPrintShow( ownerToast, 2, 1200 );
+                    Serial.printf( "\n\rGPIO %d is held by %s\n\r",
+                                   gpioChosen,
+                                   padGpioOwner ? padGpioOwner
+                                                : "another service" );
+                    break;
+                }
+
                 // Serial.print( "gpioChosen: " );
                 // Serial.println( gpioChosen );
                 // Serial.print( "gpioState[gpioChosen]: " );
@@ -5109,6 +5128,25 @@ int Probing::chooseADC( void ) {
 }
 
 int Probing::chooseGPIOinputOutput( int gpioChosen ) {
+    // Refuse a pin a service OWNS before offering the Input/Output choice
+    // at all (the chooseGPIO edge-branch idiom): the bare gpioState writes
+    // in the apply block below destroy the bus-role sentinel (gpioState ==
+    // 6) that setGPIO/applyPinConfig honor, so accepting GPIO 7/8 while
+    // the OLED runs on the crossbar I2C pads re-muxes the live display bus
+    // and kills the panel. gpioChosen is 1-BASED here (the
+    // gpioState[gpioChosen - 1] writes below are the proof). Name the
+    // owner instead; -1 reads as cancel at both call sites.
+    const char* gpioOwner = nullptr;
+    if ( !routableGpioAvailable( gpioChosen - 1, &gpioOwner ) ) {
+        char ownerToast[ 24 ];
+        snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                  gpioChosen, gpioOwner ? gpioOwner : "in use" );
+        oled.clearPrintShow( ownerToast, 2, 1200 );
+        Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen,
+                       gpioOwner ? gpioOwner : "another service" );
+        return -1;
+    }
+
     int settingOption = -1;
     int selectedOption = 0; // 0 = input (default), 1 = output
 
@@ -5588,10 +5626,14 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         }
     }
 
-    if ( function == -1 ) {
-        return function;
-    }
-    if ( selected == -1 ) {
+    if ( function == -1 || selected == -1 ) {
+        // Cancel / timeout: the press that cancelled must not echo into the
+        // surrounding session as a fresh gesture - same button cleanup the
+        // success tail below runs. The LED/OLED restores are deliberately
+        // NOT here: cancel leaves those to the probe-exit path.
+        ProbeButton::getInstance( ).clearButtonState( );
+        blockProbeButton = 500;
+        blockProbeButtonTimer = millis( );
         return function;
     }
     if ( skipInputOutput == 0 && connectOrClearProbe == 1 ) {
@@ -5635,6 +5677,12 @@ int Probing::chooseGPIO( int skipInputOutput ) {
                 oled.clearPrintShow( ownerToast, 2, 1200 );
                 Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
                                gpioOwner ? gpioOwner : "another service" );
+                // The refusal must cancel the CONNECT too: with function
+                // still set, readRows took the owned pin as the connect
+                // target and the wire landed on the live bus anyway - the
+                // toast said refused while the commit spliced the user's
+                // row onto it. Callers treat -1 as cancel.
+                function = -1;
             } else {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 0;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 0) {
@@ -5669,6 +5717,7 @@ int Probing::chooseGPIO( int skipInputOutput ) {
                 oled.clearPrintShow( ownerToast, 2, 1200 );
                 Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
                                gpioOwnerOut ? gpioOwnerOut : "another service" );
+                function = -1; // cancel the connect too (see outIn == 1)
             } else {
             gpioState[ gpioDef[ gpioChosen ][ 2 ] ] = 4;
             // if (globalState.config.gpioDirection[gpioChosen - 1] == 1) {

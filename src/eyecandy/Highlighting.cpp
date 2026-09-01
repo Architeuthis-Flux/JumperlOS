@@ -437,6 +437,13 @@ static int scrollPartNextPin( const PartDefinition& p, int fromRow, bool up, boo
 static int s_gpioSeenNet = -12345;       // last brightenedNet observed
 static int s_gpioWindowNet = -1;         // net whose click window is open
 static unsigned long s_gpioWindowAt = 0; // when that highlight landed
+// TRUE while a press that STARTED inside the window is still in flight. The
+// window is judged at click RELEASE, but a legal click can hold up to
+// buttonHoldLength (~500 ms) - so a press begun at 0.7 s that released at
+// 1.05 s opened the main menu on a user who did click in time. Latched every
+// service pass while PRESSED-inside-window; cleared on consumption, on HELD,
+// and whenever the button leaves the press without a release.
+static bool s_gpioClickLatched = false;
 
 // gpioDef index of a routable GPIO on this net, or -1 (toggleGPIO net-scan
 // idiom; catches input/output/PWM/UART pins regardless of mux).
@@ -453,8 +460,25 @@ static int routableGpioOnNet( int net ) {
 }
 
 static bool gpioClickWindowOpen( void ) {
-    return s_gpioWindowNet > 0 && brightenedNet == s_gpioWindowNet &&
+    // No OLED, no window: the carousel renders OLED + serial only, and the
+    // hint on the reading card is what makes the click discoverable (the
+    // rails' clickAdjustEnabled reasoning) - on an OLED-less board the
+    // window would eat the click for an invisible carousel while the board
+    // looks completely idle.
+    return oledConnected && s_gpioWindowNet > 0 &&
+           brightenedNet == s_gpioWindowNet &&
            ( millis( ) - s_gpioWindowAt ) < 1000;
+}
+
+// The click belongs to the carousel when the window is open at RELEASE - or
+// when the press STARTED inside it (s_gpioClickLatched) and the highlight
+// still sits on the window's net. The net check keeps the invariant the
+// handler leans on (routableGpioOnNet(brightenedNet) >= 0): a wheel turn
+// mid-press can move the highlight off the armed net.
+static bool gpioClickAccepted( void ) {
+    return gpioClickWindowOpen( ) ||
+           ( s_gpioClickLatched && s_gpioWindowNet > 0 &&
+             brightenedNet == s_gpioWindowNet );
 }
 
 int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
@@ -746,9 +770,11 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
         // GPIO click window (see the block comment above routableGpioOnNet):
         // note when the highlight ENTERS a routable-GPIO net. This runs every
         // service pass, so a brightenedNet change - encoder scroll landing or
-        // probe tap - is seen within one loop. The carousel-exit re-highlight
-        // restores the SAME net, so it does not restart the window; a
-        // highlight timeout drops brightenedNet and re-arms the next entry.
+        // probe tap - is seen within one loop. A highlight timeout drops
+        // brightenedNet and re-arms the next entry; the carousel-exit
+        // re-highlight restores the SAME net but resets s_gpioSeenNet on
+        // purpose (handleEncoderButtonPress), so leaving the carousel arms
+        // ONE fresh window - a quick second click re-enters.
         if ( brightenedNet != s_gpioSeenNet ) {
             s_gpioSeenNet = brightenedNet;
             if ( routableGpioOnNet( brightenedNet ) >= 0 ) {
@@ -757,6 +783,31 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             } else {
                 s_gpioWindowNet = -1;
             }
+        }
+
+        // Probe dwell keeps the window armed: while the tip is ON the
+        // window's net, re-stamp the timer so the 1 s countdown effectively
+        // starts at probe LIFT (reading the card must not burn the window),
+        // and a re-tap of the SAME net re-arms the same way. justReadProbe's
+        // duplicate timer re-accepts a held row at least every 500 ms, so
+        // the stamps keep coming mid-dwell. Live probe reads only: the
+        // carousel-exit re-highlight goes through highlightNets(0, heldNet)
+        // and never sets lastProbeReading, so it cannot re-arm here.
+        if ( s_gpioWindowNet > 0 && brightenedNet == s_gpioWindowNet &&
+             probing.getLastProbeReading( ) > 0 ) {
+            s_gpioWindowAt = millis( );
+        }
+
+        // Click-window press latch (see s_gpioClickLatched above): remember
+        // a press that started inside the window; forget it the moment the
+        // button goes anywhere but RELEASED (HELD is a hold, IDLE without a
+        // consume means someone else took it).
+        if ( encoderButtonState == PRESSED ) {
+            if ( gpioClickWindowOpen( ) ) {
+                s_gpioClickLatched = true;
+            }
+        } else if ( encoderButtonState != RELEASED ) {
+            s_gpioClickLatched = false;
         }
 
         if ( encoderDirectionState == UP ) {
@@ -1379,14 +1430,19 @@ static void showGpioPinReading( int netNum, int gpioIdx, bool isOutput,
     }
     // Raw paints on purpose: the header is already the part pin (or
     // deliberately not one), and the re-heading funnel would double it.
+    // The hint is the click window's ONLY affordance (the rails' "adjust?"
+    // idiom): "options?" appears while a click would open the carousel and
+    // vanishes when the window lapses - checkForReadingChanges forces a
+    // repaint on both transitions.
+    const char* hint = gpioClickWindowOpen( ) ? "options?" : nullptr;
     if ( pinName[ 0 ] != '\0' ) {
-        showNetReadingRaw( pinName, gpioLabel, stateString );
+        showNetReadingRaw( pinName, gpioLabel, stateString, hint );
     } else {
         char name[ 16 ];
         if ( netSemanticName( netNum, gpioIdx, name, sizeof( name ) ) )
-            showNetReadingRaw( name, stateString );   // the I2C "GPIO N SCL" form
+            showNetReadingRaw( name, stateString, nullptr, hint );   // the I2C "GPIO N SCL" form
         else
-            showNetReadingRaw( gpioLabel, stateString );
+            showNetReadingRaw( gpioLabel, stateString, nullptr, hint );
     }
 }
 
@@ -1948,6 +2004,22 @@ int Highlighting::checkForReadingChanges( void ) {
     auto& lastMeasuredNet     = g_readingGuards.lastMeasuredNet;
     auto& lastUpdateTime      = g_readingGuards.lastUpdateTime;
 
+    // GPIO click window hint: the card's "options?" tag rides the reading
+    // (showGpioPinReading), so the window's open/close transitions must
+    // repaint even though the pin state itself didn't change. Forcing the
+    // prev-state latches makes the next pass here (<= 40 ms) repaint;
+    // ReadingDisplay's dedupe keys on the hint, so the same reading with a
+    // different hint still reaches the panel. Function-local static on
+    // purpose - this is a transition edge, not a repaint guard
+    // resetReadingState() needs to reach.
+    static bool s_prevGpioWindowOpen = false;
+    bool gpioWindowOpenNow = gpioClickWindowOpen( );
+    if ( gpioWindowOpenNow != s_prevGpioWindowOpen ) {
+        s_prevGpioWindowOpen = gpioWindowOpenNow;
+        prevGpioInputState = -1;
+        prevGpioOutputState = -1;
+    }
+
     // UART live-display state (small persistent buffers, display-only)
     auto& prevUartTx    = g_readingGuards.prevUartTx;
     auto& prevUartTxLen = g_readingGuards.prevUartTxLen;
@@ -2395,8 +2467,10 @@ bool Highlighting::wantsToHandleButtonPress(void) {
     // GPIO click window - the click belongs to the options carousel, not the
     // menu (see handleEncoderButtonPress). Checked before the gates below:
     // GPIO inputs/UART pins don't persist-highlight, and part-pin stops park
-    // highlightedNet at -1 while brightenedNet still holds the net.
-    if (gpioClickWindowOpen()) {
+    // highlightedNet at -1 while brightenedNet still holds the net. The
+    // latch half accepts a click that STARTED inside the window and
+    // released just past it.
+    if (gpioClickAccepted()) {
         return true;
     }
 
@@ -2445,7 +2519,8 @@ int Highlighting::handleEncoderButtonPress(void) {
     // GPIO highlight opens the options carousel - the scroller itself is
     // never captured, turns always keep scrolling. Before the persistence
     // gates below for the same reasons as wantsToHandleButtonPress.
-    if ( gpioClickWindowOpen( ) ) {
+    if ( gpioClickAccepted( ) ) {
+        s_gpioClickLatched = false; // this press is consumed either way
         int gpioIdx = routableGpioOnNet( brightenedNet );
         const char* owner = nullptr;
         if ( !routableGpioAvailable( gpioIdx, &owner ) &&
@@ -2471,8 +2546,7 @@ int Highlighting::handleEncoderButtonPress(void) {
             // Latch the highlight identity BEFORE the modal - the highlight
             // timeout can fire inside its serviceInner() loop and zero
             // brightenedNet/Node; re-highlight on exit (the adjustDACVoltage
-            // idiom). The restore is the SAME net, so the entry tracker does
-            // not restart the click window.
+            // idiom).
             int heldNet = brightenedNet;
             int heldNode = brightenedNode;
             gpioOptionsCarousel( gpioIdx );
@@ -2481,6 +2555,15 @@ int Highlighting::handleEncoderButtonPress(void) {
             brightenedNode = heldNode;
             highlightNets( 0, heldNet, 1 );
             requestLedShow( 1 );
+            // Re-arm ONE fresh window on the restored net: without this the
+            // restore left NO quick way back in (set Direction, exit, want
+            // Pulls too = scroll off and back, or dig through the menu).
+            // The seen-net sentinel makes the next service pass treat the
+            // restore as an entry - a quick second click re-enters, turns
+            // still just scroll, and a click after the window falls through
+            // to the menu as designed. Shows its "options?" hint like any
+            // other window.
+            s_gpioSeenNet = -12345;
         }
         return 1; // consumed either way - the menu must not open on this press
     }
