@@ -1287,6 +1287,19 @@ int checkChangedNetColors(int netIndex) {
 uint32_t railNetColors[3] = // dim
   {  0x000f04, 0x0f0202, 0x0f0202 };
 
+// A power rail sitting NEGATIVE paints its whole net BLUE (Kevin, 2026-09-01:
+// the wires are the rail color people actually look at), at the same dim
+// weight as the red. Hardware truth first, persisted value as the fallback -
+// the rule lightUpRail uses for the rail strip itself. assignNetColors runs
+// every frame from showNets, so the wires follow the dial live.
+static uint32_t railNetColor(int rail) {
+  float v = (railHwVolts[rail] > -99.0f)
+                ? railHwVolts[rail]
+                : ((rail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+  if (v < -0.1f) return 0x02020f;
+  return railNetColors[rail + 1];
+}
+
 void assignNetColors(int preview) {
   // numberOfNets = 60;
 
@@ -1342,12 +1355,12 @@ void assignNetColors(int preview) {
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 2:
-        netColors[netIdx] = unpackRgb(railNetColors[1]);
+        netColors[netIdx] = unpackRgb(railNetColor(0));
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 3:
-        netColors[netIdx] = unpackRgb(railNetColors[2]);
+        netColors[netIdx] = unpackRgb(railNetColor(1));
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
