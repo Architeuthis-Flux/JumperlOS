@@ -580,6 +580,99 @@ static bool reservedKRowForSenseTaps(int chip, int y) {
          virginChipKYRowCount() <= 2;
 }
 
+// ============================================================================
+// Chip-K y-row budget for primary paths (bench 2026-09-02)
+// ============================================================================
+// Every K-resident signal (rails, DACs, ADC0-3, BUF_IN, AREF, rows 29/59, GND
+// when it lands on K) leaves chip K through one of its 8 y-rows, so a net with
+// a K node needs at least one. The router handed virgin K rows out first-come:
+// a rail's second breadboard row, or an ADC net's second node (3-ADC_1, then
+// 3-ADC_2 through a different hop chip) each took a fresh row, and the nets
+// that have NO alternative to a K bounce - the probe feed BUF_IN<->GP_8 and
+// ADC_3<->D1 - found all 8 spent and failed. Kevin's bench: "we should be able
+// to find a path here with some hops."
+//
+// Rule: a net's FIRST K row is unconditional (connectivity first). A second
+// row for a net that already holds one, or any row for a net that merely hops
+// through K, is granted only while enough virgin rows remain for every
+// K-needing net that holds none yet. A refused row falls through to the
+// same-net retry (stackingAttempt 1), where the alt-path search piggybacks on
+// the net's existing K row through that row's breadboard chip.
+//
+// The budget only bites when K would otherwise starve a net - with slack the
+// routing is identical to before. If a refused path finds no piggyback, a
+// rescue pass re-runs the three phases for the unrouted paths with the budget
+// off, so nothing that routed before stops routing. The rescue must skip
+// fully-routed paths: ijklPaths leaves altPathNeeded set and resets y to -2
+// on re-entry, and resolveUncommittedHops(allowStacking=2) is virgin-only, so
+// a re-resolved path would refuse its own row and break.
+//
+// Duplicates are exempt (they run after all primaries and carry the sense-tap
+// reservation above). RouteSafety's ephemeral taps never come through here.
+static bool kRowBudgetActive = false;
+static bool kRowRescuePass = false;
+static uint64_t kNeedingNetMask = 0; // nets with a node on chip K (bit = net)
+
+static inline uint64_t netBit(int net) {
+  return (net >= 0 && net < 64) ? (1ULL << net) : 0;
+}
+
+// Nets with a K-resident node, from the chips resolveChipCandidates chose.
+static void computeKNeedingNets(void) {
+  kNeedingNetMask = 0;
+  for (int i = 0; i < numberOfPaths; i++) {
+    struct pathStruct &p = globalState.connections.paths[i];
+    if (p.pathType == VIRTUAL || p.duplicate != 0) {
+      continue;
+    }
+    if (p.chip[0] == CHIP_K || p.chip[1] == CHIP_K) {
+      kNeedingNetMask |= netBit(p.net);
+    }
+  }
+}
+
+static uint64_t kRowsHeldMask(void) {
+  uint64_t held = 0;
+  for (int y = 0; y < 8; y++) {
+    held |= netBit(globalState.connections.chipStates[CHIP_K].yStatus[y]);
+  }
+  return held;
+}
+
+// True when net may not take the virgin chip-K row y right now.
+static bool kRowBudgetRefuses(int chip, int y, int net) {
+  if (!kRowBudgetActive || routingDuplicatePathNow || chip != CHIP_K) {
+    return false;
+  }
+  if (globalState.connections.chipStates[CHIP_K].yStatus[y] != -1) {
+    return false; // not virgin: the same-net / conflict rules decide
+  }
+  uint64_t held = kRowsHeldMask();
+  uint64_t mine = netBit(net);
+  bool needsK = (kNeedingNetMask & mine) != 0;
+  bool holdsK = (held & mine) != 0;
+  if (needsK && !holdsK) {
+    return false; // first row: always
+  }
+  uint64_t waiting = kNeedingNetMask & ~held & ~mine;
+  int waitingCount = __builtin_popcountll(waiting);
+  return (virginChipKYRowCount() - 1) < waitingCount;
+}
+
+// Every position that has a chip also has both coordinates.
+static bool pathFullyRouted(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  if (p.chip[0] == -1 || p.chip[1] == -1) {
+    return false;
+  }
+  for (int j = 0; j < 4; j++) {
+    if (p.chip[j] != -1 && (p.x[j] < 0 || p.y[j] < 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Helper function to track direct Y status assignments
 void setChipYStatus(int chip, int y, int net, const char *location) {
   if (debugNTCC6 && globalState.connections.chipStates[chip].yStatus[y] != -1 && globalState.connections.chipStates[chip].yStatus[y] != net) {
@@ -772,6 +865,9 @@ bool setChipYStatusSafe(int chip, int y, int net, const char *location) {
   // vetted by freeOrSameNetY() in the same iteration, but refuse here too so
   // no unvetted path can consume a reserved virgin K row.
   if (reservedKRowForSenseTaps(chip, y)) {
+    return false;
+  }
+  if (kRowBudgetRefuses(chip, y, net)) {
     return false;
   }
 
@@ -1736,6 +1832,10 @@ void bridgesToPaths(
   btp_step = micros();
   #endif
 
+  // Primary pass under the chip-K y-row budget (see kRowBudgetRefuses)
+  computeKNeedingNets();
+  kRowBudgetActive = true;
+
   commitPaths(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
   Serial.print("  commitPaths: "); Serial.print(micros() - btp_step); Serial.println(" us");
@@ -1753,6 +1853,36 @@ void bridgesToPaths(
   Serial.print("  resolveUncommittedHops: "); Serial.print(micros() - btp_step); Serial.println(" us");
   btp_step = micros();
   #endif
+
+  kRowBudgetActive = false;
+
+  // Rescue pass: whatever the budget left unrouted gets one more try with
+  // unconditional K access, so a refused second row can never cost a path
+  // that would have routed before the budget existed.
+  {
+    bool anyUnrouted = false;
+    for (int i = startIndex; i < numberOfPaths; i++) {
+      if (globalState.connections.paths[i].pathType == VIRTUAL ||
+          globalState.connections.paths[i].duplicate != 0) {
+        continue;
+      }
+      if (!pathFullyRouted(i)) {
+        anyUnrouted = true;
+        break;
+      }
+    }
+    if (anyUnrouted) {
+      kRowRescuePass = true;
+      commitPaths(2, -1, 0, startIndex);
+      resolveAltPaths(2, -1, 0, startIndex);
+      resolveUncommittedHops(2, -1, 0, startIndex);
+      kRowRescuePass = false;
+      #if PROFILE_BRIDGES_TO_PATHS
+      Serial.print("  K-row rescue pass: "); Serial.print(micros() - btp_step); Serial.println(" us");
+      btp_step = micros();
+      #endif
+    }
+  }
   // printPathsCompact(2 );
   // printChipStatus();
   // Serial.println("no duplicates");
@@ -2296,6 +2426,10 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
   for (int i = startIndex; i < numberOfPaths; i++) {
     // Skip virtual paths
     if (globalState.connections.paths[i].pathType == VIRTUAL) {
+      continue;
+    }
+    // K-row rescue pass: only the paths the budgeted pass left unrouted
+    if (kRowRescuePass && pathFullyRouted(i)) {
       continue;
     }
     
@@ -3082,6 +3216,11 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
   for (int i = startIndex; i < numberOfPaths; i++) {
     // Skip virtual paths
     if (globalState.connections.paths[i].pathType == VIRTUAL) {
+      continue;
+    }
+    // K-row rescue pass: a fully-routed ijkl path still carries altPathNeeded,
+    // and re-entering ijklPaths would reset its y-rows to -2
+    if (kRowRescuePass && pathFullyRouted(i)) {
       continue;
     }
     
@@ -4518,6 +4657,9 @@ bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
   if (reservedKRowForSenseTaps(chip, y)) {
     return false;
   }
+  if (kRowBudgetRefuses(chip, y, net)) {
+    return false;
+  }
   if (globalState.connections.chipStates[chip].yStatus[y] == -1 ||
       (globalState.connections.chipStates[chip].yStatus[y] == net && allowStacking == 1)) {
     // Serial.println("true");
@@ -4680,6 +4822,10 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
   for (int i = startIndex; i < numberOfPaths; i++) {
     // Skip virtual paths
     if (globalState.connections.paths[i].pathType == VIRTUAL) {
+      continue;
+    }
+    // K-row rescue pass: only the paths the budgeted pass left unrouted
+    if (kRowRescuePass && pathFullyRouted(i)) {
       continue;
     }
     
