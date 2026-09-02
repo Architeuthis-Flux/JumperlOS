@@ -4479,6 +4479,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 }
 
 bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
+  if (chip < 0 || chip >= 12 || x < 0 || x >= 16) return false;   // a -1 lane from xMapForChipLane1 indexed the status array at -1
   // Serial.print("freeOrSameNetX: ");
   // Serial.print(chip);
   // Serial.print(", ");
@@ -4499,6 +4500,7 @@ bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
 }
 
 bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
+  if (chip < 0 || chip >= 12 || y < 0 || y >= 8) return false;   // a -1 lane from xMapForChipLane1 indexed the status array at -1
   // Serial.print("freeOrSameNetY: ");
   // Serial.print(chip);
   // Serial.print(", ");
@@ -5689,7 +5691,10 @@ void printPathsCompact(int showCullDupes, Stream* target) {
 
     if (skipLine == 0) {
       lastDuplicate = globalState.connections.paths[i].duplicate;
-      changeTerminalColor(globalState.connections.nets[globalState.connections.paths[i].net].termColor, false, target);
+      {
+        int pn = globalState.connections.paths[i].net;   // a culled duplicate carries net -1
+        changeTerminalColor(globalState.connections.nets[(pn >= 0 && pn < MAX_NETS) ? pn : 0].termColor, false, target);
+      }
       target->print(i);
       target->print("\t");
 
@@ -5861,7 +5866,6 @@ void findStartAndEndChips(int node1, int node2, int pathIdx) {
         }
         candidatesFound++;
         chipCandidates[twice][1] = nano.mapKL[nanoIndex];
-        Serial.print(candidatesFound);
         globalState.connections.paths[pathIdx].candidates[twice][1] = chipCandidates[twice][1];
         candidatesFound++;
         if (debugNTCC5) {
@@ -6301,7 +6305,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
-  for (int i = 0; i < 16; i++) {
+  for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {
         nodeFound = i + 1;

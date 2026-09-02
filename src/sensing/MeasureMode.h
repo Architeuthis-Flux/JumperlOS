@@ -83,6 +83,7 @@ private:
     int measuredNode = -1;
     int adcChannel = -1;           // ADC channel number (0-4)
     int adcDefine = -1;            // ADC define value (ADC0-ADC4)
+    int ephemeralNode = -1;        // the node the ephemeral ADC bridge was made to (a same-net hop moves measuredNode, not the bridge)
     MeasurementType currentType = MeasurementType::VOLTAGE;
     
     // ========================================================================

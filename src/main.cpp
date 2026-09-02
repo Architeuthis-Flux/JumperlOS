@@ -1161,6 +1161,10 @@ dontshowmenu:
             // Use zero-copy consume to avoid heap-allocating a String for every command
             // String heap fragmentation was causing crashes after minutes of continuous commands
             const char* cmdPtr = CommandBuffer::getInstance( ).consumePendingCommandPtr( );
+            // `input` is a global: a relayed command the guards below reject
+            // fell through to the input-selection code with the PREVIOUS
+            // command's char still in it and ran that command again.
+            input = '\0';
 
             if ( cmdPtr != nullptr ) {
                 // Trim leading whitespace manually (avoid extra String heap ops)

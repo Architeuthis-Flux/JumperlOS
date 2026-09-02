@@ -542,6 +542,14 @@ void cycleTerminalColor(bool reset,  float step, bool flush, Stream *stream, int
       }
     }
   }
+  // one static index serves both palettes: clamp to the one being read
+  // (the bright table is 29 entries, the spectrum 51)
+  if (currentColor < 0) currentColor = 0;
+  if (bright == 1) {
+    if (currentColor >= highSaturationBrightColorsCount) currentColor %= highSaturationBrightColorsCount;
+  } else {
+    if (currentColor >= highSaturationSpectrumColorsCount) currentColor %= highSaturationSpectrumColorsCount;
+  }
   int color = highSaturationSpectrumColors[currentColor];
   if (bright == 1) {
     color = highSaturationBrightColors[currentColor];
@@ -725,7 +733,10 @@ static void addVirtualCurrentSensePath() {
 }
 
 static void removeVirtualCurrentSensePath() {
-  if (virtualCurrentSensePathIndex >= 0 && virtualCurrentSensePathIndex < numberOfPaths) {
+  if (virtualCurrentSensePathIndex >= 0 && virtualCurrentSensePathIndex < numberOfPaths &&
+      globalState.connections.paths[virtualCurrentSensePathIndex].pathType == VIRTUAL) {
+    // (pathType check: a core-0 rebuild may have reused this slot for a real
+    // wire since we added the overlay - never clear someone else's path)
     // Clear the virtual path
     globalState.connections.paths[virtualCurrentSensePathIndex].node1 = -1;
     globalState.connections.paths[virtualCurrentSensePathIndex].node2 = -1;
@@ -804,6 +815,9 @@ void drawWires(int net) {
       if (globalState.connections.paths[i].duplicate == 1) {
         continue;
       }
+      if (globalState.connections.paths[i].net < 0) {
+        continue; // a culled overlapping duplicate (net -1): not a wire
+      }
 
       if (globalState.connections.paths[i].node1 != -1 && globalState.connections.paths[i].node2 != -1 &&
           globalState.connections.paths[i].node1 != globalState.connections.paths[i].node2) {
@@ -812,7 +826,7 @@ void drawWires(int net) {
           // globalState.connections.paths[i].node1 <= 113) || (globalState.connections.paths[i].node2 >= 110 && globalState.connections.paths[i].node2 <=
           // 113)) {
           bothOnBB = 1;
-          if (globalState.connections.paths[i].node1 > 0 && globalState.connections.paths[i].node1 < 30 && globalState.connections.paths[i].node2 > 0 &&
+          if (globalState.connections.paths[i].node1 > 0 && globalState.connections.paths[i].node1 <= 30 && globalState.connections.paths[i].node2 > 0 &&
               globalState.connections.paths[i].node2 <= 30) {
             bothOnTop = 1;
             sameLevel = 1;
@@ -2963,6 +2977,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
 
   uint32_t frameColors[5];
   uint32_t brightenedNodeColors[5];
+  bool railHueSwapOk = false;   // set by the plain-frame branch, cleared by the voltage overrides
 
   bool isCurrentSenseNet = (net == currentSenseState.plusNet || net == currentSenseState.minusNet);
   // if (isCurrentSenseNet) {
@@ -3129,7 +3144,12 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
       frameColors[i] =
           rowAnimations[index].frames[(rowAnimations[index].currentFrame + i) %
                                       rowAnimations[index].numberOfFrames];
+      // a net that is not brightened/warned still crosses highlighted rows in
+      // wires mode: default the crossing pixels to the frame instead of
+      // whatever this stack slot held
+      brightenedNodeColors[i] = frameColors[i];
     }
+    railHueSwapOk = true;   // plain animation frames: the negative-rail hue swap applies
   }
 
   // If this is an ADC net, override the animation colors with the voltage-based ADC color
@@ -3143,6 +3163,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
         frameColors[i] = adcColor;
         brightenedNodeColors[i] = adcColor;
       }
+      railHueSwapOk = false;  // a measured-voltage color must not be re-hued
     }
   }
 
@@ -3158,6 +3179,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
             frameColors[i] = fakeColor;
             brightenedNodeColors[i] = fakeColor;
           }
+          railHueSwapOk = false;
         }
         break;  // Found the matching input, no need to keep searching
       }
@@ -3256,7 +3278,11 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
   // motion and brightness and only moves the hue. railHwVolts is the same
   // hardware truth lightUpRail and assignNetColors read; this painter runs
   // after drawWires, which is why the blue net color alone never showed.
-  if (index == 0 || index == 2) {
+  // Only the STATIC red frames get the swap: the brightened / warning
+  // branches derive their frames from netColors (already blue for a negative
+  // rail - swapping made them red again) and the ADC / fake-GPIO overrides
+  // carry a measured-voltage color that must stay as measured.
+  if ((index == 0 || index == 2) && railHueSwapOk) {
     int rail = (index == 0) ? 0 : 1;
     float railV = (railHwVolts[rail] > -99.0f)
                       ? railHwVolts[rail]
@@ -4086,7 +4112,7 @@ void printTextFromMenu(int print) {
   // b.clear();
   unsigned long timeout = millis();
   while (Jerial.available() > 0) {
-    if (index > 78) {
+    if (index > 76) {   // three spaces are appended below: keep f[index+2] < 80
       break;
     }
     f[index] = Jerial.read();

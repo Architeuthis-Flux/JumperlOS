@@ -1759,7 +1759,8 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
       pio_sm_set_enabled(pio, sm, false);
       delayMicroseconds(100);
       pio_sm_set_enabled(pio, sm, true);
-      pio_interrupt_clear(pio, sm);
+      // (pio_interrupt_clear(pio, sm) cleared FLAG number `sm` = 0, a foreign
+      // SM's flag; the handshake is flag 1, which isrFromPio() clears)
       isrFromPio();
       break;
     }

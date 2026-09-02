@@ -694,6 +694,16 @@ int shiftNets(
     globalState.connections.nets[i].name = netNameConstants[i];
     globalState.connections.nets[i].number = i;
     }
+  // gpioNet[] records NET NUMBERS (populateSpecialFunctions): renumber them
+  // with the shift, or a routable GPIO keeps pointing at a net that is now
+  // someone else's. Sentinels (-1/-2/-3) are left alone.
+  for (int g = 0; g < 10; g++) {
+    if (gpioNet[g] == deletedNet) {
+      gpioNet[g] = -1;
+      } else if (gpioNet[g] > deletedNet && gpioNet[g] <= lastNet) {
+      gpioNet[g]--;
+      }
+    }
 
   globalState.connections.nets[lastNet].number = 0;
   globalState.connections.nets[lastNet].name = netNameConstants[lastNet];
@@ -786,7 +796,7 @@ int findNodeInNet(int node) {
 void createNewNet() // add those nodes to a new net
   {
   int newNetNumber = findFirstUnusedNetIndex();
-  if (newNetNumber < 0 || newNetNumber >= MAX_NETS) {
+  if (newNetNumber < 0 || newNetNumber >= MAX_NETS - 2) {
     Serial.println("all nets used - connection not added (too many nets)");
     globalState.connections.paths[newBridgeIndex].net = -1;
     return;
@@ -986,7 +996,9 @@ void addNodeToNet(int netToAddNode, int node) {
 
 int findFirstUnusedNetIndex() // search for a free globalState.connections.nets[]
   {
-  for (int i = 0; i < MAX_NETS; i++) {
+  // MAX_NETS-2 (FAKE_GPIO_TDM_NET) and MAX_NETS-1 (EPHEMERAL_PATH_NET) are
+  // sentinels the router rewrites paths onto - never hand them to a real net.
+  for (int i = 0; i < MAX_NETS - 2; i++) {
     if (globalState.connections.nets[i].nodes[0] <= 0) {
       if (debugNM)
         Serial.print("found unused Net ");
@@ -1438,15 +1450,20 @@ void listNets(int liveUpdate, Stream *stream)
           int gpioOrAdcNumber = 0;
 
           if (netsShowingSpecial[i] != 0) {
-            for (int j = 0; j < MAX_NODES; j++) {
-              if (globalState.connections.nets[i].nodes[j] > 0) {
-                for (int k = 0; k < 8; k++) {
-                  if (globalState.connections.nets[i].nodes[j] == ADC0 + k || globalState.connections.nets[i].nodes[j] == RP_GPIO_1 + k) {
-                    gpioOrAdcNumber = k;
-                    break;
-                    }
-                  }
+            // scan EVERY node for the ADC/GPIO member (the old unconditional
+            // break looked at nodes[0] only, so a net whose special node was
+            // not first showed channel 0's reading)
+            bool foundSpecial = false;
+            for (int j = 0; j < MAX_NODES && !foundSpecial; j++) {
+              if (globalState.connections.nets[i].nodes[j] <= 0) {
                 break;
+                }
+              for (int k = 0; k < 8; k++) {
+                if (globalState.connections.nets[i].nodes[j] == ADC0 + k || globalState.connections.nets[i].nodes[j] == RP_GPIO_1 + k) {
+                  gpioOrAdcNumber = k;
+                  foundSpecial = true;
+                  break;
+                  }
                 }
               }
             }
@@ -2324,3 +2341,8 @@ void deleteNodesAndShift(); //delete the nodes and bridges that were copied from
 the original net
 
 void leftShiftNodesBridgesNets();*/
+
+// Exported table sizes (States.cpp parseNodeName): the arrays above are
+// incomplete types where they are extern-declared, so sizeof must live here.
+extern const int numNanoDefines = (int)(sizeof(nanoDefines) / sizeof(nanoDefines[0]));
+extern const int numSpecialDefines = (int)(sizeof(specialDefines) / sizeof(specialDefines[0]));

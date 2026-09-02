@@ -205,7 +205,12 @@ static void guideParseStepLine(const String& body, GuideScript& out, String& err
     else if (v == "skip")  st.onFail = GuideOnFail::SKIP;
     else if (v == "block") st.onFail = GuideOnFail::BLOCK;
     v = guideFlowField(fields, "timeout_ms:");
-    if (v.length() > 0) st.timeoutMs = (uint16_t)v.toInt();
+    if (v.length() > 0) {
+        long t = v.toInt();   // uint16_t field: clamp instead of wrapping
+        if (t < 0) t = 0;
+        if (t > 65535) t = 65535;
+        st.timeoutMs = (uint16_t)t;
+    }
     v = guideFlowField(fields, "probe_confirm:");
     if (v.length() > 0) {
         bool ok;

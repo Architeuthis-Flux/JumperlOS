@@ -92,7 +92,7 @@ int setSlowPWMDutyCycle(int gpio_pin, float duty_cycle);
 int setSlowPWMFrequency(int gpio_pin, float frequency);
 int stopSlowPWM(int gpio_pin);
 
-void updateGPIOConfigFromState(void);
+void updateGPIOConfigFromState(int onlyIdx = -1);
 // Apply the persisted direction/pull config to hardware + gpioState.
 // onlyIdx >= 0 applies exactly that gpioDef index (what the probe GPIO menu
 // wants after changing one pin); -1 applies the whole SIO bank. Outputs get

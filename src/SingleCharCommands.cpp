@@ -1555,8 +1555,10 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                         ", filename='" + filename + "', fromApp=" + String( fromApp ) + ")" );
     }
 
-    // Validate slot number
-    if ( slotNum < 0 || slotNum >= NUM_SLOTS ) {
+    // Validate slot number (SLOT_FILE_CONTEXT is the active-file default and
+    // has its own branch below - rejecting every negative number made W
+    // unusable from a project/file context)
+    if ( slotNum != SLOT_FILE_CONTEXT && ( slotNum < 0 || slotNum >= NUM_SLOTS ) ) {
         Jerial.println( "◇ Invalid slot number: " + String( slotNum ) );
         return CMD_SHOW_MENU;
     }
@@ -1602,7 +1604,7 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
             unsigned long humanTime = millis( );
             int shown = 0;
             while ( Jerial.available( ) == 0 && jsonContent.length() == 0 ) {
-                if ( !fromApp && millis( ) - humanTime == 2000 && shown == 0 ) {
+                if ( !fromApp && millis( ) - humanTime >= 2000 && shown == 0 ) {
                     Jerial.println( "\n  Waiting for JSON paste..." );
                     Jerial.println( "  (Copy from Wokwi editor: diagram.json tab)" );
                     shown = 1;
@@ -1748,6 +1750,14 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                 }
             } else {
                 Jerial.println( "  ✗ Parse error: " + errorMsg );
+                // the in-RAM connection list was cleared before parsing: put
+                // the still-intact on-disk state back
+                String reloadErr;
+                if ( mgr.isPathContext( ) ) {
+                    mgr.loadSlotFromPath( String( mgr.getActiveSlotPath( ) ), reloadErr );
+                } else {
+                    mgr.loadSlot( slotNum, reloadErr );
+                }
             }
         } else {
             // ========== INACTIVE SLOT: Parse directly to file (ZERO-COPY) ==========
@@ -4291,6 +4301,7 @@ CommandResult cmd_rawSpeedTest( char c, const String& line ) {
     Jerial.print( ( (float)cycles / (float)( end - start ) ) * 1000 );
     Jerial.println( " kHz\n\r" );
     Jerial.flush( );
+    sendXYraw( 10, 0, 4, 0 );   // the setup crosspoint stayed closed after the test
     releaseCore1Frames( );
 
     return CMD_SHOW_MENU;

@@ -822,6 +822,13 @@ void FileManager::refreshListing( ) {
             }
         }
     }
+    // a listing that shrank (delete, refresh) left selectedIndex == fileCount:
+    // no highlighted row, and Enter/v/e/i did nothing until the wheel moved
+    if ( selectedIndex >= fileCount ) {
+        selectedIndex = ( fileCount > 0 ) ? fileCount - 1 : 0;
+    }
+    if ( selectedIndex < 0 ) selectedIndex = 0;
+    if ( displayOffset > selectedIndex ) displayOffset = selectedIndex;
 }
 
 void FileManager::showCurrentListing( bool showHeader ) {
@@ -1887,7 +1894,7 @@ void FileManager::run( ) {
 
             if ( Serial.available( ) ) {
                 char seq1 = Serial.read( );
-                bool isCSI = ( seq1 == '[' );
+                bool isCSI = ( seq1 == '[' || seq1 == 'O' );   // CSI, or SS3 arrows (application cursor mode)
                 if ( isCSI && Serial.available( ) == 0 ) {
                     // Same tolerant wait for the sequence's final byte
                     escWaitStart = millis( );
@@ -2691,6 +2698,11 @@ void filesystemApp( bool waitForEnter ) {
 
         if ( c == 'q' || c == 'Q' ) {
             Serial.println( "  File Manager cancelled." );
+            // same teardown as the normal exit: screen state, the OLED
+            // mirror setting and raw-input mode were all left behind here
+            restoreScreenState( );
+            jumperlessConfig.top_oled.show_in_terminal = showOledInTerminal;
+            pushLineBufferingToApp( );
             // Pop context on early exit
             ContextManager::getInstance( ).popContext( );
             return;

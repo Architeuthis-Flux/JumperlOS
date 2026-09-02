@@ -567,7 +567,7 @@ bool statusDiagnosticsMenu() {
 
         // Enable raw input mode for the status menu (navigation keys).
         bool wasInteractive = ( termInInteractiveMode == 1 );
-        setTerminalLineBuffering(true);
+        bool prevLineBuffering = setTerminalLineBuffering(true);
         delay(10);
 
     // The "press enter to start" prompt/wait only exists to break the app's cooked
@@ -611,6 +611,7 @@ bool statusDiagnosticsMenu() {
             // 'q' to cancel before even starting
             if (ch == 'q' || ch == 'Q') {
                 Serial.print("\033[0m");  // Reset colors
+                setTerminalLineBuffering(prevLineBuffering);
                 return true;
             }
         }
@@ -756,7 +757,7 @@ bool statusDiagnosticsMenu() {
     }
     
     // Clean up: resync the app to the user's line-buffering config.
-    pushLineBufferingToApp();
+    setTerminalLineBuffering(prevLineBuffering);   // the user's persisted setting, not the mutated one
     delay(10);
     Serial.print("\033[2J\033[H");  // Clear screen
     Serial.flush();
@@ -1562,7 +1563,11 @@ void action_memoryMap() {
         uintptr_t base       = 0x20000000u;
         uintptr_t heapStart  = (uintptr_t)&__end__;
         uintptr_t stackLimit = (uintptr_t)&__StackLimit;   // top of heap = 0x20080000
+#if defined(OG_JUMPERLESS)
+        uintptr_t sramEnd    = 0x20042000u;                // RP2040: 256 KB + 2x4 KB scratch
+#else
         uintptr_t sramEnd    = 0x20082000u;                // + 8 KB scratch (core stacks)
+#endif
         uint64_t  total      = sramEnd - base;
 
         struct mallinfo mi = mallinfo();
@@ -1641,7 +1646,9 @@ void action_memoryMap() {
                  fmtBytes(heapFree, b3, sizeof(b3)),
                  fmtBytes((uint64_t)(heapStart - base), b4, sizeof(b4)),
                  (unsigned)blocks);
-        drawMemRegion("SRAM  (520 KB)", info, base, total, segs, n);
+        char sramTitle[24];
+        snprintf(sramTitle, sizeof(sramTitle), "SRAM  (%u KB)", (unsigned)(total / 1024));
+        drawMemRegion(sramTitle, info, base, total, segs, n);
 
         // Key for the marked buffers (matches the colors painted above).
         if (nNamed > 0) {
@@ -2343,7 +2350,7 @@ void pioEdgeCapture( const Params& p, bool& quitOut ) {
         return;
     }
 
-    const uint32_t preN = 300, postN = 600;
+    const uint32_t preN = kTracePre, postN = kTracePost;   // a window larger than the ring dumped nothing around the edge
     // Released holds the node high so y reaches 0 -> elapsed == timeout. Any
     // contact makes elapsed < timeout; treat that as "pressed".
     const uint32_t edgeThresh = timeout > 8 ? timeout - 4 : 1;

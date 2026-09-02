@@ -169,7 +169,9 @@ bool OledVars::resolveToken( const char* token, char* out, size_t outSize ) {
     // Pushed variables: try the full token first (so "undo" / custom names
     // with no arg work), then the base name.
     if ( getStr( token, out, outSize ) ) return true;
-    if ( colon && getStr( base, out, outSize ) ) return true;
+    // names are STORED truncated to OLED_VAR_NAME_MAX-1: a 24+ char name never
+    // matched the untruncated token above, so look the truncated base up too
+    if ( getStr( base, out, outSize ) ) return true;
     return false;
 }
 

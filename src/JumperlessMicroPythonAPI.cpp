@@ -766,8 +766,8 @@ void jl_gpio_set_floating_read( int pin, int floating ) {
         globalState.markDirty();
     } else if ( pin >= 20 && pin <= 27 ) {
         int index = pin - 20;
-        gpioReadFloating[ index ] = 0;
-        globalState.config.gpioReadFloating[ index ] = 0;
+        gpioReadFloating[ index ] = floating;   // (was hardcoded 0)
+        globalState.config.gpioReadFloating[ index ] = (uint8_t)floating;
         globalState.markDirty();
     }
 }
@@ -1355,13 +1355,13 @@ int jl_nodes_connect( int node1, int node2, int save, int duplicates ) {
 
     // Add to RAM state
     // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
-    addBridgeToState( node1, node2, duplicates, true );
+    bool ok = addBridgeToState( node1, node2, duplicates, true );
 
     // Update shown readings to detect current sense connections
     // This enables the marching ants animation when ISENSE_PLUS/MINUS are connected
     //chooseShownReadings( );
 
-    return 1;
+    return ok ? 1 : 0;   // 0 = refused (part_safety) or not added
 }
 
 int jl_nodes_disconnect( int node1, int node2 ) {
@@ -1380,7 +1380,7 @@ int jl_nodes_fast_connect( int node1, int node2, int duplicates ) {
     
     // Add to RAM state
     // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
-    addBridgeToState( node1, node2, duplicates, false );
+    bool ok = addBridgeToState( node1, node2, duplicates, false );
 
     // Update shown readings to detect current sense connections
     // chooseShownReadings( );
@@ -1388,7 +1388,7 @@ int jl_nodes_fast_connect( int node1, int node2, int duplicates ) {
     // Fast refresh with immediate hardware update (bypasses Core 2 scheduler)
     fastRefresh( 1 );  // 1 = show LEDs after refresh
 
-    return 1;
+    return ok ? 1 : 0;
 }
 
 int jl_nodes_fast_disconnect( int node1, int node2 ) {
@@ -1738,8 +1738,9 @@ void jl_send_raw( int chip, int x, int y, int setOrClear ) {
         return; // Invalid chip number
     }
 
-    // Validate x,y coordinates (assuming 0-15 range based on typical crossbar chips)
-    if ( x < 0 || x > 15 || y < 0 || y > 15 ) {
+    // Validate x,y coordinates: CH446Q is 16 X by 8 Y (lastChipXY[].connected
+    // has 8 entries - y 8..15 wrote into the next chip's bitfield)
+    if ( x < 0 || x > 15 || y < 0 || y > 7 ) {
         Serial.print( "jl_send_raw: Invalid coordinates: " );
         Serial.print( x );
         Serial.print( "," );
@@ -2564,8 +2565,10 @@ const char* jl_part_vectors( int baseRow, int width, int gndRow, int vddRow ) {
 #else
     VectorIdentifyResult res[ 8 ];
     int tried = 0;
+    partsClearAbortLatch( );   // a stale scan-flow abort made every later call return instantly
     int n = partsVectorIdentify( baseRow, width, gndRow, vddRow, res, 8,
                                  nullptr, &tried );
+    partsClearAbortLatch( );
     if ( n < 0 ) {
         snprintf( vecBuffer, sizeof( vecBuffer ), "status=-1 tried=0" );
         return vecBuffer;
@@ -2737,7 +2740,13 @@ int jl_oled_display_bitmap( int x, int y, int width, int height,
     if ( !oled.isConnected( ) ) return 0;
     
     if ( data != NULL && data_len > 0 ) {
-        // Display provided bitmap data
+        // Display provided bitmap data - only if the buffer really holds
+        // width x height bits (displayBitmap has no length argument and read
+        // past a short buffer)
+        if ( width <= 0 || height <= 0 || width > 2048 || height > 2048 ||
+             data_len < (size_t)( ( width + 7 ) / 8 ) * (size_t)height ) {
+            return 0;
+        }
         oled.displayBitmap( x, y, data, width, height );
     } else if ( customBitmapLoaded ) {
         // Display previously loaded bitmap
@@ -3907,10 +3916,14 @@ int jl_fs_mkdir( const char* path ) {
         if ( path[ 0 ] == '/' && path[ 1 ] == '\0' ) {
             isdir = true; // Root is always a directory
         } else {
+            // f_open refuses directories (the same fact jl_fs_stat_isdir relies
+            // on): exists() true + open-as-file FAILING means it is a directory
             File f = FatFS.open( path, "r" );
             if ( f ) {
                 isdir = f.isDirectory( );
                 f.close( );
+            } else {
+                isdir = true;
             }
         }
         
@@ -4053,9 +4066,8 @@ int jl_set_state(const char* jsonState, int clearFirst, int fromWokwi) {
         String json = String(jsonState);
         String errorMsg;
 
-        if (clearFirst) {
-            globalState.clear();
-        }
+        // (clearFirst is honoured just before the parse below - clearing here
+        // left the board empty when the file could not be opened)
 
         // Load file if it looks like a path
         if (json.length() > 0 && json.charAt(0) != '{' && safeFileExists(json.c_str(), 500)) {
@@ -4078,6 +4090,9 @@ int jl_set_state(const char* jsonState, int clearFirst, int fromWokwi) {
         // which is path-aware (service() -> saveActiveSlot). So a file context
         // needs no special case: the diagram lands in the active file.
         int activeSlot = SlotManager::getInstance().getActiveSlot();
+        if (clearFirst) {
+            globalState.clear();
+        }
         bool success = parseWokwiDiagram(json, globalState, activeSlot, errorMsg);
 
         if (!success) {

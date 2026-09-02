@@ -2031,10 +2031,14 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
         
         // Check for cancellation (long press)
         if (encoderButtonState == HELD || probeButton.getButtonState() == 1) {
-            // Restore original value if we have a callback
-            // if (config.callback) {
-            //     config.callback(originalValue, true, config.context);
-            // }
+            // Restore the entry value on hardware, same as the serial cancel
+            // below: with this commented out the rails/DAC stayed at the last
+            // live detent while the callers reset globalState to the entry
+            // value ("Hardware was already restored by VoltageAdjuster
+            // callback", they say - now it is).
+            if (config.callback) {
+                config.callback(originalValue, true, config.context);
+            }
             
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
@@ -2054,7 +2058,13 @@ AdjustResult VoltageAdjuster::adjust(VoltageAdjustConfig& config) {
             // }
             
             rotaryDivider = lastDivider;
-            config.initialValue = currentValue; // Update config with new value
+            // Commit the ROUNDED value the display/LEDs/callbacks all showed -
+            // the raw accumulator sits up to 0.05 V off it.
+            {
+                float committed = roundf(currentValue * 10.0f) / 10.0f;
+                if (committed > -0.05f && committed < 0.05f) committed = 0.0f;
+                config.initialValue = committed; // Update config with new value
+            }
             Menus::getInstance().inClickMenu = 0;
             b.clear();
             requestLedShow( -1 );

@@ -270,9 +270,10 @@ void setGPIO( void ) {
             break;
         }
 
-        // Set initial output state for output pins
+        // Set initial output state for output pins. Only state 1 is HIGH:
+        // every other code (2..7, 0xff) is a mode marker, never a level.
         if ( globalState.config.gpioDirection[ i ] == 0 ) {
-            gpio_put( gpio_pin, gpioState[ i ] );
+            gpio_put( gpio_pin, gpioState[ i ] == 1 );
         }
     }
 }
@@ -313,9 +314,12 @@ int gpioReadWithFloating(
     }
 
     if (gpio_get_function(pin) == GPIO_FUNC_I2C || gpio_get_function(pin) == GPIO_FUNC_UART || pin < 2){
+        // Never twiddle pulls/input-enable on these pads - but DO report the
+        // level (a hardcoded 0 made a Tx/Rx pin configured as an SIO input read
+        // LOW forever; the real read below it was unreachable).
+        int plain = gpio_get( pin );
         __atomic_clear( (volatile char *)&readingGPIO, __ATOMIC_RELEASE );  // unlock before early return
-        return 0;
-        return gpio_get( pin );
+        return plain;
     }
 
     int dir = gpio_get_dir( pin );
@@ -559,8 +563,13 @@ const char* gpio_function_name_for_pin( uint gpio, gpio_function_t function ) {
     // on RP2040 where the RP2350-only mux functions are compiled out, so a raw
     // `< 15` would index past the end. The F9 special-casing above is RP2350
     // pin mapping; on RP2040 this lookup is best-effort for the debug display.
-    if ( (int)function < GPIO_FUNCTION_NAMES_COUNT ) {
-        return gpio_function_names[ function ].name;
+    // The table is hand-ordered and conditionally compiled, so index != enum
+    // value (RP2040 shifts every row by one without HSTX; RP2350's rows 10/11
+    // are not USB/UART_AUX). Match on the enum the row carries.
+    for ( int k = 0; k < GPIO_FUNCTION_NAMES_COUNT; k++ ) {
+        if ( gpio_function_names[ k ].function == function ) {
+            return gpio_function_names[ k ].name;
+        }
     }
 
     // GPIO_FUNC_NULL (0x1f) or other special values
@@ -747,7 +756,11 @@ void __not_in_flash_func(readGPIO)( ) {
         }
 
         if ( gpioNet[ i ] == -1 ) {
-            if ( gpioState[ i ] != 6 && !bcdOwnsPin( i ) ) {
+            // OUTPUTS keep their 0/1 level: this stamp is the input-pulldown
+            // marker, and both appliers hand gpioState[] to gpio_put() as the
+            // level, so an unrouted output was driven HIGH on every refresh.
+            if ( gpioState[ i ] != 6 && !bcdOwnsPin( i ) &&
+                 globalState.config.gpioDirection[ i ] != 0 ) {
                 // bus-role marks survive the acquire-to-route window (sweep),
                 // and so does a live BCD counter bit: an unrouted counter pin
                 // is still driving a real level, and stamping it to 4 here
@@ -1383,6 +1396,15 @@ int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
     int gpio_index = gpio_pin - 1;                 // Convert to 0-based index
     int physical_pin = gpioDef[ gpio_index ][ 0 ]; // Get physical pin number
 
+    // A slow (timer) PWM on this pin dies first: left alone its 1 ms callback
+    // kept gpio_put-ing the pad under the hardware PWM, and every later
+    // setPWMDutyCycle()/setPWMFrequency() saw the stale flag and took the slow
+    // path (setupSlowPWM tears down the other direction already).
+    if ( gpioSlowPWMEnabled[ gpio_index ] ) {
+        cancel_repeating_timer( &gpioSlowPWMTimers[ gpio_index ] );
+        gpioSlowPWMEnabled[ gpio_index ] = false;
+    }
+
     // Set up PWM
     gpio_set_function( physical_pin, GPIO_FUNC_PWM );
 
@@ -1410,6 +1432,20 @@ int setupPWM( int gpio_pin, float frequency, float duty_cycle ) {
 
     // Enable PWM
     pwm_set_enabled( slice_num, true );
+
+    // The slice is SHARED with the neighbouring routable GPIO (pins 20/21,
+    // 22/23, 24/25, 26/27 = GPIO 1/2, 3/4, 5/6, 7/8): clkdiv and wrap are per
+    // slice, so a live sibling now runs at this frequency. Keep its DUTY by
+    // recomputing its level for the new wrap and record the shared frequency.
+    {
+        int sib = gpio_index ^ 1;
+        if ( sib >= 0 && sib <= 7 && sib != gpio_index && gpioPWMEnabled[ sib ] ) {
+            pwm_set_gpio_level( gpioDef[ sib ][ 0 ],
+                                (uint32_t)( gpioPWMDutyCycle[ sib ] * ( wrap + 1 ) ) );
+            gpioPWMFrequency[ sib ] = frequency;
+            globalState.config.gpioPwmFrequency[ sib ] = frequency;
+        }
+    }
 
     // Update state tracking
     gpioPWMFrequency[ gpio_index ] = frequency;
@@ -1516,8 +1552,15 @@ int stopPWM( int gpio_pin ) {
     // Find out which PWM slice is connected to this GPIO
     uint slice_num = pwm_gpio_to_slice_num( physical_pin );
 
-    // Disable PWM
-    pwm_set_enabled( slice_num, false );
+    // Disable the slice only when the sibling channel is idle: the slice is
+    // shared (see setupPWM), and halting it froze the neighbour's PWM at
+    // whatever level it was at while its flags still said "running".
+    {
+        int sib = gpio_index ^ 1;
+        if ( !( sib >= 0 && sib <= 7 && sib != gpio_index && gpioPWMEnabled[ sib ] ) ) {
+            pwm_set_enabled( slice_num, false );
+        }
+    }
 
     // Set pin back to SIO function
     gpio_set_function( physical_pin, GPIO_FUNC_SIO );
@@ -1561,12 +1604,19 @@ void updateStateFromGPIOConfig(int onlyIdx) {
     if (routableGpioFunction(i) == GPIO_FUNC_SIO) {
 
       switch (globalState.config.gpioDirection[i]) {
-        case 0: // output (starts low)
-          gpioState[i] = 0;
+        case 0: { // output: a NEW output starts low, an existing one keeps its level
+          bool wasOut = gpio_is_dir_out(gpio_pin);
+          gpioState[i] = (wasOut && gpio_get_out_level(gpio_pin)) ? 1 : 0;
           gpio_set_dir(gpio_pin, true);  // Set as output
           gpio_set_pulls(gpio_pin, false, false);  // No pulls
-          // gpio_put(gpio_pin, 0);
+          if (!wasOut) {
+            // gpio_set_dir only flips OE; a stale SIO OUT latch (from a PWM
+            // level, an earlier HIGH) would drive the row HIGH the moment the
+            // pin became an output. This put used to be commented out.
+            gpio_put(gpio_pin, 0);
+          }
           break;
+        }
         case 1: // input (pulls per config)
           switch (globalState.config.gpioPulls[i]) {
             case 0: // pulldown
@@ -1599,7 +1649,7 @@ void updateStateFromGPIOConfig(int onlyIdx) {
     }
   }
 
-void updateGPIOConfigFromState(void) {
+void updateGPIOConfigFromState(int onlyIdx) {
   if ( routableGpioAbsent( ) ) {
     return;
   }
@@ -1609,6 +1659,12 @@ void updateGPIOConfigFromState(void) {
   int changed = 0;
   for (int i = 0; i < 10; i++) {  // Changed from 8 to 10 to include UART pins
     // Map gpioState to direction and pull settings
+    // onlyIdx >= 0: the caller changed ONE pin's gpioState - copying the
+    // whole bank turned core 1's readGPIO stamps into config for every
+    // unrouted pin (input-pulldown over the user's own settings).
+    if (onlyIdx >= 0 && i != onlyIdx) {
+      continue;
+    }
 
     int gpio_pin = gpioDef[i][0];  // Map GPIO 0-7 to pins 20-27
 
@@ -1707,6 +1763,10 @@ void applyGpioSettingsFromConfig(void) {
   if ( routableGpioAbsent( ) ) {
     return;
   }
+  // The counter's truth is the PINS (a probe toggle / pad action / jl_gpio_set
+  // moves a bit without touching bcdValue): sample it before the loop stamps
+  // gpioState, so the re-drive at the bottom encodes what the user sees.
+  int liveBcd = (globalState.config.bcdPins != 0) ? bcdReadValue() : 0;
   for (int i = 0; i < 10; i++) {  // Changed from 8 to 10 to include UART pins
 
     // Combine direction and pull settings into a single value
@@ -1716,6 +1776,14 @@ void applyGpioSettingsFromConfig(void) {
 
     // Skip bus-role pins (gpioState 6), same contract as setGPIO().
     if (gpioState[i] == 6) {
+      continue;
+      }
+    // Same skips as setGPIO(): machine.Pin owns dir/pulls until release, and a
+    // live PWM (hardware or slow-timer) owns the mux/direction.
+    if (globalState.config.gpioPythonOwned[i]) {
+      continue;
+      }
+    if (i <= 7 && (gpioPWMEnabled[i] || gpioSlowPWMEnabled[i])) {
       continue;
       }
 
@@ -1730,9 +1798,16 @@ void applyGpioSettingsFromConfig(void) {
 
    // if (gpio_get_function(gpio_pin) == GPIO_FUNC_SIO) {
     if (globalState.config.gpioDirection[i] == 0) { // output
-      //gpioState[i] = globalState.config.gpioPulls[i] ? 1 : 0; // 1 for high, 0 for low
+      // An output that is ALREADY an output keeps its live level (this runs
+      // on every config.txt save, and stamping 0 here made the next refresh
+      // drive every user-HIGH output LOW); a pin turning INTO an output
+      // starts low, latch cleared explicitly.
+      bool wasOut = gpio_is_dir_out(gpio_pin);
+      gpioState[i] = (wasOut && gpio_get_out_level(gpio_pin)) ? 1 : 0;
       gpio_set_dir(gpio_pin, true);
-      gpioState[i] = 0;
+      if (!wasOut) {
+        gpio_put(gpio_pin, 0);
+      }
       // Serial.print("gpio_pin: ");
       // Serial.print(gpio_pin);
       // Serial.print(" gpioState[i]: ");
@@ -1780,8 +1855,11 @@ void applyGpioSettingsFromConfig(void) {
     // this the next setGPIO() refresh drives every counter bit LOW while the
     // UI still shows the old count. fromLoad = no markDirty (this runs on
     // pure load/apply paths; dirtying here made the idle autosave rewrite the
-    // slot file after every config change).
+    // slot file after every config change). Encode the LIVE value sampled
+    // above, not the stored bcdValue - they diverge whenever a bit was moved
+    // by something other than the counter.
     if (globalState.config.bcdPins != 0) {
+        globalState.config.bcdValue = liveBcd;
         bcdApply(true);
     }
 }
@@ -1810,6 +1888,16 @@ void applyStateGpioToHardware(void) {
         // - and re-stamps state 4, which sends readGPIO down the pull-twiddling
         // float path mid-transaction.
         if (gpioState[i] == 6) {
+            continue;
+        }
+        // machine.Pin owns dir/pulls until release; a live PWM (hardware or
+        // the slow timer, which drives an SIO OUTPUT) owns the mux/direction -
+        // re-asserting the config's default INPUT here killed slow PWM on
+        // every slot load and stomped Python pins. Same skips as setGPIO().
+        if (globalState.config.gpioPythonOwned[i]) {
+            continue;
+        }
+        if (i <= 7 && (gpioPWMEnabled[i] || gpioSlowPWMEnabled[i])) {
             continue;
         }
 
@@ -1854,10 +1942,32 @@ void applyStateGpioToHardware(void) {
                 break;
         }
 
-        // Set initial output state for output pins
+        // Set initial output state for output pins (only state 1 is HIGH;
+        // mode markers 2..7 / 0xff must never be interpreted as a level)
         if (globalState.config.gpioDirection[i] == 0) {
-            gpio_put(gpio_pin, gpioState[i]);
+            gpio_put(gpio_pin, gpioState[i] == 1);
         }
+    }
+
+    // A slot that saved PWM on a pin (gpioPwmEnabled persists) never re-armed
+    // it on load: nothing called setupPWM, so the pin came back as a plain SIO
+    // pin while the persisted flag made routableGpioAvailable() report a ghost
+    // "PWM" owner that refused every UI assignment until the flag was cleared
+    // by hand. Re-arm here (the docs promise PWM rides with the slot), then
+    // put the dirty flag back - setupPWM marks dirty and this is a LOAD.
+    {
+        bool wasDirty = globalState.isDirty();
+        for (int i = 0; i <= 7; i++) {
+            if (!globalState.config.gpioPwmEnabled[i]) continue;
+            if (gpioPWMEnabled[i] || gpioSlowPWMEnabled[i]) continue;   // already live
+            if (gpioState[i] == 6 || globalState.config.gpioPythonOwned[i]) continue;
+            if (probeGpioPowerClaimIdx() == i) continue;
+            float f = globalState.config.gpioPwmFrequency[i];
+            float d = globalState.config.gpioPwmDutyCycle[i];
+            if (f < 0.01f || f > 62500000.0f || d < 0.0f || d > 1.0f) continue;
+            setupPWM(i + 1, f, d);
+        }
+        if (!wasDirty) globalState.clearDirty();
     }
 
     // Re-drive a loaded slot's counter (Phase 3): the loop above restored
@@ -2187,16 +2297,23 @@ int bcdReadValue( void ) {
     }
     int count = bcdPinCount( mask );
     int value = 0;
+    // Input bits are sampled off the pad: hold the same lock core 1's floating
+    // sweep takes, or a read can land mid-twiddle (input-enable off) and count
+    // a driven-HIGH bit as 0.
+    bcdLockGpioReads( );
     for ( int bit = 0; bit < count; bit++ ) {
         int idx = bcdBitIndexIn( mask, bit );
         if ( idx < 0 ) {
             break; // fewer set bits than the count - cannot happen
         }
-        if ( !bcdPinClaimable( idx ) ) {
-            continue; // bcdApply skipped this bit too - it reads 0
+        // Strict availability, same rule as bcdApply's load path: a PWM-owned
+        // bit (hardware OR the slow timer, which toggles an SIO output and so
+        // passed the mux test below) is not our level - it flapped the count.
+        if ( !routableGpioAvailable( idx ) ) {
+            continue;
         }
         if ( routableGpioFunction( idx ) != GPIO_FUNC_SIO ) {
-            continue; // PWM / UART / a stale mux holds the pad - not our level
+            continue; // UART / a stale mux holds the pad - not our level
         }
         uint pin = (uint)gpioDef[ idx ][ 0 ];
         // An OUTPUT's truth is the level SIO DRIVES, which is what readGPIO()
@@ -2208,6 +2325,7 @@ int bcdReadValue( void ) {
                         : ( gpio_get( pin ) ? 1 : 0 );
         value |= level << bit;
     }
+    bcdUnlockGpioReads( );
     return value;
 }
 
@@ -2398,6 +2516,7 @@ static void bcdDrawAdjustFrame( int value ) {
         rows[ 2 ].segCount = 2;
         rows[ 2 ].align = OLED_ALIGN_LEFT;
         oled.clearPrintShowRich( rows, 3, 1, true, true, true );
+        ReadingDisplay::resetLastShown( ); // painted around ReadingDisplay - its dedupe key is stale
     }
     Serial.printf( "\rBCD %-4s  %s   ", valueText, levels );
 }
@@ -2496,6 +2615,7 @@ static bool bcdEnsureRange( int preferredStart ) {
     }
     if ( mask != 0 ) {
         globalState.setBcdPins( mask ); // wraps the stored value in range
+        bcdApply( false ); // drive the fresh range NOW - a claimed-but-undriven mask persisted as inputs and every later load flipped them to outputs silently
         return true;
     }
 
@@ -3028,6 +3148,7 @@ static void gpioCarouselDrawFrame( int gpioIdx, int item ) {
         rows[ 1 ].segCount = 1;
         rows[ 1 ].align = OLED_ALIGN_CENTER;
         oled.clearPrintShowRich( rows, 2, 1, true, true, true );
+        ReadingDisplay::resetLastShown( ); // a sub-editor's first frame goes through ReadingDisplay::show, which dedupes on lastLine
     }
 
     // Serial is the whole readout on a board with no OLED (the LED matrix
@@ -3635,6 +3756,13 @@ int gpioOptionsCarousel( int gpioIdx ) {
             requestLedShow( -1 );
             Menus::getInstance( ).inClickMenu = 0;
             g_gpioUiShowsCircuit = false;
+            // The modals read the probe button as a LEVEL; the press EVENT the
+            // PIO handler latched is still queued and would echo into
+            // handleProbeButtonActions as a fresh probe session (gpioAppPicker
+            // idiom).
+            ProbeButton::getInstance( ).clearButtonState( );
+            blockProbeButton = 500;
+            blockProbeButtonTimer = millis( );
             return 0;
         }
 
@@ -3693,6 +3821,7 @@ int gpioOptionsCarousel( int gpioIdx ) {
             holdExitArmed = false;
             probeCancelArmed = false;
             probeConfirmArmed = false;
+            ProbeButton::getInstance( ).clearButtonState( ); // the press that ended the child stays consumed
             accelerator.reset( );
             encoderAccumulator = 0.0f;
             lastEncoderPosition = encoderPosition;
@@ -4107,7 +4236,12 @@ void gpioSettingsLauncher( void ) {
                     // Hold/probe-remove cancelled the editor: full unwind +
                     // menu reopen. The editors return -1 with the hold
                     // still physically down - wait it out before handing
-                    // the encoder to the reopened menu.
+                    // the encoder to the reopened menu. The probe-remove
+                    // press EVENT is still queued (editors read levels):
+                    // consume it or the reopened menu backs out instantly.
+                    ProbeButton::getInstance( ).clearButtonState( );
+                    blockProbeButton = 500;
+                    blockProbeButtonTimer = millis( );
                     gpioAppWaitOutHold( );
                     Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
                     reopening = true;
@@ -4230,7 +4364,10 @@ void bcdMenuLauncher( void ) {
             if ( r == -1 ) {
                 // Hold/probe-remove inside the modal: full unwind + menu
                 // reopen. The modals return -1 with the hold still down -
-                // wait it out first.
+                // wait it out first, and consume the queued press event.
+                ProbeButton::getInstance( ).clearButtonState( );
+                blockProbeButton = 500;
+                blockProbeButtonTimer = millis( );
                 gpioAppWaitOutHold( );
                 Menus::getInstance( ).requestReopenAtTopLevel( "GPIO" );
                 reopening = true;

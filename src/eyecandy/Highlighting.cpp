@@ -465,7 +465,11 @@ static bool gpioClickWindowOpen( void ) {
     // rails' clickAdjustEnabled reasoning) - on an OLED-less board the
     // window would eat the click for an invisible carousel while the board
     // looks completely idle.
-    return oledConnected && s_gpioWindowNet > 0 &&
+    // oled.oledConnected, the member the panel driver actually writes - the
+    // file-scope `oledConnected` global is never assigned (every writer in
+    // oled.cpp is a member function and binds the member), so the window
+    // never opened.
+    return oled.oledConnected && s_gpioWindowNet > 0 &&
            brightenedNet == s_gpioWindowNet &&
            ( millis( ) - s_gpioWindowAt ) < 1000;
 }
@@ -1319,7 +1323,7 @@ static void uartRefreshLiveView( bool tx, bool rx, const char* txSnapshot,
 // OLED-less board on the default setting behaves exactly as before.
 static bool clickAdjustEnabled( void ) {
     int flag = jumperlessConfig.clickwheel.rail_click_adjust;
-    return flag == 2 || ( flag == 1 && oledConnected );
+    return flag == 2 || ( flag == 1 && oled.oledConnected );
 }
 
 // The prompt for adjustable readings: shown only while a click would
@@ -2672,6 +2676,21 @@ void Highlighting::adjustRailVoltage(int rail) {
     AdjustResult result = VoltageAdjuster::adjust(config);
     
     if (result == AdjustResult::CONFIRMED) {
+        // Commit the confirmed value to HARDWARE as a user write (mirrors
+        // adjustDACVoltage): a value outside the 0..5 V live band was
+        // preview-only while scrolling, so without this the state and the
+        // file said e.g. 7 V while the rail still carried the last live value.
+        {
+            float v = config.initialValue; // the adjuster stores the confirmed value here
+            if (rail == 0 || rail == 1) {
+                setTopRail(v, 1, 0);
+                globalState.power.topRail = v;
+            }
+            if (rail == 0 || rail == 2) {
+                setBotRail(v, 1, 0);
+                globalState.power.bottomRail = v;
+            }
+        }
         // User confirmed - save voltages to persistent storage
         saveVoltages(globalState.power.topRail, globalState.power.bottomRail,
                      globalState.power.dac0, globalState.power.dac1);

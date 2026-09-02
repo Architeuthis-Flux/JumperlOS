@@ -616,6 +616,13 @@ int arduinoPresence = 0;
 
 int checkArduinoResetPin0( void ) {
     // Arduino reset pin 0 should be pulled high when Arduino is present
+    // Never re-drive a line that is being HELD as an output (ESPReset keeps
+    // B1 low as the ESP32 boot strap for the whole flash): a presence poll
+    // mid-flash released the strap. An output-driven reset line means an
+    // Arduino is there.
+    if ( gpio_is_dir_out( ARDUINO_RESET_0_PIN ) ) {
+        return 1;
+    }
     pinMode( ARDUINO_RESET_0_PIN, INPUT );
     delayMicroseconds( ARDUINO_RESET_SENSE_SETTLE_US ); // Let the pull-up charge the line
     return digitalRead( ARDUINO_RESET_0_PIN );
@@ -627,6 +634,13 @@ int checkArduinoResetPin1( void ) {
         return -1; // Return -1 to indicate pin not available
     }
     // Arduino reset pin 1 should be pulled high when Arduino is present
+    // Never re-drive a line that is being HELD as an output (ESPReset keeps
+    // B1 low as the ESP32 boot strap for the whole flash): a presence poll
+    // mid-flash released the strap. An output-driven reset line means an
+    // Arduino is there.
+    if ( gpio_is_dir_out( ARDUINO_RESET_1_PIN ) ) {
+        return 1;
+    }
     pinMode( ARDUINO_RESET_1_PIN, INPUT );
     delayMicroseconds( ARDUINO_RESET_SENSE_SETTLE_US ); // Let the pull-up charge the line
     return digitalRead( ARDUINO_RESET_1_PIN );

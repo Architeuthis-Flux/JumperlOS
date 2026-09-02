@@ -931,11 +931,23 @@ void configResetOptionToDefault(const ConfigOptionDesc* opt, bool liveApply) {
     ConfigOptionDesc defOpt = *opt;
     defOpt.ptr = (void*)((const char*)&jlConfigDefaults + off);
     char defVal[64];
-    configFormatValue(&defOpt, defVal, sizeof(defVal), true);
+    if (opt->hook == HOOK_OLED_CONNECTION) {
+        // the compile-time default (0 = gpio_7_8 via the crossbar) is wrong
+        // for rev 7 boards; resetConfigToDefaults already uses the per-
+        // revision default, the TUI's 'd' did not
+        snprintf(defVal, sizeof(defVal), "%d",
+                 defaultOledConnectionTypeForRevision(jumperlessConfig.hardware.revision));
+    } else {
+        configFormatValue(&defOpt, defVal, sizeof(defVal), true);
+    }
     configSetValue(opt, defVal, liveApply);
 }
 
 bool configOptionIsDefault(const ConfigOptionDesc* opt) {
+    if (opt->hook == HOOK_OLED_CONNECTION) {
+        return jumperlessConfig.top_oled.connection_type ==
+               defaultOledConnectionTypeForRevision(jumperlessConfig.hardware.revision);
+    }
     size_t off = (size_t)((char*)opt->ptr - (char*)&jumperlessConfig);
     return memcmp(opt->ptr, (const char*)&jlConfigDefaults + off, cfgFieldSize(opt)) == 0;
 }
@@ -1170,6 +1182,13 @@ bool saveConfigToFile(const char* filename) {
             const ConfigOptionDesc* opt = &jlConfigOptions[i];
             if (opt->section != s) continue;
             configFormatValue(opt, valBuf, sizeof(valBuf), /*names=*/true);
+            if (opt->section == JLSECT_probe && strcmp(opt->key, "auto_connect") == 0 &&
+                jumperlessConfig.probe.auto_connect == 0) {
+                // 0 = "off until reboot": transient by definition - every
+                // whole-struct save used to persist it (only updateConfigValue
+                // skipped), so the reboot that should re-enable it never did
+                strcpy(valBuf, "1");
+            }
             file.print(opt->key);
             file.print(" = ");
             file.print(valBuf);
@@ -1877,7 +1896,7 @@ void printConfigToSerial(bool showNamesArg) {
                 String sectionName = configCmd.substring(1, endBracket);
                 int section = configSectionFromName(sectionName.c_str());
                 if (section != -1) {
-                    printConfigSectionToSerial(section, showNamesArg);
+                    printConfigSectionToSerial(section, showNames != 0);
                 } else {
                     Serial.print("Unknown section: ");
                     Serial.println(sectionName);
@@ -1888,7 +1907,7 @@ void printConfigToSerial(bool showNamesArg) {
         }
         
         // Default: print all config
-        printConfigSectionToSerial(-1, showNamesArg);
+        printConfigSectionToSerial(-1, showNames != 0);
         Serial.println("\n\n");
         currentCommandLine = "";
         return;
@@ -1932,12 +1951,14 @@ void printConfigToSerial(bool showNamesArg) {
                 char* endBracket = strchr(line, ']');
                 if (endBracket) {
                     char sectionName[32] = {0};
-                    strncpy(sectionName, line + 1, endBracket - (line + 1));
-                    sectionName[endBracket - (line + 1)] = '\0';
+                    size_t secLen = (size_t)(endBracket - (line + 1));
+                    if (secLen > sizeof(sectionName) - 1) secLen = sizeof(sectionName) - 1;   // the line is 127 bytes wide
+                    memcpy(sectionName, line + 1, secLen);
+                    sectionName[secLen] = '\0';
 
                     int section = configSectionFromName(sectionName);
                     if (section != -1) {
-                        printConfigSectionToSerial(section, showNamesArg);
+                        printConfigSectionToSerial(section, showNames != 0);
                     } else {
                         Serial.print("Unknown section: ");
                         Serial.println(sectionName);
@@ -1949,7 +1970,7 @@ void printConfigToSerial(bool showNamesArg) {
 
         // Check for timeout
         if (millis() - lastCharTime > timeout) {
-            printConfigSectionToSerial(-1, showNamesArg);
+            printConfigSectionToSerial(-1, showNames != 0);
             Serial.println("\n\n");
             return;
         }
@@ -1972,7 +1993,7 @@ static bool handleConfigCommandLine(const char* line) {
     }
     if (strcmp(line, "reset") == 0) {
                 resetConfigToDefaults();
-                saveConfigToFile("/config.txt");
+                saveConfig();   // like its siblings: forces the SPIFTL sync and re-syncs the globals
                 Serial.println("Done. Settings have been reset to defaults");
         return true;
             }
@@ -2043,9 +2064,10 @@ static bool handleConfigCommandLine(const char* line) {
                 Serial.println("Done. All settings have been cleared");
                 delay(200);
                 
-                unsigned long startTime = millis() + 1000;
+                unsigned long begin = millis();       // elapsed, not absolute uptime (the loop never ran)
+                unsigned long startTime = begin;      // 500 ms dot cadence
                 int dots = 0;
-                while (millis() < 3000) {
+                while (millis() - begin < 3000) {
                     if (millis() - startTime > 500) {
                         Serial.print("\r                                           \r");
                         Serial.print("Power cycling");
@@ -2074,7 +2096,7 @@ void readConfigFromSerial() {
     bool inSection = false;
 
     unsigned long lastCharTime = millis();
-    const unsigned long timeout = 10;
+    const unsigned long timeout = 100;   // idle ticks of 10 ms: ~1 s between bytes (was 100 ms TOTAL)
 
     // Check if we already have a command line from line buffering mode
     // ONLY use buffered mode if terminal line_buffering is enabled
@@ -2169,21 +2191,36 @@ void readConfigFromSerial() {
 
             // Add character to line buffer if there's space
             if (lineIndex < (int)sizeof(line) - 1) {
-                line[lineIndex++] = c;
-                line[lineIndex] = '\0'; // Keep string null-terminated
-
-                // Special commands act as soon as they're fully typed
-                if (handleConfigCommandLine(line)) {
-                    memset(line, 0, sizeof(line));
-                    lineIndex = 0;
+                if (c == '`' && lineIndex == 0) {
+                    // a pasted "`[section] key = value;" line (printConfig's
+                    // own format): the prompt char is not part of the setting
                     continue;
                 }
+                line[lineIndex++] = c;
+                line[lineIndex] = '\0'; // Keep string null-terminated
             }
+            timedOut = 0;   // a byte arrived: the idle budget restarts (it never did - a human typist was ejected after ~100 ms of TOTAL gaps)
 
                         // Process line when newline or semicolon is received
             if (c == '\n' || c == '\r' || c == ';') {
                 if (lineIndex > 0) {
                     line[lineIndex] = '\0';
+
+                    // Special commands act on the TERMINATED line. Dispatching
+                    // after every byte fired "reset" the moment the 't' of
+                    // "reset_all" arrived (and "self_test" inside
+                    // "self_test_report"), then parsed the tail as junk.
+                    {
+                        char* t = line;
+                        while (*t == ' ' || *t == '\t') t++;
+                        char* e = t + strlen(t);
+                        while (e > t && (e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
+                        if (handleConfigCommandLine(t)) {
+                            memset(line, 0, sizeof(line));
+                            lineIndex = 0;
+                            continue;
+                        }
+                    }
                     
                     // Check if this is a section header
                     if (line[0] == '[') {

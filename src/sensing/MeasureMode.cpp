@@ -257,6 +257,7 @@ void MeasureMode::startMeasurement(int node) {
         return;  // Failed to connect - error already reported
     }
     
+    ephemeralNode = node;   // where the bridge really is (see the same-net hop above)
     measuredNode = node;
     measurementActive = true;
     // Note: measureModeActive is controlled by switch position in service(), not here
@@ -266,6 +267,11 @@ void MeasureMode::startMeasurement(int node) {
     // Highlight the node being measured (minimal LED change)
     brightenNet(node);
 }
+
+// (display dedupe state - reset by stopMeasurement so re-measuring the same
+// node after leaving measure mode repaints instead of showing nothing)
+static float lastVoltage = 0.0f;
+static int lastMeasuredNode = -1;
 
 void MeasureMode::stopMeasurement() {
     if (!measurementActive) {
@@ -279,9 +285,11 @@ void MeasureMode::stopMeasurement() {
     measurementActive = false;
     // Note: measureModeActive is controlled by switch position in service(), not here
     measuredNode = -1;
+    ephemeralNode = -1;
     adcChannel = -1;
     adcDefine = -1;
     firstReading = true;
+    lastMeasuredNode = -1;   // next measurement of the same node repaints
 
     // Stability tracking has to die with the measurement, not just on the
     // switch-position path: an external stop (Python session end) would
@@ -377,7 +385,11 @@ bool MeasureMode::connectADCToNode(int node) {
 }
 
 void MeasureMode::disconnectADC() {
-    if (measuredNode != -1 && adcDefine != -1) {
+    // Tear down the bridge that EXISTS: after a same-net hop measuredNode is
+    // the display node, and removing (measuredNode, adc) matched nothing -
+    // the ephemeral bridge leaked while the pool slot was released.
+    int bridgedNode = (ephemeralNode != -1) ? ephemeralNode : measuredNode;
+    if (bridgedNode != -1 && adcDefine != -1) {
         // Remove the ephemeral ADC connection
         // Pass applyRouting=true to immediately update hardware.
         // ledShowOption 1 = plain redraw. It used to pass -1 assuming
@@ -386,10 +398,11 @@ void MeasureMode::disconnectADC() {
         // blanked the whole board for a few ms on every tip lift / row
         // change in measure mode.
         String errorMsg;
-        globalState.removeEphemeralConnection(measuredNode, adcDefine, errorMsg,
+        globalState.removeEphemeralConnection(bridgedNode, adcDefine, errorMsg,
                                               true,   // applyRouting - immediately apply to hardware
                                               1);     // ledShowOption - plain redraw, no clear
     }
+    ephemeralNode = -1;
     // Return the channel to the ADC pool (the ephemeral machinery above owns
     // routing/cleanup; the pool only arbitrates WHICH ADC we held).
     infraReleaseAdc(INFRA_ADC_MEASURE);
@@ -399,8 +412,6 @@ void MeasureMode::disconnectADC() {
 // Voltage Display (Simple Mode)
 // ============================================================================
 
-static float lastVoltage = 0.0f;
-static int lastMeasuredNode = -1;
 void MeasureMode::updateVoltageDisplay() {
     if (!measurementActive || adcChannel < 0) {
         return;

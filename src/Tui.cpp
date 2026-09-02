@@ -76,7 +76,11 @@ Key readKey(Stream* in) {
             default:  return KEY_NONE;
         }
     }
-    if (b1 != '[') { s_lastChar = b1; return KEY_ESC; }
+    if (b1 != '[') {
+        // ESC + printable (Alt+key): deliver the key instead of eating it as ESC
+        if (b1 >= 32 && b1 <= 126) { s_lastChar = b1; return KEY_CHAR; }
+        s_lastChar = b1; return KEY_ESC;
+    }
 
     // CSI: collect parameter bytes up to the final letter/tilde.
     char params[8];

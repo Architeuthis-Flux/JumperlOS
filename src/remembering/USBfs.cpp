@@ -533,7 +533,7 @@ void validateAllSlots(bool verbose) {
 
 void promptRefreshConnections() {
     // Check if the current slot might have changed on disk
-    String filename = "nodeFileSlot" + String(netSlot) + ".txt";
+    String filename = "/slots/slot" + String(netSlot) + ".yaml";   // (the legacy nodeFileSlotN.txt no longer exists)
     if (FatFS.exists(filename)) {
         Serial.println("USB drive mounted - slot files may have been modified");
         Serial.println("Type 'y' to refresh connections, or any other key to skip");
@@ -595,7 +595,10 @@ void manualRefreshFromUSB() {
         refreshConnections(-1);
         return;   // nothing after this in the function; core1busy already cleared above
     }
-    int validation_result = validateNodeFileSlot(netSlot, usb_debug_enabled);
+    // The legacy nodeFileSlot<n>.txt this gate validated no longer exists for
+    // any slot, so the refresh was a silent no-op; refreshConnections reloads
+    // the YAML slot itself.
+    int validation_result = 0;
     if (validation_result == 0) {
         if (usb_debug_enabled) {
             Serial.println("Slot " + String(netSlot) + " validated successfully");

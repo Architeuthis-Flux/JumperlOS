@@ -628,7 +628,7 @@ void runSnakeGame(void) {
     long lastEncoderPosition = encoderPosition;  // raw position for left/right
     int lastRotaryDivider = rotaryDivider;
     // rotaryDivider = 2;
-    setTerminalLineBuffering(true); // game needs raw input
+    bool prevLineBuffering = setTerminalLineBuffering(true); // game needs raw input
 
     while (true) {
         // rotaryEncoderStuff();  // updates encoderPosition and button
@@ -770,7 +770,7 @@ rotaryEncoderStuff();
     }
 snake_exit:
     rotaryDivider = lastRotaryDivider;
-    pushLineBufferingToApp(); // resync app to the user's config on exit
+    setTerminalLineBuffering(prevLineBuffering); // put the USER's setting back (the mutated one was being re-pushed)
     if (encoderButtonState == HELD) encoderButtonState = IDLE;
     graphicOverlayState.removeOverlay(SNAKE_OVERLAY);
     // The steps screen (if armed) or the logo - never the stale "WASD" text.
@@ -997,7 +997,10 @@ void GraphicOverlayState::debugMenu(void) {
                     int dRow = 1, dCol = 1;
                     
                     while (true) {
-                        if (Jerial.available() > 0) break;
+                        if (Jerial.available() > 0) {
+                            Jerial.read();   // consume it, or the debug menu reads the same 'q' and quits
+                            break;
+                        }
                         
                         row += dRow;
                         col += dCol;

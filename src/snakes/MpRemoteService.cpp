@@ -226,10 +226,15 @@ ServiceStatus MpRemoteService::service( ) {
                 case 0x03: // Ctrl-C: interrupt
                 case 0x04: // Ctrl-D: EOF / soft reset
                 case 0x05: // Ctrl-E: paste mode
+                case 0x06: // Ctrl-F: cursor right (MICROPY_REPL_EMACS_KEYS)
                 case 0x08: // Backspace
                 case 0x09: // Tab
                 case 0x0A: // LF
+                case 0x0B: // Ctrl-K: kill to end of line
                 case 0x0D: // CR (Enter)
+                case 0x10: // Ctrl-P: previous history
+                case 0x15: // Ctrl-U: kill line
+                case 0x17: // Ctrl-W: delete word
                 case 0x1B: // ESC (arrow-key / escape sequences)
                     break; // legitimate: fall through to feed the REPL
                 default:

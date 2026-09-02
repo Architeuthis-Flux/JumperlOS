@@ -1101,10 +1101,15 @@ void BitmapEditor::handleInput(int ch) {
                         running = false;
                     } else if (response == 'n' || response == 'N' || response == 27 || response == 17) {
                         running = false;
-                    } 
+                    } else {
+                        needFullRedraw = true;   // 'c' / anything else: stay (the prompt overwrote the canvas)
+                    }
+                } else {
+                    needFullRedraw = true;       // timed out: stay, keep the edits
                 }
-            } 
-            running = false;
+            } else {
+                running = false;                 // nothing to lose
+            }
             return;
     }
 }
@@ -1428,9 +1433,9 @@ void BitmapEditor::handleMenuNavigation(int ch) {
         const MenuItem& item = menuBar.getItem(menuSelectedIndex);
         
         if (strcmp(item.label, "View") == 0) {
-            // Cycle view mode
-            menuBar.activateItem(menuSelectedIndex);
-            displayMode = (BitmapDisplayMode)menuViewModeValue;
+            // Cycle view mode (switchDisplayMode advances it itself; the
+            // activateItem call advanced it a second time, so View cycled
+            // backwards and the label was momentarily wrong)
             switchDisplayMode();
         } else if (strcmp(item.label, "Enc") == 0) {
             // Cycle encoder mode
@@ -1475,14 +1480,15 @@ void BitmapEditor::handleMenuNavigation(int ch) {
 bool launchBitmapEditor(const String& filepath) {
     BitmapEditor& editor = BitmapEditor::getInstance();
     editor.active = true;
-    unsigned long originalInterval = ProbeSwitch::getInstance().interval_ms;
-    ProbeSwitch::getInstance().interval_ms = 300;
     
     if (!editor.loadFile(filepath)) {
         editor.active = false;
         return false;
     }
     
+    // save/override only on the path that reaches the restore below
+    unsigned long originalInterval = ProbeSwitch::getInstance().interval_ms;
+    ProbeSwitch::getInstance().interval_ms = 300;
     editor.run();
     editor.active = false;
     ProbeSwitch::getInstance().interval_ms = originalInterval;
