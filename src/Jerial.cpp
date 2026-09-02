@@ -10,6 +10,24 @@
 #include "Python_Proper.h" // For ScriptHistory
 #include "SingleCharCommands.h"
 
+// OLEDStream's ANSI filter (both write overloads). Sequences end on ANY CSI
+// final byte 0x40-0x7E - the old m/H/J/K/G list left the latch set after a
+// cursor move or DECSET and silently ate every character until the next
+// lucky terminator. A newline ends a malformed sequence and still prints.
+static bool oledAnsiConsume(bool& inEsc, bool& csi, char c) {
+    if (c == '\x1b') { inEsc = true; csi = false; return true; }
+    if (!inEsc) return false;
+    if (c == '\n' || c == '\r') { inEsc = false; csi = false; return false; }
+    if (!csi) {
+        if (c == '[') { csi = true; return true; }
+        inEsc = false;            // ESC + one char (e.g. ESC c): consumed
+        return true;
+    }
+    if (c >= 0x40 && c <= 0x7E) { inEsc = false; csi = false; }   // final byte
+    return true;
+}
+
+
 // External USB CDC instances (defined in ArduinoStuff.cpp)
 extern Adafruit_USBD_CDC USBSer1;
 extern Adafruit_USBD_CDC USBSer2;
@@ -275,7 +293,7 @@ bool TermControl::service( ) {
             break;
 
         case ANSI_ESCAPE:
-            if ( c == '[' ) {
+            if ( c == '[' || c == 'O' ) {   // CSI, or SS3 (application cursor keys)
                 ansi_state = ANSI_BRACKET;
             } else {
                 ansi_state = ANSI_NORMAL;
@@ -284,6 +302,12 @@ bool TermControl::service( ) {
             break;
 
         case ANSI_BRACKET:
+            // Parameter (0x30-0x3F) and intermediate (0x20-0x2F) bytes belong
+            // to the sequence: "ESC [ 3 ~" (Delete) used to leave "3~" to be
+            // inserted as text. Only the final byte (0x40-0x7E) ends it.
+            if ( ( c >= 0x30 && c <= 0x3F ) || ( c >= 0x20 && c <= 0x2F ) ) {
+                break;
+            }
             ansi_state = ANSI_NORMAL;
             switch ( c ) {
             case 'A':
@@ -1915,16 +1939,7 @@ size_t OLEDStream::write(uint8_t byte) {
     char c = (char)byte;
     
     // Handle ANSI escape sequences - filter them out
-    if (c == '\x1b') { // ESC
-        in_ansi_escape = true;
-        return 1;
-    }
-    
-    if (in_ansi_escape) {
-        // Stay in escape mode until we see 'm' (color code end) or other terminators
-        if (c == 'm' || c == 'H' || c == 'J' || c == 'K' || c == 'G') {
-            in_ansi_escape = false;
-        }
+    if (oledAnsiConsume(in_ansi_escape, ansi_csi, c)) {
         return 1; // Character consumed, don't display
     }
     
@@ -1987,14 +2002,7 @@ size_t OLEDStream::write(const uint8_t *buffer, size_t size) {
         char c = (char)buffer[i];
         
         // Handle ANSI escape sequences - filter them out
-        if (c == '\x1b') {
-            in_ansi_escape = true;
-            continue;
-        }
-        if (in_ansi_escape) {
-            if (c == 'm' || c == 'H' || c == 'J' || c == 'K' || c == 'G') {
-                in_ansi_escape = false;
-            }
+        if (oledAnsiConsume(in_ansi_escape, ansi_csi, c)) {
             continue;
         }
         

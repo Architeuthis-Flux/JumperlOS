@@ -163,7 +163,7 @@ static void usbSer3_sendAllStatus(Stream* out) {
         if (reading < 0 || reading > 3) reading = 3;
         out->printf("{\"net\":%d,\"reading\":\"%s\"}", gpioNet[i], readingNames[reading]);
     }
-    out->print("],\r\n");
+    out->print("]\r\n");   // (the sections below carry their own leading comma)
 
     String json = JsonState::getJumperlessStateJSON("nets");
     if (json.length() > 0) {
@@ -1083,7 +1083,13 @@ static void usbSer3_runInquiry(const String& inq) {
     if (handleUSBSer3Special(c)) return;
     Jerial.setCurrentResponseTarget(&USBSer3);
     char cmdStr[2] = { c, 0 };
-    singleCharCommands.executeCommand(c, String(cmdStr));
+    {
+        // complete as sent: the handler must not block on port 1 for arguments
+        bool wasLine = g_commandInputIsLine;
+        g_commandInputIsLine = true;
+        singleCharCommands.executeCommand(c, String(cmdStr));
+        g_commandInputIsLine = wasLine;
+    }
     Jerial.clearCurrentResponseTarget();
     USBSer3.flush();
 }
@@ -1210,7 +1216,12 @@ void SingleCharCommands::serviceUSBSer3() {
         char cmdStr[2] = { c, 0 };
         lastInquiry = String(c);
         Jerial.setCurrentResponseTarget(&USBSer3);
-        executeCommand(c, String(cmdStr));
+        {
+            bool wasLine = g_commandInputIsLine;   // same rule as the ':char' path
+            g_commandInputIsLine = true;
+            executeCommand(c, String(cmdStr));
+            g_commandInputIsLine = wasLine;
+        }
         Jerial.clearCurrentResponseTarget();
         USBSer3.flush();
     }

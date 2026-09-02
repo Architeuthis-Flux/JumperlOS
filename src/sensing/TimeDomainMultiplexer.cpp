@@ -349,7 +349,14 @@ int TimeDomainMultiplexer::reassignAdc() {
     infraReleaseAdc(INFRA_ADC_TDM);
     int newAdc = infraAcquireAdc(INFRA_ADC_TDM, (uint8_t)(0x0F & ~(1u << adcChannel)), false);
 
-    if (newAdc < 0) return -1;  // No free ADC available
+    if (newAdc < 0) {
+        // No free ADC: ownership is already released, so stop switching the
+        // inputs onto the (now user-claimed) channel - leaving adcChannel set
+        // kept joining the fake input rows to the user's ADC net every poll.
+        disconnectActive();
+        adcChannel = -1;
+        return -1;
+    }
 
     // Disconnect from old ADC X, reconnect on new ADC X
     if (oldY >= 0 && oldY < 8) {

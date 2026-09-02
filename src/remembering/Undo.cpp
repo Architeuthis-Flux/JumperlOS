@@ -24,6 +24,7 @@
 #include "NetManager.h"  // definesToChar() - friendly node names (GND/D2/...)
 #include "JumperlessDefines.h"
 #include "InfraPaths.h"  // infraIsBridge - the auto-managed authority
+#include "FakeGpio.h"    // clearAllFakeGpio() - redo of clear-all mirrors clearAllConnections()
 #include "RotaryEncoder.h"  // NUM_SLOTS, extern netSlot
 
 extern volatile unsigned long undoActivityUntil;
@@ -312,6 +313,11 @@ uint32_t blobCrc32(const uint8_t* data, size_t n) {
 // Capture the full board state (as slot YAML) into a blob at *outOffset.
 // Returns true on success and sets outOffset/outSize. Caller must hold no
 // other locks.
+// (forward: both are defined further down; the append's ref-neutralizing walk needs them)
+bool undoOpIsBlob(const UndoOp& op);
+inline size_t opRingNext(size_t i);
+static void blobNeutralizeRefs(uint32_t newOff, uint32_t newEnd);
+
 bool blobAppendCurrentState(uint32_t* outOffset, uint32_t* outSize) {
     if (!g_blobs || g_blobCap == 0) return false;
 
@@ -335,6 +341,14 @@ bool blobAppendCurrentState(uint32_t* outOffset, uint32_t* outSize) {
         UNDBG("  blob arena full - wrapping to 0");
         g_blobUsed = 0;
     }
+
+    // The region we are about to overwrite may still be referenced by an
+    // older clear-all op or snapshot (after a wrap, offset 0 always is).
+    // Nothing tied a ref to ITS blob, so such a ref validated magic+CRC
+    // against the NEWER blob and undo restored a different board. Neutralize
+    // the refs now (size 0 = "no blob", which the restore path refuses
+    // loudly instead of guessing).
+    blobNeutralizeRefs((uint32_t)g_blobUsed, (uint32_t)(g_blobUsed + aligned));
 
     uint8_t* dst = g_blobs + g_blobUsed;
     BlobHeader* hdr = (BlobHeader*)dst;
@@ -493,8 +507,11 @@ void applyOp(const UndoOp& op) {
         case UNDO_OP_CLEAR_ALL:
             // Re-applying a clear means clear again. Connections are wiped
             // without re-recording (we're inside applyOp, g_undoApplying
-            // is true, so the hook short-circuits).
+            // is true, so the hook short-circuits). Mirror what the recorded
+            // action (clearAllConnections) really did: fake-GPIO state too.
             globalState.connections.clear();
+            clearAllFakeGpio();
+            globalState.markDirty();
             break;
         case UNDO_OP_BLOB_REPLACE:
             blobRestoreState(op.blob.blobOffset, op.blob.blobSize);
@@ -641,6 +658,33 @@ struct SnapshotEntry {
     uint8_t  slot;       // owning slot - clear-all restore is per-slot
     bool     valid;
 };
+
+// See blobAppendCurrentState: drop every op/snapshot ref into [newOff,newEnd).
+static void blobNeutralizeRefs(uint32_t newOff, uint32_t newEnd) {
+    if (g_ops && g_opCap) {
+        for (size_t i = g_opTail; i != g_opHead; i = opRingNext(i)) {
+            UndoOp& op = g_ops[i];
+            if (!undoOpIsBlob(op) || op.blob.blobSize == 0) continue;
+            uint32_t a = op.blob.blobOffset, b = a + op.blob.blobSize;
+            if (a < newEnd && b > newOff) {
+                UNDBG("  neutralizing op %u blob ref off=%u", (unsigned)i, (unsigned)a);
+                op.blob.blobSize = 0;
+            }
+        }
+    }
+    if (g_snapshots) {
+        for (size_t i = 0; i < g_snapshotCap; i++) {
+            SnapshotEntry& sn = g_snapshots[i];
+            if (!sn.valid || sn.blobSize == 0) continue;
+            uint32_t a = sn.blobOffset, b = a + sn.blobSize;
+            if (a < newEnd && b > newOff) {
+                UNDBG("  invalidating snapshot %u off=%u", (unsigned)i, (unsigned)a);
+                sn.valid = false;
+            }
+        }
+    }
+}
+
 
 // Cross-reboot helper: find the snapshot matching `snapTxnId` in the
 // ring and restore globalState from its blob. Returns true on success.

@@ -238,6 +238,13 @@ void WaveGen::end() {
  *    @brief  Set the active channel
  */
 void WaveGen::setChannel(waveGen_channel_t channel) {
+    // Stop the stream while _channel still names the OLD channel: _dmaStop
+    // invalidates that channel's MCP4728 shadow, and doing it after the
+    // assignment invalidated the new one while the streamed channel kept a
+    // stale "known" word (later cached rail/DAC writes to it were skipped).
+    if (_initialized && _dmaStreaming && channel != _channel) {
+        _dmaStop();
+    }
     _channel = channel;
     _params_changed = true;
     if (_initialized) {
@@ -850,6 +857,9 @@ void WaveGen::busResume() {
             hw->dma_cr = I2C_IC_DMA_CR_TDMAE_BITS;
             (void)hw->clr_tx_abrt;
             dma_timer_set_fraction((uint)_dmaTimer, _plan.X, _plan.Y);
+            // the pause counted against the wedge window: a pause longer than
+            // 4 sample periods falsely declared the stream wedged on resume
+            _lastProgressUs = time_us_32();
         }
     }
     spin_unlock(lk, save);
