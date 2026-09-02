@@ -4623,6 +4623,15 @@ void couldntFindPath(int forcePrint) {
       }
       numberOfUnconnectablePaths++;
       globalState.connections.paths[i].skip = true;
+      // Same hazard as the duplicate branch below, one layer up: a failed
+      // ijkl primary keeps its x lanes with y == -2, sendAllPaths never looks
+      // at skip, and sendPath encoded y=-2 as a phantom y6 crosspoint (bench
+      // 2026-09-02: BUF_IN/K.x12 and GP_8/L.x14 landed on K.y6/L.y6 - an
+      // ADC net and GND). Wipe every coordinate of a failed primary.
+      for (int j = 0; j < 4; j++) {
+        globalState.connections.paths[i].x[j] = -1;
+        globalState.connections.paths[i].y[j] = -1;
+      }
     } else if (foundNegative == 1 && globalState.connections.paths[i].duplicate == 1) {
       // A duplicate that couldn't finish routing (e.g. refused a reserved
       // chip-K y-row for sense taps) is silently dropped. Wipe its
