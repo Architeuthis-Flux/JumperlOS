@@ -1187,7 +1187,7 @@ bool saveConfigToFile(const char* filename) {
                 // 0 = "off until reboot": transient by definition - every
                 // whole-struct save used to persist it (only updateConfigValue
                 // skipped), so the reboot that should re-enable it never did
-                strcpy(valBuf, "1");
+                strcpy(valBuf, "on");   // the table's name for 1 (autoConnectTable)
             }
             file.print(opt->key);
             file.print(" = ");

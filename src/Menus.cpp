@@ -3433,10 +3433,12 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                     setBotRail( roundedCurrentChoice, 1, 0 );
                     break;
                 case 3: // DAC 0 - live preview in the same band as the rails
-                    setDac0voltage( roundedCurrentChoice, 1, 0 );
+                    // checkProbePower=true: a USER write, like Probing's DAC adjusters -
+                    // the probe feed must know DAC 0 is claimed and not re-park it
+                    setDac0voltage( roundedCurrentChoice, 1, 0, true );
                     break;
                 case 4: // DAC 1
-                    setDac1voltage( roundedCurrentChoice, 1, 0 );
+                    setDac1voltage( roundedCurrentChoice, 1, 0, true );
                     break;
                 }
             }
