@@ -3129,7 +3129,11 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 // Serial.print("Lchip!!!!!!!!!!!!");
 
                                 ch[path[i].chip[0]].xStatus[xMapL0c0] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapL0c1] = path[i].net;
+                                // xMapL0c1 is an index on the HOP chip (bb = chip[2]): stamping
+                                // it on chip[1] (CHIP_L) reserved an unrelated L pin and left
+                                // the bounce lane free for a second net (the non-L branch
+                                // below marks chip[2] - this one had chip[1]).
+                                ch[path[i].chip[2]].xStatus[xMapL0c1] = path[i].net;
 
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
@@ -3149,7 +3153,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             {
                                 // Serial.print("Lchip!!!!!!!!!!!22222!");
                                 ch[path[i].chip[0]].xStatus[xMapL1c0] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapL1c1] = path[i].net;
+                                ch[path[i].chip[2]].xStatus[xMapL1c1] = path[i].net;   // hop chip, see above
 
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
