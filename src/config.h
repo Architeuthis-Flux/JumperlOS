@@ -234,6 +234,10 @@
     "How many parallel paths to stack for rail connections.") \
   X(routing, stack_dacs, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
     "How many extra parallel paths to stack for DAC connections.") \
+  X(routing, stack_gpio, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many extra parallel paths to stack for GPIO (and UART) connections; 0 = a single crosspoint path.") \
+  X(routing, stack_adcs, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many extra parallel paths to stack for ADC connections; a high-impedance input rarely needs any.") \
   X(routing, part_safety, INT, 0, 0, 2, 1, partSafetyTable, HOOK_NONE, JLC_NONE, \
     "Refuse new connections that would trigger a part warning: off, power (wrong-way supply on a placed part), all (any part warning).")
 

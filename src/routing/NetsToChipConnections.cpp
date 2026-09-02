@@ -1970,13 +1970,14 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
         bridgeDuplicates = duplicatePathsDac;
       }
     }
-    // Regular nets - check THIS BRIDGE's nodes for special cases that should skip duplicates
+    // Regular nets - classify THIS BRIDGE's nodes: GPIO and ADC bridges have
+    // their own stacking counts, fake/virtual ones never stack
     else {
-      // Don't duplicate bridges connecting to real GPIO pins (RP_GPIO_1 through RP_GPIO_8, RP_UART_TX, RP_UART_RX)
-      if ((node1 >= RP_GPIO_1 && node1 <= RP_GPIO_8) || node1 == RP_UART_TX || node1 == RP_UART_RX ||
-          (node2 >= RP_GPIO_1 && node2 <= RP_GPIO_8) || node2 == RP_UART_TX || node2 == RP_UART_RX) {
-        shouldSkipDuplicates = true;
-      }
+      // GPIO (and UART) bridges stack per stack_gpio (default 0): a GPIO has
+      // exactly one lane per breadboard chip on chip L, so a duplicate costs
+      // some other net its route - the user opts in
+      bool isGpioBridge = (node1 >= RP_GPIO_1 && node1 <= RP_GPIO_8) || node1 == RP_UART_TX || node1 == RP_UART_RX ||
+                          (node2 >= RP_GPIO_1 && node2 <= RP_GPIO_8) || node2 == RP_UART_TX || node2 == RP_UART_RX;
       
       // Don't duplicate bridges connecting to fake GPIO pins (FAKE_GPIO_1 through FAKE_GPIO_32)
       if (!shouldSkipDuplicates) {
@@ -1991,17 +1992,18 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
         shouldSkipDuplicates = true;
       }
       
-      // Don't duplicate bridges connecting to ADC nodes (high-impedance inputs don't benefit from parallel paths)
-      if (!shouldSkipDuplicates) {
-        if ((node1 >= ADC0 && node1 <= ADC4) || node1 == ADC7 ||
-            (node2 >= ADC0 && node2 <= ADC4) || node2 == ADC7) {
-          shouldSkipDuplicates = true;
-        }
-      }
+      // ADC bridges stack per stack_adcs (default 0): a high-impedance input
+      // gains nothing from a parallel path
+      bool isAdcBridge = (node1 >= ADC0 && node1 <= ADC4) || node1 == ADC7 ||
+                         (node2 >= ADC0 && node2 <= ADC4) || node2 == ADC7;
       
-      // Use default duplicate count if not explicitly set
+      // Default (-1, "the router decides") resolves per class. A stored count
+      // >= 0 is an explicit per-connection request and is honoured as-is.
       if (bridgeDuplicates < 0) {
-        bridgeDuplicates = shouldSkipDuplicates ? 0 : jumperlessConfig.routing.stack_paths;
+        if (shouldSkipDuplicates)  bridgeDuplicates = 0;
+        else if (isGpioBridge)     bridgeDuplicates = jumperlessConfig.routing.stack_gpio;
+        else if (isAdcBridge)      bridgeDuplicates = jumperlessConfig.routing.stack_adcs;
+        else                       bridgeDuplicates = jumperlessConfig.routing.stack_paths;
       }
     }
      // Serial.print("globalState.connections.nets[");

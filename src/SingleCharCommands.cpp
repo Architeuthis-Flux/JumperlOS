@@ -2081,6 +2081,10 @@ CommandResult cmd_showBridgeArray( char c, const String& line ) {
     target->println( jumperlessConfig.routing.stack_dacs );
     target->print( "railsDuplicates: " );
     target->println( jumperlessConfig.routing.stack_rails );
+    target->print( "gpioDuplicates: " );
+    target->println( jumperlessConfig.routing.stack_gpio );
+    target->print( "adcDuplicates: " );
+    target->println( jumperlessConfig.routing.stack_adcs );
     couldntFindPath( 1 );
     target->print( "\n\rBridge Array\n\r" );
     printBridgeArray( target );

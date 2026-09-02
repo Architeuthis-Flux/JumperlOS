@@ -614,14 +614,14 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
     for (int i = 0; i < connections.numBridges; i++) {
         if ((connections.bridges[i][0] == node1 && connections.bridges[i][1] == node2) ||
             (connections.bridges[i][0] == node2 && connections.bridges[i][1] == node1)) {
-            // Connection exists - update duplicates based on parameter
+            // Connection exists - an explicit count replaces the stored one; a
+            // plain re-add (-1, "no duplicate management" per the MicroPython
+            // docs) leaves it alone. It used to INCREMENT the stored count, so
+            // touching an existing pair with the probe silently spent another
+            // lane on it - and now that -1 means "default", an increment would
+            // have turned a default into an explicit 0.
             if (duplicates >= 0) {
-                // Specific duplicate count provided - replace the value
-                // Serial.println("Updating duplicate count for connection: " + String(node1) + " - " + String(node2) + " to " + String(duplicates));
                 connections.bridges[i][2] = duplicates;
-            } else {
-                // No duplicate count specified - increment existing count
-                connections.bridges[i][2]++;
             }
             connections.invalidateCache(config.autoRefreshOnChange);
             markDirty();
@@ -635,13 +635,13 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
         return false;
     }
     
-    // Determine number of duplicates: -1 means use default from config
-    int numDuplicates;
-    if (duplicates < 0) {
-        numDuplicates = config.stackPaths;  // Use default from config
-    } else {
-        numDuplicates = duplicates;
-    }
+    // -1 = "default", stored AS -1 so the router resolves it per class at
+    // route time (rails -> stack_rails, DACs -> stack_dacs, GPIO -> stack_gpio,
+    // ADCs -> stack_adcs, everything else -> stack_paths). Stamping the generic
+    // stackPaths here turned every default into an explicit count and bypassed
+    // that classification for every probe/menu/Python bridge: GPIO and ADC
+    // bridges stacked, rails got stack_paths instead of stack_rails.
+    int numDuplicates = (duplicates < 0) ? -1 : duplicates;
     
     // Add the bridge
     int idx = connections.numBridges;
@@ -1656,6 +1656,21 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         lineStart = lineEnd + 1;
     }
     
+    // Legacy stamped counts -> default. Until 5.7.10.1 addConnection stored
+    // this slot's stackPaths into every bridge added without a count, and the
+    // file carries that as an explicit "dup: N" - which the router honours
+    // as-is, so GPIO/ADC bridges kept stacking and rails never got
+    // stack_rails. The config section (it follows bridges in the file, so it
+    // is parsed by now) holds the exact value that was stamped: a count equal
+    // to it was never a user request, put it back to default. The one edge is
+    // an explicit per-connection count that happens to equal stackPaths on a
+    // GPIO/ADC/rail/DAC bridge - that becomes default too (use stack_* instead).
+    for (int i = 0; i < connections.numBridges; i++) {
+        if (connections.bridges[i][2] == config.stackPaths) {
+            connections.bridges[i][2] = -1;
+        }
+    }
+
     // Parse the parts: section whole in a single pass (multi-line list items
     // need their own scanner - same pattern as the overlays pass below)
     {
@@ -1774,9 +1789,12 @@ void JumperlessState::serializeBridges(String& output) const {
         String n1Name = nodeValueToString(node1);
         String n2Name = nodeValueToString(node2);
         
-        output += "  - {n1: " + n1Name + 
-                  ", n2: " + n2Name + 
-                  ", dup: " + String(connections.bridges[i][2]);
+        output += "  - {n1: " + n1Name + ", n2: " + n2Name;
+        // dup is written only for an explicit request; a default (-1) is left
+        // out and parses back as -1 on this and on older firmware
+        if (connections.bridges[i][2] >= 0) {
+            output += ", dup: " + String(connections.bridges[i][2]);
+        }
         
         // Add color field if this bridge has a color (0xFFFFFFFF = no color)
         if (connections.bridgeColors[i] != 0xFFFFFFFF) {

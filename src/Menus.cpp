@@ -4820,6 +4820,12 @@ int doMenuAction( int menuPosition, int selection ) {
             } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "DACs" ) != -1 ) {
                 // the old else-branch forced every non-Max pick to 1
                 jumperlessConfig.routing.stack_dacs = pickedMax ? 4 : stackPick;
+
+            } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "GPIO" ) != -1 ) {
+                jumperlessConfig.routing.stack_gpio = pickedMax ? 4 : stackPick;
+
+            } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "ADCs" ) != -1 ) {
+                jumperlessConfig.routing.stack_adcs = pickedMax ? 4 : stackPick;
             }
         }
         Serial.print( "\n\rDuplicate Rails: " );
@@ -4831,6 +4837,10 @@ int doMenuAction( int menuPosition, int selection ) {
         // Serial.print(jumperlessConfig.routing.dac_priority);
         Serial.print( "Duplicate Paths: " );
         Serial.println( jumperlessConfig.routing.stack_paths );
+        Serial.print( "Duplicate GPIO: " );
+        Serial.println( jumperlessConfig.routing.stack_gpio );
+        Serial.print( "Duplicate ADCs: " );
+        Serial.println( jumperlessConfig.routing.stack_adcs );
 
         // Serial.print("\n\n\r");
 
