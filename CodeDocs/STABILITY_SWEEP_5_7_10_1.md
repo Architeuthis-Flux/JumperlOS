@@ -2,8 +2,10 @@
 
 ## Where things stand
 
-dev = `1a24172` (+ one isolated OG-router commit on top, see below), three
-commits past the 5.7.10.0 release (`5cbe06e`). Both targets build (V5 and
+dev = `75758b6`, five commits past the 5.7.10.0 release (`5cbe06e`):
+sweep part 1, part 2, the isolated OG-router fix, this handoff, and a
+follow-up (auto_connect persists as "on"; the menu DAC preview is flagged
+as a user write so the probe feed does not re-park DAC 0). Both targets build (V5 and
 OG). The V5 board on the bench runs the part-1+2 build (fingerprinted:
 XIP `0x10000000 + 0x14dd58` reads the new ekilo status string). Kevin's
 slot0 was captured over port5 before the bench checks and restored after;
@@ -11,7 +13,17 @@ the semantic fingerprint matched.
 
 - `020f59a` part 1: release blockers + one-line fixes (44 files)
 - `1a24172` part 2: terminal parsers, undo arena, measurement restores (7 files + uf2)
-- top commit: OG router hop-pin fix — **untested on OG hardware, drop if in doubt**
+- `ec92a1a` OG router hop-pin fix — **untested on OG hardware, drop if in doubt**
+- `75758b6` follow-up (above); the board was re-flashed with it and the
+  flash bytes match the image at four offsets.
+
+Known gaps stated plainly: bcdEnsureRange only drives the ROUTED-pins
+default range immediately (the fallback-run site still persists without
+driving); a highlighted negative rail is plain blue while the unhighlighted
+rows are the "hot" doubled blue (cosmetic); MicroPython connect()/
+fast_connect() now return 0 for a refused bridge (was always 1); the
+`f { ... }` paste keeps rails/parts/names (was: reset to defaults) - the
+jumperless-v5 skill and the LBM repo do not send it.
 
 VERSION is still 5.7.10.0. The bump → merge to main → release workflow is
 deliberately left for after Kevin has turned the wheel on the encoder paths
