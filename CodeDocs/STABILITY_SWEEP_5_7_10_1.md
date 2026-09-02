@@ -169,6 +169,17 @@ the board is Kevin's right now):
   so that state was not the HIL's. If it recurs: look for "input -
   floating" on a select line in the netlist column.
 
+- **Clickwheel part walk goes round the whole part (Kevin, 14:20).** The
+  encoder scroll used to walk only the pins on the half the part was
+  entered on, then leave; now, from the entry pin, the detents go round the
+  part in pin-number order - off the edge of one side, onto the next pin
+  number on the other side - until every on-board pin has been seen, then
+  the row scan resumes just past the part's span on the half it was entered
+  from (the rows the part still owns are not stops for that one scan). The
+  first step goes the way the wheel points on that side; UP keeps stepping
+  the ring, DOWN steps it back, so reversing retraces. Host model of the
+  rules (DIP-16 / SIP / 2-pin / 1-pin, all entry points): see the commit.
+
 Bench-required additions:
 
 - **Output > Voltage > DAC 0, turn the wheel**: the TOP strip shows the bar
@@ -176,6 +187,10 @@ Bench-required additions:
   confirm applies, long-press restores the strip. Same for DAC 1 / bottom.
 - **Highlight a GPIO input that floats**: the OLED says FLOAT and the
   `options?` tag no longer collides.
+- **Scroll onto a DIP with the wheel**: from the landing, every detent is
+  the next pin number round the chip (across the edge to the other side),
+  then the scan continues past the chip on the side you came in on.
+  Reverse the wheel mid-walk: it retraces.
 - **Kevin's 4051 slot**: after loading it on this build, `b` should show no
   GPIO duplicate (path 21 in his paste) and ADC_1/ADC_2 should route (chip
   K had all eight lanes taken). Routing > Stack > GPIO / ADCs pick and
