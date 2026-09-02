@@ -3015,6 +3015,24 @@ float getActionFloat( int menuPosition, int rail ) {
         break;
     }
 
+    // DAC feedback on the rail STRIP (Kevin): the DAC slider borrows the top
+    // (DAC 0) / bottom (DAC 1) rail LEDs as its readout, exactly the way the
+    // rail slider shows a rail - the rail itself never moves. lightUpRail reads
+    // railLedPreviewVolts ahead of the hardware value; every exit below clears
+    // it and puts the strip highlight back to the -1 the DAC option rows set.
+    const int previewRail = ( rail == 3 ) ? 0 : ( rail == 4 ) ? 1 : -1;
+    auto dacPreviewShow = [&]( float v ) {
+        if ( previewRail < 0 ) return;
+        railLedPreviewVolts[ previewRail ] = v;
+        brightenedRail = previewRail * 2; // 0 = top strip, 2 = bottom strip
+    };
+    auto dacPreviewEnd = [&]( ) {
+        if ( previewRail < 0 ) return;
+        railLedPreviewVolts[ previewRail ] = -100.0f;
+        brightenedRail = -1;
+    };
+    dacPreviewShow( currentChoice ); // the first frame already shows it
+
     // Snapshot the rails BEFORE the slider mutates them. The slider runs
     // a tight encoder/probe loop, applies new voltages on every tick,
     // and bypasses undo recording per-tick (the direct globalState writes
@@ -3084,6 +3102,7 @@ float getActionFloat( int menuPosition, int rail ) {
         // Check for cancellation (long press) - check FIRST on every iteration
         if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
             encoderButtonState = IDLE;
+            dacPreviewEnd( );
             requestLedShow( -1 );
             // Long-press is a "leave the rails wherever the slider was last"
             // exit. The hardware/state still got mutated during the drag,
@@ -3115,6 +3134,7 @@ float getActionFloat( int menuPosition, int rail ) {
                 selectNodeAction( );
             }
 
+            dacPreviewEnd( );
             railCommitEdit();
             return roundedCurrentChoice;
         }
@@ -3122,6 +3142,7 @@ float getActionFloat( int menuPosition, int rail ) {
         // Check for serial cancellation
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
+            dacPreviewEnd( );
             requestLedShow( -1 );
             currentAction.analogVoltage = NAN;   // cancel = do not re-apply
             railCommitEdit();
@@ -3221,9 +3242,16 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 case 2:
                     setBotRail( roundedCurrentChoice, 1, 0 );
                     break;
+                case 3: // DACs follow the probe too (a user write, see the encoder path)
+                    setDac0voltage( roundedCurrentChoice, 1, 0, true );
+                    break;
+                case 4:
+                    setDac1voltage( roundedCurrentChoice, 1, 0, true );
+                    break;
                 }
             }
 
+            dacPreviewShow( roundedCurrentChoice );
             requestLedShow( 2 );
 
             // Reset encoder-based tracking since we're using probe now
@@ -3396,9 +3424,10 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 snprintf( floatString, 8, " %0.1f V", displayChoice );
             }
 
-            // Update LED display
+            // Update LED display (the DAC preview rides the same frame)
             b.clear( 1 );
             b.print( floatString, numberColor, 0xffffff, 0, 1, 1 );
+            dacPreviewShow( roundedCurrentChoice );
             requestLedShow( 2 );
 
             // Update serial
@@ -3458,6 +3487,7 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
         }
     }
 
+    dacPreviewEnd( );
     return roundedCurrentChoice;
 }
 

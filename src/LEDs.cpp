@@ -41,6 +41,7 @@ volatile uint32_t ADCcolorOverride1 = -1;
 volatile uint32_t DACcolorOverride0 = -1;
 ///-2 will set to default
 volatile uint32_t DACcolorOverride1 = -1;
+float railLedPreviewVolts[2] = { -100.0f, -100.0f }; // see LEDs.h
 ///-2 will set to default
 volatile uint32_t GPIOcolorOverride0 = -1;
 ///-2 will set to default
@@ -3456,6 +3457,15 @@ int scaleScale(int value) {
 
   }
 
+// The voltage a rail STRIP renders: the menu's DAC preview wins, then the
+// hardware truth (railHwVolts), then the persisted value. Force-inlined into
+// lightUpRail, which runs from RAM and must keep drawing while flash is busy.
+static inline __attribute__((always_inline)) float railStripVolts(int powerRail) {
+  if (railLedPreviewVolts[powerRail] > -99.0f) return railLedPreviewVolts[powerRail];
+  if (railHwVolts[powerRail] > -99.0f) return railHwVolts[powerRail];
+  return (powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail;
+}
+
 // Mark to run from RAM to avoid flash contention during saves
 void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightness2,
                  int switchPosition) {
@@ -3471,9 +3481,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
       const uint32_t* railPal = railColorsV5[j];
       if ((j % 2) == 0) {
         int pr = j / 2;
-        float vRail = (railHwVolts[pr] > -99.0f)
-                          ? railHwVolts[pr]
-                          : ((pr == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+        float vRail = railStripVolts(pr);
         if (vRail < -0.1f) railPal = railColorsV5Neg[j];
       }
 
@@ -3501,9 +3509,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
               // globalState.power. Read railHwVolts DIRECTLY rather than through
               // getDacHardwareVoltage() - this renderer is __not_in_flash_func and
               // must keep drawing while flash is busy.
-              float currentRailVoltage = (railHwVolts[powerRail] > -99.0f)
-                  ? railHwVolts[powerRail]
-                  : ((powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+              float currentRailVoltage = railStripVolts(powerRail);
 
               if (currentRailVoltage < 0.0) { //flipped when the voltage is negative
                 if ((i == 24 - (abs((int)(currentRailVoltage * 5)))) && (abs((int)currentRailVoltage) <= 5.0)) {
@@ -3572,9 +3578,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
               // globalState.power. Read railHwVolts DIRECTLY rather than through
               // getDacHardwareVoltage() - this renderer is __not_in_flash_func and
               // must keep drawing while flash is busy.
-              float currentRailVoltage = (railHwVolts[powerRail] > -99.0f)
-                  ? railHwVolts[powerRail]
-                  : ((powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+              float currentRailVoltage = railStripVolts(powerRail);
 
               if (currentRailVoltage < -0.1) { //flipped when the voltage is negative
                 // same geometry as the highlighted renderer above (24-/49-):

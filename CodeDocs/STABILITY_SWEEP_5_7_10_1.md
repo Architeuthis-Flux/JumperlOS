@@ -121,6 +121,69 @@ Not drivable from port5/port7 — please check on the real thing:
 - **OG board (if one is around)**: anything routed BB → nano pin via an
   alt path, then a second net that needs the same bounce lane.
 
+## Round 2 (2026-09-02, after Kevin's first look)
+
+Kevin's board was NOT running the dev build when he tested: raw flash bytes
+differed from the 75758b6 image at three of four XIP offsets (an IDE upload
+from JumperlOS-main replaces the dev build silently). So "setting the DACs
+changes the rails" was the 5.7.10.0 bug, not a failed fix. The dev build
+still has to be flashed and wheeled.
+
+What changed in this round (build-verified on both targets, not benched -
+the board is Kevin's right now):
+
+- **DAC slider readout on the rail strips.** Kevin's design: the Output >
+  Voltage slider borrows the TOP strip for DAC 0 and the BOTTOM strip for
+  DAC 1, rendered exactly as that rail's own highlighted bar, while the rail
+  itself never moves. `railLedPreviewVolts[2]` (LEDs.h, -100 = none) is read
+  by lightUpRail ahead of railHwVolts; getActionFloat sets it on entry and
+  every tick and clears it on all four exits. The probe-touch branch of the
+  slider now applies DAC 0/1 too (it only applied rails).
+- **OLED "FLOATING" -> "FLOAT"**: the long word overlapped the `options?`
+  tag now that the GPIO click window actually opens (Highlighting.cpp, both
+  sites). MicroPython's FLOATING constant is untouched.
+- **Stacking per class.** New config keys `[routing] stack_gpio` and
+  `stack_adcs` (both default 0), Stack menu rows GPIO / ADCs, and the `b`
+  print shows them. The real bug was upstream: addConnection stamped the
+  slot's stackPaths into every bridge added without a count, so the router
+  never saw "-1 = default" and never classified - GPIO/ADC bridges stacked,
+  rails got stack_paths (2) instead of stack_rails (3), DACs got 2 instead
+  of 0. Now: -1 is stored as -1; the router resolves per class (rails,
+  DACs, GPIO+UART, ADCs, else stack_paths; fake/virtual never); the YAML
+  writer omits `dup` for defaults (older firmware parses that as -1 and
+  classifies too); fromYAML turns a stored count equal to the slot's
+  stackPaths back into default (that is the exact reversal of the old
+  stamping - the one edge: an explicit per-connection count equal to
+  stackPaths on a GPIO/ADC/rail/DAC bridge becomes default). Re-adding an
+  existing pair without a count no longer increments its duplicate count
+  (a probe tap on an existing wire used to spend a lane silently).
+- **ADC flicker (Kevin: "ADCs rapidly flipping between 0 V and the real
+  value")**: not reproducible now (GPIO 1-3 read OUTPUT / no pull over
+  port5). In his screenshot all three 4051 select lines were INPUTS and
+  4051_A read "input - floating"; core 1's floating test wiggles the pulls
+  of a no-pull input every sweep (RoutableGpio.cpp readGPIO), which
+  toggles the 4051's channel and makes both ADC readings alternate between
+  the selected and the unselected channel - exactly the symptom. Likely
+  mechanism, pre-existing, not confirmed. The HIL run touched only GPIO 1
+  (output, then input, then the slot was reloaded); B and C were inputs too,
+  so that state was not the HIL's. If it recurs: look for "input -
+  floating" on a select line in the netlist column.
+
+Bench-required additions:
+
+- **Output > Voltage > DAC 0, turn the wheel**: the TOP strip shows the bar
+  at the dialed value, the rails do not move, DAC 0 follows in 0..5 V,
+  confirm applies, long-press restores the strip. Same for DAC 1 / bottom.
+- **Highlight a GPIO input that floats**: the OLED says FLOAT and the
+  `options?` tag no longer collides.
+- **Kevin's 4051 slot**: after loading it on this build, `b` should show no
+  GPIO duplicate (path 21 in his paste) and ADC_1/ADC_2 should route (chip
+  K had all eight lanes taken). Routing > Stack > GPIO / ADCs pick and
+  the TUI [routing] rows show the two new keys.
+
+Docs to add to the list below: 06-config `[routing]` table gets stack_gpio
+and stack_adcs; any OLED screenshot showing FLOATING.
+
 ## Docs to update in Jumperless-docs once the behaviour is approved
 
 - 05.7-gpio: "PWM settings go with the slot" is now true on reload (it

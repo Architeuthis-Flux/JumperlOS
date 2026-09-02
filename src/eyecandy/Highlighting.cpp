@@ -1915,7 +1915,7 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                             const char* stateString =
                                 ( gpioInputState == 0 )   ? "LOW"
                                 : ( gpioInputState == 1 ) ? "HIGH"
-                                : ( gpioInputState == 2 ) ? "FLOATING"
+                                : ( gpioInputState == 2 ) ? "FLOAT" // FLOATING overlapped the "options?" tag
                                                           : "?";
                             showGpioPinReading( netHighlighted, gpioInputNumber,
                                                 false, stateString );
@@ -2117,7 +2117,7 @@ int Highlighting::checkForReadingChanges( void ) {
             const char* stateString =
                 ( currentGpioInputState == 0 )   ? "LOW"
                 : ( currentGpioInputState == 1 ) ? "HIGH"
-                : ( currentGpioInputState == 2 ) ? "FLOATING"
+                : ( currentGpioInputState == 2 ) ? "FLOAT"
                                                  : "?";
             showGpioPinReading( showReadingNet, gpioInputNumber, false, stateString );
 
