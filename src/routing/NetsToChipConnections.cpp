@@ -5105,6 +5105,34 @@ void resolveUncommittedHops2(void) {}
       {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 13, 14, -1}, // l
   };
 
+// A row on an SF chip the net already holds, reusable for another hop of
+// the same net (2026-09-03): the row is on the net already, so closing one
+// more of the net's X pins on it changes nothing electrically, and it spares
+// a virgin row - on chip K the scarcest thing on the board (a rail duplicate
+// and every sense tap need one). The row's far-end breadboard pin must be
+// free or the net's own. Primaries only: the duplicate pass (allowStacking
+// 0) keeps looking for virgin rows so a stacked copy is a real second path.
+// Before this an SF-to-SF hop or a same-chip X-X hop always took a virgin
+// row, which is how one net ended up holding two K rows (kevin_fixture:
+// net 9 on K.Y5 and K.Y7).
+static int sameNetSfRow(int chip, int net, int allowStacking) {
+  if (allowStacking == 0 || chip < 8 || chip >= 12) {
+    return -1;
+  }
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[chip].yStatus[y] != net) {
+      continue;
+    }
+    int bb = globalState.connections.chipStates[chip].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, chip) : -1;
+    if (bbX != -1 && !freeOrSameNetX(bb, bbX, net, 1)) {
+      continue;
+    }
+    return y;
+  }
+  return -1;
+}
+
 void resolveUncommittedHops(int allowStacking, int powerOnly,
                             int noOrOnlyDuplicates, int startIndex) {
   if (debugNTCC2) {
@@ -5371,10 +5399,10 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           globalState.connections.paths[i].y[0] == -2 && globalState.connections.paths[i].y[1] == -2) {
         
         int targetChip = globalState.connections.paths[i].chip[0];
-        int sharedY = -1;
+        int sharedY = sameNetSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
         
         // Find a free Y position that can be used for both nodes on the same chip
-        for (int testY = 0; testY < 8; testY++) {
+        for (int testY = 0; sharedY < 0 && testY < 8; testY++) {
           // For breadboard chips, only allow Y=0
           if (targetChip < 8 && testY != 0) {
             continue;
@@ -5466,9 +5494,9 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           
           if (needsY) {
             int targetChip = globalState.connections.paths[i].chip[pos1]; // Both positions should be same chip
-            int freeY = -1;
+            int freeY = sameNetSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
             
-            for (int testY = 0; testY < 8; testY++) {
+            for (int testY = 0; freeY < 0 && testY < 8; testY++) {
               // For breadboard chips, only allow Y=0
               if (targetChip < 8 && testY != 0) {
                 continue;
@@ -5555,9 +5583,9 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
         // Handle regular paths: assign Y to each position independently
         for (int pos = 0; pos < 4; pos++) {
           if (globalState.connections.paths[i].chip[pos] != -1 && globalState.connections.paths[i].y[pos] == -2) {
-            int freeY = -1;
+            int freeY = sameNetSfRow(globalState.connections.paths[i].chip[pos], globalState.connections.paths[i].net, allowStacking);
             
-            for (int testY = 0; testY < 8; testY++) {
+            for (int testY = 0; freeY < 0 && testY < 8; testY++) {
               // For breadboard chips, only allow Y=0
               if (globalState.connections.paths[i].chip[pos] < 8 && testY != 0) {
                 continue;
