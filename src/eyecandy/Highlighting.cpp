@@ -350,12 +350,14 @@ int scrolledRow = -1;
 // Part focus for the mode-1 scroll: a placed part is a first-class stop
 // (Kevin's spec, 2026-08-27). Landing on any of its rows highlights the
 // WHOLE part (role-color dots + the OLED card with pin assignments and
-// cached test data); the next detents walk its pins - around the WHOLE
-// part in pin-number order (Kevin, 2026-09-02: off the edge of one side,
-// on to the next pin number on the other side, not off the part) - then
-// the row scan resumes past the part's span on the half it was entered
-// from. Reachable with zero wires: the stop check is part geometry, not
-// paths[].
+// cached test data); the next detents walk its pins the way [clickwheel]
+// part_walk says (Kevin, 2026-09-03): z (default) goes along this side and
+// then across to the far corner of the other side, so the wheel keeps its
+// direction on the board; pin_order goes round the part by pin number (the
+// DIP convention, which reverses at the ends - "kinda confusing"); off
+// walks this side only. Every walk ends with the row scan resuming past the
+// part's span on the half it was entered from. Reachable with zero wires:
+// the stop check is part geometry, not paths[].
 static int8_t scrollPartIdx = -1;   // -1 = not in part focus
 static int8_t scrollPartPin = -1;   // -1 = the whole part
 static int8_t scrollPartEntry = -1;    // pin index on the row the scan landed on: the first detent goes here
@@ -432,27 +434,42 @@ static int scrollPartOnRow( int row, int* pinIdx ) {
 
 extern unsigned long persistentHighlightTimeout;   // defined below (line ~870)
 
-// The pin-number ring: the part's on-board pins (rows 1..60) ordered by pin
-// number, wrapping from the highest back to the lowest - the way you read
-// a DIP, down one side and back up the other. Unnumbered (offset-placed)
-// pins sort after the numbered ones by row, so an all-offset part walks in
-// row order.
-static bool scrollPartPinOnBoard( const PartDefinition& p, int j ) {
+// The walk is a ring over the part's pins whose ORDER is the part_walk mode:
+//  z / off   - by row: the top side left to right (rows 1..30), then the
+//              bottom side left to right (31..60); the step from the top's
+//              last pin to the bottom's first is the Z's diagonal, so an UP
+//              detent is always "further right on the board"
+//  pin_order - by pin number, wrapping from the highest back to the lowest:
+//              the way you read a DIP, down one side and back up the other.
+//              Unnumbered (offset-placed) pins sort after the numbered ones
+//              by row, so an all-offset part walks in row order.
+// off walks only the side the part was entered on and never wraps.
+enum { PART_WALK_OFF = 0, PART_WALK_Z = 1, PART_WALK_PIN_ORDER = 2 };   // partWalkTable
+static int scrollPartWalkMode( void ) {
+    return jumperlessConfig.clickwheel.part_walk;
+}
+static bool scrollPartMember( const PartDefinition& p, int j ) {
     int r = partPinNode( p, p.pins[ j ] );
-    return r >= 1 && r <= 60;
+    if ( r < 1 || r > 60 ) return false;
+    if ( scrollPartWalkMode( ) == PART_WALK_OFF && scrollPartEntryRow >= 1 &&
+         ( r <= 30 ) != ( scrollPartEntryRow <= 30 ) ) return false;   // this side only
+    return true;
 }
 static int scrollPartRingKey( const PartDefinition& p, int j ) {
+    int r = partPinNode( p, p.pins[ j ] );
+    if ( scrollPartWalkMode( ) != PART_WALK_PIN_ORDER ) return r;
     int n = p.pins[ j ].pinNumber;
-    return ( n > 0 ) ? n : 100 + partPinNode( p, p.pins[ j ] );
+    return ( n > 0 ) ? n : 100 + r;
 }
 // (key, index) ordering breaks ties; fromIdx < 0 asks for the ring's first
-// (dir > 0) / last (dir < 0) pin. -1 when the part has no other on-board pin.
+// (dir > 0) / last (dir < 0) pin. -1 when the part has no other member pin,
+// or (off) when this side is exhausted - off never wraps.
 static int scrollPartRingNext( const PartDefinition& p, int fromIdx, int dir ) {
     int fromKey = ( fromIdx >= 0 ) ? scrollPartRingKey( p, fromIdx ) : 0;
     int best = -1, bestKey = 0;      // the nearest beyond fromIdx in `dir`
     int wrap = -1, wrapKey = 0;      // the ring's far end, for the wrap
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
-        if ( j == fromIdx || !scrollPartPinOnBoard( p, j ) ) continue;
+        if ( j == fromIdx || !scrollPartMember( p, j ) ) continue;
         int k = scrollPartRingKey( p, j );
         bool beyond = ( fromIdx < 0 ) ? false
                     : ( dir > 0 ) ? ( k > fromKey || ( k == fromKey && j > fromIdx ) )
@@ -464,7 +481,8 @@ static int scrollPartRingNext( const PartDefinition& p, int fromIdx, int dir ) {
                                    : ( k > wrapKey || ( k == wrapKey && j > wrap ) );
         if ( wrap < 0 || farther ) { wrap = j; wrapKey = k; }
     }
-    return ( best >= 0 ) ? best : wrap;
+    if ( best >= 0 || fromIdx < 0 ) return ( best >= 0 ) ? best : wrap;
+    return ( scrollPartWalkMode( ) == PART_WALK_OFF ) ? -1 : wrap;
 }
 static bool scrollPartSameHalf( int r1, int r2 ) {
     return ( r1 <= 30 ) == ( r2 <= 30 );
@@ -490,7 +508,7 @@ static int scrollPartPickRingDir( const PartDefinition& p, int e, bool up ) {
 }
 static bool scrollPartSeenAll( const PartDefinition& p ) {
     for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
-        if ( scrollPartPinOnBoard( p, j ) && !( scrollPartVisited & ( 1u << j ) ) ) return false;
+        if ( scrollPartMember( p, j ) && !( scrollPartVisited & ( 1u << j ) ) ) return false;
     }
     return true;
 }
@@ -842,26 +860,32 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             }
         };
 
-        // One detent inside a part (Kevin, 2026-09-02): the whole-part landing
-        // hands the first detent to the entry pin; after that the detents go
-        // round the pin-number ring - the first step the way the wheel points
-        // on THIS side of the part, then on round it, off the edge of one side
-        // and onto the next pin number on the other. UP keeps stepping the
-        // ring that way, DOWN steps it back, so reversing the wheel retraces.
-        // Every on-board pin seen -> the next detent leaves, and the row scan
-        // resumes just past the part's span on the half it was entered from.
+        // One detent inside a part: the whole-part landing hands the first
+        // detent to the entry pin; after that the detents step the ring (order
+        // per part_walk, see scrollPartRingKey). z / off: UP is the next
+        // higher row, always - the wheel keeps its direction on the board.
+        // pin_order: the first step goes the way the wheel points on THIS
+        // side, then on round the part by pin number. Either way UP steps the
+        // ring forward and DOWN steps it back, so reversing the wheel
+        // retraces. Every member pin seen (or, off, this side exhausted) ->
+        // the next detent leaves, and the row scan resumes just past the
+        // part's span on the half it was entered from.
         auto walkPart = [&]( bool up ) {
             const PartDefinition& p = globalState.parts.parts[ scrollPartIdx ];
             int pj = -1;
             if ( scrollPartPin < 0 ) {
                 pj = scrollPartEntry;
-                if ( pj < 0 || pj >= p.numPins || pj >= MAX_PART_PINS || !scrollPartPinOnBoard( p, pj ) ) {
+                if ( pj < 0 || pj >= p.numPins || pj >= MAX_PART_PINS || !scrollPartMember( p, pj ) ) {
                     pj = scrollPartRingNext( p, -1, +1 );   // no usable entry pin: the lowest number
                 }
             } else if ( !scrollPartSeenAll( p ) ) {
                 if ( scrollPartRingUp == 0 ) {
-                    int d = scrollPartPickRingDir( p, scrollPartPin, up );
-                    scrollPartRingUp = (int8_t)( up ? d : -d );
+                    if ( scrollPartWalkMode( ) == PART_WALK_PIN_ORDER ) {
+                        int d = scrollPartPickRingDir( p, scrollPartPin, up );
+                        scrollPartRingUp = (int8_t)( up ? d : -d );
+                    } else {
+                        scrollPartRingUp = +1;   // row order: UP is the higher row
+                    }
                 }
                 pj = scrollPartRingNext( p, scrollPartPin, up ? scrollPartRingUp : -scrollPartRingUp );
             }

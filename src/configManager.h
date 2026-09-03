@@ -459,6 +459,17 @@ const StringIntEntry railClickAdjustTable[] = {
 };
 const int railClickAdjustTableSize = sizeof(railClickAdjustTable) / sizeof(railClickAdjustTable[0]);
 
+// [clickwheel] part_walk - how the encoder scroll walks a placed part's pins
+// (Highlighting.cpp walkPart): off = this side only, then the scan moves
+// on; z = across to the far corner so the wheel keeps its direction;
+// pin_order = round the part in pin-number order (reverses at the ends)
+const StringIntEntry partWalkTable[] = {
+    {"off", 0},
+    {"z", 1},
+    {"pin_order", 2},
+};
+const int partWalkTableSize = sizeof(partWalkTable) / sizeof(partWalkTable[0]);
+
 // [clickwheel] fx_type - mirrors MenuTransitionType in eyecandy/MenuTransitions.h
 const StringIntEntry menuFxTypeTable[] = {
     {"off", 0},
