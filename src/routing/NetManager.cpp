@@ -1159,6 +1159,18 @@ int floatingTermColors[10] = { 203, 215, 221, 192, 117, 75, 176,213, 180, 147 };
 int railTermColors[5] = { 48, 197, 199, 222, 116 };
 
 
+/// @brief 256-colour index for a net's terminal text. A net whose LED colour
+/// was never assigned (packed RGB 0 - the probe feed BUF_IN -> GP_x, or any
+/// net assignNetColors skipped) used to map to index 0 = black, invisible on
+/// a dark terminal; those print grey instead (Kevin, 2026-09-02).
+int netTermColorIndex(int netIndex) {
+  uint32_t rgb = packRgb(netColors[netIndex]);
+  if (rgb == 0) {
+    return 244; // xterm grey50
+  }
+  return colorToVT100(rgb);
+}
+
 void assignTermColor(int startIndex) {
 #ifdef TERM_COLOR_NETS
 
@@ -1175,7 +1187,7 @@ void assignTermColor(int startIndex) {
 
   for (int i = startIndex; i < numberOfNets; i++) {
     if (globalState.connections.nets[i].nodes[0] > 0) {
-      globalState.connections.nets[i].termColor = colorToVT100(packRgb(netColors[i]));
+      globalState.connections.nets[i].termColor = netTermColorIndex(i);
       }
     // changeTerminalColor(globalState.connections.nets[i].termColor);
     // Serial.print("globalState.connections.nets[");
@@ -1434,7 +1446,7 @@ void listNets(int liveUpdate, Stream *stream)
           }
 
         if (floatingTermColor == -1 && i >= 6) {
-        stream->printf("\033[38;5;%dm", colorToVT100(packRgb(netColors[i])));
+        stream->printf("\033[38;5;%dm", netTermColorIndex(i));
           } else if (floatingTermColor == -1 && i < 6) {
             stream->printf("\033[38;5;%dm", railTermColors[i - 1]);
             }
@@ -1491,7 +1503,7 @@ void listNets(int liveUpdate, Stream *stream)
 
               if (TERM_SUPPORTS_RGB == 0 && TERM_SUPPORTS_ANSI_COLORS == 1)
                 {
-                stream->printf("\033[38;5;%dm%s", colorToVT100(packRgb(netColors[i])), "green  - l");
+                stream->printf("\033[38;5;%dm%s", netTermColorIndex(i), "green  - l");
                 } else if (TERM_SUPPORTS_RGB == 1 && TERM_SUPPORTS_ANSI_COLORS == 1)
                   {
                   stream->printf("\033[38;2;0;255;0m%s\033[0m", "green  - l");
@@ -1502,7 +1514,7 @@ void listNets(int liveUpdate, Stream *stream)
               } else if (gpioReading[gpioOrAdcNumber] == 1) {
                 if (TERM_SUPPORTS_RGB == 0 && TERM_SUPPORTS_ANSI_COLORS == 1)
                   {
-                  stream->printf("\033[38;5;%dm%s", colorToVT100(packRgb(netColors[i])), "red    - h");
+                  stream->printf("\033[38;5;%dm%s", netTermColorIndex(i), "red    - h");
                   } else if (TERM_SUPPORTS_RGB == 1 && TERM_SUPPORTS_ANSI_COLORS == 1)
                     {
                     stream->printf("\033[38;2;255;0;0m%s", "red    - h");
