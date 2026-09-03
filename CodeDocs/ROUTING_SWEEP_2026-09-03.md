@@ -283,3 +283,95 @@ the F7 claim leak; the mixed-lane bounce; `pathStruct chip[6]`.
 checks), bench restored to the pre-suite snapshot (Kevin's twelve bridges,
 parts, rails 3.80/2.70 V, DACs 2.50/0.60 V, `[measurement] net_currents`
 back to 1). Nothing pushed.
+
+## 6. Morning follow-up: the LED that read 0.0 mA at 12 mA (Kevin, 10:32)
+
+Kevin's bench, stacking on: an LED fed from the top rail through a pot
+(rows 18-23-24-28, meter 12 mA) showed no ants on 24-28 and the highlight
+read 0.0 mA for both 24-28 and 18-23. My first read (the stacked path's
+three parallel copies lifting the 35 mV deadband to 1.6 mA) was wrong: at
+12 mA the deadband is irrelevant. The chip status told the real story -
+chip D could not be tapped at all:
+
+* D's K lane: net 7's bounce (5-ADC3 through D).
+* D's I and J lanes: net 13's OWN duplicates (same-chip X hops of 24-28
+  took X6/X7 = DI/DJ once X2-X5 were gone), and D's L lane the probe feed.
+* every bounce row: B, C, D by primaries; A, E, F, G, H by duplicates of
+  the rail net and net 11.
+
+Two K rows were free; the tap had no way to reach them. Kevin's ruling: keep
+the stacking, but a duplicate may never take the last route a tap needs
+("reserve a single path"), and do the search-order and same-net-row items.
+
+### 6.1 Changes
+
+* **Same-chip hop search order** (`freeXSearchOrder`, breadboard chips):
+  the twelve breadboard-to-breadboard lanes first, the four I/J/K/L lanes
+  last (they used to be tried in X order, so chip D reached DI/DJ before
+  DE/DF/DG/DH).
+* **A duplicate's same-chip hop never uses an SF lane** (both X searches
+  in `resolveUncommittedHops`).
+* **Tap-escape reservation** (`reservedTapEscapeX/Y`, next to the K-row
+  reservation): a "tap-capable bounce chip" is a breadboard chip whose Y0,
+  K lane and K row are all virgin. A duplicate may not take any of those
+  three from one of the last `kTapBounceReserve = 1` such chips. Primaries
+  are never refused; same-net re-claims pass (the checks only fire on
+  virgin pins). Hooked into `freeOrSameNetX/Y` and, belt and braces, the
+  two status setters.
+* **Tap route tier 4** (`buildEphemeralRouteTiered`, RouteSafety.cpp):
+  bounce through a breadboard row already on the node's net, on a chip
+  whose K lane is virgin (usable K row) or already the net's own (K row
+  shared by the net). Rescues a net spread over several chips when the
+  node's home chip has no lane and no bounce row is left.
+* **Suite**: `("taps",)` proof - the `i!` sense-route dry run must find a
+  route for every scanned node - on `kevin_fixture`, `rail_stacking_light`
+  and the new `stacked_taps_reachable` (Kevin's 10:32 netlist as pasted).
+
+### 6.2 What the first cut missed (two more turns on the bench)
+
+* The reservation first counted only the K-side ingredients (Y0, K lane,
+  K row). A GPIO's tap bounces through a chip whose L lane and L row must
+  be free too, and the last such chip (G) was eaten by GPIO duplicates while
+  the reservation held H, whose L lane a primary owned. Now per tap kind:
+  a chip is capable for rows (Y0 + K lane + K row), or for nodes on I, J or
+  L (those plus its lane into that chip and its row there); a duplicate is
+  refused whatever would take the last chip of any kind it serves.
+* Tier 4 must accept a lane the node's own net already owns (a stacked
+  copy rides it): rows 18 and 41 had only such lanes toward their net's
+  other rows.
+* **F8 (found by the tier-4 trace): `nodeToNetIndex` is empty after every
+  rebuild.** `buildNodeToNetIndex()` runs at the end of `getNodesToConnect()`
+  and loops `for (i < numberOfNets)` - but `clearAllNTCC()` has just zeroed
+  `numberOfNets`, and `sortPathsByNet()` (inside `bridgesToPaths`, which runs
+  AFTER) is what sets it. So after any refresh the index reads -1 for every
+  node. Consequences: RouteSafety's `componentHasShort` labels no wire with
+  a net (only the driven-source rule has ever fired), the 2026-08-24
+  shared-K-row tap fallback never fired, and LEDs.cpp's bridge-colour lookup
+  by index never matches. The tap builder now keys its same-net decisions on
+  the router's own ledger (`ledgerNetAt`: xStatus/yStatus of the node's
+  pin), which is the source of truth anyway. Fixing `buildNodeToNetIndex`
+  itself (iterate the nets array by content) would switch the net-label
+  short check ON for every path and every checked crosspoint send - a
+  behaviour change with a blast radius (part measurement and guide-check
+  routes deliberately join a DAC's net to a row's net) that needs its own
+  pass. Kevin's call; not done here.
+
+Fixture diff (`snap_h2` -> `snap_taps_final`): 6 rows moved across 17
+cases, all in `same_chip_pairs`, all the same-chip hop picking a breadboard
+lane instead of an SF lane (A.X0 = AI -> A.X2 = AB0, and so on); every
+other case identical to the crosspoint. Suite 70/70 (the three `taps`
+proofs included, 24 nodes each on the stacked cases).
+
+Bench, Kevin's live netlist restored on the final build: rows 23/24/28 tap
+through D's I lane and the IK hub lane (`D(x6,y3) I(x14,y3) K(x13,y6)`),
+`get_net_current(13)` = 11.77 mA against the meter's 12 mA, node voltages
+6.69 / 5.49 / 4.36 / 4.05 V down the chain 18 -> 23 -> 24 -> 28.
+
+Observation for Kevin, not chased: the rail path 18-23 reads 37.7 mA for
+the same 12 mA. Its drop is 1.2 V over three parallel copies the scan
+models at 40 ohm per crosspoint; the copper is really ~100 ohm per
+crosspoint there. CH446Q on-resistance rises steeply as the signal nears
+the supply rail, and this net sits at 6-7 V on a ±9 V board, while the
+24-28 estimate at 4.2 V matched the meter. A signal-voltage-dependent
+crosspoint resistance in `computePathCurrents` would fix the rail-side
+numbers; a constant cannot.

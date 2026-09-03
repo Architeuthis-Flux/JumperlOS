@@ -1065,7 +1065,8 @@ static void printSenseRoute(int node, int adc, Stream* out) {
     out->printf("[nvscan] route %d:", node);
     pathStruct r;
     if (!planFastPath(node, ADC0 + adc, &r)) {
-        out->println(" (none - lanes busy, short, or node unknown)");
+        extern char routeTrace[64];
+        out->printf(" (none - lanes busy, short, or node unknown) tier4:%s\n", routeTrace);
         return;
     }
     for (int h = 0; h < 4; h++) {

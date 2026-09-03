@@ -21,6 +21,8 @@ rows (a 4051 on rows 1-8/31-38 pulled DAC0 from 2.4 V to 1.9 V at ADC0, bench
 2026-09-03), so the proof rows are ones Kevin's bench leaves empty (columns
 18-30 and 48-60).
 
+Set JL_ROUTING_CASES=sub1,sub2 to run only the cases whose names contain a
+substring (the whole-suite checks that need every case are skipped).
 Set JL_ROUTING_SNAP_DIR=<dir> to save every case's raw captures, then
 test/hil/tools/routing_snapshot_diff.py <before> <after> shows what a router
 change moved.
@@ -116,10 +118,28 @@ CASES = [
     ("kevin_fixture_2026_09_02",
      [(1, TOP), (38, GND), (2, ADC0), (ADC1, 3), (ADC2, 4), (5, ADC3),
       (6, GP[1]), (7, GP[2]), (GP[3], 8), (TOP, 11), (47, GND), (ADC3, D[0])],
-     True, (2, 3, 0), None),
+     True, (2, 3, 0), None),   # no taps proof: all four ADCs are user nets here
+    # Kevin's bench 2026-09-03: with stacking on, an LED at 12 mA on 24-28
+    # showed no ants - chip D had no lane left for a sense tap (its K lane
+    # to a primary, its I/J lanes to net 24-28's own duplicates) and the
+    # rail net's duplicates had taken every bounce row. Every scanned row
+    # must keep a tap route.
+    ("stacked_taps_reachable",
+     [(1, TOP), (38, GND), (2, ADC0), (5, ADC3), (6, GP[1]), (7, GP[2]),
+      (GP[3], 8), (ADC3, D[0]), (18, 23), (41, 45), (48, 51), (56, 58),
+      (56, GND), (18, TOP), (D[7], 18), (24, 28)],
+     True, (2, 3, 0), ("taps",)),
+    # the same netlist with GPIO stacking on: a GPIO's tap bounces through a
+    # chip whose L lane must be free too, so the reservation has to keep a
+    # chip that serves EVERY tap kind, not just rows
+    ("stacked_taps_gpio_dups",
+     [(1, TOP), (38, GND), (2, ADC0), (5, ADC3), (6, GP[1]), (7, GP[2]),
+      (GP[3], 8), (ADC3, D[0]), (18, 23), (41, 45), (48, 51), (56, 58),
+      (56, GND), (18, TOP), (D[7], 18), (24, 28)],
+     True, (2, 3, 0, 2, 0), ("taps",)),
     ("rail_stacking_light",
      [(TOP, 1), (TOP, 15), (BOT, 31), (GND, 45), (DAC0, 8)],
-     True, (2, 3, 1), None),
+     True, (2, 3, 1), ("taps",)),
     # beyond the fabric on purpose: metrics only, but never a short
     ("nano_dense_metric",
      [(D[i], i + 1) for i in range(6)] + [(A[i], i + 15) for i in range(6)],
@@ -138,7 +158,11 @@ def case_yaml(bridges, stacking):
     [routing] stack_* config. (The slot loader turns a count equal to the
     slot's stackPaths back into "default", so the config block pins that at
     a value no case uses.)"""
-    paths, rails, dacs = stacking
+    paths, rails, dacs = stacking[:3]
+    gpio = stacking[3] if len(stacking) > 3 else 0     # [routing] stack_gpio default
+    adcs = stacking[4] if len(stacking) > 4 else 0     # [routing] stack_adcs default
+    gpio_nodes = set(GP.values()) | {UART_TX, UART_RX}
+    adc_nodes = {ADC0, ADC1, ADC2, ADC3}
     lines = ["version: 2", "sourceOfTruth: bridges", "", "bridges:"]
     for n1, n2 in bridges:
         cls = paths
@@ -146,6 +170,10 @@ def case_yaml(bridges, stacking):
             cls = rails
         elif n1 in (DAC0, DAC1) or n2 in (DAC0, DAC1):
             cls = dacs
+        elif n1 in gpio_nodes or n2 in gpio_nodes:
+            cls = gpio
+        elif n1 in adc_nodes or n2 in adc_nodes:
+            cls = adcs
         lines.append("  - {n1: %d, n2: %d, dup: %d}" % (n1, n2, cls))
     lines += ["", "power:", "  topRail: 0.00", "  bottomRail: 0.00",
               "  dac0: 0.00", "  dac1: 0.00", "",
@@ -187,8 +215,35 @@ def normalized_paths(b_text):
             for r in rows if r["net"] >= 0]
 
 
+def tap_routes():
+    """{node: route or None} from the i! report's sense-route dry run
+    ('[nvscan] route N: A(x9,y1) K(x8,y0) -> ADC0' or '(none ...)'). The
+    report walks the scan's node list, which only exists while the scan
+    runs, so the scan is switched on for the read and paused again."""
+    port1_command("i", 1.5)               # on (the suite keeps it paused)
+    time.sleep(2.0)                       # let it rebuild its node list
+    out = port1_command("i!", 3.0, quiet_after=0.6, max_seconds=15)
+    port1_command("i", 1.5)               # paused again
+    routes = {}
+    for line in out.splitlines():
+        m = re.match(r"\s*\[nvscan\] route (\d+):(.*)$", line.strip("\r"))
+        if not m:
+            continue
+        body = m.group(2).strip()
+        routes[int(m.group(1))] = None if body.startswith("(none") else body
+    return routes
+
+
 def electrical(spec):
     kind = spec[0]
+    if kind == "taps":
+        routes = tap_routes()
+        if not routes:
+            return False, "the i! report listed no sense routes"
+        dead = sorted(n for n, r in routes.items() if r is None)
+        return not dead, "every scanned node keeps a sense-tap route (%d nodes%s)" % (
+            len(routes), "" if not dead else ", NO ROUTE for " + " ".join(
+                NODE_NAME.get(n, str(n)) for n in dead))
     if kind == "loopback":
         a, b = spec[1], spec[2]
         out = jl_exec(f"""
@@ -249,7 +304,10 @@ try:
 
     metrics = {}
     determinism = {}
+    only = [x for x in os.environ.get("JL_ROUTING_CASES", "").split(",") if x]
     for name, bridges, all_routed, stacking, elec in CASES:
+        if only and not any(sub in name for sub in only):
+            continue
         print(f"\n--- {name}: {len(bridges)} bridges, stacking {stacking}")
         paste_out = load_case(bridges, stacking)
         check("State applied successfully" in paste_out, f"{name}: state paste applied")
@@ -296,6 +354,8 @@ try:
 
     # --- determinism: the same document pasted again must route the same ---
     for name in ("parallel_AB", "gnd_spread", "k_rows_all_eight"):
+        if name not in determinism:
+            continue
         spec = next(c for c in CASES if c[0] == name)
         load_case(spec[1], spec[3])
         time.sleep(0.4)
@@ -309,14 +369,16 @@ try:
                     print(f"      first : {l1}\n      second: {l2}")
 
     # --- the hub tier's second shape must have been exercised ---
-    check(metrics.get("h2_through_sf_chips", {}).get("hub_tier", 0) >= 1,
-          "h2_through_sf_chips routed at least one row-to-row path through an SF chip")
+    if "h2_through_sf_chips" in metrics:
+        check(metrics["h2_through_sf_chips"].get("hub_tier", 0) >= 1,
+              "h2_through_sf_chips routed at least one row-to-row path through an SF chip")
 
     # --- rail stacking: what the duplicates actually bought ---
-    m = metrics.get("rail_stacking_light", {})
-    print(f"\n  rail_stacking_light routed duplicates: {m.get('routed_duplicates')}")
-    check(m.get("routed_duplicates", 0) >= 1,
-          "rail stacking produced at least one routed duplicate on a light netlist")
+    if "rail_stacking_light" in metrics:
+        m = metrics["rail_stacking_light"]
+        print(f"\n  rail_stacking_light routed duplicates: {m.get('routed_duplicates')}")
+        check(m.get("routed_duplicates", 0) >= 1,
+              "rail stacking produced at least one routed duplicate on a light netlist")
 
 finally:
     jl_exec("nodes_clear()\nprint('cleared')", timeout=25)
