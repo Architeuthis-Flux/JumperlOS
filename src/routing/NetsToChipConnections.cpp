@@ -1688,6 +1688,287 @@ void sortPathsByNet(
   }
 }
 
+// ============================================================================
+// Hub rescue (2026-09-03): path shapes the tiers above never try
+// ============================================================================
+// After commitPaths / resolveAltPaths / resolveUncommittedHops (and the K-row
+// rescue pass) a primary can still be unrouted while copper is left: every
+// breadboard bounce row is spent but a special-function chip still has free
+// rows, or the single lane from a breadboard chip into the SF chip its node
+// lives on is taken. Two shapes reach that copper within the four crosspoints
+// a pathStruct holds:
+//
+//   H1  BB -> SF through another SF chip (the "hub"):
+//         c0.X[lane c0->hub] on the row y0      -> hub.Y[row wired to c0]
+//         hub.X[hub lane hub<->sf]               -> sf.X[that lane] on a row ys
+//         sf.X[node] on ys
+//       chips: c0, sf, hub, sf. The breadboard chip at the far end of row
+//       ys's wire has its lane into sf claimed too - that wire is on the net.
+//
+//   H2  BB -> BB through an SF chip:
+//         c0.X[lane c0->sf] on y0  -> sf.Y[row wired to c0]
+//         c1.X[lane c1->sf] on y1  -> sf.Y[row wired to c1]
+//         sf.X[xb] closed on both rows, xb a hub lane whose far end (the
+//         other SF chip's pin) is free and gets claimed.
+//       chips: c0, c1, sf, sf. Only hub lanes may bridge: every other X pin
+//       of an SF chip is a real node (a nano pin, a rail, an ADC ...).
+//
+// Runs only for primaries that are still not fully routed, after the whole
+// existing pipeline, so a path that routed before routes exactly as before
+// (test_routing_dense's snapshot diff is the gate). Every wire is claimed at
+// both of its pins; a failed attempt rolls back through the routing
+// transaction. Rows and lanes the net already holds are reused
+// (allowStacking = 1): a row the net owns costs nothing.
+//
+// Topology queries only - nothing here knows a chip letter. TODO V6: the
+// breadboard/SF split (chip < 8), the hub-lane X range (12..14) and the
+// "SF row <-> breadboard chip" wiring should come from the board descriptor.
+
+static const int HUB_LANE_X_FIRST = 12;
+static const int HUB_LANE_X_LAST = 14;
+
+static inline bool hubIsBreadboardChip(int c) { return c >= 0 && c < 8; }
+static inline bool hubIsSfChip(int c) { return c >= 8 && c < 12; }
+
+// The SF chip's row wired to breadboard chip bb (-1 if none).
+static int hubSfRowFor(int sf, int bb) {
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[sf].yMap[y] == bb) {
+      return y;
+    }
+  }
+  return -1;
+}
+
+// A lane is free for net at BOTH its pins.
+static bool hubLaneFree(int a, int xa, int b, int xb, int net) {
+  return freeOrSameNetX(a, xa, net, 1) && freeOrSameNetX(b, xb, net, 1);
+}
+
+// An SF row is usable: the row itself and the breadboard pin at the far end
+// of its wire.
+static bool hubSfRowFree(int sf, int y, int net) {
+  if (!freeOrSameNetY(sf, y, net, 1)) {
+    return false;
+  }
+  int bb = globalState.connections.chipStates[sf].yMap[y];
+  if (!hubIsBreadboardChip(bb)) {
+    return false;
+  }
+  int xbb = xMapForChipLane0(bb, sf);
+  return xbb >= 0 && freeOrSameNetX(bb, xbb, net, 1);
+}
+
+static bool hubClaimSfRow(int sf, int y, int net, const char *where) {
+  int bb = globalState.connections.chipStates[sf].yMap[y];
+  int xbb = xMapForChipLane0(bb, sf);
+  return setChipYStatusSafe(sf, y, net, where) && setChipXStatus(bb, xbb, net, where);
+}
+
+// Wipe the coordinates a failed tier may have left (setPathX/Y refuse to
+// overwrite a real coordinate with a different one). Under a transaction.
+static void hubResetPath(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  p.chip[2] = -1;
+  p.chip[3] = -1;
+  for (int k = 0; k < 4; k++) {
+    p.x[k] = -1;
+    p.y[k] = -1;
+  }
+}
+
+static bool hubRouteBBtoSF(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  int c0 = p.chip[0], sf = p.chip[1], net = p.net;
+  if (!hubIsBreadboardChip(c0) || !hubIsSfChip(sf)) {
+    return false;
+  }
+  int y0 = yMapForNode(p.node1, c0);
+  int xNode = xMapForNode(p.node2, sf);
+  if (y0 < 0 || xNode < 0) {
+    return false;
+  }
+  if (!freeOrSameNetY(c0, y0, net, 1) || !freeOrSameNetX(sf, xNode, net, 1)) {
+    return false;
+  }
+  for (int hub = 8; hub < 12; hub++) {
+    if (hub == sf) {
+      continue;
+    }
+    int xc0 = xMapForChipLane0(c0, hub); // c0's lane into the hub
+    int yh = hubSfRowFor(hub, c0);       // the hub row on that lane
+    int xh = xMapForChipLane0(hub, sf);  // hub lane, hub side
+    int xs = xMapForChipLane0(sf, hub);  // hub lane, sf side
+    if (xc0 < 0 || yh < 0 || xh < 0 || xs < 0) {
+      continue;
+    }
+    if (!freeOrSameNetX(c0, xc0, net, 1) || !freeOrSameNetY(hub, yh, net, 1)) {
+      continue;
+    }
+    if (!hubLaneFree(hub, xh, sf, xs, net)) {
+      continue;
+    }
+    // a row on sf for the hop: one the net already holds first
+    int ys = -1;
+    for (int pass = 0; pass < 2 && ys < 0; pass++) {
+      for (int y = 0; y < 8; y++) {
+        bool held = globalState.connections.chipStates[sf].yStatus[y] == net;
+        if ((pass == 0) != held) {
+          continue;
+        }
+        if (hubSfRowFree(sf, y, net)) {
+          ys = y;
+          break;
+        }
+      }
+    }
+    if (ys < 0) {
+      continue;
+    }
+    saveRoutingState(i);
+    hubResetPath(i);
+    p.chip[2] = hub;
+    p.chip[3] = sf;
+    bool ok = setPathX(i, 0, xc0) && setPathY(i, 0, y0) &&
+              setPathX(i, 1, xNode) && setPathY(i, 1, ys) &&
+              setPathX(i, 2, xh) && setPathY(i, 2, yh) &&
+              setPathX(i, 3, xs) && setPathY(i, 3, ys) &&
+              setChipXStatus(c0, xc0, net, "hub H1 c0 lane") &&
+              setChipYStatusSafe(c0, y0, net, "hub H1 c0 row") &&
+              setChipYStatusSafe(hub, yh, net, "hub H1 hub row") &&
+              setChipXStatus(hub, xh, net, "hub H1 hub lane") &&
+              setChipXStatus(sf, xs, net, "hub H1 sf lane") &&
+              setChipXStatus(sf, xNode, net, "hub H1 sf node") &&
+              hubClaimSfRow(sf, ys, net, "hub H1 sf row");
+    if (!ok) {
+      restoreRoutingState(i);
+      continue;
+    }
+    commitRoutingState();
+    p.altPathNeeded = false;
+    p.sameChip = true;
+    if (debugNTCC2) {
+      Serial.print("hub H1: path ");
+      Serial.print(i);
+      Serial.print(" via ");
+      Serial.print(chipNumToChar(hub));
+      Serial.print(" onto ");
+      Serial.print(chipNumToChar(sf));
+      Serial.print(" row ");
+      Serial.println(ys);
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool hubRouteBBtoBB(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  int c0 = p.chip[0], c1 = p.chip[1], net = p.net;
+  if (!hubIsBreadboardChip(c0) || !hubIsBreadboardChip(c1) || c0 == c1) {
+    return false;
+  }
+  int y0 = yMapForNode(p.node1, c0);
+  int y1 = yMapForNode(p.node2, c1);
+  if (y0 < 0 || y1 < 0) {
+    return false;
+  }
+  if (!freeOrSameNetY(c0, y0, net, 1) || !freeOrSameNetY(c1, y1, net, 1)) {
+    return false;
+  }
+  for (int sf = 8; sf < 12; sf++) {
+    int x0 = xMapForChipLane0(c0, sf);
+    int x1 = xMapForChipLane0(c1, sf);
+    int r0 = hubSfRowFor(sf, c0);
+    int r1 = hubSfRowFor(sf, c1);
+    if (x0 < 0 || x1 < 0 || r0 < 0 || r1 < 0) {
+      continue;
+    }
+    if (!freeOrSameNetX(c0, x0, net, 1) || !freeOrSameNetX(c1, x1, net, 1)) {
+      continue;
+    }
+    if (!freeOrSameNetY(sf, r0, net, 1) || !freeOrSameNetY(sf, r1, net, 1)) {
+      continue;
+    }
+    // a hub lane on sf to bridge the two rows, its far end free
+    int xb = -1, other = -1, xo = -1;
+    for (int x = HUB_LANE_X_FIRST; x <= HUB_LANE_X_LAST && xb < 0; x++) {
+      int o = globalState.connections.chipStates[sf].xMap[x];
+      if (!hubIsSfChip(o)) {
+        continue;
+      }
+      int xoo = xMapForChipLane0(o, sf);
+      if (xoo >= 0 && hubLaneFree(sf, x, o, xoo, net)) {
+        xb = x;
+        other = o;
+        xo = xoo;
+      }
+    }
+    if (xb < 0) {
+      continue;
+    }
+    saveRoutingState(i);
+    hubResetPath(i);
+    p.chip[2] = sf;
+    p.chip[3] = sf;
+    bool ok = setPathX(i, 0, x0) && setPathY(i, 0, y0) &&
+              setPathX(i, 1, x1) && setPathY(i, 1, y1) &&
+              setPathX(i, 2, xb) && setPathY(i, 2, r0) &&
+              setPathX(i, 3, xb) && setPathY(i, 3, r1) &&
+              setChipXStatus(c0, x0, net, "hub H2 c0 lane") &&
+              setChipYStatusSafe(c0, y0, net, "hub H2 c0 row") &&
+              setChipXStatus(c1, x1, net, "hub H2 c1 lane") &&
+              setChipYStatusSafe(c1, y1, net, "hub H2 c1 row") &&
+              setChipYStatusSafe(sf, r0, net, "hub H2 sf row0") &&
+              setChipYStatusSafe(sf, r1, net, "hub H2 sf row1") &&
+              setChipXStatus(sf, xb, net, "hub H2 bridge lane") &&
+              setChipXStatus(other, xo, net, "hub H2 bridge far end");
+    if (!ok) {
+      restoreRoutingState(i);
+      continue;
+    }
+    commitRoutingState();
+    p.altPathNeeded = false;
+    p.sameChip = true;
+    if (debugNTCC2) {
+      Serial.print("hub H2: path ");
+      Serial.print(i);
+      Serial.print(" via ");
+      Serial.print(chipNumToChar(sf));
+      Serial.print(" x");
+      Serial.println(xb);
+    }
+    return true;
+  }
+  return false;
+}
+
+static void rescueViaHubs(int startIndex) {
+  for (int i = startIndex; i < numberOfPaths; i++) {
+    struct pathStruct &p = globalState.connections.paths[i];
+    if (p.pathType == VIRTUAL || p.duplicate != 0 || p.skip) {
+      continue;
+    }
+    if (p.net <= 0 || p.chip[0] < 0 || p.chip[1] < 0) {
+      continue;
+    }
+    if (pathFullyRouted(i)) {
+      continue;
+    }
+    switch (p.pathType) {
+    case BBtoSF:
+    case BBtoNANO:
+      hubRouteBBtoSF(i);
+      break;
+    case BBtoBB:
+      hubRouteBBtoBB(i);
+      break;
+    default:
+      break;
+    }
+  }
+}
+
 void bridgesToPaths(
     int fillUnused,
     int allowStacking,
@@ -1883,6 +2164,11 @@ void bridgesToPaths(
       #endif
     }
   }
+
+  // Hub rescue: shapes no tier above tries, only for primaries still
+  // unrouted (see rescueViaHubs). Before the duplicates, so a primary always
+  // outranks a stacked copy for the copper it needs.
+  rescueViaHubs(startIndex);
   // printPathsCompact(2 );
   // printChipStatus();
   // Serial.println("no duplicates");
