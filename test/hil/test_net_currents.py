@@ -34,7 +34,12 @@ print("ina_mA=", i_vals[len(i_vals) // 2] * 1000.0)
 """)
 vals = parse_kv(out)
 ina_mA = abs(vals.get("ina_mA", 0.0))
-check(3.0 < ina_mA < 80.0, f"INA0 sees a plausible loop current ({ina_mA:.2f} mA)")
+# Floor measured 2026-09-03: this loop (DAC0 0.8 V -> ISENSE+ -> shunt ->
+# ISENSE- -> row -> GND) reads 2.1 mA with every bridge unstacked and 4.5 mA
+# with two copies each; connect() now honours the per-class defaults
+# (stack_dacs 0 since 2026-09-02), so the old 3.0 mA floor assumed copper
+# the router no longer stacks. 1.5 mA still refuses an open loop (0 mA).
+check(1.5 < ina_mA < 80.0, f"INA0 sees a plausible loop current ({ina_mA:.2f} mA)")
 
 # Give the scanner a couple of cycles to tap the loop's nodes, then compare
 # its per-path estimate against the INA reading.

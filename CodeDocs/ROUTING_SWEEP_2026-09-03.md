@@ -367,11 +367,93 @@ through D's I lane and the IK hub lane (`D(x6,y3) I(x14,y3) K(x13,y6)`),
 `get_net_current(13)` = 11.77 mA against the meter's 12 mA, node voltages
 6.69 / 5.49 / 4.36 / 4.05 V down the chain 18 -> 23 -> 24 -> 28.
 
-Observation for Kevin, not chased: the rail path 18-23 reads 37.7 mA for
-the same 12 mA. Its drop is 1.2 V over three parallel copies the scan
-models at 40 ohm per crosspoint; the copper is really ~100 ohm per
-crosspoint there. CH446Q on-resistance rises steeply as the signal nears
-the supply rail, and this net sits at 6-7 V on a ±9 V board, while the
-24-28 estimate at 4.2 V matched the meter. A signal-voltage-dependent
-crosspoint resistance in `computePathCurrents` would fix the rail-side
-numbers; a constant cannot.
+The rail path 18-23 reads 37.7 mA for the LED's 12 mA: expected (Kevin) -
+the 4051 on the same rail net draws the rest, so the rail path carries the
+sum. The 24-28 estimate matched the meter within 2%.
+
+## 7. Second morning round (Kevin, 11:39): the index, and rails first
+
+### 7.1 `nodeToNetIndex` fixed (F8)
+
+`buildNodeToNetIndex()` now walks the nets array by content (a slot with
+number <= 0 is unused or cleared) instead of `for (i < numberOfNets)`, which
+was always 0 when it ran. What that switches on, read from the code:
+
+* `componentHasShort` (RouteSafety) now labels wires with their net, so a
+  component holding nodes of two nets is a short. Its consumers: `validateAllPaths`
+  on every rebuild (marks `skip` and the unconnectable-LED list; `sendPath`
+  does not consult `skip`, so bulk connectivity is unchanged), the checked
+  single-crosspoint send `sendXYraw` (MicroPython `send_raw`, the apps' and
+  self-test's raw sends), and `planFastPath` for every sense tap.
+* `drivenPairAllowed` (two driven sources in one component are fine when
+  the user put them in one net) can finally answer yes - it compared two
+  -1s before, so every GPIO+GND or GPIO-loopback net was being flagged as
+  a short in `validateAllPaths` (and sent anyway).
+* The scanner's shared-K-row fallback and LEDs.cpp's bridge-colour lookup
+  by index start working.
+
+Gate: the whole HIL suite (`run_all.py`) on the fix build, result below.
+
+### 7.2 Rail duplicates: first pick, and the hub lanes
+
+* `fillUnusedPaths` generates every round of the rail-net bridges' duplicates
+  (GND, TOP_RAIL, BOTTOM_RAIL) before any other bridge's, so the duplicate
+  pass - which walks paths in index order - routes rails first.
+* `rescueRailDuplicatesViaHubs()` runs at the end of the duplicate pass for
+  rail duplicates still unrouted: shape H1 (the chip's I/J/L lane, that
+  hub's row for the chip, the hub lane into K) landing on the K row the rail
+  already holds for that chip, so a second entry into the chip costs no
+  bounce row and no virgin K row. Under the same reservations as every
+  duplicate (last tap route, last two virgin K rows).
+* The current-sense pair (I.X11 / J.X11 through the 2 ohm shunt) as an extra
+  I<->J lane: a rail path through it is six crosspoints; `pathStruct` holds
+  four. Left for the chip[6] change.
+
+* Two more reservations for duplicates, found by the first run of this
+  change (a rail copy took chip A's I lane and rows 2/5/6/7 lost their taps;
+  three copies of one rail bridge took the same hub copper): a duplicate
+  may not take a breadboard chip's LAST virgin lane into I/J/K/L, nor the
+  last virgin hub lane into K (IK/JK/KL) - checked on a lane still virgin at
+  both pins, since the two pins are claimed one after the other - and a
+  duplicate's hub hop must bring virgin copper (`hubRouteBBtoSF(i, 0)`),
+  while a primary's may ride copper its net already holds.
+
+Results, dense suite on the final build (`snap_taps_final` -> `snap_rails3`):
+70/70, every tap route kept on the stacked cases, 3 rows moved:
+
+* `rail_stacking_light`: `1-TOP_RAIL` gains a hub copy
+  `A0.1 K4.0 I14.0 K13.0` (A's I lane, I.Y0, the IK hub lane, onto the K row
+  the rail already holds). Routed duplicates 1 -> 2. The second copy (via J)
+  is refused: with the probe feed on KL, JK is the last virgin hub lane into
+  K and stays for the taps. That is the copper: one hub copy per board
+  while the feed sits on KL.
+* `stacked_taps_gpio_dups`: rails first means `18-D7` gets a second copy and
+  the GPIO copy `6-GPIO_1` loses its bounce row - the priority Kevin asked
+  for.
+* Kevin's own netlist (`stacked_taps_reachable`): no rail copy fits and
+  nothing else moved. A and C (the top rail's chips) are down to their last
+  virgin SF lane, which the taps keep; H (56-GND) is the one chip left that
+  can bounce a tap, so its lanes are reserved too.
+
+Full suite (`run_all.py`) on the same build, port 1 to itself: 8/11
+files pass (micropython_fs, routing, routing_dense 70/70, config, stress,
+paste_state, slot_files 96 checks, projects 275 checks), encoder_ui skips
+without the probe, and two files fail on checks that predate today:
+
+* `test_net_currents`: "INA0 sees a plausible loop current" reads 2.78 mA
+  against a 3.0 mA floor. Measured on the bench: the loop reads 2.1 mA with
+  every bridge unstacked and 4.5 mA with two copies each, on rows 5, 20 and
+  25 alike - so it is not Kevin's 4051 but the 2026-09-02 stacking defaults
+  (`stack_dacs` 0, counts no longer stamped) that the floor never met. The
+  floor is now 1.5 mA, which still refuses an open loop; the scan-versus-INA
+  agreement check in the same file passed throughout.
+* `test_parts_roundtrip`: "plain bridge 55-42 (dup 2) survived the rewrite"
+  expects `dup: 2` to be written back; the slot loader's rule from `12e6629`
+  (a count equal to the slot's `stackPaths`, which is 2 on this bench, is a
+  legacy stamp and becomes the default) drops it on purpose. The test is
+  from 2026-08-28, the rule from 2026-09-02. Kevin's call which one is
+  right; not touched.
+
+Both findings were first seen on the index-fix build alone, which the
+earlier (port-1-contaminated) run had also flagged, so neither is the
+rails change.
