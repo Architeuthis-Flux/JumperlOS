@@ -184,6 +184,10 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         }
     }
 
+    // A terminal that reconnected after a reboot may still hold a scrolling
+    // region from an R / c! session; the menu is the first thing it hears.
+    dropStaleScrollRegion( &Jerial );
+
     // (The lastProbePowerDAC change detector is gone: probe-power source
     // moves are handled by InfraPaths' rebuild-head evaluation + nudges.)
 
@@ -1813,11 +1817,12 @@ CommandResult cmd_toggleExtraMenu( char c, const String& line ) {
 
 CommandResult cmd_showNetlist( char c, const String& line ) {
     extern volatile int core1passthrough;
-    couldntFindPath( 1 );
-    
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
-  
+    dropStaleScrollRegion( target );
+
+    couldntFindPath( 1 );
+
     target->print( "\n\n\rnetlist\n\r" );
     listNets( anythingInteractiveConnected( -1 ), target );
     return CMD_DONT_SHOW_MENU;
@@ -2064,6 +2069,7 @@ CommandResult cmd_loadJsonState( char c, const String& line ) {
 CommandResult cmd_showBridgeArray( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget( );
     if ( target == nullptr ) target = &Jerial;
+    dropStaleScrollRegion( target );
 
     int showDupes = 1;
     String arg = getCommandArgs( line, 20 );
@@ -2115,6 +2121,7 @@ CommandResult cmd_showCrossbar( char c, const String& line ) {
 
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
+    dropStaleScrollRegion( target );
 
     // Otherwise show compact crossbar view
     printChipStateArrayColorCompact( 12 , '.', target );
@@ -2124,6 +2131,7 @@ CommandResult cmd_showCrossbar( char c, const String& line ) {
 CommandResult cmd_showCrossbarFull( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
+    dropStaleScrollRegion( target );
     printChipStateArrayColor( target );  // Full detailed view with 3-char symbols
     return CMD_DONT_SHOW_MENU;
 }

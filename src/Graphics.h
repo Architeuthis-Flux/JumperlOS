@@ -261,6 +261,10 @@ extern bool ledDumpEnabled;
 
 // Clear any non-scrolling region from previous session (call at startup)
 void clearNonScrollingRegion(void);
+// Drop a scrolling region the terminal may still hold from a mirror session
+// that ended in a reboot; no-op while the LED mirror or live crossbar is on,
+// and on any stream that is not the main terminal.
+void dropStaleScrollRegion(Stream* stream = &Jerial);
 void dumpHeader(int posX = 50, int posY = 20, int absolute = 1, int wide = 0,
                 Stream *stream = &Jerial);
 void dumpHeaderHex(Stream *stream = &Jerial);

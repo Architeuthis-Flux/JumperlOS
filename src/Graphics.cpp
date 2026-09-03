@@ -4534,6 +4534,30 @@ void clearNonScrollingRegion(void) {
   Serial.flush();
 }
 
+/// @brief Drop a scrolling region the terminal may still be holding.
+/// DECSTBM state lives in the terminal, not in the firmware. A reboot or a
+/// reflash while the LED mirror (R) or the live crossbar (c!) was on never
+/// sends the reset that setLedDumpEnabled(false) / setLiveCrossbarEnabled(false)
+/// would, and the copy in clearNonScrollingRegion() goes out from setup()
+/// before any host is attached. A terminal left that way keeps its top rows
+/// frozen and discards every line that scrolls out of the window, so a 60-line
+/// dump loses its head while old text stays put above it. The long dumps
+/// (b, n, c, C) and the menu call this first: with no mirror active there is
+/// no region worth keeping, and on a clean terminal the sequence is a no-op
+/// (save cursor, reset margins - which homes the cursor - restore cursor).
+/// DECSC/DECRC (ESC 7 / ESC 8) on purpose, the same pair ReadingDisplay pins
+/// with: the CSI forms (ESC [ s / ESC [ u) are not honoured by every
+/// terminal - Kevin's ignored them on 2026-09-02, so the margin reset homed
+/// the cursor and the menu and the dump printed from the top of the screen
+/// over each other. test/hil/jl.py's _ANSI stripper removes ESC 7 / ESC 8 too.
+void dropStaleScrollRegion(Stream* stream) {
+  extern bool liveCrossbarEnabled;
+  if (ledDumpEnabled || liveCrossbarEnabled) return;   // that region is wanted
+  if (stream == nullptr) stream = &Jerial;
+  if (stream != &Jerial && stream != &Serial) return;  // port 7 / UART: not a terminal we pinned
+  stream->print("\0337\033[r\0338");
+}
+
 // ─── dumpLEDs helpers ────────────────────────────────────────────────────────
 //
 // Print a two-tone label block:  ▐XXYY▌
