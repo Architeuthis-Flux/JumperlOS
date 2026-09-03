@@ -681,20 +681,77 @@ static bool lastTapEscape(int n, int onlyKind) {
   return false;
 }
 
-// True when a duplicate may not take X pin x of a breadboard chip: the
-// pin is that chip's lane into K (needed by every tap kind) or into I/J/L
-// (needed by taps of nodes on that chip), and the chip is one of the last
-// that can bounce such a tap.
+// A breadboard chip's virgin lanes into I/J/K/L: a tap from one of its rows
+// leaves through one of them (or bounces, see above).
+static int virginSfLanes(int chip) {
+  int count = 0;
+  for (int x = 0; x < 16; x++) {
+    int to = globalState.connections.chipStates[chip].xMap[x];
+    if (to >= CHIP_I && to <= CHIP_L &&
+        globalState.connections.chipStates[chip].xStatus[x] == -1) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// Virgin hub lanes INTO chip K (IK, JK, KL): a tap that leaves its chip
+// through I, J or L enters K over one of these.
+static int virginHubLanesIntoK(void) {
+  int count = 0;
+  for (int hub = CHIP_I; hub <= CHIP_L; hub++) {
+    if (hub == CHIP_K) {
+      continue;
+    }
+    int xh = xMapForChipLane0(hub, CHIP_K);
+    int xk = xMapForChipLane0(CHIP_K, hub);
+    if (xh >= 0 && xk >= 0 &&
+        globalState.connections.chipStates[hub].xStatus[xh] == -1 &&
+        globalState.connections.chipStates[CHIP_K].xStatus[xk] == -1) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// True when a duplicate may not take X pin x of chip:
+//  * a breadboard chip's lane into K (needed by every tap kind) or into
+//    I/J/L (needed by taps of nodes on that chip) when the chip is one of
+//    the last that can bounce such a tap;
+//  * a breadboard chip's LAST virgin lane into any of I/J/K/L - the rows on
+//    that chip would have no way out but a bounce (2026-09-03: a rail copy
+//    took chip A's I lane and rows 2/5/6/7 lost their taps);
+//  * the last virgin hub lane into K (IK, JK, KL) - the way in for every tap
+//    that had to leave its chip through I, J or L.
 static bool reservedTapEscapeX(int chip, int x) {
-  if (!routingDuplicatePathNow || chip < 0 || chip >= 8 || x < 0 || x >= 16) {
+  if (!routingDuplicatePathNow || chip < 0 || chip >= 12 || x < 0 || x >= 16) {
     return false;
   }
   int to = globalState.connections.chipStates[chip].xMap[x];
-  if (to == CHIP_K) {
-    return lastTapEscape(chip, -2);
-  }
-  if (to == CHIP_I || to == CHIP_J || to == CHIP_L) {
+  if (chip < 8) {
+    if (to < CHIP_I || to > CHIP_L) {
+      return false;
+    }
+    if (globalState.connections.chipStates[chip].xStatus[x] == -1 &&
+        virginSfLanes(chip) <= 1) {
+      return true;
+    }
+    if (to == CHIP_K) {
+      return lastTapEscape(chip, -2);
+    }
     return lastTapEscape(chip, to);
+  }
+  bool hubIntoK = (chip == CHIP_K && (to == CHIP_I || to == CHIP_J || to == CHIP_L)) ||
+                  ((chip == CHIP_I || chip == CHIP_J || chip == CHIP_L) && to == CHIP_K);
+  if (hubIntoK && globalState.connections.chipStates[chip].xStatus[x] == -1) {
+    // Only a lane still virgin at BOTH pins is one of the reserve: the two
+    // pins are claimed one after the other, and the second claim must not
+    // see the first as "the last lane gone".
+    int xo = xMapForChipLane0(to, chip);
+    if (xo < 0 || globalState.connections.chipStates[to].xStatus[xo] != -1) {
+      return false;
+    }
+    return virginHubLanesIntoK() <= 1;
   }
   return false;
 }
@@ -1887,9 +1944,10 @@ static int hubSfRowFor(int sf, int bb) {
   return -1;
 }
 
-// A lane is free for net at BOTH its pins.
-static bool hubLaneFree(int a, int xa, int b, int xb, int net) {
-  return freeOrSameNetX(a, xa, net, 1) && freeOrSameNetX(b, xb, net, 1);
+// A lane is free for net at BOTH its pins (stacking 1: a pin the net already
+// holds counts as free; 0: virgin pins only).
+static bool hubLaneFree(int a, int xa, int b, int xb, int net, int stacking) {
+  return freeOrSameNetX(a, xa, net, stacking) && freeOrSameNetX(b, xb, net, stacking);
 }
 
 // An SF row is usable: the row itself and the breadboard pin at the far end
@@ -1924,7 +1982,12 @@ static void hubResetPath(int i) {
   }
 }
 
-static bool hubRouteBBtoSF(int i) {
+// newCopper: stacking rule for the copper the hop ADDS (the chip's lane into
+// the hub, the hub row, the hub lane): 1 for a primary (a lane the net
+// already holds is fine to ride), 0 for a duplicate (every copy must bring
+// its own copper or it is the same path twice). The landing row and the
+// node pin may always be the net's own.
+static bool hubRouteBBtoSF(int i, int newCopper) {
   struct pathStruct &p = globalState.connections.paths[i];
   int c0 = p.chip[0], sf = p.chip[1], net = p.net;
   if (!hubIsBreadboardChip(c0) || !hubIsSfChip(sf)) {
@@ -1949,10 +2012,10 @@ static bool hubRouteBBtoSF(int i) {
     if (xc0 < 0 || yh < 0 || xh < 0 || xs < 0) {
       continue;
     }
-    if (!freeOrSameNetX(c0, xc0, net, 1) || !freeOrSameNetY(hub, yh, net, 1)) {
+    if (!freeOrSameNetX(c0, xc0, net, newCopper) || !freeOrSameNetY(hub, yh, net, newCopper)) {
       continue;
     }
-    if (!hubLaneFree(hub, xh, sf, xs, net)) {
+    if (!hubLaneFree(hub, xh, sf, xs, net, newCopper)) {
       continue;
     }
     // a row on sf for the hop: one the net already holds first
@@ -2045,7 +2108,7 @@ static bool hubRouteBBtoBB(int i) {
         continue;
       }
       int xoo = xMapForChipLane0(o, sf);
-      if (xoo >= 0 && hubLaneFree(sf, x, o, xoo, net)) {
+      if (xoo >= 0 && hubLaneFree(sf, x, o, xoo, net, 1)) {
         xb = x;
         other = o;
         xo = xoo;
@@ -2090,6 +2153,42 @@ static bool hubRouteBBtoBB(int i) {
   return false;
 }
 
+// Rail duplicates through the hub lanes (Kevin, 2026-09-03: "we should be
+// allowed to use unused nodes like IJKL ... for rail duplicates"). A rail
+// (GND, TOP_RAIL, BOTTOM_RAIL) lives on K (GND on L too); every breadboard
+// chip has ONE lane into K, so the primary owns it and a stacked copy could
+// only bounce - a bounce row and a virgin K row each, the two scarcest
+// things on the board. Shape H1 gives a rail a second entry into the chip
+// for free copper: the chip's I, J or L lane, that hub's row for the chip,
+// the hub lane into K, landing on the K row the rail ALREADY holds for
+// this chip (hubRouteBBtoSF prefers a row the net owns). Runs in the
+// duplicate pass after the ordinary duplicate tiers, for rail duplicates
+// still unrouted, under the same reservations as every duplicate (the
+// last tap route, the last two virgin K rows). The current-sense pair
+// (I.X11 / J.X11 through the 2 ohm shunt) would be one more I<->J lane but
+// a rail path through it needs six crosspoints (pathStruct holds four) -
+// left for the chip[6] change the V6 doc asks for.
+static void rescueRailDuplicatesViaHubs(int startIndex) {
+  for (int i = startIndex; i < numberOfPaths; i++) {
+    struct pathStruct &p = globalState.connections.paths[i];
+    if (p.pathType == VIRTUAL || p.duplicate == 0 || p.skip) {
+      continue;
+    }
+    if (p.net < 1 || p.net > 3 || p.chip[0] < 0 || p.chip[1] < 0) {
+      continue;
+    }
+    if (pathFullyRouted(i)) {
+      continue;
+    }
+    if (p.pathType != BBtoSF) {
+      continue;
+    }
+    routingDuplicatePathNow = true;
+    hubRouteBBtoSF(i, 0);
+    routingDuplicatePathNow = false;
+  }
+}
+
 static void rescueViaHubs(int startIndex) {
   for (int i = startIndex; i < numberOfPaths; i++) {
     struct pathStruct &p = globalState.connections.paths[i];
@@ -2105,7 +2204,7 @@ static void rescueViaHubs(int startIndex) {
     switch (p.pathType) {
     case BBtoSF:
     case BBtoNANO:
-      hubRouteBBtoSF(i);
+      hubRouteBBtoSF(i, 1);
       break;
     case BBtoBB:
       hubRouteBBtoBB(i);
@@ -2359,6 +2458,10 @@ void bridgesToPaths(
     resolveAltPaths(0, -1, 1);
 
     resolveUncommittedHops(0, -1, 1);
+
+    // Rail duplicates that found neither a direct lane nor a bounce: the
+    // hub lanes (see rescueRailDuplicatesViaHubs).
+    rescueRailDuplicatesViaHubs(duplicateStartIndex);
   }
   
   // TDM OPTIMIZATION: Restore original net numbers after routing completes
@@ -2798,13 +2901,22 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
     }
   }
 
-  // Round-robin duplicate creation:
-  // pass 0 adds first duplicate for each eligible bridge,
-  // pass 1 adds second duplicate, etc.
-  // This keeps GND/TOP/BOT and regular duplicates interleaved.
+  // Duplicate creation order = routing priority (the duplicate pass walks
+  // paths[] in index order). Rail-net bridges (GND, TOP_RAIL, BOTTOM_RAIL -
+  // the nets that carry current) get every one of their rounds FIRST, so
+  // the scarce copper a duplicate needs - bounce rows, K rows, hub lanes -
+  // goes to a rail before a signal copy takes it (Kevin, 2026-09-03: "we
+  // generally want to find rail duplicates at a higher priority"). The
+  // remaining bridges then round-robin as before: pass 0 adds the first
+  // duplicate for each of them, pass 1 the second, and so on.
+  for (int railPass = 1; railPass >= 0; railPass--) {
   for (int round = 0; round < maxDuplicateRounds; round++) {
     for (int bridgeIdx = 0; bridgeIdx < bridgesToProcess; bridgeIdx++) {
       if (bridgeDuplicateBudget[bridgeIdx] <= round) {
+        continue;
+      }
+      bool isRail = bridgeNet[bridgeIdx] >= 1 && bridgeNet[bridgeIdx] <= 3;
+      if (isRail != (railPass == 1)) {
         continue;
       }
 
@@ -2824,6 +2936,7 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
       numberOfPaths++;
       duplindex++;
     }
+  }
   }
   
   if (debugNTCC5) {
