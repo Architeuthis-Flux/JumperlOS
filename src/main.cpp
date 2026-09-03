@@ -793,6 +793,25 @@ static bool helpQuestionApplies( int c ) {
     }
 }
 
+// Char-mode paste guard helpers (see the statics in loop()).
+// Triggers whose handler reads its body straight from the stream, so a burst
+// queued behind them is a message, not a paste: the app's Wokwi push (W,
+// preceded by Q), node-file text (f), connection lists (+ -), a Python line
+// (>), raw JSON ({ [).
+static bool pasteTriggerTakesBody( char c ) {
+    return c == 'W' || c == 'Q' || c == 'f' || c == '+' || c == '-' || c == '>' || c == '{' || c == '[';
+}
+
+// Discard everything queued on the terminal input right now; returns the count.
+static unsigned long pasteEatPending( void ) {
+    unsigned long n = 0;
+    while ( Jerial.available( ) > 0 ) {
+        Jerial.read( );
+        n++;
+    }
+    return n;
+}
+
 void loop( ) {
     // Declare variables at function scope to avoid goto scope issues
     bool useLineBuffering = false;
@@ -808,6 +827,36 @@ void loop( ) {
     static unsigned long helpDeadlineMs = 0;
     static bool helpDeadlineSpent = false; // the one wait per command char has happened
     bool gotCompletedLine = false;         // this pass's input came in as a whole line (line mode / relayed)
+
+    // Char-mode paste guard (2026-09-02). A stray paste in char mode runs every
+    // byte as a command: a KiCad symbol block printed the undo log once per '('
+    // and toggled whatever else it spelled, then the board hung. Two layers:
+    //  - the interrupt: a bare Esc, or three Enters in a row, drops whatever is
+    //    queued and says so;
+    //  - the flood limiter: a backlog no keystroke produces behind a char that
+    //    does not read a body, or PASTE_RATE_COUNT command chars inside
+    //    PASTE_RATE_WINDOW_MS, puts this loop into a drain state that keeps
+    //    eating (the busy loop still services USB, so the FIFO keeps
+    //    refilling) until the port has been quiet for PASTE_QUIET_MS, then
+    //    reports the total once.
+    // The limiter bounds the damage, it cannot block it: the first few pasted
+    // bytes are live commands before the flood is recognisable. Line mode,
+    // relayed input and the body-taking handlers (W, f, the S/L prompts) are
+    // untouched. Statics: the busy loop is entered through a label.
+    static const int PASTE_BACKLOG_BYTES = 24;          // 'i?' + CRLF queues 3; a paste queues hundreds
+    static const unsigned long PASTE_RATE_WINDOW_MS = 500;
+    static const int PASTE_RATE_COUNT = 8;              // short command runs stay under this
+    static const unsigned long PASTE_QUIET_MS = 300;    // silence that ends a drain
+    static const unsigned long ESC_WAIT_MS = 30;        // an arrow key's '[' lands well inside this
+    static bool pasteDrainActive = false;
+    static unsigned long pasteDrainLastByteMs = 0;
+    static unsigned long pasteDrainDropped = 0;
+    static unsigned long pasteDispatchMs[ PASTE_RATE_COUNT ] = { 0 };
+    static int pasteDispatchIdx = 0;
+    static int enterRun = 0;             // consecutive Enter events
+    static bool lastInputWasCr = false;  // so "\r\n" counts as one Enter
+    static bool escArmed = false;
+    static unsigned long escDeadlineMs = 0;
 
 menu:
 
@@ -1014,8 +1063,10 @@ dontshowmenu:
 
     loopStart = millis( );
     while ( !Jerial.hasCompletedLine( ) &&
-            ( useLineBuffering || Jerial.available( ) == 0 ) &&
+            ( useLineBuffering || Jerial.available( ) == 0 || escArmed ) && // armed Esc: let the rest of a key sequence land first
             !( helpArmed && (int32_t)( millis( ) - helpDeadlineMs ) >= 0 ) &&
+            !( escArmed && (int32_t)( millis( ) - escDeadlineMs ) >= 0 ) &&
+            !( pasteDrainActive && (int32_t)( millis( ) - pasteDrainLastByteMs ) >= (int32_t)PASTE_QUIET_MS ) &&
             connectFromArduino == '\0' && slotChanged == 0 ) {
 
         // Heartbeat disabled for production
@@ -1277,8 +1328,88 @@ dontshowmenu:
         // Only read single character if NOT in line buffering mode
         // (line buffering mode already handled by Jerial.service() above)
         // NOTE: Jerial.read() now handles relay buffer with tag filtering automatically
+        if ( pasteDrainActive ) {
+            // Eating a flood: take what is queued now, then wait (in the busy
+            // loop, USB still serviced) until the port has been quiet.
+            unsigned long n = pasteEatPending( );
+            if ( n > 0 ) {
+                pasteDrainDropped += n;
+                pasteDrainLastByteMs = millis( );
+                goto dontshowmenu;
+            }
+            if ( (int32_t)( millis( ) - pasteDrainLastByteMs ) < (int32_t)PASTE_QUIET_MS ) {
+                goto dontshowmenu;
+            }
+            pasteDrainActive = false;
+            Jerial.printf( "\n\r[input flood: dropped %lu bytes. Paste netlists with f or W; Esc clears queued input]\n\r",
+                           pasteDrainDropped );
+            Jerial.flush( );
+            goto dontshowmenu;
+        }
+        if ( escArmed ) {
+            // ESC_WAIT_MS ago an Esc came in and the busy loop has held every
+            // byte since. An arrow key's '[' or 'O' and its final byte landed
+            // within a millisecond (each is its own USB write from the app);
+            // a bare Esc is the interrupt.
+            escArmed = false;
+            int next = ( Jerial.available( ) > 0 ) ? Jerial.peek( ) : -1;
+            if ( next == '[' || next == 'O' ) {
+                Jerial.read( );
+                while ( Jerial.available( ) > 0 ) { // CSI / SS3: params, then one final byte 0x40-0x7E
+                    int c = Jerial.read( );
+                    if ( c >= 0x40 && c <= 0x7E ) break;
+                }
+                goto dontshowmenu;
+            }
+            unsigned long n = pasteEatPending( );
+            if ( n > 0 ) {
+                Jerial.printf( "\n\r[Esc: %lu queued bytes cleared]\n\r", n );
+                Jerial.flush( );
+            }
+            goto dontshowmenu;
+        }
         if ( Jerial.available( ) > 0 ) {
             input = Jerial.read( );
+            if ( input == 0x1b ) {
+                escArmed = true;
+                escDeadlineMs = millis( ) + ESC_WAIT_MS;
+                goto dontshowmenu;
+            }
+            if ( input == '\r' || input == '\n' ) {
+                // One Enter event per "\r\n", lone '\r' or lone '\n'.
+                bool crlfTail = ( input == '\n' && lastInputWasCr );
+                lastInputWasCr = ( input == '\r' );
+                if ( !crlfTail && ++enterRun >= 3 ) {
+                    enterRun = 0;
+                    if ( input == '\r' && Jerial.available( ) > 0 && Jerial.peek( ) == '\n' ) {
+                        Jerial.read( ); // the tail of this Enter's CRLF is not queued input
+                    }
+                    unsigned long n = pasteEatPending( );
+                    if ( n > 0 ) {
+                        Jerial.printf( "\n\r[Enter x3: %lu queued bytes cleared]\n\r", n );
+                        Jerial.flush( );
+                    }
+                    goto dontshowmenu;
+                }
+            } else {
+                lastInputWasCr = false;
+                if ( input != ' ' ) {
+                    enterRun = 0;
+                    unsigned long now = millis( );
+                    unsigned long oldest = pasteDispatchMs[ pasteDispatchIdx ];
+                    pasteDispatchMs[ pasteDispatchIdx ] = now;
+                    pasteDispatchIdx = ( pasteDispatchIdx + 1 ) % PASTE_RATE_COUNT;
+                    bool burst = ( Jerial.available( ) >= PASTE_BACKLOG_BYTES ) &&
+                                 !pasteTriggerTakesBody( (char)input );
+                    bool rate = ( oldest != 0 ) && ( now - oldest ) < PASTE_RATE_WINDOW_MS;
+                    if ( burst || rate ) {
+                        pasteDrainActive = true;
+                        pasteDrainDropped = 1 + pasteEatPending( );
+                        pasteDrainLastByteMs = now;
+                        goto dontshowmenu;
+                    }
+                }
+            }
             g_commandInputIsLine = false; // char mode: args may still be arriving
             noteUserInput( );
 #if debugJerial
