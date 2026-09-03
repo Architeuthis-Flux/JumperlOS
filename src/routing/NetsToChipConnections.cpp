@@ -5355,10 +5355,9 @@ void couldntFindPath(int forcePrint) {
 void resolveUncommittedHops2(void) {}
 
 
-  // Same-chip hop X search order. Breadboard chips try their twelve
-  // breadboard-to-breadboard lanes before their four I/J/K/L lanes
-  // (2026-09-03): an SF lane spent on a same-chip hop is one of the few
-  // ways a sense tap can leave the chip. SF chips keep only the hub lanes
+  // Same-chip hop X search order. For breadboard chips this table is only
+  // the tie-break: sameChipHopOrder() below ranks the pins by what taking
+  // them costs the rest of the board. SF chips keep only the hub lanes
   // (every other X pin is a real node).
   const int freeXSearchOrder[12][16] = {
       {2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14, 15, 0, 1, 9, 13},   // a: breadboard lanes first, then AI AJ AK AL
@@ -5401,6 +5400,101 @@ static int sameNetSfRow(int chip, int net, int allowStacking) {
     return y;
   }
   return -1;
+}
+
+// What a same-chip hop costs the board when it takes X pin x of a
+// breadboard chip (Kevin, 2026-09-03: "couldn't top rail have gone
+// K -> G -> A?" - it could not, because 48-51's hop on G had taken the only
+// A-G lane while G still had doubled lanes to B, D, E, F and H):
+//   0  a lane of a doubled pair whose other lane is still free - the pair
+//      keeps one
+//   2  a pair's last lane: a single-lane pair, or a doubled pair whose
+//      other lane is already spoken for
+//   3  a lane into I/J/K/L - a way out for the chip's sense taps
+// Ties keep the table order. Fills order[0..15]; -1 entries are skipped.
+static int sameChipHopCost(int chip, int x) {
+  int to = globalState.connections.chipStates[chip].xMap[x];
+  if (to >= CHIP_I && to <= CHIP_L) {
+    return 3;
+  }
+  if (to < 0 || to >= 8) {
+    return 3;
+  }
+  int partner = -1;
+  for (int xx = 0; xx < 16; xx++) {
+    if (xx != x && globalState.connections.chipStates[chip].xMap[xx] == to) {
+      partner = xx;
+      break;
+    }
+  }
+  if (partner < 0) {
+    return 2;
+  }
+  return globalState.connections.chipStates[chip].xStatus[partner] == -1 ? 0 : 2;
+}
+
+static void sameChipHopOrder(int chip, int order[16]) {
+  int n = 0;
+  if (chip >= 8) {
+    for (int k = 0; k < 16; k++) {
+      order[n++] = freeXSearchOrder[chip][k];
+    }
+    return;
+  }
+  for (int cost = 0; cost <= 3; cost++) {
+    for (int k = 0; k < 16; k++) {
+      int x = freeXSearchOrder[chip][k];
+      if (x < 0 || sameChipHopCost(chip, x) != cost) {
+        continue;
+      }
+      order[n++] = x;
+    }
+  }
+  while (n < 16) {
+    order[n++] = -1;
+  }
+}
+
+// The free row of an SF chip whose breadboard chip can best spare its lane
+// into that SF chip: rows are equivalent electrically, but each one strands
+// its breadboard chip's pin, and a chip down to its last I/J/K/L lane has
+// no way out for its sense taps (the row on chip A that ADC3-D0's hop took
+// was what kept the top rail from a second entry there). Same-net rows,
+// when allowed, come first (sameNetSfRow); then the virgin row whose chip
+// has the most virgin SF lanes; ties to the lowest row.
+// Rank: a chip that is one of the last able to bounce a sense tap comes
+// last (its lanes are the taps' reserve, primaries included as a tie-break);
+// a chip at its last virgin SF lane next to last (the row would strand it);
+// otherwise PACK: the chip with the fewest spare lanes first, so a pristine
+// chip stays pristine for the bounces and the hub copies. Ties to the
+// lowest row. (The first cut preferred the MOST spare lanes, which moved the
+// probe feed onto the one pristine chip in almost every case.)
+static int bestSfRow(int chip, int net, int allowStacking) {
+  int best = -1, bestRank = 1 << 20;
+  for (int y = 0; y < 8; y++) {
+    if (!freeOrSameNetY(chip, y, net, allowStacking)) {
+      continue;
+    }
+    int bb = globalState.connections.chipStates[chip].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, chip) : -1;
+    if (bbX != -1 && !freeOrSameNetX(bb, bbX, net, allowStacking)) {
+      continue;
+    }
+    int rank;
+    if (bb < 0 || bb >= 8) {
+      rank = 0;
+    } else if (tapCapableBounceChip(bb, -1) && tapCapableBounceChips(-1) <= kTapBounceReserve + 1) {
+      rank = 3000 + y;
+    } else {
+      int spare = virginSfLanes(bb);
+      rank = (spare <= 1 ? 2000 : 1000 + spare * 8) + y;
+    }
+    if (rank < bestRank) {
+      best = y;
+      bestRank = rank;
+    }
+  }
+  return best;
 }
 
 void resolveUncommittedHops(int allowStacking, int powerOnly,
@@ -5481,12 +5575,14 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
         int sharedX = -1;
         
         // Find a free X position that can be used for both nodes on the same chip
+        int hopOrder[16];
+        sameChipHopOrder(targetChip, hopOrder);
         for (int searchIdx = 0; searchIdx < 16; searchIdx++) {
-          if (freeXSearchOrder[targetChip][searchIdx] == -1) {
+          if (hopOrder[searchIdx] == -1) {
             continue;
           }
           
-          int testX = freeXSearchOrder[targetChip][searchIdx];
+          int testX = hopOrder[searchIdx];
           // A duplicate's same-chip hop stays off the chip's SF lanes: they
           // are how a sense tap leaves the chip (Kevin, 2026-09-03)
           if (globalState.connections.paths[i].duplicate != 0 && targetChip < 8 &&
@@ -5577,13 +5673,15 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           if (globalState.connections.paths[i].chip[pos] != -1 && globalState.connections.paths[i].x[pos] == -2) {
             int freeX = -1;
             
-            // Find free X position using search order
+            // Find free X position using the ranked search order
+            int hopOrder[16];
+            sameChipHopOrder(globalState.connections.paths[i].chip[pos], hopOrder);
             for (int searchIdx = 0; searchIdx < 16; searchIdx++) {
-              if (freeXSearchOrder[globalState.connections.paths[i].chip[pos]][searchIdx] == -1) {
+              if (hopOrder[searchIdx] == -1) {
                 continue;
               }
               
-              int testX = freeXSearchOrder[globalState.connections.paths[i].chip[pos]][searchIdx];
+              int testX = hopOrder[searchIdx];
               if (globalState.connections.paths[i].duplicate != 0 && globalState.connections.paths[i].chip[pos] < 8 &&
                   globalState.connections.chipStates[globalState.connections.paths[i].chip[pos]].xMap[testX] >= 8) {
                 continue; // same rule as the shared-X search above
@@ -5680,6 +5778,9 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
         
         int targetChip = globalState.connections.paths[i].chip[0];
         int sharedY = sameNetSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+        if (sharedY < 0 && targetChip >= 8) {
+          sharedY = bestSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+        }
         
         // Find a free Y position that can be used for both nodes on the same chip
         for (int testY = 0; sharedY < 0 && testY < 8; testY++) {
@@ -5775,6 +5876,9 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           if (needsY) {
             int targetChip = globalState.connections.paths[i].chip[pos1]; // Both positions should be same chip
             int freeY = sameNetSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+            if (freeY < 0 && targetChip >= 8) {
+              freeY = bestSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+            }
             
             for (int testY = 0; freeY < 0 && testY < 8; testY++) {
               // For breadboard chips, only allow Y=0
@@ -5864,6 +5968,9 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
         for (int pos = 0; pos < 4; pos++) {
           if (globalState.connections.paths[i].chip[pos] != -1 && globalState.connections.paths[i].y[pos] == -2) {
             int freeY = sameNetSfRow(globalState.connections.paths[i].chip[pos], globalState.connections.paths[i].net, allowStacking);
+            if (freeY < 0 && globalState.connections.paths[i].chip[pos] >= 8) {
+              freeY = bestSfRow(globalState.connections.paths[i].chip[pos], globalState.connections.paths[i].net, allowStacking);
+            }
             
             for (int testY = 0; freeY < 0 && testY < 8; testY++) {
               // For breadboard chips, only allow Y=0

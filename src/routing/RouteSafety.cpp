@@ -844,7 +844,42 @@ static bool buildEphemeralRouteTiered(int nodeA, int nodeB, pathStruct* out,
     }
 
     if (adcChip == CHIP_K && otherIsX) {
-        // Node on I/J/L → bounce through BB chip y0 to K
+        // Node on I/J/L: first the hub lane straight into K - a same-chip
+        // hop on the node's chip onto its hub lane (IK/JK/KL), landing on a
+        // K row whose breadboard pin is free (2026-09-03: GPIO taps needed
+        // a bounce chip while the probe feed held KL; with KL free, or a
+        // node on I/J, this costs no bounce row at all).
+        {
+            int laneHubK = laneToChip(otherChip, CHIP_K);
+            int laneKHub = laneToChip(CHIP_K, otherChip);
+            if (laneHubK >= 0 && laneKHub >= 0 && laneOk(otherChip, laneHubK) &&
+                laneOk(CHIP_K, laneKHub)) {
+                int hubRow = -1;
+                for (int y = 0; y < 8 && hubRow < 0; y++) {
+                    int bb = globalState.connections.chipStates[otherChip].yMap[y];
+                    int bbX = (bb >= CHIP_A && bb <= CHIP_H) ? laneToChip(bb, otherChip) : -1;
+                    if (yOk(otherChip, y) && bbX >= 0 && laneOk(bb, bbX)) hubRow = y;
+                }
+                for (int d = 0; d < 8 && hubRow >= 0; d++) {
+                    int dLaneK = laneToChip(d, CHIP_K);
+                    if (dLaneK < 0 || !kRowOk(d) || !laneOk(d, dLaneK)) continue;
+                    out->chip[0] = otherChip;
+                    out->x[0] = otherPin;
+                    out->y[0] = hubRow;
+                    out->chip[1] = otherChip;
+                    out->x[1] = laneHubK;
+                    out->y[1] = hubRow;
+                    out->chip[2] = CHIP_K;
+                    out->x[2] = laneKHub;
+                    out->y[2] = d;
+                    out->chip[3] = CHIP_K;
+                    out->x[3] = adcX;
+                    out->y[3] = d;
+                    return true;
+                }
+            }
+        }
+        // ... else bounce through a breadboard chip's y0 to K
         for (int c = CHIP_A; c <= CHIP_H; c++) {
             int laneSrc = laneToChip(c, otherChip);
             int laneK = laneToChip(c, CHIP_K);

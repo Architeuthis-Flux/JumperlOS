@@ -457,3 +457,50 @@ without the probe, and two files fail on checks that predate today:
 Both findings were first seen on the index-fix build alone, which the
 earlier (port-1-contaminated) run had also flagged, so neither is the
 rails change.
+
+### 7.3 "Couldn't top rail have gone K -> G -> A?" (Kevin, 13:30)
+
+It could, and that is the shape the bounce tier tries for a rail copy:
+K.Y6 -> G's K lane -> G's bounce row -> the A-G lane -> row 1. In the dump
+the A-G pair's single lane was gone: 48-51's same-chip hop on G had taken
+G.X0 (AG0) - the first free pin in G's order - while G still had both lanes
+to B, D, E, F and H free. Two choices in the router were resource-blind:
+
+* **Same-chip hop lanes**, now ranked by cost (`sameChipHopCost`): a lane
+  of a doubled pair whose other lane is free (the pair keeps one) first; a
+  pair's last lane (a single-lane pair, or a doubled pair whose other lane
+  is spoken for) after; I/J/K/L lanes last. Ties keep the breadboard-first
+  table order.
+* **SF-chip rows for SF hops** (`bestSfRow`): among the free rows, the one
+  whose breadboard chip has the most virgin SF lanes, so an SF-to-SF hop
+  stops stranding a chip at its last lane (ADC3-D0's hop took J.Y0, chip
+  A's row, when H's row would have cost nothing).
+
+* The first cut of the row choice preferred the chip with the MOST spare
+  lanes and moved the probe feed onto the one pristine chip (G) in almost
+  every case - the chip the GPIO taps bounce through. It now packs: a
+  reserve bounce chip last, a chip at its last SF lane next to last,
+  otherwise the fewest spare lanes first.
+* Tap shape for a node on I/J/L straight through the hub lane into K (a
+  same-chip hop onto IK/JK/KL, landing on a K row whose breadboard pin is
+  free): a GPIO tap no longer needs a bounce chip whenever KL is free.
+
+Results (`snap_rails3` -> `snap_hop2`, 70/70, every tap kept): 26 rows
+moved. Same-chip hops leave single-lane pairs alone (48-51 on G: X0 = the
+only A-G lane -> X2, a B-G lane; 56-58 on H likewise). The feed and the
+SF-to-SF hops sit on lane-poor chips' rows now. `rail_stacking_light`:
+1-TOP_RAIL's copy bounces through D (`A6.1 K4.3 D0.0 D15.0`), 15-TOP_RAIL
+gains a hub copy through I, GND-45's K copy goes (rails are equal, the
+top rail's bridges come first). Kevin's netlist: still no copy for
+1-TOP_RAIL - see 7.4.
+
+### 7.4 Why K -> G -> A still does not happen on Kevin's netlist
+
+With the A-G lane free, the bounce through G is refused by the tap
+reservation, correctly: G is the only chip left whose Y0, K lane and K row
+are all virgin, and a GPIO's tap (GP_1/2/3/8 are all in nets here) has no
+other shape while the probe feed holds the KL hub lane - the new hub-lane
+tap shape needs KL. So the rail copy and the GPIO taps compete for G, and
+the taps win. Move the feed off KL (dac0 in the feed window, 2.8-3.9 V, or
+the probe.power_source config) and GPIO taps go L -> KL -> K, leaving G for
+the rail. Demonstrated below.
