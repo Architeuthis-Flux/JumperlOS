@@ -15,10 +15,11 @@ Cases that fit the fabric must route completely; the two that deliberately
 exceed it are metrics (they must still be short-free). A couple of cases also
 prove the copper electrically (GPIO loopback, DAC through the crossbar to an
 ADC) after the model has cleared them - a source is only energised on a
-routing the model says has no short. Those proofs sit on rows 7/14 and
+routing the model says has no short. Those proofs sit on rows 18/25 and
 18/19/25: with the rails at 0 V a part plugged into the breadboard clamps its
 rows (a 4051 on rows 1-8/31-38 pulled DAC0 from 2.4 V to 1.9 V at ADC0, bench
-2026-09-03), so the proof rows stay away from where a part usually lives.
+2026-09-03), so the proof rows are ones Kevin's bench leaves empty (columns
+18-30 and 48-60).
 
 Set JL_ROUTING_SNAP_DIR=<dir> to save every case's raw captures, then
 test/hil/tools/routing_snapshot_diff.py <before> <after> shows what a router
@@ -68,7 +69,7 @@ CASES = [
      True, (0, 0, 0), None),
     ("parallel_AB",
      [(1, 8), (2, 9), (3, 10), (4, 11), (5, 12),
-      (GP[1], 7), (GP[2], 14), (7, 14)],
+      (GP[1], 18), (GP[2], 25), (18, 25)],
      True, (0, 0, 0), ("loopback", 1, 2)),
     # exactly eight chip-K rows: two rails on two chips each, one DAC/ADC
     # net on two chips, DAC1 on one, plus the probe feed's row
@@ -100,6 +101,12 @@ CASES = [
      True, (0, 0, 0), None),
     ("all_28_chip_pairs",
      ALL_PAIRS_28,
+     True, (0, 0, 0), None),
+    # forces the hub tier's H2 shape (row to row THROUGH an SF chip): seven
+    # A-E nets spend the single A-E lane and every other chip's bounce row,
+    # then four C-G nets (one lane) find no lane and no bounce row left
+    ("h2_through_sf_chips",
+     [(i, 30 + i) for i in range(1, 8)] + [(15, 45), (16, 46), (17, 47), (18, 48)],
      True, (0, 0, 0), None),
     ("nano_gpio_realistic",
      [(D[2], 1), (D[3], 2), (A[0], 15), (GP[1], 3), (GP[2], 4),
@@ -261,8 +268,18 @@ try:
         # the paste itself is where "Couldn't find a path" is printed
         for line in rc.unrouted_lines(paste_out):
             (v.bad if all_routed else v.notes.append)("during paste: " + line)
+        hub_rows = [r for r in rc.parse_paths(b)
+                    if r["net"] >= 0 and r["dup"] == 0 and len(r["hops"]) == 4
+                    and r["hops"][2][0] in "IJKL" and r["hops"][3][0] in "IJKL"
+                    and r["ptype"].startswith("BB to")]
+        m["hub_tier"] = len(hub_rows)
         metrics[name] = m
         print(f"  metrics: {m}")
+        for r in hub_rows:
+            print("  hub-tier path %d %s-%s: %s" % (
+                r["path"], NODE_NAME.get(r["node1"], r["node1"]),
+                NODE_NAME.get(r["node2"], r["node2"]),
+                " ".join("%s%d.%d" % h for h in r["hops"])))
         for n in v.notes:
             print(f"  note: {n}")
         check(v.ok(), f"{name}: routing model clean" +
@@ -290,6 +307,10 @@ try:
             for l1, l2 in zip(determinism[name], again):
                 if l1 != l2:
                     print(f"      first : {l1}\n      second: {l2}")
+
+    # --- the hub tier's second shape must have been exercised ---
+    check(metrics.get("h2_through_sf_chips", {}).get("hub_tier", 0) >= 1,
+          "h2_through_sf_chips routed at least one row-to-row path through an SF chip")
 
     # --- rail stacking: what the duplicates actually bought ---
     m = metrics.get("rail_stacking_light", {})

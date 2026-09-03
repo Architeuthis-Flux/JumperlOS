@@ -102,7 +102,9 @@ the bottom rail at 2.7 V it read 2.41 V. INA1 showed no load on DAC0. Kevin's
 4051 sits on rows 31-38 (and its VSS is bridged to GND): its input clamp to
 the 0 V rail is what pulled the row. Not a routing effect - the model and
 `lastChipXY` agreed throughout - but the electrical proofs in the suite now
-use rows 7/14 and 18/19/25, away from where a part usually lives.
+use rows 18/25 and 18/19/25 - columns Kevin's bench leaves empty (the first
+version used 7/14, which are the 4051's and the 74393's rows; it passed,
+but GPIO drive into a part's pin is not what the proof is for).
 
 ### F4 - rail stacking almost never happens (structural, not a code bug)
 
@@ -199,6 +201,19 @@ cases, both in `nano_dense_metric`, both from unrouted to routed:
 13/13 primaries now route in that case (11/13 before); every other case
 identical to the crosspoint. Suite 57/57 on the hub build, the copper model
 clean on the hub paths (every lane claimed at both pins).
+
+H2 coverage (added after the advisor pointed out no case had exercised it):
+`h2_through_sf_chips` - seven A-E nets (one lane, six bounces through B, C,
+D, F, G, H) then four C-G nets (one lane; A's and E's lanes toward C/G are
+spent by the bounces, so no bounce row is left). 16-46, 17-47 and 18-48
+route through I, J and K respectively:
+
+    16-46: C4.2 G12.2 I12.2 I12.6   (C's I lane, G's I lane, bridged by I.X12 = IL, L.X12 claimed)
+    17-47: C5.3 G13.3 J12.2 J12.6   (J.X12 = JL, L.X13 claimed)
+    18-48: C13.4 G5.4 K13.2 K13.6   (K.X13 = IK, I.X14 claimed)
+
+12/12 primaries, copper model clean (the far-end claims included), suite
+61/61 with the case.
 
 ### 3.3 Same-net SF row reuse in `resolveUncommittedHops` (K rows are the currency)
 
