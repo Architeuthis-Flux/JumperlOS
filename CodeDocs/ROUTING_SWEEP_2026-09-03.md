@@ -504,3 +504,48 @@ tap shape needs KL. So the rail copy and the GPIO taps compete for G, and
 the taps win. Move the feed off KL (dac0 in the feed window, 2.8-3.9 V, or
 the probe.power_source config) and GPIO taps go L -> KL -> K, leaving G for
 the rail. Demonstrated below.
+
+### 7.5 The trace, and what it changed
+
+A per-chip trace of the bounce loop (`rail dup bounce skips`, printed by
+`b` for the first rail duplicate of a rebuild) for 1-TOP_RAIL's first copy
+with the feed on DAC0 read `BK CK DK EK FK GK HR`: every chip's K lane
+refused. Two reasons:
+
+* F's K lane was already 38-GND's: the duplicate pass runs `commitPaths`
+  (direct copies) over every duplicate before `resolveAltPaths` (bounces),
+  so a rail copy that has a direct lane wins over a rail copy that needs a
+  bounce, whatever the bridge order. Reasonable - a 2-crosspoint copy
+  beats a 4-crosspoint one - and left as is.
+* G was refused by the tap reservation as the last chip able to bounce an
+  L-node (GPIO) tap - but with KL free the GPIO taps have the hub-lane
+  route and need no bounce chip. `lastTapEscape` now skips a kind whose
+  nodes can tap through the hub lane (`sfNodeTapHasHubRoute`: the hub lane
+  into K virgin at both pins, a virgin row on that SF chip and on K, each
+  with its breadboard pin virgin).
+
+* Then the reserve was still counting chips blindly: `lastTapEscape` now
+  asks whether a tap on the CURRENT netlist needs a bounce at all - rows
+  whose net owns a K row are read there by the fallback, other rows need
+  neither tier 1 (own K lane + virgin K row) nor tier 2 (an I/J/L lane, the
+  hub lane into K, a virgin K row) to be missing; SF nodes likewise (net
+  owns a K row, or the hub-lane route exists). Only then is the last
+  capable bounce chip reserved.
+
+Result (`snap_hop2` -> `snap_hop4`): 70/70, zero rows moved in the suite.
+On Kevin's netlist the trace for 1-TOP_RAIL's first copy now reads
+`... GR ...`: G's K lane and bounce row and the A-G lane all pass, and the
+bounce is refused at K.Y6 by `reservedKRowForSenseTaps` (2026-08-24: a
+duplicate may not take one of the last two virgin K rows). The third virgin
+row went to 38-GND's direct copy (`F3.1 K15.5`), which `commitPaths` routes
+before any bounce copy and which is the better copy (two crosspoints in
+parallel with two, against four in parallel with two). So on this netlist
+K -> G -> A is exactly one reserved K row away, and that reserve is Kevin's
+call: the scan's sequential pair mode needs ONE virgin K row, the guide
+checks' two-channel taps need two. With the feed on DAC0 the GPIO taps go
+through KL and the GND net gets a hub copy through I (`H14.5 K15.5 I14.7
+K13.5`, landing on the GND net's own K row).
+
+`b` now prints `rail dup bounce skips: p<path> <chip><why> ...` for the
+first rail duplicate of a rebuild (K = the chip's K lane, Y = its bounce
+row, L = no lane pair, R = its K row) - the line that answered this.

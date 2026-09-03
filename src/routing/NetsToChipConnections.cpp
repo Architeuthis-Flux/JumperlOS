@@ -601,6 +601,22 @@ static bool reservedKRowForSenseTaps(int chip, int y) {
 // K-row reservation above keeps working alongside.
 static const int kTapBounceReserve = 1;
 
+// Why the BB-to-SF bounce loop skipped each chip for the LAST unrouted rail
+// duplicate it tried (one letter per chip: K = the chip's K lane, Y = its
+// bounce row, L = no free lane pair to the row's chip, R = its row on the SF
+// chip), printed by the b command. Diagnostic only.
+char railDupTrace[64];
+static bool railDupTraced = false;   // the FIRST rail duplicate of a rebuild is traced
+static void railDupTraceNote(int bb, char why) {
+  size_t len = strlen(railDupTrace);
+  if (len + 3 < sizeof(railDupTrace)) {
+    railDupTrace[len] = (char)('A' + bb);
+    railDupTrace[len + 1] = why;
+    railDupTrace[len + 2] = ' ';
+    railDupTrace[len + 3] = 0;
+  }
+}
+
 static int kRowForBounceChip(int n) {
   for (int y = 0; y < 8; y++) {
     if (globalState.connections.chipStates[CHIP_K].yMap[y] == n) {
@@ -665,13 +681,144 @@ static int tapCapableBounceChips(int kind) {
   return count;
 }
 
+// A node on SF chip sf can be tapped WITHOUT a bounce chip when its hub lane
+// into K is virgin at both pins, sf has a virgin row whose breadboard pin is
+// virgin (the same-chip hop lands there), and K has a virgin row whose
+// breadboard pin is virgin - the tap builder's hub-lane shape for I/J/L
+// nodes (RouteSafety). Then the bounce reserve for that kind is moot.
+static bool sfNodeTapHasHubRoute(int sf) {
+  int xs = xMapForChipLane0(sf, CHIP_K);
+  int xk = xMapForChipLane0(CHIP_K, sf);
+  if (xs < 0 || xk < 0 ||
+      globalState.connections.chipStates[sf].xStatus[xs] != -1 ||
+      globalState.connections.chipStates[CHIP_K].xStatus[xk] != -1) {
+    return false;
+  }
+  bool sfRow = false, kRow = false;
+  for (int y = 0; y < 8; y++) {
+    int bb = globalState.connections.chipStates[sf].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, sf) : -1;
+    if (bbX >= 0 && globalState.connections.chipStates[sf].yStatus[y] == -1 &&
+        globalState.connections.chipStates[bb].xStatus[bbX] == -1) {
+      sfRow = true;
+    }
+    int kb = globalState.connections.chipStates[CHIP_K].yMap[y];
+    int kbX = (kb >= 0 && kb < 8) ? xMapForChipLane0(kb, CHIP_K) : -1;
+    if (kbX >= 0 && globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
+        globalState.connections.chipStates[kb].xStatus[kbX] == -1) {
+      kRow = true;
+    }
+  }
+  return sfRow && kRow;
+}
+
+static bool netOwnsKRow(int net) {
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[CHIP_K].yStatus[y] == net) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A K row a tap could land on from outside: virgin, with its breadboard
+// chip's K lane virgin.
+static bool anyVirginKRowWithLane(void) {
+  for (int y = 0; y < 8; y++) {
+    int bb = globalState.connections.chipStates[CHIP_K].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, CHIP_K) : -1;
+    if (bbX >= 0 && globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
+        globalState.connections.chipStates[bb].xStatus[bbX] == -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Do the rows on breadboard chip c need a bounce chip to be tapped? A row
+// whose net owns a K row is read there by the tap fallback (no route to
+// build). Otherwise the chip needs its own K lane with a virgin K row, or
+// a lane into I/J/L with that hub's row for c, the hub lane into K and a
+// virgin K row - the tap builder's tiers 1 and 2. Only when it has neither
+// does a bounce chip matter.
+static bool chipRowsNeedBounce(int c) {
+  bool any = false;
+  for (int y = 1; y < 8 && !any; y++) {
+    int n = globalState.connections.chipStates[c].yStatus[y];
+    if (n > 0 && n != EPHEMERAL_PATH_NET && n != FAKE_GPIO_TDM_NET && !netOwnsKRow(n)) {
+      any = true;
+    }
+  }
+  if (!any) {
+    return false;
+  }
+  int laneK = xMapForChipLane0(c, CHIP_K);
+  int rowK = kRowForBounceChip(c);
+  if (laneK >= 0 && rowK >= 0 &&
+      globalState.connections.chipStates[c].xStatus[laneK] == -1 &&
+      globalState.connections.chipStates[CHIP_K].yStatus[rowK] == -1) {
+    return false;
+  }
+  for (int via = CHIP_I; via <= CHIP_L; via++) {
+    if (via == CHIP_K) {
+      continue;
+    }
+    int laneV = xMapForChipLane0(c, via);
+    int rowV = sfRowForBounceChip(via, c);
+    int xh = xMapForChipLane0(via, CHIP_K);
+    int xk = xMapForChipLane0(CHIP_K, via);
+    if (laneV < 0 || rowV < 0 || xh < 0 || xk < 0) {
+      continue;
+    }
+    if (globalState.connections.chipStates[c].xStatus[laneV] == -1 &&
+        globalState.connections.chipStates[via].yStatus[rowV] == -1 &&
+        globalState.connections.chipStates[via].xStatus[xh] == -1 &&
+        globalState.connections.chipStates[CHIP_K].xStatus[xk] == -1 &&
+        anyVirginKRowWithLane()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Does any node on SF chip sf (a nano pin, a GPIO ...) need a bounce chip to
+// be tapped? Nodes whose net owns a K row are read there; the rest tap
+// through the hub lane when it is free.
+static bool sfKindNeedsBounce(int sf) {
+  bool any = false;
+  for (int x = 0; x < 16 && !any; x++) {
+    int to = globalState.connections.chipStates[sf].xMap[x];
+    if (to >= 0 && to < 12) {
+      continue; // a lane, not a node
+    }
+    int n = globalState.connections.chipStates[sf].xStatus[x];
+    if (n > 0 && n != EPHEMERAL_PATH_NET && n != FAKE_GPIO_TDM_NET && !netOwnsKRow(n)) {
+      any = true;
+    }
+  }
+  return any && !sfNodeTapHasHubRoute(sf);
+}
+
 // True when chip n is one of the last kTapBounceReserve chips that can
-// bounce a tap of the given kind (onlyKind -2: any kind it serves).
+// bounce a tap of the given kind (onlyKind -2: any kind it serves), and a
+// tap of that kind on the CURRENT netlist actually needs a bounce.
 static bool lastTapEscape(int n, int onlyKind) {
   for (int k = 0; k < 4; k++) {
     int kind = kTapKinds[k];
     if (onlyKind != -2 && kind != onlyKind) {
       continue;
+    }
+    if (kind >= 0 && !sfKindNeedsBounce(kind)) {
+      continue;
+    }
+    if (kind < 0) {
+      bool need = false;
+      for (int c = 0; c < 8 && !need; c++) {
+        need = chipRowsNeedBounce(c);
+      }
+      if (!need) {
+        continue;
+      }
     }
     if (tapCapableBounceChip(n, kind) &&
         tapCapableBounceChips(kind) <= kTapBounceReserve) {
@@ -1703,6 +1850,8 @@ void clearAllNTCC(void) {
   numberOfUniqueNets = 0;
   numberOfNets = 0;
   numberOfPaths = 0;
+  railDupTraced = false;
+  railDupTrace[0] = 0;
 
   pathsWithCandidatesIndex = 0;
   pathIndex = 0;
@@ -4896,6 +5045,15 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
               }
 
               int sfChip = globalState.connections.paths[i].chip[1];
+              bool traceThis = globalState.connections.paths[i].duplicate != 0 &&
+                               globalState.connections.paths[i].net >= 1 &&
+                               globalState.connections.paths[i].net <= 3 &&
+                               (!railDupTraced || bb > 0);
+              if (traceThis && bb == 0) {
+                railDupTraced = true;
+                railDupTrace[0] = 0;
+                snprintf(railDupTrace, sizeof(railDupTrace), "p%d ", i);
+              }
 
               // The bounce chip's OWN lane into the SF chip: the pin that
               // closes on bb.Y0 and lands on sfChip.Y[bb]. This used to be
@@ -4938,6 +5096,13 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 Serial.print("  \n\r");
               }
 
+              if (traceThis) {
+                if (!freeOrSameNetX(bb, xMapBB, globalState.connections.paths[i].net, currentAllowStacking)) {
+                  railDupTraceNote(bb, 'K');
+                } else if (!freeOrSameNetY(bb, 0, globalState.connections.paths[i].net, currentAllowStacking)) {
+                  railDupTraceNote(bb, 'Y');
+                }
+              }
               if (freeOrSameNetX(bb, xMapBB, globalState.connections.paths[i].net,
                                  currentAllowStacking) == true &&
                   freeOrSameNetY(bb, 0, globalState.connections.paths[i].net, currentAllowStacking) ==
@@ -5011,6 +5176,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                           currentAllowStacking) == true) {
                   freeLane = 1;
                 } else {
+                  if (traceThis) railDupTraceNote(bb, 'L');
                   continue;
                 }
 
@@ -5018,6 +5184,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 //     globalState.connections.chipStates[sfChip].yStatus[yMapSF] != globalState.connections.paths[i].net) {
                 if (freeOrSameNetY(sfChip, yMapSF, globalState.connections.paths[i].net,
                                    currentAllowStacking) == false) {
+                  if (traceThis) railDupTraceNote(bb, 'R');
                   continue;
                 }
 
@@ -6618,6 +6785,13 @@ void printPathsCompact(int showCullDupes, Stream* target) {
       i = 0;
     }
     changeTerminalColor(-1, false, target);
+  }
+  {
+    extern char railDupTrace[64];
+    if (railDupTrace[0]) {
+      target->print("rail dup bounce skips: ");
+      target->println(railDupTrace);
+    }
   }
   target->flush();
 }
