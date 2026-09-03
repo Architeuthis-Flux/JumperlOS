@@ -4349,11 +4349,22 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 break;
               }
 
-              int xMapBB = xMapForChipLane0(globalState.connections.paths[i].chip[0], bb);
-              if (xMapBB == -1) {
-                // Serial.print("xMapBB == -1");
+              int sfChip = globalState.connections.paths[i].chip[1];
 
-                continue; // don't bother checking if there's no connection
+              // The bounce chip's OWN lane into the SF chip: the pin that
+              // closes on bb.Y0 and lands on sfChip.Y[bb]. This used to be
+              // xMapForChipLane0(chip[0], bb) - chip[0]'s pin toward bb, used
+              // as an index on bb - so the availability check below tested an
+              // unrelated pin of bb (its I lane, mostly), the claim marked
+              // that unrelated pin busy, and the lane the path really used
+              // (x[3], recomputed correctly further down) was never claimed.
+              // No hardware short came of it only because sfChip.Y[bb], the
+              // other end of the same wire, was claimed. Found by
+              // test_routing_dense (2026-09-03): UNCLAIMED WIRE / CLAIM
+              // WITHOUT COPPER on every bounced BB-to-SF path.
+              int xMapBB = xMapForChipLane0(bb, sfChip);
+              if (xMapBB == -1 || xMapForChipLane0(globalState.connections.paths[i].chip[0], bb) == -1) {
+                continue; // no such lane pair: bb cannot bounce for this path
               }
               // if (xMapForChipLane1(globalState.connections.paths[i].chip[0], bb) == -1)
               // {
@@ -4364,8 +4375,6 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
               // }
               // Serial.print("           fuck         ");
               int yMapSF = bb; // always
-
-              int sfChip = globalState.connections.paths[i].chip[1];
 
               // not chip L
               if (debugNTCC2) {
@@ -4441,16 +4450,18 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 //                together,
                 //                             // so only check chip 1
                 // {
+                // a lane is free only when BOTH its pins are (they are
+                // always claimed together, but a check on one end only
+                // trusts that every claimant got it right)
                 if (freeOrSameNetX(globalState.connections.paths[i].chip[0], xMapL0c0, globalState.connections.paths[i].net,
+                                   currentAllowStacking) == true &&
+                    freeOrSameNetX(bb, xMapL0c1, globalState.connections.paths[i].net,
                                    currentAllowStacking) == true) {
                   freeLane = 0;
-                  // } else if ((xMapL1c0 != -1) &&
-                  //            ((globalState.connections.chipStates[globalState.connections.paths[i].chip[0]].xStatus[xMapL1c0] == -1)
-                  //            ||
-                  //             globalState.connections.chipStates[globalState.connections.paths[i].chip[0]].xStatus[xMapL1c0] ==
-                  //             globalState.connections.paths[i].net)) {
                 } else if (freeOrSameNetX(globalState.connections.paths[i].chip[0], xMapL1c0,
                                           globalState.connections.paths[i].net,
+                                          currentAllowStacking) == true &&
+                           freeOrSameNetX(bb, xMapL1c1, globalState.connections.paths[i].net,
                                           currentAllowStacking) == true) {
                   freeLane = 1;
                 } else {
@@ -4490,13 +4501,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                   setPathX(i, 1, SFnode);
 
                   setPathX(i, 2, xMapL0c1);
-                  // Serial.print("\n\r\t\t\t\txBB: ");
-                  // Serial.println(bb);
-
-                  xMapBB = xMapForChipLane0(globalState.connections.paths[i].chip[2], globalState.connections.paths[i].chip[1]);
-                  // Serial.println(xMapBB);
                   globalState.connections.paths[i].chip[3] = globalState.connections.paths[i].chip[2];
-
                   setPathX(i, 3, xMapBB);
 
                   setPathY(i, 0, yMapForNode(globalState.connections.paths[i].node1, globalState.connections.paths[i].chip[0]));
@@ -4532,7 +4537,6 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                   setPathX(i, 1, SFnode);
 
                   setPathX(i, 2, xMapL1c1);
-                  xMapBB = xMapForChipLane0(globalState.connections.paths[i].chip[2], globalState.connections.paths[i].chip[1]);
                   setPathX(i, 3, xMapBB);
 
                   globalState.connections.paths[i].chip[3] = globalState.connections.paths[i].chip[2];
