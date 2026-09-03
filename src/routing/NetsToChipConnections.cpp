@@ -4324,15 +4324,17 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
               Serial.println(i);
             }
 
-            int saveUncommittedHops = globalState.connections.chipStates[globalState.connections.paths[i].chip[0]].uncommittedHops;
-            int saveUncommittedHops1 = globalState.connections.chipStates[globalState.connections.paths[i].chip[1]].uncommittedHops;
-            // Serial.print("saveUncommittedHops1: ");
-            // Serial.println(saveUncommittedHops1);
-
-            // Serial.print("saveUncommittedHops: ");
-            // Serial.println(saveUncommittedHops);
-
-            for (int bb = 0; bb < (8 - saveUncommittedHops1);
+            // Every breadboard chip is a candidate bounce (its NC Y0 row joins
+            // the lane from chip[0] to its lane into the SF chip). The upper
+            // bound used to be 8 - chipStates[chip[1]].uncommittedHops, which
+            // counts SF-to-SF paths that borrowed a Y row on the SF chip: with
+            // the probe feed (BUF_IN -> GP_8) sitting on L that skipped chip H
+            // outright, and H was the only chip whose L row (L.Y7) was still
+            // free, so 7 -> GP_2 failed with A's own L row taken by GP_1
+            // (2026-09-02). The row the SF-to-SF path actually took is already
+            // refused by freeOrSameNetY(sfChip, bb, ...) below; the OG router
+            // has always looped to 8.
+            for (int bb = 0; bb < 8;
                  bb++) // check if any other chips have free paths to both the
             // sf chip and target chip
             {
