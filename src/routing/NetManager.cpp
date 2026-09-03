@@ -26,13 +26,27 @@
 // Static array avoids heap allocation during dual-core execution (XIP safety)
 int8_t nodeToNetIndex[256];
 
-// Build node→net index after nets are regenerated
+// Build node→net index after nets are regenerated.
+//
+// Walks the nets array by CONTENT, not by numberOfNets: this runs at the end
+// of getNodesToConnect(), and at that point numberOfNets is still the 0 that
+// clearAllNTCC() left - sortPathsByNet() (inside bridgesToPaths, which runs
+// after) is what counts the nets. Until 2026-09-03 the loop below therefore
+// ran zero times after every rebuild and the index read -1 for every node:
+// RouteSafety's net-label short check never labelled a wire, the scanner's
+// shared-K-row tap fallback never fired, and LEDs.cpp's bridge-colour lookup
+// by index never matched. A slot whose number is 0 (unused) or -1 (cleared)
+// is skipped; slot 0 is the Empty Net (number 127, node EMPTY_NET) and gets
+// index 0, which every consumer already treats as "no net".
 void buildNodeToNetIndex() {
     // Clear index (-1 = node not in any net)
     memset(nodeToNetIndex, -1, sizeof(nodeToNetIndex));
     
     // Build index from current nets
-    for (int i = 0; i < numberOfNets; i++) {
+    for (int i = 0; i < MAX_NETS; i++) {
+        if (globalState.connections.nets[i].number <= 0) {
+            continue;
+        }
         for (int n = 0; n < MAX_NODES && globalState.connections.nets[i].nodes[n] != 0; n++) {
             int node = globalState.connections.nets[i].nodes[n];
             if (node >= 0 && node < 256) {
