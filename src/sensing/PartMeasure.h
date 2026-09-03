@@ -51,6 +51,12 @@ struct ScanSession {
     int16_t liftA[12]; int16_t liftB[12]; int16_t liftDup[12];
     uint8_t nLift = 0;
     float dac0Restore = 0.0f;
+    // the user's rails, parked at 0 V for the session (2026-09-03): a
+    // physical wire from a rail to a DUT row kept 7.4 V on a 4051's COM
+    // through every scan and its channel rows read "something (unclear)"
+    bool railsParked = false;
+    float railTopRestore = 0.0f;
+    float railBotRestore = 0.0f;
     float iLimit_mA = 10.0f;
     // the probe power feed (DAC0/GPIO -> BUFFER_IN) is parked for the whole
     // session - Kevin's ruling supersedes the old DAC0-feed refusal: "just

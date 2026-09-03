@@ -566,3 +566,44 @@ were free and E comes first in the loop); K.Y6 stays virgin for the taps,
 a third copy (BOTTOM_RAIL through the I hub). Two non-rail copies moved
 under the rails-first rule (18-D7 and 56-58 change lanes, 41-45 loses its
 bounce copy).
+
+## 8. Part ID and the rails (Kevin, 14:37)
+
+An Auto Scan on Kevin's bench read the 4051's channel rows 32/34 as
+"rows 32-34: something (unclear)", the LED on 28-58 once as CAPACITOR and
+once as LED 2.96 V, and the pot once as "something (unclear)" and once as
+POT 10.4k. Row 33 (the 4051's COM) has a jumper wire to the bottom rail,
+which was at 7.4 V. The scan lifts every user bridge, but not copper, and
+it never touched the rails (the design's "rails-off precondition" was never
+enforced): the chip sat half-powered through the census and the pair sweep.
+
+Baseline on the current build, `part_identify()` over port 5, three times
+each with the rails live (4.4/7.4 V) and at 0 V: the LED reads LED 2.97 V
+six times out of six either way - the capacitor verdict is not the rails
+and not the routing (the session's legs are router-built and identical run
+to run). The three-row identifies return status -2 on this netlist: a
+three-row session needs three free ADC channels and rows 2 and 5 hold ADC0
+and ADC3; the Auto Scan clears the board first, so only it can measure
+those parts here.
+
+Change: `partsAutoLauncher` parks both rails at 0 V after the wire lift
+(printing the values) and restores them at `adone`; `partScanBegin` parks
+them for any session and `partScanEnd` restores (a no-op when nested in the
+scan). Headless Auto Scan runs on the new build (launched with
+`run_app('Auto Scan')` over port 5, every prompt answered `n` on port 1),
+Kevin's netlist and jumper in place, twice:
+
+    rails parked at 0 V for the scan (top 4.40 V, bottom 7.40 V - they come back when it's done)
+    row 33 v0=-0.03 v1=-0.01        (6.70/6.79 V before)
+    row 33: noise (nothing conducts)
+    rows 28-58: LED 2.95V           (LED 2.97V on the second run)
+    rails back (top 4.40 V, bottom 7.40 V)
+
+Rows 32 and 34 no longer census as parts at all - they were the half-powered
+4051 answering through its COM pin - and row 33 is cold. The LED read LED
+on both runs and on six `part_identify()` calls; the one CAPACITOR verdict
+in Kevin's first run did not reproduce, so it stays unexplained (the
+classifier's rule is "a second 1 mA read more than 0.10 V above the first
+is a cap still charging", PartClassify.cpp). Both scans finished in 14 s
+against 50-61 s: the pot and the 74393 are placed records now and the scan
+skips them.

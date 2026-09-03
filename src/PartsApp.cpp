@@ -4599,6 +4599,9 @@ void partsAutoLauncher(void) {
     // (scanLiftA/B/Dup/N are file-scope now - see partsLiftedBridge: the
     // confirm-pass placements must see the wiring this app lifted)
     scanLiftN = 0;
+    // the user's rails, parked at 0 V for the whole scan (see below)
+    float scanRailTop = 0.0f, scanRailBot = 0.0f;
+    bool scanRailsParked = false;
     // findings the user can ACT on (Kevin's ask): identified discretes
     // collect here and a CONNECT press at the end places them as records
     static PartResult addable[8];
@@ -4669,6 +4672,28 @@ void partsAutoLauncher(void) {
     bool scanPpRestore = infraProbePowerWanted();
     infraSetProbePowerEnabled(false);
     refreshConnections(-1, 0, 0);
+
+    // Rails off for the whole scan (Kevin, 2026-09-03: "we should control
+    // the rails in part id"). The wire lift above cannot lift a JUMPER: his
+    // bench had row 33 (a 4051's COM) wired to the bottom rail at 7.4 V, so
+    // the chip stayed half-powered through the census and its channel rows
+    // 32/34 censused as parts and identified as "something (unclear)".
+    // Nothing on the board is meant to be hot while the scan reads it
+    // (the design's rails-off precondition); the values come back at adone.
+    scanRailTop = getDacHardwareVoltage(2);
+    scanRailBot = getDacHardwareVoltage(3);
+    if (scanRailTop > 0.05f || scanRailTop < -0.05f ||
+        scanRailBot > 0.05f || scanRailBot < -0.05f) {
+        scanRailsParked = true;
+        setDacByNumber(2, 0.0f, 0, 0, false);
+        setDacByNumber(3, 0.0f, 0, 0, false);
+        Serial.print("rails parked at 0 V for the scan (top ");
+        Serial.print(scanRailTop, 2);
+        Serial.print(" V, bottom ");
+        Serial.print(scanRailBot, 2);
+        Serial.println(" V - they come back when it's done)");
+        delay(20);
+    }
 
     int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck, partsScanViz);
     if (found == -6) {
@@ -5972,6 +5997,16 @@ adone:
     // the user's wiring AND the parked probe feed go back, duplicate
     // stacking and all, in ONE refresh - every exit path funnels through
     // here (infraEvaluate at the refresh head reads the restored flag)
+    if (scanRailsParked) {
+        setDacByNumber(2, scanRailTop, 0, 0, false);
+        setDacByNumber(3, scanRailBot, 0, 0, false);
+        scanRailsParked = false;
+        Serial.print("rails back (top ");
+        Serial.print(scanRailTop, 2);
+        Serial.print(" V, bottom ");
+        Serial.print(scanRailBot, 2);
+        Serial.println(" V)");
+    }
     infraSetProbePowerEnabled(scanPpRestore);
     if (scanLiftN > 0) {
         for (int i = 0; i < scanLiftN; i++)
