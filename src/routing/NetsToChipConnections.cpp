@@ -550,8 +550,8 @@ void validateTransactionConsistency(void) {
 // path-stacking DUPLICATES consumed all 8 K y-rows, so every tap failed
 // "noroute" and every net displayed 0.0 mA (hardware diag showed K y4/y5 as
 // bit-identical duplicates of y2/y1). DUPLICATE paths are a pure resistance
-// optimization - never connectivity - so they must not consume one of the
-// LAST TWO virgin K y-rows. Primary paths keep unconditional access
+// optimization - never connectivity - so they must not consume the LAST
+// virgin K y-row(s) - kTapKRowReserve of them, one since 2026-09-03. Primary paths keep unconditional access
 // (connectivity first). The other half of this fix is buildEphemeralRoute's
 // same-net-row fallback in RouteSafety.cpp.
 //
@@ -573,11 +573,17 @@ static int virginChipKYRowCount(void) {
 }
 
 // True when a duplicate path may not take this row: the row is virgin on chip
-// K and 2 or fewer virgin K rows remain (the candidate row included).
+// K and kTapKRowReserve or fewer virgin K rows remain (the candidate row
+// included). Two until 2026-09-03; Kevin, after the top rail's K -> G -> A
+// copy was refused with exactly two virgin rows left: "let's only keep one
+// tap" - the scan's sequential pair mode taps on one channel, and a
+// two-channel guide-check tap falls back to a shared same-net K row.
+static const int kTapKRowReserve = 1;
+
 static bool reservedKRowForSenseTaps(int chip, int y) {
   return routingDuplicatePathNow && chip == CHIP_K &&
          globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
-         virginChipKYRowCount() <= 2;
+         virginChipKYRowCount() <= kTapKRowReserve;
 }
 
 // ============================================================================
@@ -5373,7 +5379,7 @@ bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
   // Serial.print(", ");
   // Serial.print(allowStacking);
   // Serial.print(" = ");
-  // Duplicates may not take one of the last two virgin chip-K y-rows - those
+  // Duplicates may not take the last virgin chip-K y-row(s) (kTapKRowReserve) - those
   // are reserved for ephemeral sense-tap routes (see reservedKRowForSenseTaps).
   // Stacking onto an already-same-net row is unaffected.
   if (reservedKRowForSenseTaps(chip, y)) {

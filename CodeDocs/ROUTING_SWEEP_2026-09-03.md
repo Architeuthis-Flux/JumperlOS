@@ -549,3 +549,20 @@ K13.5`, landing on the GND net's own K row).
 `b` now prints `rail dup bounce skips: p<path> <chip><why> ...` for the
 first rail duplicate of a rebuild (K = the chip's K lane, Y = its bounce
 row, L = no lane pair, R = its K row) - the line that answered this.
+
+### 7.6 "let's only keep one tap" (Kevin, 14:13)
+
+`reservedKRowForSenseTaps` keeps `kTapKRowReserve = 1` virgin K row from
+duplicates instead of two. The 2026-08-24 rule kept two for the guide
+checks' two-channel taps; the scan's sequential pair mode taps on one
+channel, and a two-channel tap falls back to a shared same-net K row.
+
+Result (`snap_hop4` -> `snap_krow1`, 70/70, every tap kept): 10 rows moved.
+Kevin's netlist: 1-TOP_RAIL gets its copy, `A8.1 K4.4 E0.0 E1.0` - A's lane
+to E, E's bounce row, E's K lane, K.Y4 - the K -> bounce -> A shape he asked
+about, through E rather than G on this rebuild (E's bounce row and K lane
+were free and E comes first in the loop); K.Y6 stays virgin for the taps,
+`i!` reports a route for all 24 scanned nodes. `rail_stacking_light` gains
+a third copy (BOTTOM_RAIL through the I hub). Two non-rail copies moved
+under the rails-first rule (18-D7 and 56-58 change lanes, 41-45 loses its
+bounce copy).
