@@ -367,6 +367,57 @@ static uint32_t scrollPartVisited = 0; // bit per pin index; every on-board pin 
 static int8_t scrollPartLeft = -1;     // the part just walked: its rows are not stops for the scan that follows
 static_assert( MAX_PART_PINS <= 32, "scrollPartVisited is one bit per pin" );
 
+// Detents per stop (Kevin, 2026-09-04): the scroll moves one stop per TWO
+// detents - one per net felt twitchy - except inside a placed part with
+// more than kScrollFastWalkPins pins, where every detent steps a pin as
+// before (walking a DIP is many detents already; a part with four pins or
+// fewer is walked at the slow pace like everything else). UP and DOWN add
+// and subtract, so a wiggle cancels itself and nothing moves. No time-based
+// reset on purpose: slow, deliberate clicking still arrives after two
+// detents. The count is zeroed with the part focus (scrollPartReset), which
+// every landing, leave and removal goes through.
+static const int kScrollDetentsPerStop = 2;
+static const int kScrollFastWalkPins = 4;
+static int8_t scrollDetentAcc = 0;
+
+static int scrollDetentsNeeded( void ) {
+    if ( scrollPartIdx >= 0 && scrollPartIdx < globalState.parts.numParts &&
+         globalState.parts.parts[ scrollPartIdx ].numPins > kScrollFastWalkPins ) {
+        return 1;
+    }
+    return kScrollDetentsPerStop;
+}
+
+// Consumes a pending detent - setting NONE is the ack the emitter in
+// RotaryEncoder.cpp waits for before it releases the next queued one, so a
+// half-step still drains the queue - and says whether it completes a step:
+// +1 UP, -1 DOWN, 0 not yet.
+static int scrollDetentStep( int needed ) {
+    int dir = 0;
+    if ( encoderDirectionState == UP ) {
+        dir = +1;
+    } else if ( encoderDirectionState == DOWN ) {
+        dir = -1;
+    } else {
+        return 0;
+    }
+    encoderDirectionState = NONE;
+    if ( needed <= 1 ) {
+        scrollDetentAcc = 0;
+        return dir;
+    }
+    scrollDetentAcc = (int8_t)( scrollDetentAcc + dir );
+    if ( scrollDetentAcc >= needed ) {
+        scrollDetentAcc = 0;
+        return +1;
+    }
+    if ( scrollDetentAcc <= -needed ) {
+        scrollDetentAcc = 0;
+        return -1;
+    }
+    return 0;
+}
+
 static void scrollPartReset( void ) {
     scrollPartIdx = -1;
     scrollPartPin = -1;
@@ -374,6 +425,7 @@ static void scrollPartReset( void ) {
     scrollPartEntryRow = -1;
     scrollPartRingUp = 0;
     scrollPartVisited = 0;
+    scrollDetentAcc = 0;
 }
 
 // The scan landed on row `scrolledRow`, owned by part `pi` through pin `pj`.
@@ -603,9 +655,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
     //   return -1;
     // rotaryEncoderStuff();
     if ( mode == 0 ) {
-        if ( encoderDirectionState == UP ) {
-            // Serial.println(encoderPosition);
-            encoderDirectionState = NONE;
+        int step = scrollDetentStep( kScrollDetentsPerStop );   // two detents a node, the row scan's pace
+        if ( step > 0 ) {
             if ( highlightedNet < 0 ) {
                 highlightedNet = -1;
                 brightenedNet = -1;
@@ -661,9 +712,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             // assignNetColors();
             // assignNetColors();
 
-        } else if ( encoderDirectionState == DOWN ) {
-            // Serial.println(encoderPosition);
-            encoderDirectionState = NONE;
+        } else if ( step < 0 ) {
             if ( highlightedNet == 0 ) {
 
                 highlightedNet = numberOfNets - 1;
@@ -958,9 +1007,11 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             s_gpioClickLatched = false;
         }
 
-        if ( encoderDirectionState == UP ) {
-            encoderDirectionState = NONE;
-
+        // Two detents a stop, one inside a big part (scrollDetentStep). The
+        // pace is read here, after the stale-focus guard above, so a removed
+        // part never counts as big-part focus.
+        int step = scrollDetentStep( scrollDetentsNeeded( ) );
+        if ( step > 0 ) {
             // Part focus first: every pin of this part before anything else
             // (walkPart above); exhausted, the row scan resumes past it.
             if ( scrollPartIdx >= 0 ) {
@@ -1028,9 +1079,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 scrollPartLeft = -1;   // the just-walked part's rows were skipped for this one scan
             }
 
-        } else if ( encoderDirectionState == DOWN ) {
-            encoderDirectionState = NONE;
-
+        } else if ( step < 0 ) {
             // Part focus, mirrored: the ring steps back (see walkPart).
             if ( scrollPartIdx >= 0 ) {
                 walkPart( false );
