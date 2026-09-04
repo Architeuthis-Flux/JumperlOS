@@ -5637,11 +5637,27 @@ static void sameChipHopOrder(int chip, int order[16]) {
 // has the most virgin SF lanes; ties to the lowest row.
 // Rank: a chip that is one of the last able to bounce a sense tap comes
 // last (its lanes are the taps' reserve, primaries included as a tie-break);
-// a chip at its last virgin SF lane next to last (the row would strand it);
+// a chip that already holds user rows next to last (this row is its only
+// direct lane to the ADCs - the taps' first tier - so among those the chip
+// with the most spare lanes first); a chip at its last virgin SF lane next;
 // otherwise PACK: the chip with the fewest spare lanes first, so a pristine
 // chip stays pristine for the bounces and the hub copies. Ties to the
 // lowest row. (The first cut preferred the MOST spare lanes, which moved the
-// probe feed onto the one pristine chip in almost every case.)
+// probe feed onto the one pristine chip in almost every case; the second
+// packed by spare lanes alone, which handed the two hub hops of a current
+// loop chip A's and B's K rows - A held the loop's row, and once its
+// stacked copies had spent the bounce lanes that row had no sense route,
+// 2026-09-03 evening.)
+static bool chipHasUserRows(int c) {
+  for (int y = 1; y < 8; y++) {
+    int n = globalState.connections.chipStates[c].yStatus[y];
+    if (n > 0 && n != EPHEMERAL_PATH_NET && n != FAKE_GPIO_TDM_NET) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static int bestSfRow(int chip, int net, int allowStacking) {
   int best = -1, bestRank = 1 << 20;
   for (int y = 0; y < 8; y++) {
@@ -5658,6 +5674,8 @@ static int bestSfRow(int chip, int net, int allowStacking) {
       rank = 0;
     } else if (tapCapableBounceChip(bb, -1) && tapCapableBounceChips(-1) <= kTapBounceReserve + 1) {
       rank = 3000 + y;
+    } else if (chipHasUserRows(bb)) {
+      rank = 2500 + (8 - virginSfLanes(bb)) * 8 + y;
     } else {
       int spare = virginSfLanes(bb);
       rank = (spare <= 1 ? 2000 : 1000 + spare * 8) + y;

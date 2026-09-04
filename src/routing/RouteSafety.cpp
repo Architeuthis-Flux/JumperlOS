@@ -779,10 +779,15 @@ static bool buildEphemeralRouteTiered(int nodeA, int nodeB, pathStruct* out,
                     globalState.connections.chipStates[n].xStatus[nLaneK] == nodeANet &&
                     kRowSharedByNet(n);
                 if (!laneVirgin && !laneOwned) { trace(n, 'k'); continue; }
+                // A breadboard row first; failing that the bounce row
+                // itself when a stacked copy of the net rides it (y0 is
+                // then the net's copper too - the case where the copies
+                // spent every bounce lane the node's chip had).
                 int row = -1;
                 for (int r = 1; r < 8 && row < 0; r++) {
                     if (globalState.connections.chipStates[n].yStatus[r] == nodeANet) row = r;
                 }
+                if (row < 0 && globalState.connections.chipStates[n].yStatus[0] == nodeANet) row = 0;
                 if (row < 0) { trace(n, 'r'); continue; }
                 // The lane between the two chips may be virgin or already
                 // the net's own (a stacked copy of the net rides it): both
@@ -898,6 +903,21 @@ static bool buildEphemeralRouteTiered(int nodeA, int nodeB, pathStruct* out,
                 out->chip[3] = CHIP_K;
                 out->x[3] = adcX;
                 out->y[3] = c;
+                return true;
+            }
+        }
+        // Fallback pass only: the node's net already holds a K row (its
+        // own hub hop - DAC0 -> I_POS over IK, the probe feed over KL) and
+        // every bounce row is spent. That row IS the net; the ADC lane
+        // joins it in one hop, the way a breadboard row's shared-K-row
+        // pass does (2026-09-03 evening, the current loop with a rail on
+        // row 2: ISENSE_PLUS and GPIO 8 had no route while their nets sat
+        // on K rows y2 and y1).
+        for (int y = 0; y < 8; y++) {
+            if (kRowSharedByNet(y)) {
+                out->chip[0] = CHIP_K;
+                out->x[0] = adcX;
+                out->y[0] = y;
                 return true;
             }
         }

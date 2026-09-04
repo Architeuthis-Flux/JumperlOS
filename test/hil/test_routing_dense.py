@@ -46,6 +46,7 @@ from fabric_v5 import NODE_NAME
 GND, TOP, BOT = 100, 101, 102
 DAC0, DAC1 = 106, 107
 ADC0, ADC1, ADC2, ADC3 = 110, 111, 112, 113
+ISP, ISM = 108, 109                              # ISENSE_PLUS / ISENSE_MINUS (the 2 ohm shunt)
 UART_TX, UART_RX = 116, 117
 GP = {i: 130 + i for i in range(1, 9)}          # GP[1] = RP_GPIO_1 = 131
 D = {i: 70 + i for i in range(14)}              # D[0] = NANO_D0
@@ -140,6 +141,22 @@ CASES = [
     ("rail_stacking_light",
      [(TOP, 1), (TOP, 15), (BOT, 31), (GND, 45), (DAC0, 8)],
      True, (2, 3, 1), ("taps",)),
+    # test_net_currents' loop (DAC0 -> shunt -> row 5 -> GND) with stacking
+    # on: the release gate of 2026-09-03 found row 5 with NO sense route.
+    # The two SF-to-SF hub hops (the probe feed BUF_IN->GP_8, DAC0->I_POS)
+    # had been packed onto K rows y0 and y1 - chip A's and B's only direct
+    # lanes to the ADCs - and the loop's six stacked copies then spent every
+    # bounce lane chip A had. bestSfRow now leaves a row-holding chip's K
+    # row alone; every scanned node must keep a tap route.
+    ("isense_loop_stacked",
+     [(DAC0, ISP), (ISM, 5), (GND, 5)],
+     True, (2, 2, 0), ("taps",)),
+    # the same loop with chip A's own K row spent by a rail on row 2: the
+    # tap for row 5 must then join the net's copper at a bounce row one of
+    # its stacked copies rides (tier 4 accepts y0 when the net owns it)
+    ("isense_loop_a_k_row_taken",
+     [(2, TOP), (DAC0, ISP), (ISM, 5), (GND, 5)],
+     True, (2, 2, 0), ("taps",)),
     # beyond the fabric on purpose: metrics only, but never a short
     ("nano_dense_metric",
      [(D[i], i + 1) for i in range(6)] + [(A[i], i + 15) for i in range(6)],
