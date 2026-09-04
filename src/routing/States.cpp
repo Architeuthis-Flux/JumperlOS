@@ -1656,7 +1656,7 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         lineStart = lineEnd + 1;
     }
     
-    // Legacy stamped counts -> default. Until 5.7.10.1 addConnection stored
+    // Legacy stamped counts -> default. Until 5.7.11.0 addConnection stored
     // this slot's stackPaths into every bridge added without a count, and the
     // file carries that as an explicit "dup: N" - which the router honours
     // as-is, so GPIO/ADC bridges kept stacking and rails never got

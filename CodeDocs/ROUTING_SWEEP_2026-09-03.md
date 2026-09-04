@@ -607,3 +607,71 @@ classifier's rule is "a second 1 mA read more than 0.10 V above the first
 is a cap still charging", PartClassify.cpp). Both scans finished in 14 s
 against 50-61 s: the pot and the 74393 are placed records now and the scan
 skips them.
+
+## 9. Release gate for 5.7.11.0 (evening): the loop with no sense route
+
+Kevin asked for a version number, a merge into main and a push. VERSION went
+to 5.7.11.0, both targets built, the board printed it, and the full HIL suite
+ran as the gate. The first run was paused for four hours at Kevin's request
+(SIGSTOP on the runner and its test); on resume the board dropped off USB
+within seconds, the slot-files teardown lost its port, and the run was dead.
+The bench was put back from the 14:45 snapshot (context slot 0, nets and
+power byte-identical) and the suite rerun from scratch.
+
+That run: 8/11 files. `parts_roundtrip` is the known stale expectation
+(a `dup: 2` bridge expected to survive a rewrite, against the loader rule of
+12e6629 - Kevin's call). `net_currents` was new: INA0 saw 2.84 mA through
+the loop DAC0 -> ISENSE+ -> shunt -> ISENSE- -> row 5 -> GND, but `i!` had
+no per-path current at all. The same check passed at 12:49.
+
+**Root cause** (reproduced by hand with the suite's capture/restore, copper
+checker clean - no short, claims match the crossbar):
+
+- Chip K's eight Y rows are the eight breadboard chips' only direct lanes
+  into K (y0 = AK ... y7 = HK). `bestSfRow` (323a6d1, "pack onto the chip
+  with the fewest spare lanes") had handed the two SF-to-SF hub hops (the
+  probe feed BUF_IN -> GP_8 over KL, and DAC0 -> I_POS over IK) K rows y0
+  and y1: with only the primaries placed, chip A - the chip holding row 5 -
+  had the fewest spare lanes and won the packing.
+- Then the loop's six stacked copies (two bridges on row 5, stack 2) spent
+  AJ, AL and the six bounce lanes A has to C..H. Row 5's tap had AK blocked
+  at K, IK busy, every bounce row spent: `route 5: (none) tier4: Bk Cr Dr
+  Er Fr Gr Hr`. Tier 4 only looked at breadboard rows (y1..y7) of the net on
+  the bounce chip, never the bounce row a copy rides.
+
+**Fix** (this build, both targets):
+
+- `bestSfRow`: a chip that holds user rows ranks after the pristine chips
+  (its K row is its taps' first tier); among those, most spare lanes first.
+  Tap-reserve chips still last. The hub hops now take y1 and y2 (B, C).
+- Tier 4 of `buildEphemeralRouteTiered` accepts the bounce row (y0) when
+  the node's net owns it: the tap joins the copy's copper and leaves over
+  that chip's K lane.
+
+After: `route 5: A(x14,y5) H(x0,y0) H(x7,y0) K(x8,y7) -> ADC0` (tier 4 over
+the GND copy on H - the duplicate pass took A's freed K lane for a direct
+2-crosspoint copy), and `path 1 5->100 +2.87 mA pair` against INA0 2.87 mA.
+
+Two dense cases keep it: `isense_loop_stacked` (the loop, stack 2/2/0, taps
+proof) and `isense_loop_a_k_row_taken` (plus 2 -> TOP_RAIL so chip A's own
+K row is spent and the tier-4 bounce-row route is the only way).
+
+The second case then found the next gap: with chip A's K row and every
+bounce row spent, ISENSE_PLUS (chip I) and GPIO 8 (chip L) had no route
+while their own nets sat on K rows y2 and y1 (the DAC0 -> I_POS hop over
+IK, the probe feed over KL). The I/J/L-node shapes only knew the hub lane
+into K and a virgin bounce chip. In the fallback pass an I/J/L node now
+joins a K row its net wholly owns in one hop, the same lawful join the
+breadboard rows' shared-K-row pass makes. Honest (virgin-copper) routes
+still come first, so the pair deltas only fall back to the hop's far end
+when nothing else exists.
+
+Dense suite on the final build: 78/78, bench restored. Duplicate counts per
+case against the last pre-fix run (19:37, 70/70): every primaries-only case
+identical (bounces, crosspoints, hub-tier count), `stacked_taps_reachable`
+and `stacked_taps_gpio_dups` 13 -> 14 copies, `rail_stacking_light` 3 -> 3
+with two fewer crosspoints; nothing lost a copy. The hand check of the
+second case: every node routes (ISENSE_PLUS at K y2, GPIO 8 at K y1) and
+each primary has a current; the fallback reads the hop's far end, so
+DAC0 -> I_POS showed 0.59 mA against a 2.7 mA loop - a low number in place
+of no number, and only when nothing honest is left.
