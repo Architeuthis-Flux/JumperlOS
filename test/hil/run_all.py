@@ -18,6 +18,7 @@ import jl  # board_state_capture/restore - leave the bench as we found it
 TESTS = [
     "test_micropython_fs.py",  # cheapest liveness check first
     "test_routing.py",
+    "test_routing_dense.py",   # dense/edge routings vs the schematic's copper
     "test_net_currents.py",
     "test_config.py",
     "test_stress.py",

@@ -1511,6 +1511,12 @@ void Probing::handleProbeButtonActions( ) {
                     // Run probe mode directly (it handles button state internally)
                     probeMode( 0, brightenedNode );
                     highlighting.clearHighlighting( );
+                    // Done: without this return the same press fell through to
+                    // the generic `buttonPress == 1` block below and opened a
+                    // SECOND probe session the moment the first one closed.
+                    blockProbeButton = 800;
+                    blockProbeButtonTimer = millis( );
+                    return;
 
                 } else {
                     // First press - show warning animation
@@ -2750,6 +2756,10 @@ void Probing::probeEmitBanner( ProbeSession& s ) {
 }
 
 void Probing::probeSessionBegin( ProbeSession& s, int setOrClear, int firstConnection, bool fromClickMenu ) {
+    // Save the caller's divider ONCE per session: the PROBE_REARM block used
+    // to re-save it on every in-session mode toggle and captured its own 3,
+    // so the exit tail restored 3 instead of the caller's value.
+    s.savedRotaryDivider = rotaryDivider;
     s.setOrClear = setOrClear;
     s.firstConnection = firstConnection;
     s.fromClickMenu = fromClickMenu;
@@ -2952,7 +2962,7 @@ void Probing::probeTick( ProbeSession& s ) {
         s.encoderCursorVisible = false;             // Whether cursor is currently shown
 
         // Set rotary divider for good responsiveness during probing
-        s.savedRotaryDivider = rotaryDivider;
+        // (saved once in probeSessionBegin)
         rotaryDivider = 3;
 
         blockProbeButton = 1000;
@@ -3697,6 +3707,23 @@ void Probing::probeTick( ProbeSession& s ) {
                         return; // (was: continue - the next PROBE_RUN tick re-checks the loop condition first)
                     }
 
+                    xbarLatTap( ); // latency probe: tap accepted, about to commit (XbarLatency.h)
+                    // Commit FIRST. addBridgeToState() can refuse the bridge
+                    // (part_safety) and paints its own "refused" card - the
+                    // "connected" text, the counters, the LED request and the
+                    // pair toast below used to run regardless, telling the
+                    // user a wire existed that was never made.
+                    bool bridgeAdded = addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
+                    if ( !bridgeAdded ) {
+                        node1or2 = 0;
+                        nodesToConnect[ 0 ] = -1;
+                        nodesToConnect[ 1 ] = -1;
+                        if ( s.firstConnection == -3 ) {
+                            s.done = true;
+                        }
+                        return;
+                    }
+
                     int numChars = strlen( node1Name );
                     for ( int i = 0; i < SPACE_FROM_LEFT - numChars; i++ ) {
                         Serial.print( " " );
@@ -3704,9 +3731,6 @@ void Probing::probeTick( ProbeSession& s ) {
                     Serial.print( node1Name );
                     Serial.print( "  -  " );
                     numChars = Serial.print( node2Name );
-                    // for (int i = 0; i < 12 - numChars; i++) {
-                    //   Serial.print(" ");
-                    //   }
 
                     // Check if the second node is a GPIO and print its direction
                     if ( nodesToConnect[ 1 ] >= RP_GPIO_1 && nodesToConnect[ 1 ] <= RP_GPIO_8 ) {
@@ -3733,20 +3757,13 @@ void Probing::probeTick( ProbeSession& s ) {
                         Serial.flush( );
                     }
 
-                    xbarLatTap( ); // latency probe: tap accepted, about to commit (XbarLatency.h)
                     if ( s.firstConnection == -3 ) {
-                        // Add to RAM state - DON'T save yet, let auto-save handle it
-                        addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
+                        // RAM state only - DON'T save yet, let auto-save handle it
                         s.numberOfLocalChanges++;
-                        // refreshConnections(1, 1, 0);
-                        // requestLedShow( -1 );
                         s.connectionsThisSession++;
                         s.done = true; return; // (was: break - leave the probing loop; exit tail runs next)
 
                     } else {
-
-                        // Add to RAM state (local changes accumulated in RAM)
-                        addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
                         showProbeLEDs = 1;
                         s.numberOfLocalChanges++;
                         s.connectionsThisSession++;
@@ -5661,7 +5678,24 @@ int Probing::chooseGPIO( int skipInputOutput ) {
         //}
 
         if ( outIn == 2 ) {
-            chooseGPIOinputOutput( gpioChosen + 1 );
+            // Same owner refusal as the two edge branches below: with the
+            // return value of chooseGPIOinputOutput discarded, an owned pin
+            // (OLED bus, Python, PWM) still became the connect target and the
+            // wire landed on the live bus. -1 from the prompt itself is a
+            // plain user cancel of the Input/Output pick and keeps the
+            // current direction, as before.
+            const char* centreOwner = nullptr;
+            if ( !routableGpioAvailable( gpioChosen, &centreOwner ) ) {
+                char ownerToast[ 24 ];
+                snprintf( ownerToast, sizeof( ownerToast ), "GPIO %d\n%s",
+                          gpioChosen + 1, centreOwner ? centreOwner : "in use" );
+                oled.clearPrintShow( ownerToast, 2, 1200 );
+                Serial.printf( "\n\rGPIO %d is held by %s\n\r", gpioChosen + 1,
+                               centreOwner ? centreOwner : "another service" );
+                function = -1;
+            } else {
+                chooseGPIOinputOutput( gpioChosen + 1 );
+            }
         } else if ( outIn == 1 ) {
             // Refuse a pin a service OWNS before touching anything. The
             // bare gpioState pre-write below destroys the bus-role sentinel
@@ -6685,9 +6719,16 @@ float Probing::checkProbeCurrentZero( void ) {
             // copy created here reads as a claim on the buffer, the feed
             // yields to it, and switch sensing goes dead (no live source).
             if ( otherNode != ROUTABLE_BUFFER_IN && otherNode > 0 ) {
-                addBridgeToState( DAC0, otherNode, -1, true );
+                // UNGATED restore (slot-load / undo idiom): these are the
+                // user's own saved bridges - addBridgeToState's part_safety
+                // judge refused some of them and the calibration silently
+                // deleted the user's wiring.
+                String restoreErr;
+                globalState.addConnection( DAC0, otherNode, restoreErr, -1 );
+                globalState.markDirty( );
             }
         }
+        refreshLocalConnections( 1, 1, 0 );
     }
 
     // Un-park the feed; the next rebuild re-adds it (nudge if the restore
@@ -7204,6 +7245,13 @@ int Probing::getNothingTouched( int samples ) {
             }
         }
 
+        if ( samples - rejects < 1 ) {
+            // every sample deviated from the pass-1 average: no division (an
+            // SDIV by zero yields 0 here, which then became pad_min = 0);
+            // let the retry loop below run again.
+            rejects = samples;
+            continue;
+        }
         nothingTouchedReading = nothingTouchedReading / ( samples - rejects );
         mapFrom = nothingTouchedReading;
         // Serial.print("mapFrom: ");
@@ -8316,7 +8364,8 @@ void Probing::probeLEDhandler( void ) {
     // a color change.
     int requestedMode = showProbeLEDs;
 
-    switch ( showProbeLEDs ) {
+    // Dispatch on the captured request, not a second read of the volatile.
+    switch ( requestedMode ) {
         case 11:
             probeLEDs.setPixelColor( 0, 0x0f0fc6 ); // connect bright
             // Serial.println("connect bright");
@@ -8418,7 +8467,11 @@ void Probing::probeLEDhandler( void ) {
         break;
     }
 
-    showProbeLEDs = 0;
+    // Compare-and-clear: a request core 0 posted while this frame ran must
+    // survive to the next pass instead of being wiped unseen.
+    if ( showProbeLEDs == requestedMode ) {
+        showProbeLEDs = 0;
+    }
 
     // Only update settle timer when LED MODE changes (not during fade brightness changes)
     // Case 2 is the remove fade - same mode, just brightness changes

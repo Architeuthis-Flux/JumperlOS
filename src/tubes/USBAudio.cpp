@@ -314,7 +314,7 @@ extern "C" void usb_audio_apply_config(void) {
     // enforces, rather than trusting the file.
     if (g_chL == g_chR || !usbAudioChannelStreamable(g_chL) ||
         !usbAudioChannelStreamable(g_chR)) { g_chL = 0; g_chR = 1; }
-    if (g_rateHz < 8000u || g_rateHz > 48000u || (g_rateHz % 1000u)) g_rateHz = JL_AUDIO_DEFAULT_RATE;
+    if (g_rateHz < 8000u || g_rateHz > 48000u || (ADC_RING_SWEEP_HZ % g_rateHz) != 0) g_rateHz = JL_AUDIO_DEFAULT_RATE;   // same rule as stream start
     if (!(g_fullScaleVolts >= 0.05f) || g_fullScaleVolts > 20.0f) g_fullScaleVolts = 8.0f;
 
     // Record the desired state. Do NOT cycle the bus from here: this runs deep
@@ -526,7 +526,7 @@ extern "C" bool usb_audio_set_channels(int left, int right) {
 // Changing the rate mid-stream restarts capture; the host is told the new
 // value through the clock entity on its next query.
 extern "C" bool usb_audio_set_rate(uint32_t hz) {
-    if (hz < 8000u || hz > 48000u || (hz % 1000u) != 0u) return false;
+    if (hz < 8000u || hz > 48000u || (ADC_RING_SWEEP_HZ % hz) != 0u) return false;   // must divide the 48 kHz sweep (stream start refuses otherwise)
     // DEFERRED while the host has the interface open. TinyUSB sizes every
     // isochronous IN packet from the rate the HOST negotiated via SET_CUR
     // SAM_FREQ, not from g_rateHz - so moving this mid-stream left capture at

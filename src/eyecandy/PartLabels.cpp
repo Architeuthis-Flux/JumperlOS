@@ -319,14 +319,19 @@ static uint8_t judgePartPin(const PartDefinition& p, int j, const NetView& v,
         if (!isNegativeSupplyPin(pin.name)) {
             if (v.has(GND))              return WARN_VCC_TO_GND;
             if (hasSrc && src < -0.25f)  return WARN_VCC_TO_NEG;
+            // A positive supply sharing a net with one of the part's own
+            // gnd-class pins is a self short. NOT for VEE/VSS/V-: the
+            // single-supply hookup ties those to GND together with VSS (the
+            // 4051's VEE+VSS on GND), which the polarity rule above already
+            // calls right - the loop here fired self_short on it anyway.
+            for (int k = 0; k < p.numPins && k < MAX_PART_PINS; k++) {
+                if (k != j && p.pins[k].pinClass == 2 &&
+                    v.has(partPinNode(p, p.pins[k]))) {
+                    return WARN_SELF_SHORT;
+                }
+            }
         } else {
             if (hasSrc && src > 0.25f)   return WARN_VEE_TO_HOT;
-        }
-        for (int k = 0; k < p.numPins && k < MAX_PART_PINS; k++) {
-            if (k != j && p.pins[k].pinClass == 2 &&
-                v.has(partPinNode(p, p.pins[k]))) {
-                return WARN_SELF_SHORT;
-            }
         }
         // 3.3V panels riding a hot rail: at 4V the bench panel NACKed at
         // random byte offsets until the display cycled lost/alive. Only
@@ -440,6 +445,15 @@ bool PartLabels::connectionRefused(int node1, int node2) {
             if (!v.has(node)) continue;           // this pin isn't on the merged net
             uint8_t r = judgePartPin(p, j, v, top, bot, d0, d1);
             if (r == WARN_NONE) continue;
+            // Refuse only what this bridge CREATES: a pin already sitting on a
+            // faulted net (a standing PARTWARN the user chose to keep) must
+            // not veto every unrelated wire that touches that net. Judge the
+            // pin against its own pre-bridge net; same verdict = not ours.
+            {
+                int pinNet = (node >= 1 && node <= 60) ? validNetForNode(node) : -1;
+                NetView before = { pinNet, -1, node, -1 };
+                if (judgePartPin(p, j, before, top, bot, d0, d1) == r) continue;
+            }
             bool power = (r == WARN_VCC_TO_GND || r == WARN_VCC_TO_NEG ||
                           r == WARN_VEE_TO_HOT || r == WARN_GND_TO_HOT ||
                           r == WARN_SELF_SHORT);

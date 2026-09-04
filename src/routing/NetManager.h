@@ -114,6 +114,7 @@ const DefineInfo* findDefineInfoByValue(int defineValue);
 int checkIfBridgeExistsLocal(int node1, int node2 = -1);
 
 void assignTermColor(int startIndex = 0);
+int netTermColorIndex(int netIndex); // 256-colour index; grey for an unassigned (black) net colour
 
 
 #endif

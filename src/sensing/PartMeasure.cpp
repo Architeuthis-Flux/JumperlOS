@@ -334,6 +334,27 @@ int partScanBegin(ScanSession& s, const int* rows, int nRows, float iLimit_mA) {
     s.probePowerRestore = infraProbePowerWanted();
     infraSetProbePowerEnabled(false);
 
+    // Rails off for the session (the design's precondition, never enforced
+    // until 2026-09-03). Lifting bridges cannot lift a jumper wire: Kevin's
+    // bench had row 33 (a 4051's COM) wired to the bottom rail at 7.4 V, so
+    // the chip sat half-powered through every scan and its channel rows
+    // read as conducting to nothing in particular. Both rails go to 0 V
+    // here and come back in partScanEnd; nested inside the Auto Scan (which
+    // parks them for the whole run) this reads 0/0 and does nothing.
+    s.railsParked = false;
+    {
+        float top = getDacHardwareVoltage(2);
+        float bot = getDacHardwareVoltage(3);
+        if (top > 0.05f || top < -0.05f || bot > 0.05f || bot < -0.05f) {
+            s.railTopRestore = top;
+            s.railBotRestore = bot;
+            s.railsParked = true;
+            setDacByNumber(2, 0.0f, 0, 0, false);
+            setDacByNumber(3, 0.0f, 0, 0, false);
+            delay(20);   // let the rail amplifiers and their decoupling settle
+        }
+    }
+
     s.nRows = nRows;
     for (int i = 0; i < nRows; i++) s.rows[i] = rows[i];
     s.nEph = 0;
@@ -429,6 +450,11 @@ void partScanEnd(ScanSession& s) {
     inaFastPollMode(false);   // ambient cadence back before anything else
     restoreRovingGpio(s);
     setDac0voltage(s.dac0Restore, 0, 0, false);
+    if (s.railsParked) {
+        setDacByNumber(2, s.railTopRestore, 0, 0, false);
+        setDacByNumber(3, s.railBotRestore, 0, 0, false);
+        s.railsParked = false;
+    }
     if (s.nEph > 0) {
         String err;
         for (int i = 0; i < s.nEph; i++)

@@ -196,8 +196,8 @@ int arduinoPinToJumperlessNode(const String& pinStr) {
     String pin = pinStr.substring(colonIdx + 1);
     pin.trim();
     
-    // Handle special pins
-    if (pin == "GND" || pin == "gnd") {
+    // Handle special pins (Wokwi's Nano has GND.1 / GND.2)
+    if (pin == "GND" || pin == "gnd" || pin.startsWith("GND.") || pin.startsWith("gnd.")) {
         return GND; // Ground node
     }
     if (pin == "5V" || pin == "VCC" || pin == "vcc") {
@@ -207,22 +207,37 @@ int arduinoPinToJumperlessNode(const String& pinStr) {
         return BOTTOM_RAIL; // 3.3V supply
     }
     
-    // Handle analog pins (A0-A7)
+    // Handle analog pins (A0-A7). toInt() returns 0 for non-digits, which
+    // silently made "AREF" -> A0 and "RESET"/"VIN"/"RX" -> D0 below: require
+    // the digits to actually be digits.
+    auto allDigits = [](const String& s) {
+        if (s.length() == 0) return false;
+        for (unsigned int i = 0; i < s.length(); i++) {
+            if (!isdigit(s[i])) return false;
+        }
+        return true;
+    };
     if (pin[0] == 'A' || pin[0] == 'a') {
-        int analogNum = pin.substring(1).toInt();
-        if (analogNum >= 0 && analogNum <= 7) {
-            return NANO_A0 + analogNum; // NANO_A0 through NANO_A7
+        String rest = pin.substring(1);
+        if (allDigits(rest)) {
+            int analogNum = rest.toInt();
+            if (analogNum >= 0 && analogNum <= 7) {
+                return NANO_A0 + analogNum; // NANO_A0 through NANO_A7
+            }
         }
         return -1;
     }
     
-    // Handle digital pins (0-13)
-    int digitalNum = pin.toInt();
-    if (digitalNum >= 0 && digitalNum <= 13) {
-        return NANO_D0 + digitalNum; // NANO_D0 through NANO_D13
+    // Handle digital pins (0-13), optionally D-prefixed
+    String digits = (pin[0] == 'D' || pin[0] == 'd') ? pin.substring(1) : pin;
+    if (allDigits(digits)) {
+        int digitalNum = digits.toInt();
+        if (digitalNum >= 0 && digitalNum <= 13) {
+            return NANO_D0 + digitalNum; // NANO_D0 through NANO_D13
+        }
     }
     
-    return -1;
+    return -1; // RESET, AREF, VIN, RX/TX, ... : skipped, not wired to D0
 }
 
 int logicAnalyzerPinToGPIO(const String& pinStr) {
@@ -312,9 +327,16 @@ int parseVoltageString(const String& voltageStr) {
         }
     }
     
+    // Nothing left (a rail label with no voltage after it) - fail here. The
+    // loop below used `i < str.length() - 1` on an UNSIGNED length: with an
+    // empty string that is 0xFFFFFFFF and it spun ~4.3 billion times.
+    if (str.length() < 2) {
+        return (str.length() == 1 && isdigit(str[0])) ? (int)((str[0] - '0') * 1000) : -9999;
+    }
+
     // Replace European comma with period for decimal point (e.g., "4,5" → "4.5")
     // Only replace the first comma that's between digits
-    for (unsigned int i = 1; i < str.length() - 1; i++) {
+    for (unsigned int i = 1; i + 1 < str.length(); i++) {
         if (str[i] == ',' && isdigit(str[i-1]) && isdigit(str[i+1])) {
             str.setCharAt(i, '.');
             break; // Only replace the first one
@@ -797,9 +819,18 @@ bool parseWokwiDiagramFromFile(const String& filename, int slotNum, String& erro
 
     // Parse directly into the active state (no temp object!)
     if (!parseWokwiDiagram(jsonContent, mgr.getActiveState(), slotNum, errorMsg)) {
-        // Restore original context on parse failure
+        // Restore original context on parse failure - ALWAYS re-establish it
+        // from disk: the active state was cleared above, and when the target
+        // was the active context itself nothing else put it back.
         if (needToRestore) {
             restoreSaved();
+        } else {
+            String e;
+            if (intoFile) {
+                mgr.loadSlotFromPath(savedActivePath, e);
+            } else {
+                mgr.loadSlot(slotNum, e);
+            }
         }
         return false;
     }

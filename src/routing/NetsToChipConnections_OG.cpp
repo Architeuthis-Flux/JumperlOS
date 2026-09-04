@@ -2057,13 +2057,14 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
         bridgeDuplicates = duplicatePathsDac;
       }
     }
-    // Regular nets - check THIS BRIDGE's nodes for special cases that should skip duplicates
+    // Regular nets - classify THIS BRIDGE's nodes: GPIO and ADC bridges have
+    // their own stacking counts, fake/virtual ones never stack
     else {
-      // Don't duplicate bridges connecting to real GPIO pins (RP_GPIO_1 through RP_GPIO_8, RP_UART_TX, RP_UART_RX)
-      if ((node1 >= RP_GPIO_1 && node1 <= RP_GPIO_8) || node1 == RP_UART_TX || node1 == RP_UART_RX ||
-          (node2 >= RP_GPIO_1 && node2 <= RP_GPIO_8) || node2 == RP_UART_TX || node2 == RP_UART_RX) {
-        shouldSkipDuplicates = true;
-      }
+      // GPIO (and UART) bridges stack per stack_gpio (default 0): a GPIO has
+      // exactly one lane per breadboard chip on chip L, so a duplicate costs
+      // some other net its route - the user opts in
+      bool isGpioBridge = (node1 >= RP_GPIO_1 && node1 <= RP_GPIO_8) || node1 == RP_UART_TX || node1 == RP_UART_RX ||
+                          (node2 >= RP_GPIO_1 && node2 <= RP_GPIO_8) || node2 == RP_UART_TX || node2 == RP_UART_RX;
       
       // Don't duplicate bridges connecting to fake GPIO pins (FAKE_GPIO_1 through FAKE_GPIO_32)
       if (!shouldSkipDuplicates) {
@@ -2078,17 +2079,18 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
         shouldSkipDuplicates = true;
       }
       
-      // Don't duplicate bridges connecting to ADC nodes (high-impedance inputs don't benefit from parallel paths)
-      if (!shouldSkipDuplicates) {
-        if ((node1 >= ADC0 && node1 <= ADC4) || node1 == ADC7 ||
-            (node2 >= ADC0 && node2 <= ADC4) || node2 == ADC7) {
-          shouldSkipDuplicates = true;
-        }
-      }
+      // ADC bridges stack per stack_adcs (default 0): a high-impedance input
+      // gains nothing from a parallel path
+      bool isAdcBridge = (node1 >= ADC0 && node1 <= ADC4) || node1 == ADC7 ||
+                         (node2 >= ADC0 && node2 <= ADC4) || node2 == ADC7;
       
-      // Use default duplicate count if not explicitly set
+      // Default (-1, "the router decides") resolves per class. A stored count
+      // >= 0 is an explicit per-connection request and is honoured as-is.
       if (bridgeDuplicates < 0) {
-        bridgeDuplicates = shouldSkipDuplicates ? 0 : jumperlessConfig.routing.stack_paths;
+        if (shouldSkipDuplicates)  bridgeDuplicates = 0;
+        else if (isGpioBridge)     bridgeDuplicates = jumperlessConfig.routing.stack_gpio;
+        else if (isAdcBridge)      bridgeDuplicates = jumperlessConfig.routing.stack_adcs;
+        else                       bridgeDuplicates = jumperlessConfig.routing.stack_paths;
       }
     }
      // Serial.print("globalState.connections.nets[");
@@ -3053,7 +3055,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
     }
   int couldFindPath = -1;
 
-    for (int i = 0; i <= numberOfPaths; i++)
+    for (int i = 0; i < numberOfPaths && i < MAX_BRIDGES; i++)   // <= walked one past the last path
     {
         couldFindPath = -1;
 
@@ -3129,7 +3131,11 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 // Serial.print("Lchip!!!!!!!!!!!!");
 
                                 ch[path[i].chip[0]].xStatus[xMapL0c0] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapL0c1] = path[i].net;
+                                // xMapL0c1 is an index on the HOP chip (bb = chip[2]): stamping
+                                // it on chip[1] (CHIP_L) reserved an unrelated L pin and left
+                                // the bounce lane free for a second net (the non-L branch
+                                // below marks chip[2] - this one had chip[1]).
+                                ch[path[i].chip[2]].xStatus[xMapL0c1] = path[i].net;
 
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
@@ -3149,7 +3155,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             {
                                 // Serial.print("Lchip!!!!!!!!!!!22222!");
                                 ch[path[i].chip[0]].xStatus[xMapL1c0] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapL1c1] = path[i].net;
+                                ch[path[i].chip[2]].xStatus[xMapL1c1] = path[i].net;   // hop chip, see above
 
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
@@ -4524,6 +4530,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 }
 
 bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
+  if (chip < 0 || chip >= 12 || x < 0 || x >= 16) return false;   // a -1 lane from xMapForChipLane1 indexed the status array at -1
   // Serial.print("freeOrSameNetX: ");
   // Serial.print(chip);
   // Serial.print(", ");
@@ -4544,6 +4551,7 @@ bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
 }
 
 bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
+  if (chip < 0 || chip >= 12 || y < 0 || y >= 8) return false;   // a -1 lane from xMapForChipLane1 indexed the status array at -1
   // Serial.print("freeOrSameNetY: ");
   // Serial.print(chip);
   // Serial.print(", ");
@@ -5718,7 +5726,10 @@ void printPathsCompact(int showCullDupes, Stream* target) {
 
     if (skipLine == 0) {
       lastDuplicate = globalState.connections.paths[i].duplicate;
-      changeTerminalColor(globalState.connections.nets[globalState.connections.paths[i].net].termColor, false, target);
+      {
+        int pn = globalState.connections.paths[i].net;   // a culled duplicate carries net -1
+        changeTerminalColor(globalState.connections.nets[(pn >= 0 && pn < MAX_NETS) ? pn : 0].termColor, false, target);
+      }
       target->print(i);
       target->print("\t");
 
@@ -5890,7 +5901,6 @@ void findStartAndEndChips(int node1, int node2, int pathIdx) {
         }
         candidatesFound++;
         chipCandidates[twice][1] = nano.mapKL[nanoIndex];
-        Serial.print(candidatesFound);
         globalState.connections.paths[pathIdx].candidates[twice][1] = chipCandidates[twice][1];
         candidatesFound++;
         if (debugNTCC5) {
@@ -6315,7 +6325,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
-  for (int i = 0; i < 16; i++) {
+  for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {
         nodeFound = i + 1;

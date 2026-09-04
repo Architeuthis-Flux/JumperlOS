@@ -606,8 +606,12 @@ void inputNodeFileList(int addRotaryConnections) {
     SlotManager& mgr = SlotManager::getInstance();
     String errorMsg;
 
-    // Clear the active state and populate it directly (NO COPIES!)
-    mgr.getActiveState().clear();
+    // Clear the CONNECTIONS and populate them directly (NO COPIES!).
+    // JumperlessState::clear() also reset the rails/DAC voltages, the placed
+    // parts, the net names and the per-slot config, and the save below
+    // persisted those defaults - a pasted `f { ... }` list replaces the
+    // wires, nothing else.
+    mgr.getActiveState().clearAllConnections();
     
     // Get direct reference to the active state (no copying!)
     JumperlessState& state = mgr.getActiveState();
@@ -745,9 +749,17 @@ void inputNodeFileList(int addRotaryConnections) {
       }
     };
     
-    // Clear the active state and populate it directly (NO COPIES!)
-    mgr.getActiveState().clear();
-    mgr.setActiveSlot(slotNum);
+    // Bring the TARGET slot in first, then replace only its connections:
+    // clearing the (previously active) state and re-labelling it as slot N
+    // saved the old slot's power/parts/names into N's file with the wires.
+    {
+        String loadErr;
+        if (!mgr.loadSlot(slotNum, loadErr)) {
+            mgr.getActiveState().clear();   // no file yet: a fresh slot
+            mgr.setActiveSlot(slotNum);
+        }
+    }
+    mgr.getActiveState().clearAllConnections();
     
     // Get direct reference to the active state (no copying!)
     JumperlessState& state = mgr.getActiveState();

@@ -804,6 +804,13 @@ static void parsePartLine(PartDefinition& p, const String& line, bool& inPins, b
     String rest = line.substring(colon + 1);
     rest.trim();
 
+    // Inside a pins: block a "{...}" line is a PIN whatever its name: a pin
+    // called name/row/value/... used to be consumed as that part field
+    // (renaming the part to the literal "{pin: 1, connect: 7}").
+    if (inPins && rest.startsWith("{")) {
+        parsePinEntry(p, key, rest, err);
+        return;
+    }
     if (key == "name") {
         String v = parseScalar(rest);
         if (v.length() == 0 || v.length() > 15) { bad = true; return; }

@@ -1162,6 +1162,15 @@ void enterMicroPythonREPLWithFile(Stream *stream, const String& filepath) {
     fileToLoad = "";  // Clear it - not a valid Python file
   }
   
+  // Check if REPL is already active - BEFORE pushing a context that nothing
+  // would pop (the orphaned entry's onExit cleanup then ran under the outer
+  // REPL: closeAllFiles / SharedBuffer::clear).
+  if (mp_repl_active) {
+    changeTerminalColor(replColors[4], true, repl_stream);
+    repl_stream->println("[MP] REPL already active");
+    return;
+  }
+
   ContextManager::getInstance().pushContext(ctx);
 
   // Colorful initialization like original implementation
@@ -1190,12 +1199,7 @@ void enterMicroPythonREPLWithFile(Stream *stream, const String& filepath) {
   // Automatically create MicroPython examples if needed
   initializeMicroPythonExamples();
 
-  // Check if REPL is already active
-  if (mp_repl_active) {
-    changeTerminalColor(replColors[4], true, repl_stream);
-    repl_stream->println("[MP] REPL already active");
-    return;
-  }
+  // (already-active check moved above pushContext)
 
   // Set initial file if provided (uses transfer path if available)
   if (fileToLoad.length() > 0) {

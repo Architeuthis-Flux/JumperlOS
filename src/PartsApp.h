@@ -86,6 +86,7 @@ struct VectorIdentifyResult {
 // fpMeasured (nullable): a measured Tier-1 clamp string (the part_fingerprint
 // fp= alphabet) - candidates whose authored fingerprint conflicts hard are
 // skipped BEFORE being powered.
+void partsClearAbortLatch(void);   // reset the scan-flow abort latch (part_vectors)
 int partsVectorIdentify(int baseRow, int width, int gndRow, int vddRow,
                         VectorIdentifyResult* out, int maxOut,
                         const char* fpMeasured = nullptr,

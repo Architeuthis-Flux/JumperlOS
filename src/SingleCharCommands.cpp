@@ -184,6 +184,10 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         }
     }
 
+    // A terminal that reconnected after a reboot may still hold a scrolling
+    // region from an R / c! session; the menu is the first thing it hears.
+    dropStaleScrollRegion( &Jerial );
+
     // (The lastProbePowerDAC change detector is gone: probe-power source
     // moves are handled by InfraPaths' rebuild-head evaluation + nudges.)
 
@@ -1555,8 +1559,10 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                         ", filename='" + filename + "', fromApp=" + String( fromApp ) + ")" );
     }
 
-    // Validate slot number
-    if ( slotNum < 0 || slotNum >= NUM_SLOTS ) {
+    // Validate slot number (SLOT_FILE_CONTEXT is the active-file default and
+    // has its own branch below - rejecting every negative number made W
+    // unusable from a project/file context)
+    if ( slotNum != SLOT_FILE_CONTEXT && ( slotNum < 0 || slotNum >= NUM_SLOTS ) ) {
         Jerial.println( "◇ Invalid slot number: " + String( slotNum ) );
         return CMD_SHOW_MENU;
     }
@@ -1602,7 +1608,7 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
             unsigned long humanTime = millis( );
             int shown = 0;
             while ( Jerial.available( ) == 0 && jsonContent.length() == 0 ) {
-                if ( !fromApp && millis( ) - humanTime == 2000 && shown == 0 ) {
+                if ( !fromApp && millis( ) - humanTime >= 2000 && shown == 0 ) {
                     Jerial.println( "\n  Waiting for JSON paste..." );
                     Jerial.println( "  (Copy from Wokwi editor: diagram.json tab)" );
                     shown = 1;
@@ -1748,6 +1754,14 @@ CommandResult cmd_parseWokwi( char c, const String& line ) {
                 }
             } else {
                 Jerial.println( "  ✗ Parse error: " + errorMsg );
+                // the in-RAM connection list was cleared before parsing: put
+                // the still-intact on-disk state back
+                String reloadErr;
+                if ( mgr.isPathContext( ) ) {
+                    mgr.loadSlotFromPath( String( mgr.getActiveSlotPath( ) ), reloadErr );
+                } else {
+                    mgr.loadSlot( slotNum, reloadErr );
+                }
             }
         } else {
             // ========== INACTIVE SLOT: Parse directly to file (ZERO-COPY) ==========
@@ -1803,11 +1817,12 @@ CommandResult cmd_toggleExtraMenu( char c, const String& line ) {
 
 CommandResult cmd_showNetlist( char c, const String& line ) {
     extern volatile int core1passthrough;
-    couldntFindPath( 1 );
-    
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
-  
+    dropStaleScrollRegion( target );
+
+    couldntFindPath( 1 );
+
     target->print( "\n\n\rnetlist\n\r" );
     listNets( anythingInteractiveConnected( -1 ), target );
     return CMD_DONT_SHOW_MENU;
@@ -2054,6 +2069,7 @@ CommandResult cmd_loadJsonState( char c, const String& line ) {
 CommandResult cmd_showBridgeArray( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget( );
     if ( target == nullptr ) target = &Jerial;
+    dropStaleScrollRegion( target );
 
     int showDupes = 1;
     String arg = getCommandArgs( line, 20 );
@@ -2071,6 +2087,10 @@ CommandResult cmd_showBridgeArray( char c, const String& line ) {
     target->println( jumperlessConfig.routing.stack_dacs );
     target->print( "railsDuplicates: " );
     target->println( jumperlessConfig.routing.stack_rails );
+    target->print( "gpioDuplicates: " );
+    target->println( jumperlessConfig.routing.stack_gpio );
+    target->print( "adcDuplicates: " );
+    target->println( jumperlessConfig.routing.stack_adcs );
     couldntFindPath( 1 );
     target->print( "\n\rBridge Array\n\r" );
     printBridgeArray( target );
@@ -2101,6 +2121,7 @@ CommandResult cmd_showCrossbar( char c, const String& line ) {
 
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
+    dropStaleScrollRegion( target );
 
     // Otherwise show compact crossbar view
     printChipStateArrayColorCompact( 12 , '.', target );
@@ -2110,6 +2131,7 @@ CommandResult cmd_showCrossbar( char c, const String& line ) {
 CommandResult cmd_showCrossbarFull( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget();
     if (target == nullptr) target = &Jerial;
+    dropStaleScrollRegion( target );
     printChipStateArrayColor( target );  // Full detailed view with 3-char symbols
     return CMD_DONT_SHOW_MENU;
 }
@@ -4291,6 +4313,7 @@ CommandResult cmd_rawSpeedTest( char c, const String& line ) {
     Jerial.print( ( (float)cycles / (float)( end - start ) ) * 1000 );
     Jerial.println( " kHz\n\r" );
     Jerial.flush( );
+    sendXYraw( 10, 0, 4, 0 );   // the setup crosspoint stayed closed after the test
     releaseCore1Frames( );
 
     return CMD_SHOW_MENU;

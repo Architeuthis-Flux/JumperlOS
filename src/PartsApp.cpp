@@ -66,6 +66,29 @@ static void partsIdentifyChip(int baseRow, int width, int* gndRow, int* vddRow,
 static int partsConfirmOne(const char* verb, const char* what,
                            const char* detail, uint32_t rgb = 0);
 static bool partsAutoAborted = false;   // the scan-flow abort latch
+
+// The user's wiring the auto scan LIFTS for its measurements (restored in
+// one refresh at the end). File scope: while it is lifted, everything that
+// reads the live bridge table to decide "is this row powered / is this GPIO
+// free" sees an empty board - the scan-confirm placement then auto-routed
+// power bridges onto rows the user's (lifted) wires already fed, and the
+// display wire-up handed out GPIOs the user had wired. Both consult this.
+static int16_t scanLiftA[MAX_BRIDGES], scanLiftB[MAX_BRIDGES];
+static int16_t scanLiftDup[MAX_BRIDGES];
+static int scanLiftN = 0;
+static bool partsLiftedBridge(int a, int b) {
+    for (int i = 0; i < scanLiftN; i++) {
+        if ((scanLiftA[i] == a && scanLiftB[i] == b) ||
+            (scanLiftA[i] == b && scanLiftB[i] == a)) return true;
+    }
+    return false;
+}
+static bool partsLiftedTouches(int node) {
+    for (int i = 0; i < scanLiftN; i++) {
+        if (scanLiftA[i] == node || scanLiftB[i] == node) return true;
+    }
+    return false;
+}
                                         // (partsAutoAbortCheck sets it)
 // The canonical routable-GPIO setters (extern "C", same file): index 1-8,
 // dir 0 = output, 1 = input. The found-display wiring drives these.
@@ -651,8 +674,10 @@ static int partsRailForVcc(const PartDbRecord& rec, int node) {
     int nearRail = (node <= 30) ? TOP_RAIL : BOTTOM_RAIL;
     int farRail = (node <= 30) ? BOTTOM_RAIL : TOP_RAIL;
     auto railVolts = [](int rail) {
-        return (rail == TOP_RAIL) ? globalState.power.topRail
-                                  : globalState.power.bottomRail;
+        // hardware truth (railHwVolts), not the saved state: dac_set(save=False)
+        // and the guide's rail writes leave them different
+        return (rail == TOP_RAIL) ? getDacHardwareVoltage(2)
+                                  : getDacHardwareVoltage(3);
     };
     float want = 0.0f;   // 0 = the record never says
     const PartDbVectorSet* vs = partdbVectorSetOf(rec);
@@ -751,6 +776,7 @@ static bool partsCommitPlacement(const PartDbRecord& rec, const int* rows, int n
     // unrouted - bridging it would short rail to GND through our own bridge;
     // PartLabels' warning (VCC_TO_GND / GND_TO_HOT) tells the user instead.
     auto rowNetHas = [](int row, int specialNode) {
+        if (partsLiftedBridge(row, specialNode)) return true;   // lifted for the scan, coming back
         int netNum = findNodeInNet(row);
         if (netNum <= 0 || netNum >= MAX_NETS) return false;
         const netStruct& net = globalState.connections.nets[netNum];
@@ -1393,6 +1419,9 @@ static bool partsRemoveByTap(void) {
         }
         b.clear();
         requestLedShow(-1);
+        if (sel >= 0 && !selWasAll && sel >= st.parts.numParts) {
+            sel = st.parts.numParts - 1;   // settle onto a real part, not the All stop
+        }
         needsDraw = true;   // the loop top clamps sel and repaints
     }
     b.clear();
@@ -2449,6 +2478,13 @@ void partsTestLauncher(void) {
 // quit mid-board looks like a crash (bench, 14:31: a lone 's' ended the
 // run right before the module measurement pass).
 static const char* partsAutoAbortCause = nullptr;
+
+// jumperless.part_vectors() runs partsVectorIdentify outside the UI flows
+// that own this latch; a stale abort made every later call bail instantly.
+void partsClearAbortLatch(void) {
+    partsAutoAborted = false;
+    partsAutoAbortCause = nullptr;
+}
 static bool partsAutoAbortCheck(void) {
     if (partsAutoAborted) return true;
     jOS.serviceInner();
@@ -4382,6 +4418,7 @@ static bool partsWireFoundDisplay(const DisplayFinding& f) {
             if (globalState.connections.bridges[i][0] == node ||
                 globalState.connections.bridges[i][1] == node)
                 used = true;
+        if (partsLiftedTouches(node)) used = true;   // the user's lifted wire counts
         if (!used) freeG[nFree++] = g + 1;   // 1-based GPIO index
     }
     if (nFree < 1) {
@@ -4559,9 +4596,12 @@ void partsAutoLauncher(void) {
     // can run while this app's modal loop holds the board cleared - slot0
     // keeps the pre-scan state throughout, and a crash mid-scan reboots
     // into the full board.
-    static int16_t scanLiftA[MAX_BRIDGES], scanLiftB[MAX_BRIDGES];
-    static int16_t scanLiftDup[MAX_BRIDGES];
-    int scanLiftN = 0;
+    // (scanLiftA/B/Dup/N are file-scope now - see partsLiftedBridge: the
+    // confirm-pass placements must see the wiring this app lifted)
+    scanLiftN = 0;
+    // the user's rails, parked at 0 V for the whole scan (see below)
+    float scanRailTop = 0.0f, scanRailBot = 0.0f;
+    bool scanRailsParked = false;
     // findings the user can ACT on (Kevin's ask): identified discretes
     // collect here and a CONNECT press at the end places them as records
     static PartResult addable[8];
@@ -4632,6 +4672,28 @@ void partsAutoLauncher(void) {
     bool scanPpRestore = infraProbePowerWanted();
     infraSetProbePowerEnabled(false);
     refreshConnections(-1, 0, 0);
+
+    // Rails off for the whole scan (Kevin, 2026-09-03: "we should control
+    // the rails in part id"). The wire lift above cannot lift a JUMPER: his
+    // bench had row 33 (a 4051's COM) wired to the bottom rail at 7.4 V, so
+    // the chip stayed half-powered through the census and its channel rows
+    // 32/34 censused as parts and identified as "something (unclear)".
+    // Nothing on the board is meant to be hot while the scan reads it
+    // (the design's rails-off precondition); the values come back at adone.
+    scanRailTop = getDacHardwareVoltage(2);
+    scanRailBot = getDacHardwareVoltage(3);
+    if (scanRailTop > 0.05f || scanRailTop < -0.05f ||
+        scanRailBot > 0.05f || scanRailBot < -0.05f) {
+        scanRailsParked = true;
+        setDacByNumber(2, 0.0f, 0, 0, false);
+        setDacByNumber(3, 0.0f, 0, 0, false);
+        Serial.print("rails parked at 0 V for the scan (top ");
+        Serial.print(scanRailTop, 2);
+        Serial.print(" V, bottom ");
+        Serial.print(scanRailBot, 2);
+        Serial.println(" V - they come back when it's done)");
+        delay(20);
+    }
 
     int found = partScanCensus(flags, v0, v1, partsAutoAbortCheck, partsScanViz);
     if (found == -6) {
@@ -5875,7 +5937,8 @@ void partsAutoLauncher(void) {
                                               dispFound.commonAnode
                                                   ? "common anode"
                                                   : "common cathode");
-                    if (ans == 1 && partsWireFoundDisplay(dispFound)) placed++;
+                    if (ans < 0) bail = true;   // a stray serial byte ends the confirm pass (sibling prompts' rule)
+                    else if (ans == 1 && partsWireFoundDisplay(dispFound)) placed++;
                 }
                 if (!bail && sipFound.valid) {
                     // one candidate confirms; several go through the picker
@@ -5934,6 +5997,16 @@ adone:
     // the user's wiring AND the parked probe feed go back, duplicate
     // stacking and all, in ONE refresh - every exit path funnels through
     // here (infraEvaluate at the refresh head reads the restored flag)
+    if (scanRailsParked) {
+        setDacByNumber(2, scanRailTop, 0, 0, false);
+        setDacByNumber(3, scanRailBot, 0, 0, false);
+        scanRailsParked = false;
+        Serial.print("rails back (top ");
+        Serial.print(scanRailTop, 2);
+        Serial.print(" V, bottom ");
+        Serial.print(scanRailBot, 2);
+        Serial.println(" V)");
+    }
     infraSetProbePowerEnabled(scanPpRestore);
     if (scanLiftN > 0) {
         for (int i = 0; i < scanLiftN; i++)

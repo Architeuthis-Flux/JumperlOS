@@ -87,7 +87,13 @@ PartResult identifyTwoLead(int rowA, int rowB) {
     r.screen[0] = vAB; r.screen[1] = iAB;
     r.screen[2] = vBA; r.screen[3] = iBA;
 
-    if (fwdAB && fwdBA) {
+    // The 1 mA screen only "reaches" below ~5.4 kOhm (5.5 V / 1 mA): a 10 k
+    // resistor never trips it in either direction and fell straight into the
+    // capacitor path. Real, settled current both ways at 5.5 V is still a
+    // resistor - partScanResistance's 0.05 mA fallback measures it.
+    bool bothConduct = (fwdAB && fwdBA) ||
+                       (!fwdAB && !fwdBA && iAB > 0.05f && iBA > 0.05f);
+    if (bothConduct) {
         // conducts both ways: resistor family (or antiparallel junctions)
         float ohms = 0, lin = 0;
         if (partScanResistance(s, 0, 1, &ohms, &lin)) {

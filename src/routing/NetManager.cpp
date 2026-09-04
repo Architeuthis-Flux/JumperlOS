@@ -26,13 +26,27 @@
 // Static array avoids heap allocation during dual-core execution (XIP safety)
 int8_t nodeToNetIndex[256];
 
-// Build node→net index after nets are regenerated
+// Build node→net index after nets are regenerated.
+//
+// Walks the nets array by CONTENT, not by numberOfNets: this runs at the end
+// of getNodesToConnect(), and at that point numberOfNets is still the 0 that
+// clearAllNTCC() left - sortPathsByNet() (inside bridgesToPaths, which runs
+// after) is what counts the nets. Until 2026-09-03 the loop below therefore
+// ran zero times after every rebuild and the index read -1 for every node:
+// RouteSafety's net-label short check never labelled a wire, the scanner's
+// shared-K-row tap fallback never fired, and LEDs.cpp's bridge-colour lookup
+// by index never matched. A slot whose number is 0 (unused) or -1 (cleared)
+// is skipped; slot 0 is the Empty Net (number 127, node EMPTY_NET) and gets
+// index 0, which every consumer already treats as "no net".
 void buildNodeToNetIndex() {
     // Clear index (-1 = node not in any net)
     memset(nodeToNetIndex, -1, sizeof(nodeToNetIndex));
     
     // Build index from current nets
-    for (int i = 0; i < numberOfNets; i++) {
+    for (int i = 0; i < MAX_NETS; i++) {
+        if (globalState.connections.nets[i].number <= 0) {
+            continue;
+        }
         for (int n = 0; n < MAX_NODES && globalState.connections.nets[i].nodes[n] != 0; n++) {
             int node = globalState.connections.nets[i].nodes[n];
             if (node >= 0 && node < 256) {
@@ -694,6 +708,16 @@ int shiftNets(
     globalState.connections.nets[i].name = netNameConstants[i];
     globalState.connections.nets[i].number = i;
     }
+  // gpioNet[] records NET NUMBERS (populateSpecialFunctions): renumber them
+  // with the shift, or a routable GPIO keeps pointing at a net that is now
+  // someone else's. Sentinels (-1/-2/-3) are left alone.
+  for (int g = 0; g < 10; g++) {
+    if (gpioNet[g] == deletedNet) {
+      gpioNet[g] = -1;
+      } else if (gpioNet[g] > deletedNet && gpioNet[g] <= lastNet) {
+      gpioNet[g]--;
+      }
+    }
 
   globalState.connections.nets[lastNet].number = 0;
   globalState.connections.nets[lastNet].name = netNameConstants[lastNet];
@@ -786,7 +810,7 @@ int findNodeInNet(int node) {
 void createNewNet() // add those nodes to a new net
   {
   int newNetNumber = findFirstUnusedNetIndex();
-  if (newNetNumber < 0 || newNetNumber >= MAX_NETS) {
+  if (newNetNumber < 0 || newNetNumber >= MAX_NETS - 2) {
     Serial.println("all nets used - connection not added (too many nets)");
     globalState.connections.paths[newBridgeIndex].net = -1;
     return;
@@ -986,7 +1010,9 @@ void addNodeToNet(int netToAddNode, int node) {
 
 int findFirstUnusedNetIndex() // search for a free globalState.connections.nets[]
   {
-  for (int i = 0; i < MAX_NETS; i++) {
+  // MAX_NETS-2 (FAKE_GPIO_TDM_NET) and MAX_NETS-1 (EPHEMERAL_PATH_NET) are
+  // sentinels the router rewrites paths onto - never hand them to a real net.
+  for (int i = 0; i < MAX_NETS - 2; i++) {
     if (globalState.connections.nets[i].nodes[0] <= 0) {
       if (debugNM)
         Serial.print("found unused Net ");
@@ -1147,6 +1173,18 @@ int floatingTermColors[10] = { 203, 215, 221, 192, 117, 75, 176,213, 180, 147 };
 int railTermColors[5] = { 48, 197, 199, 222, 116 };
 
 
+/// @brief 256-colour index for a net's terminal text. A net whose LED colour
+/// was never assigned (packed RGB 0 - the probe feed BUF_IN -> GP_x, or any
+/// net assignNetColors skipped) used to map to index 0 = black, invisible on
+/// a dark terminal; those print grey instead (Kevin, 2026-09-02).
+int netTermColorIndex(int netIndex) {
+  uint32_t rgb = packRgb(netColors[netIndex]);
+  if (rgb == 0) {
+    return 244; // xterm grey50
+  }
+  return colorToVT100(rgb);
+}
+
 void assignTermColor(int startIndex) {
 #ifdef TERM_COLOR_NETS
 
@@ -1163,7 +1201,7 @@ void assignTermColor(int startIndex) {
 
   for (int i = startIndex; i < numberOfNets; i++) {
     if (globalState.connections.nets[i].nodes[0] > 0) {
-      globalState.connections.nets[i].termColor = colorToVT100(packRgb(netColors[i]));
+      globalState.connections.nets[i].termColor = netTermColorIndex(i);
       }
     // changeTerminalColor(globalState.connections.nets[i].termColor);
     // Serial.print("globalState.connections.nets[");
@@ -1422,7 +1460,7 @@ void listNets(int liveUpdate, Stream *stream)
           }
 
         if (floatingTermColor == -1 && i >= 6) {
-        stream->printf("\033[38;5;%dm", colorToVT100(packRgb(netColors[i])));
+        stream->printf("\033[38;5;%dm", netTermColorIndex(i));
           } else if (floatingTermColor == -1 && i < 6) {
             stream->printf("\033[38;5;%dm", railTermColors[i - 1]);
             }
@@ -1438,15 +1476,20 @@ void listNets(int liveUpdate, Stream *stream)
           int gpioOrAdcNumber = 0;
 
           if (netsShowingSpecial[i] != 0) {
-            for (int j = 0; j < MAX_NODES; j++) {
-              if (globalState.connections.nets[i].nodes[j] > 0) {
-                for (int k = 0; k < 8; k++) {
-                  if (globalState.connections.nets[i].nodes[j] == ADC0 + k || globalState.connections.nets[i].nodes[j] == RP_GPIO_1 + k) {
-                    gpioOrAdcNumber = k;
-                    break;
-                    }
-                  }
+            // scan EVERY node for the ADC/GPIO member (the old unconditional
+            // break looked at nodes[0] only, so a net whose special node was
+            // not first showed channel 0's reading)
+            bool foundSpecial = false;
+            for (int j = 0; j < MAX_NODES && !foundSpecial; j++) {
+              if (globalState.connections.nets[i].nodes[j] <= 0) {
                 break;
+                }
+              for (int k = 0; k < 8; k++) {
+                if (globalState.connections.nets[i].nodes[j] == ADC0 + k || globalState.connections.nets[i].nodes[j] == RP_GPIO_1 + k) {
+                  gpioOrAdcNumber = k;
+                  foundSpecial = true;
+                  break;
+                  }
                 }
               }
             }
@@ -1474,7 +1517,7 @@ void listNets(int liveUpdate, Stream *stream)
 
               if (TERM_SUPPORTS_RGB == 0 && TERM_SUPPORTS_ANSI_COLORS == 1)
                 {
-                stream->printf("\033[38;5;%dm%s", colorToVT100(packRgb(netColors[i])), "green  - l");
+                stream->printf("\033[38;5;%dm%s", netTermColorIndex(i), "green  - l");
                 } else if (TERM_SUPPORTS_RGB == 1 && TERM_SUPPORTS_ANSI_COLORS == 1)
                   {
                   stream->printf("\033[38;2;0;255;0m%s\033[0m", "green  - l");
@@ -1485,7 +1528,7 @@ void listNets(int liveUpdate, Stream *stream)
               } else if (gpioReading[gpioOrAdcNumber] == 1) {
                 if (TERM_SUPPORTS_RGB == 0 && TERM_SUPPORTS_ANSI_COLORS == 1)
                   {
-                  stream->printf("\033[38;5;%dm%s", colorToVT100(packRgb(netColors[i])), "red    - h");
+                  stream->printf("\033[38;5;%dm%s", netTermColorIndex(i), "red    - h");
                   } else if (TERM_SUPPORTS_RGB == 1 && TERM_SUPPORTS_ANSI_COLORS == 1)
                     {
                     stream->printf("\033[38;2;255;0;0m%s", "red    - h");
@@ -2324,3 +2367,8 @@ void deleteNodesAndShift(); //delete the nodes and bridges that were copied from
 the original net
 
 void leftShiftNodesBridgesNets();*/
+
+// Exported table sizes (States.cpp parseNodeName): the arrays above are
+// incomplete types where they are extern-declared, so sizeof must live here.
+extern const int numNanoDefines = (int)(sizeof(nanoDefines) / sizeof(nanoDefines[0]));
+extern const int numSpecialDefines = (int)(sizeof(specialDefines) / sizeof(specialDefines[0]));

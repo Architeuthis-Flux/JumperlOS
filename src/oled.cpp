@@ -875,12 +875,14 @@ FontFamily mapConfigValueToFontFamily( int configValue ) {
         return FONT_ANDALE_MONO;
     case 7:
         return FONT_FREE_MONO;
+    // the config value IS the FontFamily enum (parseFont/cycleFont/init all
+    // treat it so) - this table had the last three rotated
     case 8:
-        return FONT_BERKELEY_MONO;
-    case 9:
-        return FONT_PRAGMATISM;
-    case 10:
         return FONT_IOSEVKA_REGULAR;
+    case 9:
+        return FONT_BERKELEY_MONO;
+    case 10:
+        return FONT_PRAGMATISM;
     default:
         return FONT_EUROSTILE;
     }
@@ -3159,11 +3161,15 @@ void oled::showJogo32h( ) {
         return;
     }
 
-    // Fallback to embedded jogo bitmap if file not found
-    int x = ( displayWidth - jumperlessConfig.top_oled.width ) / 2;
-    int y = ( displayHeight - jumperlessConfig.top_oled.height ) / 2;
+    // Fallback to embedded jogo bitmap if file not found. The asset is a fixed
+    // 128x32 image (512 bytes): drawing it with the PANEL's configured size
+    // read past the array on a 128x64 panel.
+    int x = ( displayWidth - 128 ) / 2;
+    int y = ( displayHeight - 32 ) / 2;
+    if ( x < 0 ) x = 0;
+    if ( y < 0 ) y = 0;
 
-    getDisplay().drawBitmap( x, y, jogo32h, jumperlessConfig.top_oled.width, jumperlessConfig.top_oled.height, SSD1306_WHITE );
+    getDisplay().drawBitmap( x, y, jogo32h, 128, 32, SSD1306_WHITE );
     show();
     //getDisplay().display( );
 }
@@ -3260,7 +3266,9 @@ bool oledHoldActive( ) {
 
 void oled::oledHold( uint32_t durationMs ) {
     uint32_t target = millis() + durationMs;
-    if ( target > holdUntilMs ) holdUntilMs = target;  // extend, never shorten
+    if ( target == 0 ) target = 1;   // 0 is the "no hold" sentinel
+    // extend, never shorten - signed-delta compare so it survives the millis wrap
+    if ( holdUntilMs == 0 || (int32_t)( target - holdUntilMs ) > 0 ) holdUntilMs = target;
 }
 
 void oled::oledHoldBegin( uint32_t durationMs ) {
@@ -3783,7 +3791,7 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
                     // Calculate buffer position for this pixel
                     int page = row / 8;
                     int bit = row % 8;
-                    int bufferIndex = page * displayWidth + col;
+                    int bufferIndex = page * _createdDisplayWidth + col;
 
                     // Extract the pixel value
                     uint8_t pixelByte = buffer[ bufferIndex ];
@@ -3843,13 +3851,13 @@ void oled::dumpFrameBuffer( Stream* stream ) {
     stream->printf( "OLED Framebuffer Dump (%dx%d):\n\r", displayWidth, displayHeight );
     stream->println( "┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐" );
 
-    for ( int row = 0; row < displayHeight; row++ ) {
+    for ( int row = 0; row < displayHeight && row < _createdDisplayHeight; row++ ) {
         stream->print( "│" ); // Left border
 
-        for ( int col = 0; col < displayWidth; col++ ) {
+        for ( int col = 0; col < displayWidth && col < _createdDisplayWidth; col++ ) {
             int page = row / 8;
             int bit = row % 8;
-            int bufferIndex = page * displayWidth + col;
+            int bufferIndex = page * _createdDisplayWidth + col;
 
             uint8_t pixelByte = buffer[ bufferIndex ];
             bool pixelOn = ( pixelByte >> bit ) & 0x01;
@@ -3963,7 +3971,9 @@ void oled::streamFrameToSer3() {
     if ( !oledSer3Stream || oledSer3Target == nullptr ) return;
     uint8_t* sbuf = oledGetDumpBuffer();
     if ( !sbuf ) return;
-    size_t n = (size_t)displayWidth * ( ( displayHeight + 7 ) / 8 );
+    // hash over the buffer the panel object was BUILT with (config width/
+    // height can be larger than the constructed geometry - see the file header)
+    size_t n = (size_t)_createdDisplayWidth * ( ( _createdDisplayHeight + 7 ) / 8 );
     uint32_t hsh = 2166136261u;
     for ( size_t i = 0; i < n; i++ ) {
         hsh ^= sbuf[ i ];

@@ -41,6 +41,7 @@ volatile uint32_t ADCcolorOverride1 = -1;
 volatile uint32_t DACcolorOverride0 = -1;
 ///-2 will set to default
 volatile uint32_t DACcolorOverride1 = -1;
+float railLedPreviewVolts[2] = { -100.0f, -100.0f }; // see LEDs.h
 ///-2 will set to default
 volatile uint32_t GPIOcolorOverride0 = -1;
 ///-2 will set to default
@@ -856,7 +857,9 @@ logoLedAccess = true;
       logoColorOverrideBottom = -1;
     } else 
       if (colorOverride == -2) {
-        logoColorOverrideBottom = logoOverrideMap[LOGO_BOTTOM].defaultOverride;
+        // logoOverrideMap is laid out per physical LED, not per this enum:
+        // [LOGO_BOTTOM] is a TOP-logo entry (amber) - use the named default
+        logoColorOverrideBottom = logoColorOverrideBottomDefault;
       } else {
           logoColorOverrideBottom = colorOverride;
       }
@@ -866,12 +869,14 @@ logoLedAccess = true;
       logoColorOverride = -1;
     } else 
       if (colorOverride == -2) {
-        logoColorOverride = logoOverrideMap[LOGO].defaultOverride;
+        logoColorOverride = logoColorOverrideDefault;   // (map[LOGO] is a TOP-logo entry too)
       } else {
         logoColorOverride = colorOverride;
       }
-      logoColorOverrideTop = colorOverride;
-      logoColorOverrideBottom = colorOverride;
+      // propagate the RESOLVED value: the raw -2/-3 sentinels were being
+      // stored as colors on the two halves
+      logoColorOverrideTop = logoColorOverride;
+      logoColorOverrideBottom = logoColorOverride;
       break;
     default:
       break;
@@ -1365,13 +1370,13 @@ void assignNetColors(int preview) {
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 4:
-        railColor = logoColors8vSelect[map((long)(globalState.power.dac0 * 10), -80, 80, 0, 59)];
+        railColor = logoColors8vSelect[constrain(map((long)(globalState.power.dac0 * 10), -80, 80, 0, 59), 0, 59)];
         netColors[netIdx] = unpackRgb(railColor);
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 5:
-        railColor = logoColors8vSelect[map((long)(globalState.power.dac1 * 10), -80, 80, 0, 59)];
+        railColor = logoColors8vSelect[constrain(map((long)(globalState.power.dac1 * 10), -80, 80, 0, 59), 0, 59)];
         netColors[netIdx] = unpackRgb(railColor);
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
@@ -2246,7 +2251,7 @@ void showSkippedNodes(uint32_t onColor, uint32_t offColor) {
             //}
             }
 
-          } else if (globalState.connections.paths[i].node1 >= NANO_D0 && globalState.connections.paths[i].node2 <= NANO_5V) {
+          } else if (globalState.connections.paths[i].node2 >= NANO_D0 && globalState.connections.paths[i].node2 <= NANO_5V) {
             hsvColor onColorHsv = RgbToHsv(onColorRgb);
             hsvColor offColorHsv = RgbToHsv(offColorRgb);
             onColorHsv.h = (onColorHsv.h + colorCycleOn + 40) % 254;
@@ -3452,6 +3457,15 @@ int scaleScale(int value) {
 
   }
 
+// The voltage a rail STRIP renders: the menu's DAC preview wins, then the
+// hardware truth (railHwVolts), then the persisted value. Force-inlined into
+// lightUpRail, which runs from RAM and must keep drawing while flash is busy.
+static inline __attribute__((always_inline)) float railStripVolts(int powerRail) {
+  if (railLedPreviewVolts[powerRail] > -99.0f) return railLedPreviewVolts[powerRail];
+  if (railHwVolts[powerRail] > -99.0f) return railHwVolts[powerRail];
+  return (powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail;
+}
+
 // Mark to run from RAM to avoid flash contention during saves
 void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightness2,
                  int switchPosition) {
@@ -3467,9 +3481,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
       const uint32_t* railPal = railColorsV5[j];
       if ((j % 2) == 0) {
         int pr = j / 2;
-        float vRail = (railHwVolts[pr] > -99.0f)
-                          ? railHwVolts[pr]
-                          : ((pr == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+        float vRail = railStripVolts(pr);
         if (vRail < -0.1f) railPal = railColorsV5Neg[j];
       }
 
@@ -3497,9 +3509,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
               // globalState.power. Read railHwVolts DIRECTLY rather than through
               // getDacHardwareVoltage() - this renderer is __not_in_flash_func and
               // must keep drawing while flash is busy.
-              float currentRailVoltage = (railHwVolts[powerRail] > -99.0f)
-                  ? railHwVolts[powerRail]
-                  : ((powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+              float currentRailVoltage = railStripVolts(powerRail);
 
               if (currentRailVoltage < 0.0) { //flipped when the voltage is negative
                 if ((i == 24 - (abs((int)(currentRailVoltage * 5)))) && (abs((int)currentRailVoltage) <= 5.0)) {
@@ -3531,7 +3541,7 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
 
 
 
-                } else if ((i == abs((int)((currentRailVoltage - 0.1) * 5))) && (abs((int)currentRailVoltage) <= 5.0)) {
+                } else if ((i == abs((int)((currentRailVoltage - 0.1) * 5))) && (abs((int)currentRailVoltage) < 5.0)) {
 
                   leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(dotColor, scaleScale(250)));
 
@@ -3568,29 +3578,31 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
               // globalState.power. Read railHwVolts DIRECTLY rather than through
               // getDacHardwareVoltage() - this renderer is __not_in_flash_func and
               // must keep drawing while flash is busy.
-              float currentRailVoltage = (railHwVolts[powerRail] > -99.0f)
-                  ? railHwVolts[powerRail]
-                  : ((powerRail == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+              float currentRailVoltage = railStripVolts(powerRail);
 
               if (currentRailVoltage < -0.1) { //flipped when the voltage is negative
-                if ((i == 25 - (abs((int)(currentRailVoltage * 5)))) && (abs((int)currentRailVoltage) < 5.0)) {
+                // same geometry as the highlighted renderer above (24-/49-):
+                // the 25-/50- copy drifted one pixel and could not place the
+                // marker at all between -5.0 and -5.19 V (index 25 is never
+                // reached by a 0..24 loop)
+                if ((i == 24 - (abs((int)(currentRailVoltage * 5)))) && (abs((int)currentRailVoltage) <= 5.0)) {
 
                   leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(negDot, 250));
 
-                  } else if (i == 50 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
+                  } else if (i == 49 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
                     leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(dangerDot, 250));
 
 
-                    } else if (i > 25 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) < 5.0)) {
+                    } else if (i > 24 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) < 5.0)) {
 
                       leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[4], scaleScale(-20)));
 
-                      } else if (i > 50 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
+                      } else if (i > 49 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
                         leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[2], scaleScale(-30)));
 
-                        } else if (i < 50 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
+                        } else if (i < 49 - (abs((int)((currentRailVoltage * 5)))) && (abs(currentRailVoltage) >= 5.0)) {
 
                           leds.setPixelColor(railsToPixelMap[j][i], scaleBrightness(railPal[4], scaleScale(-20)));
 

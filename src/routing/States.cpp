@@ -559,6 +559,7 @@ JumperlessState::JumperlessState() {
 
 void JumperlessState::clear() {
     connections.clear();
+    numEphemeralConnections = 0;   // the bridges they tracked are gone
     power.setDefaults();
     display.clear();
     config.setDefaults();
@@ -613,14 +614,14 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
     for (int i = 0; i < connections.numBridges; i++) {
         if ((connections.bridges[i][0] == node1 && connections.bridges[i][1] == node2) ||
             (connections.bridges[i][0] == node2 && connections.bridges[i][1] == node1)) {
-            // Connection exists - update duplicates based on parameter
+            // Connection exists - an explicit count replaces the stored one; a
+            // plain re-add (-1, "no duplicate management" per the MicroPython
+            // docs) leaves it alone. It used to INCREMENT the stored count, so
+            // touching an existing pair with the probe silently spent another
+            // lane on it - and now that -1 means "default", an increment would
+            // have turned a default into an explicit 0.
             if (duplicates >= 0) {
-                // Specific duplicate count provided - replace the value
-                // Serial.println("Updating duplicate count for connection: " + String(node1) + " - " + String(node2) + " to " + String(duplicates));
                 connections.bridges[i][2] = duplicates;
-            } else {
-                // No duplicate count specified - increment existing count
-                connections.bridges[i][2]++;
             }
             connections.invalidateCache(config.autoRefreshOnChange);
             markDirty();
@@ -634,13 +635,13 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
         return false;
     }
     
-    // Determine number of duplicates: -1 means use default from config
-    int numDuplicates;
-    if (duplicates < 0) {
-        numDuplicates = config.stackPaths;  // Use default from config
-    } else {
-        numDuplicates = duplicates;
-    }
+    // -1 = "default", stored AS -1 so the router resolves it per class at
+    // route time (rails -> stack_rails, DACs -> stack_dacs, GPIO -> stack_gpio,
+    // ADCs -> stack_adcs, everything else -> stack_paths). Stamping the generic
+    // stackPaths here turned every default into an explicit count and bypassed
+    // that classification for every probe/menu/Python bridge: GPIO and ADC
+    // bridges stacked, rails got stack_paths instead of stack_rails.
+    int numDuplicates = (duplicates < 0) ? -1 : duplicates;
     
     // Add the bridge
     int idx = connections.numBridges;
@@ -726,6 +727,7 @@ void JumperlessState::clearAllConnections() {
     }
 
     connections.clear();
+    numEphemeralConnections = 0;   // a stale entry made the next addEphemeral a no-op
     
     // Clear all fake GPIO state so they won't be serialized to YAML
     clearAllFakeGpio();
@@ -1525,7 +1527,11 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
             int colonIdx = line.indexOf(':');
             String val = line.substring(colonIdx + 1);
             val.trim();
-            config.sourceOfTruth = (val == "nets") ? NETS_PRIMARY : BRIDGES_PRIMARY;
+            // "nets" is accepted but never honoured: deserializeNets ignores
+            // the nodes lists, so rebuilding bridges from nets threw every
+            // bridge away. Bridges are always the source of truth on load.
+            (void)val;
+            config.sourceOfTruth = BRIDGES_PRIMARY;
         }
         else if (!indented && line.startsWith("guideProgress:")) {
             // ONE shape only (matched with toYAML - see States.h):
@@ -1650,6 +1656,21 @@ bool JumperlessState::fromYAML(const String& input, String& errorMsg) {
         lineStart = lineEnd + 1;
     }
     
+    // Legacy stamped counts -> default. Until 5.7.11.0 addConnection stored
+    // this slot's stackPaths into every bridge added without a count, and the
+    // file carries that as an explicit "dup: N" - which the router honours
+    // as-is, so GPIO/ADC bridges kept stacking and rails never got
+    // stack_rails. The config section (it follows bridges in the file, so it
+    // is parsed by now) holds the exact value that was stamped: a count equal
+    // to it was never a user request, put it back to default. The one edge is
+    // an explicit per-connection count that happens to equal stackPaths on a
+    // GPIO/ADC/rail/DAC bridge - that becomes default too (use stack_* instead).
+    for (int i = 0; i < connections.numBridges; i++) {
+        if (connections.bridges[i][2] == config.stackPaths) {
+            connections.bridges[i][2] = -1;
+        }
+    }
+
     // Parse the parts: section whole in a single pass (multi-line list items
     // need their own scanner - same pattern as the overlays pass below)
     {
@@ -1768,9 +1789,12 @@ void JumperlessState::serializeBridges(String& output) const {
         String n1Name = nodeValueToString(node1);
         String n2Name = nodeValueToString(node2);
         
-        output += "  - {n1: " + n1Name + 
-                  ", n2: " + n2Name + 
-                  ", dup: " + String(connections.bridges[i][2]);
+        output += "  - {n1: " + n1Name + ", n2: " + n2Name;
+        // dup is written only for an explicit request; a default (-1) is left
+        // out and parses back as -1 on this and on older firmware
+        if (connections.bridges[i][2] >= 0) {
+            output += ", dup: " + String(connections.bridges[i][2]);
+        }
         
         // Add color field if this bridge has a color (0xFFFFFFFF = no color)
         if (connections.bridgeColors[i] != 0xFFFFFFFF) {
@@ -1889,7 +1913,7 @@ bool JumperlessState::deserializeBridges(const char* yamlContent, String& errorM
                 bool parseSuccess;
                 color = parseColorValue(val, parseSuccess);
                 if (!parseSuccess) {
-                    color = 0;  // Ignore invalid colors
+                    color = 0xFFFFFFFF;  // ignore invalid colors (0 is BLACK, a real color)
                 }
             }
         }
@@ -1907,8 +1931,17 @@ bool JumperlessState::deserializeBridges(const char* yamlContent, String& errorM
     // Store the color if provided and connection was added
     // 0xFFFFFFFF means no color was specified
     if (success && color != 0xFFFFFFFF) {
-        // The bridge was just added, so it's at index (numBridges - 1)
-        int bridgeIdx = connections.numBridges - 1;
+        // Locate the bridge by its node pair: addConnection returns true for
+        // a DUPLICATE line too (it only bumps the dup count), and "the last
+        // bridge" then painted whatever happened to be last.
+        int bridgeIdx = -1;
+        for (int i = connections.numBridges - 1; i >= 0; i--) {
+            if ((connections.bridges[i][0] == n1 && connections.bridges[i][1] == n2) ||
+                (connections.bridges[i][0] == n2 && connections.bridges[i][1] == n1)) {
+                bridgeIdx = i;
+                break;
+            }
+        }
         if (bridgeIdx >= 0 && bridgeIdx < MAX_BRIDGES) {
             connections.bridgeColors[bridgeIdx] = color;
         }
@@ -2748,10 +2781,10 @@ int parseNodeName(const String& nodeName) {
         }
     }
     
-    // Search through nano defines
+    // Search through nano defines (counts exported from NetManager.cpp via
+    // sizeof - the hardcoded 35 here read 4 entries past a 31-entry table)
     extern const DefineInfo nanoDefines[];
-    // Count elements in nanoDefines - it has 35 elements based on the defNanoToCharShort array
-    const int numNanoDefines = 35;
+    extern const int numNanoDefines;
     for (int i = 0; i < numNanoDefines; i++) {
         String longName = String(nanoDefines[i].longName);
         String shortName = String(nanoDefines[i].shortName);
@@ -2765,8 +2798,7 @@ int parseNodeName(const String& nodeName) {
     
     // Search through special defines
     extern const DefineInfo specialDefines[];
-    // Count elements in specialDefines - updated to 70 elements (added 32 FAKE_GPIO, removed 7 PAD defines, was 49)
-    const int numSpecialDefines = 70;
+    extern const int numSpecialDefines;
     for (int i = 0; i < numSpecialDefines; i++) {
         String longName = String(specialDefines[i].longName);
         String shortName = String(specialDefines[i].shortName);
@@ -2823,7 +2855,8 @@ uint32_t parseColorValue(const String& colorStr, bool& success) {
     
     // Try hex format first
     if (normalized.startsWith("0x") || normalized.startsWith("#")) {
-        uint32_t color = scaleBrightness(strtoul(normalized.c_str() + 2, NULL, 16), -80   );
+        int skip = normalized.startsWith("0x") ? 2 : 1;   // '#' is ONE char - skipping 2 dropped the first digit
+        uint32_t color = scaleBrightness(strtoul(normalized.c_str() + skip, NULL, 16), -80   );
         if (debugFP) {
             Serial.printf("parsed 0x color value: %14s 0x%06X\n", normalized.c_str(), color);
         }
@@ -3937,12 +3970,21 @@ bool SlotManager::deleteSlot(int slotNum, String& errorMsg) {
     //     FatFS.remove(legacyFilename.c_str());
     // }
     
-    // If this was the active slot, clear it
+    // If this was the active slot, clear it. Same terminal state as the
+    // failed-restore path in loadSlotFromPath: NO active context (netSlot
+    // -1 too - with netSlot left at 0 the next idle auto-save synced
+    // activeSlotNumber to 0 and wrote the cleared state over slot0.yaml),
+    // and nothing routed or powered beyond defaults on the hardware.
     if (activeSlotNumber == slotNum) {
         activeState.clear();
         activeSlotNumber = -1;
-        netSlot = 0;  // Reset to slot 0
+        netSlot = -1;
         activeSlotPath[0] = '\0';  // don't leave a path pointing at a dead file
+        extern void refreshConnections(int ledShowOption, int fillUnused, int clean);
+        refreshConnections(-1, 1, 1);
+        if (!previewModeActive) {
+            applyStateToHardware();
+        }
     }
 
     return true;

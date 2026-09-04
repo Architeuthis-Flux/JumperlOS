@@ -632,7 +632,9 @@ bool JsonStateParser::parseNetsSection(const String& json, const PowerState& old
                             // override reaches RAM and not the file. Degenerate
                             // input through one specific door; recorded rather
                             // than fixed so the safety claim stays honest.
-                            *currentValPtr = voltage;
+                            if (voltage >= -8.0f && voltage <= 8.0f) {   // same range the power section enforces
+                                *currentValPtr = voltage;
+                            }
                         }
                         // Else: Power section ALSO changed it. We prioritize Power section (keep currentVal).
                     }

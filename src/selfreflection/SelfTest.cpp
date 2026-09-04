@@ -1132,6 +1132,7 @@ static const SelfTestFn selfTestFns[ SELFTEST_NUM_TESTS ] = {
 
 // Shared session wrapper: temp slot + hardware normalize around the given
 // tests, then teardown, overlay, and reports.
+static bool s_selfTestSessionAborted = false;   // set when a session could not run at all
 static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_NUM_TESTS ],
                                 bool fromFirstStart ) {
     // Every test below reads the ADC directly and expects the real converter,
@@ -1145,6 +1146,7 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     if ( !audioYield.ok( ) ) {
         Serial.println( "\n\rSelf test aborted: the USB audio stream still holds the ADC." );
         Serial.println( "Close the microphone on the host (or run M to disable it) and try again.\n\r" );
+        s_selfTestSessionAborted = true;   // the callers must not retry/store/reboot on this
         return;
     }
 
@@ -1263,7 +1265,13 @@ void runFullSelfTest( bool fromFirstStart ) {
     SelfTestReport r;
     initReport( r );
     const bool all[ SELFTEST_NUM_TESTS ] = { true, true, true, true, true };
+    s_selfTestSessionAborted = false;
     runSelfTestSession( r, all, fromFirstStart );
+    if ( s_selfTestSessionAborted ) {
+        // nothing ran: no retry rounds, no NOTRUN report on disk, no reboot
+        s_selfTestSessionAborted = false;
+        return;
+    }
 
     // Loop until EVERYTHING passes, re-running only the failed tests each
     // round (the operator reseats the cable / fixes the fixture between

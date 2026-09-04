@@ -1110,7 +1110,7 @@ int getMenuSelection( void ) {
         // button never took you back in the menus (Kevin, 2026-08-18). Read
         // once, dispatch on the local.
         int probePress = ProbeButton::getInstance( ).getButtonPress( );
-        if ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED || probePress == 2 ) { //! click
+        if ( menuPosition >= 0 && ( ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) || probePress == 2 ) ) { //! click
 
             lastMenuLevel = menuLevel;
             noInputTimer = millis( );
@@ -1540,12 +1540,28 @@ int getMenuSelection( void ) {
 
             } else if ( actions[ menuPosition ] == 3 && subSelection != -1 ) {
 
-                // Serial.println("get float voltage");
-                // Serial.println(subSelection);
-                // Serial.println(subSelection);
-                // Serial.println(subSelection);
-
-                getActionFloat( menuPosition, subSelection );
+                // getActionFloat()'s second argument is a RAIL CODE (0 = both,
+                // 1 = top, 2 = bottom), which happens to equal the option index
+                // on the Rails line ("Both Top Bottom"). The Output > Voltage
+                // line is "DAC 0 / DAC 1 / Top R / Bot R", so passing its raw
+                // index drove BOTH rails live while the user dialed DAC 0 (and
+                // the top rail for DAC 1). Translate by the picked option's
+                // text; DACs get their own codes (3 / 4) inside getActionFloat.
+                int railArg = subSelection;
+                if ( subSelection >= 0 && subSelection < 20 ) {
+                    String pickedOpt = String( currentAction.fromAscii[ subSelection ] );
+                    pickedOpt.trim( );
+                    if ( pickedOpt.startsWith( "DAC 0" ) ) {
+                        railArg = 3;
+                    } else if ( pickedOpt.startsWith( "DAC 1" ) ) {
+                        railArg = 4;
+                    } else if ( pickedOpt.startsWith( "Top R" ) ) {
+                        railArg = 1;
+                    } else if ( pickedOpt.startsWith( "Bot R" ) ) {
+                        railArg = 2;
+                    }
+                }
+                getActionFloat( menuPosition, railArg );
 
                 // doMenuAction();
                 return doMenuAction( );
@@ -2242,6 +2258,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                             b.print( "g", scaledColor[ 3 ], 0xffffff, 3, 0, 3 );
                             b.print( "h", scaledColor[ 4 ], 0xffffff, 4, 0, 3 );
                             b.print( "t", scaledColor[ 5 ], 0xffffff, 5, 0, 3 );
+                            break; // fell through into case 4 and rewrote special_net_brightness on every tick
                         case 4:
                             LEDbrightnessSpecial = highlightedOption * 5 + 5;
                             jumperlessConfig.display.special_net_brightness = LEDbrightnessSpecial;
@@ -2682,7 +2699,11 @@ int selectNodeAction( int whichSelection ) {
             highlightedNode = subMenuChoices[ currentlySelecting ];
             inNanoHeader = 1;
         } else {
-            highlightedNode = subMenuChoices[ currentlySelecting ] + 1;
+            // stored picks are 1-based nodes (see the return at the bottom);
+            // the cursor is a 0-based row - +1 here put it two rows below
+            highlightedNode = subMenuChoices[ currentlySelecting ] - 1;
+            if ( highlightedNode < 0 ) highlightedNode = 0;
+            if ( highlightedNode > 59 ) highlightedNode = 59;
         }
         subMenuChoices[ currentlySelecting ] = -1;
         maxNumSelections++;
@@ -2897,12 +2918,17 @@ int selectNodeAction( int whichSelection ) {
             nodeSelected = highlightedNode;
 
             if ( alreadySelected == 0 ) {
-                currentAction.to[ currentAction.connectIndex ] = highlightedNode + 1;
+                // Rows are 0-based cursor values (+1 = node); header cursor
+                // values ARE the node define already (NANO_D0..), so +1 there
+                // wired the neighbouring header pin. Same test the return
+                // path below uses.
+                currentAction.to[ currentAction.connectIndex ] =
+                    ( highlightedNode >= 0 && highlightedNode <= 59 ) ? highlightedNode + 1 : highlightedNode;
                 currentAction.connectIndex++;
             } else {
                 for ( int i = 0; i < 10; i++ ) {
                     if ( currentAction.from[ i ] == currentlySelecting ) {
-                        if ( nodeSelected > 0 && nodeSelected < 60 ) {
+                        if ( nodeSelected >= 0 && nodeSelected < 60 ) {
                             currentAction.to[ i ] = highlightedNode + 1;
                         } else {
                             currentAction.to[ i ] = highlightedNode;
@@ -2981,7 +3007,31 @@ float getActionFloat( int menuPosition, int rail ) {
     case 2:
         currentChoice = globalState.power.bottomRail;
         break;
+    case 3: // DAC 0 (Output > Voltage menu)
+        currentChoice = globalState.power.dac0;
+        break;
+    case 4: // DAC 1
+        currentChoice = globalState.power.dac1;
+        break;
     }
+
+    // DAC feedback on the rail STRIP (Kevin): the DAC slider borrows the top
+    // (DAC 0) / bottom (DAC 1) rail LEDs as its readout, exactly the way the
+    // rail slider shows a rail - the rail itself never moves. lightUpRail reads
+    // railLedPreviewVolts ahead of the hardware value; every exit below clears
+    // it and puts the strip highlight back to the -1 the DAC option rows set.
+    const int previewRail = ( rail == 3 ) ? 0 : ( rail == 4 ) ? 1 : -1;
+    auto dacPreviewShow = [&]( float v ) {
+        if ( previewRail < 0 ) return;
+        railLedPreviewVolts[ previewRail ] = v;
+        brightenedRail = previewRail * 2; // 0 = top strip, 2 = bottom strip
+    };
+    auto dacPreviewEnd = [&]( ) {
+        if ( previewRail < 0 ) return;
+        railLedPreviewVolts[ previewRail ] = -100.0f;
+        brightenedRail = -1;
+    };
+    dacPreviewShow( currentChoice ); // the first frame already shows it
 
     // Snapshot the rails BEFORE the slider mutates them. The slider runs
     // a tight encoder/probe loop, applies new voltages on every tick,
@@ -3052,6 +3102,7 @@ float getActionFloat( int menuPosition, int rail ) {
         // Check for cancellation (long press) - check FIRST on every iteration
         if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
             encoderButtonState = IDLE;
+            dacPreviewEnd( );
             requestLedShow( -1 );
             // Long-press is a "leave the rails wherever the slider was last"
             // exit. The hardware/state still got mutated during the drag,
@@ -3083,6 +3134,7 @@ float getActionFloat( int menuPosition, int rail ) {
                 selectNodeAction( );
             }
 
+            dacPreviewEnd( );
             railCommitEdit();
             return roundedCurrentChoice;
         }
@@ -3090,6 +3142,7 @@ float getActionFloat( int menuPosition, int rail ) {
         // Check for serial cancellation
         if ( Serial.available( ) > 0 ) {
             Serial.read( );
+            dacPreviewEnd( );
             requestLedShow( -1 );
             currentAction.analogVoltage = NAN;   // cancel = do not re-apply
             railCommitEdit();
@@ -3189,9 +3242,16 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 case 2:
                     setBotRail( roundedCurrentChoice, 1, 0 );
                     break;
+                case 3: // DACs follow the probe too (a user write, see the encoder path)
+                    setDac0voltage( roundedCurrentChoice, 1, 0, true );
+                    break;
+                case 4:
+                    setDac1voltage( roundedCurrentChoice, 1, 0, true );
+                    break;
                 }
             }
 
+            dacPreviewShow( roundedCurrentChoice );
             requestLedShow( 2 );
 
             // Reset encoder-based tracking since we're using probe now
@@ -3364,9 +3424,10 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 snprintf( floatString, 8, " %0.1f V", displayChoice );
             }
 
-            // Update LED display
+            // Update LED display (the DAC preview rides the same frame)
             b.clear( 1 );
             b.print( floatString, numberColor, 0xffffff, 0, 1, 1 );
+            dacPreviewShow( roundedCurrentChoice );
             requestLedShow( 2 );
 
             // Update serial
@@ -3376,28 +3437,37 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
             // Update OLED
             oled.clearPrintShow( floatString, 2, true, true, true );
 
-            // Update global state immediately
-            if ( rail == 0 ) {
-                globalState.power.topRail = roundedCurrentChoice;
-                globalState.power.bottomRail = roundedCurrentChoice;
-            } else if ( rail == 1 ) {
-                globalState.power.topRail = roundedCurrentChoice;
-            } else if ( rail == 2 ) {
-                globalState.power.bottomRail = roundedCurrentChoice;
-            }
-
-            // Apply voltage to hardware (only for safe range)
+            // Update globalState and hardware TOGETHER, and only for what
+            // actually reaches the copper (not the first pass, only the live
+            // 0..5 V band). The state used to be pre-written unconditionally
+            // while the apply below skipped the first pass and out-of-band
+            // values: entering Rails > Both stamped the AVERAGE of the two rails
+            // into both power fields before a single detent, and a cancel then
+            // persisted rails the hardware never carried. Confirm applies the
+            // final value itself (doMenuAction), any range.
             if ( firstTime == 0 && currentChoice >= 0.0 && currentChoice <= 5.0 ) {
                 switch ( rail ) {
                 case 0:
+                    globalState.power.topRail = roundedCurrentChoice;
+                    globalState.power.bottomRail = roundedCurrentChoice;
                     setTopRail( roundedCurrentChoice, 1, 0 ); // save=1 to update globalState
                     setBotRail( roundedCurrentChoice, 1, 0 );
                     break;
                 case 1:
+                    globalState.power.topRail = roundedCurrentChoice;
                     setTopRail( roundedCurrentChoice, 1, 0 );
                     break;
                 case 2:
+                    globalState.power.bottomRail = roundedCurrentChoice;
                     setBotRail( roundedCurrentChoice, 1, 0 );
+                    break;
+                case 3: // DAC 0 - live preview in the same band as the rails
+                    // checkProbePower=true: a USER write, like Probing's DAC adjusters -
+                    // the probe feed must know DAC 0 is claimed and not re-park it
+                    setDac0voltage( roundedCurrentChoice, 1, 0, true );
+                    break;
+                case 4: // DAC 1
+                    setDac1voltage( roundedCurrentChoice, 1, 0, true );
                     break;
                 }
             }
@@ -3417,6 +3487,7 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
         }
     }
 
+    dacPreviewEnd( );
     return roundedCurrentChoice;
 }
 
@@ -4262,7 +4333,10 @@ int doMenuAction( int menuPosition, int selection ) {
                         default:
                             break;
                         }
-                        updateGPIOConfigFromState( );
+                        // Only the picked pin: the bank-wide form copied core 1's
+                        // readGPIO stamps (input-pulldown on every unrouted pin)
+                        // into the config of pins the user never touched.
+                        updateGPIOConfigFromState( currentAction.from[ i ] );
                     }
                 }
             }
@@ -4523,6 +4597,10 @@ int doMenuAction( int menuPosition, int selection ) {
             // round 1 left here) would dirty the state for a visit that changed
             // nothing at all.
             bool wroteAPowerField = false;
+            // A cancelled slider leaves analogVoltage NAN (getActionFloat's
+            // long-press / serial exits): keep any picked bridge, but never
+            // write NAN into a power field - setRailsAndDACs would drive it.
+            bool voltageValid = !isnan( currentAction.analogVoltage );
 
             for ( int i = 0; i < 10; i++ ) {
                 if ( currentAction.from[ i ] != -1 && currentAction.to[ i ] != -1 ) {
@@ -4530,27 +4608,35 @@ int doMenuAction( int menuPosition, int selection ) {
                     case 0:
                         addBridgeToState( DAC0, currentAction.to[ i ] );
                         // setDac0_5Vvoltage(currentAction.analogVoltage);
-                        globalState.power.dac0 = currentAction.analogVoltage;
-                        wroteAPowerField = true;
+                        if ( voltageValid ) {
+                            globalState.power.dac0 = currentAction.analogVoltage;
+                            wroteAPowerField = true;
+                        }
                         break;
                     case 1:
 
                         addBridgeToState( DAC1, currentAction.to[ i ] );
-                        globalState.power.dac1 = currentAction.analogVoltage;
-                        wroteAPowerField = true;
+                        if ( voltageValid ) {
+                            globalState.power.dac1 = currentAction.analogVoltage;
+                            wroteAPowerField = true;
+                        }
                         // setDac1_8Vvoltage(currentAction.analogVoltage);
                         break;
                         // break;
 
                     case 2:
                         addBridgeToState( TOP_RAIL, currentAction.to[ i ] );
-                        globalState.power.topRail = currentAction.analogVoltage;
-                        wroteAPowerField = true;
+                        if ( voltageValid ) {
+                            globalState.power.topRail = currentAction.analogVoltage;
+                            wroteAPowerField = true;
+                        }
                         break;
                     case 3:
                         addBridgeToState( BOTTOM_RAIL, currentAction.to[ i ] );
-                        globalState.power.bottomRail = currentAction.analogVoltage;
-                        wroteAPowerField = true;
+                        if ( voltageValid ) {
+                            globalState.power.bottomRail = currentAction.analogVoltage;
+                            wroteAPowerField = true;
+                        }
                         break;
 
                     default:
@@ -4745,35 +4831,31 @@ int doMenuAction( int menuPosition, int selection ) {
 
         if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf( "Stack" ) !=
              -1 ) {
+            // The option row is "0 1 2 3 4 Max": the picked text lives in
+            // fromAscii[<picked index>], not fromAscii[0] (which holds the
+            // clearAction blank), so the old 'M' test never fired.
+            int stackPick = currentAction.from[ 0 ];
+            bool pickedMax = ( stackPick == 5 ) ||
+                             ( stackPick >= 0 && stackPick < 20 &&
+                               ( currentAction.fromAscii[ stackPick ][ 0 ] == 'M' ||
+                                 currentAction.fromAscii[ stackPick ][ 0 ] == 'm' ) );
             if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Rails" ) !=
                  -1 ) {
-                jumperlessConfig.routing.stack_rails = currentAction.from[ 0 ];
-
-                if ( currentAction.fromAscii[ 0 ][ 0 ] == 'M' || currentAction.fromAscii[ 0 ][ 0 ] == 'm' ) {
-                    jumperlessConfig.routing.stack_rails = 7;
-                }
+                jumperlessConfig.routing.stack_rails = pickedMax ? 7 : stackPick;
 
             } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "Paths" ) != -1 ) {
 
-                jumperlessConfig.routing.stack_paths = currentAction.from[ 0 ];
-
-                if ( currentAction.fromAscii[ 0 ][ 0 ] == 'M' || currentAction.fromAscii[ 0 ][ 0 ] == 'm' ) {
-                    // pathPriority = 2;
-                    // pathDuplicates = 5;
-                    jumperlessConfig.routing.stack_paths = 5;
-                }
+                jumperlessConfig.routing.stack_paths = pickedMax ? 5 : stackPick;
 
             } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "DACs" ) != -1 ) {
-                jumperlessConfig.routing.stack_dacs = currentAction.from[ 0 ];
+                // the old else-branch forced every non-Max pick to 1
+                jumperlessConfig.routing.stack_dacs = pickedMax ? 4 : stackPick;
 
-                if ( currentAction.fromAscii[ 0 ][ 0 ] == 'M' || currentAction.fromAscii[ 0 ][ 0 ] == 'm' ) {
-                    // dacPriority = 2;
-                    // dacDuplicates = 4;
-                    jumperlessConfig.routing.stack_dacs = 4;
-                } else {
-                    // dacPriority = 1;
-                    jumperlessConfig.routing.stack_dacs = 1;
-                }
+            } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "GPIO" ) != -1 ) {
+                jumperlessConfig.routing.stack_gpio = pickedMax ? 4 : stackPick;
+
+            } else if ( menuLines[ currentAction.previousMenuPositions[ 2 ] ].indexOf( "ADCs" ) != -1 ) {
+                jumperlessConfig.routing.stack_adcs = pickedMax ? 4 : stackPick;
             }
         }
         Serial.print( "\n\rDuplicate Rails: " );
@@ -4785,6 +4867,10 @@ int doMenuAction( int menuPosition, int selection ) {
         // Serial.print(jumperlessConfig.routing.dac_priority);
         Serial.print( "Duplicate Paths: " );
         Serial.println( jumperlessConfig.routing.stack_paths );
+        Serial.print( "Duplicate GPIO: " );
+        Serial.println( jumperlessConfig.routing.stack_gpio );
+        Serial.print( "Duplicate ADCs: " );
+        Serial.println( jumperlessConfig.routing.stack_adcs );
 
         // Serial.print("\n\n\r");
 
@@ -4892,8 +4978,11 @@ int doMenuAction( int menuPosition, int selection ) {
             String selectedOption = String( currentAction.fromAscii[ 0 ] );
             selectedOption.toLowerCase( );
 
-            if ( selectedOption.indexOf( "text" ) != -1 ) {
+            if ( selectedOption.indexOf( "text" ) != -1 &&
+                 currentAction.stringValue.length( ) > 0 ) {
                 // User wants to edit - the text input already ran, so save the value
+                // (an empty string is the editor's ESC/cancel - "Clear" is the
+                // explicit way to empty the message, same guard as the bitmap arm)
                 strncpy( jumperlessConfig.top_oled.startup_message, currentAction.stringValue.c_str( ), 32 );
                 jumperlessConfig.top_oled.startup_message[ 32 ] = '\0'; // Ensure null termination
                 configChanged = true;
@@ -5235,6 +5324,7 @@ char LEDbrightnessMenu( void ) {
 
                 requestLedShow( 2 );
             } else if ( input2 == 'x' || input2 == ' ' || input2 == 'm' ) {
+                saveLEDbrightness( 0 ); // the r/s/t loops save on exit; this one didn't
                 input = ' ';
             } else {
             }
@@ -5381,7 +5471,8 @@ char LEDbrightnessMenu( void ) {
                 b.print( "s", menuColors[ 0 ], 0xffffff, 4, 1, 2 );
 
                 requestLedShow( 2 );
-            } else if ( input2 == 'x' ) {
+            } else if ( input2 == 'x' || input2 == 'm' ) {
+                saveLEDbrightness( 0 ); // (also honour the advertised 'm' exit)
                 input = ' ';
             } else {
             }

@@ -550,8 +550,8 @@ void validateTransactionConsistency(void) {
 // path-stacking DUPLICATES consumed all 8 K y-rows, so every tap failed
 // "noroute" and every net displayed 0.0 mA (hardware diag showed K y4/y5 as
 // bit-identical duplicates of y2/y1). DUPLICATE paths are a pure resistance
-// optimization - never connectivity - so they must not consume one of the
-// LAST TWO virgin K y-rows. Primary paths keep unconditional access
+// optimization - never connectivity - so they must not consume the LAST
+// virgin K y-row(s) - kTapKRowReserve of them, one since 2026-09-03. Primary paths keep unconditional access
 // (connectivity first). The other half of this fix is buildEphemeralRoute's
 // same-net-row fallback in RouteSafety.cpp.
 //
@@ -573,11 +573,454 @@ static int virginChipKYRowCount(void) {
 }
 
 // True when a duplicate path may not take this row: the row is virgin on chip
-// K and 2 or fewer virgin K rows remain (the candidate row included).
+// K and kTapKRowReserve or fewer virgin K rows remain (the candidate row
+// included). Two until 2026-09-03; Kevin, after the top rail's K -> G -> A
+// copy was refused with exactly two virgin rows left: "let's only keep one
+// tap" - the scan's sequential pair mode taps on one channel, and a
+// two-channel guide-check tap falls back to a shared same-net K row.
+static const int kTapKRowReserve = 1;
+
 static bool reservedKRowForSenseTaps(int chip, int y) {
   return routingDuplicatePathNow && chip == CHIP_K &&
          globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
-         virginChipKYRowCount() <= 2;
+         virginChipKYRowCount() <= kTapKRowReserve;
+}
+
+// ============================================================================
+// Sense-tap escape reservation for duplicates (bench 2026-09-03)
+// ============================================================================
+// A sense tap from a breadboard row reaches the ADCs on chip K through the
+// row's own chip (its K lane, or an I/J/L lane and a hub lane) or by
+// bouncing through another breadboard chip: that chip's Y0, its K lane and
+// its K row. Kevin's LED at 12 mA (meter) showed no ants and 0.0 mA because
+// chip D had every lane spent - the K lane by a primary, the I/J lanes by
+// the net's OWN stacked copies - and duplicates of the rail net had taken
+// five of the eight bounce rows, so no tap could leave D although chip K
+// still had two free rows.
+//
+// Ruling (Kevin, 2026-09-03): keep the stacking, duplicates may still
+// bounce, but "reserve a single path": a duplicate may not take a resource
+// that belongs to one of the last kTapBounceReserve TAP-CAPABLE bounce
+// chips - a breadboard chip whose Y0, K lane and K row are all still
+// virgin. Primaries are never refused (connectivity first), same-net
+// re-claims are unaffected (the checks only fire on virgin pins), and the
+// K-row reservation above keeps working alongside.
+static const int kTapBounceReserve = 1;
+
+// Why the BB-to-SF bounce loop skipped each chip for the LAST unrouted rail
+// duplicate it tried (one letter per chip: K = the chip's K lane, Y = its
+// bounce row, L = no free lane pair to the row's chip, R = its row on the SF
+// chip), printed by the b command. Diagnostic only.
+char railDupTrace[64];
+static bool railDupTraced = false;   // the FIRST rail duplicate of a rebuild is traced
+static void railDupTraceNote(int bb, char why) {
+  size_t len = strlen(railDupTrace);
+  if (len + 3 < sizeof(railDupTrace)) {
+    railDupTrace[len] = (char)('A' + bb);
+    railDupTrace[len + 1] = why;
+    railDupTrace[len + 2] = ' ';
+    railDupTrace[len + 3] = 0;
+  }
+}
+
+static int kRowForBounceChip(int n) {
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[CHIP_K].yMap[y] == n) {
+      return y;
+    }
+  }
+  return -1;
+}
+
+// The SF chip's row wired to breadboard chip n (-1 if none).
+static int sfRowForBounceChip(int sf, int n) {
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[sf].yMap[y] == n) {
+      return y;
+    }
+  }
+  return -1;
+}
+
+// A tap has four shapes by where its node lives: on a breadboard row
+// (kind -1: the bounce needs the chip's Y0, K lane and K row) or on chip
+// I, J or L (kind = that chip: the bounce additionally needs the chip's
+// lane into it and its row there). A chip is tap-capable for a kind when
+// every ingredient of that shape is still virgin.
+static const int kTapKinds[4] = {-1, CHIP_I, CHIP_J, CHIP_L};
+
+static bool tapCapableBounceChip(int n, int kind) {
+  if (n < 0 || n >= 8) {
+    return false;
+  }
+  int laneK = xMapForChipLane0(n, CHIP_K);
+  int rowK = kRowForBounceChip(n);
+  if (laneK < 0 || rowK < 0) {
+    return false;
+  }
+  if (globalState.connections.chipStates[n].yStatus[0] != -1 ||
+      globalState.connections.chipStates[n].xStatus[laneK] != -1 ||
+      globalState.connections.chipStates[CHIP_K].yStatus[rowK] != -1) {
+    return false;
+  }
+  if (kind >= 0) {
+    int laneS = xMapForChipLane0(n, kind);
+    int rowS = sfRowForBounceChip(kind, n);
+    if (laneS < 0 || rowS < 0) {
+      return false;
+    }
+    if (globalState.connections.chipStates[n].xStatus[laneS] != -1 ||
+        globalState.connections.chipStates[kind].yStatus[rowS] != -1) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static int tapCapableBounceChips(int kind) {
+  int count = 0;
+  for (int n = 0; n < 8; n++) {
+    if (tapCapableBounceChip(n, kind)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// A node on SF chip sf can be tapped WITHOUT a bounce chip when its hub lane
+// into K is virgin at both pins, sf has a virgin row whose breadboard pin is
+// virgin (the same-chip hop lands there), and K has a virgin row whose
+// breadboard pin is virgin - the tap builder's hub-lane shape for I/J/L
+// nodes (RouteSafety). Then the bounce reserve for that kind is moot.
+static bool sfNodeTapHasHubRoute(int sf) {
+  int xs = xMapForChipLane0(sf, CHIP_K);
+  int xk = xMapForChipLane0(CHIP_K, sf);
+  if (xs < 0 || xk < 0 ||
+      globalState.connections.chipStates[sf].xStatus[xs] != -1 ||
+      globalState.connections.chipStates[CHIP_K].xStatus[xk] != -1) {
+    return false;
+  }
+  bool sfRow = false, kRow = false;
+  for (int y = 0; y < 8; y++) {
+    int bb = globalState.connections.chipStates[sf].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, sf) : -1;
+    if (bbX >= 0 && globalState.connections.chipStates[sf].yStatus[y] == -1 &&
+        globalState.connections.chipStates[bb].xStatus[bbX] == -1) {
+      sfRow = true;
+    }
+    int kb = globalState.connections.chipStates[CHIP_K].yMap[y];
+    int kbX = (kb >= 0 && kb < 8) ? xMapForChipLane0(kb, CHIP_K) : -1;
+    if (kbX >= 0 && globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
+        globalState.connections.chipStates[kb].xStatus[kbX] == -1) {
+      kRow = true;
+    }
+  }
+  return sfRow && kRow;
+}
+
+static bool netOwnsKRow(int net) {
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[CHIP_K].yStatus[y] == net) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A K row a tap could land on from outside: virgin, with its breadboard
+// chip's K lane virgin.
+static bool anyVirginKRowWithLane(void) {
+  for (int y = 0; y < 8; y++) {
+    int bb = globalState.connections.chipStates[CHIP_K].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, CHIP_K) : -1;
+    if (bbX >= 0 && globalState.connections.chipStates[CHIP_K].yStatus[y] == -1 &&
+        globalState.connections.chipStates[bb].xStatus[bbX] == -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Do the rows on breadboard chip c need a bounce chip to be tapped? A row
+// whose net owns a K row is read there by the tap fallback (no route to
+// build). Otherwise the chip needs its own K lane with a virgin K row, or
+// a lane into I/J/L with that hub's row for c, the hub lane into K and a
+// virgin K row - the tap builder's tiers 1 and 2. Only when it has neither
+// does a bounce chip matter.
+static bool chipRowsNeedBounce(int c) {
+  bool any = false;
+  for (int y = 1; y < 8 && !any; y++) {
+    int n = globalState.connections.chipStates[c].yStatus[y];
+    if (n > 0 && n != EPHEMERAL_PATH_NET && n != FAKE_GPIO_TDM_NET && !netOwnsKRow(n)) {
+      any = true;
+    }
+  }
+  if (!any) {
+    return false;
+  }
+  int laneK = xMapForChipLane0(c, CHIP_K);
+  int rowK = kRowForBounceChip(c);
+  if (laneK >= 0 && rowK >= 0 &&
+      globalState.connections.chipStates[c].xStatus[laneK] == -1 &&
+      globalState.connections.chipStates[CHIP_K].yStatus[rowK] == -1) {
+    return false;
+  }
+  for (int via = CHIP_I; via <= CHIP_L; via++) {
+    if (via == CHIP_K) {
+      continue;
+    }
+    int laneV = xMapForChipLane0(c, via);
+    int rowV = sfRowForBounceChip(via, c);
+    int xh = xMapForChipLane0(via, CHIP_K);
+    int xk = xMapForChipLane0(CHIP_K, via);
+    if (laneV < 0 || rowV < 0 || xh < 0 || xk < 0) {
+      continue;
+    }
+    if (globalState.connections.chipStates[c].xStatus[laneV] == -1 &&
+        globalState.connections.chipStates[via].yStatus[rowV] == -1 &&
+        globalState.connections.chipStates[via].xStatus[xh] == -1 &&
+        globalState.connections.chipStates[CHIP_K].xStatus[xk] == -1 &&
+        anyVirginKRowWithLane()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Does any node on SF chip sf (a nano pin, a GPIO ...) need a bounce chip to
+// be tapped? Nodes whose net owns a K row are read there; the rest tap
+// through the hub lane when it is free.
+static bool sfKindNeedsBounce(int sf) {
+  bool any = false;
+  for (int x = 0; x < 16 && !any; x++) {
+    int to = globalState.connections.chipStates[sf].xMap[x];
+    if (to >= 0 && to < 12) {
+      continue; // a lane, not a node
+    }
+    int n = globalState.connections.chipStates[sf].xStatus[x];
+    if (n > 0 && n != EPHEMERAL_PATH_NET && n != FAKE_GPIO_TDM_NET && !netOwnsKRow(n)) {
+      any = true;
+    }
+  }
+  return any && !sfNodeTapHasHubRoute(sf);
+}
+
+// True when chip n is one of the last kTapBounceReserve chips that can
+// bounce a tap of the given kind (onlyKind -2: any kind it serves), and a
+// tap of that kind on the CURRENT netlist actually needs a bounce.
+static bool lastTapEscape(int n, int onlyKind) {
+  for (int k = 0; k < 4; k++) {
+    int kind = kTapKinds[k];
+    if (onlyKind != -2 && kind != onlyKind) {
+      continue;
+    }
+    if (kind >= 0 && !sfKindNeedsBounce(kind)) {
+      continue;
+    }
+    if (kind < 0) {
+      bool need = false;
+      for (int c = 0; c < 8 && !need; c++) {
+        need = chipRowsNeedBounce(c);
+      }
+      if (!need) {
+        continue;
+      }
+    }
+    if (tapCapableBounceChip(n, kind) &&
+        tapCapableBounceChips(kind) <= kTapBounceReserve) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A breadboard chip's virgin lanes into I/J/K/L: a tap from one of its rows
+// leaves through one of them (or bounces, see above).
+static int virginSfLanes(int chip) {
+  int count = 0;
+  for (int x = 0; x < 16; x++) {
+    int to = globalState.connections.chipStates[chip].xMap[x];
+    if (to >= CHIP_I && to <= CHIP_L &&
+        globalState.connections.chipStates[chip].xStatus[x] == -1) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// Virgin hub lanes INTO chip K (IK, JK, KL): a tap that leaves its chip
+// through I, J or L enters K over one of these.
+static int virginHubLanesIntoK(void) {
+  int count = 0;
+  for (int hub = CHIP_I; hub <= CHIP_L; hub++) {
+    if (hub == CHIP_K) {
+      continue;
+    }
+    int xh = xMapForChipLane0(hub, CHIP_K);
+    int xk = xMapForChipLane0(CHIP_K, hub);
+    if (xh >= 0 && xk >= 0 &&
+        globalState.connections.chipStates[hub].xStatus[xh] == -1 &&
+        globalState.connections.chipStates[CHIP_K].xStatus[xk] == -1) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// True when a duplicate may not take X pin x of chip:
+//  * a breadboard chip's lane into K (needed by every tap kind) or into
+//    I/J/L (needed by taps of nodes on that chip) when the chip is one of
+//    the last that can bounce such a tap;
+//  * a breadboard chip's LAST virgin lane into any of I/J/K/L - the rows on
+//    that chip would have no way out but a bounce (2026-09-03: a rail copy
+//    took chip A's I lane and rows 2/5/6/7 lost their taps);
+//  * the last virgin hub lane into K (IK, JK, KL) - the way in for every tap
+//    that had to leave its chip through I, J or L.
+static bool reservedTapEscapeX(int chip, int x) {
+  if (!routingDuplicatePathNow || chip < 0 || chip >= 12 || x < 0 || x >= 16) {
+    return false;
+  }
+  int to = globalState.connections.chipStates[chip].xMap[x];
+  if (chip < 8) {
+    if (to < CHIP_I || to > CHIP_L) {
+      return false;
+    }
+    if (globalState.connections.chipStates[chip].xStatus[x] == -1 &&
+        virginSfLanes(chip) <= 1) {
+      return true;
+    }
+    if (to == CHIP_K) {
+      return lastTapEscape(chip, -2);
+    }
+    return lastTapEscape(chip, to);
+  }
+  bool hubIntoK = (chip == CHIP_K && (to == CHIP_I || to == CHIP_J || to == CHIP_L)) ||
+                  ((chip == CHIP_I || chip == CHIP_J || chip == CHIP_L) && to == CHIP_K);
+  if (hubIntoK && globalState.connections.chipStates[chip].xStatus[x] == -1) {
+    // Only a lane still virgin at BOTH pins is one of the reserve: the two
+    // pins are claimed one after the other, and the second claim must not
+    // see the first as "the last lane gone".
+    int xo = xMapForChipLane0(to, chip);
+    if (xo < 0 || globalState.connections.chipStates[to].xStatus[xo] != -1) {
+      return false;
+    }
+    return virginHubLanesIntoK() <= 1;
+  }
+  return false;
+}
+
+// True when a duplicate may not take row y of chip: a breadboard chip's
+// bounce row (Y0), or an SF chip's row wired to a breadboard chip that is
+// one of the last tap escapes (K's row: every kind; I/J/L's row: taps of
+// nodes on that chip).
+static bool reservedTapEscapeY(int chip, int y) {
+  if (!routingDuplicatePathNow || y < 0 || y >= 8) {
+    return false;
+  }
+  if (chip >= 0 && chip < 8) {
+    return y == 0 && lastTapEscape(chip, -2);
+  }
+  if (chip == CHIP_K || chip == CHIP_I || chip == CHIP_J || chip == CHIP_L) {
+    int n = globalState.connections.chipStates[chip].yMap[y];
+    if (n < 0 || n >= 8) {
+      return false;
+    }
+    return lastTapEscape(n, chip == CHIP_K ? -2 : chip);
+  }
+  return false;
+}
+
+// ============================================================================
+// Chip-K y-row budget for primary paths (bench 2026-09-02)
+// ============================================================================
+// Every K-resident signal (rails, DACs, ADC0-3, BUF_IN, AREF, rows 29/59, GND
+// when it lands on K) leaves chip K through one of its 8 y-rows, so a net with
+// a K node needs at least one. The router handed virgin K rows out first-come:
+// a rail's second breadboard row, or an ADC net's second node (3-ADC_1, then
+// 3-ADC_2 through a different hop chip) each took a fresh row, and the nets
+// that have NO alternative to a K bounce - the probe feed BUF_IN<->GP_8 and
+// ADC_3<->D1 - found all 8 spent and failed. Kevin's bench: "we should be able
+// to find a path here with some hops."
+//
+// Rule: a net's FIRST K row is unconditional (connectivity first). A second
+// row for a net that already holds one, or any row for a net that merely hops
+// through K, is granted only while enough virgin rows remain for every
+// K-needing net that holds none yet. A refused row falls through to the
+// same-net retry (stackingAttempt 1), where the alt-path search piggybacks on
+// the net's existing K row through that row's breadboard chip.
+//
+// The budget only bites when K would otherwise starve a net - with slack the
+// routing is identical to before. If a refused path finds no piggyback, a
+// rescue pass re-runs the three phases for the unrouted paths with the budget
+// off, so nothing that routed before stops routing. The rescue must skip
+// fully-routed paths: ijklPaths leaves altPathNeeded set and resets y to -2
+// on re-entry, and resolveUncommittedHops(allowStacking=2) is virgin-only, so
+// a re-resolved path would refuse its own row and break.
+//
+// Duplicates are exempt (they run after all primaries and carry the sense-tap
+// reservation above). RouteSafety's ephemeral taps never come through here.
+static bool kRowBudgetActive = false;
+static bool kRowRescuePass = false;
+static uint64_t kNeedingNetMask = 0; // nets with a node on chip K (bit = net)
+
+static inline uint64_t netBit(int net) {
+  return (net >= 0 && net < 64) ? (1ULL << net) : 0;
+}
+
+// Nets with a K-resident node, from the chips resolveChipCandidates chose.
+static void computeKNeedingNets(void) {
+  kNeedingNetMask = 0;
+  for (int i = 0; i < numberOfPaths; i++) {
+    struct pathStruct &p = globalState.connections.paths[i];
+    if (p.pathType == VIRTUAL || p.duplicate != 0) {
+      continue;
+    }
+    if (p.chip[0] == CHIP_K || p.chip[1] == CHIP_K) {
+      kNeedingNetMask |= netBit(p.net);
+    }
+  }
+}
+
+static uint64_t kRowsHeldMask(void) {
+  uint64_t held = 0;
+  for (int y = 0; y < 8; y++) {
+    held |= netBit(globalState.connections.chipStates[CHIP_K].yStatus[y]);
+  }
+  return held;
+}
+
+// True when net may not take the virgin chip-K row y right now.
+static bool kRowBudgetRefuses(int chip, int y, int net) {
+  if (!kRowBudgetActive || routingDuplicatePathNow || chip != CHIP_K) {
+    return false;
+  }
+  if (globalState.connections.chipStates[CHIP_K].yStatus[y] != -1) {
+    return false; // not virgin: the same-net / conflict rules decide
+  }
+  uint64_t held = kRowsHeldMask();
+  uint64_t mine = netBit(net);
+  bool needsK = (kNeedingNetMask & mine) != 0;
+  bool holdsK = (held & mine) != 0;
+  if (needsK && !holdsK) {
+    return false; // first row: always
+  }
+  uint64_t waiting = kNeedingNetMask & ~held & ~mine;
+  int waitingCount = __builtin_popcountll(waiting);
+  return (virginChipKYRowCount() - 1) < waitingCount;
+}
+
+// Every position that has a chip also has both coordinates.
+static bool pathFullyRouted(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  if (p.chip[0] == -1 || p.chip[1] == -1) {
+    return false;
+  }
+  for (int j = 0; j < 4; j++) {
+    if (p.chip[j] != -1 && (p.x[j] < 0 || p.y[j] < 0)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Helper function to track direct Y status assignments
@@ -722,6 +1165,10 @@ bool setChipXStatus(int chip, int x, int net, const char *location) {
     return false; // Invalid parameters, assignment failed
   }
 
+  if (reservedTapEscapeX(chip, x)) {
+    return false; // belt and braces: freeOrSameNetX vets this in the same iteration
+  }
+
   // Check for overlap conflicts before assignment
   if (globalState.connections.chipStates[chip].xStatus[x] != -1 && globalState.connections.chipStates[chip].xStatus[x] != net) {
     DEBUG_NTCC6_PRINT("WARNING: X position conflict in ");
@@ -772,6 +1219,12 @@ bool setChipYStatusSafe(int chip, int y, int net, const char *location) {
   // vetted by freeOrSameNetY() in the same iteration, but refuse here too so
   // no unvetted path can consume a reserved virgin K row.
   if (reservedKRowForSenseTaps(chip, y)) {
+    return false;
+  }
+  if (kRowBudgetRefuses(chip, y, net)) {
+    return false;
+  }
+  if (reservedTapEscapeY(chip, y)) {
     return false;
   }
 
@@ -1403,6 +1856,8 @@ void clearAllNTCC(void) {
   numberOfUniqueNets = 0;
   numberOfNets = 0;
   numberOfPaths = 0;
+  railDupTraced = false;
+  railDupTrace[0] = 0;
 
   pathsWithCandidatesIndex = 0;
   pathIndex = 0;
@@ -1592,6 +2047,329 @@ void sortPathsByNet(
   }
 }
 
+// ============================================================================
+// Hub rescue (2026-09-03): path shapes the tiers above never try
+// ============================================================================
+// After commitPaths / resolveAltPaths / resolveUncommittedHops (and the K-row
+// rescue pass) a primary can still be unrouted while copper is left: every
+// breadboard bounce row is spent but a special-function chip still has free
+// rows, or the single lane from a breadboard chip into the SF chip its node
+// lives on is taken. Two shapes reach that copper within the four crosspoints
+// a pathStruct holds:
+//
+//   H1  BB -> SF through another SF chip (the "hub"):
+//         c0.X[lane c0->hub] on the row y0      -> hub.Y[row wired to c0]
+//         hub.X[hub lane hub<->sf]               -> sf.X[that lane] on a row ys
+//         sf.X[node] on ys
+//       chips: c0, sf, hub, sf. The breadboard chip at the far end of row
+//       ys's wire has its lane into sf claimed too - that wire is on the net.
+//
+//   H2  BB -> BB through an SF chip:
+//         c0.X[lane c0->sf] on y0  -> sf.Y[row wired to c0]
+//         c1.X[lane c1->sf] on y1  -> sf.Y[row wired to c1]
+//         sf.X[xb] closed on both rows, xb a hub lane whose far end (the
+//         other SF chip's pin) is free and gets claimed.
+//       chips: c0, c1, sf, sf. Only hub lanes may bridge: every other X pin
+//       of an SF chip is a real node (a nano pin, a rail, an ADC ...).
+//
+// Runs only for primaries that are still not fully routed, after the whole
+// existing pipeline, so a path that routed before routes exactly as before
+// (test_routing_dense's snapshot diff is the gate). Every wire is claimed at
+// both of its pins; a failed attempt rolls back through the routing
+// transaction. Rows and lanes the net already holds are reused
+// (allowStacking = 1): a row the net owns costs nothing.
+//
+// Topology queries only - nothing here knows a chip letter. TODO V6: the
+// breadboard/SF split (chip < 8), the hub-lane X range (12..14) and the
+// "SF row <-> breadboard chip" wiring should come from the board descriptor.
+
+static const int HUB_LANE_X_FIRST = 12;
+static const int HUB_LANE_X_LAST = 14;
+
+static inline bool hubIsBreadboardChip(int c) { return c >= 0 && c < 8; }
+static inline bool hubIsSfChip(int c) { return c >= 8 && c < 12; }
+
+// The SF chip's row wired to breadboard chip bb (-1 if none).
+static int hubSfRowFor(int sf, int bb) {
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[sf].yMap[y] == bb) {
+      return y;
+    }
+  }
+  return -1;
+}
+
+// A lane is free for net at BOTH its pins (stacking 1: a pin the net already
+// holds counts as free; 0: virgin pins only).
+static bool hubLaneFree(int a, int xa, int b, int xb, int net, int stacking) {
+  return freeOrSameNetX(a, xa, net, stacking) && freeOrSameNetX(b, xb, net, stacking);
+}
+
+// An SF row is usable: the row itself and the breadboard pin at the far end
+// of its wire.
+static bool hubSfRowFree(int sf, int y, int net) {
+  if (!freeOrSameNetY(sf, y, net, 1)) {
+    return false;
+  }
+  int bb = globalState.connections.chipStates[sf].yMap[y];
+  if (!hubIsBreadboardChip(bb)) {
+    return false;
+  }
+  int xbb = xMapForChipLane0(bb, sf);
+  return xbb >= 0 && freeOrSameNetX(bb, xbb, net, 1);
+}
+
+static bool hubClaimSfRow(int sf, int y, int net, const char *where) {
+  int bb = globalState.connections.chipStates[sf].yMap[y];
+  int xbb = xMapForChipLane0(bb, sf);
+  return setChipYStatusSafe(sf, y, net, where) && setChipXStatus(bb, xbb, net, where);
+}
+
+// Wipe the coordinates a failed tier may have left (setPathX/Y refuse to
+// overwrite a real coordinate with a different one). Under a transaction.
+static void hubResetPath(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  p.chip[2] = -1;
+  p.chip[3] = -1;
+  for (int k = 0; k < 4; k++) {
+    p.x[k] = -1;
+    p.y[k] = -1;
+  }
+}
+
+// newCopper: stacking rule for the copper the hop ADDS (the chip's lane into
+// the hub, the hub row, the hub lane): 1 for a primary (a lane the net
+// already holds is fine to ride), 0 for a duplicate (every copy must bring
+// its own copper or it is the same path twice). The landing row and the
+// node pin may always be the net's own.
+static bool hubRouteBBtoSF(int i, int newCopper) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  int c0 = p.chip[0], sf = p.chip[1], net = p.net;
+  if (!hubIsBreadboardChip(c0) || !hubIsSfChip(sf)) {
+    return false;
+  }
+  int y0 = yMapForNode(p.node1, c0);
+  int xNode = xMapForNode(p.node2, sf);
+  if (y0 < 0 || xNode < 0) {
+    return false;
+  }
+  if (!freeOrSameNetY(c0, y0, net, 1) || !freeOrSameNetX(sf, xNode, net, 1)) {
+    return false;
+  }
+  for (int hub = 8; hub < 12; hub++) {
+    if (hub == sf) {
+      continue;
+    }
+    int xc0 = xMapForChipLane0(c0, hub); // c0's lane into the hub
+    int yh = hubSfRowFor(hub, c0);       // the hub row on that lane
+    int xh = xMapForChipLane0(hub, sf);  // hub lane, hub side
+    int xs = xMapForChipLane0(sf, hub);  // hub lane, sf side
+    if (xc0 < 0 || yh < 0 || xh < 0 || xs < 0) {
+      continue;
+    }
+    if (!freeOrSameNetX(c0, xc0, net, newCopper) || !freeOrSameNetY(hub, yh, net, newCopper)) {
+      continue;
+    }
+    if (!hubLaneFree(hub, xh, sf, xs, net, newCopper)) {
+      continue;
+    }
+    // a row on sf for the hop: one the net already holds first
+    int ys = -1;
+    for (int pass = 0; pass < 2 && ys < 0; pass++) {
+      for (int y = 0; y < 8; y++) {
+        bool held = globalState.connections.chipStates[sf].yStatus[y] == net;
+        if ((pass == 0) != held) {
+          continue;
+        }
+        if (hubSfRowFree(sf, y, net)) {
+          ys = y;
+          break;
+        }
+      }
+    }
+    if (ys < 0) {
+      continue;
+    }
+    saveRoutingState(i);
+    hubResetPath(i);
+    p.chip[2] = hub;
+    p.chip[3] = sf;
+    bool ok = setPathX(i, 0, xc0) && setPathY(i, 0, y0) &&
+              setPathX(i, 1, xNode) && setPathY(i, 1, ys) &&
+              setPathX(i, 2, xh) && setPathY(i, 2, yh) &&
+              setPathX(i, 3, xs) && setPathY(i, 3, ys) &&
+              setChipXStatus(c0, xc0, net, "hub H1 c0 lane") &&
+              setChipYStatusSafe(c0, y0, net, "hub H1 c0 row") &&
+              setChipYStatusSafe(hub, yh, net, "hub H1 hub row") &&
+              setChipXStatus(hub, xh, net, "hub H1 hub lane") &&
+              setChipXStatus(sf, xs, net, "hub H1 sf lane") &&
+              setChipXStatus(sf, xNode, net, "hub H1 sf node") &&
+              hubClaimSfRow(sf, ys, net, "hub H1 sf row");
+    if (!ok) {
+      restoreRoutingState(i);
+      continue;
+    }
+    commitRoutingState();
+    p.altPathNeeded = false;
+    p.sameChip = true;
+    if (debugNTCC2) {
+      Serial.print("hub H1: path ");
+      Serial.print(i);
+      Serial.print(" via ");
+      Serial.print(chipNumToChar(hub));
+      Serial.print(" onto ");
+      Serial.print(chipNumToChar(sf));
+      Serial.print(" row ");
+      Serial.println(ys);
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool hubRouteBBtoBB(int i) {
+  struct pathStruct &p = globalState.connections.paths[i];
+  int c0 = p.chip[0], c1 = p.chip[1], net = p.net;
+  if (!hubIsBreadboardChip(c0) || !hubIsBreadboardChip(c1) || c0 == c1) {
+    return false;
+  }
+  int y0 = yMapForNode(p.node1, c0);
+  int y1 = yMapForNode(p.node2, c1);
+  if (y0 < 0 || y1 < 0) {
+    return false;
+  }
+  if (!freeOrSameNetY(c0, y0, net, 1) || !freeOrSameNetY(c1, y1, net, 1)) {
+    return false;
+  }
+  for (int sf = 8; sf < 12; sf++) {
+    int x0 = xMapForChipLane0(c0, sf);
+    int x1 = xMapForChipLane0(c1, sf);
+    int r0 = hubSfRowFor(sf, c0);
+    int r1 = hubSfRowFor(sf, c1);
+    if (x0 < 0 || x1 < 0 || r0 < 0 || r1 < 0) {
+      continue;
+    }
+    if (!freeOrSameNetX(c0, x0, net, 1) || !freeOrSameNetX(c1, x1, net, 1)) {
+      continue;
+    }
+    if (!freeOrSameNetY(sf, r0, net, 1) || !freeOrSameNetY(sf, r1, net, 1)) {
+      continue;
+    }
+    // a hub lane on sf to bridge the two rows, its far end free
+    int xb = -1, other = -1, xo = -1;
+    for (int x = HUB_LANE_X_FIRST; x <= HUB_LANE_X_LAST && xb < 0; x++) {
+      int o = globalState.connections.chipStates[sf].xMap[x];
+      if (!hubIsSfChip(o)) {
+        continue;
+      }
+      int xoo = xMapForChipLane0(o, sf);
+      if (xoo >= 0 && hubLaneFree(sf, x, o, xoo, net, 1)) {
+        xb = x;
+        other = o;
+        xo = xoo;
+      }
+    }
+    if (xb < 0) {
+      continue;
+    }
+    saveRoutingState(i);
+    hubResetPath(i);
+    p.chip[2] = sf;
+    p.chip[3] = sf;
+    bool ok = setPathX(i, 0, x0) && setPathY(i, 0, y0) &&
+              setPathX(i, 1, x1) && setPathY(i, 1, y1) &&
+              setPathX(i, 2, xb) && setPathY(i, 2, r0) &&
+              setPathX(i, 3, xb) && setPathY(i, 3, r1) &&
+              setChipXStatus(c0, x0, net, "hub H2 c0 lane") &&
+              setChipYStatusSafe(c0, y0, net, "hub H2 c0 row") &&
+              setChipXStatus(c1, x1, net, "hub H2 c1 lane") &&
+              setChipYStatusSafe(c1, y1, net, "hub H2 c1 row") &&
+              setChipYStatusSafe(sf, r0, net, "hub H2 sf row0") &&
+              setChipYStatusSafe(sf, r1, net, "hub H2 sf row1") &&
+              setChipXStatus(sf, xb, net, "hub H2 bridge lane") &&
+              setChipXStatus(other, xo, net, "hub H2 bridge far end");
+    if (!ok) {
+      restoreRoutingState(i);
+      continue;
+    }
+    commitRoutingState();
+    p.altPathNeeded = false;
+    p.sameChip = true;
+    if (debugNTCC2) {
+      Serial.print("hub H2: path ");
+      Serial.print(i);
+      Serial.print(" via ");
+      Serial.print(chipNumToChar(sf));
+      Serial.print(" x");
+      Serial.println(xb);
+    }
+    return true;
+  }
+  return false;
+}
+
+// Rail duplicates through the hub lanes (Kevin, 2026-09-03: "we should be
+// allowed to use unused nodes like IJKL ... for rail duplicates"). A rail
+// (GND, TOP_RAIL, BOTTOM_RAIL) lives on K (GND on L too); every breadboard
+// chip has ONE lane into K, so the primary owns it and a stacked copy could
+// only bounce - a bounce row and a virgin K row each, the two scarcest
+// things on the board. Shape H1 gives a rail a second entry into the chip
+// for free copper: the chip's I, J or L lane, that hub's row for the chip,
+// the hub lane into K, landing on the K row the rail ALREADY holds for
+// this chip (hubRouteBBtoSF prefers a row the net owns). Runs in the
+// duplicate pass after the ordinary duplicate tiers, for rail duplicates
+// still unrouted, under the same reservations as every duplicate (the
+// last tap route, the last two virgin K rows). The current-sense pair
+// (I.X11 / J.X11 through the 2 ohm shunt) would be one more I<->J lane but
+// a rail path through it needs six crosspoints (pathStruct holds four) -
+// left for the chip[6] change the V6 doc asks for.
+static void rescueRailDuplicatesViaHubs(int startIndex) {
+  for (int i = startIndex; i < numberOfPaths; i++) {
+    struct pathStruct &p = globalState.connections.paths[i];
+    if (p.pathType == VIRTUAL || p.duplicate == 0 || p.skip) {
+      continue;
+    }
+    if (p.net < 1 || p.net > 3 || p.chip[0] < 0 || p.chip[1] < 0) {
+      continue;
+    }
+    if (pathFullyRouted(i)) {
+      continue;
+    }
+    if (p.pathType != BBtoSF) {
+      continue;
+    }
+    routingDuplicatePathNow = true;
+    hubRouteBBtoSF(i, 0);
+    routingDuplicatePathNow = false;
+  }
+}
+
+static void rescueViaHubs(int startIndex) {
+  for (int i = startIndex; i < numberOfPaths; i++) {
+    struct pathStruct &p = globalState.connections.paths[i];
+    if (p.pathType == VIRTUAL || p.duplicate != 0 || p.skip) {
+      continue;
+    }
+    if (p.net <= 0 || p.chip[0] < 0 || p.chip[1] < 0) {
+      continue;
+    }
+    if (pathFullyRouted(i)) {
+      continue;
+    }
+    switch (p.pathType) {
+    case BBtoSF:
+    case BBtoNANO:
+      hubRouteBBtoSF(i, 1);
+      break;
+    case BBtoBB:
+      hubRouteBBtoBB(i);
+      break;
+    default:
+      break;
+    }
+  }
+}
+
 void bridgesToPaths(
     int fillUnused,
     int allowStacking,
@@ -1736,6 +2514,10 @@ void bridgesToPaths(
   btp_step = micros();
   #endif
 
+  // Primary pass under the chip-K y-row budget (see kRowBudgetRefuses)
+  computeKNeedingNets();
+  kRowBudgetActive = true;
+
   commitPaths(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
   Serial.print("  commitPaths: "); Serial.print(micros() - btp_step); Serial.println(" us");
@@ -1753,6 +2535,41 @@ void bridgesToPaths(
   Serial.print("  resolveUncommittedHops: "); Serial.print(micros() - btp_step); Serial.println(" us");
   btp_step = micros();
   #endif
+
+  kRowBudgetActive = false;
+
+  // Rescue pass: whatever the budget left unrouted gets one more try with
+  // unconditional K access, so a refused second row can never cost a path
+  // that would have routed before the budget existed.
+  {
+    bool anyUnrouted = false;
+    for (int i = startIndex; i < numberOfPaths; i++) {
+      if (globalState.connections.paths[i].pathType == VIRTUAL ||
+          globalState.connections.paths[i].duplicate != 0) {
+        continue;
+      }
+      if (!pathFullyRouted(i)) {
+        anyUnrouted = true;
+        break;
+      }
+    }
+    if (anyUnrouted) {
+      kRowRescuePass = true;
+      commitPaths(2, -1, 0, startIndex);
+      resolveAltPaths(2, -1, 0, startIndex);
+      resolveUncommittedHops(2, -1, 0, startIndex);
+      kRowRescuePass = false;
+      #if PROFILE_BRIDGES_TO_PATHS
+      Serial.print("  K-row rescue pass: "); Serial.print(micros() - btp_step); Serial.println(" us");
+      btp_step = micros();
+      #endif
+    }
+  }
+
+  // Hub rescue: shapes no tier above tries, only for primaries still
+  // unrouted (see rescueViaHubs). Before the duplicates, so a primary always
+  // outranks a stacked copy for the copper it needs.
+  rescueViaHubs(startIndex);
   // printPathsCompact(2 );
   // printChipStatus();
   // Serial.println("no duplicates");
@@ -1796,6 +2613,10 @@ void bridgesToPaths(
     resolveAltPaths(0, -1, 1);
 
     resolveUncommittedHops(0, -1, 1);
+
+    // Rail duplicates that found neither a direct lane nor a bounce: the
+    // hub lanes (see rescueRailDuplicatesViaHubs).
+    rescueRailDuplicatesViaHubs(duplicateStartIndex);
   }
   
   // TDM OPTIMIZATION: Restore original net numbers after routing completes
@@ -1970,13 +2791,14 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
         bridgeDuplicates = duplicatePathsDac;
       }
     }
-    // Regular nets - check THIS BRIDGE's nodes for special cases that should skip duplicates
+    // Regular nets - classify THIS BRIDGE's nodes: GPIO and ADC bridges have
+    // their own stacking counts, fake/virtual ones never stack
     else {
-      // Don't duplicate bridges connecting to real GPIO pins (RP_GPIO_1 through RP_GPIO_8, RP_UART_TX, RP_UART_RX)
-      if ((node1 >= RP_GPIO_1 && node1 <= RP_GPIO_8) || node1 == RP_UART_TX || node1 == RP_UART_RX ||
-          (node2 >= RP_GPIO_1 && node2 <= RP_GPIO_8) || node2 == RP_UART_TX || node2 == RP_UART_RX) {
-        shouldSkipDuplicates = true;
-      }
+      // GPIO (and UART) bridges stack per stack_gpio (default 0): a GPIO has
+      // exactly one lane per breadboard chip on chip L, so a duplicate costs
+      // some other net its route - the user opts in
+      bool isGpioBridge = (node1 >= RP_GPIO_1 && node1 <= RP_GPIO_8) || node1 == RP_UART_TX || node1 == RP_UART_RX ||
+                          (node2 >= RP_GPIO_1 && node2 <= RP_GPIO_8) || node2 == RP_UART_TX || node2 == RP_UART_RX;
       
       // Don't duplicate bridges connecting to fake GPIO pins (FAKE_GPIO_1 through FAKE_GPIO_32)
       if (!shouldSkipDuplicates) {
@@ -1991,17 +2813,18 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
         shouldSkipDuplicates = true;
       }
       
-      // Don't duplicate bridges connecting to ADC nodes (high-impedance inputs don't benefit from parallel paths)
-      if (!shouldSkipDuplicates) {
-        if ((node1 >= ADC0 && node1 <= ADC4) || node1 == ADC7 ||
-            (node2 >= ADC0 && node2 <= ADC4) || node2 == ADC7) {
-          shouldSkipDuplicates = true;
-        }
-      }
+      // ADC bridges stack per stack_adcs (default 0): a high-impedance input
+      // gains nothing from a parallel path
+      bool isAdcBridge = (node1 >= ADC0 && node1 <= ADC4) || node1 == ADC7 ||
+                         (node2 >= ADC0 && node2 <= ADC4) || node2 == ADC7;
       
-      // Use default duplicate count if not explicitly set
+      // Default (-1, "the router decides") resolves per class. A stored count
+      // >= 0 is an explicit per-connection request and is honoured as-is.
       if (bridgeDuplicates < 0) {
-        bridgeDuplicates = shouldSkipDuplicates ? 0 : jumperlessConfig.routing.stack_paths;
+        if (shouldSkipDuplicates)  bridgeDuplicates = 0;
+        else if (isGpioBridge)     bridgeDuplicates = jumperlessConfig.routing.stack_gpio;
+        else if (isAdcBridge)      bridgeDuplicates = jumperlessConfig.routing.stack_adcs;
+        else                       bridgeDuplicates = jumperlessConfig.routing.stack_paths;
       }
     }
      // Serial.print("globalState.connections.nets[");
@@ -2233,13 +3056,22 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
     }
   }
 
-  // Round-robin duplicate creation:
-  // pass 0 adds first duplicate for each eligible bridge,
-  // pass 1 adds second duplicate, etc.
-  // This keeps GND/TOP/BOT and regular duplicates interleaved.
+  // Duplicate creation order = routing priority (the duplicate pass walks
+  // paths[] in index order). Rail-net bridges (GND, TOP_RAIL, BOTTOM_RAIL -
+  // the nets that carry current) get every one of their rounds FIRST, so
+  // the scarce copper a duplicate needs - bounce rows, K rows, hub lanes -
+  // goes to a rail before a signal copy takes it (Kevin, 2026-09-03: "we
+  // generally want to find rail duplicates at a higher priority"). The
+  // remaining bridges then round-robin as before: pass 0 adds the first
+  // duplicate for each of them, pass 1 the second, and so on.
+  for (int railPass = 1; railPass >= 0; railPass--) {
   for (int round = 0; round < maxDuplicateRounds; round++) {
     for (int bridgeIdx = 0; bridgeIdx < bridgesToProcess; bridgeIdx++) {
       if (bridgeDuplicateBudget[bridgeIdx] <= round) {
+        continue;
+      }
+      bool isRail = bridgeNet[bridgeIdx] >= 1 && bridgeNet[bridgeIdx] <= 3;
+      if (isRail != (railPass == 1)) {
         continue;
       }
 
@@ -2259,6 +3091,7 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
       numberOfPaths++;
       duplindex++;
     }
+  }
   }
   
   if (debugNTCC5) {
@@ -2294,6 +3127,10 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
   for (int i = startIndex; i < numberOfPaths; i++) {
     // Skip virtual paths
     if (globalState.connections.paths[i].pathType == VIRTUAL) {
+      continue;
+    }
+    // K-row rescue pass: only the paths the budgeted pass left unrouted
+    if (kRowRescuePass && pathFullyRouted(i)) {
       continue;
     }
     
@@ -3080,6 +3917,11 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
   for (int i = startIndex; i < numberOfPaths; i++) {
     // Skip virtual paths
     if (globalState.connections.paths[i].pathType == VIRTUAL) {
+      continue;
+    }
+    // K-row rescue pass: a fully-routed ijkl path still carries altPathNeeded,
+    // and re-entering ijklPaths would reset its y-rows to -2
+    if (kRowRescuePass && pathFullyRouted(i)) {
       continue;
     }
     
@@ -4183,15 +5025,17 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
               Serial.println(i);
             }
 
-            int saveUncommittedHops = globalState.connections.chipStates[globalState.connections.paths[i].chip[0]].uncommittedHops;
-            int saveUncommittedHops1 = globalState.connections.chipStates[globalState.connections.paths[i].chip[1]].uncommittedHops;
-            // Serial.print("saveUncommittedHops1: ");
-            // Serial.println(saveUncommittedHops1);
-
-            // Serial.print("saveUncommittedHops: ");
-            // Serial.println(saveUncommittedHops);
-
-            for (int bb = 0; bb < (8 - saveUncommittedHops1);
+            // Every breadboard chip is a candidate bounce (its NC Y0 row joins
+            // the lane from chip[0] to its lane into the SF chip). The upper
+            // bound used to be 8 - chipStates[chip[1]].uncommittedHops, which
+            // counts SF-to-SF paths that borrowed a Y row on the SF chip: with
+            // the probe feed (BUF_IN -> GP_8) sitting on L that skipped chip H
+            // outright, and H was the only chip whose L row (L.Y7) was still
+            // free, so 7 -> GP_2 failed with A's own L row taken by GP_1
+            // (2026-09-02). The row the SF-to-SF path actually took is already
+            // refused by freeOrSameNetY(sfChip, bb, ...) below; the OG router
+            // has always looped to 8.
+            for (int bb = 0; bb < 8;
                  bb++) // check if any other chips have free paths to both the
             // sf chip and target chip
             {
@@ -4206,11 +5050,31 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 break;
               }
 
-              int xMapBB = xMapForChipLane0(globalState.connections.paths[i].chip[0], bb);
-              if (xMapBB == -1) {
-                // Serial.print("xMapBB == -1");
+              int sfChip = globalState.connections.paths[i].chip[1];
+              bool traceThis = globalState.connections.paths[i].duplicate != 0 &&
+                               globalState.connections.paths[i].net >= 1 &&
+                               globalState.connections.paths[i].net <= 3 &&
+                               (!railDupTraced || bb > 0);
+              if (traceThis && bb == 0) {
+                railDupTraced = true;
+                railDupTrace[0] = 0;
+                snprintf(railDupTrace, sizeof(railDupTrace), "p%d ", i);
+              }
 
-                continue; // don't bother checking if there's no connection
+              // The bounce chip's OWN lane into the SF chip: the pin that
+              // closes on bb.Y0 and lands on sfChip.Y[bb]. This used to be
+              // xMapForChipLane0(chip[0], bb) - chip[0]'s pin toward bb, used
+              // as an index on bb - so the availability check below tested an
+              // unrelated pin of bb (its I lane, mostly), the claim marked
+              // that unrelated pin busy, and the lane the path really used
+              // (x[3], recomputed correctly further down) was never claimed.
+              // No hardware short came of it only because sfChip.Y[bb], the
+              // other end of the same wire, was claimed. Found by
+              // test_routing_dense (2026-09-03): UNCLAIMED WIRE / CLAIM
+              // WITHOUT COPPER on every bounced BB-to-SF path.
+              int xMapBB = xMapForChipLane0(bb, sfChip);
+              if (xMapBB == -1 || xMapForChipLane0(globalState.connections.paths[i].chip[0], bb) == -1) {
+                continue; // no such lane pair: bb cannot bounce for this path
               }
               // if (xMapForChipLane1(globalState.connections.paths[i].chip[0], bb) == -1)
               // {
@@ -4221,8 +5085,6 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
               // }
               // Serial.print("           fuck         ");
               int yMapSF = bb; // always
-
-              int sfChip = globalState.connections.paths[i].chip[1];
 
               // not chip L
               if (debugNTCC2) {
@@ -4240,6 +5102,13 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 Serial.print("  \n\r");
               }
 
+              if (traceThis) {
+                if (!freeOrSameNetX(bb, xMapBB, globalState.connections.paths[i].net, currentAllowStacking)) {
+                  railDupTraceNote(bb, 'K');
+                } else if (!freeOrSameNetY(bb, 0, globalState.connections.paths[i].net, currentAllowStacking)) {
+                  railDupTraceNote(bb, 'Y');
+                }
+              }
               if (freeOrSameNetX(bb, xMapBB, globalState.connections.paths[i].net,
                                  currentAllowStacking) == true &&
                   freeOrSameNetY(bb, 0, globalState.connections.paths[i].net, currentAllowStacking) ==
@@ -4298,19 +5167,22 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 //                together,
                 //                             // so only check chip 1
                 // {
+                // a lane is free only when BOTH its pins are (they are
+                // always claimed together, but a check on one end only
+                // trusts that every claimant got it right)
                 if (freeOrSameNetX(globalState.connections.paths[i].chip[0], xMapL0c0, globalState.connections.paths[i].net,
+                                   currentAllowStacking) == true &&
+                    freeOrSameNetX(bb, xMapL0c1, globalState.connections.paths[i].net,
                                    currentAllowStacking) == true) {
                   freeLane = 0;
-                  // } else if ((xMapL1c0 != -1) &&
-                  //            ((globalState.connections.chipStates[globalState.connections.paths[i].chip[0]].xStatus[xMapL1c0] == -1)
-                  //            ||
-                  //             globalState.connections.chipStates[globalState.connections.paths[i].chip[0]].xStatus[xMapL1c0] ==
-                  //             globalState.connections.paths[i].net)) {
                 } else if (freeOrSameNetX(globalState.connections.paths[i].chip[0], xMapL1c0,
                                           globalState.connections.paths[i].net,
+                                          currentAllowStacking) == true &&
+                           freeOrSameNetX(bb, xMapL1c1, globalState.connections.paths[i].net,
                                           currentAllowStacking) == true) {
                   freeLane = 1;
                 } else {
+                  if (traceThis) railDupTraceNote(bb, 'L');
                   continue;
                 }
 
@@ -4318,6 +5190,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 //     globalState.connections.chipStates[sfChip].yStatus[yMapSF] != globalState.connections.paths[i].net) {
                 if (freeOrSameNetY(sfChip, yMapSF, globalState.connections.paths[i].net,
                                    currentAllowStacking) == false) {
+                  if (traceThis) railDupTraceNote(bb, 'R');
                   continue;
                 }
 
@@ -4347,13 +5220,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                   setPathX(i, 1, SFnode);
 
                   setPathX(i, 2, xMapL0c1);
-                  // Serial.print("\n\r\t\t\t\txBB: ");
-                  // Serial.println(bb);
-
-                  xMapBB = xMapForChipLane0(globalState.connections.paths[i].chip[2], globalState.connections.paths[i].chip[1]);
-                  // Serial.println(xMapBB);
                   globalState.connections.paths[i].chip[3] = globalState.connections.paths[i].chip[2];
-
                   setPathX(i, 3, xMapBB);
 
                   setPathY(i, 0, yMapForNode(globalState.connections.paths[i].node1, globalState.connections.paths[i].chip[0]));
@@ -4389,7 +5256,6 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                   setPathX(i, 1, SFnode);
 
                   setPathX(i, 2, xMapL1c1);
-                  xMapBB = xMapForChipLane0(globalState.connections.paths[i].chip[2], globalState.connections.paths[i].chip[1]);
                   setPathX(i, 3, xMapBB);
 
                   globalState.connections.paths[i].chip[3] = globalState.connections.paths[i].chip[2];
@@ -4479,6 +5345,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 }
 
 bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
+  if (chip < 0 || chip >= 12 || x < 0 || x >= 16) return false;   // a -1 lane from xMapForChipLane1 indexed the status array at -1
+  if (reservedTapEscapeX(chip, x)) {
+    return false;
+  }
   // Serial.print("freeOrSameNetX: ");
   // Serial.print(chip);
   // Serial.print(", ");
@@ -4499,6 +5369,7 @@ bool freeOrSameNetX(int chip, int x, int net, int allowStacking) {
 }
 
 bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
+  if (chip < 0 || chip >= 12 || y < 0 || y >= 8) return false;   // a -1 lane from xMapForChipLane1 indexed the status array at -1
   // Serial.print("freeOrSameNetY: ");
   // Serial.print(chip);
   // Serial.print(", ");
@@ -4508,10 +5379,16 @@ bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
   // Serial.print(", ");
   // Serial.print(allowStacking);
   // Serial.print(" = ");
-  // Duplicates may not take one of the last two virgin chip-K y-rows - those
+  // Duplicates may not take the last virgin chip-K y-row(s) (kTapKRowReserve) - those
   // are reserved for ephemeral sense-tap routes (see reservedKRowForSenseTaps).
   // Stacking onto an already-same-net row is unaffected.
   if (reservedKRowForSenseTaps(chip, y)) {
+    return false;
+  }
+  if (kRowBudgetRefuses(chip, y, net)) {
+    return false;
+  }
+  if (reservedTapEscapeY(chip, y)) {
     return false;
   }
   if (globalState.connections.chipStates[chip].yStatus[y] == -1 ||
@@ -4619,6 +5496,15 @@ void couldntFindPath(int forcePrint) {
       }
       numberOfUnconnectablePaths++;
       globalState.connections.paths[i].skip = true;
+      // Same hazard as the duplicate branch below, one layer up: a failed
+      // ijkl primary keeps its x lanes with y == -2, sendAllPaths never looks
+      // at skip, and sendPath encoded y=-2 as a phantom y6 crosspoint (bench
+      // 2026-09-02: BUF_IN/K.x12 and GP_8/L.x14 landed on K.y6/L.y6 - an
+      // ADC net and GND). Wipe every coordinate of a failed primary.
+      for (int j = 0; j < 4; j++) {
+        globalState.connections.paths[i].x[j] = -1;
+        globalState.connections.paths[i].y[j] = -1;
+      }
     } else if (foundNegative == 1 && globalState.connections.paths[i].duplicate == 1) {
       // A duplicate that couldn't finish routing (e.g. refused a reserved
       // chip-K y-row for sense taps) is silently dropped. Wipe its
@@ -4642,21 +5528,165 @@ void couldntFindPath(int forcePrint) {
 void resolveUncommittedHops2(void) {}
 
 
+  // Same-chip hop X search order. For breadboard chips this table is only
+  // the tie-break: sameChipHopOrder() below ranks the pins by what taking
+  // them costs the rest of the board. SF chips keep only the hub lanes
+  // (every other X pin is a real node).
   const int freeXSearchOrder[12][16] = {
-      // this disallows bounces from sf x pins that would cause problems (5V, GND, etc.)
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},        // a
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},         // b
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},        // c
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},         // d
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},       // e
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},         // f
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},         // g
-      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},         // h
+      {2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14, 15, 0, 1, 9, 13},   // a: breadboard lanes first, then AI AJ AK AL
+      {0, 1, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 2, 3, 11, 15},   // b: breadboard lanes first, then BI BJ BK BL
+      {0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 14, 15, 4, 5, 9, 13},   // c: breadboard lanes first, then CI CJ CL CK
+      {0, 1, 2, 3, 4, 5, 8, 9, 10, 12, 13, 14, 6, 7, 11, 15},   // d: breadboard lanes first, then DI DJ DL DK
+      {0, 2, 3, 4, 6, 7, 10, 11, 12, 13, 14, 15, 1, 5, 8, 9},   // e: breadboard lanes first, then EK EL EI EJ
+      {0, 1, 2, 4, 5, 6, 8, 9, 12, 13, 14, 15, 3, 7, 10, 11},   // f: breadboard lanes first, then FK FL FI FJ
+      {0, 2, 3, 4, 6, 7, 8, 9, 10, 11, 14, 15, 1, 5, 12, 13},   // g: breadboard lanes first, then GL GK GI GJ
+      {0, 1, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 3, 7, 14, 15},   // h: breadboard lanes first, then HL HK HI HJ
       {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 11, 12, 13, 14, -1}, // i
       {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 13, 14, -1}, // j
       {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 13, 14, -1}, // k
       {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 13, 14, -1}, // l
   };
+
+// A row on an SF chip the net already holds, reusable for another hop of
+// the same net (2026-09-03): the row is on the net already, so closing one
+// more of the net's X pins on it changes nothing electrically, and it spares
+// a virgin row - on chip K the scarcest thing on the board (a rail duplicate
+// and every sense tap need one). The row's far-end breadboard pin must be
+// free or the net's own. Primaries only: the duplicate pass (allowStacking
+// 0) keeps looking for virgin rows so a stacked copy is a real second path.
+// Before this an SF-to-SF hop or a same-chip X-X hop always took a virgin
+// row, which is how one net ended up holding two K rows (kevin_fixture:
+// net 9 on K.Y5 and K.Y7).
+static int sameNetSfRow(int chip, int net, int allowStacking) {
+  if (allowStacking == 0 || chip < 8 || chip >= 12) {
+    return -1;
+  }
+  for (int y = 0; y < 8; y++) {
+    if (globalState.connections.chipStates[chip].yStatus[y] != net) {
+      continue;
+    }
+    int bb = globalState.connections.chipStates[chip].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, chip) : -1;
+    if (bbX != -1 && !freeOrSameNetX(bb, bbX, net, 1)) {
+      continue;
+    }
+    return y;
+  }
+  return -1;
+}
+
+// What a same-chip hop costs the board when it takes X pin x of a
+// breadboard chip (Kevin, 2026-09-03: "couldn't top rail have gone
+// K -> G -> A?" - it could not, because 48-51's hop on G had taken the only
+// A-G lane while G still had doubled lanes to B, D, E, F and H):
+//   0  a lane of a doubled pair whose other lane is still free - the pair
+//      keeps one
+//   2  a pair's last lane: a single-lane pair, or a doubled pair whose
+//      other lane is already spoken for
+//   3  a lane into I/J/K/L - a way out for the chip's sense taps
+// Ties keep the table order. Fills order[0..15]; -1 entries are skipped.
+static int sameChipHopCost(int chip, int x) {
+  int to = globalState.connections.chipStates[chip].xMap[x];
+  if (to >= CHIP_I && to <= CHIP_L) {
+    return 3;
+  }
+  if (to < 0 || to >= 8) {
+    return 3;
+  }
+  int partner = -1;
+  for (int xx = 0; xx < 16; xx++) {
+    if (xx != x && globalState.connections.chipStates[chip].xMap[xx] == to) {
+      partner = xx;
+      break;
+    }
+  }
+  if (partner < 0) {
+    return 2;
+  }
+  return globalState.connections.chipStates[chip].xStatus[partner] == -1 ? 0 : 2;
+}
+
+static void sameChipHopOrder(int chip, int order[16]) {
+  int n = 0;
+  if (chip >= 8) {
+    for (int k = 0; k < 16; k++) {
+      order[n++] = freeXSearchOrder[chip][k];
+    }
+    return;
+  }
+  for (int cost = 0; cost <= 3; cost++) {
+    for (int k = 0; k < 16; k++) {
+      int x = freeXSearchOrder[chip][k];
+      if (x < 0 || sameChipHopCost(chip, x) != cost) {
+        continue;
+      }
+      order[n++] = x;
+    }
+  }
+  while (n < 16) {
+    order[n++] = -1;
+  }
+}
+
+// The free row of an SF chip whose breadboard chip can best spare its lane
+// into that SF chip: rows are equivalent electrically, but each one strands
+// its breadboard chip's pin, and a chip down to its last I/J/K/L lane has
+// no way out for its sense taps (the row on chip A that ADC3-D0's hop took
+// was what kept the top rail from a second entry there). Same-net rows,
+// when allowed, come first (sameNetSfRow); then the virgin row whose chip
+// has the most virgin SF lanes; ties to the lowest row.
+// Rank: a chip that is one of the last able to bounce a sense tap comes
+// last (its lanes are the taps' reserve, primaries included as a tie-break);
+// a chip that already holds user rows next to last (this row is its only
+// direct lane to the ADCs - the taps' first tier - so among those the chip
+// with the most spare lanes first); a chip at its last virgin SF lane next;
+// otherwise PACK: the chip with the fewest spare lanes first, so a pristine
+// chip stays pristine for the bounces and the hub copies. Ties to the
+// lowest row. (The first cut preferred the MOST spare lanes, which moved the
+// probe feed onto the one pristine chip in almost every case; the second
+// packed by spare lanes alone, which handed the two hub hops of a current
+// loop chip A's and B's K rows - A held the loop's row, and once its
+// stacked copies had spent the bounce lanes that row had no sense route,
+// 2026-09-03 evening.)
+static bool chipHasUserRows(int c) {
+  for (int y = 1; y < 8; y++) {
+    int n = globalState.connections.chipStates[c].yStatus[y];
+    if (n > 0 && n != EPHEMERAL_PATH_NET && n != FAKE_GPIO_TDM_NET) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static int bestSfRow(int chip, int net, int allowStacking) {
+  int best = -1, bestRank = 1 << 20;
+  for (int y = 0; y < 8; y++) {
+    if (!freeOrSameNetY(chip, y, net, allowStacking)) {
+      continue;
+    }
+    int bb = globalState.connections.chipStates[chip].yMap[y];
+    int bbX = (bb >= 0 && bb < 8) ? xMapForChipLane0(bb, chip) : -1;
+    if (bbX != -1 && !freeOrSameNetX(bb, bbX, net, allowStacking)) {
+      continue;
+    }
+    int rank;
+    if (bb < 0 || bb >= 8) {
+      rank = 0;
+    } else if (tapCapableBounceChip(bb, -1) && tapCapableBounceChips(-1) <= kTapBounceReserve + 1) {
+      rank = 3000 + y;
+    } else if (chipHasUserRows(bb)) {
+      rank = 2500 + (8 - virginSfLanes(bb)) * 8 + y;
+    } else {
+      int spare = virginSfLanes(bb);
+      rank = (spare <= 1 ? 2000 : 1000 + spare * 8) + y;
+    }
+    if (rank < bestRank) {
+      best = y;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
 
 void resolveUncommittedHops(int allowStacking, int powerOnly,
                             int noOrOnlyDuplicates, int startIndex) {
@@ -4667,6 +5697,10 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
   for (int i = startIndex; i < numberOfPaths; i++) {
     // Skip virtual paths
     if (globalState.connections.paths[i].pathType == VIRTUAL) {
+      continue;
+    }
+    // K-row rescue pass: only the paths the budgeted pass left unrouted
+    if (kRowRescuePass && pathFullyRouted(i)) {
       continue;
     }
     
@@ -4732,12 +5766,20 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
         int sharedX = -1;
         
         // Find a free X position that can be used for both nodes on the same chip
+        int hopOrder[16];
+        sameChipHopOrder(targetChip, hopOrder);
         for (int searchIdx = 0; searchIdx < 16; searchIdx++) {
-          if (freeXSearchOrder[targetChip][searchIdx] == -1) {
+          if (hopOrder[searchIdx] == -1) {
             continue;
           }
           
-          int testX = freeXSearchOrder[targetChip][searchIdx];
+          int testX = hopOrder[searchIdx];
+          // A duplicate's same-chip hop stays off the chip's SF lanes: they
+          // are how a sense tap leaves the chip (Kevin, 2026-09-03)
+          if (globalState.connections.paths[i].duplicate != 0 && targetChip < 8 &&
+              globalState.connections.chipStates[targetChip].xMap[testX] >= 8) {
+            continue;
+          }
           if (!freeOrSameNetX(targetChip, testX, globalState.connections.paths[i].net, allowStacking)) {
             continue;
           }
@@ -4822,13 +5864,19 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           if (globalState.connections.paths[i].chip[pos] != -1 && globalState.connections.paths[i].x[pos] == -2) {
             int freeX = -1;
             
-            // Find free X position using search order
+            // Find free X position using the ranked search order
+            int hopOrder[16];
+            sameChipHopOrder(globalState.connections.paths[i].chip[pos], hopOrder);
             for (int searchIdx = 0; searchIdx < 16; searchIdx++) {
-              if (freeXSearchOrder[globalState.connections.paths[i].chip[pos]][searchIdx] == -1) {
+              if (hopOrder[searchIdx] == -1) {
                 continue;
               }
               
-              int testX = freeXSearchOrder[globalState.connections.paths[i].chip[pos]][searchIdx];
+              int testX = hopOrder[searchIdx];
+              if (globalState.connections.paths[i].duplicate != 0 && globalState.connections.paths[i].chip[pos] < 8 &&
+                  globalState.connections.chipStates[globalState.connections.paths[i].chip[pos]].xMap[testX] >= 8) {
+                continue; // same rule as the shared-X search above
+              }
               if (!freeOrSameNetX(globalState.connections.paths[i].chip[pos], testX, globalState.connections.paths[i].net, allowStacking)) {
                 continue;
               }
@@ -4920,10 +5968,13 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           globalState.connections.paths[i].y[0] == -2 && globalState.connections.paths[i].y[1] == -2) {
         
         int targetChip = globalState.connections.paths[i].chip[0];
-        int sharedY = -1;
+        int sharedY = sameNetSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+        if (sharedY < 0 && targetChip >= 8) {
+          sharedY = bestSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+        }
         
         // Find a free Y position that can be used for both nodes on the same chip
-        for (int testY = 0; testY < 8; testY++) {
+        for (int testY = 0; sharedY < 0 && testY < 8; testY++) {
           // For breadboard chips, only allow Y=0
           if (targetChip < 8 && testY != 0) {
             continue;
@@ -5015,9 +6066,12 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
           
           if (needsY) {
             int targetChip = globalState.connections.paths[i].chip[pos1]; // Both positions should be same chip
-            int freeY = -1;
+            int freeY = sameNetSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+            if (freeY < 0 && targetChip >= 8) {
+              freeY = bestSfRow(targetChip, globalState.connections.paths[i].net, allowStacking);
+            }
             
-            for (int testY = 0; testY < 8; testY++) {
+            for (int testY = 0; freeY < 0 && testY < 8; testY++) {
               // For breadboard chips, only allow Y=0
               if (targetChip < 8 && testY != 0) {
                 continue;
@@ -5104,9 +6158,12 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
         // Handle regular paths: assign Y to each position independently
         for (int pos = 0; pos < 4; pos++) {
           if (globalState.connections.paths[i].chip[pos] != -1 && globalState.connections.paths[i].y[pos] == -2) {
-            int freeY = -1;
+            int freeY = sameNetSfRow(globalState.connections.paths[i].chip[pos], globalState.connections.paths[i].net, allowStacking);
+            if (freeY < 0 && globalState.connections.paths[i].chip[pos] >= 8) {
+              freeY = bestSfRow(globalState.connections.paths[i].chip[pos], globalState.connections.paths[i].net, allowStacking);
+            }
             
-            for (int testY = 0; testY < 8; testY++) {
+            for (int testY = 0; freeY < 0 && testY < 8; testY++) {
               // For breadboard chips, only allow Y=0
               if (globalState.connections.paths[i].chip[pos] < 8 && testY != 0) {
                 continue;
@@ -5689,7 +6746,10 @@ void printPathsCompact(int showCullDupes, Stream* target) {
 
     if (skipLine == 0) {
       lastDuplicate = globalState.connections.paths[i].duplicate;
-      changeTerminalColor(globalState.connections.nets[globalState.connections.paths[i].net].termColor, false, target);
+      {
+        int pn = globalState.connections.paths[i].net;   // a culled duplicate carries net -1
+        changeTerminalColor(globalState.connections.nets[(pn >= 0 && pn < MAX_NETS) ? pn : 0].termColor, false, target);
+      }
       target->print(i);
       target->print("\t");
 
@@ -5749,6 +6809,13 @@ void printPathsCompact(int showCullDupes, Stream* target) {
       i = 0;
     }
     changeTerminalColor(-1, false, target);
+  }
+  {
+    extern char railDupTrace[64];
+    if (railDupTrace[0]) {
+      target->print("rail dup bounce skips: ");
+      target->println(railDupTrace);
+    }
   }
   target->flush();
 }
@@ -5861,7 +6928,6 @@ void findStartAndEndChips(int node1, int node2, int pathIdx) {
         }
         candidatesFound++;
         chipCandidates[twice][1] = nano.mapKL[nanoIndex];
-        Serial.print(candidatesFound);
         globalState.connections.paths[pathIdx].candidates[twice][1] = chipCandidates[twice][1];
         candidatesFound++;
         if (debugNTCC5) {
@@ -6301,7 +7367,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
-  for (int i = 0; i < 16; i++) {
+  for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {
         nodeFound = i + 1;

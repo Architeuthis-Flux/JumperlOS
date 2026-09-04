@@ -852,8 +852,19 @@ float measureVoltage(int adcNumber, int node, bool checkForFloating) {
     return 0.0;
   }
 
-  // Temporary measurement connections - no need to save
-  // Remove any existing ADC connections, then add the new one
+  // Temporary measurement connections - no need to save. The -1 form below
+  // strips EVERY bridge on this ADC from the state, including the user's
+  // own: remember them so they go back afterwards.
+  static int16_t savedAdcA[MAX_BRIDGES], savedAdcB[MAX_BRIDGES];
+  int savedAdcN = 0;
+  for (int i = 0; i < globalState.connections.numBridges && i < MAX_BRIDGES; i++) {
+    int a = globalState.connections.bridges[i][0], b = globalState.connections.bridges[i][1];
+    if ((a == adcDefine || b == adcDefine) && !(a == node || b == node)) {
+      savedAdcA[savedAdcN] = (int16_t)a;
+      savedAdcB[savedAdcN] = (int16_t)b;
+      savedAdcN++;
+    }
+  }
   removeBridgeFromState(adcDefine, -1);  // Remove all connections to this ADC
   addBridgeToState(node, adcDefine);
   refreshLocalConnections(1 , 0, 0);
@@ -884,6 +895,16 @@ float measureVoltage(int adcNumber, int node, bool checkForFloating) {
   refreshLocalConnections(0, 0, 0);
   //refreshBlind();
   waitCore2();
+
+  // Put the user's ADC wiring back (ungated: these are their own bridges)
+  if (savedAdcN > 0) {
+    String e;
+    for (int i = 0; i < savedAdcN; i++) {
+      globalState.addConnection(savedAdcA[i], savedAdcB[i], e, -1);
+    }
+    refreshLocalConnections(0, 0, 0);
+    waitCore2();
+  }
 
   if (floating == 1) {
     return (float)0xFFFFFFFF;

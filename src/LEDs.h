@@ -288,6 +288,13 @@ extern ledClass leds;
 // extern int brightenedAmount;
 extern bool lightUpName;
 
+// Menu preview for the rail STRIPS: while the Output > Voltage slider dials a
+// DAC, the matching strip (DAC 0 = top, DAC 1 = bottom) shows the dialed value
+// exactly as it would show that rail's voltage - the rail itself never moves.
+// -100 = no preview. Written by core 0 (getActionFloat), read by lightUpRail
+// on core 1; an aligned float store is atomic, so no lock.
+extern float railLedPreviewVolts[2];
+
 extern int netColorMode; // 0 = rainbow, 1 = shuffle
 //extern int displayMode;
 extern int numberOfShownNets;

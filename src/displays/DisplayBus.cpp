@@ -230,6 +230,19 @@ bool displayBusAcquire(DisplayInstance& d, const char** reasonOut) {
     //     slot load and yields to any live owner (dropGhostPwmClaim).
     //   * Release is per pin, and the gpioState 6 marks never outlive the
     //     attachment - they are our bookkeeping, not the claimant's.
+    // Decide the Python refusal BEFORE displacing anything: when the OTHER
+    // pin is Python-owned the acquire is doomed, yet the loop below still
+    // stopped this pin's PWM (and re-tried every 750 ms poll).
+    {
+        int sIdx = d.sdaPin - 20, cIdx = d.sclPin - 20;
+        bool sdaPy = (sIdx >= 0 && sIdx <= 7) && globalState.config.gpioPythonOwned[sIdx];
+        bool sclPy = (cIdx >= 0 && cIdx <= 7) && globalState.config.gpioPythonOwned[cIdx];
+        if (sdaPy || sclPy) {
+            if (reasonOut) *reasonOut = claimedReason;
+            d.sdaPin = d.sclPin = -1;
+            return false;
+        }
+    }
     for (int k = 0; k < 2; k++) {
         int pin = (k == 0) ? d.sdaPin : d.sclPin;
         int idx = pin - 20;

@@ -1586,7 +1586,10 @@ void __not_in_flash_func(sendPath)(int i, int setOrClear, int newOrLast) {
         // through a whole collected list and stall the kick.)
         chipToConnect = globalState.connections.paths[i].chip[chip];
 
-        if (globalState.connections.paths[i].y[chip] == -1 || globalState.connections.paths[i].x[chip] == -1) {
+        // Any negative coordinate is "not routed" (-1 unset, -2 unresolved
+        // hop). The address encoder masks y to 3 bits, so -2 would close a
+        // phantom y6 crosspoint (routing wipes -2 too; this is the last gate).
+        if (globalState.connections.paths[i].y[chip] < 0 || globalState.connections.paths[i].x[chip] < 0) {
           if (debugNTCC)
             Serial.print("!");
 
@@ -1759,7 +1762,8 @@ void __not_in_flash_func(sendXYrawUnchecked)(int chip, int x, int y, int setOrCl
       pio_sm_set_enabled(pio, sm, false);
       delayMicroseconds(100);
       pio_sm_set_enabled(pio, sm, true);
-      pio_interrupt_clear(pio, sm);
+      // (pio_interrupt_clear(pio, sm) cleared FLAG number `sm` = 0, a foreign
+      // SM's flag; the handshake is flag 1, which isrFromPio() clears)
       isrFromPio();
       break;
     }

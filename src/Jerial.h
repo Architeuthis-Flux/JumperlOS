@@ -883,6 +883,7 @@ private:
     
     // ANSI escape filtering
     bool in_ansi_escape;
+    bool ansi_csi = false;   // inside "ESC [" (a CSI sequence ends on any 0x40-0x7E final byte)
     
     // Newline filtering (prevent consecutive newlines)
     bool last_was_newline;

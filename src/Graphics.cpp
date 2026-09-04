@@ -542,6 +542,14 @@ void cycleTerminalColor(bool reset,  float step, bool flush, Stream *stream, int
       }
     }
   }
+  // one static index serves both palettes: clamp to the one being read
+  // (the bright table is 29 entries, the spectrum 51)
+  if (currentColor < 0) currentColor = 0;
+  if (bright == 1) {
+    if (currentColor >= highSaturationBrightColorsCount) currentColor %= highSaturationBrightColorsCount;
+  } else {
+    if (currentColor >= highSaturationSpectrumColorsCount) currentColor %= highSaturationSpectrumColorsCount;
+  }
   int color = highSaturationSpectrumColors[currentColor];
   if (bright == 1) {
     color = highSaturationBrightColors[currentColor];
@@ -725,7 +733,10 @@ static void addVirtualCurrentSensePath() {
 }
 
 static void removeVirtualCurrentSensePath() {
-  if (virtualCurrentSensePathIndex >= 0 && virtualCurrentSensePathIndex < numberOfPaths) {
+  if (virtualCurrentSensePathIndex >= 0 && virtualCurrentSensePathIndex < numberOfPaths &&
+      globalState.connections.paths[virtualCurrentSensePathIndex].pathType == VIRTUAL) {
+    // (pathType check: a core-0 rebuild may have reused this slot for a real
+    // wire since we added the overlay - never clear someone else's path)
     // Clear the virtual path
     globalState.connections.paths[virtualCurrentSensePathIndex].node1 = -1;
     globalState.connections.paths[virtualCurrentSensePathIndex].node2 = -1;
@@ -804,6 +815,9 @@ void drawWires(int net) {
       if (globalState.connections.paths[i].duplicate == 1) {
         continue;
       }
+      if (globalState.connections.paths[i].net < 0) {
+        continue; // a culled overlapping duplicate (net -1): not a wire
+      }
 
       if (globalState.connections.paths[i].node1 != -1 && globalState.connections.paths[i].node2 != -1 &&
           globalState.connections.paths[i].node1 != globalState.connections.paths[i].node2) {
@@ -812,7 +826,7 @@ void drawWires(int net) {
           // globalState.connections.paths[i].node1 <= 113) || (globalState.connections.paths[i].node2 >= 110 && globalState.connections.paths[i].node2 <=
           // 113)) {
           bothOnBB = 1;
-          if (globalState.connections.paths[i].node1 > 0 && globalState.connections.paths[i].node1 < 30 && globalState.connections.paths[i].node2 > 0 &&
+          if (globalState.connections.paths[i].node1 > 0 && globalState.connections.paths[i].node1 <= 30 && globalState.connections.paths[i].node2 > 0 &&
               globalState.connections.paths[i].node2 <= 30) {
             bothOnTop = 1;
             sameLevel = 1;
@@ -2963,6 +2977,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
 
   uint32_t frameColors[5];
   uint32_t brightenedNodeColors[5];
+  bool railHueSwapOk = false;   // set by the plain-frame branch, cleared by the voltage overrides
 
   bool isCurrentSenseNet = (net == currentSenseState.plusNet || net == currentSenseState.minusNet);
   // if (isCurrentSenseNet) {
@@ -3129,7 +3144,12 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
       frameColors[i] =
           rowAnimations[index].frames[(rowAnimations[index].currentFrame + i) %
                                       rowAnimations[index].numberOfFrames];
+      // a net that is not brightened/warned still crosses highlighted rows in
+      // wires mode: default the crossing pixels to the frame instead of
+      // whatever this stack slot held
+      brightenedNodeColors[i] = frameColors[i];
     }
+    railHueSwapOk = true;   // plain animation frames: the negative-rail hue swap applies
   }
 
   // If this is an ADC net, override the animation colors with the voltage-based ADC color
@@ -3143,6 +3163,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
         frameColors[i] = adcColor;
         brightenedNodeColors[i] = adcColor;
       }
+      railHueSwapOk = false;  // a measured-voltage color must not be re-hued
     }
   }
 
@@ -3158,6 +3179,7 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
             frameColors[i] = fakeColor;
             brightenedNodeColors[i] = fakeColor;
           }
+          railHueSwapOk = false;
         }
         break;  // Found the matching input, no need to keep searching
       }
@@ -3256,7 +3278,11 @@ void __not_in_flash_func(showRowAnimation)(int index, int net) {
   // motion and brightness and only moves the hue. railHwVolts is the same
   // hardware truth lightUpRail and assignNetColors read; this painter runs
   // after drawWires, which is why the blue net color alone never showed.
-  if (index == 0 || index == 2) {
+  // Only the STATIC red frames get the swap: the brightened / warning
+  // branches derive their frames from netColors (already blue for a negative
+  // rail - swapping made them red again) and the ADC / fake-GPIO overrides
+  // carry a measured-voltage color that must stay as measured.
+  if ((index == 0 || index == 2) && railHueSwapOk) {
     int rail = (index == 0) ? 0 : 1;
     float railV = (railHwVolts[rail] > -99.0f)
                       ? railHwVolts[rail]
@@ -4086,7 +4112,7 @@ void printTextFromMenu(int print) {
   // b.clear();
   unsigned long timeout = millis();
   while (Jerial.available() > 0) {
-    if (index > 78) {
+    if (index > 76) {   // three spaces are appended below: keep f[index+2] < 80
       break;
     }
     f[index] = Jerial.read();
@@ -4506,6 +4532,30 @@ void clearNonScrollingRegion(void) {
   // Show cursor (in case it was hidden)
   Serial.print("\033[?25h");
   Serial.flush();
+}
+
+/// @brief Drop a scrolling region the terminal may still be holding.
+/// DECSTBM state lives in the terminal, not in the firmware. A reboot or a
+/// reflash while the LED mirror (R) or the live crossbar (c!) was on never
+/// sends the reset that setLedDumpEnabled(false) / setLiveCrossbarEnabled(false)
+/// would, and the copy in clearNonScrollingRegion() goes out from setup()
+/// before any host is attached. A terminal left that way keeps its top rows
+/// frozen and discards every line that scrolls out of the window, so a 60-line
+/// dump loses its head while old text stays put above it. The long dumps
+/// (b, n, c, C) and the menu call this first: with no mirror active there is
+/// no region worth keeping, and on a clean terminal the sequence is a no-op
+/// (save cursor, reset margins - which homes the cursor - restore cursor).
+/// DECSC/DECRC (ESC 7 / ESC 8) on purpose, the same pair ReadingDisplay pins
+/// with: the CSI forms (ESC [ s / ESC [ u) are not honoured by every
+/// terminal - Kevin's ignored them on 2026-09-02, so the margin reset homed
+/// the cursor and the menu and the dump printed from the top of the screen
+/// over each other. test/hil/jl.py's _ANSI stripper removes ESC 7 / ESC 8 too.
+void dropStaleScrollRegion(Stream* stream) {
+  extern bool liveCrossbarEnabled;
+  if (ledDumpEnabled || liveCrossbarEnabled) return;   // that region is wanted
+  if (stream == nullptr) stream = &Jerial;
+  if (stream != &Jerial && stream != &Serial) return;  // port 7 / UART: not a terminal we pinned
+  stream->print("\0337\033[r\0338");
 }
 
 // ─── dumpLEDs helpers ────────────────────────────────────────────────────────

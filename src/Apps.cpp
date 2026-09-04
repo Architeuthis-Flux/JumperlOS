@@ -1051,6 +1051,12 @@ void probeCalibApp( void ) {
         int rowProbed = map( lastValidProbeRead, mapMin, mapMax, 101, 0 );
         int rowProbedWithOldMapping = map( lastValidProbeRead, jumperlessConfig.probe.pad_min, probeMax, 101, 0 );
 
+        // map() does not clamp: a reading past either end of the range gave
+        // a negative or > 101 index into the 108-entry tables
+        if ( rowProbed < 0 ) rowProbed = 0;
+        if ( rowProbed > 101 ) rowProbed = 101;
+        if ( rowProbedWithOldMapping < 0 ) rowProbedWithOldMapping = 0;
+        if ( rowProbedWithOldMapping > 101 ) rowProbedWithOldMapping = 101;
         nodeSelected = probeRowMap[ rowProbed ];
         nodeSelectedWithOldMapping = probeRowMapByPad[ rowProbedWithOldMapping ];
         if ( probeRead != -1 ) {
@@ -2202,10 +2208,8 @@ void calibrateDacs( ) {
                 counter++;
                 //}
 
-                if ( counter > 80 ) {
-                    zeroFound++;
-                    failedToConverge++;
-                }
+                // (the old `counter > 80` test could never be true inside a
+                // `counter < 80` loop; the give-up is counted after the loop)
 
                 Serial.print( "dacZero: " );
                 Serial.print( dacZero[ d ] );
@@ -2214,6 +2218,9 @@ void calibrateDacs( ) {
                 Serial.print( reading );
                 Serial.println( " mV" );
                 // zeroFound = 1;
+            }
+            if ( zeroFound < 2 ) {
+                failedToConverge++; // gave up at 80 iterations without a zero
             }
 
             int spreadFound = 0;
@@ -2427,49 +2434,57 @@ void calibrateDacs( ) {
                 float slope = ( n * sumADCxINA - sumADC * sumINA ) / ( n * sumADCSquared - sumADC * sumADC );
                 float intercept = ( sumINA - slope * sumADC ) / n;
 
-                // Handle different ADC formulas
+                // Handle different ADC formulas - into LOCALS: the globals used
+                // to be written before the slope test below, so a degenerate
+                // regression (identical readings -> 0/0 = NaN) landed in
+                // adcSpread/adcZero, the "keep default values" branch kept the
+                // NaN, and saveDacCalibration persisted it.
+                float newSpread, newZero;
                 if ( d == 4 ) {
                     // ADC 4 formula: voltage = (rawADC * adcSpread / 4095) (no offset)
                     // We want: INA_voltage = slope * rawADC + intercept
                     // So: adcSpread/4095 = slope, and intercept should be 0
-                    adcSpread[ d ] = slope * 4095.0;
-                    adcZero[ d ] = 0.0; // No offset for ADC 4
+                    newSpread = slope * 4095.0;
+                    newZero = 0.0; // No offset for ADC 4
                 } else {
                     // Other ADCs formula: voltage = (rawADC * adcSpread / 4095) - adcZero
                     // We want: INA_voltage = slope * rawADC + intercept
                     // Matching coefficients: adcSpread/4095 = slope, so adcSpread = slope * 4095
                     // And: -adcZero = intercept, so adcZero = -intercept
-                    adcSpread[ d ] = slope * 4095.0;
-                    adcZero[ d ] = -intercept; // This is what gets subtracted in the offset
+                    newSpread = slope * 4095.0;
+                    newZero = -intercept; // This is what gets subtracted in the offset
                 }
 
-                if ( abs( slope ) > 0.0001 ) {
+                float den = n * sumADCSquared - sumADC * sumADC;
+                if ( den != 0.0f && isfinite( slope ) && isfinite( intercept ) && abs( slope ) > 0.0001 ) {
 
                     // Clamp to reasonable values based on ADC type
                     if ( d == 4 ) {
                         // ADC 4 is 0-5V range
-                        if ( adcSpread[ d ] < 3.0 || adcSpread[ d ] > 8.0 ) {
+                        if ( newSpread < 3.0 || newSpread > 8.0 ) {
                             Serial.print( "ADC4 spread out of range: " );
-                            Serial.print( adcSpread[ d ] );
+                            Serial.print( newSpread );
                             Serial.println( ", using default" );
-                            adcSpread[ d ] = 5.0; // Default for 0-5V
-                            adcZero[ d ] = 0.0;
+                            newSpread = 5.0; // Default for 0-5V
+                            newZero = 0.0;
                         }
                     } else {
                         // Other ADCs are ±8V range
-                        if ( adcSpread[ d ] < 10.0 || adcSpread[ d ] > 30.0 ) {
+                        if ( newSpread < 10.0 || newSpread > 30.0 ) {
                             Serial.print( "adcSpread out of range: " );
-                            Serial.print( adcSpread[ d ] );
+                            Serial.print( newSpread );
                             Serial.println( ", using default" );
-                            adcSpread[ d ] = 18.28; // Default value
-                            adcZero[ d ] = 8.0;
-                        } else if ( abs( adcZero[ d ] ) > 50.0 ) {
+                            newSpread = 18.28; // Default value
+                            newZero = 8.0;
+                        } else if ( abs( newZero ) > 50.0 ) {
                             Serial.print( "adcZero out of range: " );
-                            Serial.print( adcZero[ d ] );
+                            Serial.print( newZero );
                             Serial.println( ", using default" );
-                            adcZero[ d ] = 8.0; // Default value
+                            newZero = 8.0; // Default value
                         }
                     }
+                    adcSpread[ d ] = newSpread;
+                    adcZero[ d ] = newZero;
 
                     // Print calibration results if values are reasonable
                     Serial.print( "ADC " );
@@ -3269,7 +3284,12 @@ void DMXSerialApp( void ) {
     };
 
     auto getChannelName = [ & ]( ) -> const char* {
-        return ( config.channel_mode == DMXLightConfig::MODE_6CH ) ? channelNames6ch[ currentChannel ] : channelNames10ch[ currentChannel ];
+        // a 10-ch index can outlive a switch to 6-ch mode (pattern mode never
+        // reset it): clamp so the 6-entry table is never read past its end
+        int ch = currentChannel;
+        if ( config.channel_mode == DMXLightConfig::MODE_6CH && ch > 5 ) ch = 0;
+        if ( ch > 9 ) ch = 0;
+        return ( config.channel_mode == DMXLightConfig::MODE_6CH ) ? channelNames6ch[ ch ] : channelNames10ch[ ch ];
     };
 
     Serial.println( "MANUAL CONTROL MODE" );
@@ -3613,8 +3633,8 @@ void DMXSerialApp( void ) {
                     config.channel_mode = DMXLightConfig::MODE_6CH;
                     Serial.println( "\n\n✓ Switched to 6-channel mode\n" );
                 }
+                currentChannel = 0;  // Reset to first channel (in BOTH modes - the stale 10-ch index was the OOB read)
                 if ( manualMode ) {
-                    currentChannel = 0;  // Reset to first channel
                     lastDisplayTime = 0; // Force immediate dashboard update
                 }
                 break;

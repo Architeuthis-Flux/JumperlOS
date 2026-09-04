@@ -227,6 +227,11 @@ EditorConfig::~EditorConfig() {
     // Cleanup will be handled by the editor
 }
 
+// True only while every row still points into the SharedBuffer image of the
+// file that was loaded (zero-copy load, no row added or removed since). It is
+// the precondition ekilo_save's fast path needs and used to be assumed.
+static bool s_bufferMirrorsRows = false;
+
 // Initialize the editor
 void ekilo_init() {
     E.cx = 0;
@@ -241,6 +246,18 @@ void ekilo_init() {
     E.syntax = nullptr;
     E.should_quit = 0;
     E.should_launch_repl = false;  // CRITICAL: Reset between sessions to prevent stale Ctrl+P state
+    // Per-session modes: E is constructed once at boot, so a wheel Cancel
+    // that quit from the menu left in_menu_mode set and the NEXT session
+    // opened in menu mode; one fragmented launch set low_memory_mode forever.
+    E.in_menu_mode = false;
+    E.menu_selection = 0;
+    E.char_selection_mode = false;
+    E.selected_char_index = 0;
+    E.char_selection_timer = 0;
+    E.low_memory_mode = false;   // ekilo_run recomputes it from the heap test
+    E.read_only = false;         // ekilo_open sets it per file
+    E.oled_update_pending = false;
+    s_bufferMirrorsRows = false;
     strcpy(E.statusmsg, "");
     E.statusmsg_time = 0;
     setTerminalLineBuffering(true); // editor needs raw keystrokes
@@ -585,17 +602,24 @@ int ekilo_read_key() {
     
     // Handle escape sequences (arrow keys, etc.)
     if (c == ESC) {
-        // Wait a bit for the rest of the sequence
+        // Wait (bounded) for the rest of a sequence: a split arrow key used to
+        // read as a bare ESC, which quit the editor.
         unsigned long start = millis();
-        // while (millis() - start < 12 && !Jerial.available()) {
-        //    // delayMicroseconds(1);
-        // }
+        while (millis() - start < 8 && !Jerial.available()) {
+            delayMicroseconds(200);
+        }
         
         if (!Jerial.available()) return ESC;
         
         char seq[3];
         seq[0] = Jerial.read();
-        if (!Jerial.available()) return ESC;
+        if (seq[0] != '[' && seq[0] != 'O') {
+            return 0;   // Alt+key / unknown - ignore, never "quit"
+        }
+        while (millis() - start < 8 && !Jerial.available()) {
+            delayMicroseconds(200);
+        }
+        if (!Jerial.available()) return 0;
         seq[1] = Jerial.read();
         
         if (seq[0] == '[') {
@@ -627,10 +651,10 @@ int ekilo_read_key() {
                         return ESC;
                     }
                     if (next != ';' && (next < '0' || next > '9')) {
-                        break;  // Unknown sequence
+                        break;  // Unknown sequence (final byte consumed)
                     }
                 }
-                return ESC;
+                return 0;   // undecoded CSI (Ctrl/Shift+arrow, F-keys): ignore
             } else {
                 switch (seq[1]) {
                     case 'A': return ARROW_UP;
@@ -643,11 +667,15 @@ int ekilo_read_key() {
             }
         } else if (seq[0] == 'O') {
             switch (seq[1]) {
+                case 'A': return ARROW_UP;     // SS3 arrows (application cursor mode)
+                case 'B': return ARROW_DOWN;
+                case 'C': return ARROW_RIGHT;
+                case 'D': return ARROW_LEFT;
                 case 'H': return HOME_KEY;
                 case 'F': return END_KEY;
             }
         }
-        return ESC;
+        return 0;   // any other decoded-but-unknown sequence: ignore
     } else {
         return c;
     }
@@ -863,8 +891,12 @@ void ekilo_update_row(EditorRow* row) {
     free(row->render);
     row->render = (char*)malloc(needed_size);
     if (!row->render) {
-        // Silently fail - we can still edit, just no fancy rendering
+        // Silently fail - we can still edit, just no fancy rendering.
+        // Drop the old hl too: it was sized for the previous render and the
+        // refresh loop indexes it against the (possibly longer) chars.
         row->rsize = 0;
+        free(row->hl);
+        row->hl = nullptr;
         return;
     }
     
@@ -887,6 +919,7 @@ void ekilo_update_row(EditorRow* row) {
 void ekilo_insert_row(int at, const char* s, size_t len) {
     if (at < 0 || at > E.numrows) return;
     if (!s) return;
+    s_bufferMirrorsRows = false;   // (ekilo_open re-asserts it after the load)
     
     // Just check if we have critical memory available - be aggressive about using what we have
     size_t freeHeap = rp2040.getFreeHeap();
@@ -1024,6 +1057,7 @@ void ekilo_free_row(EditorRow* row) {
 // Delete a row
 void ekilo_del_row(int at) {
     if (at < 0 || at >= E.numrows) return;
+    s_bufferMirrorsRows = false;   // the buffer image no longer equals the rows
     
     ekilo_free_row(&E.row[at]);
     memmove(&E.row[at], &E.row[at + 1], sizeof(EditorRow) * (E.numrows - at - 1));
@@ -1302,14 +1336,17 @@ int ekilo_open(const char* filename) {
         file_size = safeFileSize(filename, 2000);
         if (file_size < 0) {
             ekilo_set_status_message("ERROR: Cannot open file '%s'", filename);
-            return -1;
+            // -2 = EXISTS but could not be read (fs timeout/mutex): the caller
+            // must not treat this as "new file" - its first save would
+            // truncate the real file to whatever is in the empty buffer.
+            return safeFileExists(filename, 1000) ? -2 : -1;
         }
     }
     
     // Hard limit: file must fit in SharedBuffer with room for edits
     if ((size_t)file_size >= SHARED_BUFFER_SIZE - 256) {
         ekilo_set_status_message("ERROR: File too large (max %dKB)", (SHARED_BUFFER_SIZE - 256) / 1024);
-        return -1;
+        return -2; // exists, refused - see above
     }
     
     // Check if this file should be read-only
@@ -1394,6 +1431,7 @@ int ekilo_open(const char* filename) {
 
         E.dirty = 0;
         E.screen_dirty = true;
+        s_bufferMirrorsRows = true;   // zero-copy rows over the buffer image
 
         Serial.printf("[ekilo_open] SUCCESS: Parsed %d lines from %d bytes\n", (int)line_count, (int)bytes_read);
         ekilo_set_status_message("Loaded %d lines (%d bytes)", line_count, bytes_read);
@@ -1496,6 +1534,11 @@ int ekilo_save() {
         ekilo_set_status_message("Save aborted - no filename");
         return 0;
     }
+    if (E.read_only) {
+        // the keyboard paths check this; the wheel menu's Save did not
+        ekilo_set_status_message("READ-ONLY file - cannot save");
+        return 0;
+    }
     
     SharedBuffer& buf = SharedBuffer::getInstance();
 
@@ -1518,8 +1561,10 @@ int ekilo_save() {
         }
     }
     
-    if (!any_rows_edited && buf.hasContent()) {
+    if (!any_rows_edited && buf.hasContent() && E.numrows > 0 && s_bufferMirrorsRows) {
         // Fast path: SharedBuffer already has the file content, no copy needed
+        // (numrows > 0 && s_bufferMirrorsRows: a new/empty file, or one whose
+        // rows were added/removed, must NOT be written from the stale image)
         buf.setFilename(E.filename);
         buf.setContentType(SharedBufferContentType::PYTHON_SCRIPT);
         buf.setSourceContext((uint8_t)ContextType::EKILO_EDITOR);
@@ -1790,9 +1835,15 @@ void ekilo_refresh_screen() {
         E.rowoff = E.cy;
         scroll_changed = true;
     }
-    if (E.cy >= E.rowoff + E.screenrows) {
-        E.rowoff = E.cy - E.screenrows + 1;
-        scroll_changed = true;
+    {
+        // only screenrows-4 file rows are drawn (status/help lines take the
+        // rest) - clamping against the full height parked the cursor on an
+        // undrawn row over the status bar
+        const int available_rows = E.screenrows - 4;
+        if (available_rows > 0 && E.cy >= E.rowoff + available_rows) {
+            E.rowoff = E.cy - available_rows + 1;
+            scroll_changed = true;
+        }
     }
     if (E.cx < E.coloff) {
         E.coloff = E.cx;
@@ -1896,7 +1947,7 @@ void ekilo_refresh_screen() {
             if (len > E.screencols) len = E.screencols;
             
             // If we have syntax highlighting, use it
-            if (display_str && E.row[filerow].hl && !E.low_memory_mode) {
+            if (display_str && E.row[filerow].render && E.row[filerow].hl && !E.low_memory_mode) {
                 char* c = &display_str[E.coloff];
                 unsigned char* hl = &E.row[filerow].hl[E.coloff];
                 int current_color = -1;
@@ -2101,8 +2152,12 @@ void ekilo_process_keypress() {
                 ekilo_set_status_message("Menu mode cancelled");
                 ekilo_schedule_oled_update();
                 E.screen_dirty = true;
+            } else if (E.dirty) {
+                // A bare ESC no longer throws edits away: say how to leave.
+                ekilo_set_status_message("Unsaved changes: Ctrl-S saves, Ctrl-Q x%d quits without saving", quit_times);
+                E.screen_dirty = true;
             } else {
-                // Not in menu mode - quit editor immediately without saving
+                // Not in menu mode, nothing to lose - quit editor
                 E.should_quit = 1;
             }
             break;
@@ -2545,6 +2600,12 @@ void ekilo_cycle_character(int direction) {
 // Confirm character selection and insert it
 void ekilo_confirm_character() {
     if (!E.char_selection_mode) return;
+    if (E.read_only) {
+        E.char_selection_mode = false;
+        ekilo_set_status_message("READ-ONLY file - cannot edit");
+        E.screen_dirty = true;
+        return;
+    }
     
     char selected = ekilo_get_character_from_index(E.selected_char_index);
     E.char_selection_mode = false;
@@ -2839,14 +2900,26 @@ bool ekilo_run(const char* filename) {
         Serial.printf("[ekilo_run] Calling ekilo_open for: %s\n\r", filename);
         int open_result = ekilo_open(filename);
         Serial.printf("[ekilo_run] ekilo_open returned: %d, numrows=%d\n\r", open_result, E.numrows);
+        if (open_result == -2) {
+            // The file EXISTS but could not be loaded (too large / fs
+            // failure). Entering new-file mode under the same name meant the
+            // first Ctrl-S overwrote the real file with an empty buffer.
+            Jerial.printf("\n\rekilo: %s\n\r", E.statusmsg);
+            Jerial.flush();
+            return false;
+        }
         if (open_result != 0) {
-            // File doesn't exist or error - set up for new file
+            // File doesn't exist - set up for new file
             free(E.filename);
             E.filename = strdup(filename);
             if (!E.filename) {
                 ekilo_set_status_message("ERROR: Memory allocation failed for filename");
                 return false;
             }
+            // The transfer buffer may still hold the PREVIOUS file: ekilo_save's
+            // fast path would have written it into this new file.
+            SharedBuffer::getInstance().clear();
+            s_bufferMirrorsRows = false;
             
             // Ensure directory exists for new files using safe functions
             String file_path = String(filename);

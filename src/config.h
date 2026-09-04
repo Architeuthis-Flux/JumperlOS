@@ -154,6 +154,8 @@
     "Which PIO block the encoder's quadrature sampler tries first; auto = PIO2 then PIO1, keeping PIO0 for user programs.") \
   X(clickwheel, rail_click_adjust, INT, 1, 0, 2, 1, railClickAdjustTable, HOOK_NONE, JLC_NONE, \
     "Click the wheel on a highlighted rail/DAC to adjust its voltage: off, only with an OLED, or always.") \
+  X(clickwheel, part_walk, INT, 1, 0, 2, 1, partWalkTable, HOOK_NONE, JLC_NONE, \
+    "How the wheel walks a placed part's pins: off (this side only, then move on), z (across to the far corner, the wheel keeps its direction), pin_order (round the part by pin number).") \
   X(clickwheel, fx_type, INT, 8, 0, 9, 1, menuFxTypeTable, HOOK_MENU_FX, JLC_NONE, \
     "Menu frame transition style on the breadboard LEDs (glow, sparkle, dither, wipe...).") \
   X(clickwheel, fx_duration_ms, INT, 160, 0, 1000, 15, nullptr, HOOK_MENU_FX, JLC_NONE, \
@@ -234,6 +236,10 @@
     "How many parallel paths to stack for rail connections.") \
   X(routing, stack_dacs, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
     "How many extra parallel paths to stack for DAC connections.") \
+  X(routing, stack_gpio, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many extra parallel paths to stack for GPIO (and UART) connections; 0 = a single crosspoint path.") \
+  X(routing, stack_adcs, INT, 0, 0, 7, 1, nullptr, HOOK_NONE, JLC_NONE, \
+    "How many extra parallel paths to stack for ADC connections; a high-impedance input rarely needs any.") \
   X(routing, part_safety, INT, 0, 0, 2, 1, partSafetyTable, HOOK_NONE, JLC_NONE, \
     "Refuse new connections that would trigger a part warning: off, power (wrong-way supply on a placed part), all (any part warning).")
 
