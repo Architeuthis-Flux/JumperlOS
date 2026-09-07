@@ -358,83 +358,61 @@ int scrolledRow = -1;
 // walks this side only. Every walk ends with the row scan resuming past the
 // part's span on the half it was entered from. Reachable with zero wires:
 // the stop check is part geometry, not paths[].
-static int8_t scrollPartIdx = -1;   // -1 = not in part focus
-static int8_t scrollPartPin = -1;   // -1 = the whole part
-static int8_t scrollPartEntry = -1;    // pin index on the row the scan landed on: the first detent goes here
-static int    scrollPartEntryRow = -1; // that row: the scan resumes past the part's span on ITS half
-static int8_t scrollPartRingUp = 0;    // +1/-1: the way round the pin-number ring an UP detent steps (DOWN steps back); 0 = not decided yet
-static uint32_t scrollPartVisited = 0; // bit per pin index; every on-board pin seen -> the next detent leaves
+//
+// Reversible (Kevin, 2026-09-07: "if I go off a part on one side then scroll
+// back on the wheel one position, it should go back to where it was and not
+// a different row"). A walk is one fixed line of stops, read forward in the
+// direction the scan ENTERED the part and backward against it:
+//
+//   [row before] <-> whole part <-> entry pin <-> ring... <-> last pin <-> [row after]
+//
+// so a step back from the entry pin is the whole-part landing again, a step
+// back from that backs out to the stop before the part, and a walk left at
+// its last pin is PARKED (one per part): the scan coming back the other way
+// onto the row it resumed from re-enters the walk at that last pin instead
+// of landing on the part afresh. A fresh landing anywhere on the part
+// forgets its parked walk - the memory is the most recent walk, not a
+// history.
+static int8_t scrollPartIdx = -1;      // -1 = not in part focus
+static int8_t scrollPartPin = -1;      // -1 = the whole part (the landing)
+static int8_t scrollPartEntry = -1;    // pin index on the row the scan landed on: the walk's first pin
+static int    scrollPartEntryRow = -1; // that row: the scan resumes past the part's span on ITS half, or backs out from it
+static bool   scrollPartEntryUp = true; // the wheel direction the scan was moving when it landed = the walk's FORWARD direction
+static int8_t scrollPartRingFwd = 0;   // +1/-1: the way round the ring a forward detent steps (backward steps the other way); 0 = not decided yet
 static int8_t scrollPartLeft = -1;     // the part just walked: its rows are not stops for the scan that follows
-static_assert( MAX_PART_PINS <= 32, "scrollPartVisited is one bit per pin" );
 
-// Detents per stop (Kevin, 2026-09-04): the scroll moves one stop per TWO
-// detents - one per net felt twitchy - except inside a placed part with
-// more than kScrollFastWalkPins pins, where every detent steps a pin as
-// before (walking a DIP is many detents already; a part with four pins or
-// fewer is walked at the slow pace like everything else). UP and DOWN add
-// and subtract, so a wiggle cancels itself and nothing moves. No time-based
-// reset on purpose: slow, deliberate clicking still arrives after two
-// detents. The count is zeroed with the part focus (scrollPartReset), which
-// every landing, leave and removal goes through.
-static const int kScrollDetentsPerStop = 2;
-static const int kScrollFastWalkPins = 4;
-static int8_t scrollDetentAcc = 0;
+struct ScrollPartPark {
+    bool   valid;
+    bool   entryUp;
+    int8_t entry;
+    int8_t entryRow;
+    int8_t ringFwd;
+    int8_t exitEdge;   // the row the scan resumed from: coming back onto it re-enters the walk
+};
+static ScrollPartPark scrollPartParked[ MAX_PARTS ] = {};
 
-static int scrollDetentsNeeded( void ) {
-    if ( scrollPartIdx >= 0 && scrollPartIdx < globalState.parts.numParts &&
-         globalState.parts.parts[ scrollPartIdx ].numPins > kScrollFastWalkPins ) {
-        return 1;
-    }
-    return kScrollDetentsPerStop;
-}
-
-// Consumes a pending detent - setting NONE is the ack the emitter in
-// RotaryEncoder.cpp waits for before it releases the next queued one, so a
-// half-step still drains the queue - and says whether it completes a step:
-// +1 UP, -1 DOWN, 0 not yet.
-static int scrollDetentStep( int needed ) {
-    int dir = 0;
-    if ( encoderDirectionState == UP ) {
-        dir = +1;
-    } else if ( encoderDirectionState == DOWN ) {
-        dir = -1;
-    } else {
-        return 0;
-    }
-    encoderDirectionState = NONE;
-    if ( needed <= 1 ) {
-        scrollDetentAcc = 0;
-        return dir;
-    }
-    scrollDetentAcc = (int8_t)( scrollDetentAcc + dir );
-    if ( scrollDetentAcc >= needed ) {
-        scrollDetentAcc = 0;
-        return +1;
-    }
-    if ( scrollDetentAcc <= -needed ) {
-        scrollDetentAcc = 0;
-        return -1;
-    }
-    return 0;
-}
+static int8_t scrollDetentAcc = 0;     // the detent counter (see scrollDetentStep below)
 
 static void scrollPartReset( void ) {
     scrollPartIdx = -1;
     scrollPartPin = -1;
     scrollPartEntry = -1;
     scrollPartEntryRow = -1;
-    scrollPartRingUp = 0;
-    scrollPartVisited = 0;
+    scrollPartEntryUp = true;
+    scrollPartRingFwd = 0;
     scrollDetentAcc = 0;
 }
 
-// The scan landed on row `scrolledRow`, owned by part `pi` through pin `pj`.
-static void scrollPartLand( int pi, int pj ) {
+// The scan, moving `up`, landed on row `scrolledRow`, owned by part `pi`
+// through pin `pj`: a fresh walk, which forgets any parked one.
+static void scrollPartLand( int pi, int pj, bool up ) {
     scrollPartReset( );
     scrollPartIdx = (int8_t)pi;
     scrollPartPin = -1;   // the whole-part landing
     scrollPartEntry = (int8_t)pj;
     scrollPartEntryRow = scrolledRow;
+    scrollPartEntryUp = up;
+    if ( pi >= 0 && pi < MAX_PARTS ) scrollPartParked[ pi ].valid = false;
 }
 
 // Every part-removal path calls this (Highlighting.h): the raw indices
@@ -444,6 +422,7 @@ static void scrollPartLand( int pi, int pj ) {
 extern "C" void highlightingInvalidatePartFocus(void) {
     scrollPartReset( );
     scrollPartLeft = -1;
+    for ( int i = 0; i < MAX_PARTS; i++ ) scrollPartParked[ i ].valid = false;
     partLabels.clearPartHighlight();
 }
 
@@ -558,12 +537,6 @@ static int scrollPartPickRingDir( const PartDefinition& p, int e, bool up ) {
     }
     return up ? +1 : -1;
 }
-static bool scrollPartSeenAll( const PartDefinition& p ) {
-    for ( int j = 0; j < p.numPins && j < MAX_PART_PINS; j++ ) {
-        if ( scrollPartMember( p, j ) && !( scrollPartVisited & ( 1u << j ) ) ) return false;
-    }
-    return true;
-}
 // The part's outermost row on the half of `entryRow` in the travel
 // direction - where the row scan resumes from after the walk.
 static int scrollPartSpanEdge( const PartDefinition& p, int entryRow, bool up ) {
@@ -574,6 +547,104 @@ static int scrollPartSpanEdge( const PartDefinition& p, int entryRow, bool up ) 
         if ( edge < 0 || ( up ? r > edge : r < edge ) ) edge = r;
     }
     return ( edge >= 1 ) ? edge : entryRow;
+}
+// The way round the ring a FORWARD detent (the entry direction) steps from
+// the entry pin: z / off go by row, so forward-UP is the higher row;
+// pin_order first continues the wheel's motion on this side, then goes
+// round by pin number (scrollPartPickRingDir).
+static int scrollPartRingFwdFor( const PartDefinition& p, int entry, bool entryUp ) {
+    if ( scrollPartWalkMode( ) == PART_WALK_PIN_ORDER && entry >= 0 ) {
+        return scrollPartPickRingDir( p, entry, entryUp );
+    }
+    return entryUp ? +1 : -1;
+}
+// The last pin of the walk that starts at `entry` and steps `ringFwd`: the
+// pin before the ring wraps back to the entry (or, off, this side's end).
+// Needs scrollPartEntryRow set - off's "this side" reads it.
+static int scrollPartWalkLast( const PartDefinition& p, int entry, int ringFwd ) {
+    int pin = entry;
+    for ( int guard = 0; guard < MAX_PART_PINS && pin >= 0; guard++ ) {
+        int n = scrollPartRingNext( p, pin, ringFwd );
+        if ( n < 0 || n == entry ) break;
+        pin = n;
+    }
+    return pin;
+}
+
+// After the rail adjuster (confirmed or cancelled) the re-highlight repaints
+// the panel. While the scroll is on a part's pin that is the part card, its
+// footer now showing the new voltage - not the rail's live card (Kevin,
+// 2026-09-07). true = painted here, the caller skips the live re-highlight.
+static bool scrollPartRepaintCard( int net ) {
+    if ( net < 1 || net > 3 ) return false;
+    if ( scrollPartIdx < 0 || scrollPartIdx >= globalState.parts.numParts || scrollPartPin < 0 ) return false;
+    const PartDefinition& p = globalState.parts.parts[ scrollPartIdx ];
+    if ( !p.placed || scrollPartPin >= p.numPins || scrollPartPin >= MAX_PART_PINS ) return false;
+    partLabels.setPartHighlight( scrollPartIdx, scrollPartPin, persistentHighlightTimeout );
+    highlightedNet = net;
+    highlightTimer = millis( );
+    partsShowPartCard( p, scrollPartPin );
+    return true;
+}
+
+// Detents per stop (Kevin, 2026-09-04): the scroll moves one stop per TWO
+// detents - one per net felt twitchy - except inside a placed part with
+// more than kScrollFastWalkPins pins, where every detent steps a pin as
+// before (walking a DIP is many detents already; a part with four pins or
+// fewer is walked at the slow pace like everything else). The steps that
+// cross the part's edge - into the entry row from the stop before, out of
+// the last pin to the stop after, and their reverses - cost two in BOTH
+// directions, so the wheel reads the same number of clicks back as it did
+// forward. UP and DOWN add and subtract, so a wiggle cancels itself and
+// nothing moves. No time-based reset on purpose: slow, deliberate clicking
+// still arrives after two detents. The count is zeroed with the part focus
+// (scrollPartReset), which every landing, leave and removal goes through.
+static const int kScrollDetentsPerStop = 2;
+static const int kScrollFastWalkPins = 4;
+
+static int scrollDetentsNeeded( bool up ) {
+    if ( scrollPartIdx < 0 || scrollPartIdx >= globalState.parts.numParts ) return kScrollDetentsPerStop;
+    const PartDefinition& p = globalState.parts.parts[ scrollPartIdx ];
+    if ( p.numPins <= kScrollFastWalkPins ) return kScrollDetentsPerStop;
+    bool fwd = ( up == scrollPartEntryUp );
+    if ( scrollPartPin < 0 ) return fwd ? 1 : kScrollDetentsPerStop;   // into the entry pin / back out to the row before
+    if ( fwd ) {
+        int rf = scrollPartRingFwd ? scrollPartRingFwd : scrollPartRingFwdFor( p, scrollPartEntry, scrollPartEntryUp );
+        int n = scrollPartRingNext( p, scrollPartPin, rf );
+        if ( n < 0 || n == scrollPartEntry ) return kScrollDetentsPerStop;   // the step that leaves
+    }
+    return 1;
+}
+
+// The pending detent's direction (+1 UP, -1 DOWN, 0 none) without consuming it.
+static int scrollDetentPeek( void ) {
+    if ( encoderDirectionState == UP ) return +1;
+    if ( encoderDirectionState == DOWN ) return -1;
+    return 0;
+}
+
+// Consumes a pending detent - setting NONE is the ack the emitter in
+// RotaryEncoder.cpp waits for before it releases the next queued one, so a
+// half-step still drains the queue - and says whether it completes a step:
+// +1 UP, -1 DOWN, 0 not yet. One rule for every pace: accumulate, step when
+// the count reaches `needed`, zero. (A needed of 1 still cancels a pending
+// half-step the other way instead of moving - the pace can differ by
+// direction at a part's edge.)
+static int scrollDetentStep( int needed ) {
+    int dir = scrollDetentPeek( );
+    if ( dir == 0 ) return 0;
+    encoderDirectionState = NONE;
+    if ( needed < 1 ) needed = 1;
+    scrollDetentAcc = (int8_t)( scrollDetentAcc + dir );
+    if ( scrollDetentAcc >= needed ) {
+        scrollDetentAcc = 0;
+        return +1;
+    }
+    if ( scrollDetentAcc <= -needed ) {
+        scrollDetentAcc = 0;
+        return -1;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -863,14 +934,22 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 brightenedNode = ( net > 0 ) ? row : -1;
                 brightenedAmount = 80;
                 // A pin wired to anything beyond the breadboard - a GPIO,
-                // ADC, DAC, rail, nano pin - hands the panel to the live
-                // net display: it knows how to show that thing (GPIO
-                // HIGH/LOW with click-to-toggle feedback, ADC volts...)
-                // and now says the pin's name too (showGpioPinReading).
+                // ADC, DAC, nano pin - hands the panel to the live net
+                // display: it knows how to show that thing (GPIO HIGH/LOW
+                // with click-to-toggle feedback, ADC volts...) and says the
+                // pin's name too (showGpioPinReading). A pin on a RAIL or
+                // GND keeps the part card, with the rail and its voltage
+                // along the bottom (Kevin, 2026-09-07; the card draws that
+                // footer itself) - highlightedNet still carries the rail so
+                // the wheel click opens the adjuster as it always did, and
+                // the live updater's gate knows to leave the card alone.
                 if ( net > 0 && net < MAX_NETS &&
                      globalState.connections.nets[ net ].number == net ) {
-                    if ( net <= 5 ) specialNet = true;
-                    for ( int n = 0; n < MAX_NODES && !specialNet; n++ ) {
+                    if ( net >= 4 && net <= 5 ) specialNet = true;
+                    // (the rail nets carry their own off-board node - GND,
+                    // TOP_RAIL, BOTTOM_RAIL - so the node test below is for
+                    // the others only)
+                    for ( int n = 0; n < MAX_NODES && !specialNet && net > 3; n++ ) {
                         int nd = globalState.connections.nets[ net ].nodes[ n ];
                         if ( nd == 0 ) break;
                         if ( nd > 60 ) specialNet = true;
@@ -905,55 +984,118 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             if ( specialNet ) {
                 highlightNets( 0, net, print );   // the live card, part-named
             } else {
+                if ( net >= 1 && net <= 3 ) highlightedNet = net;   // rail / GND: the card's footer names it
                 partsShowPartCard( p, pj );
             }
         };
 
-        // One detent inside a part: the whole-part landing hands the first
-        // detent to the entry pin; after that the detents step the ring (order
-        // per part_walk, see scrollPartRingKey). z / off: UP is the next
-        // higher row, always - the wheel keeps its direction on the board.
-        // pin_order: the first step goes the way the wheel points on THIS
-        // side, then on round the part by pin number. Either way UP steps the
-        // ring forward and DOWN steps it back, so reversing the wheel
-        // retraces. Every member pin seen (or, off, this side exhausted) ->
-        // the next detent leaves, and the row scan resumes just past the
-        // part's span on the half it was entered from.
+        // One detent inside a part, on the fixed line of stops described at
+        // the scroll state above. FORWARD (the entry direction): the whole-
+        // part landing hands the detent to the entry pin; after that the
+        // ring (order per part_walk, see scrollPartRingKey; z / off: the
+        // next higher row for an UP entry, so the wheel keeps its direction
+        // on the board; pin_order: the way the wheel points on THIS side,
+        // then round by pin number) until it would wrap back to the entry
+        // pin (or, off, this side is exhausted) - that detent leaves, parks
+        // the walk, and the row scan resumes just past the part's span on
+        // the half it was entered from. BACKWARD retraces the ring, steps
+        // from the entry pin to the whole part, and from the whole part
+        // backs out to the stop before the part.
+        auto leavePart = [&]( int resumeRow, bool park ) {
+            // Its paint goes with it (bench, 2026-08-27 - the dots/row wash
+            // lingered 15s after scrolling on). The scan below starts from
+            // resumeRow and treats the rows this part still owns as no stop.
+            int pi = scrollPartIdx;
+            if ( pi >= 0 && pi < MAX_PARTS ) {
+                scrollPartParked[ pi ].valid = park;
+                if ( park ) {
+                    scrollPartParked[ pi ].entryUp = scrollPartEntryUp;
+                    scrollPartParked[ pi ].entry = scrollPartEntry;
+                    scrollPartParked[ pi ].entryRow = (int8_t)scrollPartEntryRow;
+                    scrollPartParked[ pi ].ringFwd = scrollPartRingFwd;
+                    scrollPartParked[ pi ].exitEdge = (int8_t)resumeRow;
+                }
+            }
+            scrolledRow = resumeRow;
+            scrollPartLeft = (int8_t)pi;
+            scrollPartReset( );
+            partLabels.clearPartHighlight( );
+        };
         auto walkPart = [&]( bool up ) {
             const PartDefinition& p = globalState.parts.parts[ scrollPartIdx ];
+            bool fwd = ( up == scrollPartEntryUp );
             int pj = -1;
             if ( scrollPartPin < 0 ) {
+                if ( !fwd ) {
+                    leavePart( scrollPartEntryRow, false );   // back out the way the scan came in
+                    return;
+                }
                 pj = scrollPartEntry;
                 if ( pj < 0 || pj >= p.numPins || pj >= MAX_PART_PINS || !scrollPartMember( p, pj ) ) {
                     pj = scrollPartRingNext( p, -1, +1 );   // no usable entry pin: the lowest number
+                    scrollPartEntry = (int8_t)pj;            // ...which is then where a step back returns to the whole part
                 }
-            } else if ( !scrollPartSeenAll( p ) ) {
-                if ( scrollPartRingUp == 0 ) {
-                    if ( scrollPartWalkMode( ) == PART_WALK_PIN_ORDER ) {
-                        int d = scrollPartPickRingDir( p, scrollPartPin, up );
-                        scrollPartRingUp = (int8_t)( up ? d : -d );
-                    } else {
-                        scrollPartRingUp = +1;   // row order: UP is the higher row
-                    }
+            } else if ( fwd ) {
+                if ( scrollPartRingFwd == 0 ) {
+                    scrollPartRingFwd = (int8_t)scrollPartRingFwdFor( p, scrollPartEntry, scrollPartEntryUp );
                 }
-                pj = scrollPartRingNext( p, scrollPartPin, up ? scrollPartRingUp : -scrollPartRingUp );
+                int n = scrollPartRingNext( p, scrollPartPin, scrollPartRingFwd );
+                if ( n < 0 || n == scrollPartEntry ) {
+                    // every pin seen: leave forward, remembering the walk so the
+                    // wheel can come back into it at this pin
+                    leavePart( scrollPartSpanEdge( p, scrollPartEntryRow, scrollPartEntryUp ), true );
+                    return;
+                }
+                pj = n;
+            } else {
+                if ( scrollPartPin == scrollPartEntry || scrollPartRingFwd == 0 ) {
+                    pj = -1;   // back to the whole part
+                } else {
+                    pj = scrollPartRingNext( p, scrollPartPin, -scrollPartRingFwd );
+                }
             }
+            scrollPartPin = (int8_t)pj;
             if ( pj >= 0 ) {
-                scrollPartPin = (int8_t)pj;
-                scrollPartVisited |= ( 1u << pj );
                 scrolledRow = partPinNode( p, p.pins[ pj ] );
                 focusPart( scrollPartIdx, pj );
-                returnNode = scrolledRow;
-                return;
+            } else {
+                scrolledRow = scrollPartEntryRow;
+                focusPart( scrollPartIdx, -1 );
             }
-            // Leaving: its paint goes with it (bench, 2026-08-27 - the dots/row
-            // wash lingered 15s after scrolling on). The scan below starts
-            // from the part's far edge on the entry half and treats the rows
-            // this part still owns as no stop at all.
-            scrolledRow = scrollPartSpanEdge( p, scrollPartEntryRow, up );
-            scrollPartLeft = scrollPartIdx;
-            scrollPartReset( );
-            partLabels.clearPartHighlight( );
+            returnNode = scrolledRow;
+        };
+        // The scan, moving `up`, reached row scrolledRow owned by part pi
+        // through pin pj: the whole-part landing - unless this is the row a
+        // walk of this part resumed from and the wheel is coming back the
+        // other way, which re-enters that walk at its last pin.
+        auto arrivePart = [&]( int pi, int pj, bool up ) {
+            const PartDefinition& p = globalState.parts.parts[ pi ];
+            if ( pi < MAX_PARTS && scrollPartParked[ pi ].valid &&
+                 scrollPartParked[ pi ].exitEdge == scrolledRow &&
+                 scrollPartParked[ pi ].entryUp != up ) {
+                const ScrollPartPark k = scrollPartParked[ pi ];
+                scrollPartReset( );
+                scrollPartIdx = (int8_t)pi;
+                scrollPartEntry = k.entry;
+                scrollPartEntryRow = k.entryRow;   // before scrollPartWalkLast: off reads it
+                scrollPartEntryUp = k.entryUp;
+                scrollPartRingFwd = k.ringFwd;
+                scrollPartParked[ pi ].valid = false;
+                int last = ( k.entry >= 0 && k.entry < p.numPins && k.entry < MAX_PART_PINS && k.ringFwd != 0 )
+                               ? scrollPartWalkLast( p, k.entry, k.ringFwd )
+                               : k.entry;
+                if ( last >= 0 && last < p.numPins && last < MAX_PART_PINS ) {
+                    scrollPartPin = (int8_t)last;
+                    scrolledRow = partPinNode( p, p.pins[ last ] );
+                    focusPart( pi, last );
+                    returnNode = scrolledRow;
+                    return;
+                }
+                scrollPartReset( );   // nothing usable to return to: a fresh landing
+            }
+            scrollPartLand( pi, pj, up );
+            focusPart( pi, -1 );
+            returnNode = scrolledRow;
         };
 
         // A stale part focus (part removed / table rewritten) resets cleanly.
@@ -1008,9 +1150,11 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
         }
 
         // Two detents a stop, one inside a big part (scrollDetentStep). The
-        // pace is read here, after the stale-focus guard above, so a removed
-        // part never counts as big-part focus.
-        int step = scrollDetentStep( scrollDetentsNeeded( ) );
+        // pace depends on the detent's direction (the part's edges cost two
+        // both ways) and is read here, after the stale-focus guard above, so
+        // a removed part never counts as big-part focus.
+        int dir = scrollDetentPeek( );
+        int step = ( dir != 0 ) ? scrollDetentStep( scrollDetentsNeeded( dir > 0 ) ) : 0;
         if ( step > 0 ) {
             // Part focus first: every pin of this part before anything else
             // (walkPart above); exhausted, the row scan resumes past it.
@@ -1031,9 +1175,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     // a row still owned by the part just walked is no stop at all
                     bool ownedByLeftPart = ( pi >= 0 && pi == scrollPartLeft );
                     if ( pi >= 0 && !ownedByLeftPart ) {
-                        scrollPartLand( pi, pj );   // the whole-part landing
-                        focusPart( pi, -1 );
-                        returnNode = scrolledRow;
+                        arrivePart( pi, pj, true );   // the whole-part landing, or back into a parked walk
                         break;
                     }
 
@@ -1096,9 +1238,7 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                     // a row still owned by the part just walked is no stop at all
                     bool ownedByLeftPart = ( pi >= 0 && pi == scrollPartLeft );
                     if ( pi >= 0 && !ownedByLeftPart ) {
-                        scrollPartLand( pi, pj );   // the whole-part landing
-                        focusPart( pi, -1 );
-                        returnNode = scrolledRow;
+                        arrivePart( pi, pj, false );   // the whole-part landing, or back into a parked walk
                         break;
                     }
 
@@ -2210,7 +2350,11 @@ int Highlighting::checkForReadingChanges( void ) {
     // reading stomped it). A part-pin focus that deliberately handed the
     // panel to a special net - a GPIO pin wants its live HIGH/LOW and the
     // click-to-toggle feedback - sets highlightedNet and passes through.
-    if ( partLabels.partHighlightActive( ) && highlightedNet <= 0 ) {
+    // A pin on a rail or GND keeps the card too - its footer names the
+    // rail (Kevin, 2026-09-07) - with highlightedNet set so the wheel click
+    // still opens the adjuster; the rail's live readout must not repaint
+    // over it either.
+    if ( partLabels.partHighlightActive( ) && highlightedNet <= 3 ) {
         showReadingNet = -1;
         lastMeasuredNet = -1;
         return -1;
@@ -2866,26 +3010,27 @@ void Highlighting::adjustRailVoltage(int rail) {
         
         // Re-highlight the rail to show updated voltage. clearHighlighting()
         // zeroes highlightedNet/brightenedNode, so the identity has to be
-        // latched across it or the re-highlight highlights nothing.
+        // latched across it or the re-highlight highlights nothing. On a
+        // part's pin the panel is the part card (scrollPartRepaintCard).
         int heldNet = highlightedNet;
         int heldNode = brightenedNode;
         clearHighlighting();
         brightenedNet = heldNet;
         brightenedNode = heldNode;
-        highlightNets(0, heldNet, 1);
+        if (!scrollPartRepaintCard(heldNet)) highlightNets(0, heldNet, 1);
     } else {
         // User cancelled - restore original values in globalState
         globalState.power.topRail = origTopRail;
         globalState.power.bottomRail = origBottomRail;
         
         // Hardware was already restored by VoltageAdjuster callback
-        // Re-highlight to refresh display
+        // Re-highlight to refresh display (the part card on a part's pin)
         int heldNet = highlightedNet;
         int heldNode = brightenedNode;
         clearHighlighting();
         brightenedNet = heldNet;
         brightenedNode = heldNode;
-        highlightNets(0, heldNet, 1);
+        if (!scrollPartRepaintCard(heldNet)) highlightNets(0, heldNet, 1);
     }
     
     requestLedShow( 1 );
