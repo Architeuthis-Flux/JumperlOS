@@ -587,19 +587,21 @@ static bool scrollPartRepaintCard( int net ) {
     return true;
 }
 
-// Detents per stop (Kevin, 2026-09-04): the scroll moves one stop per TWO
-// detents - one per net felt twitchy - except inside a placed part with
-// more than kScrollFastWalkPins pins, where every detent steps a pin as
-// before (walking a DIP is many detents already; a part with four pins or
-// fewer is walked at the slow pace like everything else). The steps that
-// cross the part's edge - into the entry row from the stop before, out of
-// the last pin to the stop after, and their reverses - cost two in BOTH
-// directions, so the wheel reads the same number of clicks back as it did
-// forward. UP and DOWN add and subtract, so a wiggle cancels itself and
-// nothing moves. No time-based reset on purpose: slow, deliberate clicking
-// still arrives after two detents. The count is zeroed with the part focus
+// Detents per stop. ONE (Kevin, 2026-09-07: "let's use just a single
+// encoder click to highlight now") - every detent is a stop, everywhere.
+// The counter below is the knob for a slower scroll, tried at two on
+// 2026-09-04 and reversed after three days on the wheel: with the constant
+// above 1 the scroll moves one stop per that many detents, except inside a
+// placed part with more than kScrollFastWalkPins pins, where every detent
+// steps a pin (walking a DIP is many detents already), and the steps that
+// cross such a part's edge - into the entry row from the stop before, out
+// of the last pin to the stop after, and their reverses - cost the full
+// count in BOTH directions, so the wheel reads the same number of clicks
+// back as forward. UP and DOWN add and subtract, so a wiggle cancels
+// itself; no time-based reset. The count is zeroed with the part focus
 // (scrollPartReset), which every landing, leave and removal goes through.
-static const int kScrollDetentsPerStop = 2;
+// At 1 all of that is inert: a detent is a step.
+static const int kScrollDetentsPerStop = 1;
 static const int kScrollFastWalkPins = 4;
 
 static int scrollDetentsNeeded( bool up ) {
