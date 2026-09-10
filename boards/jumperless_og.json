@@ -3,7 +3,8 @@
         "arduino": {
             "earlephilhower": {
                 "usb_vid": "0x1D50",
-                "usb_pid": "0xACAB"
+                "usb_pid": "0xACAB",
+                "boot2_source": "boot2_w25q080_2_padded_checksum.S"
             }
         },
         "core": "earlephilhower",

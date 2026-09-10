@@ -95,6 +95,13 @@ struct BoardCaps {
   uint8_t ledsPerRow;           // V5 = 5, OG = 1
   uint16_t ledCount;            // total addressable pixels: V5 = 445, OG = 111
   uint8_t usbCdcCount;          // number of USB CDC interfaces exposed
+  int8_t uartTxPin;             // UART0 pins of the Nano-header serial bridge
+  int8_t uartRxPin;             //   (AsyncPassthrough): V5 0/1, OG 16/17 - the
+                                //   RP2040 mux truth (16 = UART0 TX, 17 = RX)
+  uint8_t mpCHeapReserveKb;     // C heap left untouched when the MicroPython GC
+                                //   heap is carved (Python_Proper mpAllocHeap):
+                                //   V5 24 (calibrated against a config-save
+                                //   `new` abort, T2.1); OG 12 (~40 KB total)
 };
 
 struct BoardTopology {
@@ -117,6 +124,11 @@ struct BoardTopology {
 
   const AnalogChannel *dac;
   uint8_t dacCount;
+
+  // Name of each physical GPIO (the X panel's pin table), indexed by GPIO
+  // number; nullptr / past gpioNameCount = unnamed. V5 48 entries, OG 30.
+  const char *const *gpioNames;
+  uint8_t gpioNameCount;
 
   BoardCaps caps;
 };
@@ -154,6 +166,9 @@ const AnalogChannel *boardFindDac(const BoardTopology &b, int node);
 // layers can return an honest structured error instead of silently lying.
 bool boardCanSetRailVoltage(const BoardTopology &b); // OG rails are a switch
 bool boardHasNode(const BoardTopology &b, int node); // gpio/adc/dac membership
+
+// The board's name for a physical GPIO ("" when it has none).
+const char *boardGpioName(const BoardTopology &b, int gpio);
 
 // Emit the board's capability set as compact JSON into buf (the USBSer3 'A'
 // status backchannel surfaces this so LLM tools can discover what the board

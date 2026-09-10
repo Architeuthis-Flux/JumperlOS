@@ -1,0 +1,82 @@
+{
+ "ts": "2026-09-07_2303",
+ "state_yaml": "/Users/kevinsanto/Documents/GitHub/JumperlOS/test/hil/kevin_state_2026-09-07_2303.yaml",
+ "fingerprint": {
+  "bridges": "frozenset({frozenset({'RP_GPIO_1', '6'}), frozenset({'8', 'RP_GPIO_3'}), frozenset({'23', '18'}), frozenset({'TOP_RAIL', '18'}), frozenset({'RP_GPIO_2', '7'}), frozenset({'5', 'ADC3'}), frozenset({'GND', '56'}), frozenset({'ADC0', '2'}), frozenset({'24', '28'}), frozenset({'58', '56'}), frozenset({'48', '51'}), frozenset({'45', '41'}), frozenset({'NANO_D0', 'ADC3'})})",
+  "power": "{'topRail': '4.40', 'bottomRail': '7.40', 'dac0': '2.50', 'dac1': '0.60'}",
+  "sections": "('bridges', 'nets', 'power', 'config', 'parts')",
+  "parts": "(('POT22', '22', 'true'), ('IC41', '41', 'true'), ('Q36', '36', 'true'), ('LED28', '28', 'true'), ('D9', '9', 'true'))"
+ },
+ "active": {
+  "slot": 0,
+  "path": "/slots/slot0.yaml"
+ },
+ "files": {
+  "/slots/slot0.yaml": {
+   "path": "/slots/slot0.yaml",
+   "existed": true,
+   "bytes": 2844.0,
+   "hash": "0x01DC2FA6"
+  },
+  "/slots/slot3.yaml": {
+   "path": "/slots/slot3.yaml",
+   "existed": true,
+   "bytes": 2157.0,
+   "hash": "0x9877EF28"
+  },
+  "/slots/last_active.txt": {
+   "path": "/slots/last_active.txt",
+   "existed": true,
+   "bytes": 17.0,
+   "hash": "0x2C69AEE9"
+  },
+  "/config.txt": {
+   "path": "/config.txt",
+   "existed": true,
+   "bytes": 3335.0,
+   "hash": "0x780917D5"
+  },
+  "/undo_history.txt": {
+   "path": "/undo_history.txt",
+   "existed": true,
+   "bytes": 454.0,
+   "hash": "0xFD72FB80"
+  },
+  "/undo.hist": {
+   "path": "/undo.hist",
+   "existed": false,
+   "bytes": null,
+   "hash": null
+  },
+  "/selftest.json": {
+   "path": "/selftest.json",
+   "existed": true,
+   "bytes": 463.0,
+   "hash": "0xB8E061B8"
+  },
+  "/projects/555/555_run.yaml": {
+   "path": "/projects/555/555_run.yaml",
+   "existed": true,
+   "bytes": 103.0,
+   "hash": "0xED234E26"
+  },
+  "/projects/i2cscrn/i2cscrn_run.yaml": {
+   "path": "/projects/i2cscrn/i2cscrn_run.yaml",
+   "existed": false,
+   "bytes": null,
+   "hash": null
+  },
+  "/projects/nand00/nand00_run.yaml": {
+   "path": "/projects/nand00/nand00_run.yaml",
+   "existed": false,
+   "bytes": null,
+   "hash": null
+  },
+  "/projects/eeprom/eeprom_run.yaml": {
+   "path": "/projects/eeprom/eeprom_run.yaml",
+   "existed": false,
+   "bytes": null,
+   "hash": null
+  }
+ }
+}

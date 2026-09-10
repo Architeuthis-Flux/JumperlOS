@@ -37,6 +37,8 @@
 #include "LEDs.h"
 
 #include "MCP4728.h"  // New library
+#include "boards/board.h"   // caps.spiDac / railsFirmwareControlled
+#include "hardware/spi.h"
 #include "WaveGen.h"  // wavegen.isRunning() - shared I2C0 bus arbitration
 #include "AdcRing.h"  // the always-on ADC ring (T2.1): readAdc() reads it when active
 extern WaveGen wavegen; // defined in main.cpp
@@ -382,6 +384,25 @@ MCP4728 mcp;
 INA219 INA0( 0x40 );
 INA219 INA1( 0x41 );
 
+// The SPI DAC of a BoardCaps::spiDac board (the OG): an MCP4822 on SPI0 - rev
+// 3.1 PCB netlist (Hardware/KiCAD): GPIO 1 = CSn, 2 = SCK, 3 = MOSI; LDAC is
+// tied to GND, so an output updates on the CS rising edge. Channel A drives
+// DAC0 (0-5 V after the L272 stage), channel B DAC1 (+/-8 V). Only SCK and
+// MOSI are muxed to SPI: GPIO 0 (SPI0 RX) is the routable RP_GPIO_0 node.
+static const uint OG_DAC_CS_PIN = 1, OG_DAC_SCK_PIN = 2, OG_DAC_MOSI_PIN = 3;
+static bool s_ogDacReady = false;
+// One MCP4822 word (datasheet 5.1): bit 15 = channel (0 A / 1 B), bit 13 = GA
+// (1 = 1x, 0 = 2x - the reference firmware runs 2x), bit 12 = active, 11:0 data.
+static void ogDacWrite( int channel, int code ) {
+    if ( !s_ogDacReady ) return;
+    if ( code < 0 ) code = 0;
+    if ( code > 4095 ) code = 4095;
+    uint16_t word = (uint16_t)( ( channel ? 0x8000u : 0u ) | 0x1000u | ( (unsigned)code & 0x0FFFu ) );
+    gpio_put( OG_DAC_CS_PIN, 0 );
+    spi_write16_blocking( spi0, &word, 1 );
+    gpio_put( OG_DAC_CS_PIN, 1 );
+}
+
 uint16_t count;
 uint32_t lastTime = 0;
 
@@ -420,6 +441,20 @@ void initADC( void ) {
     for ( int i = 0; i < 4; i++ ) {
         adc_gpio_init( 26 + i ); // Jumperless ADCs on pins 26-29
     }
+    // The scaling comes from the board descriptor's ADC ranges (board_og.cpp):
+    // readAdcVoltage() is raw * spread / 4095 - zero. The static tables above
+    // are the V5's calibration and read this board's 0-5 V buffers as +/-9 V.
+    {
+        const board::BoardTopology& b = board::currentBoard( );
+        for ( int i = 0; i < b.adcCount; i++ ) {
+            int ch = b.adc[ i ].node - ADC0;
+            if ( ch < 0 || ch >= 8 ) continue;
+            adcSpread[ ch ] = b.adc[ i ].maxV - b.adc[ i ].minV;
+            adcZero[ ch ] = -b.adc[ i ].minV;
+            adcRange[ ch ][ 0 ] = b.adc[ i ].minV;
+            adcRange[ ch ][ 1 ] = b.adc[ i ].maxV;
+        }
+    }
     #else
 
 
@@ -438,13 +473,34 @@ void initDAC( void ) {
     
     initGPIO( );
 
-#if defined(OG_JUMPERLESS)
-    // OG Jumperless uses an MCP4822 dual DAC on SPI (pin 1 = CS, pin 2 = SCK,
-    // pin 3 = MOSI), NOT the V5's MCP4728 quad DAC on I2C. The SPI DAC backend
-    // is Phase 2 work; until then, skip the I2C probe entirely so we don't
-    // waste boot time scanning addresses and printing "Failed to find MCP4728".
-    return;
-#endif
+    if ( board::currentBoard( ).caps.spiDac ) {
+        // MCP4822 on SPI0 (see ogDacWrite). 8 MHz is well inside the part's
+        // 20 MHz; 16-bit frames, mode 0.
+        spi_init( spi0, 8 * 1000 * 1000 );
+        spi_set_format( spi0, 16, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST );
+        gpio_set_function( OG_DAC_SCK_PIN, GPIO_FUNC_SPI );
+        gpio_set_function( OG_DAC_MOSI_PIN, GPIO_FUNC_SPI );
+        gpio_init( OG_DAC_CS_PIN );
+        gpio_put( OG_DAC_CS_PIN, 1 );
+        gpio_set_dir( OG_DAC_CS_PIN, GPIO_OUT );
+        // Code mapping, through the same dacSpread/dacZero the V5 path uses
+        // (code = V * 4095 / spread + zero), measured 2026-09-08 through the
+        // crossbar into the calibrated ADCs: DAC0 is unity from the
+        // MCP4822's 4.096 V full scale; DAC1's L272 stage gives 16 V per 4096
+        // codes with 0 V at code 1772 (+1.08 V at mid-scale) and saturates
+        // near +7 V. (The reference firmware's V*4095/5 and +2048 were
+        // nominal: 18 % low on DAC0, +1.1 V off on DAC1.)
+        dacSpread[ 0 ] = 4.096f;
+        dacZero[ 0 ] = 0;
+        dacSpread[ 1 ] = 16.0f;
+        dacZero[ 1 ] = 1772;
+        s_ogDacReady = true;
+        // The saved state's DAC voltages, as setRailsAndDACs() applies them on
+        // the I2C path below; the rails are a hardware switch on this board.
+        setDac0voltage( globalState.power.dac0, 0, 0 );
+        setDac1voltage( globalState.power.dac1, 0, 0 );
+        return;
+    }
 
     Wire.setSDA( 4 );
     Wire.setSCL( 5 );
@@ -705,10 +761,12 @@ void setTopRail( float value, int save, int saveEEPROM ) {
     // already holds this exact word (setRailsAndDACs re-sends every rail on
     // several paths). LDAC only needs to fall when something was written.
     bool wrote = false;
+    if ( board::currentBoard( ).caps.railsFirmwareControlled ) {
     digitalWrite( LDAC, HIGH );
     mcp.setChannelValueCached( MCP4728_CHANNEL_C, dacValue, MCP4728_VREF_VDD,
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
+    }   // else: the rails are a hardware switch (OG); keep the bookkeeping only
     (void)wrote;
 
     railHwVolts[ 0 ] = value;   // hardware truth, persisted or not
@@ -737,10 +795,12 @@ void setBotRail( float value, int save, int saveEEPROM ) {
     }
 
     bool wrote = false;
+    if ( board::currentBoard( ).caps.railsFirmwareControlled ) {
     digitalWrite( LDAC, HIGH );
     mcp.setChannelValueCached( MCP4728_CHANNEL_D, dacValue, MCP4728_VREF_VDD,
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
+    }   // else: hardware-switched rails (OG)
     (void)wrote;
 
     railHwVolts[ 1 ] = value;   // hardware truth, persisted or not
@@ -828,6 +888,12 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     // latches and their nudges) runs whether or not a byte went out: the
     // bookkeeping is about what the caller MEANT, not about the bus.
     bool wrote = false;
+    if ( board::currentBoard( ).caps.spiDac ) {
+        // MCP4822 channel A: dacValue was computed above from the spiDac
+        // dacSpread/dacZero set in initDAC() (4.096 V full scale, zero 0).
+        ogDacWrite( 0, dacValue );
+        wrote = true;
+    } else {
     digitalWrite( LDAC, HIGH );
     // delay(10);
     if ( mcp.setChannelValueCached( MCP4728_CHANNEL_A, dacValue, MCP4728_VREF_VDD,
@@ -849,6 +915,7 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     }
     // delay(10);
     digitalWrite( LDAC, LOW );
+    }
     (void)wrote;
     
     // Update globalState for YAML persistence (single source of truth)
@@ -909,10 +976,17 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
         dacValue = 0;
     }
     bool wrote = false;
+    if ( board::currentBoard( ).caps.spiDac ) {
+        // MCP4822 channel B: dacValue from the spiDac dacSpread/dacZero set in
+        // initDAC() (16 V per 4096 codes, 0 V at code 1772).
+        ogDacWrite( 1, dacValue );
+        wrote = true;
+    } else {
     digitalWrite( LDAC, HIGH );
     mcp.setChannelValueCached( MCP4728_CHANNEL_B, dacValue, MCP4728_VREF_VDD,
                                MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL, &wrote );
     digitalWrite( LDAC, LOW );
+    }
     (void)wrote;
 
     // Update globalState for YAML persistence (single source of truth)
@@ -1006,28 +1080,39 @@ float currentReadingOffset1_mA = 0.0f;
 void initINA219( void ) {
 
 #if defined(OG_JUMPERLESS)
-    // Initialize standard I2C0 bus on pins 4/5 at 400kHz for the single INA219 chip
+    // I2C0 on GPIO 4/5 at 400 kHz. The rev 3.1 PCB carries TWO INA219s (both
+    // answer the bus scan): 0x40 across the crossbar's CURR_SENSE+/- lanes,
+    // 0x41 across CURR_SENSE_DAC+/- - the DAC output path (on the V5 that
+    // address is the probe's current sense, whose readers are gated on
+    // hasProbePads).
     Wire.setSDA( 4 );
     Wire.setSCL( 5 );
     Wire.setClock( 400000 );
     Wire.begin( );
 
-    if ( !INA0.begin( ) ) {
+    if ( !INA0.begin( ) || !INA1.begin( ) ) {
         Serial.println( "Failed to find INA219 chip" );
     }
 
     INA0.setShuntSamples(4);  // 16 samples averaged
+    INA1.setShuntSamples(4);
     INA0.setBusSamples(4);    // 16 samples averaged
+    INA1.setBusSamples(4);
     INA0.setMaxCurrentShunt( 1, 2.0 );
+    INA1.setMaxCurrentShunt( 1, 2.0 );
     INA0.setBusVoltageRange( 16 );
+    INA1.setBusVoltageRange( 16 );
 
     uint32_t start = millis();
     while ( INA0.getConversionFlag() == false && (millis() - start < 100) ) {
         tight_loop_contents();
     }
-
     currentReadingOffset0_mA = INA0.getCurrent_mA();
-    currentReadingOffset1_mA = 0.0f;
+    uint32_t start1 = millis();
+    while ( INA1.getConversionFlag() == false && (millis() - start1 < 100) ) {
+        tight_loop_contents();
+    }
+    currentReadingOffset1_mA = INA1.getCurrent_mA();
 #else
     if ( !INA0.begin( ) || !INA1.begin( ) ) {
         // Remove blocking delay - just log the error

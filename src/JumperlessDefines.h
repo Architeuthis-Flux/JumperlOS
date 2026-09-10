@@ -104,8 +104,16 @@ extern int probeRev;
 #define QUADRATURE_B_PIN 13
 #define BUTTON_ENC 11
 
+#if defined(OG_JUMPERLESS)
+// OG probe kit (Jumperless/Probe_Guide.md): the needle wire sits in the GPIO 19
+// hole, the button wire in GPIO 18, and the button shorts the two lines. No
+// pads, no switch. (The V5 values below are the OG's chip selects E and D.)
+#define PROBE_PIN 19
+#define BUTTON_PIN 18
+#else
 #define PROBE_PIN 10
 #define BUTTON_PIN 9
+#endif
 
 #define LDAC 8
 
@@ -283,6 +291,14 @@ extern int probeRev;
 
 #define LED_DATA_OUT 17
 
+#if defined(OG_JUMPERLESS)
+// RP2040: four ADC inputs on GPIO 26-29 (ADC0-2 behind the LM324 buffers,
+// ADC3 the raw +/-8 V input). There is no ADC4-7 on this part.
+#define ADC0_PIN 26
+#define ADC1_PIN 27
+#define ADC2_PIN 28
+#define ADC3_PIN 29
+#else
 #define ADC0_PIN 40
 #define ADC1_PIN 41
 #define ADC2_PIN 42
@@ -291,6 +307,7 @@ extern int probeRev;
 #define ADC5_PIN 45
 #define ADC6_PIN 46
 #define ADC7_PIN 47
+#endif
 
 #define T_RAIL_POS 31
 #define T_RAIL_NEG 0

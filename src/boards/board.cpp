@@ -97,6 +97,12 @@ struct Appender {
 };
 } // namespace
 
+const char *boardGpioName(const BoardTopology &b, int gpio) {
+  if (!b.gpioNames || gpio < 0 || gpio >= (int)b.gpioNameCount) return "";
+  const char *n = b.gpioNames[gpio];
+  return n ? n : "";
+}
+
 size_t boardCapabilitiesJson(const BoardTopology &b, char *buf, size_t cap) {
   if (!buf || cap == 0) return 0;
   Appender a{buf, cap};
@@ -126,6 +132,12 @@ size_t boardCapabilitiesJson(const BoardTopology &b, char *buf, size_t cap) {
   a.i("led_count", b.caps.ledCount);
   a.s(",");
   a.i("usb_cdc_count", b.caps.usbCdcCount);
+  a.s(",");
+  a.i("uart_tx_pin", b.caps.uartTxPin);
+  a.s(",");
+  a.i("uart_rx_pin", b.caps.uartRxPin);
+  a.s(",");
+  a.i("mp_c_heap_reserve_kb", b.caps.mpCHeapReserveKb);
   a.s(",");
   a.i("gpio_count", b.gpioCount);
   a.s(",");

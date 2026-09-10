@@ -605,6 +605,26 @@ void lightUpRail(int logo = -1, int railNumber = -1, int onOff = 1,
                  int brightness = -1,
                  int supplySwitchPosition = 0);
 void setupSwirlColors(void);
+// Which of logoSwirl()'s states painted the logo on the last pass. A board
+// with ONE logo LED cannot show a 7-LED gradient, so it renders the logo
+// itself (see the OG overlay in showNets) and reads this to know what to
+// render. Write-only on a board with the full ring.
+enum LogoSwirlState {
+  LOGO_SWIRL_OTHER = 0,   // a menu ring / indicator / override owns the logo
+  LOGO_SWIRL_IDLE,        // the default rainbow
+  LOGO_SWIRL_PROBE_CONNECT, // connect mode, nothing held
+  LOGO_SWIRL_PROBE_HOLD,    // connect mode, a node is held
+  LOGO_SWIRL_PROBE_CLEAR,   // clear mode
+  // Appended, so the values above keep the numbers already verified on the
+  // bench. On a one-LED board every indicator palette folds to the rainbow
+  // (LOGO_PALETTE_COUNT is 1), so sampling the ring for these showed the old
+  // fast saturated swirl - which is the thing the OG logo work removed.
+  LOGO_SWIRL_UNDO,
+  LOGO_SWIRL_FS,
+  LOGO_SWIRL_OVERRIDE,      // an explicit logo colour: show it, do not scale it
+};
+extern volatile int logoSwirlState;
+
 void logoSwirl(int start = 0, int spread = 5, int probe = 0);
 #if defined(OG_JUMPERLESS)
 void ogStartupAnimation(void); // OG-only rainbow swirl boot animation
@@ -630,6 +650,12 @@ uint32_t scaleDownBrightness(uint32_t hexColor, int scaleFactor = 8,
                              int maxBrightness = 15);
 void showSkippedNodes(uint32_t onColor = 0x0f1f2f, uint32_t offColor =  0x040007);
 void clearLEDsExceptRails();
+// OG rails (a no-op on a board without them). positiveColor != 0 paints the
+// two positive rails that color (the probe session's 3.3 V / 5 V ask, a held
+// supply node); 0 paints every rail its own color. onlyUnlit skips pixels
+// that are already lit - showNets' rule, so a session's paint survives its
+// renders until the session puts the rails back.
+void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit = false);
 uint32_t HsvToRaw(hsvColor hsv);
 
 uint32_t packRgb(rgbColor color);

@@ -19,6 +19,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 static int failures = 0;
 
@@ -123,6 +124,25 @@ static void testCapabilities() {
   CHECK(v5BoardTopology.caps.hasStartupAnimation == true, "V5 plays startup animation");
   CHECK(v5BoardTopology.caps.ledsPerRow == 5, "V5 5 LEDs per row");
   CHECK(v5BoardTopology.caps.ledCount == 445, "V5 445 LEDs total");
+
+  // Nano-header UART: the RP2040/RP2350 mux truth, not the node names.
+  CHECK(v5BoardTopology.caps.uartTxPin == 0 && v5BoardTopology.caps.uartRxPin == 1,
+        "V5 UART0 on GPIO 0/1");
+  CHECK(ogBoardTopology.caps.uartTxPin == 16 && ogBoardTopology.caps.uartRxPin == 17,
+        "OG UART0 on GPIO 16 (TX) / 17 (RX)");
+  CHECK(ogBoardTopology.caps.uartRxPin != 1, "OG UART must not sit on the DAC CS (GPIO 1)");
+  CHECK(v5BoardTopology.caps.mpCHeapReserveKb == 24, "V5 keeps the calibrated 24 KB C-heap reserve");
+  CHECK(ogBoardTopology.caps.mpCHeapReserveKb == 12, "OG C-heap reserve 12 KB");
+
+  // GPIO name tables.
+  CHECK(v5BoardTopology.gpioNameCount == 48, "V5 names 48 GPIOs");
+  CHECK(ogBoardTopology.gpioNameCount == 30, "OG names 30 GPIOs");
+  CHECK(std::strcmp(boardGpioName(v5BoardTopology, 9), "PROBE_BUTTON") == 0, "V5 GPIO 9 = PROBE_BUTTON");
+  CHECK(std::strcmp(boardGpioName(v5BoardTopology, 19), "NANO_RESET_1") == 0, "V5 GPIO 19 = NANO_RESET_1");
+  CHECK(std::strcmp(boardGpioName(ogBoardTopology, 18), "PROBE_BUTTON") == 0, "OG GPIO 18 = PROBE_BUTTON");
+  CHECK(std::strcmp(boardGpioName(ogBoardTopology, 1), "DAC_CS") == 0, "OG GPIO 1 = DAC_CS");
+  CHECK(std::strcmp(boardGpioName(ogBoardTopology, 16), "UART_TX") == 0, "OG GPIO 16 = UART_TX");
+  CHECK(std::strcmp(boardGpioName(ogBoardTopology, 47), "") == 0, "OG GPIO 47 unnamed");
 }
 
 static bool contains(const char *hay, const char *needle) {
@@ -149,6 +169,8 @@ static void testCapabilityJson() {
   CHECK(contains(buf, "\"startup_animation\":false"), "JSON reports no startup animation");
   CHECK(contains(buf, "\"gpio_count\":3"), "JSON reports 3 gpio");
   CHECK(contains(buf, "\"led_count\":111"), "JSON reports 111 leds");
+  CHECK(contains(buf, "\"uart_tx_pin\":16"), "JSON reports the OG UART TX pin");
+  CHECK(contains(buf, "\"mp_c_heap_reserve_kb\":12"), "JSON reports the OG MP C-heap reserve");
 
   // Bounds safety: a tiny buffer must fail cleanly, not overflow.
   char tiny[8];

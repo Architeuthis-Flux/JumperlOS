@@ -37,6 +37,7 @@ KevinC@ppucc.io
 #include "ArduinoStuff.h"
 #include "AsyncPassthrough.h"
 #include "boards/board.h"  // board::currentBoard().caps - runtime hardware gating
+#include "ScanProbe.h"     // scanprobe::parkPins - the OG probe pins at boot
 #include "CommandBuffer.h" // New simplified command buffer system
 #include "Debugs.h"
 #include "FakeGpio.h"
@@ -414,6 +415,12 @@ void setup( ) {
         pinMode( BUTTON_PIN, INPUT_PULLDOWN );
     }
     digitalWrite( PROBE_PIN, HIGH );
+    #else
+    // Scanning probe (OG): the needle floats and the button line is pulled
+    // down until a session drives it (sensing/ScanProbe.cpp owns both pins).
+    if ( board::currentBoard( ).caps.scanningProbe ) {
+        scanprobe::parkPins( false );
+    }
     #endif
 
     // digitalWrite(BUTTON_PIN, HIGH);
@@ -550,13 +557,18 @@ void setup( ) {
     jOS.registerService( &stepViewer );              // HIGH - guide-step browser (wheel owns steps while armed; registered BEFORE the probe stack so it sees turns ahead of Highlighting)
 
 
-    // Probe stack is gated on the board having resistive probe pads (V5). The OG
-    // has no probe pads (its scanning probe is Phase 2 work), so registering
-    // these would poll nonexistent ADC channels and spam measure mode. Runtime
-    // cap instead of #ifdef so the contract - not a board macro - drives it.
-    if ( board::currentBoard( ).caps.hasProbePads ) {
-        jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling); inner set
+    // Probe stack. The button service and the probing service run on any board
+    // with a probe - the V5's pad probe (hasProbePads) or the OG's scanning
+    // probe (scanningProbe; the button decoder and the row sweep live in
+    // sensing/ScanProbe.cpp and Probing.cpp branches on the cap). The rest of
+    // the stack is pad hardware: the pad reader, the switch classifier,
+    // measure mode and the encoder highlighter stay V5-only. Runtime caps
+    // instead of #ifdef so the contract - not a board macro - drives it.
+    if ( board::currentBoard( ).caps.hasProbePads || board::currentBoard( ).caps.scanningProbe ) {
+        jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling on V5; a tone-coupling decoder on the OG); inner set
         jOS.registerService( &probing );          // HIGH - probe reading + probing.probeMode() entry; BLOCKING while a pad menu is open
+    }
+    if ( board::currentBoard( ).caps.hasProbePads ) {
         jOS.registerService( &highlighting );     // HIGH - encoder net highlight / voltage adjuster (BLOCKING while it owns the wheel)
         jOS.registerService( &measureModeService ); // HIGH - measure-position readings
         jOS.registerService( &probeSwitch );      // NORMAL - switch position (500 ms self-gated) + infraServiceTick()

@@ -1,0 +1,101 @@
+version: 2
+sourceOfTruth: bridges
+
+bridges:
+  - {n1: 41, n2: 42}
+
+nets:
+  - {num: 6, nodes: [41, 42], color: pink}
+
+power:
+  topRail: 5.00
+  bottomRail: 0.00
+  dac0: 3.37
+  dac1: 0.00
+
+config:
+  routing: {stackPaths: 2, stackRails: 3, stackDacs: 0, railPriority: 1}
+  gpio:
+    direction:    [1,1,1,1,1,1,1,1,1,1]
+    pulls:        [0,0,0,0,0,0,0,0,0,0]
+    pwmFrequency: [1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00]
+    pwmDutyCycle: [0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50]
+    pwmEnabled:   [0,0,0,0,0,0,0,0,0,0]
+    readFloating: [1,1,1,1,1,1,1,1,0,0]
+  uart: {txFunction: 0, rxFunction: 1}
+  oled: {connected: false, lockConnection: false}
+  bcd: {pins: 0, value: 0}
+parts:
+  - name: "U1"
+    type: ic
+    value: "NE555"
+    footprint: dip8
+    row: 35
+    placed: false
+    pins:
+      GND: {pin: 1, connect: GND, class: gnd}
+      TRIG: {pin: 2, connect: 7, class: signal}
+      OUT: {pin: 3, class: signal}
+      RESET: {pin: 4, connect: TOP_RAIL, class: power}
+      CTRL: {pin: 5, class: nc}
+      THR: {pin: 6, class: signal}
+      DIS: {pin: 7, class: signal}
+      VCC: {pin: 8, connect: TOP_RAIL, class: power}
+  - name: "R1"
+    type: resistor
+    value: "10k"
+    footprint: axial2
+    row: 10
+    placed: false
+    pins:
+      A: {pin: 1, connect: TOP_RAIL, class: signal}
+      B: {pin: 2, connect: 6, class: signal}
+  - name: "R2"
+    type: resistor
+    value: "47k"
+    footprint: axial2
+    row: 13
+    placed: false
+    pins:
+      A: {pin: 1, connect: 6, class: signal}
+      B: {pin: 2, connect: 7, class: signal}
+  - name: "C1"
+    type: capacitor
+    value: "10uF"
+    footprint: sip2
+    row: 18
+    placed: false
+    pins:
+      PLUS: {pin: 1, connect: 7, class: signal}
+      MINUS: {pin: 2, connect: GND, class: signal}
+  - name: "LED1"
+    type: led
+    footprint: sip2
+    row: 22
+    placed: false
+    pins:
+      A: {pin: 1, class: signal}
+      K: {pin: 2, connect: GND, class: signal}
+  - name: "R3"
+    type: resistor
+    value: "330"
+    footprint: axial2
+    row: 16
+    placed: false
+    pins:
+      A: {pin: 1, connect: 37, class: signal}
+      B: {pin: 2, connect: 22, class: signal}
+
+
+
+
+
+
+
+
+
+
+
+
+
+

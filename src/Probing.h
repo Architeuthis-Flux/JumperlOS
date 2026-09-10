@@ -123,6 +123,18 @@ public:
     //@return 0 = neither pressed, 1/2 = the two buttons, revision-dependent
     int checkProbeButtonHardware(void);
 
+    // The one-button probe of a scanning-probe board (BoardCaps::scanningProbe,
+    // the OG): hold length decodes into the two codes above - short press =
+    // the current mode's own button, long press = the other one. Runs in
+    // place of the sampler + processSample() there (see the definition).
+    void scanProbeButtonService(void);
+    // The decoder's debounced physical hold (survives clearButtonState()).
+    bool scanProbeHeld(void) const;
+    // Whether the press scanProbeButtonService() most recently posted was the
+    // long one (>= kScanLongPressMs). The session's ask / pick sub-states read
+    // it next to the posted code: short press = cycle, long press = select.
+    bool scanLastPressWasLong(void) const;
+
     // Run the press/release/double-tap state machine against a freshly
     // decoded sample. Factored out of service() so the PIO IRQ handler
     // can drive it directly from the polling state machine, decoupling
@@ -474,6 +486,31 @@ public:
     int readRails(int pin = 0);
     int justReadProbe(bool allowDuplicates = false, int rawPad = 0);
     int readProbe(void);
+    // readProbe() for a scanning-probe board (BoardCaps::scanningProbe): one
+    // tick of the crossbar sweep, same return contract. Defined next to readProbe.
+    int scanProbeRead(void);
+    // Scanning-probe session sub-states (defined next to scanProbeRead): the
+    // 3.3 V / 5 V ask a positive-rail touch opens, and the pick a multi-row
+    // sweep opens. scanSessionFilter() sits right after readProbe() in the
+    // tick and either swallows the read (-1) or hands the chosen node on as
+    // if the needle had read it.
+    int scanSessionFilter(ProbeSession& s, int read);
+    void scanAskShow(ProbeSession& s);
+    void scanPickShow(ProbeSession& s);
+    void scanPickClose(ProbeSession& s);
+    void scanRailsRelease(ProbeSession& s);
+    // "Is the needle still on what the pick / this touch is about?" - the
+    // sweep reports a flickering subset of one net, so overlap, not equality.
+    bool scanReadOverlapsPick(const ProbeSession& s) const;
+    bool scanReadOverlapsTouch(const ProbeSession& s) const;
+    void scanPickOpen(ProbeSession& s);
+    void scanTouchReset(ProbeSession& s);
+    // Consecutive sweeps that completed with nothing on the needle. One
+    // empty sweep is not a lift: the button decoder drives a tone on the
+    // needle every 12 ms and the session aborts sweeps around it, so a
+    // resting needle reports nothing every few sweeps. The sub-states treat
+    // the needle as lifted only at kScanLiftSweeps (see scanSessionFilter).
+    volatile int scanEmptySweeps = 99;
     
     int readProbeRaw(int readNothingTouched = 0, bool allowDuplicates = false); 
     int smoothProbeReading(int probeRead, bool reset = false);
@@ -606,6 +643,18 @@ extern int (&buildingBottomSetting)[2];
 
 // Global state flags from main.cpp
 extern volatile int probeActive;
+// True while a scanning-probe session is asking the user something: the
+// multi-row pick, or the 3.3 V / 5 V rail ask. The OG logo is a single LED and
+// shows it blue, the colour the OG reference firmware used for "disambiguate".
+extern volatile bool probeChooserActive;
+// The open multi-row pick, published for the renderer. A board whose logo and
+// rows are single LEDs paints these itself at the END of showNets, after
+// lightUpNet has drawn the nets - otherwise a row that is already part of a
+// net keeps its net colour and the pick is invisible on exactly the rows a
+// user is most likely to be disambiguating (Kevin, 2026-09-08).
+extern volatile int probePickCount;   // 0 = no pick open
+extern volatile int probePickIndex;   // which entry is the bright one
+extern volatile int probePickNodes[8];
 
 extern volatile bool core1busy;
 extern volatile bool core2busy;

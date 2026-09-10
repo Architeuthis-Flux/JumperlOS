@@ -24,6 +24,7 @@
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MCP4728.h"
+#include "boards/board.h"   // boardGpioName / gpioNameCount (X panel)
 #include "MatrixState.h"
 #include "Menus.h"
 #include "NetManager.h"
@@ -40,6 +41,7 @@
 #include "IrqSlots.h"
 #include "PersistentStuff.h"
 #include "Probing.h"
+#include "ScanProbe.h" // cmd_scanProbeTest (OG scanning probe diagnostic)
 #include "ProjectsApp.h" // z: guided-project runner (headless/HIL entry)
 #include "GuideScript.h" // z band: parsePartValue / guideResistorBand report
 #include "StepViewer.h"  // z steps: the viewer's serial twin
@@ -617,6 +619,10 @@ void SingleCharCommands::initializeCommands( ) {
                      "Dump pad/IO state for every crossbar chip-select pin "
                      "(A-H + I-L). 'I <chip 0-11>' pulses one chip's CS for scoping.",
                      cmd_testChipSelect, MENU_DEBUG, CAT_DEBUG );
+    registerCommand( 's', "scanning probe test",
+                     "OG scanning probe: 's' = tip level, button, one full row sweep with timing; "
+                     "'s b' = watch the button decoder for 5 s; 's r <node>' = raw tone patterns for one node.",
+                     cmd_scanProbeTest, MENU_DEBUG, CAT_DEBUG );
 #endif
 
     registerCommand( 'Z', "USB debug menu",
@@ -2800,12 +2806,8 @@ CommandResult cmd_readADC( char c, const String& line ) {
             }
         } else if ( ch == 'i' ) {
             if ( arg.length( ) > 1 && arg[ 1 ] == '1' ) {
-#if defined(OG_JUMPERLESS)
-                float iSense = 0.0f;
-#else
-                extern INA219 INA1;
+                extern INA219 INA1;   // OG: the DAC-side sensor (0x41)
                 float iSense = INA1.getCurrent_mA()- currentReadingOffset1_mA;
-#endif
                 target->print( "ina1 = " );
                 target->print( iSense );
                 target->println( "mA" );
@@ -3025,56 +3027,8 @@ CommandResult cmd_statusDiagnosticsMenu( char c, const String& line ) {
 
 
 
-const char* pinNames[48] = {
-    "UART_Tx",
-    "UART_Rx",
-    "LED_PROBE",
-    "LED_TOP",
-    "I2C0_SDA",
-    "I2C0_SCL",
-    "RP6",
-    "RP7",
-    "LDAC",
-    "PROBE_BUTTON",
-    "PROBE_PROBE",
-    "ENC_PUSH",
-    "ENC_A",
-    "ENC_B",
-    "CH_DATA",
-    "CH_CLK",
-    "CH_RESET",
-    "LED_BB",
-    "NANO_RESET_0",
-    "NANO_RESET_1",
-    "GPIO_1",
-    "GPIO_2",
-    "GPIO_3",
-    "GPIO_4",
-    "GPIO_5",
-    "GPIO_6",
-    "GPIO_7",
-    "GPIO_8",
-    "CH_CS_A",
-    "CH_CS_B",
-    "CH_CS_C",
-    "CH_CS_D",
-    "CH_CS_E",
-    "CH_CS_F",
-    "CH_CS_G",
-    "CH_CS_H",
-    "CH_CS_I",
-    "CH_CS_J",
-    "CH_CS_K",
-    "CH_CS_L",
-    "ADC_0",
-    "ADC_1",
-    "ADC_2",
-    "ADC_3",
-    "ADC_4_5V",
-    "PROBE_PAD_SENS",
-    "SUPPLY_MONITOR",
-    "ADC_PROBE"
-};
+// (The GPIO name table lives in the board descriptor now: board_v5.cpp /
+// board_og.cpp kV5GpioNames / kOgGpioNames, read through boardGpioName().)
 const char* PSRAM_CS = "PSRAM_CS";
 
 
@@ -3385,36 +3339,47 @@ CommandResult cmd_resourceStatus( char c, const String& line ) {
     target->println( "\n\rgpio  up dn  func      hex  name            gpio  up dn  func      hex  name" );
     target->println(     "────  ─────  ────────  ───  ────────────    ────  ─────  ────────  ───  ────────────" );
     
-    for ( int row = 0; row < 24; row++ ) {
+    // Two columns over the board's GPIOs (V5 48 -> 24 rows, exactly the old
+    // layout; OG 30 -> 15 rows - its pads past 29 do not exist).
+    const board::BoardTopology& bd = board::currentBoard( );
+    const int gpioTotal = bd.gpioNameCount;
+    const int rows = ( gpioTotal + 1 ) / 2;
+    for ( int row = 0; row < rows; row++ ) {
         int gpio1 = row;
-        int gpio2 = row + 24;
+        int gpio2 = row + rows;
         
         uint32_t pad1 = pads_bank0_hw->io[gpio1];
-        uint32_t pad2 = pads_bank0_hw->io[gpio2];
         
         bool up1 = gpio_is_pulled_up(gpio1);
         bool dn1 = gpio_is_pulled_down(gpio1);
-        bool up2 = gpio_is_pulled_up(gpio2);
-        bool dn2 = gpio_is_pulled_down(gpio2);
         
         gpio_function_t func1 = gpio_get_function( gpio1 );
-        gpio_function_t func2 = gpio_get_function( gpio2 );
         const char* funcName1 = gpio_function_name_for_pin( gpio1, func1 );
-        const char* funcName2 = gpio_function_name_for_pin( gpio2, func2 );
         
-        target->printf( "%4d   %c  %c  %-8s  %-2X   %-14s  %4d   %c  %c  %-8s  %-2X   %-14s\n\r",
+        target->printf( "%4d   %c  %c  %-8s  %-2X   %-14s",
                        gpio1,
                        up1 ? '^' : ' ',
                        dn1 ? 'v' : ' ',
                        funcName1,
                        (int)func1,
-                       (gpio1 == 19 && jumperlessConfig.hardware.psram_installed == 1) ? "PSRAM_CS" : pinNames[gpio1],
-                       gpio2,
-                       up2 ? '^' : ' ',
-                       dn2 ? 'v' : ' ',
-                       funcName2,
-                       (int)func2,
-                       pinNames[gpio2] );
+                       (gpio1 == 19 && jumperlessConfig.hardware.psram_installed == 1) ? "PSRAM_CS" : boardGpioName( bd, gpio1 ) );
+        if ( gpio2 < gpioTotal ) {
+            uint32_t pad2 = pads_bank0_hw->io[gpio2];
+            bool up2 = gpio_is_pulled_up(gpio2);
+            bool dn2 = gpio_is_pulled_down(gpio2);
+            gpio_function_t func2 = gpio_get_function( gpio2 );
+            const char* funcName2 = gpio_function_name_for_pin( gpio2, func2 );
+            target->printf( "  %4d   %c  %c  %-8s  %-2X   %-14s",
+                           gpio2,
+                           up2 ? '^' : ' ',
+                           dn2 ? 'v' : ' ',
+                           funcName2,
+                           (int)func2,
+                           boardGpioName( bd, gpio2 ) );
+            (void)pad2;
+        }
+        target->print( "\n\r" );
+        (void)pad1;
     }
     
     target->println( "\n\r          ^ = pull-up  v = pull-down     ● = claimed, ○ = free\n\r" );
@@ -3735,6 +3700,90 @@ CommandResult cmd_testChipSelect( char c, const String& line ) {
     target->println( "pad clobber; if they match but the chip still won't switch," );
     target->println( "it's hardware (CS not wired to 20-23). Use 'I <chip>' to scope." );
     return CMD_SHOW_MENU;
+}
+
+// Diagnostic for the scanning probe (sensing/ScanProbe.cpp): the bench spike
+// that proves the physics on a board before a probe session is trusted - tip
+// level, button, one full sweep with timing; 's b' watches the one-button
+// decoder; 's r <node>' shows the raw tone patterns one node produces. Every
+// mode resets the crossbar and restores the circuit with a clean refresh.
+// OG-only (gated so the V5 build is unaffected).
+CommandResult cmd_scanProbeTest( char c, const String& line ) {
+    Stream* target = Jerial.getResponseTarget( );
+    if ( target == nullptr ) target = &Serial;
+    if ( !scanprobe::available( ) ) {
+        target->println( "this board has no scanning probe" );
+        return CMD_DONT_SHOW_MENU;
+    }
+    auto tipName = []( scanprobe::TipLevel t ) -> const char* {
+        return t == scanprobe::TIP_HIGH ? "HIGH (a positive rail)" : t == scanprobe::TIP_LOW ? "LOW (GND)" : "floating";
+    };
+    auto bits4 = []( int p, char* out ) -> const char* {
+        if ( p < 0 ) { strcpy( out, "no edge" ); return out; }
+        for ( int i = 0; i < 4; i++ ) out[ i ] = ( ( p >> ( 3 - i ) ) & 1 ) ? '1' : '0';
+        out[ 4 ] = '\0';
+        return out;
+    };
+
+    String arg = getCommandArgs( line );
+    arg.trim( );
+
+    if ( arg.startsWith( "b" ) ) {
+        target->println( "watching the probe button for 5 s (at idle: short press -> 2, long press -> 1)..." );
+        target->flush( );
+        unsigned long until = millis( ) + 5000;
+        int lastState = -1;
+        while ( millis( ) < until ) {
+            probeButton.service( );
+            int st = probeButton.getButtonState( );
+            if ( st != lastState ) {
+                target->printf( "  state %d  (%lu us per sample)\n\r", st, (unsigned long)probeButtonCPULastUs );
+                lastState = st;
+            }
+            int ev = probeButton.getButtonPress( );
+            if ( ev ) target->printf( "  event %d (%s)\n\r", ev, ev == 2 ? "short = connect" : "long = clear" );
+            delay( 2 );
+        }
+        target->println( "done." );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    if ( arg.startsWith( "r" ) ) {
+        int node = arg.substring( 1 ).toInt( );
+        if ( node <= 0 ) {
+            target->println( "usage: s r <node>   (e.g. 's r 12'; header pins by node number, 70+)" );
+            return CMD_DONT_SHOW_MENU;
+        }
+        int down = -1, up = -1;
+        char d[ 8 ], u[ 8 ];
+        scanprobe::rawPatterns( node, &down, &up );
+        target->printf( "node %d: tone pattern under pull-down %s, pull-up %s   (a touch reads 0101 / 0101)\n\r",
+                        node, bits4( down, d ), bits4( up, u ) );
+        refreshLocalConnections( 1, 1, 1 );
+        return CMD_DONT_SHOW_MENU;
+    }
+
+    target->printf( "tip (circuit live): %s\n\r", tipName( scanprobe::tipLevel( ) ) );
+    target->printf( "button: %s\n\r", scanprobe::buttonPressed( ) ? "pressed" : "released" );
+    target->flush( );
+    scanprobe::TipLevel tip = scanprobe::sweepBegin( );
+    if ( tip != scanprobe::TIP_FLOATING ) {
+        target->printf( "tip (crossbar empty): %s - no sweep, the tone is never driven into a rail\n\r", tipName( tip ) );
+    } else {
+        int steps = 0;
+        while ( !scanprobe::sweepStep( ) && scanprobe::sweepActive( ) ) steps++;
+        int nodes[ 8 ];
+        int n = scanprobe::sweepResults( nodes, 8 );
+        target->printf( "sweep: %lu us over %d groups, %d node(s) following the tone", (unsigned long)scanprobe::lastSweepUs( ), steps + 1, n );
+        for ( int i = 0; i < n; i++ ) {
+            target->print( i == 0 ? ": " : ", " );
+            target->print( definesToChar( nodes[ i ] ) );
+        }
+        target->println( );
+    }
+    refreshLocalConnections( 1, 1, 1 );
+    target->println( "crossbar restored (clean refresh)." );
+    return CMD_DONT_SHOW_MENU;
 }
 #endif // OG_JUMPERLESS
 
