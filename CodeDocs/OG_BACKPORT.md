@@ -377,7 +377,11 @@ How to flash + debug the OG (workflow established this session):
   with `target extended-remote 127.0.0.1:3333; monitor reset halt; break abort;
   continue; bt`. (A Raspberry Pi Debug Probe `2e8a:000c` is wired to the OG SWD pads.)
 - Gotchas: don't `pkill -f openocd` (matches & kills your own shell); zsh aborts
-  the line on a no-match glob (use `ls /dev/ | grep usbmodem`).
+  the line on a no-match glob (use `ls /dev/ | grep usbmodem`). After any
+  `reset run` give the board ~12 s before the next SWD attach: attaching while
+  it is still booting / re-enumerating left both cores halted with a garbage
+  SP once (2026-09-08, "Failed to read memory at 0xffffffe0", USB gone) -
+  recovery is `program firmware.elf verify reset exit`.
 
 ### Session 2026-06-24 — static-RAM reclaim + grouped feature flags + caps-gated scheduler
 Reclaimed ~16.6 KB of OG static RAM (69.9% -> **63.6%**, 166,660 B) so the 20 KB
@@ -409,11 +413,816 @@ firstLoop `#if !OG`) is a deferred follow-up. Host board test green (OG + V5).
 **NOT yet verified on hardware** - needs a BOOTSEL/SWD reflash + REPL smoke test
 (`import jumperless`, confirm no "FATAL: failed to malloc 20 KB heap").
 
+### Session 2026-09-07 — the scanning probe lands (uncommitted on dev until Kevin's hands-on pass)
+
+> **The session-open reboot is fixed (2026-09-08, next section):** it was the
+> flash bootloader, not the probe. The bisect and the SWD recipes stay in
+> **`CodeDocs/HANDOFF_2026-09-08_OG_PROBE_REBOOT.md`**.
+
+**What the OG probe is.** A needle in the GPIO 19 hole and a button that shorts
+that line to GPIO 18 (`Probe_Guide.md`); no pads, no switch, no addressable LED
+(the kit LED sits between the two lines). Until now the OG build had
+`PROBE_PIN 10` / `BUTTON_PIN 9` (the V5 values = the OG's chip selects E and D)
+and `ADC0_PIN 40` (RP2350 numbering); both are OG-conditional now (19/18 and
+26..29 in `JumperlessDefines.h`).
+
+**How it finds the row** (the reference firmware's algorithm, topology-driven):
+the needle carries a 25 kHz tone; every breadboard row, corner row and header
+pin is routed in turn through the crossbar to the RP2040's ADC0/ADC1 pin (read
+digitally, behind the OG's LM324 buffers) and the one that follows the tone -
+four samples a quarter period after the falling edge read 0,1,0,1 - is the
+touch. A non-touched node reads 1111 (`s r <node>` shows the raw patterns).
+The crossbar has to be empty for this, so a sweep resets the chips - the
+original OG probe-mode behaviour; between sweeps the board stays reset, and
+`Probing::probeExitTail()` restores the circuit with a forced clean
+`refreshLocalConnections(1,1,1)` (the OG's RouteSafety is stubbed, so the
+suspect-shadow upgrade a V5 would get does not exist here). A sweep is chunked
+into 13 groups (one chip's 7 rows, the 4 corners, half a header chip) so one
+probe tick stays ~1 ms; a full sweep measured **9.1-9.4 ms** on the bench.
+`sweepBegin()` waits for core 1 (`waitCore2`) and a sweep restarts itself if
+`routingGeneration` moves underneath it (a connection landed mid-sweep).
+
+**The button** is read by coupling (10 kHz tone on the needle shows up on GPIO
+18 under BOTH pulls - the kit LED couples one way only) and decoded by hold
+length in `ProbeButton::scanProbeButtonService()`: short press = the current
+mode's own button (idle: connect, in a session: exit / cancel a half-made
+pick), long press (>= 750 ms) = the other button (idle: clear, in a session:
+toggle connect <-> clear). That is the original OG gesture set ("long press =
+connect / clear, short press = commit") laid over the V5 session, which
+already treats the same button as exit and the other as a mode switch. One
+event per physical press; 12 ms sampling (~360 us per sample), 2-sample
+debounce. `processSample()` (two buttons, PIO sampler, double-tap undo) is
+bypassed on this board.
+
+**Wiring into the stack** (all runtime-gated on `caps.scanningProbe` /
+`caps.hasProbePads`, no new board macro): `main.cpp` registers `probeButton` +
+`probing` for either probe kind, the pad-only services (highlighting, measure
+mode, switch classifier, pad reader) stay V5; `Probing::service()` skips the
+pad read at idle (a sweep would empty the crossbar); `Probing::readProbe()`
+dispatches to `Probing::scanProbeRead()`; `probeLEDhandler()` and
+`classifySwitchPosition()` return early without pads (the JeoPixel was never
+begun on the OG, and the classifier read a stub INA). The tip pre-read (needle
+as input, pull-up vs pull-down) reports a hard level as GND / SUPPLY_3V3 and
+never drives the tone into a rail (the reference did).
+
+**Diagnostic:** `s` (OG-only, debug menu) = tip level, button, one full sweep
+with timing, then a clean refresh; `s b` watches the decoder for 5 s;
+`s r <node>` prints the raw tone patterns for one node.
+
+**Bench (serial-verified, nothing touching the board):** tip floating, button
+released, 5 sweeps 9101-9365 us with 0 nodes; `c` (crossbar dump) identical
+before and after a sweep with a live `+ 1-2` connection = restore works.
+**Not yet verified (needs hands):** a real touch -> row on the terminal, two
+touches -> a connection, the button decode (short/long) entering and toggling
+probe mode, the kit LED lighting in a session, header-pin and corner-row
+touches, a touch on a rail reading GND / 3.3 V.
+
+**Two things found on the way, both pre-existing:**
+1. **Two USB loads ended with stale flash.** Twice, `picotool load -x`
+   (once via the 1200-baud touch, once from a button BOOTSEL) reported success
+   and the board then hard-faulted before `setup()`: SWD showed sectors
+   0x10003000..0x10056fff (the first 84 sectors of `.text`) holding an
+   older build while everything after matched the uf2, so crt0's literal pool
+   sent `runtime_init` into `__retarget_lock_acquire(NULL)`. What was NOT
+   isolated: whether the write was incomplete or something rewrote those
+   sectors on the first boot. The discriminator is cheap - `picotool load`
+   without `-x`, dump over SWD while still in BOOTSEL, diff. The OTA stub is
+   not the culprit (it mounts LittleFS; the OG's FS is FatFS behind the SPIFTL
+   translation layer - the first blocks of the region read 0xFF over SWD, but
+   `/` lists projects, python_scripts and slots, so the FS is fine). Programming the ELF
+   over the debug probe (`openocd ... program firmware.elf verify; reset run`,
+   `target/rp2040.cfg`) verified and booted first time. Until this is
+   understood, flash the OG over SWD or verify after a USB load
+   (`picotool verify`). Note openocd probes this flash as 32 MB.
+2. **MicroPython is disabled on the OG build** at boot: `mpAllocHeap` finds
+   40248 bytes of C heap (`X`: "Free: 39 KB") against a 40960-byte need (16 KB
+   rung + 24 KB reserve) - 712 bytes short, on the build that was on the board
+   before this session too (this session adds 376 B of static RAM). Also
+   "Not enough memory to write file (54KB needed)" when `/` tries to create
+   `jumperless.pyi`. MpRemoteService retried the heap every pass, printing the
+   FATAL line ~200 times a second on port 1 - the terminal was unusable. The
+   line now prints once (`Python_Proper.cpp`); the heap shortfall itself is
+   untouched and is the OG's primary-deliverable regression to chase next (the
+   static-RAM reclaim list in this doc is where the kilobyte comes from).
+3. Smaller, seen in `X`: the GPIO table still labels 9/10 as PROBE_BUTTON /
+   PROBE_PROBE and knows nothing about 18/19 (a V5 label table), and the OLED
+   block reports its default "crossbar" pins as GPIO 26/27 - on the OG those
+   are the ADC0/ADC1 pins the sweep (and every ADC read) uses. The OLED is
+   inert here today; if an OG panel is ever brought up it must not land on
+   26/27 or 18/19.
+
+**Follow-ups (design calls for Kevin):** a positive rail reads as 3.3 V with no
+way to pick 5 V (the reference asked with short/long press); the needle on a
+row that is pulled to a rail through a resistor classifies as that rail (as
+before); when the needle's net spans several holes the lowest is reported
+(`debug.probing` prints the rest); a ±8 V rail on the needle over-drives GPIO
+19 (hardware, unchanged); a terminal way into probe mode for OG users with no
+button; the OLED-on-GP18/19 idea in this doc conflicts with the probe pins;
+the HIL harness knows only `JLV5port*` (the OG enumerates as `JLOGport1/3/5/7`
+= terminal / UART passthrough / MicroPython REPL / TUI).
+
+### Session 2026-09-08 — the probe-session reboot was the flash bootloader
+
+**Symptom:** opening a probe session (button press, or the press written
+into `ProbeButton` over SWD) HardFaulted core 1 at a random PC 0–11.5 s in;
+eight of eight runs on the previous build. Bare sweeps from the terminal
+never faulted.
+
+**What the debugger showed** (vector catch on both cores, Tcl scripts in the
+handoff): three faults at plain instructions that touch no memory (`lsrs`,
+`blx r3`, `beq.n`) and one whose stacked frame held PC `0x41000200` with the
+Thumb bit clear - a function pointer loaded from a flash literal pool that
+read back as garbage. Hardware breakpoints on `__wrap_flash_range_erase` /
+`__wrap_flash_range_program` never fired before a fault, the SSI/XIP
+registers read normal at the fault, `ch446q_timeout_count` stayed 0, and
+core 1's SP sat 0x48–0x120 below the top of its 8 KB block (no overflow).
+So: not a flash write, not the crosspoint ISR, not the stack - the flash
+itself was returning bad data.
+
+**Root cause:** `boards/jumperless_og.json` named no second-stage
+bootloader, so the platform linked its fallback `boot2_generic_03h_2`:
+single-bit SPI, the `03h` Read Data command, CLKDIV 2 = **66.5 MHz** at the
+133 MHz sys clock. The W25Q128's `03h` read is rated to 50 MHz. Reads were
+marginal, and they failed exactly when core 1 fetched hard (LED rendering in
+a session) with ~200 crosspoint switches per sweep adding noise - core 0
+runs the sweep mostly from RAM, so core 1 took every fault. Live registers:
+`SSI_CTRLR0=0x001f0300` (standard frame format), `SSI_BAUDR=2`. The
+reference OG firmware (`board = pico`, its `pico.json`) and the framework's
+own `jumperless_v1` variant both use a quad Winbond boot2.
+
+**Fix:** `build.arduino.earlephilhower.boot2_source =
+boot2_w25q080_2_padded_checksum.S` in `boards/jumperless_og.json` (quad
+I/O `EBh` at CLKDIV 2, the reference's choice; the framework's variant uses
+`w25q128jvxq_4`, 33 MHz, if this ever needs to be more conservative). The
+`.boot2` section of the ELF changes, nothing else does. XIP is also faster
+now (4 bits per clock instead of 1).
+
+**Verified (serial + SWD, no hands):** 3 x 20 s and 2 x 60 s injected
+sessions, `probeActive=1`, sweeps completing at 11.5–12.6 ms (core 1 busy),
+zero faults; `?` and `s` normal after the reflash. The `g_debugMask` bisect
+scaffolding is removed. V5 builds unchanged (its board json was not touched).
+**Still needs Kevin's hands:** everything in the 2026-09-07 list above (a real
+touch, two touches, the short/long press gestures, the kit LED).
+
+**Commit these together (the boot2 fix, separable from the probe work):**
+`boards/jumperless_og.json`, this section of `CodeDocs/OG_BACKPORT.md`, and
+the RESOLVED banner in `CodeDocs/HANDOFF_2026-09-08_OG_PROBE_REBOOT.md`.
+The probe files (`src/sensing/ScanProbe.*`, `src/Probing.*`, `src/main.cpp`,
+`src/JumperlessDefines.h`, `src/SingleCharCommands.*`,
+`src/snakes/Python_Proper.cpp`) are the 2026-09-07 session's commit. Never
+stage `.pio/build/jumperless_v5/firmware.uf2` outside a release.
+
+**Worth re-testing now:** the two `picotool load -x` USB flashes that "left
+stale sectors" (2026-09-07 finding 1) were diagnosed by reading flash back
+over SWD - through the same marginal XIP path. That verdict may have been a
+read error, not a write error.
+
+**OG flash notes:** openocd's probe reports the part as 32 MB
+(`RP2040 Flash Probe: 33554432 bytes`); the board json still says 16 MB.
+Whichever it is, the quad boot2 works on both W25Q128 and W25Q256 (3-byte
+addressing covers the first 16 MB).
+
+### Session 2026-09-08 (afternoon) — parity batch: MicroPython back, DAC, UART, INA, ADC scaling
+
+All runtime-gated on `board::currentBoard()` (caps / descriptor tables), V5
+builds unchanged in behaviour (its `pinNames` table moved into the descriptor
+as `kV5GpioNames`, 192 B of .data to rodata). Host board test green. Bench:
+serial + MicroPython REPL + SWD, no hands.
+
+**Contract additions (`board.h`):** `BoardCaps::uartTxPin/uartRxPin` (V5 0/1,
+OG 16/17), `BoardCaps::mpCHeapReserveKb` (V5 24, OG 12),
+`BoardTopology::gpioNames/gpioNameCount` + `boardGpioName()`; all in
+`boardCapabilitiesJson` (`uart_tx_pin`, `uart_rx_pin`,
+`mp_c_heap_reserve_kb`) with host-test assertions.
+
+**MicroPython is back on the OG.** `mpAllocHeap` takes its C-heap reserve
+from the board: with 12 KB the ladder lands on a **24 KB GC heap** (the 28 KB
+configured rung needs 40960 B), leaving ~15.6 KB of C heap. Verified on the
+REPL (port 5): `import jumperless` -> `adc_get`, `gpio_get`, `os.listdir('/')`,
+`gc.mem_free()` = 15632 after import; config saves (`:`) and slot autosaves
+(`+`/`-`) ran with the heap allocated, `X` free heap 15.3 KB, no abort over a
+140 s session. It is a small Python: a 4 KB bytearray plus a 300-string join
+raises MemoryError. If a C-heap abort ever shows up in a file path, raise the
+OG reserve to 14 (the ladder then still gives 24 KB) before shrinking anything.
+
+**UART passthrough pins.** `AsyncPassthrough` muxed GPIO 0/1 to UART0 on
+every board; on the OG those are the routable `RP_GPIO_0` node (0, via R7 to
+chip L) and the **MCP4822's SPI chip-select (1)**. The Nano-header UART0 is on
+GPIO 16 (TX) / 17 (RX) - the PCB netlist and the reference's
+`Serial1.setTX(16)/setRX(17)` agree. The pins now come from the descriptor,
+and the MicroPython port's `machine.UART(0)` defaults are set to 16/17 for the
+OG env (`-DMICROPY_HW_UART0_TX/RX/CTS/RTS`), so Python cannot re-mux the DAC
+CS either.
+
+**Both INA219s.** The rev 3.1 PCB carries two (bus scan: 0x40, 0x41): 0x40
+across the crossbar's CURR_SENSE lanes, 0x41 across the DAC output path. The
+OG init brought up only INA0; both are initialised now and the OG-only zero
+stubs in `vi1` and `jumperless.ina_get_*(1)` are gone.
+
+**MCP4822 DAC backend** (`caps.spiDac`, Peripherals.cpp): pico-sdk
+`spi_init(spi0, 8 MHz)`, 16-bit frames, only SCK (2) and MOSI (3) muxed to
+SPI - GPIO 0 (SPI0 RX) stays the routable node - CS (1) as SIO. 2x gain,
+LDAC is tied to GND on the PCB. Rails are a hardware switch: `setTopRail` /
+`setBotRail` keep only the bookkeeping when `!railsFirmwareControlled`.
+Scaling measured through the crossbar into the ADCs (`+ DAC0-ADC0`,
+`+ DAC1-ADC3`), with the +5 V supply as the reference (it reads 4.64 V on
+ADC0 and 4.77 V on ADC3 with the formulas below - a USB rail behind a diode):
+
+| requested | DAC0 out (unity from 4.096 V FS) | DAC1 out (16 V / 4096 codes) |
+|---|---|---|
+| 0 V | 0.05 V | +1.08 V at code 2048 -> zero moved to code 1772 |
+| 2.5 V | 2.10 V with the reference's V*4095/5 -> now code = V*4095/4.096 | |
+| +4 / -4 V | | +5.1 / -3.1 V around the old zero; symmetric around 1772 |
+| +8 / -8 V | 4.17 V (full scale) | saturates at +7.0 V; code 0 = -6.9 V |
+
+Re-verified after the fix (`jumperless.dac_set` -> `adc_get` through the
+crossbar): DAC0 0 / 1 / 2.5 / 4 / 4.096 V read 0.05 / 1.03 / 2.56 / 4.06 /
+4.17 V; DAC1 -6 / -4 / 0 / 4 / 6.5 V read -6.17 / -4.15 / -0.10 / 4.01 /
+6.47 V. Idle (floating) inputs now read 4.99 V on ADC0-2 and 7.0 V on ADC3 -
+the buffers sit high with nothing connected.
+
+So the OG's DAC0 is **0-4.096 V** and DAC1 **-6.9..+7.0 V**; the descriptor
+ranges say so, and `initDAC()` sets `dacSpread/dacZero` = {4.096, 0} and
+{16, 1772} so the shared `V*4095/spread + zero` formula produces the codes
+(a future `$` calibration lands in the same arrays). The reference firmware's
+nominal V*4095/5 and +2048 were 18 % low on DAC0 and +1.1 V off on DAC1.
+
+**ADC scaling from the descriptor.** `readAdcVoltage` used the V5's static
+`adcSpread/adcZero` (18.28 / 8.0) on the OG, reading a floating buffered
+input as 9.2 V. `initADC()`'s OG branch now copies the descriptor's ranges
+into those arrays: ADC0-2 0-5 V, ADC3 -8.1..+8.24 (the reference's 16/4010
+and -8.1). `jumperless.adc_get()` follows.
+
+**X panel:** the pin table is the board's (`kOgGpioNames`, 30 rows: 0 GPIO_0,
+1-3 DAC_CS/SCK/MOSI, 16/17 UART_TX/RX, 18/19 PROBE_BUTTON/PROBE_PROBE, 24
+CH_RESET, 25 LED_BB, 26-29 ADC_0-3); the V5 output is unchanged.
+
+**First hands-on finding (Kevin, 09:57): "nothing shows until the second
+connection."** `printGraphicsRow()` - the primitive under every
+`b.printRawRow()` / `b.lightUpNode()` - returns immediately on a
+one-LED-per-row board, so the session's first-node latch, its three flash
+frames and the delete fades painted nothing on the OG; only a finished
+connection showed (through `showNets()`, which maps rows itself).
+`bread::printRawRow` / `bread::lightUpNode` now paint the row's single pixel
+from `nodesToPixelMap` on `ledsPerRow == 1` (any lit column lights it, the
+`0xFFFFFE` bg keeps it transparent), while `printGraphicsRow` stays a no-op
+there - glyph text has no meaning on one pixel. Add `src/Graphics.cpp` to the
+parity commit. **Bench-verified by Kevin: pending.**
+
+**Seen on the way, not fixed (Kevin's calls / follow-ups):**
+- `RP_UART_TX` / `RP_UART_RX` node perspective: the OG's nets are named from
+  the Nano's side, so `kOgGpio` maps `RP_UART_TX` to GPIO 17 = the RP2040's
+  RX; the V5 names the same node from the RP's side (GPIO 0 = TX). Changing
+  it is a routing-semantics change - left alone, flagged.
+- `TOP_RAIL` / `BOTTOM_RAIL` are "Invalid node" on the OG (its rail nodes are
+  `TOP_1/TOP_30/BOTTOM_1/BOTTOM_30`); an LLM tool using the V5 names fails.
+- `+ GND-ADC3` reports no path (GND cannot reach chip L's ADC3 lane on the
+  OG router), and `+ GND-ADC2` read full scale on ADC2 - unverified whether
+  the crosspoint or the ADC2 buffer; ADC0/ADC1/ADC3 behave.
+- `$` (calibrate DACs) on the OG would overwrite the spiDac
+  `dacSpread/dacZero` with V5-style values - gate it on `!spiDac` or make it
+  OG-aware before anyone runs it there.
+- `MICROPY_HW_UART0_CTS/RTS` default to 18/19, the probe pins; only muxed if
+  a script asks for flow control, and there is no harmless choice on this
+  pinout (the other option, 2/3, is the DAC bus).
+- `loop1` still reads `readAdcVoltage(6, 4)` for `supplySense` on a part with
+  four ADC inputs (pre-existing; gate on `adcCount`).
+- `MICROPY_HEAP_SIZE` for the OG is 28 KB, which no longer fits with the
+  12 KB reserve, so every boot prints "configured 28 KB doesn't fit"; set it
+  to 24 KB so the first rung lands.
+- Validation caveats: the slot-autosave write path ran with the GC heap
+  allocated (two netlist changes); the config.txt write was only inferred
+  (`:` marks config dirty but `saveConfig()` skips an unchanged file and the
+  DAC voltages live in the slot). A real config change through `` ` `` with
+  MicroPython up is the airtight test of the 12 KB reserve. The V5 `X` output
+  identity is by inspection of the split printf, not a bench run (V5 was busy).
+- The positive-rail 3.3/5 V ask, the OLED default on 26/27, the HIL
+  harness's `JLOGport` discovery, and the flash part identity (openocd
+  reports 32 MB without a JEDEC read; the json says 16 MB, which is where the
+  FatFS partition and the 4 KB EEPROM emulation are placed - if the part is
+  really 32 MB they sit mid-part, harmless but worth one `picotool info`).
+
+**Commit these together (the parity batch):** `src/boards/board.{h,cpp}`,
+`src/boards/v5/board_v5.cpp`, `src/boards/og/board_og.cpp`,
+`test/test_boards/test_boards.cpp`, `src/Peripherals.cpp`,
+`src/tubes/AsyncPassthrough.cpp`, `src/snakes/Python_Proper.cpp`,
+`src/SingleCharCommands.cpp`, `src/JumperlessMicroPythonAPI.cpp`,
+`platformio.ini` (the OG env's MicroPython UART defines).
+
+### Session 2026-09-08 (evening) — rail ask, multi-row pick, exit clear (build 12)
+
+Kevin, hands-on with the needle after the first-node LED fix landed: "we need
+to get rail sensing working now ... The old Jumperless had a system where
+tapping a rail would ask the user to select 5 or 3 V and use short probe
+clicks to cycle and long clicks to confirm. ... make sure when we exit probing
+with a single node lit, we clear it. ... disambiguation mode ... light up all
+the sensed rows and then use short and long clicks to cycle through and
+select them."
+
+**The reference (Jumperless repo, tag 1.3.9, `JumperlessNano/src/Probing.cpp`):**
+`voltageSelect()` asked ONCE per boot (`voltageChosen` never reset; the forum
+how-to says "persists until power cycling"), lit rows 1-3 / 31-35 in the
+voltage's color, short press cycled, long press selected.
+`selectFromLastFound()` lit every found row pink with one brighter, short =
+next, long = select, and dropped GND/3V3/5V from the list. Both were blocking
+loops.
+
+**What landed (all gated on `scanprobe::available()`, V5 paths untouched):**
+
+- `scanProbeRead()` returns `kScanRailTouch` (-21) for a positive hard level
+  instead of guessing `SUPPLY_3V3`; a low level is still `GND`. A sweep that
+  finds several rows now hands the whole list back sorted in `connectedRows`
+  (`connectedRowsIndex = n`), lowest as the read value. An empty sweep sets
+  `Probing::scanLifted` - the "needle came off" signal both sub-states need,
+  so the touch just answered cannot reopen them on the next tick (advisor).
+- `Probing::scanSessionFilter(s, read)` runs right after `readProbe()` in the
+  tick. Two sub-states in `ProbeSession`:
+  - **ask** (`askOpen`): terminal `      3.3V   short press = 5V, long press
+    = select` (one line, rewritten in place - the banner rewind counts lines),
+    both positive rail strips painted amber `0x502800` (3.3 V) or red-orange
+    `0x500a00` (5 V) via the new `ogRailsPaint()`. Short = flip, long =
+    select: the supply node then goes through the normal latch/commit path
+    as if the needle had read it, and the rails KEEP the color while the
+    supply node is held (`railHeld`) - a supply node has no row LED, so
+    without that "holding 5V" would show nothing (advisor). Asks on every
+    positive-rail tap, preselecting the last answer (`s_scanRailChoice`, RAM,
+    default 3.3 V) - the switch can be flipped any time and the firmware can't
+    see it, so per-tap is the honest ask (the reference's once-per-boot is
+    one line away if Kevin prefers it). A lifted needle landing on a row
+    abandons the ask.
+  - **pick** (`pickCount > 0`): rows painted `0x4000e8` (current) /
+    `0x0a0020` (others) through `printRawRow`, previous pixel colors saved
+    and put back on close; terminal `  [5] 12   short press = next, long
+    press = select`. Short = next (wraps), long = select and latch. A lifted
+    needle on a different net abandons the pick.
+- Button kind: `ProbeButton::scanLastPressWasLong()` (set in the decoder's
+  `post()`), read next to the -16/-18 code. The decoder maps short/long onto
+  the mode's own/other button using `connectOrClearProbe`, which only the
+  wrapper set - so a clear session entered by toggling read the opposite of
+  one entered from idle. The session's two toggle handlers now keep it in
+  sync (scan boards only; `LEDs.cpp:3194` reads it for the V5 logo, hence
+  the gate). The resulting one-button gesture table (code-derived, bench
+  check pending):
+
+  | mode | short press | long press (750 ms) |
+  |---|---|---|
+  | idle | `connect` | `clear` |
+  | `connect` | drop the held row / exit when nothing is held | `clear` |
+  | `clear` | exit | `connect` |
+
+- **Exit clear:** `probeExitTail()` on scan boards tears down an open ask /
+  pick, restores the rails, and posts `requestLedShow( -1 )` after the
+  `refreshLocalConnections( 1, 1, 1 )` (a plain 1 renders without clearing,
+  and nothing repaints a raw-lit row on a 1-LED strip). The -18 toggle, the
+  -16 drop, the -16 switch-to-connect, "can't connect" and the bridge-refused
+  paths do the same on scan boards.
+- `clearLEDsExceptRails()` on the OG now clears rows 0-59 and the header
+  80-109 only (rails 60-79 and the logo 110 keep their color, as the name
+  says); before, the whole strip went dark on every clearing render.
+- `LEDs.cpp`: `kOgRailPixels` / `ogRailOwnColor()` hoisted out of
+  `showNets()` into `ogRailsPaint(positiveColor, onlyUnlit)`; showNets calls
+  it with `(0, true)` (its only-unlit rule, unchanged, is what lets a
+  session's rail paint survive the swirl-pass renders).
+
+**Verified:** both targets build (OG RAM 67.6% / 177168 B; V5 319852 B),
+flashed over SWD (`Verified OK`), ports back, `? -> 1.7.11.0`; a session
+opened by SWD injection printed `connect nodes`, a terminal key ended it
+(banner rewind), `n` answered after. That is the whole serial-side
+verification: every needle path (rail, pick, exit with a lit row) is
+**bench-pending, Kevin's hands**. The advisor's completion review caught one
+bug before the reflash: the exit tail zeroed `askOpen` before calling
+`scanRailsRelease()`, which early-returns on the flag, so an exit during an
+open ask would have left the rails in the ask color until reboot (fixed,
+build 13 flashed).
+
+Watch for on the bench (pre-existing, from the 09-07 port, not this batch):
+the 700 ms `doubleSelectTimeout` reset sets `s.row[1] = -2`, so a needle
+HELD on a row (or the GND rail) past 700 ms can re-latch the same node as
+node 2 and drop the pair. Tap, don't hold.
+
+**Bench script for Kevin (build 12):**
+1. Rail: `connect`, tap a `+` rail -> both `+` strips amber, terminal
+   `3.3V ...`; short press -> red-orange `5V`; long press -> the rails stay
+   red-orange (holding); tap row 10 -> `5V - 10 connected`, rails back to
+   normal, `n` shows 10 on `5V`. Then the reverse order (row first, rail
+   second). Then a `-` rail -> straight to `GND`.
+2. Pick: a wire between rows 5 and 12, tap 5 -> both lit, one brighter,
+   terminal `[5] 12 ...`; short press moves it; long press picks. Repeat with
+   a resistor, and find out whether a 100 nF cap reads as two rows (at the
+   25 kHz tone it is ~64 ohm, so it probably does). The dim color of the
+   other rows (`0x0a0020`, then `paintSingleLedRow`'s -40 brightness scale)
+   may be too dim to see: Kevin's eyes decide.
+3. Exit: tap a row, then leave three ways (short press with nothing else
+   held, a key in the terminal, the 80 s timeout) -> the row goes dark each
+   time. Also toggle to `clear` with a row held.
+4. Gestures: confirm the table above with `probe_button_trace` on (the
+   clear-mode row is the one that changed).
+
+**Known limits (documented on the docs page, not fixed):** a row tied to a
+rail through a part (a pull-up, an LED to GND) reads as the rail, not the
+row (`tipLevel()` sees a DC path). The pick shows at most 8 rows
+(`kMaxFound`).
+
+**Docs:** `Jumperless-docs/docs/10.5-og-jumperless.md` + a nav entry under 3D
+Printable Stand (uncommitted, like the firmware): firmware download + BOOTSEL,
+a V5/OG table, the one-button gestures, rails (switch not sensed, `3V3`/`5V`
+are nodes, DACs as the adjustable alternative with the measured ranges), the
+pick, clearing, measuring. Written against `WRITING_LIKE_KEVIN.md`'s
+checklist; Kevin's pass wanted before it ships.
+
+**Commit-together (parity batch + this):** `src/Probing.cpp`, `src/Probing.h`,
+`src/LEDs.cpp`, `src/LEDs.h`, `src/Graphics.cpp`, this doc.
+
+### Session 2026-09-08 (evening, 2) — why a press during the pick exited the session
+
+Kevin, on the bench: "when I press a row shorted to another and press the
+button, it just exits probing instead of letting me cycle through them and
+select."
+
+**The exit is by design, and the filter was the only thing in front of it.**
+The `-18` / `-16` handlers in `probeTick()` both have their old `break`
+commented out, so a press that neither mode-branch returns from falls through
+to `s.done = true` (`Probing.cpp`, the "Committing paths!" block). On the V5
+that is the documented "click Connect with nothing held to leave probe mode".
+The OG inherits it through the one-button decoder, so ANY press the
+scanning-probe filter does not intercept ends the session. Three ways a press
+got past the filter, all found by measurement, not reading:
+
+1. **The sweep flickers.** A single sweep does not report the same set twice
+   running - one row of a shorted pair this pass, both the next, none the one
+   after (the button decoder drives a tone on the needle every 12 ms and the
+   session aborts sweeps around it). The old filter treated ONE empty sweep as
+   "the needle lifted" and any non-idle read while lifted as "the needle moved",
+   so the pick was torn down and rebuilt several times a second. Measured on
+   the board with a deliberately flickering fake touch: `pick OPEN` /
+   `pick ABANDON` alternating, the highlight resetting to index 0 every time,
+   and a press landing in a closed window falling through to the exit.
+2. **The deferred press bypassed the filter.** Every in-session press was
+   stashed for `kWindowMs` (~420 ms) so a double-tap could cancel it, then
+   re-queued straight into `s.row[0]` - the one path to the button handler
+   that never calls `scanSessionFilter`.
+3. **A press during a settling touch could never open the pick.** While the
+   button is down `scanProbeRead()` aborts the sweep every tick, so a user who
+   touches and presses without pausing never gets a completed multi-row sweep:
+   the pick does not exist yet and the press exits.
+
+**Fixed (all scanning-probe gated; the V5 paths, debug output included, are
+untouched):**
+
+- `scanLifted` (one empty sweep) became `scanEmptySweeps`, and "the needle is
+  off" is now `kScanLiftSweeps` (4) consecutive empty sweeps. A level read
+  (GND / a rail) resets the counter - it is something on the needle, not a lift.
+- **The touch is settled before it is answered**, unioning every row seen over
+  `kScanSettleSweeps` (5) sweeps and at least `kScanSettleMs` (45 ms). This is
+  what the OG reference firmware did (`scanRows` three more times, keep the
+  largest set) and it is what makes a shorted pair read as a pair rather than
+  as whichever row a single sweep happened to catch. Raise it if a real pair
+  still answers single.
+- **The pick only closes on a real change**: a read that shares no node with
+  the open pick AND a settled lift. Sweep flicker no longer touches it.
+- **One node per touch** (`touchAnswered`): the needle reports its node once
+  and says nothing more until it lifts or lands somewhere else. This also
+  retires the pre-existing "held past 700 ms re-latches as node 2" trap.
+- **A press while a touch is still settling belongs to that touch**: it opens
+  the pick (or answers the single row) and is eaten. A press with nothing on
+  the needle still exits - `touchSweeps` is 0 then, verified on the board.
+- **No press deferral on scanning-probe boards.** The deferral exists so a
+  double-tap can cancel click 1, and `scanProbeButtonService()` never runs
+  `processSample()`, so `g_probeDoubleTapBail` cannot fire on the OG. It was
+  pure latency (~420 ms per press) and the bypass in item 2.
+- **A pressed button no longer reads as GND.** `tipLevel()` sees the needle
+  shorted to the low-driven button line for the ~24-36 ms before the decoder
+  debounces the press. That returned GND, which could latch - and in clear
+  mode latching GND cleared GND's whole net. The low path now asks
+  `scanprobe::buttonPressed()` first (~0.5 ms, rare path).
+- A settled lift also drops an UNANSWERED touch, so two separate taps can no
+  longer union into one spurious pick.
+
+**How it was verified.** A temporary SWD-drivable fake-touch hook stood in for
+the needle (removed before this landed; the traces behind `debugProbing`
+stayed - the OG has no display and this is the only way to watch a probe
+session). On the board, with `debugProbing = 1`:
+
+| check | result |
+|---|---|
+| two-row touch, 2 short presses, 1 long | `pick OPEN n=2`, cycle 0-1-0, `pick select 5` |
+| the same under a flickering sweep | pick opens once, no ABANDON churn, cycling sticks |
+| plain tap, lift, second tap | `5 - 20   connected` |
+| rail touch, long press | `ask OPEN`, `5V`, selected and held (`n12=1`) |
+| press with nothing on the needle | `[EXIT] button fallthrough` - the exit gesture still works |
+| long press in connect mode | `clear nodes` - mode switch, no exit |
+
+Both targets build (OG RAM 67.6% / 177168 B; V5 319852 B), flashed over SWD,
+`? -> 1.7.11.0`.
+
+**What that table does NOT cover, stated plainly.** The last three fixes - the
+press-during-settle guard, the lift-drops-an-unanswered-touch reset, and the
+button-as-GND check - were written AFTER the fake-touch hook came out, so only
+the first four rows above ran against the code that is on the board now. Of
+the last three, only the negative case was re-run on the shipped build (a
+press with nothing on the needle still exits, and a long press still switches
+mode). Their positive paths are Kevin's to confirm. The rail ask's SHORT press
+was never observed either - the injection raced the firmware's own consume and
+only the long press landed; it is the same code shape as the pick's cycle,
+which was observed six times.
+
+**Known limit, not fixed.** While the button is physically down the needle is
+shorted to the low-driven button line, so no sweep can see the row AT ALL
+during a press. The press-during-settle guard only helps when at least one
+sweep completed between the needle landing and the press debouncing (~24 ms).
+A touch and a squeeze in one motion, with no daylight between them, still
+reaches the exit gesture. Kevin's normal gesture almost certainly clears that
+window; if it does not, the fix is to remember the last settled touch across
+the press rather than requiring one in flight.
+
+**Still needs Kevin's hands** beyond the above: every check used an injected
+touch, so the real sweep's behaviour on a real shorted pair - whether 45 ms is
+long enough to see both rows - is unverified. If a pair still answers with one
+row, raise `kScanSettleMs` / `kScanSettleSweeps`.
+
+**Bench hygiene.** The two-tap and rail tests made real bridges in Kevin's
+active slot (`5-20`, then `5V-20`). Removed with `- 5V-20`; `b` afterwards
+shows an empty bridge array and `numberOfPaths: 0`. Capture-before-you-touch
+was skipped for these injected runs, which is why the cleanup had to be
+reconstructed from `b` rather than from a snapshot - do the capture next time.
+
+**Diagnostics left in.** `debugProbing` (nonzero) now prints every non-idle
+filter read plus the pick / ask / exit events on a scanning-probe board. It is
+off by default and V5 output is unchanged. It is how a repro gets handed over
+without an SWD round trip - the OG has no display, so there is no other way to
+watch a probe session.
+
+**A multi-agent pass (14 agents) over the press path** produced the exit-site
+confirmation and, adversarially verified, the three gaps above that the first
+fix missed. Its ledger: the workflow journal under
+`subagents/workflows/wf_b8255a92-7c7/`.
+
+### Session 2026-09-08 (evening, 3) — the OG logo LED
+
+Kevin: "let's make the logo LED on the OG jumperless cycle much slower with
+less saturation. then in probe mode states, have it a fixed color instead of
+the cycle."
+
+The OG logo is ONE pixel (110). It used to be a sample of `LOGO_LED_START + 0`,
+one of the eight LEDs the V5 swirl paints across a palette - so it inherited
+the ring's ~3 s fully saturated rainbow, which on a single LED reads as a
+blinking light rather than a swirl. In probe mode it sampled the cold / pink /
+hot palettes the same way, so it CYCLED through shades of the mode colour
+instead of holding one.
+
+- `logoSwirlState` (new, `LEDs.cpp`): `logoSwirl()` now records which of its
+  branches painted the logo - OTHER (menu ring, press animation, the undo /
+  filesystem / measure indicators, an explicit override), IDLE, or one of the
+  three probe states. Write-only on the V5; nothing there reads it.
+- The OG overlay in `showNets()` paints pixel 110 itself from that state
+  instead of sampling the ring. Idle is an HSV drift, hue `(millis()/100) &
+  0xFF` at saturation 105 and value 130 - about 26 s a lap against the ring's
+  3 s, and pastel rather than full rainbow. The constants sit together at the
+  top of the block. OTHER still samples the ring, which is the only place the
+  indicators exist.
+- Probe states are fixed literals, in the OG reference firmware's own colour
+  code (the forum how-to: pink connect, orange clear, blue disambiguate):
+  `0x50002A` connect with nothing held, `0xB00060` holding a node, `0xA02800`
+  clear, `0x0020B0` while a chooser is up.
+- `probeChooserActive` (new, `Probing.cpp`): true while the multi-row pick or
+  the rail ask is open, so "it is asking you something" gets its own colour.
+  Set at pick open / close, ask open / select / release, session begin and the
+  exit tail.
+
+**Verified on the board, at the pixel.** Two ways to read the OG strip without
+a camera, both worth keeping:
+
+- `:leds` on the port-7 backchannel dumps every pixel as RGB hex
+  (`Ser3Backchannel.cpp`). Read-only, does not disturb port 1 - but it does
+  NOT answer during a probe session, because `probeMode()` pumps only CRITICAL
+  services and the backchannel is not one.
+- Over SWD, the JeoPixel buffer is the heap pointer at `bbleds + 0x40`
+  (0x20034c18 in this build), 3 bytes per pixel in **GRB** order, so the logo
+  is at `+ 110*3`. That works mid-session. Identify the pointer by matching a
+  pixel that does not drift (109 = VIN, `c00010`) against a `:leds` dump.
+
+| state | logoSwirlState | pixel 110 (RGB) | |
+|---|---|---|---|
+| idle | 1 | 0x784C82 -> 0x826E4C, drifting | pastel, max channel 130 / min 76 = 41% saturation |
+| connect, nothing held | 2 | 0x50002A | exactly the literal |
+| clear | 4 | 0xA02800 | exactly the literal |
+| after exit | 1 | drifting again | |
+
+Sampled every 2.5 s while idle, the hue advances ~70 degrees per 5 s: about
+26 s a lap against the ring's 3.06 s (60 steps x 51 ms), so ~8x slower.
+
+Both targets build (OG RAM 67.7% / 177364 B; V5 319900 B) and the OG is
+flashed. **Not verified**: the holding state (3) and the chooser blue both
+need a needle, and nothing was checked on a V5 beyond the build. Kevin's eyes
+decide whether 26 s and saturation 105 are the right numbers - they are two
+named constants at the top of the block.
+
+**A five-dimension adversarial review (9 agents) found four real defects,
+all now fixed and verified at the pixel.** (An earlier partial read of its
+journal showed nothing standing; that was the verify stage still running.)
+
+1. **The OG rails were painted once and then frozen.** The morning's
+   `clearLEDsExceptRails` change stopped zeroing pixels 60-79, and showNets
+   mirrors the rails with `ogRailsPaint(0, onlyUnlit=true)` - so after the
+   first frame every rail pixel was non-zero and `ogRailOwnColor`'s sign test
+   was unreachable. A rail set NEGATIVE kept its positive colour forever.
+   Now `ogRailsPaint(0, probeActive != 0)`: only-unlit protects the probe
+   session's rail paint, and outside a session the rails re-evaluate every
+   frame. Nothing else writes 60-79 on this board (lightUpNet's node loop
+   stops at NANO_A7), so the unconditional repaint is safe.
+2. **The pick and the rail ask could never close on a lift.** `lifted` can
+   only be true on a tick whose read is -1, because every other return path
+   zeroes `scanEmptySweeps` first - so `if ( read == -1 || ... || !lifted )
+   return -1;` always returned before the close below it, making that code
+   dead. A chooser stayed up until a press or the end of the session, and the
+   logo stayed blue with it. `!lifted` now gates the "leave it up" tests
+   instead of sitting behind them.
+3. **Every flash write repainted the logo with the old fast saturated
+   rainbow.** On a one-LED board `LOGO_PALETTE_COUNT` is 1, so the undo /
+   filesystem / measure indicator palettes all fold to the rainbow, and the
+   overlay sampled the ring for them. Since a save follows every probe-session
+   exit and holds `filesystemActiveUntil` for 4 s, the swirl Kevin asked to
+   remove came back for four seconds at a time. `LOGO_SWIRL_UNDO`, `_FS` and
+   `_OVERRIDE` were APPENDED to the enum (so the already-verified 1/2/3/4 keep
+   their numbers) and given their own fixed OG colours.
+4. **The probe colours were far dimmer than idle.** Connect sat at Rec.709
+   Y=20 against idle's 81-125: opening a session read as the logo going out.
+   All five colours now sit in one band (Y roughly 40-90) with the idle value
+   dropped from 130 to 95. Still meant to be tuned by eye.
+   A fifth, folded in: the OVERRIDE arm writes the requested colour straight
+   through instead of through `scaleUpBrightness`, whose x12 multiply fires
+   only when all three channels are under 0x90 - so 0x8F8F8F came out white
+   and 0x909090 came out 1.8x dimmer.
+
+**Verified on the board after the fixes**, reading the strip buffer over SWD:
+
+| check | result |
+|---|---|
+| rail pixel 70 overwritten with white | back to `011b0b` within 400 ms |
+| idle | max channel 95, min 55 - the v=95 s=105 pastel |
+| connect, nothing held | `0xA00050` exactly |
+| chooser (pick open) | `0x0030C8` exactly, state 2 |
+| needle lifted with the pick open | back to connect - **the pick closes on a lift now** |
+| long press selects from the pick | `0xF00080`, state 3 (holding) |
+| `filesystemActiveUntil` driven forward | `0x502000` amber, state 6 - not the rainbow |
+| `undoActivityUntil` driven forward | `0x504000` yellow, state 5 |
+
+The indicator checks drove the two flags directly over SWD rather than
+performing a real flash write, so nothing was saved to Kevin's slots. The
+temporary fake-touch hook went back in for this pass and came out again.
+
+What the review established beyond the bench:
+
+- V5 renders byte-identically, checked at the object level rather than by
+  reading: in the V5 ELF `logoSwirlState` is referenced from exactly ONE
+  literal pool, inside `logoSwirl` itself, so no reader is linked; the
+  `clearLEDsExceptRails` `#else` arm is byte-identical to the old body; and
+  `ogRailsPaint` compiles to a 2-byte `bx lr`. Cost on V5 is 4 bytes of BSS
+  plus 1 byte plus one literal-pool word.
+- No stuck logo state. The `logoLedAccess` bail is the only exit that leaves
+  `logoSwirlState` unassigned, every holder of that latch releases it, and the
+  assignment sits after the take and before every early return - so a torn
+  cross-core read resolves to OTHER (the sample path), never to a stale probe
+  colour.
+- No `probeChooserActive` leak: every open has a matching clear, and
+  `pickCount` is only zeroed inside `scanPickClose`, so the pick cannot close
+  behind the flag's back.
+
+**Work-list item it surfaced (no wrong colour on any board that exists, so not
+fixed here).** `ogRailsPaint()`'s CALLERS are gated on the runtime capability
+`caps.scanningProbe`, but its BODY is gated on the compile-time
+`OG_JUMPERLESS` macro. Those two gates are different in kind. A V6 - or an
+OG-capability board built without the macro - would call a no-op stub and put
+the 3.3 V / 5 V ask on screen with no rail colour behind it. The honest fix is
+a rail-pixel map in the board descriptor rather than the hardcoded
+`kOgRailPixels`, which is a design change, not a patch.
+
+### Session 2026-09-08 (evening, 4) — two things Kevin hit with the needle
+
+"we shouldn't need to hold the row poked to disambiguate, and also the logo
+led stays yellow"
+
+**1. The chooser now survives a lift.** Yesterday's review flagged the
+pick's and the ask's close-on-lift as dead code; the fix made a lift close
+them, which is backwards. You poke the row, the choices light up, and you take
+the probe OFF the board to cycle and select - holding a needle steady on a
+shorted row while clicking a button on the same needle is not a thing anyone
+wants to do, and the OG reference firmware's `selectFromLastFound()` /
+`voltageSelect()` were blocking loops that did not look at the needle at all.
+So the `lifted` test is gone from both blocks: nothing on the needle, or the
+needle back on the same net, leaves the chooser up; only a node that is NOT
+part of it closes it, and that read is then handled as a fresh touch. (Which
+also absorbs the sweep's flicker, the reason the test was there.)
+
+**2. "The logo led stays yellow" was the autosave indicator.** Two causes,
+both fixed OG-side:
+
+- FileCache holds `filesystemActiveUntil` for **4 s** per flush so the cue is
+  unmissable on the V5's 8-LED ring. On one LED that meant amber for four
+  seconds after every connection the autosave picked up - effectively always,
+  while probing. The OG overlay now shows it only while flash is ACTUALLY
+  being written (`filesystemActive`, plus a 250 ms tail so it is perceptible).
+  The 4 s window is shared V5 code and was not touched.
+- Inside `logoSwirl` the undo and filesystem indicators OUTRANK the probe
+  branch. That is right for a ring of 8 and wrong for the only status LED on
+  the board: while a session is open, what the logo has to say is which mode
+  you are in. The OG overlay now derives the probe colour from `probeActive` /
+  `connectOrClearProbe` / `node1or2` / `probeChooserActive` directly, ahead of
+  every indicator.
+
+Note this was a pre-existing OG condition that the fixed logo colours merely
+made visible: before, every indicator palette folded to the rainbow
+(`LOGO_PALETTE_COUNT` is 1 on the OG), so a permanently-armed indicator looked
+exactly like a normal swirl.
+
+**Verified on the board** (pixel buffer over SWD, plus the port-1 trace):
+
+| check | result |
+|---|---|
+| pick open, needle ON | blue `0x0030C8` |
+| pick open, needle taken OFF | still blue, still open |
+| short press with the needle off | `pick cycle -> 1` |
+| long press with the needle off | `pick select 12`, logo to hold pink `0xF00080` |
+| `filesystemActiveUntil` far ahead, `filesystemActive` false | idle drift, NOT amber |
+| `filesystemActive` true | amber `0x502000` |
+| session open while the fs flag is still set | connect pink - probe outranks it |
+
+Both targets build (OG RAM 67.8% / 177608 B; V5 319932 B). The temporary
+fake-touch hook went in and came out again; Kevin's three bridges (42-50,
+6-28, 21-12) were on the board throughout and are untouched.
+
+### Session 2026-09-08 (night) — idle saturation, and what the PCB does to the logo
+
+Kevin: "add more saturation to the idle animation, the pcb adds a lot of
+yellowish filter."
+
+The OG logo LED shines UP THROUGH the board, and the PCB filters it yellowish
+and eats a lot of the colour, so a value that looks right in the pixel buffer
+reads washed out on the bench. `kOgLogoIdleSat` 105 -> 180: most of the way
+back to the ring's full 255, still visibly softer. Nothing else changed - the
+26 s lap, the value (95) and the fixed probe colours are untouched, so if it
+now reads dimmer than before that is the saturation eating the white floor
+(min channel drops from 55 to 27 while max stays 95) and the value is the knob
+for it.
+
+Worth carrying into any future OG colour work: **judging OG logo colours from
+the buffer is unreliable.** Everything else on this board is a top-firing LED
+under a diffuser; the logo is not.
+
+**The pick now overrides a row's net colour.** Kevin: "disambiguation mode
+should override the lit color of a node if it's already connected to another
+net." It painted the rows with `printRawRow` and asked for a menu flush
+(`requestLedShow( 2 )`), which does not run `showNets` - so the next swirl pass
+DID run it, `lightUpNet` repainted every net row, and the highlight vanished
+from exactly the rows worth disambiguating. The pick is now published to the
+renderer (`probePickCount` / `probePickIndex` / `probePickNodes`) and painted
+at the END of the OG overlay, after the nets, and `scanPickShow` asks for a
+nets render instead of a flush (`scanPickClose` asks for a clearing one, since
+a pick row that is in no net has nothing to repaint over it). Colours are the
+OG reference's: all found rows pink, the current one much brighter - dim
+`0x300010`, bright `0xF00068`, written straight to the pixel with no
+brightness scaling.
+
+Verified with a fake pick published over rows 6 and 28 (both in one of Kevin's
+nets, colour `0x5A004B`): row 6 went `0xF00068` and row 28 `0x300010` while a
+second net's rows were untouched; moving the index swapped which was bright;
+withdrawing the pick put both rows back to `0x5A004B`.
+
+**The same defect exists for the held-node highlight** (the first tap's latch
+paints with `printRawRow` too), and it is NOT fixed - Kevin asked about
+disambiguation. Tapping a row that is already in a net in connect mode will
+show the latch flash and then lose the held indication to the next `showNets`.
+Same remedy if he wants it.
+
+#### Bench: the debug probe died, and MicroPython replaced it
+
+Mid-session SWD stopped connecting entirely - `Failed to connect multidrop
+rp2040.dap0` on every attempt, at 5000, 2000 and 1000 kHz, with and without
+`reset halt`, while the CMSIS-DAP probe still enumerated. A flash attempt had
+already half-run when it went: `picotool info` then reported **"Program
+Information: none"**, i.e. the image was damaged. Recovered over USB with the
+1200-baud touch on port 1 plus `picotool load` (NO `-x`) + `picotool verify` +
+`picotool reboot` - the sequence this doc already recommends over `load -x`.
+Check `picotool info` reports an RP2040 before writing: the V5 on the same
+host is an RP2350, so the CPU type is the discriminator.
+
+**`uctypes.bytearray_at(addr, size)` in the OG's MicroPython is a full
+read/write window onto RAM, over USB, with no debug probe.** (`machine.mem32`
+is not built in; `uctypes` is.) That is what verified the pick work with SWD
+down, and it replaces SWD for anything that only needs to poke a global -
+publishing a fake pick, setting `debugProbing`, driving an indicator flag.
+Injecting a button press still works the same way: write 2 to
+`ProbeButton::getInstance()::inst + 0x5c`.
+
 ### Phase 2 — analog + probe
-- [ ] SPI `MCP4822` DAC backend (DAC0 0–5 V, DAC1 ±8 V) behind the HAL.
-- [ ] 4 ADCs (ADC3 ±8 V), INA219 current sense.
-- [ ] 3 routable GPIO + single routable `NANO_RESET`.
-- [ ] Scanning probe (`scanRows`) ported from OG reference firmware.
+- [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
+      −6.9..+7.0 V - see the session above; `caps.spiDac`).
+- [x] 4 ADCs scaled from the descriptor (ADC3 ±8 V), both INA219s (2026-09-08).
+- [ ] 3 routable GPIO + single routable `NANO_RESET` (UART pins are right now;
+      `RP_GPIO_0` routing itself untested; the UART node naming is a design call).
+- [x] Scanning probe ported from the OG reference firmware (2026-09-07,
+      `src/sensing/ScanProbe.cpp`; serial-verified on the bench, hands-on
+      pending - see the 2026-09-07 session below).
 - [ ] Capability-aware structured errors for unsupported ops (rail voltage set,
       GPIO 4–10, out-of-range DAC, probe pads) on serial + MicroPython.
 

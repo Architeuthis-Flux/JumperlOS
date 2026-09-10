@@ -263,6 +263,16 @@ void *jl_mp_commit_exec(void *buf, size_t len);
 }
 #endif
 #define MP_PLAT_COMMIT_EXEC(buf, len, opt) jl_mp_commit_exec((buf), (len))
+// The emitted code is Thumb, and the emitter hands back the buffer's plain
+// address (bit 0 clear). py/objfun.c calls native, viper and asm_thumb functions
+// through this macro, and the upstream Cortex-M ports (rp2, stm32) set bit 0
+// here so the branch stays in Thumb state. Without it every CALL of a
+// @micropython.native / .viper function takes an INVSTATE UsageFault
+// (CFSR=0x00020000, PC=the heap buffer's even address) that escalates to a
+// HardFault and reboots the board. Defining the function was always fine;
+// calling it was not. Verified on a V5 running 5.7.11.0 (2026-09-09) from the
+// [crashlog] record, fixed and re-verified on hardware the same day.
+#define MICROPY_MAKE_POINTER_CALLABLE(p) ((void *)((mp_uint_t)(p) | 1))
 #endif // JL_ENABLE_NATIVE_CODEGEN
 
 // =============================================================================

@@ -490,11 +490,7 @@ float jl_ina_get_current( int sensor ) {
     if ( sensor == 0 ) {
         result = INA0.getCurrent( );
     } else if ( sensor == 1 ) {
-#if defined(OG_JUMPERLESS)
-        result = 0.0f;
-#else
-        result = INA1.getCurrent( );
-#endif
+        result = INA1.getCurrent( );   // OG: the DAC-side sensor (0x41), both boards init it
     }
 
     return result;
@@ -505,11 +501,7 @@ float jl_ina_get_voltage( int sensor ) {
     if ( sensor == 0 ) {
         result = INA0.getBusVoltage( );
     } else if ( sensor == 1 ) {
-#if defined(OG_JUMPERLESS)
-        result = 0.0f;
-#else
         result = INA1.getBusVoltage( );
-#endif
     }
 
     return result;
@@ -520,11 +512,7 @@ float jl_ina_get_bus_voltage( int sensor ) {
     if ( sensor == 0 ) {
         result = INA0.getBusVoltage( );
     } else if ( sensor == 1 ) {
-#if defined(OG_JUMPERLESS)
-        result = 0.0f;
-#else
         result = INA1.getBusVoltage( );
-#endif
     }
 
     return result;

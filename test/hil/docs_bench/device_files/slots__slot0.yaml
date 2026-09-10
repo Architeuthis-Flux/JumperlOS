@@ -1,0 +1,111 @@
+version: 2
+sourceOfTruth: bridges
+
+bridges:
+  - {n1: 2, n2: ADC0}
+  - {n1: 5, n2: ADC3}
+  - {n1: 6, n2: RP_GPIO_1}
+  - {n1: 7, n2: RP_GPIO_2}
+  - {n1: RP_GPIO_3, n2: 8}
+  - {n1: ADC3, n2: NANO_D0}
+  - {n1: 18, n2: 23}
+  - {n1: 41, n2: 45}
+  - {n1: 48, n2: 51}
+  - {n1: 56, n2: 58}
+  - {n1: 56, n2: GND}
+  - {n1: 18, n2: TOP_RAIL}
+  - {n1: 24, n2: 28}
+
+nets:
+  - {num: 1, nodes: [GND, 56, 58], anim: true}
+  - {num: 2, nodes: [TOP_R, 18, 23], anim: true}
+  - {num: 6, nodes: [2, ADC_0], anim: true}
+  - {num: 7, nodes: [5, ADC_3, D0], anim: true}
+  - {num: 8, nodes: [6, GP_1], anim: true}
+  - {num: 9, nodes: [7, GP_2], anim: true}
+  - {num: 10, nodes: [GP_3, 8], anim: true}
+  - {num: 11, nodes: [41, 45], color: pink, name: "IC41_P1"}
+  - {num: 12, nodes: [48, 51], color: indigo}
+  - {num: 13, nodes: [24, 28], color: blue, name: "POT22_B"}
+
+power:
+  topRail: 4.40
+  bottomRail: 7.40
+  dac0: 2.50
+  dac1: 0.60
+
+config:
+  routing: {stackPaths: 2, stackRails: 3, stackDacs: 0, railPriority: 1}
+  gpio:
+    direction:    [0,0,0,0,0,1,0,0,1,1]
+    pulls:        [2,2,2,2,0,0,0,0,0,0]
+    pwmFrequency: [1000.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00,1.00]
+    pwmDutyCycle: [0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50,0.50]
+    pwmEnabled:   [0,0,0,0,0,0,0,0,0,0]
+    readFloating: [1,1,1,1,1,1,1,1,0,0]
+  uart: {txFunction: 0, rxFunction: 1}
+  oled: {connected: false, lockConnection: false}
+  bcd: {pins: 7, value: 4}
+parts:
+  - name: "POT22"
+    type: pot
+    value: "10.4k"
+    part_id: "POT22"
+    footprint: sip3
+    row: 22
+    placed: true
+    pins:
+      A: {offset: 0, class: signal}
+      WIPER: {offset: 1, class: signal}
+      B: {offset: 2, class: signal}
+  - name: "IC41"
+    type: ic
+    footprint: dip14
+    row: 41
+    placed: true
+    pins:
+      P1: {pin: 1, class: signal}
+      P2: {pin: 2, class: signal}
+      P3: {pin: 3, class: signal}
+      P4: {pin: 4, class: signal}
+      P5: {pin: 5, class: signal}
+      P6: {pin: 6, class: signal}
+      P7: {pin: 7, class: signal}
+      P8: {pin: 8, class: signal}
+      P9: {pin: 9, class: signal}
+      P10: {pin: 10, class: signal}
+      P11: {pin: 11, class: signal}
+      P12: {pin: 12, class: signal}
+      P13: {pin: 13, class: signal}
+      P14: {pin: 14, class: signal}
+  - name: "Q36"
+    type: bjt
+    part_id: "Q36"
+    footprint: sip3
+    row: 36
+    placed: true
+    pins:
+      E: {offset: 0, class: signal}
+      B: {offset: 1, class: signal}
+      C: {offset: 2, class: signal}
+  - name: "LED28"
+    type: led
+    value: "blue/white"
+    part_id: "LED28"
+    footprint: axial2
+    row: 28
+    placed: true
+    pins:
+      A: {pin: 1, class: signal}
+      K: {pin: 2, class: signal}
+  - name: "D9"
+    type: diode
+    part_id: "D9"
+    footprint: axial2
+    row: 9
+    placed: true
+    pins:
+      K: {pin: 1, class: signal}
+      A: {pin: 2, class: signal}
+
+

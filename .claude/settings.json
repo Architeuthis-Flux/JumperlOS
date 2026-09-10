@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ioreg *)",
+      "Bash(system_profiler *)",
+      "Bash(hidutil list *)",
+      "Bash(nm *)",
+      "Bash(brew list *)",
+      "Bash(brew info *)",
+      "Bash(brew search *)",
+      "Bash(pip3 list *)",
+      "Bash(pip3 show *)",
+      "mcp__deja__recall"
+    ]
+  }
+}

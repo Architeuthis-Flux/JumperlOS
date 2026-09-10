@@ -1,3 +1,4 @@
+#include "boards/board.h"   // caps.mpCHeapReserveKb
 #include "Python_Proper.h"
 #include "Debugs.h"
 #include "KickGap.h" // would-be watchdog kick from the VM hook (T1.6 measure-only)
@@ -836,7 +837,10 @@ static bool mpAllocHeap(void) {
   if (mp_heap) return true;
   const size_t configured = jumperlessConfig.hardware.psram_installed
       ? MICROPY_HEAP_SIZE_PSRAM : MICROPY_HEAP_SIZE;
-  const size_t MP_HEAP_C_RESERVE = 24 * 1024;
+  // Per board: the V5's 24 KB is the calibrated figure above; the OG has
+  // ~40 KB of C heap in total, and 12 KB left behind is what its file paths
+  // fit in (BoardCaps::mpCHeapReserveKb).
+  const size_t MP_HEAP_C_RESERVE = (size_t)board::currentBoard( ).caps.mpCHeapReserveKb * 1024;
   const size_t rungs[] = {configured, 64 * 1024, 48 * 1024,
                           32 * 1024,  24 * 1024, 16 * 1024};
   for (size_t i = 0; i < sizeof(rungs) / sizeof(rungs[0]); i++) {
@@ -858,8 +862,15 @@ static bool mpAllocHeap(void) {
     }
     return true;
   }
-  Serial.printf("[MP] FATAL: no room for a MicroPython GC heap (16 KB rung + 24 KB reserve, %d KB free) - MicroPython disabled\r\n",
-      (int)(rp2040.getFreeHeap() / 1024));
+  // Once. MpRemoteService retries this every service pass until it succeeds,
+  // and on an OG whose C heap is a kilobyte short that was ~200 copies of this
+  // line per second on port 1 - the terminal was unusable (bench, 2026-09-07).
+  static bool s_fatalPrinted = false;
+  if (!s_fatalPrinted) {
+    s_fatalPrinted = true;
+    Serial.printf("[MP] FATAL: no room for a MicroPython GC heap (16 KB rung + %d KB reserve, %d KB free) - MicroPython disabled\r\n",
+        (int)(MP_HEAP_C_RESERVE / 1024), (int)(rp2040.getFreeHeap() / 1024));
+  }
   if (global_mp_stream && global_mp_stream != (Stream *)&Serial) {
     global_mp_stream->println("[MP] FATAL: failed to allocate MicroPython heap - MicroPython disabled");
   }

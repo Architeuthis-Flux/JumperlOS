@@ -3700,9 +3700,42 @@ void bread::printMenuReminder(int menuDepth, uint32_t color) {
   }
 }
 
+// A row paint on a board with ONE LED per breadboard row (the OG): that row's
+// pixel, from nodesToPixelMap. Any lit column lights it; with nothing lit, bg
+// 0xFFFFFE leaves it alone (the "transparent" convention of the callers) and
+// any other bg paints the bg. printGraphicsRow() itself stays a no-op there -
+// it is the 5-wide text grid, and a glyph row has no meaning on one pixel -
+// which is why, until now, the probe session's first-node latch, its flash
+// frames and the delete fades painted nothing on the OG (only a finished
+// connection showed, through showNets()).
+static void __not_in_flash_func(paintSingleLedRow)(uint8_t data, int row, uint32_t color, uint32_t bg) {
+  const int node = row + 1;
+  if (node <= 0 || node >= (int)(sizeof(nodesToPixelMap) / sizeof(nodesToPixelMap[0]))) {
+    return;
+  }
+  const int pixel = nodesToPixelMap[node];
+  if (pixel < 0) {
+    return;
+  }
+  if (color == 0xFFFFFF) {
+    color = defaultColor;
+  }
+  if ((data & 0b00011111) != 0) {
+    leds.setPixelColor(pixel, scaleBrightness(color, menuBrightnessSetting));
+  } else if (bg == 0xFFFFFF) {
+    leds.setPixelColor(pixel, 0);
+  } else if (bg != 0xFFFFFE) {
+    leds.setPixelColor(pixel, bg);
+  }
+}
+
 void __not_in_flash_func(bread::printRawRow)(uint8_t data, int row, uint32_t color, uint32_t bg,
                         int scale) {
 
+  if (board::currentBoard().caps.ledsPerRow == 1) {
+    paintSingleLedRow(data, row, color, bg);
+    return;
+  }
   // color = scaleBrightness(color, (menuBrightnessSetting / scale));
   // Rows are 0-59; the old `row <= 60` off-by-one let row 60 through to
   // printGraphicsRow, which wrote pixels 300-304 — the first rail LEDs.
@@ -3721,6 +3754,12 @@ void __not_in_flash_func(bread::printRawRow)(uint8_t data, int row, uint32_t col
 
 void bread::lightUpNode(int node, uint32_t color) {
   if (node <= 0) {
+    return;
+  }
+  if (board::currentBoard().caps.ledsPerRow == 1) {
+    // One pixel per node (rows and header alike); the pads and logo
+    // overrides below are V5 hardware.
+    paintSingleLedRow(0b00011111, node - 1, color, 0xfffffe);
     return;
   }
 

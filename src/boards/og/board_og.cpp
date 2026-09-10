@@ -80,16 +80,62 @@ static const GpioEntry kOgGpio[] = {
 
 // 4 ADCs: 0-2 buffered 0-5V, ADC3 raw +/-8V.
 static const AnalogChannel kOgAdc[] = {
+    // The ranges are the ADC scaling too (initADC copies them into
+    // adcSpread/adcZero): ADC0-2 read 5 V per full scale behind the LM324
+    // buffers; ADC3's -8.1..+8.24 is the reference firmware's calibration
+    // (16/4010 per count, -8.1 offset), which put the +5 V supply at 4.77 V on
+    // ADC3 and 4.64 V on ADC0 on the bench (2026-09-08).
     {ADC0, "ADC0", 0.0f, 5.0f, true},
     {ADC1, "ADC1", 0.0f, 5.0f, true},
     {ADC2, "ADC2", 0.0f, 5.0f, true},
-    {ADC3, "ADC3", -8.0f, 8.0f, true},
+    {ADC3, "ADC3", -8.1f, 8.24f, true},
 };
 
-// 2 DACs: DAC0 0-5V, DAC1 +/-8V (SPI MCP4822).
+// 2 DACs (MCP4822 over SPI, 2x gain, through the L272 stage). The usable
+// ranges as measured through the crossbar into the calibrated ADCs
+// (2026-09-08): DAC0 is unity from the 4.096 V full scale (the "0-5 V" of the
+// silkscreen is nominal); DAC1's stage puts 0 V at code ~1772 with 16 V per
+// 4096 codes and saturates near +7 V. The code mapping lives in
+// Peripherals.cpp initDAC() (dacSpread/dacZero on a spiDac board).
 static const AnalogChannel kOgDac[] = {
-    {DAC0, "DAC0", 0.0f, 5.0f, true},
-    {DAC1, "DAC1", -8.0f, 8.0f,     true},
+    {DAC0, "DAC0", 0.0f, 4.096f, true},
+    {DAC1, "DAC1", -6.9f, 7.0f,  true},
+};
+
+// RP2040 GPIO names from the rev 3.1 PCB netlist (Hardware/KiCAD): 0 is the
+// routable RP_GPIO_0 node, 1-3 the MCP4822's SPI0 CS/SCK/MOSI, 16/17 the
+// Nano-header UART0 (TX/RX by RP2040 function), 18/19 the probe kit.
+static const char *const kOgGpioNames[30] = {
+    "GPIO_0",
+    "DAC_CS",
+    "DAC_SCK",
+    "DAC_MOSI",
+    "I2C0_SDA",
+    "I2C0_SCL",
+    "CH_CS_A",
+    "CH_CS_B",
+    "CH_CS_C",
+    "CH_CS_D",
+    "CH_CS_E",
+    "CH_CS_F",
+    "CH_CS_G",
+    "CH_CS_H",
+    "CH_DATA",
+    "CH_CLK",
+    "UART_TX",
+    "UART_RX",
+    "PROBE_BUTTON",
+    "PROBE_PROBE",
+    "CH_CS_I",
+    "CH_CS_J",
+    "CH_CS_K",
+    "CH_CS_L",
+    "CH_RESET",
+    "LED_BB",
+    "ADC_0",
+    "ADC_1",
+    "ADC_2",
+    "ADC_3",
 };
 
 const BoardTopology ogBoardTopology = {
@@ -102,6 +148,7 @@ const BoardTopology ogBoardTopology = {
     kOgGpio, (uint8_t)(sizeof(kOgGpio) / sizeof(kOgGpio[0])),
     kOgAdc, (uint8_t)(sizeof(kOgAdc) / sizeof(kOgAdc[0])),
     kOgDac, (uint8_t)(sizeof(kOgDac) / sizeof(kOgDac[0])),
+    kOgGpioNames, (uint8_t)(sizeof(kOgGpioNames) / sizeof(kOgGpioNames[0])),
     {
         /* railsFirmwareControlled */ false,
         /* hasProbePads           */ false,
@@ -116,6 +163,9 @@ const BoardTopology ogBoardTopology = {
         /* ledsPerRow             */ 1,
         /* ledCount               */ 111,
         /* usbCdcCount            */ 4,
+        /* uartTxPin              */ 16,
+        /* uartRxPin              */ 17,
+        /* mpCHeapReserveKb       */ 12,
     },
 };
 

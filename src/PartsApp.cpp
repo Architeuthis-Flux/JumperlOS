@@ -1939,6 +1939,30 @@ void partsShowPartCard(const PartDefinition& p, int focusPin) {
     char testLine[26] = "";
     PartLabels::partTestSummary(p, testLine, sizeof(testLine));
 
+    // A focused pin on a rail or GND: the rail and its voltage along the
+    // bottom, in place of the test summary (Kevin, 2026-09-07 - the card
+    // stays, the rail is a fact about THIS pin). Both the scroll's walk and
+    // the tap-to-inspect card come through here, so they agree.
+    char footer[26] = "";
+    if (focusPin >= 0 && focusPin < p.numPins && focusPin < MAX_PART_PINS) {
+        int node = partPinNode(p, p.pins[focusPin]);
+        int net = -1;
+        for (int i = 0; i < numberOfPaths; i++) {
+            if (globalState.connections.paths[i].node1 == node ||
+                globalState.connections.paths[i].node2 == node) {
+                net = globalState.connections.paths[i].net;
+                break;
+            }
+        }
+        if (net == 1) {
+            snprintf(footer, sizeof(footer), "GND");
+        } else if (net == 2) {
+            snprintf(footer, sizeof(footer), "TOP_RAIL %0.2f V", getDacHardwareVoltage(2));
+        } else if (net == 3) {
+            snprintf(footer, sizeof(footer), "BOTTOM_RAIL %0.2f V", getDacHardwareVoltage(3));
+        }
+    }
+
     // Pin columns (Kevin's spec, 11:37 + 12:53): labels on one line, rows
     // on the next, the focused pin fenced in |bars| that line up between
     // the two lines. Each column's label/number cell pair is built to the
@@ -2014,7 +2038,7 @@ void partsShowPartCard(const PartDefinition& p, int focusPin) {
         rows[2].segCount = 1;
         rows[2].align = OLED_ALIGN_LEFT;
     }
-    rows[3].segs[0] = {testLine, f, OLED_ALIGN_INHERIT};
+    rows[3].segs[0] = {footer[0] ? footer : testLine, f, OLED_ALIGN_INHERIT};
     rows[3].segCount = 1;
     rows[3].align = OLED_ALIGN_LEFT;
     for (int i = 0; i < 4; i++) rows[i].fixedH = 7;

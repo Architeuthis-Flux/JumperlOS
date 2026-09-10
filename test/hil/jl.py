@@ -12,6 +12,7 @@ Per the project rule: no retry loops or connection troubleshooting here.
 If the board isn't there, fail fast with one clear message.
 """
 
+import atexit
 import glob
 import os
 import re
@@ -357,14 +358,175 @@ def guarded(fn, *args, **kwargs):
         return None, exc
 
 
-def jl_exec(code, timeout=15):
-    """Run a MicroPython snippet on the device, return its stdout.
+# ---------------------------------------------------------------------------
+# Call profile. Every primitive below counts its calls and seconds; with
+# JL_PROFILE set (run_all sets it for the suites it spawns) the totals print
+# at exit, one line per process, so a slow file names its dominant term.
+_PROF = {}
 
-    The snippet is wrapped so it leaves no globals behind - see the
-    "Device namespace hygiene" note above.
-    """
-    if not os.environ.get("JL_KEEP_DEVICE_GLOBALS"):
-        code = _HYGIENE_PROLOGUE + code + _HYGIENE_EPILOGUE
+
+def _prof(name, t0):
+    e = _PROF.setdefault(name, [0, 0.0])
+    e[0] += 1
+    e[1] += time.perf_counter() - t0
+
+
+def _print_profile():
+    if not _PROF:
+        return
+    tot = sum(v[1] for v in _PROF.values())
+    parts = ", ".join(f"{k} {v[0]}x {v[1]:.1f}s"
+                      for k, v in sorted(_PROF.items(), key=lambda kv: -kv[1][1]))
+    print(f"  jl profile: {tot:.1f} s in the harness primitives - {parts}",
+          flush=True)
+
+
+if os.environ.get("JL_PROFILE", "").strip() not in ("", "0"):
+    atexit.register(_print_profile)
+
+
+# ---------------------------------------------------------------------------
+# Persistent raw-REPL client on port 5 (2026-09-04). jl_exec used to spawn
+# the skill's jumperless.py for EVERY snippet: a fresh Python, a fresh port
+# open and a fresh raw-REPL handshake - 1.3 s for print(1), and the suite
+# makes hundreds of calls. The connection is now opened once per process
+# and kept in raw mode; the protocol is the one jumperless.py speaks
+# (Ctrl-A, code + Ctrl-D, 2-byte status, stdout block, stderr block).
+#
+# Rules that keep it honest:
+# - One process holds port 5. run_all closes its own handle (close_ports)
+#   before spawning each suite, and every process closes at exit.
+# - reboot_board sends machine.reset() over this handle and drops it; the
+#   next jl_exec reconnects. Any other death of the port surfaces as the
+#   same "FAIL: REPL exec failed" sys.exit the subprocess path raised.
+# - No retry after the code was sent: a snippet is never run twice.
+# - JL_EXEC_SUBPROCESS=1 brings the old transport back for bisecting.
+_REPL = None
+_RAW_PROMPT = b"raw REPL; CTRL-B to exit\r\n"
+
+
+def port5_path():
+    for pattern in ("/dev/cu.usbmodem*JLV5port5", "/dev/cu.*JLV5port5"):
+        hits = [p for p in glob.glob(pattern) if p.endswith("port5")]
+        if hits:
+            return hits[0]
+    sys.exit("FAIL: MicroPython REPL (JLV5port5) not found. Is the board connected?")
+
+
+def _repl_read_until(ser, marker, timeout):
+    end = time.time() + timeout
+    buf = b""
+    while time.time() < end:
+        chunk = ser.read(ser.in_waiting or 1)
+        if chunk:
+            buf += chunk
+            if marker in buf:
+                return buf
+    raise TimeoutError(f"raw REPL: no {marker!r} within {timeout}s (got {buf[-80:]!r})")
+
+
+def _repl_open():
+    global _REPL
+    import serial  # pyserial
+    ser = serial.Serial(port5_path(), 115200, timeout=0.05)
+    ser.reset_input_buffer()
+    ser.write(b"\r\x03\x03")   # interrupt whatever runs
+    ser.flush()
+    time.sleep(0.1)
+    ser.write(b"\r\x01")       # Ctrl-A: raw REPL
+    ser.flush()
+    _repl_read_until(ser, _RAW_PROMPT, 2.0)
+    _REPL = ser
+    return ser
+
+
+def close_ports():
+    """Leave raw mode and close the cached port-5 handle (no-op when none).
+    run_all calls this before every suite it spawns; atexit calls it too."""
+    global _REPL
+    ser, _REPL = _REPL, None
+    if ser is None:
+        return
+    try:
+        ser.write(b"\x02")     # Ctrl-B: back to the friendly REPL
+        ser.flush()
+    except Exception:
+        pass
+    try:
+        ser.close()
+    except Exception:
+        pass
+
+
+atexit.register(close_ports)
+
+
+def _repl_block(ser, timeout, carry):
+    """One raw-REPL output block: bytes up to Ctrl-D. `carry` is whatever a
+    previous chunked read took past its own terminator."""
+    end = time.time() + timeout
+    buf = carry
+    while True:
+        i = buf.find(b"\x04")
+        if i >= 0:
+            return buf[:i], buf[i + 1:]
+        if time.time() >= end:
+            raise TimeoutError("raw REPL: no block terminator")
+        buf += ser.read(ser.in_waiting or 1)
+
+
+def _repl_exec(ser, code, timeout):
+    """Run `code` on the cached raw REPL. Returns (status, stdout, stderr)."""
+    ser.write(b"\x03\r")       # clear the raw line (Ctrl-C is harmless at the prompt)
+    ser.flush()
+    time.sleep(0.05)
+    ser.reset_input_buffer()
+    payload = code.replace("\r\n", "\n").replace("\r", "\n")
+    if not payload.endswith("\n"):
+        payload += "\n"
+    ser.write(payload.encode("utf-8") + b"\x04")
+    ser.flush()
+    end = time.time() + timeout
+    buf = b""
+    while len(buf) < 2 and time.time() < end:
+        buf += ser.read(ser.in_waiting or 1)
+    if len(buf) < 2:
+        raise TimeoutError("raw REPL: no status bytes")
+    status, rest = buf[:2], buf[2:]
+    out, rest = _repl_block(ser, timeout, rest)
+    err, _ = _repl_block(ser, timeout, rest)
+    return status, out.decode("utf-8", errors="ignore"), err.decode("utf-8", errors="ignore")
+
+
+def _exec_fail(out, err):
+    sys.exit(
+        f"FAIL: REPL exec failed (rc=1).\n"
+        f"stdout: {out.strip()}\nstderr: {err.strip()}\n"
+        "Check the board connection and try again."
+    )
+
+
+def _jl_exec_repl(code, timeout):
+    ser = _REPL
+    if ser is None:
+        try:
+            ser = _repl_open()
+        except (OSError, TimeoutError) as exc:
+            close_ports()
+            _exec_fail("", f"could not open the raw REPL: {exc!r}")
+    try:
+        status, out, err = _repl_exec(ser, code, timeout)
+    except (OSError, TimeoutError) as exc:
+        close_ports()
+        _exec_fail("", f"{exc!r}")
+    if err.strip():
+        _exec_fail(out, err)
+    if status != b"OK":
+        _exec_fail(out, "Device returned non-OK raw REPL status (possible syntax error).")
+    return out
+
+
+def _jl_exec_subprocess(code, timeout):
     jl = find_jumperless_py()
     with tempfile.NamedTemporaryFile(
         "w", suffix=".py", delete=False, prefix="hil_"
@@ -388,6 +550,25 @@ def jl_exec(code, timeout=15):
             "Check the board connection and try again."
         )
     return proc.stdout
+
+
+def jl_exec(code, timeout=15):
+    """Run a MicroPython snippet on the device, return its stdout.
+
+    The snippet is wrapped so it leaves no globals behind - see the
+    "Device namespace hygiene" note above. Transport: the cached raw REPL
+    (see above), or the skill's jumperless.py per call with
+    JL_EXEC_SUBPROCESS=1.
+    """
+    t0 = time.perf_counter()
+    try:
+        if not os.environ.get("JL_KEEP_DEVICE_GLOBALS"):
+            code = _HYGIENE_PROLOGUE + code + _HYGIENE_EPILOGUE
+        if os.environ.get("JL_EXEC_SUBPROCESS"):
+            return _jl_exec_subprocess(code, timeout)
+        return _jl_exec_repl(code, timeout)
+    finally:
+        _prof("jl_exec", t0)
 
 
 def device_text(path, chunk=512):
@@ -457,30 +638,38 @@ def port1_paste(cmd, payload, settle=3.5):
 
     _ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
-    def _collect(ser, secs):
+    t0 = time.perf_counter()
+
+    def _collect(ser, secs, quiet):
+        # Drain until the port has been silent for `quiet`, never longer
+        # than `secs` (2026-09-04: the three fixed windows were 6 s per
+        # paste; the firmware's last line - "State applied successfully" -
+        # arrives well inside them, and the drain ends 0.6 s after it).
         deadline = time.time() + secs
         buf = b""
+        last = time.time()
         while time.time() < deadline:
             chunk = ser.read(4096)
             if chunk:
                 buf += chunk
+                last = time.time()
+            elif buf and time.time() - last > quiet:
+                break
         return _ansi.sub("", buf.decode(errors="replace"))
 
     with serial.Serial(port1_path(), 115200, timeout=0.05) as ser:
         ser.write(b"\r\n")
         ser.flush()
-        # The connection-init banner is where a post-fault [crashlog] appears -
-        # it is printed once, to the first terminal that attaches after the
-        # reboot - so it gets scanned even though nothing else reads it.
-        fault_scan(_collect(ser, 1.5), f"the connect banner before '{cmd}'")
+        fault_scan(_collect(ser, 1.5, 0.3), f"the connect banner before '{cmd}'")
         ser.reset_input_buffer()
         ser.write(cmd.encode() + b"\r\n")
         ser.flush()
-        prompt = _collect(ser, 1.0)
+        prompt = _collect(ser, 1.0, 0.3)
         ser.write(payload)
         ser.flush()
-        out = _collect(ser, settle)
+        out = _collect(ser, settle, 0.6)
     fault_scan(prompt + out, f"the '{cmd}' paste")
+    _prof("port1_paste", t0)
     return prompt, out
 
 
@@ -1039,34 +1228,52 @@ print("purged=", n)
 def reboot_board():
     """Reset the board via machine.reset() and wait for it to come back.
 
-    jl_exec() cannot be used directly: the REPL dies mid-exec (that IS the
-    reset), so jumperless.py returns non-zero and jl_exec would sys.exit. The
-    subprocess is therefore run here with its failure ignored, and readiness is
-    proven by port1_wait_ready() rather than assumed.
+    The reset kills the REPL mid-exec (that IS the reset), so it is sent
+    over the cached raw-REPL handle without waiting for a reply, the handle
+    is dropped (the next jl_exec reconnects), and readiness is proven by
+    port1_wait_ready() rather than assumed. JL_EXEC_SUBPROCESS=1 keeps the
+    old jumperless.py transport.
 
     Returns True when the firmware answers again.
     """
-    jl = find_jumperless_py()
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".py", delete=False, prefix="hil_reset_"
-    ) as f:
-        f.write("import machine\nmachine.reset()\n")
-        path = f.name
-    try:
-        subprocess.run(
-            [sys.executable, jl, "exec", "--file", path, "--timeout", "8"],
-            capture_output=True, text=True, timeout=30,
-            cwd=os.path.dirname(os.path.dirname(jl)),
-        )
-    except subprocess.TimeoutExpired:
-        pass
-    finally:
+    t0 = time.perf_counter()
+    if os.environ.get("JL_EXEC_SUBPROCESS"):
+        jl = find_jumperless_py()
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".py", delete=False, prefix="hil_reset_"
+        ) as f:
+            f.write("import machine\nmachine.reset()\n")
+            path = f.name
         try:
-            os.unlink(path)
-        except OSError:
+            subprocess.run(
+                [sys.executable, jl, "exec", "--file", path, "--timeout", "8"],
+                capture_output=True, text=True, timeout=30,
+                cwd=os.path.dirname(os.path.dirname(jl)),
+            )
+        except subprocess.TimeoutExpired:
             pass
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    else:
+        try:
+            ser = _REPL or _repl_open()
+            ser.write(b"\x03\r")
+            ser.flush()
+            time.sleep(0.05)
+            ser.reset_input_buffer()
+            ser.write(b"import machine\nmachine.reset()\n\x04")
+            ser.flush()
+            time.sleep(0.3)
+        except Exception:
+            pass
+        close_ports()
     time.sleep(2.0)   # let the USB node actually disappear before we poll
-    return port1_wait_ready(35.0)
+    ok = port1_wait_ready(35.0)
+    _prof("reboot_board", t0)
+    return ok
 
 
 def port1_wait_ready(timeout=25.0):
@@ -1102,7 +1309,10 @@ def port1_wait_ready(timeout=25.0):
     return False
 
 
-def port1_command(cmd, collect_seconds=2.5, quiet_after=None, max_seconds=None):
+_QUIET_DEFAULT = object()
+
+
+def port1_command(cmd, collect_seconds=2.5, quiet_after=_QUIET_DEFAULT, max_seconds=None):
     """Send a single-char command line on port 1, return de-ANSI'd output.
 
     `quiet_after` switches the RESPONSE drain from a fixed window to the same
@@ -1116,7 +1326,19 @@ def port1_command(cmd, collect_seconds=2.5, quiet_after=None, max_seconds=None):
     """
     import serial  # pyserial
 
-    with serial.Serial(port1_path(), 115200, timeout=0.2) as ser:
+    t0 = time.perf_counter()
+    # Default (2026-09-04): drain until the port has been quiet, never
+    # longer than collect_seconds - the fixed window was 2.5 s of waiting
+    # after a 20 ms reply. The quiet threshold scales with the window a
+    # caller asked for (a quarter of it, 0.5 s to 3 s): a 1.5 s '?' returns
+    # 0.5 s after its reply, a 4 s slot switch keeps a full second of grace
+    # for the pause between its lines, an 8 s guided check keeps two. A
+    # caller that names its own quiet_after keeps the old 4x
+    # collect_seconds ceiling unless it names max_seconds.
+    if quiet_after is _QUIET_DEFAULT:
+        quiet_after = min(3.0, max(0.5, collect_seconds * 0.25))
+        max_seconds = max_seconds or collect_seconds
+    with serial.Serial(port1_path(), 115200, timeout=0.05) as ser:
         # The FIRST byte on a fresh connection triggers the firmware's
         # connection-init (greeting banner + input flush), which eats
         # whatever follows it - an 'i?' losing its '?' silently becomes a
@@ -1133,7 +1355,7 @@ def port1_command(cmd, collect_seconds=2.5, quiet_after=None, max_seconds=None):
             if chunk:
                 banner += chunk
                 quiet_start = time.time()
-            elif time.time() - quiet_start > 0.6:
+            elif time.time() - quiet_start > 0.3:   # the banner ends ~80 ms in
                 break
         # The banner was previously read and thrown away, which is precisely
         # where a post-fault [crashlog] lands: the firmware prints it once, to
@@ -1165,5 +1387,6 @@ def port1_command(cmd, collect_seconds=2.5, quiet_after=None, max_seconds=None):
                 chunk = ser.read(4096)
                 if chunk:
                     buf += chunk
+        _prof("port1_command", t0)
         return fault_scan(_ANSI.sub("", buf.decode(errors="replace")),
                           f"the '{cmd}' command")

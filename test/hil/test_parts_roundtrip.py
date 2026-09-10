@@ -331,11 +331,20 @@ print(overlay_serialize())
 print("<<<END>>>")
 """, timeout=30)
     vals = parse_kv(out)
-    check(vals.get("ovcount") == 1,
-          f"exactly one overlay loaded (got {vals.get('ovcount')}) - the parts "
-          f"section did not hijack the overlays scan")
     ov = re.search(r"<<<OV>>>\r?\n(.*)<<<END>>>", out, re.DOTALL)
     ovtext = ov.group(1) if ov else ""
+    # overlay_count() counts the firmware's own session-only overlays too
+    # (names starting with '_': the part-label card the load raises for a
+    # placed part). Those come and go on their own clock - the 2026-09-04
+    # harness reaches this read 3 s after the switch instead of 6 and found
+    # one still up - so the hijack guard counts the overlays the FILE
+    # loaded: every name that is not session-only.
+    loaded = [n for n in re.findall(r'"name":"([^"]*)"', ovtext)
+              if not n.startswith("_")]
+    check(len(loaded) == 1,
+          f"exactly one overlay loaded from the file (got {loaded}, table "
+          f"count {vals.get('ovcount')}) - the parts section did not hijack "
+          f"the overlays scan")
     check("RTTEST" in ovtext,
           f"the loaded overlay is RTTEST, not a part name (got {ovtext[:200]!r})")
     check(not re.search(r'"(U1|U2|R1|C1)"', ovtext),

@@ -10,10 +10,15 @@ Usage:
 
 import os
 import subprocess
+import time
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jl  # board_state_capture/restore - leave the bench as we found it
+
+# Every suite prints its harness call profile at exit (jl.py) unless the
+# caller turned it off; the runner prints each file's wall time and a table.
+os.environ.setdefault("JL_PROFILE", "1")
 
 TESTS = [
     "test_micropython_fs.py",  # cheapest liveness check first
@@ -99,15 +104,21 @@ orig_slot, orig_path = jl.active_context(1.5)
 print(f"pre-suite context: slot {orig_slot}, path {orig_path!r}")
 
 results = {}
+durations = {}
+t_suite = time.perf_counter()
 restore_error = None
 try:
     for name in TESTS:
         if selector and selector not in name:
             continue
         print(f"\n=== {name} " + "=" * max(0, 60 - len(name)), flush=True)
+        jl.close_ports()   # one process holds port 5: hand it to the suite
+        t_file = time.perf_counter()
         proc = subprocess.run([sys.executable, os.path.join(here, name)],
                               cwd=here)
         results[name] = proc.returncode
+        durations[name] = time.perf_counter() - t_file
+        print(f"  {name} took {durations[name]:.1f} s", flush=True)
 
         # Heap read-out between suites. Cheap (~1 s) and permanent: "free" and
         # "maxblk" are different diseases, and "retained" is the harness's own
@@ -206,6 +217,12 @@ for name, rc in results.items():
         status = "PASS"
     print(f"  {status}  {name}")
 passed = len(results) - fails - skipped
+if durations:
+    print("\nwall time per file:")
+    for name, secs in sorted(durations.items(), key=lambda kv: -kv[1]):
+        print(f"  {secs:7.1f} s  {name}")
+    print(f"  {time.perf_counter() - t_suite:7.1f} s  total (suites + heap reads + restore)")
+
 print(f"HIL suite: {'PASS' if fails == 0 else 'FAIL'} "
       f"({passed}/{len(results)} files passed"
       + (f", {skipped} SKIPPED - they asserted nothing" if skipped else "")

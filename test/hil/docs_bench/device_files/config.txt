@@ -1,0 +1,177 @@
+[config]
+firmware_version = 5.7.11.0;
+
+[firmware]
+last_version = 5.7.11.0;
+
+[hardware]
+generation = 5;
+revision = 7;
+probe_revision = 5;
+psram_installed = false;
+psram_app_size_kb = 2048;
+
+[probe]
+auto_connect = on;
+power_source = dac0_first;
+use_pio_button = true;
+led_on_button_pin = true;
+led_refresh_us = 0;
+pad_max = 4056;
+pad_min = 16;
+pad_max_measure = 4111;
+pad_max_measure_gpio = 4110;
+pad_min_measure = 10;
+switch_threshold_high = 1.2000;
+switch_threshold_low = 0.9000;
+switch_select_max_ma = 0.0000;
+switch_blink_hold_pct = 50;
+measure_voltage = 3.3671;
+current_zero = 1.5869;
+min_valid_reading = 85;
+droop_v0 = 3.3500;
+droop_ohms = 169.6479;
+pad_ohms = 5.0000;
+
+[clickwheel]
+encoder_pio = auto;
+rail_click_adjust = oled_only;
+part_walk = z;
+fx_type = glow;
+fx_duration_ms = 160;
+fx_tint = 0x00;
+fx_density = 128;
+
+[measurement]
+net_currents = 1;
+current_flow = conventional;
+show_probe_current = 0;
+crosspoint_resistance = 40.0000;
+
+[terminal]
+colors = true;
+line_buffering = true;
+
+[undo]
+persist = true;
+max_saved_actions = 256;
+
+[dacs]
+limit_max = 8.00;
+limit_min = -8.00;
+
+[debug]
+file_parsing = false;
+net_manager = false;
+nets_to_chips = false;
+nets_to_chips_alt = false;
+probing = false;
+arduino = 0;
+show_node_errors = true;
+probe_switch_stats = false;
+probe_switch_agree = false;
+net_voltage_scan = false;
+net_scan_pair_taps = 1;
+
+[routing]
+stack_paths = 2;
+stack_rails = 3;
+stack_dacs = 0;
+stack_gpio = 0;
+stack_adcs = 0;
+part_safety = off;
+
+[slots]
+boot_mode = last_active;
+boot_slot = 0;
+
+[calibration]
+top_rail_zero = 1655;
+top_rail_spread = 18.4000;
+bottom_rail_zero = 1639;
+bottom_rail_spread = 19.0000;
+dac_0_zero = 1655;
+dac_0_spread = 18.2300;
+dac_1_zero = 1629;
+dac_1_spread = 19.0300;
+adc_0_zero = 8.9969;
+adc_0_spread = 18.0563;
+adc_1_zero = 8.9903;
+adc_1_spread = 18.0659;
+adc_2_zero = 8.9993;
+adc_2_spread = 18.0637;
+adc_3_zero = 8.9826;
+adc_3_spread = 18.0345;
+adc_4_zero = 0.0000;
+adc_4_spread = 4.9151;
+adc_7_zero = 8.8184;
+adc_7_spread = 17.7676;
+
+[logo_pads]
+top_guy = uart_tx;
+bottom_guy = uart_rx;
+building_pad_top = isense_pos;
+building_pad_bottom = isense_neg;
+top_guy_idle = off;
+bottom_guy_idle = off;
+building_pad_top_idle = off;
+building_pad_bottom_idle = off;
+
+[display]
+lines_wires = wires;
+menu_brightness = -10;
+led_brightness = 10;
+rail_brightness = 55;
+special_net_brightness = 20;
+net_color_mode = rainbow;
+
+[serial_1]
+function = passthrough;
+baud_rate = 115200;
+print_passthrough = 0;
+connect_on_boot = 0;
+lock_connection = 0;
+autoconnect_flashing = 1;
+async_passthrough = true;
+tag_parsing = enabled;
+flash_reset_type = avr;
+
+[serial_2]
+function = micropython;
+baud_rate = 115200;
+print_passthrough = 0;
+connect_on_boot = 0;
+lock_connection = 0;
+
+[top_oled]
+enabled = 1;
+i2c_address = 0x3C;
+width = 128;
+height = 32;
+rotation = 0;
+connection_type = i2c0;
+sda_pin = 4;
+scl_pin = 5;
+gpio_sda = 134;
+gpio_scl = 135;
+sda_row = -1;
+scl_row = -1;
+connect_on_boot = 1;
+lock_connection = 0;
+show_in_terminal = off;
+font = Eurostl;
+startup_message = images/bubbleJumpThin.bin;
+
+[usb_cdc]
+ignore_dtr = false;
+
+[usb_audio]
+enabled = false;
+left = 0;
+right = 1;
+rate = 16000;
+full_scale = 8.00;
+dc_block = true;
+
+
+

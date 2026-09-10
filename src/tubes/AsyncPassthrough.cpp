@@ -32,6 +32,7 @@
 
 // Debug flag for command relay tracing
 // Set to 1 to see each character being relayed from <j> tags
+#include "boards/board.h"   // uartTxPin / uartRxPin
 #include "ArduinoStuff.h"
 #include "Commands.h"
 #include "FileParsing.h"
@@ -238,8 +239,11 @@ static const uint8_t NUM_COMMAND_TAGS = 4;
 #define ASYNC_PASSTHROUGH_UART uart0
 #define ASYNC_PASSTHROUGH_UART_IRQ UART0_IRQ
 
-#define ASYNC_PASSTHROUGH_UART_TX_PIN 0
-#define ASYNC_PASSTHROUGH_UART_RX_PIN 1
+// The pins come from the board descriptor: V5 0/1, OG 16/17. (The OG's GPIO 1
+// is the MCP4822's SPI chip-select and GPIO 0 the routable RP_GPIO_0 node -
+// the old hardcoded 0/1 muxed both to UART0 on that board.)
+#define ASYNC_PASSTHROUGH_UART_TX_PIN ( (uint)board::currentBoard( ).caps.uartTxPin )
+#define ASYNC_PASSTHROUGH_UART_RX_PIN ( (uint)board::currentBoard( ).caps.uartRxPin )
 #endif
 
 #ifndef ASYNC_PASSTHROUGH_UART_DEFAULT_BAUD

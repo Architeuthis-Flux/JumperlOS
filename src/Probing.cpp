@@ -65,6 +65,8 @@ extern WaveGen wavegen; // defined in main.cpp
 #include "oled.h"
 #include "USBAudio.h" // usb_audio_probe_activity()
 #include "AdcRing.h"  // T2.1: the pad decode reads the ring's history
+#include "ScanProbe.h"     // the scanning probe (BoardCaps::scanningProbe - the OG): tone sweep + one-button decode
+#include "boards/board.h"  // board::currentBoard().caps - which probe this board has
 
 // Button timing constants
 #define BUTTON_SETTLE_US 8
@@ -122,6 +124,13 @@ extern volatile int           g_pendingRedoSplit;
 ServiceStatus ProbeButton::service( ) {
     lastStatus = ServiceStatus::IDLE;
     extern struct config jumperlessConfig;
+
+    // A scanning-probe board (the OG) has one button and no PIO sampler: the
+    // hold decoder below is the whole service there.
+    if ( board::currentBoard( ).caps.scanningProbe ) {
+        scanProbeButtonService( );
+        return lastStatus;
+    }
 
     // -------------------------------------------------------------------
     // 0. Handle a runtime PIO/CPU mode toggle from the debug menu.
@@ -1251,6 +1260,13 @@ bool setProbeLedMerged( bool wantMerged ) {
 int ProbeButton::checkProbeButtonHardware( void ) {
     extern struct config jumperlessConfig;
 
+    if ( board::currentBoard( ).caps.scanningProbe ) {
+        // One button, read by tone coupling (sensing/ScanProbe.cpp). This is
+        // the raw physical state; scanProbeButtonService() decodes it.
+        probeButtonCPUReadCount++;
+        return scanprobe::buttonPressed( ) ? 2 : 0;
+    }
+
     // ============================================================
     // Multiplex coordination (PROBE_LED_PIN is the WS2812 data
     // line; BUTTON_PIN sits on the same external net). We MUST NOT
@@ -1405,6 +1421,97 @@ int ProbeButton::checkProbeButtonHardware( void ) {
     return returnState;
 }
 
+// ----------------------------------------------------------------------------
+// Scanning-probe boards (the OG) have ONE probe button, read by coupling: the
+// needle carries a tone, and a pressed button puts that tone on the button
+// line (scanprobe::buttonPressed). The press is decoded by hold length into
+// the two button codes the rest of the stack speaks:
+//   short press (released before kScanLongPressMs) -> the CURRENT mode's own
+//     button: at idle CONNECT (2); in a session it ends the session (or, in
+//     connect mode with one node picked, clears that pick - as on the V5)
+//   long press (still held at kScanLongPressMs)     -> the OTHER button: at
+//     idle CLEAR (1); in a session it toggles connect <-> clear
+// That is the original OG probe-mode gesture set ("long press = connect /
+// clear, short press = commit") laid over the V5 session, which already
+// treats the same button as exit and the other one as a mode switch. One
+// event per physical press, nothing more until a debounced release.
+// processSample() is bypassed: its block / double-tap machinery is built
+// around two buttons and a PIO sampler this hardware does not have.
+// ----------------------------------------------------------------------------
+static const uint32_t kScanLongPressMs    = 750;
+static const uint32_t kScanSampleMs       = 12;
+static const int      kScanConfirmSamples = 2; // ~24 ms of agreement before a press or a release counts
+
+// The decoder's own debounced "finger on the button" - distinct from
+// currentButtonState, which probeSessionBegin() zeroes on entry. A long
+// press opens a session while still held; the sweep gate in scanProbeRead()
+// must see THIS, or its first tip read finds the needle shorted to the
+// low-driven button line, calls it GND, and clear mode strips every GND
+// bridge (advisor review, 2026-09-07).
+static volatile bool s_scanProbeHeld = false;
+static volatile bool s_scanLastLong = false;
+
+bool ProbeButton::scanProbeHeld( void ) const { return s_scanProbeHeld; }
+bool ProbeButton::scanLastPressWasLong( void ) const { return s_scanLastLong; }
+
+void ProbeButton::scanProbeButtonService( void ) {
+    bool&           s_held = *const_cast<bool*>( &s_scanProbeHeld );
+    static bool     s_fired = false;
+    static int      s_agree = 0;
+    static uint32_t s_pressStartMs = 0;
+
+    unsigned long now = millis( );
+    if ( now - lastCheckTime < kScanSampleMs ) return;
+    lastCheckTime = now;
+
+    uint32_t t0 = time_us_32( );
+    bool pressed = scanprobe::buttonPressed( );
+    probeButtonCPUReadCount++;
+    probeButtonCPULastUs = time_us_32( ) - t0;
+
+    // Debounce: a change of physical state has to hold for kScanConfirmSamples.
+    if ( pressed != s_held ) {
+        if ( ++s_agree < kScanConfirmSamples ) return;
+    }
+    s_agree = 0;
+
+    auto post = [ & ]( bool longPress ) {
+        // Which of the two V5 buttons this press stands for (see above).
+        int mode = probeActive ? (int)Probing::getInstance( ).connectOrClearProbe : 1;
+        int same = ( mode == 1 ) ? 2 : 1;
+        int other = ( mode == 1 ) ? 1 : 2;
+        s_scanLastLong = longPress;
+        buttonPress = longPress ? other : same;
+        lastStatus = ServiceStatus::BUSY;
+        if ( probe_button_trace ) {
+            Serial.printf( "[%lu] PROBE-SCAN %s press -> %d (mode %d)\n\r", (unsigned long)now,
+                           longPress ? "long" : "short", buttonPress, mode );
+        }
+    };
+
+    if ( pressed ) {
+        if ( !s_held ) {
+            s_held = true;
+            s_fired = false;
+            s_pressStartMs = now;
+            lastButtonState = currentButtonState;
+            currentButtonState = 2;
+            buttonChanged = true;
+            noteUserInput( );
+        } else if ( !s_fired && ( now - s_pressStartMs ) >= kScanLongPressMs ) {
+            s_fired = true;
+            post( true );
+        }
+    } else if ( s_held ) {
+        s_held = false;
+        lastButtonState = currentButtonState;
+        currentButtonState = 0;
+        buttonChanged = true;
+        if ( !s_fired ) post( false );
+        s_fired = false;
+    }
+}
+
 // Global reference for clean syntax
 ProbeButton& probeButton = ProbeButton::getInstance( );
 
@@ -1419,6 +1526,10 @@ Probing& Probing::getInstance() {
 }
 
 Probing::Probing( ) {
+    // The board's probe pins (JumperlessDefines.h: V5 10/9, OG 19/18).
+    probePin = PROBE_PIN;
+    buttonPin = BUTTON_PIN;
+
     // Initialize probe row maps
     int probeRowMapInit[ 108 ] = {
         -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, TOP_RAIL, GND,
@@ -1664,6 +1775,13 @@ ServiceStatus Probing::service( ) {
         return lastStatus;
     }
 
+    // Scanning probe (the OG): there is no pad ladder to read at idle, and a
+    // sweep empties the crossbar - the button decoder is the whole idle job.
+    if ( board::currentBoard( ).caps.scanningProbe ) {
+        handleProbeButtonActions( );
+        return lastStatus;
+    }
+
     // Rate limiting for probe reading
     // Run probe check every ~10ms (100Hz) for responsive probing
     static unsigned long lastProbeCheckTime = 0;
@@ -1713,6 +1831,10 @@ int& buttonPin = Probing::getInstance( ).buttonPin;
 volatile unsigned long& blockProbeButton = Probing::getInstance( ).blockProbeButton;
 volatile unsigned long& blockProbeButtonTimer = Probing::getInstance( ).blockProbeButtonTimer;
 volatile int& connectOrClearProbe = Probing::getInstance( ).connectOrClearProbe;
+volatile bool probeChooserActive = false;
+volatile int  probePickCount = 0;
+volatile int  probePickIndex = 0;
+volatile int  probePickNodes[ 8 ] = { 0 };
 volatile int& node1or2 = Probing::getInstance( ).node1or2;
 int& probeHighlight = Probing::getInstance( ).probeHighlight;
 volatile int& removeFade = Probing::getInstance( ).removeFade;
@@ -2734,6 +2856,28 @@ struct Probing::ProbeSession {
     int flashPhase = 0;              // 0 idle; 1..3 = frame N painted, dwelling
     unsigned long flashNextAtUs = 0; // when the current dwell ends
     int flashRow = -1;               // 0-based row being flashed (node1or2 moves on eagerly)
+
+    // --- scanning-probe sub-states (scanSessionFilter; idle on a board
+    // without BoardCaps::scanningProbe) ---
+    bool askOpen = false;            // the 3.3 V / 5 V ask is up
+    int askChoice = SUPPLY_3V3;      // what a long press would select
+    // One touch of the needle, accumulated across consecutive sweeps. A
+    // single sweep is not a reliable answer - it reports one row of a shorted
+    // pair as often as both - so the rows are unioned over kScanSettleSweeps
+    // sweeps before the session decides "one row" or "a pick". (The OG
+    // reference firmware did the same thing: scanRows three more times and
+    // keep the largest set.) touchAnswered means this touch already produced
+    // a node; nothing more happens until the needle moves or lifts.
+    int touchSet[ 8 ] = { };
+    int touchCount = 0;
+    int touchSweeps = 0;
+    unsigned long touchStartMs = 0;
+    bool touchAnswered = false;
+    bool touchWasRail = false;
+    bool railHeld = false;           // a supply node is held: the positive rails wear its color
+    int pickCount = 0;               // > 0: the multi-row pick is up
+    int pickIndex = 0;
+    int pickNodes[ 8 ] = { };
 };
 
 // The old emitBanner lambda. Deferral contract unchanged: nothing prints
@@ -2796,6 +2940,12 @@ void Probing::probeSessionBegin( ProbeSession& s, int setOrClear, int firstConne
     s.connectionsThisSession = 0; // Track total connections made this probe mode session
 
     routableBufferPower( 1, 1 );
+
+    if ( scanprobe::available( ) ) {
+        scanprobe::parkPins( true ); // button line low: the kit LED lights on the tone
+        scanEmptySweeps = 99;        // nothing is on the needle yet
+        probeChooserActive = false;
+    }
 
     // probeMode owns the terminal from here: its banners and node names
     // scroll the rows the live reading pinned for itself, so drop that anchor
@@ -3196,6 +3346,9 @@ void Probing::probeTick( ProbeSession& s ) {
 
         } else if ( s.row[ 0 ] == -1 ) { // Only read physical probe if encoder didn't select
             s.row[ 0 ] = readProbe( );
+            if ( scanprobe::available( ) ) {
+                s.row[ 0 ] = scanSessionFilter( s, s.row[ 0 ] );
+            }
         }
 
 
@@ -3224,6 +3377,7 @@ void Probing::probeTick( ProbeSession& s ) {
             s.row[ 0 ] = s.pendingInProbeButton;
             s.pendingInProbeButton = 0;
             pendingCommitting = true;
+            if ( debugProbing ) { Serial.printf( "\n\r[defer] requeue %d (pick=%d ask=%d)\n\r", s.row[ 0 ], s.pickCount, (int)s.askOpen ); Serial.flush( ); }
         }
 
         if ( s.row[ 0 ] == -1 ) {
@@ -3361,7 +3515,14 @@ void Probing::probeTick( ProbeSession& s ) {
             // we don't want to silently drop click 1. Commit the old
             // pending immediately and defer the new press so both
             // mode switches happen sequentially.
-            if ( !pendingCommitting ) {
+            // A scanning-probe board never defers: the deferral exists so a
+            // double-tap can cancel click 1 before it acts, and the OG's
+            // one-button decoder has no double-tap (scanProbeButtonService
+            // does not run processSample, so g_probeDoubleTapBail cannot
+            // fire there). Deferring cost 420 ms of latency AND bypassed
+            // scanSessionFilter on the re-queue, which is how a press during
+            // the pick reached the fall-through exit below.
+            if ( !pendingCommitting && !scanprobe::available( ) ) {
                 if ( s.pendingInProbeButton != 0 && s.pendingInProbeButton != s.row[ 0 ] ) {
                     int newPress = s.row[ 0 ];
                     s.row[ 0 ] = s.pendingInProbeButton;       // process old pending in this iter
@@ -3372,6 +3533,7 @@ void Probing::probeTick( ProbeSession& s ) {
                 } else {
                     s.pendingInProbeButton     = s.row[ 0 ];
                     s.pendingInProbeButtonTime = millis( );
+                    if ( debugProbing ) { Serial.printf( "\n\r[defer] stash %d\n\r", s.row[ 0 ] ); Serial.flush( ); }
                     s.row[ 0 ] = -1;
                     return; // (was: continue - the next PROBE_RUN tick re-checks the loop condition first)
                 }
@@ -3433,7 +3595,17 @@ void Probing::probeTick( ProbeSession& s ) {
                     //           s.lastProbedRows[0] = -1;
                     // s.lastProbedRows[1] = -1;
                     // clearLEDsExceptRails();
-                    requestLedShow( 1 );
+                    if ( scanprobe::available( ) ) {
+                        // The one-button decoder maps short / long onto the
+                        // mode's own / other button: keep it on the mode the
+                        // session is in. A held row was painted raw on the
+                        // single-LED strip: clear before the render.
+                        connectOrClearProbe = 0;
+                        scanRailsRelease( s );
+                        requestLedShow( -1 );
+                    } else {
+                        requestLedShow( 1 );
+                    }
                     node1or2 = 0;
 
                     // Serial.println("-18 s.connectionsThisSession = " + String(s.connectionsThisSession) + "\n\n\n\n\n\r");
@@ -3470,7 +3642,12 @@ void Probing::probeTick( ProbeSession& s ) {
 
                         probeHighlight = -1;
                         // clearLEDsExceptRails();
-                        requestLedShow( -2 );
+                        if ( scanprobe::available( ) ) {
+                            scanRailsRelease( s );
+                            requestLedShow( -1 ); // a clearing render: the raw-painted row goes dark now
+                        } else {
+                            requestLedShow( -2 );
+                        }
                         // waitCore2();
 
                         // Serial.println("-16 s.setOrClear == 1\n\r");
@@ -3492,6 +3669,11 @@ void Probing::probeTick( ProbeSession& s ) {
                     // Serial.println("-16 s.setOrClear == 0\n\r");
                     s.setOrClear = 1;
                     // showProbeLEDs = 2;
+                    if ( scanprobe::available( ) ) {
+                        connectOrClearProbe = 1; // see the clear-mode twin above
+                        scanRailsRelease( s );
+                        requestLedShow( -1 );
+                    }
 
                     probingTimer = millis( );
                     blockProbeButton = 8000;
@@ -3540,6 +3722,13 @@ void Probing::probeTick( ProbeSession& s ) {
             }
 
             // Serial.print("\n\rCommitting paths!\n\r");
+            // Scanning-probe boards only: on the V5 nothing about this path
+            // changed, debug output included.
+            if ( debugProbing && scanprobe::available( ) ) {
+                Serial.printf( "\n\r[EXIT] button fallthrough r=%d soc=%d n12=%d pick=%d ask=%d\n\r",
+                               s.row[ 0 ], s.setOrClear, node1or2, s.pickCount, (int)s.askOpen );
+                Serial.flush( );
+            }
             s.row[ 1 ] = -2;
             probingTimer = millis( );
 
@@ -3701,6 +3890,10 @@ void Probing::probeTick( ProbeSession& s ) {
                         Serial.print( " to " );
                         Serial.println( node2Name );
                         Serial.flush( );
+                        if ( scanprobe::available( ) ) {
+                            scanRailsRelease( s );
+                            requestLedShow( -1 ); // the held row's raw paint goes with it
+                        }
                         node1or2 = 0;
                         nodesToConnect[ 0 ] = -1;
                         nodesToConnect[ 1 ] = -1;
@@ -3713,6 +3906,7 @@ void Probing::probeTick( ProbeSession& s ) {
                     // "connected" text, the counters, the LED request and the
                     // pair toast below used to run regardless, telling the
                     // user a wire existed that was never made.
+                    if ( scanprobe::available( ) ) scanRailsRelease( s ); // the supply node is no longer held
                     bool bridgeAdded = addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
                     if ( !bridgeAdded ) {
                         node1or2 = 0;
@@ -3974,6 +4168,15 @@ void Probing::probeTick( ProbeSession& s ) {
 
 int Probing::probeExitTail( ProbeSession& s ) {
 
+    if ( scanprobe::available( ) ) {
+        probeChooserActive = false;
+        // Tear down an open ask / pick and the held-supply rail paint: a
+        // timeout or a serial key can end the session with one of them up.
+        // (scanRailsRelease clears askOpen itself - it must still see it set,
+        // or the rails stay in the ask color: advisor review.)
+        if ( s.pickCount > 0 ) scanPickClose( s );
+        scanRailsRelease( s );
+    }
 
     // Serial.println("fuck you");
     //  digitalWrite(RESETPIN, LOW);
@@ -3987,6 +4190,19 @@ int Probing::probeExitTail( ProbeSession& s ) {
     probeHighlight = -1;
     //showProbeLEDs = 4;
     brightenNet( -1 );
+
+    if ( scanprobe::available( ) ) {
+        // Every sweep emptied the crossbar, and the OG has no suspect
+        // bookkeeping to upgrade the next send to a clean one - put the
+        // circuit back now, before anything else looks at the board.
+        scanprobe::sweepAbort( );
+        scanprobe::parkPins( false );
+        refreshLocalConnections( 1, 1, 1 );
+        // That refresh renders without clearing, and on the single-LED strip
+        // nothing else repaints a row the session lit raw (the first node of
+        // an unfinished pair): clear first, then render.
+        requestLedShow( -1 );
+    }
 
     // (Previously: immediate fileCacheFlushNowAll("probe_exit") here.
     // Removed - flush during probe-exit was visibly stopping the UI
@@ -6102,6 +6318,10 @@ int Probing::checkSwitchPosition( ) { // 0 = measure, 1 = select
 // the idle classifier catches it within a check once the session ends.
 int Probing::classifySwitchPosition( bool inSession ) { // 0 = measure, 1 = select
 
+    if ( !board::currentBoard( ).caps.hasProbePads ) {
+        return switchPosition; // no switch, no INA on this board's probe
+    }
+
     // Timing: only sample at a fixed interval.
     static unsigned long last_check_millis = 0;
     // SELECT->MEASURE needs two consecutive below-low readings (see below).
@@ -8115,9 +8335,408 @@ int Probing::justReadProbe( bool allowDuplicates, int rawPad ) {
         return probeRowMap[ rowProbed ];
     }
 }
+// The scanning probe's readProbe(): one tick. Same contract - a node, -1 for
+// nothing (yet), -18 / -16 for the decoded button. A sweep runs over ~13 of
+// these ticks (sensing/ScanProbe.cpp); the wrapper's pump between ticks keeps
+// USB and the inner services alive.
+// scanProbeRead()'s "a positive hard level on the needle": the session asks
+// 3.3 V or 5 V (scanSessionFilter) - the needle cannot tell them apart and
+// the rail switch is not sensed. Negative like the other readProbe() codes.
+static const int kScanRailTouch = -21;
+// sweepResults() never hands back more than ScanProbe's own kMaxFound (8).
+static const int kScanMaxFound = 8;
+
+int Probing::scanProbeRead( void ) {
+    if ( blockProbing > 0 && ( millis( ) - blockProbingTimer < blockProbing ) ) {
+        return -1;
+    }
+    if ( blockProbing > 0 ) {
+        blockProbing = 0;
+    }
+
+    // The decoder first - for the same reason readProbe() services the
+    // button: inside a session this tick is the only place it runs often.
+    probeButton.service( );
+    int buttonState = checkProbeButton( );
+    if ( buttonState == 1 ) {
+        scanprobe::sweepAbort( );
+        return -18;
+    }
+    if ( buttonState == 2 ) {
+        scanprobe::sweepAbort( );
+        return -16;
+    }
+    if ( probeButton.scanProbeHeld( ) || probeButton.getButtonState( ) != 0 ) {
+        // Held: the button shorts the needle to the (low-driven) button line,
+        // so neither the tip level nor a tone means anything until it is
+        // released. scanProbeHeld() is the decoder's own state - the session
+        // entry zeroes getButtonState() while a long press is still down.
+        scanprobe::sweepAbort( );
+        return -1;
+    }
+
+    if ( !scanprobe::sweepActive( ) ) {
+        scanprobe::TipLevel tip = scanprobe::sweepBegin( );
+        if ( tip == scanprobe::TIP_FLOATING ) {
+            return -1; // sweeping; the result lands in a later tick
+        }
+        // A hard level on an empty crossbar is a rail (or a header power
+        // pin): never drive the tone into it, report it. Low is GND. High is
+        // 3.3 V or 5 V - the needle cannot tell and the rail switch is not
+        // sensed - so it goes back as kScanRailTouch and the session asks,
+        // the way the reference firmware did.
+        if ( tip == scanprobe::TIP_LOW && scanprobe::buttonPressed( ) ) {
+            // Not ground: the button shorts the needle to the button line,
+            // which the session drives LOW, and the hold decoder has not
+            // debounced the press yet (~24-36 ms). Reporting GND here let a
+            // press latch GND - and in clear mode that cleared GND's whole
+            // net. ~0.5 ms, and only on the rare low-level path.
+            return -1;
+        }
+        scanEmptySweeps = 0; // a level is something on the needle, not a lift
+        if ( tip == scanprobe::TIP_HIGH ) {
+            return kScanRailTouch;
+        }
+        connectedRows[ 0 ] = GND;
+        connectedRowsIndex = 1;
+        return GND;
+    }
+
+    if ( !scanprobe::sweepStep( ) ) {
+        return -1;
+    }
+
+    int nodes[ kScanMaxFound ];
+    int n = scanprobe::sweepResults( nodes, kScanMaxFound );
+    if ( n <= 0 ) {
+        if ( scanEmptySweeps < 99 ) scanEmptySweeps++;
+        return -1;
+    }
+    scanEmptySweeps = 0;
+    // The needle's net reaches more than one hole when a wire or a part sits
+    // between rows (the crossbar is empty during the sweep). Electrically any
+    // of them is the same net, but a bridge names ONE row, so the session
+    // asks which (scanSessionFilter's pick). The whole list goes back sorted
+    // in connectedRows; the lowest is the read value.
+    std::sort( nodes, nodes + n );
+    for ( int i = 0; i < n; i++ ) connectedRows[ i ] = nodes[ i ];
+    connectedRowsIndex = n;
+    if ( n > 1 && debugProbing == 1 ) {
+        Serial.print( "scan: needle net on " );
+        for ( int i = 0; i < n; i++ ) {
+            if ( i > 0 ) Serial.print( ", " );
+            printNodeOrName( nodes[ i ] );
+        }
+        Serial.print( "\n\r" );
+    }
+    return nodes[ 0 ];
+}
+
+// --- scanning-probe session sub-states -------------------------------------------
+//
+// Two things the reference OG firmware did in blocking loops, as sub-states
+// of the tick: the rail-voltage ask (its voltageSelect) and the multi-row
+// pick (its selectFromLastFound). Both live in the read path - the filter
+// runs on every readProbe() result - so the rest of the session sees the
+// chosen node exactly as if the needle had read it. Terminal output is ONE
+// line rewritten in place: the session's banner rewind counts lines.
+
+static const uint32_t kScanRail3V3Color = 0x502800; // amber, the header's 3V3 pin family
+static const uint32_t kScanRail5VColor  = 0x500a00; // red-orange, the header's 5V pin
+
+// The last answer to the ask, preselected next time. 3.3 V until told
+// otherwise (the safer wrong guess); RAM only, the switch can be flipped
+// between boots.
+static int s_scanRailChoice = SUPPLY_3V3;
+
+// How many consecutive empty sweeps mean the needle really came off, and how
+// long one touch is unioned before the session decides "one row" or "a pick".
+// A sweep is ~9.2 ms, so 5 sweeps is ~46 ms - the settle floor is there for
+// the fast paths that do not sweep at all (a rail level reads in ~0.4 ms and
+// would otherwise settle in under a millisecond). Both rows of a shorted pair
+// have to be seen in that window or the touch answers with one row, so this
+// is the knob to raise if a real pair still answers single.
+static const int kScanLiftSweeps    = 4;
+static const int kScanSettleSweeps  = 5;
+static const unsigned long kScanSettleMs = 45;
+
+
+static int scanNodePixel( int node ) {
+    if ( node <= 0 || node >= (int)( sizeof( nodesToPixelMap ) / sizeof( nodesToPixelMap[ 0 ] ) ) ) return -1;
+    return nodesToPixelMap[ node ];
+}
+
+// Does this sweep's result share a node with the open pick / the current
+// touch? "Same net, still there" - as opposed to the needle having moved.
+bool Probing::scanReadOverlapsPick( const ProbeSession& s ) const {
+    for ( int i = 0; i < connectedRowsIndex; i++ ) {
+        for ( int j = 0; j < s.pickCount; j++ ) {
+            if ( connectedRows[ i ] == s.pickNodes[ j ] ) return true;
+        }
+    }
+    return false;
+}
+
+bool Probing::scanReadOverlapsTouch( const ProbeSession& s ) const {
+    for ( int i = 0; i < connectedRowsIndex; i++ ) {
+        for ( int j = 0; j < s.touchCount; j++ ) {
+            if ( connectedRows[ i ] == s.touchSet[ j ] ) return true;
+        }
+    }
+    return false;
+}
+
+// Turn the settled touch set into the open pick.
+void Probing::scanPickOpen( ProbeSession& s ) {
+    probeChooserActive = true;
+    s.pickCount = ( s.touchCount < kScanMaxFound ) ? s.touchCount : kScanMaxFound;
+    s.pickIndex = 0;
+    for ( int i = 0; i < s.pickCount; i++ ) {
+        s.pickNodes[ i ] = s.touchSet[ i ];
+        probePickNodes[ i ] = s.touchSet[ i ];
+    }
+    probePickIndex = 0;
+    probePickCount = s.pickCount; // last: the renderer reads count as the gate
+    if ( debugProbing ) { Serial.printf( "\n\r[filt] pick OPEN n=%d\n\r", s.pickCount ); Serial.flush( ); }
+    connectedRowsIndex = 0;
+    connectedRows[ 0 ] = -1;
+    probeTimeout = millis( );
+    scanPickShow( s );
+}
+
+void Probing::scanTouchReset( ProbeSession& s ) {
+    s.touchCount = 0;
+    s.touchSweeps = 0;
+    s.touchStartMs = 0;
+    s.touchAnswered = false;
+    s.touchWasRail = false;
+}
+
+void Probing::scanAskShow( ProbeSession& s ) {
+    ogRailsPaint( s.askChoice == SUPPLY_5V ? kScanRail5VColor : kScanRail3V3Color );
+    requestLedShow( 2 );
+    Serial.print( "\x1b[2K\r" );
+    Serial.print( s.askChoice == SUPPLY_5V ? "        5V   short press = 3.3V, long press = select"
+                                           : "      3.3V   short press = 5V, long press = select" );
+    Serial.flush( );
+}
+
+void Probing::scanPickShow( ProbeSession& s ) {
+    probePickIndex = s.pickIndex;
+    // A NETS render, not a menu flush: the pick highlight is painted at the
+    // end of showNets so it lands ON TOP of the net colours.
+    requestLedShow( 1 );
+    Serial.print( "\x1b[2K\r  " );
+    for ( int i = 0; i < s.pickCount; i++ ) {
+        if ( i > 0 ) Serial.print( " " );
+        if ( i == s.pickIndex ) Serial.print( "[" );
+        Serial.print( definesToChar( s.pickNodes[ i ] ) );
+        if ( i == s.pickIndex ) Serial.print( "]" );
+    }
+    Serial.print( "   short press = next, long press = select" );
+    Serial.flush( );
+}
+
+// Put the pixels under the pick back. The chosen row, if there is one, is
+// latched by the caller right after this and painted then.
+void Probing::scanPickClose( ProbeSession& s ) {
+    probeChooserActive = false;
+    probePickCount = 0; // first: stop the renderer painting the highlight
+    s.pickCount = 0;
+    s.pickIndex = 0;
+    // Clear first, then render: a pick row that is NOT in a net has nothing
+    // to repaint over it otherwise.
+    requestLedShow( -1 );
+}
+
+// The rails go back to their own colors when the ask closes or the held
+// supply node is released (commit, drop, mode switch, exit).
+void Probing::scanRailsRelease( ProbeSession& s ) {
+    probeChooserActive = false;
+    if ( !s.railHeld && !s.askOpen ) return;
+    s.railHeld = false;
+    s.askOpen = false;
+    ogRailsPaint( 0 );
+}
+
+int Probing::scanSessionFilter( ProbeSession& s, int read ) {
+    const bool press = ( read == -16 || read == -18 );
+    const bool longPress = press && probeButton.scanLastPressWasLong( );
+    // "The needle is off the board": several sweeps in a row with nothing on
+    // it. One is noise (see scanEmptySweeps in Probing.h).
+    const bool lifted = ( scanEmptySweeps >= kScanLiftSweeps );
+
+    // TEMPORARY bench trace (debugProbing != 0), for the "a press during the
+    // pick exits the session" hunt. Only non-idle reads print.
+    if ( debugProbing && read != -1 ) {
+        Serial.printf( "\n\r[filt] r=%d cri=%d empt=%d ask=%d pick=%d tc=%d tsw=%d ans=%d n12=%d lp=%d\n\r",
+                       read, connectedRowsIndex, scanEmptySweeps, (int)s.askOpen,
+                       s.pickCount, s.touchCount, s.touchSweeps, (int)s.touchAnswered,
+                       node1or2, (int)longPress );
+        Serial.flush( );
+    }
+
+    if ( s.askOpen ) {
+        if ( press ) {
+            probeTimeout = millis( );
+            if ( !longPress ) {
+                s.askChoice = ( s.askChoice == SUPPLY_5V ) ? SUPPLY_3V3 : SUPPLY_5V;
+                scanAskShow( s );
+                return -1;
+            }
+            s_scanRailChoice = s.askChoice;
+            s.askOpen = false;
+            probeChooserActive = false;
+            s.railHeld = true;      // the rails keep the color while it is held
+            s.touchAnswered = true; // this touch is done: no re-ask until it moves
+            connectedRows[ 0 ] = s.askChoice;
+            connectedRowsIndex = 1;
+            return s.askChoice;
+        }
+        // Lifting the needle does NOT take the ask down: you poke the rail,
+        // read the question, take the probe off the board and answer it with
+        // the button (Kevin, 2026-09-08 - "we shouldn't need to hold the row
+        // poked"). Only landing on something that is not a rail closes it, and
+        // that read is then handled below as a fresh touch.
+        if ( read == -1 || read == kScanRailTouch ) return -1;
+        scanRailsRelease( s );
+        Serial.print( "\x1b[2K\r" );
+        scanTouchReset( s );
+    }
+
+    if ( s.pickCount > 0 ) {
+        if ( press ) {
+            probeTimeout = millis( );
+            if ( !longPress ) {
+                s.pickIndex = ( s.pickIndex + 1 ) % s.pickCount;
+                if ( debugProbing ) { Serial.printf( "\n\r[filt] pick cycle -> %d\n\r", s.pickIndex ); Serial.flush( ); }
+                scanPickShow( s );
+                return -1;
+            }
+            int chosen = s.pickNodes[ s.pickIndex ];
+            if ( debugProbing ) { Serial.printf( "\n\r[filt] pick select %d\n\r", chosen ); Serial.flush( ); }
+            scanPickClose( s );
+            s.touchAnswered = true;
+            Serial.print( "\x1b[2K\r" );
+            connectedRows[ 0 ] = chosen;
+            connectedRowsIndex = 1;
+            return chosen;
+        }
+        // Same rule as the ask: the pick survives a lift. You poke the row,
+        // the choices light up, and you take the probe off the board to cycle
+        // and select - holding the needle steady on a shorted row while
+        // clicking is not a thing anyone wants to do. Nothing on the needle,
+        // or the needle back on the same net, leaves the pick up; only a node
+        // that is NOT part of it closes it, and that read is then handled
+        // below as a fresh touch. (This also absorbs the sweep's own flicker,
+        // which used to tear the pick down and rebuild it several times a
+        // second, resetting the highlight under the user's finger.)
+        if ( read == -1 ) return -1;                 // nothing on the needle
+        if ( scanReadOverlapsPick( s ) ) return -1;  // still that net
+        if ( debugProbing ) { Serial.printf( "\n\r[filt] pick ABANDON on r=%d\n\r", read ); Serial.flush( ); }
+        scanPickClose( s );
+        Serial.print( "\x1b[2K\r" );
+        scanTouchReset( s );
+    }
+
+    // A press that lands while a touch is still settling belongs to THAT
+    // touch, not to the session. The sweep cannot finish while the button is
+    // down - scanProbeRead aborts it on every held tick - so a user who
+    // touches a shorted row and presses without pausing never gets the pick
+    // open, and the press falls through the button handler to its
+    // session-exit gesture. That is the bug Kevin hit. Deciding the touch
+    // here and eating the press keeps the gesture meaning what it looks
+    // like. (A press with nothing on the needle still exits: touchSweeps is
+    // 0 then, so this does not fire.)
+    if ( press && s.touchSweeps > 0 && !s.touchAnswered && s.touchCount > 0 ) {
+        std::sort( s.touchSet, s.touchSet + s.touchCount );
+        if ( s.touchCount > 1 && node1or2 == 0 ) {
+            scanPickOpen( s );
+            return -1;
+        }
+        s.touchAnswered = true;
+        connectedRows[ 0 ] = s.touchSet[ 0 ];
+        connectedRowsIndex = 1;
+        return s.touchSet[ 0 ];
+    }
+
+    // A settled lift drops an unanswered touch, the same way the block below
+    // drops an answered one. Without this the union survived the lift and the
+    // next touch joined it, so two separate taps could raise a pick that
+    // spanned both.
+    if ( lifted && !s.touchAnswered && s.touchCount > 0 ) {
+        scanTouchReset( s );
+    }
+
+    // One node per touch. Until the needle lifts or lands somewhere else,
+    // the touch that was already answered reports nothing.
+    if ( s.touchAnswered ) {
+        if ( !lifted ) {
+            if ( read == -1 ) return -1;
+            if ( read == kScanRailTouch && s.touchWasRail ) return -1;
+            if ( read > 0 && scanReadOverlapsTouch( s ) ) return -1;
+        }
+        scanTouchReset( s );
+    }
+
+    if ( read == kScanRailTouch ) {
+        // A level needs no settling - it is read directly, not swept.
+        s.touchWasRail = true;
+        s.touchSweeps = kScanSettleSweeps;
+        s.touchStartMs = millis( ) - kScanSettleMs;
+        s.askOpen = true;
+        s.askChoice = s_scanRailChoice;
+        probeChooserActive = true;
+        if ( debugProbing ) { Serial.printf( "\n\r[filt] ask OPEN\n\r" ); Serial.flush( ); }
+        probeTimeout = millis( );
+        scanAskShow( s );
+        return -1;
+    }
+
+    if ( read > 0 && connectedRowsIndex > 0 ) {
+        // Union this sweep into the touch and wait for the set to settle.
+        for ( int i = 0; i < connectedRowsIndex; i++ ) {
+            int node = connectedRows[ i ];
+            if ( node <= 0 ) continue;
+            bool have = false;
+            for ( int j = 0; j < s.touchCount; j++ ) {
+                if ( s.touchSet[ j ] == node ) { have = true; break; }
+            }
+            if ( !have && s.touchCount < (int)( sizeof( s.touchSet ) / sizeof( s.touchSet[ 0 ] ) ) ) {
+                s.touchSet[ s.touchCount++ ] = node;
+            }
+        }
+        if ( s.touchCount == 0 ) return -1;
+        if ( s.touchSweeps == 0 ) s.touchStartMs = millis( );
+        if ( s.touchSweeps < kScanSettleSweeps ||
+             ( millis( ) - s.touchStartMs ) < kScanSettleMs ) {
+            s.touchSweeps++;
+            return -1;
+        }
+        if ( s.touchSweeps < 1000000 ) s.touchSweeps++; // settled; just don't wrap
+        std::sort( s.touchSet, s.touchSet + s.touchCount );
+
+        if ( s.touchCount > 1 && node1or2 == 0 ) {
+            scanPickOpen( s );
+            return -1;
+        }
+
+        // One row (or a second node is already held): report it once.
+        s.touchAnswered = true;
+        connectedRows[ 0 ] = s.touchSet[ 0 ];
+        connectedRowsIndex = 1;
+        return s.touchSet[ 0 ];
+    }
+
+    return read;
+}
+
 /// @brief returns the row probed plus checks for button presses, or -1 if nothing
 /// @return -16 connect, -18 remove, -19 encoder up, -17 encoder down, -10 encoder pressed
 int Probing::readProbe( ) {
+    if ( board::currentBoard( ).caps.scanningProbe ) {
+        return scanProbeRead( );
+    }
     int found = -1;
     // connectedRows[0] = -1;
     unsigned long buttonCheck = 0;
@@ -8292,6 +8911,11 @@ unsigned long probeLEDsDelay = 20;
 unsigned long lastButtonCheckTime = 0;
 
 void Probing::probeLEDhandler( void ) {
+
+    // The addressable probe LED belongs to the pad probe (V5). A scanning
+    // probe's kit LED is passive (needle -> LED -> button line, lit by the
+    // tone), and probeLEDs was never begun on that board.
+    if ( !board::currentBoard( ).caps.hasProbePads ) return;
 
     // core2busy = true;
     //  pinMode(2, OUTPUT);

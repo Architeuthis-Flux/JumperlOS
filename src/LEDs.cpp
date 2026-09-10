@@ -3108,6 +3108,8 @@ void ogStartupAnimation(void) {
 }
 #endif
 
+volatile int logoSwirlState = LOGO_SWIRL_OTHER;
+
 void __not_in_flash_func(logoSwirl)(int start, int spread, int probe) {
 
 
@@ -3117,6 +3119,10 @@ if (logoLedAccess == true) {
   return;
 }
 logoLedAccess = true;
+// Every early return below is a menu ring, an indicator or the press
+// animation - all "something other than the swirl owns the logo". The two
+// branches that are the swirl proper name themselves at the bottom.
+logoSwirlState = LOGO_SWIRL_OTHER;
 
   // ========================================================================
   // MENU RING INDICATOR - Highest precedence while a click-menu owns the logo.
@@ -3161,6 +3167,7 @@ logoLedAccess = true;
   // ========================================================================
   if (undoActivityUntil > 0 && now < undoActivityUntil) {
     setLogoFromPaletteIndex(undoIndicatorPalette, start, spread);
+    logoSwirlState = LOGO_SWIRL_UNDO;
     logoLedAccess = false;
     return;
   }
@@ -3173,6 +3180,7 @@ logoLedAccess = true;
 
   if (showFilesystemIndicator) {
     setLogoFromPaletteIndex(filesystemIndicatorPalette, start, spread);
+    logoSwirlState = LOGO_SWIRL_FS;
     logoLedAccess = false;
     return;
   }
@@ -3194,18 +3202,22 @@ logoLedAccess = true;
     if (connectOrClearProbe == 1 && node1or2 == 0) {
       // Connect mode, no node selected yet -> Cold (cyan)
       setLogoFromPalette(logoColorsCold, start, spread);
+      logoSwirlState = LOGO_SWIRL_PROBE_CONNECT;
     } else if (connectOrClearProbe == 1 && node1or2 != 0) {
       // Connect mode, node selected -> Pink (brighter)
       setLogoFromPalette(logoColorsPink, start, spread, 33);
+      logoSwirlState = LOGO_SWIRL_PROBE_HOLD;
     } else {
       // Clear mode -> Hot (red/orange)
       setLogoFromPalette(logoColorsHot, start, spread);
+      logoSwirlState = LOGO_SWIRL_PROBE_CLEAR;
     }
   } else {
     // ========================================================================
     // DEFAULT MODE - Rainbow swirl
     // ========================================================================
     setLogoFromPalette(logoColors, start, spread);
+    logoSwirlState = LOGO_SWIRL_IDLE;
   }
 
   // ========================================================================
@@ -3213,12 +3225,17 @@ logoLedAccess = true;
   // ========================================================================
   if (logoColorOverride != -1) {
     setLogoSolidColor(logoColorOverride);
+    logoSwirlState = LOGO_SWIRL_OVERRIDE;
   }
 
   if (logoColorOverrideTop == -2) {
     setLogoTop(logoColorOverrideTopDefault);
+    logoSwirlState = LOGO_SWIRL_OVERRIDE;
   } else if (logoColorOverrideTop != -1) {
     setLogoTop(logoColorOverrideTop);
+    // A board with one logo LED samples LOGO_LED_START + 0, which is a TOP
+    // LED - so a top override owns its logo and it must not paint its own.
+    logoSwirlState = LOGO_SWIRL_OVERRIDE;
   }
 
   if (logoColorOverrideBottom == -2) {
@@ -3671,6 +3688,51 @@ void __not_in_flash_func(lightUpRail)(int logo, int rail, int onOff, int brightn
 //int displayMode = jumperlessConfig.display.lines_wires; // 0 = lines 1= wires
 
 // Mark to run from RAM to avoid flash contention during saves
+#if defined(OG_JUMPERLESS)
+// The OG rail LEDs, from the hardware LED order (top+ / top- / bottom+ /
+// bottom-), one row per rail in railColorsV5's order.
+static const int kOgRailPixels[4][5] = {
+    { 70, 73, 74, 77, 78 }, // rail 0: top positive
+    { 71, 72, 75, 76, 79 }, // rail 1: top negative
+    { 69, 66, 65, 62, 61 }, // rail 2: bottom positive
+    { 68, 67, 64, 63, 60 }, // rail 3: bottom negative
+};
+
+// A rail's own color: the dim variant of the palette, no scale-up (the rails
+// read too bright otherwise on one LED per segment). Same palette rule as
+// lightUpRail - a power rail sitting NEGATIVE paints blue (ground rails, odd
+// j, never do).
+static uint32_t ogRailOwnColor(int j) {
+  const uint32_t* railPal = railColorsV5[j];
+  if ((j % 2) == 0) {
+    int pr = j / 2;
+    float vRail = (railHwVolts[pr] > -99.0f)
+                      ? railHwVolts[pr]
+                      : ((pr == 0) ? globalState.power.topRail : globalState.power.bottomRail);
+    if (vRail < -0.1f) railPal = railColorsV5Neg[j];
+  }
+  return railPal[0];
+}
+#endif
+
+void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit) {
+#if defined(OG_JUMPERLESS)
+  for (int j = 0; j < 4; j++) {
+    const bool positive = (j % 2) == 0;
+    if (positiveColor != 0 && !positive) continue;
+    const uint32_t color = (positiveColor != 0) ? positiveColor : ogRailOwnColor(j);
+    for (int i = 0; i < 5; i++) {
+      const int px = kOgRailPixels[j][i];
+      if (onlyUnlit && leds.getPixelColor(px) != 0) continue;
+      leds.setPixelColor(px, color);
+    }
+  }
+#else
+  (void)positiveColor;
+  (void)onlyUnlit;
+#endif
+}
+
 void __not_in_flash_func(showNets)(void) {
   // Serial.println(rp2040.cpuid());
   // core2busy = true;
@@ -3767,50 +3829,128 @@ void __not_in_flash_func(showNets)(void) {
         leds.setPixelColor(hp.pixel, hp.color);
       }
 
-      // 3) Breadboard power rails. The shared lightUpRail() renders into the V5
-      //    railsToPixelMap (pixels 300-399), which are off the 111-px OG strip,
-      //    so the physical OG rails never lit. Mirror each rail's color onto its
-      //    OG pixels. Positions from the OG hardware LED order (top+/top-/bot+/
-      //    bot-); railColorsV5[j][1] is the per-rail "bright" color, scaled up
-      //    since the raw values are tuned dim for V5's 5-LEDs-per-rail-segment.
-      static const int kOgRailPixels[4][5] = {
-          { 70, 73, 74, 77, 78 }, // rail 0: top positive
-          { 71, 72, 75, 76, 79 }, // rail 1: top negative
-          { 69, 66, 65, 62, 61 }, // rail 2: bottom positive
-          { 68, 67, 64, 63, 60 }, // rail 3: bottom negative
-      };
-      for (int j = 0; j < 4; j++) {
-        // Same palette rule as lightUpRail: a power rail sitting NEGATIVE
-        // paints blue (ground rails, odd j, never do).
-        const uint32_t* railPal = railColorsV5[j];
-        if ((j % 2) == 0) {
-          int pr = j / 2;
-          float vRail = (railHwVolts[pr] > -99.0f)
-                            ? railHwVolts[pr]
-                            : ((pr == 0) ? globalState.power.topRail : globalState.power.bottomRail);
-          if (vRail < -0.1f) railPal = railColorsV5Neg[j];
-        }
-        // Use the dim rail variant directly (no scale-up): the rails read too
-        // bright otherwise on the OG's single LED per rail segment.
-        uint32_t railColor = railPal[0];
-        for (int i = 0; i < 5; i++) {
-          // Only fill unlit rail pixels: a rail that is part of a net was
-          // already painted its net color by lightUpNet() (pixels 60/61 are the
-          // nodesToPixelMap targets of the rail nodes), so leave those alone.
-          if (leds.getPixelColor(kOgRailPixels[j][i]) == 0) {
-            leds.setPixelColor(kOgRailPixels[j][i], railColor);
-          }
+      // 3) Breadboard power rails: ogRailsPaint() above. The shared
+      //    lightUpRail() renders into the V5 railsToPixelMap (pixels 300-399),
+      //    off the 111-px OG strip, so the rails are mirrored here. Only unlit
+      //    rail pixels are filled, so a probe session's rail paint (the 3.3 V /
+      //    5 V ask, a held supply node) survives this render; the session puts
+      //    the rails back with ogRailsPaint( 0 ) when it is done with them.
+      //
+      //    onlyUnlit ONLY while a probe session is running. The OG arm of
+      //    clearLEDsExceptRails deliberately keeps pixels 60-79, so an
+      //    unconditional only-unlit rule meant the rails were painted once
+      //    after boot and never re-evaluated: a rail set NEGATIVE kept its
+      //    positive colour forever, because the sign test in ogRailOwnColor
+      //    was unreachable (review, 2026-09-08). Nothing else writes 60-79 on
+      //    this board - lightUpNet's node loop stops at NANO_A7 - so
+      //    repainting them every frame outside a session is safe.
+      ogRailsPaint(0, /*onlyUnlit=*/ probeActive != 0);
+
+      // 4) The open multi-row pick, painted LAST so it wins. lightUpNet has
+      //    already drawn every net by this point, so a row that is part of one
+      //    would otherwise keep its net colour - and a row already wired to
+      //    something is exactly the row a user is disambiguating (Kevin,
+      //    2026-09-08). All the found rows go pink with the current one much
+      //    brighter, which is what the OG reference firmware did.
+      {
+        const uint32_t kOgPickDim    = 0x300010;
+        const uint32_t kOgPickBright = 0xF00068;
+        const int pickCount = probePickCount;   // one read: core 0 can change it
+        for (int i = 0; i < pickCount && i < 8; i++) {
+          const int node = probePickNodes[i];
+          if (node <= 0 ||
+              node >= (int)(sizeof(nodesToPixelMap) / sizeof(nodesToPixelMap[0]))) continue;
+          const int px = nodesToPixelMap[node];
+          if (px < 0) continue;
+          leds.setPixelColor(px, (i == probePickIndex) ? kOgPickBright : kOgPickDim);
         }
       }
 
-      // 4) Logo is a SINGLE LED (pixel 110). The shared V5 swirl writes 7 LEDs
-      //    (LOGO_LED_START..+6), each at a different point on the rainbow --
-      //    those buffer slots are off the 111-px OG strip, and averaging them
-      //    would wash out to grey. Sample ONE (LOGO_LED_START+0, which logoSwirl
-      //    cycles through the whole spectrum over time) and brighten it (the
-      //    swirl runs dim because V5 clusters 7 LEDs; the OG shows just one).
-      leds.setPixelColor(kOgLogoPixel,
-                         scaleUpBrightness(leds.getPixelColor(LOGO_LED_START + 0), 12, 0x90));
+      // 5) Logo is a SINGLE LED (pixel 110). The shared V5 swirl writes 8 LEDs
+      //    (LOGO_LED_START..+7) spread across a palette, and those buffer slots
+      //    are off the 111-px OG strip - so the OG paints its own logo from
+      //    logoSwirlState instead of sampling one of them.
+      //
+      //    Idle is a slow pastel drift rather than the ring's ~3 s saturated
+      //    rainbow: one LED sweeping the full spectrum that fast reads as a
+      //    blinking light, not a swirl (Kevin, 2026-09-08). Probe mode holds a
+      //    FIXED colour per state, in the OG reference firmware's own code -
+      //    pink connect, orange clear, blue while it is asking you something.
+      //    Anything else (a menu ring, the undo / filesystem / measure
+      //    indicators, an explicit override) still comes from the swirl buffer,
+      //    which is the only place those states exist.
+      {
+        const unsigned long kOgLogoHueMs  = 100;  // 256 * 100 ms = ~26 s a lap
+        // 255 = the ring's full rainbow. The logo LED shines up through the
+        // PCB, which filters it yellowish and eats a lot of the colour, so a
+        // pastel that looks right in the buffer reads washed out on the board
+        // (Kevin, 2026-09-08). 180 is most of the way back to the rainbow and
+        // still visibly softer than the ring.
+        const uint8_t       kOgLogoIdleSat = 180;
+        const uint8_t       kOgLogoIdleVal = 95;
+        // Every colour below sits in one luminance band (Rec.709 Y roughly
+        // 40-90) so no state is jarringly dimmer than another - the first cut
+        // put connect at a quarter of idle, which read as the logo going out
+        // when a session opened (review, 2026-09-08). All of them are meant to
+        // be tuned by eye.
+        const uint32_t kOgLogoConnect = 0xA00050; // pink        - connect, nothing held
+        const uint32_t kOgLogoHold    = 0xF00080; // bright pink - a node is held
+        const uint32_t kOgLogoClear   = 0x902000; // orange      - clear mode
+        const uint32_t kOgLogoChoose  = 0x0030C8; // blue        - a chooser is up
+        const uint32_t kOgLogoUndo    = 0x504000; // yellow      - undo / history
+        const uint32_t kOgLogoFs      = 0x502000; // amber       - flash write
+
+        // The flash-write indicator, but only while flash is ACTUALLY being
+        // written. FileCache holds `filesystemActiveUntil` for 4 s per flush so
+        // the cue is unmissable on the V5's logo ring; on one LED that meant
+        // the logo sat amber for four seconds after every connection the
+        // autosave picked up, which is Kevin's "the logo led stays yellow"
+        // (2026-09-08). A quarter second after the real write is plenty here.
+        static unsigned long s_ogFsSeenMs = 0;
+        if (filesystemActive) s_ogFsSeenMs = millis();
+        const bool ogFsWriting =
+            filesystemActive || (s_ogFsSeenMs != 0 && (millis() - s_ogFsSeenMs) < 250);
+
+        uint32_t logoColor;
+        if (probeActive) {
+          // A probe session owns the logo on this board. Inside logoSwirl the
+          // undo and filesystem indicators outrank the probe branch, which is
+          // right when the logo is a ring of 8 and wrong when it is the only
+          // status LED there is: while you are probing, what the logo has to
+          // say is which mode you are in.
+          if (probeChooserActive)            logoColor = kOgLogoChoose;
+          else if (connectOrClearProbe != 1) logoColor = kOgLogoClear;
+          else if (node1or2 != 0)            logoColor = kOgLogoHold;
+          else                               logoColor = kOgLogoConnect;
+        } else if (logoSwirlState == LOGO_SWIRL_PROBE_CONNECT) {
+          logoColor = probeChooserActive ? kOgLogoChoose : kOgLogoConnect;
+        } else if (logoSwirlState == LOGO_SWIRL_PROBE_HOLD) {
+          logoColor = probeChooserActive ? kOgLogoChoose : kOgLogoHold;
+        } else if (logoSwirlState == LOGO_SWIRL_PROBE_CLEAR) {
+          logoColor = probeChooserActive ? kOgLogoChoose : kOgLogoClear;
+        } else if (logoSwirlState == LOGO_SWIRL_UNDO) {
+          logoColor = kOgLogoUndo;
+        } else if (logoSwirlState == LOGO_SWIRL_FS && ogFsWriting) {
+          logoColor = kOgLogoFs;
+        } else if (logoSwirlState == LOGO_SWIRL_OVERRIDE) {
+          // Somebody asked for THIS colour. Show it, do not run it through
+          // scaleUpBrightness - that multiplies by 12 only when all three
+          // channels are under 0x90, so 0x8F8F8F came out white and 0x909090
+          // came out 1.8x dimmer.
+          logoColor = leds.getPixelColor(LOGO_LED_START + 0);
+        } else if (logoSwirlState == LOGO_SWIRL_IDLE ||
+                   logoSwirlState == LOGO_SWIRL_FS) {
+          // FS here means the 4 s tail with nothing being written: drift.
+          hsvColor hsv;
+          hsv.h = (unsigned char)((millis() / kOgLogoHueMs) & 0xFF);
+          hsv.s = kOgLogoIdleSat;
+          hsv.v = kOgLogoIdleVal;
+          logoColor = HsvToRaw(hsv);
+        } else {
+          logoColor = scaleUpBrightness(leds.getPixelColor(LOGO_LED_START + 0), 12, 0x90);
+        }
+        leds.setPixelColor(kOgLogoPixel, logoColor);
+      }
     }
 #endif
 
@@ -4384,6 +4524,18 @@ void clearLEDs(void) {
 // CRITICAL: Use setPixelColorDirect to write to buffer WITHOUT marking dirty
 // This prevents Core 2 from showing partial clears before new content is drawn
 void __not_in_flash_func(clearLEDsExceptRails)(void) {
+#if defined(OG_JUMPERLESS)
+  // The OG strip: rows 0-59, rails 60-79, Nano header 80-109, logo 110. The
+  // rows and the header clear (a held row or header pin goes dark); the rails
+  // keep their color, as the name says and as they do on V5, and so does the
+  // logo. (Before this the whole strip cleared, rails and logo included.)
+  for (int i = 0; i < 60; i++) {
+    leds.setPixelColorDirect(i, 0);
+  }
+  for (int i = 80; i < 110; i++) {
+    leds.setPixelColorDirect(i, 0);
+  }
+#else
   for (int i = 0; i < 300; i++) {
     leds.setPixelColorDirect(i, 0);
   }
@@ -4394,6 +4546,7 @@ void __not_in_flash_func(clearLEDsExceptRails)(void) {
       leds.setPixelColorDirect(i, 0);
     }
   }
+#endif
   // Note: Buffer is cleared but NOT marked dirty
   // Call showLEDsCore2 = 12 (or similar) to actually display
 }
