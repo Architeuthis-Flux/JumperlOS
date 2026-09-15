@@ -1217,6 +1217,25 @@ void assignTermColor(int startIndex) {
 
 
 
+// Is the host still DRAINING this port? Adafruit CDC write() spins forever
+// while the port is open and its TX FIFO stays full, so a burst into a host
+// that stopped reading (a choked terminal renderer) hangs core 0 on the first
+// write. Flush first: TinyUSB holds a partial packet in the FIFO until
+// something flushes it, so bytes already queued (the "netlist" header) count
+// against the floor for as long as we wait. The floor is one bulk packet,
+// not the old 120 - the OG's TX FIFO is 128 (custom_tusb_config.h), and 120
+// free was only ever true with it empty, so 'n' printed nothing there
+// (Kevin, 2026-09-10). A wedged host sits at ~0 either way.
+static bool hostDraining(Stream* stream, unsigned long waitMs) {
+  const int kDrainFloor = 64;
+  stream->flush();
+  unsigned long t0 = millis();
+  while (stream->availableForWrite() < kDrainFloor && millis() - t0 < waitMs) {
+    delay(5);
+  }
+  return stream->availableForWrite() >= kDrainFloor;
+}
+
 /// @brief list all nets
 /// @param liveUpdate 0 = no live update, 1 = live update
 void listNets(int liveUpdate, Stream *stream)
@@ -1389,17 +1408,9 @@ void listNets(int liveUpdate, Stream *stream)
     //   lineCount+=2;
     //   }
 
-    // Never start a listing into a wedged port: Adafruit CDC write() spins
-    // FOREVER while the port is open and its FIFO stays full, so a host
-    // that stopped draining (a choked terminal renderer) would hang core 0
-    // on the first burst. Draining hosts pass this instantly.
-    {
-      unsigned long drainStart = millis();
-      while (stream->availableForWrite() < 120 && millis() - drainStart < 500) {
-        delay(5);
-      }
-      if (stream->availableForWrite() < 120) return;
-    }
+    // Never start a listing into a wedged port (hostDraining above).
+    // Draining hosts pass this in a USB frame or two.
+    if (!hostDraining(stream, 500)) return;
 
     stream->print("\n\rIndex\tName\t\tVoltage\t    Nodes\t\n\r");
 
@@ -1857,12 +1868,7 @@ void listNets(int liveUpdate, Stream *stream)
           // a wedged terminal leaves the FIFO full and the next write
           // blocks core 0 indefinitely. Stalled for a second: abandon
           // live mode with no goodbye bytes (even 2 would block).
-          unsigned long drainStart = millis();
-          while (stream->availableForWrite() < 120 &&
-                 millis() - drainStart < 1000) {
-            delay(5);
-          }
-          if (stream->availableForWrite() < 120) return;
+          if (!hostDraining(stream, 1000)) return;
           stream->printf("\033[%dA", lineCount - 1);
           //stream->print("   ffdflkj;ldfkj ");
           stream->printf("\033[J");

@@ -3715,8 +3715,13 @@ static uint32_t ogRailOwnColor(int j) {
 }
 #endif
 
-void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit) {
+void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit, int litCount) {
 #if defined(OG_JUMPERLESS)
+  // ponytail: the LEDs past litCount are "dark", not 0. showNets refills any
+  // rail pixel that reads 0 with the rail's own colour while a session is
+  // running (the onlyUnlit rule below), so a true 0 would come back lit.
+  // 0x010000 is below what the strip can show.
+  const uint32_t kDark = 0x010000;
   for (int j = 0; j < 4; j++) {
     const bool positive = (j % 2) == 0;
     if (positiveColor != 0 && !positive) continue;
@@ -3724,12 +3729,13 @@ void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit) {
     for (int i = 0; i < 5; i++) {
       const int px = kOgRailPixels[j][i];
       if (onlyUnlit && leds.getPixelColor(px) != 0) continue;
-      leds.setPixelColor(px, color);
+      leds.setPixelColor(px, (i < litCount) ? color : kDark);
     }
   }
 #else
   (void)positiveColor;
   (void)onlyUnlit;
+  (void)litCount;
 #endif
 }
 
@@ -3821,8 +3827,8 @@ void __not_in_flash_func(showNets)(void) {
           { 96,  0xC05A00 }, // 3V3          - amber
           { 106, 0xC01400 }, // 5V           - red-orange
           { 109, 0xC00010 }, // VIN          - deep red
-          { 82,  0x3000B0 }, // RST (top)    - blue/violet
-          { 107, 0x3000B0 }, // RST (bottom) - blue/violet
+          { 82,  0x5000B0 }, // RST (top)    - blue/violet
+          { 107, 0x5000B0 }, // RST (bottom) - blue/violet
           { 97,  0x008060 }, // AREF         - teal
       };
       for (const auto& hp : kOgHardwired) {
@@ -3880,25 +3886,25 @@ void __not_in_flash_func(showNets)(void) {
       //    indicators, an explicit override) still comes from the swirl buffer,
       //    which is the only place those states exist.
       {
-        const unsigned long kOgLogoHueMs  = 100;  // 256 * 100 ms = ~26 s a lap
+        const unsigned long kOgLogoHueMs  = 50;  // 256 * 100 ms = ~26 s a lap
         // 255 = the ring's full rainbow. The logo LED shines up through the
         // PCB, which filters it yellowish and eats a lot of the colour, so a
         // pastel that looks right in the buffer reads washed out on the board
         // (Kevin, 2026-09-08). 180 is most of the way back to the rainbow and
         // still visibly softer than the ring.
-        const uint8_t       kOgLogoIdleSat = 180;
-        const uint8_t       kOgLogoIdleVal = 95;
+        const uint8_t       kOgLogoIdleSat = 190;
+        const uint8_t       kOgLogoIdleVal = 75;
         // Every colour below sits in one luminance band (Rec.709 Y roughly
         // 40-90) so no state is jarringly dimmer than another - the first cut
         // put connect at a quarter of idle, which read as the logo going out
         // when a session opened (review, 2026-09-08). All of them are meant to
         // be tuned by eye.
-        const uint32_t kOgLogoConnect = 0xA00050; // pink        - connect, nothing held
-        const uint32_t kOgLogoHold    = 0xF00080; // bright pink - a node is held
-        const uint32_t kOgLogoClear   = 0x902000; // orange      - clear mode
-        const uint32_t kOgLogoChoose  = 0x0030C8; // blue        - a chooser is up
-        const uint32_t kOgLogoUndo    = 0x504000; // yellow      - undo / history
-        const uint32_t kOgLogoFs      = 0x502000; // amber       - flash write
+        const uint32_t kOgLogoConnect = 0xa000f0; // pink        - connect, nothing held
+        const uint32_t kOgLogoHold    = 0xFf30f0; // bright pink - a node is held
+        const uint32_t kOgLogoClear   = 0xe09000; // orange      - clear mode
+        const uint32_t kOgLogoChoose  = 0x0080f0; // blue        - a chooser is up
+        const uint32_t kOgLogoUndo    = 0xf0f090; // yellow      - undo / history
+        const uint32_t kOgLogoFs      = 0x70f050; // amber       - flash write
 
         // The flash-write indicator, but only while flash is ACTUALLY being
         // written. FileCache holds `filesystemActiveUntil` for 4 s per flush so

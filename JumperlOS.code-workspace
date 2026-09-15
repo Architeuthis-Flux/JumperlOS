@@ -52,6 +52,12 @@
         },
         {
             "path": "../JumperLLM"
+        },
+        {
+            "path": "../../../Desktop/JumperlessV5eratta"
+        },
+        {
+            "path": "../../../Desktop/V6pile"
         }
     ],
     "launch": {

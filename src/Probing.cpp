@@ -1438,7 +1438,10 @@ int ProbeButton::checkProbeButtonHardware( void ) {
 // processSample() is bypassed: its block / double-tap machinery is built
 // around two buttons and a PIO sampler this hardware does not have.
 // ----------------------------------------------------------------------------
-static const uint32_t kScanLongPressMs    = 750;
+// 750 read as "nothing is happening" during the rail ask (Kevin, 2026-09-10);
+// 450 is still well past a deliberate tap (the short presses in that trace
+// were 300-400 ms apart, press to press).
+static const uint32_t kScanLongPressMs    = 450;
 static const uint32_t kScanSampleMs       = 12;
 static const int      kScanConfirmSamples = 2; // ~24 ms of agreement before a press or a release counts
 
@@ -8513,7 +8516,10 @@ void Probing::scanTouchReset( ProbeSession& s ) {
 }
 
 void Probing::scanAskShow( ProbeSession& s ) {
-    ogRailsPaint( s.askChoice == SUPPLY_5V ? kScanRail5VColor : kScanRail3V3Color );
+    // 3 of the 5 rail LEDs for 3.3 V, all 5 for 5 V: the count says the
+    // voltage, not just the colour.
+    ogRailsPaint( s.askChoice == SUPPLY_5V ? kScanRail5VColor : kScanRail3V3Color,
+                  false, s.askChoice == SUPPLY_5V ? 5 : 3 );
     requestLedShow( 2 );
     Serial.print( "\x1b[2K\r" );
     Serial.print( s.askChoice == SUPPLY_5V ? "        5V   short press = 3.3V, long press = select"

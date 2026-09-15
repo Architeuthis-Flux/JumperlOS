@@ -1454,9 +1454,18 @@ dontshowmenu:
     // modes (they used to get the help page in char mode and their own
     // handler in line mode - now always their handler).
     if ( gotCompletedLine ) {
-        if ( currentCommandLine == "help" ) {
-            showGeneralHelp( );
-            goto dontshowmenu;
+        if ( currentCommandLine == "help" || currentCommandLine == "h" ) {
+            // The browser hands back a command char when the user chose
+            // "run" on its Commands screen; otherwise land on the menu, not
+            // a blank screen.
+            int run = showGeneralHelp( );
+            if ( run ) {
+                input = run;
+                currentCommandLine = String( (char)run );
+                g_commandInputIsLine = true;
+                goto skipinput;
+            }
+            goto menu;
         }
         if ( currentCommandLine.startsWith( "help " ) ) {
             String category = currentCommandLine.substring( 5 );
@@ -1479,7 +1488,7 @@ dontshowmenu:
             goto dontshowmenu;
         }
         helpDeadlineSpent = false;
-        if ( input == 'h' && Jerial.available( ) > 0 ) {
+        if ( input == 'h' ) {
             String helpString = "h";
             while ( Jerial.available( ) > 0 && helpString.length( ) < 50 ) {
                 char c = Jerial.read( );
@@ -1487,9 +1496,15 @@ dontshowmenu:
                     break;
                 helpString += c;
             }
-            if ( helpString == "help" ) {
-                showGeneralHelp( );
-                goto dontshowmenu;
+            if ( helpString == "help" || helpString == "h" ) {
+                int run = showGeneralHelp( );
+                if ( run ) {
+                    input = run;
+                    currentCommandLine = String( (char)run );
+                    g_commandInputIsLine = true;
+                    goto skipinput;
+                }
+                goto menu;
             }
             if ( helpString.startsWith( "help " ) ) {
                 String category = helpString.substring( 5 );
@@ -1497,7 +1512,7 @@ dontshowmenu:
                 showCategoryHelp( category.c_str( ) );
                 goto dontshowmenu;
             }
-            // Just 'h' alone (or 'h' + something else): fall through
+            // 'h' + something else: fall through
         } else if ( Jerial.available( ) > 0 && Jerial.peek( ) == '?' ) {
             Jerial.read( ); // consume '?'
             showCommandHelp( input );

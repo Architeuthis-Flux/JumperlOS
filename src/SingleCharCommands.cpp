@@ -222,7 +222,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         // printSpectrumOrderedColorCube();
         cycleTerminalColor( true, steps, true, &Jerial );
         shownMenuItems += printMenuLine( "\n\n\r\t\tMenu\n\r\n\r" );
-        shownMenuItems += printMenuLine( "\t'help' for docs or [command]?\n\r" );
+        shownMenuItems += printMenuLine( "\th = help, or [command]?\n\r" );
         shownMenuItems += printMenuLine( "\n\r" );
         shownMenuItems += printMenuLine( "\tm = show this menu\n\r" );
 

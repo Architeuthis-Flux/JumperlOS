@@ -6,8 +6,9 @@
 // Function to show help for a specific command
 void showCommandHelp(char command);
 
-// Function to show general help menu
-void showGeneralHelp();
+// Open the interactive help browser. Returns the command char the user chose
+// to run from its Commands screen, or 0 if they just left.
+int showGeneralHelp();
 
 // Function to show category-specific help
 void showCategoryHelp(const char* category);

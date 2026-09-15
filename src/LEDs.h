@@ -654,8 +654,10 @@ void clearLEDsExceptRails();
 // two positive rails that color (the probe session's 3.3 V / 5 V ask, a held
 // supply node); 0 paints every rail its own color. onlyUnlit skips pixels
 // that are already lit - showNets' rule, so a session's paint survives its
-// renders until the session puts the rails back.
-void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit = false);
+// renders until the session puts the rails back. litCount is how many of a
+// rail's 5 LEDs take positiveColor, from the same end on every rail (3 for
+// the 3.3 V ask, 5 for the 5 V ask); the rest sit dark.
+void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit = false, int litCount = 5);
 uint32_t HsvToRaw(hsvColor hsv);
 
 uint32_t packRgb(rgbColor color);
