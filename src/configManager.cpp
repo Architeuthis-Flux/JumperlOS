@@ -131,7 +131,8 @@ const ConfigAlias jlConfigAliases[] = {
     { "calibration", "probe_min",                 JLSECT_probe,       "pad_min" },
     { "calibration", "probe_max_measure",         JLSECT_probe,       "pad_max_measure" },
     { "calibration", "probe_max_measure_gpio",    JLSECT_probe,       "pad_max_measure_gpio" },
-    { "calibration", "probe_min_measure",         JLSECT_probe,       "pad_min_measure" },
+    // (probe_min_measure / pad_min_measure retired: the measure decode uses
+    // pad_min, the boot-measured floor. Old files' lines are silent no-ops.)
     { "calibration", "probe_switch_threshold_high", JLSECT_probe,     "switch_threshold_high" },
     { "calibration", "probe_switch_threshold_low",  JLSECT_probe,     "switch_threshold_low" },
     { "calibration", "probe_switch_select_max_ma",  JLSECT_probe,     "switch_select_max_ma" },
@@ -1579,14 +1580,11 @@ void loadConfig(void) {
         jumperlessConfig.probe.pad_max = 4060;
     }
 
-    // Seed the MEASURE-position pad endpoints from the base (select) pair so
-    // the config holds real, individually-adjustable numbers instead of a 0
-    // sentinel. They are stored in the 3.3V frame; the decode scales them by
-    // the live tip voltage (ADC7) at runtime, so seeding with the base pair
-    // is correct for a fresh board.
-    if (jumperlessConfig.probe.pad_min_measure <= 0) {
-        jumperlessConfig.probe.pad_min_measure = jumperlessConfig.probe.pad_min;
-    }
+    // Seed the MEASURE-position top endpoint from the base (select) one so
+    // the config holds a real, adjustable number instead of a 0 sentinel. It
+    // is stored in the 3.3V frame; the decode scales the span above the
+    // shared floor (pad_min) by the live tip voltage (ADC7) at runtime, so
+    // seeding with the base value is correct for a fresh board.
     if (jumperlessConfig.probe.pad_max_measure <= 0) {
         jumperlessConfig.probe.pad_max_measure = jumperlessConfig.probe.pad_max;
     }

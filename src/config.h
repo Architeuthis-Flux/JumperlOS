@@ -93,12 +93,14 @@
 // Everything about the probe: behavior knobs plus its calibration (flagged
 // JLC_CAL so it survives resets and firmware-update migration).
 //
-// pad_max/pad_min: SELECT-feed pad decode endpoints. pad_max_measure /
-// pad_max_measure_gpio: MEASURE-position endpoints per power feed - DAC0 is a
-// stiff ~2-crosspoint feed, a routable GPIO is ~170-185 ohm through 4
-// crosspoints and droops under the pad ladder. The ratiometric decode
-// (endpoints x live ADC7 / 3.3V) cancels the drive VOLTAGE but not the source
-// impedance, so each feed carries its own max. pad_min_measure is shared.
+// pad_min: the nothing-touched floor of the pad sense node, re-measured at
+// every boot (and by the pad calibration app) - the bottom decode endpoint in
+// BOTH switch positions. pad_max: SELECT-feed top endpoint. pad_max_measure /
+// pad_max_measure_gpio: MEASURE-position top endpoints per power feed - DAC0
+// is a stiff ~2-crosspoint feed, a routable GPIO is ~170-185 ohm through 4
+// crosspoints and droops under the pad ladder. The ratiometric decode (span
+// above the floor x live ADC7 / 3.3V) cancels the drive VOLTAGE but not the
+// source impedance, so each feed carries its own max.
 //
 // droop_v0 / droop_ohms: GPIO-powered measure buffer droop-current model
 // I = (V0 - ADC7) / R. droop_ohms == 0 means the droop calibration never ran
@@ -118,13 +120,11 @@
   X(probe, pad_max, INT, 4055, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
     "Highest raw probe ADC reading in SELECT position (top pad decode endpoint).") \
   X(probe, pad_min, INT, 10, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
-    "Lowest raw probe ADC reading in SELECT position (bottom pad decode endpoint).") \
+    "Nothing-touched floor of the pad sense ADC, re-measured at boot (bottom pad decode endpoint in both switch positions).") \
   X(probe, pad_max_measure, INT, 4055, 0, 4200, 5, nullptr, HOOK_NONE, JLC_CAL, \
     "MEASURE-position top pad endpoint with the DAC0 power feed.") \
   X(probe, pad_max_measure_gpio, INT, 4055, 0, 4200, 5, nullptr, HOOK_NONE, JLC_CAL, \
     "MEASURE-position top pad endpoint with a routable-GPIO power feed (droops more than DAC0).") \
-  X(probe, pad_min_measure, INT, 10, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
-    "MEASURE-position bottom pad endpoint (shared by both power feeds).") \
   X(probe, switch_threshold_high, FLOAT, 1.2f, 0.0f, 10.0f, 0.05f, nullptr, HOOK_NONE, JLC_CAL, \
     "Buffer current (mA) above which the switch reads as SELECT (hysteresis top).") \
   X(probe, switch_threshold_low, FLOAT, 0.90f, 0.0f, 10.0f, 0.05f, nullptr, HOOK_NONE, JLC_CAL, \

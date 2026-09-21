@@ -595,11 +595,13 @@ extern int& showProbeCurrent;
 
 
 // Pad-decode endpoints for the CURRENT switch position (defined in
-// Probing.cpp): the base probe_min/max pair in SELECT, the
-// probe_min_measure/max_measure pair scaled by the live ADC7 tip voltage in
-// MEASURE. Use this instead of reading the calibration values directly so
+// Probing.cpp): probe_min (the boot-measured nothing-touched floor, shared
+// by both positions) to probe_max in SELECT; in MEASURE the same floor to
+// the per-feed probe_max_measure* with the span above the floor scaled by
+// the live ADC7 tip voltage. scaleOut (optional) receives that scale (1.0 in
+// SELECT). Use this instead of reading the calibration values directly so
 // displays/calibration match what the runtime decode actually does.
-void probeMapRange(int* mapMin, int* mapMax);
+void probeMapRange(int* mapMin, int* mapMax, float* scaleOut = nullptr);
 
 // Evict stale routable-GPIO -> BUFFER_IN power-claim bridges (persisted into
 // slots by debug.probe_power_gpio) that don't belong to the live claim.

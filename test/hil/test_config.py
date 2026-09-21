@@ -238,7 +238,7 @@ CAL_KEYS = [("probe", "droop_ohms"), ("probe", "droop_v0"),
             ("probe", "pad_ohms"), ("measurement", "crosspoint_resistance"),
             ("probe", "switch_threshold_high"), ("probe", "switch_threshold_low"),
             ("probe", "pad_max_measure"), ("probe", "pad_max_measure_gpio"),
-            ("probe", "pad_min_measure"), ("probe", "measure_voltage"),
+            ("probe", "pad_min"), ("probe", "measure_voltage"),
             ("calibration", "dac_0_zero"), ("calibration", "adc_0_spread")]
 snapshot = read_config()
 snap = parse_cfg(snapshot)

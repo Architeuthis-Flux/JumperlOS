@@ -7479,6 +7479,10 @@ int Probing::getNothingTouched( int samples ) {
         mapFrom = nothingTouchedReading;
         // Serial.print("mapFrom: ");
         // Serial.println(mapFrom);
+        // The floor is the bottom decode endpoint for BOTH switch positions
+        // (see probeMapRange): it is the sense node's offset with the ladder
+        // unpowered, not a tip reading, so it does not depend on which
+        // source drives the tip.
         jumperlessConfig.probe.pad_min = mapFrom;
 
         if ( loops > 5 ) {
@@ -7496,14 +7500,29 @@ int Probing::getNothingTouched( int samples ) {
 // ~3.3V) driving the tip. In MEASURE position the routable buffer drives the
 // tip instead - at measure_mode_output_voltage from the DAC, or the drooped
 // GPIO-high level when the feed fell through to a GPIO - and the pad ladder into the
-// 10K sense divider is purely resistive, so every reading scales linearly
-// with the tip voltage. The probe_min_measure/probe_max_measure pair holds
-// the measure endpoints in the 3.3V frame (seeded from the base pair at
-// load, individually adjustable); the decode multiplies them by the live
-// tip voltage measured on ADC7 (hardwired to the buffer output = the tip).
+// 10K sense divider is purely resistive, so every PAD reading scales linearly
+// with the tip voltage. probe_max_measure / probe_max_measure_gpio hold the
+// measure top endpoint in the 3.3V frame; the decode scales the span above
+// the floor by the live tip voltage measured on ADC7 (hardwired to the
+// buffer output = the tip).
+//
+// The BOTTOM endpoint is the same number in both positions: probe_min is the
+// nothing-touched FLOOR getNothingTouched() measures at boot - the sense
+// node's offset/leakage with the ladder unpowered. It is not a tip reading,
+// so it neither depends on which source drives the tip nor scales with it.
+// It used to be a separate probe_min_measure key that nothing ever
+// measured: it sat at its 10-count default while probe_min was re-measured
+// every boot (typically 15-50 on real boards). The bottom of the decode is
+// dominated by the min endpoint, so measure position decoded the ADC / DAC
+// / GPIO / logo pads one index off (ADC read as DAC, DAC as GPIO...) and the
+// mid rows a fraction of a row off ("occasionally drift"), while select
+// position - using the measured floor - was fine. One floor, both frames.
+//
 // Non-static: probeCalibApp uses it so the calibration display decodes rows
-// exactly the way the runtime does.
-void probeMapRange( int* mapMin, int* mapMax ) {
+// exactly the way the runtime does. scaleOut (optional) returns the live
+// ratiometric scale the span was multiplied by (1.0 in select / on OG).
+void probeMapRange( int* mapMin, int* mapMax, float* scaleOut ) {
+    if ( scaleOut ) *scaleOut = 1.0f;
 #if defined(OG_JUMPERLESS)
     // OG has no measure buffer and no ADC7 (RP2040: ADC0-3 only), and its
     // checkProbeCurrentRaw() stub returns 0mA which parks switchPosition at
@@ -7529,7 +7548,7 @@ void probeMapRange( int* mapMin, int* mapMax ) {
         inMeasure = true;
         lastScaleRead = 0;
     }
-    int mMin = jumperlessConfig.probe.pad_min_measure;
+    int mMin = jumperlessConfig.probe.pad_min;
     // Per-feed top endpoint. The ratiometric scale below cancels the tip
     // DRIVE VOLTAGE exactly (hardware-confirmed: moving
     // measure_mode_output_voltage does not move a decoded row), but it does
@@ -7540,9 +7559,7 @@ void probeMapRange( int* mapMin, int* mapMax ) {
     int mMax = ( s_gpioPowerIdx >= 0 )
                    ? jumperlessConfig.probe.pad_max_measure_gpio
                    : jumperlessConfig.probe.pad_max_measure;
-    if ( mMin <= 0 )
-        mMin = jumperlessConfig.probe.pad_min;
-    if ( mMax <= 0 )
+    if ( mMax <= mMin )
         mMax = jumperlessConfig.probe.pad_max;
     // The scale must be read (nearly) simultaneously with the pad decode:
     // the decode is ratiometric (pad reading = tip voltage x ladder ratio,
@@ -7564,8 +7581,10 @@ void probeMapRange( int* mapMin, int* mapMax ) {
             cachedScale = vTip / 3.3f; // the pair's stored frame is 3.3V
         }
     }
-    *mapMin = (int)( (float)mMin * cachedScale + 0.5f );
-    *mapMax = (int)( (float)mMax * cachedScale + 0.5f );
+    // Only the tip-driven span is ratiometric; the floor is an offset.
+    *mapMin = mMin;
+    *mapMax = mMin + (int)( (float)( mMax - mMin ) * cachedScale + 0.5f );
+    if ( scaleOut ) *scaleOut = cachedScale;
 }
 
 unsigned long doubleTimeout = 0;
