@@ -408,7 +408,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && !strcmp(argv[1], "regress")) {
         // Each line: a netlist that shorted or mis-routed on the 2026-09-22 bench
         // build. Must route with no SHORT/STRAY and every bridge connected.
-        // Every one of these failed on the 2026-09-22 bench build (8/8). The lane-1
+        // The first eight all failed on the 2026-09-22 bench build. The lane-1
         // slot bug, the paired -2 bounce and the hop -2 need a busier board to
         // show and are left to the fuzz mode.
         const char* cases[][8] = {
@@ -420,6 +420,11 @@ int main(int argc, char** argv) {
             {"D5-1", 0},                              // NANO->L routed as breadboard->L: y = 8
             {"D7-5V", "A7-48", "29-10", "55-40", "4-8", "13-GND", "49-35", "53-27"}, // Lchip decided before chips
             {"AREF-A6", "AREF-60", 0},                // AREF on the V5 nano table (chip K)
+            // Bench 2026-09-23 (live OG, 438 bridges): the only two opens. A second
+            // row->L route on a chip failed because the hop loop only ever tried
+            // chip A's hub (a `break` where a `continue` belonged - reference too).
+            {"46-D12", "57-30", "7-32", "43-AREF", "A7-27", "21-24", "36-46", "22-D7"},
+            {"10-44", "53-A4", "50-51", "37-D8", "D5-A2", "ADC2-20", "D1-15", "16-5V"},
         };
         int failures = 0;
         for (auto& c : cases) {
@@ -456,6 +461,15 @@ int main(int argc, char** argv) {
         int r = routeAndCheck(bridges, true, tag);
         g_quiet = true;
         printPaths();
+        if (getenv("STATUS")) {
+            printf("  Y0 of A..H:");
+            for (int c = 0; c < 8; c++) printf(" %c=%d", 'A' + c, globalState.connections.chipStates[c].yStatus[0]);
+            printf("\n  L.Y[0..7]: ");
+            for (int y = 0; y < 8; y++) printf(" %d", globalState.connections.chipStates[CHIP_L].yStatus[y]);
+            printf("\n  H.X[0..15]:");
+            for (int x = 0; x < 16; x++) printf(" %d", globalState.connections.chipStates[CHIP_H].xStatus[x]);
+            printf("\n");
+        }
         printf("result: %d (%s)\n", r, tag.c_str());
         return r > 0 ? 1 : 0;
     }

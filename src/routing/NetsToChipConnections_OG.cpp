@@ -3107,8 +3107,9 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                     if (path[i].Lchip == true)
                     {
+                        if (bb == path[i].chip[0]) continue; // no lane from a chip to itself (index -1)
                         // Serial.print("Lchip!!!!!!!!!!!!");
-                        if (ch[CHIP_L].yStatus[bb] == -1 || ch[CHIP_L].yStatus[bb] == path[i].net) /////////
+                        if (freeOrSameNetY(CHIP_L, bb, path[i].net, 1) && freeOrSameNetY(bb, 0, path[i].net, 1)) // the hub line, both ends
                         {
 
                             int xMapL0c0 = xMapForChipLane0(path[i].chip[0], bb);
@@ -3140,6 +3141,38 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             path[i].chip[2] = bb;
                             path[i].chip[3] = bb;
                             path[i].altPathNeeded = false;
+
+                            // The route now rides bb's hub, not this chip's. commitPaths
+                            // reserved this chip's Y0 / L.Y[chip] for the direct route (the
+                            // fallback when no hop chip is found); release that reservation
+                            // unless another path of this net actually sits on it, or the
+                            // NEXT row->L connection on this chip finds its hub "taken"
+                            // (bench: 57-30 after 59-DAC1 on chip H, 16-5V after 20-ADC2 on
+                            // chip C - "Couldn't find a path").
+                            {
+                                int c0 = path[i].chip[0];
+                                bool hubInUse = false;
+                                for (int p = 0; p < numberOfPaths && !hubInUse; p++)
+                                {
+                                    if (p == i || path[p].net != path[i].net || path[p].skip) continue;
+                                    for (int h = 0; h < 4; h++)
+                                    {
+                                        // x == -2 is a planned bounce on that hub (a same-net path still
+                                        // waiting for its own alt pass) and counts as in use
+                                        if ((path[p].chip[h] == c0 && path[p].y[h] == 0 && path[p].x[h] != -1) ||
+                                            (path[p].chip[h] == CHIP_L && path[p].y[h] == c0 && path[p].x[h] != -1))
+                                        {
+                                            hubInUse = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!hubInUse && ch[c0].yStatus[0] == path[i].net && ch[CHIP_L].yStatus[c0] == path[i].net)
+                                {
+                                    ch[c0].yStatus[0] = -1;
+                                    ch[CHIP_L].yStatus[c0] = -1;
+                                }
+                            }
 
                             // int otherNode = yMapForChip(path[i].node2, path[i].chip[1]);
 
@@ -3214,7 +3247,11 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 Serial.print(" \n\r");
                             }
                         }
-                        break;
+                        // Next hop candidate. This was `break` (in the reference too), so a
+                        // row->L route that could not use chip A's hub failed outright:
+                        // every hop in the OG's history went through chip A. The loop's
+                        // own `if (foundPath == 1) break;` ends it on success.
+                        continue;
                     }
 
                     int xMapBB = xMapForChipLane0(path[i].chip[0], bb);

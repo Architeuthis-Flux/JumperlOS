@@ -1947,7 +1947,17 @@ void readStringFromSerial(int source, int addRemove) {
     specialFunctionsString.substring(serialString, 0, dashIndex);
     // serialString.readUntil(specialFunctionsString, "-");
     // serialString.removeLast(1);
-    serialString.toInt(node1);
+    // A token the name tables did not turn into a number ("GPIO_0" on a
+    // build without that alias, "UART_RX" after a shorter alias ate part of
+    // it) fails toInt() and used to leave node1 holding the PREVIOUS bridge's
+    // node - so "+ 5V-3, GPIO_0-8" put 5V on row 8. Invalid means invalid.
+    node1 = -1;
+    if (!serialString.toInt(node1)) {
+      Jerial.print("Unknown node name: ");
+      serialString.printTo(Jerial);
+      Jerial.println();
+      return;
+    }
     // serialString.printTo(Serial);
     // Jerial.println();
     // nodeFileString.printTo(Serial);
@@ -1981,7 +1991,13 @@ void readStringFromSerial(int source, int addRemove) {
       // specialFunctionsString.printTo(Serial);
       // Jerial.println();
 
-      serialString.toInt(node2);
+      node2 = -1; // same as node1 above: never inherit the previous bridge's node
+      if (!serialString.toInt(node2)) {
+        Jerial.print("Unknown node name: ");
+        serialString.printTo(Jerial);
+        Jerial.println();
+        return;
+      }
       // serialString.printTo(Serial);
       // Jerial.println();
       // Jerial.print("node1 = ");
@@ -2531,6 +2547,25 @@ void replaceSFNamesWithDefinedInts(void) {
     Jerial.println(specialFunctionsString);
   }
 
+  // Longest names first: the short aliases below match INSIDE longer ones
+  // ("T_R" is in UART_RX, "I_P"/"I_N" in I_POS/I_NEG - the very names `b`
+  // prints), and a half-replaced token then failed to parse.
+  specialFunctionsString.replace("RP_UART_TX", "116");
+  specialFunctionsString.replace("RP_UART_RX", "117");
+  specialFunctionsString.replace("UART_TX", "116");
+  specialFunctionsString.replace("UART_RX", "117");
+  specialFunctionsString.replace("ISENSE_PLUS", "108");
+  specialFunctionsString.replace("ISENSE_MINUS", "109");
+  specialFunctionsString.replace("I_POS", "108");
+  specialFunctionsString.replace("I_NEG", "109");
+  if (board::boardFindGpio(board::currentBoard(), RP_GPIO_0) != nullptr) {
+    // The OG's one routable GPIO (node 114 - ADC4 on a V5, which has no GPIO_0)
+    specialFunctionsString.replace("RP_GPIO_0", "114");
+    specialFunctionsString.replace("GPIO_0", "114");
+    specialFunctionsString.replace("GP_0", "114");
+    specialFunctionsString.replace("GPIO0", "114");
+  }
+
   specialFunctionsString.replace("GND", "100");
   specialFunctionsString.replace("GROUND", "100");
   specialFunctionsString.replace("TOP_RAIL", "101");
@@ -2741,6 +2776,7 @@ void replaceNanoNamesWithDefinedInts(
   }
   itoa(NANO_RESET, nanoName, 10);
   specialFunctionsString.replace("RESET", nanoName);
+  specialFunctionsString.replace("RST", nanoName); // the name `b` prints for it
   for (int i = 0; i < 10; i++) {
     nanoName[i] = ' ';
   }

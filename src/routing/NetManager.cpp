@@ -4,6 +4,7 @@
 //#include "FileParsing.h"
 #include "ArduinoStuff.h"
 #include "JumperlessDefines.h"
+#include "boards/board.h"
 #include <string.h>
 #include <math.h>
 #include "MatrixState.h"
@@ -206,7 +207,7 @@ const DefineInfo nanoDefines[] = {
     {"D11",      "NANO_D11",    NANO_D11},      // 81
     {"D12",      "NANO_D12",    NANO_D12},      // 82
     {"D13",      "NANO_D13",    NANO_D13},      // 83
-    {"3V3",      "NANO_3V3",    NANO_3V3},    // 84
+    {"RST",      "NANO_RESET",  NANO_RESET},    // 84
     {"AREF",     "NANO_AREF",   NANO_AREF},     // 85
     {"A0",       "NANO_A0",     NANO_A0},       // 86
     {"A1",       "NANO_A1",     NANO_A1},       // 87
@@ -2177,7 +2178,7 @@ int printNodeOrName(
 
 const char* defNanoToCharShort[35] = {
     "VIN",  "D0",   "D1",   "D2",     "D3",     "D4",       "D5",     "D6",
-    "D7",   "D8",   "D9",   "D10",    "D11",    "D12",      "D13",    "3V3",
+    "D7",   "D8",   "D9",   "D10",    "D11",    "D12",      "D13",    "RST", // 84 = NANO_RESET (was "3V3": the OG routes it, and a connected RESET read as a supply)
     "AREF", "A0",   "A1",   "A2",     "A3",     "A4",       "A5",     "A6",
     "A7",   "RST0", "RST1", "N_GND1", "N_GND0", "NANO_3V3", "NANO_5V" };
 
@@ -2196,7 +2197,7 @@ const char* defNanoToCharLong[35] = {
     "NANO_VIN",   "NANO_D0",   "NANO_D1",     "NANO_D2",     "NANO_D3",
     "NANO_D4",    "NANO_D5",   "NANO_D6",     "NANO_D7",     "NANO_D8",
     "NANO_D9",    "NANO_D10",  "NANO_D11",    "NANO_D12",    "NANO_D13",
-    "NANO_3V3", "NANO_AREF", "NANO_A0",     "NANO_A1",     "NANO_A2",
+    "NANO_RESET", "NANO_AREF", "NANO_A0",     "NANO_A1",     "NANO_A2",
     "NANO_A3",    "NANO_A4",   "NANO_A5",     "NANO_A6",     "NANO_A7",
     "NANO_RST0",  "NANO_RST1", "NANO_N_GND1", "NANO_N_GND0", "NANO_3V3",
     "NANO_5V" };
@@ -2223,6 +2224,12 @@ const char* definesToChar(int defined,
               int longOrShort) // converts the internally used #defined numbers
   // into human readable strings
   {
+  // Node 114 is ADC4 on a V5 and RP_GPIO_0 on the OG (same id, different
+  // hardware). The tables are the V5's; on a board whose GPIO table has
+  // RP_GPIO_0, name it as what it is.
+  if (defined == RP_GPIO_0 && board::boardFindGpio(board::currentBoard(), RP_GPIO_0) != nullptr) {
+    return (longOrShort == 1) ? "RP_GPIO_0" : "GPIO_0";
+  }
   // Try finding the define using our lookup function
   const DefineInfo* info = findDefineInfoByValue(defined);
   if (info) {

@@ -1298,9 +1298,58 @@ node lists). OG build 73.6 % RAM.
 Fuzz numbers, 20 000 random netlists of up to 16 bridges: shipped build 120
 netlists with a short or a stray source per 5 000, 13.6 % of bridges open;
 now 0 shorts, 0 validator drops (router and validator agree), 0.6 % open
-(0.27 % on row-heavy netlists). **Not yet on hardware** - the user's board
-is the only OG that has run this path; flash `jumperless_og` and run
-`GND-D6` + `3V3-D1` with a meter on 3V3 before trusting it further.
+(0.27 % on row-heavy netlists).
+
+### Session 2026-09-23 — on the bench: a build that could not boot, then 599 bridges clean
+
+**The local OG build had been unbootable since Sep 17, for a reason unrelated
+to routing.** `lib/micropython/library.json` pulled `extmod/{vfs,vfs_reader,
+modos}.c` from `../../../micropython_repo/` - outside the library, so
+PlatformIO compiled them into `.pio/build/micropython_repo/` with NO env in the
+path, shared by the V5 and OG envs and never rebuilt. The V5 build left
+**ARMv8-M objects** there; linked into the OG, they promoted the ELF to
+`Tag_CPU_arch: v8-M.mainline`, and GNU ld then emitted Thumb-2 long-branch
+veneers (`ldr.w pc, [pc]`) for every flash->RAM call. The first one executed
+is libgcc's `__gnu_thumb1_case_uhi` from TinyUSB's `tud_task_ext()` (the
+arduino-pico linker script puts libgcc in RAM): undefined instruction on the
+M0+, HardFault before `setup()`, dark board, no USB. Caught over SWD with
+`vector_catch hard_err`. Fix: the three lines are gone from `library.json`
+(the embed tree's `+<extmod/*.c>` already compiles byte-identical copies
+per env; the duplicates only linked because of `--allow-multiple-definition`).
+`rm -rf .pio/build/micropython_repo` once. Verify a build with
+`arm-none-eabi-readelf -A firmware.elf | grep Tag_CPU_arch` = `v6S-M`.
+This is very likely the doc's earlier "USB load left stale flash" mystery -
+the flash was fine, the image was not.
+
+**Do not bench with a debug-probe session attached.** A core left halted
+pauses the RP2040 timer (`DBGPAUSE`), `main()`'s `delay(1)` before the core-1
+launch never returns, and the board sits enumerated-but-silent (or drops off
+USB). It cost an hour looking for a routing hang that was not there.
+
+**Routing, on copper** (`test/test_routing_og/bench_og.py`: random netlists
+over port 1, `:crossbar` over port 7, the wire model on lastChipXY):
+`GND-D6` + `3V3-D1` = `J.x15/x6 on J.y0`, `I.x14/x1 on I.y0`, nothing on A-H
+or L. Then 25 + 59 + 28 netlists (599 bridges, up to 14 per netlist, half
+the endpoints SF nodes): **0 shorts, 0 strays**. Two opens in the first
+dense batch, both `Couldn't find a path`, both the same cause: the Lchip
+alt loop ended in a `break` (reference too), so a row->L route that could
+not use CHIP A's hub failed outright - every hop in the OG's history went
+through chip A. Now `continue`: host fuzz opens 0.6 % -> **0.03 %**, and
+the rerun on the board was 0 open. Also: the row's own chip is skipped as a
+hop candidate (its lane index to itself is -1 -> `xStatus[-1]`), the hub is
+checked from both ends, and a hop releases the direct-route reservation
+when nothing else of the net is on it.
+
+**Connection-string parser** (`FileParsing.cpp`, both boards): a token the
+alias tables did not turn into a number failed `toInt()` and **left node1/
+node2 holding the previous bridge's node** - `+ 5V-3, GPIO_0-8` put 5 V on
+row 8. Now "Unknown node name" and the command stops. Why tokens failed:
+short aliases matched inside longer names (`T_R` in `UART_RX`, `I_P`/`I_N`
+in the very `I_POS`/`I_NEG` that `b` prints); long names now go first, and
+`GPIO_0`/`GP_0`/`RST` exist as aliases (`GPIO_0` only on a board whose GPIO
+table has RP_GPIO_0). Node 84 (NANO_RESET, routable on the OG) printed as
+**"3V3"** - the positional nano name table had the wrong label; now `RST`.
+Node 114 prints `GPIO_0` on the OG (`ADC_4` is the V5's).
 
 ## Agent conventions
 
