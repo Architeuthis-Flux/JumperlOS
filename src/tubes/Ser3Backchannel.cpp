@@ -44,6 +44,8 @@
 #include "oled.h"
 #include "JsonState.h"
 #include "Undo.h"
+#include "AdcRing.h"
+#include "Probing.h"
 
 // ============================================================================
 // USBSer3 Backchannel - Machine-Parseable Commands
@@ -92,6 +94,8 @@ static Ser3Verb usbSer3_verbs[] = {
     { "yaml",      "Full state YAML dump",                         "",               "---YAML_START---..---YAML_END---", ":yaml",         6000 },
     { "nets",      "Net list",                                     "",               "json",                          ":nets",            2000 },
     { "adc",       "ADC voltages + INA current",                   "",               "json",                          ":adc",             4000 },
+    { "padraw",    "Pad-sense ADC5 raw ring history (448 x 12-bit hex)", "",         "padraw{end:<sweep>,n:448,pos:<sw>,v:<hex3...>}", ":padraw", 2000 },
+    { "padgate",   "Stream probe decode-gate diagnostics here",    "on|off",         "accepted/finger/phantom lines", ":padgate:on",     0 },
     { "all",       "Full status (version+adc+current+gpio+nets+power)", "",          "json",                          ":all",             9000 },
     { "status",    "Alias of all",                                 "",               "json",                          ":status",          9000 },
     { "slot",      "Active slot query",                            "",               "slot info",                     ":slot",            30 },
@@ -205,6 +209,29 @@ static void usbSer3_sendADC(Stream* out) {
     out->printf("},\"current\":{\"ina0_mA\":%.3f,\"ina1_mA\":%.3f}}\r\n",
                 INA0.getCurrent_mA()- currentReadingOffset0_mA, INA1.getCurrent_mA()- currentReadingOffset1_mA);
 #endif
+}
+
+// :padraw - the pad-sense channel's newest ring history, raw, for signature
+// work on what touches the pad ladder (probe tip vs a finger). 448 sweeps
+// (~9.3 ms at 48 kHz) of ADC5 as 3-hex-digit samples, oldest first, tagged
+// with the exclusive end sweep so consecutive dumps stitch (or expose their
+// gap) host-side, plus the switch position and the tip feed's drive level.
+static void usbSer3_sendPadRaw(Stream* out) {
+    if (!adcRingActive()) { out->print("{\"error\":\"adc_ring_inactive\"}\r\n"); return; }
+    static const int n = 448;
+    static char buf[n * 3 + 80];
+    uint32_t end = adcRingSweeps();
+    const volatile uint16_t* ring = adcRingData();
+    int len = snprintf(buf, sizeof(buf), "padraw{end:%lu,n:%d,pos:%d,tip:%d,v:",
+                       (unsigned long)end, n, (int)switchPosition, (int)gpio_get_out_level(PROBE_PIN));
+    for (uint32_t s = end - (uint32_t)n; s != end; s++) {
+        uint16_t v = ring[((s << 3) + 5u) & (ADC_RING_HALFWORDS - 1u)] & 0x0FFFu;
+        buf[len++] = "0123456789abcdef"[(v >> 8) & 0xF];
+        buf[len++] = "0123456789abcdef"[(v >> 4) & 0xF];
+        buf[len++] = "0123456789abcdef"[v & 0xF];
+    }
+    buf[len++] = '}'; buf[len++] = '\r'; buf[len++] = '\n';
+    out->write((const uint8_t*)buf, len);
 }
 
 static void usbSer3_sendGpioJson(Stream* out) {
@@ -770,6 +797,14 @@ static void usbSer3_dispatchVerb(Stream* out, const String& verb) {
         usbSer3_sendNets(out);
     } else if (head == "adc") {
         usbSer3_sendADC(out);
+    } else if (head == "padraw") {
+        usbSer3_sendPadRaw(out);
+    } else if (head == "padgate") {
+        // Probing.cpp's decode-gate diagnostics: 2 = to USBSer3, 0 = off.
+        // (1 = port 1, owned by the [debug] probing config.)
+        String rl = rest; rl.toLowerCase();
+        debugProbing = rl.startsWith("on") ? 2 : 0;
+        out->printf("{\"padgate\":\"%s\"}\r\n", debugProbing == 2 ? "on" : "off");
     } else if (head == "all" || head == "status") {
         usbSer3_sendAllStatus(out);
     } else if (head == "slot") {

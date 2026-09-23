@@ -61,6 +61,11 @@ int      adcRingMeanNewest(int ch, int n);
 // into ordered windows. Sweeps older than the ring depth read as garbage -
 // callers keep windows within the last ~440 sweeps.
 int      adcRingMeanWindow(int ch, uint32_t endSweep, int n);
+// Shape of the same window for the probe decode's finger gate: returns how
+// many samples are <= thresh (a pad with no DC source behind it is pinned at
+// the unpowered floor about half the time) and, via stdOut, the samples'
+// standard deviation (a finger rides a ~8 kHz tone the tip never has).
+int      adcRingWindowShape(int ch, uint32_t endSweep, int n, int thresh, int* stdOut);
 // Wait until n sweeps NEWER than sweep index `after` exist (bounded by
 // timeoutUs; ~ (n+1) x 21 us normally), then return their mean. This is a
 // fresh burst starting "now" when `after` = adcRingSweeps() at the call.

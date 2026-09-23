@@ -12,7 +12,12 @@
 #include "CoreMailbox.h" // core1req::allIdle() (T2.2b) - src/coredination is on the include path
 #include "CH446Q.h" // sendXYrawUnchecked
 
-#ifndef OG_JUMPERLESS
+// The wire graph, the short checker and validateAllPaths() build on BOTH
+// boards: the OG has no other gate between the router and the crossbar (its
+// sendXYraw check is compiled out), and a router slip there went straight to
+// copper - GND-D6 + 3V3-D1 shorted GND to 3.3 V through chip H's hub line.
+// Only the V5 fast-path planner and the V5-fabric self-check stay V5-only
+// (bottom of the file).
 
 #include "JumperlessDefines.h"
 #include "MatrixState.h"
@@ -35,11 +40,18 @@ volatile bool sendXYrawCheckEnabled = true;
 // Wire table
 // ============================================================================
 
+#ifdef OG_JUMPERLESS
+// The OG fabric is 182 wires (56 rows + 4 corner rows + 56 A-H lane pairs +
+// 32 A-H<->I/J/K lanes + 8 hub lines + the SF nodes). Sized for it: RAM on the
+// RP2040 is the OG's scarcest resource.
+static const int kMaxWires = 200;
+#else
 // Theoretical ceiling: 12 chips x 24 pins = 288 distinct wires if nothing
 // were shared. The old 160 silently overflowed on the V5 fabric (allocWire
 // returned kInvalidWire for later rows, making them invisible to the short
 // checker); the self-check now fails loudly if the table ever fills again.
 static const int kMaxWires = 288;
+#endif
 static const int kInvalidWire = -1;
 
 // pinWire[chip][0..15] = X pins; pinWire[chip][16..23] = Y pins
@@ -50,6 +62,23 @@ static uint8_t wireIsHighZ[kMaxWires];
 static int numWires = 0;
 static bool wireTableReady = false;
 
+#ifdef OG_JUMPERLESS
+// OG: 3V3 and 5V are crossbar nodes (chips I/J/L), the DACs are power op-amp
+// outputs, RP_GPIO_0 is the one routable GPIO. Node 114 is RP_GPIO_0 here
+// (ADC4 on V5 - same id, opposite class), which is why this is per board.
+static bool isDrivenSourceNode(int node) {
+    return node == GND || node == SUPPLY_3V3 || node == SUPPLY_5V ||
+           node == DAC0 || node == DAC1 ||
+           node == RP_UART_TX || node == RP_GPIO_0;
+}
+
+static bool isHighZNode(int node) {
+    return (node >= ADC0 && node <= ADC3) ||
+           node == ISENSE_PLUS || node == ISENSE_MINUS ||
+           node == RP_UART_RX ||
+           node == NANO_AREF;
+}
+#else
 static bool isDrivenSourceNode(int node) {
     return node == GND || node == TOP_RAIL || node == BOTTOM_RAIL ||
            node == DAC0 || node == DAC1 ||
@@ -65,6 +94,7 @@ static bool isHighZNode(int node) {
            node == RP_UART_RX ||
            node == NANO_AREF;
 }
+#endif
 
 static int allocWire(int node) {
     if (numWires >= kMaxWires) return kInvalidWire;
@@ -84,13 +114,18 @@ static int wireForNode(int node) {
 }
 
 // Lane wire registry built during init
-static int16_t laneWire[12][12][4]; // [lo][hi][laneIdx] -> wire id
+#ifdef OG_JUMPERLESS
+static const int kMaxLanes = 2; // the OG fabric has at most two wires between any two chips
+#else
+static const int kMaxLanes = 4;
+#endif
+static int16_t laneWire[12][12][kMaxLanes]; // [lo][hi][laneIdx] -> wire id
 static uint8_t laneCount[12][12];
 
 static int laneWireFor(int fromChip, int toChip, int laneIdx) {
     int lo = fromChip < toChip ? fromChip : toChip;
     int hi = fromChip < toChip ? toChip : fromChip;
-    if (laneIdx < 0 || laneIdx >= 4) return kInvalidWire;
+    if (laneIdx < 0 || laneIdx >= kMaxLanes) return kInvalidWire;
     if (laneWire[lo][hi][laneIdx] < 0) {
         laneWire[lo][hi][laneIdx] = (int16_t)allocWire(-1);
         if (laneCount[lo][hi] <= laneIdx)
@@ -120,7 +155,15 @@ void initRouteSafety(void) {
     for (int c = 0; c < 12; c++) {
         for (int x = 0; x < 16; x++) {
             int map = globalState.connections.chipStates[c].xMap[x];
-            if (map >= CHIP_A && map <= CHIP_L) {
+            // A chip reference on an X pin: every X of a breadboard chip, but on
+            // an SF chip only the I/J/K/L interconnects (SF chips reach the
+            // breadboard chips over their Y axis, never X). The OG's L.x8 is
+            // ROW 1, whose node id equals CHIP_B - read as a lane it became
+            // chip B's hub wire and every net on row 1 "shorted" whatever
+            // hopped through chip B.
+            bool chipRef = (map >= CHIP_A && map <= CHIP_L) &&
+                           (c < CHIP_I || map >= CHIP_I);
+            if (chipRef) {
                 int laneIdx = countPriorLanesOnChip(c, map, x);
                 pinWire[c][x] = (int16_t)laneWireFor(c, map, laneIdx);
             } else if (map > 0) {
@@ -136,6 +179,14 @@ void initRouteSafety(void) {
             if (map == BOUNCE_NODE) {
                 // Unique stub per breadboard chip
                 pinWire[c][16 + y] = (int16_t)allocWire(-1);
+            } else if (c < CHIP_I && y == 0 && map >= CHIP_A && map <= CHIP_L) {
+                // OG: a breadboard chip's Y0 is wired straight to chip L's
+                // Y[c] - the hub line. One wire, shared with L's Y pass
+                // below (which lands on the same laneWireFor key). Without
+                // this branch the value CHIP_L (11) fell through to
+                // wireForNode(11) = ROW 11, and every hub line aliased onto
+                // that row's wire.
+                pinWire[c][16 + y] = (int16_t)laneWireFor(c, map, 0);
             } else if (c >= CHIP_I && c <= CHIP_L && map >= CHIP_A && map <= CHIP_L) {
                 // Chip references exist ONLY on the SF chips' Y pins. On
                 // breadboard chips A-H, yMap 1-7 hold ROW NODES whose ids
@@ -265,16 +316,24 @@ static bool componentHasShort(WireUF& uf, int* outNetA = nullptr,
     // recursion, encoder yield never routes), so one buffer per core is safe.
     static int16_t rootDrivenBuf[2][kMaxWires];
     static int16_t rootNetBuf[2][kMaxWires];
-    static int16_t rootNodesBuf[2][kMaxWires][8];
-    static uint8_t rootNodeCountBuf[2][kMaxWires];
+    static int16_t rootStrayBuf[2][kMaxWires];
     int core = get_core_num() & 1;
     int16_t* rootDriven = rootDrivenBuf[core];
     int16_t* rootNet = rootNetBuf[core];
-    int16_t (*rootNodes)[8] = rootNodesBuf[core];
-    uint8_t* rootNodeCount = rootNodeCountBuf[core];
+    int16_t* rootStray = rootStrayBuf[core];
     memset(rootDriven, 0xFF, sizeof(rootDrivenBuf[0]));
     memset(rootNet, 0xFF, sizeof(rootNetBuf[0]));
+    memset(rootStray, 0xFF, sizeof(rootStrayBuf[0]));
+#ifndef OG_JUMPERLESS
+    // Per-root node lists for the doNotIntersect pair check. ~6 KB of scratch:
+    // left out on the OG, where the driven-source and two-net checks above
+    // already refuse every pair its doNotIntersect lists name.
+    static int16_t rootNodesBuf[2][kMaxWires][8];
+    static uint8_t rootNodeCountBuf[2][kMaxWires];
+    int16_t (*rootNodes)[8] = rootNodesBuf[core];
+    uint8_t* rootNodeCount = rootNodeCountBuf[core];
     memset(rootNodeCount, 0, sizeof(rootNodeCountBuf[0]));
+#endif
 
     for (int w = 0; w < numWires; w++) {
         int node = wireNode[w];
@@ -301,15 +360,37 @@ static bool componentHasShort(WireUF& uf, int* outNetA = nullptr,
                     if (outNetB) *outNetB = net;
                     return true; // two distinct nets
                 }
+                if (rootStray[r] >= 0) {
+                    if (outNetA) *outNetA = rootStray[r];
+                    if (outNetB) *outNetB = net;
+                    return true; // a net riding on a source / row nobody routed
+                }
                 if (rootNet[r] < 0) rootNet[r] = (int16_t)net;
+            } else if (net <= 0 && (wireIsDriven[w] || (node >= 1 && node <= 60))) {
+                // A driven source or a breadboard row that is in NO net has no
+                // business on a net's copper. The two-net rule above cannot see
+                // it (no net id), so it is tracked separately: on the OG, an
+                // unused 5V (chip L x14) or DAC0 (L x7) or row 60 (L x11)
+                // reached this way when a hop-chip lane index was written into
+                // chip L's X slot. Bounce lanes on ADC inputs and header pins
+                // are the reference router's own practice and stay allowed.
+                if (rootNet[r] >= 0) {
+                    if (outNetA) *outNetA = rootNet[r];
+                    if (outNetB) *outNetB = node;
+                    return true;
+                }
+                if (rootStray[r] < 0) rootStray[r] = (int16_t)node;
             }
         }
 
+#ifndef OG_JUMPERLESS
         if (rootNodeCount[r] < 8) {
             rootNodes[r][rootNodeCount[r]++] = (int16_t)node;
         }
+#endif
     }
 
+#ifndef OG_JUMPERLESS
     // doNotIntersect / connectionAllowed on node pairs in each component
     for (int r = 0; r < numWires; r++) {
         if (rootNodeCount[r] < 2) continue;
@@ -325,6 +406,7 @@ static bool componentHasShort(WireUF& uf, int* outNetA = nullptr,
             }
         }
     }
+#endif
     return false;
 }
 
@@ -389,6 +471,17 @@ static bool isFakeGpioInputPath(int pathIdx) {
     return false;
 }
 
+// A skipped path must carry NO crosspoints: sendPath()/updateChipStateArray()
+// read x/y straight off the table and never look at `skip`, so a path that
+// was only flagged still went to the crossbar (V5 bench 2026-09-02, and every
+// short this validator refused before this wipe existed).
+static void wipePathCoords(pathStruct& p) {
+    for (int h = 0; h < 4; h++) {
+        p.x[h] = -1;
+        p.y[h] = -1;
+    }
+}
+
 int validateAllPaths(void) {
     if (!wireTableReady) return 0;
 
@@ -398,19 +491,37 @@ int validateAllPaths(void) {
 
     for (int i = 0; i < numberOfPaths; i++) {
         pathStruct& p = globalState.connections.paths[i];
-        if (p.skip || p.net <= 0) continue;
+        if (p.skip) {
+            wipePathCoords(p); // flagged upstream (overlap check, failed hop) - make it stick
+            continue;
+        }
+        if (p.net <= 0) continue;
         if (p.pathType == VIRTUAL) continue;
         // TDM manages these; simultaneous presence in paths[] is intentional.
         if (isFakeGpioInputPath(i)) continue;
 
         int8_t hc[4], hx[4], hy[4];
         int nHops = 0;
+        bool corrupt = false;
         for (int h = 0; h < 4; h++) {
             if (p.chip[h] < 0 || p.x[h] < 0 || p.y[h] < 0) continue;
+            if (p.chip[h] >= 12 || p.x[h] >= 16 || p.y[h] >= 8) {
+                // Not a crosspoint. sendPath() would still encode it - the
+                // address is masked to 4+3 bits, so y = 8 closes y0 - and the
+                // wire graph cannot see it. The whole path is untrustworthy.
+                corrupt = true;
+                break;
+            }
             hc[nHops] = (int8_t)p.chip[h];
             hx[nHops] = (int8_t)p.x[h];
             hy[nHops] = (int8_t)p.y[h];
             nHops++;
+        }
+        if (corrupt) {
+            p.skip = true;
+            wipePathCoords(p);
+            found++;
+            continue;
         }
         if (nHops == 0) continue;
 
@@ -422,6 +533,7 @@ int validateAllPaths(void) {
         int netA = -1, netB = -1;
         if (componentHasShort(uf, &netA, &netB)) {
             p.skip = true;
+            wipePathCoords(p);
             if (numberOfUnconnectablePaths < 10) {
                 unconnectablePaths[numberOfUnconnectablePaths][0] = p.node1;
                 unconnectablePaths[numberOfUnconnectablePaths][1] = p.node2;
@@ -504,8 +616,10 @@ void reassertOpenOnLanes(const int8_t* hopChip, const int8_t* hopX,
     }
 }
 
+#ifndef OG_JUMPERLESS
 // ============================================================================
-// Fabric helpers for fastConnectPath (from NetVoltageScan)
+// Fabric helpers for fastConnectPath (from NetVoltageScan) - V5 fabric only
+// (chip-K ADC lanes, bounce bus). The OG stubs are at the end of the file.
 // ============================================================================
 
 static inline bool yRowFreeHW(int chip, int y) {
@@ -1154,6 +1268,7 @@ void fastPathFailSnapshot(int node, uint16_t* kFreeYMask, uint16_t* kXBusyMask,
         *xBusyMask = m;
     }
 }
+#endif // !OG_JUMPERLESS (fast path)
 
 // ============================================================================
 // Self-check + audit
@@ -1181,6 +1296,9 @@ void auditLastChipXY(Stream* out) {
     out->println();
 }
 
+#ifndef OG_JUMPERLESS
+// The test vectors below are the V5 fabric (chip-K sources, RP_GPIO_20, the
+// bounce stubs). The OG's check is the host fuzz harness in test/test_routing_og.
 int routeSafetySelfCheck(Stream* out) {
     if (!out) out = &Serial;
     if (!wireTableReady) {
@@ -1380,36 +1498,27 @@ int routeSafetySelfCheck(Stream* out) {
 
 #else // OG_JUMPERLESS
 
-#include "RouteSafety.h"
-
-volatile uint32_t routingGeneration = 1;
-volatile uint16_t chipXYSuspectMask = 0;
-volatile uint32_t sendxy_blocked_count = 0;
-volatile bool sendXYrawCheckEnabled = true;
-
-void initRouteSafety(void) {}
-int validateAllPaths(void) { return 0; }
-bool wouldShort(const int8_t*, const int8_t*, const int8_t*, int, int) {
-    return false;
-}
-bool wouldShortCrosspoint(int, int, int) { return false; }
-bool wouldShortCrosspointMasked(int, int, int, int, int, uint16_t) {
-    return false;
-}
+// The OG has no ephemeral fast path (no chip-K ADC lanes, no bounce bus) and
+// the self-check's vectors are the V5 fabric. Everything else in this file -
+// the wire graph, componentHasShort(), validateAllPaths(), the suspect mask,
+// the audit - is built for the OG above.
 bool planFastPath(int, int, pathStruct*) { return false; }
 int fastConnectPath(int, int, FastPathHandle*, unsigned long) { return -1; }
 void fastDisconnectPath(FastPathHandle* p) {
     if (p) p->active = false;
 }
-void reassertOpenOnLanes(const int8_t*, const int8_t*, const int8_t*, int) {}
-void markChipXYSuspect(int) {}
-void clearChipXYSuspect(void) {}
-bool anyChipXYSuspect(void) { return false; }
-int routeSafetySelfCheck(Stream* out) {
-    if (out) out->println("RouteSafety: V5 only");
-    return 0;
+void fastPathFailSnapshot(int, uint16_t* kFreeYMask, uint16_t* kXBusyMask, int* chip,
+                          uint16_t* xBusyMask, uint8_t* bounceOkMask) {
+    if (kFreeYMask) *kFreeYMask = 0;
+    if (kXBusyMask) *kXBusyMask = 0;
+    if (chip) *chip = -1;
+    if (xBusyMask) *xBusyMask = 0;
+    if (bounceOkMask) *bounceOkMask = 0;
 }
-void auditLastChipXY(Stream* out) {
-    if (out) out->println("RouteSafety: V5 only");
+int routeSafetySelfCheck(Stream* out) {
+    if (!out) out = &Serial;
+    out->println("RouteSafety self-check: V5 fabric vectors only - the OG router is checked by test/test_routing_og");
+    auditLastChipXY(out);
+    return 0;
 }
 #endif // OG_JUMPERLESS

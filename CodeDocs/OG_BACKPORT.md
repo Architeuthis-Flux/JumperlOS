@@ -1238,6 +1238,70 @@ Injecting a button press still works the same way: write 2 to
       the MicroPython/serial control surface. Not started; intentionally
       deferred until the OG firmware boots.
 
+### Session 2026-09-22 — a user's OG fried itself: the router shorted supplies, and nothing was checking
+
+A field report of an OG burning a crossbar chip on the backport build. Found
+by compiling the OG router on the host and fuzzing random netlists through it
+against a wire model of the OG fabric (`test/test_routing_og/run.sh`, the
+runnable check; `regress` mode holds the eight netlists below, all of which
+shorted or mis-routed on the shipped build). Root causes, all in
+`NetsToChipConnections_OG.cpp` unless noted:
+
+1. **`Lchip` was never cleared.** `clearAllNTCC()` memsets the path table to
+   -1, which reads back as `true` for that bool, and the flag was only ever set.
+   Every alt path took the chip-L branches, including a same-SF-chip hop with a
+   loop that has no `break`: it claimed all eight hub lines and parked the net
+   on chip H's Y0. Two nets there = a hard short. **`GND-D6` + `3V3-D1` shorted
+   GND to 3.3 V** through I.y7 / J.y7 / H.x14 / H.x15. Now decided (and cleared)
+   in `assignPathType`.
+2. **SF<->SF hops through a breadboard chip** (`D6-A0`, `5V-D9`) never set
+   `chip[3]` (half the route unsent) and never checked or claimed chip L's side
+   of the hub line they rode - `5V-D9` sat on B.Y0 while `DAC0-ADC0` sat on
+   L.Y[B] = the same copper: 5 V into the DAC0 op-amp. One checked loop replaces
+   the reference's two.
+3. **The BB->L alt path's lane-1 branch wrote a hop-chip lane index into chip
+   L's X slot** (`x[1] = xMapL1c1`): chip D rows reached UART_TX through L.x7 =
+   DAC0, chip H rows through L.x15 = GPIO_0, chips E/F through L.x9/x11 = rows
+   30/60.
+4. **NANO->L paths went through the breadboard->L code** (`commitPaths`, case
+   labels include NANOtoSF): `yMapChipL = chip[0] = 8` put y = 8 in the path -
+   `sendPath` masks that to y0 - and wrote `yStatus[8]` past the array. Case
+   now requires a breadboard `chip[0]`; `sendPath` and the validator refuse
+   out-of-range coordinates.
+5. `Lchip` was decided before `resolveChipCandidates()` picked the chips, so a
+   5V/DAC0/ADC2 that resolved to L went down the I/J/K hop loop and came out
+   unrouted. Recomputed from the resolved chips in `resolveAltPaths`.
+6. The paired `-2` bounce slots of a row->L route (same chip, Y0 and the row)
+   resolved to two different lanes under the virgin-only lane test; same for
+   the hop chip's `-2` Y slots in the BB->SF and SF->L hops. They are one lane
+   / Y0 now.
+7. Nano pins used the shared V5 `nano` table (AREF on chip K): every AREF
+   bridge was unrouted. `findStartAndEndChips` finds Nano pins on the board's
+   own xMap like every other SF node, which also opens chip K for primaries.
+
+**RouteSafety now builds for the OG** (`RouteSafety.cpp`): the wire graph,
+`componentHasShort()`, `validateAllPaths()` and the audit; only the V5 fast
+path and the V5-fabric self-check stay stubbed. Fixes needed for the OG
+fabric: a breadboard chip's Y0 is the hub wire shared with L.Y[c] (it fell
+through to `wireForNode(CHIP_L=11)` = row 11); a chip reference on an SF
+chip's X pin must be >= CHIP_I (L.x8 is row 1 = CHIP_B, and read as a lane it
+made row 1 chip B's hub); `RP_GPIO_0` is node 114 = V5's ADC4, so the driven /
+high-Z classifier is per board. Two rules added for both boards: a driven
+source or a breadboard row that is in NO net must not ride a net's copper
+(the two-net rule cannot see an unused 5V), and a path with an out-of-range
+coordinate is corrupt. And `validateAllPaths()` now WIPES the coordinates of
+every skipped path - `sendPath()` and `updateChipStateArray()` never looked at
+`skip`, so on V5 too a path the validator refused still went to the crossbar.
+Cost on the RP2040: 4.6 KB static (`kMaxWires` 200, two lanes, no per-root
+node lists). OG build 73.6 % RAM.
+
+Fuzz numbers, 20 000 random netlists of up to 16 bridges: shipped build 120
+netlists with a short or a stray source per 5 000, 13.6 % of bridges open;
+now 0 shorts, 0 validator drops (router and validator agree), 0.6 % open
+(0.27 % on row-heavy netlists). **Not yet on hardware** - the user's board
+is the only OG that has run this path; flash `jumperless_og` and run
+`GND-D6` + `3V3-D1` with a meter on 3V3 before trusting it further.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

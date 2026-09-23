@@ -45,6 +45,7 @@ extern char *strcpy(char *dest, const char *src);
 #include "NetManager.h"
 #include "Peripherals.h"
 #include "Probing.h"
+#include "RouteSafety.h"
 #include "FakeGpio.h"
 //#include "SerialWrapper.h"
 
@@ -1896,6 +1897,12 @@ void bridgesToPaths(
   couldntFindPath(1);
   // couldntFindPath();
   checkForOverlappingPaths();
+  // The last gate before copper: union every path's crosspoints over the
+  // physical wire graph (RouteSafety) and drop any path that would put two
+  // nets, or two driven sources, on one wire. The OG's sendXYraw() has no
+  // per-crosspoint check, so this is the ONLY thing between a router slip
+  // and a shorted crossbar chip.
+  validateAllPaths();
   #if PROFILE_BRIDGES_TO_PATHS
   Serial.print("  validation: "); Serial.print(micros() - btp_step); Serial.println(" us");
   btp_step = micros();
@@ -2666,7 +2673,14 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
         case BBtoSF: // nodes should always be in order of the enum, so node1 is BB and node2 is SF
         {
 
-            if (path[i].chip[0] != CHIP_L && path[i].chip[1] == CHIP_L) // if theyre both chip L we'll deal with it differently
+            // Breadboard chip -> chip L only. A NANO/SF endpoint on chip I/J/K also
+            // has chip[1] == CHIP_L here (the case labels include NANOtoSF) and was
+            // routed as if chip[0] were a breadboard chip: yMapChipL = chip[0] = 8..10
+            // put y = 8 in the path (sendPath masks that to y0: L.x8 = row 1 closed
+            // onto chip A's hub), wrote ch[CHIP_L].yStatus[8..10] past the array, and
+            // the -2 bounce on chip I resolved to x13 = ADC0. Those routes belong to
+            // resolveAltPaths' SF<->L branch.
+            if (path[i].chip[0] < CHIP_I && path[i].chip[1] == CHIP_L)
             {
                 // Serial.print("\tBBtoCHIP L  \n\n\n\n");
                 int yMapBBc0 = 0; // y 0 is always connected to chip L
@@ -2698,8 +2712,11 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
                     path[i].chip[2] = path[i].chip[0];
                     path[i].sameChip = true; // so we know both -2 values need to be the same
 
+                    // As the reference: hand the route to resolveAltPaths' Lchip
+                    // branch (a neighbouring chip's hub). Measured on the host fuzz:
+                    // taking the direct Y0 here instead routed FEWER netlists (each
+                    // duplicate then ate another bounce lane on the row's own chip).
                     path[i].altPathNeeded = true;
-                    // path[i].sameChip = true; //so we know both -2 values need to be the same
 
                     if (debugNTCC2 == true)
                     {
@@ -3160,7 +3177,12 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
                                 path[i].x[0] = xMapForChipLane1(path[i].chip[0], path[i].chip[2]);
-                                path[i].x[1] = xMapL1c1;
+                                // x[1] is chip L's lane for the node, same as the lane-0 case
+                                // above. This slot held xMapL1c1 - a lane index on the HOP
+                                // chip - so a row on chip D reached UART_TX through L.x7 =
+                                // DAC0, chip H rows landed on L.x15 = GPIO_0, chips E/F on
+                                // L.x9/x11 = rows 30/60 (fuzz: 43-UART_RX closed row 60).
+                                path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
 
                                 path[i].x[2] = xMapForChipLane1(path[i].chip[2], path[i].chip[0]);
                                 // path[i].x[3] = -2;
@@ -3230,7 +3252,13 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                         Serial.print("  \n\r");
                     }
 
-                    if ((ch[bb].xStatus[xMapBB] == path[i].net || ch[bb].xStatus[xMapBB] == -1) && ch[bb].yStatus[0] == -1) // were going through each bb chip to see if it has a connection to both chips free
+                    // The hop bridges the two lanes over bb's Y0 - the hub line, which is
+                    // chip L's Y[bb] too - and lands on the SF chip's Y[bb]. All of them
+                    // must be free (or already this net's).
+                    if ((ch[bb].xStatus[xMapBB] == path[i].net || ch[bb].xStatus[xMapBB] == -1) &&
+                        freeOrSameNetY(bb, 0, path[i].net, 1) &&
+                        freeOrSameNetY(CHIP_L, bb, path[i].net, 1) &&
+                        freeOrSameNetY(path[i].chip[1], bb, path[i].net, 1)) // were going through each bb chip to see if it has a connection to both chips free
 
                     {
 
@@ -3326,13 +3354,18 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                             path[i].y[0] = yMapForNode(path[i].node1, path[i].chip[0]);
                             path[i].y[1] = yMapSF;
-                            path[i].y[2] = -2;
-                            path[i].y[3] = -2;
+                            // bb bridges its two lanes over Y0 (the hub). These were -2 for
+                            // resolveUncommittedHops, whose virgin-only lane test then refused
+                            // the Y0 this very net had just claimed below - so the route was
+                            // never completed (41-A0: F.x2 and K.x0 closed, B never bridged).
+                            path[i].y[2] = 0;
+                            path[i].y[3] = 0;
 
                             ch[path[i].chip[0]].yStatus[path[i].y[0]] = path[i].net;
 
                             ch[path[i].chip[1]].yStatus[path[i].y[1]] = path[i].net;
                             ch[path[i].chip[2]].yStatus[0] = path[i].net;
+                            ch[CHIP_L].yStatus[path[i].chip[2]] = path[i].net; // same wire as bb's Y0
 
                             path[i].sameChip = true;
                         }
@@ -3358,13 +3391,15 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                             path[i].y[0] = yMapForNode(path[i].node1, path[i].chip[0]);
                             path[i].y[1] = yMapSF;
-                            path[i].y[2] = -2;
-                            path[i].y[3] = -2;
+                            path[i].y[2] = 0; // see the lane-0 branch
+                            path[i].y[3] = 0;
 
                             ch[path[i].chip[0]].yStatus[path[i].y[0]] = path[i].net;
 
                             ch[path[i].chip[1]].yStatus[path[i].y[1]] = path[i].net;
                             ch[path[i].chip[2]].yStatus[0] = path[i].net;
+                            ch[CHIP_L].yStatus[path[i].chip[2]] = path[i].net;
+                            path[i].sameChip = true;
                         }
 
                         foundPath = 1;
@@ -3906,6 +3941,16 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 int swapped = 0;
                 duplicateSFnets();
 
+                // assignPathType() decided Lchip before resolveChipCandidates()
+                // picked the chips: a node that lives on two chips (5V: J or L,
+                // DAC0: I or L, ADC2: K or L) and resolved to L arrived here
+                // unflagged, went down the I/J/K hop loop below, and came out
+                // unrouted (D7-5V with K and L chosen).
+                if (path[i].chip[0] == CHIP_L || path[i].chip[1] == CHIP_L)
+                {
+                    path[i].Lchip = true;
+                }
+
                  if (path[i].Lchip == true) // TODO check if the same net is connected to another SF chip and use that instead
                 //if (false)
                 {
@@ -3988,7 +4033,14 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                     Serial.println();
                                 }
-                                if ((ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsSF])] == -1) && (ch[hopBB].yStatus[0] == -1))
+                                int hopLane = xMapForChipLane0(hopBB, path[i].chip[whichIsSF]);
+                                // Every wire the hop rides, both ends: the SF chip's Y[hop] (=
+                                // hop.X[lane]) and the hub line (hop.Y0 = L.Y[hop]).
+                                if (hopLane >= 0 &&
+                                    freeOrSameNetX(hopBB, hopLane, path[i].net, 1) &&
+                                    freeOrSameNetY(path[i].chip[whichIsSF], hopBB, path[i].net, 1) &&
+                                    freeOrSameNetY(hopBB, 0, path[i].net, 1) &&
+                                    freeOrSameNetY(CHIP_L, hopBB, path[i].net, 1))
                                 {
                                     if (debugNTCC2)
                                     {
@@ -3999,22 +4051,34 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                     path[i].chip[2] = hopBB;
                                     path[i].chip[3] = hopBB;
 
-                                    path[i].x[whichIsSF] = xMapForNode(path[i].node1, path[i].chip[whichIsSF]);
+                                    // each slot gets ITS node's lane on ITS chip (this assumed
+                                    // node1 is the SF side, which only holds when whichIsL == 1)
+                                    path[i].x[whichIsSF] = xMapForNode(whichIsSF == 0 ? path[i].node1 : path[i].node2, path[i].chip[whichIsSF]);
                                     path[i].y[whichIsSF] = hopBB;
 
-                                    path[i].x[whichIsL] = xMapForNode(path[i].node2, path[i].chip[whichIsL]);
+                                    path[i].x[whichIsL] = xMapForNode(whichIsL == 0 ? path[i].node1 : path[i].node2, path[i].chip[whichIsL]);
                                     path[i].y[whichIsL] = hopBB;
+                                    ch[path[i].chip[whichIsSF]].yStatus[hopBB] = path[i].net; // = hop.X[lane], both ends
 
                                     path[i].x[2] = xMapForChipLane0(hopBB, path[i].chip[whichIsSF]);
 
-                                    path[i].y[2] = -2;
-                                    path[i].y[3] = -2;
+                                    // The route is sf.X[node] - sf.Y[hop] - hop.X[lane] - hop.Y0 -
+                                    // L.Y[hop] - L.X[node]: three crosspoints, the hop chip's Y
+                                    // is its hub line Y0 (no X lane to L exists on this board).
+                                    // These were -2 for resolveUncommittedHops, which then
+                                    // refused Y0 because THIS net had just claimed it, and the
+                                    // path stayed half-routed (A5-DAC0: J.x5 and L.x7 closed on
+                                    // two hub lines nothing bridged).
+                                    path[i].y[2] = 0;
+                                    path[i].chip[3] = -1;
+                                    path[i].x[3] = -1;
+                                    path[i].y[3] = -1;
 
                                     path[i].altPathNeeded = false;
 
                                     ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsSF])] = path[i].net;
-
-                                    ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsL])] = path[i].net;
+                                    // (was also stamping xStatus[xMapForChipLane0(hopBB, CHIP_L)] -
+                                    // that lane does not exist on the OG, so the index was -1)
 
                                     ch[hopBB].yStatus[0] = path[i].net;
                                     ch[CHIP_L].yStatus[hopBB] = path[i].net;
@@ -4314,205 +4378,91 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 }
                 else // if the path is not on the L chip
                 {
-          giveUpOnL = 0;
-
-                    for (int bb = 0; bb < 8; bb++) // this is a long winded way to do this but it's at least slightly readable
+                    // SF chip <-> SF chip (I/J/K), through one breadboard chip `bb`.
+                    // Different chips: sf1.X[node1] - sf1.Y[bb] - bb.X[lane1] - bb.Y0 -
+                    // bb.X[lane2] - sf2.Y[bb] - sf2.X[node2]. bb's Y0 IS chip L's Y[bb]
+                    // (the hub line), so L must have nothing on it, and every wire the
+                    // hop rides is checked AND claimed on both of its ends. Same chip:
+                    // sf.X[node1] - sf.Y[bb] - sf.X[node2], no hub involved.
+                    //
+                    // This replaces two loops from the reference: the first never set
+                    // chip[3] (half the route was never sent) and left the hub line
+                    // unclaimed on the bb side; the second ("connect to a random
+                    // breadboard row") did not look at chip L at all. Fuzz: 5V-D9 hopped
+                    // through B.Y0 while DAC0-ADC0 sat on L.Y[B] -> 5V into DAC0.
+                    (void)giveUpOnL;
+                    for (int attempt = 0; attempt < 2 && foundHop == 0; attempt++)
                     {
-                         
+                        if (attempt == 1)
+                        {
+                            swapped = 1;
+                            swapDuplicateNode(i); // node2's other chip (GND: J<->I, 5V: J<->L ...)
+                            if (path[i].chip[1] == CHIP_L) break; // that is the Lchip route, not this one
+                        }
                         int sfChip1 = path[i].chip[0];
                         int sfChip2 = path[i].chip[1];
-                        //Serial.print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                        // Serial.print("\tpath: ");
-                        // Serial.println(i);
+                        int xNode1 = xMapForNode(path[i].node1, sfChip1);
+                        int xNode2 = xMapForNode(path[i].node2, sfChip2);
+                        if (xNode1 < 0 || xNode2 < 0) continue;
 
-            int chip1Lane = xMapForNode(sfChip1, bb);
-            int chip2Lane = xMapForNode(sfChip2, bb);
-
-                        if (bb == 7 && giveUpOnL == 0 && swapped == 0)
+                        for (int bb = 0; bb < 8; bb++)
                         {
-              bb = 0;
-              giveUpOnL = 0;
-              swapped = 1;
-                            swapDuplicateNode(i);
-                        }
-                        else if (bb == 7 && giveUpOnL == 0 && swapped == 1)
-                        {
-                            bb = 0;
-              giveUpOnL = 1;
-            }
-
-                        if ((ch[CHIP_L].yStatus[bb] != -1 && ch[CHIP_L].yStatus[bb] != path[i].net) && giveUpOnL == 0)
-                        {
-
-                            continue;
-                        }
-
-                        if (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1)
-                        {
-
-                            if (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1)
+                            int lane1 = xMapForChipLane0(bb, sfChip1);
+                            int lane2 = xMapForChipLane0(bb, sfChip2);
+                            if (lane1 < 0 || lane2 < 0) continue;
+                            // the two SF chips' Y[bb] lines (= bb's lanes to them)
+                            if (!freeOrSameNetY(sfChip1, bb, path[i].net, 1)) continue;
+                            if (!freeOrSameNetY(sfChip2, bb, path[i].net, 1)) continue;
+                            if (!freeOrSameNetX(bb, lane1, path[i].net, 1)) continue;
+                            if (!freeOrSameNetX(bb, lane2, path[i].net, 1)) continue;
+                            if (sfChip1 != sfChip2)
                             {
-                                // Serial.println("VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV");
-                                // Serial.print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                                // Serial.print("\tpath: ");
-              // Serial.println(i);
-                                // Serial.print("bb:\t");
-                                // Serial.print(bb);
-                                 
-                  // printPathsCompact();
-                  // printChipStatus();
+                                // the hub line, seen from both of its ends
+                                if (!freeOrSameNetY(bb, 0, path[i].net, 1)) continue;
+                                if (!freeOrSameNetY(CHIP_L, bb, path[i].net, 1)) continue;
+                            }
 
+                            ch[sfChip1].xStatus[xNode1] = path[i].net;
+                            ch[sfChip2].xStatus[xNode2] = path[i].net;
+                            ch[sfChip1].yStatus[bb] = path[i].net;
+                            ch[sfChip2].yStatus[bb] = path[i].net;
+                            ch[bb].xStatus[lane1] = path[i].net;
+                            ch[bb].xStatus[lane2] = path[i].net;
 
-                                
-                                if (giveUpOnL == 1)
-                                {
-                                    if (debugNTCC2)
-                                    {
-                                        Serial.println("Gave up on L");
-                                        Serial.print("path :");
-                                        Serial.println(i);
-                                    }
-                                    break;
-                                }
-
-                                path[i].sameChip = true;
-
-                                ch[bb].xStatus[chip1Lane] = path[i].net;
-                                ch[bb].xStatus[chip2Lane] = path[i].net;
-
-                                if (path[i].chip[0] != path[i].chip[1])
-                                {
-                                    path[i].chip[2] = bb;
-                                    path[i].y[2] = -2;
-                                    path[i].y[3] = -2;
-
-                                    path[i].x[2] = chip1Lane;
-                                    path[i].x[3] = chip2Lane;
-                                }
-
-                                path[i].altPathNeeded = false;
-
-                                path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
-                                path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
-                                ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapForNode(path[i].node2, path[i].chip[1])] = path[i].net;
-
-                                path[i].y[0] = bb;
-                                path[i].y[1] = bb;
-
-                  //            Serial.print(">>>> path ");
-                  // Serial.println(i);
-                                ch[path[i].chip[0]].yStatus[bb] = path[i].net;
-                                ch[path[i].chip[1]].yStatus[bb] = path[i].net;
-
-                                if (debugNTCC2)
-                                {
-                                    Serial.print("\n\r");
-                    Serial.print(i);
-                    Serial.print("  chip[2]: ");
-                                    Serial.print(chipNumToChar(path[i].chip[2]));
-
-                    Serial.print("  y[2]: ");
-                                    Serial.print(path[i].y[2]);
-
-                    Serial.print("  y[3]: ");
-                                    Serial.print(path[i].y[3]);
-
-                                    Serial.print(" \n\r");
-                  }
-                  foundHop = 1;
-                  couldFindPath = i;
-
-
-                  // Serial.println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
-                  //  printPathsCompact();
-                  //  printChipStatus();
-
-                  // Serial.print("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^");
-                  break;
-              }
-            }
-          }
-
-                    for (int bb = 0; bb < 8; bb++) // this will connect to a random breadboard row, add a test to make sure nothing is connected
-          {
-                        int sfChip1 = path[i].chip[0];
-                        int sfChip2 = path[i].chip[1];
-
-            int chip1Lane = xMapForNode(sfChip1, bb);
-            int chip2Lane = xMapForNode(sfChip2, bb);
-            // Serial.print("bb:\t");
-            // Serial.println(bb);
-            // Serial.print("xStatus:\t");
-                        // Serial.println(ch[bb].xStatus[chip1Lane]);
-            // Serial.print("xStatus:\t");
-                        // Serial.println(ch[bb].xStatus[chip2Lane]);
-            // Serial.println(" ");
-            // Serial.print("path: ");
-            // Serial.println(i);
-              // Serial.print("?????????????????????\n\r");
-                        if ((ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1) && foundHop == 0)
-                        {
-                            if (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1)
+                            path[i].x[0] = xNode1;
+                            path[i].y[0] = bb;
+                            path[i].x[1] = xNode2;
+                            path[i].y[1] = bb;
+                            if (sfChip1 != sfChip2)
                             {
-                  // Serial.print("path :");
-                  // Serial.println(i);
-                  //  printPathsCompact();
-                                ch[bb].xStatus[chip1Lane] = path[i].net;
-                                ch[bb].xStatus[chip2Lane] = path[i].net;
+                                ch[bb].yStatus[0] = path[i].net;
+                                ch[CHIP_L].yStatus[bb] = path[i].net;
+                                path[i].chip[2] = bb;
+                                path[i].chip[3] = bb;
+                                path[i].x[2] = lane1;
+                                path[i].y[2] = 0;
+                                path[i].x[3] = lane2;
+                                path[i].y[3] = 0;
+                            }
+                            path[i].sameChip = true;
+                            path[i].altPathNeeded = false;
+                            foundHop = 1;
+                            couldFindPath = i;
 
-                                if (path[i].chip[0] != path[i].chip[1]) // this makes it not try to find a third chip if it doesn't need to
-                                {
-
-                                    path[i].chip[2] = bb;
-                                    path[i].x[2] = chip1Lane;
-                                    path[i].x[3] = chip2Lane;
-
-                                    path[i].y[2] = -2;
-                                    path[i].y[3] = -2;
-                                }
-
-                                path[i].sameChip = true;
-                                path[i].altPathNeeded = false;
-
-                                path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
-                                path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
-                                ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapForNode(path[i].node2, path[i].chip[1])] = path[i].net;
-                  // Serial.print(">>>> path ");
-                  // Serial.println(i);
-
-                                path[i].y[0] = bb;
-                                path[i].y[1] = bb;
-                                ch[path[i].chip[0]].yStatus[bb] = path[i].net;
-                                ch[path[i].chip[1]].yStatus[bb] = path[i].net;
-
-                                if (debugNTCC2)
-                                {
-                    Serial.print("\n\r");
-                    Serial.print(i);
-                    Serial.print("  chip[2]: ");
-                                    Serial.print(chipNumToChar(path[i].chip[2]));
-
-                    Serial.print("  y[2]: ");
-                                    Serial.print(path[i].y[2]);
-
-                    Serial.print("  y[3]: ");
-                                    Serial.print(path[i].y[3]);
-
-                    Serial.print(" \n\r");
-                  }
-                  foundHop = 1;
-                  couldFindPath = i;
-                  // printPathsCompact();
-                  // printChipStatus();
-                  break;
+                            if (debugNTCC2)
+                            {
+                                Serial.print("\n\r");
+                                Serial.print(i);
+                                Serial.print("  SF hop via chip ");
+                                Serial.print(chipNumToChar(bb));
+                                Serial.print("  y: ");
+                                Serial.print(bb);
+                                Serial.print(" \n\r");
+                            }
+                            break;
+                        }
+                    }
                 }
-              }
-            }
-
-          // couldntFindPath(i);
-        }
             }
 
                 break;
@@ -4893,6 +4843,20 @@ void resolveUncommittedHops(int allowStacking, int powerOnly,
 
             if (freeX != -1) {
               bool pathXSuccess = setPathX(i, pos, freeX);
+              // A row-to-chip-L route (commitPaths, Lchip case) carries the
+              // bounce as TWO -2 slots on the SAME breadboard chip: one on Y0
+              // (the hub) and one on the row. They are one lane - the X that
+              // bridges the two Y lines. Resolved one at a time with this
+              // pass's virgin-only lane test, the second slot refused the lane
+              // the first had just claimed and took the next one, so the row
+              // sat on x2 while the hub sat on x0 and 19-31 / 58-DAC0 / 7-30
+              // never connected (fuzz: the single most common open).
+              for (int pos2 = pos + 1; pos2 < 4 && pathXSuccess; pos2++) {
+                if (globalState.connections.paths[i].chip[pos2] == globalState.connections.paths[i].chip[pos] &&
+                    globalState.connections.paths[i].x[pos2] == -2) {
+                  pathXSuccess = setPathX(i, pos2, freeX);
+                }
+              }
               bool chipXSuccess = false;
               if (pathXSuccess) {
                 chipXSuccess = setChipXStatus(globalState.connections.paths[i].chip[pos], freeX, globalState.connections.paths[i].net, "resolveUncommittedHops X");
@@ -5879,37 +5843,12 @@ void findStartAndEndChips(int node1, int node2, int pathIdx) {
       }
       break;
     }
-    case NANO_D0 ... NANO_A7: // on the nano
-    {
-      int nanoIndex = defToNano(bothNodes[twice]);
-
-      if (nano.numConns[nanoIndex] == 1) {
-        globalState.connections.paths[pathIdx].chip[twice] = nano.mapIJ[nanoIndex];
-        if (debugNTCC5) {
-          Serial.print("nano chip: ");
-          Serial.println(chipNumToChar(globalState.connections.paths[pathIdx].chip[twice]));
-        }
-      } else {
-        if (debugNTCC5) {
-          Serial.print("nano candidate chips: ");
-        }
-        chipCandidates[twice][0] = nano.mapIJ[nanoIndex];
-        globalState.connections.paths[pathIdx].candidates[twice][0] = chipCandidates[twice][0];
-        // Serial.print(candidatesFound);
-        if (debugNTCC5) {
-          Serial.print(chipNumToChar(globalState.connections.paths[pathIdx].candidates[twice][0]));
-        }
-        candidatesFound++;
-        chipCandidates[twice][1] = nano.mapKL[nanoIndex];
-        globalState.connections.paths[pathIdx].candidates[twice][1] = chipCandidates[twice][1];
-        candidatesFound++;
-        if (debugNTCC5) {
-          Serial.print(" ");
-          Serial.println(chipNumToChar(globalState.connections.paths[pathIdx].candidates[twice][1]));
-        }
-      }
-      break;
-    }
+    // Nano header pins: found on the board's own xMap like every other SF node
+    // (the GND...141 case below). The shared `nano` helper table is the V5
+    // one - it puts AREF on chip K, which on the OG has no AREF (it is J.x11),
+    // so every AREF bridge came out unrouted, and it hides the second chip
+    // (K) most Nano pins are wired to on this board.
+    case NANO_D0 ... NANO_A7:
     // Virtual node expansion for FakeGPIO outputs
     // Expands FAKE_GP_OUT_x to actual voltage source based on currentState
     // NOTE: We update path.node1/node2 so routing can find x/y coordinates
@@ -6135,6 +6074,14 @@ void assignPathType(int pathIndex) {
   } else {
     globalState.connections.paths[pathIndex].sameChip = false;
   }
+
+  // Lchip is decided right here and nowhere else. clearAllNTCC() memsets the
+  // path table to -1, which reads back as `true` for this bool, and the flag
+  // was never cleared - so EVERY path took the chip-L alt routes below
+  // (resolveAltPaths), including the same-SF-chip hop that parks a net on a
+  // breadboard chip's hub line. Two nets there = a hard short (GND-D6 + 3V3-D1
+  // shorted GND to 3.3 V through chip H's Y0).
+  globalState.connections.paths[pathIndex].Lchip = false;
 
   // OG: breadboard rows 1/30/31/60 live on CHIP_L's X axis (not on an A..H
   // chip), and anything already resolved to CHIP_L is an SF/hub endpoint. Treat

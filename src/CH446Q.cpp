@@ -1587,9 +1587,13 @@ void __not_in_flash_func(sendPath)(int i, int setOrClear, int newOrLast) {
         chipToConnect = globalState.connections.paths[i].chip[chip];
 
         // Any negative coordinate is "not routed" (-1 unset, -2 unresolved
-        // hop). The address encoder masks y to 3 bits, so -2 would close a
-        // phantom y6 crosspoint (routing wipes -2 too; this is the last gate).
-        if (globalState.connections.paths[i].y[chip] < 0 || globalState.connections.paths[i].x[chip] < 0) {
+        // hop). The address encoder masks y to 3 bits and x to 4, so -2 would
+        // close a phantom y6 crosspoint and y = 8 (an SF chip number that
+        // leaked into a Y slot on the OG) would close y0. Routing wipes these
+        // too; this is the last gate.
+        if (globalState.connections.paths[i].y[chip] < 0 || globalState.connections.paths[i].x[chip] < 0 ||
+            globalState.connections.paths[i].y[chip] >= 8 || globalState.connections.paths[i].x[chip] >= 16 ||
+            chipToConnect >= 12) {
           if (debugNTCC)
             Serial.print("!");
 

@@ -7883,6 +7883,27 @@ static int medianProbeBursts( const int* v, int n ) {
 // floor, while a reading produced anywhere else (a finger bridging a
 // powered row onto a pad, body coupling from holding the board) persists,
 // and gets rejected. ~115us per blink.
+// Window shape of the reading under test, for the debug prints below
+// (readProbeRaw() sets these right before it consults the gate).
+static int s_dbgWindowStd = 0, s_dbgFloorSamples = 0, s_dbgWindowSamples = 0;
+// Where the decode-gate diagnostics go: debugProbing 1 = port 1 (the
+// [debug] probing config, as ever), 2 = the port-7 backchannel
+// (":padgate:on") so they can be logged while an app owns port 1.
+static Print* probeGateDbg( ) {
+    if ( debugProbing == 1 ) return &Serial;
+    if ( debugProbing == 2 ) return &USBSer3;
+    return nullptr;
+}
+static void dbgProbeAccepted( int average, int dark ) {
+    Print* out = probeGateDbg( );
+    if ( !out ) return;
+    static unsigned long lastAcceptPrintMs = 0;   // a held contact accepts ~100x/s
+    if ( millis( ) - lastAcceptPrintMs < 250 ) return;
+    lastAcceptPrintMs = millis( );
+    out->printf( "accepted: lit %d dark %d std %d floor %d/%d pos %d\n\r",
+                 average, dark, s_dbgWindowStd, s_dbgFloorSamples, s_dbgWindowSamples, (int)switchPosition );
+}
+
 static bool probeReadingIsPhantom( int average, int mapMin ) {
     int pin = -1;
 #if defined(OG_JUMPERLESS)
@@ -7895,6 +7916,7 @@ static bool probeReadingIsPhantom( int average, int mapMin ) {
     }
 #endif
     if ( pin < 0 ) {
+        dbgProbeAccepted( average, -1 );
         return false; // DAC-powered measure buffer: nothing we can blink
     }
 
@@ -7906,6 +7928,7 @@ static bool probeReadingIsPhantom( int average, int mapMin ) {
     static int lastCheckedValue = -1000;
     static unsigned long lastCheckedMs = 0;
     if ( millis( ) - lastCheckedMs < 250 && abs( average - lastCheckedValue ) <= 5 ) {
+        dbgProbeAccepted( average, -2 ); // -2: rode the cached verdict
         return false;
     }
 
@@ -7930,18 +7953,16 @@ static bool probeReadingIsPhantom( int average, int mapMin ) {
     int rejectAbove = ( fracThresh > darkFloor ) ? fracThresh : darkFloor;
     if ( dark > rejectAbove ) {
         lastCheckedMs = 0; // never cache a rejection
-        if ( debugProbing == 1 ) {
-            Serial.print( "phantom reading rejected: dark " );
-            Serial.print( dark );
-            Serial.print( " > " );
-            Serial.print( rejectAbove );
-            Serial.print( ", lit " );
-            Serial.println( average );
+        if ( Print* out = probeGateDbg( ) ) {
+            out->printf( "phantom reading rejected: dark %d > %d, lit %d std %d floor %d/%d pos %d\n\r",
+                         dark, rejectAbove, average, s_dbgWindowStd, s_dbgFloorSamples, s_dbgWindowSamples,
+                         (int)switchPosition );
         }
         return true;
     }
     lastCheckedValue = average;
     lastCheckedMs = millis( );
+    dbgProbeAccepted( average, dark );
     return false;
 }
 
@@ -7969,7 +7990,13 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // Serial.println(connectOrClearProbe);
     // Serial.print("CheckingPads: ");
     // Serial.println(checkingPads);
-    
+
+    // Ring history lets the finger gate below see the raw samples behind the
+    // burst means: how many of the decode window's samples sit at the
+    // unpowered floor.
+    bool ringWindow = false;
+    int windowSamples = 0, floorSamples = 0, windowStd = 0;
+
     if ( adcRingActive( ) ) {
         // T2.1: the same decode - N bursts of B samples each, variance across
         // bursts, median of bursts - taken from the ring's HISTORY in one
@@ -7994,6 +8021,9 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
                 }
             }
             if ( lowReads > 2 && numberOfReads == 8 ) { numberOfReads = 16; lowReads = 0; continue; }
+            windowSamples = numberOfReads * burstSamples;
+            floorSamples = adcRingWindowShape( 5, end, windowSamples, mapMin + 4, &windowStd );
+            ringWindow = true;
             break;
         }
     } else if ( connectOrClearProbe == 1 ) {
@@ -8061,13 +8091,41 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // Serial.print("average ");
     // Serial.println(average);
 
+    // Finger gate (bench-measured 2026-09-22, 48 kHz ring captures of ADC5 on
+    // a V5: fingers-only vs probe-only, select and measure position). A
+    // finger on a pad has no DC source behind it: what it injects is a
+    // zero-mean ~8 kHz tone (aliased) that the sense node half-wave
+    // rectifies at its floor, so the window's MEAN lands 10-60 counts above
+    // the floor - exactly the BUILDING_PAD_BOTTOM/TOP bands - while 46-60%
+    // of its SAMPLES sit at or below floor+4 (every finger window, light or
+    // firm). A probe tip is a DC source: on any pad, in either switch
+    // position, even with a hand-noisy grip riding a 55-count tone on top,
+    // at most 2% of the samples ever return to the floor. Burst-mean
+    // variance can't tell the two apart (2% of finger windows pass
+    // maxVariance <= 6, 15% of light touches) and neither can the blink
+    // test reliably at these levels; the floor fraction does, with a 1/3
+    // threshold sitting between 0.46 and 0.02.
+    bool fingerLike = ringWindow && ( floorSamples * 3 >= windowSamples );
+
+    // The no-touch gate. minimum_probe_reading was added as a blunt finger
+    // fence (85 raw on a 14 floor kills the bottom building pad at 54). With
+    // ring history the finger gate does that job, so the floor only has to
+    // sit under the lowest decodable pad: BUILDING_PAD_BOTTOM is one ladder
+    // step above the floor, so half a step is the lowest reading that can
+    // still decode to it. The history-less legacy path keeps the fence.
+    int minValid = jumperlessConfig.probe.min_valid_reading;
+    if ( ringWindow ) {
+        int halfStep = ( mapMax - mapMin ) / 202;
+        if ( mapMin + halfStep < minValid ) minValid = mapMin + halfStep;
+    }
+
 #if USB_AUDIO_ENABLE
     // Tip is on a pad: tell the USB audio capture the probe is in use so it
     // yields the ADC to us (it resumes ~300 ms after the tip lifts). This is
     // the ONE place every probe path - idle service, pad check, probe mode,
     // measure mode - decodes a touch, which is why the hook lives here and not
     // in the callers.
-    if ( average >= jumperlessConfig.probe.min_valid_reading ) {
+    if ( average >= minValid && !fingerLike ) {
         usb_audio_probe_activity( );
     }
 #endif
@@ -8081,9 +8139,30 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     // outside measure position - re-arms.
     static bool measureTouchLatched = false;
     if ( switchPosition != 0 ||
-         average < jumperlessConfig.probe.min_valid_reading ) {
+         average < minValid ) {
         measureTouchLatched = false;
     }
+
+    if ( fingerLike && average >= minValid ) {
+        // Only report windows the accept path would otherwise have taken: a
+        // tap's ONSET window is floor-heavy too (half pre-contact, half
+        // contact) but fails the variance gate on its own.
+        Print* out = probeGateDbg( );
+        if ( out && maxVariance <= 6 ) {
+            // Once per 250ms: a resting finger produces hundreds of these a second.
+            static unsigned long lastFingerPrintMs = 0;
+            if ( millis( ) - lastFingerPrintMs > 250 ) {
+                lastFingerPrintMs = millis( );
+                out->printf( "finger rejected: avg %d std %d, %d/%d samples at floor (%d) pos %d\n\r",
+                             average, windowStd, floorSamples, windowSamples, mapMin + 4, (int)switchPosition );
+            }
+        }
+        return -1;
+    }
+
+    s_dbgWindowStd = windowStd;
+    s_dbgFloorSamples = floorSamples;
+    s_dbgWindowSamples = windowSamples;
 
     int rowProbed = -1;
     // if (average < 90 && abs(average - nothingTouchedReading) > 10) {
@@ -8100,7 +8179,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
     //   //lastReadRaw = 4096;
     // }
 
-    if ( maxVariance <= 6 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= jumperlessConfig.probe.min_valid_reading ) ) {
+    if ( maxVariance <= 6 && ( ( abs( average - lastReadRaw ) > 5 ) || checkingPads == 1 ) && ( average >= minValid ) ) {
 
         // MEASURE position: contact engagement slews the pad reading over
         // several ms (the tip feeds the ladder through the crossbar - ~150
@@ -8154,7 +8233,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
 
     } else {
 
-        if ( allowDuplicates && ( average >= jumperlessConfig.probe.min_valid_reading ) &&
+        if ( allowDuplicates && ( average >= minValid ) &&
              maxVariance <= 6 &&
              abs( average - lastReadRaw ) <= 10 ) {
             if ( probeReadingIsPhantom( average, mapMin ) ) {
@@ -8164,7 +8243,7 @@ int Probing::readProbeRaw( int readNothingTouched, bool allowDuplicates ) {
             return average;
         }
 
-        if ( ( abs( average - lastReadRaw ) < 2 ) && allowDuplicates && ( average >= jumperlessConfig.probe.min_valid_reading ) ) {
+        if ( ( abs( average - lastReadRaw ) < 2 ) && allowDuplicates && ( average >= minValid ) ) {
             if ( probeReadingIsPhantom( average, mapMin ) ) {
                 return -1;
             }

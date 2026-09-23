@@ -267,6 +267,32 @@ int __not_in_flash_func(adcRingMeanWindow)(int ch, uint32_t endSweep, int n) {
 #endif
 }
 
+int __not_in_flash_func(adcRingWindowShape)(int ch, uint32_t endSweep, int n, int thresh, int* stdOut) {
+#if ADC_RING_BUILD
+    if (stdOut) *stdOut = 0;
+    if (!s_active || ch < 0 || ch > 7 || n < 1) return 0;
+    if (n > (int)ADC_RING_SWEEPS - 64) n = (int)ADC_RING_SWEEPS - 64;
+    int count = 0;
+    uint32_t sum = 0;
+    uint64_t sumSq = 0;
+    uint32_t s = endSweep - (uint32_t)n;
+    for (int i = 0; i < n; i++, s++) {
+        uint32_t v = s_ring[((s << 3) + (uint32_t)ch) & (ADC_RING_HALFWORDS - 1u)] & 0x0FFFu;
+        if ((int)v <= thresh) count++;
+        sum += v;
+        sumSq += (uint64_t)v * v;
+    }
+    if (stdOut) {
+        // population variance = E[x^2] - E[x]^2, in 64-bit so 256 x 4095^2 fits
+        uint64_t var = (sumSq - ((uint64_t)sum * sum) / (uint64_t)n) / (uint64_t)n;
+        *stdOut = (int)sqrtf((float)var);
+    }
+    return count;
+#else
+    (void)ch; (void)endSweep; (void)n; (void)thresh; if (stdOut) *stdOut = 0; return 0;
+#endif
+}
+
 int __not_in_flash_func(adcRingMeanAfterStrict)(int ch, uint32_t after, int n, uint32_t timeoutUs, bool* fresh) {
 #if ADC_RING_BUILD
     if (fresh) *fresh = false;
