@@ -95,7 +95,13 @@ volatile bool logoOverriden = false;
 // Rev 4+: Split into breadboard (LED_COUNT) and top (LED_COUNT_TOP)
 bool splitLEDs = 1;
 JeoPixel bbleds(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);  // Start with correct size!
+#if defined(OG_JUMPERLESS)
+// One chain on the OG (splitLEDs = 0): the top strip is never begun or shown,
+// so don't hold a 145-pixel (435 B) buffer for it on the RP2040's heap.
+JeoPixel topleds(1, LED_PIN_TOP, NEO_GRB + NEO_KHZ800);
+#else
 JeoPixel topleds(LED_COUNT_TOP, LED_PIN_TOP, NEO_GRB + NEO_KHZ800);
+#endif
 
 // #include "RamMacros.h"
 
@@ -128,10 +134,13 @@ void ledClass::begin(void) {
 #endif
 
 #if defined(OG_JUMPERLESS)
-  // OG: one physical chain on GPIO 25. We size the buffer to LED_COUNT + LED_COUNT_TOP (445 pixels)
-  // to prevent out-of-bounds reads/writes on special LEDs.
+  // OG: one physical chain of OG_LED_COUNT pixels on GPIO 25. The buffer used
+  // to be sized 445 (V5 index space) so V5-only paths could not write past it;
+  // the ledMaxPixels() guards in every setPixelColor/getPixelColor now drop
+  // those instead, and 445 pixels cost 1 KB of heap plus 13 ms on the wire per
+  // frame for 111 LEDs.
   splitLEDs = 0;
-  bbleds.updateLength(LED_COUNT + LED_COUNT_TOP);
+  bbleds.updateLength(OG_LED_COUNT);
 #else
   if (jumperlessConfig.hardware.revision <= 3) {
     // Rev 3 and below use single strip for all LEDs
@@ -432,8 +441,8 @@ void __not_in_flash_func(ledClass::clear)(void) {
     }
   
   // Clear exactly the buffer that was allocated. On the OG the single strip is
-  // LED_COUNT pixels (not LED_COUNT + LED_COUNT_TOP like V5 rev<=3), so deriving
-  // the count from the strip itself avoids running past the buffer.
+  // OG_LED_COUNT pixels (not LED_COUNT + LED_COUNT_TOP like V5 rev<=3), so
+  // deriving the count from the strip itself avoids running past the buffer.
   int bb_count = bbleds.numPixels();
   if (ram_bb_pixels) {
       memset(ram_bb_pixels, 0, bb_count * 3);
@@ -444,6 +453,7 @@ void __not_in_flash_func(ledClass::clear)(void) {
   }
 
 uint32_t __not_in_flash_func(ledClass::getPixelColor)(uint16_t n) {
+  if (n >= ledMaxPixels()) return 0;  // same bound as the writers: no read off the buffer
   if (n >= LED_COUNT && splitLEDs == 1) {
     if (ram_top_pixels) {
         uint8_t *p = &ram_top_pixels[(n - LED_COUNT) * 3];
@@ -3062,8 +3072,8 @@ bool renderLogoRing(void) {
 // core2initFinished first), so core0 owns the strip exclusively here and can
 // drive leds.show() directly.
 void ogStartupAnimation(void) {
-  const int count     = 111; // physical OG LED count
-  const int logoPixel = 110; // single logo LED
+  const int count     = OG_LED_COUNT;     // physical OG LED count
+  const int logoPixel = OG_LED_COUNT - 1; // single logo LED, last on the chain
   hsvColor hsv;
   int offset = 1;
   int fade = 0;
@@ -3800,7 +3810,7 @@ void __not_in_flash_func(showNets)(void) {
     {
       const int kOgNanoHeaderFirst = 80;
       const int kOgNanoHeaderLast  = 109;
-      const int kOgLogoPixel       = 110;
+      const int kOgLogoPixel       = OG_LED_COUNT - 1;
       const uint32_t kOgHeaderGlow = 0x0C0028; // dim purple "headerglow"
 
       // 1) Every still-unlit nano-header LED gets a dim purple glow so the

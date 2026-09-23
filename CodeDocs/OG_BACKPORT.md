@@ -1384,6 +1384,26 @@ walks, the port-5 raw REPL answers, `gc.mem_free()` 19 KB after
 walkFs in 0.34 s, version read) replayed OK over pyserial. MpRemote 14 us /
 10 %. V5 builds; its RAM map is unchanged apart from the erf swap.
 
+**LED buffers, second pass (same afternoon):** the OG's strip buffer was
+`updateLength(445)` since the first tentative backport ("so V5-only paths
+can't write past it") - but every setPixelColor variant has guarded on
+`ledMaxPixels()` since that same commit, so it was 1 KB of heap and 13 ms of
+DMA per frame (445 x 30 us) for a 111-LED chain. Now `OG_LED_COUNT` (111:
+rows 0-59, rails 60-79, header 80-109, logo 110) in LEDs.h sizes the buffer,
+`topleds` is a 1-pixel stub on the OG (never begun there; was 435 B of dead
+heap), `getPixelColor()` got the same bound as the writers, and the `:leds`
+dump is 111 pixels on the OG (1.1 KB static back; V5 output unchanged). On
+the board `:leds` before/after match on all 110 non-logo pixels; free C heap
+at boot 28.4 KB with the GC heap allocated. Static 167,320 → 166,200 B; V5
++24 B (the read guard is RAM-resident code). Bench note: after this
+`picotool load`, ports 5 and 7 came back enumerated but silent while port 1
+answered `?` - a 1200-baud touch on port 5 + `picotool reboot` (no load)
+re-enumerated them clean. Left alone: `wireStatus[64][5]` 1.3 KB (V5 wire
+mode, dead on the OG but indexed [i][0..4] in shared code) and the menu
+tables (`menuLines[150]` Strings 1.8 KB static + their heap copies,
+`menuLevels`/`stayOnTop`/`optionSlpitLocations` 1.8 KB) - the next ~6 KB if
+it's needed, but they're menu code, not LED code.
+
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); the OG's
 banner still says `jumperless-v5 ... with rp2350b`; MpRemoteService still
 retries a failed heap alloc every pass (latch it). Build note: with the IDE

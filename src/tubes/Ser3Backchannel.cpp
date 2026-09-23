@@ -352,9 +352,17 @@ static void usbSer3_sendLeds(Stream* out) {
     uint32_t t0 = micros();
     while (bbleds.isDMABusy() && (micros() - t0) < 2000) { }
 
-    static char b[16 + LED_COUNT * 6 + 8];
-    int len = snprintf(b, sizeof(b), "leds{%d:", LED_COUNT);
-    for (int i = 0; i < LED_COUNT; i++) {
+    // V5: the 300 breadboard pixels (unchanged output). OG: its whole
+    // 111-pixel chain - there is nothing past it, and the V5-sized line was
+    // 1.1 KB of static RAM the RP2040 can't spare.
+#if defined(OG_JUMPERLESS)
+    constexpr int kDumpPixels = OG_LED_COUNT;
+#else
+    constexpr int kDumpPixels = LED_COUNT;
+#endif
+    static char b[16 + kDumpPixels * 6 + 8];
+    int len = snprintf(b, sizeof(b), "leds{%d:", kDumpPixels);
+    for (int i = 0; i < kDumpPixels; i++) {
         uint32_t c = leds.getPixelColor(i) & 0xFFFFFFu;
         b[len++] = USBSER3_HEX[(c >> 20) & 0xF];
         b[len++] = USBSER3_HEX[(c >> 16) & 0xF];

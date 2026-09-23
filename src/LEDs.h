@@ -46,9 +46,13 @@
   #define LOGO_LED_END 445
 
 #if defined(OG_JUMPERLESS)
-// Keep the same size LED buffer even if we're only showing the middle row
+// The V5's logical index space is kept so the shared graphics code compiles
+// unchanged; the OG's physical chain is OG_LED_COUNT pixels (rows 0-59, rails
+// 60-79, Nano header 80-109, logo 110) and the strip buffer is sized to THAT
+// (ledClass::begin). Writes past it are dropped by the ledMaxPixels() guards.
 #define LED_COUNT 300
 #define LED_COUNT_TOP 145
+#define OG_LED_COUNT 111
 #else
 #define LED_COUNT 300
 #define LED_COUNT_TOP 145
