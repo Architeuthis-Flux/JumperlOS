@@ -2496,10 +2496,22 @@ double statStd( const Stat& s ) {
     return v > 0.0 ? sqrt( v ) : 0.0;
 }
 
+// erf() by Abramowitz & Stegun 7.1.26 (|err| < 1.5e-7). libm's s_erf.o is
+// RAM-resident under the arduino-pico linker script (~3.6 KB of the RP2040's
+// SRAM, which the MicroPython heap has to fit in) - too much for one debug
+// percentage. expf is linked already.
+static float erfApprox( float x ) {
+    const float s = x < 0.0f ? -1.0f : 1.0f;
+    x = fabsf( x );
+    const float t = 1.0f / ( 1.0f + 0.3275911f * x );
+    const float p = ( ( ( ( 1.061405429f * t - 1.453152027f ) * t + 1.421413741f ) * t - 0.284496736f ) * t + 0.254829592f ) * t;
+    return s * ( 1.0f - p * expf( -x * x ) );
+}
+
 // Best-case classification accuracy (%) for two equal-prior Gaussians separated
 // by Cohen's d: a single optimal threshold gets Phi(d/2) right.
 double sepAccuracyPct( double d ) {
-    return 100.0 * 0.5 * ( 1.0 + erf( d / ( 2.0 * 1.41421356 ) ) );
+    return 100.0 * 0.5 * ( 1.0 + erfApprox( (float)( d / ( 2.0 * 1.41421356 ) ) ) );
 }
 void clearStats( ) { memset( g_stat, 0, sizeof( g_stat ) ); }
 

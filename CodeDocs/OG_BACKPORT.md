@@ -1351,6 +1351,48 @@ table has RP_GPIO_0). Node 84 (NANO_RESET, routable on the OG) printed as
 **"3V3"** - the positional nano name table had the wrong label; now `RST`.
 Node 114 prints `GPIO_0` on the OG (`ADC_4` is the V5's).
 
+### Session 2026-09-23 (afternoon) — MicroPython back on the OG: 26.5 KB of static RAM reclaimed
+
+**Symptom:** JumperIDE "Device not responding" on the OG. Port 5 opened but
+never answered anything (not even Ctrl-C); port 7 was fine. `:fs` on port 7
+said `{"error":"mp_init_failed"}`: `mpAllocHeap` needs 28 KB of free C heap
+(16 KB rung + the OG's 12 KB reserve) and found 17.4 KB. Static RAM had
+grown 177.6 → 193.8 KB since the 09-08 session that verified the REPL (4.6 KB
+of it RouteSafety on 09-22, the rest not itemized), and this morning's build -
+the first bootable OG since Sep 17 - was the first to show it. Side effect:
+MpRemoteService retried the failed init every pass, 48 us / 28 % of core 0.
+The REPL service path itself is identical to V5; the heap floor is the only
+OG-specific difference that kills port 5.
+
+**Cuts (OG only unless noted):** AdcRing `s_ring` 8 KB sat outside its own
+`ADC_RING_BUILD` gate (the flag now lives in AdcRing.h; `adcRingData()` is
+NULL on the OG); the `:padraw` 1.4 KB dump buffer gates on the same flag;
+MenuTransitions frames 3 x 1.2 KB → 1 pixel (no click wheel, no menus);
+PartLabels `lblScratch` 1.2 KB → placeholder, with a `ledsPerRow` guard in
+`compose()`; `-DMICROPY_PY_MATH_SPECIAL_FUNCTIONS=0` in the OG env
+(erff/erfcf/lgammaf/tgammaf are 7.5 KB of RAM-resident libm under the
+arduino-pico linker script; the library carries three mpconfigport.h copies,
+so a build flag); Debugs `sepAccuracyPct` uses an A&S 7.1.26 erf (both
+boards, |err| < 1.5e-7) so libm's double erf/erfc (3.6 KB) leave the image.
+
+**Result:** static 193,800 → 167,320 B (73.9 → 63.8 %); arena 60,984 →
+93,816 B. On the board (1.7.11.2, flashed by the port-5 1200-baud touch +
+`picotool load`/`verify`/`reboot`, filtered to 2e8a:0003): the GC heap
+allocates at the configured 28 KB rung with 21.7 KB of C heap left, `:fs`
+walks, the port-5 raw REPL answers, `gc.mem_free()` 19 KB after
+`import jumperless`; JumperIDE's whole post-connect script set (device info,
+walkFs in 0.34 s, version read) replayed OK over pyserial. MpRemote 14 us /
+10 %. V5 builds; its RAM map is unchanged apart from the erf swap.
+
+**Still open:** `os.statvfs` is missing (the IDE tolerates it); the OG's
+banner still says `jumperless-v5 ... with rp2350b`; MpRemoteService still
+retries a failed heap alloc every pass (latch it). Build note: with the IDE
+open, a venv `pio run` and the IDE's own PlatformIO take turns cleaning
+`.pio/build` (project.checksum mismatch) - builds die mid-way with "can't
+create ...o" and the tracked V5 `firmware.uf2` gets deleted. Build with
+`PLATFORMIO_BUILD_DIR` pointed at a scratch dir and `git checkout` the uf2
+before committing.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

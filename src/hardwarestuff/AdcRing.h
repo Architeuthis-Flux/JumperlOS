@@ -31,6 +31,16 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// V5 (RP2350B, eight ADC inputs) only: the OG's RP2040 keeps the START_ONCE
+// path, and the 8 KB ring itself is not allocated there (adcRingData() is
+// NULL, adcRingActive() is false). Consumers with their own ring-sized
+// buffers (the :padraw dump) gate on this too.
+#if !defined(OG_JUMPERLESS)
+#define ADC_RING_BUILD 1
+#else
+#define ADC_RING_BUILD 0
+#endif
+
 #define ADC_RING_CHANNELS   8u
 #define ADC_RING_SWEEPS     512u                    // ring depth in sweeps (~10.7 ms)
 #define ADC_RING_HALFWORDS  (ADC_RING_SWEEPS * ADC_RING_CHANNELS)   // 4096

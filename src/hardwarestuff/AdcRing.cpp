@@ -8,20 +8,19 @@
 #include "hardware/structs/dma.h"
 #include "hardware/structs/adc.h"
 
-// See AdcRing.h for the design. V5 (RP2350B, eight ADC inputs) only: the OG's
-// RP2040 keeps the START_ONCE path (no board to verify, T2.3's precedent).
-#if !defined(OG_JUMPERLESS)
-#define ADC_RING_BUILD 1
-#else
-#define ADC_RING_BUILD 0
-#endif
+// See AdcRing.h for the design and ADC_RING_BUILD: V5 (RP2350B, eight ADC
+// inputs) only; the OG's RP2040 keeps the START_ONCE path (no board to
+// verify, T2.3's precedent).
 
 // The ring: 4096 halfwords = 8 KB, aligned to its own size for the DMA write
-// ring wrap. Plain SRAM (.bss), never PSRAM.
+// ring wrap. Plain SRAM (.bss), never PSRAM. Not allocated on a board that
+// doesn't build the ring: 8 KB is a fifth of the RP2040's free SRAM.
 #define RING_BYTES  (ADC_RING_HALFWORDS * 2u)
 #define RING_BITS   13u
 static_assert((1u << RING_BITS) == RING_BYTES, "ring bits vs ring size");
+#if ADC_RING_BUILD
 static uint16_t __attribute__((aligned(8192))) s_ring[ADC_RING_HALFWORDS];
+#endif
 
 // One block = 1 ms of conversions = 48 sweeps of 8. The DMA channel runs in
 // TRIGGER_SELF mode with this count: it re-triggers itself at the end of every
@@ -358,7 +357,13 @@ void adcRingService(void) {
 #endif
 }
 
-const volatile uint16_t* adcRingData(void) { return s_ring; }
+const volatile uint16_t* adcRingData(void) {
+#if ADC_RING_BUILD
+    return s_ring;
+#else
+    return nullptr;
+#endif
+}
 uint32_t adcRingHalfwords(void) {
 #if ADC_RING_BUILD
     return syncTotal();

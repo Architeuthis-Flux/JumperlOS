@@ -217,6 +217,10 @@ static void usbSer3_sendADC(Stream* out) {
 // with the exclusive end sweep so consecutive dumps stitch (or expose their
 // gap) host-side, plus the switch position and the tip feed's drive level.
 static void usbSer3_sendPadRaw(Stream* out) {
+#if !ADC_RING_BUILD
+    // No ring on this board (AdcRing.h), so no 1.4 KB dump buffer either.
+    out->print("{\"error\":\"adc_ring_inactive\"}\r\n");
+#else
     if (!adcRingActive()) { out->print("{\"error\":\"adc_ring_inactive\"}\r\n"); return; }
     static const int n = 448;
     static char buf[n * 3 + 80];
@@ -232,6 +236,7 @@ static void usbSer3_sendPadRaw(Stream* out) {
     }
     buf[len++] = '}'; buf[len++] = '\r'; buf[len++] = '\n';
     out->write((const uint8_t*)buf, len);
+#endif
 }
 
 static void usbSer3_sendGpioJson(Stream* out) {

@@ -7,7 +7,14 @@
 MenuTransitionConfig menuTransitionConfig;
 
 // Breadboard region managed by the engine: rows 0-59, 5 pixels per row.
+// The OG has no click wheel, so no menu ever opens and no transition ever
+// arms; one pixel keeps every loop well-formed and gives its RP2040 back the
+// 3.6 KB the three snapshots cost.
+#if defined(OG_JUMPERLESS)
+#define MENU_TRANSITION_PIXELS 1
+#else
 #define MENU_TRANSITION_PIXELS 300
+#endif
 
 // Frame snapshots. prevFrame is what the transition blends *from*, targetFrame
 // is the frame Core 0 just drew (what it blends *to*), accentFrame is the

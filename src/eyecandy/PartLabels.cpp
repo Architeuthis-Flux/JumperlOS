@@ -172,8 +172,14 @@ static int validNetForNode(int node) {
     return netNum;
 }
 
-// Scratch overlay buffer: static, core-0 single-writer.
+// Scratch overlay buffer: static, core-0 single-writer. Labels need five LEDs
+// per row; on a one-LED-per-row board compose() returns before touching it,
+// so it shrinks to a placeholder there (1.2 KB of the RP2040's SRAM).
+#if defined(OG_JUMPERLESS)
+static uint32_t lblScratch[1];
+#else
 static uint32_t lblScratch[MAX_OVERLAY_PIXELS];
+#endif
 
 // ---------------------------------------------------------------------------
 // Tap-to-inspect
@@ -540,6 +546,7 @@ uint32_t PartLabels::computeVisMask(unsigned long now) {
 // ---------------------------------------------------------------------------
 
 void PartLabels::compose(uint32_t visMask) {
+    if (board::currentBoard().caps.ledsPerRow < 5) return;  // lblScratch is a placeholder here
     memset(lblScratch, 0, sizeof(lblScratch));
     bool any = false;
 
