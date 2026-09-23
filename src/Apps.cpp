@@ -800,20 +800,17 @@ void probeCalibApp( void ) {
     cycleTerminalColor( true, 5.0, true );
     Serial.println( "Probe Calibration App" );
     cycleTerminalColor( );
-    Serial.println( "\n\rTap pads with the probe and rotate the clickwheel until the correct row lights up" );
+    Serial.println( "\n\rTap pads with the probe and turn the clickwheel until the correct row lights up" );
     cycleTerminalColor( );
-    Serial.println( "Check both ends: row 1 and row 60, the nano header, and the logo / ADC / DAC / GPIO pads" );
+    Serial.println( "SELECT: tap row 1, then A5 on the nano header, then a row in 20-40." );
+    Serial.println( "Go between them nudging the wheel until all three are spot on." );
     cycleTerminalColor( );
-    Serial.println( "The bottom end (the small pads) is set by the nothing-touched floor, measured" );
-    Serial.println( "right now with the tip in the air - the wheel only moves the top end." );
+    Serial.println( "MEASURE: first HOLD the tip on a row in 20-40 for half a second (the app" );
+    Serial.println( "matches the two tip feeds against it), then row 1, then A5, same as above." );
+    Serial.println( "Short-click re-runs the matching." );
     cycleTerminalColor( );
-    Serial.println( "SELECT position calibrates probe_max. The feed is pinned to DAC0 there so" );
-    Serial.println( "INA1 can measure the switch (probe LED supply) current - shown as sw:." );
-    cycleTerminalColor( );
-    Serial.println( "MEASURE position: hold the tip on ONE breadboard row for half a second and" );
-    Serial.println( "the app samples it under both tip feeds (DAC0, then a GPIO) and sets" );
-    Serial.println( "probe_max_measure_gpio so both decode the SAME row. After that the wheel" );
-    Serial.println( "moves both measure endpoints together. Short-click re-runs the matching." );
+    Serial.println( "Keep the tip in the air for the first second - that's the no-touch reading" );
+    Serial.println( "the bottom end (the small pads) is set from. The wheel only moves the top." );
     cycleTerminalColor( );
     Serial.println( "Hold the clickwheel when you're done\n\n\r" );
     cycleTerminalColor( );
@@ -821,7 +818,7 @@ void probeCalibApp( void ) {
     refreshConnections( -1, 0 );
     probing.routableBufferPower( 1, 1, 1 );
     oled.connect( );
-    const char* oledHelp = "Tap pads + turn wheel until the right row lights\n\rmeasure: hold one row to match feeds\n\rhold click = save";
+    const char* oledHelp = "Tap row 1, A5, a row in 20-40; turn wheel till all spot on\n\rmeasure: hold a 20-40 row first\n\rhold click = save";
     oled.showMultiLineSmallText( oledHelp, true, true );
 
     SlotManager::getInstance( ).enterTemporarySlot( 8 ); // Save current slot, switch to temp slot 8
@@ -1000,7 +997,7 @@ void probeCalibApp( void ) {
                 converged = false;
                 gpioFeedAvailable = true;
                 convState = CONV_IDLE;
-                Serial.println( "\n\rre-running feed matching - hold the tip on one breadboard row" );
+                Serial.println( "\n\rre-running feed matching - hold the tip on a row in 20-40" );
             }
         }
         if ( encoderButtonState == HELD || encoderButtonState == MEDIUM_HELD ||
@@ -1092,7 +1089,7 @@ void probeCalibApp( void ) {
                                        "now turn the wheel to align the row (moves both)\n\r",
                                        convRowDac, jumperlessConfig.probe.pad_max_measure, wantMax, was );
                     } else {
-                        Serial.println( "\n\rfeed matching needs a breadboard row (not the header or the small pads) - lift and hold one" );
+                        Serial.println( "\n\rfeed matching needs a breadboard row (not the header or the small pads) - lift and hold a row in 20-40" );
                     }
                     forceFeed( -1 ); // back to the runtime's own preference
                     convState = CONV_DONE;
@@ -1161,7 +1158,7 @@ void probeCalibApp( void ) {
                           converged ? "(feeds matched - wheel moves both)"
                                     : ( !gpioFeedAvailable ? "(no free GPIO)"
                                         : ( convState == CONV_DAC || convState == CONV_GPIO ) ? "(matching feeds...)"
-                                                                                                : "(hold one row to match feeds)" ) );
+                                                                                                : "(hold a row in 20-40 to match feeds)" ) );
             } else if ( isnan( switchCurrent_mA ) ) {
                 snprintf( statusLine, sizeof( statusLine ),
                           "\rraw: %d enc: %d reading: %d max: %d node: %s select sw: --\033[K",
