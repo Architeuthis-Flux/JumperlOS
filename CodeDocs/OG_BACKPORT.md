@@ -1435,6 +1435,27 @@ read: deleted. Result: OG static 166,200 → 156,916 B (59.9 %), globalState
 28 KB GC heap up, `connect(1,2)`/`(2,3)`/`(10,11)` → two nets, crossbar
 populated, `nodes_clear()` back to empty.
 
+**Regression + fix (same evening):** on the V5 the menu went "out of bounds"
+after the lazy-menu commit. Cause, read from the V5's RAM over port 5
+(`uctypes.bytes_at` at the ELF's symbol addresses): `menuRead 1`,
+`menuParsed 0`, every `menuLevels[]` 0, `categoryIndex 16`. `menuParsed = 1`
+had always sat INSIDE `parseMenuFile()`'s `if (printMenuLinesAtStartup == 1)`
+debug block, so it never latched on a normal boot - harmless while boot was
+`initMenu()`'s only caller, but the lazy load calls `initMenu()` on every
+menu open, and a second parse of already-stripped lines finds no dashes,
+zeroes the levels and appends categories until `categoryRanges[16]` is full.
+The latch now sits at the end of the function. Verified on both boards by
+opening the real click menu twice through the Debugs "Menu FX" tuner
+(port 1: SI, `D`, Enter, 15 x Down, Enter; a byte ends a session and the
+tuner reopens it) and re-reading the tables: `menuParsed 1`, `categoryIndex
+14`, levels `0,1,2,0,1,...`, mirror rows `>Rails`. The check lives in
+`test/hil/menu_check.py`-shaped form in the session scratchpad; worth
+promoting. Build note: `pio run -e jumperless_og -e jumperless_v5` in ONE
+invocation can leave the OG image labeled with the V5's version (the shared
+`include/FirmwareVersion.generated.h` is rewritten per env; the OG compiled
+against the V5's copy once today and reported 5.7.11.2 on port 7). Build the
+OG env in its own invocation until `version_from_file.py` writes per-env.
+
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); the OG's
 banner still says `jumperless-v5 ... with rp2350b`; MpRemoteService still
 retries a failed heap alloc every pass (latch it). Build note: with the IDE

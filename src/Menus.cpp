@@ -436,9 +436,16 @@ void parseMenuFile( void ) {
         //   for (int i = 0; i < menuLineIndex; i++) {
         // getActionCategory(i);
         //   }
-
-        menuParsed = 1;
     }
+
+    // OUTSIDE the printMenuLinesAtStartup block, where it had always sat: with
+    // that debug print off the latch never set, so initMenu() re-parsed on
+    // every call. Harmless while boot was its only caller; once the lazy load
+    // made every menu open call initMenu(), the second pass found no dashes
+    // left to count, zeroed every menuLevels[] entry and filled categoryRanges
+    // - the "menu goes out of bounds" V5 regression of 2026-09-23. A parse is
+    // one-shot (it strips the markup it reads), so this latch is load-bearing.
+    menuParsed = 1;
 }
 
 uint32_t menuColors[ 10 ] = { 0x09000a, 0x0f0004, 0x080800, 0x010f00,
