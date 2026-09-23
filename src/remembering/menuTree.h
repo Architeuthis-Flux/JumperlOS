@@ -6,13 +6,15 @@
 
 
 
-// IMPORTANT: this array MUST be declared with an explicit size matching the
-// companion arrays in Menus.cpp (menuLevels[150], stayOnTop[150], actions[150],
-// ...). It used to be sized by its initializer (~117 entries), so any code
-// indexing up to 150 walked off the end — straight into menuParsed/menuPosition/
-// menuTreeFile, reinterpreting them as String objects (heap corruption, then a
-// hard fault in free()). The unused tail is value-initialized to empty Strings.
-String menuLines[150] = {
+// The default menu tree, in flash. Menus.cpp copies it into the heap-allocated
+// menuLines[MENU_LINES] table on the first initMenu() (boot on a board with a
+// click wheel; the first terminal-driven open on one without). It used to be
+// `String menuLines[150] = {...}` here: 1.8 KB of .bss for the String objects
+// plus ~3 KB of heap copies of these literals on every boot, whether or not a
+// menu ever opened. menuLines stays sized MENU_LINES (150), not by this list:
+// code indexes up to 150, and an initializer-sized array once let that walk
+// off the end into menuParsed/menuPosition (heap corruption, hard fault).
+static const char* const kMenuTreeDefault[] = {
   "$Rails$",
   "-*Both* *Top* *Bottom*",
   "-->v1",
@@ -257,6 +259,7 @@ String menuLines[150] = {
        "---*0**1**2**3**4**Max *",
        "end"
   };
+static const int kMenuTreeDefaultCount = (int)(sizeof(kMenuTreeDefault) / sizeof(kMenuTreeDefault[0]));
 
 
 /*

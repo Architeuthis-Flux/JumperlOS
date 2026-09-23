@@ -495,7 +495,12 @@ void setup( ) {
     // Serial.println("Arduino initialized");
     // Serial.flush();
     // delay(100);
-    initMenu( );
+    // The click-wheel menu tree: load at boot where a wheel will use it (V5),
+    // lazily on the first terminal-driven open elsewhere (the OG - ~5 KB of
+    // SRAM that a board without a wheel almost never needs).
+    if ( board::currentBoard( ).caps.hasRotaryEncoder ) {
+        initMenu( );
+    }
     heapMark("initMenu");
     startupTimers[ 6 ] = millis( );
     initADC( );

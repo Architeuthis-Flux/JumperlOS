@@ -1404,6 +1404,37 @@ tables (`menuLines[150]` Strings 1.8 KB static + their heap copies,
 `menuLevels`/`stayOnTop`/`optionSlpitLocations` 1.8 KB) - the next ~6 KB if
 it's needed, but they're menu code, not LED code.
 
+**globalState audit + lazy menu (third pass, same afternoon).** From the V5
+image's DWARF (`arm-none-eabi-gdb -batch -ex 'ptype /o globalState'`; the OG
+env builds without debug info) with the OG constants: 32.5 KB = nets 11.8 KB
+(196 B each: nodes 48 + bridges 96 + ...), paths 9.2 KB (128 B each),
+DisplayState 5.3 KB, parts 2.4 KB, chipXY 1.5 KB, chipStates 1 KB.
+Cut: `chipXY[12]` (1,536 B, both boards - only ever memset, the live
+crossbar image is `lastChipXY`); `MAX_CUSTOM_NET_ENTRIES` 16 on the OG for
+the custom color/name tables (3,872 B; 60 hand-named nets on a 60-row board
+is not a thing). NOT cut, and it cost two boot loops to learn: the per-net
+`bridges[MAX_NODES][2]` table (5.5 KB). A `grep | head -12` hid the hits in
+`NetsToChipConnections_OG.cpp` (1455, 1980): the OG router reads it, and a
+1-slot table let those loops read past the array into the net's name pointer
+and colour fields - HardFault ~3 s into boot, watchdog reboot, loop. Rescue
+that works from the desk: 1200-baud touch on PORT 1 (the core's CDC0 handler
+runs from the USB task even when setup() never finishes; the port-5 touch
+needs the main loop), `picotool load` the last good uf2 with a retry, verify,
+reboot. Candidates left: pathStruct int→int8/int16 packing (~6 KB OG, ~11 KB
+V5, both routers), `wireStatus[64][5]` 1.3 KB.
+Menu tree: `menuLines`/`menuLevels`/`stayOnTop`/`numberOfChoices`/`actions`/
+`optionSlpitLocations` are heap tables allocated by the first `initMenu()`
+(the tree literals live in flash as `kMenuTreeDefault[]`); boot loads them
+only where `caps.hasRotaryEncoder` (V5 timing unchanged, .bss → heap), the OG
+loads on its first open - `clickMenu()`'s activation branch, `getMenuSelection`,
+`requestReopenAtTopLevel` all call the latched `::initMenu()` (mind the
+`Menus::initMenu` declaration with no body: inside a member function the
+unqualified name picks it and the link fails). `menuChars[1000]` was never
+read: deleted. Result: OG static 166,200 → 156,916 B (59.9 %), globalState
+27,088 B; V5 −5.4 KB static. Board: 40.8 KB C heap free at boot with the
+28 KB GC heap up, `connect(1,2)`/`(2,3)`/`(10,11)` → two nets, crossbar
+populated, `nodes_clear()` back to empty.
+
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); the OG's
 banner still says `jumperless-v5 ... with rp2350b`; MpRemoteService still
 retries a failed heap alloc every pass (latch it). Build note: with the IDE

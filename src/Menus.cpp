@@ -92,17 +92,37 @@ int& menuPositionMin = Menus::getInstance( ).menuPositionMin;
 
 int menuRead = 0;
 int menuLength = 0;
-char menuChars[ 1000 ];
 
 int menuLineIndex = 0;
-// String menuLines[150];
-int menuLevels[ 150 ];
-int stayOnTop[ 150 ];
-uint8_t numberOfChoices[ 150 ];
-uint8_t actions[ 150 ]; //>n nodes 1 //>b baud 2 //>v voltage 3 //>i integer 7 //>t text 8 //>c connect 9
+// The menu tables. Heap-allocated on the first initMenu() rather than static:
+// ~5 KB (150 Strings + five 150-entry tables + the ~3 KB of literal copies)
+// that a board without a click wheel never needs unless a terminal command
+// opens the menu. Boards with a wheel still load at boot (main.cpp), so their
+// timing is unchanged; the memory just moved from .bss to the heap.
+#define MENU_LINES 150
+String* menuLines = nullptr;
+int* menuLevels = nullptr;
+int* stayOnTop = nullptr;
+uint8_t* numberOfChoices = nullptr;
+uint8_t* actions = nullptr; //>n nodes 1 //>b baud 2 //>v voltage 3 //>i integer 7 //>t text 8 //>c connect 9
 
-uint32_t optionSlpitLocations[ 150 ];
+uint32_t* optionSlpitLocations = nullptr;
 int numberOfLevels = 0;
+
+static void menuTablesAlloc( void ) {
+    if ( menuLines != nullptr ) {
+        return;
+    }
+    menuLines            = new String[ MENU_LINES ];
+    menuLevels           = new int[ MENU_LINES ]( );
+    stayOnTop            = new int[ MENU_LINES ]( );
+    numberOfChoices      = new uint8_t[ MENU_LINES ]( );
+    actions              = new uint8_t[ MENU_LINES ]( );
+    optionSlpitLocations = new uint32_t[ MENU_LINES ]( );
+    for ( int i = 0; i < kMenuTreeDefaultCount && i < MENU_LINES; i++ ) {
+        menuLines[ i ] = kMenuTreeDefault[ i ];
+    }
+}
 int optionVoltage = 0;
 
 uint8_t selectMultiple[ 10 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -130,6 +150,7 @@ struct action {
 };
 
 void readMenuFile( int flashOrLocal ) {
+    menuTablesAlloc( );
     // FatFS.begin();
     // delay(10);
     if ( flashOrLocal == 0 ) {
@@ -424,6 +445,9 @@ uint32_t menuColors[ 10 ] = { 0x09000a, 0x0f0004, 0x080800, 0x010f00,
                               0x000a03, 0x00030a, 0x040010, 0x070006 };
 
 void initMenu( void ) {
+    // Idempotent (menuRead / menuParsed latch), so every menu entry point
+    // calls it: it is the lazy load on a board without a click wheel.
+    menuTablesAlloc( );
 
     // FatFS.begin();
     // delay(1);
@@ -463,6 +487,7 @@ void Menus::requestReopenAtTopLevel( const char* rowText ) {
     if ( rowText == nullptr ) {
         return;
     }
+    ::initMenu( ); // lazy load on a board without a click wheel (the free function)
     for ( int i = 0; i <= menuLineIndex && i < 150; i++ ) {
         if ( menuLevels[ i ] != 0 ) {
             continue; // only a LEVEL-0 row can be the landing
@@ -523,12 +548,8 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         return -1;
     }
 
-    if ( menuLineIndex < 2 ) {
-        // b.clear();
-        b.print( "No menu file", 0x0f0400, 0xFFFFFF, 0, -1, 0 );
-        inClickMenu = 0;
-        return -1;
-    }
+    // (The "No menu file" bail moved below the activation check: the tree is
+    // loaded lazily there, and this function is polled every main-loop pass.)
 
     int returnedMenuPosition = -1;
     bool menuSessionRan = false;
@@ -549,6 +570,18 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
                 return -1;
             }
             encoderButtonState = IDLE;
+        }
+
+        // A board without a click wheel loads the tree here, on its first
+        // terminal-driven open; with a wheel it loaded at boot and this is a
+        // latched no-op. (::initMenu - the free function; Menus::initMenu is
+        // a declaration without a definition.)
+        ::initMenu( );
+        if ( menuLineIndex < 2 ) {
+            // b.clear();
+            b.print( "No menu file", 0x0f0400, 0xFFFFFF, 0, -1, 0 );
+            inClickMenu = 0;
+            return -1;
         }
         // Don't set showLEDsCore2 here - buffer not ready yet
         // It will be set in getMenuSelection() after buffer is prepared
@@ -992,6 +1025,7 @@ static void renderMenuLine( int menuPosition, int menuLevel,
 // action_menuTransitionTuner() in Debugs.cpp.)
 
 int getMenuSelection( void ) {
+    initMenu( ); // latched; the tables must exist before anything below indexes them
 
     optionVoltage = 0;
     int stayOnTopLevel = -1;

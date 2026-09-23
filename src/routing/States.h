@@ -61,9 +61,14 @@ config:
 #if defined(OG_JUMPERLESS)
   #define MAX_PARTS 6
   #define MAX_PART_PINS 16
+  // Custom net colors / names (DisplayState): 88 B per net-slot pair. Sixteen
+  // hand-colored or hand-named nets is plenty on a 60-row board; MAX_NETS of
+  // them was 3.9 KB of the RP2040's SRAM.
+  #define MAX_CUSTOM_NET_ENTRIES 16
 #else
   #define MAX_PARTS 16
   #define MAX_PART_PINS 24
+  #define MAX_CUSTOM_NET_ENTRIES MAX_NETS
 #endif
 
 // PartDefinition::placement - how a part's legs sit on the board (guide-UX
@@ -142,7 +147,9 @@ struct ConnectionState {
     bool pathsCacheValid;  // Set to false when connections change
     
     chipStatus chipStates[12];  // Derived from paths
-    struct justXY chipXY[12];   // Crossbar switch states (reconstructed from paths)
+    // (chipXY[12] - 1.5 KB of bool[16][8] per chip - lived here until 2026-09-23.
+    // Nothing ever read or wrote it except the clear; the live crossbar image is
+    // lastChipXY, a chipXYBitfield.)
     bool chipStatesCacheValid;
     
     ConnectionState();
@@ -190,10 +197,10 @@ struct DisplayState {
         char name[32];
     };
     
-    NetColorEntry customColors[MAX_NETS];
+    NetColorEntry customColors[MAX_CUSTOM_NET_ENTRIES];
     int numCustomColors;
-    
-    NetNameEntry customNames[MAX_NETS];
+
+    NetNameEntry customNames[MAX_CUSTOM_NET_ENTRIES];
     int numCustomNames;
     
     DisplayState();

@@ -126,7 +126,6 @@ void ConnectionState::clear() {
     // Clear chip states
     for (int i = 0; i < 12; i++) {
         memset(&chipStates[i], 0, sizeof(chipStatus));
-        memset(&chipXY[i], 0, sizeof(struct justXY));
     }
 
     // Restore locked connections after all state has been reset.
@@ -282,7 +281,7 @@ void DisplayState::setNetColor(int netNum, rgbColor color, uint32_t raw, const c
     }
     
     // Add new if space available
-    if (numCustomColors < MAX_NETS) {
+    if (numCustomColors < MAX_CUSTOM_NET_ENTRIES) {
         customColors[numCustomColors].netNumber = netNum;
         customColors[numCustomColors].firstNode = firstNode;
         customColors[numCustomColors].color = color;
@@ -338,7 +337,7 @@ void DisplayState::setNetName(int netNum, const char* name) {
     }
     
     // Add new entry if space available
-    if (numCustomNames < MAX_NETS) {
+    if (numCustomNames < MAX_CUSTOM_NET_ENTRIES) {
         customNames[numCustomNames].netNumber = netNum;
         customNames[numCustomNames].firstNode = firstNode;
         strncpy(customNames[numCustomNames].name, name, 31);
