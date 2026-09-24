@@ -266,27 +266,29 @@
     "Bottom rail DAC code that outputs 0V.") \
   X(calibration, bottom_rail_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "Bottom rail full-scale voltage spread.") \
-  X(calibration, dac_0_zero, INT, 1650, 0, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
+  /* zero rows allow a little below 0: an OG fit lands DAC0's zero a few codes
+     negative and ADC zeros a few mV negative, and the loader clamps to these. */ \
+  X(calibration, dac_0_zero, INT, 1650, -500, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
     "DAC 0 code that outputs 0V.") \
   X(calibration, dac_0_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "DAC 0 full-scale voltage spread.") \
-  X(calibration, dac_1_zero, INT, 1650, 0, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
+  X(calibration, dac_1_zero, INT, 1650, -500, 4095, 1, nullptr, HOOK_NONE, JLC_CAL, \
     "DAC 1 code that outputs 0V.") \
   X(calibration, dac_1_spread, FLOAT, 21.5f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "DAC 1 full-scale voltage spread.") \
-  X(calibration, adc_0_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+  X(calibration, adc_0_zero, FLOAT, 9.0f, -5.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 0 zero offset.") \
   X(calibration, adc_0_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 0 full-scale spread.") \
-  X(calibration, adc_1_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+  X(calibration, adc_1_zero, FLOAT, 9.0f, -5.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 1 zero offset.") \
   X(calibration, adc_1_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 1 full-scale spread.") \
-  X(calibration, adc_2_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+  X(calibration, adc_2_zero, FLOAT, 9.0f, -5.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 2 zero offset.") \
   X(calibration, adc_2_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 2 full-scale spread.") \
-  X(calibration, adc_3_zero, FLOAT, 9.0f, 0.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
+  X(calibration, adc_3_zero, FLOAT, 9.0f, -5.0f, 20.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 3 zero offset.") \
   X(calibration, adc_3_spread, FLOAT, 18.28f, 0.0f, 40.0f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "ADC 3 full-scale spread.") \

@@ -149,6 +149,7 @@ static const char *const kV5GpioNames[48] = {
 
 const BoardTopology v5BoardTopology = {
     "jumperless_v5",
+    5,
     Y0Rule::BounceNode,
     BOUNCE_NODE,
     kV5XMap,
@@ -169,7 +170,6 @@ const BoardTopology v5BoardTopology = {
         /* hasStartupAnimation    */ true,
         /* breadboardDisplays     */ true,
         /* spiDac                 */ false,
-        /* analogCalInConfig      */ true,
         /* ledsPerRow             */ 5,
         /* ledCount               */ 445,
         /* usbCdcCount            */ 4,

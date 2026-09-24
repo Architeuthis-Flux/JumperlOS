@@ -1,5 +1,4 @@
 #include "PersistentStuff.h"
-#include "boards/board.h"   // caps.analogCalInConfig
 #include "FileParsing.h"
 #include "JumperlessDefines.h"
 #include "LEDs.h"
@@ -434,37 +433,9 @@ void readSettingsFromConfig() {
   // Routing stacking counts are read directly from jumperlessConfig.routing
   // by the routing code; no runtime mirrors needed here.
 
-  // DAC/ADC calibration. Only where the board solved these itself and saved
-  // them (caps.analogCalInConfig): on the OG the config section holds the V5
-  // defaults, and copying them over initADC()'s descriptor ranges turned
-  // every routed reading into nonsense until the next boot (self test read
-  // -5.8 V on a 0-5 V channel, 2026-09-24).
-  if (board::currentBoard().caps.analogCalInConfig) {
-  // DAC calibration
-  dacSpread[0] = jumperlessConfig.calibration.dac_0_spread;
-  dacSpread[1] = jumperlessConfig.calibration.dac_1_spread;
-  dacSpread[2] = jumperlessConfig.calibration.top_rail_spread;
-  dacSpread[3] = jumperlessConfig.calibration.bottom_rail_spread;
-
-  dacZero[0] = jumperlessConfig.calibration.dac_0_zero;
-  dacZero[1] = jumperlessConfig.calibration.dac_1_zero;
-  dacZero[2] = jumperlessConfig.calibration.top_rail_zero;
-  dacZero[3] = jumperlessConfig.calibration.bottom_rail_zero;
-
-  // ADC calibration
-  adcSpread[0] = jumperlessConfig.calibration.adc_0_spread;
-  adcSpread[1] = jumperlessConfig.calibration.adc_1_spread;
-  adcSpread[2] = jumperlessConfig.calibration.adc_2_spread;
-  adcSpread[3] = jumperlessConfig.calibration.adc_3_spread;
-  adcSpread[4] = jumperlessConfig.calibration.adc_4_spread;
-  adcSpread[7] = jumperlessConfig.calibration.adc_7_spread;
-  adcZero[0] = jumperlessConfig.calibration.adc_0_zero;
-  adcZero[1] = jumperlessConfig.calibration.adc_1_zero;
-  adcZero[2] = jumperlessConfig.calibration.adc_2_zero;
-  adcZero[3] = jumperlessConfig.calibration.adc_3_zero;
-  adcZero[4] = jumperlessConfig.calibration.adc_4_zero;
-  adcZero[7] = jumperlessConfig.calibration.adc_7_zero;
-  }
+  // DAC/ADC calibration: descriptor defaults, then config's [calibration]
+  // when its generation stamp is this board's (Peripherals.cpp).
+  applyAnalogCalibration();
 
 
   // DAC voltages are now stored in globalState.power (loaded from YAML state file)

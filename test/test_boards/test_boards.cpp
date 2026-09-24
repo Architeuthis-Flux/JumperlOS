@@ -114,13 +114,13 @@ static void testCapabilities() {
   CHECK(ogBoardTopology.caps.hasProbePads == false, "OG has no probe pads");
   CHECK(ogBoardTopology.caps.scanningProbe == true, "OG uses scanning probe");
   CHECK(ogBoardTopology.caps.spiDac == true, "OG uses SPI DAC");
-  CHECK(ogBoardTopology.caps.analogCalInConfig == false, "OG analog scaling comes from the descriptor, not config");
+  CHECK(ogBoardTopology.generation == 1, "OG is generation 1 (config calibration stamped 5 is not its own)");
   CHECK(ogBoardTopology.caps.hasPsram == false, "OG has no PSRAM");
   CHECK(ogBoardTopology.caps.hasStartupAnimation == false, "OG skips startup animation");
   CHECK(ogBoardTopology.caps.ledsPerRow == 1, "OG 1 LED per row");
   CHECK(ogBoardTopology.caps.ledCount == 111, "OG 111 LEDs");
 
-  CHECK(v5BoardTopology.caps.analogCalInConfig == true, "V5 keeps its solved analog constants in config");
+  CHECK(v5BoardTopology.generation == 5, "V5 is generation 5 (matches the config.h hardware.generation default)");
   CHECK(v5BoardTopology.caps.railsFirmwareControlled == true,
         "V5 rails ARE firmware controlled");
   CHECK(v5BoardTopology.caps.hasStartupAnimation == true, "V5 plays startup animation");

@@ -664,12 +664,17 @@ static void runCrossbarTest( SelfTestReport& r ) {
     // problem and fails the test on its own.
     float ref[ 4 ];
     bool refOk = true;
+    // The DAC was just zeroed by the normalise and rewritten above: give its
+    // output stage time to land before anything is judged against it (the
+    // first reference read used to come out ~0.1 V low on the OG, every run).
+    delay( 60 );
     for ( int adcCh = 0; adcCh < 4; adcCh++ ) {
         globalState.clearAllConnections( );
         addBridgeToState( DAC1, ADC0 + adcCh );
         refreshConnections( -1, 0, 1 );
         waitCore2( );
-        delay( 8 );
+        delay( 20 );
+        readAdcVoltage( adcCh, 16 ); // throwaway: the first conversion after a mux change
         ref[ adcCh ] = readAdcVoltage( adcCh, 16 );
         if ( fabsf( ref[ adcCh ] - target ) > 1.0f )
             refOk = false;

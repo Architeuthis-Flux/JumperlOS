@@ -1901,6 +1901,281 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
     return nDevices;
 }
 
+// Big block PASS / FAIL, the way the calibration has always ended.
+static void printCalibBanner( bool pass ) {
+    if ( pass ) {
+        changeTerminalColor( 84, true ); // Green
+        Serial.println( "\r\n" );
+        Serial.println( "███████   █████   ███████ ███████" );
+        Serial.println( "██    ██ ██   ██  ██      ██     " );
+        Serial.println( "███████  ███████  ███████ ███████" );
+        Serial.println( "██       ██   ██       ██      ██" );
+        Serial.println( "██       ██   ██  ███████ ███████" );
+        Serial.println( "\r\n" );
+    } else {
+        changeTerminalColor( 196, true ); // Red
+        Serial.println( "\r\n" );
+        Serial.println( "███████  █████  ██ ██     " );
+        Serial.println( "██      ██   ██ ██ ██     " );
+        Serial.println( "█████   ███████ ██ ██     " );
+        Serial.println( "██      ██   ██ ██ ██     " );
+        Serial.println( "██      ██   ██ ██ ███████" );
+        Serial.println( "\r\n" );
+    }
+    changeTerminalColor( -1, true );
+}
+
+// ---- OG analog calibration -------------------------------------------------
+// The V5 solves its DAC constants against the INA219s in its DAC path and its
+// ADCs against those DACs. On the OG the per-board error lives in DAC1's
+// bipolar L272 stage (bench 2026-09-24: 0.5 V low at every setting, slope
+// right), so the reference here is ADC0 - unity 0-5 V behind its buffer per
+// the descriptor, its zero taken from the RP2040's own IO driven low through
+// GPIO_0 and its gain checked against that IO driven high. Both DACs are then
+// fitted to ADC0 through the crossbar, and ADC1-3 to the fitted DAC1. The
+// constants land in config.txt [calibration] stamped with this board's
+// generation, which is what applyAnalogCalibration() keys on.
+
+// Least squares of y on x over n points: y = a*x + b.
+static bool linFit( const float* x, const float* y, int n, float* a, float* b ) {
+    if ( n < 2 )
+        return false;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for ( int i = 0; i < n; i++ ) {
+        sx += x[ i ];
+        sy += y[ i ];
+        sxx += (double)x[ i ] * x[ i ];
+        sxy += (double)x[ i ] * y[ i ];
+    }
+    double den = n * sxx - sx * sx;
+    if ( den == 0 )
+        return false;
+    *a = (float)( ( n * sxy - sx * sy ) / den );
+    *b = (float)( ( sy - *a * sx ) / n );
+    return true;
+}
+
+// One bridge alone on the matrix, sent and settled.
+static void ogCalRoute( int nodeA, int nodeB ) {
+    globalState.clearAllConnections( );
+    addBridgeToState( nodeA, nodeB );
+    refreshConnections( -1, 0, 1 );
+    waitCore2( );
+    delay( 10 );
+}
+
+// Median of five 32-sample reads: a probe tap or a wobbling supply mid-sweep
+// moves one read, not the middle one.
+static float ogCalReadV( int ch ) {
+    float v[ 5 ];
+    for ( int i = 0; i < 5; i++ ) {
+        v[ i ] = readAdcVoltage( ch, 32 );
+        delay( 2 );
+    }
+    return medianInPlace( v, 5 );
+}
+static float ogCalReadRaw( int ch ) {
+    float v[ 5 ];
+    for ( int i = 0; i < 5; i++ ) {
+        v[ i ] = (float)readAdc( ch, 32 );
+        delay( 2 );
+    }
+    return medianInPlace( v, 5 );
+}
+
+// Fit one DAC's code mapping (code = V*4095/spread + zero) to ADC0.
+static bool ogCalFitDac( int dac, float spreadMin, float spreadMax, int zeroMin, int zeroMax ) {
+    static const float pts[] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f };
+    const int n = (int)( sizeof( pts ) / sizeof( pts[ 0 ] ) );
+    float code[ 8 ], meas[ 8 ];
+    int used = 0;
+    ogCalRoute( dac == 0 ? DAC0 : DAC1, ADC0 );
+    Serial.printf( "  DAC%d -> ADC0 (spread %.3f V, zero code %d going in):\n\r", dac,
+                   (double)dacSpread[ dac ], dacZero[ dac ] );
+    for ( int i = 0; i < n; i++ ) {
+        int c = (int)( pts[ i ] * 4095 / dacSpread[ dac ] ) + dacZero[ dac ];
+        if ( c < 0 )
+            c = 0;
+        if ( c > 4095 )
+            c = 4095;
+        setDacByNumber( dac, pts[ i ], 0 );
+        delay( 40 );
+        float m = ogCalReadV( 0 );
+        // ADC0 reads 0-5 V: a point the stage pushed below its floor or above
+        // its ceiling says nothing about the slope.
+        bool ok = ( m > 0.15f && m < 4.8f && c > 0 && c < 4095 );
+        Serial.printf( "    set %.2fV (code %4d) -> read %.3fV%s\n\r", (double)pts[ i ], c,
+                       (double)m, ok ? "" : "  (clipped, skipped)" );
+        if ( ok ) {
+            code[ used ] = (float)c;
+            meas[ used ] = m;
+            used++;
+        }
+    }
+    float a, b;
+    if ( used < 3 || !linFit( code, meas, used, &a, &b ) || a <= 0.0f ) {
+        Serial.printf( "  DAC%d: not enough clean points to fit (%d)\n\r", dac, used );
+        return false;
+    }
+    float spread = a * 4095.0f;
+    int zero = (int)lroundf( -b / a );
+    Serial.printf( "  DAC%d fit: %.5f V/code -> spread %.3f V, zero code %d\n\r", dac, (double)a,
+                   (double)spread, zero );
+    if ( spread < spreadMin || spread > spreadMax || zero < zeroMin || zero > zeroMax ) {
+        Serial.printf( "  DAC%d: outside the plausible window (spread %.1f..%.1f, zero %d..%d) - not applied\n\r",
+                       dac, (double)spreadMin, (double)spreadMax, zeroMin, zeroMax );
+        return false;
+    }
+    dacSpread[ dac ] = spread;
+    dacZero[ dac ] = zero;
+    setDacByNumber( dac, 2.5f, 0 );
+    delay( 40 );
+    float check = ogCalReadV( 0 );
+    setDacByNumber( dac, 0.0f, 0 );
+    bool pass = fabsf( check - 2.5f ) <= 0.06f;
+    Serial.printf( "  DAC%d check: asked 2.500V, ADC0 reads %.3fV -> %s\n\r", dac, (double)check,
+                   pass ? "ok" : "FAIL" );
+    return pass;
+}
+
+// Fit one ADC's scaling (V = raw*spread/4095 - zero) to the fitted DAC1.
+static bool ogCalFitAdc( int ch, const float* pts, int n, float spreadMin, float spreadMax,
+                         float zeroMin, float zeroMax ) {
+    float raw[ 12 ], volts[ 12 ];
+    int used = 0;
+    ogCalRoute( DAC1, ADC0 + ch );
+    Serial.printf( "  DAC1 -> ADC%d:\n\r", ch );
+    for ( int i = 0; i < n && i < 12; i++ ) {
+        setDacByNumber( 1, pts[ i ], 0 );
+        delay( 40 );
+        float r = ogCalReadRaw( ch );
+        bool ok = ( r > 40.0f && r < 4055.0f );
+        Serial.printf( "    DAC1 %5.2fV -> raw %4.0f%s\n\r", (double)pts[ i ], (double)r,
+                       ok ? "" : "  (at the rail, skipped)" );
+        if ( ok ) {
+            raw[ used ] = r;
+            volts[ used ] = pts[ i ];
+            used++;
+        }
+    }
+    setDacByNumber( 1, 0.0f, 0 );
+    float a, b;
+    if ( used < 3 || !linFit( raw, volts, used, &a, &b ) || a <= 0.0f ) {
+        Serial.printf( "  ADC%d: not enough clean points to fit (%d)\n\r", ch, used );
+        return false;
+    }
+    float spread = a * 4095.0f;
+    float zero = -b;
+    Serial.printf( "  ADC%d fit: spread %.3f V, zero %.3f V\n\r", ch, (double)spread, (double)zero );
+    if ( spread < spreadMin || spread > spreadMax || zero < zeroMin || zero > zeroMax ) {
+        Serial.printf( "  ADC%d: outside the plausible window (spread %.1f..%.1f, zero %.1f..%.1f) - not applied\n\r",
+                       ch, (double)spreadMin, (double)spreadMax, (double)zeroMin, (double)zeroMax );
+        return false;
+    }
+    adcSpread[ ch ] = spread;
+    adcZero[ ch ] = zero;
+    setDacByNumber( 1, 2.0f, 0 );
+    delay( 40 );
+    float check = ogCalReadV( ch );
+    setDacByNumber( 1, 0.0f, 0 );
+    bool pass = fabsf( check - 2.0f ) <= 0.08f;
+    Serial.printf( "  ADC%d check: DAC1 at 2.000V reads %.3fV -> %s\n\r", ch, (double)check,
+                   pass ? "ok" : "FAIL" );
+    return pass;
+}
+
+static void calibrateAnalogOg( void ) {
+    SlotManager::getInstance( ).enterTemporarySlot( 8 );
+    globalState.clearAllConnections( );
+    refreshConnections( -1, 0, 1 );
+    waitCore2( );
+    b.clear( );
+    Serial.println( "\n\r\t\tCalibrating\n\r" );
+    Serial.println( "ADC0 is the reference: unity 0-5 V behind its buffer, zeroed on the RP2040's IO\n\r"
+                    "driven low through GPIO_0 and checked against it driven high. DAC0 and DAC1 are\n\r"
+                    "fitted to ADC0 through the crossbar, then ADC1-3 to the fitted DAC1. The result\n\r"
+                    "goes to config.txt [calibration].\n\r" );
+
+    const auto& bd = board::currentBoard( );
+    int gpioNode = -1, gpioPin = -1;
+    for ( int i = 0; i < bd.gpioCount; i++ ) {
+        if ( strncmp( bd.gpio[ i ].label, "GPIO", 4 ) == 0 ) {
+            gpioNode = bd.gpio[ i ].node;
+            gpioPin = bd.gpio[ i ].physicalPin;
+            break;
+        }
+    }
+    bool pass = false;
+    bool refOk = false;
+    if ( gpioNode >= 0 ) {
+        // Start from the descriptor's ADC0 so a stale zero can't fold into
+        // the new one.
+        adcSpread[ 0 ] = 5.0f;
+        adcZero[ 0 ] = 0.0f;
+        ogCalRoute( gpioNode, ADC0 );
+        pinMode( gpioPin, OUTPUT );
+        digitalWrite( gpioPin, LOW );
+        delay( 20 );
+        float lo = ogCalReadV( 0 );
+        digitalWrite( gpioPin, HIGH );
+        delay( 20 );
+        float hi = ogCalReadV( 0 );
+        digitalWrite( gpioPin, LOW );
+        pinMode( gpioPin, INPUT );
+        refOk = ( fabsf( lo ) < 0.15f && hi > 3.1f && hi < 3.5f );
+        Serial.printf( "  reference: GPIO_0 low reads %.3fV, high %.3fV on ADC0 -> %s\n\r", (double)lo,
+                       (double)hi, refOk ? "ok" : "OUT OF RANGE" );
+        if ( refOk ) {
+            adcZero[ 0 ] = lo; // the chain's offset at 0 V; unity gain kept
+            Serial.printf( "  ADC0 zero set to %.3fV (spread 5.000 V)\n\r", (double)lo );
+        }
+    }
+    if ( !refOk ) {
+        Serial.println( "  ADC0 does not read the IO rail sensibly - nothing to calibrate against." );
+        applyAnalogCalibration( );
+    } else {
+        bool dac0 = ogCalFitDac( 0, 3.5f, 4.7f, -300, 300 );
+        bool dac1 = ogCalFitDac( 1, 12.0f, 20.0f, 1400, 2200 );
+        static const float uni[] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f };
+        static const float bip[] = { -4.0f, -3.0f, -2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 3.0f, 4.0f };
+        bool adc1 = dac1 && ogCalFitAdc( 1, uni, 8, 3.0f, 8.0f, -1.0f, 1.0f );
+        bool adc2 = dac1 && ogCalFitAdc( 2, uni, 8, 3.0f, 8.0f, -1.0f, 1.0f );
+        bool adc3 = dac1 && ogCalFitAdc( 3, bip, 9, 10.0f, 30.0f, 4.0f, 12.0f );
+        pass = dac0 && dac1 && adc1 && adc2 && adc3;
+        if ( pass ) {
+            jumperlessConfig.calibration.dac_0_spread = dacSpread[ 0 ];
+            jumperlessConfig.calibration.dac_0_zero = dacZero[ 0 ];
+            jumperlessConfig.calibration.dac_1_spread = dacSpread[ 1 ];
+            jumperlessConfig.calibration.dac_1_zero = dacZero[ 1 ];
+            jumperlessConfig.calibration.adc_0_spread = adcSpread[ 0 ];
+            jumperlessConfig.calibration.adc_0_zero = adcZero[ 0 ];
+            jumperlessConfig.calibration.adc_1_spread = adcSpread[ 1 ];
+            jumperlessConfig.calibration.adc_1_zero = adcZero[ 1 ];
+            jumperlessConfig.calibration.adc_2_spread = adcSpread[ 2 ];
+            jumperlessConfig.calibration.adc_2_zero = adcZero[ 2 ];
+            jumperlessConfig.calibration.adc_3_spread = adcSpread[ 3 ];
+            jumperlessConfig.calibration.adc_3_zero = adcZero[ 3 ];
+            // The stamp applyAnalogCalibration() keys on: these are this
+            // board's own numbers now.
+            jumperlessConfig.hardware.generation = bd.generation;
+            configChanged = true;
+            saveConfig( ); // re-syncs the arrays through applyAnalogCalibration()
+            Serial.println( "  saved to config.txt [calibration]" );
+        } else {
+            applyAnalogCalibration( ); // back to whatever was in force
+            Serial.println( "  not saved; the previous constants are back in force" );
+        }
+    }
+    printCalibBanner( pass );
+
+    setDacByNumber( 0, 0.0f, 0 );
+    setDacByNumber( 1, 0.0f, 0 );
+    globalState.clearAllConnections( );
+    leaveApp( );
+    setRailsAndDACs( 0 );
+    refreshConnections( -1 );
+}
+
 // The tail of first start, shared by both boards: examples, the unattended
 // self test, the interactive pad calibration where there are pads, a clean
 // undo history, restart.
@@ -1945,15 +2220,16 @@ static void firstStartFinish( void ) {
 
 void calibrateDacs( ) {
 #if defined(OG_JUMPERLESS)
-    // The MCP4822 has no INA-readable path to solve constants against, so the
-    // sweep below is V5-only. First start still finishes the way the V5's
-    // does (examples, self test, restart), with nothing to calibrate first.
+    // The sweep below solves its constants against the INA219s in the V5's
+    // DAC path; the OG fits its DACs to ADC0 through the crossbar instead
+    // (calibrateAnalogOg), then finishes first start the same way.
     if ( firstStart == 1 ) {
-        Serial.println( "\n\rFirst startup (no DAC calibration on this board)\n\r" );
-        firstStartFinish( );
-        return;
+        Serial.println( "\n\rFirst startup calibration\n\r" );
     }
-    Serial.println( "DAC calibration is not supported on Jumperless OG." );
+    calibrateAnalogOg( );
+    if ( firstStart == 1 ) {
+        firstStartFinish( );
+    }
     return;
 #endif
     // Calibration solves for ADC constants with set/measure pairs; it needs the
@@ -2734,25 +3010,7 @@ void calibrateDacs( ) {
     leaveApp( );  // Restore original slot
 if ( yesNo == 1 ) {
     // Print big block text for PASS or FAIL
-    if ( failedToConverge < 7 ) {
-        changeTerminalColor( 84, true ); // Green
-        Serial.println( "\r\n" );
-        Serial.println( "███████   █████   ███████ ███████" );
-        Serial.println( "██    ██ ██   ██  ██      ██     " );
-        Serial.println( "███████  ███████  ███████ ███████" );
-        Serial.println( "██       ██   ██       ██      ██" );
-        Serial.println( "██       ██   ██  ███████ ███████" );
-        Serial.println( "\r\n" );
-    } else {
-        changeTerminalColor( 196, true ); // Red
-        Serial.println( "\r\n" );
-        Serial.println( "███████  █████  ██ ██     " );
-        Serial.println( "██      ██   ██ ██ ██     " );
-        Serial.println( "█████   ███████ ██ ██     " );
-        Serial.println( "██      ██   ██ ██ ██     " );
-        Serial.println( "██      ██   ██ ██ ███████" );
-        Serial.println( "\r\n" );
-    }
+    printCalibBanner( failedToConverge < 7 );
     // Serial.println();
     Serial.print( "\n\n\rFailedToConverge = " );
     Serial.println( failedToConverge );

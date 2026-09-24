@@ -109,6 +109,8 @@ size_t boardCapabilitiesJson(const BoardTopology &b, char *buf, size_t cap) {
   a.s("{\"board\":\"");
   a.s(b.name);
   a.s("\",");
+  a.i("generation", b.generation);
+  a.s(",");
   a.b("rails_firmware_controlled", b.caps.railsFirmwareControlled);
   a.s(",");
   a.b("probe_pads", b.caps.hasProbePads);
@@ -126,8 +128,6 @@ size_t boardCapabilitiesJson(const BoardTopology &b, char *buf, size_t cap) {
   a.b("startup_animation", b.caps.hasStartupAnimation);
   a.s(",");
   a.b("spi_dac", b.caps.spiDac);
-  a.s(",");
-  a.b("analog_cal_in_config", b.caps.analogCalInConfig);
   a.s(",");
   a.i("leds_per_row", b.caps.ledsPerRow);
   a.s(",");

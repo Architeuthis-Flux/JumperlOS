@@ -449,11 +449,10 @@ void initADC( void ) {
         for ( int i = 0; i < b.adcCount; i++ ) {
             int ch = b.adc[ i ].node - ADC0;
             if ( ch < 0 || ch >= 8 ) continue;
-            adcSpread[ ch ] = b.adc[ i ].maxV - b.adc[ i ].minV;
-            adcZero[ ch ] = -b.adc[ i ].minV;
             adcRange[ ch ][ 0 ] = b.adc[ i ].minV;
             adcRange[ ch ][ 1 ] = b.adc[ i ].maxV;
         }
+        applyAnalogCalibration( );
     }
     #else
 
@@ -466,6 +465,59 @@ void initADC( void ) {
 
     // Set Arduino ADC resolution to 12 bits for compatibility
     analogReadResolution( 12 );
+}
+
+// The ADC/DAC scaling arrays: the descriptor's defaults, overridden by
+// config.txt's [calibration] when that section was written by this board
+// generation (calibrateDacs stamps hardware.generation when it saves). The
+// OG's config starts life with the V5's constants in it, which decode its
+// 0-5 V channels as +/-9 V (self test read -5.8 V, 2026-09-24); those stay
+// ignored until the board has calibrated itself. Called from initDAC/initADC
+// and from every config sync, so the arrays can't drift from this rule.
+void applyAnalogCalibration( void ) {
+    const board::BoardTopology& b = board::currentBoard( );
+    for ( int i = 0; i < b.adcCount; i++ ) {
+        int ch = b.adc[ i ].node - ADC0;
+        if ( ch < 0 || ch >= 8 ) continue;
+        adcSpread[ ch ] = b.adc[ i ].maxV - b.adc[ i ].minV;
+        adcZero[ ch ] = -b.adc[ i ].minV;
+    }
+    if ( b.caps.spiDac ) {
+        // Code = V * 4095 / spread + zero, measured 2026-09-08 through the
+        // crossbar into the calibrated ADCs: DAC0 is unity from the MCP4822's
+        // 4.096 V full scale; DAC1's L272 stage gives 16 V per 4096 codes with
+        // 0 V at code 1772 (+1.08 V at mid-scale) and saturates near +7 V.
+        // (The reference firmware's V*4095/5 and +2048 were nominal: 18 % low
+        // on DAC0, +1.1 V off on DAC1.) Per-board zero codes differ by a
+        // hundred-odd counts; that is what calibrateDacs solves.
+        dacSpread[ 0 ] = 4.096f;
+        dacZero[ 0 ] = 0;
+        dacSpread[ 1 ] = 16.0f;
+        dacZero[ 1 ] = 1772;
+    }
+    if ( jumperlessConfig.hardware.generation != b.generation ) {
+        return;
+    }
+    dacSpread[ 0 ] = jumperlessConfig.calibration.dac_0_spread;
+    dacSpread[ 1 ] = jumperlessConfig.calibration.dac_1_spread;
+    dacSpread[ 2 ] = jumperlessConfig.calibration.top_rail_spread;
+    dacSpread[ 3 ] = jumperlessConfig.calibration.bottom_rail_spread;
+    dacZero[ 0 ] = jumperlessConfig.calibration.dac_0_zero;
+    dacZero[ 1 ] = jumperlessConfig.calibration.dac_1_zero;
+    dacZero[ 2 ] = jumperlessConfig.calibration.top_rail_zero;
+    dacZero[ 3 ] = jumperlessConfig.calibration.bottom_rail_zero;
+    adcSpread[ 0 ] = jumperlessConfig.calibration.adc_0_spread;
+    adcSpread[ 1 ] = jumperlessConfig.calibration.adc_1_spread;
+    adcSpread[ 2 ] = jumperlessConfig.calibration.adc_2_spread;
+    adcSpread[ 3 ] = jumperlessConfig.calibration.adc_3_spread;
+    adcSpread[ 4 ] = jumperlessConfig.calibration.adc_4_spread;
+    adcSpread[ 7 ] = jumperlessConfig.calibration.adc_7_spread;
+    adcZero[ 0 ] = jumperlessConfig.calibration.adc_0_zero;
+    adcZero[ 1 ] = jumperlessConfig.calibration.adc_1_zero;
+    adcZero[ 2 ] = jumperlessConfig.calibration.adc_2_zero;
+    adcZero[ 3 ] = jumperlessConfig.calibration.adc_3_zero;
+    adcZero[ 4 ] = jumperlessConfig.calibration.adc_4_zero;
+    adcZero[ 7 ] = jumperlessConfig.calibration.adc_7_zero;
 }
 
 void initDAC( void ) {
@@ -490,10 +542,7 @@ void initDAC( void ) {
         // codes with 0 V at code 1772 (+1.08 V at mid-scale) and saturates
         // near +7 V. (The reference firmware's V*4095/5 and +2048 were
         // nominal: 18 % low on DAC0, +1.1 V off on DAC1.)
-        dacSpread[ 0 ] = 4.096f;
-        dacZero[ 0 ] = 0;
-        dacSpread[ 1 ] = 16.0f;
-        dacZero[ 1 ] = 1772;
+        applyAnalogCalibration( );
         s_ogDacReady = true;
         // The saved state's DAC voltages, as setRailsAndDACs() applies them on
         // the I2C path below; the rails are a hardware switch on this board.
@@ -890,7 +939,7 @@ void setDac0voltage( float voltage, int save, int saveEEPROM,
     bool wrote = false;
     if ( board::currentBoard( ).caps.spiDac ) {
         // MCP4822 channel A: dacValue was computed above from the spiDac
-        // dacSpread/dacZero set in initDAC() (4.096 V full scale, zero 0).
+        // dacSpread/dacZero (applyAnalogCalibration: 4.096 V full scale, zero 0).
         ogDacWrite( 0, dacValue );
         wrote = true;
     } else {
@@ -977,8 +1026,8 @@ void setDac1voltage( float voltage, int save, int saveEEPROM,
     }
     bool wrote = false;
     if ( board::currentBoard( ).caps.spiDac ) {
-        // MCP4822 channel B: dacValue from the spiDac dacSpread/dacZero set in
-        // initDAC() (16 V per 4096 codes, 0 V at code 1772).
+        // MCP4822 channel B: dacValue from the spiDac dacSpread/dacZero
+        // (applyAnalogCalibration: 16 V per 4096 codes, 0 V at code 1772 nominal).
         ogDacWrite( 1, dacValue );
         wrote = true;
     } else {

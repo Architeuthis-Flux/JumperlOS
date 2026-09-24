@@ -1536,9 +1536,48 @@ as designed. Not verified: the row paint's persistence during the hold (port
 7 is serviced by the main loop, which the hold blocks, so no LED dump). Host
 `test_boards` OK. V5: builds; RAM -1.2 KB from the overlay buffer.
 
+**DAC calibration on the OG (afternoon).** Kevin: "the rows reading ~2V is
+weird, we should calibrate the dacs". Measured with the descriptor constants
+in RAM (`dacZero` 1772 confirmed as int32): DAC0 within 25 mV at every
+point, DAC1 0.5 V low at every point with the slope right - a per-board zero
+code, not a scaling error. `calibrateDacs()` on the OG now runs
+`calibrateAnalogOg()` (Apps.cpp): ADC0 is the reference (descriptor unity
+0-5 V; its zero is read off GPIO_0 driven low, its gain checked against
+GPIO_0 driven high), DAC0 and DAC1 are fitted to it through the crossbar
+(least squares of ADC0 volts on the DAC code; clipped points dropped), then
+ADC1-3 to the fitted DAC1 (ADC3 over -4..+4 V). Each fit is range-checked
+and verified at a mid point before it is kept; the set is saved only if
+every fit passed. Bench, this board: DAC0 spread 4.086 zero 13, DAC1 spread
+15.922 zero 1913 (vs 1772 nominal), ADC0-2 zero ~0.04 V, ADC3 16.44/8.29.
+After: DAC1 2.5 -> 2.496 V, 3.3 -> 3.295, -3.0 -> -2.988 on ADC3; DAC0 2.5
+-> 2.501. 
+
+**Where the constants live, second pass.** Yesterday's `analogCalInConfig`
+capability (config calibration never applied on the OG) could not survive
+the OG calibrating itself. Replaced by a stamp: `BoardTopology.generation`
+(V5 5, OG 1) and `applyAnalogCalibration()` (Peripherals.cpp) - descriptor
+defaults first, then config.txt's [calibration] only when
+`hardware.generation` in the config equals the board's. `calibrateDacs`
+writes the stamp with the constants; `resetConfigToDefaults(clearCal)` puts
+it back to the config.h default (5). So an OG config that still carries the
+V5 numbers (stamped 5) is ignored, as before, until the board calibrates;
+the V5 (stamped 5 by default) is unchanged. `initDAC`/`initADC` and
+`readSettingsFromConfig` all go through the one function, so the boot-order
+trap (config sync before initADC re-seeded the descriptor over it) is gone.
+The config zero rows (`dac_*_zero`, `adc_0..3_zero`) now allow a little
+below 0: the loader clamps to the X-table range and DAC0's fitted zero is a
+few codes negative on some boards.
+
+**Bench notes.** Port 1's read dropped mid-calibration (the board stayed up
+on port 5 and finished; probably the config flash write stalling USB) - the
+PASS banner was not captured, the config was. `$` runs the calibration from
+port 1 in line mode.
+
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); MpRemoteService
-still retries a failed heap alloc every pass (latch it); the OG DAC1 ~0.5 V
-low; the OG router prints a burst of blank lines per refresh on port 1. Build note: with the IDE
+still retries a failed heap alloc every pass (latch it); the OG router prints
+a burst of blank lines per refresh on port 1 (not from routing itself -
+MicroPython connects print nothing - something per self-test row);
+port 1 dropping during a config save. Build note: with the IDE
 open, a venv `pio run` and the IDE's own PlatformIO take turns cleaning
 `.pio/build` (project.checksum mismatch) - builds die mid-way with "can't
 create ...o" and the tracked V5 `firmware.uf2` gets deleted. Build with

@@ -970,6 +970,14 @@ void resetConfigToDefaults(int clearCalibration, int clearHardware) {
     if (clearHardware == 0) {
         jumperlessConfig.hardware = saved.hardware;
     }
+    // hardware.generation doubles as the [calibration] ownership stamp
+    // (calibrateDacs writes the board's generation when it saves; the
+    // constants are applied only while it matches - Peripherals.cpp
+    // applyAnalogCalibration). Cleared calibration belongs to nobody, so the
+    // stamp goes back to the config.h default with it.
+    if (clearCalibration) {
+        jumperlessConfig.hardware.generation = config().hardware.generation;
+    }
     if (clearCalibration == 0) {
         for (int i = 0; i < jlConfigOptionCount; i++) {
             const ConfigOptionDesc* opt = &jlConfigOptions[i];

@@ -161,6 +161,10 @@ void writeGPIOex(int value, uint8_t pin);
 void initINA219(void);
 void initADC(void);
 void printCalibration(void);
+// Descriptor defaults, then config.txt's [calibration] if its generation stamp
+// is this board's (see Peripherals.cpp).
+void applyAnalogCalibration( void );
+
 void initDAC(void);
 
 

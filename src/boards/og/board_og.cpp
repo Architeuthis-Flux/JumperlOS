@@ -140,6 +140,7 @@ static const char *const kOgGpioNames[30] = {
 
 const BoardTopology ogBoardTopology = {
     "jumperless_og",
+    1,
     Y0Rule::ChipL,
     CHIP_L,
     kOgXMap,
@@ -160,7 +161,6 @@ const BoardTopology ogBoardTopology = {
         /* hasStartupAnimation    */ false,
         /* breadboardDisplays     */ false,
         /* spiDac                 */ true,
-        /* analogCalInConfig      */ false,
         /* ledsPerRow             */ 1,
         /* ledCount               */ 111,
         /* usbCdcCount            */ 4,
