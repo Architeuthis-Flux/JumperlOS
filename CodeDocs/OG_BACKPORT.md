@@ -1505,8 +1505,12 @@ heap allocation for the moment `addOverlay` needs it (which copies).
 First start: the tail of `calibrateDacs` (examples, self test, pad
 calibration, undo wipe, restart) is now `firstStartFinish()`, and the OG
 runs it too - minus the pad calibration - instead of skipping everything
-along with the DAC sweep. That path is read-verified only (no factory reset
-of the bench OG).
+along with the DAC sweep. On a pad-less board that hold is bounded (20 s,
+any input cuts it short): an OG's first start is a user dropping a UF2 with
+no terminal and maybe no probe, not an operator at a bench. That path is
+read-verified only (no factory reset of the bench OG). The sentinel fix was
+checked by flashing a build labeled 1.7.11.3 over the 1.7.11.2 config: boot
+came up clean and `?` answered with the version line, no Switch Calib.
 
 **The reading that was not a crossbar fault.** The first OG run failed all
 60 rows at -5.8 V on 0-5 V channels and GPIO_0 LOW at -8.85 V. MicroPython

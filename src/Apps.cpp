@@ -1924,9 +1924,10 @@ static void firstStartFinish( void ) {
         selfTestClearOverlay( );
         probeCalibApp( ); // saves config (incl. pad endpoints) on finish
     } else {
-        // Nothing to align on a scanning-probe board: hold the result until
-        // the operator has seen it, then finish.
-        selfTestWaitForInput( "finish first start" );
+        // Nothing to align on a scanning-probe board, and nobody is
+        // necessarily there: an OG's first start is a user dropping a UF2,
+        // not a factory operator. Show the result, then move on by itself.
+        selfTestWaitForInput( "finish first start", 20 );
         selfTestClearOverlay( );
     }
 

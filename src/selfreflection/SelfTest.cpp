@@ -1428,8 +1428,9 @@ void runFullSelfTest( bool fromFirstStart ) {
     }
 }
 
-// Block until any human input: probe button, encoder click/turn, or a serial byte.
-static void waitForAnyInput( void ) {
+// Block until any human input: probe button, encoder click/turn, or a serial
+// byte - or, with timeoutMs > 0, until that long has passed without one.
+static void waitForAnyInput( unsigned long timeoutMs = 0 ) {
     // Swallow whatever input state got us here
     encoderButtonState = IDLE;
     encoderDirectionState = NONE;
@@ -1438,6 +1439,7 @@ static void waitForAnyInput( void ) {
     }
     delay( 300 ); // let a button held from earlier be released
 
+    unsigned long t0 = millis( );
     while ( true ) {
         if ( probing.checkProbeButtonState( ) != 0 )
             break;
@@ -1445,20 +1447,26 @@ static void waitForAnyInput( void ) {
             break;
         if ( Serial.available( ) > 0 )
             break;
+        if ( timeoutMs && millis( ) - t0 >= timeoutMs )
+            break;
         delay( 10 );
     }
 }
 
-void selfTestWaitForInput( const char* nextWhat ) {
+void selfTestWaitForInput( const char* nextWhat, int timeoutSeconds ) {
     Serial.println( "\n\rResults are showing on the breadboard LEDs." );
-    Serial.printf( "%s or send any serial byte to %s.\n\r",
+    Serial.printf( "%s or send any serial byte to %s",
                    board::currentBoard( ).caps.hasRotaryEncoder
                        ? "Touch a probe button, click or turn the encoder,"
                        : "Press the probe button,",
                    nextWhat );
+    if ( timeoutSeconds > 0 ) {
+        Serial.printf( " (it continues by itself in %d s)", timeoutSeconds );
+    }
+    Serial.println( "." );
     Serial.flush( );
 
-    waitForAnyInput( );
+    waitForAnyInput( timeoutSeconds > 0 ? (unsigned long)timeoutSeconds * 1000UL : 0UL );
 }
 
 void selfTestClearOverlay( void ) {

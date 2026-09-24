@@ -50,7 +50,10 @@ void selfTestWaitForInputThenReset( void );
 // Same hold-for-input, but WITHOUT the restart - nextWhat names what the
 // touch will do (e.g. "start probe pad calibration"). The first-start flow
 // uses it to chain into the interactive pad calibration before resetting.
-void selfTestWaitForInput( const char* nextWhat );
+// timeoutSeconds > 0 bounds the hold: a board nobody is standing at (an OG's
+// first start after a UF2 drop, no terminal, maybe no probe) must not sit
+// on its result forever.
+void selfTestWaitForInput( const char* nextWhat, int timeoutSeconds = 0 );
 
 // Remove the self-test result overlay from the breadboard LEDs.
 void selfTestClearOverlay( void );
