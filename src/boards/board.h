@@ -92,6 +92,13 @@ struct BoardCaps {
                                 // GPIOs): V5 only - the service hardcodes the
                                 // V5 node map (RP 20-27 -> nodes 131-138)
   bool spiDac;                  // OG MCP4822 over SPI; V5 MCP4728 over I2C
+  bool analogCalInConfig;       // the DAC/ADC scaling constants are solved on
+                                //   the board (calibrateDacs) and live in
+                                //   config.txt's [calibration]; false = the
+                                //   descriptor's adc/dac ranges are the truth
+                                //   and that config section is never applied
+                                //   (OG: no calibration app, and its config
+                                //   carries the V5 defaults)
   uint8_t ledsPerRow;           // V5 = 5, OG = 1
   uint16_t ledCount;            // total addressable pixels: V5 = 445, OG = 111
   uint8_t usbCdcCount;          // number of USB CDC interfaces exposed

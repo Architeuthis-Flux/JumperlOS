@@ -1472,8 +1472,69 @@ and the desktop app were taught the OG the same evening (JumperIDE
 major 1 as a fallback, because every OG build shipped before this change
 still claims to be a V5.
 
+### Session 2026-09-24 — the self test runs on the OG; two OG bugs underneath it
+
+**Why a probe calibration kept starting.** Kevin: "it wants to calibrate the
+probe which doesn't apply". Not the self test (stubbed out on the OG until
+today) and not `calibrateDacs`'s tail (it returns at the top on the OG): the
+firmware-version migration in `updateConfigFromFile` sets
+`probeCalibrationNeeded` whenever `probe.droop_ohms == 0`, and boot then runs
+`calibrateProbeSwitchThresholds()`. The pad probe's droop calibration is the
+only thing that ever writes `droop_ohms`, so on an OG it is 0 forever and
+every version change (each of yesterday's reflashes) re-armed it. The OG's
+config confirmed it over port 5: `droop_ohms = 0.0000` under
+`firmware_version = 1.7.11.2`. The sentinel is now gated on
+`caps.hasProbePads`, and `calibrateProbeSwitchThresholds()` /
+`probeCalibApp()` bail with one line on a board without pads, so no other
+caller (menu, app table) can start them either.
+
+**Self test on the OG.** `SelfTest.cpp` compiled unchanged for the OG once
+the stub block was removed (the compiler was the cheapest way to find that
+out), so the port is runtime gating on the descriptor: probe_cable and
+tip_voltage SKIP without pads, psram SKIPs without `hasPsram`, the
+peripherals test takes `spiDac` as "no I2C DAC to ACK", the crossbar test
+loops the descriptor's routable GPIOs (V5: GPIO_1-8, OG: GPIO_0) instead of
+`gpioDef[0..7]` and skips the rail phase unless `railsFirmwareControlled`,
+`selfTestNormalizeHardware` zeroes only the DACs the board has and releases
+only those same GPIOs, encoder input is ignored where there is no encoder
+(the OG's `BUTTON_ENC` pin reads something else), and the LED result is
+painted straight into rows 1-3 / 5-8 / 10-13 / ... on a 1-LED-per-row
+board, since `renderGraphicOverlays` returns on the OG. The overlay's
+300-pixel buffer was a static that the OG now paid 1.2 KB for; it is a
+heap allocation for the moment `addOverlay` needs it (which copies).
+First start: the tail of `calibrateDacs` (examples, self test, pad
+calibration, undo wipe, restart) is now `firstStartFinish()`, and the OG
+runs it too - minus the pad calibration - instead of skipping everything
+along with the DAC sweep. That path is read-verified only (no factory reset
+of the bench OG).
+
+**The reading that was not a crossbar fault.** The first OG run failed all
+60 rows at -5.8 V on 0-5 V channels and GPIO_0 LOW at -8.85 V. MicroPython
+read the same route at 2.0 V. The arrays in RAM at boot were the descriptor's
+(ADC0-2 spread 5 zero 0, ADC3 16.34/8.1) - but `readSettingsFromConfig()`
+copies `[calibration]` from config.txt over `adcSpread/adcZero/dacSpread/
+dacZero` on every config sync (seven call sites), and the OG's config holds
+the V5 defaults (zero 9.0, spread 18.28, dac zero 1650): the readings decode
+exactly to those constants. New capability `analogCalInConfig` (V5 true, OG
+false; in `boardCapabilitiesJson` and `test_boards.cpp`); the sync applies
+the calibration block only when it is set. Independently, the crossbar sweep
+now measures DAC1 straight into each ADC first and judges the rows against
+that reference (+/-0.35 V) instead of the 2.5 V nominal: the OG's bipolar
+DAC1 stage reads ~0.5 V low through the reference firmware's constants
+(2.5 -> 1.97 V, 3.3 -> 2.78, 1.0 -> 0.49 over MicroPython), which is a
+calibration observation for later, not sixty dead crosspoints.
+
+**Bench.** OG, `self_test` from port 1 (line-buffered mode - SO then the
+backtick line; the raw path never dispatched): crossbar PASS 60/60 with
+every row within 0.1 V of its reference, GPIO_0 3.333/0.042 V, peripherals
+PASS, three SKIPs, 13 s end to end, the hold released by a serial byte, reset
+as designed. Not verified: the row paint's persistence during the hold (port
+7 is serviced by the main loop, which the hold blocks, so no LED dump). Host
+`test_boards` OK. V5: builds; RAM -1.2 KB from the overlay buffer.
+
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); MpRemoteService
-still retries a failed heap alloc every pass (latch it). Build note: with the IDE
+still retries a failed heap alloc every pass (latch it); the OG DAC1 ~0.5 V
+low; the OG router prints a burst of blank lines per refresh on port 1. Build note: with the IDE
 open, a venv `pio run` and the IDE's own PlatformIO take turns cleaning
 `.pio/build` (project.checksum mismatch) - builds die mid-way with "can't
 create ...o" and the tracked V5 `firmware.uf2` gets deleted. Build with

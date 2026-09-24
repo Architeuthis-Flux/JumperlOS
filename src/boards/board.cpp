@@ -127,6 +127,8 @@ size_t boardCapabilitiesJson(const BoardTopology &b, char *buf, size_t cap) {
   a.s(",");
   a.b("spi_dac", b.caps.spiDac);
   a.s(",");
+  a.b("analog_cal_in_config", b.caps.analogCalInConfig);
+  a.s(",");
   a.i("leds_per_row", b.caps.ledsPerRow);
   a.s(",");
   a.i("led_count", b.caps.ledCount);

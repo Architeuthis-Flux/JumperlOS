@@ -160,6 +160,7 @@ const BoardTopology ogBoardTopology = {
         /* hasStartupAnimation    */ false,
         /* breadboardDisplays     */ false,
         /* spiDac                 */ true,
+        /* analogCalInConfig      */ false,
         /* ledsPerRow             */ 1,
         /* ledCount               */ 111,
         /* usbCdcCount            */ 4,

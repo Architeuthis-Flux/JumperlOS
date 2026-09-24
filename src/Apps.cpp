@@ -29,6 +29,7 @@
 #include "hardwarestuff/RoutableGpio.h" // gpioSettingsLauncher / bcdMenuLauncher
                                         // - the "Set Pins" / "BCD Counter" rows
 #include "SelfTest.h"
+#include "boards/board.h"   // caps.hasProbePads gates the pad-probe calibration apps
 #include "States.h"
 #include "USBAudio.h"
 #include "Undo.h"
@@ -437,6 +438,10 @@ static bool switchCalibWaitClick( const char* oledText ) {
 }
 
 void calibrateProbeSwitchThresholds( void ) {
+    if ( !board::currentBoard( ).caps.hasProbePads ) {
+        Serial.println( "Probe switch calibration needs the pad probe; this board has a scanning probe." );
+        return;
+    }
     b.clear( );
 
    // showProbeLEDs = 4;
@@ -795,6 +800,10 @@ static void probeCalibPaint( int node, int ghostNode, int measureOrSelect ) {
 // run (~80ms each), which happen once per steady hold in MEASURE and never
 // again once matched.
 void probeCalibApp( void ) {
+    if ( !board::currentBoard( ).caps.hasProbePads ) {
+        Serial.println( "Probe pad calibration needs the pad probe; this board has a scanning probe." );
+        return;
+    }
     b.clear( );
 
     cycleTerminalColor( true, 5.0, true );
@@ -1892,8 +1901,57 @@ int i2cScan( int sdaRow, int sclRow, int sdaPin, int sclPin, int leaveConnection
     return nDevices;
 }
 
+// The tail of first start, shared by both boards: examples, the unattended
+// self test, the interactive pad calibration where there are pads, a clean
+// undo history, restart.
+static void firstStartFinish( void ) {
+    initializeMicroPythonExamples( false );
+
+    // Unattended hardware self test replaces the interactive probe apps
+    // (calibrateProbeSwitchThresholds / probeCalibApp) so mass flashing
+    // needs no operator input. Both remain available from the clickwheel
+    // calibration menu for manual fine-tuning. This writes /selftest.json
+    // plus the one-shot marker that repaints the result overlay after the
+    // restart below.
+    runFullSelfTest( true );
+
+    if ( board::currentBoard( ).caps.hasProbePads ) {
+        // Hold the result overlay on the breadboard LEDs; the operator's
+        // touch (probe button / encoder / serial byte) chains into the
+        // interactive probe pad calibration instead of resetting - they are
+        // already at the board, so use the moment to align the pad map.
+        selfTestWaitForInput( "start probe pad calibration" );
+        selfTestClearOverlay( );
+        probeCalibApp( ); // saves config (incl. pad endpoints) on finish
+    } else {
+        // Nothing to align on a scanning-probe board: hold the result until
+        // the operator has seen it, then finish.
+        selfTestWaitForInput( "finish first start" );
+        selfTestClearOverlay( );
+    }
+
+    // Start the device with a clean undo/redo history: the calibration
+    // connects/disconnects above are internal setup, not user actions, and
+    // any history carried over from a factory/test image shouldn't ship to
+    // the user. Wipe it before the reboot that ends first-start.
+    undoWipeHistory( );
+
+    Serial.println( "Resetting..." );
+    Serial.flush( );
+    delay( 150 );
+    rp2040.restart( );
+}
+
 void calibrateDacs( ) {
 #if defined(OG_JUMPERLESS)
+    // The MCP4822 has no INA-readable path to solve constants against, so the
+    // sweep below is V5-only. First start still finishes the way the V5's
+    // does (examples, self test, restart), with nothing to calibrate first.
+    if ( firstStart == 1 ) {
+        Serial.println( "\n\rFirst startup (no DAC calibration on this board)\n\r" );
+        firstStartFinish( );
+        return;
+    }
     Serial.println( "DAC calibration is not supported on Jumperless OG." );
     return;
 #endif
@@ -2724,34 +2782,7 @@ if ( yesNo == 1 ) {
     // calibrateProbeSwitchThresholds( );
 
     if ( firstStart == 1 ) {
-        initializeMicroPythonExamples( false );
-
-        // Unattended hardware self test replaces the interactive probe apps
-        // (calibrateProbeSwitchThresholds / probeCalibApp) so mass flashing
-        // needs no operator input. Both remain available from the clickwheel
-        // calibration menu for manual fine-tuning. This writes /selftest.json
-        // plus the one-shot marker that repaints the result overlay after the
-        // restart below.
-        runFullSelfTest( true );
-
-        // Hold the result overlay on the breadboard LEDs; the operator's
-        // touch (probe button / encoder / serial byte) chains into the
-        // interactive probe pad calibration instead of resetting - they are
-        // already at the board, so use the moment to align the pad map.
-        selfTestWaitForInput( "start probe pad calibration" );
-        selfTestClearOverlay( );
-        probeCalibApp( ); // saves config (incl. pad endpoints) on finish
-
-        // Start the device with a clean undo/redo history: the calibration
-        // connects/disconnects above are internal setup, not user actions, and
-        // any history carried over from a factory/test image shouldn't ship to
-        // the user. Wipe it before the reboot that ends first-start.
-        undoWipeHistory( );
-
-        Serial.println( "Resetting..." );
-        Serial.flush( );
-        delay( 150 );
-        rp2040.restart( );
+        firstStartFinish( );
     }
 }
 

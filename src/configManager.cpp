@@ -32,6 +32,7 @@
 #include "Probing.h"
 #include "Python_Proper.h"
 #include "SelfTest.h"
+#include "boards/board.h"   // caps.hasProbePads: the droop sentinel below
 #include "FileCache.h"  // fileCacheFlushNow / fileCacheSpiftlSync - force config durable
 #include "InfraPaths.h" // infraNudge - re-evaluate the probe feed on probe.power_source
 #include "eyecandy/MenuTransitions.h" // menuTransitionConfig <-> [clickwheel] fx_*
@@ -1109,8 +1110,12 @@ void updateConfigFromFile(const char* filename) {
 
         // The probe droop calibration writes droop_ohms; 0 is the firmware's
         // own "never ran" sentinel. Boards that predate the pad/switch
-        // calibration should run it once after this update.
-        if (jumperlessConfig.probe.droop_ohms == 0.0f) {
+        // calibration should run it once after this update. A board without
+        // probe pads (the OG's scanning probe) can never write it, so the
+        // sentinel would re-arm on every version change and run a
+        // calibration that has nothing to measure.
+        if (jumperlessConfig.probe.droop_ohms == 0.0f &&
+            board::currentBoard().caps.hasProbePads) {
             probeCalibrationNeeded = true;
         }
 

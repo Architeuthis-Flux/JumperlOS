@@ -38,6 +38,7 @@
 #include "RotaryEncoder.h"
 #include "States.h"
 #include "USBAudio.h"
+#include "boards/board.h"
 #include "config.h"
 #include "configManager.h"
 #include "oled.h"
@@ -66,23 +67,21 @@ static const char* SELFTEST_OVERLAY_NAME = "_SELFTEST_";
 // Pause between tests so each one is watchable on the LEDs/OLED
 #define SELFTEST_PAUSE_MS 1500
 
-#if defined(OG_JUMPERLESS)
+// Both boards run this file. A test that needs hardware the board lacks
+// (probe pads, PSRAM, firmware-controlled rails) reports SKIP instead of
+// failing, and the result painting takes the form the board can show.
 
-// The OG has no crossbar-routable buffer, single-LED rows, and a different
-// analog front end - none of this test suite applies.
-void runFullSelfTest( bool ) { Serial.println( "Self test is not supported on Jumperless OG." ); }
-void selfTestWaitForInput( const char* ) { }
-void selfTestClearOverlay( void ) { }
-void selfTestWaitForInputThenReset( void ) { rp2040.restart( ); }
-void probeCableTestApp( void ) { runFullSelfTest( false ); }
-void crossbarTestApp( void ) { runFullSelfTest( false ); }
-void tipVoltageTestApp( void ) { runFullSelfTest( false ); }
-void psramTestApp( void ) { runFullSelfTest( false ); }
-void fullSelfTestApp( void ) { runFullSelfTest( false ); }
-void selfTestPrintStoredReport( void ) { Serial.println( "::SELFTEST::none::END::" ); }
-void selfTestShowSavedResultIfPending( void ) { }
-
-#else // V5 implementation
+// The board's routable GPIO nodes (V5: GPIO_1-8 on pins 20-27; OG: GPIO_0 on
+// pin 0), from the board descriptor. The UART pair sits in the same table but
+// belongs to the Nano-header bridge, so it is left alone.
+template <typename Fn> static void forEachRoutableGpio( Fn fn ) {
+    const auto& bd = board::currentBoard( );
+    for ( int i = 0; i < bd.gpioCount; i++ ) {
+        if ( strncmp( bd.gpio[ i ].label, "GPIO", 4 ) != 0 )
+            continue;
+        fn( (int)bd.gpio[ i ].node, (int)bd.gpio[ i ].physicalPin, bd.gpio[ i ].label );
+    }
+}
 
 // ============================================================================
 // Framework
@@ -124,8 +123,12 @@ static void selfTestNormalizeHardware( void ) {
     refreshConnections( -1, 0, 1 );
     waitCore2( );
 
-    Serial.println( "    zeroing MCP4728: DAC0, DAC1, top rail, bottom rail -> 0.000V" );
-    for ( int d = 0; d < 4; d++ ) {
+    // Rails are DAC channels 2/3 on the V5; on the OG they are a hardware
+    // switch and the setters keep bookkeeping only, so zero the two real DACs.
+    const int dacs = board::currentBoard( ).caps.railsFirmwareControlled ? 4 : 2;
+    Serial.printf( "    zeroing DACs: DAC0, DAC1%s -> 0.000V\n\r",
+                   dacs == 4 ? ", top rail, bottom rail" : "" );
+    for ( int d = 0; d < dacs; d++ ) {
         setDacByNumber( d, 0.0, 0 );
     }
     // The zero writes above are save=0 (hardware only, state untouched) -
@@ -133,10 +136,8 @@ static void selfTestNormalizeHardware( void ) {
     // MCP unconditionally instead of trusting the stale in-window state.
     infraDacParkEpochBump( );
 
-    Serial.println( "    releasing routable GPIOs 1-8 (pins 20-27) to inputs" );
-    for ( int g = 0; g < 8; g++ ) {
-        pinMode( gpioDef[ g ][ 0 ], INPUT );
-    }
+    Serial.println( "    releasing the routable GPIOs to inputs" );
+    forEachRoutableGpio( []( int, int pin, const char* ) { pinMode( pin, INPUT ); } );
 
     Serial.println( "    restoring INA219 ADC config (0x0b)" );
     INA0.setBusADC( 0x0b );
@@ -197,8 +198,12 @@ static uint32_t statusColor( SelfTestStatus s ) {
 // Paint the result overlay: overall status on columns 1-3, then one 4-column
 // band per test (left to right in test order) with a blank column between.
 static void paintSelfTestOverlay( const SelfTestReport& r ) {
-    static uint32_t colors[ MAX_OVERLAY_PIXELS ]; // 300 * 4B; static to spare stack
-    memset( colors, 0, sizeof( colors ) );
+    // 300 * 4 B, off the stack. From the heap for the moment it takes
+    // (addOverlay copies it) rather than a static that would also occupy the
+    // OG's RAM, where this path never runs.
+    uint32_t* colors = (uint32_t*)calloc( MAX_OVERLAY_PIXELS, sizeof( uint32_t ) );
+    if ( !colors )
+        return;
 
     bool anyRun = false;
     for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
@@ -223,7 +228,39 @@ static void paintSelfTestOverlay( const SelfTestReport& r ) {
     }
 
     graphicOverlayState.addOverlay( SELFTEST_OVERLAY_NAME, 1, 1, 30, 10, colors );
+    free( colors );
     requestLedShow( -2 );
+}
+
+// The OG renders no graphic overlays (one LED per row), so its result goes
+// straight into the row pixels: the overall verdict on rows 1-3, then one
+// 4-row band per test (rows 5-8, 10-13, ...) - the V5 overlay's left-to-right
+// order, read along the top half of the board.
+static void paintSelfTestRows( const SelfTestReport& r ) {
+    bool anyRun = false;
+    for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
+        if ( r.status[ i ] != SELFTEST_NOTRUN )
+            anyRun = true;
+    }
+    uint32_t overall = anyRun ? statusColor( reportOverallPass( r ) ? SELFTEST_PASS : SELFTEST_FAIL ) : 0;
+    for ( int row = 1; row <= 3; row++ ) {
+        paintRowColor( row, overall );
+    }
+    for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
+        uint32_t c = statusColor( r.status[ i ] );
+        int start = 5 + i * 5;
+        for ( int row = start; row < start + 4; row++ ) {
+            paintRowColor( row, c );
+        }
+    }
+}
+
+static void paintSelfTestResult( const SelfTestReport& r ) {
+    if ( board::currentBoard( ).caps.ledsPerRow == 1 ) {
+        paintSelfTestRows( r );
+    } else {
+        paintSelfTestOverlay( r );
+    }
 }
 
 static String selfTestToJson( const SelfTestReport& r ) {
@@ -393,6 +430,12 @@ static bool probeLineFloatCheck( uint pin ) {
 
 static void runProbeCableTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] probe cable..." );
+    if ( !board::currentBoard( ).caps.hasProbePads ) {
+        Serial.println( "  scanning probe: no TRRS cable, LED line or tip ADC to check - skipping" );
+        snprintf( r.detail[ SELFTEST_PROBE_CABLE ], sizeof( r.detail[ 0 ] ), "no probe pads on this board" );
+        r.status[ SELFTEST_PROBE_CABLE ] = SELFTEST_SKIP;
+        return;
+    }
     b.clear( );
     b.print( "Probe", (uint32_t)0x000a12 );
     requestLedShow( 2 );
@@ -611,11 +654,37 @@ static void runCrossbarTest( SelfTestReport& r ) {
     const float target = 2.5f;
     const float tol = 0.35f;
     setDacByNumber( 1, target, 0 );
+
+    // Reference first: the source straight into each ADC (two chip-K
+    // crosspoints, no breadboard row). Rows are then judged against what the
+    // converter reads of this DAC, not against the nominal, so a source
+    // sitting a few hundred mV off (the OG's bipolar DAC1 stage reads ~0.5 V
+    // low through its reference-firmware constants) can't fail sixty healthy
+    // crosspoints. A reference itself far from nominal is the DAC/ADC path's
+    // problem and fails the test on its own.
+    float ref[ 4 ];
+    bool refOk = true;
+    for ( int adcCh = 0; adcCh < 4; adcCh++ ) {
+        globalState.clearAllConnections( );
+        addBridgeToState( DAC1, ADC0 + adcCh );
+        refreshConnections( -1, 0, 1 );
+        waitCore2( );
+        delay( 8 );
+        ref[ adcCh ] = readAdcVoltage( adcCh, 16 );
+        if ( fabsf( ref[ adcCh ] - target ) > 1.0f )
+            refOk = false;
+    }
     Serial.printf( "  phase 1/3: DAC1 at %.3fV routed to each of the 60 rows,\n\r"
                    "             read back through a rotating ADC0-3 return path\n\r"
-                   "             (pass window %.2f..%.2fV; measured voltage is the\n\r"
-                   "             only ground truth a crosspoint actually closed)\n\r",
-                   (double)target, (double)( target - tol ), (double)( target + tol ) );
+                   "             (reference DAC1 direct: ADC0 %.3f ADC1 %.3f ADC2 %.3f ADC3 %.3fV;\n\r"
+                   "             each row must land within %.2fV of its ADC's reference -\n\r"
+                   "             measured voltage is the only ground truth a crosspoint closed)\n\r",
+                   (double)target, (double)ref[ 0 ], (double)ref[ 1 ], (double)ref[ 2 ],
+                   (double)ref[ 3 ], (double)tol );
+    if ( !refOk ) {
+        Serial.println( "  reference more than 1V from nominal: DAC1 or the ADC path is off; "
+                        "the rows are still judged against it, the test fails regardless" );
+    }
 
     int rowFails = 0;
     char rowList[ 32 ] = "";
@@ -628,7 +697,7 @@ static void runCrossbarTest( SelfTestReport& r ) {
         waitCore2( );
         delay( 8 );
         float v = readAdcVoltage( adcCh, 16 );
-        bool ok = fabsf( v - target ) <= tol;
+        bool ok = fabsf( v - ref[ adcCh ] ) <= tol;
         paintRowStatus( row, ok ); // progressive green/red fill across the board
         // 4 rows per line keeps the live log readable across 60 rows
         Serial.printf( "  row %2d ADC%d %5.3fV %-4s%s", row, adcCh, (double)v,
@@ -645,18 +714,18 @@ static void runCrossbarTest( SelfTestReport& r ) {
     setDacByNumber( 1, 0.0, 0 );
 
     // GPIO loopback: drive each routable GPIO high/low through the matrix
-    Serial.println( "  phase 2/3: GPIO 1-8 driven high then low, measured through routed ADC" );
-    int gpioFails = 0;
-    for ( int g = 0; g < 8; g++ ) {
+    Serial.println( "  phase 2/3: routable GPIOs driven high then low, measured through routed ADC" );
+    int gpioFails = 0, gpioCount = 0;
+    forEachRoutableGpio( [&]( int node, int pin, const char* label ) {
+        int g = gpioCount++;
         globalState.clearAllConnections( );
         int row = 15 + g; // spread across rows; exact row doesn't matter
         int adcCh = g % 4;
-        addBridgeToState( RP_GPIO_1 + g, row );
+        addBridgeToState( node, row );
         addBridgeToState( ADC0 + adcCh, row );
         refreshConnections( -1, 0, 1 );
         waitCore2( );
         delay( 5 );
-        int pin = gpioDef[ g ][ 0 ];
         pinMode( pin, OUTPUT );
         digitalWrite( pin, HIGH );
         delay( 3 );
@@ -667,17 +736,22 @@ static void runCrossbarTest( SelfTestReport& r ) {
         pinMode( pin, INPUT );
         bool ok = !( vHigh < 2.9f || vHigh > 3.6f || fabsf( vLow ) > 0.4f );
         paintRowColor( row, ok ? 0x000814 : 0x160000 ); // blue = gpio phase
-        Serial.printf( "  gpio %d loopback: high=%.3fV low=%.3fV %s\n\r", g + 1,
+        Serial.printf( "  %s loopback: high=%.3fV low=%.3fV %s\n\r", label,
                        (double)vHigh, (double)vLow, ok ? "ok" : "FAIL" );
         if ( !ok ) {
             gpioFails++;
         }
-    }
+    } );
 
     // Rails through the matrix to their calibration ADCs
-    Serial.println( "  phase 3/3: rails set to 3.300V, routed to ADC2/ADC3" );
     int railFails = 0;
-    for ( int rail = 0; rail < 2; rail++ ) {
+    const bool railsTestable = board::currentBoard( ).caps.railsFirmwareControlled;
+    if ( railsTestable ) {
+        Serial.println( "  phase 3/3: rails set to 3.300V, routed to ADC2/ADC3" );
+    } else {
+        Serial.println( "  phase 3/3: rails are a hardware switch on this board - skipped" );
+    }
+    for ( int rail = 0; railsTestable && rail < 2; rail++ ) {
         globalState.clearAllConnections( );
         setDacByNumber( 2 + rail, 3.3f, 0 );
         addBridgeToState( rail == 0 ? TOP_RAIL : BOTTOM_RAIL, ADC2 + rail );
@@ -701,15 +775,17 @@ static void runCrossbarTest( SelfTestReport& r ) {
     // probing.routableBufferPower(1) pass re-claims a pin if enabled.
     infraForceCandidate( "probe_power", -1 );
 
-    if ( rowFails || gpioFails || railFails ) {
+    if ( rowFails || gpioFails || railFails || !refOk ) {
         printChipStateArray( ); // routing model dump to help diagnose
         snprintf( r.detail[ SELFTEST_CROSSBAR ], sizeof( r.detail[ 0 ] ),
-                  "rowFail:%d[%s] gpioFail:%d railFail:%d", rowFails, rowList,
-                  gpioFails, railFails );
+                  "rowFail:%d[%s] gpioFail:%d railFail:%d ref:%.2f/%.2f/%.2f/%.2f",
+                  rowFails, rowList, gpioFails, railFails, (double)ref[ 0 ],
+                  (double)ref[ 1 ], (double)ref[ 2 ], (double)ref[ 3 ] );
         r.status[ SELFTEST_CROSSBAR ] = SELFTEST_FAIL;
     } else {
         snprintf( r.detail[ SELFTEST_CROSSBAR ], sizeof( r.detail[ 0 ] ),
-                  "rows:60/60 gpio:8/8 rails:2/2" );
+                  "rows:60/60 gpio:%d/%d rails:%s", gpioCount, gpioCount,
+                  railsTestable ? "2/2" : "switch" );
         r.status[ SELFTEST_CROSSBAR ] = SELFTEST_PASS;
     }
 }
@@ -751,6 +827,12 @@ static float readTipAveraged( int bursts, int samplesPerBurst, float* spreadOut 
 
 static void runTipVoltageTest( SelfTestReport& r ) {
     Serial.println( "\n\r[selftest] probe tip voltage..." );
+    if ( !board::currentBoard( ).caps.hasProbePads ) {
+        Serial.println( "  no measure-mode buffer or tip ADC on this board - skipping" );
+        snprintf( r.detail[ SELFTEST_TIP_VOLTAGE ], sizeof( r.detail[ 0 ] ), "no probe pads on this board" );
+        r.status[ SELFTEST_TIP_VOLTAGE ] = SELFTEST_SKIP;
+        return;
+    }
     b.clear( );
     b.print( "Tip V", (uint32_t)0x0a0a00 );
     requestLedShow( 2 );
@@ -1063,6 +1145,12 @@ static void runPsramTest( SelfTestReport& r ) {
     b.print( "PSRAM", (uint32_t)0x001008 );
     requestLedShow( 2 );
 
+    if ( !board::currentBoard( ).caps.hasPsram ) {
+        Serial.println( "  no PSRAM on this board - skipping" );
+        snprintf( r.detail[ SELFTEST_PSRAM ], sizeof( r.detail[ 0 ] ), "no PSRAM on this board" );
+        r.status[ SELFTEST_PSRAM ] = SELFTEST_SKIP;
+        return;
+    }
     size_t sz = rp2040.getPSRAMSize( );
     if ( sz == 0 ) {
         Serial.println( "  no PSRAM detected (optional mod kit) - skipping" );
@@ -1101,8 +1189,15 @@ static void runPeripheralsTest( SelfTestReport& r ) {
     Serial.printf( "  INA219 #0 (0x40): %s\n\r", ina0 ? "ack" : "NO ACK" );
     bool ina1 = i2cAck( 0x41 );
     Serial.printf( "  INA219 #1 (0x41): %s\n\r", ina1 ? "ack" : "NO ACK" );
-    bool dac = i2cAck( 0x60 );
-    Serial.printf( "  MCP4728 DAC (0x60): %s\n\r", dac ? "ack" : "NO ACK" );
+    // The OG's MCP4822 is on SPI with no readback; its output is proven by
+    // the crossbar test's DAC1 sweep instead.
+    const bool spiDac = board::currentBoard( ).caps.spiDac;
+    bool dac = spiDac || i2cAck( 0x60 );
+    if ( spiDac ) {
+        Serial.println( "  DAC: MCP4822 on SPI (no readback; covered by the crossbar sweep)" );
+    } else {
+        Serial.printf( "  MCP4728 DAC (0x60): %s\n\r", dac ? "ack" : "NO ACK" );
+    }
     // The boot path writes 0xAA here before we can run, so a readback of
     // anything else means the emulated-EEPROM flash sector is broken.
     uint8_t eepromByte = EEPROM.read( FIRSTSTARTUPADDRESS );
@@ -1221,15 +1316,25 @@ static void runSelfTestSession( SelfTestReport& r, const bool runMask[ SELFTEST_
     setRailsAndDACs( 0 );
     refreshConnections( -1 );
     probing.routableBufferPower( 1, 0, 1 );
+    waitCore2( ); // let the slot-restore render land before the result is painted over it
     b.clear( );
 
-    paintSelfTestOverlay( r );
+    paintSelfTestResult( r );
     printHumanReport( r );
     oledStatus( reportOverallPass( r ) ? "Test PASS" : "Test FAIL" );
     printSentinelReport( selfTestToJson( r ) );
     // NOTE: report persistence lives in runFullSelfTest, not here - retry
     // rounds call this with partial masks and must not clobber the stored
     // result with a partial view.
+}
+
+// Encoder click/turn as a "human is here" signal. A board without an encoder
+// has that pin doing something else, so it never counts there.
+static bool encoderInput( void ) {
+    if ( !board::currentBoard( ).caps.hasRotaryEncoder )
+        return false;
+    return encoderButtonState != IDLE || isEncoderButtonPhysicallyPressed( ) ||
+           encoderDirectionState != NONE;
 }
 
 // Countdown before a retry round. Any human input (probe button, encoder
@@ -1248,9 +1353,7 @@ static bool selfTestRetryCountdownAborted( int seconds ) {
         while ( millis( ) - t0 < 1000 ) {
             if ( probing.checkProbeButtonState( ) != 0 )
                 return true;
-            if ( encoderButtonState != IDLE || isEncoderButtonPhysicallyPressed( ) )
-                return true;
-            if ( encoderDirectionState != NONE )
+            if ( encoderInput( ) )
                 return true;
             if ( Serial.available( ) > 0 )
                 return true;
@@ -1338,9 +1441,7 @@ static void waitForAnyInput( void ) {
     while ( true ) {
         if ( probing.checkProbeButtonState( ) != 0 )
             break;
-        if ( encoderButtonState != IDLE || isEncoderButtonPhysicallyPressed( ) )
-            break;
-        if ( encoderDirectionState != NONE )
+        if ( encoderInput( ) )
             break;
         if ( Serial.available( ) > 0 )
             break;
@@ -1350,8 +1451,11 @@ static void waitForAnyInput( void ) {
 
 void selfTestWaitForInput( const char* nextWhat ) {
     Serial.println( "\n\rResults are showing on the breadboard LEDs." );
-    Serial.printf( "Touch a probe button, click or turn the encoder, or send any\n\r"
-                   "serial byte to %s.\n\r", nextWhat );
+    Serial.printf( "%s or send any serial byte to %s.\n\r",
+                   board::currentBoard( ).caps.hasRotaryEncoder
+                       ? "Touch a probe button, click or turn the encoder,"
+                       : "Press the probe button,",
+                   nextWhat );
     Serial.flush( );
 
     waitForAnyInput( );
@@ -1359,7 +1463,8 @@ void selfTestWaitForInput( const char* nextWhat ) {
 
 void selfTestClearOverlay( void ) {
     graphicOverlayState.removeOverlay( SELFTEST_OVERLAY_NAME );
-    requestLedShow( -2 );
+    // The OG's result lives in the row pixels: clear and redraw the nets.
+    requestLedShow( board::currentBoard( ).caps.ledsPerRow == 1 ? -1 : -2 );
 }
 
 void selfTestWaitForInputThenReset( void ) {
@@ -1380,11 +1485,7 @@ static void runSingleTest( int idx ) {
 
     // Single tests don't reset: hold the result on the LEDs until any input,
     // then clear the overlay and hand the board back as-is.
-    Serial.println( "\n\rResult is showing on the breadboard LEDs." );
-    Serial.println( "Touch a probe button, click or turn the encoder, or send any" );
-    Serial.println( "serial byte to clear it." );
-    Serial.flush( );
-    waitForAnyInput( );
+    selfTestWaitForInput( "clear it" );
     selfTestClearOverlay( );
 }
 
@@ -1423,5 +1524,3 @@ void selfTestShowSavedResultIfPending( void ) {
     // that missed the pre-restart report across the USB re-enumeration.
     selfTestPrintStoredReport( );
 }
-
-#endif // OG_JUMPERLESS
