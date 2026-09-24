@@ -1458,9 +1458,22 @@ the V5's string and survived an OG-only rebuild). `version_from_file.py` now
 passes `FIRMWARE_VERSION` as a per-env `-D` (`env.StringifyMacro`) and writes
 the header as a guarded fallback for editors and the host QSTR build only.
 
-**Still open:** `os.statvfs` is missing (the IDE tolerates it); the OG's
-banner still says `jumperless-v5 ... with rp2350b`; MpRemoteService still
-retries a failed heap alloc every pass (latch it). Build note: with the IDE
+**Banner (evening).** The OG's MicroPython banner said `jumperless-v5
+v1.7.11.2 with rp2350b` and `sys.platform` said `jumperless-rp2350`: the
+three `mpconfigport.h` copies hard-coded the V5's names. The OG env already
+passes `-DOG_JUMPERLESS`, so the copies now pick `jumperless-og` / `rp2040` /
+`jumperless-rp2040` under it (all three edited identically; keep them
+byte-identical). None of these are QSTRs (`MP_DEFINE_STR_OBJ`), so the
+host-side QSTR build, which never sees the define, is unaffected. Verified on
+the OG over port 5: `sys.implementation._machine` = `jumperless-og v1.7.11.2
+with rp2040`, `os.uname().machine` = `jumperless-og with rp2040`. JumperIDE
+and the desktop app were taught the OG the same evening (JumperIDE
+`src/firmware_feed.mjs`, app `classify_firmware()`): both key on the version
+major 1 as a fallback, because every OG build shipped before this change
+still claims to be a V5.
+
+**Still open:** `os.statvfs` is missing (the IDE tolerates it); MpRemoteService
+still retries a failed heap alloc every pass (latch it). Build note: with the IDE
 open, a venv `pio run` and the IDE's own PlatformIO take turns cleaning
 `.pio/build` (project.checksum mismatch) - builds die mid-way with "can't
 create ...o" and the tracked V5 `firmware.uf2` gets deleted. Build with

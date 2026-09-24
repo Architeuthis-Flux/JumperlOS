@@ -432,7 +432,13 @@ void *jl_mp_commit_exec(void *buf, size_t len);
 // 12. sys / os module configuration
 // =============================================================================
 #define MICROPY_PY___FILE__         (1)
+// sys.platform / os.uname().sysname. The OG env passes -DOG_JUMPERLESS, so
+// the RP2040 build names its own chip; host-side tooling keys on "jumperless".
+#ifdef OG_JUMPERLESS
+#define MICROPY_PY_SYS_PLATFORM     "jumperless-rp2040"
+#else
 #define MICROPY_PY_SYS_PLATFORM     "jumperless-rp2350"
+#endif
 #define MICROPY_PY_SYS_EXIT         (1)
 #define MICROPY_PY_SYS_PATH         (1)
 #define MICROPY_PY_SYS_PS1_PS2      (1)  // Enable for REPL
@@ -470,12 +476,18 @@ void *jl_mp_commit_exec(void *buf, size_t len);
 #define MODULE_JUMPERLESS_ENABLED   (1)
 
 // Board name for sys.platform
+#ifdef OG_JUMPERLESS
+#define MICROPY_HW_BOARD_NAME "jumperless-og"
+#define MICROPY_HW_MCU_NAME   "rp2040"
+#else
 #define MICROPY_HW_BOARD_NAME "jumperless-v5"
 #define MICROPY_HW_MCU_NAME   "rp2350b"
+#endif
 
 // Surface the Jumperless firmware version in the REPL banner's machine field
 // (the segment after "; ") and in sys.implementation._machine, so external
-// tooling like JumperIDE can parse "jumperless-v5 vX.Y.Z.W with rp2350b" from
+// tooling like JumperIDE can parse "jumperless-v5 vX.Y.Z.W with rp2350b" (or
+// "jumperless-og v1.Y.Z.W with rp2040" on the RP2040 build) from
 // the greeting. Single source of truth is the project VERSION file, emitted as
 // FIRMWARE_VERSION by scripts/version_from_file.py into
 // include/FirmwareVersion.generated.h. That header is only on the include path
