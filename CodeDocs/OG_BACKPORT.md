@@ -1568,16 +1568,18 @@ The config zero rows (`dac_*_zero`, `adc_0..3_zero`) now allow a little
 below 0: the loader clamps to the X-table range and DAC0's fitted zero is a
 few codes negative on some boards.
 
-**Bench notes.** Port 1's read dropped mid-calibration (the board stayed up
-on port 5 and finished; probably the config flash write stalling USB) - the
-PASS banner was not captured, the config was. `$` runs the calibration from
-port 1 in line mode.
+**Bench notes.** `$` runs the calibration from port 1 in line mode. My
+port-1 capture dropped mid-calibration because Kevin's app (a Python
+process) held that port from ~12:50 and macOS let both readers in: the
+board finished, the config proves it, and the PASS banner went to his
+terminal. Disclosed in the session report; the one-process-per-port rule
+stands.
 
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); MpRemoteService
 still retries a failed heap alloc every pass (latch it); the OG router prints
 a burst of blank lines per refresh on port 1 (not from routing itself -
 MicroPython connects print nothing - something per self-test row);
-port 1 dropping during a config save. Build note: with the IDE
+the config TUI shows `hardware.generation 5` on an uncalibrated OG (the stamp's default; cosmetic). Build note: with the IDE
 open, a venv `pio run` and the IDE's own PlatformIO take turns cleaning
 `.pio/build` (project.checksum mismatch) - builds die mid-way with "can't
 create ...o" and the tracked V5 `firmware.uf2` gets deleted. Build with
