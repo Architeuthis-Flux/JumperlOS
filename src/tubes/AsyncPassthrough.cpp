@@ -1666,7 +1666,13 @@ static void uart_rx_clean_resync( uint32_t max_wait_us ) {
 // begin(); here we force a clean byte-aligned resync (handles the case where the
 // Arduino was already streaming when the Jumperless rebooted), discard anything
 // captured during boot, and mark the receiver live.
+// The UART pins belong to someone else for now (the OG's OLED, see
+// releaseUartPins): begin() and every receiver re-enable honour it, whichever
+// order boot runs them in, and reclaimUartPins() is the only way back.
+static volatile bool s_pinsReleased = false;
+
 static void enableUARTReceiver() {
+    if ( s_pinsReleased ) return;
     if ( s_uart_irq_enabled ) return;
     if ( s_rx_dma_chan < 0 ) setupRxDma();
     uart_rx_clean_resync( 60000 );  // up to 60ms (one-time, at boot) to find an idle gap
@@ -1676,6 +1682,7 @@ static void enableUARTReceiver() {
 }
 
 void releaseUartPins() {
+    s_pinsReleased = true;
     if ( !async_begun ) return;
     if ( s_rx_dma_chan >= 0 && dma_channel_is_busy( s_rx_dma_chan ) ) {
         dma_channel_abort( s_rx_dma_chan );
@@ -1689,6 +1696,7 @@ void releaseUartPins() {
 }
 
 void reclaimUartPins() {
+    s_pinsReleased = false;
     if ( !async_begun ) return;
     gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_UART );
     gpio_set_function( ASYNC_PASSTHROUGH_UART_RX_PIN, GPIO_FUNC_UART );
@@ -1697,10 +1705,17 @@ void reclaimUartPins() {
 
 void begin( unsigned long baud ) {
     // Configure UART pins and UART with HW FIFO enabled
-    gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_UART );
-    gpio_set_function( ASYNC_PASSTHROUGH_UART_RX_PIN, GPIO_FUNC_UART );
+    if ( !s_pinsReleased ) {
+        gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_UART );
+        gpio_set_function( ASYNC_PASSTHROUGH_UART_RX_PIN, GPIO_FUNC_UART );
+    }
 
     uart_init( ASYNC_PASSTHROUGH_UART, baud );
+    if ( s_pinsReleased ) {
+        // No pin feeds the receiver: leave it off, or an unassigned input
+        // (reads low) is a permanent break and the ring fills with garbage.
+        hw_clear_bits( &uart_get_hw( ASYNC_PASSTHROUGH_UART )->cr, UART_UARTCR_RXE_BITS );
+    }
     uart_set_format( ASYNC_PASSTHROUGH_UART, 8, 1, UART_PARITY_NONE );
     uart_set_fifo_enabled( ASYNC_PASSTHROUGH_UART, true );
 

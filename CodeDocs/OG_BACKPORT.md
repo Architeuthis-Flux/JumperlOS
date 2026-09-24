@@ -1629,9 +1629,25 @@ What it took, in the order the bench found it:
   routed to the SCL lane. Table fixed; `test_boards` now pins the lane-to-
   pin mapping.
 
-Bench (OG, over port 5 - Kevin's app holds port 1): OLED live from boot,
-4/4 reconnects, every `oled_show` 16.4 ms (a full 512-byte frame at
-400 kHz), INA0/INA1 reads correct and 0.4 ms across every pair switch,
+Two more from the review pass and the boot tests:
+- The passthrough begins ~3 s after `startupCompleteRequestTime`, i.e.
+  after the boot OLED init, and two other paths re-enable its receiver.
+  `s_pinsReleased` (set by releaseUartPins, cleared by reclaim) is honoured
+  by `begin()` (no pin mux, receiver left off) and by every
+  `enableUARTReceiver()`, whichever order boot runs them in. Port 3 read 0
+  bytes with the OLED live, before and after the passthrough's start.
+- Detection at boot was a coin toss across resets while manual connects
+  were 6/6, and the run that recovered it had toggled the SDA lane by hand
+  first: a reset mid-transaction leaves the SSD1306 holding SDA low, which
+  is a STOP away from answering again. `i2cBusUnstick()` (nine SCL clocks
+  and a STOP, bit-banged while the pair is still SIO) now runs before the
+  alternate pair's first ping; the init pings five times over 200 ms.
+
+Bench (OG, over port 5 - Kevin's app holds port 1): OLED live from boot on
+5/5 consecutive boots, 6/6 manual reconnects, every `oled_show` 16.7 ms (a
+full 512-byte frame at 400 kHz), INA0/INA1 reads correct and 0.4 ms across
+every pair switch, pin-to-row path proven by driving GPIO 16/17 and reading
+D2/D3 through ADC0 with the panel's pull-ups as the load,
 `:nets` shows D2<->UART_Tx and D3<->UART_Rx while connected and nothing
 after. V5: builds and `test_boards` passes; one V5 behaviour change:
 connection_type 3 (custom) picks the bus by its SDA pin now, where before

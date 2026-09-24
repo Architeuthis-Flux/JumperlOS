@@ -699,11 +699,14 @@ int oled::init( ) {
         // rather than holding a bridge and a parked UART for a display that
         // is not there (every OG boot comes through here with
         // connect_on_boot's default of 1).
+        // Five tries over ~200 ms: the OG reaches this boot init well before
+        // the V5 does (no startup animation), and a panel powered with the
+        // board is still in its own power-on reset for the first pings.
         bool answered = false;
-        for ( int tries = 0; !answered && tries < 3; tries++ ) {
+        for ( int tries = 0; !answered && tries < 5; tries++ ) {
             answered = checkConnection( true );
             if ( !answered )
-                delay( 20 );
+                delay( 40 );
         }
         if ( !answered ) {
             disconnect( );

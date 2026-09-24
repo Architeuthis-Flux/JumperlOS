@@ -638,6 +638,36 @@ int findI2CAddress( int sdaPin, int sclPin, int i2cNumber, int print ) {
     return address;
 }
 
+// Standard I2C bus recovery on a pair that is not yet the block's: SDA
+// released (input, pull-up), SCL driven for nine clocks, then a STOP
+// (SDA low -> SCL high -> SDA high). Leaves both pins as inputs.
+void i2cBusUnstick( int sdaPin, int sclPin ) {
+    gpio_set_function( sdaPin, GPIO_FUNC_SIO );
+    gpio_set_dir( sdaPin, false );
+    gpio_set_pulls( sdaPin, true, false );
+    gpio_set_function( sclPin, GPIO_FUNC_SIO );
+    gpio_set_pulls( sclPin, true, false );
+    gpio_put( sclPin, 1 );
+    gpio_set_dir( sclPin, true );
+    delayMicroseconds( 5 );
+    for ( int i = 0; i < 9; i++ ) {
+        gpio_put( sclPin, 0 );
+        delayMicroseconds( 5 );
+        gpio_put( sclPin, 1 );
+        delayMicroseconds( 5 );
+    }
+    // STOP: SDA low while SCL low, SCL high, then SDA high.
+    gpio_put( sclPin, 0 );
+    gpio_put( sdaPin, 0 );
+    gpio_set_dir( sdaPin, true );
+    delayMicroseconds( 5 );
+    gpio_put( sclPin, 1 );
+    delayMicroseconds( 5 );
+    gpio_set_dir( sdaPin, false ); // SDA released high = STOP
+    delayMicroseconds( 5 );
+    gpio_set_dir( sclPin, false );
+}
+
 int initI2C( int sdaPin, int sclPin, int speed ) {
 
     // Serial.println("initI2C");
@@ -697,6 +727,13 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
             // caller registers that address; the bus clock stays its owner's.
             Wire.begin( ); // a no-op while running; after a Wire.end() (the
                            // OLED's hot-plug reset) it brings the block back
+            // A slave left mid-transaction by the last reset holds SDA low
+            // and answers nothing until it has been clocked out; nine SCL
+            // pulses and a STOP, bit-banged while the pair is still SIO.
+            // Harmless to an idle panel (SDA high throughout = no START).
+            // Bench 2026-09-24: OLED detection at boot was a coin toss
+            // without this and the SDA lane toggled by hand fixed it.
+            i2cBusUnstick( sdaPin, sclPin );
             i2c0ArbiterSetAltPins( sdaPin, sclPin, i2c0Pins[ 0 ], i2c0Pins[ 1 ] );
             return 20; // I2C0 through the arbiter's alternate pair
         }
