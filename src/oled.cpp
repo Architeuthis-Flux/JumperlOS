@@ -19,7 +19,9 @@
 #include "States.h"
 #include "WaveGen.h" // shared-I2C0 gate in show() checks wavegen.isRunning()
 #include "Wire.h"
-#include "boards/board.h"     // currentBoard().caps.hasOled (OG gate)
+#include "boards/board.h"     // currentBoard(): caps + the crossbar I2C pair
+#include "coredination/I2C0Arbiter.h"   // the OG shares I2C0 with the INA219s
+#include "AsyncPassthrough.h"           // parked while the OLED holds the UART pins
 #include "config.h"
 #include "configManager.h"
 
@@ -135,18 +137,16 @@ static bool oledFramebufferReady( ) {
 // INA219s get their clock back). We also force a recreate on first call (when
 // the static placeholder is still in use) so the slow-default static never
 // runs real OLED traffic.
+// Which I2C block a pin belongs to: SDA pins sit on I2C0 at 0,4,8,... and on
+// I2C1 at 2,6,10,... (RP2040 and RP2350 alike), so bit 1 of the SDA pin is
+// the block. V5: type 0 (26) and 1 (6) -> I2C1, type 2 (4) -> I2C0; the OG's
+// type 0 (16, the UART pair) -> I2C0, shared with the INA219s through the
+// arbiter's per-transaction pin switch.
+static int oledWireForSdaPin(int sdaPin) { return (sdaPin >> 1) & 1; }
+
 bool initDisplayForConnectionType(int connectionType) {
-    // Determine which Wire to use based on connection_type
-    // Type 0 = GPIO 26/27 -> I2C1 (Wire1)
-    // Type 1 = GPIO 6/7 -> I2C1 (Wire1)
-    // Type 2 = GPIO 4/5 -> I2C0 (Wire)
-    // Type 3 = custom -> check pins
-    int needWire;
-    if (connectionType == 2) {
-        needWire = 0;  // I2C0 (Wire)
-    } else {
-        needWire = 1;  // I2C1 (Wire1) for types 0, 1, 3
-    }
+    (void)connectionType;
+    int needWire = oledWireForSdaPin(jumperlessConfig.top_oled.sda_pin);
 
     // Already using the correctly-clocked dynamic instance on the right Wire
     // AND the right geometry. Without the size check, changing width/height at
@@ -620,6 +620,15 @@ struct OledSharedBusWindow {
 }   // namespace
 
 // Initialization
+// The configured pair is the board's UART pair (boards/board.h xbarI2c*: the
+// OG's 16/17). The passthrough is parked around a connection there.
+static bool oledPinsAreUartPins( void ) {
+    const auto& caps = board::currentBoard( ).caps;
+    const int sda = jumperlessConfig.top_oled.sda_pin, scl = jumperlessConfig.top_oled.scl_pin;
+    auto isUart = [&]( int pin ) { return pin == caps.uartTxPin || pin == caps.uartRxPin; };
+    return sda != scl && isUart( sda ) && isUart( scl );
+}
+
 int oled::init( ) {
     #if OLED_DEBUG
     Serial.printf("[OLED] init() called, connection_type=%d\n", jumperlessConfig.top_oled.connection_type);
@@ -630,6 +639,20 @@ int oled::init( ) {
     }
 
     int success = 0;
+    {
+        // The hardwired choices (RP6/RP7, internal I2C0) are V5 rev 7 headers;
+        // a board without them takes the crossbar route. And type 0's pins
+        // come from the board descriptor, never from the file: a config
+        // written for the other board names pins that mean something else
+        // here (the V5's 26/27 are the OG's ADC0/ADC1).
+        int t = jumperlessConfig.top_oled.connection_type;
+        if ( !board::currentBoard( ).caps.internalOledHeader && ( t == 1 || t == 2 ) ) {
+            t = 0;
+        }
+        if ( t == 0 ) {
+            updateOledPinsForConnectionType( 0 );
+        }
+    }
     address = jumperlessConfig.top_oled.i2c_address;
     sda_pin = jumperlessConfig.top_oled.sda_pin;
     scl_pin = jumperlessConfig.top_oled.scl_pin;
@@ -646,7 +669,7 @@ int oled::init( ) {
 
     // Hold the shared bus for everything below (see OledSharedBusWindow): the
     // whole init is one window, released on every return path.
-    OledSharedBusWindow busWindow( connType == 2 ? 0 : 1 );
+    OledSharedBusWindow busWindow( oledWireForSdaPin( sda_pin ) );
 
     #if OLED_DEBUG
     Serial.printf("[OLED] init(): addr=0x%02X, connType=%d, hardwired=%d\n", address, connType, oledUsingHardwiredPins);
@@ -668,6 +691,25 @@ int oled::init( ) {
     Serial.printf("[OLED] init(): connect() returned %d\n", success);
     #endif
     
+    if ( oledPinsAreUartPins( ) ) {
+        // Forced pings: checkConnection() without force answers from a
+        // once-a-second cache, and connect() has just set that cache to
+        // "present" without asking the panel. Nothing answering means the
+        // pins go back to the passthrough and the D2/D3 routes are dropped
+        // rather than holding a bridge and a parked UART for a display that
+        // is not there (every OG boot comes through here with
+        // connect_on_boot's default of 1).
+        bool answered = false;
+        for ( int tries = 0; !answered && tries < 3; tries++ ) {
+            answered = checkConnection( true );
+            if ( !answered )
+                delay( 20 );
+        }
+        if ( !answered ) {
+            disconnect( );
+            return 0;
+        }
+    }
     if ( checkConnection( ) == false ) {
         #if OLED_DEBUG
         Serial.println("[OLED] init(): checkConnection() failed after connect()");
@@ -782,7 +824,7 @@ int oled::init( ) {
     // also reinits the I2C block and clocks a stuck-low SDA free, so the
     // shared bus (INA219s + DAC live on Wire) recovers instead of failing
     // every transaction until reboot.
-    if ( jumperlessConfig.top_oled.connection_type == 2 ) {
+    if ( _currentDisplayWire == 0 ) {
         Wire.setTimeout( 3, true );
     } else {
         Wire1.setTimeout( 3, true );
@@ -831,7 +873,7 @@ bool oled::checkConnection( bool force  ) {
         // If display not initialized yet, use connection_type to determine Wire
         int wireNum = _currentDisplayWire;
         if (wireNum == -1) {
-            wireNum = (jumperlessConfig.top_oled.connection_type == 2) ? 0 : 1;
+            wireNum = oledWireForSdaPin(jumperlessConfig.top_oled.sda_pin);
         }
         TwoWire& wire = (wireNum == 0) ? Wire : Wire1;
 
@@ -3554,7 +3596,7 @@ void oled::oledPeriodic( ) {
             // Reset the I2C bus before reinit - this clears any stuck state from hot-unplug
             // Wire1 is used for GPIO 6/7 (connection types 0, 1, 3)
             // Wire is used for GPIO 4/5 (connection type 2)
-            int wireNum = (jumperlessConfig.top_oled.connection_type == 2) ? 0 : 1;
+            int wireNum = oledWireForSdaPin(jumperlessConfig.top_oled.sda_pin);
             if (wireNum == 0) {
                 #if OLED_DEBUG
                 Serial.println("[OLED] Resetting Wire (I2C0) before reinit...");
@@ -4500,6 +4542,7 @@ int oled::connect( void ) {
         #endif
         refreshConnections( 1, 0, 0 );
         waitCore2( );
+        delay( 10 ); // let the crosspoints land before the first addressed byte
         #if OLED_DEBUG
         Serial.println("[OLED] refreshConnections() done");
         #endif
@@ -4521,7 +4564,17 @@ int oled::connect( void ) {
     Serial.printf("[OLED] Calling initI2C(sda=%d, scl=%d, %d)...\n",
         jumperlessConfig.top_oled.sda_pin, jumperlessConfig.top_oled.scl_pin, busClockHz);
     #endif
+    // On the board whose crossbar I2C pair is its UART pair (the OG), the
+    // passthrough gives the pins up for as long as the OLED is connected.
+    if ( oledPinsAreUartPins( ) ) {
+        AsyncPassthrough::releaseUartPins( );
+    }
     found = initI2C( jumperlessConfig.top_oled.sda_pin, jumperlessConfig.top_oled.scl_pin, busClockHz );
+    if ( found == 20 ) {
+        // I2C0 shared through the arbiter's alternate pair: our address is
+        // what routes a transaction onto it (I2C0Arbiter.h).
+        i2c0ArbiterSetAltAddr( address );
+    }
     #if OLED_DEBUG
     Serial.printf("[OLED] initI2C returned %d\n", found);
     #endif
@@ -4556,7 +4609,7 @@ int oled::connect( void ) {
 
 const char* getOledConnectionTypeShortName(int connectionType) {
     switch (connectionType) {
-        case 0: return "GPIO 7/8";
+        case 0: return board::currentBoard( ).xbarI2cName;
         case 1: return "RP6/RP7";
         case 2: return "I2C0";
         case 3: return "Custom";
@@ -4649,7 +4702,9 @@ bool autoDetectAndConfigureOled(void) {
     // OG has no OLED and no internal I2C0 bus to probe, so an ACK from
     // whatever is on those pins must never promote hardware.revision or
     // re-point connection_type on a board that can't use either.
-    if ( !board::currentBoard( ).caps.hasOled ) {
+    // Only a board with the rev 7 internal I2C0 OLED header has anything to
+    // probe there (on the OG those pins are the INA219 bus).
+    if ( !board::currentBoard( ).caps.internalOledHeader ) {
         return false;
     }
 
@@ -4798,6 +4853,12 @@ int cycleOledConnectionType(bool reinitDisplay, bool persist) {
 }
 
 void oled::disconnect( void ) {
+    if ( i2c0ArbiterAltPinsActive( ) ) {
+        i2c0ArbiterClearAltPins( );
+    }
+    if ( oledPinsAreUartPins( ) ) {
+        AsyncPassthrough::reclaimUartPins( );
+    }
     // if (jumperlessConfig.top_oled.enabled == 0) {
     //     return;
     // }

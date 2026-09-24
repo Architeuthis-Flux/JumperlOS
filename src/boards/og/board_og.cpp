@@ -11,7 +11,8 @@
 //     it is NOT GPIO_1.
 //   - 4 ADCs (0-2 buffered 0-5V, ADC3 raw +/-8V); 2 DACs (DAC0 0-5V, DAC1 +/-8V).
 //   - rails are a hardware switch (not firmware-controllable), no probe pads,
-//     no rotary encoder, no OLED, no breadboard text, no PSRAM.
+//     no rotary encoder, no breadboard text, no PSRAM; an OLED reaches
+//     it through the crossbar on the UART pins.
 //
 // Node id constants come from the shared JumperlessDefines.h; the 100+ id space
 // is compatible between OG and V5 (GND=100, DAC0=106, ADC0=110, RP_GPIO_0=114,
@@ -74,8 +75,11 @@ static const int8_t kOgBbNodesToChip[kBbNodesToChipLen] = {
 // GPIO_1. RP_GPIO_0 maps to RP2040 GPIO 0; UART TX/RX are GPIO 17/16 on the RP2040.
 static const GpioEntry kOgGpio[] = {
     {RP_GPIO_0, 0, "GPIO_0", true},
-    {RP_UART_TX, 17, "UART_TX", true},
-    {RP_UART_RX, 16, "UART_RX", true},
+    // Lane-to-pin as measured 2026-09-24 (GPIO driven, lane read through the
+    // crossbar into ADC0): the UART_TX lane is GPIO 16, UART_RX is 17 - the
+    // RP2040's UART0 TX/RX by function, matching caps.uartTxPin/uartRxPin.
+    {RP_UART_TX, 16, "UART_TX", true},
+    {RP_UART_RX, 17, "UART_RX", true},
 };
 
 // 4 ADCs: 0-2 buffered 0-5V, ADC3 raw +/-8V.
@@ -150,12 +154,14 @@ const BoardTopology ogBoardTopology = {
     kOgAdc, (uint8_t)(sizeof(kOgAdc) / sizeof(kOgAdc[0])),
     kOgDac, (uint8_t)(sizeof(kOgDac) / sizeof(kOgDac[0])),
     kOgGpioNames, (uint8_t)(sizeof(kOgGpioNames) / sizeof(kOgGpioNames[0])),
+    16, 17, RP_UART_TX, RP_UART_RX, "UART 16/17",
     {
         /* railsFirmwareControlled */ false,
         /* hasProbePads           */ false,
         /* scanningProbe          */ true,
         /* hasRotaryEncoder       */ false,
-        /* hasOled                */ false,
+        /* hasOled                */ true,
+        /* internalOledHeader     */ false,
         /* hasBreadboardText      */ false,
         /* hasPsram               */ false,
         /* hasStartupAnimation    */ false,

@@ -492,15 +492,17 @@ const char* getStringFromTableRef(int value, const JlTableRef& ref) {
 // Type 3 = custom (via crossbar, use existing sda_pin/scl_pin)
 void updateOledPinsForConnectionType(int connectionType) {
     switch (connectionType) {
-        case 0: // GPIO 7/8 (via crossbar using GPIO 26/27)
-            jumperlessConfig.top_oled.sda_pin = 26;
-            jumperlessConfig.top_oled.scl_pin = 27;
-            jumperlessConfig.top_oled.gpio_sda = RP_GPIO_26;
-            jumperlessConfig.top_oled.gpio_scl = RP_GPIO_27;
+        case 0: { // via the crossbar: the board's I2C-capable routable pair
+            const board::BoardTopology& bd = board::currentBoard();
+            jumperlessConfig.top_oled.sda_pin = bd.xbarI2cSdaPin;
+            jumperlessConfig.top_oled.scl_pin = bd.xbarI2cSclPin;
+            jumperlessConfig.top_oled.gpio_sda = bd.xbarI2cSdaNode;
+            jumperlessConfig.top_oled.gpio_scl = bd.xbarI2cSclNode;
             jumperlessConfig.top_oled.sda_row = NANO_D2;
             jumperlessConfig.top_oled.scl_row = NANO_D3;
             oledUsingHardwiredPins = false;
             break;
+        }
         case 1: // RP6/RP7 (hardwired GPIO 6/7)
             jumperlessConfig.top_oled.sda_pin = 6;
             jumperlessConfig.top_oled.scl_pin = 7;
@@ -524,15 +526,16 @@ void updateOledPinsForConnectionType(int connectionType) {
         case 3: // Custom - don't change pins, user sets them manually
             // Keep existing values
             break;
-        default:
-            // Fall back to GPIO 7/8
-            jumperlessConfig.top_oled.sda_pin = 26;
-            jumperlessConfig.top_oled.scl_pin = 27;
-            jumperlessConfig.top_oled.gpio_sda = RP_GPIO_26;
-            jumperlessConfig.top_oled.gpio_scl = RP_GPIO_27;
+        default: {
+            const board::BoardTopology& bd = board::currentBoard();
+            jumperlessConfig.top_oled.sda_pin = bd.xbarI2cSdaPin;
+            jumperlessConfig.top_oled.scl_pin = bd.xbarI2cSclPin;
+            jumperlessConfig.top_oled.gpio_sda = bd.xbarI2cSdaNode;
+            jumperlessConfig.top_oled.gpio_scl = bd.xbarI2cSclNode;
             jumperlessConfig.top_oled.sda_row = NANO_D2;
             jumperlessConfig.top_oled.scl_row = NANO_D3;
             break;
+        }
     }
     jumperlessConfig.top_oled.connection_type = connectionType;
     

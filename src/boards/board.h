@@ -83,7 +83,11 @@ struct BoardCaps {
   bool hasProbePads;            // resistive touch pads (V5) -> OG false
   bool scanningProbe;           // OG uses crossbar scan probing -> true
   bool hasRotaryEncoder;        // OG false
-  bool hasOled;                 // OG false
+  bool hasOled;                 // an SSD1306 can be driven (through the
+                                //   crossbar on both boards; OG since 2026-09-24)
+  bool internalOledHeader;      // V5 rev 7's OLED header on internal I2C0
+                                //   (connection_type 2 and the boot probe);
+                                //   OG false
   bool hasBreadboardText;       // OG can't render text on the breadboard
   bool hasPsram;                // OG false (RP2040)
   bool hasStartupAnimation;     // V5 plays the boot logo animation; OG skips it
@@ -136,6 +140,19 @@ struct BoardTopology {
   // number; nullptr / past gpioNameCount = unnamed. V5 48 entries, OG 30.
   const char *const *gpioNames;
   uint8_t gpioNameCount;
+
+  // Where an accessory reached through the crossbar lands (the OLED's
+  // connection_type 0): the board's I2C-capable routable pins, their node
+  // ids, and the name the config UI shows for the choice. V5: GPIO 26/27 on
+  // I2C1 through RP_GPIO_7/8. OG: the UART pair 16/17 on I2C0 through
+  // RP_UART_RX/TX - the I2C0 arbiter switches the block between them and the
+  // INA219s' 4/5 per transaction, and the passthrough is parked while the
+  // OLED is up.
+  int8_t xbarI2cSdaPin;
+  int8_t xbarI2cSclPin;
+  int16_t xbarI2cSdaNode;
+  int16_t xbarI2cSclNode;
+  const char *xbarI2cName;
 
   BoardCaps caps;
 };

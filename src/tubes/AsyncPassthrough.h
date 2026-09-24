@@ -19,6 +19,13 @@ namespace AsyncPassthrough {
     // Call frequently from loop() to move data in both directions and
     // apply any pending line-coding changes safely outside ISRs
     void task();
+    // Hand the UART pins to another peripheral and take them back. The OG's
+    // OLED reaches GPIO 16/17 through the crossbar (boards/board.h
+    // xbarI2c*), so while it is connected the passthrough's receiver and DMA
+    // are stopped and the pins are the OLED's; reclaim re-muxes them and
+    // brings the receiver up the way boot does.
+    void releaseUartPins();
+    void reclaimUartPins();
 
     // Expose UART received ring for other modules.
     // DMA-filled ring (zero-CPU RX); see AsyncPassthrough.cpp. Size must match

@@ -1575,6 +1575,75 @@ board finished, the config proves it, and the PASS banner went to his
 terminal. Disclosed in the session report; the one-process-per-port rule
 stands.
 
+### Session 2026-09-24 (afternoon) — an OLED on the OG, through the UART pins
+
+Kevin: "an og jumperless should be able to connect to an oled", then "it can
+use uart", then "we can use I2C0 and just share the bus", then "oh wait
+nevermind, it's different pins". All four were right in turn. The V5's
+connection_type 0 routes the panel's SDA/SCL from Nano D2/D3 through the
+crossbar to its routable GPIO 26/27 (I2C1); the OG's only I2C-capable
+routable pins are the UART pair, 16/17, which are I2C0 SDA/SCL - and I2C0 is
+the INA219 bus, hardwired on 4/5. The wires can't be shared, the block can:
+`I2C0Arbiter.cpp` (which already wraps every I2C0 transfer for WaveGen)
+now takes an alternate pin pair and, per transaction, muxes in the pair the
+target address lives on (0x3C -> 16/17, everything else -> 4/5). Two pairs
+assigned to one peripheral input are combined by the GPIO mux, so never
+both. I2C0 is core-0-only (readCurrent's own note), so no lock.
+
+What it took, in the order the bench found it:
+- `BoardTopology` gained the crossbar I2C pair (`xbarI2c*`: V5 26/27 on
+  RP_GPIO_7/8, OG 16/17 on RP_UART_TX/RX, plus the UI name), `caps.hasOled`
+  is true on the OG and a new `caps.internalOledHeader` (V5 rev 7 only)
+  guards the boot probe of the internal I2C0 header. Type 0's pins come from
+  the descriptor at every `oled::init`, never from config.txt: the OG's file
+  still said 26/27, which are its ADC0/ADC1 pins. The bus is chosen by the
+  SDA pin's block (bit 1), not by connection type.
+- `initI2C` knows 16/17 and, when I2C0 already runs on another pair,
+  registers the alternate pair instead of `Wire.setSDA` - which on this core
+  is a panic on a running bus, not a move.
+- `AsyncPassthrough::releaseUartPins/reclaimUartPins`: the passthrough's
+  receiver and DMA stop while the OLED holds 16/17, and come back the way
+  boot brings them up. **While an OLED is connected on the OG, the UART
+  passthrough (port 3, Arduino flashing) is off.**
+- The pair switch wedged the block: un-muxing the old pair before muxing
+  the new one in leaves the block's SDA/SCL inputs unassigned (they read
+  low) for a few writes, and the master took the edges for a START it never
+  saw a STOP for - after which it held every command in its FIFO waiting for
+  a free bus (INA reads timing out at exactly TwoWire's 1 s, block "idle",
+  TXFLR=1). Now the incoming pair is muxed in first (SCL, then SDA) while
+  the outgoing one still holds both buses high, then the outgoing pair is
+  parked; a transaction that still times out with a pair registered toggles
+  the block's enable. The mux is verified against the pins' real function
+  select before every transaction, because TwoWire's timeout recovery and
+  any `Wire.begin()` re-mux the primary pair on their own.
+- `checkConnection()` answers from a once-a-second cache, and `connect()`
+  primes that cache with "present" without asking the panel; on the UART
+  pair `init` now pings for real (up to three tries, 20 ms apart) and, if
+  nothing answers, `disconnect()`s - routes dropped, passthrough back -
+  rather than holding a bridge and a parked UART for a display that is not
+  there (every OG boot comes through here, connect_on_boot defaults to 1).
+- The detection then still failed on the bench with the panel powered (D2
+  and D3 read 3.27 V through its pull-ups). Driving GPIO 16 and 17 and
+  reading each UART lane through ADC0: the UART_TX lane is GPIO 16 and
+  UART_RX is 17. `kOgGpio` had them the other way round, so SDA was being
+  routed to the SCL lane. Table fixed; `test_boards` now pins the lane-to-
+  pin mapping.
+
+Bench (OG, over port 5 - Kevin's app holds port 1): OLED live from boot,
+4/4 reconnects, every `oled_show` 16.4 ms (a full 512-byte frame at
+400 kHz), INA0/INA1 reads correct and 0.4 ms across every pair switch,
+`:nets` shows D2<->UART_Tx and D3<->UART_Rx while connected and nothing
+after. V5: builds and `test_boards` passes; one V5 behaviour change:
+connection_type 3 (custom) picks the bus by its SDA pin now, where before
+it always took I2C1, and `connect()` waits 10 ms after the crossbar send.
+`I2C0_BUS_CLOCK_HZ` is 400 kHz on the OG (was a literal in initINA219).
+
+Follow-ups: `updateLazyAdcReadings` still returns early on the OG (the OLED
+GUI's {adc:N} tokens read a stale cache there); `provisionFirmwareFiles`
+still skips the OLED image assets on the OG; the config TUI's type-0 label
+comes from the descriptor but the config-file token is still `gpio_7_8`;
+`gpioDef[8..9]` (pins 0/1 for the UART nodes) is V5 wiring on both boards.
+
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); MpRemoteService
 still retries a failed heap alloc every pass (latch it); the OG router prints
 a burst of blank lines per refresh on port 1 (not from routing itself -

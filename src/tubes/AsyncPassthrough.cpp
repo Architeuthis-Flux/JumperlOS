@@ -1675,6 +1675,26 @@ static void enableUARTReceiver() {
     s_uart_irq_enabled = true;
 }
 
+void releaseUartPins() {
+    if ( !async_begun ) return;
+    if ( s_rx_dma_chan >= 0 && dma_channel_is_busy( s_rx_dma_chan ) ) {
+        dma_channel_abort( s_rx_dma_chan );
+    }
+    hw_clear_bits( &uart_get_hw( ASYNC_PASSTHROUGH_UART )->cr, UART_UARTCR_RXE_BITS );
+    gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_SIO );
+    gpio_set_dir( ASYNC_PASSTHROUGH_UART_TX_PIN, false );
+    gpio_set_function( ASYNC_PASSTHROUGH_UART_RX_PIN, GPIO_FUNC_SIO );
+    gpio_set_dir( ASYNC_PASSTHROUGH_UART_RX_PIN, false );
+    s_uart_irq_enabled = false;
+}
+
+void reclaimUartPins() {
+    if ( !async_begun ) return;
+    gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_UART );
+    gpio_set_function( ASYNC_PASSTHROUGH_UART_RX_PIN, GPIO_FUNC_UART );
+    enableUARTReceiver();
+}
+
 void begin( unsigned long baud ) {
     // Configure UART pins and UART with HW FIFO enabled
     gpio_set_function( ASYNC_PASSTHROUGH_UART_TX_PIN, GPIO_FUNC_UART );

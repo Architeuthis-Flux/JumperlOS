@@ -926,14 +926,10 @@ menu:
         // Serial.flush();
         // Serial.println("millis = " + String(millis()));
 
-#if !defined(OG_JUMPERLESS)
-        // OG has no OLED; skip init (it also kicks refreshConnections + debug
-        // printfs that abort on the OG's tight heap).
-        if ( jumperlessConfig.top_oled.connect_on_boot == 1 ) {
-            // Serial.println("Initializing OLED");
+        if ( board::currentBoard( ).caps.hasOled &&
+             jumperlessConfig.top_oled.connect_on_boot == 1 ) {
             oled.init( );
         }
-#endif
         probing.checkProbeCurrentZero( );
 
         // Ensure the probe-sense DAC is at the calibrated measure_mode_output_voltage

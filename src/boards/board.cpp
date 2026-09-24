@@ -121,6 +121,12 @@ size_t boardCapabilitiesJson(const BoardTopology &b, char *buf, size_t cap) {
   a.s(",");
   a.b("oled", b.caps.hasOled);
   a.s(",");
+  a.b("internal_oled_header", b.caps.internalOledHeader);
+  a.s(",");
+  a.i("xbar_i2c_sda_pin", b.xbarI2cSdaPin);
+  a.s(",");
+  a.i("xbar_i2c_scl_pin", b.xbarI2cSclPin);
+  a.s(",");
   a.b("breadboard_text", b.caps.hasBreadboardText);
   a.s(",");
   a.b("psram", b.caps.hasPsram);

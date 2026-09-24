@@ -38,6 +38,7 @@
 
 #include "MCP4728.h"  // New library
 #include "boards/board.h"   // caps.spiDac / railsFirmwareControlled
+#include "coredination/I2C0Arbiter.h"   // initI2C: a second pin pair on a running I2C0
 #include "hardware/spi.h"
 #include "WaveGen.h"  // wavegen.isRunning() - shared I2C0 bus arbitration
 #include "AdcRing.h"  // the always-on ADC ring (T2.1): readAdc() reads it when active
@@ -643,13 +644,15 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
     static int i2c1Pins[ 3 ] = { 26, 27, 100000 };
     static int i2c0Pins[ 3 ] = { 4, 5, 100000 };
 
-    int gpioI2Cmap[ 15 ][ 3 ] = {
+    int gpioI2Cmap[ 17 ][ 3 ] = {
         { 0, 0, 0 },
         { 1, 1, 0 },
         { 4, 0, 0 },
         { 5, 1, 0 },
         { 6, 0, 1 },
         { 7, 1, 1 },
+        { 16, 0, 0 }, // the OG's UART pair doubles as I2C0 SDA/SCL
+        { 17, 1, 0 },
         { 20, 0, 0 },
         { 21, 1, 0 },
         { 22, 0, 1 },
@@ -665,7 +668,7 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
     int sclFound = 0;
     int portFound = -1;  // Will be determined from mapping
 
-    for ( int i = 0; i < 15; i++ ) {
+    for ( int i = 0; i < 17; i++ ) {
         if ( gpioI2Cmap[ i ][ 0 ] == sdaPin ) {
             sdaFound = i;
             portFound = gpioI2Cmap[ i ][ 2 ];  // Get I2C port from mapping (0 or 1)
@@ -686,6 +689,17 @@ int initI2C( int sdaPin, int sclPin, int speed ) {
         gpio_set_pulls( sdaPin, true, false ); // Enable pull-up on SDA
         gpio_set_pulls( sclPin, true, false ); // Enable pull-up on SCL
 
+        if ( sdaPin != i2c0Pins[ 0 ] || sclPin != i2c0Pins[ 1 ] ) {
+            // Wire is up on another pair (the INA219s' 4/5 on the OG) and
+            // TwoWire::setSDA on a running bus is a panic, not a move. The
+            // block is shared instead: the arbiter muxes this pair in for the
+            // transactions addressed to the device on it (I2C0Arbiter.h). The
+            // caller registers that address; the bus clock stays its owner's.
+            Wire.begin( ); // a no-op while running; after a Wire.end() (the
+                           // OLED's hot-plug reset) it brings the block back
+            i2c0ArbiterSetAltPins( sdaPin, sclPin, i2c0Pins[ 0 ], i2c0Pins[ 1 ] );
+            return 20; // I2C0 through the arbiter's alternate pair
+        }
         Wire.setSDA( sdaPin );
         Wire.setSCL( sclPin );
         Wire.setClock( speed );
@@ -1136,7 +1150,7 @@ void initINA219( void ) {
     // hasProbePads).
     Wire.setSDA( 4 );
     Wire.setSCL( 5 );
-    Wire.setClock( 400000 );
+    Wire.setClock( I2C0_BUS_CLOCK_HZ );
     Wire.begin( );
 
     if ( !INA0.begin( ) || !INA1.begin( ) ) {

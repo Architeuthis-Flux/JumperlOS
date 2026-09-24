@@ -284,7 +284,13 @@ extern int probeRev;
 // INA219s and the WaveGen stream ran at whichever the last of those left.
 // 1 MHz, not 1.7: the INA219s silently failed reads at 1.7 MHz (see initDAC);
 // WaveGen's B_PER_SAM sample-rate model was calibrated at ~1 MHz.
+#if defined(OG_JUMPERLESS)
+// The OG's I2C0 carries only the two INA219s (and the OLED through the
+// arbiter's alternate pair): their rated 400 kHz.
+#define I2C0_BUS_CLOCK_HZ 400000
+#else
 #define I2C0_BUS_CLOCK_HZ 1000000
+#endif
 
 #define RP6_PIN 6
 #define RP7_PIN 7

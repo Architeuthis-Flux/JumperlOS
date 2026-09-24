@@ -109,7 +109,26 @@ static void testAnalogRanges() {
 static void testCapabilities() {
   CHECK(ogBoardTopology.caps.railsFirmwareControlled == false,
         "OG rails are NOT firmware controlled");
-  CHECK(ogBoardTopology.caps.hasOled == false, "OG has no OLED");
+  CHECK(ogBoardTopology.caps.hasOled == true, "OG drives an OLED through the crossbar");
+  CHECK(ogBoardTopology.caps.internalOledHeader == false, "OG has no internal I2C0 OLED header");
+  CHECK(v5BoardTopology.caps.internalOledHeader == true, "V5 rev 7 OLED header on internal I2C0");
+  // SDA must be the I2C0 SDA pin (16) and SCL the SCL pin (17); which of the
+  // two the UART calls TX is the RP2040's business, so compare as a set.
+  CHECK(ogBoardTopology.xbarI2cSdaPin == 16 && ogBoardTopology.xbarI2cSclPin == 17 &&
+        ((ogBoardTopology.caps.uartTxPin == 16 && ogBoardTopology.caps.uartRxPin == 17) ||
+         (ogBoardTopology.caps.uartTxPin == 17 && ogBoardTopology.caps.uartRxPin == 16)),
+        "OG crossbar I2C pair is the UART pair (I2C0 SDA/SCL on 16/17)");
+  CHECK(ogBoardTopology.xbarI2cSdaNode == RP_UART_TX && ogBoardTopology.xbarI2cSclNode == RP_UART_RX,
+        "OG crossbar I2C nodes: SDA on the UART_TX lane (GPIO 16), SCL on UART_RX (GPIO 17)");
+  // The lane a node reaches must be the pin the descriptor names for it.
+  for (int i = 0; i < ogBoardTopology.gpioCount; i++) {
+    if (ogBoardTopology.gpio[i].node == RP_UART_TX)
+      CHECK(ogBoardTopology.gpio[i].physicalPin == 16, "OG UART_TX lane is GPIO 16 (measured)");
+    if (ogBoardTopology.gpio[i].node == RP_UART_RX)
+      CHECK(ogBoardTopology.gpio[i].physicalPin == 17, "OG UART_RX lane is GPIO 17 (measured)");
+  }
+  CHECK(v5BoardTopology.xbarI2cSdaPin == 26 && v5BoardTopology.xbarI2cSclPin == 27,
+        "V5 crossbar I2C pair is GPIO 26/27 (I2C1)");
   CHECK(ogBoardTopology.caps.hasRotaryEncoder == false, "OG has no encoder");
   CHECK(ogBoardTopology.caps.hasProbePads == false, "OG has no probe pads");
   CHECK(ogBoardTopology.caps.scanningProbe == true, "OG uses scanning probe");
