@@ -620,6 +620,12 @@ struct OledSharedBusWindow {
 }   // namespace
 
 // Initialization
+// True from the top of connect() to disconnect() when the pair is the UART
+// pair: the routing side reads it (InfraPaths enSerial1) so the passthrough's
+// D0/D1 bridges yield the lanes before the OLED's refresh asks for them.
+bool oledOwnsUartPins = false;
+static bool s_uartRoutesParked = false; // connect() removed the passthrough's D0/D1 bridges
+
 // The configured pair is the board's UART pair (boards/board.h xbarI2c*: the
 // OG's 16/17). The passthrough is parked around a connection there.
 static bool oledPinsAreUartPins( void ) {
@@ -4520,6 +4526,21 @@ int oled::connect( void ) {
         jumperlessConfig.top_oled.sda_row, jumperlessConfig.top_oled.scl_row);
     #endif
 
+    // Claim the UART lanes before the refresh below evaluates the infra
+    // functions, or serial_1's D0/D1 pairs keep them and ours are dropped.
+    oledOwnsUartPins = oledPinsAreUartPins( );
+    // The passthrough's own D0/D1 bridges (connectArduino at boot, on DTR,
+    // on flash) are plain bridges on our lanes, and a plain bridge on the
+    // OLED's GPIO node makes our infra pairs yield. Park them for the
+    // duration; disconnect() puts them back.
+    if ( oledOwnsUartPins ) {
+        s_uartRoutesParked = globalState.hasConnection( NANO_D1, RP_UART_RX ) ||
+                             globalState.hasConnection( NANO_D0, RP_UART_TX );
+        if ( s_uartRoutesParked ) {
+            removeBridgeFromState( NANO_D1, RP_UART_RX );
+            removeBridgeFromState( NANO_D0, RP_UART_TX );
+        }
+    }
     // If using hardwired RP6/RP7 (GPIO 6/7), skip crossbar bridge management
     if ( !oledUsingHardwiredPins ) {
         // Reserve pins on net map so UI shows them as I2C (not generic GPIO)
@@ -4856,6 +4877,12 @@ int cycleOledConnectionType(bool reinitDisplay, bool persist) {
 }
 
 void oled::disconnect( void ) {
+    oledOwnsUartPins = false; // the refresh below hands the lanes back to serial_1
+    if ( s_uartRoutesParked ) {
+        addBridgeToState( RP_UART_RX, NANO_D1, 0, false );
+        addBridgeToState( RP_UART_TX, NANO_D0, 0, false );
+        s_uartRoutesParked = false;
+    }
     if ( i2c0ArbiterAltPinsActive( ) ) {
         i2c0ArbiterClearAltPins( );
     }

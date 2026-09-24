@@ -436,8 +436,14 @@ static bool ovSerial1(void) {
     return nonInfraBridgeTouches(RP_UART_TX) || nonInfraBridgeTouches(RP_UART_RX);
 }
 
+extern bool oledOwnsUartPins; // oled.cpp: set at the top of connect(), cleared in disconnect()
 static bool enSerial1(void) {
-    return jumperlessConfig.serial_1.lock_connection == 1;
+    // Not while the OLED holds the UART pair (the OG: its SDA/SCL ride the
+    // same lanes, and the passthrough is parked for it). Bench 2026-09-24: a
+    // DTR on port 3 locked serial_1, its D0/D1 pairs took the lanes and the
+    // panel went dark for good. The flag, not the arbiter's registration:
+    // connect() refreshes the routes before it registers the pair.
+    return jumperlessConfig.serial_1.lock_connection == 1 && !oledOwnsUartPins;
 }
 
 // --- serial_2 --------------------------------------------------------------

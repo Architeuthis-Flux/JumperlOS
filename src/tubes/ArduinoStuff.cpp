@@ -531,7 +531,14 @@ void printMicrosPerByte( void ) {
 //   digitalWrite(ARDUINO_RESET_1_PIN, LOW);
 // }
 
+extern bool oledOwnsUartPins; // oled.cpp: the OLED holds the UART lanes (the OG)
 void connectArduino( int flashOrLocal, int refreshConnections ) {
+    // The OLED's SDA/SCL ride the UART lanes and the passthrough is parked
+    // for it: a D0/D1 bridge now would only take the panel's lanes away.
+    // The OLED's disconnect puts these bridges back if it found them.
+    if ( oledOwnsUartPins ) {
+        return;
+    }
 
     // Use RAM-based state system
     // CRITICAL: Pass autoRefresh=false to avoid triggering refreshLocalConnections()

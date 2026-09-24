@@ -1643,6 +1643,19 @@ Two more from the review pass and the boot tests:
   and a STOP, bit-banged while the pair is still SIO) now runs before the
   alternate pair's first ping; the init pings five times over 200 ms.
 
+- The last way the panel went dark: the passthrough's own routing.
+  `connectArduino()` bridges the UART lanes to Nano D0/D1 as plain bridges
+  (at boot, on a DTR on port 3, on flash), and a plain bridge on the OLED's
+  GPIO node is exactly what makes its infra pairs yield ("a user claiming
+  the pins wins"). Every dead-panel episode in the log followed a port-3
+  open. Now `oledOwnsUartPins` (set at the top of connect(), cleared in
+  disconnect()) makes `connectArduino()` a no-op and `enSerial1()` false
+  while the OLED holds the lanes; connect() parks any D0/D1 bridges it
+  finds and disconnect() puts them back. Reproduced and fixed on the bench:
+  OLED live at boot after the passthrough's boot routing, still live with
+  port 3 open (0 bytes on it), D0/D1 routes back after disconnect, lanes
+  back to the OLED on reconnect.
+
 Bench (OG, over port 5 - Kevin's app holds port 1): OLED live from boot on
 5/5 consecutive boots, 6/6 manual reconnects, every `oled_show` 16.7 ms (a
 full 512-byte frame at 400 kHz), INA0/INA1 reads correct and 0.4 ms across
