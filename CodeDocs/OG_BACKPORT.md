@@ -1450,11 +1450,13 @@ opening the real click menu twice through the Debugs "Menu FX" tuner
 tuner reopens it) and re-reading the tables: `menuParsed 1`, `categoryIndex
 14`, levels `0,1,2,0,1,...`, mirror rows `>Rails`. The check lives in
 `test/hil/menu_check.py`-shaped form in the session scratchpad; worth
-promoting. Build note: `pio run -e jumperless_og -e jumperless_v5` in ONE
-invocation can leave the OG image labeled with the V5's version (the shared
-`include/FirmwareVersion.generated.h` is rewritten per env; the OG compiled
-against the V5's copy once today and reported 5.7.11.2 on port 7). Build the
-OG env in its own invocation until `version_from_file.py` writes per-env.
+promoting. Build note: the OG image came out labeled 5.7.11.2 twice today.
+`include/FirmwareVersion.generated.h` is one shared file rewritten by each
+env's pre-script, and an object SCons considers up to date keeps the version
+it was compiled with (the OG's `main.cpp.o` from a two-env `pio run` embedded
+the V5's string and survived an OG-only rebuild). `version_from_file.py` now
+passes `FIRMWARE_VERSION` as a per-env `-D` (`env.StringifyMacro`) and writes
+the header as a guarded fallback for editors and the host QSTR build only.
 
 **Still open:** `os.statvfs` is missing (the IDE tolerates it); the OG's
 banner still says `jumperless-v5 ... with rp2350b`; MpRemoteService still

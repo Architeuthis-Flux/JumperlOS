@@ -24,11 +24,22 @@ if pioenv.startswith("jumperless_og"):
     version = ".".join(parts)
     print(f"OG build: firmware version remapped to {version}")
 
+# The version reaches the compiler as a per-env -D, not through the shared
+# header alone: with two envs the header in include/ is whichever env wrote it
+# last, and an object that SCons considers up to date keeps the version it was
+# compiled with (2026-09-23: an OG image reported 5.7.11.2 on port 7). The
+# header stays for editors and the host-side QSTR build, guarded so the -D wins.
+env.Append(CPPDEFINES=[("FIRMWARE_VERSION", env.StringifyMacro(version))])
+
 header_path = project_dir / "include" / "FirmwareVersion.generated.h"
 header_path.write_text(
     "// Auto-generated from VERSION at build time. Do not edit.\n"
+    "// The build passes FIRMWARE_VERSION as a -D per env; this copy is a\n"
+    "// fallback for editors and the host-side QSTR build only.\n"
     "#pragma once\n"
-    f'#define FIRMWARE_VERSION "{version}"\n',
+    "#ifndef FIRMWARE_VERSION\n"
+    f'#define FIRMWARE_VERSION "{version}"\n'
+    "#endif\n",
     encoding="utf-8",
 )
 print(f"Firmware version from VERSION: {version}")
