@@ -200,6 +200,10 @@ bool TermControl::service( ) {
     }
 
     bool line_was_ready_before = line_ready;
+    if ( space_pending && millis( ) - space_pending_at > 80 ) {
+        space_pending = false; // a lone space, nothing behind it: the click
+        terminalWheelClick( );
+    }
     
     int avail = stream->available();
     if (avail > 0) {
@@ -476,8 +480,19 @@ void TermControl::setColoredPrompt( const char* prompt, int color_code ) {
 
 // Character and Line Handling
 void TermControl::handleNormalChar( char c ) {
-    if ( c == ' ' && line_length == 0 ) { // a bare space on an empty line is the wheel's click
-        terminalWheelClick( );
+    if ( space_pending ) {
+        // Something followed the space. Enter: the line was just that space,
+        // the click it promised. Anything else: it was a leading space after
+        // all (a paste, most likely) - put it in the line and carry on.
+        space_pending = false;
+        if ( c == '\r' || c == '\n' ) {
+            terminalWheelClick( );
+            return;
+        }
+        insertCharAtCursor( ' ' );
+    } else if ( c == ' ' && line_length == 0 ) {
+        space_pending = true; // decided by the next byte, or by the timeout in service()
+        space_pending_at = millis( );
         return;
     }
     switch ( c ) {

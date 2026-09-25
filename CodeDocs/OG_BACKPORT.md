@@ -2024,6 +2024,33 @@ through `supplySlotName / supplySlotVolts / supplyAdjustHint` (OG: "5V" 5.00
 V, "3V3" 3.30 V, no adjust hint). After: `5V  20  5.00 V`, `GND  25`,
 `3V3  30  3.30 V`, walking both ways.
 
+### Session 2026-09-25 (afternoon, 2) — a space clicks only when it stands alone; the release bump push
+
+**Kevin:** "only read a spacebar with nothing else in the line" - a pasted
+line that begins with a space must not click. And the release workflow's
+version-bump push was rejected (non-fast-forward: main had moved under the
+run while the firmware built).
+
+**Space:** a space on an empty line is now PENDING, not a click. The next byte
+decides: Enter → the line was just that space, click; anything else → it was
+a leading space, it goes into the line and the byte is handled as usual. With
+nothing behind it for 80 ms (`TermControl::service()` checks each pass) it is
+the click. Bench (OG, line mode, raw bytes with timestamps): lone space →
+nothing printed, the click consumed; `" x"` in one write → the line ` x`
+echoed, no command; `"  n"` → `  n`; `" \n"` → click; `m` + Enter still
+dispatches. (An earlier pass of this bench, before the rule was fully in,
+once executed `x` - "Cleared all connections" - from a `" x"` write; not
+reproduced in three later tries with the rule in, the main loop's raw read
+is gated on `!useLineBuffering`, and the click path cannot synthesise an
+Enter. Noted, not explained.)
+
+**Workflow:** `release.yml`'s "Commit version bump back to main" now fetches
+the branch, replays the bump on its tip (`git rebase -X theirs`: this run's
+VERSION wins a conflict), and retries the push up to five times with a
+growing pause. The checkout has full history and the release step targets
+HEAD, which the push must have landed first. Not exercised until the next
+release run.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

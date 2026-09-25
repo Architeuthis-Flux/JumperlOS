@@ -704,6 +704,11 @@ private:
     char display_buffer[JERIAL_MAX_LINE_LENGTH * 4]; // Display buffer with ANSI codes
     int display_length;
     int line_length;
+    // A space typed on an empty line is the wheel click ONLY if nothing follows
+    // it (Enter, or ~80 ms of silence): a pasted line that starts with a
+    // space must not click (Kevin, 2026-09-25). See handleNormalChar.
+    bool space_pending = false;
+    unsigned long space_pending_at = 0;
     int cursor_position;
     
     // Completed line ready for external parsing (single slot - legacy)
