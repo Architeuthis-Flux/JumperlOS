@@ -73,6 +73,11 @@ void savePreformattedNodeFile (int source = 0, int slot = 0, int keepEncoder = 1
 // New RAM-based state functions (preferred over file-based functions above)
 // All code should use these functions instead of addBridgeToNodeFile/removeBridgeFromNodeFile
 bool addBridgeToState(int node1, int node2, int duplicates = -1, bool autoRefresh = true); // Add bridge to globalState
+// What the last addBridgeToState did beyond adding: a refusal reason (a short
+// sentence, "" when it was not refused) and the special node a plain node was
+// taken off so the new supply could land (-1 when nothing moved).
+extern char lastBridgeNote[64];
+extern int lastBridgeMovedFrom;
 bool removeBridgeFromState(int node1, int node2, bool autoRefresh = true); // Remove bridge from globalState (node2=-1 removes ALL connections containing node1)
 bool saveStateToSlot(int slot = -1); // Save globalState to YAML file (slot=-1 uses current slot)
 

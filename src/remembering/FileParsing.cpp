@@ -228,25 +228,128 @@ void clearNodeFileString() { nodeFileString.clear(); }
  * @param autoRefresh If true, immediately refresh hardware (default: true for single ops, set false for batch)
  * @return true if added successfully, false if invalid
  */
+char lastBridgeNote[64] = "";
+int lastBridgeMovedFrom = -1;
+
+// A breadboard row or a Nano header pin: a node that CAN be moved from one
+// supply to another. Everything else (GND, the supplies, DACs, ADCs, GPIO) is
+// what makes a net special.
+static bool isPlainNode(int n) {
+    return (n >= 1 && n <= 60) || (n >= NANO_D0 && n <= NANO_A7);
+}
+
+// The two nets may not be merged: one lists a node of the other in its
+// do-not-intersect list. A pure check - checkDoNotIntersectsByNet() marks a
+// path skipped as a side effect and belongs to the net manager's rebuild.
+static bool netsMustNotMeet(int netA, int netB) {
+    for (int pass = 0; pass < 2; pass++) {
+        const netStruct& a = globalState.connections.nets[pass == 0 ? netA : netB];
+        const netStruct& b = globalState.connections.nets[pass == 0 ? netB : netA];
+        for (int i = 0; i < MAX_DNI && a.doNotIntersectNodes[i] != 0; i++) {
+            for (int j = 0; j < MAX_NODES && b.nodes[j] != 0; j++) {
+                if (a.doNotIntersectNodes[i] == b.nodes[j]) return true;
+            }
+        }
+    }
+    return false;
+}
+
+static int netOf(int node) {
+    int n = findNodeInNet(node);
+    if (n <= 0 || n >= MAX_NETS) return -1;
+    if (globalState.connections.nets[n].number != n) return -1;
+    return n;
+}
+
+static void bridgeRefused(int node1, int node2, const char* why) {
+    if (why && why[0]) {
+        snprintf(lastBridgeNote, sizeof(lastBridgeNote), "%s", why);
+        Jerial.printf("\r\n  can't connect %s to %s: %s\r\n", definesToChar(node1, 0), definesToChar(node2, 0), why);
+    } else {
+        snprintf(lastBridgeNote, sizeof(lastBridgeNote), "can't connect %s to %s", definesToChar(node1, 0), definesToChar(node2, 0));
+        Jerial.printf("\r\n  %s\r\n", lastBridgeNote);
+    }
+    Jerial.flush();
+}
+
 bool addBridgeToState(int node1, int node2, int duplicates, bool autoRefresh) {
     String errorMsg;
+    lastBridgeNote[0] = '\0';
+    lastBridgeMovedFrom = -1;
 
     // [routing] part_safety: refuse a USER connection that would put
     // wrong-way power on a placed part (off by default). This is the one
     // path every user connection takes; slot loads and undo call
     // addConnection directly and are deliberately not gated.
     if (partLabels.connectionRefused(node1, node2)) {
+        snprintf(lastBridgeNote, sizeof(lastBridgeNote), "refused for a part"); // it printed and showed its own card
         return false;
     }
-    
+
+    // Two nets that must not meet (a row on GND tapped to 5V). The bridge used
+    // to be stored anyway and left dangling as "Net ?" while the terminal said
+    // connected (Kevin, 2026-09-25). Now: if exactly one side is a plain row or
+    // header pin and its only link to the old supply is its own direct bridge,
+    // that bridge goes and the new supply lands ("remove GND from 23 and
+    // connect it to 5V"); anything else is refused, and says why.
+    {
+        int netA = netOf(node1), netB = netOf(node2);
+        if (netA > 0 && netB > 0 && netA != netB && netsMustNotMeet(netA, netB)) {
+            int specA = globalState.connections.nets[netA].specialFunction;
+            int specB = globalState.connections.nets[netB].specialFunction;
+            int plain = -1, oldSpecial = -1;
+            if (isPlainNode(node1) && !isPlainNode(node2)) { plain = node1; oldSpecial = specA; }
+            else if (isPlainNode(node2) && !isPlainNode(node1)) { plain = node2; oldSpecial = specB; }
+            char why[64];
+            if (plain < 0 && isPlainNode(node1) && isPlainNode(node2) && specA > 0 && specB > 0) {
+                snprintf(why, sizeof(why), "%s is on %s, %s is on %s", definesToChar(node1, 0), definesToChar(specA, 0),
+                         definesToChar(node2, 0), definesToChar(specB, 0));
+                bridgeRefused(node1, node2, why);
+                return false;
+            }
+            if (plain < 0 || oldSpecial <= 0) {
+                bridgeRefused(node1, node2, nullptr);
+                return false;
+            }
+            // Every bridge of the plain node whose far end sits in a net the
+            // NEW supply's net may not meet has to go: the old supply itself,
+            // and any stale bridge to another supply still dangling on the
+            // row (a "Net ?" left by the old silent path - Kevin's rows 23 and
+            // 38 carry those). A plain far end in such a net is a wire to a
+            // row that is also on the old supply: refuse, nothing touched.
+            int newNet = (plain == node1) ? netB : netA;
+            int drop[8];
+            int nDrop = 0;
+            int via = -1;
+            for (int i = 0; i < globalState.connections.numBridges; i++) {
+                int a = globalState.connections.bridges[i][0], b = globalState.connections.bridges[i][1];
+                if (a != plain && b != plain) continue;
+                int other = (a == plain) ? b : a;
+                int on = netOf(other);
+                if (on <= 0 || on == newNet || !netsMustNotMeet(on, newNet)) continue;
+                if (isPlainNode(other)) { via = other; break; }
+                if (nDrop < 8) drop[nDrop++] = other;
+            }
+            if (via > 0 || nDrop == 0) {
+                if (via > 0) snprintf(why, sizeof(why), "%s is on %s through %s", definesToChar(plain, 0), definesToChar(oldSpecial, 0), definesToChar(via, 0));
+                else snprintf(why, sizeof(why), "%s is on %s", definesToChar(plain, 0), definesToChar(oldSpecial, 0));
+                bridgeRefused(node1, node2, why);
+                return false;
+            }
+            for (int i = 0; i < nDrop; i++) removeBridgeFromState(plain, drop[i], false);
+            lastBridgeMovedFrom = oldSpecial;
+        }
+    }
+
     // Use the state's built-in validation and addition
     bool success = globalState.addConnection(node1, node2, errorMsg, duplicates);
-    
+
     if (!success) {
         if (debugFP) {
             Jerial.print("addBridgeToState failed: ");
             Jerial.println(errorMsg);
         }
+        bridgeRefused(node1, node2, nullptr);
         return false;
     }
     
