@@ -4590,9 +4590,18 @@ void couldntFindPath(int forcePrint) {
   auto& ch   = globalState.connections.chipStates; (void)ch;
   auto& net  = globalState.connections.nets;  (void)net;
 
-    if (debugNTCC2 || forcePrint)
+    // The framing newlines belong to the debug trace only: with forcePrint the
+
+    // message below carries its own, and an empty pass must print nothing -
+
+    // every rebuild used to leave two blank lines on the terminal (2026-09-25).
+
+    if (debugNTCC2)
+
     {
+
         Serial.print("\n\r");
+
     }
 
     for (int i = 0; i < numberOfPaths; i++)
@@ -4639,7 +4648,7 @@ void couldntFindPath(int forcePrint) {
             //path[i].skip = true;
     }
   }
-    if (debugNTCC2 || forcePrint)
+    if (debugNTCC2)
     {
         Serial.print("\n\r");
   }

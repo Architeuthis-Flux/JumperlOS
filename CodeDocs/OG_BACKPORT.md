@@ -1870,6 +1870,103 @@ fixed here. (2) Port 7 went silent for every verb (even `:ver`) after a client
 closed mid-`:leds` frame; port 5 stayed live; `machine.reset()` cleared it.
 Once; not chased.
 
+### Session 2026-09-25 (late morning, 2) — GND on the rails, and the pick for the second node
+
+**Kevin:** highlight the GND rail when GND is selected; and a 560 ohm resistor
+across two rows does not get the "which row?" pick when he is placing power.
+
+**GND:** GND has no row LED, so a held GND was invisible. The first-node latch
+now paints both GND rails (`ogGndRailsPaint`, new in LEDs.cpp, OG only)
+0x00c030 while GND is the held node in connect mode, and sets `s.railHeld` so
+the same `scanRailsRelease` that drops the rail ask's colour (commit, drop,
+mode switch) puts the rails back; the exit render repaints them too.
+
+**Pick:** `scanSessionFilter` opened the pick only for the first node
+(`node1or2 == 0`, both the settle and the press-during-settle sites). With
+the supply held as node 1 by the row-tap ask, a touch that spans two rows
+answered with the lowest row unasked - and through a resistor those rows are
+not one net. The pick now opens for any node.
+
+**Verification:** builds both targets, flashed; both need the probe: (1) touch
+GND, lift - both GND rails bright green until the next tap commits or a
+press drops it; (2) rail, then a leg of the resistor - the pick shows the two
+rows, short press cycles, long press selects, `5V  -  N  connected` on the
+chosen row.
+
+### Session 2026-09-25 (late morning, 3) — a refused bridge says so; a supply tap moves the row
+
+**Kevin:** dim the GND-held green; a bridge the net manager quietly drops must
+tell the user on the terminal and OLED (V5 and OG) instead of "connected";
+and when the new connection is the valid one (row 23 on GND, tapped to 5V),
+remove the older conflicting bridge and make the new one. His paste: `5V - 23
+connected`, netlist unchanged, 23 still on GND.
+
+**Where it lives:** `addBridgeToState` (FileParsing.cpp), the one path every
+user connection takes (probe tap, MicroPython `connect`, the text commands).
+Before the bridge is stored: if the two nodes' nets may not meet (a pure
+two-way check of the nets' do-not-intersect lists - `checkDoNotIntersectsByNet`
+has a skip-marking side effect and stays the net manager's), then
+- exactly one side a plain row / header pin, its only link to the old supply
+  its own direct bridge → that bridge is removed and the new one lands;
+  `lastBridgeMovedFrom` carries the old supply and the probe tap prints
+  `connected  (was on GND)` and appends "was GND" on the OLED;
+- otherwise refused with a reason: "23 is on GND through 24", "23 is on GND,
+  24 is on 5V", or plain "can't connect GND to 5V" (also for the tap gate's
+  own refusals, which were silent outside debugFP). The reason goes to the
+  terminal from `addBridgeToState` (so every path says it) and to
+  `lastBridgeNote`, which the probe tap shows on the OLED.
+`kScanGndHeldColor` 0x00c030 → 0x008020.
+
+The scan over the plain node's bridges is keyed on the NEW supply's net, not
+on "the bridge to the old supply": every bridge whose far end sits in a net
+the new net may not meet goes (the old supply, and any stale "Net ?" bridge
+to another supply that the old silent path left on the row - Kevin's rows 23
+and 38 carry those), and a plain far end in such a net is a wire to another
+row on the old supply, refused untouched. Keyed on the old supply alone, a
+row carrying a dangling 5V bridge tapped to 3V3 would have ended with both
+supplies on it and the terminal saying connected - the same lie, one tap
+away. The polluted case cannot be built through the gated path any more, so
+it stays a code argument, not a bench result.
+
+**Undo, flagged:** a move is a removeConnection then an addConnection, two
+undo entries; one undo after a move leaves the row on nothing. Not fixed.
+
+**Not changed:** MicroPython `connect` still returns False on a refusal (the
+reason prints on port 1, not the REPL); slot loads and undo call
+`addConnection` directly and are not gated, as before.
+
+**Bench (OG 1.7.11.4 label, ports 5 + 7; port 1 was Kevin's app, so the
+terminal lines were his to see):** GND-23 then 5V-23 → `5V=[5V,23]`, GND net
+without 23 (moved). GND-24, 5V-25, then 24-25 → nets unchanged (refused,
+both sides on a supply). GND-26, 26-27, then 5V-27 → 27 stays on GND
+(refused, through 26). GND-5V → refused. 3V3-23 with 23 on 5V → `3V3=[3V3,23]`
+(moved again). The probe tap's "(was on GND)" line and the OLED note need the
+probe; not seen yet.
+
+### Session 2026-09-25 (midday, 2) — the stray blank lines, and wrong names in the refusal text
+
+**Kevin's paste:** `can't connect 25 to 25: 25 is on GND, 25 is on 5V`,
+`26 is on GND through 26`, plus "some stray newlines on the og terminal".
+
+**Names:** `definesToChar()` returns one static buffer for a row number, so
+several row names in one format call all read the last one. `addBridgeToState`
+now copies each name out first. The refusal line is also written in place
+(`ESC[2K` + CR, like the tap's own line) rather than on a fresh line below.
+
+**Blank lines, traced with markers, not by reading:** with the app closed,
+port 1 captured raw showed exactly `\n\r\n\r` (two line endings) 50 ms
+after every bridge change - connect, disconnect, clear - in raw and line mode
+alike, and nothing for a DAC change. A one-off build with single-token
+markers between every step of `refreshLocalConnections` put the pair inside
+`bridgesToPaths()`. The OG router calls `couldntFindPath(1)` at the end of
+every pass, and with `forcePrint` that reporter printed a bare `\n\r` before
+and after its loop whether or not any path had failed. Those framing newlines
+are debug-trace-only now; the per-failure message carries its own. After:
+a connect prints nothing, a refusal prints its one line. Likely the same
+mechanism behind the ledger's older "blank-line bursts per self-test row"
+note. The V5 router calls its own `couldntFindPath(1)` too, but its copy has
+those two prints commented out already - which is why this was OG-only.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the
