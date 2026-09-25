@@ -8620,8 +8620,8 @@ void Probing::scanAskShow( ProbeSession& s ) {
                   false, s.askChoice == SUPPLY_5V ? 5 : 3 );
     requestLedShow( 2 );
     Serial.print( "\x1b[2K\r" );
-    Serial.print( s.askChoice == SUPPLY_5V ? "        5V   short press = 3.3V, long press = select"
-                                           : "      3.3V   short press = 5V, long press = select" );
+    Serial.print( s.askChoice == SUPPLY_5V ? "        5V   tap a row to connect it, short press = 3.3V"
+                                           : "      3.3V   tap a row to connect it, short press = 5V" );
     Serial.flush( );
 }
 
@@ -8685,6 +8685,7 @@ int Probing::scanSessionFilter( ProbeSession& s, int read ) {
             probeTimeout = millis( );
             if ( !longPress ) {
                 s.askChoice = ( s.askChoice == SUPPLY_5V ) ? SUPPLY_3V3 : SUPPLY_5V;
+                s_scanRailChoice = s.askChoice; // remembered as soon as it is chosen (Kevin, 2026-09-25)
                 scanAskShow( s );
                 return -1;
             }
@@ -8700,12 +8701,38 @@ int Probing::scanSessionFilter( ProbeSession& s, int read ) {
         // Lifting the needle does NOT take the ask down: you poke the rail,
         // read the question, take the probe off the board and answer it with
         // the button (Kevin, 2026-09-08 - "we shouldn't need to hold the row
-        // poked"). Only landing on something that is not a rail closes it, and
-        // that read is then handled below as a fresh touch.
+        // poked"). A row under the needle answers it with what the rails show
+        // (Kevin, 2026-09-25 - "it should just place whatever's shown on the
+        // rails if we tap a row"): the supply node goes back now and is
+        // latched as the pair's first node, and the row keeps settling through
+        // the touch path below and lands as the second, so the pair commits
+        // without a press. A row that was already held is dropped - the tapped
+        // row is the one that gets the supply. GND (a low level, node 100) is
+        // never an answer: it takes the ask down as before.
         if ( read == -1 || read == kScanRailTouch ) return -1;
-        scanRailsRelease( s );
-        Serial.print( "\x1b[2K\r" );
-        scanTouchReset( s );
+        if ( read == GND ) {
+            scanRailsRelease( s );
+            Serial.print( "\x1b[2K\r" );
+            scanTouchReset( s );
+        } else {
+            s_scanRailChoice = s.askChoice;
+            s.askOpen = false;
+            probeChooserActive = false;
+            s.railHeld = true;      // the rails keep the color until the pair commits
+            scanTouchReset( s );    // the row starts a fresh touch on the next sweep
+            if ( node1or2 == 1 ) {
+                node1or2 = 0;
+                nodesToConnect[ 0 ] = -1;
+                nodesToConnect[ 1 ] = -1;
+                probeHighlight = -1;
+                requestLedShow( -1 ); // the dropped row's raw paint goes with it
+            }
+            s.row[ 1 ] = -2;        // the same supply again, a moment later, is a fresh latch
+            Serial.print( "\x1b[2K\r" );
+            connectedRows[ 0 ] = s.askChoice;
+            connectedRowsIndex = 1;
+            return s.askChoice;
+        }
     }
 
     if ( s.pickCount > 0 ) {
