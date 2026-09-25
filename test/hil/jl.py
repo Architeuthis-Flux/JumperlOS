@@ -72,6 +72,51 @@ def finish(name):
 
 
 # ----------------------------------------------------------------------------
+# Port lease: get the Jumperless desktop app off port 1 for our lifetime
+# ----------------------------------------------------------------------------
+# The OS hands a CDC port to one process, and the app sits on port 1 for as
+# long as it runs - so every port1_* helper here would fail with "Resource
+# busy" unless the user closed the app first. The app polls this file at 10 Hz
+# and closes its port while any line's PID is alive (it deletes the file itself
+# once every holder has exited). We append our line at import - every suite
+# and run_all import this module - and remove it at exit. Nothing else here
+# retries: if something that ignores the lease (JumperIDE in a browser) holds
+# the port, the first open still fails fast with the OS's own message.
+PORT_LEASE_FILE = os.path.expanduser("~/.jumperless_port_lease")
+
+
+def _take_port_lease():
+    try:
+        fresh = not os.path.exists(PORT_LEASE_FILE)
+        with open(PORT_LEASE_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} hil {os.path.basename(sys.argv[0])}\n")
+    except OSError:
+        return
+    atexit.register(_drop_port_lease)
+    if fresh:
+        # ponytail: fixed settle instead of a busy-retry at every open site.
+        # The app needs one 100 ms poll plus a close() to let go; the first
+        # serial.Serial() in a suite can be its very first statement.
+        time.sleep(0.3)
+
+
+def _drop_port_lease():
+    try:
+        with open(PORT_LEASE_FILE, "r", encoding="utf-8") as f:
+            others = [ln for ln in f if ln.split(None, 1)[:1] != [str(os.getpid())]]
+        if others:
+            with open(PORT_LEASE_FILE, "w", encoding="utf-8") as f:
+                f.writelines(others)
+        else:
+            os.remove(PORT_LEASE_FILE)
+    except OSError:
+        pass
+
+
+_take_port_lease()
+
+
+# ----------------------------------------------------------------------------
 # Fault witness
 # ----------------------------------------------------------------------------
 # Every byte this module reads off port 1 passes through here. The firmware

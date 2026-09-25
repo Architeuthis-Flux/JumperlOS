@@ -662,6 +662,8 @@ void clearLEDsExceptRails();
 // rail's 5 LEDs take positiveColor, from the same end on every rail (3 for
 // the 3.3 V ask, 5 for the 5 V ask); the rest sit dark.
 void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit = false, int litCount = 5);
+// The OG's two GND rails (all five LEDs each) in one colour; ogRailsPaint(0) puts them back.
+void ogGndRailsPaint(uint32_t color);
 uint32_t HsvToRaw(hsvColor hsv);
 
 uint32_t packRgb(rgbColor color);

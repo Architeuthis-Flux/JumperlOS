@@ -63,8 +63,14 @@ touching it.**
 
 - **Ports:** `/dev/cu.usbmodemJLV5port1` = terminal (single-char commands),
   `/dev/cu.usbmodemJLV5port5` = MicroPython raw REPL. `test/hil/jl.py`
-  wraps both and discovers them itself. One host process per port — the
-  Jumperless desktop app must be closed.
+  wraps both and discovers them itself. One host process per port. The
+  Jumperless desktop app does NOT need to be closed: it only holds port 1,
+  and it lets go of it while `~/.jumperless_port_lease` exists (`jl.py`
+  writes that lease at import and removes it at exit; the app reconnects
+  by itself afterwards). For an ad-hoc tool, `touch ~/.jumperless_port_lease`
+  before and `rm` it after (a bare touch lasts 60 s; a `<pid> <label>` line
+  lasts while that PID lives). `Resource busy` therefore means a holder that
+  ignores the lease - JumperIDE in a browser, a stray `screen` - not the app.
 - **The suite is `python3 test/hil/run_all.py`** (optional substring arg
   runs matching files, e.g. `run_all.py projects`). Full run ≈ 15–40 min.
   PASS = the final `HIL suite: PASS` line; a SKIP is not a pass. Run it

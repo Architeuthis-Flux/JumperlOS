@@ -2797,6 +2797,9 @@ static int persistentEncoderCursorNode = -1;
 static int persistentCursorZone = ZONE_BREADBOARD;
 static int persistentSubIndex = 0;  // For multi-item zones (DAC 0/1, ADC 0-4, etc.)
 static bool firstProbeEntry = true; // Track first entry to reset position
+// The OG's GND rails while GND is the held node (the latch in probeTick; the
+// rail ask's own palette lives with the scanning-probe sub-states below).
+static const uint32_t kScanGndHeldColor = 0x008020;
 
 struct Probing::ProbeSession {
     enum State { PROBE_ARM, PROBE_REARM, PROBE_RUN };
@@ -3806,6 +3809,14 @@ void Probing::probeTick( ProbeSession& s ) {
                     // probeConnectHighlight = nodesToConnect[node1or2];
                     brightenNet( probeHighlight, 5 );
                 }
+                if ( s.setOrClear == 1 && scanprobe::available( ) && probeHighlight == GND ) {
+                    // GND has no row to light: hold it on the two GND rails
+                    // (Kevin, 2026-09-25). Released with the pair, exactly
+                    // like the rail ask's colour (scanRailsRelease).
+                    s.railHeld = true;
+                    ogGndRailsPaint( kScanGndHeldColor );
+                    requestLedShow( 2 );
+                }
 
                 // oled.clearPrintShow(bothNames, 2, 0, 5, true, true, true);
 
@@ -3912,6 +3923,12 @@ void Probing::probeTick( ProbeSession& s ) {
                     if ( scanprobe::available( ) ) scanRailsRelease( s ); // the supply node is no longer held
                     bool bridgeAdded = addBridgeToState( nodesToConnect[ 0 ], nodesToConnect[ 1 ], -1, true );
                     if ( !bridgeAdded ) {
+                        // The terminal line came from addBridgeToState; the OLED
+                        // gets the same reason (Kevin, 2026-09-25: a refused
+                        // tap must say so, not "connected").
+                        if ( lastBridgeNote[ 0 ] != '\0' ) {
+                            oled.clearPrintShow( lastBridgeNote, 2, true, true, true );
+                        }
                         node1or2 = 0;
                         nodesToConnect[ 0 ] = -1;
                         nodesToConnect[ 1 ] = -1;
@@ -3950,7 +3967,14 @@ void Probing::probeTick( ProbeSession& s ) {
                         Serial.flush( );
                     } else {
 
-                        Serial.print( "     \tconnected\n\r" );
+                        Serial.print( "     \tconnected" );
+                        if ( lastBridgeMovedFrom > 0 ) {
+                            Serial.printf( "  (was on %s)", definesToChar( lastBridgeMovedFrom, 0 ) );
+                            size_t bl = strlen( bothNames );
+                            if ( bl < sizeof( bothNames ) )
+                                snprintf( bothNames + bl, sizeof( bothNames ) - bl, " was %s", definesToChar( lastBridgeMovedFrom, 0 ) );
+                        }
+                        Serial.print( "\n\r" );
                         Serial.flush( );
                     }
 
@@ -8781,7 +8805,11 @@ int Probing::scanSessionFilter( ProbeSession& s, int read ) {
     // 0 then, so this does not fire.)
     if ( press && s.touchSweeps > 0 && !s.touchAnswered && s.touchCount > 0 ) {
         std::sort( s.touchSet, s.touchSet + s.touchCount );
-        if ( s.touchCount > 1 && node1or2 == 0 ) {
+        if ( s.touchCount > 1 ) {
+            // Any node, not only the first: through a resistor the rows are
+            // NOT one net, and the second node is where the supply lands
+            // (Kevin, 2026-09-25 - a 560 ohm across two rows placed power on
+            // the lower row unasked).
             scanPickOpen( s );
             return -1;
         }
@@ -8847,12 +8875,16 @@ int Probing::scanSessionFilter( ProbeSession& s, int read ) {
         if ( s.touchSweeps < 1000000 ) s.touchSweeps++; // settled; just don't wrap
         std::sort( s.touchSet, s.touchSet + s.touchCount );
 
-        if ( s.touchCount > 1 && node1or2 == 0 ) {
+        if ( s.touchCount > 1 ) {
+            // Any node, not only the first: through a resistor the rows are
+            // NOT one net, and the second node is where the supply lands
+            // (Kevin, 2026-09-25 - a 560 ohm across two rows placed power on
+            // the lower row unasked).
             scanPickOpen( s );
             return -1;
         }
 
-        // One row (or a second node is already held): report it once.
+        // One row: report it once.
         s.touchAnswered = true;
         connectedRows[ 0 ] = s.touchSet[ 0 ];
         connectedRowsIndex = 1;

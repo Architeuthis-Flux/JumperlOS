@@ -3763,6 +3763,16 @@ void ogRailsPaint(uint32_t positiveColor, bool onlyUnlit, int litCount) {
 #endif
 }
 
+void ogGndRailsPaint(uint32_t color) {
+#if defined(OG_JUMPERLESS)
+  for (int j = 1; j < 4; j += 2) {
+    for (int i = 0; i < 5; i++) leds.setPixelColor(kOgRailPixels[j][i], color);
+  }
+#else
+  (void)color;
+#endif
+}
+
 void __not_in_flash_func(showNets)(void) {
   // Serial.println(rp2040.cpuid());
   // core2busy = true;
