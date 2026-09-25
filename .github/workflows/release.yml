@@ -159,7 +159,25 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION
           git commit -m "Auto-bump firmware version to ${VERSION} [skip ci]"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          # main can move while the firmware builds (a push from the bench
+          # landed under a run on 2026-09-25 and this push was rejected as a
+          # non-fast-forward). Replay the bump on the current tip - this run's
+          # VERSION wins a conflict - and retry the push a few times. The
+          # release step targets HEAD, so it needs this push to have landed.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "${GITHUB_REF_NAME}"
+            if ! git rebase -X theirs "origin/${GITHUB_REF_NAME}"; then
+              git rebase --abort
+              echo "::error::could not replay the version bump onto origin/${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not push the version bump after 5 attempts"
+          exit 1
 
       - name: Create GitHub release
         # Publishes BOTH firmwares in one release: the V5 firmware.uf2 (asset name
