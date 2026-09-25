@@ -208,9 +208,11 @@ static void crossbarReset( void ) {
     busy_wait_us( 600 );
     digitalWrite( RESETPIN, LOW );
     busy_wait_us( 50 );
-    // The shadow now lies about every chip. (A no-op on the OG build, whose
-    // RouteSafety is stubbed - which is why the session forces a clean resend
-    // at exit instead of relying on this.)
+    // The shadow (lastChipXY) now lies about every chip. The mark compiles
+    // on the OG, but only refreshConnections() consults it - the local
+    // refresh the session exits through does not - which is why the session
+    // asks that refresh for a clean resend explicitly instead of relying on
+    // this.
     for ( int c = 0; c < board::kChipCount; c++ ) markChipXYSuspect( c );
 }
 

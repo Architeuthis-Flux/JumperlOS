@@ -1684,6 +1684,93 @@ create ...o" and the tracked V5 `firmware.uf2` gets deleted. Build with
 `PLATFORMIO_BUILD_DIR` pointed at a scratch dir and `git checkout` the uf2
 before committing.
 
+### Session 2026-09-25 — a user's circuit stayed dead after probing: the exit's clean resend was never clean
+
+**Report (an OG user, via Kevin):** a 1k + LED circuit on the board. On the
+original firmware the LED goes out on entering probing mode and comes back on
+leaving it, as the connections are re-made. On every JumperlOS OG release they
+tried (1.7.11.1 through 1.7.11.4) the LED goes out and stays out.
+
+**Mechanism, traced hop by hop (the OG was not on the bus, so this is a code
+trace, not a bench repro):**
+
+1. `scanprobe::sweepBegin()` empties the crossbar with a RESETPIN pulse
+   (`crossbarReset()`), which is the reference firmware's behaviour and why the
+   LED goes out. It marks every chip suspect, but that mark is only read by
+   `refreshConnections()`.
+2. `Probing::probeExitTail()` restores with `refreshLocalConnections(1, 1, 1)`,
+   asking for a clean resend.
+3. `refreshLocalConnections()` never used its `clean` argument: it posted
+   `REQ_BYPASS` unconditionally, and before the mailbox (3f02a14) it was
+   `sendAllPathsCore2 = 3` unconditionally. Neither cleans.
+4. A bypass is `sendPaths(0)` → `sendAllPaths(0)`, a diff against
+   `lastChipXY`. The reset pulse never touched that shadow, so every
+   pre-existing crosspoint still reads "set" and nothing is sent. Only a
+   crosspoint that changes later (a new connection) goes out — which is what
+   the user saw: the old circuit is dead until the next real edit.
+
+The `s r` diagnostic (SingleCharCommands) restores through the same call after
+its own reset and prints "crossbar restored (clean refresh)", so it had the
+same bug.
+
+**Fix (both targets build, host `test_boards` OK, bench-verified below). What
+it routes into was already bench-proven:** yesterday's OG self test drove
+`refreshConnections(-1, 0, 1)` — `sendPaths(1)`, the same RESETPIN pulse and
+full chip-ordered resend — repeatedly, and its crossbar sweep passed 60/60.
+The only untested piece today is the one-line routing of the local refresh's
+`clean` into that slot.
+`refreshLocalConnections()` honours `clean`: with `clean == 1` it posts
+`REQ_SEND` with `SEND_PATHS | SEND_CLEAN` (sticky, served on core 1's next
+8 ms tick; the LED branch's `allIdle()` gate means the exit's
+`requestLedShow(-1)` renders after the crossbar is back). Still no wait, as
+before. The suspect mark is deliberately NOT mirrored in the local refresh —
+that would put a clean on the V5's tap hot path.
+
+`FileParsing.cpp`'s paste refresh had passed `clean = 1` for years without
+getting one; it now passes 0 so the paste path keeps running exactly as it
+always did (no reset pulse + full resend per paste on either board). That is
+behaviour preservation, not a fix.
+
+**Bench, 09:00–09:20 (Kevin plugged the OG back in; it was running the
+released 1.7.11.1 with an empty slot — the user's exact firmware):**
+
+- Baseline on 1.7.11.1, ports 1 + 7 (port 5 is dead on that release, the
+  heap-floor bug): `f DAC1-10, ADC0-10`, DAC1 at 0 V, ADC0 0.05 V; `s r 10`;
+  ADC0 4.99 V ×3 (the OG's floating buffer input) — the circuit is gone. The
+  `:crossbar` shadow is byte-identical before and after: it still claims the
+  crosspoints. That release's ADC calibration is garbage with today's config
+  (2.5 V read 9.25 V), so the 0 V case is the clean one.
+- Fixed build (1.7.11.3 label, flashed through the bootloader): DAC1 2.5 V →
+  ADC0 2.29 V; `s r 10`; ADC0 2.26 / 2.28 / 2.26 V; DAC1 stepped to 1.0 V →
+  ADC0 0.76 V (a live path follows; a held float would not); back to 2.5 V →
+  2.27 V. `s r` restores through the identical `refreshLocalConnections(1, 1, 1)`
+  the probe exit uses. The probe-button path itself was not pressed (no hands).
+- Side effect of the 1.7.11.1 flash: the config came back with V5 default
+  calibration stamped generation 5, so yesterday's OG calibration was gone
+  (hence 2.29 V for 2.5 V: the fixed build ignored the foreign stamp, as
+  designed). Re-ran `$`: generation 1, DAC1 2.5 V → ADC0 2.502 V. Bench left
+  with an empty slot and DAC1 at 0 V, as found.
+
+**Follow-ups (not in this commit):**
+- `board_og.cpp:75`'s comment still says UART TX/RX are GPIO 17/16; the table
+  under it (measured and fixed 2026-09-24) says 16/17. Stale comment.
+- OLED + a probe session on the OG is untested: every sweep resets the crossbar
+  and cuts the panel's SDA/SCL mid-transaction; the stuck-slave unstick runs
+  only at connect, not at probe exit. No user has both yet.
+
+**Bench checks** (both need port 1 free of the desktop app):
+
+- The user's scenario: an LED + 1k on a net, press the probe button to enter
+  connect mode, press again / send a byte to leave. Fixed: the LED comes back
+  on together with the exit's LED render (the LED branch's `allIdle()` gate
+  runs it after the clean send completes). Broken: it stays off until the
+  next edit.
+- Button-free, scriptable: from port 5 `jumperless.dac_set(1, 2.5)`,
+  `jumperless.connect("DAC1", 10)`, `jumperless.connect("ADC0", 10)`,
+  `jumperless.adc_get(0)` → 2.5 V. Then on port 1 `s r 10` (resets the
+  crossbar, restores through the same `refreshLocalConnections(1, 1, 1)`),
+  and read ADC0 again. Broken build: ~0 V. Fixed: 2.5 V.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

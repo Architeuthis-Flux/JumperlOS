@@ -1103,9 +1103,13 @@ void savePreformattedNodeFile(int source, int slot, int keepEncoder, const Strin
     if (connCount > 0) {
       globalState.markDirty();
       
-      // Refresh immediately but with optimizations to keep it fast
+      // Refresh immediately but with optimizations to keep it fast.
+      // (clean = 0: this call passed 1 for years while refreshLocalConnections
+      // ignored the argument; now that it is honoured, 0 keeps the paste path
+      // as it always ran - a reset pulse and full resend per paste is not
+      // wanted here.)
       unsigned long refreshStart = millis();
-      refreshLocalConnections(-1, 1, 1);
+      refreshLocalConnections(-1, 1, 0);
       unsigned long refreshTime = millis() - refreshStart;
       
       // Warn if refresh is taking too long (indicates performance problem)

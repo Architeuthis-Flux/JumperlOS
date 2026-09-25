@@ -478,7 +478,18 @@ unsigned long start2 = millis();
   // OPTIMIZATION: Use Core 2 bypass for parallel execution (like fastRefresh)
   // This allows Core 0 to return immediately while Core 2 sends paths asynchronously
   // Result: ~13ms saved per refresh by eliminating synchronous wait
-  core1req::post(core1req::REQ_BYPASS, 1u);  // the old "3": send now, no clean, no wait
+  if (clean == 1) {
+    // The bypass cannot clean: it is a diff against lastChipXY, and a caller
+    // asking for a clean has usually just emptied the crossbar behind that
+    // shadow's back (the OG probe sweep's RESETPIN pulse). Until 2026-09-25
+    // this argument was dropped on the floor - a bypass went out, the diff
+    // found nothing to send, and the circuit stayed dead until the next real
+    // change. The SEND slot's sticky clean bit resets the chips and resends
+    // everything; still no wait here.
+    core1req::post(core1req::REQ_SEND, core1req::SEND_PATHS | core1req::SEND_CLEAN);
+  } else {
+    core1req::post(core1req::REQ_BYPASS, 1u);  // the old "3": send now, no clean, no wait
+  }
   xbarLatRequest();  // latency probe: request stamped (XbarLatency.h)
   
   // NOTE: We do NOT wait for Core 2 to finish here (unlike old synchronous approach)
