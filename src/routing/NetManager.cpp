@@ -1590,12 +1590,18 @@ void listNets(int liveUpdate, Stream *stream)
                     spaces = stream->print("0 V       ");
                     break;
                   case 2:
+#if defined(OG_JUMPERLESS)
+                    spaces = stream->print("5.00 V"); // the header's 5V pin (special net 2 on the OG)
+#else
                     spaces = stream->printf("%-.2f V", globalState.power.topRail);
-
+#endif
                     break;
                   case 3:
+#if defined(OG_JUMPERLESS)
+                    spaces = stream->print("3.30 V"); // the header's 3V3 pin (special net 3 on the OG)
+#else
                     spaces = stream->printf("%-.2f V", globalState.power.bottomRail);
-
+#endif
                     break;
                   case 4:
                     spaces = stream->printf("%-.2f V", globalState.power.dac0);
@@ -1933,12 +1939,20 @@ void listSpecialNets() {
         spaces += Serial.print("0V");
         break;
       case 2:
+#if defined(OG_JUMPERLESS)
+        spaces += Serial.print("5.00V");
+#else
         spaces += Serial.print(globalState.power.topRail);
         spaces += Serial.print("V");
+#endif
         break;
       case 3:
+#if defined(OG_JUMPERLESS)
+        spaces += Serial.print("3.30V");
+#else
         spaces += Serial.print(globalState.power.bottomRail);
         spaces += Serial.print("V");
+#endif
         break;
       case 4:
         spaces += Serial.print(globalState.power.dac0);

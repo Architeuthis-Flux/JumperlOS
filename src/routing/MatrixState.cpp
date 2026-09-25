@@ -18,11 +18,25 @@
 static const netStruct specialFunctionNetsInit[] = { //these are the special function nets that will always be made
   //netNumber,       ,netName          ,memberNodes[]         ,memberBridges[][2]     ,specialFunction        ,intsctNet[] ,doNotIntersectNodes[]                 ,priority (unused)
       {     127      ,"Empty Net"      ,{EMPTY_NET}           ,{{}}                   ,EMPTY_NET                        ,{EMPTY_NET,EMPTY_NET,EMPTY_NET,EMPTY_NET,EMPTY_NET,EMPTY_NET,EMPTY_NET} , 0},
+#if defined(OG_JUMPERLESS)
+      // The OG's rails are not on the crossbar (the rail switch feeds them);
+      // its always-made supplies are the header's 5V and 3V3 pins, which the
+      // scanning probe's rail ask hands out. Slots 2 and 3 hold those, so
+      // every row put on a supply joins one fixed-colour net (Kevin,
+      // 2026-09-25). The slot NUMBERS are what the rest of the firmware keys
+      // on (assignNetColors, the netlist print), so they stay 2 and 3.
+      {     1        ,"GND"            ,{GND}                 ,{{}}                   ,GND                              ,{SUPPLY_5V, SUPPLY_3V3, DAC1}    , 1},
+      {     2        ,"5V"             ,{SUPPLY_5V}           ,{{}}                   ,SUPPLY_5V                        ,{GND, SUPPLY_3V3, DAC0, DAC1}                               , 1},
+      {     3        ,"3V3"            ,{SUPPLY_3V3}          ,{{}}                   ,SUPPLY_3V3                       ,{GND, SUPPLY_5V, DAC0, DAC1}                               , 1},
+      {     4        ,"DAC 0"          ,{DAC0}                ,{{}}                   ,DAC0                             ,{ SUPPLY_5V, SUPPLY_3V3, DAC1}                               , 1},
+      {     5        ,"DAC 1"          ,{DAC1}                ,{{}}                   ,DAC1                            ,{GND, SUPPLY_5V, SUPPLY_3V3, DAC0}                               , 1},
+#else
       {     1        ,"GND"            ,{GND}                 ,{{}}                   ,GND                              ,{BOTTOM_RAIL,TOP_RAIL,DAC1}    , 1},
       {     2        ,"Top Rail"       ,{TOP_RAIL}            ,{{}}                   ,TOP_RAIL                         ,{GND, BOTTOM_RAIL, DAC0, DAC1}                               , 1},
       {     3        ,"Bottom Rail"    ,{BOTTOM_RAIL}         ,{{}}                   ,BOTTOM_RAIL                      ,{GND, TOP_RAIL, DAC0, DAC1}                               , 1},
       {     4        ,"DAC 0"          ,{DAC0}                ,{{}}                   ,DAC0                             ,{ TOP_RAIL, BOTTOM_RAIL, DAC1}                               , 1},
       {     5        ,"DAC 1"          ,{DAC1}                ,{{}}                   ,DAC1                            ,{GND, TOP_RAIL, BOTTOM_RAIL, DAC0}                               , 1},
+#endif
       // {     6        ,"I Sense +"      ,{ISENSE_PLUS}         ,{{}}                   ,ISENSE_PLUS                      ,{ISENSE_MINUS}                      , 2},
       // {     7        ,"I Sense -"      ,{ISENSE_MINUS}        ,{{}}                   ,ISENSE_MINUS                     ,{ISENSE_PLUS}                       , 2},
   };
@@ -408,6 +422,18 @@ int globalDoNotIntersects[60][2] = {
   {ROUTABLE_BUFFER_OUT, BOTTOM_RAIL},
   {ROUTABLE_BUFFER_OUT, DAC1}, //maybe
   {ROUTABLE_BUFFER_OUT, DAC0},
+#if defined(OG_JUMPERLESS)
+  // The OG's always-made supplies (special nets 2 and 3): a bridge that would
+  // put 5V or 3V3 on GND, on each other or on a DAC is refused at the tap
+  // ("can't connect"), not left to the path validator.
+  {GND, SUPPLY_5V},
+  {GND, SUPPLY_3V3},
+  {SUPPLY_5V, SUPPLY_3V3},
+  {SUPPLY_5V, DAC0},
+  {SUPPLY_5V, DAC1},
+  {SUPPLY_3V3, DAC0},
+  {SUPPLY_3V3, DAC1},
+#endif
 
   
   };

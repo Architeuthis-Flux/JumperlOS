@@ -1771,6 +1771,105 @@ released 1.7.11.1 with an empty slot — the user's exact firmware):**
   crossbar, restores through the same `refreshLocalConnections(1, 1, 1)`),
   and read ADC0 again. Broken build: ~0 V. Fixed: 2.5 V.
 
+### Session 2026-09-25 (late morning) — the rail ask answers on a row tap
+
+**Kevin, three messages:** selecting power in OG probing lets him pick the
+voltage but never places the connection; the long-press select doesn't work;
+the ask should not need a long press at all - "it should just place whatever's
+shown on the rails if we tap a row" - and the last 3.3 / 5 V choice should be
+kept so several rows going to power do not each need a selection.
+
+**What the code trace found (no button on the bench, so no repro):** every hop
+from the ask's long-press select to the commit checks out on paper -
+`scanSessionFilter` returns the supply node with `connectedRows` set, the
+tick's only silent gate is `isConnectable()`, which reads
+`globalState.connections.chipStates`, and `jumperless.connect(103, 10)` routes
+through the OG router's lookups on that same table (3V3 on row 10 read
+3.27 V on ADC0), so the node is connectable; `addBridgeToState` is the same
+call MicroPython made. The `C` crossbar print's lane labels are a fixed V5
+name table (MatrixState.cpp:208), not the live map - cosmetic on the OG.
+A 5-minute port-1 capture with `:padgate on` (port 7, RAM-only
+`debugProbing = 2`) caught nothing, and a later 20-minute one decoded three
+row-tap connects and no long press - but Kevin's own terminal pasted `[filt]`
+lines from the same period, so his client and the capture were sharing one
+byte stream and absence in the log proves nothing about the decoder (the
+02cf018 commit message over-claims this; this line is the correction).
+
+One dynamic candidate for the long press, unverified: `scanProbeButtonService`
+posts a release after two disagreeing samples (24 ms), and `buttonPressed()`
+is a tone test through the probe cable; a dropout mid-hold would chop a
+450 ms hold into short presses (toggles) and the long press would never fire.
+"The rail colour flips on a long press" would confirm it.
+
+**Change (Probing.cpp, `scanSessionFilter` + `scanAskShow`):** while the ask
+is open, a row (or header pin) under the needle answers it: the shown supply
+node goes back as the pair's first node, the row keeps settling through the
+touch path and lands as the second, and the pair commits with no press. A row
+that was already held is dropped - the tapped row gets the supply (order
+independent, and what the sentence says literally). GND (a low level, node
+100) is never an answer and takes the ask down as before. Every short-press
+toggle now writes `s_scanRailChoice` immediately (RAM, survives the session;
+across a reboot is a config field and a follow-up). `s.row[1]` is cleared at
+the resolve so the same supply a moment later is a fresh latch. The long
+press still selects, unchanged, until its failure is explained. Ask line:
+`3.3V   tap a row to connect it, short press = 5V`.
+
+**Verification:** builds both targets; the button half is Kevin's. Flow to
+try: touch a rail (rails show the remembered voltage), lift, tap row N -
+expect `3V3  -  N     connected` and the row lit; again with row M, no press.
+Then a short press on the ask to flip to 5 V, tap a row. Then GND: touching
+GND with the ask up should take the ask down, not connect the supply.
+
+**Follow-ups:** `initChipStatus()` overwrites the live chip maps with the V5
+`rev4minusXmap` whenever `hardware.revision <= 4` - an OG config that says
+rev 3 would lose its topology at boot (Kevin's reads 5 today). The `C` print
+labels are V5's on the OG.
+
+### Session 2026-09-25 (midday) — 5V and 3V3 are the OG's special nets
+
+**Kevin's paste** showed the row-tap ask working (`5V  -  3     connected`,
+no press) and two ordinary nets called "Net 7" / "Net 8" holding 5V and 3V3
+rows in palette colours. Two asks: give 5V / 3V3 nets special colouring, and
+make the OG's always-made special nets 5V and 3V3 instead of the top and
+bottom rail (the OG's rails are not on the crossbar; the rail switch feeds
+them, and nets 2 / 3 were empty "TOP_R 0.00 V" vestiges).
+
+**Change:** `specialFunctionNetsInit` (MatrixState.cpp) has an OG variant:
+slot 2 = "5V" {SUPPLY_5V}, slot 3 = "3V3" {SUPPLY_3V3}, with do-not-intersect
+lists rewritten around them (GND / DAC0 / DAC1 too). The slot numbers stay 2
+and 3 because that is what the rest keys on. The OG router's literal copy of
+nets 1-5 in `clearAllNTCC` is dead (`initNets()` overwrites it from the table
+on the next line) and was left alone. Seven supply pairs go into
+`globalDoNotIntersects` under OG only (GND-5V, GND-3V3, 5V-3V3, 5V/3V3-DAC0,
+5V/3V3-DAC1: 59 of 60 slots used), so a tap that would short a supply is
+refused at the tap. `assignNetColors` slots 2 / 3 take fixed colours on the OG
+(0x140200 red-orange for 5V, 0x140a00 amber for 3V3 - the rail ask's palette
+at net weight). Both netlist prints show 5.00 V / 3.30 V for those slots on
+the OG. V5: every edit is under `#if defined(OG_JUMPERLESS)`, builds.
+
+Not changed: `Undo.cpp` names for DAC-set ops and `PartsApp`'s "TOP_RAIL"
+footer for net 2 (parts, V5 surfaces); the `ogRailsPaint` rail LEDs still
+show the switch-fed rails, not these nets.
+
+**Bench (this build, ports 5 + 7 + 1):** `connect(105, 20)`, `connect(103, 21)`
+→ `:nets` index 2 "5V" [5V, 20], index 3 "3V3" [3V3, 21]; port-1 `n` prints
+`5V 5.00 V` and `3V3 3.30 V`. `:leds` snapshot: pixel 19 (row 20) 0x640900
+red-orange, pixel 20 (row 21) 0x643100 amber, pixel 21 (row 22, GND)
+0x006410; swapping the two supplies swaps the two colours. Row N is pixel
+N-1 on the OG strip.
+The new pairs: `connect(100, 105)`, `(105, 103)`, `(103, 107)` each return
+with no bridge added (`b` empty); the control `(105, 20)` lands as
+`[5V,20,Net 2]`. The MicroPython path refuses silently; the probe tap prints
+"can't connect".
+
+**Seen along the way:** (1) a tap that puts 5V on a row already on GND passes
+`connectionAllowed` (row vs supply is not a listed pair), the net manager
+refuses the merge silently (`debugNM` only), and the bridge is left dangling as
+`[5V,22,Net ?]` - same shape as a V5 rail onto a GND row; a follow-up, not
+fixed here. (2) Port 7 went silent for every verb (even `:ver`) after a client
+closed mid-`:leds` frame; port 5 stayed live; `machine.reset()` cleared it.
+Once; not chased.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

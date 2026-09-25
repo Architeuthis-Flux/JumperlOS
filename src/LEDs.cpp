@@ -1302,6 +1302,12 @@ int checkChangedNetColors(int netIndex) {
 uint32_t railNetColors[3] = // dim
   {  0x000f04, 0x0f0202, 0x0f0202 };
 
+#if defined(OG_JUMPERLESS)
+// The OG's special nets 2 and 3 are the header's 5V and 3V3 (MatrixState.cpp):
+// fixed colours, the rail ask's palette at net weight (red-orange, amber).
+static const uint32_t kOgSupplyNetColors[2] = { 0x140200, 0x140a00 };
+#endif
+
 // A power rail sitting NEGATIVE paints its whole net BLUE (Kevin, 2026-09-01:
 // the wires are the rail color people actually look at), at the same dim
 // weight as the red. Hardware truth first, persisted value as the fallback -
@@ -1370,12 +1376,20 @@ void assignNetColors(int preview) {
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 2:
+#if defined(OG_JUMPERLESS)
+        netColors[netIdx] = unpackRgb(kOgSupplyNetColors[0]); // 5V
+#else
         netColors[netIdx] = unpackRgb(railNetColor(0));
+#endif
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
       case 3:
+#if defined(OG_JUMPERLESS)
+        netColors[netIdx] = unpackRgb(kOgSupplyNetColors[1]); // 3V3
+#else
         netColors[netIdx] = unpackRgb(railNetColor(1));
+#endif
         globalState.connections.nets[netIdx].color = netColors[netIdx];
         specialNetColors[slot] = netColors[netIdx];
         break;
