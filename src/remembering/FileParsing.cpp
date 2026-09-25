@@ -261,14 +261,26 @@ static int netOf(int node) {
     return n;
 }
 
+// definesToChar() hands back one static buffer for a row number, so two names
+// in one format call read the same text ("can't connect 25 to 25", Kevin's
+// terminal, 2026-09-25). Copy each name out first.
+static void nodeName(int node, char* out, size_t n) { snprintf(out, n, "%s", definesToChar(node, 0)); }
+
 static void bridgeRefused(int node1, int node2, const char* why) {
+    char n1[16], n2[16];
+    nodeName(node1, n1, sizeof(n1));
+    nodeName(node2, n2, sizeof(n2));
     if (why && why[0]) {
         snprintf(lastBridgeNote, sizeof(lastBridgeNote), "%s", why);
-        Jerial.printf("\r\n  can't connect %s to %s: %s\r\n", definesToChar(node1, 0), definesToChar(node2, 0), why);
     } else {
-        snprintf(lastBridgeNote, sizeof(lastBridgeNote), "can't connect %s to %s", definesToChar(node1, 0), definesToChar(node2, 0));
-        Jerial.printf("\r\n  %s\r\n", lastBridgeNote);
+        snprintf(lastBridgeNote, sizeof(lastBridgeNote), "can't connect %s to %s", n1, n2);
     }
+    // In place of whatever the tap had written on this line (the probe's
+    // "23  -  " is rewritten the same way), not on a fresh line below it.
+    Jerial.print("\x1b[2K\r  ");
+    if (why && why[0]) Jerial.printf("can't connect %s to %s: %s", n1, n2, why);
+    else Jerial.print(lastBridgeNote);
+    Jerial.print("\r\n");
     Jerial.flush();
 }
 
@@ -300,10 +312,11 @@ bool addBridgeToState(int node1, int node2, int duplicates, bool autoRefresh) {
             int plain = -1, oldSpecial = -1;
             if (isPlainNode(node1) && !isPlainNode(node2)) { plain = node1; oldSpecial = specA; }
             else if (isPlainNode(node2) && !isPlainNode(node1)) { plain = node2; oldSpecial = specB; }
-            char why[64];
+            char why[64], n1[16], n2[16], sA[16], sB[16];
             if (plain < 0 && isPlainNode(node1) && isPlainNode(node2) && specA > 0 && specB > 0) {
-                snprintf(why, sizeof(why), "%s is on %s, %s is on %s", definesToChar(node1, 0), definesToChar(specA, 0),
-                         definesToChar(node2, 0), definesToChar(specB, 0));
+                nodeName(node1, n1, sizeof(n1)); nodeName(specA, sA, sizeof(sA));
+                nodeName(node2, n2, sizeof(n2)); nodeName(specB, sB, sizeof(sB));
+                snprintf(why, sizeof(why), "%s is on %s, %s is on %s", n1, sA, n2, sB);
                 bridgeRefused(node1, node2, why);
                 return false;
             }
@@ -331,8 +344,10 @@ bool addBridgeToState(int node1, int node2, int duplicates, bool autoRefresh) {
                 if (nDrop < 8) drop[nDrop++] = other;
             }
             if (via > 0 || nDrop == 0) {
-                if (via > 0) snprintf(why, sizeof(why), "%s is on %s through %s", definesToChar(plain, 0), definesToChar(oldSpecial, 0), definesToChar(via, 0));
-                else snprintf(why, sizeof(why), "%s is on %s", definesToChar(plain, 0), definesToChar(oldSpecial, 0));
+                char pl[16], os[16], vi[16];
+                nodeName(plain, pl, sizeof(pl)); nodeName(oldSpecial, os, sizeof(os));
+                if (via > 0) { nodeName(via, vi, sizeof(vi)); snprintf(why, sizeof(why), "%s is on %s through %s", pl, os, vi); }
+                else snprintf(why, sizeof(why), "%s is on %s", pl, os);
                 bridgeRefused(node1, node2, why);
                 return false;
             }
