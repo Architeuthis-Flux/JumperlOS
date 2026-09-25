@@ -573,8 +573,10 @@ void setup( ) {
         jOS.registerService( &probeButton );      // CRITICAL - button state machine (PIO IRQ does the sampling on V5; a tone-coupling decoder on the OG); inner set
         jOS.registerService( &probing );          // HIGH - probe reading + probing.probeMode() entry; BLOCKING while a pad menu is open
     }
+    // The idle net highlight and the wheel click's consumer: on every board,
+    // now that the terminal is a wheel (arrows, space, the app's 0x1C / 0x1D).
+    jOS.registerService( &highlighting );         // HIGH - encoder net highlight / voltage adjuster (BLOCKING while it owns the wheel)
     if ( board::currentBoard( ).caps.hasProbePads ) {
-        jOS.registerService( &highlighting );     // HIGH - encoder net highlight / voltage adjuster (BLOCKING while it owns the wheel)
         jOS.registerService( &measureModeService ); // HIGH - measure-position readings
         jOS.registerService( &probeSwitch );      // NORMAL - switch position (500 ms self-gated) + infraServiceTick()
         jOS.registerService( &probePads );        // LOW - expensive ADC pad reading (50 ms self-gated)
@@ -1370,7 +1372,13 @@ dontshowmenu:
                 Jerial.read( );
                 while ( Jerial.available( ) > 0 ) { // CSI / SS3: params, then one final byte 0x40-0x7E
                     int c = Jerial.read( );
-                    if ( c >= 0x40 && c <= 0x7E ) break;
+                    if ( c >= 0x40 && c <= 0x7E ) {
+                        // Raw mode's left / right arrows are the wheel too
+                        // (line mode does this in TermControl::handleArrowLeft/Right).
+                        if ( c == 'C' ) terminalWheelStep( +1 );
+                        else if ( c == 'D' ) terminalWheelStep( -1 );
+                        break;
+                    }
                 }
                 goto dontshowmenu;
             }

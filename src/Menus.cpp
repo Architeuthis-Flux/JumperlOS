@@ -1,4 +1,5 @@
 #include "Menus.h"
+#include "boards/board.h"
 #include "ReadingDisplay.h" // resetLastShown() - drop the live-reading pin
 #include "RotaryEncoder.h"
 #include "SafeString.h"
@@ -567,7 +568,8 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
     // encoder-state consume.
     bool reopenRequested = s_menuReopenRequested;
     if ( reopenRequested ||
-         ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ) {
+         ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED &&
+           board::currentBoard( ).caps.hasRotaryEncoder ) ) { // a terminal click on the OG must not open it: the menu reset the board (2026-09-25)
         if ( reopenRequested ) {
             s_menuReopenRequested = false;
         } else {

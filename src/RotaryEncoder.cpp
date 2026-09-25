@@ -1054,6 +1054,67 @@ void synthesizeEncoderClick( void ) {
     lastButtonEncoderState = PRESSED;
 }
 
+// ---------------------------------------------------------------------------
+// The terminal as a wheel (Kevin, 2026-09-25 - the OG has no encoder). The
+// events land in the same encoderDirectionState / encoderButtonState the
+// hardware writes, so every consumer (idle net highlight, click menu, the
+// probe's cursor, "hold to exit") sees a wheel. A press goes PRESSED, HELD
+// after buttonHoldLength (500 ms) while still down, and RELEASED with the
+// previous state remembered when it comes up - the hardware's own sequence.
+// encoderOverride keeps a V5's core-1 poll off the state for a few passes; on
+// the OG that poll never runs, so the service also retires a RELEASED that no
+// consumer took (core 1 does that after 15 ms on the V5).
+// ---------------------------------------------------------------------------
+static bool s_termWheelDown = false;
+static unsigned long s_termWheelDownAt = 0;
+static unsigned long s_termWheelReleasedAt = 0;
+
+void terminalWheelStep( int dir ) {
+    if ( dir == 0 ) return;
+    encoderOverride = 10;
+    lastDirectionState = NONE;
+    encoderDirectionState = ( dir > 0 ) ? UP : DOWN;
+}
+
+void terminalWheelDown( void ) {
+    if ( s_termWheelDown ) return;
+    s_termWheelDown = true;
+    s_termWheelDownAt = millis( );
+    encoderOverride = 10;
+    lastButtonEncoderState = IDLE;
+    encoderButtonState = PRESSED;
+}
+
+void terminalWheelUp( void ) {
+    if ( !s_termWheelDown ) return;
+    s_termWheelDown = false;
+    encoderOverride = 10;
+    lastButtonEncoderState = encoderButtonState; // PRESSED = a click, HELD = the end of a hold
+    encoderButtonState = RELEASED;
+    buttonEventTimestamp = micros( );
+    s_termWheelReleasedAt = millis( );
+    requestLedShow( 1 );
+}
+
+void terminalWheelClick( void ) {
+    terminalWheelDown( );
+    terminalWheelUp( );
+}
+
+void terminalWheelService( void ) {
+    if ( s_termWheelDown && encoderButtonState == PRESSED &&
+         millis( ) - s_termWheelDownAt > buttonHoldLength ) {
+        encoderOverride = 10;
+        encoderButtonState = HELD;
+    }
+    if ( !s_termWheelDown && s_termWheelReleasedAt != 0 && encoderButtonState == RELEASED &&
+         millis( ) - s_termWheelReleasedAt > 100 ) {
+        s_termWheelReleasedAt = 0;
+        lastButtonEncoderState = encoderButtonState;
+        encoderButtonState = IDLE;
+    }
+}
+
 static void rotaryEncoderStuffLocked( void ) {
 
 #if !defined( OG_JUMPERLESS )

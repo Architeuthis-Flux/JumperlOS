@@ -9,6 +9,7 @@
 #include "ReadingDisplay.h" // resetLastShown() when Enter scrolls the pinned rows
 #include "Python_Proper.h" // For ScriptHistory
 #include "SingleCharCommands.h"
+#include "RotaryEncoder.h" // the terminal as a wheel (terminalWheel*)
 
 // OLEDStream's ANSI filter (both write overloads). Sequences end on ANY CSI
 // final byte 0x40-0x7E - the old m/H/J/K/G list left the latch set after a
@@ -258,6 +259,14 @@ bool TermControl::service( ) {
             Serial.flush( );
             continue;
         }
+        if ( c == 0x1C ) { // the app: space went down (the wheel button)
+            terminalWheelDown( );
+            continue;
+        }
+        if ( c == 0x1D ) { // ... and came up
+            terminalWheelUp( );
+            continue;
+        }
 
         // Machine-command fast-path (buffered mode only). The app pushes Wokwi
         // netlists as bare machine commands with NO trailing newline and NO
@@ -467,6 +476,10 @@ void TermControl::setColoredPrompt( const char* prompt, int color_code ) {
 
 // Character and Line Handling
 void TermControl::handleNormalChar( char c ) {
+    if ( c == ' ' && line_length == 0 ) { // a bare space on an empty line is the wheel's click
+        terminalWheelClick( );
+        return;
+    }
     switch ( c ) {
     case '\r':
     case '\n':
@@ -704,6 +717,10 @@ void TermControl::handleArrowDown( ) {
 }
 
 void TermControl::handleArrowLeft( ) {
+    if ( line_length == 0 ) { // nothing typed: the arrows are the wheel
+        terminalWheelStep( -1 );
+        return;
+    }
     if ( cursor_position > 0 ) {
         cursor_position--;
         if ( echo_enabled ) {
@@ -713,6 +730,10 @@ void TermControl::handleArrowLeft( ) {
 }
 
 void TermControl::handleArrowRight( ) {
+    if ( line_length == 0 ) {
+        terminalWheelStep( +1 );
+        return;
+    }
     if ( cursor_position < line_length ) {
         cursor_position++;
         if ( echo_enabled ) {
@@ -1125,6 +1146,7 @@ bool JerialClass::service() {
     #endif
     // USBSer3 backchannel - handled by SingleCharCommands
     singleCharCommands.serviceUSBSer3();
+    terminalWheelService(); // a held synthetic press becomes HELD; a stale RELEASED retires
 
     if (term_control_active && term_control && jumperlessConfig.terminal.line_buffering == 1) {
         return term_control->service();

@@ -1967,6 +1967,63 @@ mechanism behind the ledger's older "blank-line bursts per self-test row"
 note. The V5 router calls its own `couldntFindPath(1)` too, but its copy has
 those two prints commented out already - which is why this was OG-only.
 
+### Session 2026-09-25 (afternoon) — the terminal as a wheel: arrows, space, and a hold the app can send
+
+**Kevin:** left / right arrow keys should highlight rows at idle the way the
+wheel does; space should be the wheel click, and a hold too - a new app
+version is shipping, so the app can be taught whatever the firmware needs.
+
+**Where the wheel's idle behaviour lives:** `Highlighting::service()` calls
+`encoderNetHighlight()` every pass; its step comes from `scrollDetentPeek()`,
+which reads `encoderDirectionState` (UP / DOWN) - the same variable the
+MicroPython `clickwheel_up/down` set, with `encoderOverride = 10` so a V5's
+core-1 poll leaves it alone for a few passes. The click is
+`encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED`; a hold
+is `HELD`, promoted by the hardware poll 500 ms (`buttonHoldLength`) into a
+press; a release remembers the previous state (PRESSED = click, HELD = the
+end of a hold). `rotaryEncoderStuff()` returns at once on the OG.
+
+**Change:** `terminalWheelStep/Down/Up/Click/Service` (RotaryEncoder.cpp) write
+those same variables. In line mode (the app), `TermControl` maps a left /
+right arrow on an EMPTY input line to a step (with text typed they still move
+the cursor), a bare space on an empty line to a click (down + up), and two new
+control bytes from the app to the button: **FS 0x1C = space went down, GS
+0x1D = space came up**, so a held space becomes HELD after 500 ms exactly
+like the hardware. `terminalWheelService()` (from `Jerial.service()` each
+pass) does the HELD promotion and retires a RELEASED no consumer took after
+100 ms, since the OG has no core-1 poll to do it. Raw mode registers 0x1C /
+0x1D as single-char commands; a leading space is dropped by the raw
+dispatcher before dispatch, so the click is line-mode only there, and raw
+arrow sequences still reach the dispatcher as ESC, `[`, `C` (`C` prints the
+crossbar) - as before.
+
+**App protocol (for the new version):** on space keydown send 0x1C, on keyup
+send 0x1D, and do not send the space itself; everything else unchanged. A
+plain terminal without that sends a space = one click.
+
+**What it took to make the OG act on it:** `highlighting` (the idle wheel
+consumer) was registered only behind `caps.hasProbePads`, so nothing on the
+OG read a wheel step - not even MicroPython's `clickwheel_up()`. It is
+registered on every board now (its pad-only siblings stay gated). And a
+synthetic click at idle opened `Menus::clickMenu()` on the OG, which RESET
+the board (USB gone within a second, uptime back at zero; `initMenu()` is a
+lazy ~5 KB load on the OG and nothing in Menus.cpp knows the board) - the
+click menu's idle entry is gated on `caps.hasRotaryEncoder` until that is
+understood. Raw-mode arrows ride the main loop's existing CSI swallow (the
+final byte `C` / `D`).
+
+**Bench (OG, port 1 in line mode, nets 5V-20-21, GND-25, 3V3-30):** right ×3
+walked the highlight 20 → 21 → 25 with the reading line rewritten each time
+and the rows brightening (0x640900 → 0xb41100, 0x006410 → 0x00b41e); left
+walked back; a space at idle: nothing and the board stayed up; raw-mode
+right: the same step. The hold (0x1C … 0x1D) has no consumer at idle, so it
+is code-verified only.
+The reading line named the 5V net "Top Rail 0.00 V" - Highlighting.cpp keys
+the two supply slots to the V5's DAC-driven rails in two places; both now go
+through `supplySlotName / supplySlotVolts / supplyAdjustHint` (OG: "5V" 5.00
+V, "3V3" 3.30 V, no adjust hint). After: `5V  20  5.00 V`, `GND  25`,
+`3V3  30  3.30 V`, walking both ways.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

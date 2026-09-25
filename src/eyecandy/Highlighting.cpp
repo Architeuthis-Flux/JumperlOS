@@ -1643,6 +1643,32 @@ static const char* adjustHintText( void ) {
     return clickAdjustEnabled( ) ? "adjust?" : nullptr;
 }
 
+// The two always-made supply slots (special nets 2 and 3): the V5's rails,
+// DAC-driven and adjustable, or the OG's 5V / 3V3 header pins, fixed. The
+// reading line names and values them by slot so the OG never says "Top Rail
+// 0.00 V" for its 5V net (2026-09-25).
+static const char* supplySlotName( int slot ) {
+#if defined(OG_JUMPERLESS)
+    return ( slot == 2 ) ? "5V" : "3V3";
+#else
+    return ( slot == 2 ) ? "Top Rail" : "Bottom Rail";
+#endif
+}
+static float supplySlotVolts( int slot ) {
+#if defined(OG_JUMPERLESS)
+    return ( slot == 2 ) ? 5.0f : 3.3f;
+#else
+    return getDacHardwareVoltage( slot );
+#endif
+}
+static const char* supplyAdjustHint( void ) {
+#if defined(OG_JUMPERLESS)
+    return nullptr; // nothing to adjust on a fixed supply
+#else
+    return adjustHintText( );
+#endif
+}
+
 // Highlight readings label themselves with the currently brightened node.
 // The rendering itself lives in ReadingDisplay so measure mode, the voltage
 // adjuster and the probe cursor draw the exact same way.
@@ -1872,9 +1898,9 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                     // Hardware truth, not the persisted value: a save=0 write
                     // (the guide's rail restore) moves the rail without
                     // touching globalState.power.
-                    snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 2 ) );
+                    snprintf( value, sizeof( value ), "%0.2f V", supplySlotVolts( 2 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "Top Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    showNetReading( supplySlotName( 2 ), value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), supplyAdjustHint( ) );
                 }
             }
             brightenedRail = 0;
@@ -1884,9 +1910,9 @@ int Highlighting::highlightNets( int probeReading, int encoderNetHighlighted, in
                 lastPrintedNet = netHighlighted;
                 if ( print == 1 ) {
                     char value[ 28 ];
-                    snprintf( value, sizeof( value ), "%0.2f V", getDacHardwareVoltage( 3 ) );
+                    snprintf( value, sizeof( value ), "%0.2f V", supplySlotVolts( 3 ) );
                     char curBuf[ 16 ];
-                    showNetReading( "Bottom Rail", value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+                    showNetReading( supplySlotName( 3 ), value, netCurrentValue( netHighlighted, curBuf, sizeof( curBuf ) ), supplyAdjustHint( ) );
                 }
             }
             brightenedRail = 2;
@@ -2536,7 +2562,7 @@ int Highlighting::checkForReadingChanges( void ) {
         bool top = ( showReadingNet == 2 );
         // Hardware truth (see the rail readout above): a save=0 rail write
         // moves the pin without touching globalState.power.
-        float currentRailVoltage = getDacHardwareVoltage( top ? 2 : 3 );
+        float currentRailVoltage = supplySlotVolts( top ? 2 : 3 );
         float estCurrent = netCurrent_mA( showReadingNet );
 
         // Check if change is significant (>0.05V dead zone / >0.1mA)
@@ -2547,7 +2573,7 @@ int Highlighting::checkForReadingChanges( void ) {
 
             snprintf( valueString, sizeof( valueString ), "%0.2f V", currentRailVoltage );
             char curBuf[ 16 ];
-            showNetReading( top ? "Top Rail" : "Bottom Rail", valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), adjustHintText( ) );
+            showNetReading( supplySlotName( top ? 2 : 3 ), valueString, netCurrentValue( showReadingNet, curBuf, sizeof( curBuf ) ), supplyAdjustHint( ) );
 
             displayUpdated = true;
         }

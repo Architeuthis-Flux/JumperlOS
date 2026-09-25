@@ -116,6 +116,17 @@ static inline void encoderServiceYield(void) { rotaryEncoderStuff(); }
 // PRESSED and a fresh event timestamp) so a blocking UI loop can hand a
 // click it detected to another poller, e.g. probeMode -> clickMenu().
 void synthesizeEncoderClick(void);
+
+// The terminal as a wheel (RotaryEncoder.cpp, terminalWheel*): left / right on
+// an empty input line are a detent each way, a bare space is a click, and the
+// app sends FS (0x1C) when space goes down and GS (0x1D) when it comes up so a
+// hold reads as HELD like the hardware button. terminalWheelService() runs
+// from Jerial.service() every pass.
+void terminalWheelStep(int dir);
+void terminalWheelDown(void);
+void terminalWheelUp(void);
+void terminalWheelClick(void);
+void terminalWheelService(void);
 bool isRotaryEncoderInitialized(void);
 void printRotaryEncoderStatus(void);
 

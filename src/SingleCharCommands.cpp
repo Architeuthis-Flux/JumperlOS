@@ -426,6 +426,8 @@ void SingleCharCommands::sortCommands( ) {
 // Command Initialization
 // ============================================================================
 
+CommandResult cmd_terminalWheel( char c, const String& line ); // defined with the other handlers below
+
 void SingleCharCommands::initializeCommands( ) {
     // === Connection commands ===
     registerCommand( 'f', "load node file",
@@ -683,6 +685,16 @@ void SingleCharCommands::initializeCommands( ) {
     registerCommand( '\x13', "toggle line buffering quietly",
                      "Toggle line buffering on/off. For raw terminals without line buffering.",
                      cmd_toggleLineBufferingQuiet, MENU_DEBUG, CAT_SETTINGS, true, SER3_IRRELEVANT );
+    // The terminal as a wheel (RotaryEncoder.cpp terminalWheel*): in line mode
+    // TermControl takes these before a line completes; this is the raw-mode
+    // path. (A bare space is the click in line mode; raw mode drops a leading
+    // space before dispatch, so it is not registered here.)
+    registerCommand( '\x1C', "wheel button down (app)",
+                     "The app sends this when space goes down: a wheel press, HELD after 500 ms.",
+                     cmd_terminalWheel, MENU_DEBUG, CAT_SETTINGS, true, SER3_IRRELEVANT );
+    registerCommand( '\x1D', "wheel button up (app)",
+                     "The app sends this when space comes up: the wheel release.",
+                     cmd_terminalWheel, MENU_DEBUG, CAT_SETTINGS, true, SER3_IRRELEVANT );
 
     registerCommand( 'E', "don't show this menu",
                      "Toggle automatic menu display.",
@@ -3006,6 +3018,13 @@ CommandResult cmd_calibrateDACs( char c, const String& line ) {
 }
 
 // Debug commands
+CommandResult cmd_terminalWheel( char c, const String& line ) {
+    if ( c == '\x1C' ) terminalWheelDown( );
+    else if ( c == '\x1D' ) terminalWheelUp( );
+    else terminalWheelClick( );
+    return CMD_DONT_SHOW_MENU;
+}
+
 CommandResult cmd_showVersion( char c, const String& line ) {
     Stream* target = Jerial.getResponseTarget( );
     if ( target == nullptr ) target = &Jerial;
