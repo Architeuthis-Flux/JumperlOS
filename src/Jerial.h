@@ -309,6 +309,7 @@ public:
      * Check if a completed line is ready for processing
      */
     bool hasCompletedLine() const;
+    bool takeOtherInput(); // TermControl::takeOtherInput() (false when line buffering is off)
     
     /**
      * Get the completed line (consumes it)
@@ -686,6 +687,7 @@ public:
     Stream* getResponseTarget();        // Get response target for current command
     const char* getCurrentLineBuffer(); // Get current line being edited (read-only)
     int getLineLength() const { return line_length; }             // typed-so-far, in columns
+    bool takeOtherInput() { bool s = other_input_seen; other_input_seen = false; return s; }
     int getPromptVisibleWidth() const { return prompt_visible_cols; } // prompt width WITHOUT its SGR codes
     void setPrompt(const char* prompt); // Set prompt string
     void enableEcho(bool enabled);      // Enable/disable character echoing
@@ -709,6 +711,10 @@ private:
     // space must not click (Kevin, 2026-09-25). See handleNormalChar.
     bool space_pending = false;
     unsigned long space_pending_at = 0;
+    // Set by every typed byte that is NOT a wheel key (arrows on an empty line,
+    // a lone space, FS / GS). A modal loop that owns the wheel (the click menu)
+    // keeps servicing the terminal and ends only when this rises.
+    bool other_input_seen = false;
     int cursor_position;
     
     // Completed line ready for external parsing (single slot - legacy)

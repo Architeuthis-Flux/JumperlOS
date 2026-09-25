@@ -1553,8 +1553,15 @@ static const char* netDisplayName( int net, char* buf, size_t bufLen ) {
 // ALWAYS returns a value ("0.0 mA" when nothing measurable) so voltage-
 // bearing displays show both readings at all times. buf outlives the return.
 static const char* netCurrentValue( int net, char* buf, size_t len ) {
+#if defined(OG_JUMPERLESS)
+    // No per-net current on the OG yet (the net voltage scan is a stub there):
+    // no field rather than a fake 0.0 mA (Kevin, 2026-09-25).
+    (void)net; (void)buf; (void)len;
+    return nullptr;
+#else
     snprintf( buf, len, "%.1f mA", netCurrent_mA( net ) );
     return buf;
+#endif
 }
 
 // Scanned voltage for the highlighted node (or the net's dominant-path
@@ -2655,7 +2662,11 @@ int Highlighting::checkForReadingChanges( void ) {
                 char nameBuffer[ 16 ];
                 const char* baseName = netDisplayName( showReadingNet, nameBuffer, sizeof( nameBuffer ) );
                 snprintf( valueString, sizeof( valueString ), "%.1f mA", estCurrent_mA );
+#if defined(OG_JUMPERLESS)
+                showNetReading( baseName, scanV, nullptr ); // no per-net current on the OG yet (the scan is a stub): no field, not a fake 0.0
+#else
                 showNetReading( baseName, scanV, valueString );
+#endif
 
                 displayUpdated = true;
                 showReadingRow = showReadingNet;

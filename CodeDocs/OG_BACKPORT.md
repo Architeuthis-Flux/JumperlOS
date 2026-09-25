@@ -2051,6 +2051,68 @@ growing pause. The checkout has full history and the release step targets
 HEAD, which the push must have landed first. Not exercised until the next
 release run.
 
+### Session 2026-09-25 (afternoon, 3) — the click menu from the terminal; no fake mA; the scan port sized
+
+**Kevin:** the highlight line shows `Net 6  14  0.0 mA` and no voltage - why;
+then: drop the fake current, try to fit the existing net voltage scan in the
+OG's RAM, and space should open the menu.
+
+**Why:** the net voltage scan (`sensing/NetVoltageScan.cpp`, ~1600 lines) is
+the source of both readings on the V5; on the OG it is a stub
+("single-LED rows and a different fabric - feature off"): `nodeVoltageValid`
+false, `netCurrent_mA` 0.0, and the highlight formatted the zero. Nets with
+an ADC node already show `ADC n  x.xx V` (direct read). Fix now:
+`netCurrentValue()` returns no field on the OG.
+
+**The click menu "reset" was a misread.** A marker build with free-heap
+prints opened the menu from a raw-mode FS/GS click and ran it: heap 40.7 KB
+→ 33.5 KB across `menuTablesAlloc` (150 Strings + five 150-entry tables),
+`readMenuFile`, `parseMenuFile`, then the selection loop, `>Rails` on the
+terminal, ports up afterwards. The earlier "uptime 298 s" was the time
+since my own flash reboot minutes before, not since the click. The
+`hasRotaryEncoder` gate on the idle entry is gone.
+
+**Making the menu usable from the terminal:** the selection loop (and four
+sibling modal loops in Menus.cpp) ended on `Serial.available() == 0` - any
+byte - and nothing parsed the terminal inside them (`TermSerialService` is a
+stub; `Jerial.service()` runs from the main loop only), so the first arrow
+would have closed the menu. `menuKeyboardExitPending()` replaces that check:
+with line buffering it services the terminal, whose wheel keys become wheel
+events, and returns a session-latched flag `TermControl` raises for any
+other typed byte (`other_input_seen` / `takeOtherInput()`); without line
+buffering, any byte still ends the loop. The latch matters: the inner loop
+consumed the byte and the outer loop reopened the menu on top of it.
+
+Two more things the bench found: `other_input_seen` accumulated at idle
+(nobody consumed it), so the first open closed at once - the session now
+discards it when it opens; and the exit had to be latched, since the inner
+loop consumed the byte and the outer loop reopened the menu. The mA also had
+a second formatter, the periodic ordinary-net update (`checkForReadingChanges`),
+gated the same way; with neither voltage nor current the line is just the net
+name (`Net 6`) until the scan port gives it a voltage.
+
+**Bench (OG, line mode, after all of that):** right at idle → `Net 6`, `Net 7`
+(no mA); Ctrl-U (stale typing) then space → `>Rails`; right, right, left →
+`>Connect`, `>Parts`, `>Connect`; space → into the submenu, right →
+`>>AddRemove`; typing `m` ends the menu and the terminal menu prints; Ctrl-U;
+right at idle → `Net 6` again; the board stays up throughout.
+
+**Scan port, sized:** the V5 object is 1.25 KB data + 4.9 KB bss (~6.2 KB
+static; the OG sits at 59.8 % with ~40 KB heap free at idle, 33 KB with the
+menu loaded, floor 28 KB for MicroPython), so RAM is not the blocker. The
+code has no chip constants but its route SHAPES are the V5's: "ADC0-3 live
+on chip K x8-11, K y0-7 are the lanes to chips A-H", a K↔L interchip
+fallback, and taps from I/J/L x pins through a breadboard chip's y0. On the
+OG that role is chip L (ADC0-3 on L x2-x5, L y0-7 the hub lanes), there is no
+K↔L pair, and I/J carry their own ADC0/ADC1 lanes. Also board-specific:
+`kSourceNodes {TOP_RAIL, BOTTOM_RAIL, DAC0, DAC1}` (OG: 5V, 3V3, DAC0, DAC1
+with fixed supply volts), ADC4 (node 114 is RP_GPIO_0 on the OG), and the
+ring sampler (`adcRingActive()` false → the direct-read branch, which exists).
+Per-net current comes from pair taps at both ends of a bridge over the
+crosspoint resistance, so it could work on the OG too. The port is: an "ADC
+chip" and ADC-lane lookup from the descriptor, the OG's hub in place of K,
+drop the K↔L fallback, board the source table. Not started.
+
 ## Agent conventions
 
 - **Never** branch the shared core on `OG_JUMPERLESS`/board macros — extend the

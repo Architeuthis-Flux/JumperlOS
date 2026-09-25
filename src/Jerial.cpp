@@ -324,9 +324,11 @@ bool TermControl::service( ) {
             ansi_state = ANSI_NORMAL;
             switch ( c ) {
             case 'A':
+                other_input_seen = true;
                 handleArrowUp( );
                 break;
             case 'B':
+                other_input_seen = true;
                 handleArrowDown( );
                 break;
             case 'C':
@@ -495,6 +497,7 @@ void TermControl::handleNormalChar( char c ) {
         space_pending_at = millis( );
         return;
     }
+    other_input_seen = true; // everything from here on is typing, not the wheel
     switch ( c ) {
     case '\r':
     case '\n':
@@ -736,6 +739,7 @@ void TermControl::handleArrowLeft( ) {
         terminalWheelStep( -1 );
         return;
     }
+    other_input_seen = true; // an arrow with text on the line edits, and ends a wheel-owning modal
     if ( cursor_position > 0 ) {
         cursor_position--;
         if ( echo_enabled ) {
@@ -749,6 +753,7 @@ void TermControl::handleArrowRight( ) {
         terminalWheelStep( +1 );
         return;
     }
+    other_input_seen = true; // an arrow with text on the line edits, and ends a wheel-owning modal
     if ( cursor_position < line_length ) {
         cursor_position++;
         if ( echo_enabled ) {
@@ -1170,6 +1175,13 @@ bool JerialClass::service() {
     Serial.println("⚠️  TermControl not active!");
     Serial.flush();
     #endif
+    return false;
+}
+
+bool JerialClass::takeOtherInput() {
+    if (term_control_active && term_control && jumperlessConfig.terminal.line_buffering == 1) {
+        return term_control->takeOtherInput();
+    }
     return false;
 }
 

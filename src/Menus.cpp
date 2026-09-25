@@ -550,6 +550,24 @@ static void menuShowKeepalive( unsigned long& lastRequestMs,
     }
 }
 
+// What ends a wheel-owning modal loop from the keyboard. With line buffering
+// (the app), the terminal is serviced here so its wheel keys - arrows on an
+// empty line, a lone space, the app's FS / GS - become wheel events for the
+// loop instead of ending it; any other typed byte ends it, as any byte did
+// before. Without line buffering every byte still ends it.
+// Latched for the session: the byte that ends the menu is seen by the inner
+// loop, and the outer loop must not reopen the menu on top of it.
+static bool s_menuKeyboardExit = false;
+
+static bool menuKeyboardExitPending( void ) {
+    if ( jumperlessConfig.terminal.line_buffering == 1 ) {
+        Jerial.service( );
+        if ( Jerial.takeOtherInput( ) ) s_menuKeyboardExit = true;
+        return s_menuKeyboardExit;
+    }
+    return Serial.available( ) > 0;
+}
+
 int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
     // Don't allow menus to run if the bitmap editor is active
     if ( BitmapEditor::getInstance( ).active ) {
@@ -568,8 +586,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
     // encoder-state consume.
     bool reopenRequested = s_menuReopenRequested;
     if ( reopenRequested ||
-         ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED &&
-           board::currentBoard( ).caps.hasRotaryEncoder ) ) { // a terminal click on the OG must not open it: the menu reset the board (2026-09-25)
+         ( encoderButtonState == RELEASED && lastButtonEncoderState == PRESSED ) ) {
         if ( reopenRequested ) {
             s_menuReopenRequested = false;
         } else {
@@ -585,6 +602,8 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // terminal-driven open; with a wheel it loaded at boot and this is a
         // latched no-op. (::initMenu - the free function; Menus::initMenu is
         // a declaration without a definition.)
+        s_menuKeyboardExit = false; // a fresh session
+        Jerial.takeOtherInput( );   // typing from before the click is not a reason to leave
         ::initMenu( );
         if ( menuLineIndex < 2 ) {
             // b.clear();
@@ -620,7 +639,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // while(Serial.available() == 0) ;
 
         returnedMenuPosition = getMenuSelection( );
-        while ( returnedMenuPosition == -1 && Serial.available( ) == 0 && arduinoInReset == 0 ) {
+        while ( returnedMenuPosition == -1 && !menuKeyboardExitPending( ) && arduinoInReset == 0 ) {
             // delayMicroseconds(5000);
             // Use state-based check in loop (doesn't consume event)
             if ( probing.checkProbeButtonState( ) == 1 ) {
@@ -1096,7 +1115,7 @@ int getMenuSelection( void ) {
     }
 
     noInputTimer = millis( );
-    while ( Serial.available( ) == 0 ) {
+    while ( !menuKeyboardExitPending( ) ) {
         jOS.serviceInner( );
         rotaryEncoderButtonStuff( ); // Update button state every iteration
 
@@ -5307,7 +5326,7 @@ char LEDbrightnessMenu( void ) {
         /// delay(10);
     }
 
-    while ( Serial.available( ) == 0 ) {
+    while ( !menuKeyboardExitPending( ) ) {
         // delayMicroseconds(10);
     }
 
@@ -5669,7 +5688,7 @@ char LEDbrightnessMenu( void ) {
         Serial.print( "\n\rPress any key to exit\n\n\r" );
         leds.clear( );
         holdCore1Frames( ); // park core 1 while we own the LED strip
-        while ( Serial.available( ) == 0 ) {
+        while ( !menuKeyboardExitPending( ) ) {
             // startupColorsV5();
             drawAnimatedImage( 0 );
             delay( 80 );
@@ -5691,7 +5710,7 @@ char LEDbrightnessMenu( void ) {
     } else if ( input == 'c' ) {
         Serial.print( "\n\rPress any key to exit\n\n\r" );
         holdCore1Frames( ); // park core 1 while we own the LED strip
-        while ( Serial.available( ) == 0 ) {
+        while ( !menuKeyboardExitPending( ) ) {
 
             randomColors( );
             leds.show( );
@@ -5732,7 +5751,7 @@ char LEDbrightnessMenu( void ) {
         return ' ';
     } else if ( input == '?' ) {
         showLoss( );
-        while ( Serial.available( ) == 0 ) {
+        while ( !menuKeyboardExitPending( ) ) {
         }
         requestLedShow( -1 );
         return ' ';
