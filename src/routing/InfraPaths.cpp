@@ -237,8 +237,7 @@ static void parkDacAtMeasureTarget(int dacNum) {
     // stays false: the voltage-claim nudge must never re-enter evaluation.
     // Clamp to the tip-drive sanity band (configManager also validates on
     // load): parking above 3.3V logic clips the pad ladder's high end.
-    float target = jumperlessConfig.probe.measure_voltage;
-    if (target < 3.0f || target > 3.6f) target = 3.33f;
+    float target = probeTipDriveSane(jumperlessConfig.probe.measure_voltage);
     // THE PARK IS A SYSTEM RE-ASSERT, NEVER A USER EDIT - so it writes the
     // state field DIRECTLY and calls the setter with save=0. It must not go
     // through globalState.setDacVoltage(), because that is the dirty marker.

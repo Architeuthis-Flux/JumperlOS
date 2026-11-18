@@ -22,7 +22,6 @@ include/FirmwareVersion.generated.h
 .micropython
 src_micropython*.o
 lib/micropython/build-embed
-micropython_repo
 JumperlOS.code-workspace
 docs/DOCUMENTATION_REVIEW.md
 CodeDocs/LAYERS_README.md

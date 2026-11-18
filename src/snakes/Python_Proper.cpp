@@ -709,19 +709,44 @@ extern "C" void mp_hal_check_interrupt(void) {
     last_gc_check_time = current_time;
     
     #if MICROPY_ENABLE_GC
-    // Get free memory without triggering GC
-    gc_info_t info;
-    gc_info(&info);
-    
     // Trigger GC if less than 5KB free (critical threshold for script execution)
     // This ensures we always have breathing room for allocations
     const size_t CRITICAL_FREE_THRESHOLD = 5 * 1024;  // 5KB
-    if (info.free < CRITICAL_FREE_THRESHOLD) {
-      // Memory is getting critically low - run GC to free up space
-      // This prevents MemoryError from occurring mid-script
-      // CRITICAL: Use gc_collect_safe() to pause Core 2 first - GC finalisers
-      // may access the filesystem, which can corrupt if Core 2 is also accessing it
-      gc_collect_safe();
+
+    // gc_info() WALKS THE WHOLE HEAP. On the V5's PSRAM heap (6 MB) that is
+    // 180 ms, measured with gc.mem_free() - so asking every 500 ms froze every
+    // running script for a third of its time (an empty `while True:
+    // sleep_ms(2)` loop stalled 182 ms twice a second). Walk only when the
+    // answer can have changed: gc_alloc_amount counts blocks allocated since
+    // the last collection in O(1), and free memory cannot have dropped by more
+    // than was allocated since we last looked.
+    bool look = true;
+    #if MICROPY_GC_ALLOC_THRESHOLD
+    static bool   gc_looked = false;
+    static size_t gc_free_at_look = 0;    // bytes free at the last walk
+    static size_t gc_alloc_at_look = 0;   // bytes allocated since the last GC, at that walk
+    const size_t alloc_now = MP_STATE_MEM(gc_alloc_amount) * MICROPY_BYTES_PER_GC_BLOCK;
+    look = !gc_looked
+        || alloc_now < gc_alloc_at_look   // a collection ran since: the old figure is stale
+        || alloc_now - gc_alloc_at_look + CRITICAL_FREE_THRESHOLD >= gc_free_at_look;
+    #endif
+    if (look) {
+      // Get free memory without triggering GC
+      gc_info_t info;
+      gc_info(&info);
+      if (info.free < CRITICAL_FREE_THRESHOLD) {
+        // Memory is getting critically low - run GC to free up space
+        // This prevents MemoryError from occurring mid-script
+        // CRITICAL: Use gc_collect_safe() to pause Core 2 first - GC finalisers
+        // may access the filesystem, which can corrupt if Core 2 is also accessing it
+        gc_collect_safe();
+        gc_info(&info);
+      }
+      #if MICROPY_GC_ALLOC_THRESHOLD
+      gc_looked = true;
+      gc_free_at_look = info.free;
+      gc_alloc_at_look = MP_STATE_MEM(gc_alloc_amount) * MICROPY_BYTES_PER_GC_BLOCK;
+      #endif
     }
     #endif
   }

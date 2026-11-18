@@ -1,5 +1,7 @@
 #include "oled.h"
+#include "MenuTermView.h" // isOpen(): the terminal mirror waits for the click menu's columns
 #include "OledGui.h"   // persistent idle screen takes the logo's place
+#include "StatsPages.h" // a live stats page yields to the idle logo
 #include "Adafruit_GFX.h"
 #include "Adafruit_SSD1306.h"
 #include "Apps.h"
@@ -3178,6 +3180,9 @@ void oled::showJogo32h( ) {
     if ( !oledFramebufferReady( ) )
         return;
 
+    // Back to idle: a live stats page stops refreshing over the logo.
+    StatsPages::hide();
+
     // If a persistent OLED-GUI screen is registered (oledgui show(persist=True)),
     // it takes the logo's place as the idle display. Drawing it here is what
     // makes it reappear when the UI returns to idle (leaving a menu, etc.)
@@ -3753,6 +3758,14 @@ void oled::dumpFrameBufferQuarterSize( int clearFirst, int x_pos, int y_pos, int
     uint8_t* buffer = oledGetDumpBuffer();
     if ( !buffer ) {
         Serial.println( "No framebuffer available" );
+        return;
+    }
+
+    // The click menu's columns (K) are drawn in place under the cursor; a
+    // mirror box painted onto the same terminal lands on top of them, and
+    // the cursor it leaves behind moves every repaint after it. They already
+    // show what the panel shows, so port 1's mirror waits until they fold.
+    if ( MenuTermView::isOpen( ) && jumperlessConfig.top_oled.show_in_terminal == 1 ) {
         return;
     }
 

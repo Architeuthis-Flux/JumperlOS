@@ -56,6 +56,18 @@ public:
     // equals rowText ("GPIO"). No-op when no top-level row matches (a
     // custom MenuTree.txt without that row: the app just exits).
     void requestReopenAtTopLevel(const char* rowText);
+
+    // Every session is also drawn on the terminal as columns (MenuTermView),
+    // however it was opened, with the arrow keys standing in for the wheel -
+    // up / down turn it, right clicks, left is the hold's step back. A caller
+    // that owns the terminal while the menu runs (the Menu FX tuner, which
+    // also needs a typed byte to pop the menu back out to it) clears this
+    // around its own loop and gets the old one-line echo.
+    bool showOnTerminal = true;
+
+    // The terminal's way in (the K command): the next Menus::service() pass
+    // opens a session exactly as a wheel click would.
+    void requestOpenFromTerminal(void);
     
 private:
     Menus();

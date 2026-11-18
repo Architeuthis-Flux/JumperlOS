@@ -34,6 +34,7 @@
 #include "States.h"         // globalState
 #include "config.h"         // jumperlessConfig.hardware.probe_revision
 #include "oled.h"
+#include "OledGui.h"            // the big part card paints the panel itself and must yield the idle screen
 #include "Peripherals.h"    // INA1 (the power-up watchdog), setDac0voltage
 #include <Wire.h>           // Wire1 - the chip-cluster I2C probe
 #include "hardware/gpio.h"  // pad reads + function bookkeeping for the probe
@@ -1909,6 +1910,110 @@ void partsAppendPinLabel(int node, char* buf, size_t cap) {
     }
 }
 
+// The big form of the part card (Kevin, 2026-11-10: "it's just kinda small
+// on a 3 pin part ... make sure excess space is used"). Same four facts as
+// the 5pt card, three bands instead of four equal rows:
+//   2N3906                 PNP      header, 5pt
+//    E 17   [B 18]   C 19          one line of pin cells, as big as fits
+//   hFE 457  0.60V                 test data / the focused pin's rail, 5pt
+// Each cell is "label row" in fixed-pitch Pragmatism at the largest cut that
+// fits the band's height and the panel's width; the focused pin is the
+// inverted cell. A part with no footer on ANY of its stops gets the taller
+// band and a bigger cut (a 2-pin part runs to 12pt); `reserveFooter` holds
+// the band at its short height for a part that shows one on some stop, so
+// walking its pins never resizes the cells. false = nothing bigger than the
+// old card fits (long pin names on a 4-pin module) - the caller draws the
+// 5pt card instead.
+static bool partsShowPartCardBig(const char* name, const char* typeLine,
+                                 const char cells[][12], int nCells, int focusCell,
+                                 const char* sideNote, const char* footer, bool reserveFooter) {
+    if (jumperlessConfig.top_oled.enabled == 0) return true;   // nothing to draw, and no fallback either
+    Adafruit_SSD1306& d = getDisplay();
+    if (d.getBuffer() == nullptr) return true;
+
+    const int16_t kHeaderFont = 12;   // Andale Mono 5pt, 6 px pitch
+    const int kPadX = 3;
+    bool haveFooter = (footer != nullptr && footer[0] != '\0');
+    const int top = 9;                          // clear of the header's descenders
+    const int bottom = (haveFooter || reserveFooter) ? 24 : 31;   // above the footer's
+    int noteW = (sideNote != nullptr && sideNote[0] != '\0') ? (int)strlen(sideNote) * 6 + 4 : 0;
+
+    // Largest Pragmatism cut (fontList 16..23 = 5..12pt) whose cells fit.
+    const int kPadY = 2;
+    const GFXfont* f = nullptr;
+    int pitch = 0, inkH = 0, total = 0;
+    for (int fi = 23; fi >= 17; fi--) {         // 6pt is the floor: below it the old card is no smaller
+        const GFXfont* cand = fontList[fi].font;
+        int cPitch = cand->glyph['0' - cand->first].xAdvance;
+        // Pragmatism inks its baseline row: a capital is one row taller
+        // than its offset above the baseline.
+        int cInkH = 1 - cand->glyph['H' - cand->first].yOffset;
+        int cTotal = 0;
+        for (int i = 0; i < nCells; i++) cTotal += (int)strlen(cells[i]) * cPitch + 2 * kPadX;
+        if (cInkH + 2 * kPadY > bottom - top + 1) continue;
+        if (cTotal + (nCells - 1) * 2 + noteW > 126) continue;
+        f = cand; pitch = cPitch; inkH = cInkH; total = cTotal;
+        break;
+    }
+    if (f == nullptr) return false;
+
+    OledGui::getInstance().notePanelTakenByOther();
+    d.clearDisplay();
+    d.setTextWrap(false);
+    d.setTextSize(1);
+    d.setTextColor(SSD1306_WHITE);
+    int y0 = (oled.displayHeight > 32) ? (oled.displayHeight - 32) / 2 : 0;   // a taller panel centers the card
+
+    // header: name left, type right - the type gives way to a long name
+    d.setFont(fontList[kHeaderFont].font);
+    d.setCursor(1, y0 + 6);
+    d.print(name);
+    int typeRoom = (126 - 1 - (int)strlen(name) * 6 - 6) / 6;
+    if (typeRoom > 0) {
+        char typeBuf[26];
+        snprintf(typeBuf, sizeof(typeBuf), "%.*s", typeRoom, typeLine);
+        d.setCursor(127 - (int)strlen(typeBuf) * 6, y0 + 6);
+        d.print(typeBuf);
+    }
+
+    // the pin cells, spread evenly across what the side note leaves
+    int h = inkH + 2 * kPadY;
+    int y = y0 + top + (bottom - top + 1 - h) / 2;
+    int gap = (128 - noteW - total) / (nCells + 1);
+    int x = gap;
+    d.setFont(f);
+    for (int i = 0; i < nCells; i++) {
+        int w = (int)strlen(cells[i]) * pitch + 2 * kPadX;
+        if (i == focusCell) {
+            d.fillRect(x, y, w, h, SSD1306_WHITE);
+            d.drawPixel(x, y, SSD1306_BLACK);               // knock the corners off
+            d.drawPixel(x + w - 1, y, SSD1306_BLACK);
+            d.drawPixel(x, y + h - 1, SSD1306_BLACK);
+            d.drawPixel(x + w - 1, y + h - 1, SSD1306_BLACK);
+            d.setTextColor(SSD1306_BLACK);
+        }
+        d.setCursor(x + kPadX, y + kPadY + inkH - 1);
+        d.print(cells[i]);
+        d.setTextColor(SSD1306_WHITE);
+        x += w + gap;
+    }
+
+    d.setFont(fontList[kHeaderFont].font);
+    if (noteW > 0) {
+        d.setCursor(127 - (int)strlen(sideNote) * 6, y0 + top + (bottom - top + 1 + 6) / 2);
+        d.print(sideNote);
+    }
+    if (haveFooter) {
+        d.setCursor(1, y0 + 31);
+        d.print(footer);
+    }
+
+    d.setFont(oled.currentFont);   // hand the GFX font back as the firmware left it
+    d.setTextSize(oled.currentTextSize);
+    oled.priorityFlushHeldFrame();
+    return true;
+}
+
 void partsShowPartCard(const PartDefinition& p, int focusPin) {
     if (!oled.oledConnected) return;
     highlightingNoteExternalOledPaint();
@@ -1960,6 +2065,62 @@ void partsShowPartCard(const PartDefinition& p, int focusPin) {
             snprintf(footer, sizeof(footer), "TOP_RAIL %0.2f V", getDacHardwareVoltage(2));
         } else if (net == 3) {
             snprintf(footer, sizeof(footer), "BOTTOM_RAIL %0.2f V", getDacHardwareVoltage(3));
+        }
+    }
+
+    // The big form first: one line of "label row" cells with the focused
+    // pin inverted (partsShowPartCardBig). The 5pt card below is what is
+    // left when those cells don't fit any larger cut.
+    {
+        char cells[4][12];
+        int nCells = 0, focusCell = -1;
+        char sideNote[12] = "";
+        if (p.numPins >= 1 && p.numPins <= 4) {
+            for (int j = 0; j < p.numPins; j++) {
+                char label[8];
+                partsCardPinLabel(p, p.pins[j], label, sizeof(label));
+                snprintf(cells[j], sizeof(cells[j]), "%s %d", label, partPinNode(p, p.pins[j]));
+                if (j == focusPin) focusCell = j;
+                nCells++;
+            }
+        } else if (focusPin >= 0 && focusPin < p.numPins && focusPin < MAX_PART_PINS) {
+            char label[8];
+            partsCardPinLabel(p, p.pins[focusPin], label, sizeof(label));
+            snprintf(cells[0], sizeof(cells[0]), "%s %d", label, partPinNode(p, p.pins[focusPin]));
+            snprintf(sideNote, sizeof(sideNote), "%d pins", (int)p.numPins);
+            nCells = 1;
+            focusCell = 0;
+        } else {
+            int lo = 61, hi = 0;
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                if (node < 1 || node > 60) continue;
+                if (node < lo) lo = node;
+                if (node > hi) hi = node;
+            }
+            snprintf(cells[0], sizeof(cells[0]), "%d pins", (int)p.numPins);
+            snprintf(cells[1], sizeof(cells[1]), "rows %d-%d", lo, hi);
+            nCells = 2;
+        }
+        // The footer band is reserved per PART, not per stop: test data
+        // shows on every stop, a supply name only on the pins that sit on
+        // one - and the cells must not resize as the wheel walks the pins.
+        bool reserveFooter = (testLine[0] != '\0');
+        for (int i = 0; !reserveFooter && i < numberOfPaths; i++) {
+            const pathStruct& path = globalState.connections.paths[i];
+            if (path.net < 1 || path.net > 3) continue;
+            for (int j = 0; j < p.numPins && j < MAX_PART_PINS; j++) {
+                int node = partPinNode(p, p.pins[j]);
+                if (path.node1 == node || path.node2 == node) {
+                    reserveFooter = true;
+                    break;
+                }
+            }
+        }
+        if (nCells > 0 &&
+            partsShowPartCardBig(p.name, typeLine, cells, nCells, focusCell, sideNote,
+                                 footer[0] ? footer : testLine, reserveFooter)) {
+            return;
         }
     }
 

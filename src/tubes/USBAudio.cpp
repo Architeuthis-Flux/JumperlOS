@@ -503,6 +503,37 @@ extern "C" bool usbAudioRefreshLazy(float *readings) {
     return false;
 }
 
+// Drain the PCM ring into TinyUSB's software FIFO. Runs in USB IRQ context on
+// core 0 (audiod_xfer_cb -> here), the only safe place to touch that FIFO,
+// once per completed isochronous transfer (~1 kHz while the host records).
+// T2.1 (557203e) deleted this along with the old DMA pump, which left the ring
+// with a producer and no consumer: frames_sent stayed 0, fifo_overflow climbed,
+// and the host recorded nothing at all.
+extern "C" bool __not_in_flash_func(tud_audio_tx_done_isr)(uint8_t rhport, uint16_t n_bytes_sent,
+                                                           uint8_t func_id, uint8_t ep_in,
+                                                           uint8_t cur_alt_setting) {
+    (void) rhport; (void) n_bytes_sent; (void) func_id; (void) ep_in; (void) cur_alt_setting;
+
+    const uint32_t maxSamples = 2u * 48u;   // one ms of stereo at the top rate
+    const uint32_t head = g_ringHead;
+    const uint32_t tail = g_ringTail;
+    uint32_t avail = (head - tail) & JL_AUDIO_RING_MASK;
+    if (avail > maxSamples) avail = maxSamples;
+    avail &= ~1u;                           // whole stereo frames only
+    if (avail == 0) return true;            // nothing captured yet; driver sends silence
+
+    int16_t buf[2 * 48];
+    for (uint32_t n = 0; n < avail; n++) {
+        buf[n] = g_ring[(tail + n) & JL_AUDIO_RING_MASK];
+    }
+    __sync_synchronize();
+    g_ringTail = (tail + avail) & JL_AUDIO_RING_MASK;
+
+    tud_audio_write(buf, (uint16_t)(avail * sizeof(int16_t)));
+    g_statFramesSent += avail / 2u;
+    return true;
+}
+
 //--------------------------------------------------------------------+
 // Configuration
 //--------------------------------------------------------------------+

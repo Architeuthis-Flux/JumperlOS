@@ -1002,9 +1002,18 @@ static void runTipVoltageTest( SelfTestReport& r ) {
         }
     }
 
+    // The servo hunts only inside the tip-drive guard band (config.h), so it
+    // can neither drive the tip nor save a setpoint outside ~3.3 V. It used
+    // to range 2.5-5.2 V and store whatever it converged on; the load clamp
+    // then swapped an out-of-band result for the default on the next boot,
+    // silently. With the guard bypassed ([probe] tip_guard = false) the old
+    // full range is back.
+    const bool tipGuard = jumperlessConfig.probe.tip_guard;
+    const float setLo = tipGuard ? PROBE_TIP_DRIVE_MIN_V : 2.5f;
+    const float setHi = tipGuard ? PROBE_TIP_DRIVE_MAX_V : 5.2f;
     float set = jumperlessConfig.probe.measure_voltage;
-    if ( set < 2.8f || set > 5.0f )
-        set = 3.33f;
+    if ( !( set >= setLo && set <= setHi ) )
+        set = PROBE_TIP_DRIVE_DEFAULT_V;
 
     // Each iteration reads a 3-burst average; convergence needs the error
     // inside the CENTER of the window (+/-5mV of a +/-8mV acceptance) three
@@ -1024,10 +1033,15 @@ static void runTipVoltageTest( SelfTestReport& r ) {
         } else {
             converged = 0;
             set += err * 0.8f;
-            set = constrain( set, 2.5f, 5.2f );
+            set = constrain( set, setLo, setHi );
         }
         Serial.printf( "  set=%.4f measured=%.4f target=%.4f (avg of 3x32)\n\r",
                        (double)set, (double)v, (double)vTarget );
+    }
+    if ( !done && tipGuard && ( set <= setLo || set >= setHi ) ) {
+        Serial.printf( "  servo pinned at the %.1f-%.1fV tip-drive guard: the tip cannot match the\n\r"
+                       "  reference from inside it, so nothing is saved ([probe] tip_guard = false bypasses)\n\r",
+                       (double)setLo, (double)setHi );
     }
 
     // Final verification at the converged setpoint: a long averaged burst

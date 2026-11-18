@@ -1202,6 +1202,11 @@ float pathCurrentSigned_mA(int pathIndex) {
     return pathShown_mA[pathIndex]; // deadband-gated: solid 0 below the band
 }
 
+float pathCurrentRaw_mA(int pathIndex) {
+    if (!pathCurrentKnown(pathIndex)) return 0.0f;
+    return pathCurrent_mA[pathIndex]; // smoothed, no deadband (display consumers)
+}
+
 static int pickScanAdc() {
     // Pool-arbitrated: ADC0-3, per-tap acquire (released right after the
     // tap so measure mode / TDM aren't starved between taps). TDM's channel
@@ -1577,6 +1582,7 @@ bool nodeVoltageValid(int) { return false; }
 float netCurrent_mA(int) { return 0.0f; }
 bool pathCurrentKnown(int) { return false; }
 float pathCurrentSigned_mA(int) { return 0.0f; }
+float pathCurrentRaw_mA(int) { return 0.0f; }
 uint32_t netScanComputeGeneration(void) { return 0; }
 // One-shot taps are a V5 primitive (the OG has no scanner fabric here);
 // refusing the request tells the caller immediately, and the guide checks

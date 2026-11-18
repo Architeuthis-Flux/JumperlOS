@@ -1144,6 +1144,19 @@ void updateConfigFromFile(const char* filename) {
 // ============================================================================
 
 bool saveConfigToFile(const char* filename) {
+    // Save-side twin of the load clamp: a tip drive outside the guard band
+    // never reaches config.txt or (eepromPersistFromConfig below) the EEPROM
+    // store. Until now only the loads clamped, so a bad value was stored and
+    // then silently swapped for the default on the next boot.
+    if (!probeTipDriveOk(jumperlessConfig.probe.measure_voltage)) {
+        Serial.printf("[config] probe.measure_voltage %.3f V is outside %.1f-%.1f V - saving %.2f V "
+                      "([probe] tip_guard = false bypasses)\n\r",
+                      (double)jumperlessConfig.probe.measure_voltage,
+                      (double)PROBE_TIP_DRIVE_MIN_V, (double)PROBE_TIP_DRIVE_MAX_V,
+                      (double)PROBE_TIP_DRIVE_DEFAULT_V);
+        jumperlessConfig.probe.measure_voltage = PROBE_TIP_DRIVE_DEFAULT_V;
+    }
+
     uint32_t startTime = micros();
     if (debugConfigSaveTiming) {
         Serial.println("[ConfigSave] FULL SAVE starting...");
@@ -1643,10 +1656,9 @@ void loadConfig(void) {
     // the top of the pad ladder past ADC full-scale - hardware-observed as
     // "measure mode off at the high end / logo pads" plus a self-test
     // reference stuck at the bad parked level.
-    if (jumperlessConfig.probe.measure_voltage < 3.0f ||
-        jumperlessConfig.probe.measure_voltage > 3.6f) {
-        jumperlessConfig.probe.measure_voltage = 3.33f;
-    }
+    // (The band and its [probe] tip_guard bypass live in config.h.)
+    jumperlessConfig.probe.measure_voltage =
+        probeTipDriveSane(jumperlessConfig.probe.measure_voltage);
 
     readSettingsFromConfig();
     

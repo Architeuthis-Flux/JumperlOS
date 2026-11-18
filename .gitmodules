@@ -1,3 +1,7 @@
 [submodule "lib/FatFS/lib/SPIFTL"]
 	path = lib/FatFS/lib/SPIFTL
 	url = https://github.com/Architeuthis-Flux/SPIFTL.git
+[submodule "micropython_repo"]
+	path = micropython_repo
+	url = https://github.com/micropython/micropython.git
+	shallow = true

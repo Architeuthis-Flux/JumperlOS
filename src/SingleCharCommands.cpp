@@ -208,7 +208,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
 
     int shownMenuItems = 0;
     int menuItemCount[ 4 ] = { 0, 0, 0, 0 };
-    int menuItemCounts[ 4 ] = { 14, 22, 37, 46 };
+    int menuItemCounts[ 4 ] = { 15, 23, 38, 47 };
 
     if ( dontShowMenu == 0 ) {
     forceprintmenu:
@@ -246,6 +246,7 @@ void SingleCharCommands::printMenu( int extraMenuLevel ) {
         shownMenuItems += printMenuLine( showExtraMenu, 2, "\td = set debug flags\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 2, "\tD = show debug menu\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 2, "\tl = LED brightness / test\n\r" );
+        shownMenuItems += printMenuLine( showExtraMenu, 0, "\tK = click menu\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 0, "\t\b\b`/~ = edit / print config\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 0, "\tp = microPython REPL\n\r" );
         shownMenuItems += printMenuLine( showExtraMenu, 0, "\t> = send Python formatted command\n\r" );
@@ -427,6 +428,7 @@ void SingleCharCommands::sortCommands( ) {
 // ============================================================================
 
 CommandResult cmd_terminalWheel( char c, const String& line ); // defined with the other handlers below
+CommandResult cmd_clickMenu( char c, const String& line );
 
 void SingleCharCommands::initializeCommands( ) {
     // === Connection commands ===
@@ -522,6 +524,13 @@ void SingleCharCommands::initializeCommands( ) {
     // registerCommand( '%', "list all filesystem contents",
     //                  "Recursively list all files on the filesystem.",
     //                  cmd_listFilesystem, MENU_DEBUG, CAT_FILE_SYSTEM );
+
+    // === The click menu, on the terminal ===
+    registerCommand( 'K', "click menu",
+                     "Open the click menu, as a wheel click does. Either way in, its tree shows here as\n\r"
+                     "columns: up / down move (the wheel's turn), right or Enter opens (its click), left\n\r"
+                     "goes back (its hold), q closes. The wheel and the keys drive the same menu.",
+                     cmd_clickMenu, MENU_BASIC, CAT_SETTINGS, true, SER3_INTERACTIVE );
 
     // === Config commands ===
     registerCommand( '`', "edit config",
@@ -2704,6 +2713,13 @@ CommandResult cmd_listFilesystem( char c, const String& line ) {
 }
 
 // Config commands
+// K: the click menu, opened from the terminal. The session itself starts on
+// the next Menus::service() pass, the same place a wheel click starts one.
+CommandResult cmd_clickMenu( char c, const String& line ) {
+    Menus::getInstance( ).requestOpenFromTerminal( );
+    return CMD_DONT_SHOW_MENU;
+}
+
 CommandResult cmd_editConfig( char c, const String& line ) {
     extern volatile bool core1busy;
     // core1busy = 1;

@@ -135,6 +135,8 @@
     "GPIO-feed switch detector: ADC7 held percentage during the feed blink at or above this classifies SELECT.") \
   X(probe, measure_voltage, FLOAT, 3.30f, 3.0f, 3.6f, 0.01f, nullptr, HOOK_NONE, JLC_CAL, \
     "MEASURE-mode tip drive voltage; servoed by the self test so the tip sits at 3.30V - nothing else should move it.") \
+  X(probe, tip_guard, BOOL, true, 0, 0, 0, nullptr, HOOK_NONE, JLC_NONE, \
+    "Keep the MEASURE-mode tip drive inside 3.0-3.6V wherever it is saved or applied; false bypasses the guard.") \
   X(probe, current_zero, FLOAT, 2.0f, 0.0f, 10.0f, 0.05f, nullptr, HOOK_NONE, JLC_CAL, \
     "INA current reading (mA) with the probe unloaded, subtracted from switch-position measurements.") \
   X(probe, min_valid_reading, INT, 85, 0, 4095, 5, nullptr, HOOK_NONE, JLC_CAL, \
@@ -153,7 +155,9 @@
   X(clickwheel, encoder_pio, INT, -1, -1, 2, 1, encoderPioTable, HOOK_ENCODER_PIO, JLC_BOOT_ONLY, \
     "Which PIO block the encoder's quadrature sampler tries first; auto = PIO2 then PIO1, keeping PIO0 for user programs.") \
   X(clickwheel, rail_click_adjust, INT, 1, 0, 2, 1, railClickAdjustTable, HOOK_NONE, JLC_NONE, \
-    "Click the wheel on a highlighted rail/DAC to adjust its voltage: off, only with an OLED, or always.") \
+    "Click the wheel within 5 seconds of highlighting a rail/DAC to adjust its voltage: off, only with an OLED, or always.") \
+  X(clickwheel, stats_pages, INT, 1, 0, 2, 1, statsPagesTable, HOOK_NONE, JLC_NONE, \
+    "What the wheel passes between the last row and the first, on the OLED: off (the Jumperless logo), on (live board status pages), logo (the pages plus the startup logo).") \
   X(clickwheel, part_walk, INT, 1, 0, 2, 1, partWalkTable, HOOK_NONE, JLC_NONE, \
     "How the wheel walks a placed part's pins: off (this side only, then move on), z (across to the far corner, the wheel keeps its direction), pin_order (round the part by pin number).") \
   X(clickwheel, fx_type, INT, 8, 0, 9, 1, menuFxTypeTable, HOOK_MENU_FX, JLC_NONE, \
@@ -501,5 +505,23 @@ struct config {
     struct usb_cdc     { JL_CFG_USB_CDC(JL_XFIELD) }     usb_cdc;
     struct usb_audio   { JL_CFG_USB_AUDIO(JL_XFIELD) }   usb_audio;
 };
+
+// The MEASURE-mode tip drive (probe.measure_voltage) may only sit near 3.3 V:
+// above it the top of the pad ladder passes ADC full scale and the tip
+// overdrives 3.3 V logic. ONE band for every writer and reader - the
+// config.txt and EEPROM-store saves, both load clamps, the state default, the
+// probe-feed park and the self-test servo - so they cannot drift apart.
+// Bypass: [probe] tip_guard = false. A bypassed value must still be a real
+// DAC voltage (the compares also reject NaN).
+#define PROBE_TIP_DRIVE_MIN_V     3.0f
+#define PROBE_TIP_DRIVE_MAX_V     3.6f
+#define PROBE_TIP_DRIVE_DEFAULT_V 3.33f
+static inline bool probeTipDriveOk( float v ) {
+    if ( !jumperlessConfig.probe.tip_guard ) return v >= 0.0f && v <= 8.0f;
+    return v >= PROBE_TIP_DRIVE_MIN_V && v <= PROBE_TIP_DRIVE_MAX_V;
+}
+static inline float probeTipDriveSane( float v ) {
+    return probeTipDriveOk( v ) ? v : PROBE_TIP_DRIVE_DEFAULT_V;
+}
 
 #endif // CONFIG_H

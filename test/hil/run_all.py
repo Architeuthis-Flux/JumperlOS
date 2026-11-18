@@ -36,6 +36,8 @@ TESTS = [
     # and the bare `z steps` check hardcodes cursor 1/ while the cursor
     # deliberately persists. 7/9 green on the bench 2026-08-27.
     "test_projects.py",        # /projects tree, provisioning, the launcher
+    "test_stats_pages.py",     # the scroll's status stops + the rail adjust window (port-1 arrows, read-only)
+    "test_click_menu.py",      # the K command: the click menu as terminal columns (port-1 keys; picks only the value already set)
     "test_encoder_ui.py",      # last: drives the physical UI
 ]
 

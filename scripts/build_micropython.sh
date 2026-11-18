@@ -81,10 +81,12 @@ echo -e "${YELLOW}Building MicroPython embed port with Jumperless module and bui
 
 MICROPYTHON_URL="https://github.com/micropython/micropython.git"
 
-# Check if MicroPython repo exists
-if [ ! -d "$MICROPYTHON_REPO_PATH" ]; then
-    echo -e "${YELLOW}Cloning MicroPython repository...${NC}"
-    git clone "$MICROPYTHON_URL" "${MICROPYTHON_REPO_PATH}"
+# micropython_repo is a git submodule (see .gitmodules). An empty dir means it isn't
+# checked out yet; never run git inside it in that state (it would hit the superproject).
+if [ ! -e "$MICROPYTHON_REPO_PATH/.git" ]; then
+    echo -e "${YELLOW}Fetching MicroPython submodule (shallow)...${NC}"
+    git -C "$(dirname "$MICROPYTHON_REPO_PATH")" submodule update --init --depth 1 -- micropython_repo \
+        || { echo "MicroPython submodule init failed; not touching an empty micropython_repo/" >&2; exit 1; }
 fi
 
 pushd "${MICROPYTHON_REPO_PATH}"

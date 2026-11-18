@@ -25,6 +25,7 @@
 #include "Undo.h"
 #include "Menus.h"
 #include "ReadingDisplay.h"
+#include "StatsPages.h"      // the scroll's status stops between the last row and the first
 #include "PartLabels.h"      // partLabels - the part-highlight overlay channel
 #include "PartsApp.h"        // partsShowPartCard - the scroll's part card
 #include "PartPlacement.h"   // partPinNode - semantic labels for part-pin nets
@@ -181,6 +182,9 @@ ServiceStatus Highlighting::service() {
         
         // Check for reading changes
         checkForReadingChanges();
+
+        // A status stop's page stays live until something else paints
+        StatsPages::service();
     }
     
     // Track changes for LED updates
@@ -337,6 +341,7 @@ void Highlighting::clearHighlighting( int updateLEDs) {
 // feature - so this is the separate, explicit "someone else owns the display
 // now" reset, used when handing back from a Python script.
 void Highlighting::resetReadingState( ) {
+    StatsPages::hide( );   // same contract for a live stats page
     showReadingNet = -1;
     showReadingRow = -1;
     lastPrintedNet = -1;
@@ -392,6 +397,14 @@ struct ScrollPartPark {
 static ScrollPartPark scrollPartParked[ MAX_PARTS ] = {};
 
 static int8_t scrollDetentAcc = 0;     // the detent counter (see scrollDetentStep below)
+
+// Status stops (StatsPages; Kevin, 2026-11-10): where the row ring wraps -
+// past the last header pin going up, before row 1 going down - the scroll
+// passes a few OLED pages of board status with nothing highlighted. This is
+// the scroll's position among them, -1 = on the row ring. scrolledRow keeps
+// the ring's end the scroll came in over; leaving sets it to the end the
+// scan resumes AT.
+static int8_t scrollStatsPage = -1;
 
 static void scrollPartReset( void ) {
     scrollPartIdx = -1;
@@ -706,6 +719,38 @@ static bool gpioClickAccepted( void ) {
     return gpioClickWindowOpen( ) ||
            ( s_gpioClickLatched && s_gpioWindowNet > 0 &&
              brightenedNet == s_gpioWindowNet );
+}
+
+// ---------------------------------------------------------------------------
+// Rail / DAC adjust window (Kevin, 2026-11-10). The click-to-adjust shortcut
+// used to stay armed for as long as the highlight persisted (15 s), so a
+// click meant for the menu kept landing in the adjuster. It is a window now,
+// the GPIO one's shape: for kAdjustWindowMs after a rail or DAC highlight
+// LANDS, the card says "adjust?" and a wheel click opens the adjuster; after
+// that the hint goes blank and the click opens the menu as if nothing were
+// highlighted. The highlight itself persists exactly as it did.
+//
+// highlightTimer is the landing stamp: every way onto the net writes it (a
+// wheel stop, a probe tap, the adjuster's own exit re-highlight - so leaving
+// the adjuster arms one fresh window, like the carousel), a held probe keeps
+// re-writing it so the countdown starts at LIFT, and clearHighlighting()
+// zeroes it.
+static const unsigned long kAdjustWindowMs = 5000;
+// A press that BEGAN inside the window still adjusts if it releases just
+// past it (s_gpioClickLatched's twin; latched and cleared beside it).
+static bool s_adjustClickLatched = false;
+static bool clickAdjustEnabled( void );   // with the reading helpers below
+
+static bool adjustableNetHighlighted( void ) {
+    return clickAdjustEnabled( ) && highlightedNet >= 2 && highlightedNet <= 5;
+}
+static bool adjustWindowOpen( void ) {
+    return adjustableNetHighlighted( ) && highlightTimer != 0 &&
+           ( millis( ) - highlightTimer ) < kAdjustWindowMs;
+}
+static bool adjustClickAccepted( void ) {
+    return adjustWindowOpen( ) ||
+           ( s_adjustClickLatched && adjustableNetHighlighted( ) );
 }
 
 int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
@@ -1100,6 +1145,46 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             returnNode = scrolledRow;
         };
 
+        // A status stop: nothing is highlighted and the panel is page `page`.
+        // The last net's live reading is dropped with the highlight - it
+        // would repaint over the page, and scrolling back onto that net
+        // would then find its card "already shown".
+        auto landStats = [&]( int page ) {
+            scrollPartReset( );
+            scrollPartLeft = -1;
+            clearHighlighting( -1 );
+            resetReadingState( );
+            scrollStatsPage = (int8_t)page;
+            if ( print ) StatsPages::show( page );
+        };
+        // One row along the ring. false = the step crossed the ring's end
+        // onto a status stop, and the detent is spent.
+        auto advanceRow = [&]( bool up ) -> bool {
+            int n = StatsPages::count( );
+            if ( n > 0 && scrolledRow == ( up ? NANO_RESET_1 : 1 ) ) {
+                landStats( up ? 0 : n - 1 );
+                return false;
+            }
+            if ( up ) incrementRow( scrolledRow );
+            else decrementRow( scrolledRow );
+            return true;
+        };
+        // A detent while ON a status stop: the next page, or off the end of
+        // them and back onto the ring. true = the row scan takes it from
+        // scrolledRow, which is its FIRST candidate (row 1 going up, the
+        // last header pin going down) - the scan's own first step is skipped.
+        auto stepStats = [&]( bool up ) -> bool {
+            int next = scrollStatsPage + ( up ? 1 : -1 );
+            if ( next >= 0 && next < StatsPages::count( ) ) {
+                landStats( next );
+                return false;
+            }
+            scrollStatsPage = -1;
+            StatsPages::hide( );   // the stop the scan finds repaints the panel
+            scrolledRow = up ? 1 : NANO_RESET_1;
+            return true;
+        };
+
         // A stale part focus (part removed / table rewritten) resets cleanly.
         if ( scrollPartIdx >= 0 &&
              ( scrollPartIdx >= globalState.parts.numParts ||
@@ -1147,8 +1232,12 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
             if ( gpioClickWindowOpen( ) ) {
                 s_gpioClickLatched = true;
             }
+            if ( adjustWindowOpen( ) ) {
+                s_adjustClickLatched = true;
+            }
         } else if ( encoderButtonState != RELEASED ) {
             s_gpioClickLatched = false;
+            s_adjustClickLatched = false;
         }
 
         // Two detents a stop, one inside a big part (scrollDetentStep). The
@@ -1164,9 +1253,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 walkPart( true );
             }
 
-            if ( returnNode == -1 ) {
-                incrementRow( scrolledRow );
-
+            if ( returnNode == -1 &&
+                 ( scrollStatsPage >= 0 ? stepStats( true ) : advanceRow( true ) ) ) {
                 // Find the next stop: a placed part's row (checked BEFORE the
                 // wiring test, so a part with no wires is reachable), else a
                 // row with connections, starting from current scrolledRow
@@ -1216,8 +1304,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                         highlightNets( 0, highlightedNet, print );
                         returnNode = scrolledRow;
                         break;
-                    } else {
-                        incrementRow( scrolledRow );
+                    } else if ( !advanceRow( true ) ) {
+                        break;   // wrapped onto a status stop
                     }
                 } while ( scrolledRow != originalRow ); // prevent infinite loop
                 scrollPartLeft = -1;   // the just-walked part's rows were skipped for this one scan
@@ -1229,9 +1317,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                 walkPart( false );
             }
 
-            if ( returnNode == -1 ) {
-                decrementRow( scrolledRow );
-
+            if ( returnNode == -1 &&
+                 ( scrollStatsPage >= 0 ? stepStats( false ) : advanceRow( false ) ) ) {
                 // Find the next stop (part row first - see the UP branch)
                 int originalRow = scrolledRow;
                 do {
@@ -1279,8 +1366,8 @@ int Highlighting::encoderNetHighlight( int print, int mode, int divider ) {
                         highlightNets( 0, highlightedNet, print );
                         returnNode = scrolledRow;
                         break;
-                    } else {
-                        decrementRow( scrolledRow );
+                    } else if ( !advanceRow( false ) ) {
+                        break;   // wrapped onto a status stop
                     }
                 } while ( scrolledRow != originalRow ); // prevent infinite loop
                 scrollPartLeft = -1;   // (see the UP branch)
@@ -1645,9 +1732,13 @@ static bool clickAdjustEnabled( void ) {
 }
 
 // The prompt for adjustable readings: shown only while a click would
-// actually enter the voltage adjuster.
+// actually enter the voltage adjuster (adjustWindowOpen). Lapsed, it is
+// blanks as wide as the prompt rather than nullptr: ReadingDisplay centers
+// the reading when there is no hint, and the card must not jump when the
+// window closes.
 static const char* adjustHintText( void ) {
-    return clickAdjustEnabled( ) ? "adjust?" : nullptr;
+    if ( !clickAdjustEnabled( ) ) return nullptr;
+    return adjustWindowOpen( ) ? "adjust?" : "       ";
 }
 
 // The two always-made supply slots (special nets 2 and 3): the V5's rails,
@@ -2368,6 +2459,17 @@ int Highlighting::checkForReadingChanges( void ) {
         prevGpioOutputState = -1;
     }
 
+    // The adjust window's hint, the same way: "adjust?" leaves the rail /
+    // DAC card when the window lapses (and returns when a re-tap reopens
+    // it) with the voltage unchanged, so force those branches' next repaint.
+    static bool s_prevAdjustWindowOpen = false;
+    bool adjustWindowOpenNow = adjustWindowOpen( );
+    if ( adjustWindowOpenNow != s_prevAdjustWindowOpen ) {
+        s_prevAdjustWindowOpen = adjustWindowOpenNow;
+        prevRailVoltage = kNoReading;
+        prevDacVoltage = kNoReading;
+    }
+
     // UART live-display state (small persistent buffers, display-only)
     auto& prevUartTx    = g_readingGuards.prevUartTx;
     auto& prevUartTxLen = g_readingGuards.prevUartTxLen;
@@ -2846,11 +2948,10 @@ bool Highlighting::wantsToHandleButtonPress(void) {
     }
     
     // Rails and DACs are adjustable - by NET (see shouldPersistHighlight's
-    // note; GND is net 1 and never matches). shouldPersistHighlight() above
-    // already requires clickAdjustEnabled() for these, but the explicit
-    // gate keeps this readable on its own.
-    if (clickAdjustEnabled() &&
-        highlightedNet >= 2 && highlightedNet <= 5) {
+    // note; GND is net 1 and never matches) - and only inside the adjust
+    // window (adjustWindowOpen): past it the highlight is still up, but the
+    // click is the menu's, as if nothing were highlighted.
+    if (adjustClickAccepted()) {
         return true;
     }
     
@@ -2934,6 +3035,15 @@ int Highlighting::handleEncoderButtonPress(void) {
         return 0;
     }
     
+    // The adjust window: wantsToHandleButtonPress asks this same question,
+    // so the menu and this handler never both claim - or both drop - a press.
+    if (highlightedNet >= 2 && highlightedNet <= 5) {
+        if (!adjustClickAccepted()) {
+            return 0;   // lapsed: the menu's click
+        }
+        s_adjustClickLatched = false;   // this press is consumed
+    }
+
     // Handle rails - by NET, matching wantsToHandleButtonPress (net 1 =
     // GND is not adjustable and never claimed; brightenedNode is too
     // volatile to key on - see shouldPersistHighlight's note).

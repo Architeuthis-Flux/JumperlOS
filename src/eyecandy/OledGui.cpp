@@ -1,4 +1,5 @@
 #include "OledGui.h"
+#include "StatsPages.h"
 
 #include "Peripherals.h"
 #include "oled.h"
@@ -598,6 +599,9 @@ void OledGui::notePanelTakenByOther() {
     // (non-persistent) screens keep free-running, matching prior behavior, so
     // interactive apps like the layout editor aren't disturbed.
     if ( idleScreen_ && active_ == idleScreen_ ) ownsPanel_ = false;
+    // A live stats page (the scroll's status stops) yields the same way: this
+    // is the one call every toast, reading card and part card already makes.
+    StatsPages::hide();
 }
 
 // Blank the panel so a removed screen doesn't linger. Safe no-op if the OLED

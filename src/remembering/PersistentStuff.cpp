@@ -63,13 +63,9 @@ static void applyStoreToConfig(void) {
   jumperlessConfig.probe.pad_min  = g_store.probe_min;
   jumperlessConfig.probe.switch_threshold_high = g_store.probe_switch_threshold_high;
   jumperlessConfig.probe.switch_threshold_low  = g_store.probe_switch_threshold_low;
-  jumperlessConfig.probe.measure_voltage = g_store.measure_mode_output_voltage;
-  // Store-wins runs after loadConfig(), so keep this band in sync with the
-  // clamp there (configManager.cpp) or it is bypassed.
-  if (jumperlessConfig.probe.measure_voltage < 3.0f ||
-      jumperlessConfig.probe.measure_voltage > 3.6f) {
-    jumperlessConfig.probe.measure_voltage = 3.33f;
-  }
+  // Store-wins runs after loadConfig(), so this goes through the same band
+  // (config.h) as the clamp there or that one is bypassed.
+  jumperlessConfig.probe.measure_voltage = probeTipDriveSane(g_store.measure_mode_output_voltage);
 }
 
 // Copy FROM jumperlessConfig INTO the in-RAM store struct (no flash yet).
@@ -100,7 +96,8 @@ static void fillStoreFromConfig(void) {
   g_store.probe_min = jumperlessConfig.probe.pad_min;
   g_store.probe_switch_threshold_high = jumperlessConfig.probe.switch_threshold_high;
   g_store.probe_switch_threshold_low  = jumperlessConfig.probe.switch_threshold_low;
-  g_store.measure_mode_output_voltage = jumperlessConfig.probe.measure_voltage;
+  // The one place the tip drive enters the EEPROM store: in-band or the default.
+  g_store.measure_mode_output_voltage = probeTipDriveSane(jumperlessConfig.probe.measure_voltage);
 }
 
 bool eepromStoreLoadAndApplyIdentity(void) {

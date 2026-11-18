@@ -459,6 +459,16 @@ const StringIntEntry railClickAdjustTable[] = {
 };
 const int railClickAdjustTableSize = sizeof(railClickAdjustTable) / sizeof(railClickAdjustTable[0]);
 
+// [clickwheel] stats_pages - the scroll's stops between the last row and the
+// first (eyecandy/StatsPages.cpp): off = one stop, the Jumperless logo;
+// on = the live status pages; logo = those plus the startup logo
+const StringIntEntry statsPagesTable[] = {
+    {"off", 0},
+    {"on", 1},
+    {"logo", 2},
+};
+const int statsPagesTableSize = sizeof(statsPagesTable) / sizeof(statsPagesTable[0]);
+
 // [clickwheel] part_walk - how the encoder scroll walks a placed part's pins
 // (Highlighting.cpp walkPart): off = this side only, then the scan moves
 // on; z = across to the far corner so the wheel keeps its direction;

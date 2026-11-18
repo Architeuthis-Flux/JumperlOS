@@ -221,7 +221,7 @@ void PowerState::setDefaults() {
     // their non-probe defaults.
     extern volatile bool configLoaded;
     if (configLoaded && jumperlessConfig.probe.auto_connect > 0) {
-        dac0 = jumperlessConfig.probe.measure_voltage;
+        dac0 = probeTipDriveSane(jumperlessConfig.probe.measure_voltage);
     }
 }
 
@@ -4082,6 +4082,7 @@ bool SlotManager::exitTemporarySlot(bool refreshHardware) {
     // to that run file.
     String content;
     String errorMsg;
+    bool reloaded = false;
 
     if (activeSlotPath[0] != '\0' && safeFileExists(activeSlotPath)) {
         File f = safeFileOpen(activeSlotPath, "r", 5000);
@@ -4089,7 +4090,22 @@ bool SlotManager::exitTemporarySlot(bool refreshHardware) {
             content = f.readString();
             safeFileClose(f, false);
             activeState.fromYAML(content, errorMsg);
+            reloaded = true;
         }
+    }
+
+    // Nothing was read back: the original slot has no file (never saved, so
+    // it was empty - every slot on a first start, where calibrateDacs() runs
+    // before any slot file exists) or the file would not open. RAM holds only
+    // what the app left - enterTemporarySlot() cleared the state on the way
+    // in - so clearing drops nothing of the user's, and keeps the app's last
+    // wiring (calibrateDacs: BOTTOM_RAIL to ISENSE_PLUS and ADC3) from
+    // becoming their slot. Same end state as loadSlot()'s missing-file branch.
+    // ponytail: an unopenable file comes back as an empty board, and the next
+    // edit auto-saves over it. Go to the no-active-context state, as
+    // loadSlotFromPath does, if that ever bites.
+    if (!reloaded) {
+        activeState.clear();
     }
 
     temporarySlotActive = false;

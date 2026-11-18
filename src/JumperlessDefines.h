@@ -38,7 +38,7 @@
 #define MICROPY_HEAP_SIZE       (28 * 1024)
 #define MICROPY_HEAP_SIZE_PSRAM (28 * 1024)
 #else
-#define MICROPY_HEAP_SIZE       (64 * 1024)  // SRAM heap when no PSRAM
+#define MICROPY_HEAP_SIZE       (94 * 1024)  // SRAM heap when no PSRAM
 #define MICROPY_HEAP_SIZE_PSRAM  (64 * 1024)  // Smaller SRAM heap when PSRAM provides extra GC space
 #endif
 

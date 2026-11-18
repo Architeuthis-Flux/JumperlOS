@@ -20,6 +20,7 @@
 #include "JumperlessDefines.h"
 #include "LEDs.h"
 #include "MatrixState.h"
+#include "MenuTermView.h"
 #include "MenuTransitions.h"
 #include "NetManager.h"
 #include "NetsToChipConnections.h"
@@ -28,6 +29,7 @@
 #include "Probing.h"
 #include "RotaryEncoder.h"
 #include "States.h"
+#include "Tui.h"
 #include "configManager.h"
 #include "menuTree.h"
 #include "oled.h"
@@ -559,7 +561,349 @@ static void menuShowKeepalive( unsigned long& lastRequestMs,
 // loop, and the outer loop must not reopen the menu on top of it.
 static bool s_menuKeyboardExit = false;
 
+// ---------------------------------------------------------------------------
+// The click menu on the terminal. Every session - a wheel click, the K
+// command, a reopen - is also drawn there as columns by MenuTermView, and
+// takes the terminal's keys. getMenuSelection() and selectSubmenuOption()
+// stay the only code that walks the tree. What is added here reports where
+// they are standing, and turns keys into the wheel's own events - up / down
+// are a detent, right is the click, left is the hold's one step back - so a
+// key and the wheel cannot do different things, and either can take over
+// from the other mid-menu. (Menus::showOnTerminal turns it off for a caller
+// that owns the terminal itself: the Menu FX tuner.)
+// ---------------------------------------------------------------------------
+static bool s_viewOpenedByKey = false;      // K opened the next session: its line ending is still coming
+static bool s_view = false;                 // this session is on the terminal, until its action starts
+static bool s_viewPrevLineBuffering = true; // what to hand back to the terminal
+static bool s_viewBack = false;             // left arrow, taken where the hold's back-step is
+static int s_viewPicked = -1;               // the row last clicked: where the picked path ends
+static int8_t s_viewPick[ 10 ];             // per level, the option clicked on a choice row
+static int s_viewRows = 1;                  // list lines in the block
+static bool s_viewValueLine = false;        // a picker / editor left its value on the current line
+static bool s_viewSpaceDown = false;        // the app's space is down (it sends 0x1C / 0x1D) ...
+static unsigned long s_viewSpaceDownAt = 0; // ... since then ...
+static unsigned long s_viewHoldStepAt = 0;  // ... and its hold last stepped back then (0 = not yet)
+
+struct ViewCol {
+    int16_t lo, hi;     // the run of menu lines the list lives in
+    int16_t level;
+    int16_t choiceRow;  // >= 0: the list is this "*A**B*" row's options
+};
+static ViewCol s_viewCols[ MenuTermView::MAX_COLUMNS ];
+
+// The nav loops' one-line echo (">>Show in Term"). While the columns are up
+// they are the echo, and a stray line would knock them out of place.
+class NullPrint : public Print {
+  public:
+    size_t write( uint8_t ) override { return 1; }
+};
+static NullPrint s_noEcho;
+static Print& navEcho( void ) { return s_view ? (Print&)s_noEcho : (Print&)Serial; }
+
+// A menu line as a person reads it. The tree's text is laid out for the
+// breadboard: two 7-column lines, \31 marking the break, padding between.
+static void viewClean( const char* in, char* out, int outLen ) {
+    int o = 0;
+    bool gap = false, marked = false;
+    for ( int col = 0; in[ col ] != '\0' && o < outLen - 3; col++ ) {
+        char c = in[ col ];
+        if ( c == ' ' || c == '\31' || c == '\r' || c == '\n' ) {
+            gap = true;
+            if ( c == '\31' ) marked = true;
+            continue;
+        }
+        if ( gap && o > 0 ) {
+            // Padding that fills the first line out to column 7 in front of a
+            // lowercase letter split one word ("Calib  ration"), not two.
+            bool wrapped = !marked && col == 7 && c >= 'a' && c <= 'z';
+            if ( !wrapped ) out[ o++ ] = ' ';
+        }
+        gap = marked = false;
+        if ( c == '~' ) {
+            out[ o++ ] = '\xC2'; // ±, as the one-line echo prints it
+            out[ o++ ] = '\xB1';
+        } else {
+            out[ o++ ] = ( c == '_' ) ? '-' : c;
+        }
+    }
+    out[ o ] = '\0';
+    // The rail options carry the breadboard font's arrow glyphs.
+    if ( strncmp( out, "Top R", 5 ) == 0 ) snprintf( out, outLen, "Top Rail" );
+    if ( strncmp( out, "Bot R", 5 ) == 0 ) snprintf( out, outLen, "Bottom Rail" );
+}
+
+// Option n of a "*A**B*" row; parseMenuFile kept where the stars stood as
+// bits (the arithmetic is selectSubmenuOption's). False past the last one.
+static bool menuOptionText( int row, int n, char* out, int outLen ) {
+    int seen = 0, start = -1;
+    for ( int j = 0; j < 32; j++ ) {
+        if ( !bitRead( optionSlpitLocations[ row ], j ) ) continue;
+        if ( seen == 2 * n ) start = j;
+        if ( seen == 2 * n + 1 ) {
+            String option = menuLines[ row ].substring( start - 2 * n, j - 2 * n - 1 );
+            viewClean( option.c_str( ), out, outLen );
+            return true;
+        }
+        seen++;
+    }
+    return false;
+}
+
+static int menuOptionCount( int row ) {
+    int stars = 0;
+    for ( int j = 0; j < 32; j++ ) stars += bitRead( optionSlpitLocations[ row ], j );
+    return stars / 2;
+}
+
+static bool menuRowOpens( int row ) {
+    return row < menuLineIndex && menuLevels[ row + 1 ] > menuLevels[ row ];
+}
+
+static bool viewLabel( int c, int row, char* out, int outLen ) {
+    const ViewCol& v = s_viewCols[ c ];
+    out[ 0 ] = '\0';
+    if ( v.choiceRow >= 0 ) {
+        return menuOptionText( v.choiceRow, row, out, outLen ) && menuRowOpens( v.choiceRow );
+    }
+    int k = 0;
+    for ( int i = v.lo; i <= v.hi; i++ ) {
+        if ( menuLevels[ i ] != v.level || k++ != row ) continue;
+        viewClean( menuLines[ i ].c_str( ), out, outLen );
+        if ( out[ 0 ] == '\0' ) { // a bare action row (">v1"): name what it asks for
+            static const char* const asks[] = { "...", "pick node", "baud", "set voltage", "slot",
+                                                "...", "font", "enter number", "enter text", "connect" };
+            snprintf( out, outLen, "%s", asks[ actions[ i ] < 10 ? actions[ i ] : 0 ] );
+        }
+        return menuRowOpens( i );
+    }
+    return false;
+}
+
+// The columns for the engine standing on `row`: its own list on the right,
+// each ancestor's to the left. `option` lights that option when `row` is a
+// choice row whose carousel is running. Returns how many columns.
+static int viewBuild( int row, int option, MenuTermView::Column* cols ) {
+    if ( row < 0 || row > menuLineIndex ) return 0;
+    int path[ MenuTermView::MAX_COLUMNS ];
+    int n = 0;
+    for ( int r = row; r >= 0 && n < MenuTermView::MAX_COLUMNS; ) {
+        path[ n++ ] = r;
+        int level = menuLevels[ r ];
+        if ( level <= 0 ) break;
+        r--; // the parent: the nearest line above at a shallower level
+        while ( r >= 0 && menuLevels[ r ] >= level ) r--;
+    }
+    int hue = 0;
+    for ( int c = 0; c < n; c++ ) {
+        int r = path[ n - 1 - c ];
+        int level = menuLevels[ r ];
+        ViewCol& v = s_viewCols[ c ];
+        MenuTermView::Column& col = cols[ c ];
+        v.level = level;
+        v.lo = v.hi = r;
+        if ( optionSlpitLocations[ r ] != 0 ) {
+            v.choiceRow = r;
+            col.id = -1 - r;
+            col.count = menuOptionCount( r );
+            int pick = ( c == n - 1 && option >= 0 ) ? option : s_viewPick[ level < 10 ? level : 9 ];
+            col.selected = ( pick > 0 && pick < col.count ) ? pick : 0;
+        } else {
+            v.choiceRow = -1;
+            while ( v.lo > 0 && menuLevels[ v.lo - 1 ] >= level ) v.lo--;
+            while ( v.hi < menuLineIndex && menuLevels[ v.hi + 1 ] >= level ) v.hi++;
+            col.id = level * 200 + v.lo;
+            col.count = 0;
+            col.selected = 0;
+            for ( int i = v.lo; i <= v.hi; i++ ) {
+                if ( menuLevels[ i ] != level ) continue;
+                if ( i == r ) col.selected = col.count;
+                col.count++;
+            }
+        }
+        col.hue = hue;
+        hue += col.selected + 1; // a submenu's colours carry on from the row it came through
+    }
+    return n;
+}
+
+static void viewShow( int row, int option = -1 ) {
+    if ( !s_view ) return;
+    if ( s_viewValueLine ) { // back from a node pick for the next option: start under its line
+        Serial.print( "\r\n" );
+        s_viewValueLine = false;
+    }
+    MenuTermView::Column cols[ MenuTermView::MAX_COLUMNS ];
+    int n = viewBuild( row, option, cols );
+    if ( n > 0 ) MenuTermView::show( Serial, cols, n, s_viewRows, viewLabel );
+}
+
+// Fold the columns down to the picked path on one line (to nothing, for a
+// cancel). The node picker and the value editors fold before they print.
+static void viewFold( bool picked ) {
+    if ( !s_view || !MenuTermView::isOpen( ) ) return;
+    MenuTermView::Column cols[ MenuTermView::MAX_COLUMNS ];
+    int n = picked ? viewBuild( s_viewPicked, -1, cols ) : 0;
+    MenuTermView::close( Serial, cols, n, viewLabel );
+}
+
+// The node picker and the value editors rewrite one line in place ("\r 3.3 V")
+// and never end it: the screen clear that closes a wheel session did. Here
+// the line stays in the scrollback, so it gets its ending when they are done.
+static void viewFoldForValue( void ) {
+    if ( !s_view ) return;
+    viewFold( true );
+    s_viewValueLine = true;
+}
+
+// ... and hand the terminal back: the session's action, or its end, is next.
+static void viewEnd( bool picked ) {
+    if ( !s_view ) return;
+    viewFold( picked );
+    if ( s_viewValueLine ) {
+        Serial.print( "\r\n" );
+    }
+    s_viewValueLine = false;
+    s_viewBack = false;      // a Left that ended the session is not the next session's
+    s_viewSpaceDown = false;
+    s_view = false;
+    setTerminalLineBuffering( s_viewPrevLineBuffering );
+}
+
+static void viewBegin( bool openedByKey ) {
+    s_view = true;
+    s_viewBack = false;
+    s_viewPicked = -1;
+    s_viewValueLine = false;
+    s_viewSpaceDown = false;
+    for ( int i = 0; i < 10; i++ ) s_viewPick[ i ] = -1;
+    // Keys one at a time from the app (it sends whole lines otherwise), the
+    // way Tui::Session asks for them.
+    s_viewPrevLineBuffering = setTerminalLineBuffering( true );
+    // The line ending typed with K is not a click. (Only then: a wheel click
+    // has nothing typed behind it, and should not wait 30 ms to open.)
+    for ( unsigned long t0 = millis( ); openedByKey && millis( ) - t0 < 30; ) {
+        Tui::drainInput( &Serial );
+        Tui::idle( );
+    }
+    // The block is as tall as the longest list in the tree.
+    s_viewRows = 1;
+    for ( int i = 0; i <= menuLineIndex; i++ ) {
+        int count = 0;
+        if ( optionSlpitLocations[ i ] != 0 ) {
+            count = menuOptionCount( i );
+        } else if ( i == 0 || menuLevels[ i - 1 ] < menuLevels[ i ] ) { // the first row of a list
+            for ( int j = i; j <= menuLineIndex && menuLevels[ j ] >= menuLevels[ i ]; j++ ) {
+                if ( menuLevels[ j ] == menuLevels[ i ] ) count++;
+            }
+        }
+        if ( count > s_viewRows ) s_viewRows = count;
+    }
+}
+
+static bool viewTakeBack( void ) {
+    bool back = s_viewBack;
+    s_viewBack = false;
+    return back;
+}
+
+// One key per call, so each lands as its own event in the loop that asked.
+// The node picker and the value editors read wheel counts, not events: they
+// pass `counts` and get their arrows back as +1 / -1 (up is more).
+//
+// Call it IMMEDIATELY before the loop tests the wheel. A step written into
+// encoderDirectionState from here is not the poll's own: on a board with a
+// wheel, core 1 clears it as soon as encoderOverride runs out (10 polls,
+// ~5 ms). Read at the top of the loop, a key was lost whenever the service
+// pass in between ran long (an OLED flush, a flash save).
+static int viewKeys( bool counts = false ) {
+    if ( !s_view ) return 0;
+    terminalWheelService( ); // a click nobody took retires (no wheel poll does it on the OG)
+    // A space held down is the wheel's hold: a step back at the hold length,
+    // one more per 800 ms after it (getMenuSelection's pacing), and let go
+    // before that it is the click. Timed here rather than as a PRESSED in
+    // encoderButtonState: on a board with a wheel, core 1's poll of the real
+    // button puts a synthetic PRESSED back to IDLE within a few ms.
+    if ( s_viewSpaceDown ) {
+        unsigned long now = millis( );
+        if ( s_viewHoldStepAt == 0 ? ( now - s_viewSpaceDownAt > buttonHoldLength )
+                                   : ( now - s_viewHoldStepAt > 800 ) ) {
+            s_viewHoldStepAt = now;
+            s_viewBack = true;
+        }
+    }
+    if ( s_menuKeyboardExit || Serial.available( ) <= 0 ) return 0;
+    int next = Serial.peek( );
+    // What is not the menu's own input ends the session and stays in the port
+    // for the main loop, as every byte did before the terminal took keys:
+    //  - a control byte: Ctrl-C (the way out of a stuck menu - the flash
+    //    recipe leans on it), the app's ENQ / DC4 queries (answering here
+    //    would print into the block) and its SO / SI mode bytes;
+    //  - a burst: a paste or a pushed netlist, whose spaces and newlines
+    //    would otherwise land as clicks. Held arrows queue a few keys at
+    //    most, three bytes each.
+    bool menuControl = next == 0x1B || next == '\r' || next == '\n' || next == 0x08 ||
+                       next == 0x1C || next == 0x1D;
+    if ( ( next < 0x20 && !menuControl ) || Serial.available( ) > 15 ) {
+        s_menuKeyboardExit = true;
+        return 0;
+    }
+    if ( next == 0x1C ) { // the app: space went down ...
+        Serial.read( );
+        s_viewSpaceDown = true;
+        s_viewSpaceDownAt = millis( );
+        s_viewHoldStepAt = 0;
+        return 0;
+    }
+    if ( next == 0x1D ) { // ... and came up
+        Serial.read( );
+        if ( s_viewSpaceDown && s_viewHoldStepAt == 0 ) {
+            terminalWheelClick( );
+        }
+        s_viewSpaceDown = false;
+        return 0;
+    }
+    Tui::Key key = Tui::readKey( &Serial );
+    int ch = ( key == Tui::KEY_CHAR ) ? Tui::lastChar( ) : 0;
+    if ( key == Tui::KEY_ENTER && next == '\r' && Serial.peek( ) == '\n' ) {
+        Serial.read( ); // CR LF is one Enter
+    }
+    if ( key == Tui::KEY_UP || ch == 'k' ) {
+        if ( counts ) return +1;
+        terminalWheelStep( -1 );
+    } else if ( key == Tui::KEY_DOWN || ch == 'j' ) {
+        if ( counts ) return -1;
+        terminalWheelStep( +1 );
+    } else if ( key == Tui::KEY_RIGHT || key == Tui::KEY_ENTER || ch == ' ' ) {
+        terminalWheelClick( );
+    } else if ( key == Tui::KEY_LEFT || key == Tui::KEY_BACKSPACE ) {
+        s_viewBack = true;
+    } else if ( key == Tui::KEY_ESC || ch == 'q' ) {
+        s_menuKeyboardExit = true;
+    }
+    return 0;
+}
+
+// "A typed byte cancels", as the option, node and value screens test it.
+// With the columns up the keys are the wheel there too: only q / Esc cancels.
+static bool menuTypedCancel( void ) {
+    return s_view ? s_menuKeyboardExit : Serial.available( ) > 0;
+}
+
+void Menus::requestOpenFromTerminal( void ) {
+    s_viewOpenedByKey = true;
+    s_menuReopenRequested = true; // the next service pass opens a session; no click needed
+}
+
 static bool menuKeyboardExitPending( void ) {
+    if ( s_view ) {
+        return s_menuKeyboardExit; // its keys are read where they are acted on (viewKeys)
+    }
+    if ( !Menus::getInstance( ).showOnTerminal ) {
+        // The Menu FX tuner: any byte ends the menu and stays in the port for
+        // the tuner to read. (In line mode the branch below hands the byte to
+        // the line editor instead, and the tuner never saw its keys.)
+        return Serial.available( ) > 0;
+    }
     if ( jumperlessConfig.terminal.line_buffering == 1 ) {
         Jerial.service( );
         if ( Jerial.takeOtherInput( ) ) s_menuKeyboardExit = true;
@@ -579,6 +923,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
 
     int returnedMenuPosition = -1;
     bool menuSessionRan = false;
+    bool viewSession = false; // the terminal shows this session as columns (showOnTerminal)
     // Two ways into a session: the physical click edge, or a programmatic
     // reopen request (requestReopenAtTopLevel - the GPIO apps' hold
     // unwind). The flag path skips only the click-specific parts: no
@@ -604,6 +949,13 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // a declaration without a definition.)
         s_menuKeyboardExit = false; // a fresh session
         Jerial.takeOtherInput( );   // typing from before the click is not a reason to leave
+        // (Not while R is mirroring the board's LEDs live: that view owns the
+        // whole screen, redraws from inside these loops, and already shows
+        // the menu as the LEDs do. The session keeps the one-line echo there.)
+        extern volatile int dumpLED;
+        viewSession = showOnTerminal && dumpLED != 1;
+        bool openedByKey = s_viewOpenedByKey;
+        s_viewOpenedByKey = false;
         ::initMenu( );
         if ( menuLineIndex < 2 ) {
             // b.clear();
@@ -616,6 +968,9 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
 
         inClickMenu = 1;
         menuSessionRan = true;
+        if ( viewSession ) {
+            viewBegin( openedByKey );
+        }
         // The menu owns the terminal for this session and scrolls it freely,
         // which moves the rows a live reading pinned for itself. Drop the OLED
         // dedupe so the next reading repaints once the menu is gone. MUST stay
@@ -643,6 +998,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
             // delayMicroseconds(5000);
             // Use state-based check in loop (doesn't consume event)
             if ( probing.checkProbeButtonState( ) == 1 ) {
+                viewEnd( false );
                 Serial.println( "Probe button pressed" );
                 // Same teardown, same order, as the end-of-session block below:
                 // leaving inClickMenu at 1 pins Menus::service() at BLOCKING.
@@ -671,6 +1027,7 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
             // breadboard underneath the redrawn nets. Same order as that
             // block: menuTransitionCancel() before b.clear(), or a linger
             // frame can restomp the cleared buffer.
+            viewEnd( false ); // backed out of the top level: nothing was picked
             inClickMenu = 0;
             logoRing.enabled = false;
             clearColorOverrides( false, true, false ); // restore depth pads
@@ -736,7 +1093,14 @@ int Menus::clickMenu( int menuType, int menuOption, int extraOptions ) {
         // included - and printed a main menu the reopened session
         // supersedes one loop pass later. The reopened session owns the
         // terminal again immediately.
-        if ( !s_menuReopenRequested ) {
+        if ( viewSession ) {
+            // The columns folded to the picked path when the action started
+            // (or fold to nothing here, on q). Whatever the action printed
+            // stays in the scrollback under it: no clear, no main menu.
+            viewEnd( false );
+        } else if ( !s_menuReopenRequested ) {
+            // (A session kept off the terminal - the Menu FX tuner's - still
+            // ends the old way.)
             extern int showExtraMenu;
             Serial.print( "\x1b[2J\x1b[H" );
             Serial.flush( );
@@ -1047,6 +1411,7 @@ static void renderMenuLine( int menuPosition, int menuLevel,
         oled.clearPrintShow( oledText, 2, true, true, true, -1, -1 );
     }
     requestLedShow( ledShowMode );
+    viewShow( menuPosition );
 }
 
 // (The Menu FX debug TUI drives the real click menu directly — see
@@ -1166,6 +1531,8 @@ int getMenuSelection( void ) {
             return -2;
         }
 
+        viewKeys( ); // the terminal's key for this pass, read right where it is acted on
+
         // One probe-button read per pass: getButtonPress() CONSUMES the press
         // whatever its value, so checking "== 2" here used to EAT a remove
         // press before the back-step handler below could see it - the remove
@@ -1187,6 +1554,7 @@ int getMenuSelection( void ) {
             }
 
             previousMenuSelection[ menuLevel ] = menuPosition;
+            s_viewPicked = menuPosition;
 
             menuLevel++;
 
@@ -1306,25 +1674,25 @@ int getMenuSelection( void ) {
             renderMenuLine( menuPosition, menuLevel, stayOnTopLevel, stayOnTopIndex );
 
             delayMicroseconds( 100 );
-            Serial.print( " " );
+            navEcho( ).print( " " );
             if ( actions[ menuPosition ] == 0 ) {
-                Serial.print( "\r                                              \r" );
+                navEcho( ).print( "\r                                              \r" );
 
                 // oled.clear();
                 for ( int j = 0; j <= menuLevels[ menuPosition ]; j++ ) {
-                    Serial.print( ">" );
+                    navEcho( ).print( ">" );
 
                     if ( j > 8 ) {
                         break;
                     }
                 }
-                Serial.flush( );
+                navEcho( ).flush( );
 
                 String menuLine = menuLines[ menuPosition ];
                 menuLine.replace( "~", "±" );
                 menuLine.replace( "_", "-" );
-                Serial.print( menuLine.c_str( ) );
-                Serial.flush( );
+                navEcho( ).print( menuLine.c_str( ) );
+                navEcho( ).flush( );
                 menuLine.replace( "±", "+-" );
                 if ( numberOfChoices[ menuPosition ] == 0 ) {
                     oled.clearPrintShow( menuLine.c_str( ), 2, true, true, true, -1, -1 );
@@ -1345,8 +1713,8 @@ int getMenuSelection( void ) {
                 String menuLine = menuLines[ menuPosition ];
                 menuLine.replace( "~", "±" );
                 menuLine.replace( "_", "-" );
-                Serial.println( menuLine.c_str( ) );
-                Serial.flush( );
+                navEcho( ).println( menuLine.c_str( ) );
+                navEcho( ).flush( );
                 menuLine.replace( "±", "+-" );
                 oled.clearPrintShow( menuLine.c_str( ), 2, true, true, true, -1, -1 );
             }
@@ -1396,7 +1764,7 @@ int getMenuSelection( void ) {
                         i = subMenuEndIndex + 1;
                     } else if ( i == subMenuStartIndex && loopCount == 1 ) {
 
-                        Serial.println( " " );
+                        navEcho( ).println( " " );
 
                         b.clear( );
                         returnToMenuPosition = -1;
@@ -1508,26 +1876,26 @@ int getMenuSelection( void ) {
 
             // Serial.print(menuLevel);
             delayMicroseconds( 100 );
-            Serial.print( " " );
+            navEcho( ).print( " " );
             if ( actions[ menuPosition ] == 0 ) {
-                Serial.print( "\r                                              \r" );
+                navEcho( ).print( "\r                                              \r" );
                 // oled.clear();
 
                 for ( int j = 0; j <= menuLevels[ menuPosition ]; j++ ) {
-                    Serial.print( ">" );
+                    navEcho( ).print( ">" );
                     // oled.clearPrintShow(">", 2, 5, 8, false, false);
                     if ( j > 8 ) {
                         break;
                     }
                 }
 
-                Serial.flush( );
+                navEcho( ).flush( );
 
                 String menuLine = menuLines[ menuPosition ];
                 menuLine.replace( "~", "±" );
                 menuLine.replace( "_", "-" );
-                Serial.print( menuLine.c_str( ) );
-                Serial.flush( );
+                navEcho( ).print( menuLine.c_str( ) );
+                navEcho( ).flush( );
                 menuLine.replace( "±", "+-" );
 
                 // if (actions[menuPosition+1] != 0) {
@@ -1549,7 +1917,7 @@ int getMenuSelection( void ) {
                 }
             } else {
                 // Serial.println(menuLines[menuPosition-1]);
-                Serial.println( " " );
+                navEcho( ).println( " " );
                 // oled.print(" ");
             }
 
@@ -1802,7 +2170,7 @@ int getMenuSelection( void ) {
             }
         }
 
-        if ( holdBackStep || probePress == 1 ) {
+        if ( holdBackStep || probePress == 1 || viewTakeBack( ) ) {
             noInputTimer = millis( );
             lastMenuLevel = menuLevel;
             // Serial.println("Held");
@@ -2136,8 +2504,10 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
         rotaryEncoderButtonStuff( );
         jOS.serviceInner( );
         delayMicroseconds( 1000 );
+        viewKeys( );
 
-        if ( encoderButtonState == HELD || Serial.available( ) > 0 || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
+        // (s_viewBack is left set: the caller's back-step takes it.)
+        if ( encoderButtonState == HELD || menuTypedCancel( ) || s_viewBack || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
             /// Serial.println("selectSubmenuOption: HELD");
             b.clear( );
             SlotManager& mgr = SlotManager::getInstance( );
@@ -2153,6 +2523,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
 
             encoderButtonState = IDLE;
             optionSelected = highlightedOption;
+            s_viewPick[ menuLevels[ menuPosition ] < 10 ? menuLevels[ menuPosition ] : 9 ] = optionSelected;
 
             for ( int i = 0; i < 10; i++ ) {
                 alreadySelected = 0;
@@ -2371,15 +2742,15 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                 int loopCount = 0;
                 int nudge = 0;
                 int moveMax = 0;
-                Serial.print( "\r                          \r" );
+                navEcho( ).print( "\r                          \r" );
                 for ( int j = 0; j <= menuLevels[ menuPosition ]; j++ ) {
-                    Serial.print( ">" );
+                    navEcho( ).print( ">" );
                     if ( j > 8 ) {
 
                         break;
                     }
                 }
-                Serial.print( " " );
+                navEcho( ).print( " " );
 
                 // Serial.print(subMenuStrings[highlightedOption]);
 
@@ -2400,11 +2771,11 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                     menuLine = prefix + menuLine;
                 }
 
-                Serial.print( menuLine.c_str( ) );
+                navEcho( ).print( menuLine.c_str( ) );
                 menuLine.replace( "±", "+-" );
 
                 oled.clearPrintShow( menuLine.c_str( ), 2, true, true, true, 5, 8 );
-                Serial.flush( );
+                navEcho( ).flush( );
 
                 for ( int i = 0; i < 7; i++ ) {
 
@@ -2441,15 +2812,15 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                 int nextStart = 0;
                 // selectColor = 0x1a001a;
 
-                Serial.print( "\r                        \r" );
+                navEcho( ).print( "\r                        \r" );
                 for ( int j = 0; j <= menuLevels[ menuPosition ]; j++ ) {
-                    Serial.print( ">" );
+                    navEcho( ).print( ">" );
                     if ( j > 8 ) {
 
                         break;
                     }
                 }
-                Serial.print( " " );
+                navEcho( ).print( " " );
                 // Serial.print(subMenuStrings[highlightedOption]);
 
                 if ( actions[ menuPosition ] == 6 ) {
@@ -2467,7 +2838,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                     menuLine = prefix + menuLine;
                 }
 
-                Serial.print( menuLine.c_str( ) );
+                navEcho( ).print( menuLine.c_str( ) );
                 menuLine.replace( "±", "+-" );
                 oled.clearPrintShow( menuLine.c_str( ), 2, true, true, true, 5, 8 );
 
@@ -2502,16 +2873,16 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                          subMenuColors[ ( highlightedOption + menuLevel ) % 8 ],
                          backgroundColor, 0, 1, 1 );
 
-                Serial.print( "\r                              \r" );
+                navEcho( ).print( "\r                              \r" );
                 oled.clear( );
                 for ( int j = 0; j <= menuLevels[ menuPosition ]; j++ ) {
-                    Serial.print( ">" );
+                    navEcho( ).print( ">" );
                     if ( j > 8 ) {
 
                         break;
                     }
                 }
-                Serial.print( " " );
+                navEcho( ).print( " " );
                 // Serial.print(subMenuStrings[highlightedOption]);
 
                 String menuLine = subMenuStrings[ highlightedOption ];
@@ -2548,9 +2919,9 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
                 //   menuLine = prefix + menuLine;
                 // }
 
-                Serial.print( menuLine.c_str( ) );
+                navEcho( ).print( menuLine.c_str( ) );
                 // Serial.println();
-                Serial.flush( );
+                navEcho( ).flush( );
 
                 menuLine.replace( "±", "+-" );
                 oled.clearPrintShow( menuLine.c_str( ), 2, true, true, true, 5, 8 );
@@ -2600,6 +2971,7 @@ int selectSubmenuOption( int menuPosition, int menuLevel ) {
             // rails==2 — so =2 would defeat SlotManager::isPreviewMode() and leave the
             // breadboard showing menu text instead of the slot. Use =1 there so nets render.
             requestLedShow( ( menuType == 3 ) ? 1 : 2 );
+            viewShow( menuPosition, highlightedOption );
             changed = 0;
         }
 
@@ -2734,6 +3106,7 @@ int yesNoMenu( unsigned long timeout, int startOption ) {
 }
 
 int selectNodeAction( int whichSelection ) {
+    viewFoldForValue( ); // the terminal columns fold to the path; this screen prints under it
     // This screen paints the breadboard without the transition bracket —
     // abort any in-flight menu transition so its blend frames can't stamp
     // the old menu line over what we draw here.
@@ -2802,13 +3175,14 @@ int selectNodeAction( int whichSelection ) {
 
     unsigned long lastShowRequestMs = 0;
 
-    while ( nodeSelected == -1 && Serial.available( ) == 0 ) {
+    while ( nodeSelected == -1 && !menuTypedCancel( ) ) {
         delayMicroseconds( 200 );
         // rotaryEncoderStuff( );
         jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
+        int termSteps = viewKeys( true ); // the terminal's arrows, when its columns opened this
         int probePress = ProbeButton::getInstance( ).getButtonPress( ); // one read per pass (see getMenuSelection)
-        if ( encoderButtonState == HELD || Serial.available( ) > 0 || probePress == 1 ) {
+        if ( encoderButtonState == HELD || menuTypedCancel( ) || probePress == 1 || viewTakeBack( ) ) {
             b.clear( );
             // Flush the cleared buffer back to nets, otherwise the node-selection
             // overlay lingers on the breadboard after cancelling.
@@ -2821,6 +3195,12 @@ int selectNodeAction( int whichSelection ) {
         long currentEncoderPosition = encoderPosition;
         long encoderDelta = -( currentEncoderPosition - lastEncoderPosition );
         lastEncoderPosition = currentEncoderPosition;
+        if ( termSteps != 0 ) {
+            // An arrow key is exactly one node, whatever speed tier the wheel left.
+            speedLevel = 0;
+            detentAccum = 0;
+            encoderDelta = termSteps * COUNTS_PER_DETENT * 2;
+        }
 
         bool needsUpdate = false;
         if ( firstTime == 1 ) {
@@ -3013,6 +3393,7 @@ int selectNodeAction( int whichSelection ) {
 }
 
 float getActionFloat( int menuPosition, int rail ) {
+    viewFoldForValue( ); // the terminal columns fold to the path; the value prints under it
     // This screen paints the breadboard without the transition bracket —
     // abort any in-flight menu transition so its blend frames can't stamp
     // the old menu line over what we draw here.
@@ -3159,10 +3540,11 @@ float getActionFloat( int menuPosition, int rail ) {
     while ( true ) {
         jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
+        int termSteps = viewKeys( true ); // the terminal's arrows, when its columns opened this
         // rotaryEncoderStuff();  // Update encoder and button state
 
         // Check for cancellation (long press) - check FIRST on every iteration
-        if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonState( ) == 1 ) {
+        if ( encoderButtonState == HELD || ProbeButton::getInstance( ).getButtonState( ) == 1 || viewTakeBack( ) ) {
             encoderButtonState = IDLE;
             dacPreviewEnd( );
             requestLedShow( -1 );
@@ -3202,8 +3584,10 @@ float getActionFloat( int menuPosition, int rail ) {
         }
 
         // Check for serial cancellation
-        if ( Serial.available( ) > 0 ) {
-            Serial.read( );
+        if ( menuTypedCancel( ) ) {
+            if ( !s_view ) {
+                Serial.read( );
+            }
             dacPreviewEnd( );
             requestLedShow( -1 );
             currentAction.analogVoltage = NAN;   // cancel = do not re-apply
@@ -3336,9 +3720,9 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
         bool valueChanged = false;
 
         // Process encoder movement
-        if ( encoderDelta != 0 || firstTime == 1 ) {
+        if ( encoderDelta != 0 || firstTime == 1 || termSteps != 0 ) {
             // Handle snap delay
-            if ( snapToValue > 0 && !firstTime ) {
+            if ( snapToValue > 0 && !firstTime && termSteps == 0 ) {
                 snapToValue--;
                 lastEncoderPosition = currentEncoderPosition;
                 continue;
@@ -3405,6 +3789,8 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
                 }
                // firstTime = 0;
             }
+            // An arrow key is a tenth of a volt: no acceleration to outrun.
+            currentChoice += termSteps * 0.1f;
 
             lastEncoderPosition = currentEncoderPosition;
             // Serial.print( "currentChoice: " );
@@ -3567,6 +3953,7 @@ roundedCurrentChoice = roundf(currentChoice * 10.0f) / 10.0f;
  * @return Selected integer value
  */
 int getActionInt( int minVal, int maxVal, int currentValue ) {
+    viewFoldForValue( ); // the terminal columns fold to the path; the value prints under it
     // This screen paints the breadboard without the transition bracket —
     // abort any in-flight menu transition so its blend frames can't stamp
     // the old menu line over what we draw here.
@@ -3641,10 +4028,11 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
         rotaryEncoderStuff( );
         jOS.serviceInner( );
         menuShowKeepalive( lastShowRequestMs );
+        int termSteps = viewKeys( true ); // the terminal's arrows, when its columns opened this
 
         // Check for cancellation (long press)
         int probePress = ProbeButton::getInstance( ).getButtonPress( ); // one read per pass (see getMenuSelection)
-        if ( encoderButtonState == HELD || probePress == 1 ) {
+        if ( encoderButtonState == HELD || probePress == 1 || viewTakeBack( ) ) {
             rotaryDivider = lastDivider;
             encoderButtonState = IDLE;
             b.clear( );
@@ -3662,8 +4050,10 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
         }
 
         // Handle serial input for cancellation
-        if ( Serial.available( ) > 0 ) {
-            Serial.read( );
+        if ( menuTypedCancel( ) ) {
+            if ( !s_view ) {
+                Serial.read( );
+            }
             rotaryDivider = lastDivider;
             b.clear( );
             Menus::getInstance( ).inClickMenu = 0;
@@ -3676,13 +4066,14 @@ int getActionInt( int minVal, int maxVal, int currentValue ) {
 
         bool valueChanged = false;
 
-        if ( encoderDelta != 0 || firstUpdate ) {
+        if ( encoderDelta != 0 || firstUpdate || termSteps != 0 ) {
             if ( !firstUpdate ) {
                 // Get accelerated delta from helper class
-                float deltaFloat = accelerator.getAcceleratedDelta( encoderDelta );
+                float deltaFloat = ( encoderDelta != 0 ) ? accelerator.getAcceleratedDelta( encoderDelta ) : 0.0f;
 
                 // Apply to fractional value (note: negative because encoder direction)
                 fractionalValue -= deltaFloat;
+                fractionalValue += termSteps; // an arrow key is one count
 
                 // Clamp fractional value to range
                 if ( fractionalValue > (float)maxVal )
@@ -3836,6 +4227,7 @@ static void displayStringOnBreadboard( const char* inputString, int cursorPos,
  * @return Entered string (empty on cancel/ESC)
  */
 String getActionString( int maxLength ) {
+    viewFoldForValue( ); // the terminal columns fold to the path; this screen prints under it
     // This screen paints the breadboard without the transition bracket —
     // abort any in-flight menu transition so its blend frames can't stamp
     // the old menu line over what we draw here.
@@ -4156,6 +4548,7 @@ String getActionString( int maxLength ) {
  * @return Selected image filename (empty on cancel)
  */
 String getActionBitmap( ) {
+    viewFoldForValue( ); // the terminal columns fold to the path; this screen prints under it
     // This screen paints the breadboard without the transition bracket —
     // abort any in-flight menu transition so its blend frames can't stamp
     // the old menu line over what we draw here.
@@ -4266,6 +4659,7 @@ actionCategories getActionCategory( void ) {
 }
 
 int doMenuAction( int menuPosition, int selection ) {
+    viewEnd( true ); // the terminal columns fold to the picked path; the action prints under it
     // This screen paints the breadboard without the transition bracket —
     // abort any in-flight menu transition so its blend frames can't stamp
     // the old menu line over what we draw here.
@@ -5206,9 +5600,12 @@ int doMenuAction( int menuPosition, int selection ) {
 
         } else if ( menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf( "Show" ) != -1 &&
                     menuLines[ currentAction.previousMenuPositions[ 1 ] ].indexOf( "in Term" ) != -1 ) {
-            if ( jumperlessConfig.top_oled.show_in_terminal == 1 ) {
+            // On / Off as picked, like Lock and Connect On Boot beside it.
+            // (It toggled whatever was picked: "Off" switched the mirror on.)
+            // "On" keeps a mirror port the config already chose (2..5).
+            if ( currentAction.from[ 0 ] == 1 ) {
                 jumperlessConfig.top_oled.show_in_terminal = 0;
-            } else {
+            } else if ( jumperlessConfig.top_oled.show_in_terminal == 0 ) {
                 jumperlessConfig.top_oled.show_in_terminal = 1;
             }
             configChanged = true;

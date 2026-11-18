@@ -3194,6 +3194,9 @@ static void drawMenuFxPanel( void ) {
 }
 
 void action_menuTransitionTuner( void ) {
+    // This panel owns the terminal, and its keys reach it by popping the menu
+    // back out: keep the menu's own terminal view (and its key handling) off.
+    Menus::getInstance( ).showOnTerminal = false;
     drawMenuFxPanel( );
 
     bool dirty = false;
@@ -3295,6 +3298,8 @@ void action_menuTransitionTuner( void ) {
         clickMenu( );
         delay( 2 );
     }
+
+    Menus::getInstance( ).showOnTerminal = true;
 
     // Disarm the synthesized click. Every lap primes RELEASED/PRESSED to pop
     // clickMenu() open; quitting between the prime and the consume leaves the
